@@ -43,12 +43,22 @@ verbatim to a materialised SCALE:
 
 A scale column is that same opinion in a cheaper encoding — derived state whose
 correctness depends on a policy recorded in a different file, going stale silently the
-moment the policy moves. It also buys nothing measurable: a consumer that holds a
-series' bars already holds every factor the product needs, so the derivation is one
-O(n) backward pass over memory it has, not a join. And it would put
-`research_price_series.adjustment_basis = 'unadjusted'` into tension with a table
-carrying an adjusted level beside the raw one — the single-basis property
-`strategy_price_basis.CERTIFYING_ARCHIVE_BASES` depends on.
+moment the policy moves. A consumer that holds a series' bars also already holds every
+factor the product needs, so the derivation is one backward pass over memory it has
+rather than a join.
+
+⚠ **The consistency argument is the load-bearing one; the cost argument is not
+measured.** No timing or memory comparison against a materialised column was run, and
+a repeated or windowed consumer could plausibly benefit from one. What is claimed is
+narrower: a derivation cannot go stale against its own policy, and that is the failure
+mode this corpus has actually had. A versioned materialisation could close that too — at
+the price of a second copy of the corpus's price semantics — and is not ruled out for a
+later slice with a consumer whose read pattern justifies it.
+
+⚠ It would also put `research_price_series.adjustment_basis = 'unadjusted'` into tension
+with a table carrying an adjusted level beside the raw one. That is a tension rather than
+a contradiction — explicitly labelled columns could coexist — but resolving it is work
+this slice has no consumer to justify.
 
 ⚠ The consequence for the rung: this slice has **no migration, no ETL and no corpus
 mutation**, so it is a behavioural change with data semantics, not a corpus change. The
@@ -76,67 +86,115 @@ check first" and is the only one a test can pin.
 computed on the RAW basis and never on the corrected one.**
 
 - **open / high / low / close divide by `scale`.** They are one measurement of one
-  instrument in one unit and a split re-denominates the unit. Scaling `close` alone
-  would leave `high < close` on the bar before a forward split, breaking an ordering
-  every OHLC consumer assumes.
-- **`volume` multiplies by `scale`.** A 4:1 split quarters the price and quadruples the
-  share count, so a post-split share count must be multiplied to reach the pre-split
-  unit the corrected price is denominated in. Measured on AAPL either side of
-  2020-08-31: close 499.23 → 129.04, volume 46,907,479 → 223,505,733.
-- **`close × volume` is split-invariant, so `price_quarantine`'s T3 admit-back must keep
-  reading the raw basis.**
+  instrument in one unit and a split re-denominates the unit. Correcting `close` alone
+  before a FORWARD split divides it while `low` keeps its raw level, so the bar can print
+  `close < low`; before a REVERSE split the scale is below 1 and the same omission pushes
+  `close` above `high`. The direction depends on the event, which is why the rule is "all
+  four or none" rather than a bound in one direction.
+- **`volume` multiplies by `scale`.** Measured on AAPL either side of 2020-08-31: close
+  499.23 → 129.04, volume 46,907,479 → 223,505,733.
 
-⚠⚠ **That last clause is a REQUIREMENT, and it arrived as a correction to this
-document's own first draft.** The draft asserted that corrected turnover equals raw
-turnover *exactly* and proposed to assert it over the full population. It does not:
-`close / scale` is a DIVISION, exact only where the scale divides the close, and AAPL's
-own 7:1 already breaks it (92.7 / 7 = 13.242857142…). So a consumer that corrects both
-sides and multiplies gets the raw product back only to the quotient's rounding. The raw
-product is exact and needs no correction at all — which makes "T3 stays on raw" the
-answer to contract (b) rather than a caveat about it.
+  ⚠ **The target unit is the series' TERMINAL basis, not a pre-split one**, and an
+  earlier draft of this section said the opposite. Because `scale` is the product of
+  every LATER factor, the whole corrected series is denominated in the share unit of the
+  LAST bar: AAPL's 1980 bar is restated in today's shares, not today's bars restated in
+  1980's. A bar recorded in OLD shares is therefore multiplied to express the same
+  holding in the new.
+- **`close × volume` is split-invariant, so `price_quarantine`'s T3 admit-back should
+  keep reading the raw basis.**
 
-`corrected_price` and `corrected_volume` are published as a PAIR so that a consumer
-correcting one and forgetting the other has to do so deliberately.
+⚠⚠ **That last clause arrived as a correction to this document's own first draft**,
+which asserted corrected turnover equals raw turnover *exactly* and proposed to assert it
+over the full population. It does not. `close / scale` is a DIVISION, and a decimal
+quotient terminates only when the reduced denominator's prime factors are 2 and 5 **and**
+the ambient `prec` is wide enough to hold it. A scale of 4 terminates; AAPL's own 7:1
+does not (92.7 / 7 = 13.242857142…).
+
+⚠ The reason for T3 is narrower than "paired adjustment is wrong" — **in exact arithmetic
+paired adjustment is exactly turnover-preserving.** The reason is that the raw product
+performs no division at all and therefore cannot acquire the error, so reading raw is
+strictly the safer of two otherwise-equivalent routes. ⚠ And "the raw product is exact"
+is itself bounded: `close * Decimal(volume)` runs in the caller's context too. What §6
+measures is a TOLERANCE; rounding is the reading that tolerance supports, not a proof
+about every unit in the last place.
+
+⚠ `corrected_price` and `corrected_volume` are published as a PAIR so that correcting one
+and not the other is a visible omission. That is a LEGIBILITY property and not an
+enforcement one — nothing stops a consumer calling only one, and the enforcement, if
+wanted, belongs to the consumer that reads both.
+
+⚠ Both appliers validate their scale (positive, finite) rather than trusting the caller,
+because they are public and reachable without `split_scales`. Measured reason: an
+unguarded `NaN` scale makes the division SUCCEED and return `NaN`, which then raises
+`InvalidOperation` at whichever unrelated ORDERING comparison meets it first — a
+`MIN_CLOSE` filter, a decile sort — with nothing pointing back at the scale.
 
 ## 5. §7 contract (d) — already-adjusted segments, SETTLED as a measured residual
 
 The worry: an Intrader segment that already carries an adjustment would be
 double-adjusted by a uniform rule.
 
-The internal discriminator is the price STEP across the stamped bar, tested against the
-stamp itself. An event whose own factor sits inside the test band cannot be told from a
-no-step bar by any step test, so those are reported separately rather than assigned.
-Full population, all 9,354 stamped events (`--segments`):
+The internal discriminator is the price STEP across the stamped bar — `close(prev) /
+close(event)` — tested against the stamp. **The band is stated, not implied**: a step
+"matches the factor" when `step / factor` lands in [0.8, 1.25], and is "absent" when
+`step` alone does. An event whose own factor sits inside that band cannot be told from a
+no-step bar by any step test, so it is classed separately.
 
-| class | dir | events | step = factor | no step | neither |
-| --- | --- | ---: | ---: | ---: | ---: |
-| factor inside band | forward | 1,031 | 1,023 | 925 | 6 |
-| factor inside band | reverse | 35 | 34 | 34 | 0 |
-| **resolvable** | forward | 4,825 | 4,706 | **111** | 17 |
-| **resolvable** | reverse | 3,430 | 2,811 | **114** | 508 |
+⚠⚠ **The classes are DISJOINT and EXHAUSTIVE, and the first version of this table was
+neither** — a Codex finding at both checkpoints independently. The two predicates were
+applied as independent filters, and their acceptance regions OVERLAP whenever the factor
+is only just outside the band (at f = 1.26, both hold for any step in [1.008, 1.25]). The
+columns summed to 100.145% of their own row. The overlap is now its own class.
 
-Of **8,255 resolvable** events, **7,517 (91.1%)** print a step matching their factor —
-the segment is unadjusted and applying the factor is correct. **225 (2.7%)** print no
-step at all: the already-adjusted candidate class, 111 forward and 114 reverse. **525
-(6.4%)** print a step of the wrong magnitude, which is a different defect (mis-sized or
-mis-dated stamp) and is counted separately rather than folded in.
+Full population (`--segments`). **9,354 stamped events; 9,321 testable; 33 EXCLUDED**
+because the stamp sits on a series' first bar, where no prior close exists and no step
+test is defined:
 
-⚠ The 'neither' column is overwhelmingly reverse — 508 of 525, i.e. 14.8% of resolvable
-reverse events against 0.35% of forward ones. That is not established as a stamp defect
-rate: reverse splits happen on distressed names whose real one-day moves are large and
-whose pre-event closes are tick-quantised, so the step test is at its least informative
-exactly there. Reported as what it is, an upper bound on a discriminator's agreement.
+| class | dir | events | step = factor | no step | both | neither |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| factor inside band | forward | 1,031 | 100 | 2 | 923 | 6 |
+| factor inside band | reverse | 35 | 1 | 1 | 33 | 0 |
+| **resolvable** | forward | 4,825 | 4,697 | **102** | 9 | 17 |
+| **resolvable** | reverse | 3,430 | 2,808 | **111** | 3 | 508 |
 
-**The verdict: no special treatment. Every stamp is applied, and the 225 are the
-declared residual.** Gating on this discriminator would reintroduce precisely what
-`d15e680e` §5 froze out — a free parameter (the band) and a discriminator of unmeasured
-precision. `b65abd9c` separately measured the internal check passing 364 of 383 stamps
-that an external processing disputes, so its error rate is known to be poor rather than
-unknown. It bounds the residual; it cannot adjudicate it.
+Of **8,255 resolvable** events: **7,505 (90.9%)** print a step matching their factor,
+**213 (2.58%)** print no step, **12** fall in the overlap and **525 (6.4%)** print a step
+of the wrong magnitude.
 
-⚠ Direction, per §3.5's framework: the 225 split 111 forward / 114 reverse, so the
-residual is not concentrated on the side that BUYS a position. That is an observation
-about this class, not a general claim about the corpus.
+⚠⚠ **None of these classes is a cause, and the earlier draft asserted them as such.**
+A matching step is *consistent with* an unadjusted segment and equally with market
+movement, a stale price or a coincidentally-sized stamp. "No step" is *consistent with* a
+prior adjustment and equally with a false stamp, a mis-dated one, or a non-trading stub
+bar — ACET's stamp below sits on exactly such a bar, flat at 2.28 with zero volume.
+"Neither" is *consistent with* a mis-sized stamp and equally with an ordinary large
+return. The discriminator separates SHAPES, not explanations.
+
+⚠ 'neither' is overwhelmingly reverse — 508 of 525, i.e. 14.8% of resolvable reverse
+events against 0.35% of forward ones. Reverse splits happen on distressed names whose
+real one-day moves are large and whose pre-event closes are tick-quantised, so the step
+test is at its least informative exactly there.
+
+**The verdict: no special treatment. Every stamp is applied, and the 213 are a declared
+candidate count.**
+
+⚠ The operative reason is NOT "gating needs a parameter" — a frozen, versioned band
+would be a perfectly deterministic policy, and an earlier draft leaned on that argument
+wrongly. The two reasons that hold are: (1) **the discriminator is unvalidated**, and
+`b65abd9c` measured the internal check passing 364 of 383 stamps an external processing
+disputes — which is not an error RATE (external disagreement is not ground truth, and the
+disputed set is a selected denominator) but is enough to show it is not trustworthy; and
+(2) **the policy is already frozen** by `d15e680e` §5 on evidence this document does not
+revisit. Reopening it needs the grounds §5's "what would reopen this" names, not a new
+discriminator of unknown precision.
+
+⚠ **213 is a candidate-EVENT count, not a bounded residual.** It excludes the 33
+untestable and the 12 ambiguous events, says nothing about false negatives, and is not
+converted to bars or to strategy exposure anywhere.
+
+⚠ Direction: 102 forward / 111 reverse — but as RATES those are 2.11% of resolvable
+forward events against 3.24% of reverse, so the counts being near-equal is not a
+statement about balance. Neither figure establishes balance in trading harm, which would
+need a return-window measurement rather than an event count.
 
 ## 6. Full-population evidence
 
@@ -154,10 +212,21 @@ invariant arms gate the exit code; the disagreement arms are reported and do not
 | series whose last bar does not scale to 1 | **0** |
 
 A quarter of the corpus (25.0%) carries a scale other than 1, which is the size of what
-`suppress_all` was leaving on the table. The extreme scales are all reverse-split
-distress chains — `TOPS` at 2.2e-14, `DCTH` at 3.2e-11, `XTIA` at 8.2e-11 — i.e. names
-whose uncorrected early closes are inflated by up to fourteen orders of magnitude, which
-is `d15e680e` §3.5's "inflates a momentum score" in its most extreme form.
+`suppress_all` was leaving uncorrected. The extreme scales are far below 1 — `TOPS` at
+2.2e-14, `DCTH` at 3.2e-11, `XTIA` at 8.2e-11 — i.e. compounding reverse-split chains.
+
+⚠ **The direction, stated carefully, because an earlier draft had it backwards.** A
+scale far below 1 means the correction RAISES those early prices (divide by 2.2e-14);
+the raw early close is *understated* relative to its corrected form, not inflated. What
+is inflated is the uncorrected momentum RATIO — `close(t) / close(t-252)` spans the
+reverse split and reads the artificial jump as return. Level and ratio move opposite
+ways here, and `d15e680e` §3.5's claim is about the ratio.
+
+⚠ Calling all ten "distress chains" reads more than the output supports: it lists
+symbols and scales, not chain histories. The scale magnitudes alone establish repeated
+reverse splits; the distress reading is an inference from that pattern. ⚠ 12,546,227
+moved bars is a measure of COVERAGE — how much the correction touches — and not of harm
+avoided, which needs a return-window measurement.
 
 ### Arm 3 — turnover
 
@@ -169,9 +238,24 @@ exclusion is printed rather than left to be inferred from the arithmetic.
 
 ### Arm 4 — corroboration against the vendor's own `adj_close`
 
-19,170,987 bars sit on a dividend-free suffix and are therefore comparable.
-**19,163,077 (99.96%) agree to within 1e-12.** 7,910 (0.04%) do not, and they localise
-to **8 series of 22,879**:
+19,170,987 bars sit on a dividend-free suffix and are therefore comparable — **38.24% of
+the corpus**, so this arm bounds nothing about the other 61.76%.
+
+⚠⚠ **Split by whether the correction did anything, because one headline rate credits the
+derivation for identity comparisons** (Codex ckpt-1). A bar at scale 1 compares `close`
+against `adj_close` and exercises no arithmetic at all:
+
+| comparable bars | agree ≤ 1e-12 | of | rate |
+| --- | ---: | ---: | ---: |
+| **scale ≠ 1 — the correction did something** | **4,314,873** | **4,317,795** | **99.93%** |
+| scale = 1 — identity | 14,848,204 | 14,853,192 | 99.97% |
+| all | 19,163,077 | 19,170,987 | 99.96% |
+
+**4.31M bars actually exercise a non-trivial correction and 99.93% of them reproduce the
+vendor's own adjusted level.** That is the figure the claim is about; the 19.17M headline
+is the weaker one and must not be quoted for it.
+
+The 7,910 disagreements (0.04%) localise to **8 series of 22,879**:
 
 | symbol | bars | span (d) | bars/yr | disagreeing |
 | --- | ---: | ---: | ---: | ---: |
@@ -181,9 +265,9 @@ to **8 series of 22,879**:
 | DBD | 725 | 15,611 | **17.0** | 441 |
 | GGE / LTBR / CHLN / NUROW | — | — | ~252 | 26 / 16 / 1 / 1 |
 
-**What this establishes: the derivation reproduces the vendor's own adjustment
-arithmetic on 19.16M bars.** That is what arm 4 is for, and it is the strongest
-statement available about the code.
+**What this establishes: the derivation reproduces the vendor's own adjustment arithmetic
+on 4.31M bars that actually carry a correction.** That is what arm 4 is for, and it is
+the strongest statement available about the code.
 
 ⚠⚠ **Arm 4 is an implementation check, not an adjudicator**, and the distinction is the
 whole of #3280's lesson. It can show our product reproduces the arithmetic of the party
@@ -210,17 +294,24 @@ with an arithmetic error on our side:
   bars — the shape a single mis-handled event in a chain produces, since every bar
   before it inherits the error and every bar after it does not.
 
-⚠ **This is a three-series inspection and the cause is NOT established for the other
-five.** "Consistent with missing stamps" is what three bar-level reads support; it is
-not a measured rate and must not be quoted as one. The check that would settle it is a
-per-event comparison of the implied `close/adj_close` factor against the stamp on the
-same bar, across all 8 — one query, deliberately not run here because it changes nothing
-this slice decides.
+⚠ **These are HYPOTHESES from a three-series inspection, not established causes, and
+nothing is claimed about the other five.** DBD's sparsity does not prove an omitted bar
+carried a split; ACET's inconsistent ratios do not uniquely identify a missing event;
+RSLS's roughly-half disagreement is consistent with a single mis-handled event in a chain
+but does not establish one. The check that would settle it is a per-event comparison of
+the implied `close/adj_close` factor against the stamp on the same bar, across all 8 —
+one query, deliberately not run because it changes nothing this slice decides.
 
-⚠ **It does bound the exposure**: whatever the cause, it is confined to 8 of 22,879
-series and 0.04% of comparable bars. `apply_all` under-corrects there — it cannot apply
-a stamp that was never shipped — which is a MISS rather than the inflation `d15e680e`
-§3.5 identified as the direction that buys a position.
+⚠ **What IS bounded is the extent, not the direction.** The disagreement is confined to
+8 of 22,879 series and 0.04% of comparable bars. An earlier draft went further and said
+that "whatever the cause" these under-correct and therefore only cause a MISS. **That is
+withdrawn**: a MISSING reverse-split stamp leaves the uncorrected upward ratio distortion
+in place, which is the direction §3.5 identifies as buying a position. The direction of
+harm here is unresolved, and resolving it needs the per-event comparison above rather
+than an argument.
+
+⚠ And that comparison can only locate an INCONSISTENCY between two vendor products. It
+cannot adjudicate which one is right — #3280's finding still binds.
 
 ### §7 item 3's inputs (`--floor`)
 

@@ -28,14 +28,21 @@ unit test cannot reach, plus the corroboration arm:
    should reproduce the raw one. Measured on every bar the correction actually
    moves (``scale <> 1``; a bar at scale 1 is invariant by construction).
 
-   ⚠⚠ THE AGREEMENT IS NOT EXACT AND CANNOT BE, WHICH IS ITSELF THE ANSWER TO
-   §7 CONTRACT (b). ``close / scale`` is a DIVISION — exact only when the scale
-   divides the close, which AAPL's 7:1 already breaks (92.7 / 7 =
-   13.242857142…). So corrected turnover equals raw turnover only up to the
-   quotient's rounding, and the residual measured here is that rounding.
-   ``price_quarantine``'s T3 admit-back must therefore keep reading the RAW
-   basis, where the product is exact — stated as a requirement rather than left
-   to be rediscovered.
+   ⚠⚠ THE AGREEMENT IS NOT EXACT, WHICH IS ITSELF THE ANSWER TO §7 CONTRACT (b).
+   ``close / scale`` is a DIVISION, and a decimal quotient terminates only when
+   the reduced denominator's prime factors are 2 and 5 AND the ambient ``prec``
+   is wide enough to hold it. A scale of 4 terminates; AAPL's own 7:1 does not
+   (92.7 / 7 = 13.242857142…). So a consumer that corrects both sides and
+   multiplies recovers the raw product only to the quotient's rounding.
+   ``price_quarantine``'s T3 should therefore keep reading the RAW basis — not
+   because paired adjustment is wrong in exact arithmetic (it is exactly
+   turnover-preserving there) but because the raw product needs no division at
+   all, so it cannot acquire the error.
+
+   ⚠ "The raw product is exact" is itself a bounded claim: ``close *
+   Decimal(volume)`` runs in the caller's context too. What is measured below is
+   a TOLERANCE, and the rounding explanation is the reading it supports, not a
+   proof that every unit in the last place came from the quotient.
 4. **Corroboration against ``adj_close``** — the arm slice A did not have. The
    vendor ships a ninth CSV column carrying the split AND dividend adjustment
    fused. On a bar with **no dividend strictly after it**, the dividend half is
@@ -215,6 +222,16 @@ def derive(conn: psycopg.Connection[Any]) -> int:
                     assert derived is not None
                     error = abs(derived - adj_close) / adj_close
                     band_hits[_band(error)] += 1
+                    # ⚠⚠ SPLIT BY WHETHER THE CORRECTION DID ANYTHING. A bar at
+                    # scale 1 compares `close` against `adj_close` and exercises
+                    # no arithmetic at all, so folding it into one headline
+                    # agreement rate credits the derivation for identity
+                    # comparisons (Codex checkpoint 1). The non-trivial
+                    # denominator is the one the claim is about.
+                    key = "nontrivial" if scale != 1 else "trivial"
+                    totals[f"corroborable_{key}"] += 1
+                    if error <= _BANDS[0]:
+                        totals[f"agree_{key}"] += 1
                     if error > _BANDS[-1]:
                         disagreeing[symbol] += 1
                         if worst is None or error > worst[0]:
@@ -260,6 +277,16 @@ def derive(conn: psycopg.Connection[Any]) -> int:
     print("  ⚠ The residual is the QUOTIENT'S ROUNDING, not a defect — see the module docstring.")
 
     _report("=== arm 4: corroboration against the vendor's own adj_close ===", band_hits, totals["corroborable"])
+    print(
+        f"  comparable bars: {totals['corroborable']:,} of {totals['bars']:,} "
+        f"({100.0 * totals['corroborable'] / totals['bars']:.2f}% of the corpus)"
+    )
+    for key in ("nontrivial", "trivial"):
+        denominator = totals[f"corroborable_{key}"]
+        agree = totals[f"agree_{key}"]
+        share = 100.0 * agree / denominator if denominator else 0.0
+        label = "scale <> 1 (the correction did something)" if key == "nontrivial" else "scale = 1 (identity)"
+        print(f"    {label:44s} {agree:>12,} / {denominator:>12,}  {share:6.2f}%")
     if worst is not None:
         print(f"  worst: rel err {worst[0]:.3e} at {worst[1]}")
     print(f"  disagreeing series: {len(disagreeing):,} of {totals['series_derived']:,}")
@@ -296,9 +323,17 @@ def segments(conn: psycopg.Connection[Any]) -> int:
     its own error rate is known to be poor. It bounds the residual; it does not
     adjudicate it.
     """
-    # The band is disjoint by construction: an event whose factor sits INSIDE it
-    # cannot be told apart from a no-step bar by any step test, so those events
-    # are reported as unresolvable rather than assigned.
+    # ⚠⚠ EVERY EVENT LANDS IN EXACTLY ONE CLASS, and the first draft of this
+    # query did not. It reported "step matches the factor" and "no step" as
+    # independent FILTERs, and the two acceptance regions OVERLAP whenever the
+    # factor is only just outside the band: at f = 1.26 both hold for any step in
+    # [1.008, 1.25]. 12 events were counted twice and the columns summed to
+    # 100.145% of their own row (Codex checkpoint 1). A CASE makes the
+    # classification exhaustive and disjoint by construction, and the overlap
+    # becomes its own named class instead of a silent double count.
+    #
+    # The band itself is stated, not implied: a step is "matching" when
+    # step / factor lands in [0.8, 1.25], and "absent" when step alone does.
     rows = conn.execute(
         """
         WITH ev AS (
@@ -312,34 +347,59 @@ def segments(conn: psycopg.Connection[Any]) -> int:
             SELECT *, prev_close / close AS step
               FROM ev
              WHERE split_factor <> 1 AND prev_close IS NOT NULL AND close > 0 AND prev_close > 0
+        ),
+        c AS (
+            SELECT CASE WHEN split_factor BETWEEN 0.8 AND 1.25 THEN 'factor_inside_band' ELSE 'resolvable' END
+                       AS cls,
+                   CASE WHEN split_factor > 1 THEN 'forward' ELSE 'reverse' END AS dir,
+                   CASE
+                       WHEN step / split_factor BETWEEN 0.8 AND 1.25 AND step BETWEEN 0.8 AND 1.25
+                           THEN 'both'
+                       WHEN step / split_factor BETWEEN 0.8 AND 1.25 THEN 'step_matches_factor'
+                       WHEN step BETWEEN 0.8 AND 1.25 THEN 'no_step'
+                       ELSE 'neither'
+                   END AS verdict
+              FROM e
         )
-        SELECT CASE WHEN split_factor BETWEEN 0.8 AND 1.25 THEN 'factor_inside_band' ELSE 'resolvable' END,
-               CASE WHEN split_factor > 1 THEN 'forward' ELSE 'reverse' END,
-               count(*),
-               count(*) FILTER (WHERE step / split_factor BETWEEN 0.8 AND 1.25),
-               count(*) FILTER (WHERE step BETWEEN 0.8 AND 1.25),
-               count(*) FILTER (WHERE step / split_factor NOT BETWEEN 0.8 AND 1.25
-                                  AND step NOT BETWEEN 0.8 AND 1.25)
-          FROM e
+        SELECT cls, dir, count(*),
+               count(*) FILTER (WHERE verdict = 'step_matches_factor'),
+               count(*) FILTER (WHERE verdict = 'no_step'),
+               count(*) FILTER (WHERE verdict = 'both'),
+               count(*) FILTER (WHERE verdict = 'neither')
+          FROM c
          GROUP BY 1, 2
          ORDER BY 1, 2
         """,
         (VENDOR,),
     ).fetchall()
-    total_events = conn.execute(
-        "SELECT count(*) FROM research_price_daily d JOIN research_price_series s USING (series_id)"
-        " WHERE s.vendor = %s AND d.split_factor <> 1",
+    stamped, comparable = conn.execute(
+        """
+        SELECT count(*) FILTER (WHERE d.split_factor <> 1),
+               count(*) FILTER (WHERE d.split_factor <> 1 AND d.prev_close IS NOT NULL
+                                  AND d.close > 0 AND d.prev_close > 0)
+          FROM (SELECT d.*, lag(d.close) OVER (PARTITION BY d.series_id ORDER BY d.bar_date) AS prev_close
+                  FROM research_price_daily d
+                  JOIN research_price_series s USING (series_id)
+                 WHERE s.vendor = %s) d
+        """,
         (VENDOR,),
-    ).fetchone()
+    ).fetchone() or (0, 0)
     print("=== §7 contract (d): already-adjusted segments — REPORTED, NOT GATED ===")
-    print(f"  stamped events in the corpus: {total_events[0] if total_events else 0:,}")
-    print(f"  {'class':20s} {'dir':8s} {'events':>8s} {'step=factor':>12s} {'no step':>8s} {'neither':>8s}")
-    for cls, direction, events, step_eq, no_step, neither in rows:
-        print(f"  {cls:20s} {direction:8s} {events:>8,} {step_eq:>12,} {no_step:>8,} {neither:>8,}")
+    print(f"  stamped events in the corpus: {stamped:,}")
+    print(f"  of which testable (a prior bar with a positive close exists): {comparable:,}")
+    print(f"  ⚠ EXCLUDED: {stamped - comparable:,} events with no comparable prior bar — no step test exists.")
     print(
-        "\n  'no step' on a RESOLVABLE event is the already-adjusted candidate class.\n"
-        "  'neither' is a step of the wrong magnitude — a different defect (mis-sized or\n"
-        "  mis-dated stamp), counted separately rather than folded in."
+        f"  {'class':20s} {'dir':8s} {'events':>8s} {'step=factor':>12s} {'no step':>8s} {'both':>6s} {'neither':>8s}"
+    )
+    for cls, direction, events, step_eq, no_step, both, neither in rows:
+        print(f"  {cls:20s} {direction:8s} {events:>8,} {step_eq:>12,} {no_step:>8,} {both:>6,} {neither:>8,}")
+    print(
+        "\n  Classes are DISJOINT and EXHAUSTIVE — the four columns sum to 'events' per row.\n"
+        "  'both' is the overlap region: the factor is outside the band but close enough that\n"
+        "  a step of the factor's size is ALSO a step of no size. The test cannot separate them.\n"
+        "  'no step' on a RESOLVABLE event is the already-adjusted CANDIDATE class — consistent\n"
+        "  with a prior adjustment, and equally with a false, mis-dated or stub-bar stamp.\n"
+        "  'neither' is a step of the wrong magnitude, which ordinary returns also produce."
     )
     return 0
 

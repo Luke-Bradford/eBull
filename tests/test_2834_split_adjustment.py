@@ -157,6 +157,36 @@ class TestPriceAndVolumeMoveOppositeWays:
         assert corrected_volume(None, Decimal(4)) is None
 
 
+class TestTheAppliersDoNotTrustTheirScale:
+    """The appliers are public, so they cannot assume a `split_scales` output."""
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "NaN", "Infinity"])
+    def test_a_scale_that_is_not_a_positive_finite_multiplier_raises(self, bad: str) -> None:
+        for apply in (lambda s: corrected_price(Decimal(10), s), lambda s: corrected_volume(10, s)):
+            with pytest.raises(UncorrectableStamp, match="positive finite multiplier"):
+                apply(Decimal(bad))
+
+    def test_a_nan_scale_does_not_propagate_silently(self) -> None:
+        # Why the guard exists rather than letting the arithmetic speak, MEASURED
+        # in this interpreter rather than reasoned from the float rules:
+        #   * the division SUCCEEDS and returns NaN — no error at the site of
+        #     the defect;
+        #   * `Decimal("NaN") == 1` is False (quiet), but `Decimal("NaN") >= 1`
+        #     RAISES InvalidOperation — unlike `float("nan") >= 1.0`, which is
+        #     merely False.
+        # So an unguarded NaN scale travels silently through the correction and
+        # then explodes at whichever unrelated ORDERING comparison meets it
+        # first — a MIN_CLOSE filter, a decile sort — with nothing pointing back
+        # to the scale. Failing here makes the site of the defect the site of
+        # the error.
+        assert (Decimal(10) / Decimal("NaN")).is_nan()
+        assert (Decimal("NaN") == Decimal(1)) is False
+        with pytest.raises(decimal.InvalidOperation):
+            _ = Decimal("NaN") >= Decimal(1)
+        with pytest.raises(UncorrectableStamp):
+            corrected_price(Decimal(10), Decimal("NaN"))
+
+
 class TestThePolicyIsFrozenAndCarried:
     def test_the_policy_is_apply_all(self) -> None:
         assert SPLIT_CORRECTION_POLICY == "apply_all"

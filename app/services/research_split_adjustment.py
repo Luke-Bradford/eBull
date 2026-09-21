@@ -184,6 +184,24 @@ def split_scales(factors: Sequence[Decimal | None], *, stamps_marker: str | None
 
     ⚠ ``stamps_marker`` is keyword-only and mandatory. See the module docstring:
     the precondition is a parameter so that it cannot be forgotten.
+
+    ⚠⚠ THREE CALLER OBLIGATIONS THIS FUNCTION CANNOT VERIFY, NAMED RATHER THAN
+    ASSUMED. A bare sequence of factors carries no dates, so none of these is
+    checkable here — the same hole ``BarSeries`` exists to close for OHLC, and
+    the reason a consumer should derive its factor list FROM a validated
+    ``BarSeries`` rather than from a second query:
+
+    1. **Order.** Factors reversed or shuffled produce a well-formed, wrong
+       answer silently — the exact failure ``BarSeries``' docstring records for
+       ``rsi_series(closes)``.
+    2. **Completeness.** The scale of bar ``i`` is a claim about *every* later
+       event in the series. Hand this function a SLICE and it silently
+       re-anchors the whole result to the slice's last bar, which is a different
+       basis, not a subset of the same one.
+    3. **Growth.** A later re-load that appends a NEW split changes the
+       corrected level of every earlier bar, and therefore floor membership and
+       every ratio computed across it. The corrected basis is a function of the
+       series as it stands, not a fixed property of a bar.
     """
     require_correctable(stamps_marker)
     scales: list[Decimal] = []
@@ -201,6 +219,21 @@ def split_scales(factors: Sequence[Decimal | None], *, stamps_marker: str | None
     return tuple(scales)
 
 
+def _validated_scale(scale: Decimal) -> Decimal:
+    """A scale a caller may divide by.
+
+    ⚠ The appliers are PUBLIC and a caller can reach them without
+    :func:`split_scales` — so they cannot assume a scale this module produced.
+    An unchecked ``0`` raises ``DivisionByZero`` from inside the arithmetic and
+    an unchecked ``NaN`` PROPAGATES SILENTLY, turning one bad scale into a whole
+    corrected series of ``NaN`` that compares false against every threshold it
+    meets. Checked here so both are the same loud failure.
+    """
+    if not scale.is_finite() or scale <= 0:
+        raise UncorrectableStamp(f"scale {scale!r} is not a positive finite multiplier")
+    return scale
+
+
 def corrected_price(price: Decimal | None, scale: Decimal) -> Decimal | None:
     """A price level on the split-only basis: ``price / scale``.
 
@@ -210,46 +243,65 @@ def corrected_price(price: Decimal | None, scale: Decimal) -> Decimal | None:
 
     ⚠⚠ EVERY PRICE FIELD TAKES THE SAME SCALE — §7 contract (b), settled here.
     open, high, low and close are one measurement of one instrument in one unit,
-    and a split re-denominates the unit. Scaling ``close`` alone would leave
-    ``high < close`` on the bar before a forward split, breaking an ordering
-    every OHLC consumer assumes.
+    and a split re-denominates the unit. Correcting ``close`` alone before a
+    FORWARD split divides it while ``low`` keeps its raw level, so the bar can
+    print ``close < low``; before a REVERSE split the scale is below 1 and the
+    same omission pushes ``close`` above ``high``. Either way the ordering every
+    OHLC consumer assumes is broken, and the direction depends on the event.
 
-    ⚠ The DIVISION is inexact by nature and is deliberately NOT trapped: 100/3
-    has no exact decimal form and a corrected price is a derived quantity, not
-    an observation. Exactness is enforced on the PRODUCT, where it is achievable
-    and where an error would compound across events. The caller's context
-    decides the quotient's precision, as it already does for every other derived
-    price in this codebase.
+    ⚠ THE DIVISION IS NOT EXACT IN GENERAL and this module does not trap it: a
+    corrected price is a derived quantity, not an observation. Exactness is
+    enforced on the PRODUCT, where it is achievable and where an error would
+    compound across events.
+
+    ⚠⚠ THE ARITHMETIC CONTEXT HERE IS THE CALLER'S, NOT THIS MODULE'S, and that
+    is a stated limit rather than a guarantee. A caller who has trapped
+    ``Inexact`` makes ``Decimal(100) / 3`` RAISE; one who has narrowed ``prec``
+    gets a coarser quotient. That is deliberate — the caller owns the precision
+    of its own derived prices, as it already does everywhere else in this
+    codebase — but it means nothing about this quotient enters
+    ``SPLIT_ADJUSTMENT_RULE_VERSION``, so two consumers on the same rule version
+    can legitimately produce different corrected prices.
     """
     if price is None:
         return None
-    return price / scale
+    return price / _validated_scale(scale)
 
 
 def corrected_volume(volume: int | None, scale: Decimal) -> Decimal | None:
     """Share count on the split-only basis: ``volume * scale``.
 
     ⚠⚠ MULTIPLIED, NOT DIVIDED — §7 contract (b), the half that is easy to get
-    backwards. A 4:1 split quarters the price and quadruples the share count, so
-    a volume expressed in POST-split shares must be multiplied to reach the
-    pre-split unit the corrected price is denominated in. Measured on the same
-    AAPL bars: volume runs 46,907,479 (08-28) → 223,505,733 (08-31).
+    backwards.
+
+    ⚠ THE TARGET UNIT IS THE SERIES' TERMINAL (LATEST) BASIS, NOT A PRE-SPLIT
+    ONE, and an earlier draft of this docstring said the opposite. Because
+    ``scale`` is the product of every LATER factor, the whole corrected series
+    is denominated in the share unit of the LAST bar. A 4:1 split quadruples the
+    share count, so a bar recorded in OLD shares is multiplied to express the
+    same holding in the new — AAPL's 1980 bar is restated in today's shares, not
+    today's bars restated in 1980's. Measured on the same AAPL bars: volume runs
+    46,907,479 (08-28, old shares) → 223,505,733 (08-31, new shares).
 
     ⚠⚠ THIS IS NOT COSMETIC — ``close * volume`` IS SPLIT-INVARIANT AND T3
     DEPENDS ON IT (``price_quarantine.py``). Correcting the price and leaving the
     volume raw would break that invariant on every bar before an event, which is
-    precisely the silent failure §7 contract (b) was raised to prevent. The two
-    functions exist as a PAIR so a consumer that corrects one and forgets the
-    other has to do so deliberately.
+    precisely the silent failure §7 contract (b) was raised to prevent.
 
-    ⚠ Returns a ``Decimal``, never a rounded ``int``. A pre-split share count is
+    ⚠ The two functions are published as a PAIR so that correcting one and not
+    the other is a visible omission. That is a legibility property and NOT an
+    enforcement one — nothing here can stop a consumer calling only
+    :func:`corrected_price`. The enforcement, if it is wanted, belongs to the
+    consumer that reads both.
+
+    ⚠ Returns a ``Decimal``, never a rounded ``int``. A restated share count is
     genuinely fractional under a reverse split (1:10 turns 1,000 shares into
-    100), and rounding here would destroy the invariant above to make the type
-    tidier.
+    100, and 5 into 0.5), and rounding here would destroy the invariant above to
+    make the type tidier.
     """
     if volume is None:
         return None
-    return Decimal(volume) * scale
+    return Decimal(volume) * _validated_scale(scale)
 
 
 __all__ = [
