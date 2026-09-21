@@ -71,7 +71,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Literal, Protocol, get_args
+from typing import Final, Literal, Protocol, get_args
 
 from app.services.indicator_series import BarSeries, Universe
 from app.services.market_regime import RegimeSeries
@@ -1251,7 +1251,28 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
 )
 
 
+#: The strategies whose VERDICTS depend on the price-basis carrier (#2840 §8b).
+#:
+#: ⚠⚠ THIS IS A COST ROUTE, NOT A PERMISSION. Every adapter still RECEIVES a
+#: carrier and every alignment check still runs; this decides only whether the
+#: caller bothers to build a CERTIFYING one. Codex checkpoint 2 caught why it is
+#: needed: ``backtest_run._signals_for`` builds a carrier per strategy per
+#: quarantine arm, so binding every bar for all twelve made eleven of them pay
+#: ~1.6 µs/bar (measured) to encode and re-check a value they discard.
+#:
+#: ⚠ FAIL-CLOSED when it drifts. A strategy that starts reading the carrier while
+#: absent from this set receives ``from_undeclared_source``'s all-refusing carrier
+#: and refuses every bar — visibly wrong, never silently certified. Two tests
+#: catch the drift first: ``tests/test_2840_price_basis_carrier.py::
+#: test_s12_is_the_only_consumer_while_the_rule_stays_out_of_input_rule_sets``
+#: greps the strategy modules, and ``tests/test_2840_s12_price_basis_gate.py``
+#: calls every adapter twice — once certified, once not — and requires the
+#: non-consumers to return identical results.
+PRICE_BASIS_CONSUMERS: Final[frozenset[str]] = frozenset({S12_STRATEGY_ID})
+
+
 __all__ = [
+    "PRICE_BASIS_CONSUMERS",
     "STRATEGY_CLASSES",
     "STRATEGY_MANIFEST",
     "CrossSectionalLeg",

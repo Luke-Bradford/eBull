@@ -166,8 +166,13 @@ from app.services.strategy_exit_gap import (
 from app.services.strategy_exit_gap import (
     summarise as summarise_exit_gap,
 )
-from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_manifest import (
+    PRICE_BASIS_CONSUMERS,
+    STRATEGY_MANIFEST,
+    StrategyEntry,
+    StrategyPurpose,
+)
+from app.services.strategy_price_basis import from_archive_basis, from_undeclared_source
 from app.services.strategy_promotion_evidence_measure import (
     LedgerMeasurements,
     RealisedLedger,
@@ -3235,7 +3240,21 @@ def _signals_for(
     design (``:30``). ⚠ ``None`` is the WITHHELD state and refuses every bar,
     which is ``archive_policy_for``'s own posture, not a new one.
     """
-    price_basis = from_archive_basis(archive_adjustment_basis, series=series)
+    # ⚠⚠ THE CERTIFYING CARRIER IS BUILT ONLY FOR A DECLARED CONSUMER (#2840 §8b,
+    # Codex checkpoint 2). This function runs per strategy per quarantine arm, and
+    # binding every bar costs ~0.8 µs to encode plus ~0.8 µs to re-check at the
+    # dispatcher (measured) — which eleven of the twelve adapters would pay to
+    # discard. ``PRICE_BASIS_CONSUMERS`` names the ones whose verdicts depend on it.
+    #
+    # ⚠ Everyone still RECEIVES a carrier and every alignment check still runs;
+    # only the certification is withheld. A non-consumer that started reading it
+    # would refuse every bar — visibly wrong, never silently certified — and two
+    # tests fail before that can ship.
+    price_basis = (
+        from_archive_basis(archive_adjustment_basis, series=series)
+        if entry.strategy_id in PRICE_BASIS_CONSUMERS
+        else from_undeclared_source(series=series)
+    )
     if entry.signals is not None:
         return segmented_signals(
             entry,

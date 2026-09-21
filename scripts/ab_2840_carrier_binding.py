@@ -39,7 +39,9 @@ import argparse
 import logging
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import date
 
 import psycopg
 
@@ -94,7 +96,7 @@ def _check(carrier: PriceBasisSeries, series: BarSeries, counts: _Counts, *, lab
 def _check_segments(
     carrier: PriceBasisSeries,
     series: BarSeries,
-    breaks: list[object],
+    breaks: Sequence[date],
     counts: _Counts,
     *,
     label: str,
@@ -106,7 +108,7 @@ def _check_segments(
     the indices would bind the wrong bars — silently, since every length still
     agrees.
     """
-    for start, end in series_segment_bounds(series, unresolved_breaks=breaks):  # type: ignore[arg-type]
+    for start, end in series_segment_bounds(series, unresolved_breaks=breaks):
         counts.segments += 1
         segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
         if (mismatch := carrier.segment(start, end).binding_mismatch(segment)) is not None:
@@ -155,7 +157,7 @@ def main() -> int:
                 for counts in per_route.values():
                     counts.skipped_short += 1
                 continue
-            instrument_breaks = list(breaks.get(instrument_id, ()))
+            instrument_breaks = tuple(breaks.get(instrument_id, ()))
             for route, basis in _ROUTES.items():
                 counts = per_route[route]
                 counts.loaded += 1

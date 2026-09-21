@@ -15,7 +15,6 @@ from typing import cast
 import pytest
 
 from app.services.indicator_series import BarSeries
-from app.services.technical_analysis import OHLCVRow
 from app.services.market_regime import unconstrained_regime
 from app.services.price_segments import series_segment_bounds
 from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
@@ -24,7 +23,7 @@ from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
     S12_STRATEGY_ID,
     s12_signals,
 )
-from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_manifest import PRICE_BASIS_CONSUMERS, STRATEGY_MANIFEST
 from app.services.strategy_price_basis import (
     PRICE_BASIS_RULE_VERSION,
     PriceBasisSeries,
@@ -34,6 +33,7 @@ from app.services.strategy_price_basis import (
 )
 from app.services.strategy_registry import StrategySignal
 from app.services.strategy_segmented_evaluation import segmented_signals
+from app.services.technical_analysis import OHLCVRow
 from tests.test_2840_cheapest_band_price_gated_breakout import (
     FIRING_INDEX,
     REASON,
@@ -476,3 +476,52 @@ def test_the_scans_undeclared_carrier_is_unbound_and_still_refuses_every_bar() -
     signals = s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=carrier)
     assert signals, "an empty verdict list would make the set assertion below vacuous"
     assert {s.verdict for s in signals} == {"not_evaluable"}
+
+
+def test_only_the_declared_consumers_verdicts_depend_on_the_carrier() -> None:
+    """⚠⚠ THE PIN UNDER ``PRICE_BASIS_CONSUMERS``, asserted BEHAVIOURALLY.
+
+    ``backtest_run._signals_for`` builds a CERTIFYING carrier only for the
+    strategies in that set, because binding every bar costs ~0.8 µs to encode plus
+    ~0.8 µs to re-check (measured) and eleven of the twelve adapters discard the
+    carrier. That routing is only sound while the set is exactly the strategies
+    whose verdicts move with it.
+
+    So every per-series adapter is CALLED TWICE — once with a fully certified
+    carrier, once with one that certifies nothing — and:
+
+    * a strategy IN the set must DISAGREE (or the set has a passenger, and the
+      assertion below would be vacuous);
+    * a strategy OUTSIDE it must AGREE (or it is an undeclared consumer that the
+      backtest is now silently handing an all-refusing carrier).
+
+    ⚠ Not a source substring. The cross-sectional sibling above records why: a
+    textual gate is defeated by a multiline call or a reordered kwarg, and one
+    that passes on a technicality is worse than none because it reads as coverage.
+    """
+    series = _above_edge()
+    regime = unconstrained_regime(len(series))
+    certified = _certified(series)
+    undeclared = from_undeclared_source(series=series)
+
+    disagreed: set[str] = set()
+    checked = 0
+    for strategy_id, entry in sorted(STRATEGY_MANIFEST.items()):
+        if entry.signals is None:
+            continue
+        checked += 1
+        both = [
+            entry.signals(series, universe=UNIVERSE, masked_reason=REASON, regime=regime, price_basis=carrier)
+            for carrier in (certified, undeclared)
+        ]
+        if [(s.signal_index, s.verdict, s.reason) for s in both[0]] != [
+            (s.signal_index, s.verdict, s.reason) for s in both[1]
+        ]:
+            disagreed.add(strategy_id)
+
+    assert checked >= 10, f"only {checked} per-series adapters were exercised; the comparison must not be near-empty"
+    assert disagreed == set(PRICE_BASIS_CONSUMERS), (
+        f"{sorted(disagreed)} have verdicts that move with the carrier but PRICE_BASIS_CONSUMERS is "
+        f"{sorted(PRICE_BASIS_CONSUMERS)}; backtest_run routes the certifying carrier by that set, so a "
+        "strategy missing from it is handed an all-refusing carrier and refuses every bar"
+    )

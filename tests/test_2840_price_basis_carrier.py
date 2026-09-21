@@ -22,7 +22,6 @@ from typing import cast
 import pytest
 
 from app.services.indicator_series import BarSeries
-from app.services.technical_analysis import OHLCVRow
 from app.services.strategy_price_basis import (
     CERTIFIED_PRICE_BASES,
     CERTIFYING_ARCHIVE_BASES,
@@ -34,6 +33,7 @@ from app.services.strategy_price_basis import (
     from_undeclared_source,
 )
 from app.services.strategy_registry import StrategyInput, evaluate
+from app.services.technical_analysis import OHLCVRow
 
 _BARS = 200
 _START = date(2024, 1, 1)
