@@ -10777,3 +10777,19 @@ writing the justification down makes it feel verified.**
   (drives the real manager, because the defect was the wiring — probe-verified: reverting
   the `pending` mapping makes it assert `(0, None) == (2, 'broker_edit_pending')`);
   `tests/test_3284_repair_refusal_streak.py::test_only_broker_confirmed_state_clears_a_streak`.
+
+⚠ **Coda, same branch, one round later: when a review changes SEMANTICS, grep for every
+place that states them.** The `pending`/`submitted` correction above left `sql/408`'s
+`COMMENT ON TABLE` still saying an accepted edit resets the streak — the exact opposite of
+what the code now does, in the artefact the #3288 lesson two entries up identifies as the
+one a reader trusts most (`obj_description`). Caught by Codex as a P3, not by any gate.
+**After any behavioural correction, `rg` the changed state names through
+`COMMENT ON`, docstrings and migration headers before pushing** — the code moved, the
+prose describing it did not, and prose does not fail a test.
+
+⚠ Mechanical consequence worth knowing: correcting a COMMENT in an ALREADY-APPLIED
+migration trips #1333's content-drift guard (`run_migrations` stores each file's SHA-256
+and raises on mismatch). For an UNMERGED migration of your own, un-apply it —
+`DROP TABLE` + `DELETE FROM schema_migrations WHERE filename=...` — assert the row count
+is 0 first, then re-apply. Do NOT add a second migration to fix the first one's comment,
+and do NOT leave the comment wrong because the file is "already applied".

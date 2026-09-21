@@ -83,8 +83,12 @@ CREATE TABLE IF NOT EXISTS strategy_position_repair_streaks (
 
 COMMENT ON TABLE strategy_position_repair_streaks IS
     '#3284 item 4a. One row per ownership: consecutive fixed-exit repair refusals, '
-    'incremented when the repair arm declines and RESET when the position is protected '
-    'or an edit is accepted. Exists because both refusals return before any '
+    'incremented when the repair arm declines or a submitted edit is observed NOT in '
+    'effect. ⚠ Only BROKER-CONFIRMED protection resets it — the levels observed in '
+    'place, or an edit confirmed against the broker''s own rates. Acceptance of an edit '
+    '(202) does NOT reset it: acknowledgement is not landing, and a submitted edit whose '
+    'levels never arrive is never terminalised, so clearing on acceptance left a '
+    'permanently naked position reading zero. Exists because both refusals return before any '
     'strategy_position_operations row is written, and because sql/406''s UNIQUE '
     'material-identity index collapses every refusal for one ownership onto a single '
     'key — so a row-per-attempt ledger cannot count a streak. Item 4b reads this to '
