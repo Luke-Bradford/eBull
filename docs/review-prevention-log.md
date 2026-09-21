@@ -10645,3 +10645,151 @@ written CONFIDENTLY and each failed silently in the reassuring direction.
   `docs/settled-decisions.md` (`grep -c 2448 docs/settled-decisions.md` → 0) — so working-order
   step 2 alone would not have surfaced it, which is precisely why the `obj_description` check
   above is the one that has to be mechanical.
+
+## 2026-09-21 — a refusal that returns before its ledger write is invisible, and copying a shape CHECK copies its NULL hole (#3284 item 4a)
+
+Two lessons from building the repair-refusal counter. The first is the class the ticket
+existed to close; the second is a defect in the precedent I copied the constraint from.
+
+### 1. "The code returns a rejection" is not the same as "the rejection is recorded"
+
+My own handoff note on #3284 said item 4 was *"a query over existing
+`strategy_position_operations` rows"*, because `manage_owned_position` demonstrably returns
+`PositionManagerResult(..., "rejected", reason)` for both fixed-exit refusals. **It writes
+nothing.** Both refusals return before `_persist_edit_intent`, and the caller
+(`run_strategy_paper_cycle`) discards the result and increments `managed` on the ATTEMPT.
+Measured before the fix — state the query, not the figure:
+
+```sql
+SELECT operation_type, status, count(*) FROM strategy_position_operations GROUP BY 1,2;
+-- one group: fixed_exit_repair | applied | 2.  Never a `rejected` row, on any path.
+```
+
+So a position refusing its stop repair on every visit was indistinguishable from one that
+needed none: the cycle reports `success`, the counter counts up, the position stays naked.
+The self-consistent-success class, on the safety net the operator asked for.
+
+⚠ **The check: a returned status is durable only if you can name the INSERT that carries
+it and the caller that reads it.** A `return` statement is not a write, and a return value
+nobody assigns is not an observation. `rg` the call site before believing a state is
+queryable — this is the same shape as the existing rule about reading what a path actually
+calls, applied to the value coming back out.
+
+⚠ Corollary that shaped the design: the obvious fix (write a `rejected` row per attempt)
+was blocked by a guard shipped the day before. `sql/406`'s
+`idx_strategy_position_operation_material_identity` is UNIQUE on
+`(ownership_id, operation_type, desired_stop_rate, desired_take_profit_rate,
+completed_bar_at) NULLS NOT DISTINCT WHERE status <> 'applied'`, and a core repair's
+desired levels are a pure function of an unchanged entry — so every refusal for one
+ownership collapses onto ONE key and the second raises `UniqueViolation`. **Counting a
+streak and forbidding re-entry of a refused verb are in direct tension in the same table.**
+When a counter and an idempotence guard want the same key, the counter moves out.
+
+### 2. A bare `col <> ''` inside a shape CHECK admits the row it forbids
+
+`strategy_position_ownership_release_shape` (`sql/281`) is the precedent this migration's
+constraint was written from:
+
+```sql
+(status = 'active'   AND released_at IS NULL     AND release_reason IS NULL)
+OR (status = 'released' AND released_at IS NOT NULL AND release_reason <> '')
+```
+
+A `released` row with `release_reason = NULL` gives branch 1 FALSE and branch 2
+`TRUE AND TRUE AND NULL` = NULL, so the CHECK evaluates to NULL — and **a CHECK passes on
+NULL.** Verified empirically rather than reasoned, on the test cluster:
+
+```sql
+CREATE TEMP TABLE shape_probe (status text NOT NULL, reason text,
+  CONSTRAINT bare_form CHECK ((status='active' AND reason IS NULL)
+                           OR (status='released' AND reason <> '')));
+INSERT INTO shape_probe VALUES ('released', NULL);   -- INSERT 0 1  ← admitted
+```
+
+The same probe with `reason IS NOT NULL AND reason <> ''` raises `CheckViolation`.
+`sql/408`'s `strategy_position_repair_streak_shape` uses the explicit form, and
+`tests/test_3284_repair_streak_db.py::test_a_live_streak_cannot_exist_without_a_reason`
+asserts it at the database rather than trusting the DDL.
+
+⚠ **The hole in `sql/281` is LATENT, not exploited** — `select count(*) from
+strategy_position_ownership where status='released' and release_reason is null` returns
+**0** on dev today (the table holds 1 row, `active`). Recorded here rather than fixed in
+passing: tightening a constraint on a table this PR does not otherwise touch is scope
+creep, and there is nothing to repair.
+
+⚠ **Generalisable: inside a CHECK, three-valued logic makes "non-empty" and "present and
+non-empty" different constraints, and only the second is the one you meant.** Any
+`col <> ''`, `col > 0` or `col <> 'x'` in a multi-branch CHECK needs its own `IS NOT NULL`
+unless the column is already `NOT NULL`. Copying a shape constraint from a sibling table
+copies this silently, because the bare form reads as correct.
+
+- Enforced in: this prevention log; `sql/408_position_repair_refusal_streak.sql` (the
+  explicit form, with the reason written beside it);
+  `tests/test_3284_repair_streak_db.py` (the CHECK asserted against Postgres);
+  `app/services/strategy_position_repair_streak.py` (the service-layer refusal on an empty
+  reason code, so the constraint is not the only line of defence).
+- ⚠ Owed and NOT shipped here: the `<> ''`/NULL rule belongs in
+  `.claude/skills/engineering/sql-correctness.md`, which is write-refused from a loop
+  worktree. Text parked on #2403 for the operator to apply.
+
+### 3. A new write site records only what the early returns ABOVE it let through — and an in-flight status is transient only if something terminalises it
+
+Caught by Codex ckpt-2 on the same branch, and it is the sharper of the three.
+
+I instrumented the fixed-exit repair arm at both of its outcomes and believed the
+coverage complete. It was not: `_resume_operation` runs at the TOP of
+`manage_owned_position` and returns before the arm, so an ownership with an unresolved
+operation never reaches either site. The worst case was therefore the *only* one
+unrecordable — which is the reliable shape of this defect, because an early return exists
+precisely for the states that are already anomalous.
+
+Compounding it, I assumed `submitted` was transient. It is not:
+`strategy_position_manager.py`'s last resume branch returns
+`("pending", "broker_edit_pending")` and **leaves the row `submitted` forever** when the
+levels never arrive. `idx_strategy_position_one_unresolved_operation` then blocks any
+fresh repair. So mapping `submitted` to "episode over" produced a permanently naked
+position with a **zero** streak and a frozen `last_checked_at` — the exact failure the
+ticket was written to catch, shipped under a docstring asserting it was safe.
+
+⚠ **Two mechanical checks, neither needing a reviewer:**
+
+1. **Before adding a write site inside a function, `rg` every `return` ABOVE it and ask
+   which states reach your code.** A site added at the bottom of a funnel instruments the
+   happy path. Here the answer was "everything with an unresolved operation", i.e. the
+   population of interest.
+2. **For any status you are treating as transient, find the line that writes its terminal
+   status.** If no branch terminalises it under the failing condition, it is not
+   transient — it is a permanent state with an optimistic name. `submitted`, `pending`,
+   `in_flight` and `submitting` all read as temporary and none of them promise it.
+
+⚠ Third time on #3284 that a justification phrased as *what a function would do* was
+wrong (after the `resume_core_submission` replay claim and the "no such row can exist"
+guard). The existing rule — *open the function that path runs and read what it calls* —
+is correct and was not applied to a path I had already written a docstring about. **A
+docstring asserting safety is the least reliable place to discover you did not check:
+writing the justification down makes it feel verified.**
+
+- Enforced in: `app/services/strategy_position_repair_streak.py` (only `applied` /
+  `no_change` clear a streak — broker-confirmed state, never acknowledgement);
+  `app/services/strategy_position_manager.py::_record_resumed_repair_visit` (the third
+  site, on the resume path, filtered to `fixed_exit_repair`);
+  `tests/test_strategy_position_manager.py::test_an_accepted_edit_that_never_lands_keeps_accruing_refusals`
+  (drives the real manager, because the defect was the wiring — probe-verified: reverting
+  the `pending` mapping makes it assert `(0, None) == (2, 'broker_edit_pending')`);
+  `tests/test_3284_repair_refusal_streak.py::test_only_broker_confirmed_state_clears_a_streak`.
+
+⚠ **Coda, same branch, one round later: when a review changes SEMANTICS, grep for every
+place that states them.** The `pending`/`submitted` correction above left `sql/408`'s
+`COMMENT ON TABLE` still saying an accepted edit resets the streak — the exact opposite of
+what the code now does, in the artefact the #3288 lesson two entries up identifies as the
+one a reader trusts most (`obj_description`). Caught by Codex as a P3, not by any gate.
+**After any behavioural correction, `rg` the changed state names through
+`COMMENT ON`, docstrings and migration headers before pushing** — the code moved, the
+prose describing it did not, and prose does not fail a test.
+
+⚠ Mechanical consequence worth knowing: correcting a COMMENT in an ALREADY-APPLIED
+migration trips #1333's content-drift guard (`run_migrations` stores each file's SHA-256
+and raises on mismatch). For an UNMERGED migration of your own, un-apply it —
+`DROP TABLE` + `DELETE FROM schema_migrations WHERE filename=...` — assert the row count
+is 0 first, then re-apply. Do NOT add a second migration to fix the first one's comment,
+and do NOT leave the comment wrong because the file is "already applied".
