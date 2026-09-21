@@ -9608,3 +9608,68 @@ original, because the gate now *looked* like a bound.
 - The test: for every outcome value, name the operator question it answers. If two code
   paths that would prompt **different next actions** map to the same value, it is one
   value too few. This is cheap to fix while the migration is unmerged and expensive after.
+
+## A doc-only edit to a strategy module is an IDENTITY ROTATION (#2840, 2026-09-21)
+
+- Symptom: none at any gate. A spec proposed correcting two stale in-code comments in
+  `app/services/strategies/s12_cheapest_band_price_gated_breakout.py` and asserted, in its
+  own acceptance criteria, *"no production file that feeds an identity hash is touched"*.
+  The diff would have been pure prose, and it would have rotated S-12's `strategy_version`.
+- Root cause: `StrategyIdentity.source_hash` is fed by each strategy module's
+  `_source_hash()`, which is `sha256(Path(__file__).read_bytes())[:12]` — **the whole file,
+  comments included**. Verified rather than reasoned: `31a38948e10a` → `b261c0bce572` after
+  appending a single `# comment` line. This is DELIBERATE, not a defect: `source_hash` is
+  documented as *"Source of the module DEFINING the strategy"* and hashing bytes is the
+  conservative reading of criterion 11 (*"identity must cover code, not just parameters"*).
+  A hash over bytes cannot tell a comment from a branch, and erring the other way would let
+  a real edit hide in a reformat.
+- ⚠ The effect is already visible in the ledger and is easy to misread as corruption. The
+  5,791 stored S-12 rows in `strategy_signal_observations` carry
+  `strategy-registry-v1+b18d5869092b`, which is **neither** of today's two identities
+  (`survivor_only` → `6b4b504f4fdf`, `survivorship_free` → `e711e9312913`). The module has
+  been edited since; the rows are correctly detached.
+- ⚠ It also means "which universe" silently changes the identity you quote. A measurement
+  that prints a `strategy_version` without pinning `universe` and `cost_model_id` is not
+  reproducible, and a reviewer who cannot reproduce it is right to refuse it.
+- Prevention: before editing ANY file under `app/services/strategies/`, including a
+  comment or a docstring, ask whether that module feeds a `source_hash`. All 11 do. If the
+  edit is documentation, put it in the spec, the prevention log or the issue — not in the
+  module — unless an identity rotation is intended and its evidence disposition is part of
+  the change. Self-review prompt: a diff touching `app/services/strategies/**` whose PR
+  description says "comment only" or "doc only" is the tell.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-21-2840-carrier-source-selection-tripwire.md` §4 (carries the
+  verified before/after hashes and the ledger evidence).
+
+## "Not reachable today" is a claim about CONSTRUCTION, not about the call-site inventory (#2840, 2026-09-21)
+
+- Symptom: a spec disposed of an open hardening obligation — *"a certified price-basis
+  carrier is bound to its series only by length and rule version"* — as **unreachable**. The
+  reasoning enumerated all four production construction sites, found each builds the carrier
+  at `n_bars=len(series)` in the same expression as the call it accompanies, and concluded
+  no caller can supply a foreign carrier. The inventory was correct and the conclusion was
+  false.
+- Root cause: an inventory of who DOES something cannot establish what CAN be done through a
+  public, structural API. Codex refused it at checkpoint 1 by building the counterexample
+  instead of arguing about it, and it reproduces in one call: a `PriceBasisSeries` built for
+  series B at `len(series_B)` is accepted by `s12_signals` AND by `segmented_signals` when
+  passed alongside series A, and the strategy **fires** —
+  `{'not_evaluable': 114, 'not_fired': 60, 'fired': 1}`. Three length checks exist
+  (`s12_signals`, `PriceBasisSeries.segment`, both segmented dispatchers); all three catch a
+  wrong-LENGTH carrier and none catches an equal-length foreign one.
+- ⚠ The same draft named a trigger for when the class would become reachable ("a carrier
+  built from something other than `len(series)`"). It was wrong in both directions: foreign
+  certification arises *while* using `len(series)`, and a correctly bound per-bar source need
+  not introduce it. **A trigger condition is a claim too, and it needs the same falsification
+  attempt as the thing it gates.**
+- Prevention: to write "X cannot happen", try to MAKE it happen — one constructed call,
+  reported with its output — and only then write the sentence, scoped to what the attempt
+  actually showed. Where the attempt succeeds, the honest form is the two-part one: reachable
+  through the public API, not reachable through any current application call site. Grep for
+  "not reachable", "cannot arise", "no caller can" in a spec and require a reproduction
+  attempt next to each. Related in kind to working-order 3c (an inherited root cause is a
+  premise) and to `cbfd8144`'s lesson (an inherited PREREQUISITE is a premise) — this is the
+  same error applied to a SAFETY claim rather than to a blocker.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-21-2840-carrier-source-selection-tripwire.md` §5 (carries the
+  reproduction and the corrected guard inventory).
