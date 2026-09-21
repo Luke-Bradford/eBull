@@ -106,7 +106,10 @@ class SecFact:
     ⚠ ``instant`` is populated ONLY for an instant context (SEC sends ``end`` with no
     ``start``). A duration fact fixes the ratio to a reporting PERIOD and recovers no
     event date, so it is retained for the census and excluded from matching — an
-    earlier draft matched on ``end`` regardless and silently admitted 1,626 of them.
+    earlier draft matched on ``end`` regardless and silently admitted every one of
+    them. ⚠ The count is deliberately not written here: ``main()`` prints it as
+    "DURATION context", and a hand-copied figure goes stale the moment the probe set
+    changes (it did — an earlier cache over fewer CIKs gave a different number).
     """
 
     cik: str
