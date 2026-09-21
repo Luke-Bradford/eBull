@@ -120,6 +120,11 @@ class CoreResumeAuthority:
     api_key_credential_id: UUID
     user_key_credential_id: UUID
     stop_loss_rate: Decimal | None
+    """The committed stop.  See :attr:`take_profit_rate` -- the pair is one fact and the
+    ``None`` contract below governs both.  ⚠ Split across the two fields deliberately: a
+    bare string attaches to the field it FOLLOWS, so a single block after the second
+    would leave this one undocumented in every tool that reads them."""
+
     take_profit_rate: Decimal | None
     """#3284 item 1.  The exit levels this authority was committed with, read back from
     ``strategy_core_entry_exit_levels``.
