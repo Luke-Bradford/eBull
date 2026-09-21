@@ -1107,12 +1107,18 @@ class CoreSleeveResponse(BaseModel):
     #: clause UNSUPPORTABLE, not false, so both of its claims are kept. Why the
     #: opening is conditional, and the rest of the rationale, on PR #3272.
     #:
-    #: "reports no sterling figure" is the checkable form of the original's
-    #: "unhedged" -- ``strategy_core_mandate_events.base_currency`` is
-    #: ``CHECK (base_currency = 'USD')`` (``sql/336``). ⚠ An earlier draft cited
-    #: the declaration's ``fx_rule`` here instead; that rule is about
-    #: instrument-currency-to-USD conversion, a different pair from the
-    #: household's, and it does not support this sentence.
+    #: ⚠⚠ The sentence about the £ sign is here because the FIRST version of this
+    #: caveat claimed the engine "reports no sterling figure", which is FALSE on
+    #: the page that renders it: the owned-positions table prints £ for this very
+    #: sleeve. The claim was checked by grepping ``StrategyPortfolioLens.tsx``
+    #: alone and reading an empty result as a property of the whole page -- the
+    #: label is formatted one component down, in ``StrategyPositions.tsx`` from
+    #: ``position.currency``. What IS checkable is the provenance: this module
+    #: sets ``currency=broker_position.currency`` straight from the broker
+    #: payload and converts no amount, so the label is the broker's and not ours.
+    #: ⚠ Whether that label is CORRECT is a separate defect, tracked on its own
+    #: issue; this sentence deliberately claims only what we do, not what is true
+    #: of the number.
     #:
     #: The cost clause is the declaration's ``all_in_cost_rule``
     #: (``docs/proposals/ta/2026-08-24-core-selection-declaration.json``): p75
@@ -1121,10 +1127,11 @@ class CoreSleeveResponse(BaseModel):
     household_currency_caveat: str = (
         "Sterling is not the unit here. Where the core sleeve holds a USD-quoted "
         "instrument, a household measuring it in GBP carries GBP/USD exposure on the "
-        "whole position value and not only on its return, and this engine neither "
-        "hedges that exposure nor reports any sterling figure. Converting when you "
-        "fund or withdraw is a household cost that the preregistered ceiling, which "
-        "prices round-trip spread, does not include."
+        "whole position value and not only on its return, and this engine does not "
+        "hedge it. A £ sign in the positions table is the broker's own label carried "
+        "through unchanged — no amount on this page has been converted by us. "
+        "Converting when you fund or withdraw is a household cost that the "
+        "preregistered ceiling, which prices round-trip spread, does not include."
     )
 
 

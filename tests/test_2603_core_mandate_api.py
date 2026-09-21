@@ -180,7 +180,14 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     # USD holding into GBP moves the whole of it. Dropping this qualifier would
     # understate the caveat, so it is pinned separately.
     assert "whole position value and not only on its return" in response.household_currency_caveat
-    assert "nor reports any sterling figure" in response.household_currency_caveat
+    assert "this engine does not hedge it" in response.household_currency_caveat
+    # ⚠ The first shipped version claimed the engine "reports no sterling figure".
+    # The owned-positions table prints £ for this sleeve, so that was false on the
+    # page rendering it. Pinned negatively so it cannot come back.
+    assert "sterling figure" not in response.household_currency_caveat
+    # What replaced it is a claim about provenance, which IS checkable here:
+    # `currency=broker_position.currency`, and no amount is converted.
+    assert "carried through unchanged" in response.household_currency_caveat
     # Names the excluded cost specifically. "does not include" alone would still
     # pass if the sentence stopped identifying WHICH cost is outside the ceiling.
     assert "Converting when you fund or withdraw" in response.household_currency_caveat
