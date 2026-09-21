@@ -29,6 +29,7 @@ import pytest
 from app.services.research_corpus_ingest import (
     HF_ARCHIVE,
     INTRADER_ARCHIVE,
+    ArchiveProvenance,
     Form25Match,
     archive_symbol_candidates,
     classify_form25_match,
@@ -364,3 +365,95 @@ def test_the_two_archives_disagree_about_their_adjustment_basis() -> None:
     # Both are Yahoo redistributions, so agreement between them is circular
     # rather than corroborating — sql/249's `upstream_source` exists for this.
     assert HF_ARCHIVE.upstream_source == INTRADER_ARCHIVE.upstream_source == "yahoo_derivative"
+
+
+# ---------------------------------------------------------------------------
+# #2834 §7 item 2 — the per-bar corporate-action stamps
+# ---------------------------------------------------------------------------
+
+
+def test_intrader_row_carries_the_split_stamp_on_the_effective_bar() -> None:
+    """Field 6 is stamped ON the split bar, not on the one before it.
+
+    AAPL's 4:1 settled 2020-08-31, and the archive prints ``4`` against that
+    date. The direction matters to every consumer: the scale correcting a bar
+    is the product of the factors of the events STRICTLY AFTER it, so a stamp
+    read as belonging to the previous bar would leave the split bar itself
+    divided by 4.
+    """
+    line = "2020-08-31,127.58,131,126,129.04,223505733,4,0,126.107533922878"
+    row = next(parse_intrader_rows("AAPL", iter([line])))
+    assert row.split_factor == Decimal("4")
+    assert row.close == Decimal("129.04")
+    assert row.dividend == Decimal("0")
+
+
+def test_an_ordinary_bar_stamps_one_not_none() -> None:
+    """``1`` and ``None`` are DIFFERENT states and the parser must not fuse them.
+
+    ``1`` is "the vendor looked and there was no event"; ``None`` is "this
+    archive ships no stamp column at all". ``COALESCE(split_factor, 1)`` reads
+    them identically downstream, which is why the distinction is made here and
+    recorded per series (sql/405 §3).
+    """
+    row = next(parse_intrader_rows("X", iter(["2023-01-05,1,2,0.5,1.25,100,1,0,1.25"])))
+    assert row.split_factor == Decimal("1")
+    assert row.split_factor is not None
+
+
+@pytest.mark.parametrize("raw", ["0", "-2", "-0.25", "abc", "", "nan", "-inf"])
+def test_an_unusable_split_factor_is_absent_rather_than_stored(raw: str) -> None:
+    """The derivation DIVIDES by a product of these, so 0 and -2 are not data.
+
+    Absent is nullable, counted by ``LoadCensus.split_stamps_absent`` and
+    refusable; a stored ``-2`` silently flips the sign of every price before
+    the event. ``nan``/``-inf`` parse fine as ``Decimal`` and are caught by the
+    finiteness test in ``_csv_decimal``, not by the except clause.
+    """
+    row = next(parse_intrader_rows("X", iter([f"2023-01-05,1,2,0.5,1.25,100,{raw},0,1.25"])))
+    assert row.split_factor is None
+    # The rest of the bar survives: an unusable stamp is not an unusable price.
+    assert row.close == Decimal("1.25")
+
+
+def test_a_negative_dividend_is_stored_as_published() -> None:
+    """AGII 2016-05-27 really does publish ``-4.80545454545455``.
+
+    One row in 460,693 non-zero dividends across the full mirror. Nothing
+    consumes field 7 yet, so rejecting it would be this ingest inventing a rule
+    about a column it does not read — and a CHECK would abort a 50.1M-row load
+    over one vendor artefact.
+    """
+    line = "2016-05-27,52.32,53.6065,52.32,52.86,96011,1,-4.80545454545455,58.9677700515509"
+    row = next(parse_intrader_rows("AGII", iter([line])))
+    assert row.dividend == Decimal("-4.80545454545455")
+    assert row.split_factor == Decimal("1")
+
+
+def test_only_the_stamped_archive_declares_stamps() -> None:
+    """The marker is per ARCHIVE and the two archives genuinely differ.
+
+    The Parquet archive has no stamp columns at all, so every one of its
+    25.8M bars is NULL — which is 'unknown', not 'no corporate actions'. That
+    is the whole reason the marker is a stored column rather than an inference
+    from the bars.
+    """
+    assert INTRADER_ARCHIVE.corporate_action_stamps == "vendor_supplied"
+    assert HF_ARCHIVE.corporate_action_stamps == "absent"
+
+
+def test_a_new_archive_is_presumed_stampless() -> None:
+    """The default fails towards 'unknown', which is the safe direction.
+
+    An archive whose stamps nobody has measured must not present as carrying
+    them: that would let a derivation divide by a scale built from absent data
+    and report a corrected series.
+    """
+    unmeasured = ArchiveProvenance(
+        vendor="someone/new",
+        upstream_source="yahoo_derivative",
+        licence="other/unspecified",
+        adjustment_basis="unknown",
+        quarantine_as_of=date(2026, 1, 1),
+    )
+    assert unmeasured.corporate_action_stamps == "absent"

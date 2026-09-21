@@ -88,6 +88,10 @@ def load(conn: psycopg.Connection[tuple], mirror: Path) -> int:
     print(f"    unresolved          : {census.unresolved_series:,}   <- eToro-listing-bias measure")
     print(f"    ambiguous symbols   : {len(census.ambiguous_symbols):,}")
     print(f"  bars loaded           : {census.bars_copied:,}")
+    print(f"  corporate_action_stamps: {provenance.corporate_action_stamps}  <- written at the END of the bar pass")
+    print(f"  split stamps <> 1     : {census.split_events:,}")
+    print(f"  dividend stamps <> 0  : {census.dividend_stamps:,}")
+    print(f"  split stamps ABSENT   : {census.split_stamps_absent:,}  <- MUST be 0 for a vendor_supplied archive")
     print(f"  rows without a close  : {census.rows_without_close:,}  (dropped, counted, no floor)")
     print(f"  duplicate vendor rows : {census.duplicate_bar_rows:,}")
     print(f"  {census.reuse_guard_note}")
@@ -96,6 +100,16 @@ def load(conn: psycopg.Connection[tuple], mirror: Path) -> int:
 
     if drift:
         logger.error("census drift is %d, expected 0 — the load is NOT done", drift)
+        return 1
+    if census.split_stamps_absent:
+        # The marker this load just wrote says every bar carries a stamp. If
+        # any bar does not, the marker is a lie in the dangerous direction and
+        # every downstream COALESCE(split_factor, 1) reads those bars as
+        # split-free. Fail rather than report a successful load (#2834).
+        logger.error(
+            "%d bars carry NO split stamp under a vendor_supplied archive — the marker overstates coverage",
+            census.split_stamps_absent,
+        )
         return 1
     return 0
 
