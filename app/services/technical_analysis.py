@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from decimal import Decimal
-from typing import TypedDict
+from typing import ReadOnly, TypedDict
 
 
 class OHLCVRow(TypedDict):
@@ -19,6 +19,52 @@ class OHLCVRow(TypedDict):
     low: Decimal
     close: Decimal
     volume: int | None
+
+
+class ReadOnlyOHLCVRow(TypedDict):
+    """``OHLCVRow`` with every key PEP 705 ``ReadOnly``. Refs #2840.
+
+    What ``indicator_series.BarSeries.rows`` holds, and what every function
+    here that only READS its bars should accept. Lives beside ``OHLCVRow``
+    rather than in ``indicator_series`` because that module imports this one.
+
+    ⚠ Assignability runs ONE WAY: ``OHLCVRow`` -> ``ReadOnlyOHLCVRow`` is fine
+    (PEP 705 lets a mutable item satisfy a read-only one), the reverse is not.
+    So a *parameter* widened to this type accepts both and costs nothing, while
+    a reader that insists on ``OHLCVRow`` cannot be handed a ``BarSeries``' rows
+    — which is precisely the report pyright should give, because such a reader
+    is claiming a write capability it does not use.
+
+    ⚠ ``OHLCVRow`` itself is deliberately NOT narrowed: loaders all over the
+    repo build these dicts field by field, and taking their write capability
+    away is a different, much wider change.
+
+    ⚠⚠ THE OHLC TYPES BELOW ARE KNOWN TO BE WRONG, AND ARE WRONG ON PURPOSE —
+    they mirror ``OHLCVRow`` exactly, including its inaccuracy. ``Decimal`` is
+    not what production supplies: ``price_masked_bars`` masks a quarantined
+    field to ``None``, which is why ``BarSeries._floats`` and
+    ``BarSeries.closes`` have always carried ``None`` branches and why
+    ``closes`` is typed ``list[Decimal | None]``. Measured over 60 instruments
+    / 60,626 bars out of ``load_masked_bars``: ``volume`` ``None`` 16,661
+    times, ``high`` 12, ``low`` 12, ``close`` 11, ``open`` 2. All five keys
+    were always present, so at least the required-ness is right.
+
+    Declaring ``Decimal | None`` here — tried, not guessed — produces **35
+    pyright errors** across call sites that assume non-null. Every one is
+    pre-existing: ``OHLCVRow`` has always made the same false promise and those
+    sites have always relied on it. Correcting it is a real and separate round;
+    smuggling it in here would mix two changes and leave the accompanying A/B
+    unable to attribute a difference to either.
+
+    So this type's job is narrow — remove the WRITE capability, change nothing
+    else — and the residual is named rather than silently inherited.
+    """
+
+    open: ReadOnly[Decimal]
+    high: ReadOnly[Decimal]
+    low: ReadOnly[Decimal]
+    close: ReadOnly[Decimal]
+    volume: ReadOnly[int | None]
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +208,7 @@ def bollinger_bands(
     return (mean + num_std * std, mean - num_std * std)
 
 
-def atr(bars: Sequence[OHLCVRow], period: int = 14) -> float | None:
+def atr(bars: Sequence[ReadOnlyOHLCVRow], period: int = 14) -> float | None:
     """Average True Range with Wilder smoothing.
 
     True Range = max(high - low, |high - prev_close|, |low - prev_close|).
@@ -191,7 +237,7 @@ def atr(bars: Sequence[OHLCVRow], period: int = 14) -> float | None:
 
 
 def stochastic(
-    bars: Sequence[OHLCVRow],
+    bars: Sequence[ReadOnlyOHLCVRow],
     k_period: int = 14,
     d_period: int = 3,
 ) -> tuple[float, float] | None:
@@ -230,7 +276,7 @@ def stochastic(
 
 
 def compute_indicators(
-    bars: Sequence[OHLCVRow],
+    bars: Sequence[ReadOnlyOHLCVRow],
 ) -> dict[str, float | None] | None:
     """Compute all technical indicators from OHLCV bars.
 

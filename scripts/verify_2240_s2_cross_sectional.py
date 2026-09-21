@@ -40,6 +40,7 @@ import statistics
 import sys
 import time
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -240,7 +241,7 @@ def equivalence() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _window_usable(closes: list[float | None], index: int) -> bool:
+def _window_usable(closes: Sequence[float | None], index: int) -> bool:
     """Would the 12-1 window at ``index`` yield a score, ignoring the 273-bar gate?
 
     ⚠ Deliberately the module's DATA rule without its ELIGIBILITY rule — that is

@@ -40,19 +40,26 @@ here closes those.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from functools import cached_property
 from pathlib import Path
-from typing import Literal
+from types import MappingProxyType
+from typing import Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
 from numpy.lib.stride_tricks import sliding_window_view
 
-from app.services.technical_analysis import OHLCVRow
+# ⚠ `OHLCVRow` is re-exported: three test modules import it from here, and it is
+# half of this module's input contract. `ReadOnlyOHLCVRow` is what `BarSeries`
+# actually holds and is defined there, beside its mutable twin, because this
+# module imports that one and the reverse would be a cycle.
+from app.services.technical_analysis import OHLCVRow as OHLCVRow
+from app.services.technical_analysis import ReadOnlyOHLCVRow
 
 # ---------------------------------------------------------------------------
 # Rule-set version
@@ -101,12 +108,107 @@ class BarSeries:
     normal (holidays, halts, an instrument that had not listed yet); a
     fabricated bar to fill it would be an invented observation, which is a
     worse failure than a gap.
+
+    ⚠⚠ ``frozen=True`` IS SHALLOW, AND THAT USED TO BE A SILENT FAULT (#2840).
+    It overrides ``__setattr__`` so a FIELD cannot be rebound; it says nothing
+    about the objects a field points at. ``OHLCVRow`` is a ``TypedDict``, i.e. a
+    plain mutable ``dict``, so ``rows[i]["close"] = x`` used to move the bars
+    out from under the caches below — which are a SNAPSHOT taken at first
+    access. Measured before the fix: ``closes`` returned ``999`` while
+    ``float_closes`` and ``array_closes`` still returned ``10.5``, with no
+    exception. Every strategy reads the caches, so the stale value is the one
+    that decides the verdict, and ``PriceBasisSeries.binding_mismatch``
+    validates ``rows`` — the other side — so the carrier binding passed on data
+    the strategy never read.
+
+    ``__post_init__`` therefore COPIES each row and wraps it in a
+    ``MappingProxyType``. Both halves matter: the copy decouples a dict the
+    caller kept a reference to, and the proxy refuses a write through
+    ``series.rows``. Neither alone is enough — a proxy is a VIEW, so
+    ``MappingProxyType(callers_dict)`` would still track the caller.
+
+    ⚠⚠ THIS IS AN ACCIDENT CONTROL, NOT A BOUNDARY — the same class as
+    ``app/security/unattended_guard.py``, which constrains a confused run and
+    not a determined one. The threat is one of ~17 consumer sites writing
+    through an alias by mistake.
+
+    What it actually stops, stated as operations rather than as intent:
+    ``series.rows[i][key] = v`` (pyright AND ``TypeError``), ``float_*[i] = v``
+    (pyright AND ``TypeError``), ``array_*[i] = v`` (``ValueError`` only —
+    see below), and a caller mutating a row ``dict`` it passed in.
+
+    ⚠ THE ARRAYS HAVE ONE GATE, NOT TWO. pyright accepts
+    ``series.array_closes[0] = 999`` with no diagnostic — numpy has no static
+    write protection — so only the runtime ``WRITEABLE`` flag guards them. The
+    rows and the float tuples do get both.
+
+    These REPRODUCED bypasses survive, named so silence is not mistaken for
+    coverage:
+
+    * ``proxy == obj`` hands ``obj.__eq__`` the BACKING DICT, so an ``__eq__``
+      that writes to its argument moves the row (measured: ``1.5 -> 99.9``);
+    * ``array_closes.setflags(write=True)`` is reversible — the array owns its
+      storage;
+    * ``.shape`` / ``.dtype`` / ``.strides`` stay assignable on a read-only
+      array. ⚠ Unlike the others this one is NOT exotic: reshaping an array is
+      ordinary numpy, so a helper that normalises shape in place would corrupt
+      the shared cache's dimensions by accident. It is the weakest point here;
+      copy before reshaping;
+    * ``vars(series)["float_closes"] = …`` writes the ``cached_property`` slot
+      directly, and ``vars(series)["rows"] = …`` replaces the field;
+    * the copy is SHALLOW, so a mutable value inside a row — a ``Decimal``
+      subclass with a stateful ``__float__``, say — is still shared;
+    * a preceding mixin whose ``__init_subclass__`` omits ``super()``
+      suppresses the subclass refusal below.
+
+    ⚠ An earlier draft said each of these "needs code whose only purpose is the
+    bypass". That was wrong about the reshape, and the claim is not worth
+    repairing — a control should be described by the operations it refuses, not
+    by a guess at the caller's intent.
     """
 
     dates: tuple[date, ...]
-    rows: tuple[OHLCVRow, ...]
+    #: ⚠ Read-only at BOTH levels. The element type is ``ReadOnlyOHLCVRow`` so
+    #: pyright refuses an item assignment in the pre-push gate; the runtime
+    #: objects are ``MappingProxyType`` so it raises ``TypeError`` if it gets
+    #: past that. A ``tuple[OHLCVRow, ...]`` still assigns here (PEP 705), so
+    #: no construction site changes.
+    rows: tuple[ReadOnlyOHLCVRow, ...]
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        # Refused rather than supported. A subclass can override __post_init__
+        # without super() and get mutable rows back, and — more quietly —
+        # `frozen=True`'s inherited __setattr__ does not stop a subclass
+        # instance taking a NON-FIELD attribute, so `child.float_closes = fake`
+        # replaces the consumed cache. Both were reproduced. Nothing subclasses
+        # BarSeries, so refusing costs nothing.
+        #
+        # ⚠ THIS GUARD IS ITSELF SUPPRESSIBLE and must not be leaned on: a
+        # preceding mixin whose own `__init_subclass__` omits `super()`
+        # swallows the hook, and `class Child(Mixin, BarSeries)` then builds
+        # with mutable rows (reproduced). That is why `__getstate__` enumerates
+        # `dataclasses.fields` rather than trusting this to keep the field list
+        # at two.
+        raise TypeError("BarSeries may not be subclassed — see the frozen-is-shallow note in its docstring")
 
     def __post_init__(self) -> None:
+        # Coerce BEFORE validating. The annotations are unenforced at run time,
+        # so a caller can pass LISTS, keep them, and mutate ordering or length
+        # after the checks below have passed. Tupling makes the validated thing
+        # the stored thing.
+        object.__setattr__(self, "dates", tuple(self.dates))
+        # ⚠ `dict(row)` and NOT `row.copy()`, although `.copy()` is a C-level
+        # call and ~3x faster on the already-frozen rows a sub-series is built
+        # from. `mappingproxy.copy()` DELEGATES to the backing object's `copy`,
+        # so a dict subclass whose `copy()` returns `self` passes straight
+        # through and the caller keeps a live handle (reproduced). `dict(row)`
+        # cannot be redirected. Measured price of the choice: 0.275 vs 0.131
+        # us/bar on the sub-series path, 0.060 vs 0.058 on a first build.
+        object.__setattr__(
+            self,
+            "rows",
+            tuple(cast("ReadOnlyOHLCVRow", MappingProxyType(dict(row))) for row in self.rows),
+        )
         if len(self.dates) != len(self.rows):
             raise ValueError(f"BarSeries length mismatch: {len(self.dates)} dates, {len(self.rows)} rows")
         for i in range(1, len(self.dates)):
@@ -117,6 +219,48 @@ class BarSeries:
                     f"BarSeries not ascending at index {i}: {self.dates[i - 1]} then {self.dates[i]}. "
                     "Bars must be oldest-first — reversed input silently inverts time."
                 )
+
+    # ⚠ A `MappingProxyType` is not picklable, and `BarSeries` WAS. These two
+    # hooks keep `pickle` AND `copy.deepcopy` working (both route through them)
+    # rather than dropping a capability silently — nothing crosses a process
+    # boundary today, which is exactly why the loss would have gone unnoticed.
+    #
+    # ⚠ `dataclasses.asdict` / `astuple` are NOT restored: they walk the fields
+    # directly, never these hooks. That loss is real and is pinned by a test so
+    # it cannot quietly come back as a surprise.
+
+    def __getstate__(self) -> dict[str, Any]:
+        # Plain dicts on the wire, and the warm caches deliberately DROPPED —
+        # the default here is `self.__dict__`, which ships whatever
+        # `cached_property` values happened to be warm. They are derived; the
+        # receiver recomputes them.
+        #
+        # ⚠ Enumerated from `dataclasses.fields` rather than written out. The
+        # earlier version hardcoded the two field names and justified it by
+        # `__init_subclass__` forbidding a third — but that guard is itself
+        # suppressible by a preceding mixin whose own `__init_subclass__` omits
+        # `super()` (reproduced), so the justification did not hold and a
+        # subclass field would have silently reverted to its default across
+        # every copy and pickle. Enumerating removes the dependency entirely.
+        state: dict[str, Any] = {field.name: getattr(self, field.name) for field in dataclasses.fields(self)}
+        state["rows"] = tuple(dict(row) for row in self.rows)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        # ⚠ VALIDATE BEFORE COMMITTING. Building the replacement first means a
+        # malformed payload raises with `self` untouched. The earlier version
+        # cleared `__dict__` and then called `__init__`, which on a bad payload
+        # left an EXISTING, previously valid instance empty or length-
+        # inconsistent — a new defect, and a worse one than the pickle
+        # incompatibility it was there to fix.
+        replacement = type(self)(**state)
+        # Clearing is what drops any already-warm cache. `__setstate__` can be
+        # called on a live instance, and a surviving `cached_property` value
+        # would describe the PREVIOUS rows — the original desync, by another
+        # door.
+        self.__dict__.clear()
+        for field in dataclasses.fields(replacement):
+            object.__setattr__(self, field.name, getattr(replacement, field.name))
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -140,22 +284,38 @@ class BarSeries:
     #
     # ⚠ `slots=True` would break this: there would be no instance `__dict__` to
     # write into, and it fails at first access rather than at class definition.
-    # The cached values live outside the declared fields, so `__eq__` and
-    # `__hash__` still compare `(dates, rows)` alone.
+    # The cached values live outside the declared fields, so `__eq__` compares
+    # `(dates, rows)` alone.
+    #
+    # ⚠ `__hash__` is generated over the same pair and RAISES for any non-empty
+    # series — `TypeError: unhashable type: 'dict'`, and `mappingproxy` is
+    # unhashable too, so freezing did not change it. `hash(BarSeries((), ()))`
+    # does succeed. Nothing in the repo hashes a BarSeries or uses one as a key
+    # or set member; this is written down because the sentence that used to be
+    # here claimed __hash__ worked, which is the kind of false reassurance a
+    # reader checking whether caching is safe would act on.
+    #
+    # ⚠⚠ THE CACHES ARE HANDED OUT BY REFERENCE AND ARE THEREFORE FROZEN TOO.
+    # Freezing `rows` alone would guard the half nothing reads: the strategies
+    # read THESE (`closes = series.float_closes`, `LevelScan.build(highs=
+    # series.array_highs, …)`), so `float_closes[i] = 999` would still corrupt
+    # the series for every later reader. Tuples below, and `setflags(write=
+    # False)` on the arrays. ⚠ That flag is REVERSIBLE and leaves `.shape`
+    # mutable — it stops `arr[i] = x`, which is the accident, and nothing more.
 
-    def _floats(self, field: str) -> list[float | None]:
-        return [None if (v := row.get(field)) is None else float(v) for row in self.rows]
+    def _floats(self, field: str) -> tuple[float | None, ...]:
+        return tuple(None if (v := row.get(field)) is None else float(v) for row in self.rows)
 
     @cached_property
-    def float_closes(self) -> list[float | None]:
+    def float_closes(self) -> tuple[float | None, ...]:
         return self._floats("close")
 
     @cached_property
-    def float_highs(self) -> list[float | None]:
+    def float_highs(self) -> tuple[float | None, ...]:
         return self._floats("high")
 
     @cached_property
-    def float_lows(self) -> list[float | None]:
+    def float_lows(self) -> tuple[float | None, ...]:
         return self._floats("low")
 
     # ⚠ NaN, not None, and that is the load-bearing part (#2311).
@@ -171,17 +331,23 @@ class BarSeries:
     # Built from the float cache rather than the Decimals so the conversion
     # still happens exactly once per field per series.
 
+    @staticmethod
+    def _read_only(values: tuple[float | None, ...]) -> npt.NDArray[np.float64]:
+        array = np.array(values, dtype=float)
+        array.setflags(write=False)
+        return array
+
     @cached_property
     def array_closes(self) -> npt.NDArray[np.float64]:
-        return np.array(self.float_closes, dtype=float)
+        return self._read_only(self.float_closes)
 
     @cached_property
     def array_highs(self) -> npt.NDArray[np.float64]:
-        return np.array(self.float_highs, dtype=float)
+        return self._read_only(self.float_highs)
 
     @cached_property
     def array_lows(self) -> npt.NDArray[np.float64]:
-        return np.array(self.float_lows, dtype=float)
+        return self._read_only(self.float_lows)
 
 
 # ---------------------------------------------------------------------------

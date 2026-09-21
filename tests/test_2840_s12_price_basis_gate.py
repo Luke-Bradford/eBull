@@ -444,25 +444,47 @@ def test_an_UNCERTIFIED_bar_is_bound_too_because_it_feeds_the_certified_verdict(
         s12_signals(mine, universe=UNIVERSE, masked_reason=REASON, price_basis=partial)
 
 
-def test_mutating_a_row_after_construction_is_caught() -> None:
-    """⚠⚠ WHY THE BINDING IS A SNAPSHOT AND NOT A REFERENCE (Codex checkpoint 1).
+def test_a_retained_row_dict_can_no_longer_move_the_series_under_the_carrier() -> None:
+    """⚠⚠ THIS TEST CHANGED MEANING DELIBERATELY — it was not repaired (#2840).
 
-    ``OHLCVRow`` is a plain mutable ``dict``. An earlier design carried the
-    ``BarSeries`` itself, so carrier and series aliased the same objects and
-    ``rows[i]["close"] = …`` moved both sides while equality still passed. The
-    encoded snapshot is taken at construction, so it does not move.
+    It used to mutate a retained row ``dict`` after construction and assert the
+    carrier REJECTED the series, because ``OHLCVRow`` is a plain mutable
+    ``dict`` and ``BarSeries`` aliased the caller's objects. ``BarSeries`` now
+    copies each row and wraps it in a ``MappingProxyType``, so the mutation
+    cannot reach the series at all and there is nothing left to reject.
 
-    ⚠ It does NOT cover a desynchronised ``BarSeries`` CACHE — see
-    ``binding_mismatch``'s docstring. That is open on #2840.
+    ⚠ Rewriting it to assert "binding passes" alone would DEFANG it — that
+    assertion holds even if the binding check were deleted. So the old content
+    was split and both halves are still asserted:
+
+    * the caller's retained dicts cannot reach the series, cold and warm —
+      ``tests/test_2840_barseries_row_immutability.py``;
+    * the binding is a VALUE SNAPSHOT and not a live reference — pinned below
+      against the independently computed encoding.
+
+    ⚠⚠ The obvious replacement for the second half — "build a changed series
+    separately and check the carrier rejects it" — does NOT work, and Codex
+    checkpoint 1 refused it by construction: a carrier holding a live REFERENCE
+    to the original series also rejects a different series, so that assertion
+    cannot tell the two designs apart. Comparing against the independently
+    recomputed encoding can, because a reference-backed carrier has no encoding
+    to compare.
     """
     rows = [dict(row) for row in _above_edge().rows]
     series = BarSeries(dates=_above_edge().dates, rows=cast(tuple[OHLCVRow, ...], tuple(rows)))
     carrier = from_archive_basis("unadjusted", series=series)
     assert carrier.binding_mismatch(series) is None
 
+    # The snapshot is VALUES, taken at construction, and equal to what an
+    # independent encoding of the same bars produces.
+    assert carrier.bar_bindings == bindings_for(series)
+
+    before = series.rows[FIRING_INDEX]["close"]
     rows[FIRING_INDEX]["close"] = Decimal("7.77")
-    with pytest.raises(ValueError, match="built for different bars"):
-        s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=carrier)
+    assert series.rows[FIRING_INDEX]["close"] == before
+    assert carrier.bar_bindings == bindings_for(series)
+    assert carrier.binding_mismatch(series) is None
+    s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=carrier)
 
 
 def test_the_scans_undeclared_carrier_is_unbound_and_still_refuses_every_bar() -> None:
