@@ -515,7 +515,7 @@ def _edit_landed(
 
 
 def _resume_operation(
-    conn: psycopg.Connection[Any], *, broker: BrokerProvider, owned: _OwnedPosition
+    conn: psycopg.Connection[Any], *, broker: BrokerProvider, owned: _OwnedPosition, observed_at: datetime
 ) -> PositionManagerResult | None:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -606,6 +606,17 @@ def _resume_operation(
                     "WHERE strategy_trade_id=%s",
                     (owned.strategy_trade_id,),
                 )
+        # #3284 item 4a — recorded HERE rather than at the caller, because this function
+        # holds the exact position it already fetched. See `_record_resumed_repair_visit`.
+        _record_resumed_repair_visit(
+            conn,
+            owned=owned,
+            operation_type=str(operation["operation_type"]),
+            position=position,
+            state="applied" if landed else "reconcile_required",
+            reason_code="broker_state_matches_intent" if landed else "crash_before_submission_identity",
+            observed_at=observed_at,
+        )
         return PositionManagerResult(
             owned.strategy_trade_id,
             owned.broker_position_id,
@@ -667,11 +678,33 @@ def _resume_operation(
         desired_take=operation["desired_take_profit_rate"],
     )
     if not landed:
+        # #3284 item 4a — THE case the counter exists for. This branch never terminalises
+        # the operation, so a submitted edit whose levels never arrive returns `pending`
+        # here forever while `idx_strategy_position_one_unresolved_operation` blocks any
+        # fresh repair. Unrecorded, that is a permanently naked position reading zero.
+        _record_resumed_repair_visit(
+            conn,
+            owned=owned,
+            operation_type=str(operation["operation_type"]),
+            position=position,
+            state="pending",
+            reason_code="broker_edit_pending",
+            observed_at=observed_at,
+        )
         return PositionManagerResult(
             owned.strategy_trade_id, owned.broker_position_id, "pending", "broker_edit_pending", operation_id
         )
     with conn.transaction():
         _terminal(conn, operation_id=operation_id, status="applied")
+    _record_resumed_repair_visit(
+        conn,
+        owned=owned,
+        operation_type=str(operation["operation_type"]),
+        position=position,
+        state="applied",
+        reason_code="broker_edit_applied",
+        observed_at=observed_at,
+    )
     return PositionManagerResult(
         owned.strategy_trade_id, owned.broker_position_id, "applied", "broker_edit_applied", operation_id
     )
@@ -1033,9 +1066,11 @@ def _exit_intent(*, owned: _OwnedPosition, position: BrokerPosition) -> _ExitInt
 def _record_resumed_repair_visit(
     conn: psycopg.Connection[Any],
     *,
-    broker: BrokerProvider,
     owned: _OwnedPosition,
-    resumed: PositionManagerResult,
+    operation_type: str,
+    position: BrokerPosition | None,
+    state: str,
+    reason_code: str,
     observed_at: datetime,
 ) -> None:
     """Count a resumed FIXED-EXIT REPAIR against the ownership's refusal streak.
@@ -1069,19 +1104,17 @@ def _record_resumed_repair_visit(
     and ``idx_strategy_position_one_unresolved_operation`` then blocks later repairs — but it
     is a DIFFERENT one, and "the stop cannot be set" is the wrong thing to say about a
     position whose stop is set.  Noted on the PR rather than conflated with this counter.
+
+    ⚠ ``position`` is PASSED IN, never re-fetched.  ``_resume_operation`` has already
+    fetched the exact position to reach its verdict, and Codex checkpoint 2 flagged the
+    version that called the broker a second time: a transient failure on that redundant
+    request raises AFTER a valid result was obtained, and `run_strategy_paper_cycle`'s
+    loop has no per-position guard, so it would abort every later position in the cycle.
+    A refusal counter that can stop the repair of other positions is worse than no counter.
     """
-    if resumed.position_operation_id is None:
+    if operation_type != "fixed_exit_repair":
         return
-    row = conn.execute(
-        "SELECT operation_type FROM strategy_position_operations WHERE position_operation_id=%s",
-        (resumed.position_operation_id,),
-    ).fetchone()
-    conn.commit()
-    if row is None or row[0] != "fixed_exit_repair":
-        return
-    state, reason_code = resumed.state, resumed.reason_code
     if state == "pending":
-        position = _exact_broker_position(broker, owned)
         if position is None:
             # Nothing to judge the gap against. The resume path owns that case; recording a
             # refusal here would be an inference, not an observation.
@@ -1194,13 +1227,12 @@ def manage_owned_position(
     with _paper_allocator_lock(conn), _position_lock(conn, broker_position_id):
         owned = _load_owned(conn, strategy_trade_id=strategy_trade_id, broker_position_id=broker_position_id)
         conn.commit()
-        resumed = _resume_operation(conn, broker=broker, owned=owned)
+        # ⚠ #3284 item 4a records from INSIDE `_resume_operation`, not from here: that is
+        # the function which already holds the fetched position, and re-fetching it to
+        # classify the visit adds a broker call that can raise AFTER a valid result and
+        # abort every later position in the cycle.
+        resumed = _resume_operation(conn, broker=broker, owned=owned, observed_at=observed_at)
         if resumed is not None:
-            # #3284 item 4a — the resume path is the THIRD recording site, and the one a
-            # never-landing edit is only ever observed from. See
-            # `_record_resumed_repair_visit` for why omitting it left the worst case with
-            # a zero streak.
-            _record_resumed_repair_visit(conn, broker=broker, owned=owned, resumed=resumed, observed_at=observed_at)
             return resumed
         position = _exact_broker_position(broker, owned)
         if position is None:

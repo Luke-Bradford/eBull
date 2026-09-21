@@ -277,11 +277,19 @@ def test_an_accepted_edit_that_never_lands_keeps_accruing_refusals(
     assert _streak() == (0, None)
 
     # The portfolio is deliberately NOT updated — the levels never reached the broker.
+    before = broker.get_portfolio.call_count
     for _ in range(2):
         stalled = manage_owned_position(
             conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
         )
         assert (stalled.state, stalled.reason_code) == ("pending", "broker_edit_pending")
+
+    # ⚠ ONE portfolio read per resumed visit, not two. An earlier fix classified the visit
+    # by re-fetching the position, which Codex checkpoint 2 flagged: that request can raise
+    # AFTER a valid pending result, and `run_strategy_paper_cycle`'s loop has no
+    # per-position guard, so it would abort every later position in the cycle. Recording
+    # from inside `_resume_operation` reuses the snapshot it already holds.
+    assert broker.get_portfolio.call_count - before == 2
 
     # The whole point: the streak is non-zero and climbing. Under the first draft this
     # assertion read (0, None) forever, which is the defect.
