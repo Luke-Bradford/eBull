@@ -19,7 +19,21 @@ DAYS="${1:-7}"
 # have obeyed it, so auditing them reports noise instead of violations.
 # 09-22 is the first FULL day under the rule; PRs merged on 09-21 predate its merge.
 RULE_EFFECTIVE="${LOOP_RUNG_RULE_EFFECTIVE:-2026-09-22}"
-STATE_DIR="${TA_LOOP_STATE:-/Users/lukebradford/Dev/.ebull-autonomy/var/autonomy}"
+# No hardcoded operator path: prefer the env the loop itself sets, then the
+# sibling autonomy worktree, then this repo. Fail loudly rather than auditing a
+# directory that does not exist and reporting "clean".
+if [ -n "${TA_LOOP_STATE:-}" ]; then
+  STATE_DIR="$TA_LOOP_STATE"
+else
+  _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  for _cand in "$(dirname "$_repo_root")/.ebull-autonomy/var/autonomy" "$_repo_root/var/autonomy"; do
+    [ -d "$_cand" ] && STATE_DIR="$_cand" && break
+  done
+fi
+if [ -z "${STATE_DIR:-}" ] || [ ! -d "$STATE_DIR" ]; then
+  echo "FATAL: no loop state dir found; set TA_LOOP_STATE to the directory holding iteration-*.log" >&2
+  exit 2
+fi
 SINCE=$(date -u -v-"${DAYS}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "${DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)
 violations=0
 
@@ -32,7 +46,13 @@ missing=0
 while read -r num merged title; do
   [ -z "$num" ] && continue
   [ "${merged%%T*}" \< "$RULE_EFFECTIVE" ] && continue
-  body=$(gh pr view "$num" --json body --jq .body 2>/dev/null)
+  # ⚠ A `gh` failure is NOT a missing declaration: counting it as one inflates
+  # the violation count on a transient API error, which is the fastest way to
+  # teach a reader to ignore this script.
+  if ! body=$(gh pr view "$num" --json body --jq .body 2>/dev/null); then
+    printf '  SKIPPED (gh lookup failed): #%s\n' "$num"
+    continue
+  fi
   if printf '%s' "$body" | grep -qiE '^[^a-z]*rung:'; then
     :
   else
@@ -56,6 +76,9 @@ for t in "$STATE_DIR"/iteration-*.log; do
   case "$t" in *.err) continue ;; esac
   [ -e "$t" ] || continue
   # only iterations inside the window
+  # Both sides are YYYYMMDDTHHMMSSZ (16 chars) once SINCE loses its ':' and '-',
+  # so the lexical compare below is well defined. Verified 2026-09-21:
+  # filename 20260921T092211Z vs SINCE 20260918T093334Z.
   ts=$(basename "$t" | sed -n 's/iteration-\([0-9TZ]*\)-.*/\1/p')
   [ "$ts" \< "$(printf '%s' "$SINCE" | tr -d ':-')" ] && continue
   # the run's own verdict text is the last result event
