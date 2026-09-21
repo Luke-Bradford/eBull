@@ -228,8 +228,14 @@ def test_the_declared_percentages_are_the_ones_the_operator_chose() -> None:
     """A change to either constant is an operator decision (#3284), not tuning.
 
     This test is a tripwire, not a calculation: it fails loudly if a later session
-    'improves' the levels, and points at the ticket that fixed them.  The measured
-    basis (worst day -10.94%, worst 5-day -19.79%, worst 10-day -24.95% over 7,973 SPY
-    bars) lives in the module docstring with the query that reproduces it.
+    'improves' the levels, and points at the ticket that fixed them.
+
+    ⚠ The measured basis is deliberately NOT restated here — it lives in
+    ``core_exit_levels``'s module docstring, beside the query that reproduces it.  An
+    earlier version of this docstring copied the figures, and one of the copies
+    ("worst 10-day -24.95%") was already stale by the time it was written: the real
+    figure is -26.77%, and -24.95% is the worst NINE-day move.  A hand-copied statistic
+    goes stale silently and in the place a reader trusts most, which is why the repo
+    rule is to compute it or cite where it is computed — never to duplicate it.
     """
     assert (CORE_STOP_LOSS_PCT, CORE_TAKE_PROFIT_PCT) == (Decimal("25"), Decimal("100"))
