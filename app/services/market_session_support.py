@@ -190,6 +190,44 @@ _ASSET_CLASS_CALENDARS: Final = MappingProxyType({"us_equity": _NYSE, "uk_equity
 #: halt-risk bound. Specify the risk bound first, then show collection can meet it.
 #: ``etoro_websocket.upsert_quote`` also writes this table, but only for whatever is
 #: on the operator's screen, so it remains no unattended producer for anything.
+#:
+#: ⚠ **WHERE THE UK HALT STATUS ACTUALLY LIVES (#2312, researched 2026-09-21).** The
+#: remaining half for ``uk_equity`` is a data-feed acquisition, and the prior write-up
+#: named the wrong instrument for it -- *"licensed RNS feed"* (#2834, 2026-09-18). RNS
+#: carries company and regulatory announcements.  The per-instrument trading status is
+#: on LSE's own market-data protocols, VERIFIED at source:
+#:
+#: * **MITCH** (MIT303 Issue 11.9) §4.9.4 ``Symbol Status``, message type ``0x48``,
+#:   carries a trading-status byte -- ``e`` = *AESP Auction Call*, ``f`` = *Resume
+#:   Auction Call*, ``l`` = *Pause*.  Its Session Change message stamps a New End Time
+#:   *"only ... if the session change was not in the original schedule e.g. AESP
+#:   auction call or unscheduled session"*.
+#: * **GTP** ``Instrument Status`` reportedly carries the same plus ``Session Change
+#:   Reason = 5`` for a circuit-breaker trigger, and the instrument directory carries
+#:   the static/dynamic tolerances.  ⚠ Not independently verified here; MITCH was.
+#: * Vendor Level 2 (LSEG Elektron) exposes ``TRD_STATUS`` / ``HALT_RSN`` /
+#:   ``INST_PHASE``.  ⚠ Entitlement, mapping and latency all unpriced.
+#:
+#: ⛔ **A correction, recorded so it is not re-derived: an earlier draft of this
+#: comment claimed no UK feed of this shape exists and that no purchase supplies one,
+#: inferring it from LSEG's March-2020 circuit-breakers brochure.** That is FALSE --
+#: the brochure contrasts US *market-wide* breakers with LSE's security-by-security
+#: control and says nothing about feed availability, and MITCH §4.9.4 above publishes
+#: exactly the event it claimed was unpublished.  Caught at Codex checkpoint 1.
+#:
+#: ⇒ **So #2312's "person-gated on spend" label STANDS**, now with a priceable ask
+#: rather than a vague one.  What is NOT settled, and must not be assumed either way:
+#: whether eToro already exposes an equivalent status for ``.L`` names (it is the
+#: broker we route through, so its status may be the relevant one, not the venue's).
+#:
+#: ⚠ The FCA Official List suspended-securities CSV
+#: (``marketsecurities.fca.org.uk/downloadOfficiallist/suspended``; JS-redirects to a
+#: ``text/csv``, measured 2026-09-21: 59 current LSE rows keyed by ISIN) is free and
+#: machine-readable, and is NOT a substitute for the above.  Two measured reasons:
+#: it covers listing suspensions on the Official List only -- **AIM is outside it**
+#: and our ``uk_equity`` includes AIM -- and it is unjoinable today, because we store
+#: no ISIN at all (``external_identifiers`` holds ``figi`` / ``cik`` / ``cusip`` /
+#: ``class_id`` only, and ``uk_equity`` has **0 of 1,032** instruments with any).
 _HALT_COVERED_ASSET_CLASSES: Final = frozenset({"us_equity"})
 
 #: ⚠ An ALLOW-list, and that direction is the whole point: ``exchanges.asset_class``
