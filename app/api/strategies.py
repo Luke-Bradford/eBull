@@ -1116,9 +1116,15 @@ class CoreSleeveResponse(BaseModel):
     #: ``position.currency``. What IS checkable is the provenance: this module
     #: sets ``currency=broker_position.currency`` straight from the broker
     #: payload and converts no amount, so the label is the broker's and not ours.
-    #: ⚠ Whether that label is CORRECT is a separate defect, tracked on its own
-    #: issue; this sentence deliberately claims only what we do, not what is true
-    #: of the number.
+    #: ⚠ Whether that label is CORRECT is a separate defect (#3274); this sentence
+    #: deliberately claims only what we do, not what is true of the number.
+    #:
+    #: ⚠⚠ The clause is scoped to the POSITIONS TABLE, and the narrowing is the
+    #: point. A first correction said "no amount on this page has been converted
+    #: by us", which is false as well -- ``local_eod_value_in_account_currency``
+    #: is a conversion we perform and the account-evidence panel renders it on
+    #: this same route. Three claims in a row were scoped wider than the site that
+    #: was checked; see ``docs/review-prevention-log.md``.
     #:
     #: The cost clause is the declaration's ``all_in_cost_rule``
     #: (``docs/proposals/ta/2026-08-24-core-selection-declaration.json``): p75
@@ -1129,7 +1135,7 @@ class CoreSleeveResponse(BaseModel):
         "instrument, a household measuring it in GBP carries GBP/USD exposure on the "
         "whole position value and not only on its return, and this engine does not "
         "hedge it. A £ sign in the positions table is the broker's own label carried "
-        "through unchanged — no amount on this page has been converted by us. "
+        "through unchanged, not a conversion this engine performed. "
         "Converting when you fund or withdraw is a household cost that the "
         "preregistered ceiling, which prices round-trip spread, does not include."
     )

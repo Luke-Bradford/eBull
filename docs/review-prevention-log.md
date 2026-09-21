@@ -9912,3 +9912,39 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry;
   `docs/proposals/execution/2026-09-21-closed-execution-ownership-claim.md`;
   `docs/proposals/execution/2026-09-21-externally-closed-ownership-release.md`.
+
+## A negative claim is only as wide as the thing you grepped (#2833, 2026-09-21)
+
+- Three false claims shipped or nearly shipped in one PR (#3272 / #3273), all the same shape:
+  a claim about a PAGE, verified at one FILE or one ASSIGNMENT SITE.
+  - *"this engine reports no sterling figure"* — verified by grepping
+    `frontend/src/pages/StrategyPortfolioLens.tsx` for `GBP|sterling|£`, zero hits. **Merged,
+    and false on the rendered page**: the owned-positions table prints `£168.64` for the core
+    sleeve. The label is formatted one component down, in `StrategyPositions.tsx:75-86`, from
+    `position.currency`. Caught by the post-merge FE-QA screenshot, by no test.
+  - *"no amount on this page has been converted by us"* — the correction for the above, and
+    false for the same reason one level out. `local_eod_value_in_account_currency` is
+    documented as "the stored end-of-day total merely converted" and the account-evidence
+    panel renders it on the same route. Caught by the review bot.
+  - The surviving version is scoped to the positions table, which is the site that was
+    actually read (`app/api/strategies.py:3362`, `currency=broker_position.currency`).
+- ⚠ The tell is grammatical and available before any grep: **the claim's subject was "the
+  engine" / "this page"; the evidence's subject was one file.** A composed UI has no single
+  file, so no single-file grep can ever establish a page-level negative.
+- ⚠⚠ Related, and the reason this is not just the #2840 `%split%` lesson again: that one
+  failed on VOCABULARY (`%split%` missed `dividend_events`), this one failed on SCOPE with
+  the search terms correct. Both are negative existence claims; record the search's
+  **extent** next to its terms, not just the terms.
+- Also in this PR, and the reason it is filed together: Codex checkpoint 3 had already
+  surfaced the adjacent fact — *"totals use `pool.currency`, position rows use
+  `position.currency`"* — on the round before. It was used to delete one overclaim and not
+  carried to the neighbouring one. **A refutation read is not a constraint applied**
+  (2026-09-21, #2840), now observed twice in two days.
+- Prevention: before asserting a negative about operator-visible output, **render it and
+  read it**, or name the extent of the search beside it ("no literal in `<file>`" is not "no
+  such figure on the route"). For a React route, the honest check is the screenshot or a
+  `getByText` assertion, not a grep — which is exactly what the loop's own FE-QA step
+  exists for, and it worked here only because the pass ran after the merge rather than not
+  at all.
+- Enforced in: this entry; `app/api/strategies.py::CoreSleeveResponse.household_currency_caveat`
+  (comment + the negative test pins in `tests/test_2603_core_mandate_api.py`); issue #3274.
