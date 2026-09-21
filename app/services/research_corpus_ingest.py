@@ -57,7 +57,7 @@ from __future__ import annotations
 import csv
 import logging
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -247,10 +247,19 @@ class LoadCensus:
 
     #: Bars where a ``vendor_supplied`` archive produced NO factor — either
     #: unparseable or non-positive, both read as absent by ``_split_factor``.
-    #: ⚠ MUST be 0. A non-zero value means the marker written at the end of the
-    #: load overstates what the bars carry, and every downstream
-    #: ``COALESCE(split_factor, 1)`` silently turns those bars into "no split".
+    #: ⚠ MUST be 0. A non-zero value means those bars cannot be corrected, and
+    #: every downstream ``COALESCE(split_factor, 1)`` would turn them into "no
+    #: split". Their SERIES are written ``absent`` rather than the archive's
+    #: declared value, so the marker stays truthful either way; this counter is
+    #: what makes the downgrade visible rather than silent.
     split_stamps_absent: int = 0
+
+    #: The same, for the dividend half of the marker's contract. sql/405 says
+    #: ``vendor_supplied`` means BOTH columns are populated on every bar, so an
+    #: absent dividend falsifies the marker exactly as an absent factor does —
+    #: and it is a different defect, because ``_csv_decimal`` is the only gate
+    #: on this field (there is no sign or range rule to reject it).
+    dividend_stamps_absent: int = 0
 
     #: (symbol, date) pairs the archive repeats. Drained via ON CONFLICT, so
     #: the last one wins; counted so a vendor-side duplication is visible.
@@ -843,6 +852,12 @@ def load_archive(
     # prove nothing.
     stats: dict[str, tuple[date, date, int]] = {}
 
+    #: Symbols whose bars did NOT all carry both stamps. They are written
+    #: ``absent`` regardless of what the archive declares — the marker must
+    #: never claim coverage the bars do not have, and a post-hoc refusal in the
+    #: CLI cannot undo committed batches (Codex checkpoint 2).
+    incomplete_symbols: set[str] = set()
+
     batch: list[tuple[Any, ...]] = []
 
     def flush() -> None:
@@ -899,18 +914,33 @@ def load_archive(
             # read, so a query cannot tell "the parser rejected this factor"
             # from "this archive ships no stamps" without the marker it is
             # trying to validate. The load knows.
+            #
+            # ⚠ BOTH columns, because the marker's contract is both. sql/405
+            # says `vendor_supplied` means split_factor AND dividend are
+            # populated on every bar, so an absent dividend falsifies it just
+            # as an absent factor does (Codex checkpoint 2).
             if row.split_factor is None:
                 census.split_stamps_absent += 1
+                incomplete_symbols.add(row.symbol)
             elif row.split_factor != 1:
                 census.split_events += 1
-            if row.dividend:
+            if row.dividend is None:
+                census.dividend_stamps_absent += 1
+                incomplete_symbols.add(row.symbol)
+            elif row.dividend:
                 census.dividend_stamps += 1
         if len(batch) >= batch_rows:
             flush()
             logger.info("  %s bars loaded", f"{census.bars_copied:,}")
     flush()
 
-    _write_census(conn, stats, provenance.vendor, provenance.corporate_action_stamps)
+    _write_census(
+        conn,
+        stats,
+        provenance.vendor,
+        provenance.corporate_action_stamps,
+        incomplete_symbols,
+    )
     census.duplicate_bar_rows = reconcile_census(conn, provenance.vendor)
     return census
 
@@ -920,6 +950,7 @@ def _write_census(
     stats: dict[str, tuple[date, date, int]],
     vendor: str = VENDOR,
     corporate_action_stamps: str = "absent",
+    incomplete_symbols: Collection[str] = (),
 ) -> None:
     """Set the denormalised census columns from the load accumulator.
 
@@ -936,7 +967,22 @@ def _write_census(
     cannot mislead a divider. Set in the symbol pass it would fail the other
     way. It rides on ``stats`` for the same reason the census columns do —
     those are exactly the symbols whose bars reached the table.
+
+    ⚠ And it is written PER SERIES, downgraded to ``absent`` for any symbol in
+    ``incomplete_symbols``. An earlier draft wrote the archive's declared value
+    uniformly and left the refusal to the CLI's exit code — which cannot roll
+    back batches that are already committed, so a load that detected a missing
+    stamp still published a marker saying every bar had one. The marker is only
+    worth having if it can never overstate; downgrading here is the only place
+    that holds, because it is the only place that both knows and still writes.
     """
+    incomplete = frozenset(incomplete_symbols)
+    if incomplete:
+        logger.warning(
+            "%d series carry an incomplete stamp and are marked 'absent' rather than %r",
+            len(incomplete),
+            corporate_action_stamps,
+        )
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -944,26 +990,30 @@ def _write_census(
                 vendor_symbol TEXT NOT NULL,
                 first_bar     DATE NOT NULL,
                 last_bar      DATE NOT NULL,
-                bar_count     INTEGER NOT NULL
+                bar_count     INTEGER NOT NULL,
+                stamps        TEXT NOT NULL
             ) ON COMMIT DROP
             """
         )
-        with cur.copy("COPY _stg_research_census (vendor_symbol, first_bar, last_bar, bar_count) FROM STDIN") as copy:
+        with cur.copy(
+            "COPY _stg_research_census (vendor_symbol, first_bar, last_bar, bar_count, stamps) FROM STDIN"
+        ) as copy:
             for symbol, (first, last, count) in stats.items():
-                copy.write_row((symbol, first, last, count))
+                stamps = "absent" if symbol in incomplete else corporate_action_stamps
+                copy.write_row((symbol, first, last, count, stamps))
         cur.execute(
             """
             UPDATE research_price_series s
                SET first_bar = g.first_bar,
                    last_bar  = g.last_bar,
                    bar_count = g.bar_count,
-                   corporate_action_stamps = %(stamps)s,
+                   corporate_action_stamps = g.stamps,
                    updated_at = now()
               FROM _stg_research_census g
              WHERE s.vendor = %(vendor)s
                AND s.vendor_symbol = g.vendor_symbol
             """,
-            {"vendor": vendor, "stamps": corporate_action_stamps},
+            {"vendor": vendor},
         )
     conn.commit()
     logger.info("census written for %d series", len(stats))

@@ -71,6 +71,19 @@
 -- writer, and `parse_intrader_rows` independently reads a non-positive factor
 -- as ABSENT rather than letting it reach the table.
 --
+-- ⚠ `> 0` ALONE IS NOT ENOUGH, and this is a Postgres fact rather than a
+-- theoretical one. `NUMERIC` has a NaN and (since PG14) an infinity, and
+-- Postgres orders NaN as GREATER THAN every non-NaN value, so measured on the
+-- test cluster:
+--
+--     select 'NaN'::numeric > 0, 'Infinity'::numeric > 0   ->   t | t
+--
+-- Both would pass a bare `> 0` and then propagate through a cumulative product
+-- into NaN prices — exactly the next-writer scenario this guard exists for.
+-- `<> 'NaN'::numeric` excludes NaN (Postgres defines NaN = NaN as true, so the
+-- inequality is the working test) and `< 'Infinity'::numeric` excludes +Inf.
+-- `-Infinity` is already excluded by `> 0`. Caught by Codex checkpoint 2.
+--
 -- `dividend` gets NO sign CHECK, and that is measured rather than lax. AGII
 -- 2016-05-27 carries `-4.80545454545455` — one row in 460,693. A CHECK would
 -- abort a 50.1M-row load over a single vendor artefact in a column nothing
@@ -108,7 +121,12 @@ BEGIN
     ) THEN
         ALTER TABLE research_price_daily
             ADD CONSTRAINT research_price_daily_split_factor_positive
-            CHECK (split_factor IS NULL OR split_factor > 0) NOT VALID;
+            CHECK (
+                split_factor IS NULL
+                OR (    split_factor > 0
+                    AND split_factor <> 'NaN'::numeric
+                    AND split_factor < 'Infinity'::numeric)
+            ) NOT VALID;
     END IF;
 END
 $$;

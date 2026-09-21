@@ -23,7 +23,9 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
+import psycopg
 import pytest
 
 from app.services.research_corpus_ingest import (
@@ -31,9 +33,11 @@ from app.services.research_corpus_ingest import (
     INTRADER_ARCHIVE,
     ArchiveProvenance,
     Form25Match,
+    IntraderCsvArchive,
     archive_symbol_candidates,
     classify_form25_match,
     index_instruments,
+    load_archive,
     normalise_vendor_symbol,
     parse_intrader_rows,
     resolve_archive_symbol,
@@ -457,3 +461,65 @@ def test_a_new_archive_is_presumed_stampless() -> None:
         quarantine_as_of=date(2026, 1, 1),
     )
     assert unmeasured.corporate_action_stamps == "absent"
+
+
+@pytest.mark.db
+def test_a_series_missing_a_stamp_is_marked_absent_not_vendor_supplied(
+    ebull_test_conn: psycopg.Connection[tuple], tmp_path: Path
+) -> None:
+    """The marker is downgraded PER SERIES, by the code that writes it.
+
+    The load cannot roll back batches it has already committed, so a refusal
+    that lives in the CLI's exit code runs too late: the marker would already
+    be published claiming coverage the bars do not have. This asserts the only
+    guard that holds — `load_archive` writing `absent` for the affected series
+    while its clean sibling still gets `vendor_supplied`.
+
+    GOOD has both stamps on every bar. BAD has one bar whose split field is
+    unparseable, which `_split_factor` reads as absent.
+    """
+    (tmp_path / "GOOD.csv").write_text("2023-01-05,1,2,0.5,1.25,100,1,0,1.25\n2023-01-06,1,2,0.5,1.30,100,2,0,1.30\n")
+    (tmp_path / "BAD.csv").write_text("2023-01-05,1,2,0.5,1.25,100,1,0,1.25\n2023-01-06,1,2,0.5,1.30,100,abc,0,1.30\n")
+
+    census = load_archive(
+        ebull_test_conn,
+        IntraderCsvArchive(tmp_path),
+        provenance=INTRADER_ARCHIVE,
+    )
+    assert census.split_stamps_absent == 1
+    assert census.dividend_stamps_absent == 0
+    assert census.split_events == 1  # GOOD's factor of 2
+
+    markers = dict(
+        ebull_test_conn.execute(
+            "SELECT vendor_symbol, corporate_action_stamps FROM research_price_series"
+            " WHERE vendor = %s AND vendor_symbol IN ('GOOD', 'BAD')",
+            (INTRADER_ARCHIVE.vendor,),
+        ).fetchall()
+    )
+    assert markers == {"GOOD": "vendor_supplied", "BAD": "absent"}
+
+
+@pytest.mark.db
+def test_an_absent_dividend_downgrades_the_marker_too(
+    ebull_test_conn: psycopg.Connection[tuple], tmp_path: Path
+) -> None:
+    """Both halves of the contract, not just the one the derivation divides by.
+
+    sql/405 says `vendor_supplied` means split_factor AND dividend are
+    populated on every bar. A missing dividend with a perfectly good factor
+    therefore falsifies the marker, and it is a distinct defect: `_csv_decimal`
+    is the only gate on field 7 — there is no sign or range rule that would
+    catch it.
+    """
+    (tmp_path / "NODIV.csv").write_text("2023-01-05,1,2,0.5,1.25,100,1,0,1.25\n2023-01-06,1,2,0.5,1.30,100,1,,1.30\n")
+
+    census = load_archive(ebull_test_conn, IntraderCsvArchive(tmp_path), provenance=INTRADER_ARCHIVE)
+    assert census.split_stamps_absent == 0
+    assert census.dividend_stamps_absent == 1
+
+    row = ebull_test_conn.execute(
+        "SELECT corporate_action_stamps FROM research_price_series WHERE vendor = %s AND vendor_symbol = 'NODIV'",
+        (INTRADER_ARCHIVE.vendor,),
+    ).fetchone()
+    assert row == ("absent",)

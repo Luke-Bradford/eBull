@@ -10249,13 +10249,29 @@ original, because the gate now *looked* like a bound.
   the marker at `absent`, which understates coverage and cannot mislead a divider. The other
   ordering fails in the dangerous direction — the marker claims stamps that were never
   written, and every `COALESCE` downstream reads those bars as event-free.
+- ⚠⚠ **And ordering alone is not enough: the WRITER must downgrade, not the caller.** The
+  first draft of this change wrote the archive's declared value uniformly and left the
+  refusal to the ingest CLI's exit code. Caught by Codex checkpoint 2, and it is the more
+  interesting half of the lesson: **an exit code cannot roll back a committed batch.** The
+  load streams 500k-row batches, each committed as it drains, so by the time any caller sees
+  a non-zero return the marker is already published claiming coverage the bars do not have.
+  A validation that runs after the write is a report, not a guard. Put the downgrade in the
+  only place that both KNOWS the defect and STILL WRITES — here, per series, inside
+  `_write_census`. The exit code stays, demoted to what it can honestly be: notice that the
+  upstream archive changed shape.
+- ⚠ Check every field the marker's contract covers, not just the one you care about. The
+  same draft counted absent split factors and ignored absent dividends, while the column
+  COMMENT said `vendor_supplied` meant BOTH were populated. A marker that is only validated
+  on half its own claim is a marker that is wrong half the time it matters.
 - Test to apply: for each nullable column you are adding, say out loud what NULL means. If
   the sentence contains "this source doesn't supply it", you owe a marker. If it contains
   "there genuinely wasn't one", a default is fine.
 - Enforced in: `sql/405_research_corpus_split_stamps.sql` §3 and both column COMMENTs;
   `app/services/research_corpus_ingest.py` (`ArchiveProvenance.corporate_action_stamps`
-  defaulting to `absent`, `_write_census` writing it last, `LoadCensus.split_stamps_absent`
-  failing the load when a `vendor_supplied` archive produces a bar without one);
-  `tests/test_research_corpus_ingest.py::test_an_ordinary_bar_stamps_one_not_none` and
-  `::test_a_new_archive_is_presumed_stampless`;
+  defaulting to `absent`, `_write_census` writing it last AND downgrading per series from
+  `incomplete_symbols`, `LoadCensus.split_stamps_absent` / `.dividend_stamps_absent`);
+  `tests/test_research_corpus_ingest.py::test_an_ordinary_bar_stamps_one_not_none`,
+  `::test_a_new_archive_is_presumed_stampless`,
+  `::test_a_series_missing_a_stamp_is_marked_absent_not_vendor_supplied` and
+  `::test_an_absent_dividend_downgrades_the_marker_too`;
   `tests/test_research_corpus_schema.py::TestCorporateActionStamps`.

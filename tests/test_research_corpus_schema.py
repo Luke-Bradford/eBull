@@ -278,3 +278,21 @@ class TestCorporateActionStamps:
             (series_id,),
         )
         ebull_test_conn.commit()
+
+    @pytest.mark.parametrize("bad", ["NaN", "Infinity"])
+    def test_a_non_finite_split_factor_is_rejected(self, ebull_test_conn: psycopg.Connection[tuple], bad: str) -> None:
+        """`> 0` alone admits both, because Postgres orders NaN above everything.
+
+        Measured on this cluster: ``select 'NaN'::numeric > 0`` returns **true**,
+        and so does ``'Infinity'::numeric > 0``. A bare positivity CHECK would
+        let either through and a cumulative split scale would then carry it into
+        every corrected price as NaN. `-Infinity` needs no clause — `> 0` has it.
+        """
+        series_id = _new_series(ebull_test_conn, f"STAMP{bad[:3].upper()}")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            ebull_test_conn.execute(
+                "INSERT INTO research_price_daily (series_id, bar_date, close, split_factor)"
+                " VALUES (%s, '2023-01-05', 1.25, %s::numeric)",
+                (series_id, bad),
+            )
+        ebull_test_conn.rollback()
