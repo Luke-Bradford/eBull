@@ -159,16 +159,31 @@ researched it enough to escalate — research it first.
 ## Each iteration
 1. **Take the next item from the build queue above.**
 
-   Only if the entire build queue is genuinely complete, fall back to the board —
-   `gh issue list --state open --limit 100`, preferring correctness bugs >
-   operator-visible gaps > tech-debt.
-
-   **If #2437's R5b comment is unreadable, do not halt.** Fall back to the board order
-   above and say in the run note that the queue lookup failed. A missing queue comment
-   is never a reason to end a run.
-
    Skip anything blocked, already in flight (open PR), or needing a genuine human
    decision. Within those rules decide the order yourself — do not ask.
+
+   ⚠⚠ **NO ELIGIBLE QUEUE TICKET means BACK OFF — it does NOT mean find something else.**
+   When every queue ticket is blocked, parked or wall-clock gated:
+
+   1. post/refresh a one-line blocked note on each blocked ticket carrying a **WAKE
+      CONDITION** — the observable event that makes it eligible ("wake when the demo
+      acceptance evidence for scenario B is posted on this issue", "wake after
+      2026-09-24 when the 5 sessions have closed"). A block with no wake condition is
+      re-discovered from scratch every cycle, and the re-discovery costs a full startup;
+   2. write the run note saying the queue is blocked and naming what would unblock it;
+   3. **end the iteration and spend nothing further.** Sleeping is the correct output.
+
+   **Board fallback is NOT the default for a blocked queue.** It is allowed only when the
+   queue is genuinely COMPLETE — every ticket closed, none parked. Measured 2026-09-18 →
+   09-21: with the queue blocked on one attended session, fallback produced 32 research
+   PRs (48% of output) against 9 on the stated priority (13%), at ~$26 per iteration.
+   The loop optimised what it was asked for; this is the correction.
+
+   **If #2437's queue comment is unreadable, do not halt and do not fall back.** Say so in
+   the run note, treat the last-known queue as current, and apply the same back-off rule.
+
+   ⚠ Exception, deliberately narrow: a **security advisory or a red main** that blocks
+   every PR is always eligible, queue or no queue.
 
    ⚠ **Why this ordering exists.** Between 2026-08-09 and 2026-08-12 this prompt said
    only "decide the order yourself". The loop produced 167 commits and six sealed
@@ -196,11 +211,42 @@ researched it enough to escalate — research it first.
      mutates broker state is.**
    - **settled-decision reversals and irreversible-loss calls** (already covered under
      "When to stop").
-2. **Execute the full workflow** from `.claude/CLAUDE.md` for that ticket:
+2. **Execute the workflow from `.claude/CLAUDE.md` AT THE RUNG THE DIFF DESERVES.**
+
+   ⚠⚠ **This step used to state ONE unconditional chain, which contradicted
+   `.claude/CLAUDE.md`'s own review-intensity ladder and cost ~6 Codex sessions per
+   iteration (4.15 per merged PR, measured 09-18 → 09-21).** The ladder is the single
+   source for how much review a change needs. Pick the rung FIRST, then work it:
+
+   - **Narrow / mechanical** (no data semantics, no authorisation surface, no corpus
+     effect) → **do NOT write a spec** and therefore run no ckpt-1: self-review + local
+     gates + the pre-push hook + the review bot. That is the whole gate set.
+   - **Behavioural change with data semantics** (service logic, endpoints, scoring
+     inputs) → domain-skill read for the surface touched + **Codex ckpt-2** before first
+     push.
+   - **Corpus change** (parser, ETL, schema migration, metric derivation) → the above
+     **plus full-population A/B and the Definition-of-Done clauses 8–12 evidence table**.
+     Non-negotiable.
+   - **A judgement artefact — whenever you WRITE a spec, plan, causal claim, priority
+     order or acceptance criteria** → **Codex ckpt-1 on it, always.** ⚠ The saving above
+     comes from not writing a spec for work that does not need one; it NEVER comes from
+     writing one and skipping its review.
+   - **Rebuttal-only round** → Codex ckpt-3 over the rebuttals, unchanged.
+
+   ⚠ The rung is decided by WHAT THE DIFF TOUCHES, not by how many files it spans: a
+   one-line authorisation or cost-constant edit is behavioural, a 300-line test-only diff
+   is narrow.
+
+   ⚠ **A ckpt-1 prompt names exact files and line ranges.** An open-ended "also read
+   `app/services/…`" makes Codex crawl the repo at high reasoning — those prompts measured
+   1.3–2.0M input tokens each in two turns, and were 59M of the 115M spent in the five
+   days to 09-18.
+
+   The rest of the workflow is unchanged:
    read the issue → `docs/settled-decisions.md` + `docs/review-prevention-log.md`
    → research the source rule + **falsify the premise on the dev DB / full
-   population BEFORE speccing** → spec → Codex ckpt-1 → implement (schema →
-   service → tests → glue) → local gates → Codex ckpt-2 → branch + PR → poll the
+   population BEFORE speccing** → implement (schema →
+   service → tests → glue) → local gates → branch + PR → poll the
    Claude review bot + CI → resolve EVERY comment (FIXED/EXTRACTED/REBUTTED) →
    **merge ONLY via `"$AUTONOMY_ENGINE_HOME/bin/safe_merge.sh" <pr>`** (mechanically
    verifies bot-APPROVE-on-latest-SHA + CI-green; never `gh pr merge` directly).
@@ -315,6 +361,41 @@ researched it enough to escalate — research it first.
        is NOT an FE-QA pass.
 5. Update memory (the index + topic files) as you land work, per the memory rules.
 6. Next ticket.
+
+## Iteration budget — stop safely, and hand off (added 2026-09-21)
+
+Measured 09-18 → 09-21: median **346 tool calls** and **177 turns** per iteration, mean
+**$26.45**, worst **1,072 calls / $112.15**. Essentially all of that is context re-read on
+every turn — uncached input across 45 iterations was 14,338 tokens in total. **Cost scales
+with how long an iteration runs, not with how much code it writes** (output was 0.3% of
+traffic).
+
+- **Soft budget: ~250 tool calls.** On crossing it, finish the step you are in — land the
+  current PR or park the ticket — then END the iteration. Do not start new research.
+- **Hard stop: ~400 tool calls.** Park with a handoff note even mid-ticket.
+- **Start a second ticket only if** the first MERGED and you are under the soft budget.
+  Otherwise end; the next iteration starts cheaper than continuing this one.
+- ⚠ **A stop without a handoff note is worse than no stop** — the next iteration re-derives
+  what you already know, including the negative findings ("tried X, it does not work",
+  "this discriminator is falsified"), which are the expensive half. The note is mandatory
+  and belongs on the ISSUE, not only in the run log.
+
+⚠ These are budgets, not deadlines: a corpus change that genuinely needs its
+full-population A/B runs it. Blowing the budget is a signal to SPLIT the ticket, and to say
+so on the issue, not to skip a gate.
+
+## Prevention-log lessons ship INSIDE the PR that earned them (added 2026-09-21)
+
+`.claude/CLAUDE.md`: *"extract it into the relevant skill AND `docs/review-prevention-log.md`
+in the SAME PR"*. Measured 09-18 → 09-21: **12 of 67 merged PRs were standalone
+`docs(#N): …lessons…` PRs**, each paying its own branch, pre-push gate, CI, bot review and
+merge for a documentation edit the code PR should have carried.
+
+- Put the prevention-log and skill edits in the code PR's own diff.
+- Only a lesson that arrives AFTER its PR merged (a late bot PREVENTION comment) may need
+  its own PR — and then **batch those weekly**, not one per ticket.
+- ⚠ This does not relax the resolution contract: every PREVENTION comment still ends in
+  `EXTRACTED {file}` / `ALREADY_COVERED {file}` / `REBUTTED {reason}`.
 
 ## Board discipline — keep the Projects v2 board honest (every ticket)
 
