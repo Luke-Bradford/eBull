@@ -10466,3 +10466,46 @@ written CONFIDENTLY and each failed silently in the reassuring direction.
   both errors named); `sql/406_core_exit_material_identity.sql`;
   `tests/test_3284_core_exit_levels.py::test_the_quote_freshness_bound_is_the_sleeve_s_existing_measured_one`;
   `tests/test_2949_core_close_recovery_db.py::test_an_applied_core_repair_does_not_block_a_later_one`.
+
+## 2026-09-21 — the ISSUE BODY is not the settled decision, and a same-day correction lives somewhere else (#3284)
+
+- Symptom: #3284's body specifies **SL -25% / TP +100%** and cites 569.90 / 1519.72 as the
+  hand-set levels. I read the body, re-derived its worst-move justification, froze -25%/+100%
+  as constants, shipped and DEPLOYED them. The levels had been **corrected the same day** to
+  **-50% / +200%** (379.93 / 2279.58) after the operator asked "are the SL and TP realistic?"
+  — and the live broker position already carried the corrected pair.
+- ⚠⚠ **The consequence was a live-risk regression, not a documentation error.** The deployed
+  mechanism derives its desired levels and repairs any divergence, so on the first cycle
+  where the eligibility and quote gates passed it would have **PATCHED the operator's
+  deliberate -50% stop back to -25%** — replacing a stop that fires on 8.2% of entries with
+  one that fires on 35.7%, i.e. converting the spike guard back into the bear-market exit the
+  operator had explicitly rejected. Nothing in the diff, the tests, CI, Codex ckpt-2 or the
+  review bot could catch it: every one of them validated the mechanism against the constants
+  it was given.
+- The measurement that settles it, and the reusable half:
+  **a stop's size is set by "how often would this fire from a real entry", never by "how big
+  can a move be".** Sweeping every SPY bar as a hypothetical entry (7,973 bars, 1993-2024):
+  -25% fires on **35.7%** of entries ever and **10.1%** within a year; -40% on 23.0%; -50% on
+  **8.2%** (9.3% measured on the intraday low, which is the more faithful figure since a stop
+  triggers on a touch). Worst-move percentiles — -10.94% in a day, -19.79% over five days —
+  answer a different question and made -25% look conservative when it is the opposite.
+- ⚠ Why the existing rules did not fire. "Never assert a CAUSE without checking whether the
+  effect is a settled decision" sends you to `docs/settled-decisions.md`; the core no-SL/TP
+  exemption was never there, it lived in a code docstring, and the LEVEL correction lived in
+  neither — it was on the operator's own later record. The working order's step 2 is aimed at
+  the files, and this decision was not in the files.
+- Test to apply: **when a ticket's own numbers are the thing you are about to freeze, verify
+  them against CURRENT STATE before the body.** Two checks, both cheap:
+  1. read the live value back (`select stop_loss_rate, take_profit_rate from broker_positions
+     where position_id=...`) — the deployed system is the most reliable record of a decision
+     that has already been acted on;
+  2. re-read the ticket's LATEST comments AND the operator's own notes, not the body. A body
+     is written once; a decision gets corrected in the comments.
+  ⚠ If the live value and the body disagree, the body is stale — a hand-applied value is
+  someone acting on a decision, and the prose is what got left behind.
+- ⚠ Corollary for the ticket itself: a stale body will mislead the NEXT session too. Fixing
+  the code without fixing the body leaves the trap armed.
+- Enforced in: this prevention log; `app/services/core_exit_levels.py` (the entry-sweep basis
+  with its query, and the superseded levels named as superseded);
+  `tests/test_3284_core_exit_levels.py::test_the_live_position_reproduces_the_levels_the_operator_set_by_hand`
+  (asserts the pair READ BACK from `broker_positions`, and says so).

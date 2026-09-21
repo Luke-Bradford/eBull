@@ -14,62 +14,64 @@ spike risk and chosen the stop.  A later session reading only the old comment wo
 restore the exemption as 'correct', which is why the reversal is recorded on #3284 and
 #2437 as well as here.
 
-⚠⚠ **The accepted cost, stated so it is not rediscovered as a defect.**  This is a
-deterministic buy-and-hold BETA sleeve with **no re-entry rule**.  In a sustained bear
-(2008: -55%; 2020: -34% over weeks) a -25% stop sells near the bottom and the sleeve
-then sits in cash indefinitely.  That is the price of the spike guard and the operator
-has accepted it.  Do NOT 'fix' it by tightening the stop, and do NOT tighten the target:
-a near take-profit converts the sleeve into a market-timing strategy, which is what the
-price-only steer cut (#2837).  Profit-taking is already handled by the rebalance band,
-which trims above 55%.  A re-entry rule is a separate, evidence-gated decision.
+⚠⚠ **THE LEVELS ANSWER "HOW OFTEN WOULD THIS FIRE FROM A REAL ENTRY", NOT "HOW BIG CAN
+A MOVE BE".**  Those are different questions and only the first is the one a stop answers.
+An earlier draft of this module set -25% / +100% by placing the stop just outside the
+worst observed MOVE (-10.94% in a day, -19.79% over five days).  The operator asked "are
+the SL and TP realistic?" and the answer was no: swept over every bar as a hypothetical
+entry, a **-25% stop fires on 35.7% of entries ever and 10.1% within a year**, which makes
+it a BEAR-MARKET EXIT rather than a spike guard.  In 2022 it stops out near the October
+low, and SPY then rose ~56% by 2024-09 (366 -> 572) with **no re-entry rule** to get back
+in.  A -50% stop fires on **8.2%**.
 
-Basis for the two percentages -- SPY daily closes, ``icyDenev/Intrader``, the same
-(vendor, symbol) pair ``market_regime_provider.CHAIN_FALLBACK`` already pins.
-**7,973 bars, 1993-01-29 -> 2024-09-27** (7,972 daily returns; the ticket's "7,972"
-counts returns, this counts bars -- same series, different subject).  Reproduce with::
+Measured over SPY daily closes, ``icyDenev/Intrader`` -- the same (vendor, symbol) pair
+``market_regime_provider.CHAIN_FALLBACK`` already pins -- **7,973 bars, 1993-01-29 ->
+2024-09-27**.  Reproduce with::
 
     WITH b AS (
-      SELECT d.bar_date, d.close
+      SELECT d.bar_date, d.close, d.low
       FROM research_price_daily d
       JOIN research_price_series s ON s.series_id = d.series_id
       WHERE s.vendor = 'icyDenev/Intrader' AND s.vendor_symbol = 'SPY'
-    ), w AS (
-      SELECT close / lag(close,  1) OVER (ORDER BY bar_date) - 1 AS r1,
-             close / lag(close,  5) OVER (ORDER BY bar_date) - 1 AS r5,
-             close / lag(close, 10) OVER (ORDER BY bar_date) - 1 AS r10,
-             close / lag(close, 20) OVER (ORDER BY bar_date) - 1 AS r20
+    ), f AS (
+      SELECT close,
+             min(close) OVER (ORDER BY bar_date
+               ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS fmin,
+             min(close) OVER (ORDER BY bar_date
+               ROWS BETWEEN 1 FOLLOWING AND 252 FOLLOWING)       AS fmin_1y,
+             min(low)   OVER (ORDER BY bar_date
+               ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS fmin_low
       FROM b
     )
-    SELECT count(*) + 1 AS bars,
-           round(min(r1) * 100, 2)                                        AS worst_1d,
-           round((percentile_cont(0.001) WITHIN GROUP (ORDER BY r1))::numeric * 100, 2) AS p999,
-           round(min(r5) * 100, 2)                                        AS worst_5d,
-           round(min(r10) * 100, 2)                                       AS worst_10d,
-           round(min(r20) * 100, 2)                                       AS worst_20d
-    FROM w
+    SELECT count(*) AS entries,
+           round(100.0 * count(*) FILTER (WHERE fmin     <= close * 0.75) / count(*), 1) AS pct25,
+           round(100.0 * count(*) FILTER (WHERE fmin     <= close * 0.60) / count(*), 1) AS pct40,
+           round(100.0 * count(*) FILTER (WHERE fmin     <= close * 0.50) / count(*), 1) AS pct50,
+           round(100.0 * count(*) FILTER (WHERE fmin_1y  <= close * 0.75) / count(*), 1) AS pct25_1y,
+           round(100.0 * count(*) FILTER (WHERE fmin_low <= close * 0.50) / count(*), 1) AS pct50_low
+    FROM f
 
-which returns worst day **-10.94%** (2020-03-16), 99.9th-percentile day **-7.14%**,
-worst 5-trading-day move **-19.79%**, worst 10-trading-day **-26.77%**, worst
-20-trading-day **-31.39%**.
+which returns 7,973 entries and fire rates **35.7%** (-25%), **23.0%** (-40%), **8.2%**
+(-50%); -25% within one year **10.1%**; and -50% measured on the intraday LOW rather than
+the close **9.3%**.
 
-⚠ **"N-day" must be N days of MOVEMENT, and the window is easy to get wrong.** A
-``ROWS BETWEEN 4 PRECEDING AND CURRENT ROW`` high spans five BARS but only four days of
-movement, and returns -17.80% rather than -19.79%.  ``lag(close, N)`` is used here
-because it cannot express that error.
+⚠ The low-based figure is the more faithful one -- a stop triggers on a touch, not on a
+close -- and it is reported so the close-based headline is not mistaken for a bound.  It
+does not change the ranking or the decision.
 
-⚠⚠ **THE STOP IS OUTSIDE THE 1-DAY AND 5-DAY TAILS AND INSIDE THE 10-DAY ONE.**  This
-is the fact most likely to be misread, so it is stated before the constants: at
-**-26.77%** the worst 10-trading-day move in 31 years is BEYOND the -25% stop, and the
-15- and 20-day figures (-28.70%, -31.39%) are further beyond it.  So the stop does not
-merely risk firing in a sustained decline -- on the March 2020 sequence it **would have**
-fired.  That is not a new objection: it is the accepted cost above, now with the number
-attached.  A spike guard that survives every one-day and one-week move while yielding to
-a month-long bear is the trade the operator made knowingly.
+⚠⚠ **The accepted cost, stated so it is not rediscovered as a defect.**  This is a
+deterministic buy-and-hold BETA sleeve with **no re-entry rule**, so ANY stop that fires
+leaves it in cash indefinitely.  -50% keeps that to 8.2% of entries while still cutting a
+genuine collapse.  Do NOT 'fix' it by tightening the stop -- that is the exact change the
+operator already reversed once, and the 35.7% figure above is why.
 
-⚠ An earlier draft of this docstring reported the 10-day figure as -24.95% and concluded
-the stop sat "outside every measured window".  Both were wrong -- -24.95% is the worst
-NINE-day move, from a ``ROWS BETWEEN 9 PRECEDING AND CURRENT ROW`` window -- and they
-were wrong in the reassuring direction, which is why the corrected numbers lead here.
+⚠ **The target is a formality, not a control.**  +200% needs roughly eleven years at
+historical drift, so its only realistic trigger is a BAD TICK -- where firing would sell
+at a fake price.  That is the argument for placing a mandated target FAR away rather than
+near: a near target converts the sleeve into a market-timing strategy, which the
+price-only steer cut (#2837).  Profit-taking is the rebalance band's job; it trims above
+55%.
+
 """
 
 from __future__ import annotations
@@ -81,11 +83,12 @@ from typing import Final
 from app.services.strategy_core_preflight import CORE_MAX_QUOTE_AGE_SECONDS
 
 #: Distance below the entry price at which the broker-side stop sits, in percent.
-CORE_STOP_LOSS_PCT: Final[Decimal] = Decimal("25")
+#: ⚠ -50%, NOT -25%.  See the module docstring: -25% fires on 35.7% of entries.
+CORE_STOP_LOSS_PCT: Final[Decimal] = Decimal("50")
 
 #: Distance above the entry price at which the broker-side target sits, in percent.
 #: A spike guard, NOT a profit target -- see the module docstring.
-CORE_TAKE_PROFIT_PCT: Final[Decimal] = Decimal("100")
+CORE_TAKE_PROFIT_PCT: Final[Decimal] = Decimal("200")
 
 #: The precision of a submitted rate.  Fixed BY CONSTRUCTION rather than from a
 #: published rule: eToro quotes and echoes equity rates in cents, and submitting more
@@ -121,7 +124,7 @@ CORE_EXIT_MAX_QUOTE_AGE_SECONDS: Final[int] = CORE_MAX_QUOTE_AGE_SECONDS
 
 #: Bump when any constant above changes, so a stored operation's rates can be read
 #: back against the policy that produced them.
-CORE_EXIT_POLICY_VERSION: Final[str] = "core-exit-v1"
+CORE_EXIT_POLICY_VERSION: Final[str] = "core-exit-v2"
 
 
 @dataclass(frozen=True)
@@ -139,8 +142,8 @@ def core_exit_levels(entry_rate: Decimal) -> CoreExitLevels:
     ⚠ **Quantization rounds AWAY from the entry price, in both directions** -- the stop
     down, the target up.  One rule with one consequence: neither exit can fire before
     the declared move has actually happened.  Rounding the stop up would stop the
-    sleeve out marginally inside -25%, and rounding the target down would take profit
-    marginally inside +100%; both make the realised policy tighter than the declared
+    sleeve out marginally inside -50%, and rounding the target down would take profit
+    marginally inside +200%; both make the realised policy tighter than the declared
     one, which is the direction a reader would not expect from a "rounding" step.
     """
     if not entry_rate.is_finite() or entry_rate <= 0:
