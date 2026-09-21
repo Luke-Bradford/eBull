@@ -26,12 +26,16 @@ if [ -n "${TA_LOOP_STATE:-}" ]; then
   STATE_DIR="$TA_LOOP_STATE"
 else
   _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  # ⚠ A directory that EXISTS but holds no iteration logs is the WRONG directory:
+  # accepting it would make the audit report "clean" about nothing at all.
   for _cand in "$(dirname "$_repo_root")/.ebull-autonomy/var/autonomy" "$_repo_root/var/autonomy"; do
-    [ -d "$_cand" ] && STATE_DIR="$_cand" && break
+    if [ -d "$_cand" ] && compgen -G "$_cand/iteration-*.log" > /dev/null; then
+      STATE_DIR="$_cand"; break
+    fi
   done
 fi
-if [ -z "${STATE_DIR:-}" ] || [ ! -d "$STATE_DIR" ]; then
-  echo "FATAL: no loop state dir found; set TA_LOOP_STATE to the directory holding iteration-*.log" >&2
+if [ -z "${STATE_DIR:-}" ] || [ ! -d "$STATE_DIR" ] || ! compgen -G "$STATE_DIR/iteration-*.log" > /dev/null; then
+  echo "FATAL: no loop state dir holding iteration-*.log; set TA_LOOP_STATE explicitly" >&2
   exit 2
 fi
 SINCE=$(date -u -v-"${DAYS}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "${DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)
@@ -43,6 +47,7 @@ echo "== loop discipline audit, since $SINCE"
 echo
 echo "-- rung declarations (P2)"
 missing=0
+skipped=0
 while read -r num merged title; do
   [ -z "$num" ] && continue
   [ "${merged%%T*}" \< "$RULE_EFFECTIVE" ] && continue
@@ -51,6 +56,7 @@ while read -r num merged title; do
   # teach a reader to ignore this script.
   if ! body=$(gh pr view "$num" --json body --jq .body 2>/dev/null); then
     printf '  SKIPPED (gh lookup failed): #%s\n' "$num"
+    skipped=$((skipped + 1))
     continue
   fi
   if printf '%s' "$body" | grep -qiE '^[^a-z]*rung:'; then
@@ -61,6 +67,11 @@ while read -r num merged title; do
   fi
 done < <(gh pr list --state merged --search "merged:>=${SINCE%%T*}" --limit 60 \
            --json number,mergedAt,title --jq '.[] | "\(.number) \(.mergedAt) \(.title)"' 2>/dev/null)
+# ⚠ Unchecked is NOT clean: an outage that skips every PR must not read as a
+# pass, or the audit becomes decorative exactly when it is needed.
+if [ "$skipped" -gt 0 ]; then
+  echo "  ⚠ $skipped PR(s) UNCHECKED (gh failure) — re-run before treating this as a pass"
+fi
 if [ "$missing" -gt 0 ]; then
   echo "  → $missing merged PR(s) without a declared rung"
   violations=$((violations + missing))
@@ -98,5 +109,9 @@ echo
 if [ "$violations" -gt 0 ]; then
   echo "RESULT: $violations violation(s)"
   exit 1
+fi
+if [ "$skipped" -gt 0 ]; then
+  echo "RESULT: INCONCLUSIVE — $skipped PR(s) could not be checked"
+  exit 3
 fi
 echo "RESULT: clean"
