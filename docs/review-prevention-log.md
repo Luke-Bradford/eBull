@@ -10093,3 +10093,47 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry; `scripts/measure_2834_armb_split_only_basis.py` (the B1 circularity
   block, the parameter-free gate, `unmatched_census`);
   `docs/proposals/ta/2026-09-21-armb-split-only-basis-verdict.md` §3–§4.
+
+## A source brought in to adjudicate a dispute needs a CONTROL arm — its verdict on the UNDISPUTED events is its error bar (#2834, 2026-09-21)
+
+- Symptom: a measurement ran an outside source (SEC XBRL split ratios via `companyconcept`)
+  against the events where two price archives DISAGREE, found it backed the stamp on 21 of 30,
+  and was written up as the first non-circular corroboration the ticket had. The number is real.
+  The reading was not.
+- What was missing: the same source's verdict on the events where the two archives already
+  **agree** — 3,824 of them, where there is no reason to doubt the stamp. Measured, it returns
+  non-direct on **30 of 251 covered (12.0%)**: wrong identity, wrong date, orientation, share
+  class, or a genuinely different corporate action. That is the source's noise floor through
+  that path, and the disputed arm's 30.0% sits only ~2.5× above it on **n = 30**.
+- **The generalisation: an adjudicator's agreement rate on disputed cases is uninterpretable
+  without its agreement rate on undisputed ones.** Every retrieval path has an error rate —
+  identity joins, date semantics, unit conventions — and that error rate does not announce
+  itself. Measured only on the disputed set it is invisible, because there is no baseline to
+  subtract. The control arm is usually free: it is the population you already filtered OUT.
+- Test to apply: before writing "the outside source confirms X on N events", ask **what does it
+  say about events where nothing is in dispute?** If that was not measured, the claim has no
+  error bar and the effect may be entirely the floor.
+- ⚠ This is the second half of the same session's circularity lesson, and the inverse failure.
+  The first was trusting a check that CANNOT fail (a derived column validating its own stamp).
+  This one is trusting a check whose FAILURE RATE was never measured. Independence and accuracy
+  are different properties: a source can be genuinely independent and still be wrong 12% of the
+  time, and independence alone is what makes it tempting.
+- ⚠ Three further claims on the same document were withdrawn before merge, all the same shape —
+  a number computed on one population, described as if it characterised another. "SEC backs the
+  stamp over the reference 27 to 4" was never computed at all (nothing compared SEC to the
+  reference's implied factor); a 2% agreement tolerance was quoted against the predecessor's 1%
+  dispute threshold, flattering agreement; and 1,681 duration-context facts were matched as
+  though they carried an event date. **Pin a derived comparison to the SAME threshold as the
+  partition it is being compared against** — a looser tolerance on one side of a cross-tab is a
+  silent thumb on the scale.
+- ⚠ Separately, and worth its own line because it nearly justified never looking: **a
+  regulatory MANDATE date bounds when a FILING exists, not which EVENT DATES that filing can
+  describe.** A draft excluded 57% of events as "outside XBRL coverage by construction" because
+  they predate the 2009 phase-in; a 10-K filed in 2013 can disclose a 1987 split. The empirical
+  answer happened to be close (1 of 2,630 instant facts predates 2009) — but "rare in practice"
+  and "impossible by construction" justify very different next steps, and only one of them was
+  measured.
+- Enforced in: this entry; `scripts/measure_2834_armb_sec_adjudicator.py` (the `agreeing`
+  control row in the dispute cross-tab, `TOLERANCES` pinned to the predecessor's
+  `_EVENT_TOLERANCE`, `SecFact.is_instant`, and the removal of the era filter);
+  `docs/proposals/ta/2026-09-21-armb-sec-adjudicator-verdict.md` §3.1 and §5.3.
