@@ -16,12 +16,13 @@ THE THREE OUTCOMES, and why a two-way split would be wrong.  The obvious shape i
 "refused or not", but ``PositionManagerResult`` can also come back genuinely undecided,
 and folding that into either side is a real error in one direction or the other:
 
-* ``cleared`` — nothing is outstanding.  Either the arm observed both levels already in
-  place, or the broker ACCEPTED an edit.  Resets the streak.
+* ``cleared`` — the position is CONFIRMED carrying its levels.  Either the arm observed
+  both in place (``no_change``), or a submitted edit was confirmed against the broker's
+  own rates by ``_edit_landed`` (``applied``).  Resets the streak.
 * ``refused`` — a repair was needed and did not happen; the position stays unprotected.
   Increments the streak.
-* ``unknown`` — the outcome is not established (``reconcile_required``, or an operation
-  already in flight).  Stamps ``last_checked_at`` and touches nothing else.
+* ``unknown`` — the outcome is not established.  Stamps ``last_checked_at`` and touches
+  nothing else.
 
 ⚠ ``reconcile_required`` is deliberately NOT a refusal.  A broker edit whose outcome is
 uncertain may well have landed, and it is already loud by other means: the path sets
@@ -29,13 +30,29 @@ uncertain may well have landed, and it is already loud by other means: the path 
 Counting it would raise a second alarm for a condition that already has one, and — worse
 — an alarm that says "the stop cannot be set" about an edit that may be set.
 
-⚠ An ACCEPTED edit (``submitted``) counts as ``cleared`` even though acceptance is not
-landing, and that is not a blind spot.  ``idx_strategy_position_one_unresolved_operation``
-admits at most one unresolved operation per ownership, so an accept-but-never-land loop
-cannot repeat: the operation stays unresolved, ``_resume_operation`` is what handles it,
-and ``_edit_landed`` only reaches ``applied`` by comparing the broker's own rates.  If an
-edit genuinely fails to take effect, the next visit sees the gap again and the streak
-climbs from zero — one cycle slower to alert, never silent.
+⚠⚠ ``submitted`` IS NOT ``cleared``, AND ``pending`` IS A REFUSAL.  The first draft had
+both the other way round, on the reasoning that an accepted edit settles the episode
+because ``idx_strategy_position_one_unresolved_operation`` prevents an accept-but-never-land
+loop from repeating.  **Codex checkpoint 2 falsified it by reading the path.**
+``_resume_operation`` does NOT terminalise a ``submitted`` edit whose levels never arrive:
+``strategy_position_manager.py``'s last branch returns ``("pending", "broker_edit_pending")``
+and leaves the row ``submitted`` forever.  That return happens at the TOP of
+``manage_owned_position``, before either recording site — so under the first draft the
+streak was reset by the submit and then never touched again, while the unresolved-operation
+index blocked any fresh repair.  A permanently naked position with a zero streak and a
+frozen ``last_checked_at``: the precise failure this ticket exists to catch, shipped with a
+docstring asserting it was safe.
+
+So only BROKER-CONFIRMED state clears a streak.  Acceptance (202) is an
+acknowledgement, which is ``unknown``; a submitted edit observed NOT in effect is the
+refusal, counted on every visit it stays that way.  Sequence, in order: the submit stamps
+and preserves the streak, and the next visit either confirms (``applied`` → cleared) or
+counts (``pending`` → refused).
+
+⚠ ``pending`` is only ever a refusal because its recording site filters on
+``operation_type='fixed_exit_repair'``.  ``_resume_operation`` also returns ``pending`` for
+a close lookup (``close_lookup_unavailable``, ``broker_close_pending``), which says nothing
+about a stop — see ``_record_resumed_repair_visit``.
 
 WHY THE STREAK IS A COUNT OF VISITS.  ``_OWNED_BATCH_SQL`` rotates the owned batch by
 five-minute slot, so how often one ownership is visited is a function of sleeve size.  A
@@ -61,14 +78,19 @@ RepairVisitOutcome = Literal["cleared", "refused", "unknown"]
 _OUTCOME_BY_STATE: dict[str, RepairVisitOutcome] = {
     # The arm found both levels in place, so no repair was outstanding.
     "no_change": "cleared",
-    # The broker accepted the edit (202) or it has been confirmed against broker state.
-    "submitted": "cleared",
+    # `_edit_landed` compared the broker's OWN rates against the intent and they match.
+    # The only state that is evidence of protection rather than of intent.
     "applied": "cleared",
     # The arm declined: broker capability, an unsafe quote, or a prior refusal of this
     # exact edit still standing.
     "rejected": "refused",
-    # Undecided — see the module docstring.
-    "pending": "unknown",
+    # A submitted edit that `_edit_landed` says is NOT in effect. The position is
+    # unprotected and the repair has not happened, which is the refusal this ticket is
+    # about — see the module docstring for why the first draft had this as `unknown`.
+    "pending": "refused",
+    # Acknowledged (202) but not confirmed, and uncertain-outcome mutations. Neither
+    # establishes protection nor establishes a refusal.
+    "submitted": "unknown",
     "reconcile_required": "unknown",
 }
 

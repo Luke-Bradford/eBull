@@ -155,14 +155,44 @@ def test_the_streak_accrues_then_resets_and_dates_the_episode(
     )
     assert _streak(conn, ownership_id) == (2, _NOW, "broker_fixed_exit_edit_not_allowed", undecided)
 
-    # The position comes back protected: the episode is over, detail cleared.
-    protected = undecided + timedelta(minutes=5)
+    # ⚠ An ACCEPTED edit is also only `unknown`: the streak must SURVIVE it. Under the
+    # first draft this cleared, and a never-landing edit then sat at zero forever because
+    # `_resume_operation` returns `broker_edit_pending` from above the repair arm.
+    accepted = undecided + timedelta(minutes=5)
     assert (
         record_repair_visit(
             conn,
             ownership_id=ownership_id,
-            state="no_change",
-            reason_code="position_protected",
+            state="submitted",
+            reason_code="broker_edit_accepted",
+            observed_at=accepted,
+        )
+        == "unknown"
+    )
+    assert _streak(conn, ownership_id) == (2, _NOW, "broker_fixed_exit_edit_not_allowed", accepted)
+
+    # ...and the resumed visit that finds it NOT in effect keeps counting.
+    still_pending = accepted + timedelta(minutes=5)
+    assert (
+        record_repair_visit(
+            conn,
+            ownership_id=ownership_id,
+            state="pending",
+            reason_code="broker_edit_pending",
+            observed_at=still_pending,
+        )
+        == "refused"
+    )
+    assert _streak(conn, ownership_id) == (3, _NOW, "broker_edit_pending", still_pending)
+
+    # Only broker-confirmed protection ends the episode.
+    protected = still_pending + timedelta(minutes=5)
+    assert (
+        record_repair_visit(
+            conn,
+            ownership_id=ownership_id,
+            state="applied",
+            reason_code="broker_edit_applied",
             observed_at=protected,
         )
         == "cleared"

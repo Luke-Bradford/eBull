@@ -234,6 +234,64 @@ def test_fixed_exit_gap_is_repaired_once_and_manual_position_is_untouched(
     )
 
 
+def test_an_accepted_edit_that_never_lands_keeps_accruing_refusals(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3284 item 4a — the case Codex checkpoint 2 found unrecordable in the first draft.
+
+    The broker accepts the edit (202) and the levels never arrive. `_resume_operation`
+    then returns ``broker_edit_pending`` on every later visit and NEVER terminalises the
+    row, and that return happens above the repair arm — so the first draft, which cleared
+    the streak on ``submitted`` and recorded nothing from the resume path, left the
+    position permanently naked reading ZERO refusals while
+    ``idx_strategy_position_one_unresolved_operation`` blocked any fresh attempt.
+
+    Driven through the real `manage_owned_position` rather than the classifier, because
+    the defect was the WIRING, not the mapping: every visit below returns before the code
+    the classifier tests exercise.
+    """
+    conn = ebull_test_conn
+    trade_id, _, broker, _ = _opened_trade(conn, monkeypatch)
+    ownership = conn.execute(
+        "SELECT ownership_id FROM strategy_position_ownership WHERE strategy_trade_id=%s", (trade_id,)
+    ).fetchone()
+    assert ownership is not None
+    conn.commit()
+
+    def _streak() -> tuple[Any, ...] | None:
+        # ⚠ `manage_owned_position` requires an IDLE connection, so a read between visits
+        # has to close its own transaction or the next visit raises.
+        row = conn.execute(
+            "SELECT consecutive_refusals, last_refusal_reason FROM strategy_position_repair_streaks "
+            "WHERE ownership_id=%s",
+            (ownership[0],),
+        ).fetchone()
+        conn.commit()
+        return row
+
+    accepted = manage_owned_position(
+        conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+    )
+    assert accepted.state == "submitted"
+    # Acceptance is acknowledged, not confirmed: a row exists but claims no refusal yet.
+    assert _streak() == (0, None)
+
+    # The portfolio is deliberately NOT updated — the levels never reached the broker.
+    for _ in range(2):
+        stalled = manage_owned_position(
+            conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+        )
+        assert (stalled.state, stalled.reason_code) == ("pending", "broker_edit_pending")
+
+    # The whole point: the streak is non-zero and climbing. Under the first draft this
+    # assertion read (0, None) forever, which is the defect.
+    assert _streak() == (2, "broker_edit_pending")
+
+    # And the operation is still unresolved, which is why nothing else could have seen it.
+    assert conn.execute("SELECT status FROM strategy_position_operations").fetchone() == ("submitted",)
+    broker.edit_demo_strategy_position.assert_called_once()
+
+
 def test_rejected_patch_is_a_single_material_event_not_a_retry_heap(
     ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

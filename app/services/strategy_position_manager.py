@@ -956,6 +956,49 @@ def _submit_close(
     )
 
 
+def _record_resumed_repair_visit(
+    conn: psycopg.Connection[Any],
+    *,
+    owned: _OwnedPosition,
+    resumed: PositionManagerResult,
+    observed_at: datetime,
+) -> None:
+    """Count a resumed FIXED-EXIT REPAIR against the ownership's refusal streak.
+
+    ⚠⚠ THIS SITE IS NOT OPTIONAL, and its absence was the defect Codex checkpoint 2 found
+    in the first draft of #3284 item 4a.  ``_resume_operation`` runs at the TOP of
+    ``manage_owned_position`` and returns before the fixed-exit arm, so without this the
+    one case that matters most is unrecordable: a ``submitted`` edit whose levels never
+    reach the broker stays ``submitted`` forever (the resume path returns
+    ``broker_edit_pending`` and never terminalises it), ``idx_strategy_position_one_unresolved_operation``
+    blocks any fresh repair, and the position is naked indefinitely with a ZERO streak.
+
+    ⚠ Filtered on ``operation_type='fixed_exit_repair'``, and the filter is load-bearing:
+    ``_resume_operation`` also returns ``pending`` for a close lookup
+    (``close_lookup_unavailable`` / ``broker_close_pending``) and ``applied`` for a
+    completed close, neither of which is evidence about a stop.  Counting a pending CLOSE
+    as a stop refusal would alert that the safety net is broken on a position being
+    deliberately closed.  A ``stop_ratchet`` is excluded for the same reason: a ratchet
+    that has not moved leaves the position protected at its existing stop.
+    """
+    if resumed.position_operation_id is None:
+        return
+    row = conn.execute(
+        "SELECT operation_type FROM strategy_position_operations WHERE position_operation_id=%s",
+        (resumed.position_operation_id,),
+    ).fetchone()
+    conn.commit()
+    if row is None or row[0] != "fixed_exit_repair":
+        return
+    record_repair_visit(
+        conn,
+        ownership_id=owned.ownership_id,
+        state=resumed.state,
+        reason_code=resumed.reason_code,
+        observed_at=observed_at,
+    )
+
+
 def _repair_fixed_exit(
     conn: psycopg.Connection[Any],
     *,
@@ -1055,6 +1098,11 @@ def manage_owned_position(
         conn.commit()
         resumed = _resume_operation(conn, broker=broker, owned=owned)
         if resumed is not None:
+            # #3284 item 4a — the resume path is the THIRD recording site, and the one a
+            # never-landing edit is only ever observed from. See
+            # `_record_resumed_repair_visit` for why omitting it left the worst case with
+            # a zero streak.
+            _record_resumed_repair_visit(conn, owned=owned, resumed=resumed, observed_at=observed_at)
             return resumed
         position = _exact_broker_position(broker, owned)
         if position is None:

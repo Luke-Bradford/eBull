@@ -28,16 +28,15 @@ from app.services.strategy_position_repair_streak import (
     [
         # No gap was observed: the position already carries both levels.
         ("no_change", "cleared"),
-        # The broker accepted the edit. Acceptance is not landing — see the module
-        # docstring for why that is still `cleared` and not a blind spot.
-        ("submitted", "cleared"),
         # Confirmed against the broker's own rates by `_edit_landed`.
         ("applied", "cleared"),
         # The arm declined: broker capability, an unsafe quote, or a standing prior
         # refusal of this exact edit. All three leave the position unprotected.
         ("rejected", "refused"),
-        # Undecided. An operation is in flight, or a mutation's outcome is unknown.
-        ("pending", "unknown"),
+        # A submitted edit that is demonstrably NOT in effect.
+        ("pending", "refused"),
+        # Acknowledged but unconfirmed, and uncertain-outcome mutations.
+        ("submitted", "unknown"),
         ("reconcile_required", "unknown"),
     ],
 )
@@ -55,6 +54,31 @@ def test_an_uncertain_broker_edit_is_not_counted_as_a_refusal() -> None:
     """
     assert classify_repair_visit("reconcile_required") == "unknown"
     assert classify_repair_visit("rejected") == "refused"
+
+
+def test_only_broker_confirmed_state_clears_a_streak() -> None:
+    """The correction Codex checkpoint 2 forced, asserted so it cannot be undone.
+
+    The first draft mapped ``submitted`` to ``cleared`` and ``pending`` to ``unknown``,
+    reasoning that an accepted edit settles the episode. It does not:
+    ``_resume_operation`` never terminalises a ``submitted`` edit whose levels fail to
+    arrive — it returns ``broker_edit_pending`` from ABOVE the repair arm, forever — so
+    that mapping reset the streak at the submit and then never touched it again, while the
+    unresolved-operation index blocked any fresh attempt. A permanently naked position
+    reading zero refusals.
+
+    The property that fixes it, stated directly: acceptance is not protection.
+    """
+    # Acknowledgement preserves whatever the streak was; it does not clear it.
+    assert classify_repair_visit("submitted") == "unknown"
+    # An edit observed not in effect is the refusal, on every visit it stays that way.
+    assert classify_repair_visit("pending") == "refused"
+    # Exactly one state is evidence of protection from the broker's own rates, plus the
+    # no-gap observation the arm makes directly.
+    assert {state for state, outcome in _OUTCOME_BY_STATE.items() if outcome == "cleared"} == {
+        "applied",
+        "no_change",
+    }
 
 
 def test_an_unmapped_state_raises_rather_than_defaulting() -> None:
