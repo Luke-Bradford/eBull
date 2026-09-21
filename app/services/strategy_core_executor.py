@@ -19,6 +19,7 @@ from app.providers.broker import (
     BrokerOrderSubmissionUncertain,
     BrokerProvider,
 )
+from app.services.core_exit_levels import CoreExitLevelsUnderivable, core_exit_levels
 from app.services.strategy_control_plane import link_strategy_order, load_paper_pool
 from app.services.strategy_core_allocator import evaluate_core_rebalance
 from app.services.strategy_core_broker_preflight import (
@@ -118,6 +119,27 @@ class CoreResumeAuthority:
     operator_id: UUID
     api_key_credential_id: UUID
     user_key_credential_id: UUID
+    stop_loss_rate: Decimal | None
+    """The committed stop.  See :attr:`take_profit_rate` -- the pair is one fact and the
+    ``None`` contract below governs both.  ⚠ Split across the two fields deliberately: a
+    bare string attaches to the field it FOLLOWS, so a single block after the second
+    would leave this one undocumented in every tool that reads them."""
+
+    take_profit_rate: Decimal | None
+    """#3284 item 1.  The exit levels this authority was committed with, read back from
+    ``strategy_core_entry_exit_levels``.
+
+    ⚠ ``None`` IS A LEGAL VALUE, and making it illegal was a real defect caught at Codex
+    checkpoint 2.  An authority committed before ``sql/407`` has no levels row, and the
+    ONLY thing that can still happen to it is :func:`resume_core_submission` --  which
+    RECONCILES and never resubmits (see its docstring).  Raising here would 500 both
+    ``GET /core-sleeve`` and ``POST /core-sleeve/rebalance`` and make that authority
+    permanently unreconcilable: a guard against submitting naked, blocking the one action
+    that cannot submit anything at all.
+
+    ⚠ The refusal that matters therefore lives at the SUBMIT site
+    (:func:`_submit_core_authority_locked`), not at the load site.  "No committed levels"
+    must stop a submission; it must not stop a read."""
 
 
 def _result(
@@ -203,13 +225,15 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
                o.instrument_id, o.requested_amount, o.strategy_request_id,
                o.broker_order_ref, proof.core_eligibility_proof_id,
                proof.operator_id, proof.api_key_credential_id,
-               proof.user_key_credential_id
+               proof.user_key_credential_id,
+               lv.stop_loss_rate, lv.take_profit_rate
         FROM strategy_order_reconciliation_state state
         JOIN orders o ON o.order_id=state.order_id
         JOIN strategy_trade_orders link ON link.order_id=o.order_id
         JOIN strategy_trades t ON t.strategy_trade_id=link.strategy_trade_id
         JOIN strategy_core_eligibility_proofs proof
           ON proof.core_eligibility_proof_id=t.core_eligibility_proof_id
+        LEFT JOIN strategy_core_entry_exit_levels lv ON lv.order_id=o.order_id
         WHERE t.core_rebalance_intent_id IS NOT NULL
           AND state.state NOT IN ('resolved','rejected')
         ORDER BY state.first_unresolved_at, state.order_id
@@ -219,6 +243,12 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
     conn.commit()
     if row is None:
         return None
+    # ⚠ LEFT JOIN, and the exit levels are deliberately NOT in the completeness check
+    # below.  An INNER JOIN would make a pre-`sql/407` authority INVISIBLE, and adding
+    # NULL rates to this raise would make it UNLOADABLE -- both break the only action
+    # such an authority can still take, which is reconciliation.  The submit path is
+    # where missing levels have to stop something, and that is where they do
+    # (`_submit_core_authority_locked`).  #3284 item 1, Codex checkpoint 2.
     if row[0] is None or row[4] is None or row[5] is None:
         raise StrategyCoreExecutionError("core resume authority is incomplete")
     return CoreResumeAuthority(
@@ -233,6 +263,8 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
         operator_id=row[8],
         api_key_credential_id=row[9],
         user_key_credential_id=row[10],
+        stop_loss_rate=None if row[11] is None else Decimal(str(row[11])),
+        take_profit_rate=None if row[12] is None else Decimal(str(row[12])),
     )
 
 
@@ -480,10 +512,33 @@ def _submit_core_authority_locked(
     # already precedes this either way, so the callback bought only the unattended
     # guard and body construction, and it was not the last client-side instant
     # anyway (`ResilientClient` throttles after it).
+    # ⚠ #3284 item 1, and BEFORE the marker deliberately.  This is where "no committed
+    # exit levels" has to stop something: a marked authority reads as "may have reached
+    # the broker", so refusing after the marker would cost the order its own provenance
+    # to prevent a call that has not happened yet.
+    #
+    # ⚠ Unreachable today and kept anyway.  `_submit_core_authority` is only entered from
+    # `execute_core_rebalance`, which derives the rates in this same lock hold -- so a
+    # `None` here means a caller was added that submits a LOADED authority, which is
+    # exactly the change that would otherwise reintroduce the naked open this ticket
+    # closed.  A raise rather than a refusal because it is a caller-contract breach, not
+    # a state of the world.
+    if authority.stop_loss_rate is None or authority.take_profit_rate is None:
+        raise StrategyCoreExecutionError(
+            f"core authority {authority.order_id} has no committed exit levels and must not be submitted"
+        )
     mark_core_submission_entered(conn, order_id=authority.order_id)
     try:
         submission = broker.place_demo_core_order(
-            BrokerCoreOrder(instrument_id=authority.instrument_id, amount=authority.amount),
+            BrokerCoreOrder(
+                instrument_id=authority.instrument_id,
+                amount=authority.amount,
+                # ⚠ From the AUTHORITY, never re-derived here.  This line runs on the
+                # resume path too, replaying `authority.request_id`; a fresh derivation
+                # would put a different body under an accepted idempotency key.
+                stop_loss_rate=authority.stop_loss_rate,
+                take_profit_rate=authority.take_profit_rate,
+            ),
             request_id=authority.request_id,
         )
     except BrokerOrderSubmissionError as exc:
@@ -785,6 +840,46 @@ def execute_core_rebalance(
                 return _result("refused", "core_submission_action_unbuilt", intent_id=intent_id)
             order_action, order_purpose = order_shape
 
+            # #3284 item 1 -- the exit levels are derived BEFORE the durable authority
+            # exists, so a body that cannot carry them is never committed.
+            #
+            # ⚠ The anchor is `db_preflight.price`, which for `buy_core` is the ASK, read
+            # inside THIS hold of `core_submission_lock` and already refused as
+            # `core_quote_stale` beyond `CORE_MAX_QUOTE_AGE_SECONDS` -- the very constant
+            # `CORE_EXIT_MAX_QUOTE_AGE_SECONDS` re-exports.  So the anchor's freshness
+            # bound and the repair's are ONE policy rather than two that happen to agree,
+            # and no second quote read is needed.  This mirrors the signal arm, which
+            # anchors on `intent.ask` (`strategy_paper_executor`).
+            #
+            # ⚠ The anchor is NOT the fill.  A market order fills where it fills, so the
+            # submitted stop is approximately -50% of the fill rather than exactly; the
+            # five-minute repair re-anchors on `broker_positions.open_price` (the true
+            # fill) and corrects it. That approximation is the price of protecting the
+            # position from the first instant, and it is the right trade: the alternative
+            # is exactness with a naked window.
+            anchor_rate = db_preflight.price
+            anchor_quoted_at = db_preflight.quoted_at
+            # An admitted verdict always carries both -- `_age_ok` cannot pass on a NULL
+            # `quoted_at` and the price refusals precede it.  Re-checked anyway, because
+            # "cannot happen" is how a naked position gets opened: the refusal costs one
+            # cycle, the alternative is an unguarded `None` reaching the INSERT.
+            if anchor_rate is None or not anchor_rate.is_finite() or anchor_rate <= 0 or anchor_quoted_at is None:
+                return _result("refused", "core_exit_anchor_unavailable", intent_id=intent_id)
+            try:
+                exit_levels = core_exit_levels(anchor_rate)
+            except CoreExitLevelsUnderivable:
+                # ⚠ The SPECIFIC exception, not a bare `ValueError` -- a bare catch would map
+                # any future failure inside `core_exit_levels` to this same refusal, which
+                # reads as a handled condition when it is an unhandled one (review bot,
+                # PR #3289).
+                #
+                # ⚠ A REFUSAL, not an exception, and the case is real rather than defensive:
+                # `core_exit_levels` quantizes the stop DOWN to a cent, so any anchor under
+                # two cents derives a stop of 0.00 and raises.  SPY cannot reach there, but
+                # the mandate instrument is configurable and an executor that raises where
+                # it could refuse turns a bad candidate into a failed attended request.
+                return _result("refused", "core_exit_levels_underivable", intent_id=intent_id)
+
             amount = broker_verdict.amount
             request_id = uuid4()
             trade_row = conn.execute(
@@ -813,6 +908,26 @@ def execute_core_rebalance(
             if order_row is None:
                 raise StrategyCoreExecutionError("core order INSERT did not return an id")
             order_id = int(order_row[0])
+            # ⚠ INSIDE the authority transaction, with the order and the reconciliation
+            # row.  All three commit together or none do, so "a durable core authority
+            # exists" and "its exit levels are known" are the same fact -- which is what
+            # lets the submit path read them rather than re-derive them (#3284 item 1).
+            conn.execute(
+                """
+                INSERT INTO strategy_core_entry_exit_levels (
+                    order_id, anchor_rate, anchor_quoted_at,
+                    stop_loss_rate, take_profit_rate, policy_version
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    order_id,
+                    anchor_rate,
+                    anchor_quoted_at,
+                    exit_levels.stop_loss_rate,
+                    exit_levels.take_profit_rate,
+                    exit_levels.policy_version,
+                ),
+            )
             link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose=order_purpose)
             # ⚠ `submission_phase` is declared HERE, in the authority transaction,
             # and advanced by `mark_core_submission_entered` in a SEPARATE commit
@@ -843,6 +958,8 @@ def execute_core_rebalance(
                 operator_id=operator_id,
                 api_key_credential_id=api_key_credential_id,
                 user_key_credential_id=user_key_credential_id,
+                stop_loss_rate=exit_levels.stop_loss_rate,
+                take_profit_rate=exit_levels.take_profit_rate,
             ),
         )
 

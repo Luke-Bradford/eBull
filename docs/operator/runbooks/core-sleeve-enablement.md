@@ -243,8 +243,14 @@ from any of them.
   arm has no kill-switch check.
 - **The executor's own outcomes**, which belong to no preflight: `portfolio_drawdown_limit`,
   `core_credential_provenance_changed`, `core_submission_action_unbuilt`,
+  `core_exit_anchor_unavailable`, `core_exit_levels_underivable`,
   `broker_submission_rejected`, `broker_submission_uncertain`, and the reconciliation
   outcomes.
+  - ⚠ The two `core_exit_*` codes are #3284 item 1 and both mean the same operator-facing
+    thing: **the entry was refused because its stop and target could not be derived**, so
+    no order exists and nothing is naked. `core_exit_anchor_unavailable` is an admitted
+    preflight that nonetheless carried no usable ask; `core_exit_levels_underivable` is an
+    ask too small to quantize a stop from (under two cents). Neither is reachable for SPY.
 
 ⚠ **Do not read a reported code as ruling out the conditions listed above it.** The
 declaration order is a stable *reporting* contract inside a module; the executor's actual

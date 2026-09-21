@@ -88,11 +88,16 @@ def _submission_outcome_is_uncertain(status_code: int) -> bool:
     return status_code >= 500 or status_code in _UNCERTAIN_4XX_STATUSES
 
 
-def _exact_json_decimal(value: Decimal) -> float:
-    """Return a JSON-native number only when its emitted decimal is unchanged."""
+def _exact_json_decimal(value: Decimal, field: str = "amount") -> float:
+    """Return a JSON-native number only when its emitted decimal is unchanged.
+
+    ``field`` names the offending value in the error.  It is not decoration: a core
+    body now carries three Decimals and a message saying "amount" for a rejected
+    ``stopLossRate`` would send the reader to the wrong one.
+    """
     encoded = float(value)
     if Decimal(str(encoded)) != value:
-        raise BrokerOrderSubmissionError("core order amount cannot be represented exactly in the broker JSON payload")
+        raise BrokerOrderSubmissionError(f"core order {field} cannot be represented exactly in the broker JSON payload")
     return encoded
 
 
@@ -597,7 +602,20 @@ class EtoroBrokerProvider(BrokerProvider):
         *,
         request_id: UUID,
     ) -> BrokerCoreOrderSubmission:
-        """Submit one demo-only underlying core buy with no SL/TP fields."""
+        """Submit one demo-only underlying core buy, carrying its stop and target.
+
+        ⚠⚠ This docstring used to read "with no SL/TP fields", and that was the whole
+        of #3284: a position opened here was naked until some later cycle noticed.
+        The operator's decision (2026-09-21) is a stop and target at ALL times, so the
+        rates are part of the submitted body and :class:`BrokerCoreOrder` requires them.
+
+        ⚠ ``stopLossType: "fixed"`` is sent explicitly rather than left to the broker's
+        default.  Precedent is ``place_demo_strategy_order`` above, which posts the same
+        ``settlementType: "real"`` body to the SAME endpoint with the same three fields
+        -- so this is our own measured field set for this endpoint, not an inference.
+        The core stop is fixed by definition: it is a function of the entry price and
+        does not trail.
+        """
         refuse_broker_mutation_if_unattended("place_demo_core_order")
         if self._env != "demo":
             raise BrokerOrderSubmissionError("core orders require demo credentials")
@@ -610,6 +628,9 @@ class EtoroBrokerProvider(BrokerProvider):
             "leverage": 1,
             "amount": _exact_json_decimal(order.amount),
             "orderCurrency": "usd",
+            "stopLossRate": _exact_json_decimal(order.stop_loss_rate, "stopLossRate"),
+            "takeProfitRate": _exact_json_decimal(order.take_profit_rate, "takeProfitRate"),
+            "stopLossType": "fixed",
         }
         try:
             response = self._http_write.post(
