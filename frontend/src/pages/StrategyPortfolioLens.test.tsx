@@ -155,7 +155,7 @@ const CORE_COLLECTING = {
   household_tax_caveat:
     "No supported public-API route into eToro's Stocks & Shares ISA is established. Compare an ISA elsewhere using personal tax, FX and dealing costs, and expected turnover; #2915's £50,000 sensitivity was mixed, not a universal ISA advantage.",
   household_currency_caveat:
-    "Sterling is not the unit here. Where the core sleeve holds a USD-quoted instrument, a household measuring it in GBP carries GBP/USD exposure on the whole position value and not only on its return — exposure this engine neither hedges nor models, since its cost declaration refuses an observation whose conversion rate is not exactly 1 rather than converting it. Converting when you fund or withdraw is a household cost that the preregistered ceiling, which prices round-trip spread, does not include.",
+    "Sterling is not the unit here. Where the core sleeve holds a USD-quoted instrument, a household measuring it in GBP carries GBP/USD exposure on the whole position value and not only on its return, and this engine neither hedges that exposure nor reports any sterling figure. Converting when you fund or withdraw is a household cost that the preregistered ceiling, which prices round-trip spread, does not include.",
 } as const;
 
 const CORE_READY = {
@@ -216,10 +216,11 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.getByText(/No supported public-API route into eToro's Stocks & Shares ISA/i)).toBeInTheDocument();
     expect(screen.getByText(/£50,000 sensitivity was mixed, not a universal ISA advantage/i)).toBeInTheDocument();
     // #2833 caveat (b). Asserted on the RENDER and not only in the fixture --
-    // deleting the JSX would otherwise still pass. This state holds no sleeve, so
-    // the conditional opening is the part that has to survive.
+    // deleting the JSX would otherwise still pass. No instrument is selected in
+    // this state, so the conditional opening is the part that has to survive.
     expect(screen.getByText(/Where the core sleeve holds a USD-quoted instrument/i)).toBeInTheDocument();
-    expect(screen.getByText(/neither hedges nor models/i)).toBeInTheDocument();
+    expect(screen.getByText(/nor reports any sterling figure/i)).toBeInTheDocument();
+    expect(screen.getByText(/Converting when you fund or withdraw/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Minimum cash reserve %")).toHaveValue(10);
     expect(screen.getByLabelText("Rebalance band (pp)")).toHaveValue(5);
     expect(screen.getByLabelText("Minimum amount (USD)")).toHaveValue(25);

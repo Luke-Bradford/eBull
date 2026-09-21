@@ -1100,32 +1100,31 @@ class CoreSleeveResponse(BaseModel):
         "Compare an ISA elsewhere using personal tax, FX and dealing costs, and expected turnover; "
         "#2915's £50,000 sensitivity was mixed, not a universal ISA advantage."
     )
-    #: #2833's second adoption caveat, not carried verbatim. Why, and what each
-    #: surviving clause is anchored in -- the rationale is on PR #3272:
+    #: #2833's caveat (b), not carried verbatim. "On a GBP account" is dropped
+    #: because the evidence cannot support it: the NULL-``account_currency_id``
+    #: rows of ``broker_account_equity_snapshots`` are the assumed ``'USD'``
+    #: literal ``sql/341`` exists to stop us reading as evidence. ⚠ That makes the
+    #: clause UNSUPPORTABLE, not false, so both of its claims are kept. Why the
+    #: opening is conditional, and the rest of the rationale, on PR #3272.
     #:
-    #: * "on a GBP account" is DROPPED, and only those words. Every row of
-    #:   ``broker_account_equity_snapshots`` is demo, and its NULL
-    #:   ``account_currency_id`` rows are the assumed ``'USD'`` literal ``sql/341``
-    #:   exists to stop us reading as evidence. ⚠ That makes the clause
-    #:   unsupportable, NOT false -- it plausibly meant valuation exposure, so
-    #:   nothing here refutes it and both surviving claims are kept.
-    #: * "Where ... holds a USD-quoted instrument" is conditional on purpose: this
-    #:   response is also served in ``cash``, ``evidence_collecting`` and
-    #:   ``unavailable``, where no sleeve is held.
-    #: * "neither hedges nor models" is the declaration's ``fx_rule`` -- an
-    #:   observation whose ``conversion_rate`` is not exactly 1 fails
-    #:   ``fx_unmodelled`` rather than being converted (how 3075 IUSA.L failed).
-    #: * The ceiling's scope is its ``all_in_cost_rule``:
-    #:   ``p75_full_round_trip_spread_bps`` plus a documented 0 bps entry-sizing
-    #:   markup, so funding/withdrawal conversion sits outside it.
+    #: "reports no sterling figure" is the checkable form of the original's
+    #: "unhedged" -- ``strategy_core_mandate_events.base_currency`` is
+    #: ``CHECK (base_currency = 'USD')`` (``sql/336``). ⚠ An earlier draft cited
+    #: the declaration's ``fx_rule`` here instead; that rule is about
+    #: instrument-currency-to-USD conversion, a different pair from the
+    #: household's, and it does not support this sentence.
+    #:
+    #: The cost clause is the declaration's ``all_in_cost_rule``
+    #: (``docs/proposals/ta/2026-08-24-core-selection-declaration.json``): p75
+    #: round-trip spread plus a documented 0 bps entry-sizing markup, so funding
+    #: and withdrawal conversion sits outside it.
     household_currency_caveat: str = (
         "Sterling is not the unit here. Where the core sleeve holds a USD-quoted "
         "instrument, a household measuring it in GBP carries GBP/USD exposure on the "
-        "whole position value and not only on its return — exposure this engine "
-        "neither hedges nor models, since its cost declaration refuses an observation "
-        "whose conversion rate is not exactly 1 rather than converting it. Converting "
-        "when you fund or withdraw is a household cost that the preregistered ceiling, "
-        "which prices round-trip spread, does not include."
+        "whole position value and not only on its return, and this engine neither "
+        "hedges that exposure nor reports any sterling figure. Converting when you "
+        "fund or withdraw is a household cost that the preregistered ceiling, which "
+        "prices round-trip spread, does not include."
     )
 
 

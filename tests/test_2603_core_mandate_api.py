@@ -171,18 +171,28 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     assert "No supported public-API route into eToro's Stocks & Shares ISA" in response.household_tax_caveat
     assert "#2915's £50,000 sensitivity was mixed" in response.household_tax_caveat
     assert "tax-dominates" not in response.household_tax_caveat
-    # #2833's caveat (b), and this assertion block is deliberately about the three
-    # claims rather than the prose. The state under test is `evidence_collecting`,
-    # where NO sleeve is held -- so the currency clause must stay conditional or it
-    # is simply false here, which is what the first assertion pins.
+    # #2833's caveat (b), pinned by claim rather than by prose. The state under
+    # test is `evidence_collecting`, which can be served with NO instrument
+    # selected -- so the currency clause must stay conditional or it is false
+    # here, which is what the first assertion holds.
     assert "Where the core sleeve holds a USD-quoted instrument" in response.household_currency_caveat
-    assert "neither hedges nor models" in response.household_currency_caveat
-    assert "does not include" in response.household_currency_caveat
-    # "On a GBP account" is dropped because `broker_account_equity_snapshots` is
-    # demo-only, and its NULL-`account_currency_id` rows are the assumed `'USD'`
-    # literal `sql/341` exists to stop us reading as evidence. Pinned negatively,
-    # like the "tax-dominates" line above, so it cannot be restored unexamined.
+    # The exposure is on the position VALUE, not only on the return: translating a
+    # USD holding into GBP moves the whole of it. Dropping this qualifier would
+    # understate the caveat, so it is pinned separately.
+    assert "whole position value and not only on its return" in response.household_currency_caveat
+    assert "nor reports any sterling figure" in response.household_currency_caveat
+    # Names the excluded cost specifically. "does not include" alone would still
+    # pass if the sentence stopped identifying WHICH cost is outside the ceiling.
+    assert "Converting when you fund or withdraw" in response.household_currency_caveat
+    # "On a GBP account" is dropped because the NULL-`account_currency_id` rows of
+    # `broker_account_equity_snapshots` are the assumed `'USD'` literal `sql/341`
+    # exists to stop us reading as evidence. Pinned negatively, like the
+    # "tax-dominates" line above, so it cannot be restored unexamined.
     assert "GBP account" not in response.household_currency_caveat
+    # An earlier draft justified the hedging clause with the declaration's
+    # `fx_rule`, which governs instrument-currency-to-USD conversion -- a
+    # different currency pair from the household's, so it never supported it.
+    assert "conversion rate" not in response.household_currency_caveat
     assert [blocker.code for blocker in response.blockers] == [
         "core_paper_pool_unconfigured",
         "core_evidence_collecting",
