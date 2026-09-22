@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Audit the autonomy loop against the 2026-09-21 discipline rules (PR #3276).
 #
-# Answers two questions the loop prompt asserts are auditable, so the assertion
+# Answers three questions the loop prompt asserts are auditable, so the assertion
 # is a command rather than a claim (review bot WARNING on #3276):
 #
 #   1. BACK-OFF: did an iteration report a blocked queue and then open a
 #      board-fallback PR anyway? (P0)
 #   2. RUNG: does every merged PR declare the review rung it worked at? (P2)
+#   3. WAKE: was one blocked note posted verbatim on several issues? (P1, #3296)
 #
 # Read-only. Exit 1 if any violation is found, so it can gate a weekly check.
 #
@@ -105,13 +106,41 @@ for t in "$STATE_DIR"/iteration-*.log; do
 done
 echo "  $blocked_runs iteration(s) reported a blocked queue in window"
 
+# ---- P1: a wake condition is per-ticket, never copied (#3296) ------------
+# 2026-09-22 00:25Z: one 703-byte blocked note was posted verbatim on six issues
+# and hid buildable work on most of them for 17h. A byte-identical wake note on
+# more than one issue is the mechanical fingerprint of a copied condition.
+# Population = human-posted BLOCKED notes carrying a wake condition, CREATED in
+# the window (the API's `since` filters on last UPDATE). Known limits: a copy of
+# a note older than the window, or the same condition inside otherwise different
+# bodies, is not caught — this is a fingerprint, not a proof of per-ticket-ness.
+echo
+echo "-- copied wake conditions (P1)"
+if ! copies=$(gh api --paginate --slurp "repos/{owner}/{repo}/issues/comments?since=${SINCE}&per_page=100" \
+    | jq -r --arg since "$SINCE" '[.[][]
+              | select(.user.type == "User" and .created_at >= $since)
+              | select((.body | test("BLOCKED")) and (.body | test("wake condition"; "i")))
+              | {i: (.issue_url | split("/") | last), b: .body, t: .created_at, u: .html_url}]
+             | group_by(.b) | map(select((map(.i) | unique | length) > 1))
+             | .[] | "\(.[0].t) #\(map(.i) | unique | join(" #")) \(.[0].u)"'); then
+  echo "  ⚠ UNCHECKED (gh/jq failure) — re-run before treating this as a pass"
+  skipped=$((skipped + 1))
+elif [ -n "$copies" ]; then
+  while read -r line; do
+    printf '  COPIED wake note, byte-identical across issues: %s\n' "$line"
+    violations=$((violations + 1))
+  done <<< "$copies"
+else
+  echo "  no wake note is shared verbatim across issues"
+fi
+
 echo
 if [ "$violations" -gt 0 ]; then
   echo "RESULT: $violations violation(s)"
   exit 1
 fi
 if [ "$skipped" -gt 0 ]; then
-  echo "RESULT: INCONCLUSIVE — $skipped PR(s) could not be checked"
+  echo "RESULT: INCONCLUSIVE — $skipped check(s) could not be completed"
   exit 3
 fi
 echo "RESULT: clean"

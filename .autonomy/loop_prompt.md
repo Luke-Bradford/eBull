@@ -169,7 +169,17 @@ researched it enough to escalate — research it first.
       CONDITION** — the observable event that makes it eligible ("wake when the demo
       acceptance evidence for scenario B is posted on this issue", "wake after
       2026-09-24 when the 5 sessions have closed"). A block with no wake condition is
-      re-discovered from scratch every cycle, and the re-discovery costs a full startup;
+      re-discovered from scratch every cycle, and the re-discovery costs a full startup.
+      ⚠⚠ **A wake condition must be all three of these, or the ticket is not blocked
+      (#3296):**
+      - **per-ticket** — derived from THAT ticket's own latest acceptance and verdict,
+        never copied from a sibling. On 2026-09-22 00:25Z one note was posted verbatim on
+        six issues; it was wrong for most of them and held the queue shut for 17h.
+      - **producible** — name who or what produces the event and state that it can be
+        produced on demand. An opportunistic event ("if a partial fill ever happens") is
+        a WATCH item, not a wake condition, and cannot block the queue.
+      - **split** — if any part of the ticket is buildable without the observation, the
+        ticket is NOT blocked; only its acceptance is. Build that part.
    2. write the run note saying the queue is blocked and naming what would unblock it —
       **the same wake condition text as on the issue**, so a later session can diff the
       two and see whether the block was ever re-checked;
