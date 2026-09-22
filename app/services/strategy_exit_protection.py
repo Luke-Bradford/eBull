@@ -125,6 +125,14 @@ _ALERTING_STATUSES: frozenset[str] = frozenset({"unrepairable", "error"})
 #: INCLUDING ones this module has never seen.
 DEFAULT_REFUSAL_BUDGET = 2
 
+#: Identifier on the contained-failure sentinel row, which describes no position.
+#: ⚠ Safe because `strategy_position_ownership.ownership_id` is BIGSERIAL and
+#: `strategy_position_ownership.broker_position_id` carries `CHECK (broker_position_id > 0)`
+#: (`sql/281`), so zero is outside both domains and cannot collide with a real row. Named
+#: rather than written as a bare `0` at the construction site so that a future schema
+#: change making zero reachable has one place to fail, not three (review bot, PR #3292).
+NO_POSITION_SENTINEL = 0
+
 #: The exception, granted only where retrying is proven incapable of changing the answer.
 #: ⚠ Keyed on `PositionManagerResult.reason_code` strings; pinned against the manager's
 #: own literals by a test rather than by an import, because `strategy_position_manager`
@@ -295,9 +303,9 @@ def check_exit_protection(conn: psycopg.Connection[Any]) -> list[ExitProtection]
         logger.exception("check_exit_protection: failed to read owned repair streaks")
         return [
             ExitProtection(
-                ownership_id=0,
-                strategy_trade_id=0,
-                broker_position_id=0,
+                ownership_id=NO_POSITION_SENTINEL,
+                strategy_trade_id=NO_POSITION_SENTINEL,
+                broker_position_id=NO_POSITION_SENTINEL,
                 status="error",
                 consecutive_refusals=0,
                 refusal_budget=DEFAULT_REFUSAL_BUDGET,
@@ -317,6 +325,7 @@ def alerting_exit_protection(entries: Sequence[ExitProtection]) -> list[ExitProt
 
 __all__ = [
     "DEFAULT_REFUSAL_BUDGET",
+    "NO_POSITION_SENTINEL",
     "REFUSAL_BUDGET_BY_REASON",
     "ExitProtection",
     "ExitProtectionStatus",
