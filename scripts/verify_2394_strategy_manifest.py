@@ -234,10 +234,11 @@ def equivalence() -> bool:
                 masked_reason=MASKED_REASON,
                 regime=unconstrained_regime(len(series)),
                 price_basis=from_undeclared_source(series=series),
+                ratio_basis=series,
             )
-            # `ratio_basis=series` mirrors `_s2_member`'s own declaration about the
-            # live corpus — see its comment (#2834 §7 slice C). This arm compares the
-            # manifest adapter against a direct call, so it must make the SAME
+            # `ratio_basis=series` is the live corpus's declaration — see
+            # `strategy_signal_scan` (#2834 §7 item 2). This arm compares the
+            # manifest adapter against a direct call, so both sides make the SAME
             # declaration or it would measure the basis rather than the wiring.
             want_member = s2_member(
                 series,

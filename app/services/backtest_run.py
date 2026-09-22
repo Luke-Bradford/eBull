@@ -123,6 +123,7 @@ from app.services.research_price_structure_store import (
     load_arms,
     load_masked_series,
 )
+from app.services.research_split_corrected_reader import load_ratio_basis
 from app.services.result_ledger import (
     holdout_access_counts,
     store_holdout_arm_pair,
@@ -168,6 +169,7 @@ from app.services.strategy_exit_gap import (
 )
 from app.services.strategy_manifest import (
     PRICE_BASIS_CONSUMERS,
+    RATIO_BASIS_CONSUMERS,
     STRATEGY_MANIFEST,
     StrategyEntry,
     StrategyPurpose,
@@ -2651,6 +2653,7 @@ def evaluate_arm(
             archive_adjustment_basis=(
                 corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None
             ),
+            ratio_basis=_ratio_basis_for(conn, entry, series, series_id=series_id, through_date=corpus.window.end),
         )
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
@@ -3023,6 +3026,7 @@ def evaluate_level_arms(
             archive_adjustment_basis=(
                 corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None
             ),
+            ratio_basis=_ratio_basis_for(conn, entry, series, series_id=series_id, through_date=corpus.window.end),
         )
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
@@ -3200,6 +3204,34 @@ class _CrossSection:
     thin: frozenset[date]
 
 
+def _ratio_basis_for(
+    conn: psycopg.Connection[Any],
+    entry: StrategyEntry,
+    series: BarSeries,
+    *,
+    series_id: int,
+    through_date: date,
+) -> BarSeries | None:
+    """The split-consistent ratio basis of one loaded series, for a declared consumer only.
+
+    ``series`` is ``_to_series`` of the ``load_masked_series``/``load_arms`` read
+    for the SAME ``series_id`` and ``through_date`` — ``load_ratio_basis``'s
+    contract — so a quarantine-masked bar stays masked on the corrected side.
+    ``load_ratio_basis`` corrects an `unadjusted` + stamped archive, returns the
+    series itself for a `split_adjusted` one, and raises ``StampsUnavailable``
+    for a basis it cannot define. ⚠ That raise is deliberate and not caught: a
+    ranked score on an undefined basis is the silent failure #2834 §7 exists to
+    stop, and one refused series would otherwise shrink the panel unseen.
+
+    Every other member gets ``None`` (``RATIO_BASIS_CONSUMERS``), which spares
+    them two reads per series.
+    """
+    if entry.strategy_id not in RATIO_BASIS_CONSUMERS:
+        return None
+    corrected, _method = load_ratio_basis(conn, series_id, series, through_date=through_date)
+    return corrected.ratio_basis
+
+
 def _signals_for(
     entry: StrategyEntry,
     series: BarSeries,
@@ -3210,6 +3242,7 @@ def _signals_for(
     regime_provider: MarketRegimeProvider,
     universe: Universe = BACKTEST_UNIVERSE,
     archive_adjustment_basis: str | None,
+    ratio_basis: BarSeries | None,
 ) -> list[StrategySignal]:
     """One instrument's whole-series verdicts, per-series or cross-sectional.
 
@@ -3277,6 +3310,7 @@ def _signals_for(
             unresolved_breaks=unresolved_breaks,
             regime=regime_provider.for_dates(series.dates),
             price_basis=price_basis,
+            ratio_basis=ratio_basis,
             leg=leg,
         )
         for index, verdict in enumerate(staged.verdicts):
@@ -3447,6 +3481,7 @@ def _rank_cross_section(
                 if entry.strategy_id in PRICE_BASIS_CONSUMERS
                 else from_undeclared_source(series=series)
             ),
+            ratio_basis=_ratio_basis_for(conn, entry, series, series_id=series_id, through_date=corpus.window.end),
             leg=leg,
         )
         for when, value in staged.scores.items():

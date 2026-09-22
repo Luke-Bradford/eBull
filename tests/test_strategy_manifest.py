@@ -416,6 +416,7 @@ class TestUniformInvocationEqualsTheDirectCall:
             masked_reason=REASON,
             regime=unconstrained_regime(len(series)),
             price_basis=from_archive_basis("unadjusted", series=series),
+            ratio_basis=series,
         )
         expected = s2_member(
             series, ratio_basis=series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=REASON

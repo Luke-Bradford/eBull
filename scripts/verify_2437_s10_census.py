@@ -100,6 +100,7 @@ def main() -> int:
                 # would let the two diverge silently, which is the "two texts" defect
                 # #2840 already carries a prevention entry for.
                 price_basis=from_undeclared_source(series=series),
+                ratio_basis=series,  # the scan's own declaration — see strategy_signal_scan
                 leg=leg,
             )
             staged_by_leg[leg][instrument_id] = staged

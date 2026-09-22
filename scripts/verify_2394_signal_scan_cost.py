@@ -468,6 +468,7 @@ def cost() -> bool:
             masked_reason=MASKED_REASON,
             regime=unconstrained_regime(len(series)),
             price_basis=from_undeclared_source(series=series),
+            ratio_basis=series,  # the live scan's declaration — see strategy_signal_scan
         )
         if instrument_id not in at_frontier:
             continue
