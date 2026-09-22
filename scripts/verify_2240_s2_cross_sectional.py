@@ -293,6 +293,9 @@ class _PanelRun:
     ratio_basis_methods: Counter[str] = field(default_factory=Counter)
     #: Bars the correction actually moved (scale != 1), summed over the panel.
     correction_moved_bars: int = 0
+    #: ``series_id -> name_key`` the pass streamed, so ``ranking`` re-derives over
+    #: the SAME admitted set rather than loading the admission a second time.
+    panel: dict[int, int] = field(default_factory=dict)
 
 
 def _admitted_panel(conn: psycopg.Connection[tuple], *, universe: Universe, progress: bool = True) -> dict[int, int]:
@@ -326,8 +329,8 @@ def _stream_panel(conn: psycopg.Connection[tuple], *, universe: Universe, progre
     by_series = _admitted_panel(conn, universe=universe, progress=progress)
     if len(set(by_series.values())) != len(by_series):
         raise RuntimeError(
-            "an instrument in the validated universe has more than one research series — the panel would "
-            "rank one name against itself; resolve the series before trusting this census"
+            "two admitted series share one name_key — the panel would rank one name against itself; "
+            "universe_selection's admission is broken, fix it before trusting this census"
         )
     if progress:
         print(f"  research series in it {len(by_series)}", flush=True)
@@ -354,7 +357,7 @@ def _stream_panel(conn: psycopg.Connection[tuple], *, universe: Universe, progre
     if progress:
         print(f"  panel calendar {len(calendar)} dates · {len(rebals)} rebalance dates", flush=True)
 
-    run = _PanelRun()
+    run = _PanelRun(panel=by_series)
     scores_by_date: dict[date, dict[int, float]] = {}
     started = time.monotonic()
 
@@ -632,7 +635,7 @@ def ranking(universe: Universe) -> int:
     print(f"\n[ranking] strategy {S2_STRATEGY_ID} version {_stamped_version(universe)}", flush=True)
     with psycopg.connect(settings.database_url) as conn:
         run = _stream_panel(conn, universe=universe)
-        panel = _admitted_panel(conn, universe=universe, progress=False)
+        panel = run.panel
         print(
             f"  python selection: {len(run.selected)} dates, {sum(map(len, run.selected.values()))} picks", flush=True
         )
