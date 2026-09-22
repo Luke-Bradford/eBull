@@ -129,17 +129,32 @@ def test_a_row_the_claim_did_not_write_reads_as_not_recorded(
     assert context.order_params is None
 
 
+_CTX = Jsonb({"order_params": None})
+
+
 @pytest.mark.parametrize(
-    ("action", "context"),
+    ("action", "position_id", "units", "context"),
     [
         # A lot on a non-EXIT order has no meaning.
-        ("BUY", Jsonb({"order_params": None})),
+        ("BUY", 42, Decimal("1"), _CTX),
         # A lot without its context is half a record.
-        ("EXIT", None),
+        ("EXIT", 42, Decimal("1"), None),
+        # Half a lot, each way. Without explicit IS NOT NULL the arm is UNKNOWN and
+        # Postgres accepts it.
+        ("EXIT", 42, None, _CTX),
+        ("EXIT", None, Decimal("1"), _CTX),
+        # `'NaN'::numeric > 0` is TRUE in Postgres.
+        ("EXIT", 42, Decimal("NaN"), _CTX),
+        ("EXIT", 42, Decimal("0"), _CTX),
+        ("EXIT", -42, Decimal("1"), _CTX),
     ],
 )
 def test_the_check_refuses_a_lot_that_is_not_one_whole_exit_record(
-    ebull_test_conn: psycopg.Connection[tuple], action: str, context: Jsonb | None
+    ebull_test_conn: psycopg.Connection[tuple],
+    action: str,
+    position_id: int | None,
+    units: Decimal | None,
+    context: Jsonb | None,
 ) -> None:
     rec, _decision = _seed(ebull_test_conn, action=action)
     with pytest.raises(psycopg.errors.CheckViolation):
@@ -147,8 +162,8 @@ def test_the_check_refuses_a_lot_that_is_not_one_whole_exit_record(
             "INSERT INTO orders (instrument_id, recommendation_id, action, order_type, status, "
             "raw_payload_json, created_at, recommendation_exit_position_id, recommendation_exit_units, "
             "recommendation_submission_context) "
-            "VALUES (%s,%s,%s,'market','submitted','{}'::jsonb,%s,42,1,%s)",
-            (INSTRUMENT_ID, rec, action, _NOW, context),
+            "VALUES (%s,%s,%s,'market','submitted','{}'::jsonb,%s,%s,%s,%s)",
+            (INSTRUMENT_ID, rec, action, _NOW, position_id, units, context),
         )
     ebull_test_conn.rollback()
 

@@ -41,10 +41,17 @@ ALTER TABLE orders
 ALTER TABLE orders
     ADD CONSTRAINT orders_recommendation_exit_lot_check CHECK (
         (recommendation_exit_position_id IS NULL AND recommendation_exit_units IS NULL)
+        -- ⚠ Every column is tested with an explicit IS NOT NULL: a NULL inside a CHECK
+        -- makes the arm UNKNOWN, and Postgres ACCEPTS an unknown CHECK, so `> 0` alone
+        -- would admit a half-written lot (Codex checkpoint 2).  And `'NaN'::numeric > 0`
+        -- is TRUE in Postgres (NaN sorts above every number), so NaN is refused by name.
         OR (
             action = 'EXIT'
+            AND recommendation_exit_position_id IS NOT NULL
+            AND recommendation_exit_units IS NOT NULL
             AND recommendation_exit_position_id > 0
             AND recommendation_exit_units > 0
+            AND recommendation_exit_units <> 'NaN'::numeric
             -- One record, written by one INSERT: a lot without its context would be
             -- half a record, so the reader would have to choose which half to trust.
             AND recommendation_submission_context IS NOT NULL
