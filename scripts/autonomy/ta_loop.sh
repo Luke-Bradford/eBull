@@ -80,6 +80,16 @@ LOG="$STATE_DIR/loop.log"
 STATUS="$STATE_DIR/status.md"
 MAX_ITERATIONS="${TA_LOOP_MAX:-0}"        # 0 = unbounded
 COOLDOWN_SECONDS="${TA_LOOP_COOLDOWN:-60}"
+#: Cooldown after an iteration that found nothing eligible. ⚠ NOT a tuning knob
+#: for throughput: it exists because a blocked queue is a WAIT, and re-asking a
+#: question whose answer is "an operator must act" costs a full startup each
+#: time. 30 minutes bounds the waste at ~$1/hour while keeping the loop
+#: responsive to a ticket landing.
+BLOCKED_COOLDOWN_SECONDS="${TA_LOOP_BLOCKED_COOLDOWN:-1800}"
+#: Written by the ITERATION (see .autonomy/loop_prompt.md, "NO ELIGIBLE QUEUE
+#: TICKET") and consumed once by the driver. A file, not a phrase: the driver
+#: must not depend on how the model words its run note.
+BLOCKED_SENTINEL="$STATE_DIR/BLOCKED_PASS"
 
 # ⚠ An installed driver lives at <worktree>/var/autonomy/bin, so its own path
 # states which loop it is. If that disagrees with TA_LOOP_WORKTREE, the agent
@@ -541,7 +551,27 @@ while true; do
     break
   fi
 
-  sleep "$COOLDOWN_SECONDS"
+  # ⚠⚠ A BLOCKED PASS MUST SLEEP, or "back off" becomes a spin. #3276 told the
+  # loop to end its iteration when no queue ticket is eligible; the driver then
+  # restarted it ${COOLDOWN_SECONDS}s later, so on 2026-09-22 it ran 167
+  # iterations between 01:07 and 08:58 re-deriving the same blocked verdict at
+  # $0.54 each -- $89.55 to learn nothing, and it read to the operator as "the
+  # loop stopped" because no PR ever appeared.
+  #
+  # ⚠ THE SIGNAL IS A SENTINEL FILE, NOT THE TRANSCRIPT'S WORDING. The first
+  # fix grepped the transcript for "blocked pass"; any rephrasing by the model
+  # would have fallen back to the 60s cooldown and silently restored the spin,
+  # which is the same class of defect one layer down. The prompt writes
+  # $BLOCKED_SENTINEL as the last act of a blocked pass; tests/test_ta_loop_blocked_sentinel.py
+  # asserts the prompt and this driver name the SAME path, so a wording change
+  # fails CI instead of regressing here.
+  cooldown="$COOLDOWN_SECONDS"
+  if [[ -f "$BLOCKED_SENTINEL" ]]; then
+    rm -f "$BLOCKED_SENTINEL"
+    cooldown="$BLOCKED_COOLDOWN_SECONDS"
+    log "blocked pass -- sleeping ${cooldown}s instead of ${COOLDOWN_SECONDS}s (nothing is eligible; re-deriving that costs money)"
+  fi
+  sleep "$cooldown"
 done
 
 log "=== ta_loop exit after $iteration iteration(s) ==="
