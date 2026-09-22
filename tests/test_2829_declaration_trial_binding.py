@@ -261,9 +261,12 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
         the same command: the five stored ``(version, purpose)`` groups were
         unchanged at 488 rows, all ``harness_validation``, and r8 itself carried
         none because nothing has been backtested since it landed.
+
+        r10 (2026-09-22, #2834) added ARM B stage (i); the same command returned
+        the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 276
-        assert len(TRIAL_REGISTER.trials) == 32
+        assert TRIAL_REGISTER.declared_count == 277
+        assert len(TRIAL_REGISTER.trials) == 33
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1
