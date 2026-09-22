@@ -80,6 +80,12 @@ LOG="$STATE_DIR/loop.log"
 STATUS="$STATE_DIR/status.md"
 MAX_ITERATIONS="${TA_LOOP_MAX:-0}"        # 0 = unbounded
 COOLDOWN_SECONDS="${TA_LOOP_COOLDOWN:-60}"
+#: Cooldown after an iteration that found nothing eligible. ⚠ NOT a tuning knob
+#: for throughput: it exists because a blocked queue is a WAIT, and re-asking a
+#: question whose answer is "an operator must act" costs a full startup each
+#: time. 30 minutes bounds the waste at ~$1/hour while keeping the loop
+#: responsive to a ticket landing.
+BLOCKED_COOLDOWN_SECONDS="${TA_LOOP_BLOCKED_COOLDOWN:-1800}"
 
 # ⚠ An installed driver lives at <worktree>/var/autonomy/bin, so its own path
 # states which loop it is. If that disagrees with TA_LOOP_WORKTREE, the agent
@@ -541,7 +547,23 @@ while true; do
     break
   fi
 
-  sleep "$COOLDOWN_SECONDS"
+  # ⚠⚠ A BLOCKED PASS MUST SLEEP, or "back off" becomes a spin. #3276 told the
+  # loop to end its iteration when no queue ticket is eligible; the driver then
+  # restarted it ${COOLDOWN_SECONDS}s later, so on 2026-09-22 it ran 167
+  # iterations between 01:07 and 08:58 re-deriving the same blocked verdict at
+  # $0.54 each -- $89.55 to learn nothing, and it read to the operator as "the
+  # loop stopped" because no PR ever appeared.
+  #
+  # The iteration reports its own state; the driver reads it back from the
+  # transcript's result event rather than guessing. A blocked pass earns the
+  # long cooldown; anything else keeps the normal one.
+  cooldown="$COOLDOWN_SECONDS"
+  if [[ -f "$transcript" ]] && tail -c 20000 "$transcript" 2>/dev/null \
+       | grep -qiE 'blocked pass|no ticket taken|no eligible (queue )?ticket'; then
+    cooldown="$BLOCKED_COOLDOWN_SECONDS"
+    log "blocked pass -- sleeping ${cooldown}s instead of ${COOLDOWN_SECONDS}s (nothing is eligible; re-deriving that costs money)"
+  fi
+  sleep "$cooldown"
 done
 
 log "=== ta_loop exit after $iteration iteration(s) ==="
