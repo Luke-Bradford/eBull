@@ -62,16 +62,26 @@ FIXTURE_OPEN_ORDER_RESPONSE = {
     },
 }
 
-FIXTURE_CLOSE_ORDER_RESPONSE = {
+# ⚠ The eToro close ACK shape, verbatim from an attended demo session on
+# 2026-09-22 (#3007): a numeric `statusID`, and NONE of `executionPrice`,
+# `units` or `unitsToDeduct`. The fixture that stood here before was invented
+# under the heading "documented eToro API response shapes" -- it carried
+# `statusID: "Executed"` plus a price and units, a shape neither the committed
+# contract nor the broker has ever produced, and it pinned the normaliser to
+# it. Same defect as the #2942 prevention-log entry: a request/response-shape
+# test is the one place the source's shape must win over ours.
+FIXTURE_CLOSE_ORDER_ACK = {
     "orderForClose": {
-        "positionID": 98765,
-        "orderID": 12346,
-        "statusID": "Executed",
-        "instrumentID": 1001,
-        "executionPrice": 190.25,
-        "units": 0.54,
-        "fees": 0.0,
+        "positionID": 3602456774,
+        "instrumentID": 3434,
+        "orderID": 383127337,
+        "orderType": 19,
+        "statusID": 1,
+        "CID": 20661956,
+        "openDateTime": "2026-09-22T14:45:00.6711552Z",
+        "lastUpdate": "2026-09-22T14:45:00.6711552Z",
     },
+    "token": "17df1d41-bf63-4320-9d32-c2b47dd6242d",
 }
 
 FIXTURE_ORDER_INFO_RESPONSE = {
@@ -1328,32 +1338,33 @@ class TestClosePosition:
     def test_close_position_posts_to_correct_endpoint(self) -> None:
         """close_position takes a position_id directly — no portfolio lookup."""
         close_resp = MagicMock()
-        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
+        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_ACK
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_write = MagicMock()
             broker._http_write.post.return_value = close_resp
 
-            result = broker.close_position(98765, instrument_id=1001)
+            result = broker.close_position(3602456774, instrument_id=3434)
 
             broker._http_write.post.assert_called_once()
             post_endpoint = broker._http_write.post.call_args.args[0]
-            assert post_endpoint == "/api/v1/trading/execution/demo/market-close-orders/positions/98765"
+            assert post_endpoint == "/api/v1/trading/execution/demo/market-close-orders/positions/3602456774"
 
             body = broker._http_write.post.call_args.kwargs["json"]
             assert body["UnitsToDeduct"] is None
             # eToro documents InstrumentID as REQUIRED on this body
             # (api-reference/trading--demo/close-demo-position-by-units).
             # The prior version of this test asserted its ABSENCE (#2942).
-            assert body["InstrumentID"] == 1001
+            assert body["InstrumentID"] == 3434
 
-            assert result.status == "filled"
-            assert result.broker_order_ref == "12346"
+            # #3007: the ack is not a fill. Numeric statusID, no price, no units.
+            assert result.status == "pending"
+            assert result.broker_order_ref == "383127337"
 
     def test_close_position_partial_close(self) -> None:
         """units_to_deduct is passed through when provided."""
         close_resp = MagicMock()
-        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
+        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_ACK
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_write = MagicMock()
@@ -1392,7 +1403,7 @@ class TestClosePosition:
     def test_close_position_carries_the_caller_request_id(self) -> None:
         """The committed UUID must reach the broker as x-request-id (#2942)."""
         close_resp = MagicMock()
-        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
+        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_ACK
         request_id = UUID("11111111-2222-3333-4444-555555555555")
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
@@ -1678,12 +1689,45 @@ class TestNormaliseOpenOrderResponse:
 
 
 class TestNormaliseCloseOrderResponse:
-    def test_extracts_order_for_close_fields(self) -> None:
-        result = _normalise_close_order_response(FIXTURE_CLOSE_ORDER_RESPONSE)
+    def test_live_ack_is_pending_with_no_fill_fields(self) -> None:
+        """#3007: the observed close ack carries an identity and nothing else.
 
-        assert result.broker_order_ref == "12346"
-        assert result.status == "filled"
-        assert result.filled_price == Decimal("190.25")
+        Numeric `statusID`, no `executionPrice`, no `units`. The only honest
+        reading is "acknowledged, outcome unknown".
+        """
+        result = _normalise_close_order_response(FIXTURE_CLOSE_ORDER_ACK)
+
+        assert result.broker_order_ref == "383127337"
+        assert result.status == "pending"
+        assert result.filled_price is None
+        assert result.filled_units is None
+        assert result.fees == Decimal("0")
+
+    def test_numeric_status_is_never_resolved_to_a_fill(self) -> None:
+        """The contract types `statusId` as an integer with NO enum.
+
+        `OrderForClose.statusId` is `{"type": "integer"}` in
+        `tests/fixtures/etoro/openapi_v1.375.0.json` — there is no documented
+        code-to-meaning table, so no numeric code may resolve to a terminal
+        status. `3` is the code the lookup route reported for a FILLED close
+        (#2961); it must still not book a fill from an acknowledgement.
+        """
+        for code in (0, 1, 2, 3, 19, "1", "3"):
+            raw = {"orderForClose": {"orderID": 1, "statusID": code}}
+            assert _normalise_close_order_response(raw).status == "pending"
+
+    def test_units_to_deduct_is_not_read_as_a_fill(self) -> None:
+        """#3007 proposed reading `unitsToDeduct` as the executed units.
+
+        Rebutted: it is the deduction we requested, echoed back before the
+        broker executed (the ack's `openDateTime` equals its `lastUpdate`, and
+        the lookup route still 404'd seconds later — #2961). Executed units
+        come from the lookup, never from the acknowledgement.
+        """
+        raw = {"orderForClose": {"orderID": 1, "statusID": 1, "unitsToDeduct": 2, "lotsToDeduct": 2}}
+        result = _normalise_close_order_response(raw)
+        assert result.filled_units is None
+        assert result.status == "pending"
 
     def test_missing_optional_fields(self) -> None:
         raw = {"orderForClose": {"orderID": 1, "statusID": "Pending"}}
@@ -1691,6 +1735,13 @@ class TestNormaliseCloseOrderResponse:
         assert result.filled_price is None
         assert result.filled_units is None
         assert result.fees == Decimal("0")
+
+    def test_textual_status_still_maps(self) -> None:
+        """A textual status keeps its documented meaning — only numerics abstain."""
+        raw = {"orderForClose": {"orderID": 1, "statusID": "Executed", "executionPrice": 10, "units": 2}}
+        result = _normalise_close_order_response(raw)
+        assert result.status == "filled"
+        assert result.filled_units == Decimal("2")
 
 
 class TestNormaliseOrderInfoResponse:
@@ -1757,7 +1808,7 @@ class TestRequestBodyShape:
 
     def test_close_body_has_required_fields(self) -> None:
         close_resp = MagicMock()
-        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
+        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_ACK
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_write = MagicMock()

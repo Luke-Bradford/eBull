@@ -171,6 +171,42 @@ _STATUS_MAP: dict[str, OrderStatus] = {
 }
 
 
+#: A status that is only digits (optionally signed / decimal) is one of the
+#: undocumented integer codes described below, whether the transport handed it
+#: to us as an ``int`` or as a quoted string.
+_NUMERIC_STATUS_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
+
+
+def _map_textual_order_status(raw_status: Any) -> OrderStatus:
+    """Map a submit-ack order status, ABSTAINING on a numeric one.
+
+    ``_STATUS_MAP`` keys are textual, but the contract types every ack status as
+    an opaque integer with **no enum** and no code table --
+    ``OrderForOpen.statusId``, ``OrderForClose.statusId``,
+    ``OrderForCloseInfoResponse.statusID``
+    (``tests/fixtures/etoro/openapi_v1.375.0.json``). A numeric status therefore
+    cannot resolve to filled/rejected without inventing the mapping, so it
+    resolves to ``pending``: acknowledged, outcome unknown.
+
+    ⚠ The outcome belongs to ``get_demo_close_order``, which derives it from the
+    response SHAPE (``errorCode`` -> rejected, non-empty ``positions[]`` ->
+    filled) and keeps the integer as opaque evidence. Copy that, not a map.
+
+    Rationale and the live evidence: #3007, #2961, and the "status typed as an
+    opaque integer must abstain" entry in ``docs/review-prevention-log.md``.
+    """
+    if raw_status is None:
+        return "pending"
+    # `bool` needs no member here -- it subclasses `int`, so a JSON `true`
+    # lands in this branch too, which is the right answer for it.
+    if isinstance(raw_status, (int, float, Decimal)):
+        return "pending"
+    text = str(raw_status).strip()
+    if _NUMERIC_STATUS_RE.match(text):
+        return "pending"
+    return _STATUS_MAP.get(text, "pending")
+
+
 class PortfolioParseError(Exception):
     """Raised when a mirrors[] row cannot be parsed safely.
 
@@ -1228,10 +1264,32 @@ def _normalise_open_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
 
 
 def _normalise_close_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
-    """Normalise an eToro close-order response to BrokerOrderResult.
+    """Normalise an eToro close-order ACKNOWLEDGEMENT to BrokerOrderResult.
 
-    Close order returns ``orderForClose`` with ``positionID``, ``orderID``,
-    ``statusID``, ``instrumentID``.
+    ⚠ This is an acknowledgement, not a fill. Measured live on demo (#3007,
+    attended session 2026-09-22) -- the verbatim body of a full close::
+
+        {"orderForClose": {"positionID": 3602456774, "instrumentID": 3434,
+                           "orderID": 383127337, "orderType": 19,
+                           "statusID": 1, "CID": 20661956,
+                           "openDateTime": "2026-09-22T14:45:00.6711552Z",
+                           "lastUpdate": "2026-09-22T14:45:00.6711552Z"},
+         "token": "..."}
+
+    No ``executionPrice``, no ``units``, no ``unitsToDeduct`` (we send
+    ``UnitsToDeduct: None`` for a full close), and a numeric ``statusID``. So
+    the result is always ``status='pending'`` with ``filled_price`` and
+    ``filled_units`` at ``None``, and ``execute_order``'s fill guard correctly
+    persists nothing.
+
+    The outcome is resolved by looking the order up afterwards -- see
+    ``get_demo_close_order``, which derives status from the response SHAPE and
+    is the only path allowed to declare a close filled. ⚠ A 404 there does NOT
+    mean the broker never received it: the same order id 404'd immediately
+    after submission and reported ``broker_status=3`` with the affected
+    position seconds later (#2961). The legacy EXIT path in
+    ``app/services/order_client.py`` does not yet call it -- that completion
+    path is the open half of #3007.
     """
     order_data = raw.get("orderForClose") or raw
     return _build_result(order_data, raw)
@@ -2178,13 +2236,19 @@ def _build_result(
 ) -> BrokerOrderResult:
     """Build a BrokerOrderResult from normalised eToro order data."""
     ref = order_data.get("orderID")
-    raw_status = order_data.get("statusID")
-    status: OrderStatus = _STATUS_MAP.get(str(raw_status), "pending") if raw_status is not None else "pending"
+    status: OrderStatus = _map_textual_order_status(order_data.get("statusID"))
 
     filled_price: Decimal | None = None
     filled_units: Decimal | None = None
     fees = Decimal("0")
 
+    # ⚠ `units` only. A close ack may carry `unitsToDeduct`, which the contract
+    # describes as "the number of units closed in this order" -- but it is the
+    # deduction we ASKED for, echoed back before anything executed: the live
+    # ack's `openDateTime` equals its `lastUpdate`, and the same order was
+    # still a 404 on the lookup route seconds later (#2961). Reading it as
+    # `filled_units` books a fill the broker has not made. Executed units come
+    # from the lookup, never from the acknowledgement.
     raw_price = order_data.get("executionPrice")
     raw_units = order_data.get("units")
     raw_fees = order_data.get("fees")

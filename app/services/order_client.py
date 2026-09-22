@@ -2356,6 +2356,25 @@ def execute_order(
         explanation = "order reported filled but zero units — no fill persisted"
     elif order_status == "pending":
         explanation = f"order pending: ref={broker_result.broker_order_ref}"
+        if action == "EXIT":
+            # #3007: the eToro close ACK carries no price, no units and an
+            # undocumented numeric status, so every accepted close lands here.
+            # Nothing polls it afterwards, so `positions` and `cash_ledger`
+            # keep reading as fully held while the broker closes the position.
+            # Say so in the audit trail rather than letting `execution_pending`
+            # imply the request merely has not been answered yet.
+            explanation += (
+                " — EXIT acknowledged but NOT confirmed filled; position and cash are unchanged"
+                " and no completion path polls this order (#3007)"
+            )
+            logger.warning(
+                "execute_order: EXIT recommendation_id=%d instrument_id=%d acknowledged as pending "
+                "(broker_ref=%s) — ledger still reads the position as held; resolve via the "
+                "close-order lookup (#3007)",
+                recommendation_id,
+                instrument_id,
+                broker_result.broker_order_ref,
+            )
     else:
         explanation = f"order {order_status}: {broker_result.raw_payload}"
 
