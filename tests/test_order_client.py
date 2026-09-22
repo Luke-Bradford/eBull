@@ -1154,7 +1154,7 @@ class TestExecuteOrderLiveMode:
             # _load_exit_lot resolves instrument_id → (position_id, units)
             _make_cursor([{"position_id": 98765, "units": 5.0}]),
             # #243 pre-broker durable intent INSERT
-            _order_returning_cursor(order_id=11),
+            intent_cursor := _order_returning_cursor(order_id=11),
             # broker called (no cursor)
             # #243 post-broker UPDATE asserts rowcount == 1
             _update_cursor(rowcount=1),
@@ -1179,6 +1179,12 @@ class TestExecuteOrderLiveMode:
         assert call.kwargs["instrument_id"] == 1
         # #2942: the committed identity, not a fresh one minted at the header.
         assert isinstance(call.kwargs["request_id"], UUID)
+        # #3007: the claim INSERT records the exact lot handed to `close_position`,
+        # and no OrderParams (`close_position` takes none).
+        params = intent_cursor.__enter__.return_value.execute.call_args.args[1]
+        assert params["exit_position_id"] == 98765
+        assert params["exit_units"] == Decimal("5")
+        assert params["context"].obj == {"order_params": None}
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_exit_no_broker_positions_row_fails(self, _mock_now: MagicMock) -> None:

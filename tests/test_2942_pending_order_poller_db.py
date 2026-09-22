@@ -743,6 +743,8 @@ def test_the_claim_insert_records_the_broker_environment(
         requested_amount=None,
         requested_units=None,
         broker_env="real",
+        order_params=None,
+        exit_lot=None,
         now=_NOW,
     )
     ebull_test_conn.commit()
