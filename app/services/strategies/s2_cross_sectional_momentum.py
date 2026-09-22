@@ -406,8 +406,18 @@ def momentum_series(ratio_basis: BarSeries, *, universe: Universe) -> IndicatorS
     A zero denominator would be a ``ZeroDivisionError`` and a negative one a
     sign-flipped return that ranks like a winner, which is the worse failure of
     the two — it is a plausible number.
+
+    ⚠ THE RATIO IS TAKEN ON THE ``Decimal`` CLOSES AND CONVERTED ONCE (#2834).
+    A split-corrected close is ``as_traded / scale`` rounded to 28 digits, so
+    converting each close to float first rounds twice and the division a third
+    time, and two exactly equal ratios come out an ulp apart. Measured on the
+    dev DB, 1997-08-01: series 8918 (two stamps) scored ``0.7500000000000002``
+    and series 11616 ``0.75`` on the same ``8.75 / 5`` as-traded pair, so
+    ``s2_select`` ranked on arithmetic residue instead of its frozen
+    key-ascending tie-break. In ``Decimal`` the shared scale cancels to within
+    the 28th digit and the one final ``float()`` rounds that away.
     """
-    closes = ratio_basis.float_closes
+    closes = ratio_basis.closes
     values: list[float | None] = []
     unevaluable: list[int] = []
     for index in range(len(closes)):
@@ -416,11 +426,11 @@ def momentum_series(ratio_basis: BarSeries, *, universe: Universe) -> IndicatorS
             continue
         past = closes[index - LOOKBACK_BARS]
         recent = closes[index - SKIP_BARS]
-        if past is None or recent is None or past <= 0.0 or recent <= 0.0:
+        if past is None or recent is None or past <= 0 or recent <= 0:
             values.append(None)
             unevaluable.append(index)
             continue
-        values.append(recent / past - 1.0)
+        values.append(float(recent / past - 1))
     return IndicatorSeries(values=tuple(values), universe=universe, not_evaluable_indices=tuple(unevaluable))
 
 

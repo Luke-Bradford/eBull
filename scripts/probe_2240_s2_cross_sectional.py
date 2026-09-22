@@ -74,7 +74,7 @@ PROBES: list[tuple[str, list[tuple[Path, str, str]], str, str]] = [
         [
             (
                 STRATEGY,
-                "        if past is None or recent is None or past <= 0.0 or recent <= 0.0:",
+                "        if past is None or recent is None or past <= 0 or recent <= 0:",
                 "        if past is None or recent is None:",
             )
         ],

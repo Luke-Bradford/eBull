@@ -178,6 +178,39 @@ class TestMomentumSeries:
         assert series.values[index] is not None
         assert index not in series.not_evaluable_indices
 
+    def test_a_split_corrected_ratio_ties_exactly_with_its_as_traded_twin(self) -> None:
+        """#2834: the dev-DB pair that broke the tie-break. Series 8918's corrected
+        closes are ``8.75`` and ``5`` divided by a non-terminating scale; series
+        11616 is the same pair uncorrected. Both ratios are exactly 0.75, and a
+        float-first division scored the corrected one ``0.7500000000000002``, so
+        ``s2_select`` picked it over the lower key."""
+        index = ELIGIBILITY_BARS + 5
+        corrected_recent = Decimal("262.5002625002625002625002625")
+        corrected_past = Decimal("150.0001500001500001500001500")
+        # The fixture only tests something while the float path leaks residue.
+        assert float(corrected_recent) / float(corrected_past) - 1.0 != 0.75
+
+        def _series(past: Decimal, recent: Decimal) -> BarSeries:
+            rows: list[OHLCVRow] = [
+                {"open": past, "high": past, "low": past, "close": past, "volume": 1_000} for _ in range(BARS)
+            ]
+            rows[index - SKIP_BARS] = {**rows[0], "close": recent}
+            return BarSeries(dates=tuple(date(2020, 1, 1) + timedelta(days=i) for i in range(BARS)), rows=tuple(rows))
+
+        corrected = momentum_series(_series(corrected_past, corrected_recent), universe=UNIVERSE)
+        as_traded = momentum_series(_series(Decimal("5"), Decimal("8.75")), universe=UNIVERSE)
+        corrected_score = corrected.values[index]
+        as_traded_score = as_traded.values[index]
+        assert corrected_score is not None and as_traded_score is not None
+        assert corrected_score == as_traded_score == 0.75
+
+        # One name per decile slot: the corrected twin carries the HIGHER key, so
+        # the frozen tie-break must pick the as-traded one.
+        scores = {key: 0.0 for key in range(3, DECILE + 1)}
+        scores[2] = corrected_score
+        scores[1] = as_traded_score
+        assert s2_select(date(2020, 1, 1), scores) == frozenset({1})
+
 
 class TestRebalanceDates:
     def test_only_the_first_bar_of_each_month(self) -> None:
