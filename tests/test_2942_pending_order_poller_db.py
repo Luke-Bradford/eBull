@@ -31,11 +31,15 @@ import pytest
 from psycopg.pq import TransactionStatus
 
 from app.providers.broker import (
+    BrokerCloseOrderDetail,
     BrokerOrderDetail,
     BrokerOrderLookupError,
     BrokerOrderNotFound,
     BrokerPositionExecution,
+    BrokerPositionMutationError,
+    BrokerPositionMutationUncertain,
     BrokerProvider,
+    OrderStatus,
 )
 from app.services.order_client import (
     RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS,
@@ -86,6 +90,51 @@ def _broker(*, detail: BrokerOrderDetail | None = None, error: Exception | None 
         broker.lookup_order.side_effect = error
     else:
         broker.lookup_order.return_value = detail
+    # #3007 half 2: the open-order path must never reach the close-order route.
+    # A bare MagicMock would answer it happily and the routing assertion below
+    # would pass for an order that was resolved twice.
+    broker.get_close_order.side_effect = AssertionError("an open order must not use the close-order route")
+    return broker
+
+
+def _close_detail(
+    status: OrderStatus,
+    *,
+    ref: str = _REF,
+    position_ids: tuple[int, ...] = (),
+    broker_status: str = "3",
+    instrument_id: int | None = INSTRUMENT_ID,
+) -> BrokerCloseOrderDetail:
+    """One close-order lookup answer, shaped as ``get_close_order`` returns it.
+
+    ⚠ ``broker_status`` defaults to the NUMERIC string the live demo broker
+    actually returned on 2026-09-22 (#3007). It is opaque evidence, not a code
+    we map: ``status`` is derived from the response SHAPE, which is why the two
+    are separate arguments here rather than one being computed from the other.
+    """
+    return BrokerCloseOrderDetail(
+        broker_order_ref=ref,
+        status=status,
+        broker_status=broker_status,
+        position_ids=position_ids,
+        reference_id=None,
+        raw_payload={
+            "orderID": int(ref),
+            "statusID": int(broker_status),
+            "instrumentID": instrument_id,
+            "positions": list(position_ids),
+        },
+        instrument_id=instrument_id,
+    )
+
+
+def _close_broker(*, detail: BrokerCloseOrderDetail | None = None, error: Exception | None = None) -> MagicMock:
+    broker = MagicMock(spec=BrokerProvider)
+    if error is not None:
+        broker.get_close_order.side_effect = error
+    else:
+        broker.get_close_order.return_value = detail
+    broker.lookup_order.side_effect = AssertionError("an EXIT must not use the v2 order-lookup route")
     return broker
 
 
@@ -117,6 +166,7 @@ def _seed_order(
     origin: str = "manual",
     last_polled_at: datetime | None = None,
     broker_env: str | None = _ENV,
+    action: str = "BUY",
 ) -> int:
     """Seed one order row.
 
@@ -134,7 +184,7 @@ def _seed_order(
              recommendation_request_id, recommendation_submission_phase,
              recommendation_last_polled_at, broker_environment)
         VALUES
-            (%(iid)s, %(rid)s, 'BUY', 'market', %(status)s,
+            (%(iid)s, %(rid)s, %(action)s, 'market', %(status)s,
              %(ref)s, '{}'::jsonb, %(now)s, %(origin)s,
              %(req)s, 'broker_verb_entered', %(polled)s, %(benv)s)
         RETURNING order_id
@@ -142,6 +192,7 @@ def _seed_order(
         {
             "iid": INSTRUMENT_ID,
             "rid": recommendation_id,
+            "action": action,
             "status": status,
             "ref": ref,
             "now": _NOW,
@@ -1030,3 +1081,165 @@ def test_reconciliation_refuses_a_connection_inside_a_transaction(
 
     with pytest.raises(RuntimeError, match="idle connection"):
         _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Pending")), now=_NOW)
+
+
+# ---------------------------------------------------------------------------
+# #3007 half 2 — an EXIT is resolved through the close-order route
+# ---------------------------------------------------------------------------
+
+
+def test_an_exit_is_resolved_through_the_close_order_route(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The routing itself, which is the whole of #3007 half 2.
+
+    ``execute_order`` submits an EXIT through ``close_position``, so its
+    ``broker_order_ref`` is a CLOSE-order id and the documented confirmation for
+    it is ``/api/v1/trading/info/{env}/close-orders/{orderId}``. Both mocks
+    raise if the wrong route is taken, so this fails in both directions rather
+    than only asserting that the right call happened."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+    broker = _close_broker(detail=_close_detail("filled", position_ids=(3_602_456_774,)))
+
+    results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert [r.verdict for r in results] == ["filled_not_booked"]
+    assert broker.get_close_order.call_args.kwargs == {"order_id": _REF}
+    # Booking a late EXIT fill is still the deliberate gap — the lot it closed
+    # is not persisted (#3006) — so the claim stays held and nothing is booked.
+    assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
+    assert _parked_reason(ebull_test_conn, order_id) == "filled_unbooked"
+    fills = ebull_test_conn.execute("SELECT count(*) FROM fills WHERE order_id=%s", (order_id,)).fetchone()
+    assert fills is not None and int(fills[0]) == 0
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+    ebull_test_conn.rollback()
+
+
+def test_a_rejected_close_order_terminalises_and_lifts_the_claim(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """``errorCode`` set and no affected positions: the broker refused the
+    close, nothing moved, so the claim is safe to release and the EXIT becomes
+    proposable again."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+
+    results = _reconcile(ebull_test_conn, broker=_close_broker(detail=_close_detail("rejected")), now=_NOW)
+
+    assert [r.verdict for r in results] == ["terminalised_rejected"]
+    assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
+    assert _rec_status(ebull_test_conn, rec) == "execution_failed"
+    ebull_test_conn.commit()
+    # The claim has lifted: a fresh attempt is now admissible.
+    _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+
+
+def test_a_rejected_close_order_carrying_positions_keeps_the_claim(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3189 finding 3, carried to the close-order route.
+
+    ``get_close_order`` resolves ``errorCode`` to ``rejected`` BEFORE it looks
+    at ``positions[]``, so a response carrying both says the close was refused
+    and names positions it affected. Terminalising on that would lift the claim
+    over a real execution; the honest verdict is that positions exist and we
+    have not booked them."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+    detail = _close_detail("rejected", position_ids=(3_602_456_774,))
+
+    results = _reconcile(ebull_test_conn, broker=_close_broker(detail=detail), now=_NOW)
+
+    assert [r.verdict for r in results] == ["filled_not_booked"]
+    assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
+    assert _rec_status(ebull_test_conn, rec) == "execution_pending"
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+    ebull_test_conn.rollback()
+
+
+def test_a_pending_close_order_is_stamped_and_otherwise_untouched(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """No ``errorCode``, no affected positions yet: the broker has the close and
+    has not finished it."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+
+    results = _reconcile(ebull_test_conn, broker=_close_broker(detail=_close_detail("pending")), now=_NOW)
+
+    assert [r.verdict for r in results] == ["still_pending"]
+    row = _order_row(ebull_test_conn, order_id)
+    assert row["status"] == "pending"
+    assert row["recommendation_last_polled_at"] == _NOW
+    assert _parked_reason(ebull_test_conn, order_id) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BrokerPositionMutationError("demo close-order lookup failed with HTTP 404"),
+        BrokerPositionMutationError("real close-order lookup failed with HTTP 500"),
+        BrokerPositionMutationUncertain("demo close-order lookup transport failed"),
+    ],
+)
+def test_a_close_order_lookup_failure_never_advances_and_is_never_parked(
+    ebull_test_conn: psycopg.Connection[tuple], error: Exception
+) -> None:
+    """⚠⚠ The 404 case is the one that matters, and it is NOT an absence.
+
+    The attended session on 2026-09-22 got a 404 on an order id the broker had
+    just issued, then ``statusID=3`` with the affected position on the same id
+    seconds later (#2961, #3007). Treating that as "no such close order" would
+    release the claim on a close that filled. So every lookup failure stamps
+    (the rotation key must move) and parks nothing (the row must stay
+    pollable)."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+
+    results = _reconcile(ebull_test_conn, broker=_close_broker(error=error), now=_NOW)
+
+    assert [r.verdict for r in results] == ["lookup_error"]
+    row = _order_row(ebull_test_conn, order_id)
+    assert row["status"] == "pending"
+    assert row["recommendation_last_polled_at"] == _NOW
+    assert _parked_reason(ebull_test_conn, order_id) is None
+    assert _rec_status(ebull_test_conn, rec) == "execution_pending"
+    assert count_pending_recommendation_orders(ebull_test_conn) == 1
+
+
+@pytest.mark.parametrize("answered_instrument", [INSTRUMENT_ID + 1, None])
+def test_a_close_order_about_another_instrument_advances_nothing(
+    ebull_test_conn: psycopg.Connection[tuple], answered_instrument: int | None
+) -> None:
+    """Codex checkpoint 2 on #3007 half 2, and the ABSENT case fails closed too.
+
+    ``instrumentID`` is ``required`` on ``OrderForCloseInfoResponse``, so a
+    response carrying the right ``orderID`` and a different instrument is the
+    broker answering about something else. The status it carries is
+    ``rejected`` here deliberately: that is the ONE verdict that releases the
+    submission claim, so a mis-addressed answer acted on would make a second
+    economic close possible. A missing field is refused for the same reason a
+    missing ``broker_environment`` is — it is not "probably ours"."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
+    detail = _close_detail("rejected", instrument_id=answered_instrument)
+
+    results = _reconcile(ebull_test_conn, broker=_close_broker(detail=detail), now=_NOW)
+
+    assert [r.verdict for r in results] == ["identity_mismatch"]
+    row = _order_row(ebull_test_conn, order_id)
+    assert row["status"] == "pending"
+    assert row["recommendation_last_polled_at"] == _NOW
+    # NOT parked: a statement about the ANSWER, not about the row, so a later
+    # correct response must still be readable.
+    assert _parked_reason(ebull_test_conn, order_id) is None
+    assert _rec_status(ebull_test_conn, rec) == "execution_pending"

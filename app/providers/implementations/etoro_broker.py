@@ -188,7 +188,7 @@ def _map_textual_order_status(raw_status: Any) -> OrderStatus:
     cannot resolve to filled/rejected without inventing the mapping, so it
     resolves to ``pending``: acknowledged, outcome unknown.
 
-    ⚠ The outcome belongs to ``get_demo_close_order``, which derives it from the
+    ⚠ The outcome belongs to ``get_close_order``, which derives it from the
     response SHAPE (``errorCode`` -> rejected, non-empty ``positions[]`` ->
     filled) and keeps the integer as opaque evidence. Copy that, not a map.
 
@@ -368,6 +368,14 @@ class EtoroBrokerProvider(BrokerProvider):
         self._exec_prefix = f"/api/v1/trading/execution{env_segment}"
         self._info_prefix = f"/api/v1/trading/info{env_segment}"
         self._v2_info_prefix = f"/api/v2/trading/info/{env}"
+        # ⚠⚠ NOT ``_info_prefix`` (#3007 half 2). ``close-orders`` and ``pnl`` are
+        # the only two v1 info routes that carry an EXPLICIT ``/real/`` segment,
+        # while ``portfolio`` / ``aggregate-portfolio`` omit it — so
+        # ``_info_prefix`` builds ``/api/v1/trading/info/close-orders/{id}`` in
+        # real mode, which the contract documents nowhere. Both concrete paths
+        # are in ``tests/fixtures/etoro/openapi_v1.375.0.json``:
+        # ``/api/v1/trading/info/{demo,real}/close-orders/{orderId}``.
+        self._close_order_prefix = f"/api/v1/trading/info/{env}/close-orders"
 
     def __enter__(self) -> EtoroBrokerProvider:
         return self
@@ -849,19 +857,34 @@ class EtoroBrokerProvider(BrokerProvider):
             )
         return BrokerPositionCloseSubmission(str(broker_order_ref), returned_position_id, raw)
 
-    def get_demo_close_order(
+    def get_close_order(
         self,
         *,
         order_id: str,
         persist_response: Callable[[dict[str, Any]], None] | None = None,
     ) -> BrokerCloseOrderDetail:
-        """Resolve a close order without inferring success from disappearance."""
-        if self._env != "demo" or not order_id.isdigit() or int(order_id) <= 0:
-            raise BrokerPositionMutationError("valid demo close-order identity is required")
+        """Resolve a close order without inferring success from disappearance.
+
+        ⚠ Reachable in BOTH environments since #3007 half 2. The previous
+        ``self._env != "demo"`` refusal was our own choice; eToro documents the
+        route for ``real`` too, and a real EXIT whose close order can never be
+        looked up is an acknowledgement nothing ever completes.
+
+        ⚠⚠ A 404 here does NOT mean the broker never received the close. The
+        attended session on 2026-09-22 got a 404 on an order id the broker had
+        just issued, then ``statusID=3`` with the affected position on the same
+        id seconds later (#2961, #3007). Callers must treat
+        :class:`BrokerPositionMutationError` as "not yet", never as "no such
+        close order" — ``strategy_position_manager`` returns ``pending`` /
+        ``close_lookup_unavailable`` on it, and the recommendation poller
+        reports ``lookup_error`` without advancing the order.
+        """
+        if self._env not in ("demo", "real") or not order_id.isdigit() or int(order_id) <= 0:
+            raise BrokerPositionMutationError("valid close-order identity and environment are required")
         raw: dict[str, Any] | None = None
         try:
             response = self._http_read.get(
-                f"/api/v1/trading/info/demo/close-orders/{order_id}",
+                f"{self._close_order_prefix}/{order_id}",
                 headers=self._request_headers(),
             )
             raw = _safe_json(response)
@@ -875,24 +898,33 @@ class EtoroBrokerProvider(BrokerProvider):
             if any(not isinstance(row, dict) for row in raw_positions):
                 raise TypeError("every affected position must be an object")
             position_ids = tuple(int(row["positionID"]) for row in raw_positions)
+            # ⚠ LENIENT ON PURPOSE. The contract marks `instrumentID` required
+            # on this response, but we have observed the route once, so a
+            # strict parse would break `strategy_position_manager`'s close
+            # recovery on an unmeasured field. Absence is carried as `None`
+            # and the CONSUMER fails closed on it (Codex checkpoint 2, #3007).
+            raw_instrument = raw.get("instrumentID")
+            instrument_id = int(raw_instrument) if isinstance(raw_instrument, (int, str)) else None
             error_code = raw.get("errorCode")
             raw_status = str(raw.get("statusID", "unknown"))
             reference = raw.get("referenceID")
             reference_id = UUID(str(reference)) if reference else None
         except httpx.HTTPStatusError as exc:
             raise BrokerPositionMutationError(
-                f"demo close-order lookup failed with HTTP {exc.response.status_code}",
+                f"{self._env} close-order lookup failed with HTTP {exc.response.status_code}",
                 raw_payload=raw or _safe_json(exc.response),
             ) from exc
         except httpx.HTTPError as exc:
-            raise BrokerPositionMutationUncertain("demo close-order lookup transport failed") from exc
+            raise BrokerPositionMutationUncertain(f"{self._env} close-order lookup transport failed") from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise BrokerPositionMutationUncertain(
-                "demo close-order lookup response is malformed", raw_payload=raw
+                f"{self._env} close-order lookup response is malformed", raw_payload=raw
             ) from exc
         assert raw is not None
         if returned_order_id != int(order_id):
-            raise BrokerPositionMutationUncertain("demo close-order lookup identity does not match", raw_payload=raw)
+            raise BrokerPositionMutationUncertain(
+                f"{self._env} close-order lookup identity does not match", raw_payload=raw
+            )
         status: OrderStatus
         if error_code not in (None, 0, "0"):
             status = "rejected"
@@ -900,7 +932,15 @@ class EtoroBrokerProvider(BrokerProvider):
             status = "filled"
         else:
             status = "pending"
-        return BrokerCloseOrderDetail(order_id, status, raw_status, position_ids, reference_id, raw)
+        return BrokerCloseOrderDetail(
+            broker_order_ref=order_id,
+            status=status,
+            broker_status=raw_status,
+            position_ids=position_ids,
+            reference_id=reference_id,
+            raw_payload=raw,
+            instrument_id=instrument_id,
+        )
 
     def get_order_status(self, broker_order_ref: str) -> BrokerOrderResult:
         try:
@@ -1283,13 +1323,18 @@ def _normalise_close_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
     persists nothing.
 
     The outcome is resolved by looking the order up afterwards -- see
-    ``get_demo_close_order``, which derives status from the response SHAPE and
+    ``get_close_order``, which derives status from the response SHAPE and
     is the only path allowed to declare a close filled. ⚠ A 404 there does NOT
     mean the broker never received it: the same order id 404'd immediately
     after submission and reported ``broker_status=3`` with the affected
-    position seconds later (#2961). The legacy EXIT path in
-    ``app/services/order_client.py`` does not yet call it -- that completion
-    path is the open half of #3007.
+    position seconds later (#2961).
+
+    Since #3007 half 2 the recommendation poller
+    (``order_client.reconcile_pending_recommendation_orders``) routes an EXIT's
+    pending row to that lookup rather than to v2 ``orders:lookup``. ⚠ It
+    RESOLVES the order; it does not BOOK the fill — the lot an EXIT closed is
+    not persisted (#3006), so a late fill still parks as ``filled_unbooked``
+    with the submission claim held.
     """
     order_data = raw.get("orderForClose") or raw
     return _build_result(order_data, raw)

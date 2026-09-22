@@ -317,10 +317,13 @@ CALL_SITES: tuple[CallSite, ...] = (
     # --- lane D: order-info pool --------------------------------------------
     CallSite(
         _BROKER,
-        "get_demo_close_order",
+        "get_close_order",
         "_http_read",
         "GET",
-        "/api/v1/trading/info/demo/close-orders/{orderId}",
+        # ``{env}`` since #3007 half 2 — the lookup is reachable in real mode
+        # too, and eToro documents BOTH concrete operations. The resolver
+        # expands this to each of them, so the cross-check covers both.
+        "/api/v1/trading/info/{env}/close-orders/{orderId}",
         "D_order_info",
         60,
     ),

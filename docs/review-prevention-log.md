@@ -10997,3 +10997,74 @@ neighbouring container and match it.**
   `tests/test_broker_provider.py::TestNormaliseCloseOrderResponse::test_numeric_status_is_never_resolved_to_a_fill`,
   `::test_units_to_deduct_is_not_read_as_a_fill` and `::test_live_ack_is_pending_with_no_fill_fields`
   (against `FIXTURE_CLOSE_ORDER_ACK`, the verbatim attended-session payload).
+
+### A shared path prefix is a claim about EVERY route it builds — check the segment per route (#3007 half 2)
+
+- First seen in: #3007 (2026-09-22), generalising the close-order lookup out of demo-only.
+- Symptom: `EtoroBrokerProvider._info_prefix` is
+  `f"/api/v1/trading/info{'/demo' if env == 'demo' else ''}"` — correct for `portfolio`,
+  `aggregate-portfolio` and `orders/{id}`, which drop the segment in real mode. It is
+  **wrong for `close-orders`**: `grep` of the committed contract
+  (`tests/fixtures/etoro/openapi_v1.375.0.json`) returns
+  `/api/v1/trading/info/demo/close-orders/{orderId}` **and**
+  `/api/v1/trading/info/real/close-orders/{orderId}`, and `…/real/pnl` alongside them —
+  the only two v1 info routes carrying an explicit `/real/` segment. Reusing the prefix
+  would have addressed `/api/v1/trading/info/close-orders/{id}` in real mode: a path the
+  document does not contain, failing only in the environment that has money in it.
+- Prevention: a prefix helper encodes ONE route family's convention. Before reusing it
+  for a new route, grep the committed spec for that route's own concrete paths in both
+  environments and build the segment explicitly when they disagree with the helper — the
+  check is one `grep`, and the alternative is a 404 that only exists in real mode where
+  nothing tests it. The lane map makes this cheap to state once: a `CallSite` path may be
+  written with `{env}`, which the census resolver expands to both documented operations,
+  so the cross-check then covers both.
+- ⚠ Incidental, same pass: `scripts/refresh_2946_openapi_census.py` run WITHOUT
+  `--offline` overwrote `tests/fixtures/etoro/openapi_v1.375.0.json` in place with
+  v1.379.0 bytes, against its own docstring's promise that a new spec version "lands as
+  an add + delete rather than an invisible overwrite". The failure is silent —
+  `git status` is the only tell, and `--offline` then refuses with a sha mismatch that
+  reads as a stale artefact rather than as a clobbered fixture. Run it with `--offline`
+  when you only renamed a call site; check `git status` on the fixtures directory either
+  way.
+- Enforced in: this prevention log;
+  `app/providers/implementations/etoro_broker.py::EtoroBrokerProvider._close_order_prefix`;
+  `tests/test_broker_provider.py::test_the_close_order_lookup_spells_its_environment_out`
+  (parametrised demo/real) and `::test_an_unknown_environment_cannot_invent_a_close_order_path`.
+
+#### Same round — what a consumer does with an ABSENT required field depends on the witness it already holds
+
+- Symptom: exposing `instrumentID` on `BrokerCloseOrderDetail` (Codex checkpoint 2 caught
+  that the new EXIT poll advanced on an unvalidated identity) raised the same question in
+  two places at once, and the same answer is wrong in one of them.
+  `order_client._poll_one_pending_order` matches on the ORDER ID alone and its advancing
+  verdict RELEASES a submission claim, so a missing instrument leaves it with nothing to
+  check and must fail closed — the same posture the function already takes on a NULL
+  `broker_environment`. `strategy_position_manager` matches on the exact
+  `broker_position_id` it owns, which names one instrument by construction, so there the
+  instrument is corroboration and absence is not a hole.
+- Prevention: when adding an identity field to a shared response type, decide the
+  CONTRADICTS case once (always refuse) and the ABSENT case per consumer, by naming the
+  witness that consumer already has. Write the asymmetry down where both sides can see
+  it — the dataclass docstring — or the next reader "fixes" the inconsistency in whichever
+  direction they meet first. ⚠ Parse leniently at the adapter when the live shape has been
+  observed once: strictness there converts an unmeasured field into an outage on a path
+  that currently works.
+- Enforced in: this prevention log; `app/providers/broker.py::BrokerCloseOrderDetail`;
+  `tests/test_2942_pending_order_poller_db.py::test_a_close_order_about_another_instrument_advances_nothing`
+  (parametrised over a conflicting AND an absent instrument);
+  `tests/test_2949_core_close_recovery_db.py::test_a_close_that_names_another_instrument_never_releases_our_ownership`.
+
+#### Same round — verify a review finding by running the NAMED TEST, not the file you assume it lives in
+
+- Symptom: Codex checkpoint 2 reported "`test_every_documented_call_site_classifies_to_its_own_lane`
+  now fails deterministically" and anchored it to `etoro_quota_lanes.py`. I ran
+  `tests/test_etoro_quota_lanes.py`, got exit 0, and wrote the finding off as false. The
+  test is in `tests/test_2946_etoro_request_log.py` and the finding was exactly right:
+  making the lane template `{env}` compiles the segment as REQUIRED
+  (`_segment_regex`), while a literal `demo` segment compiles as optional, so the
+  suite's missing-segment variant fell out as `unclassified`. The full fast tier caught
+  it one step later — but only because it was run.
+- Prevention: a review comment names a SYMBOL, and its file anchor is where the reviewer
+  thinks the cause is, not where the symptom lives. Verify with `pytest -k <test name>`
+  or `grep -rn "def <test name>" tests/`, never by running the file the comment points
+  at. A green run of the wrong file is indistinguishable from a rebuttal.

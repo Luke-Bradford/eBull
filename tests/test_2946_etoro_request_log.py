@@ -63,9 +63,24 @@ def _sample_url(template: str) -> str:
     return re.sub(r"\{[^{}]*\}", "424242", template)
 
 
-def _env_variants(url: str) -> tuple[str, str, str]:
-    """The three shapes our providers build: demo, real, and no env segment at all."""
-    return (url, url.replace("/demo", "/real", 1), url.replace("/demo", "", 1))
+def _env_variants(url: str, template: str = "") -> tuple[str, ...]:
+    """The shapes our providers build for this route: demo, real, and — only
+    where the route tolerates it — no env segment at all.
+
+    ⚠ A template written with ``{env}`` REQUIRES the segment: ``_segment_regex``
+    compiles it to ``(?:demo|real)``, while a literal ``demo`` segment compiles
+    to the optional ``(?:/(?:demo|real))?``. That is the difference between a
+    route whose real shape drops the segment (``portfolio``, ``orders/{id}``)
+    and one whose real shape spells it out (``pnl``, and ``close-orders`` since
+    #3007 half 2). Generating a missing-segment variant for the latter asserts
+    that a path NO provider builds classifies — and it cannot, by the same
+    deliberate strictness ``test_env_placeholder_is_not_an_open_wildcard``
+    exists to protect.
+    """
+    variants = (url, url.replace("/demo", "/real", 1))
+    if "{env}" in template:
+        return variants
+    return (*variants, url.replace("/demo", "", 1))
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +93,7 @@ def test_every_documented_call_site_classifies_to_its_own_lane() -> None:
     mismatches = [
         (site.method, url, site.lane, lane_for_request(site.verb, url).lane)
         for site in CALL_SITES
-        for url in _env_variants(_sample_url(site.demo_path))
+        for url in _env_variants(_sample_url(site.demo_path), site.demo_path)
         if lane_for_request(site.verb, url).lane != site.lane
     ]
     assert mismatches == []

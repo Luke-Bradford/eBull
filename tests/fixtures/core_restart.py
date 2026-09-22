@@ -201,13 +201,19 @@ class FileBackedFakeBroker:
         #: single arm would have made the scenario look like a statement about
         #: our state when it is a statement about what our state cannot tell.
         self.close_failure: str | None = None
-        #: ``get_demo_close_order`` raises instead of answering (lookup outage).
+        #: ``get_close_order`` raises instead of answering (lookup outage).
         self.close_lookup_unreachable = False
         #: The close reports ``filled`` against a DIFFERENT position id —
         #: malformed acceptance, which must never release our ownership.
         #: ⚠ Applies to a FILLED close only: a pending one carries no
         #: ``position_ids`` for this to override.
         self.close_reports_position_id: int | None = None
+        #: The close reports a DIFFERENT ``instrumentID`` — the broker answering
+        #: about another instrument while keeping the position id we asked about
+        #: (#3007 half 2). Unlike the position knob this applies to any status,
+        #: because the field is on the response itself rather than on the
+        #: executions it lists.
+        self.close_reports_instrument_id: int | None = None
         if not self.state_path.exists():
             self._write(
                 {
@@ -531,7 +537,7 @@ class FileBackedFakeBroker:
             raw_payload=raw,
         )
 
-    def get_demo_close_order(
+    def get_close_order(
         self,
         *,
         order_id: str,
@@ -570,6 +576,13 @@ class FileBackedFakeBroker:
                 position_ids=position_ids,
                 reference_id=UUID(str(record["reference_id"])),
                 raw_payload={},
+                # The close ledger records the order and position, not the
+                # instrument — this fake only ever trades the core one.
+                instrument_id=(
+                    self.close_reports_instrument_id
+                    if self.close_reports_instrument_id is not None
+                    else int(record.get("instrument_id", CORE_INSTRUMENT_ID))
+                ),
             )
         raise BrokerPositionMutationError(f"no close order for order_id={order_id!r}")
 
