@@ -275,12 +275,14 @@ def _measure(limit: int) -> dict[str, Any]:
                                     evaluated[key] += 1
                             elif entry.member is not None:
                                 panel = frozenset(series.dates)
-                                flat_m = entry.member(series, panel_decision_dates=panel, **common)  # type: ignore[arg-type]
+                                # ⚠ Member-only: the per-series interfaces take no ratio basis.
+                                flat_m = entry.member(series, panel_decision_dates=panel, ratio_basis=series, **common)  # type: ignore[arg-type]
                                 seg_m = segmented_member(
                                     entry,
                                     series,
                                     panel_decision_dates=panel,
                                     unresolved_breaks=instrument_breaks,
+                                    ratio_basis=series,
                                     **common,  # type: ignore[arg-type]
                                 )
                                 for shape, member in (("flat", flat_m), ("segmented", seg_m)):

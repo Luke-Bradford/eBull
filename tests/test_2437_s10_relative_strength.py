@@ -433,6 +433,7 @@ class TestManifestAdaptersMatchTheDirectCalls:
             unresolved_breaks=(),
             regime=regime,
             price_basis=from_archive_basis("unadjusted", series=series),
+            ratio_basis=None,
             leg=leg,  # type: ignore[arg-type]
         )
         if leg == "entry":
@@ -473,6 +474,7 @@ class TestManifestAdaptersMatchTheDirectCalls:
             regime=_regime(),
             leg="exit",
             price_basis=from_archive_basis("unadjusted", series=series),
+            ratio_basis=None,
         )
         kinds = {verdict.kind for verdict in staged.verdicts if verdict is not None}
         assert kinds == {"exit"}

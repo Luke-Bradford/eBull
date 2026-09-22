@@ -2193,6 +2193,7 @@ class TestSeriesBreakBoundary:
             ranking=None,
             regime_provider=provider,  # type: ignore[arg-type]
             archive_adjustment_basis="unadjusted",
+            ratio_basis=None,
         )
         segmented = _signals_for(
             entry,
@@ -2202,6 +2203,7 @@ class TestSeriesBreakBoundary:
             unresolved_breaks=(dates[150],),
             regime_provider=provider,  # type: ignore[arg-type]
             archive_adjustment_basis="unadjusted",
+            ratio_basis=None,
         )
         assert whole[200].verdict == "fired"
         assert (segmented[149].verdict, segmented[149].reason) == ("not_evaluable", "no_fill_bar")
@@ -2230,6 +2232,7 @@ class TestSeriesBreakBoundary:
             unresolved_breaks=(),
             regime=unconstrained_regime(len(series)),
             price_basis=from_archive_basis("unadjusted", series=series),
+            ratio_basis=series,
         )
         segmented = segmented_member(
             entry,
@@ -2240,6 +2243,7 @@ class TestSeriesBreakBoundary:
             unresolved_breaks=(dates[300],),
             regime=unconstrained_regime(len(series)),
             price_basis=from_archive_basis("unadjusted", series=series),
+            ratio_basis=series,
         )
         assert whole.verdicts[400] is None
         before_break = segmented.verdicts[299]

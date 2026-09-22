@@ -275,6 +275,7 @@ def test_no_member_adapter_reads_the_carrier() -> None:
                 masked_reason=REASON,
                 regime=unconstrained_regime(len(series)),
                 price_basis=basis,
+                ratio_basis=series,
             )
             for basis in (_certified(series), _withheld(series))
         ]

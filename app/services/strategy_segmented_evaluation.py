@@ -97,6 +97,7 @@ def segmented_member(
     unresolved_breaks: Sequence[date],
     regime: RegimeSeries,
     price_basis: PriceBasisSeries,
+    ratio_basis: BarSeries | None,
     leg: SignalKind = "entry",
 ) -> StagedMember:
     """Stage one ranked member with fresh state inside each scale segment.
@@ -112,6 +113,11 @@ def segmented_member(
     merge needs no index remapping. ``None`` (unrefined) survives only when
     EVERY segment returned ``None``; the same member function produces the
     same shape per segment, so a mix is a bug and raises.
+
+    ``ratio_basis`` is ``MemberStager``'s: the SAME bars on a split-consistent
+    basis, or ``None`` where the caller built none. It is cut with the segment
+    exactly as the series is, and its dates are checked against the series
+    here — the last point that holds both — rather than only inside the member.
     """
     if leg == "entry":
         member_stager = entry.member
@@ -131,6 +137,11 @@ def segmented_member(
     # current one (#2840 §8b).
     if (mismatch := price_basis.binding_mismatch(series)) is not None:
         raise ValueError(f"{entry.strategy_id}: {mismatch}")
+    if ratio_basis is not None and ratio_basis.dates != series.dates:
+        raise ValueError(
+            f"{entry.strategy_id}: ratio_basis carries {len(ratio_basis)} bars against {len(series)} price bars, "
+            "or they differ in date; it must be the same bars on another basis"
+        )
     verdicts: list[StrategySignal | None] = []
     scores: dict[date, float] = {}
     admissible: set[date] | None = None
@@ -147,6 +158,11 @@ def segmented_member(
                 masked_reason=masked_reason,
                 regime=regime.segment(start, end),
                 price_basis=price_basis.segment(start, end),
+                ratio_basis=(
+                    None
+                    if ratio_basis is None
+                    else BarSeries(dates=ratio_basis.dates[start:end], rows=ratio_basis.rows[start:end])
+                ),
             ),
             kind=leg,
         )

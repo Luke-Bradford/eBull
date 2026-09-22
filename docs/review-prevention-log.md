@@ -11068,3 +11068,21 @@ neighbouring container and match it.**
   thinks the cause is, not where the symptom lives. Verify with `pytest -k <test name>`
   or `grep -rn "def <test name>" tests/`, never by running the file the comment points
   at. A green run of the wrong file is indistinguishable from a rebuttal.
+
+#### 2026-09-22 (#2834 §7 item 2) — a refusal that compares two vocabularies never fires
+
+- Symptom: `strategy_manifest._s2_member` refused S-2 on an as-traded archive with
+  `any(value in CERTIFYING_ARCHIVE_BASES for value in price_basis.values)`. The carrier's
+  values are `AsTradedPriceBasis` (`observed_unadjusted`, …); `CERTIFYING_ARCHIVE_BASES` is
+  archive `adjustment_basis` (`unadjusted`). No value is in both, so the guard was dead —
+  and S-2 is not a `PRICE_BASIS_CONSUMERS` member, so its carrier was all-`None` anyway.
+  Every S-2 backtest on the Intrader pin scored the split-contaminated 12-1 ratio behind a
+  comment saying it refused. Three tests already handed S-2 `from_archive_basis("unadjusted")`
+  and passed, which is the refusal being exercised and not firing.
+- Prevention: a fail-closed guard needs a test that makes it FIRE, not only one that
+  passes with it present. When a guard tests membership, check the two sides share a type
+  (`Literal` vs `frozenset[str]` type-checks either way). Prefer keying a refusal on the
+  input the computation reads (here `ratio_basis is None`) over inferring it from a
+  second object.
+- Enforced in: `tests/test_2834_s2_ratio_basis_threading.py::test_s2_refuses_a_path_that_built_no_ratio_basis`;
+  `app/services/strategy_manifest.py::MemberStager` (`ratio_basis` has no default).

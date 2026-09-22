@@ -1028,6 +1028,10 @@ def _stage_cross_sectional(
         # inference from ``price_daily``'s columns — see ``from_undeclared_source``,
         # which carries the policy and cannot be flipped by editing a token.
         price_basis=from_undeclared_source(series=series),
+        # ⚠ A DECLARATION, not a default (#2834 §7 item 2): ``price_daily`` is eToro's
+        # back-adjusted candles, so the bars are already split-consistent and a
+        # second correction would apply the split twice. See ``_s2_member``.
+        ratio_basis=series,
         leg=leg,
     )
 

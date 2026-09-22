@@ -172,7 +172,7 @@ from app.services.strategy_exit_levels_batch import (
     s8_exit_levels_batch,
     s9_exit_levels_batch,
 )
-from app.services.strategy_price_basis import CERTIFYING_ARCHIVE_BASES, PriceBasisSeries
+from app.services.strategy_price_basis import PriceBasisSeries
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
     CrossSectionalMember,
@@ -265,6 +265,13 @@ class MemberStager(Protocol):
     ``PerSeriesSignals`` records above, for the same reason: S-2 ignores it,
     S-10's entry leg gates on it, and the adapters absorb the difference so a
     runner cannot forget to supply it for the one member that needs it.
+
+    ⚠⚠ ``ratio_basis`` IS ``BarSeries | None`` AND HAS NO DEFAULT (#2834 §7
+    item 2). ``None`` means "this path did not build a split-consistent basis",
+    and a member that needs one (S-2) refuses on it. A bare default of
+    ``series`` would re-open the silent class ``s2_member``'s own no-default
+    ``ratio_basis`` closes: an as-traded ratio across a split is the split.
+    ``RATIO_BASIS_CONSUMERS`` names the members that read it.
     """
 
     def __call__(
@@ -276,6 +283,7 @@ class MemberStager(Protocol):
         masked_reason: NotEvaluableReason,
         regime: RegimeSeries,
         price_basis: PriceBasisSeries,
+        ratio_basis: BarSeries | None,
     ) -> CrossSectionalMember: ...
 
 
@@ -513,46 +521,36 @@ def _s2_member(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-2 does not gate on regime
-    price_basis: PriceBasisSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; S-2 reads ratio_basis, not the carrier
+    ratio_basis: BarSeries | None,
 ) -> CrossSectionalMember:
-    # ⚠⚠ #2834 §7 slice C — THIS ADAPTER SERVES TWO CORPORA AND ONLY ONE OF
-    # THEM CAN DECLARE ``ratio_basis=series``. An earlier draft asserted the
-    # manifest path reads ``price_daily``; that is FALSE and Codex ckpt-2
-    # caught it. ``backtest_run`` reaches here through ``segmented_member``
-    # over ``research_price_daily`` via ``load_masked_series``, and the default
-    # survivorship-free corpus pins the `unadjusted` Intrader archive.
+    # ⚠⚠ #2834 §7 item 2 — THE CALLER BUILDS THE RATIO BASIS, BECAUSE ONLY THE
+    # CALLER KNOWS THE CORPUS. This adapter serves two:
     #
-    # * LIVE SCAN — ``price_daily`` through ``price_masked_bars``, carrier built
-    #   by ``from_undeclared_source`` so nothing is certified `unadjusted`.
-    #   eToro back-adjusts its candles, so those bars are already
-    #   split-consistent and a second correction would apply it twice.
-    #   ``ratio_basis=series`` is the right declaration.
-    # * RESEARCH BACKTEST on an `unadjusted` archive — the bars ARE as-traded,
-    #   so the 12-1 ratio is split-contaminated and needs
-    #   ``research_split_corrected_reader.load_ratio_basis``. This uniform call
-    #   has no connection and cannot build it.
+    # * LIVE SCAN — ``price_daily``. eToro back-adjusts its candles, so the bars
+    #   are already split-consistent and the scan passes ``ratio_basis=series``
+    #   as a declaration; a second correction would apply the split twice.
+    # * RESEARCH BACKTEST — ``research_price_daily``. ``backtest_run`` builds the
+    #   basis with ``research_split_corrected_reader.load_ratio_basis``, which
+    #   corrects an `unadjusted` + stamped archive (Intrader) and returns the
+    #   series itself for a `split_adjusted` one, and refuses the rest.
     #
-    # So it REFUSES rather than scoring a number it knows is wrong. The
-    # carrier is the evidence: ``from_archive_basis`` certifies bars as
-    # `unadjusted` only for a run pinned to such an archive, and
-    # ``CERTIFYING_ARCHIVE_BASES`` is that same set.
-    #
-    # ⚠ Fail-closed on purpose, and it is a REGRESSION IN REACH that is worth
-    # it: S-2 research backtests on the Intrader pin stop producing numbers
-    # until the runner supplies the corrected basis. Those numbers were
-    # split-contaminated — `008da625` measured S-2's momentum as basis-sensitive
-    # on exactly this corpus — so a loud refusal replaces a silent wrong score,
-    # which is this repo's standing trade.
-    if any(value in CERTIFYING_ARCHIVE_BASES for value in price_basis.values):
-        raise NotImplementedError(
-            "S-2 cannot be evaluated through the manifest on an as-traded archive: its 12-1 ratio needs the "
-            "split-corrected basis from research_split_corrected_reader.load_ratio_basis, which this uniform "
-            "call cannot build (it has no connection). Route the corrected series through the research runner "
-            "— #2834 §7 slice C, the named next step."
+    # ``None`` is a path that built neither, and it REFUSES rather than falling
+    # back to ``series``. ⚠ The refusal this replaces compared carrier VALUES
+    # (``observed_unadjusted``) against archive BASES (``unadjusted``) and so
+    # could never fire — and S-2 is not a ``PRICE_BASIS_CONSUMERS`` member, so
+    # its carrier was all-``None`` anyway. Every S-2 backtest on the Intrader
+    # pin silently scored the as-traded ratio. Keying on the ratio basis itself
+    # removes the inference from a second object.
+    if ratio_basis is None:
+        raise ValueError(
+            "S-2 needs a split-consistent ratio basis and this path supplied none: build it with "
+            "research_split_corrected_reader.load_ratio_basis, or pass the series itself where the corpus is "
+            "already split-adjusted (#2834 §7 item 2)"
         )
     return s2_member(
         series,
-        ratio_basis=series,
+        ratio_basis=ratio_basis,
         panel_rebalance_dates=panel_decision_dates,
         universe=universe,
         close_reason=masked_reason,
@@ -567,6 +565,7 @@ def _s10_entry_member(
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
     price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
+    ratio_basis: BarSeries | None,  # noqa: ARG001 - uniform call; S-10 is not a RATIO_BASIS_CONSUMERS member
 ) -> CrossSectionalMember:
     """S-10's entry leg is the first cross-sectional member that reads ``regime``."""
     return s10_entry_member(
@@ -586,6 +585,7 @@ def _s10_exit_member(
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - deliberate: a missing benchmark must never refuse an exit (S-7's rule)
     price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
+    ratio_basis: BarSeries | None,  # noqa: ARG001 - uniform call; S-10 is not a RATIO_BASIS_CONSUMERS member
 ) -> CrossSectionalMember:
     return s10_exit_member(
         series,
@@ -1306,9 +1306,18 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
 #: non-consumers to return identical results.
 PRICE_BASIS_CONSUMERS: Final[frozenset[str]] = frozenset({S12_STRATEGY_ID})
 
+#: The cross-sectional members whose score reads ``MemberStager``'s
+#: ``ratio_basis`` (#2834 §7 item 2). ``backtest_run`` builds the split-corrected
+#: basis for these only — two extra reads per series — and hands every other
+#: member ``None``. ⚠ FAIL-CLOSED when it drifts: a member that starts reading the
+#: basis while absent from this set receives ``None``, and S-2's adapter shows
+#: the shape — it raises rather than falling back to the as-traded bars.
+RATIO_BASIS_CONSUMERS: Final[frozenset[str]] = frozenset({S2_STRATEGY_ID})
+
 
 __all__ = [
     "PRICE_BASIS_CONSUMERS",
+    "RATIO_BASIS_CONSUMERS",
     "STRATEGY_CLASSES",
     "STRATEGY_MANIFEST",
     "CrossSectionalLeg",
