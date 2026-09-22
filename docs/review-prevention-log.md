@@ -10955,3 +10955,45 @@ neighbouring container and match it.**
 
 - Enforced in: `frontend/src/components/admin/ProblemsPanel.tsx` (both new rows carry
   `dark:text-red-300` / `dark:text-red-400` / `dark:text-slate-300` / `dark:text-slate-400`).
+
+### A status the source types as an INTEGER WITH NO ENUM cannot be mapped — abstain, and derive the outcome from the response shape
+
+- First seen in: #3007 (2026-09-22), the eToro close-order acknowledgement, after the
+  attended demo session finally produced the payload the ticket had been blocked on.
+- Symptom: `_build_result` resolved a status with
+  `_STATUS_MAP.get(str(raw_status), "pending")`, against a map whose keys are textual
+  (`Executed` / `Filled` / `Pending` / …). The live ack carries `statusID: 1`, so
+  `str(1)` missed every key and fell to `pending` — **the right answer for the wrong
+  reason**. The ticket's own proposed fix was "map numeric `statusID`", which would have
+  invented a code-to-meaning table the source does not publish: the committed contract
+  types `OrderForOpen.statusId`, `OrderForClose.statusId` and
+  `OrderForCloseInfoResponse.statusID` as `integer` with **no `enum`** and no description
+  beyond "status of the order". Probe: inject `"1": "filled"` into `_STATUS_MAP` and the
+  old expression books an unexecuted close as a filled one — a `positions` write, a
+  `cash_ledger` credit and an `executed` recommendation, for an order the broker had not
+  acted on (its `openDateTime` equalled its `lastUpdate`, and the lookup route still
+  404'd seconds later, #2961).
+- Prevention: when a source types a status as an opaque integer and publishes no enum,
+  the parser must **abstain** — resolve to the non-terminal state and keep the integer as
+  opaque evidence. Derive the real outcome from the response SHAPE instead, which is what
+  `get_demo_close_order` already did one function away (`errorCode` → rejected, non-empty
+  `positions[]` → filled, else pending) and what #2961 confirmed live. ⚠ The tell that
+  you are inventing a rule: you can state the mapping but cannot cite where the source
+  says it. ⚠ Second tell, cheaper to check: a `.get(str(x), default)` whose default is
+  load-bearing is a mapping that does not know its own key space — assert the abstention
+  instead of leaving it to a missed lookup.
+- ⚠ Same round, second finding (a re-commit of the #2942 entry above, which this file
+  already carries): `tests/test_broker_provider.py::FIXTURE_CLOSE_ORDER_RESPONSE` sat
+  under the heading *"Fixtures — documented eToro API response shapes"* carrying
+  `statusID: "Executed"` plus an `executionPrice` and `units`. **Neither the committed
+  contract nor the broker has ever produced that shape.** It was invented, labelled as
+  documented, and four tests asserted against it — including one asserting the close
+  returned `status == "filled"`. A response-shape fixture must be copied from the source
+  or from an observation, with the provenance written beside it; anything else pins our
+  own guess and makes the suite agree with the bug.
+- Enforced in: this prevention log;
+  `app/providers/implementations/etoro_broker.py::_map_textual_order_status` (with the
+  contract citation in its docstring);
+  `tests/test_broker_provider.py::TestNormaliseCloseOrderResponse::test_numeric_status_is_never_resolved_to_a_fill`,
+  `::test_units_to_deduct_is_not_read_as_a_fill` and `::test_live_ack_is_pending_with_no_fill_fields`
+  (against `FIXTURE_CLOSE_ORDER_ACK`, the verbatim attended-session payload).
