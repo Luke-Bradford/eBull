@@ -50,7 +50,7 @@ from psycopg import sql as pgsql
 
 from app.config import settings
 from app.services.cost_model import COST_MODEL_ID
-from app.services.indicator_series import BarSeries
+from app.services.indicator_series import BarSeries, Universe
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION, load_masked_series
 from app.services.research_split_corrected_reader import load_ratio_basis
 from app.services.strategies.s2_cross_sectional_momentum import (
@@ -71,11 +71,13 @@ from app.services.strategies.s2_cross_sectional_momentum import (
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_registry import stage_cross_sectional_member
 from app.services.technical_analysis import OHLCVRow
+from app.services.universe_selection import load_universe_selection
 
 #: The research corpus is survivor-only (#2284: no free source serves the
 #: delisted cohort), and ``price_daily`` is eToro's listing as it stands today.
 #: Both are ``survivor_only`` and every figure below inherits that label (#2288).
-UNIVERSE = "survivor_only"
+#: ``--census`` / ``--ranking`` take ``--universe``; this is the default.
+UNIVERSE: Universe = "survivor_only"
 
 #: ⚠ IMPORTED, never restated. Stage 5b froze the model, so the identity hash
 #: records a real cost basis; a local literal here would be a second source of
@@ -293,17 +295,35 @@ class _PanelRun:
     correction_moved_bars: int = 0
 
 
-def _stream_panel(conn: psycopg.Connection[tuple], *, progress: bool = True) -> _PanelRun:
-    universe = load_validated_universe(conn)
-    if progress:
-        print(f"  validated universe {len(universe)} instruments (US stocks ex-ETF, §4.0)", flush=True)
+def _admitted_panel(conn: psycopg.Connection[tuple], *, universe: Universe, progress: bool = True) -> dict[int, int]:
+    """``series_id -> name_key`` for the series ``universe`` admits — the engine's own selection.
 
-    series_rows = conn.execute(
-        "SELECT series_id, instrument_id FROM research_price_series WHERE instrument_id = ANY(%(ids)s) "
-        "ORDER BY series_id",
-        {"ids": list(universe)},
-    ).fetchall()
-    by_series = {int(series_id): int(instrument_id) for series_id, instrument_id in series_rows}
+    #2834 part 2. This used to select every research series on a validated
+    instrument with NO vendor filter, so every instrument carrying both an
+    Intrader and an HF series refused the whole census. The collision was
+    already resolved upstream: #2721's ``universe_selection`` admits SERIES,
+    vendor-pinned per universe label, and the engine reads nothing else. A census
+    that picks its own series measures a panel the engine never runs.
+
+    ⚠ Do not "fix" this by splicing the two vendors onto one instrument.
+    ``survivorship_free`` cannot extend past ``INTRADER_CAPTURE_DATE`` (#2721's
+    hard bound), and some two-vendor instruments are two DIFFERENT issuers under one
+    ``instrument_id`` — a reused ticker. Count them with
+    ``scripts/measure_2834_series_identity.py``.
+    """
+    validated = load_validated_universe(conn)
+    selection = load_universe_selection(conn, universe=universe, validated_ids=frozenset(validated))
+    if progress:
+        print(
+            f"  validated universe {len(validated)} instruments (US stocks ex-ETF, §4.0); "
+            f"{universe} admits {len(selection.admitted)} series from {selection.vendor}",
+            flush=True,
+        )
+    return {admitted.series_id: admitted.name_key for admitted in selection.admitted}
+
+
+def _stream_panel(conn: psycopg.Connection[tuple], *, universe: Universe, progress: bool = True) -> _PanelRun:
+    by_series = _admitted_panel(conn, universe=universe, progress=progress)
     if len(set(by_series.values())) != len(by_series):
         raise RuntimeError(
             "an instrument in the validated universe has more than one research series — the panel would "
@@ -365,7 +385,7 @@ def _stream_panel(conn: psycopg.Connection[tuple], *, progress: bool = True) -> 
             series,
             ratio_basis=corrected.ratio_basis,
             panel_rebalance_dates=rebals,
-            universe=UNIVERSE,
+            universe=universe,
             close_reason="quarantined_bar",
         )
         staged = stage_cross_sectional_member(member)
@@ -435,12 +455,12 @@ def _stream_panel(conn: psycopg.Connection[tuple], *, progress: bool = True) -> 
     return run
 
 
-def census() -> int:
+def census(universe: Universe) -> int:
     """Verdict + refusal distribution over the §4.0 validated universe, masked."""
     started = time.monotonic()
-    print(f"\n[census] strategy {S2_STRATEGY_ID} version {_stamped_version()}", flush=True)
+    print(f"\n[census] strategy {S2_STRATEGY_ID} version {_stamped_version(universe)}", flush=True)
     with psycopg.connect(settings.database_url) as conn:
-        run = _stream_panel(conn)
+        run = _stream_panel(conn, universe=universe)
 
     total = sum(run.verdicts.values())
     print(f"  series with bars  {run.series_with_bars}   (fail-closed empties: {run.empty_series})")
@@ -570,10 +590,14 @@ eligible AS (
     -- rebalance dates (1989-01-03, 1999-10-01) where the decile cut lands on an
     -- EXACT tie — 0.5 and 1.0 in both arithmetics, so not float drift, a
     -- different tie-break key. The arm was wrong; the strategy was not.
-    SELECT ps.instrument_id, w.bar_date, (w.c_skip / w.c_back) * w.window_scale - 1 AS score
+    --
+    -- #2834 part 2: the key is the ADMITTED name key passed in beside the series
+    -- ids (`universe_selection`), not a join back to `research_price_series`,
+    -- which has no key for an unlinked terminating series.
+    SELECT ps.name_key, w.bar_date, (w.c_skip / w.c_back) * w.window_scale - 1 AS score
     FROM windowed w
     JOIN rebalances r ON r.bar_date = w.bar_date
-    JOIN research_price_series ps ON ps.series_id = w.series_id
+    JOIN unnest(%(ids)s::bigint[], %(keys)s::bigint[]) AS ps(series_id, name_key) ON ps.series_id = w.series_id
     WHERE w.rn >= %(eligibility)s
       AND w.rn < w.n_bars
       AND w.close IS NOT NULL
@@ -582,20 +606,20 @@ eligible AS (
       AND w.c_back IS NOT NULL AND w.c_back > 0
 ),
 ranked AS (
-    SELECT instrument_id, bar_date, score,
-           row_number() OVER (PARTITION BY bar_date ORDER BY score DESC, instrument_id) AS position,
+    SELECT name_key, bar_date, score,
+           row_number() OVER (PARTITION BY bar_date ORDER BY score DESC, name_key) AS position,
            count(*)     OVER (PARTITION BY bar_date) AS n
     FROM eligible
 )
-SELECT bar_date, instrument_id
+SELECT bar_date, name_key
 FROM ranked
 WHERE n >= %(min_cross_section)s
   AND position <= n / %(decile)s
-ORDER BY bar_date, instrument_id
+ORDER BY bar_date, name_key
 """
 
 
-def ranking() -> int:
+def ranking(universe: Universe) -> int:
     """The decile cut re-derived end to end in SQL, set-for-set against Python.
 
     ⚠ This is the arm ``--equivalence`` cannot cover. That one checks the SCORE;
@@ -605,27 +629,21 @@ def ranking() -> int:
     no code with the module.
     """
     started = time.monotonic()
-    print(f"\n[ranking] strategy {S2_STRATEGY_ID} version {_stamped_version()}", flush=True)
+    print(f"\n[ranking] strategy {S2_STRATEGY_ID} version {_stamped_version(universe)}", flush=True)
     with psycopg.connect(settings.database_url) as conn:
-        run = _stream_panel(conn)
-        universe = load_validated_universe(conn)
-        series_ids = [
-            int(row[0])
-            for row in conn.execute(
-                "SELECT series_id FROM research_price_series WHERE instrument_id = ANY(%(ids)s)",
-                {"ids": list(universe)},
-            ).fetchall()
-        ]
+        run = _stream_panel(conn, universe=universe)
+        panel = _admitted_panel(conn, universe=universe, progress=False)
         print(
             f"  python selection: {len(run.selected)} dates, {sum(map(len, run.selected.values()))} picks", flush=True
         )
         print("  re-deriving in SQL…", flush=True)
         sql_selected: dict[date, set[int]] = {}
-        for bar_date, instrument_id in conn.execute(
+        for bar_date, name_key in conn.execute(
             _RANKING_SQL,
             {
                 "version": QUARANTINE_RULE_SET_VERSION,
-                "ids": series_ids,
+                "ids": list(panel),
+                "keys": list(panel.values()),
                 "skip": SKIP_BARS,
                 "lookback": LOOKBACK_BARS,
                 "eligibility": ELIGIBILITY_BARS,
@@ -634,7 +652,7 @@ def ranking() -> int:
                 "decile": DECILE,
             },
         ).fetchall():
-            sql_selected.setdefault(bar_date, set()).add(int(instrument_id))
+            sql_selected.setdefault(bar_date, set()).add(int(name_key))
 
     print(f"  sql selection:    {len(sql_selected)} dates, {sum(map(len, sql_selected.values()))} picks", flush=True)
     problems: list[str] = []
@@ -651,7 +669,7 @@ def ranking() -> int:
     return 1 if problems else 0
 
 
-def _stamped_version() -> str:
+def _stamped_version(universe: Universe = UNIVERSE) -> str:
     """The strategy version, with the source pinned either side of reading it.
 
     ⚠ ``_source_hash`` re-reads the strategy file at CALL time while Python
@@ -663,7 +681,7 @@ def _stamped_version() -> str:
     """
     if _source_hash() != _SOURCE_AT_IMPORT:
         raise RuntimeError(f"strategy source moved before stamping (expected {_SOURCE_AT_IMPORT}) — refusing to report")
-    version = s2_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID).version
+    version = s2_identity(universe=universe, cost_model_id=COST_MODEL_ID).version
     if _source_hash() != _SOURCE_AT_IMPORT:
         raise RuntimeError(f"strategy source moved while stamping (expected {_SOURCE_AT_IMPORT}) — refusing to report")
     return version
@@ -675,6 +693,12 @@ def main() -> int:
     parser.add_argument("--census", action="store_true", help="validated universe, masked bars, verdict distribution")
     parser.add_argument("--ranking", action="store_true", help="the decile cut, re-derived in SQL")
     parser.add_argument("--all", action="store_true")
+    parser.add_argument(
+        "--universe",
+        choices=("survivor_only", "survivorship_free"),
+        default=UNIVERSE,
+        help="which universe_selection admission --census/--ranking read (default %(default)s)",
+    )
     args = parser.parse_args()
     if not (args.equivalence or args.census or args.ranking or args.all):
         parser.error("pick at least one arm: --equivalence, --census, --ranking or --all")
@@ -683,9 +707,9 @@ def main() -> int:
     if args.equivalence or args.all:
         failures += equivalence()
     if args.census or args.all:
-        failures += census()
+        failures += census(args.universe)
     if args.ranking or args.all:
-        failures += ranking()
+        failures += ranking(args.universe)
     print(f"\nverdict: {'*** FAIL ***' if failures else 'PASS'}", flush=True)
     return 1 if failures else 0
 
