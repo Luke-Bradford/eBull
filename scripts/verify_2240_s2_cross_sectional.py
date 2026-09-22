@@ -147,7 +147,7 @@ def _sql_scores(
         if past is None or recent is None or past <= 0 or recent <= 0:
             out.append(None)
             continue
-        out.append(float(recent) / float(past) - 1.0)
+        out.append(float(recent / past - 1))
     return out
 
 
