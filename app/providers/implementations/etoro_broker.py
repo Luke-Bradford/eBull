@@ -197,7 +197,9 @@ def _map_textual_order_status(raw_status: Any) -> OrderStatus:
     """
     if raw_status is None:
         return "pending"
-    if isinstance(raw_status, bool) or isinstance(raw_status, (int, float, Decimal)):
+    # `bool` needs no member here -- it subclasses `int`, so a JSON `true`
+    # lands in this branch too, which is the right answer for it.
+    if isinstance(raw_status, (int, float, Decimal)):
         return "pending"
     text = str(raw_status).strip()
     if _NUMERIC_STATUS_RE.match(text):
