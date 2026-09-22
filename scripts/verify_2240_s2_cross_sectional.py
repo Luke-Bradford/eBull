@@ -308,8 +308,8 @@ def _admitted_panel(conn: psycopg.Connection[tuple], *, universe: Universe, prog
     ⚠ Do not "fix" this by splicing the two vendors onto one instrument.
     ``survivorship_free`` cannot extend past ``INTRADER_CAPTURE_DATE`` (#2721's
     hard bound), and some two-vendor instruments are two DIFFERENT issuers under one
-    ``instrument_id`` — a reused ticker. Count them with
-    ``scripts/measure_2834_series_identity.py``.
+    ``instrument_id`` — a reused ticker, confirmed by SEC Form 25 issuer CIK (see
+    ``scripts/measure_2834_series_identity.py``).
     """
     validated = load_validated_universe(conn)
     selection = load_universe_selection(conn, universe=universe, validated_ids=frozenset(validated))

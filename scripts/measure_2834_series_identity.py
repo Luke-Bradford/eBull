@@ -1,23 +1,26 @@
-"""#2834 part 2 — issuer identity across the two research vendors, read-only.
+"""#2834 part 2 — feed agreement across the two research vendors, read-only.
 
 For every instrument carrying BOTH an ``icyDenev/Intrader`` and a
 ``paperswithbacktest/Stocks-Daily-Price`` series, compare the two series' daily
-close-to-close returns over their common dates. Same security ⇒ the returns are
-equal on most days, so the MEDIAN absolute difference is ~0; two different issuers
-filed under one ``instrument_id`` (a reused ticker) ⇒ it is of the order of a
-daily return.
+close-to-close returns over their common dates and report the MEDIAN absolute
+difference. Pairs split into ``feeds_agree`` (median ~0) and ``feeds_disagree``
+(median of the order of a daily move).
+
+⚠ THIS IS FEED AGREEMENT, NOT AN IDENTITY CERTIFICATE. Both archives are Yahoo
+derivatives (``research_corpus_ingest`` provenance), so their agreement is
+circular and cannot prove one issuer. Disagreement is a flag to adjudicate, and
+the adjudicator must be independent: for a series with a Form 25 link,
+``sec_form25_register.issuer_cik`` against the instrument's SEC CIK. On
+2026-09-22 that SEC witness showed reused tickers among the two-vendor pairs (AVX,
+CAI, JCAP, NP, TGE: no overlap, the Form 25 issuer delisted 1-5 years before HF's series
+starts, under a different CIK).
 
 WHY THIS IS A MEASUREMENT AND NOT A SELECTION RULE. The engine never reads both
 vendors for one name: #2721's ``universe_selection`` admits series vendor-pinned
-per universe label. This script exists to show why the two must NOT be spliced
-into one instrument history: some ``instrument_id`` rows carry two different
-issuers, because both vendors resolve ``symbol_exact`` on the CURRENT eToro
-symbol and a ticker can change hands. Any instrument-keyed join from an Intrader
-series (shares outstanding, fundamentals, CIK) inherits that.
-
-The two constants below are a REPORTING partition, not a verdict any code
-consumes. The median is used because a same-security pair agrees on the majority
-of days, so isolated bad ticks or split/dividend days do not move it.
+per universe label. The reuse cases are why the two must NOT be spliced into one
+instrument history. Both vendors resolve ``symbol_exact`` on the CURRENT eToro
+symbol, so any instrument-keyed join from an Intrader series (shares outstanding,
+fundamentals, CIK) inherits a wrong issuer where the ticker changed hands.
 
 Usage: ``PYTHONPATH=. uv run python -m scripts.measure_2834_series_identity``
 """
@@ -78,8 +81,8 @@ def main() -> None:
     print(f"  insufficient overlap (n < {MIN_OVERLAP_RETURNS})   {len(thin):,}  (of which n = 0: {empty})")
     largest_same = f"{same[0]:.5f}" if same else "n/a"
     smallest_diff = f"{float(diff[0][3]):.5f}" if diff else "n/a"
-    print(f"  same_security (median <= {MEDIAN_ABS_DIFF_CUT})   {len(same):,}  largest median {largest_same}")
-    print(f"  different_security               {len(diff):,}  smallest median {smallest_diff}")
+    print(f"  feeds_agree (median <= {MEDIAN_ABS_DIFF_CUT})   {len(same):,}  largest median {largest_same}")
+    print(f"  feeds_disagree                   {len(diff):,}  smallest median {smallest_diff}")
     for iid, symbol, n, med in diff:
         print(f"    {iid:>8} {symbol:<10} n={n:<5} median={float(med):.4f}")
 
