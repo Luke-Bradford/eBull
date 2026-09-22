@@ -173,7 +173,13 @@ researched it enough to escalate — research it first.
    2. write the run note saying the queue is blocked and naming what would unblock it —
       **the same wake condition text as on the issue**, so a later session can diff the
       two and see whether the block was ever re-checked;
-   3. **end the iteration and spend nothing further.** Sleeping is the correct output.
+   3. **`touch var/autonomy/BLOCKED_PASS`** — the sentinel the driver reads to know
+      this pass found nothing. ⚠⚠ Without it the driver restarts you in 60 seconds and
+      "back off" becomes a spin: on 2026-09-22 that cost **167 iterations and $89.55
+      between 01:07 and 08:58**, produced no PR, and read to the operator as "the loop
+      stopped". With it, the driver sleeps 30 minutes. It is consumed (deleted) on read,
+      so write it on EVERY blocked pass, not once.
+   4. **end the iteration and spend nothing further.** Sleeping is the correct output.
 
    ⚠ **This rule is audited by a script, not by good intentions:**
    `scripts/audit_loop_discipline.sh [days]` pairs each run's own verdict text against the

@@ -86,6 +86,10 @@ COOLDOWN_SECONDS="${TA_LOOP_COOLDOWN:-60}"
 #: time. 30 minutes bounds the waste at ~$1/hour while keeping the loop
 #: responsive to a ticket landing.
 BLOCKED_COOLDOWN_SECONDS="${TA_LOOP_BLOCKED_COOLDOWN:-1800}"
+#: Written by the ITERATION (see .autonomy/loop_prompt.md, "NO ELIGIBLE QUEUE
+#: TICKET") and consumed once by the driver. A file, not a phrase: the driver
+#: must not depend on how the model words its run note.
+BLOCKED_SENTINEL="$STATE_DIR/BLOCKED_PASS"
 
 # ⚠ An installed driver lives at <worktree>/var/autonomy/bin, so its own path
 # states which loop it is. If that disagrees with TA_LOOP_WORKTREE, the agent
@@ -554,12 +558,16 @@ while true; do
   # $0.54 each -- $89.55 to learn nothing, and it read to the operator as "the
   # loop stopped" because no PR ever appeared.
   #
-  # The iteration reports its own state; the driver reads it back from the
-  # transcript's result event rather than guessing. A blocked pass earns the
-  # long cooldown; anything else keeps the normal one.
+  # ⚠ THE SIGNAL IS A SENTINEL FILE, NOT THE TRANSCRIPT'S WORDING. The first
+  # fix grepped the transcript for "blocked pass"; any rephrasing by the model
+  # would have fallen back to the 60s cooldown and silently restored the spin,
+  # which is the same class of defect one layer down. The prompt writes
+  # $BLOCKED_SENTINEL as the last act of a blocked pass; tests/test_ta_loop_blocked_sentinel.py
+  # asserts the prompt and this driver name the SAME path, so a wording change
+  # fails CI instead of regressing here.
   cooldown="$COOLDOWN_SECONDS"
-  if [[ -f "$transcript" ]] && tail -c 20000 "$transcript" 2>/dev/null \
-       | grep -qiE 'blocked pass|no ticket taken|no eligible (queue )?ticket'; then
+  if [[ -f "$BLOCKED_SENTINEL" ]]; then
+    rm -f "$BLOCKED_SENTINEL"
     cooldown="$BLOCKED_COOLDOWN_SECONDS"
     log "blocked pass -- sleeping ${cooldown}s instead of ${COOLDOWN_SECONDS}s (nothing is eligible; re-deriving that costs money)"
   fi
