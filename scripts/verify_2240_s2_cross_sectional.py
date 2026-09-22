@@ -572,11 +572,17 @@ windowed AS (
            -- unsplit window every factor is exactly 1, ln(1) is exactly 0 and
            -- the sum is exactly 0, so this is EXACT wherever the correction
            -- does nothing and carries ~1e-15 relative error only where it
-           -- does. That is a float tolerance on the ORACLE, not on the
-           -- strategy: the comparison below is on decile MEMBERSHIP, and an
-           -- exact score tie at the cut is counted separately as a boundary
-           -- tie rather than silently resolved by drift.
-           exp(sum(ln(split_factor)) OVER (
+           -- does.
+           --
+           -- ⚠ `round(…, 30)` BEFORE `ln`, and the score cast to float8 below,
+           -- or that residue decides an exact tie (#2834). Postgres sizes a
+           -- numeric `ln` from its input's scale, so a bare `ln(2)` carries ~16
+           -- digits and the drift lands at the double ulp. Measured 1998-08-03:
+           -- series 12114 (26.25/31.5 × factor 2) and 11905 (6.25/3.75) are both
+           -- exactly 5/3, and the 16-digit oracle ranked 11905 first against
+           -- the frozen key-ascending tie-break. At 30 digits the residue is
+           -- far below one float8 ulp, and the module compares floats too.
+           exp(sum(ln(round(split_factor, 30))) OVER (
                PARTITION BY series_id ORDER BY bar_date
                ROWS BETWEEN %(lookback)s - 1 PRECEDING AND %(skip)s PRECEDING
            )) AS window_scale,
@@ -597,7 +603,7 @@ eligible AS (
     -- #2834 part 2: the key is the ADMITTED name key passed in beside the series
     -- ids (`universe_selection`), not a join back to `research_price_series`,
     -- which has no key for an unlinked terminating series.
-    SELECT ps.name_key, w.bar_date, (w.c_skip / w.c_back) * w.window_scale - 1 AS score
+    SELECT ps.name_key, w.bar_date, ((w.c_skip * w.window_scale) / w.c_back - 1)::float8 AS score
     FROM windowed w
     JOIN rebalances r ON r.bar_date = w.bar_date
     JOIN unnest(%(ids)s::bigint[], %(keys)s::bigint[]) AS ps(series_id, name_key) ON ps.series_id = w.series_id
