@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import type {
   CoverageSummaryResponse,
+  ExitProtectionResponse,
   ProcessListResponse,
   SyncLayersV2Response,
 } from "@/api/types";
@@ -65,6 +66,40 @@ function renderPanel(
       <ProblemsPanel {...defaults} {...props} />
     </MemoryRouter>,
   );
+}
+
+
+/** The live SPY core position, unprotected: two consecutive quote-unsafe refusals. */
+function unrepairable(): ExitProtectionResponse {
+  return {
+    ownership_id: 2,
+    strategy_trade_id: 2,
+    broker_position_id: 3601264304,
+    status: "unrepairable",
+    consecutive_refusals: 2,
+    refusal_budget: 2,
+    last_refusal_reason: "fixed_exit_quote_unsafe",
+    first_refused_at: "2026-09-22T09:00:00Z",
+    last_checked_at: "2026-09-22T09:05:00Z",
+    detail: null,
+  };
+}
+
+
+/** `check_exit_protection`'s contained-failure sentinel: an HTTP 200 carrying a failure. */
+function errorSentinel(): ExitProtectionResponse {
+  return {
+    ownership_id: 0,
+    strategy_trade_id: 0,
+    broker_position_id: 0,
+    status: "error",
+    consecutive_refusals: 0,
+    refusal_budget: 2,
+    last_refusal_reason: null,
+    first_refused_at: null,
+    last_checked_at: null,
+    detail: "exit protection query failed (see server logs)",
+  };
 }
 
 
@@ -622,5 +657,140 @@ describe("ProblemsPanel", () => {
     expect(
       screen.queryByRole("link", { name: /Check layer secret configuration/i }),
     ).toBeNull();
+  });
+
+  // ---------------------------------------------------------------------
+  // #3284 item 4b — fixed-exit protection on engine-held positions.
+  // ---------------------------------------------------------------------
+
+  it("raises a red row for a position whose stop repair is unrepairable", () => {
+    renderPanel({ exitProtection: [unrepairable()] });
+    expect(screen.getByText(/Position 3601264304: the broker-side exit levels are not in place/)).toBeInTheDocument();
+    expect(screen.getByText(/2 consecutive visits against a budget of 2/)).toBeInTheDocument();
+    expect(screen.getByText(/fixed_exit_quote_unsafe/)).toBeInTheDocument();
+    expect(screen.getByText(/1 problem\(s\) need attention/)).toBeInTheDocument();
+  });
+
+  it("stays silent while a repair is merely in progress", () => {
+    // `repairing` is the expected transient — one stale quote is an event, not a
+    // condition. An alarm that fires on it ships with a documented "ignore this"
+    // attached, which is worse than no alarm.
+    const { container } = renderPanel({
+      exitProtection: [{ ...unrepairable(), status: "repairing", consecutive_refusals: 1 }],
+    });
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("stays silent for a position the fixed-exit arm has not visited yet", () => {
+    const { container } = renderPanel({
+      exitProtection: [
+        {
+          ...unrepairable(),
+          status: "never_checked",
+          consecutive_refusals: 0,
+          last_refusal_reason: null,
+          first_refused_at: null,
+          last_checked_at: null,
+        },
+      ],
+    });
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("keeps the unprotected-position row up when the status fetch goes null, marked stale", () => {
+    // safety-state-ui.md: a banner derived straight from a refetchable async value
+    // vanishes on every retry. The operator must keep seeing that the position has
+    // no stop — and must be told the indicator is cached rather than live.
+    const defaults = {
+      v2: emptyV2(),
+      processes: emptyProcesses(),
+      coverage: emptyCoverage(),
+      v2Error: false,
+      processesError: false,
+      coverageError: false,
+      onOpenOrchestrator: () => {},
+    };
+    const { rerender } = render(
+      <MemoryRouter>
+        <ProblemsPanel {...defaults} exitProtection={[unrepairable()]} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/the broker-side exit levels are not in place/)).toBeInTheDocument();
+    expect(screen.queryByText(/stale — refreshing/)).toBeNull();
+
+    rerender(
+      <MemoryRouter>
+        <ProblemsPanel {...defaults} exitProtection={null} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/the broker-side exit levels are not in place/)).toBeInTheDocument();
+    expect(screen.getByText(/stale — refreshing/)).toBeInTheDocument();
+  });
+
+  it("clears the row when a fresh response says every position is protected", () => {
+    // Clear-on-positive: an EMPTY array is a real answer, unlike null.
+    const defaults = {
+      v2: emptyV2(),
+      processes: emptyProcesses(),
+      coverage: emptyCoverage(),
+      v2Error: false,
+      processesError: false,
+      coverageError: false,
+      onOpenOrchestrator: () => {},
+    };
+    const { rerender, container } = render(
+      <MemoryRouter>
+        <ProblemsPanel {...defaults} exitProtection={[unrepairable()]} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/the broker-side exit levels are not in place/)).toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter>
+        <ProblemsPanel {...defaults} exitProtection={[]} />
+      </MemoryRouter>,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("surfaces an unreadable exit-protection verdict rather than swallowing it", () => {
+    renderPanel({ exitProtection: [errorSentinel()] });
+    expect(screen.getByText(/Exit protection could not be checked/)).toBeInTheDocument();
+    expect(screen.getByText(/exit protection query failed/)).toBeInTheDocument();
+  });
+
+  it("does NOT let a contained probe failure evict a confirmed unprotected position", () => {
+    // ⚠⚠ The subtle half of clear-on-positive. `check_exit_protection` contains its own
+    // failures and returns an `error` sentinel inside a successful HTTP 200 — so
+    // `exitProtectionError` stays FALSE and a naive cache update would replace a list
+    // naming the unprotected position with a row naming nobody. The query hiccup would
+    // silently erase the safety alert it exists to report.
+    const defaults = {
+      v2: emptyV2(),
+      processes: emptyProcesses(),
+      coverage: emptyCoverage(),
+      v2Error: false,
+      processesError: false,
+      coverageError: false,
+      onOpenOrchestrator: () => {},
+    };
+    const { rerender } = render(
+      <MemoryRouter>
+        <ProblemsPanel {...defaults} exitProtection={[unrepairable()]} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/the broker-side exit levels are not in place/)).toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter>
+        <ProblemsPanel {...defaults} exitProtection={[errorSentinel()]} />
+      </MemoryRouter>,
+    );
+    // Both facts, reported separately: the position is still known-unprotected (stale),
+    // AND the check could not be re-run.
+    expect(screen.getByText(/the broker-side exit levels are not in place/)).toBeInTheDocument();
+    expect(screen.getByText(/stale — refreshing/)).toBeInTheDocument();
+    expect(screen.getByText(/Exit protection could not be checked/)).toBeInTheDocument();
+    expect(screen.getByText(/2 problem\(s\) need attention/)).toBeInTheDocument();
   });
 });

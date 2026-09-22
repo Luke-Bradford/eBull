@@ -10793,3 +10793,165 @@ and raises on mismatch). For an UNMERGED migration of your own, un-apply it —
 `DROP TABLE` + `DELETE FROM schema_migrations WHERE filename=...` — assert the row count
 is 0 first, then re-apply. Do NOT add a second migration to fix the first one's comment,
 and do NOT leave the comment wrong because the file is "already applied".
+
+## 2026-09-22 — a conjunct added to an alarm can only ever SUPPRESS, so check which direction it moves before implementing an inherited design (#3284 item 4b)
+
+The previous session's research comment settled item 4b's alerting rule in one sentence:
+*"alerting when a position is currently unprotected (`is_no_stop_loss`) AND its streak has
+reached the class threshold"*. It was written with the full path in view, it reads as a
+safety belt-and-braces, and it survived into the 4a close-out unchallenged. Re-falsified
+before implementing, per working-order 3c, and it does not hold — in the one direction
+that matters for an alarm.
+
+### The shape of the error
+
+`record_repair_visit(..., state="rejected")` is reached ONLY from inside
+`if intent.has_gap:` in `strategy_position_manager.manage_owned_position`, and the
+resume-path recorder re-tests the same `_exit_intent` before counting a `pending` as a
+refusal. **So a non-zero streak already means "a gap was observed on the last visit and
+was not closed".** The proposed second conjunct adds no information to that — and an
+`AND` that adds no information is not neutral, it is a filter. The only thing it can do is
+remove alerts.
+
+And it removes real ones. On the core arm:
+
+```python
+stop_gap = position.is_no_stop_loss or not core_exit_level_satisfied(observed=current_stop, desired=desired_stop)
+```
+
+a DISJUNCTION, and `core_exit_levels` is a pure function of the CURRENT weighted entry.
+eToro re-weights `open_price` on an ADD (that is how #3284 item 2 "re-apply after every
+change" falls out with no extra machinery), so a position whose stop is present but
+computed from the previous entry has `is_no_stop_loss = False` while its repair refuses on
+every visit. The conjunct silences the alarm in exactly the case item 2 exists for.
+
+⚠ **The check, and it is mechanical: for every conjunct you add to an alerting condition,
+name a state where it is FALSE and the other half is TRUE, and say out loud what happens
+to that state.** If you cannot name one, the conjunct is redundant and should go. If you
+can, that state is now silent — decide deliberately whether it should be. The same test
+run on an `OR` asks the opposite question (what does it now alert on that it should not),
+which is the noisy failure and the one you would have found anyway; suppression is the
+silent one and nothing downstream reports it.
+
+### The second half: a redundant conjunct usually drags in a worse source
+
+`is_no_stop_loss` lives in `broker_positions`, written by the `portfolio_sync` job.
+Measured while writing this, `2026-09-21T23:33Z`:
+
+```sql
+SELECT position_id, is_no_stop_loss, updated_at FROM broker_positions;
+-- all 8 rows updated_at = 2026-09-21 21:21:33Z  -- a 2h12m-old snapshot
+```
+
+— stale because the jobs child that writes it was mid-drain. The streak table is written
+by the paper cycle's own fresh `get_portfolio` observation. So the conjunct would have
+imported a second, slower staleness source into a live-safety alarm while subtracting
+coverage from it. **When a proposed conjunct lives in a different table from the signal,
+price its refresh cadence before its logic** — the correct "currently" conjunct here was
+ownership liveness (`strategy_position_ownership.status='active'`), which is in the same
+write path and bounds the verdict to positions that still exist.
+
+⚠ Note what did NOT catch this. The design was researched, written up on-issue with
+evidence, and carried forward by a second session; nothing about it looked unfinished. The
+only thing that surfaced it was re-reading the producing branch before implementing —
+which is working-order 3c, and this is the second #3284 slice in two days where an
+inherited premise was wrong (item 4a's "query the existing operations rows" was the first).
+
+- Enforced in: `app/services/strategy_exit_protection.py` (module docstring carries the
+  falsification; the reader's SQL names `strategy_position_ownership` and never
+  `broker_positions`);
+  `tests/test_3284_exit_protection.py::test_a_present_but_wrong_stop_still_alerts_because_the_streak_is_the_witness`
+  and `::test_the_verdict_never_reads_the_broker_snapshot` (the guard against a future
+  "fix" re-adding the conjunct);
+  `tests/test_3284_exit_protection_db.py::test_a_released_ownership_is_excluded_even_while_its_streak_stands`
+  (the frozen-alarm hazard the handoff design was reaching for, solved by liveness instead).
+
+### Same slice — "default to the rule, grant the exception on evidence" beats a table of budgets
+
+Item 4b needs N consecutive refusals per refusal class, and no published formulation
+exists for a retry budget on a broker edit. The tempting shape is a dict of reason → N,
+which is a table of guesses and silently gives any UNSEEN reason whatever the `.get()`
+default happens to be. Fixed by construction instead, stated as a rule:
+
+> N = 2 consecutive visits, EXCEPT where retrying is proven incapable of changing the
+> answer, which gets N = 1.
+
+Two is the smallest count distinguishing a transient from a condition. The exception is
+granted per class from evidence in the refusing branch — `broker_fixed_exit_edit_not_allowed`
+tests `allow_edit_stop_loss is not True`, a broker capability verdict about the instrument,
+so retrying cannot change it. **The default then needs no separate justification: an
+unclassified reason takes the rule.** ⚠ And the default must not be silence — a refusal
+code nobody has classified, on a position observed unprotected, is the silent carry-on the
+ticket forbids. Nor N=1: we have no evidence retrying is futile for a class we have not
+seen, and N=1 on an unseen transient ships a false alarm.
+
+- Enforced in: `app/services/strategy_exit_protection.py::refusal_budget_for`
+  (`DEFAULT_REFUSAL_BUDGET` = the rule, `REFUSAL_BUDGET_BY_REASON` = the exceptions);
+  `tests/test_3284_exit_protection.py::test_a_reason_code_nobody_has_classified_still_alerts`;
+  `::test_every_budgeted_reason_is_a_reason_the_manager_can_actually_return` (pins the
+  exception keys to the manager's literals without an import edge, since the manager
+  imports item 4a's recorder).
+
+## 2026-09-22 — a contained probe failure arrives as a SUCCESSFUL response, so "only cache non-errors" must test the PAYLOAD, not the transport (#3284 item 4b)
+
+`safety-state-ui.md`'s clear-on-positive rule says a cached safety banner is updated only
+by a fresh successful response — errors and retries leave it standing. The frontend
+implemented that literally, against the transport:
+
+```tsx
+if (exitProtection !== null && exitProtection !== undefined) setCache(...)   // WRONG
+```
+
+and it is wrong on this repo's own backend containment pattern. `check_exit_protection`
+(like `check_scan_freshness` and `_stalled_job_names` before it) deliberately swallows its
+own failure and returns a one-row **`error` sentinel inside an HTTP 200**, precisely so a
+probe fault cannot 503 `/system/status`. So on a failed probe the fetch SUCCEEDS,
+`error === null`, the payload is non-null — and the cache is overwritten with a row that
+names no position at all. A transient query fault silently erases the confirmed list of
+unprotected position IDs: the alert deletes itself exactly when the system is least
+healthy.
+
+⚠ **The check: for every "only cache a good response" guard, ask what a CONTAINED backend
+failure looks like on the wire.** In this codebase it looks like success, by design and
+for a good reason. The guard has to inspect the payload for the sentinel, and the sentinel
+must be rendered as its own fact — "the safety check is unreadable" and "this position is
+unprotected" are different statements and collapsing them loses the position IDs.
+
+- Enforced in: `frontend/src/components/admin/ProblemsPanel.tsx` (the cache effect returns
+  early on an `error` entry; `probeErrors` is read from the LIVE payload and rendered by
+  `ExitProtectionUnreadableRow`, never cached — a cached one would keep claiming the check
+  is broken after it recovered);
+  `ProblemsPanel.test.tsx::"does NOT let a contained probe failure evict a confirmed unprotected position"`.
+
+### Same round — an alarm's wording must claim only what its predicate proves
+
+The row headline said *"Position N is carrying no working stop"*. The verdict behind it is
+`consecutive_refusals >= budget`, and refusals accrue on `_exit_intent.has_gap`, which is
+`stop_gap OR take_gap`. **A position with a perfectly good stop and a missing take-profit
+reaches that headline** — sending the operator to check something that is fine while the
+actual gap goes unnamed. `sql/408` stores the refusal REASON, not which half of the intent
+gapped, so the information to be more specific does not exist without a schema change.
+
+⚠ **Write the alert text from the predicate, not from the motivating example.** The
+motivating case here was a naked stop, so the wording described one; the predicate is
+broader than the case that prompted it, and an alarm that overclaims is a wrong-state
+decision waiting to happen. Fixed to "the broker-side exit levels are not in place", which
+is exactly what `has_gap` proves.
+
+- Enforced in: `frontend/src/components/admin/ProblemsPanel.tsx::UnprotectedPositionRow`
+  (the reasoning is in a comment beside the string, with the `sql/408` note on why the
+  precise form is unavailable).
+
+### Same round, third finding — `text-<colour>` has no dark-mode gate, so semantic text needs its `dark:` partner written by hand
+
+Already stated in `.claude/skills/frontend/operator-ui-conventions.md` ("Semantic colour
+carried by TEXT needs its `dark:` partner written by hand — `check-dark-classes.mjs` keys
+off background / border / hover tokens only"), and the new safety row shipped
+`text-red-800` / `text-slate-600` with no dark variants anyway, on a panel whose container
+IS dark-aware. It passed every local gate. Re-recorded because the failure mode is that
+the rule is real, written down, enforced by nothing, and invisible until an operator reads
+the page at night. **On any new semantic-coloured text, grep the file for `dark:` on the
+neighbouring container and match it.**
+
+- Enforced in: `frontend/src/components/admin/ProblemsPanel.tsx` (both new rows carry
+  `dark:text-red-300` / `dark:text-red-400` / `dark:text-slate-300` / `dark:text-slate-400`).
