@@ -11086,3 +11086,19 @@ neighbouring container and match it.**
   second object.
 - Enforced in: `tests/test_2834_s2_ratio_basis_threading.py::test_s2_refuses_a_path_that_built_no_ratio_basis`;
   `app/services/strategy_manifest.py::MemberStager` (`ratio_basis` has no default).
+
+#### 2026-09-22 (#2834 §7 item 2) — a ratio of rescaled Decimals must be divided before it is floated
+
+- Symptom: on the split-corrected Intrader basis, `s2_select`'s frozen tie-break
+  ("score descending, then key ascending") was bypassed. 1997-08-01: series 8918 (two
+  stamps) scored `0.7500000000000002`, series 11616 `0.75`, on the same `8.75 / 5`
+  as-traded pair, so the higher key won on residue. The corrected closes are
+  `as_traded / scale` at 28 digits (`262.5002625002625…`); `float_closes` rounds each one,
+  and the division rounds again. The ranking arm's 3/626 survivorship-free mismatches in
+  #3302 were this.
+- Prevention: when two values share a scale that should cancel, divide at the stored
+  precision (`Decimal`) and convert the RESULT once. A downstream tolerance or a quantised
+  score would be an invented constant; the source arithmetic already ties exactly.
+- Enforced in: `app/services/strategies/s2_cross_sectional_momentum.py::momentum_series`;
+  `tests/test_strategy_s2.py::TestMomentumSeries::test_a_split_corrected_ratio_ties_exactly_with_its_as_traded_twin`
+  (fails on the float-first code).
