@@ -1,0 +1,255 @@
+{
+  "_meta": {
+    "refs": "#2961 #2965 #2979 #2942 #2993 #3007 #2949",
+    "protocol": "docs/proposals/execution/2026-09-14-attended-demo-session-protocol.md",
+    "session_id": "2026-09-22-01",
+    "phase": "baseline",
+    "started_at": "2026-09-22T17:26:44.282622+00:00",
+    "finished_at": "2026-09-22T17:26:47.894694+00:00",
+    "environment": "demo",
+    "mutations_performed": "none \u2014 this script is read-only by construction"
+  },
+  "observation": {
+    "exit_lots": {
+      "all_positive_unit_lots": [
+        {
+          "instrument_id": 1181,
+          "position_id": 3368088761,
+          "units": "1305.05709600",
+          "is_buy": true,
+          "open_date_time": "2025-11-14 19:25:11.600000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1571,
+          "position_id": 3308441934,
+          "units": "71.94810800",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:24.700000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1571,
+          "position_id": 3324253560,
+          "units": "244.00000000",
+          "is_buy": true,
+          "open_date_time": "2025-09-15 17:04:10.990000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1699,
+          "position_id": 3308442058,
+          "units": "1000.00000000",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:59.583000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1699,
+          "position_id": 3310085041,
+          "units": "500.00000000",
+          "is_buy": true,
+          "open_date_time": "2025-08-15 16:02:14.170000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 3006,
+          "position_id": 3308441899,
+          "units": "17.25243800",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:10.217000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 3417,
+          "position_id": 3601264304,
+          "units": "0.29615500",
+          "is_buy": true,
+          "open_date_time": "2026-09-18 15:36:45.083000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 4238,
+          "position_id": 3308441892,
+          "units": "16.92933600",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:03.797000+00:00",
+          "broker_closeable": true
+        }
+      ],
+      "eligible_for_exit": [
+        {
+          "instrument_id": 1181,
+          "position_id": 3368088761,
+          "units": "1305.05709600",
+          "is_buy": true,
+          "open_date_time": "2025-11-14 19:25:11.600000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1571,
+          "position_id": 3308441934,
+          "units": "71.94810800",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:24.700000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1571,
+          "position_id": 3324253560,
+          "units": "244.00000000",
+          "is_buy": true,
+          "open_date_time": "2025-09-15 17:04:10.990000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1699,
+          "position_id": 3308442058,
+          "units": "1000.00000000",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:59.583000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 1699,
+          "position_id": 3310085041,
+          "units": "500.00000000",
+          "is_buy": true,
+          "open_date_time": "2025-08-15 16:02:14.170000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 3006,
+          "position_id": 3308441899,
+          "units": "17.25243800",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:10.217000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 3417,
+          "position_id": 3601264304,
+          "units": "0.29615500",
+          "is_buy": true,
+          "open_date_time": "2026-09-18 15:36:45.083000+00:00",
+          "broker_closeable": true
+        },
+        {
+          "instrument_id": 4238,
+          "position_id": 3308441892,
+          "units": "16.92933600",
+          "is_buy": true,
+          "open_date_time": "2025-08-12 16:46:03.797000+00:00",
+          "broker_closeable": true
+        }
+      ],
+      "would_select": {
+        "instrument_id": 1181,
+        "position_id": 3368088761,
+        "units": "1305.05709600",
+        "is_buy": true,
+        "open_date_time": "2025-11-14 19:25:11.600000+00:00",
+        "broker_closeable": true
+      },
+      "note": "would_select is the lot _load_exit_lot picks (FIFO-oldest, units>0, is_buy, position_id>0). None means an EXIT refuses with 'no broker-closeable long lot found' \u2014 expected immediately after an eBull BUY, which writes the synthetic -order_id id (#3006). Run portfolio_sync first."
+    },
+    "history_min_date": "2026-06-24T14:25:27.140543+00:00",
+    "history_min_date_is_absolute": true,
+    "comparability_note": "Comparable: pass this exact history_min_date to the close phase via --history-min-date.",
+    "closed_event_counts": {
+      "call": "get_closed_position_event_counts()",
+      "at": "2026-09-22T17:26:44.314918+00:00",
+      "result": [
+        {
+          "closeYear": 2021,
+          "assetType": "Commodities",
+          "closedPositionEvents": 27
+        },
+        {
+          "closeYear": 2021,
+          "assetType": "Crypto Currencies",
+          "closedPositionEvents": 5
+        },
+        {
+          "closeYear": 2021,
+          "assetType": "Stocks",
+          "closedPositionEvents": 113
+        },
+        {
+          "closeYear": 2022,
+          "assetType": "Commodities",
+          "closedPositionEvents": 14
+        },
+        {
+          "closeYear": 2022,
+          "assetType": "ETF",
+          "closedPositionEvents": 11
+        },
+        {
+          "closeYear": 2022,
+          "assetType": "Stocks",
+          "closedPositionEvents": 82
+        },
+        {
+          "closeYear": 2023,
+          "assetType": "Stocks",
+          "closedPositionEvents": 29
+        },
+        {
+          "closeYear": 2024,
+          "assetType": "Stocks",
+          "closedPositionEvents": 10
+        },
+        {
+          "closeYear": 2025,
+          "assetType": "Crypto Currencies",
+          "closedPositionEvents": 3
+        },
+        {
+          "closeYear": 2025,
+          "assetType": "Stocks",
+          "closedPositionEvents": 1
+        },
+        {
+          "closeYear": 2026,
+          "assetType": "Crypto Currencies",
+          "closedPositionEvents": 1
+        },
+        {
+          "closeYear": 2026,
+          "assetType": "Stocks",
+          "closedPositionEvents": 5
+        }
+      ],
+      "outcome": "found"
+    },
+    "trade_history": {
+      "call": "get_trade_history(min_date=2026-06-24T14:25:27.140543+00:00)",
+      "at": "2026-09-22T17:26:47.018072+00:00",
+      "result": {
+        "row_count": 3,
+        "slices": [
+          [
+            3600066150,
+            "2026-09-16T10:52:38.643000+00:00",
+            "0.045268",
+            "-0.01"
+          ],
+          [
+            3600561062,
+            "2026-09-17T11:54:42.493000+00:00",
+            "0.045519",
+            "0.0"
+          ],
+          [
+            3602456774,
+            "2026-09-22T14:45:00.800000+00:00",
+            "0.044729",
+            "-0.01"
+          ]
+        ]
+      },
+      "outcome": "found"
+    }
+  }
+}
