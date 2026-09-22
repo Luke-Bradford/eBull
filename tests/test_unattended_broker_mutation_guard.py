@@ -76,7 +76,7 @@ _INFORMATIONAL: Final[frozenset[str]] = frozenset(
     {
         "check_instrument_eligibility",
         "get_account_risk_snapshot",
-        "get_demo_close_order",
+        "get_close_order",
         "get_order_status",
         "get_portfolio",
         "get_trade_history",

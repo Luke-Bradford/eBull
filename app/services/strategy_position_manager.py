@@ -631,7 +631,7 @@ def _resume_operation(
         )
     if operation["operation_type"] == "close":
         try:
-            detail = broker.get_demo_close_order(
+            detail = broker.get_close_order(
                 order_id=str(operation["broker_order_ref"]),
                 persist_response=lambda raw: _persist_operation_response(
                     conn, operation_id=operation_id, raw_payload=raw
@@ -646,7 +646,27 @@ def _resume_operation(
                 owned.strategy_trade_id, owned.broker_position_id, "pending", "broker_close_pending", operation_id
             )
         exact_reference = detail.reference_id is None or detail.reference_id == operation["request_id"]
-        exact = detail.status == "filled" and detail.position_ids == (owned.broker_position_id,) and exact_reference
+        # #3007 half 2 (Codex checkpoint 2, P2): a close-order response naming a
+        # DIFFERENT instrument is the broker answering about something else, and
+        # this branch releases ownership.
+        #
+        # ⚠ An ABSENT ``instrument_id`` is tolerated here and REFUSED in
+        # ``order_client._poll_one_pending_order``, deliberately. The asymmetry is
+        # the witness each path already holds: this one matches on the exact
+        # ``broker_position_id`` it owns, which names one instrument by
+        # construction, so the instrument is a corroborating check rather than
+        # the identity. The poller has no position to match on — its only
+        # identity is the order id — so for it a missing instrument is the whole
+        # of the check and has to fail closed. The field has been observed on
+        # this route once, through our own parser, which is why neither path
+        # makes absence an error.
+        exact_instrument = detail.instrument_id is None or detail.instrument_id == owned.instrument_id
+        exact = (
+            detail.status == "filled"
+            and detail.position_ids == (owned.broker_position_id,)
+            and exact_reference
+            and exact_instrument
+        )
         with conn.transaction():
             order_status = "filled" if exact else "rejected"
             conn.execute("UPDATE orders SET status=%s WHERE order_id=%s", (order_status, operation["order_id"]))

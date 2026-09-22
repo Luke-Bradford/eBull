@@ -28,7 +28,7 @@ source before the first run rather than discovered by it.**
    straddling the broker call still terminalises to ``reconcile_required`` /
    ``crash_before_submission_identity``, whatever the broker actually did.  ⚠ Its
    own comment gives the reason as "there is no edit/close lookup by request UUID",
-   and that is established about THIS ADAPTER — ``get_demo_close_order`` takes an
+   and that is established about THIS ADAPTER — ``get_close_order`` takes an
    ``order_id`` and nothing else (``app/providers/broker.py:700``).  Whether eToro
    could offer one was not checked against the portal, so it is not a claim about
    the broker.
@@ -1045,3 +1045,35 @@ def test_an_applied_core_repair_does_not_block_a_later_one(
     _seed_operation("rejected", resolved=True)
     after_rejected = _manage(ebull_test_conn, broker, coordinates)
     assert after_rejected.state == "rejected"
+
+
+def test_a_close_that_names_another_instrument_never_releases_our_ownership(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """#3007 half 2 (Codex checkpoint 2). The instrument is corroboration, not
+    decoration.
+
+    The sibling above covers a close naming another POSITION. This covers the
+    response naming another INSTRUMENT while keeping the position id we asked
+    about — the shape a broker-side id mix-up produces when the executions look
+    right. ``instrumentID`` is ``required`` on ``OrderForCloseInfoResponse``, so
+    a value that contradicts the owned instrument is the broker answering about
+    something else and must not finish the close.
+
+    ⚠ An ABSENT instrument is a different fact and is deliberately tolerated
+    here — the exact ``broker_position_id`` match already names one instrument.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    broker = _restarted_engine_broker(core_world)
+
+    accepted = _close(ebull_test_conn, broker, coordinates)
+    assert accepted.state == "submitted"
+
+    broker.close_reports_instrument_id = CORE_INSTRUMENT_ID + 77
+    resumed = _manage(ebull_test_conn, broker, coordinates)
+    assert resumed.state == "reconcile_required"
+    assert resumed.reason_code == "close_order_did_not_affect_exact_position"
+
+    report = close_state_report(ebull_test_conn)
+    assert report["active_ownership"] == 1, "a close naming another instrument must not release ours"

@@ -541,8 +541,9 @@ def test_exact_close_remains_available_under_kill_switch_and_reconciles(
         position_ids=(_POSITION_ID,),
         reference_id=None,
         raw_payload={"orderID": 24521234, "statusID": 1, "positions": [{"positionID": _POSITION_ID}]},
+        instrument_id=2_449_001,
     )
-    broker.get_demo_close_order.side_effect = lambda **kwargs: (
+    broker.get_close_order.side_effect = lambda **kwargs: (
         kwargs["persist_response"](close_detail.raw_payload) or close_detail
     )
     broker.get_portfolio.return_value = BrokerPortfolio(

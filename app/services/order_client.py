@@ -44,6 +44,8 @@ from app.providers.broker import (
     BrokerOrderNotFound,
     BrokerOrderResult,
     BrokerOrderSubmissionUncertain,
+    BrokerPositionMutationError,
+    BrokerPositionMutationUncertain,
     BrokerProvider,
     OrderParams,
 )
@@ -2359,18 +2361,24 @@ def execute_order(
         if action == "EXIT":
             # #3007: the eToro close ACK carries no price, no units and an
             # undocumented numeric status, so every accepted close lands here.
-            # Nothing polls it afterwards, so `positions` and `cash_ledger`
-            # keep reading as fully held while the broker closes the position.
             # Say so in the audit trail rather than letting `execution_pending`
             # imply the request merely has not been answered yet.
+            #
+            # ⚠ Half 2 gave this row a reader —
+            # `reconcile_pending_recommendation_orders` now resolves it through
+            # the close-order lookup — but RESOLVING is not BOOKING: the lot the
+            # close addressed is not persisted (#3006), so a confirmed fill
+            # parks as `filled_unbooked` and `positions` / `cash_ledger` STILL
+            # read as fully held. The claim mechanism is what stops a second
+            # economic close in the meantime.
             explanation += (
                 " — EXIT acknowledged but NOT confirmed filled; position and cash are unchanged"
-                " and no completion path polls this order (#3007)"
+                " and a confirmed fill is recorded, not booked (#3007)"
             )
             logger.warning(
                 "execute_order: EXIT recommendation_id=%d instrument_id=%d acknowledged as pending "
-                "(broker_ref=%s) — ledger still reads the position as held; resolve via the "
-                "close-order lookup (#3007)",
+                "(broker_ref=%s) — ledger still reads the position as held until the close-order "
+                "lookup resolves it, and booking a late fill is still open (#3007)",
                 recommendation_id,
                 instrument_id,
                 broker_result.broker_order_ref,
@@ -2761,6 +2769,13 @@ def reconcile_pending_recommendation_orders(
     unsubmittable for ever, including when the broker rejected the order
     asynchronously a second later.
 
+    ⚠⚠ **An EXIT takes a DIFFERENT route (#3007 half 2).** Its ref is a
+    CLOSE-order id, whose documented confirmation is
+    ``/api/v1/trading/info/{env}/close-orders/{orderId}`` — see
+    ``_poll_one_pending_order``. Everything after the lookup is shared:
+    ``_apply_pending_order_verdict`` decides what the answer licenses, so the
+    two routes cannot drift on claim release.
+
     ⚠⚠ **``lookup_order``, never ``get_order_status``.** The latter catches
     ``HTTPStatusError``, ``httpx.HTTPError`` and ``ValueError`` and returns
     ``status='failed'`` for all three, so it cannot distinguish "the broker
@@ -2793,7 +2808,7 @@ def reconcile_pending_recommendation_orders(
             # ABSORBING STATE, not a delay — once the first `limit` rows are
             # stuck, the row at `limit + 1` is never visited again.
             f"""
-            SELECT order_id, recommendation_id, instrument_id, broker_order_ref
+            SELECT order_id, recommendation_id, instrument_id, action, broker_order_ref
             FROM orders
             WHERE {_POLLABLE_ORDER_PREDICATE}
             ORDER BY recommendation_last_polled_at ASC NULLS FIRST, order_id
@@ -2903,7 +2918,7 @@ def _poll_one_pending_order(
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT status, broker_order_ref, broker_environment FROM orders WHERE order_id = %(oid)s",
+                "SELECT status, action, broker_order_ref, broker_environment FROM orders WHERE order_id = %(oid)s",
                 {"oid": order_id},
             )
             current = cur.fetchone()
@@ -2954,6 +2969,10 @@ def _poll_one_pending_order(
             return PendingOrderPollResult(order_id, recommendation_id, "environment_mismatch")
 
         ref = str(current["broker_order_ref"])
+        # ⚠ From the row re-read UNDER the lock, not from the batch selection —
+        # the same reason `status` and `broker_order_ref` are. It decides WHICH
+        # broker route is asked, so a stale read would ask the wrong one.
+        action = str(current["action"])
         # ``lookup_order`` raises ValueError on a non-positive-integer order id.
         # A recommendation order can carry a ref shape we cannot look up (a v1
         # submission echo, a demo synthetic id), and that is a permanent
@@ -2972,6 +2991,88 @@ def _poll_one_pending_order(
                 ref,
             )
             return PendingOrderPollResult(order_id, recommendation_id, "ref_not_pollable")
+
+        # ⚠⚠ AN EXIT IS NOT LOOKED UP THE SAME WAY (#3007 half 2). `execute_order`
+        # submits an EXIT through `close_position`, whose acknowledgement is an
+        # `orderForClose` object and whose `orderID` is a CLOSE-order id. The
+        # documented confirmation for that id is
+        # `GET /api/v1/trading/info/{env}/close-orders/{orderId}`
+        # (`tests/fixtures/etoro/openapi_v1.375.0.json`, and measured live on
+        # 2026-09-22: `statusID=3` with the affected position). Nothing
+        # establishes that v2 `orders:lookup` answers about a close-order id at
+        # all, so asking it would resolve every EXIT to `not_found` for ever —
+        # never advancing, never parked, one shared eToro read per hour each.
+        #
+        # ⚠ The identity guard below has no counterpart here, and cannot: a
+        # close-order detail carries the positions it affected, not an
+        # instrument. `get_close_order` does refuse a response whose `orderID`
+        # is not the one asked for (raising `BrokerPositionMutationUncertain`),
+        # which is the half that protects the claim-releasing verdict. Checking
+        # the affected positions against the lot would need the lot — and #3006
+        # established nothing persists which lot an EXIT selected.
+        if action == "EXIT":
+            try:
+                close_detail = broker.get_close_order(order_id=ref)
+            except (BrokerPositionMutationError, BrokerPositionMutationUncertain) as exc:
+                # ⚠⚠ A 404 HERE IS "NOT YET", NOT "NO SUCH ORDER" (#2961,
+                # #3007). The attended session got a 404 on an id the broker
+                # had just issued and `statusID=3` on the same id seconds
+                # later. So this advances nothing and parks nothing: the row
+                # stays pollable and the claim stays held, which is the same
+                # posture `strategy_position_manager` takes on this exception
+                # (`pending` / `close_lookup_unavailable`).
+                _stamp_polled(conn, order_id=order_id, now=now)
+                logger.warning(
+                    "reconcile_pending_recommendation_orders: order_id=%d EXIT close-order lookup ref=%s "
+                    "did not answer — %s; claim stays held",
+                    order_id,
+                    ref,
+                    exc,
+                )
+                return PendingOrderPollResult(order_id, recommendation_id, "lookup_error")
+            # ⚠⚠ THE ANSWER MUST DESCRIBE THIS INSTRUMENT, AND AN ABSENT ONE
+            # FAILS CLOSED (Codex checkpoint 2, #3007 half 2). `instrumentID` is
+            # `required` on `OrderForCloseInfoResponse`
+            # (`tests/fixtures/etoro/openapi_v1.375.0.json`), so a response
+            # carrying the right `orderID` and a different instrument is the
+            # broker answering about something else — and `terminalised_rejected`
+            # RELEASES the submission claim, which is exactly the write that must
+            # not happen on a mis-addressed answer. A missing field is refused for
+            # the same reason `broker_environment IS NULL` is refused above: it is
+            # not "probably ours", and refusing costs only a stamped, unparked
+            # attempt that a correct later response still resolves.
+            if close_detail.instrument_id != instrument_id:
+                _stamp_polled(conn, order_id=order_id, now=now)
+                logger.error(
+                    "reconcile_pending_recommendation_orders: order_id=%d asked the broker about close-order "
+                    "ref=%s for instrument_id=%d and was answered about instrument_id=%s — nothing advanced",
+                    order_id,
+                    ref,
+                    instrument_id,
+                    "none recorded" if close_detail.instrument_id is None else close_detail.instrument_id,
+                )
+                return PendingOrderPollResult(
+                    order_id, recommendation_id, "identity_mismatch", close_detail.broker_status
+                )
+            # `get_close_order` derives the outcome from the response SHAPE
+            # (`errorCode` -> rejected, non-empty `positions[]` -> filled),
+            # which is the only reading available: every ack status in this
+            # contract is an opaque integer with no enum (#3007 half 1). Mapped
+            # through `pending_order_verdict` rather than a second table, so one
+            # place decides what a resolved order licenses.
+            close_state = "resolved" if close_detail.status == "filled" else close_detail.status
+            return _apply_pending_order_verdict(
+                conn,
+                verdict=pending_order_verdict(close_state),
+                order_id=order_id,
+                instrument_id=instrument_id,
+                recommendation_id=recommendation_id,
+                broker_order_ref=ref,
+                broker_status=close_detail.broker_status,
+                position_execution_count=len(close_detail.position_ids),
+                raw_payload=close_detail.raw_payload,
+                now=now,
+            )
 
         try:
             detail = broker.lookup_order(order_id=ref)
@@ -3060,78 +3161,113 @@ def _poll_one_pending_order(
             )
             return PendingOrderPollResult(order_id, recommendation_id, "unsafe_status", detail.broker_status)
 
-        # ⚠⚠ A REJECTED ORDER THAT CARRIES POSITION EXECUTIONS IS A
-        # CONTRADICTION, AND THIS IS THE ONE VERDICT THAT RELEASES THE CLAIM
-        # (#3189 finding 3). `classify_broker_order_status` reads the status
-        # word only; the detail can still name executions the broker actually
-        # made. Terminalising on the word alone would leave a partial execution
-        # unbooked AND lift the submission claim, so a second economic order
-        # for the same recommendation becomes possible — the #2942 defect
-        # reintroduced through a different door.
-        #
-        # The same contradiction is already refused one subsystem over, against
-        # the same eToro contract (#2451/#2965):
-        # `strategy_order_reconciliation.py` raises
-        # "rejected broker order unexpectedly has position executions". This is
-        # that rule, carried to the poller, which had the unsafe half.
-        #
-        # ⚠⚠ It resolves to `filled_not_booked`, and stamping alone is NOT
-        # enough (Codex checkpoint 2, P1). A bare `_stamp_polled` leaves the row
-        # selectable, so the contradiction spends a broker read every hour —
-        # and, worse, a LATER `Rejected` that omitted the executions would reach
-        # `_terminalise_rejected_order` and release the claim despite the
-        # earlier proof of an economic execution. The observation has to be
-        # durable, not just this attempt.
-        #
-        # `_record_unbooked_fill` is that mechanism and it already exists:
-        # it parks (`sql/395`), which removes the row from
-        # `_POLLABLE_ORDER_PREDICATE` so a later omission can never terminalise
-        # it; it deliberately leaves `status='pending'`, so the claim stays
-        # held; and it writes a `decision_audit` row naming the broker status,
-        # which is what keeps the trade path auditable. Reusing it also means
-        # the executions are not the only record that something happened.
-        #
-        # The verdict is the honest one: positions exist and we have not booked
-        # them, whatever word the status carried.
-        if verdict == _TERMINALISED_REJECTED and detail.position_executions:
-            logger.error(
-                "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r is rejected but carries "
-                "%d position execution(s); parking with the claim held rather than terminalising",
-                order_id,
-                detail.broker_status,
-                len(detail.position_executions),
-            )
-            verdict = _FILLED_NOT_BOOKED
+        return _apply_pending_order_verdict(
+            conn,
+            verdict=verdict,
+            order_id=order_id,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            broker_order_ref=ref,
+            broker_status=detail.broker_status,
+            position_execution_count=len(detail.position_executions),
+            raw_payload=detail.raw_payload,
+            now=now,
+        )
 
-        if verdict == _TERMINALISED_REJECTED:
-            # ⚠ The CAS can miss (#3189 finding 5): the row was re-read under
-            # the lock, but the broker round-trip since then ran outside any
-            # transaction. A miss means nothing was written and the claim is
-            # still held — the same fact the pre-lookup check reports, so the
-            # same verdict, which is deliberately not parked and not stamped
-            # (a non-`pending` row is outside `_POLLABLE_ORDER_PREDICATE`, so
-            # it cannot occupy the rotation head).
-            if not _terminalise_rejected_order(
-                conn,
-                order_id=order_id,
-                instrument_id=instrument_id,
-                recommendation_id=recommendation_id,
-                broker_order_ref=ref,
-                broker_status=detail.broker_status,
-                raw_payload=detail.raw_payload,
-                now=now,
-            ):
-                return PendingOrderPollResult(order_id, recommendation_id, "no_longer_pending", detail.broker_status)
-        elif verdict == _FILLED_NOT_BOOKED:
-            _record_unbooked_fill(
-                conn,
-                order_id=order_id,
-                instrument_id=instrument_id,
-                recommendation_id=recommendation_id,
-                broker_status=detail.broker_status,
-                raw_payload=detail.raw_payload,
-                now=now,
-            )
-        else:
-            _stamp_polled(conn, order_id=order_id, now=now)
-        return PendingOrderPollResult(order_id, recommendation_id, verdict, detail.broker_status)
+
+def _apply_pending_order_verdict(
+    conn: psycopg.Connection[Any],
+    *,
+    verdict: PendingOrderVerdict,
+    order_id: int,
+    instrument_id: int,
+    recommendation_id: int,
+    broker_order_ref: str,
+    broker_status: str,
+    position_execution_count: int,
+    raw_payload: dict[str, Any],
+    now: datetime,
+) -> PendingOrderPollResult:
+    """Write what an advancing verdict implies, and stamp what it does not.
+
+    Extracted from ``_poll_one_pending_order`` when #3007 half 2 gave that
+    function a SECOND way to reach a verdict — a close order resolved through
+    ``get_close_order`` rather than an open order through ``lookup_order``. The
+    two lookups differ; what they license does not, and a second copy of the
+    claim-release rules is the one duplication this module cannot afford.
+
+    ⚠⚠ A REJECTED ORDER THAT CARRIES POSITION EXECUTIONS IS A CONTRADICTION,
+    AND ``terminalised_rejected`` IS THE ONE VERDICT THAT RELEASES THE CLAIM
+    (#3189 finding 3). ``classify_broker_order_status`` reads the status word
+    only; the detail can still name executions the broker actually made.
+    Terminalising on the word alone would leave a partial execution unbooked AND
+    lift the submission claim, so a second economic order for the same
+    recommendation becomes possible — the #2942 defect reintroduced through a
+    different door.
+
+    The same contradiction is already refused one subsystem over, against the
+    same eToro contract (#2451/#2965): ``strategy_order_reconciliation.py``
+    raises "rejected broker order unexpectedly has position executions". This is
+    that rule, carried to the poller, which had the unsafe half.
+
+    ⚠⚠ It resolves to ``filled_not_booked``, and stamping alone is NOT enough
+    (Codex checkpoint 2, P1). A bare ``_stamp_polled`` leaves the row
+    selectable, so the contradiction spends a broker read every hour — and,
+    worse, a LATER ``Rejected`` that omitted the executions would reach
+    ``_terminalise_rejected_order`` and release the claim despite the earlier
+    proof of an economic execution. The observation has to be durable, not just
+    this attempt.
+
+    ``_record_unbooked_fill`` is that mechanism and it already exists: it parks
+    (``sql/395``), which removes the row from ``_POLLABLE_ORDER_PREDICATE`` so a
+    later omission can never terminalise it; it deliberately leaves
+    ``status='pending'``, so the claim stays held; and it writes a
+    ``decision_audit`` row naming the broker status, which is what keeps the
+    trade path auditable. Reusing it also means the executions are not the only
+    record that something happened.
+
+    The verdict is the honest one: positions exist and we have not booked them,
+    whatever word the status carried.
+    """
+    if verdict == _TERMINALISED_REJECTED and position_execution_count:
+        logger.error(
+            "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r is rejected but carries "
+            "%d position execution(s); parking with the claim held rather than terminalising",
+            order_id,
+            broker_status,
+            position_execution_count,
+        )
+        verdict = _FILLED_NOT_BOOKED
+
+    if verdict == _TERMINALISED_REJECTED:
+        # ⚠ The CAS can miss (#3189 finding 5): the row was re-read under
+        # the lock, but the broker round-trip since then ran outside any
+        # transaction. A miss means nothing was written and the claim is
+        # still held — the same fact the pre-lookup check reports, so the
+        # same verdict, which is deliberately not parked and not stamped
+        # (a non-`pending` row is outside `_POLLABLE_ORDER_PREDICATE`, so
+        # it cannot occupy the rotation head).
+        if not _terminalise_rejected_order(
+            conn,
+            order_id=order_id,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            broker_order_ref=broker_order_ref,
+            broker_status=broker_status,
+            raw_payload=raw_payload,
+            now=now,
+        ):
+            return PendingOrderPollResult(order_id, recommendation_id, "no_longer_pending", broker_status)
+    elif verdict == _FILLED_NOT_BOOKED:
+        _record_unbooked_fill(
+            conn,
+            order_id=order_id,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            broker_status=broker_status,
+            raw_payload=raw_payload,
+            now=now,
+        )
+    else:
+        _stamp_polled(conn, order_id=order_id, now=now)
+    return PendingOrderPollResult(order_id, recommendation_id, verdict, broker_status)

@@ -1066,7 +1066,7 @@ class TestDemoStrategyPositionMutations:
                 request_id=request_id,
                 persist_response=persisted.append,
             )
-            resolved = broker.get_demo_close_order(
+            resolved = broker.get_close_order(
                 order_id=submission.broker_order_ref,
                 persist_response=persisted.append,
             )
@@ -1078,6 +1078,43 @@ class TestDemoStrategyPositionMutations:
         assert submission.raw_payload == accepted.json.return_value
         assert resolved.raw_payload == detail.json.return_value
         assert persisted == [accepted.json.return_value, detail.json.return_value]
+
+    @pytest.mark.parametrize(
+        ("env", "expected_path"),
+        [
+            ("demo", "/api/v1/trading/info/demo/close-orders/12346"),
+            ("real", "/api/v1/trading/info/real/close-orders/12346"),
+        ],
+    )
+    def test_the_close_order_lookup_spells_its_environment_out(self, env: str, expected_path: str) -> None:
+        """#3007 half 2's measured trap, pinned in both directions.
+
+        ``_info_prefix`` is ``/api/v1/trading/info{"/demo" if demo else ""}``, so
+        reusing it here would build ``/api/v1/trading/info/close-orders/12346``
+        in real mode — a path eToro documents nowhere. ``close-orders`` and
+        ``pnl`` are the only two v1 info routes carrying an explicit ``/real/``
+        segment, and both concrete operations are in
+        ``tests/fixtures/etoro/openapi_v1.375.0.json``.
+        """
+        detail = MagicMock()
+        detail.json.return_value = {"orderID": 12346, "statusID": 3, "errorCode": None, "positions": []}
+        with EtoroBrokerProvider(api_key="k", user_key="u", env=env) as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = detail
+            resolved = broker.get_close_order(order_id="12346")
+            call = broker._http_read.get.call_args
+        assert call.args[0] == expected_path
+        assert resolved.status == "pending"
+
+    def test_an_unknown_environment_cannot_invent_a_close_order_path(self) -> None:
+        """The path interpolates ``self._env``, so an environment outside the
+        documented two would silently address a route that does not exist.
+        Refused before any request, not after a 404."""
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="sandbox") as broker:
+            broker._http_read = MagicMock()
+            with pytest.raises(BrokerPositionMutationError, match="environment"):
+                broker.get_close_order(order_id="12346")
+            broker._http_read.get.assert_not_called()
 
     def test_real_credentials_cannot_patch_or_close_strategy_positions(self) -> None:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:

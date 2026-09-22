@@ -136,7 +136,21 @@ class BrokerPositionCloseSubmission:
 
 @dataclass(frozen=True)
 class BrokerCloseOrderDetail:
-    """Current exact close-order result and the positions it affected."""
+    """Current exact close-order result and the positions it affected.
+
+    ⚠ ``instrument_id`` is ``required`` on ``OrderForCloseInfoResponse`` in the
+    committed contract (``tests/fixtures/etoro/openapi_v1.375.0.json``) but is
+    typed OPTIONAL here, because the live shape of this route has been observed
+    once and only through our parser (#3007, 2026-09-22) — a strict parse would
+    break a working recovery path on an unmeasured field.
+
+    A consumer must refuse a value that CONTRADICTS the order it asked about.
+    What it does with ``None`` depends on what else it can match on:
+    ``order_client._poll_one_pending_order`` fails closed, because the order id
+    is its only identity and its advancing verdict releases a submission claim;
+    ``strategy_position_manager`` tolerates it, because it matches the exact
+    ``broker_position_id`` it owns, which names one instrument by construction.
+    """
 
     broker_order_ref: str
     status: OrderStatus
@@ -144,6 +158,7 @@ class BrokerCloseOrderDetail:
     position_ids: tuple[int, ...]
     reference_id: UUID | None
     raw_payload: dict[str, Any]
+    instrument_id: int | None
 
 
 @dataclass(frozen=True)
@@ -748,13 +763,22 @@ class BrokerProvider(ABC):
         """Close one whole demo position by its exact broker id."""
         raise NotImplementedError
 
-    def get_demo_close_order(
+    def get_close_order(
         self,
         *,
         order_id: str,
         persist_response: Callable[[dict[str, Any]], None] | None = None,
     ) -> BrokerCloseOrderDetail:
-        """Resolve one exact demo close order and its affected position ids."""
+        """Resolve one exact close order and its affected position ids.
+
+        ⚠ Named ``get_demo_close_order`` until #3007 half 2. The demo-only
+        refusal inside it was OUR choice, not an API limit — eToro documents
+        ``/api/v1/trading/info/demo/close-orders/{orderId}`` and
+        ``/api/v1/trading/info/real/close-orders/{orderId}`` alike
+        (``tests/fixtures/etoro/openapi_v1.375.0.json``) — and a real-environment
+        EXIT has to be resolvable or its order is acknowledged and never read
+        again.
+        """
         raise NotImplementedError
 
     def check_instrument_eligibility(

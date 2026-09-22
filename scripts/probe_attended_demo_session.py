@@ -204,7 +204,7 @@ def _observe(label: str, call: Any) -> dict[str, Any]:
     ``error`` WITH its exception type. The distinction is the measurement.
 
     ⚠⚠ A FAILING READ STILL CARRIES EVIDENCE, and discarding it is the expensive
-    mistake here. ``get_demo_close_order`` raises ``BrokerPositionMutationUncertain``
+    mistake here. ``get_close_order`` raises ``BrokerPositionMutationUncertain``
     with the response body attached when, for instance, ``referenceID`` is present but
     not a UUID — and that body is exactly the affected-position and reference evidence
     #2979 and #3007 need. The exception is the only place it exists, so any
@@ -556,13 +556,13 @@ def _run_phase(
         if phase == "close":
 
             def _close_read() -> dict[str, Any]:
-                detail = broker.get_demo_close_order(order_id=str(broker_order_ref))
+                detail = broker.get_close_order(order_id=str(broker_order_ref))
                 return {
                     "broker_order_ref": detail.broker_order_ref,
                     "normalised_status": detail.status,
                     "broker_status": detail.broker_status,
                     "position_ids": list(detail.position_ids),
-                    # ⚠ Parsed only. `get_demo_close_order` requires a UUID and will
+                    # ⚠ Parsed only. `get_close_order` requires a UUID and will
                     # reject an otherwise-informative non-UUID string, so the raw body is
                     # kept alongside and is the thing to compare against our submitted id.
                     "parsed_reference_id": str(detail.reference_id) if detail.reference_id else None,
@@ -575,9 +575,9 @@ def _run_phase(
                 }
 
             result["close_order_read"] = (
-                _observe(f"get_demo_close_order(order_id={broker_order_ref})", _close_read)
+                _observe(f"get_close_order(order_id={broker_order_ref})", _close_read)
                 if broker_order_ref
-                else {"outcome": "absent", "call": "get_demo_close_order"}
+                else {"outcome": "absent", "call": "get_close_order"}
             )
             result.update(_counter_and_history(broker, history_min_date, comparable=history_comparable))
         return result
