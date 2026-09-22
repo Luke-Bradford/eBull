@@ -367,3 +367,38 @@ Partly rebutted:
   and the window frozen. No published formulation exists to substitute.
 - **3, other share sources.** #2834's step 0 names XBRL, and no other source is stored.
   Building a new one is not stage (i).
+
+## 9. Pre-run amendments (implementation, before any outcome was computed)
+
+These were fixed while implementing, before any return existed. The only runs so far
+were `--selection-only`, which derives no outcome mark.
+
+1. **A missing mark drops the formation.** This covers the entry mark, the live exit
+   mark and the terminal mark. A drop makes the verdict `UNMEASURABLE`, the same as
+   §2.4's zero denominator. The alternative was to renormalise over the names that
+   still have marks, and that would silently redefine the declared decile and market
+   (Codex checkpoint 2, P1). Selection-only runs measured **0** missing entry marks
+   over 240 formations.
+2. **`t_next` is the next formation, per §2.1.** It is not the next rebalance date.
+   Some in-range rebalance dates have no cross-section; they form nothing, and the
+   book is held through them. The run prints the list.
+
+   **Measured at selection-only:** 17 of 258 in-range rebalance dates form nothing,
+   and every one is **1 January or Labor Day**:
+   - 1 January in 2001–2004, 2006–2010, 2012 and 2013;
+   - Labor Day in 2001–2003, 2007, 2008 and 2012.
+
+   The cause is s2's `rebalance_dates`. It takes a stray holiday bar as the month's
+   first bar, and no cross-section forms on that date. **This is an inherited s2
+   calendar defect.** 17 of the 240 observations therefore hold for two months instead
+   of one. The rule is kept, because changing it would change s2's identity, which §2.3
+   inherits. It is declared here instead.
+3. **Admission reads `validated_ids = load_validated_universe`** (US stocks ex-ETF,
+   §4.0), as the engine does. Live series therefore do carry an asset-class cut. §2.2's
+   "no asset-class cut" holds only for terminating series, which enter on their own
+   evidence and have no class.
+4. **The reuse-suspect count is printed at run time.** §0 quoted 509 from the
+   2026-09-22 comment. The admission at this commit reports 521, and the printed figure
+   is the authoritative one.
+5. **The oracle cross-check covers the date sets as well as the members.** It refuses
+   if the module and the SQL disagree on which in-range dates form at all.

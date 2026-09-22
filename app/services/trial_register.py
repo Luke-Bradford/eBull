@@ -149,7 +149,11 @@ from typing import Final
 #: every one `harness_validation`, and r8 itself carrying none, because nothing
 #: has been backtested since it landed. So r9 strands nothing that could have
 #: promoted either.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-22-r9"
+#:
+#: r10 (2026-09-22, #2834) adds ARM B stage (i), measured the same way before the
+#: bump: the SAME five (version, purpose) groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-22-r10"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -781,6 +785,21 @@ TRIAL_REGISTER: Final = TrialRegister(
             # trials: `BACKTEST_UNIVERSE` is `survivorship_free` and that is what
             # the exploration measures; `survivor_only` is `SCAN_UNIVERSE`.
             declared_for=("s11-volatile-regime-gated-breakout", "strategy-registry-v1+d5f25fd08376"),
+        ),
+        DeclaredTrial(
+            trial_id="armb-12-2-dv-weighted-stage-i-2026-09-22",
+            description=(
+                "#2834 ARM B stage (i): canonical 12-2 momentum top decile, dollar-volume weighted, against a "
+                "DV-weighted market, on the survivorship_free admission, 2000-01 to before HOLDOUT_BOUNDARY. "
+                "ONE decision arm; the equal-weight arm, the EW market and the regime cohorts are frozen "
+                "readouts, not searches. Both termination-ambiguity arms must pass jointly, so neither is "
+                "selectable. Charged BEFORE the first run (spec §3)."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-09-22-armb-dv-weighting-prototype.md §1 and §3 (merged 936da1a3); "
+                "scripts/measure_2834_armb_dv_prototype.py; issue #2834"
+            ),
+            exactness=TrialExactness.EXACT,
         ),
     ),
 )

@@ -503,7 +503,9 @@ def census(universe: Universe) -> int:
 # --ranking
 # ---------------------------------------------------------------------------
 
-_RANKING_SQL = """
+#: Everything up to the per-date ranking. ``_RANKING_SQL`` cuts the decile from it;
+#: ``measure_2834_armb_dv_prototype`` also reads the full eligible cross-section.
+_RANKED_SQL = """
 WITH bars AS (
     SELECT d.series_id,
            d.bar_date,
@@ -528,6 +530,9 @@ WITH bars AS (
      AND q.bar_date = d.bar_date
      AND q.rule_set_version = %(version)s
     WHERE d.series_id = ANY(%(ids)s)
+      -- #2834 ARM B stage (i): a sealed caller bounds the read at the query, so
+      -- no bar past its authority boundary enters memory. NULL = unbounded.
+      AND (%(through)s::date IS NULL OR d.bar_date <= %(through)s::date)
       -- ⚠⚠ THE REFUSAL IS A PREDICATE, NOT A FALL-THROUGH (review bot, PR #3285).
       -- The CASE above sends every un-named shape to a literal 1, which for
       -- `unadjusted` + `absent` means NO CORRECTION — while
@@ -620,12 +625,18 @@ ranked AS (
            count(*)     OVER (PARTITION BY bar_date) AS n
     FROM eligible
 )
+"""
+
+_RANKING_SQL = (
+    _RANKED_SQL
+    + """
 SELECT bar_date, name_key
 FROM ranked
 WHERE n >= %(min_cross_section)s
   AND position <= n / %(decile)s
 ORDER BY bar_date, name_key
 """
+)
 
 
 def ranking(universe: Universe) -> int:
@@ -659,6 +670,7 @@ def ranking(universe: Universe) -> int:
                 "floor": MIN_CLOSE,
                 "min_cross_section": MIN_CROSS_SECTION,
                 "decile": DECILE,
+                "through": None,
             },
         ).fetchall():
             sql_selected.setdefault(bar_date, set()).add(int(name_key))
