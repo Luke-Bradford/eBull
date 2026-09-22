@@ -219,6 +219,89 @@ class ExitLot:
     units: Decimal
 
 
+def order_params_context(order_params: OrderParams | None) -> dict[str, Any]:
+    """The ``orders.recommendation_submission_context`` value for what was SENT (#3007).
+
+    Rates are decimal STRINGS, not JSON numbers: a JSON number round-trips through a
+    float in most readers, and the value a late-fill booking needs is the one the
+    broker was given, not its nearest double.  ``{"order_params": None}`` is a
+    recorded "no parameters were sent", which is distinct from a NULL column ("not
+    recorded").
+    """
+    if order_params is None:
+        return {"order_params": None}
+    return {
+        "order_params": {
+            "stop_loss_rate": None if order_params.stop_loss_rate is None else str(order_params.stop_loss_rate),
+            "take_profit_rate": None if order_params.take_profit_rate is None else str(order_params.take_profit_rate),
+            "is_tsl_enabled": order_params.is_tsl_enabled,
+            "leverage": order_params.leverage,
+        }
+    }
+
+
+@dataclass(frozen=True)
+class RecommendationSubmissionContext:
+    """What ``execute_order`` sent for one recommendation order, read back (#3007).
+
+    ``recorded`` is False for a row the claim INSERT did not write: every pre-409 row,
+    and the demo / no-lot ``_persist_order`` path, which never reaches a broker.
+    ⚠ A consumer must refuse to book on ``recorded=False`` rather than re-derive the
+    context. Re-deriving is exactly the poll-time guess this record exists to replace.
+    """
+
+    recorded: bool
+    order_params: OrderParams | None
+    exit_lot: ExitLot | None
+
+
+def load_recommendation_submission_context(
+    conn: psycopg.Connection[Any], *, order_id: int
+) -> RecommendationSubmissionContext:
+    """Read the submission context the claim INSERT persisted for ``order_id``.
+
+    Raises ``LookupError`` for an order id that does not exist: that is a caller
+    defect, never "not recorded".
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT recommendation_exit_position_id, recommendation_exit_units,
+                   recommendation_submission_context
+            FROM orders WHERE order_id = %(oid)s
+            """,
+            {"oid": order_id},
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise LookupError(f"order {order_id} does not exist")
+    context = row["recommendation_submission_context"]
+    exit_lot = (
+        None
+        if row["recommendation_exit_position_id"] is None
+        else ExitLot(
+            position_id=int(row["recommendation_exit_position_id"]),
+            units=Decimal(str(row["recommendation_exit_units"])),
+        )
+    )
+    if context is None:
+        # `orders_recommendation_exit_lot_check` refuses a lot without a context, so
+        # `exit_lot` is None here.
+        return RecommendationSubmissionContext(recorded=False, order_params=None, exit_lot=exit_lot)
+    raw = context["order_params"]
+    params = (
+        None
+        if raw is None
+        else OrderParams(
+            stop_loss_rate=None if raw["stop_loss_rate"] is None else Decimal(raw["stop_loss_rate"]),
+            take_profit_rate=None if raw["take_profit_rate"] is None else Decimal(raw["take_profit_rate"]),
+            is_tsl_enabled=bool(raw["is_tsl_enabled"]),
+            leverage=int(raw["leverage"]),
+        )
+    )
+    return RecommendationSubmissionContext(recorded=True, order_params=params, exit_lot=exit_lot)
+
+
 #: The lots a recommendation EXIT could close at the broker, before ownership.
 #: ⚠ Shared by :func:`_load_exit_lot` and :func:`_engine_owned_long_lot_count`
 #: rather than written twice: the second reports what the first REFUSED, so a
@@ -474,6 +557,8 @@ def _persist_submitted_intent(
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
     broker_env: str | None,
+    order_params: OrderParams | None,
+    exit_lot: ExitLot | None,
     now: datetime,
 ) -> tuple[int, UUID]:
     """Insert a durable order-intent row BEFORE the broker call (#243).
@@ -514,13 +599,15 @@ def _persist_submitted_intent(
                  action, order_type, requested_amount, requested_units,
                  status, broker_order_ref, raw_payload_json, created_at,
                  recommendation_request_id, recommendation_submission_phase,
-                 broker_environment)
+                 broker_environment, recommendation_exit_position_id,
+                 recommendation_exit_units, recommendation_submission_context)
             VALUES
                 (%(iid)s, %(rid)s, %(did)s,
                  %(action)s, %(otype)s, %(amt)s, %(units)s,
                  'submitted', NULL, %(payload)s, %(now)s,
                  %(request_id)s, 'claim_committed',
-                 %(broker_env)s)
+                 %(broker_env)s, %(exit_position_id)s,
+                 %(exit_units)s, %(context)s)
             RETURNING order_id
             """,
             {
@@ -535,6 +622,9 @@ def _persist_submitted_intent(
                 "now": now,
                 "request_id": request_id,
                 "broker_env": broker_env,
+                "exit_position_id": None if exit_lot is None else exit_lot.position_id,
+                "exit_units": None if exit_lot is None else exit_lot.units,
+                "context": Jsonb(order_params_context(order_params)),
             },
         )
         row = cur.fetchone()
@@ -1404,6 +1494,8 @@ def _claim_submission(
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
     broker_env: str | None,
+    order_params: OrderParams | None,
+    exit_lot: ExitLot | None,
     now: datetime,
 ) -> tuple[int, UUID]:
     """Take the single submission claim for this recommendation (#2942).
@@ -1428,6 +1520,8 @@ def _claim_submission(
             requested_amount=requested_amount,
             requested_units=requested_units,
             broker_env=broker_env,
+            order_params=order_params,
+            exit_lot=exit_lot,
             now=now,
         )
     except psycopg.errors.UniqueViolation as exc:
@@ -2023,6 +2117,10 @@ def execute_order(
                         requested_amount=requested_amount,
                         requested_units=requested_units,
                         broker_env=broker_env,
+                        # What is SENT: `close_position` below takes no OrderParams,
+                        # so none are recorded, whatever the recommendation carries.
+                        order_params=None,
+                        exit_lot=exit_lot,
                         now=now,
                     )
                     # #2942 half 2: its OWN commit, immediately before the verb.
@@ -2069,6 +2167,8 @@ def execute_order(
                     requested_amount=requested_amount,
                     requested_units=requested_units,
                     broker_env=broker_env,
+                    order_params=order_params,
+                    exit_lot=None,
                     now=now,
                 )
                 # #2942 half 2: its OWN commit, immediately before the verb.
@@ -2698,15 +2798,21 @@ def _record_unbooked_fill(
     ``_update_position_exit`` -> ``_persist_broker_position`` ->
     ``_deduct_closed_exit_lot`` -> ``_record_cash_ledger`` -> attribution ->
     ``enqueue_post_trade_sync``, plus estimated-cost recording — a path that
-    closes over ``order_params``, ``quote_data`` and ``exit_lot``, locals that
-    exist only at submission time. Two blockers, neither a preference:
+    closes over ``order_params`` and ``exit_lot``, locals that exist only at
+    submission time.  (``quote_data`` is not one of them on this path: the live
+    branch never loads it before the broker call, and cost recording loads it
+    lazily afterwards.)
 
-    * **EXIT has no persisted lot.** ``_load_exit_lot`` resolves it at
-      submission and nothing stores which lot was closed, so re-selecting at
-      poll time is exactly the instrument/time/FIFO guess for broker ownership
-      that #2942 forbids.
-    * **It cannot be dev-verified.** Producing a real pending->filled
-      recommendation order needs an attended demo session.
+    * **Submission context: RESOLVED by ``sql/409`` (#3007 part 1).** The claim
+      INSERT now records the exact lot an EXIT closed and the ``OrderParams``
+      sent; :func:`load_recommendation_submission_context` reads them back, and
+      the audit row below carries them.  ⚠ A pre-409 row reads
+      ``recorded=False``, and booking MUST refuse it rather than re-select a lot,
+      because re-selecting at poll time is the instrument/time/FIFO guess for
+      broker ownership that #2942 forbids.
+    * **Still blocking: it cannot be dev-verified.** Producing a real
+      pending->filled recommendation order needs an attended demo session, and
+      today none is producible (zero approved BUY/ADD recommendations; see #3007).
 
     So this leaves the status quo (claim held, nothing double-submits) plus the
     two things the status quo lacked: an ERROR log and a durable audit row.
@@ -2728,6 +2834,9 @@ def _record_unbooked_fill(
         """,
         {"now": now, "oid": order_id, "park": _PARKING_POLL_VERDICTS["filled_not_booked"]},
     )
+    # The context the booking slice will consume, recorded now so the operator
+    # reconciling this fill by hand sees which lot it addressed.
+    context = load_recommendation_submission_context(conn, order_id=order_id)
     _write_refusal_audit(
         conn,
         instrument_id=instrument_id,
@@ -2741,6 +2850,10 @@ def _record_unbooked_fill(
             "order_id": order_id,
             "broker_status": broker_status,
             "response": raw_payload,
+            "submission_context_recorded": context.recorded,
+            "exit_position_id": None if context.exit_lot is None else context.exit_lot.position_id,
+            "exit_units": None if context.exit_lot is None else str(context.exit_lot.units),
+            **order_params_context(context.order_params),
         },
         now=now,
     )
