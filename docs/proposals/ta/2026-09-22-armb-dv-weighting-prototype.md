@@ -402,3 +402,59 @@ were `--selection-only`, which derives no outcome mark.
    is the authoritative one.
 5. **The oracle cross-check covers the date sets as well as the members.** It refuses
    if the module and the SQL disagree on which in-range dates form at all.
+
+## 10. Result: FAIL (run once, at `6f7c351f`, after the register charge merged)
+
+Command: `PYTHONPATH=. uv run python -m scripts.measure_2834_armb_dv_prototype`. It exits 1
+after 372 s.
+
+The run stamp:
+
+| field | value |
+| --- | --- |
+| main | `6f7c351f` |
+| quarantine | `price-quarantine-v1+49ff29fea766` |
+| termination | `series-termination-v1+3854c8600072` |
+| regime | `market-regime-v1+9f9c52ce6255` |
+| admitted | 17,266 |
+| last bar read | 2021-06-28 |
+
+Formations: **240**, from 2000-01-03 to 2021-05-03. `G = 22` years, 0 dropped, 0 entry
+marks missing.
+
+| arm | decision premium `R_dv − M_dv` | t (CR1) | PF | needed to clear (2·SE) |
+| --- | ---: | ---: | ---: | ---: |
+| `worst_case` | +0.283%/mo | **+0.89** | 1.165 | +0.635% |
+| `best_case` | +0.331%/mo | **+1.05** | 1.196 | +0.630% |
+
+Neither arm reaches t ≥ 2. Under §1 that is **FAIL**. #2834's closing rule applies:
+*"direct-stock tilts are dead here; ETF arm is capped to whatever ARM A proved."*
+
+Readouts. These are printed and do not gate. They are reported here, not selected from:
+
+| readout | worst_case | best_case |
+| --- | --- | --- |
+| `R_dv − M_eq`, the equal-weighted market sensitivity | −0.144%/mo, t −0.33 | −0.189%/mo, t −0.45 |
+| `R_dv − R_eq`, the weighting effect | −0.526%/mo, t −1.41 | −0.628%/mo, t −1.76 |
+| cohort `bull_quiet` (n 175, G 20) | +0.599%/mo, t +2.00 | +0.657%/mo, t +2.24 |
+| cohort `bear_quiet` (n 60, G 16) | −0.817%/mo, t −0.95 | −0.803%/mo, t −0.94 |
+| cohort `bear_volatile` (n 2) / `bull_volatile` (n 3) | too thin to read | too thin to read |
+
+Dollar-volume concentration:
+- top-1 weight share: median 0.118, max 0.540;
+- top-5 weight share: median 0.342, max 0.657;
+- effective holdings: median 457, min 240;
+- zero-DV members: 216 of 107,665 decile slots.
+
+⚠ **What this does NOT license:**
+
+- **The `bull_quiet` cohort is not a finding.** Cohorts were declared as readouts and not
+  as gates (§2.8). Promoting the one cohort that clears t = 2, after looking, would be a
+  new, regime-gated hypothesis with its own register charge. It would not be a reading of
+  this one.
+- **The weighting effect is negative, and it is not significant.** With a t of −1.41 or
+  −1.76, it does not establish that dollar-volume weighting hurts. It does remove the
+  premise that justified building an engine weight column for ARM B.
+- **The result is scoped to its window**, 2000-01 through before `HOLDOUT_BOUNDARY`, and to
+  its population: survivorship-free Intrader, with the §2.2 limits. It says nothing about
+  the published factor ETFs, which are ARM A's question.
