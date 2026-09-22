@@ -110,13 +110,19 @@ echo "  $blocked_runs iteration(s) reported a blocked queue in window"
 # 2026-09-22 00:25Z: one 703-byte blocked note was posted verbatim on six issues
 # and hid buildable work on most of them for 17h. A byte-identical wake note on
 # more than one issue is the mechanical fingerprint of a copied condition.
+# Population = human-posted BLOCKED notes carrying a wake condition, CREATED in
+# the window (the API's `since` filters on last UPDATE). Known limits: a copy of
+# a note older than the window, or the same condition inside otherwise different
+# bodies, is not caught — this is a fingerprint, not a proof of per-ticket-ness.
 echo
 echo "-- copied wake conditions (P1)"
-if ! copies=$(gh api --paginate --slurp "repos/{owner}/{repo}/issues/comments?since=${SINCE}&per_page=100" 2>/dev/null \
-    | jq -r '[.[][] | select(.body | test("wake condition"; "i"))
-              | {i: (.issue_url | split("/") | last), b: .body, t: .created_at}]
+if ! copies=$(gh api --paginate --slurp "repos/{owner}/{repo}/issues/comments?since=${SINCE}&per_page=100" \
+    | jq -r --arg since "$SINCE" '[.[][]
+              | select(.user.type == "User" and .created_at >= $since)
+              | select((.body | test("BLOCKED")) and (.body | test("wake condition"; "i")))
+              | {i: (.issue_url | split("/") | last), b: .body, t: .created_at, u: .html_url}]
              | group_by(.b) | map(select((map(.i) | unique | length) > 1))
-             | .[] | "\(.[0].t) #\(map(.i) | unique | join(" #"))"'); then
+             | .[] | "\(.[0].t) #\(map(.i) | unique | join(" #")) \(.[0].u)"'); then
   echo "  ⚠ UNCHECKED (gh/jq failure) — re-run before treating this as a pass"
   skipped=$((skipped + 1))
 elif [ -n "$copies" ]; then
@@ -134,7 +140,7 @@ if [ "$violations" -gt 0 ]; then
   exit 1
 fi
 if [ "$skipped" -gt 0 ]; then
-  echo "RESULT: INCONCLUSIVE — $skipped PR(s) could not be checked"
+  echo "RESULT: INCONCLUSIVE — $skipped check(s) could not be completed"
   exit 3
 fi
 echo "RESULT: clean"
