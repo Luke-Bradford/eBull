@@ -14,6 +14,7 @@ import type {
   ActionNeededItem,
   CoverageSummaryResponse,
   CredentialHealthSummary,
+  ExitProtectionResponse,
   ProcessListResponse,
   SecretMissingItem,
   SyncLayersV2Response,
@@ -47,6 +48,27 @@ export interface ProblemsPanelProps {
    * state==='rejected'.
    */
   readonly credentialHealth?: CredentialHealthSummary | null;
+  /**
+   * Fixed-exit protection per engine-held position (#3284 item 4b).
+   *
+   * ⚠ A SAFETY-STATE INDICATOR under `safety-state-ui.md`: "a position is carrying
+   * no working stop" is precisely a state whose disappearance could let the operator
+   * make a wrong-state decision. So it is cached-and-ORed like the panel's other
+   * sources and rendered from the last CONFIRMED snapshot, with a visible stale
+   * marker when the live value is absent — a silent cache that looks live is worse
+   * than no cache.
+   *
+   * ⚠ Deliberately NOT counted in `pendingSources` / `erroredSources`. Those drive
+   * the "Checking N more sources…" header and the 3-source `allPending` short
+   * circuit; widening them would change when the whole panel suppresses itself,
+   * which is a behaviour change to every existing problem class. The row carries
+   * its own staleness instead.
+   *
+   * Optional + nullable so tests predating #3284 need not thread a value through.
+   */
+  readonly exitProtection?: readonly ExitProtectionResponse[] | null;
+  /** True when the /system/status fetch errored — marks a cached row stale. */
+  readonly exitProtectionError?: boolean;
   readonly v2Error: boolean;
   readonly processesError: boolean;
   readonly coverageError: boolean;
@@ -81,6 +103,8 @@ interface SourceCache {
   v2: SyncLayersV2Response | null;
   processes: ProcessListResponse | null;
   coverage: CoverageSummaryResponse | null;
+  /** #3284 item 4b — last CONFIRMED exit-protection snapshot (see the prop docs). */
+  exitProtection: readonly ExitProtectionResponse[] | null;
 }
 
 
@@ -99,12 +123,19 @@ export function ProblemsPanel({
   processes,
   coverage,
   credentialHealth,
+  exitProtection,
+  exitProtectionError = false,
   v2Error,
   processesError,
   coverageError,
   onOpenOrchestrator,
 }: ProblemsPanelProps): JSX.Element | null {
-  const [cache, setCache] = useState<SourceCache>({ v2: null, processes: null, coverage: null });
+  const [cache, setCache] = useState<SourceCache>({
+    v2: null,
+    processes: null,
+    coverage: null,
+    exitProtection: null,
+  });
 
   useEffect(() => {
     if (v2 !== null) setCache((prev) => ({ ...prev, v2 }));
@@ -115,6 +146,22 @@ export function ProblemsPanel({
   useEffect(() => {
     if (coverage !== null) setCache((prev) => ({ ...prev, coverage }));
   }, [coverage]);
+  // ⚠ Clear-on-positive (safety-state-ui.md): only a non-null response updates the
+  // cache, so a refetch or an error leaves the last confirmed verdict standing. An
+  // EMPTY array is a real answer ("no engine-held position is unprotected"), not an
+  // absence, so it DOES clear — `undefined`/`null` are the only "we do not know" values.
+  //
+  // ⚠⚠ ...and so is an `error` SENTINEL, which is the subtler half. `check_exit_protection`
+  // contains its own failures and returns `[{status: "error", ...}]` inside a successful
+  // HTTP 200, so `exitProtectionError` stays FALSE on a failed probe. Caching that payload
+  // would overwrite a confirmed list of unprotected position IDs with a row that names
+  // none of them — a query hiccup silently erasing the safety alert it was supposed to
+  // report. The sentinel is surfaced separately (`probeErrors` below) and never cached.
+  useEffect(() => {
+    if (exitProtection === null || exitProtection === undefined) return;
+    if (exitProtection.some((entry) => entry.status === "error")) return;
+    setCache((prev) => ({ ...prev, exitProtection }));
+  }, [exitProtection]);
 
   const pendingSources: string[] = [];
   if (cache.v2 === null) pendingSources.push("layers");
@@ -150,6 +197,20 @@ export function ProblemsPanel({
   const failingProcesses = steadyStateAttentionRows(cache.processes?.rows ?? []);
   const coverageNullRows = cache.coverage?.null_rows ?? 0;
 
+  // #3284 item 4b — positions whose stop repair has refused for its whole class
+  // budget. `unrepairable` is the only alerting status by design: `repairing` is the
+  // expected transient and `never_checked` is a position opened seconds ago, and an
+  // alarm that fires on either would ship with a documented "ignore this" attached.
+  const unprotectedPositions = (cache.exitProtection ?? []).filter((entry) => entry.status === "unrepairable");
+  // Read from the LIVE payload, never the cache: an unreadable probe is a fact about
+  // the current response, and a cached one would keep claiming the check is broken
+  // after it recovered.
+  const probeErrors = (exitProtection ?? []).filter((entry) => entry.status === "error");
+  // Stale when the cached rows are being rendered without a live confirmation —
+  // absent response, transport error, or a contained probe failure.
+  const exitProtectionStale =
+    exitProtection === null || exitProtection === undefined || exitProtectionError || probeErrors.length > 0;
+
   // Inject the credential-rejected banner when the operator's aggregate
   // health is REJECTED. Backend already PREREQ_SKIPs affected layers
   // (#977) and AUTH_EXPIRED suppression hides stale rows post-recovery,
@@ -160,7 +221,13 @@ export function ProblemsPanel({
     ? [CREDENTIAL_REJECTED_BANNER, ...baseActionNeeded]
     : baseActionNeeded;
 
-  const totalProblems = actionNeeded.length + secretMissing.length + failingProcesses.length + (coverageNullRows > 0 ? 1 : 0);
+  const totalProblems =
+    actionNeeded.length +
+    secretMissing.length +
+    failingProcesses.length +
+    unprotectedPositions.length +
+    probeErrors.length +
+    (coverageNullRows > 0 ? 1 : 0);
 
   if (totalProblems === 0 && pendingSources.length === 0 && erroredSources.length === 0) {
     return null;
@@ -209,6 +276,15 @@ export function ProblemsPanel({
         </span>
       </header>
       <ul className="divide-y divide-red-100">
+        {/* FIRST in the list deliberately: an engine-held position with no working
+            stop is the operator's standing mandate broken, which outranks a failing
+            ingest layer. */}
+        {unprotectedPositions.map((entry) => (
+          <UnprotectedPositionRow key={`exit-protection-${entry.ownership_id}`} entry={entry} stale={exitProtectionStale} />
+        ))}
+        {probeErrors.map((entry, index) => (
+          <ExitProtectionUnreadableRow key={`exit-protection-error-${index}`} detail={entry.detail} />
+        ))}
         {actionNeeded.map((item) => (
           <ActionNeededRow key={item.root_layer} item={item} onOpen={() => onOpenOrchestrator(item.root_layer)} />
         ))}
@@ -264,6 +340,95 @@ export function ProblemsPanel({
         ) : null}
       </ul>
     </section>
+  );
+}
+
+
+/** One engine-held position whose stop repair has refused for its whole budget (#3284 item 4b).
+ *
+ * ⚠ The stale marker is NOT optional (`safety-state-ui.md`): when the row is rendered
+ * from cache the operator must be told the indicator is real but unverified. A silent
+ * cache that looks live is worse than no cache at all.
+ */
+function UnprotectedPositionRow({
+  entry,
+  stale,
+}: {
+  entry: ExitProtectionResponse;
+  stale: boolean;
+}): JSX.Element {
+  return (
+    <li className="px-4 py-2 text-sm">
+      <div className="flex items-start gap-2">
+        <span aria-hidden className="mt-1 inline-block h-2 w-2 rounded-full bg-red-500" />
+        <div className="flex-1">
+          {/* ⚠ "exit levels", not "no stop". An `unrepairable` verdict proves
+              `_exit_intent.has_gap`, which is `stop_gap OR take_gap` — a position with a
+              perfectly good stop and a missing TAKE-PROFIT reaches this row, and telling
+              the operator its stop is gone would send them to check something that is
+              fine. The streak table does not record WHICH half gapped (`sql/408` stores
+              the refusal reason, not the intent), so the honest wording is the one that
+              covers both. Carrying the gap type through would be a schema change. */}
+          <div className="font-medium text-red-800 dark:text-red-300">
+            Position {entry.broker_position_id}: the broker-side exit levels are not in place
+            {stale ? (
+              <span
+                className="ml-2 text-[10px] font-normal uppercase text-red-600 dark:text-red-400"
+                role="status"
+              >
+                (stale — refreshing)
+              </span>
+            ) : null}
+          </div>
+          <div className="text-xs text-slate-700 dark:text-slate-300">
+            The stop/target repair has refused {entry.consecutive_refusals} consecutive{" "}
+            {entry.consecutive_refusals === 1 ? "visit" : "visits"} against a budget of {entry.refusal_budget}
+            {entry.last_refusal_reason !== null ? ` — ${entry.last_refusal_reason}` : ""}.
+          </div>
+          {entry.first_refused_at !== null ? (
+            <div className="text-xs text-slate-600 dark:text-slate-400">
+              Refusing since {formatDateTime(entry.first_refused_at)}
+            </div>
+          ) : null}
+          {entry.last_checked_at !== null ? (
+            <div className="text-xs text-slate-600 dark:text-slate-400">
+              Last checked {formatDateTime(entry.last_checked_at)}
+            </div>
+          ) : null}
+          <div className="text-xs text-slate-600 dark:text-slate-400">
+            Clears when the five-minute strategy cycle lands the stop and target at the broker. If the count keeps
+            rising, set them by hand on position {entry.broker_position_id} at the broker.
+          </div>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+
+/** The contained-failure sentinel from `check_exit_protection` (#3284 item 4b).
+ *
+ * ⚠ Its own row, never folded into the cached position list: the sentinel names no
+ * position, so caching it would replace a confirmed list of unprotected IDs with a row
+ * that identifies none of them. "The safety check is unreadable" and "this position is
+ * unprotected" are different facts and are reported as such.
+ */
+function ExitProtectionUnreadableRow({ detail }: { detail: string | null }): JSX.Element {
+  return (
+    <li className="px-4 py-2 text-sm">
+      <div className="flex items-start gap-2">
+        <span aria-hidden className="mt-1 inline-block h-2 w-2 rounded-full bg-red-500" />
+        <div className="flex-1">
+          <div className="font-medium text-red-800 dark:text-red-300">
+            Exit protection could not be checked
+          </div>
+          <div className="text-xs text-slate-600 dark:text-slate-400">{detail ?? "see server logs"}</div>
+          <div className="text-xs text-slate-600 dark:text-slate-400">
+            Any position rows above are the last confirmed verdict, not a live one.
+          </div>
+        </div>
+      </div>
+    </li>
   );
 }
 

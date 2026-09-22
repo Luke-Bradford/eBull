@@ -69,6 +69,11 @@ from app.services.processes import (
     scheduled_adapter,
 )
 from app.services.processes.health_verdict import verdict_for_row
+from app.services.strategy_exit_protection import (
+    ExitProtection,
+    ExitProtectionStatus,
+    check_exit_protection,
+)
 from app.services.strategy_scan_freshness import (
     ScanFreshnessBasis,
     ScanFreshnessStatus,
@@ -184,6 +189,33 @@ class StrategyScanFreshnessResponse(BaseModel):
     detail: str | None = None
 
 
+class ExitProtectionResponse(BaseModel):
+    """Is this engine-held position's fixed exit actually in place (#3284 item 4b)?
+
+    The arithmetic is carried, not just the colour: ``consecutive_refusals`` against
+    ``refusal_budget`` tells "1 of 1, the broker will not accept the edit at all" from
+    "3 of 2, the quote has been unsafe all morning" without opening a psql session, and
+    ``first_refused_at`` dates the EPISODE so "how long has it been naked" is answerable.
+
+    ``last_checked_at`` is the last visit on which the fixed-exit arm EVALUATED this
+    ownership — NOT the last paper cycle.  A visit that closes the position, ages it out
+    or fails to find it returns before the arm and deliberately does not stamp, so
+    reading this as a cycle heartbeat would make a closing position look like a stalled
+    check (``sql/408``).
+    """
+
+    ownership_id: int
+    strategy_trade_id: int
+    broker_position_id: int
+    status: ExitProtectionStatus
+    consecutive_refusals: int
+    refusal_budget: int
+    last_refusal_reason: str | None = None
+    first_refused_at: datetime | None = None
+    last_checked_at: datetime | None = None
+    detail: str | None = None
+
+
 class SystemStatusResponse(BaseModel):
     checked_at: datetime
     overall_status: OverallStatus
@@ -195,6 +227,10 @@ class SystemStatusResponse(BaseModel):
     # in STRATEGY_MANIFEST, always — a strategy with no verdict is a strategy
     # nothing reports on.
     strategy_scan_freshness: list[StrategyScanFreshnessResponse] = []
+    # #3284 item 4b. Additive: existing clients ignore it. One entry per ACTIVE
+    # strategy_position_ownership row, always — including a position the fixed-exit arm
+    # has never visited, which reports `never_checked` rather than disappearing.
+    strategy_exit_protection: list[ExitProtectionResponse] = []
     # Populated when the jobs process most-recently failed to boot
     # because of a hard-fail boot-guard condition (today: missing
     # operator row). NULL on healthy systems. Wired in Stream A PR-A.
@@ -310,6 +346,21 @@ def _scan_freshness_to_response(entry: StrategyScanFreshness) -> StrategyScanFre
     )
 
 
+def _exit_protection_to_response(entry: ExitProtection) -> ExitProtectionResponse:
+    return ExitProtectionResponse(
+        ownership_id=entry.ownership_id,
+        strategy_trade_id=entry.strategy_trade_id,
+        broker_position_id=entry.broker_position_id,
+        status=entry.status,
+        consecutive_refusals=entry.consecutive_refusals,
+        refusal_budget=entry.refusal_budget,
+        last_refusal_reason=entry.last_refusal_reason,
+        first_refused_at=entry.first_refused_at,
+        last_checked_at=entry.last_checked_at,
+        detail=entry.detail,
+    )
+
+
 def _job_health_to_response(name: str, jh: JobHealth) -> JobHealthResponse:
     return JobHealthResponse(
         name=name,
@@ -328,6 +379,7 @@ def _derive_overall_status(
     *,
     jobs_process_down: bool = False,
     scan_freshness: Sequence[StrategyScanFreshness] = (),
+    exit_protection: Sequence[ExitProtection] = (),
 ) -> OverallStatus:
     """Worst-of(components).
 
@@ -340,6 +392,7 @@ def _derive_overall_status(
     - any job stalled (silently stopped firing) → "degraded"  (#1510 / T4)
     - any layer "stale"/"empty" → "degraded"
     - any strategy scan alerting → "degraded"  (#2624 scope 3)
+    - any engine-held position's fixed exit unrepairable → "degraded"  (#3284 item 4b)
     - any job currently "running" → "degraded"
     - otherwise → "ok"
 
@@ -376,6 +429,16 @@ def _derive_overall_status(
     # within reach of the corpus. "degraded", never "down": it is recoverable by
     # the next scan, and "down" is reserved for "nothing is updating".
     if any(entry.is_alerting for entry in scan_freshness):
+        return "degraded"
+    # #3284 item 4b — an engine-held position observed unprotected whose repair has
+    # refused for its whole class budget. "degraded", not "down", and the choice is
+    # deliberate rather than conservative: "down" here means "nothing is updating"
+    # (kill switch, dead engine, layer error), and everything else on the box is
+    # working — the paper cycle is still visiting the position, it is the BROKER EDIT
+    # that will not take. Reporting "down" would make the one signal that means
+    # "stop reading these verdicts, they are stale" ambiguous, which costs more than
+    # the extra severity buys. The per-entry `unrepairable` row carries the detail.
+    if any(entry.is_alerting for entry in exit_protection):
         return "degraded"
     if any(job.last_status == "running" for job in jobs):
         return "degraded"
@@ -589,6 +652,14 @@ def get_system_status(
     # it cannot 503 the page, matching the per-layer containment above.
     scan_freshness = check_scan_freshness(conn)
 
+    # #3284 item 4b — the operator's standing mandate is a stop and a target on EVERY
+    # engine position at all times. Item 4a made a refused repair durable; this turns a
+    # spent refusal budget into a verdict. Nothing else carries it: the paper cycle
+    # reports `success` and counts `managed` on the attempt, so a position refusing
+    # repair on every visit is invisible to `check_job_health`. Contains its own
+    # failures (returns an `error` row), so it cannot 503 the page.
+    exit_protection = check_exit_protection(conn)
+
     overall = _derive_overall_status(
         layers,
         jobs,
@@ -596,6 +667,7 @@ def get_system_status(
         stalled_job_names,
         jobs_process_down=engine_down,
         scan_freshness=scan_freshness,
+        exit_protection=exit_protection,
     )
 
     return SystemStatusResponse(
@@ -611,6 +683,7 @@ def get_system_status(
         ),
         credential_health=_build_credential_health_summary(conn),
         strategy_scan_freshness=[_scan_freshness_to_response(entry) for entry in scan_freshness],
+        strategy_exit_protection=[_exit_protection_to_response(entry) for entry in exit_protection],
         jobs_boot_error=jobs_boot_error,
         engine_down=engine_down,
     )

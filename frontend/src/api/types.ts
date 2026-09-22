@@ -118,6 +118,38 @@ export interface CredentialHealthSummary {
   last_error: string | null;
 }
 
+// #3284 item 4b. The operator's standing mandate is a broker-side stop and target
+// on EVERY engine-held position at all times; this is the verdict on whether that
+// actually holds, one entry per ACTIVE strategy_position_ownership row.
+//   ok            — observed carrying both levels on its last visit
+//   never_checked — the fixed-exit arm has not evaluated it yet (non-alerting)
+//   repairing     — refusals accruing, class budget not yet spent (non-alerting:
+//                   one stale quote is an event, not a condition)
+//   unrepairable  — budget spent; the position is unprotected and the repair is
+//                   not fixing it. THIS is the alert-class state.
+//   error         — the verdict could not be read
+export type ExitProtectionStatus =
+  "ok" | "never_checked" | "repairing" | "unrepairable" | "error";
+
+export interface ExitProtectionResponse {
+  ownership_id: number;
+  strategy_trade_id: number;
+  broker_position_id: number;
+  status: ExitProtectionStatus;
+  // Count against budget, both carried so the operator can tell "1 of 1, the broker
+  // will not accept the edit at all" from "3 of 2, the quote has been unsafe all
+  // morning" without opening a psql session.
+  consecutive_refusals: number;
+  refusal_budget: number;
+  last_refusal_reason: string | null;
+  // Dates the EPISODE, not the last refusal — "how long has it been naked".
+  first_refused_at: string | null;
+  // Last visit on which the fixed-exit arm EVALUATED this ownership. NOT a cycle
+  // heartbeat: a visit that closes or ages out the position returns before the arm.
+  last_checked_at: string | null;
+  detail: string | null;
+}
+
 export interface SystemStatusResponse {
   checked_at: string;
   overall_status: OverallStatus;
@@ -125,6 +157,9 @@ export interface SystemStatusResponse {
   jobs: JobHealthResponse[];
   kill_switch: KillSwitchStateResponse;
   credential_health: CredentialHealthSummary;
+  // #3284 item 4b. Additive; older clients ignore it. Optional on the type because
+  // a response predating the field is a legitimate shape for a cached/mocked payload.
+  strategy_exit_protection?: ExitProtectionResponse[];
   // True when the scheduler/worker process is not running (#1508 / C4 —
   // heartbeat table empty/all-stale, i.e. `jobs_process.state == "down"`).
   // When true the Processes page raises a hard-red "Jobs engine not running"

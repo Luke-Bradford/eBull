@@ -225,6 +225,12 @@ export function AdminPage() {
         processes={processes.data}
         coverage={coverage.data}
         credentialHealth={systemStatus.data?.credential_health ?? null}
+        // #3284 item 4b. ⚠ `?? null` NOT `?? []`: an empty array is the real answer
+        // "no engine-held position is unprotected", and defaulting a missing response
+        // to it would clear the panel's cached safety verdict on every refetch —
+        // exactly the disappearing-banner failure `safety-state-ui.md` forbids.
+        exitProtection={systemStatus.data?.strategy_exit_protection ?? null}
+        exitProtectionError={systemStatus.error !== null}
         v2Error={v2.error !== null}
         processesError={processes.error !== null}
         coverageError={coverage.error !== null}
