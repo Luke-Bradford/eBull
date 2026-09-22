@@ -178,34 +178,22 @@ _NUMERIC_STATUS_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
 
 
 def _map_textual_order_status(raw_status: Any) -> OrderStatus:
-    """Map a submit-ack order status, refusing to interpret a NUMERIC one.
+    """Map a submit-ack order status, ABSTAINING on a numeric one.
 
-    ``_STATUS_MAP`` keys are textual. The eToro contract documents the
-    acknowledgement status as an opaque integer with **no enum** --
-    ``OrderForOpen.statusId`` and ``OrderForClose.statusId`` are both
-    ``{"type": "integer", "description": "Status of the order"}``, and
-    ``OrderForCloseInfoResponse.statusID`` is ``int32``, "current internal
-    status identifier" (`tests/fixtures/etoro/openapi_v1.375.0.json`). There is
-    no documented code-to-meaning table anywhere in the spec, so a numeric
-    status CANNOT be resolved to filled/rejected without inventing one.
+    ``_STATUS_MAP`` keys are textual, but the contract types every ack status as
+    an opaque integer with **no enum** and no code table --
+    ``OrderForOpen.statusId``, ``OrderForClose.statusId``,
+    ``OrderForCloseInfoResponse.statusID``
+    (``tests/fixtures/etoro/openapi_v1.375.0.json``). A numeric status therefore
+    cannot resolve to filled/rejected without inventing the mapping, so it
+    resolves to ``pending``: acknowledged, outcome unknown.
 
-    Observed live on demo (#3007, attended session 2026-09-22): a full close
-    acknowledged with ``statusID: 1``, no ``executionPrice`` and no ``units``.
-    The same order, looked up seconds later, reported ``broker_status=3`` with
-    the affected position attached (#2961) -- so ``1`` is a pre-execution code
-    and treating the ack as terminal would be wrong in both directions.
+    ⚠ The outcome belongs to ``get_demo_close_order``, which derives it from the
+    response SHAPE (``errorCode`` -> rejected, non-empty ``positions[]`` ->
+    filled) and keeps the integer as opaque evidence. Copy that, not a map.
 
-    Numeric therefore resolves to ``pending``: the broker has acknowledged the
-    order and has not told us what became of it. That is what the code did
-    before, but only by the ACCIDENT that ``str(1)`` misses every map key --
-    which is exactly the reading that made #3007 filable. Stating it makes the
-    invariant testable, and stops a later "helpful" ``{"1": "filled"}`` entry
-    from silently booking unexecuted closes as fills.
-
-    ⚠ The resolved status belongs to ``get_demo_close_order``, which derives it
-    from the response SHAPE (``errorCode`` -> rejected, non-empty
-    ``positions[]`` -> filled) and keeps the integer as opaque evidence. Copy
-    that pattern, not a numeric map.
+    Rationale and the live evidence: #3007, #2961, and the "status typed as an
+    opaque integer must abstain" entry in ``docs/review-prevention-log.md``.
     """
     if raw_status is None:
         return "pending"
