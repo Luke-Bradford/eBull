@@ -11053,3 +11053,18 @@ neighbouring container and match it.**
   `tests/test_2942_pending_order_poller_db.py::test_a_close_order_about_another_instrument_advances_nothing`
   (parametrised over a conflicting AND an absent instrument);
   `tests/test_2949_core_close_recovery_db.py::test_a_close_that_names_another_instrument_never_releases_our_ownership`.
+
+#### Same round — verify a review finding by running the NAMED TEST, not the file you assume it lives in
+
+- Symptom: Codex checkpoint 2 reported "`test_every_documented_call_site_classifies_to_its_own_lane`
+  now fails deterministically" and anchored it to `etoro_quota_lanes.py`. I ran
+  `tests/test_etoro_quota_lanes.py`, got exit 0, and wrote the finding off as false. The
+  test is in `tests/test_2946_etoro_request_log.py` and the finding was exactly right:
+  making the lane template `{env}` compiles the segment as REQUIRED
+  (`_segment_regex`), while a literal `demo` segment compiles as optional, so the
+  suite's missing-segment variant fell out as `unclassified`. The full fast tier caught
+  it one step later — but only because it was run.
+- Prevention: a review comment names a SYMBOL, and its file anchor is where the reviewer
+  thinks the cause is, not where the symptom lives. Verify with `pytest -k <test name>`
+  or `grep -rn "def <test name>" tests/`, never by running the file the comment points
+  at. A green run of the wrong file is indistinguishable from a rebuttal.
