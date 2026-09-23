@@ -27,21 +27,26 @@ evidence on 2026-09-16 and left the ticket with nothing to diagnose.
 
 from __future__ import annotations
 
+import http.client
 import json
+import logging
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.config import DEV_LIKE_ENVS, settings
 from app.security.master_key import resolve_data_dir
 from app.system.git_identity import app_tree_hash
 from app.system.served_build import SIDECAR_FILENAME
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 
@@ -78,52 +83,67 @@ class ProbeResult:
         return self.status is not None
 
 
-class _NoRedirects(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects. A probe that follows one is measuring another URL."""
+def _abort(conn: http.client.HTTPConnection) -> None:
+    """Unblock a request thread stuck in a socket call. Never raises.
 
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None
-
-
-def _fetch(url: str, timeout_s: float) -> tuple[int | None, str | None]:
-    """One GET. Returns ``(status, error)``; any HTTP status counts as an answer."""
-    opener = urllib.request.build_opener(_NoRedirects)
-    try:
-        with opener.open(url, timeout=timeout_s) as response:  # noqa: S310
-            return response.status, None
-    except urllib.error.HTTPError as exc:
-        # A 4xx/5xx is an ANSWER — the loop scheduled the handler and it
-        # returned. Treating it as a failure would report a healthy-but-
-        # degraded app as wedged, which is the opposite of this script's job.
-        return exc.code, None
-    except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+    ``shutdown`` (not just ``close``) is what wakes a thread already blocked in
+    ``recv`` on the same socket.
+    """
+    sock = conn.sock
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    conn.close()
 
 
 def probe(base_url: str, path: str, timeout_s: float) -> ProbeResult:
-    """GET ``path`` under a TOTAL deadline. Never raises.
+    """GET ``path`` under a TOTAL deadline. Never raises, never leaks the request.
 
-    ⚠ ``urlopen(timeout=...)`` bounds each individual blocking socket
-    operation, not the request as a whole — a peer that dribbles bytes, or a
-    chain of slow stages, can overrun it by a multiple. This is a wedge
-    detector, so an unbounded overrun is the one failure it cannot afford: it
-    delays the thread dump, which is the evidence the whole exercise exists to
-    capture. The fetch therefore runs on a daemon thread and the deadline is
-    enforced by ``join``. A thread still running at the deadline is abandoned,
-    which is correct for a short-lived CLI and is exactly the "no response"
-    the caller needs to hear.
+    ⚠ A socket timeout bounds each individual blocking operation, not the
+    request as a whole — a peer that dribbles bytes, or a chain of slow stages,
+    can overrun it by a multiple. This is a wedge detector, so an unbounded
+    overrun is the one failure it cannot afford: it delays the thread dump,
+    which is the evidence the whole exercise exists to capture. The request
+    therefore runs on a daemon thread and the deadline is enforced by ``join``.
+
+    ⚠ At the deadline the socket is shut down rather than the thread abandoned.
+    Abandoning was fine for a one-shot CLI, but the jobs process runs this every
+    cadence period for days, and an abandoned thread holds its socket for as
+    long as the peer keeps dribbling (Codex ckpt-2, #3119).
+
+    ``http.client`` never follows redirects, so the probe measures only the URL
+    it was given. Any HTTP status counts as an answer — ``/health`` answering
+    503 is still alive; treating it as a failure would report a
+    healthy-but-degraded app as wedged.
     """
-    url = f"{base_url.rstrip('/')}{path}"
+    parts = urllib.parse.urlsplit(base_url)
+    connection_cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+    conn = connection_cls(parts.hostname or "127.0.0.1", parts.port, timeout=timeout_s)
+    target = f"{parts.path.rstrip('/')}{path}"
     outcome: list[tuple[int | None, str | None]] = []
-    worker = threading.Thread(target=lambda: outcome.append(_fetch(url, timeout_s)), daemon=True)
 
+    def request() -> None:
+        try:
+            conn.request("GET", target)
+            response = conn.getresponse()
+            response.read()
+            outcome.append((response.status, None))
+        except Exception as exc:
+            outcome.append((None, f"{type(exc).__name__}: {exc}"))
+
+    worker = threading.Thread(target=request, name="api-wedge-probe-request", daemon=True)
     started = time.monotonic()
     worker.start()
     worker.join(timeout_s)
     elapsed = time.monotonic() - started
 
     if not outcome:
+        _abort(conn)
+        worker.join(1.0)
         return ProbeResult(path, None, elapsed, f"no response within {timeout_s:.1f}s")
+    conn.close()
     status, error = outcome[0]
     return ProbeResult(path, status, elapsed, error)
 
@@ -369,3 +389,44 @@ def _describe(result: ProbeResult) -> str:
     if result.answered:
         return f"HTTP {result.status} in {result.elapsed_s:.1f}s"
     return f"NO RESPONSE ({result.error})"
+
+
+# A wedge persists until someone restarts the API (the 2026-09-16 one served
+# stale code for ~10h), so this bounds detection latency, not correctness. It
+# also spaces the two STALE observations far beyond a uvicorn reload's seconds.
+PERIODIC_INTERVAL_S = 900.0
+
+
+def run_periodic_probe(stop_event: threading.Event, interval_s: float = PERIODIC_INTERVAL_S) -> None:
+    """Jobs-process daemon thread: probe every ``interval_s`` until stopped.
+
+    ⚠ Deliberately NOT a ``ScheduledJob`` (Codex ckpt-2, #3119). A scheduled
+    fire first waits on its execution-lane permit — the general lane has ONE,
+    held for hours by backfills — and then takes a Postgres ``JobLock`` and
+    runs the DB prelude. Either can stall the detector before it probes, and a
+    stalled Postgres is itself a plausible wedge cause. So this path touches no
+    DB at all: the evidence is the thread dump the worker appends to its own
+    ``dump_path``, and the alarm is an ERROR line in the jobs log.
+
+    A hard no-op outside a dev-like ``app_env``: it probes the local dev API
+    and signals that API's worker, neither of which exists anywhere else.
+    Never raises — one failed pass must not kill the detector.
+    """
+    if settings.app_env not in DEV_LIKE_ENVS:
+        logger.info("api wedge probe disabled: app_env=%s", settings.app_env)
+        return
+    previous_stale: StalePair | None = None
+    while not stop_event.wait(interval_s):
+        try:
+            obs = observe()
+            failure, previous_stale = periodic_decision(obs, previous_stale)
+            if obs.wedged:
+                logger.error("api wedge probe (#3119): %s", dump_threads(obs.sidecar))
+            if failure is not None:
+                logger.error("api wedge probe (#3119): %s", failure)
+            else:
+                logger.debug(
+                    "api wedge probe: live=%s health=%s app_tree=%s", obs.live.status, obs.health.status, obs.verdict
+                )
+        except Exception:
+            logger.exception("api wedge probe pass raised; continuing")

@@ -90,7 +90,6 @@ Lane = Literal[
     "db_raw_sweep",
     "db_fsnds_notes",
     "db_size_sample",
-    "api_wedge_probe",
     "db_thesis_dq",
     "db_thesis_break",
     "db_thesis_outcomes",
@@ -364,12 +363,6 @@ when one overruns). Scheduled-only, so NOT added to the
   for a once-daily job. Write-disjoint: sole writer of ``pg_size_sample``, no
   other job touches it. Scheduled-only, so NOT added to the
   ``bootstrap_stages.lane`` CHECK (matches ``db_liveness`` / ``db_raw_sweep``).
-
-* ``api_wedge_probe`` — ``api_wedge_probe`` (#3119, every 15 min, dev-only)
-  only. Reads HTTP + git + the served-build sidecar; writes nothing but
-  ``job_runs``. Own lane so a multi-hour ``db`` holder cannot starve the one
-  detector of a wedged API. Scheduled-only, so NOT added to the
-  ``bootstrap_stages.lane`` CHECK.
 
 * ``db_thesis_dq`` / ``db_thesis_break`` — ``thesis_dq_audit`` (daily 05:12,
   #2014) and ``thesis_break_scan`` (daily 05:22, #2012), one single-job lane

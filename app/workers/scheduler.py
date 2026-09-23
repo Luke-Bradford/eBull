@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from app.services.reference_data import ReferenceRefreshReport
     from app.services.strategy_halts import HaltSnapshot
 
-from app.config import DEV_LIKE_ENVS, settings
+from app.config import settings
 from app.db.background_write import background_write_connection
 from app.jobs.job_connection import connect_job, job_application_name, job_statement_timeout_ms
 from app.jobs.sources import Lane
@@ -606,8 +606,6 @@ JOB_FILING_EVENTS_SKIP_TIER_CLEANUP = "filing_events_skip_tier_cleanup"
 # MANUAL_TRIGGER_JOB_METADATA; own lane in MANUAL_TRIGGER_JOB_SOURCES.
 JOB_RAW_PAYLOAD_RETENTION_SWEEP = "raw_payload_retention_sweep"
 JOB_ORPHAN_TEST_DB_REAP = "orphan_test_db_reap"
-# #3119 — periodic dev-API wedge / stale-code probe. Own ``api_wedge_probe`` lane.
-JOB_API_WEDGE_PROBE = "api_wedge_probe"
 JOB_LIVENESS_WATCHDOG = "jobs_liveness_watchdog"
 JOB_RETRY_SWEEPER = "jobs_retry_sweeper"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
@@ -1927,30 +1925,6 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 03:15 UTC — after the retention sweeps, low-traffic window.
         cadence=Cadence.daily(hour=3, minute=15),
         catch_up_on_boot=False,  # Step 10b already reaps at boot
-    ),
-    ScheduledJob(
-        name=JOB_API_WEDGE_PROBE,
-        display_name="Dev API wedge probe",
-        # Own single-job source lane: the probe takes no lock anything else
-        # needs, and on the catch-all ``db`` lane a multi-hour holder would
-        # starve it (#1526/#1527). A source lane is a JobLock bucket only — it
-        # adds no execution lane and no connection permit (the job runs on the
-        # general execution lane, ``app/jobs/runtime.py::execution_lane_for``).
-        source="api_wedge_probe",
-        description=(
-            "#3119 — dev-only: probe the local API's /health/live + /health "
-            "under bounded deadlines and compare the served app/ tree against "
-            "the checkout. On a hang, SIGUSR1 the recorded worker for a thread "
-            "dump, then fail. Fails on stale code seen on two consecutive "
-            "probes, and on unknown freshness. Hard no-op when app_env is not "
-            "dev-like. No DB access beyond job_runs."
-        ),
-        # A wedge persists until someone restarts the API (the 2026-09-16 one
-        # served stale code for ~10h), so the cadence bounds detection latency,
-        # not correctness. 15 min also spaces the two STALE observations far
-        # beyond a uvicorn reload's seconds.
-        cadence=Cadence.every_n_minutes(interval=15),
-        catch_up_on_boot=False,
     ),
     ScheduledJob(
         name=JOB_LIVENESS_WATCHDOG,
@@ -8365,45 +8339,6 @@ def orphan_test_db_reap() -> None:
             result.total_reaped,
             result.invalid,
             result.orphans,
-        )
-
-
-# Previous run's STALE ``(served, ondisk)`` pair. Process-local by design: a
-# jobs-daemon restart forgets it, which delays a stale alarm by one cadence
-# period and can never raise a false one.
-_api_wedge_previous_stale: tuple[str | None, str | None] | None = None
-
-
-def api_wedge_probe() -> None:
-    """Periodic dev-API wedge / stale-code probe (#3119).
-
-    Thin wrapper over :mod:`app.system.api_wedge_probe`, the same code the
-    manual ``scripts/probe_api_wedge.py`` runs. A hard no-op outside a
-    dev-like ``app_env``: the probe targets the local dev API and signals its
-    worker, neither of which exists anywhere else.
-
-    Raises (so ``job_runs`` records a failure the admin page shows) on a wedge
-    — AFTER the thread dump, which is the evidence the ticket needs — on stale
-    code seen by two consecutive runs, and on unknown freshness.
-    """
-    global _api_wedge_previous_stale
-    from app.system.api_wedge_probe import dump_threads, observe, periodic_decision
-
-    with _tracked_job(JOB_API_WEDGE_PROBE):
-        if settings.app_env not in DEV_LIKE_ENVS:
-            logger.info("api_wedge_probe skipped: app_env=%s", settings.app_env)
-            return
-        obs = observe()
-        failure, _api_wedge_previous_stale = periodic_decision(obs, _api_wedge_previous_stale)
-        if obs.wedged:
-            logger.error("api_wedge_probe: %s", dump_threads(obs.sidecar))
-        if failure is not None:
-            raise RuntimeError(failure)
-        logger.info(
-            "api_wedge_probe: live=%s health=%s app_tree=%s",
-            obs.live.status,
-            obs.health.status,
-            obs.verdict,
         )
 
 

@@ -1,18 +1,20 @@
-"""#3119 — the periodic ``api_wedge_probe`` job's decision and wrapper.
+"""#3119 — the periodic API wedge probe's decision, loop and request deadline.
 
 Pure: ``observe`` and ``dump_threads`` are replaced, so nothing here touches
-the network, git, a real worker or the DB.
+git, a real worker or the DB; the one socket test uses a local listener.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import logging
+import socket
+import threading
+import time
 
 import pytest
 
 from app.system import api_wedge_probe as probe_mod
 from app.system.api_wedge_probe import Observation, ProbeResult, periodic_decision
-from app.workers import scheduler
 
 
 def _obs(
@@ -62,55 +64,112 @@ def test_periodic_decision(obs, previous, fails, remembered) -> None:
     assert pair == remembered
 
 
+class _Ticks:
+    """A stop_event stand-in: ``wait`` reports "not stopped" ``n`` times."""
+
+    def __init__(self, n: int) -> None:
+        self.remaining = n
+
+    def wait(self, _timeout: float) -> bool:
+        self.remaining -= 1
+        return self.remaining < 0
+
+
 @pytest.fixture
-def job(monkeypatch: pytest.MonkeyPatch):
-    """Run the wrapper with the tracker, env and probe all replaced."""
-
-    @contextmanager
-    def fake_tracked(_name: str):
-        yield object()
-
+def loop(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    """Run ``run_periodic_probe`` over a scripted sequence of observations."""
     dumps: list[object] = []
-    monkeypatch.setattr(scheduler, "_tracked_job", fake_tracked)
-    monkeypatch.setattr(scheduler, "_api_wedge_previous_stale", None)
-    monkeypatch.setattr(scheduler.settings, "app_env", "dev")
+    monkeypatch.setattr(probe_mod.settings, "app_env", "dev")
     monkeypatch.setattr(probe_mod, "dump_threads", lambda sidecar: dumps.append(sidecar) or "sent")
 
-    def run(obs: Observation) -> None:
-        monkeypatch.setattr(probe_mod, "observe", lambda: obs)
-        scheduler.api_wedge_probe()
+    def run(*observations: Observation) -> list[str]:
+        queue = list(observations)
+        monkeypatch.setattr(probe_mod, "observe", lambda: queue.pop(0))
+        caplog.clear()
+        with caplog.at_level(logging.ERROR, logger=probe_mod.__name__):
+            probe_mod.run_periodic_probe(_Ticks(len(observations)), interval_s=0)  # type: ignore[arg-type]
+        return [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
 
     run.dumps = dumps  # type: ignore[attr-defined]
     return run
 
 
-def test_job_dumps_threads_before_failing_on_a_wedge(job) -> None:
+def test_loop_dumps_threads_and_alarms_on_a_wedge(loop) -> None:
     obs = _obs(live=None, health=None)
-    with pytest.raises(RuntimeError, match="wedged"):
-        job(obs)
-    assert job.dumps == [obs.sidecar]
+    errors = loop(obs)
+    assert loop.dumps == [obs.sidecar]
+    assert any("wedged" in e for e in errors)
 
 
-def test_job_needs_two_consecutive_stale_runs(job) -> None:
+def test_loop_needs_two_consecutive_stale_passes(loop) -> None:
     stale = _obs(verdict="STALE", ondisk="bbb")
-    job(stale)
-    with pytest.raises(RuntimeError, match="stale"):
-        job(stale)
-    assert job.dumps == []
+    assert loop(stale) == []
+    assert any("stale" in e for e in loop(stale, stale))
+    assert loop.dumps == []
 
 
-def test_job_healthy_run_clears_the_stale_memory(job) -> None:
+def test_loop_healthy_pass_clears_the_stale_memory(loop) -> None:
     stale = _obs(verdict="STALE", ondisk="bbb")
-    job(stale)
-    job(_obs())
-    job(stale)  # first sighting again, so no failure
+    assert loop(stale, _obs(), stale) == []
 
 
-def test_job_is_a_no_op_outside_dev(job, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(scheduler.settings, "app_env", "prod")
+def test_loop_survives_a_raising_pass(loop, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = iter([RuntimeError("boom"), _obs(live=None, health=None)])
+
+    def observe() -> Observation:
+        item = next(calls)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(probe_mod, "observe", observe)
+    probe_mod.run_periodic_probe(_Ticks(2), interval_s=0)  # type: ignore[arg-type]
+    assert len(loop.dumps) == 1
+
+
+def test_loop_is_a_no_op_outside_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod.settings, "app_env", "prod")
 
     def boom() -> Observation:
         raise AssertionError("probe must not run outside dev")
 
     monkeypatch.setattr(probe_mod, "observe", boom)
-    scheduler.api_wedge_probe()
+    probe_mod.run_periodic_probe(_Ticks(3), interval_s=0)  # type: ignore[arg-type]
+
+
+def test_probe_releases_a_dribbling_peer_at_the_deadline() -> None:
+    """A peer that sends a byte every 0.1s never trips the per-op socket timeout.
+
+    The deadline must end the request thread, not abandon it: the jobs process
+    runs this every cadence period and would otherwise accumulate sockets.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def dribble() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(4096)
+            try:
+                conn.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+                while not stop.is_set():
+                    conn.sendall(b"a")
+                    time.sleep(0.1)
+            except OSError:
+                pass
+
+    server = threading.Thread(target=dribble, daemon=True)
+    server.start()
+    before = {t.ident for t in threading.enumerate() if t.name == "api-wedge-probe-request"}
+    try:
+        result = probe_mod.probe(f"http://127.0.0.1:{port}", "/health/live", 0.5)
+        leaked = [t for t in threading.enumerate() if t.name == "api-wedge-probe-request" and t.ident not in before]
+    finally:
+        stop.set()
+        listener.close()
+
+    assert not result.answered
+    assert leaked == []

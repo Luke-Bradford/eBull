@@ -97,7 +97,6 @@ from app.services.processes.param_metadata import (
 from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
     JOB_ACCOUNT_RECONCILIATION_CHECK,
-    JOB_API_WEDGE_PROBE,
     JOB_AQR_REFERENCE_REFRESH,
     JOB_ATTRIBUTION_SUMMARY,
     JOB_BLOCKHOLDER_LINK_SWEEP,
@@ -180,7 +179,6 @@ from app.workers.scheduler import (
     CadenceKind,
     ScheduledJob,
     account_reconciliation_check_job,
-    api_wedge_probe,
     aqr_reference_refresh,
     attribution_summary_job,
     blockholder_link_sweep,
@@ -471,7 +469,6 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_PG_SIZE_SAMPLE: _adapt_zero_arg(pg_size_sample),
     JOB_FINANCIAL_FACTS_RETENTION_SWEEP: _adapt_zero_arg(financial_facts_retention_sweep),
     JOB_ORPHAN_TEST_DB_REAP: _adapt_zero_arg(orphan_test_db_reap),
-    JOB_API_WEDGE_PROBE: _adapt_zero_arg(api_wedge_probe),
     JOB_LIVENESS_WATCHDOG: _adapt_zero_arg(jobs_liveness_watchdog),
     JOB_RETRY_SWEEPER: _adapt_zero_arg(jobs_retry_sweeper),
     JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP: _adapt_zero_arg(sec_business_summary_bootstrap),
