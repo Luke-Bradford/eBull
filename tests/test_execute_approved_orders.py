@@ -102,7 +102,7 @@ def _mock_conn_with_rows(rows: list[tuple[Any, ...]]) -> MagicMock:
 
 
 @patch("app.workers.scheduler._tracked_job", _noop_tracked_job)
-@patch("app.workers.scheduler._load_etoro_credentials", return_value=None)
+@patch("app.workers.scheduler._load_etoro_credentials_with_ids", return_value=None)
 class TestGuardPhase:
     """Phase 1: proposed recommendations are guarded."""
 
@@ -174,7 +174,7 @@ class TestGuardPhase:
 
 
 @patch("app.workers.scheduler._tracked_job", _noop_tracked_job)
-@patch("app.workers.scheduler._load_etoro_credentials", return_value=None)
+@patch("app.workers.scheduler._load_etoro_credentials_with_ids", return_value=None)
 class TestExecutePhase:
     """Phase 2: approved recommendations are executed."""
 
@@ -276,7 +276,7 @@ class TestExecutePhase:
 
 
 @patch("app.workers.scheduler._tracked_job", _noop_tracked_job)
-@patch("app.workers.scheduler._load_etoro_credentials", return_value=None)
+@patch("app.workers.scheduler._load_etoro_credentials_with_ids", return_value=None)
 class TestNoWork:
     """Edge cases: nothing to do."""
 
@@ -334,3 +334,135 @@ class TestPrerequisite:
         met, reason = _has_actionable_recommendations(conn)
         assert met is False
         assert "no proposed or approved" in reason
+
+
+# ---------------------------------------------------------------------------
+# #2942 — key scope, busy key, recorded account
+# ---------------------------------------------------------------------------
+
+
+def _exec_phase_conns(approved: list[tuple[Any, ...]], exec_conns: list[MagicMock]) -> list[MagicMock]:
+    return [_mock_conn_with_rows([]), _mock_conn_with_rows([]), _mock_conn_with_rows(approved), *exec_conns]
+
+
+def _exec_summary(caplog: Any) -> str:
+    lines = [r.getMessage() for r in caplog.records if "execute_approved_orders complete" in r.getMessage()]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+@patch("app.workers.scheduler._tracked_job", _noop_tracked_job)
+@patch("app.workers.scheduler._load_etoro_credentials_with_ids", return_value=None)
+class TestSubmissionKeyOutcomes:
+    @patch("app.workers.scheduler.execute_order")
+    @patch("app.workers.scheduler.evaluate_recommendation")
+    @patch("app.workers.scheduler.psycopg.connect")
+    def test_a_busy_key_counts_unresolved_and_the_loop_continues(
+        self,
+        mock_connect: MagicMock,
+        _guard: MagicMock,
+        mock_exec: MagicMock,
+        _creds: MagicMock,
+        caplog: Any,
+    ) -> None:
+        from app.services.order_client import ConcurrentSubmissionInFlightError
+        from app.workers.scheduler import execute_approved_orders
+
+        mock_connect.side_effect = _exec_phase_conns(
+            [(1, 100), (2, 200)], [_mock_conn_with_rows([]), _mock_conn_with_rows([])]
+        )
+        mock_exec.side_effect = [ConcurrentSubmissionInFlightError("busy"), _exec_filled(2, 600)]
+
+        with caplog.at_level("INFO", logger="app.workers.scheduler"):
+            execute_approved_orders()
+
+        assert mock_exec.call_count == 2
+        summary = _exec_summary(caplog)
+        assert "unresolved=1" in summary
+        assert "failed=0" in summary
+        assert "executed=1" in summary
+
+    @patch("app.workers.scheduler.execute_order")
+    @patch("app.workers.scheduler.evaluate_recommendation")
+    @patch("app.workers.scheduler.psycopg.connect")
+    def test_a_committed_result_on_a_closed_connection_counts_by_outcome(
+        self,
+        mock_connect: MagicMock,
+        _guard: MagicMock,
+        mock_exec: MagicMock,
+        _creds: MagicMock,
+        caplog: Any,
+    ) -> None:
+        """execute_order returned a committed result after its key cleanup
+        closed the connection: no post-call commit, counted by outcome."""
+        from app.workers.scheduler import execute_approved_orders
+
+        exec_conn = _mock_conn_with_rows([])
+        exec_conn.closed = True
+        exec_conn.commit.side_effect = AssertionError("commit on a closed connection")
+        mock_connect.side_effect = _exec_phase_conns([(1, 100)], [exec_conn])
+        mock_exec.return_value = _exec_filled(1, 500)
+
+        with caplog.at_level("INFO", logger="app.workers.scheduler"):
+            execute_approved_orders()
+
+        exec_conn.commit.assert_not_called()
+        summary = _exec_summary(caplog)
+        assert "executed=1" in summary
+        assert "failed=0" in summary
+
+    @patch("app.workers.scheduler.execute_order")
+    @patch("app.workers.scheduler.evaluate_recommendation")
+    @patch("app.workers.scheduler.psycopg.connect")
+    def test_a_release_between_selection_and_step_1_counts_refused(
+        self,
+        mock_connect: MagicMock,
+        _guard: MagicMock,
+        mock_exec: MagicMock,
+        _creds: MagicMock,
+        caplog: Any,
+    ) -> None:
+        from app.services.order_client import RecommendationNoLongerApprovedError
+        from app.workers.scheduler import execute_approved_orders
+
+        mock_connect.side_effect = _exec_phase_conns([(1, 100)], [_mock_conn_with_rows([])])
+        mock_exec.side_effect = RecommendationNoLongerApprovedError("status moved")
+
+        with caplog.at_level("INFO", logger="app.workers.scheduler"):
+            execute_approved_orders()
+
+        summary = _exec_summary(caplog)
+        assert "refused=1" in summary
+        assert "failed=0" in summary
+
+
+@patch("app.workers.scheduler._tracked_job", _noop_tracked_job)
+class TestRecordedAccountConstruction:
+    @patch("app.providers.implementations.etoro_broker.EtoroBrokerProvider")
+    @patch("app.workers.scheduler.execute_order")
+    @patch("app.workers.scheduler.evaluate_recommendation")
+    @patch("app.workers.scheduler.psycopg.connect")
+    def test_the_recorded_ids_are_those_of_the_plaintext_the_broker_was_built_with(
+        self,
+        mock_connect: MagicMock,
+        _guard: MagicMock,
+        mock_exec: MagicMock,
+        mock_provider: MagicMock,
+    ) -> None:
+        from uuid import uuid4
+
+        from app.services.broker_credentials import LoadedCredential
+        from app.workers.scheduler import execute_approved_orders
+
+        api = LoadedCredential(id=uuid4(), plaintext="api-plaintext")
+        user = LoadedCredential(id=uuid4(), plaintext="user-plaintext")
+        mock_connect.side_effect = _exec_phase_conns([(1, 100)], [_mock_conn_with_rows([])])
+        mock_exec.return_value = _exec_filled(1, 500)
+
+        with patch("app.workers.scheduler._load_etoro_credentials_with_ids", return_value=(api, user)):
+            execute_approved_orders()
+
+        _, provider_kwargs = mock_provider.call_args
+        assert (provider_kwargs["api_key"], provider_kwargs["user_key"]) == ("api-plaintext", "user-plaintext")
+        _, exec_kwargs = mock_exec.call_args
+        assert exec_kwargs["broker_credential_ids"] == (api.id, user.id)

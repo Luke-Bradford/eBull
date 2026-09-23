@@ -11121,3 +11121,28 @@ neighbouring container and match it.**
   UPDATE only and relies on its children's `ON DELETE RESTRICT` for the rows that
   authorised anything. State which in the migration header.
 - Enforced in: `sql/411_core_rebalance_close.sql` header; `tests/fixtures/ebull_test_db.py::_TRUNCATE_BEFORE_DELETE`.
+
+### `pg_locks` is cluster-wide: a lock probe in a test must filter by database (#2942)
+
+- Symptom (caught by the pre-push db tier, not by `-n 0`): a test helper asking "does any
+  backend still hold advisory key `(2942, rec)`?" passed alone and failed under xdist. Each
+  worker has its own test DATABASE on one cluster, every fresh DB mints `recommendation_id = 1`,
+  and `pg_locks` lists every database's locks — so a sibling worker's live key read as a leak.
+- Prevention: any `pg_locks` query not already pinned to `pid = pg_backend_pid()` adds
+  `database = (SELECT oid FROM pg_database WHERE datname = current_database())`. Run a new
+  lock-probing DB test under `-n 4` before pushing, not only `-n 0`.
+- Enforced in: `tests/fixtures/recommendation_window_b.py::key_held_elsewhere`.
+
+### Two same-named columns read positionally are a silent field swap (#2942, PR #3317)
+
+- Symptom (review NITPICK): a candidate SELECT returned `api_cred.created_at, user_cred.created_at`
+  — two columns both named `created_at` — consumed by `_Candidate(*row)`. Reordering either
+  join or the SELECT list would move values between dataclass fields with no error.
+- Prevention: a row read by more than one or two fields is read with `dict_row` — including
+  ad-hoc tuple-indexed reads in scripts (`row[5]`), and rows zipped against a hand-written name
+  list. A row consumed by a dataclass is aliased to its field names (`_Candidate(**row)`), so a
+  mismatch raises `TypeError` instead of shifting. Any SELECT with duplicate output names gets
+  explicit aliases. (The review found three sites in one PR, one per round — sweep the diff for
+  the whole class once, not the flagged line.)
+- Enforced in: `app/services/recommendation_window_b_release.py::_read_candidate` /
+  `describe_candidate`; `scripts/release_recommendation_window_b.py::_recommendation_account_broker`.

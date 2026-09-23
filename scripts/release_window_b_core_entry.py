@@ -40,11 +40,20 @@ _CALLER = "core_window_b_release"
 
 
 @contextmanager
-def _order_account_broker(operator_id: UUID, api_key_id: UUID, user_key_id: UUID) -> Iterator[BrokerProvider]:
+def _order_account_broker(
+    operator_id: UUID,
+    api_key_id: UUID,
+    user_key_id: UUID,
+    *,
+    caller: str = _CALLER,
+    refusal_slug: str = "window_b_credentials_unresolved",
+) -> Iterator[BrokerProvider]:
     """The broker of the account that submitted the order, or a refusal.
 
     Loaded on its own connection so the release's lock-holding session is never used
-    for credential audit writes.
+    for credential audit writes. ``caller`` names the act in the credential-access
+    audit and ``refusal_slug`` is the refusal it raises; the recommendation release
+    (#2942) shares this body with its own values for both.
     """
     with psycopg.connect(settings.database_url) as conn:
         ensure_broker_key_loaded(conn)
@@ -58,7 +67,7 @@ def _order_account_broker(operator_id: UUID, api_key_id: UUID, user_key_id: UUID
                         provider="etoro",
                         label=label,
                         environment="demo",
-                        caller=_CALLER,
+                        caller=caller,
                     )
                 )
                 conn.commit()
@@ -68,11 +77,11 @@ def _order_account_broker(operator_id: UUID, api_key_id: UUID, user_key_id: UUID
             if conn.info.transaction_status == TransactionStatus.INTRANS:
                 conn.commit()
             if isinstance(exc, CredentialNotFound):
-                raise WindowBRefused("window_b_credentials_unresolved", "no live demo credential") from exc
+                raise WindowBRefused(refusal_slug, "no live demo credential") from exc
             raise
     if (loaded[0].id, loaded[1].id) != (api_key_id, user_key_id):
         raise WindowBRefused(
-            "window_b_credentials_unresolved",
+            refusal_slug,
             "the order's credentials are no longer the live demo pair; the witness would read another account",
         )
     with EtoroBrokerProvider(api_key=loaded[0].plaintext, user_key=loaded[1].plaintext, env="demo") as broker:

@@ -62,8 +62,11 @@ from psycopg.pq import TransactionStatus
 from app.providers.broker import BrokerOrderResult, BrokerOrderSubmissionUncertain, OrderParams
 from app.security.unattended_guard import UnattendedExecutionRefused
 from app.services.order_client import (
+    _OUTSTANDING_CLAIM_SQL,
+    _RECOMMENDATION_STATUS_SQL,
     BrokerSubmissionUncertainError,
     PriorSubmissionUnresolvedError,
+    RecommendationNoLongerApprovedError,
     SubmissionControlsRevokedError,
     _load_approved_recommendation,
     _load_exit_lot,
@@ -163,8 +166,11 @@ def _stub_post_trade_enqueue() -> Iterator[MagicMock]:
 _BROKER_ENV = "demo"
 
 
+_BROKER_CREDENTIAL_IDS = (UUID("00000000-0000-0000-0000-00000000a01d"), UUID("00000000-0000-0000-0000-00000000b01d"))
+
+
 def _execute(conn: Any, **kwargs: Any) -> Any:
-    """``execute_order`` with this suite's broker environment.
+    """``execute_order`` with this suite's broker environment and account ids.
 
     The live path REFUSES a submission whose broker environment is not recorded
     (#3189 finding 4b): the poller fails closed on an unrecorded environment, so
@@ -172,6 +178,7 @@ def _execute(conn: Any, **kwargs: Any) -> Any:
     test's own subject visible; the test that is ABOUT the refusal omits it.
     """
     kwargs.setdefault("broker_env", _BROKER_ENV)
+    kwargs.setdefault("broker_credential_ids", _BROKER_CREDENTIAL_IDS)
     return execute_order(conn, **kwargs)
 
 
@@ -221,6 +228,12 @@ def _advisory_lock_aware_result(result: MagicMock, sql: object) -> MagicMock:
         result.fetchone.return_value = (True,)
     elif "recommendation_submission_phase = 'claim_committed'" in text:
         result.fetchone.return_value = None
+    elif text == _OUTSTANDING_CLAIM_SQL:
+        # #2942 Delta 4: no other attempt holds the claim, the ordinary case.
+        result.fetchone.return_value = None
+    elif text == _RECOMMENDATION_STATUS_SQL:
+        # #2942 Delta 4: still 'approved' under the key, the ordinary case.
+        result.fetchone.return_value = ("approved",)
     else:
         result.fetchone.return_value = MagicMock()
     return result
@@ -632,9 +645,12 @@ class TestLoadApprovedRec:
             _load_approved_recommendation(conn, 999)
 
     def test_not_approved_raises(self) -> None:
+        """#2942: an existing recommendation that moved on is an AUDITED refusal
+        (counted `refused`), not a programmer-error ValueError (counted `failed`)."""
         conn = _make_conn([_rec_cursor(status="proposed")])
-        with pytest.raises(ValueError, match="expected 'approved'"):
+        with pytest.raises(RecommendationNoLongerApprovedError, match="no longer 'approved'"):
             _load_approved_recommendation(conn, 42)
+        assert conn.commit.called  # the FAIL audit row is committed before the raise
 
     def test_approved_returns_row(self) -> None:
         conn = _make_conn([_rec_cursor(status="approved")])
@@ -693,6 +709,14 @@ class TestLoadHelpers:
 # ---------------------------------------------------------------------------
 
 
+#: #2942 Delta 4: the synthetic branch now runs under the per-recommendation
+#: key like the live one. Seven `conn.execute` calls it did not make before: the
+#: key acquire, the terminaliser's nested acquire, its release UPDATE (matching
+#: nothing), its nested unlock, the outstanding-claim check, the status re-check,
+#: and the outer unlock. The step-5 status UPDATE is still one call (now a CAS).
+_DEMO_KEY_SPAN_EXECUTES = 7
+
+
 class TestExecuteOrderDemoMode:
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_buy_produces_fill_and_order(self, _mock_now: MagicMock) -> None:
@@ -722,7 +746,7 @@ class TestExecuteOrderDemoMode:
 
         # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
         # position upsert, broker_positions, cash_ledger, rec status, audit = 7
-        assert conn.execute.call_count == 7
+        assert conn.execute.call_count == 7 + _DEMO_KEY_SPAN_EXECUTES
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -749,7 +773,7 @@ class TestExecuteOrderDemoMode:
         assert result.fill_id == 4
 
         # conn.execute: position update, cash_ledger, rec status, audit = 4
-        assert conn.execute.call_count == 4
+        assert conn.execute.call_count == 4 + _DEMO_KEY_SPAN_EXECUTES
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_exit_no_quote_fails_closed(self, _mock_now: MagicMock) -> None:
@@ -780,7 +804,7 @@ class TestExecuteOrderDemoMode:
         # conn.execute: rec status update + audit = 2 (NO position deduct,
         # NO cash ledger, NO broker_positions). The fill guard rejected
         # everything because broker_result.status = 'failed'.
-        assert conn.execute.call_count == 2
+        assert conn.execute.call_count == 2 + _DEMO_KEY_SPAN_EXECUTES
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_buy_no_quote_produces_failed_no_fill(self, _mock_now: MagicMock) -> None:
@@ -808,7 +832,7 @@ class TestExecuteOrderDemoMode:
 
         # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
         # rec status update, audit = 4 (no fill/position/cash)
-        assert conn.execute.call_count == 4
+        assert conn.execute.call_count == 4 + _DEMO_KEY_SPAN_EXECUTES
 
     @patch("app.services.order_client._synthetic_fill")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -1029,6 +1053,30 @@ class TestExecuteOrderLiveMode:
             execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         broker.place_order.assert_not_called()
+
+    @pytest.mark.parametrize("action", ["BUY", "EXIT"])
+    @pytest.mark.parametrize(
+        "ids",
+        [None, (_BROKER_CREDENTIAL_IDS[0], None), (None, _BROKER_CREDENTIAL_IDS[1]), (_BROKER_CREDENTIAL_IDS[0],)],
+        ids=["none", "no_user", "no_api", "one"],
+    )
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_a_live_submission_without_its_account_ids_is_refused_before_the_claim(
+        self, _mock_now: MagicMock, ids: Any, action: str
+    ) -> None:
+        """#2942 Delta 3: an attempt whose account is not recorded could never be
+        released by the attended window-B act, so it must not start."""
+        broker = MagicMock()
+        cursors = [_rec_cursor(action=action, target_entry=100.0, suggested_size_pct=0.05)]
+        cursors.append(_cash_cursor(balance=10_000.0) if action == "BUY" else _position_cursor(current_units=5.0))
+        conn = _make_conn(cursors)
+
+        with pytest.raises(ValueError, match="no broker_credential_ids supplied"):
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker, broker_credential_ids=ids)
+
+        broker.place_order.assert_not_called()
+        broker.close_position.assert_not_called()
+        assert not any("pg_try_advisory_lock" in str(c.args[0]) for c in conn.execute.call_args_list)
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_buy_calls_broker_place_order(self, _mock_now: MagicMock) -> None:
@@ -1274,13 +1322,16 @@ class TestExecuteOrderLiveMode:
 
         conn.execute.side_effect = _execute_tag
 
-        with pytest.raises(RuntimeError, match="simulated broker crash"):
+        # #2942 Delta 1: an unexpected provider exception is parked `uncertain`
+        # and surfaces as BrokerSubmissionUncertainError, chained from the cause.
+        with pytest.raises(BrokerSubmissionUncertainError, match="simulated broker crash") as raised:
             _execute(
                 conn,
                 recommendation_id=42,
                 decision_id=10,
                 broker=broker,
             )
+        assert isinstance(raised.value.__cause__, RuntimeError)
 
         # Order matters, and every step of it is load-bearing:
         #   lock            — the evidence key, taken before the claim exists
@@ -1304,6 +1355,7 @@ class TestExecuteOrderLiveMode:
             "marker_update",
             "commit",
             "broker.place_order",
+            "commit",  # #2942: the uncertain park's audit row
             "unlock",
             "commit",
         ], f"durable-intent ordering violated: {sequence}"
@@ -1422,7 +1474,10 @@ class TestExecuteOrderFailures:
         # the outer evidence-lock acquire, the terminaliser's own nested
         # acquire, its release UPDATE (matching nothing here), its nested
         # unlock, the marker UPDATE, and the outer unlock.
-        assert conn.execute.call_count == 4 + 6
+        #
+        # #2942 Delta 4 adds two, under the key: the outstanding-claim check and
+        # the status re-check.
+        assert conn.execute.call_count == 4 + 6 + 2
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_broker_pending_persists_order_with_pending_status(self, _mock_now: MagicMock) -> None:
@@ -1469,7 +1524,7 @@ class TestExecuteOrderFailures:
 
     def test_recommendation_not_approved_raises(self) -> None:
         conn = _make_conn([_rec_cursor(status="proposed")])
-        with pytest.raises(ValueError, match="expected 'approved'"):
+        with pytest.raises(RecommendationNoLongerApprovedError):
             _execute(
                 conn,
                 recommendation_id=42,
@@ -2073,7 +2128,8 @@ class TestUncertainSubmission:
         assert "status = 'refused'" in joined
         assert "status = 'uncertain'" not in joined
         # The recommendation is untouched — it stays approved and retryable.
-        assert "trade_recommendations" not in joined
+        # (#2942 Delta 4 READS its status under the key; nothing writes it.)
+        assert "UPDATE trade_recommendations" not in joined
         assert conn.commit.called
 
 
@@ -2424,6 +2480,30 @@ class TestExitLotMirrorDeduction:
             raw_payload={},
         )
         return broker
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_an_unexpected_close_position_exception_parks_uncertain(
+        self, _mock_now: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2942 Delta 1, at the EXIT call site: the call returned by raising, so
+        its sends are over and the outcome is unknown — park, never propagate raw."""
+        broker = self._live_exit_broker(monkeypatch)
+        broker.close_position.side_effect = KeyError("unparseable close ack")
+        conn = _make_conn(
+            [
+                _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+                _position_cursor(current_units=1500.0),
+                _make_cursor([{"position_id": 3308442058, "units": 1000.0}]),
+                _order_returning_cursor(order_id=11),
+            ]
+        )
+        with pytest.raises(BrokerSubmissionUncertainError) as raised:
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
+        assert raised.value.order_id == 11
+        park = next(c for c in conn.execute.call_args_list if "status = 'uncertain'" in str(c.args[0]))
+        params = park.args[1]
+        assert params["message"] == str(KeyError("unparseable close ack"))
+        assert params["payload"].obj["exception"] == "KeyError"
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)

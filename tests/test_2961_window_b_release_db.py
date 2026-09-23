@@ -191,7 +191,7 @@ def test_a_dead_sender_and_a_clean_witness_release_the_authority(
     assert broker.reads == 1
     assert broker.bound_to == [(OPERATOR_ID, API_CREDENTIAL_ID, USER_CREDENTIAL_ID)]
     audits = _audits(ebull_test_conn)
-    assert [(pass_fail, version) for pass_fail, version, _ in audits] == [("PASS", "core-window-b-v1")]
+    assert [(pass_fail, version) for pass_fail, version, _ in audits] == [("PASS", "core-window-b-v2")]
     evidence = audits[0][2]
     assert evidence["attestation"] == "checked the demo account by hand"
     assert evidence["operator_id"] == "attending-operator"

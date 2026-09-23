@@ -545,7 +545,7 @@ def test_credential_rotation_is_refused_while_core_reconciliation_needs_it() -> 
     cursor.fetchone.return_value = (True,)
     conn.cursor.return_value.__enter__.return_value = cursor
 
-    with pytest.raises(CredentialInUse, match="unresolved core order"):
+    with pytest.raises(CredentialInUse, match="unresolved core or recommendation order"):
         revoke_credential(conn, credential_id=API_CREDENTIAL, operator_id=OPERATOR)
 
     assert all("UPDATE broker_credentials" not in call.args[0] for call in cursor.execute.call_args_list)
