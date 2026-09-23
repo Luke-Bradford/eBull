@@ -302,8 +302,11 @@ def _build_fx_rates_used(
     for ccy in sorted(source_currencies):
         # A minor unit (GBX) consumed its major currency's live pair (#3322): report
         # that pair, scaled, so the audit field names the rate that moved the value.
-        # GBX→GBP uses no live rate and is not reported.
+        # GBX→GBP uses no live rate and is not reported. ``display_currency`` is an
+        # ISO major (runtime_config.SUPPORTED_CURRENCIES), so only the source needs resolving.
         major, scale = MINOR_UNITS.get(ccy, (ccy, Decimal("1")))
+        if major == display_currency:
+            continue
         key = (major, display_currency)
         inv_key = (display_currency, major)
         if key in rates_meta:

@@ -1417,3 +1417,16 @@ class TestInstrumentPositionsOpenConversionRate:
         # mid 697.19; mv = 6000 + 10 * (697.19 - 600) * 1.0 = 6971.9
         assert body["trades"][0]["market_value"] == pytest.approx(6971.9)
         assert body["trades"][0]["current_price"] == pytest.approx(697.19)
+
+
+def test_fx_rates_used_reports_gbx_through_the_scaled_gbp_pair() -> None:
+    """#3322: a GBX holding consumed the GBP pair; GBX→GBP consumed none."""
+    from app.api.portfolio import _build_fx_rates_used
+
+    meta = {
+        ("USD", "GBP"): {"rate": Decimal("0.75"), "quoted_at": _NOW},
+        ("GBP", "GBP"): {"rate": Decimal("1"), "quoted_at": _NOW},
+    }
+    to_usd = _build_fx_rates_used([{"currency": "GBX"}], False, 0.0, "USD", meta)
+    assert to_usd["GBX"]["rate"] == pytest.approx(0.01 / 0.75)
+    assert _build_fx_rates_used([{"currency": "GBX"}], False, 0.0, "GBP", meta) == {}
