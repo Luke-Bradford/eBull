@@ -220,6 +220,7 @@ CorePreflightRefusal = Literal[
     "core_auto_trading_disabled",
     "core_kill_switch_active_or_missing",
     "core_execution_block_active",
+    "core_operation_outstanding",
     "core_instrument_missing",
     "core_instrument_not_tradable",
     "core_unsupported_market_session",
@@ -323,6 +324,12 @@ class CorePreflightObservation:
     bid: Any
     ask: Any
     spread_flag: bool | None
+    core_operation_outstanding: bool = False
+    """#2603 sell leg §4: an operation on ANY core ownership (active or released) is
+    unresolved, or is a close in ``reconcile_required``.  A core close can stay
+    ``submitted`` after its hold ends and a ``reconcile_required`` one indefinitely; no
+    core trade may follow either until it resolves.  Defaulted so pure fixtures that
+    predate it read as "none outstanding"."""
 
 
 # One statement, so the kill switch, execution block, instrument, exchange, halt
@@ -355,7 +362,16 @@ SELECT (i.instrument_id IS NOT NULL) AS instrument_present,
        ) AS is_halted,
        (SELECT fetched_at FROM strategy_halt_feed_state WHERE source = 'nasdaq_trader_rss')
            AS halt_feed_at,
-       q.quoted_at, q.bid, q.ask, q.spread_flag
+       q.quoted_at, q.bid, q.ask, q.spread_flag,
+       EXISTS (
+           SELECT 1
+           FROM strategy_position_operations op
+           JOIN strategy_position_ownership own ON own.ownership_id = op.ownership_id
+           JOIN strategy_trades ct ON ct.strategy_trade_id = own.strategy_trade_id
+           WHERE ct.core_rebalance_intent_id IS NOT NULL
+             AND (op.status IN ('intent_persisted', 'submitting', 'submitted')
+                  OR (op.operation_type = 'close' AND op.status = 'reconcile_required'))
+       ) AS core_operation_outstanding
 FROM (SELECT %(core_instrument_id)s::bigint AS target) t
 LEFT JOIN instruments i ON i.instrument_id = t.target
 LEFT JOIN exchanges e ON e.exchange_id = i.exchange
@@ -500,6 +516,7 @@ def preflight_core_submission(
         bid=row[9],
         ask=row[10],
         spread_flag=row[11],
+        core_operation_outstanding=bool(row[12]),
     )
     return decide_core_preflight(observation, core_instrument_id=core_instrument_id, action=action, now=now)
 
@@ -537,6 +554,8 @@ def decide_core_preflight(
         )
     if observation.execution_blocked:
         return refuse("core_execution_block_active")
+    if observation.core_operation_outstanding:
+        return refuse("core_operation_outstanding")
     if not observation.instrument_present:
         return refuse("core_instrument_missing", f"instrument_id={core_instrument_id}")
     if not observation.is_tradable:

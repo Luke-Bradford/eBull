@@ -478,7 +478,15 @@ _PLANNER_TABLES: tuple[str, ...] = (
 # cleanup is allowed to empty them, but must do so explicitly before deleting
 # their parents; otherwise every test that stores real promotion evidence falls
 # through to the much slower whole-schema TRUNCATE recovery path (#2737).
-_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset({"strategy_result_universe"})
+_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset(
+    {
+        "strategy_result_universe",
+        # #2603 (sql/411) — a core_rebalance close operation and its close quote are
+        # permanent. Both are FK leaves, so TRUNCATE needs no cascade.
+        "strategy_position_operations",
+        "strategy_core_rebalance_close_quotes",
+    }
+)
 
 
 # ---------------------------------------------------------------------------

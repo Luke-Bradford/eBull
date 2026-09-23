@@ -75,7 +75,7 @@ CoreSubmissionRefusal = Literal[
     "core_intent_already_submitted",
     "core_trade_in_flight",
     "core_eligibility_unproved",
-    "core_partial_close_unproved",
+    "core_close_unproved",
 ]
 """The closed vocabulary of reasons admission is refused.
 
@@ -459,16 +459,17 @@ def admit_core_rebalance_intent(
         # the message distinguishes them, so it is carried rather than dropped.
         return _refused(intent_id, "core_eligibility_unproved", str(exc), **context)
 
-    if verdict_action == "sell_core" and proof.allow_partial_close_position is not True:
-        # A rebalance sell can never be a full close: `validate_core_mandate`
-        # requires `core_target_pct - rebalance_band_pct > 0` and the allocator
-        # sells only down to the lower band edge, so post-trade core value is
-        # strictly positive.  `is not True` rather than `not ...`: the column is
-        # nullable and None means the response did not say.
+    if verdict_action == "sell_core" and proof.allow_close_position is not True:
+        # #2603 sell leg: a `sell_core` is executed as a WHOLE close of the one owned core
+        # position, then a rebuy to `lower` (spec
+        # `docs/proposals/ta/2026-09-23-core-sell-leg-close-rebuy.md`).  So the proved
+        # capability is the whole close; the partial-close one this used to require
+        # belonged to the superseded trim model.  `is not True` rather than `not ...`:
+        # the column is nullable and None means the response did not say.
         return _refused(
             intent_id,
-            "core_partial_close_unproved",
-            f"proof {proof.proof_id} allow_partial_close_position={proof.allow_partial_close_position!r}",
+            "core_close_unproved",
+            f"proof {proof.proof_id} allow_close_position={proof.allow_close_position!r}",
             **context,
         )
 

@@ -188,6 +188,8 @@ def test_the_untraded_side_is_validated_too() -> None:
 _DEFECT_BY_CODE: dict[str, dict[str, Any]] = {
     "core_kill_switch_active_or_missing": {"kill_switch_active": True},
     "core_execution_block_active": {"execution_blocked": True},
+    # #2603 sell leg §4: an unresolved core close quarantines every core trade.
+    "core_operation_outstanding": {"core_operation_outstanding": True},
     "core_instrument_missing": {"instrument_present": False},
     "core_instrument_not_tradable": {"is_tradable": False},
     "core_unsupported_market_session": {"asset_class": "crypto"},

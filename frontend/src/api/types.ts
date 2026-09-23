@@ -3149,7 +3149,13 @@ export interface CoreMandateUpdate {
 }
 
 export interface CoreRebalanceResponse {
-  state: "held" | "refused" | "submitted" | "submission_uncertain";
+  state:
+    | "held"
+    | "refused"
+    | "submitted"
+    | "submission_uncertain"
+    | "closed"
+    | "reconcile_required";
   reason_code: string;
   intent_id: number | null;
   trade_id: number | null;

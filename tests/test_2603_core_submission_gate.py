@@ -111,4 +111,4 @@ def test_the_refusal_vocabulary_is_closed_and_has_no_duplicates() -> None:
     # The four inherited scope items plus the two this slice's falsification added.
     assert {"core_intent_already_submitted", "core_trade_in_flight"} <= set(codes)
     assert {"core_intent_superseded", "core_mandate_revision_stale"} <= set(codes)
-    assert {"core_eligibility_unproved", "core_partial_close_unproved"} <= set(codes)
+    assert {"core_eligibility_unproved", "core_close_unproved"} <= set(codes)
