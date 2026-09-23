@@ -1081,6 +1081,9 @@ def _fy_period_is_presented(facts: Sequence[FactRow], primary_end_by_accession: 
     """
     max_year_days = _FLOW_DURATION_DAYS["FY"][1]
     for fact in facts:
+        # Any duration here is ANNUAL: the caller passes facts from the fp=FY
+        # groups, which the #1835 duration guard already restricted to the
+        # _FLOW_DURATION_DAYS["FY"] span.
         if fact.period_start is not None:
             return True
         primary_end = primary_end_by_accession.get(fact.accession_number)
