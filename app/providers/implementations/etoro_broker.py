@@ -906,6 +906,7 @@ class EtoroBrokerProvider(BrokerProvider):
                 raise TypeError("positions must be a list")
             if any(not isinstance(row, dict) for row in raw_positions):
                 raise TypeError("every affected position must be an object")
+            raw_positions = _drop_bare_duplicate_positions(raw_positions)
             positions = tuple(
                 CloseOrderPositionFill(
                     position_id=_strict_positive_id(row["positionID"]),
@@ -1351,6 +1352,39 @@ def _strict_positive_id(value: object) -> int:
     return parsed
 
 
+def _row_carries_execution(row: dict[str, Any]) -> bool:
+    return all(row.get(field) is not None for field in _CLOSE_EXECUTION_FIELDS)
+
+
+def _drop_bare_duplicate_positions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse ``positions[]`` to one view per distinct ``positionID`` (#3331).
+
+    Observed live (#2603 acceptance A, order ``383424950``, 2026-09-23): an
+    executed whole close listed the SAME position twice, once with
+    ``rate``/``units``/``occurred`` and once bare. A bare entry says the order
+    touches that position; it is not evidence the close did not execute when
+    another entry for the same id carries the execution fields. So a bare entry
+    is dropped when its id has an executed entry, and repeated bare entries of
+    an id collapse to one. Executed entries are all kept: two executions of one
+    id is a shape never observed, and consumers that expect one entry refuse it
+    rather than have it merged here.
+
+    ⚠ Every id is validated strictly BEFORE anything is dropped, so a malformed
+    duplicate still fails the whole response rather than vanishing.
+    """
+    ids = [_strict_positive_id(row["positionID"]) for row in rows]
+    executed = {pid for pid, row in zip(ids, rows, strict=True) if _row_carries_execution(row)}
+    kept: list[dict[str, Any]] = []
+    bare_seen: set[int] = set()
+    for pid, row in zip(ids, rows, strict=True):
+        if _row_carries_execution(row):
+            kept.append(row)
+        elif pid not in executed and pid not in bare_seen:
+            bare_seen.add(pid)
+            kept.append(row)
+    return kept
+
+
 def _close_order_carries_execution(raw: dict[str, Any], positions: list[dict[str, Any]]) -> bool:
     """Whether a close-order lookup carries its own evidence of execution (#3320).
 
@@ -1361,10 +1395,14 @@ def _close_order_carries_execution(raw: dict[str, Any], positions: list[dict[str
     ``statusID 2`` with only ``positionID`` and ``proceeds 0.0``, and with
     ``rate``, ``units``, ``occurred`` and ``proceeds`` once executed. The 2→3
     transition corroborates this on one order; it is not the rule.
+
+    ``positions`` has already been through ``_drop_bare_duplicate_positions``,
+    so "every entry executed" means every DISTINCT position has an executed
+    entry (#3331).
     """
     if raw.get("proceeds") is None:
         return False
-    return all(row.get(field) is not None for row in positions for field in _CLOSE_EXECUTION_FIELDS)
+    return all(_row_carries_execution(row) for row in positions)
 
 
 def _normalise_close_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
