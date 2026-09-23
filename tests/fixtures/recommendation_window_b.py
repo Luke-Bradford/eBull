@@ -171,6 +171,8 @@ def key_held_elsewhere(url: str, recommendation_id: int, ns: int = 2942) -> bool
             """
             SELECT count(*) FROM pg_locks
             WHERE locktype = 'advisory' AND granted
+              -- pg_locks spans the whole cluster; xdist workers share it.
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
               AND classid::bigint = %s AND objid::bigint = %s AND objsubid = 2
             """,
             (ns, recommendation_id),

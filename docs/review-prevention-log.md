@@ -11121,3 +11121,14 @@ neighbouring container and match it.**
   UPDATE only and relies on its children's `ON DELETE RESTRICT` for the rows that
   authorised anything. State which in the migration header.
 - Enforced in: `sql/411_core_rebalance_close.sql` header; `tests/fixtures/ebull_test_db.py::_TRUNCATE_BEFORE_DELETE`.
+
+### `pg_locks` is cluster-wide: a lock probe in a test must filter by database (#2942)
+
+- Symptom (caught by the pre-push db tier, not by `-n 0`): a test helper asking "does any
+  backend still hold advisory key `(2942, rec)`?" passed alone and failed under xdist. Each
+  worker has its own test DATABASE on one cluster, every fresh DB mints `recommendation_id = 1`,
+  and `pg_locks` lists every database's locks — so a sibling worker's live key read as a leak.
+- Prevention: any `pg_locks` query not already pinned to `pid = pg_backend_pid()` adds
+  `database = (SELECT oid FROM pg_database WHERE datname = current_database())`. Run a new
+  lock-probing DB test under `-n 4` before pushing, not only `-n 0`.
+- Enforced in: `tests/fixtures/recommendation_window_b.py::key_held_elsewhere`.
