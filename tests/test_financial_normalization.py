@@ -2671,6 +2671,17 @@ class TestEpsIdentityCheck:
         [p] = _derive_periods_from_facts(facts)
         assert p.eps_diluted == Decimal("680000")
 
+    def test_disagreeing_cover_values_keep_eps(self) -> None:
+        extra = _fact(
+            concept="EntityCommonStockSharesOutstanding",
+            val=Decimal("20000000"),
+            unit="shares",
+            period_start=None,
+            period_end="2024-04-20",
+        )
+        [p] = _derive_periods_from_facts([*self._filing("680000"), extra])
+        assert p.eps_diluted == Decimal("680000")
+
     def test_ambiguous_net_income_keeps_eps(self) -> None:
         facts = [*self._filing("680000"), _fact(concept="NetIncomeLoss", val=Decimal("1"))]
         [p] = _derive_periods_from_facts(facts)

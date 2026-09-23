@@ -1237,7 +1237,7 @@ def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
     # A key holding two different values in one filing is ambiguous; it is skipped.
     numerators: dict[tuple[str, date | None, date], set[Decimal]] = defaultdict(set)
     shares: dict[tuple[str, str, date | None, date], set[Decimal]] = defaultdict(set)
-    cover_shares: dict[str, Decimal] = {}
+    cover_shares: dict[str, set[Decimal]] = defaultdict(set)
     for f in facts:
         mapping = _TAG_TO_COLUMN.get(f.concept)
         column = mapping[0] if mapping is not None else None
@@ -1246,7 +1246,7 @@ def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
         elif column is not None and column in _EPS_SHARES_COLUMN.values() and f.unit == "shares":
             shares[(column, f.accession_number, f.period_start, f.period_end)].add(f.val)
         elif f.concept == _DEI_SHARES_OUTSTANDING_CONCEPT and f.unit == "shares" and f.val > 0:
-            cover_shares[f.accession_number] = max(f.val, cover_shares.get(f.accession_number, f.val))
+            cover_shares[f.accession_number].add(f.val)
 
     refuted: set[int] = set()
     for i, f in enumerate(facts):
@@ -1255,15 +1255,16 @@ def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
             continue
         ni_vals = numerators.get((f.accession_number, f.period_start, f.period_end), set())
         sh_vals = shares.get((_EPS_SHARES_COLUMN[mapping[0]], f.accession_number, f.period_start, f.period_end), set())
-        cover = cover_shares.get(f.accession_number)
-        if len(ni_vals) != 1 or len(sh_vals) != 1 or cover is None:
+        covers = cover_shares.get(f.accession_number)
+        if len(ni_vals) != 1 or len(sh_vals) != 1 or not covers:
             continue
         [ni], [sh] = ni_vals, sh_vals
         if ni == 0 or sh == 0:
             continue
         if abs(f.val * sh) < _EPS_IDENTITY_BOUND * abs(ni):
             continue
-        if cover / 10 < abs(sh) < cover * 10:
+        # Several cover values (one per share class) must ALL corroborate.
+        if max(covers) / 10 < abs(sh) < min(covers) * 10:
             refuted.add(i)
     return refuted
 
