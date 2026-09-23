@@ -82,8 +82,8 @@ def test_tax_fx_treats_gbx_as_gbp_without_a_query() -> None:
     assert _load_fx_rate(None, NOW.date(), "GBX") == Decimal("1")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("rate", [Decimal(0), Decimal(-1), Decimal("NaN")])
-def test_native_amount_refuses_an_unusable_open_rate(rate: Decimal) -> None:
+@pytest.mark.parametrize("rate", [None, Decimal(0), Decimal(-1), Decimal("NaN")])
+def test_native_amount_refuses_an_unusable_open_rate(rate: Decimal | None) -> None:
     from app.services.portfolio_value_history import native_amount
 
     assert native_amount(Decimal("25"), rate) is None

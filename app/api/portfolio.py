@@ -411,7 +411,11 @@ def get_portfolio(
         # usable open rate, fall back to the unleveraged native cost
         # (units × open_rate) — the same fallback ``native_cost_basis`` uses —
         # never to the USD figure.
-        amount_native = native_amount(Decimal(str(br["amount"])), Decimal(str(br["open_conversion_rate"])))
+        # NOT NULL in broker_positions today; guarded so the helper decides, not str(None).
+        open_conv = br["open_conversion_rate"]
+        amount_native = native_amount(
+            Decimal(str(br["amount"])), None if open_conv is None else Decimal(str(open_conv))
+        )
         amount = float(amount_native) if amount_native is not None else units * open_rate_raw
         if cp_raw is not None:
             if is_buy:

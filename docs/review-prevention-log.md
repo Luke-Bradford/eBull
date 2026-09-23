@@ -11172,7 +11172,8 @@ neighbouring container and match it.**
   Quotes stamped during a 30-request fetch otherwise read as future-dated (the first census run
   refused 849 fresh quotes for exactly this). When the rate that makes two units compatible is missing or ≤ 0, fail closed
   (no_fx row, or a same-unit fallback such as `units × open_rate`); never fall back to the raw
-  figure in the other unit, which reintroduces the bug the conversion exists to fix.
+  figure in the other unit, which reintroduces the bug the conversion exists to fix. Coerce a
+  DB value to `Decimal` only after an explicit `is None` check: `Decimal(str(None))` raises.
 - Enforced in: `app/services/instrument_price_currency.py`; `app/services/fx.py::_pair_rate`;
   `app/services/portfolio_value_history.py::native_amount` (used by `app/api/portfolio.py` and
   `app/services/portfolio_eod.py`);
