@@ -112,7 +112,17 @@ def sync_universe(
                     -- curator's exchanges.currency, but preserve the prior
                     -- value if the exchange row is missing (transient
                     -- bootstrap order) rather than wiping it to NULL.
+                    --
+                    -- #3322: a currency derived from the broker's own
+                    -- conversion rate (``currency_source = 'broker_rate'``,
+                    -- written by ``instrument_price_currency``) outranks the
+                    -- venue default while the listing stays on the same
+                    -- exchange. An exchange move resets it to the new venue
+                    -- default; the writer re-derives it later in the same job.
                     currency           = CASE
+                        WHEN instruments.currency_source = 'broker_rate'
+                         AND instruments.exchange IS NOT DISTINCT FROM EXCLUDED.exchange
+                        THEN instruments.currency
                         WHEN EXISTS (
                             SELECT 1 FROM exchanges
                             WHERE exchange_id = EXCLUDED.exchange
@@ -122,6 +132,34 @@ def sync_universe(
                             WHERE exchange_id = EXCLUDED.exchange
                         )
                         ELSE instruments.currency
+                    END,
+                    currency_source    = CASE
+                        WHEN instruments.currency_source = 'broker_rate'
+                         AND instruments.exchange IS NOT DISTINCT FROM EXCLUDED.exchange
+                        THEN 'broker_rate'
+                        WHEN EXISTS (
+                            SELECT 1 FROM exchanges
+                            WHERE exchange_id = EXCLUDED.exchange
+                        )
+                        THEN 'exchange'
+                        ELSE instruments.currency_source
+                    END,
+                    -- Evidence goes with the value: a reset to the venue
+                    -- default is not supported by the old quote timestamp.
+                    -- Cleared exactly when the currency CASE above replaces the
+                    -- stored value with the venue default (exchange move or
+                    -- curator change).
+                    currency_derived_at = CASE
+                        WHEN NOT (instruments.currency_source = 'broker_rate'
+                                  AND instruments.exchange IS NOT DISTINCT FROM EXCLUDED.exchange)
+                         AND EXISTS (
+                            SELECT 1 FROM exchanges
+                            WHERE exchange_id = EXCLUDED.exchange
+                        )
+                         AND (SELECT currency FROM exchanges WHERE exchange_id = EXCLUDED.exchange)
+                             IS DISTINCT FROM instruments.currency
+                        THEN NULL
+                        ELSE instruments.currency_derived_at
                     END,
                     sector             = EXCLUDED.sector,
                     industry           = EXCLUDED.industry,
@@ -161,7 +199,11 @@ def sync_universe(
                     -- and carries the same latent no-op in that rare state
                     -- (exchange deleted / not-yet-seeded); not touched here
                     -- to keep its shipped behaviour stable (#1431, Codex).
+                    -- #3322: a broker-derived currency on an unchanged
+                    -- exchange is kept by the SET above, so it is not a change.
                     (EXISTS (SELECT 1 FROM exchanges WHERE exchange_id = EXCLUDED.exchange)
+                     AND NOT (instruments.currency_source = 'broker_rate'
+                              AND instruments.exchange IS NOT DISTINCT FROM EXCLUDED.exchange)
                      AND instruments.currency IS DISTINCT FROM EXCLUDED.currency)              OR
                     instruments.sector             IS DISTINCT FROM EXCLUDED.sector             OR
                     instruments.industry           IS DISTINCT FROM EXCLUDED.industry           OR

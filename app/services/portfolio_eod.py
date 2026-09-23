@@ -222,11 +222,15 @@ def compute_eod_equity(
         # Long: invested + leveraged price gain; short: invested + gain on a
         # fall. Equals close*units only for unleveraged long (the v1 universe),
         # but stays correct if a leveraged/short row ever appears.
+        # ``amount`` is eToro's USD cost basis (app/providers/broker.py
+        # BrokerPosition docstring); bring it to native with the broker's own
+        # open-time rate before adding a native price delta (#3322).
+        amount_native = p.amount / p.open_conversion_rate if p.open_conversion_rate > 0 else p.amount
         if p.is_buy:
-            value_native = p.amount + p.units * (p.close - p.open_rate)
+            value_native = amount_native + p.units * (p.close - p.open_rate)
             pnl_native = p.units * (p.close - p.open_rate)
         else:
-            value_native = p.amount + p.units * (p.open_rate - p.close)
+            value_native = amount_native + p.units * (p.open_rate - p.close)
             pnl_native = p.units * (p.open_rate - p.close)
         unrealised_pnl_usd = pnl_native * p.open_conversion_rate
         if p.native_ccy is None:
