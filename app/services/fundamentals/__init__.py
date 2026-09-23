@@ -21,7 +21,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -773,6 +773,12 @@ _BALANCE_SHEET_COLUMNS: frozenset[str] = frozenset(
 # (reported with every income statement, so it IS observed on a P−2 row).
 _PRESERVED_WHEN_UNPRESENTED_COLUMNS: frozenset[str] = _BALANCE_SHEET_COLUMNS - {"antidilutive_securities"}
 
+# #2182 — per-share columns and their storage bound: NUMERIC(12,4) (sql/032) holds
+# |v| < 10^8. See _per_share_value_is_representable.
+_PER_SHARE_COLUMNS: frozenset[str] = frozenset({"eps_basic", "eps_diluted", "dps_declared"})
+_PER_SHARE_VALUE_BOUND = Decimal("1e8")
+_PER_SHARE_SCALE = Decimal("0.0001")
+
 # Fiscal period label -> (period_type, fiscal_quarter)
 _FP_MAP: dict[str, tuple[str, int | None]] = {
     "Q1": ("Q1", 1),
@@ -1174,6 +1180,28 @@ def _fy_balance_sheet_is_presented(facts: Sequence[FactRow], primary_end_by_acce
     return False
 
 
+def _per_share_value_is_representable(fact: FactRow) -> bool:
+    """False for a per-share fact whose value cannot be a per-share amount.
+
+    #2182 — some filers tag a weighted-average share count as
+    ``EarningsPerShareDiluted`` (ICE 2016 10-Qs: 120,000,000; LNG 2012–2014:
+    131,107,000…). SEC companyfacts carries the value as filed. No US-GAAP DQC rule
+    checks EPS (XBRL US DQC_0130, EPS = earnings ÷ weighted-average shares, is
+    IFRS-only), so the bound is fixed by construction: the per-share columns'
+    declared domain, NUMERIC(12,4) (sql/032). A value outside that domain cannot be
+    stored, and before this check it failed the whole instrument's normalization.
+    Dropping the fact here, not the cell later, lets a correct fact for the same
+    period (another filing, or a lower-priority tag) fill the column. It also
+    keeps Q4 = FY − Q1 − Q2 − Q3 from subtracting a share count.
+    """
+    mapping = _TAG_TO_COLUMN.get(fact.concept)
+    if mapping is None or mapping[0] not in _PER_SHARE_COLUMNS:
+        return True
+    # Postgres rounds half away from zero to the column scale, then requires the
+    # rounded |value| < 10^8 — so 99999999.99995 overflows.
+    return abs(fact.val).quantize(_PER_SHARE_SCALE, rounding=ROUND_HALF_UP) < _PER_SHARE_VALUE_BOUND
+
+
 def _build_period_row(
     *,
     period_type: str,
@@ -1240,6 +1268,9 @@ def _derive_periods_from_facts(
     Q4 derivation: if FY exists but Q4 does not, derives Q4 = FY - Q1 - Q2 - Q3
     for all flow columns.
     """
+    # Filtered once here: the YTD pool below reads ``facts`` too, not only ``grouped``.
+    facts = [f for f in facts if _per_share_value_is_representable(f)]
+
     # Group facts by (fiscal_year, fiscal_period)
     grouped: dict[tuple[int, str], list[FactRow]] = defaultdict(list)
     for fact in facts:

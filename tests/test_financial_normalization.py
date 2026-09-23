@@ -10,6 +10,7 @@ from app.services.fundamentals import (
     PeriodRow,
     _derive_periods_from_facts,
     _is_plausible_fiscal_year,
+    _per_share_value_is_representable,
     _resolve_period_fiscal_year,
 )
 
@@ -2555,3 +2556,49 @@ class TestQuarterLabelConflict2182Item3:
         ]
         q3 = [p for p in _derive_periods_from_facts(facts) if p.period_type == "Q3"]
         assert [(p.period_end_date, p.fiscal_year) for p in q3] == [(date(2014, 12, 31), 2015)]
+
+
+class TestPerShareShareCountMistag:
+    """#2182 — a share count tagged as EPS must not reach a NUMERIC(12,4) column."""
+
+    def test_share_count_eps_dropped_and_other_filing_fills(self) -> None:
+        # ICE shape: a later 10-Q's comparative carries 112,000,000 as EPS for the
+        # quarter the original 10-Q reported correctly.
+        facts = [
+            _fact(concept="EarningsPerShareDiluted", val=Decimal("3.15"), unit="USD/shares", filed_date="2024-05-01"),
+            _fact(
+                concept="EarningsPerShareDiluted",
+                val=Decimal("112000000"),
+                unit="USD/shares",
+                accession_number="accn-later",
+                filed_date="2025-05-01",
+            ),
+        ]
+        [p] = _derive_periods_from_facts(facts)
+        assert p.eps_diluted == Decimal("3.15")
+
+    def test_share_count_eps_alone_leaves_column_null(self) -> None:
+        facts = [
+            _fact(),
+            _fact(concept="EarningsPerShareBasic", val=Decimal("-131107000"), unit="USD/shares"),
+        ]
+        [p] = _derive_periods_from_facts(facts)
+        assert p.eps_basic is None
+        assert p.revenue == Decimal("50000000")
+
+    def test_large_real_eps_below_bound_kept(self) -> None:
+        # Berkshire-class A scale EPS is a real per-share amount.
+        facts = [_fact(concept="EarningsPerShareDiluted", val=Decimal("61234.5678"), unit="USD/shares")]
+        [p] = _derive_periods_from_facts(facts)
+        assert p.eps_diluted == Decimal("61234.5678")
+
+    def test_bound_applies_after_numeric_scale_rounding(self) -> None:
+        # Postgres rounds to NUMERIC(12,4)'s scale first: 99999999.99995 -> 10^8 overflows.
+        over = _fact(concept="EarningsPerShareDiluted", val=Decimal("-99999999.99995"), unit="USD/shares")
+        under = _fact(concept="EarningsPerShareDiluted", val=Decimal("99999999.99994"), unit="USD/shares")
+        assert _per_share_value_is_representable(over) is False
+        assert _per_share_value_is_representable(under) is True
+
+    def test_non_per_share_column_unaffected_by_bound(self) -> None:
+        [p] = _derive_periods_from_facts([_fact(val=Decimal("5e11"))])
+        assert p.revenue == Decimal("5e11")

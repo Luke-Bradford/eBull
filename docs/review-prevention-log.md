@@ -11264,3 +11264,15 @@ neighbouring container and match it.**
 - Enforced in: `app/services/fundamentals/__init__.py::_fy_balance_sheet_is_presented` +
   `_canonical_merge_instrument` (`_PRESERVED_WHEN_UNPRESENTED_COLUMNS`);
   `tests/test_canonical_merge_p2_balance_sheet_2182.py`; `scripts/ab_2182_p2_merge_arms.py`.
+
+### A fact filter in `_derive_periods_from_facts` must run at function entry, not in the grouping loop (#2182)
+
+- Symptom (2026-09-23): a filter dropping share counts tagged as EPS was first placed in the
+  `(fy, fp)` grouping loop. A test still saw the dropped value in the Q1 row: the #2036 YTD
+  de-cumulation pool (`_build_ytd_pools(facts)`) reads the unfiltered `facts` list and filled the
+  empty column from it. A filter placed in one consumer does not cover the others.
+- Prevention: when a fact is inadmissible, drop it from the function's input once, before any
+  consumer. Test the null case (the bad fact is the only one for the period), not only the case
+  where a good fact outranks it. That case passed with the filter in the wrong place.
+- Enforced in: `app/services/fundamentals/__init__.py::_per_share_value_is_representable` (applied
+  at the top of `_derive_periods_from_facts`); `tests/test_financial_normalization.py::TestPerShareShareCountMistag`.
