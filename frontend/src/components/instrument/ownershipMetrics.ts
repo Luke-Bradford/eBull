@@ -276,3 +276,30 @@ export function ownershipSuppressedDenominatorCopy(
   }
   return null;
 }
+
+/** Warning-bar copy when pie-wedge totals exceed shares outstanding (#2226).
+ *
+ * Shared by the instrument panel and the ownership page so the two surfaces
+ * cannot drift. Returns ``null`` when the pie is not oversubscribed.
+ *
+ * ⚠ Do not name a cause the server did not attribute. The copy this replaced
+ * told every oversubscribed instrument "stale 13F quarter + fresh Form 4 /
+ * 13D — awaiting next 13F cycle"; measured 2026-09-23, that mix explained a
+ * minority of the 1,888 cases and none of them resolve at the next cycle. The
+ * one cause the server attributes from data is short-lending
+ * (``short_interest_cover``): Form 13F reports long positions only and a
+ * lender keeps reporting loaned shares (SEC 13F FAQ Q41/Q42), so the buyer of
+ * a shorted share and its lender both report it. Its ABSENCE is not a
+ * negative — no FINRA figure in window and a figure too small are both
+ * ``null`` — so the generic copy makes no short-interest claim.
+ */
+export function oversubscribedCopy(
+  residual: OwnershipRollupResponse["residual"],
+): string | null {
+  if (!residual.oversubscribed) return null;
+  const cover = residual.short_interest_cover ?? null;
+  if (cover !== null) {
+    return `Category totals exceed shares outstanding by ${formatShares(parseShareCount(cover.overage_shares))} shares — within FINRA short interest of ${formatShares(parseShareCount(cover.short_interest_shares))} (settlement ${cover.settlement_date}). Shares lent to short sellers are reported on Form 13F by both the lender and the buyer, so institutional totals can legitimately exceed shares outstanding. Public float cannot be derived from filings here.`;
+  }
+  return "Category totals exceed shares outstanding, so public float cannot be derived from filings here. Known contributors: shares lent to short sellers (reported on Form 13F by both lender and buyer), holdings from filers that have stopped filing, and the same shares attributed to several reporting persons.";
+}

@@ -11317,3 +11317,19 @@ neighbouring container and match it.**
   bin's instruments before fixing a bound.
 - Enforced in: `app/services/fundamentals/__init__.py::_eps_facts_contradicting_identity`;
   `tests/test_financial_normalization.py::TestEpsIdentityCheck`.
+
+### A warning bar that names a cause is a causal claim — measure it (#2226)
+
+- Symptom (2026-09-23): the ownership warning bar told every oversubscribed instrument "stale 13F
+  quarter combined with fresh Form 4 / 13D — awaiting next 13F cycle". Re-measured through the real
+  read path (`scripts.audit_2230_insider_oversubscription`, 12,845 rendered, 0 errors): 1,888 of 4,435
+  with a denominator are oversubscribed, and the institutions wedge ALONE exceeds outstanding on 785.
+  On 447 of those 785 the latest 13F quarter alone already exceeds it, so no next cycle resolves them.
+  Of the 785, 302 overages fit inside FINRA short interest at 2026-06-30. SEC 13F FAQ Q41/Q42: 13F is
+  long-only and the lender keeps reporting loaned shares, so a shorted share appears on two 13F-HRs.
+- Prevention: operator copy may name only a cause the server attributed from data. The rollup now
+  attaches `residual.short_interest_cover` when the overage is within short interest at the
+  institutions slice's as-of (256 of 1,888 via `get_ownership_rollup`). The generic copy names no cause.
+  One copy source serves both surfaces (`oversubscribedCopy`).
+- Enforced in: `tests/test_ownership_short_interest_cover.py`;
+  `frontend/src/components/instrument/ownershipMetrics.test.ts` ("never asserts the retired stale-13F cause").

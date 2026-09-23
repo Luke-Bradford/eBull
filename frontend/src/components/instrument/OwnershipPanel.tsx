@@ -60,6 +60,7 @@ import { Pane } from "@/components/instrument/Pane";
 import {
   formatPct,
   formatShares,
+  oversubscribedCopy,
   ownershipSuppressedDenominatorCopy,
   parseShareCount,
   topHoldersByShares,
@@ -287,7 +288,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
       {rollup.per_class_denominator != null && (
         <PerClassDenominatorCallout note={rollup.per_class_denominator.note} />
       )}
-      {rollup.residual.oversubscribed && <OversubscribedWarning />}
+      {rollup.residual.oversubscribed && <OversubscribedWarning rollup={rollup} />}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
         <div className="flex flex-col items-center gap-3">
           <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} />
@@ -432,18 +433,16 @@ function DrsMemo({ drs }: { readonly drs: OwnershipDrs | null }): JSX.Element | 
   );
 }
 
-function OversubscribedWarning(): JSX.Element {
-  // The server clamped the residual to 0; surface the diagnostic so
-  // the operator knows a stale 13F + fresh Form 4/13D mix is in play.
+function OversubscribedWarning({ rollup }: { rollup: OwnershipRollupResponse }): JSX.Element {
+  // The server clamped the residual to 0. The copy names a cause only when
+  // the server attributed one (#2226) — see ``oversubscribedCopy``.
   return (
     <div
       className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-200"
       role="status"
       data-test="oversubscribed-warning"
     >
-      Category totals exceed shares outstanding (likely cause: stale 13F
-      quarter combined with fresh Form 4 / 13D filings). Awaiting next
-      13F cycle for the snapshots to align.
+      {oversubscribedCopy(rollup.residual)}
     </div>
   );
 }

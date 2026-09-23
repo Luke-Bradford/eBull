@@ -362,18 +362,42 @@ class OwnershipSlice:
 
 
 @dataclass(frozen=True)
+class ShortInterestCover:
+    """The pie overage fits inside FINRA short interest (#2226).
+
+    Form 13F reports LONG positions only (SEC 13F FAQ Q41) and a lender keeps
+    reporting the shares it has loaned while the borrower does not (Q42). The short
+    seller sells those borrowed shares to a buyer, who reports them too — so the
+    same shares appear on two 13F-HRs and institutional totals can exceed shares
+    outstanding by up to the open short interest without any error on our side.
+    Set only when ``overage_shares <= short_interest_shares``; it attributes the
+    overage, it does not prove the cause."""
+
+    short_interest_shares: Decimal
+    settlement_date: date
+    overage_shares: Decimal
+
+
+@dataclass(frozen=True)
 class ResidualBlock:
     """``Public / unattributed`` wedge. ``oversubscribed=True`` when the
-    deduped pie-wedge slices exceed shares_outstanding (stale 13F + fresh
-    Form 4 / 13D mix); residual clamps to 0 in that case and the frontend
-    renders the warning bar. Treasury is NOT part of this comparison —
-    shares outstanding already excludes it (#2217)."""
+    deduped pie-wedge slices exceed shares_outstanding; residual clamps to 0
+    in that case and the frontend renders the warning bar. Treasury is NOT
+    part of this comparison — shares outstanding already excludes it (#2217).
+
+    ⚠ The cause is NOT asserted as "stale 13F + fresh Form 4" (#2226). On
+    2026-09-23 that mix explained a minority of the 1,888 oversubscribed
+    instruments; the rest are short-lending double counts (see
+    ``short_interest_cover``), 13F filers that stopped filing, and insider
+    attribution. ``short_interest_cover`` is the one cause the read path can
+    attribute from data."""
 
     shares: Decimal
     pct_outstanding: Decimal
     label: str
     tooltip: str
     oversubscribed: bool
+    short_interest_cover: ShortInterestCover | None = None
 
 
 @dataclass(frozen=True)
@@ -4432,12 +4456,11 @@ def _compute_residual(
     snapshot lag for it. Goldman carries treasury equal to 199.9% of outstanding,
     which is only possible *because* the base excludes it.
 
-    Stale-mixed-date inputs (fresh Form 4 + old 13F) can still leave the raw
-    residual negative — we clamp to 0 and surface ``oversubscribed=True`` so the
-    frontend renders a warning bar. The category-counted slices use deduped
-    totals, so with the treasury term gone the remaining paths to
-    oversubscription are the snapshot-lag class and a genuine over-attribution,
-    not arithmetic.
+    The raw residual can still go negative — we clamp to 0 and surface
+    ``oversubscribed=True`` so the frontend renders a warning bar. With the
+    treasury term gone the remaining paths are not arithmetic: 13F short-lending
+    double counts (:func:`attribute_overage_to_short_interest`), holdings from
+    filers that stopped filing, and Section 16 / 13D-G group attribution (#2226).
 
     :func:`_compute_concentration` below has always excluded treasury correctly;
     the two now agree."""
@@ -4460,6 +4483,72 @@ def _compute_residual(
         tooltip=_RESIDUAL_TOOLTIP,
         oversubscribed=raw < 0,
     )
+
+
+def attribute_overage_to_short_interest(
+    residual: ResidualBlock,
+    *,
+    outstanding: Decimal,
+    slices: Sequence[OwnershipSlice],
+    short_interest: tuple[Decimal, date] | None,
+) -> ResidualBlock:
+    """Attach :class:`ShortInterestCover` when the pie overage fits inside short
+    interest (#2226). Pure; the reader is :func:`_read_short_interest_at`.
+
+    The overage is recomputed from the same pie-wedge sum
+    :func:`_compute_residual` used, because the block itself carries only the
+    clamped residual. A missing short-interest figure attributes nothing — it is
+    not evidence either way."""
+    if not residual.oversubscribed or short_interest is None:
+        return residual
+    sum_known = sum(
+        (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
+        Decimal(0),
+    )
+    overage = sum_known - outstanding
+    si_shares, settlement_date = short_interest
+    if overage > si_shares:
+        return residual
+    return replace(
+        residual,
+        short_interest_cover=ShortInterestCover(
+            short_interest_shares=si_shares,
+            settlement_date=settlement_date,
+            overage_shares=overage,
+        ),
+    )
+
+
+def _read_short_interest_at(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    as_of: date,
+) -> tuple[Decimal, date] | None:
+    """FINRA short interest at the institutions slice's as-of (#2226).
+
+    Latest settlement ON OR BEFORE ``as_of`` — the short-lending double count lives
+    in the 13F positions, which are stocks measured at their period end, so the
+    short interest must be the stock open at that date, not today's. Bounded to one
+    month back: FINRA Rule 4560 reports short interest as of two settlement dates a
+    month, so one month is two reporting cycles and tolerates exactly one missing
+    cycle. An older figure describes a different book and attributes nothing."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT current_short_interest, settlement_date
+              FROM finra_short_interest_observations
+             WHERE instrument_id = %(iid)s
+               AND settlement_date <= %(as_of)s
+               AND settlement_date > %(as_of)s - INTERVAL '1 month'
+             ORDER BY settlement_date DESC
+             LIMIT 1
+            """,
+            {"iid": instrument_id, "as_of": as_of},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return Decimal(row[0]), row[1]
 
 
 def _compute_concentration(outstanding: Decimal, slices: Sequence[OwnershipSlice]) -> ConcentrationInfo:
@@ -5754,6 +5843,18 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         esop_holders=esop_holders,
     )
     residual = _compute_residual(effective_outstanding, slices)
+    # #2226 — only an oversubscribed pie pays for the read, and only against the
+    # institutions slice's own as-of: the double count lives in those 13F positions.
+    if residual.oversubscribed:
+        inst_as_of = next((s.as_of_max for s in slices if s.category == "institutions"), None)
+        residual = attribute_overage_to_short_interest(
+            residual,
+            outstanding=effective_outstanding,
+            slices=slices,
+            short_interest=(
+                _read_short_interest_at(conn, instrument_id, inst_as_of) if inst_as_of is not None else None
+            ),
+        )
     concentration = _compute_concentration(effective_outstanding, slices)
     sanity = _compute_sanity(slices, effective_outstanding)
     # #2232 — the denominator is fresh but does not cover the whole entity. Placed

@@ -199,11 +199,21 @@ export interface OwnershipResidual {
   readonly pct_outstanding: string;
   readonly label: string;
   readonly tooltip: string;
-  /** True when slice totals + treasury exceed shares_outstanding
-   *  (stale 13F + fresh Form 4/13D mix). The renderer shows a
-   *  warning bar above the chart in this case; residual itself is
-   *  clamped to 0. */
+  /** True when pie-wedge slice totals exceed shares_outstanding. The
+   *  renderer shows a warning bar in this case; residual itself is
+   *  clamped to 0. The cause is NOT assumed (#2226) — see
+   *  ``short_interest_cover`` for the one the server can attribute. */
   readonly oversubscribed: boolean;
+  /** Set when the overage fits inside FINRA short interest at the 13F
+   *  as-of: lent shares are reported by the lender AND the buyer
+   *  (SEC 13F FAQ Q41/Q42), so the overage is expected, not an error. */
+  readonly short_interest_cover?: OwnershipShortInterestCover | null;
+}
+
+export interface OwnershipShortInterestCover {
+  readonly short_interest_shares: string;
+  readonly settlement_date: string;
+  readonly overage_shares: string;
 }
 
 export interface OwnershipCategoryCoverage {
