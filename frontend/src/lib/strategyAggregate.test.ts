@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
-import { NAMED_LIST_LIMIT, aggregate, namedList, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
+import { NAMED_LIST_LIMIT, aggregate, namedList, positionsOutsideStrategyPnl, potWealthSummary } from "@/lib/strategyAggregate";
 
 function strategy(overrides: {
   totalPnl?: string | null;
@@ -134,5 +134,46 @@ describe("namedList", () => {
 
   it("returns nothing for no values, so the caller renders nothing rather than '0 of'", () => {
     expect(namedList([])).toEqual([]);
+  });
+});
+
+describe("potWealthSummary (#3334)", () => {
+  const point = (date: string, pot: string, total: string, flow = "0", complete = true) => ({
+    date,
+    principal: "500",
+    external_flow: flow,
+    realised_pnl: "0",
+    unrealised_pnl: total,
+    total_pnl: total,
+    pot_value: pot,
+    complete,
+    incomplete_reasons: complete ? [] : ["owned_position_mark_missing"],
+  });
+
+  it("reads the last close and nets a funding flow out of the day's change", () => {
+    const summary = potWealthSummary([
+      point("2026-09-17", "0", "0"),
+      point("2026-09-18", "500.5", "0.5", "500"),
+    ]);
+    expect(summary?.date).toBe("2026-09-18");
+    expect(summary?.potValue).toBe(500.5);
+    expect(summary?.totalReturn).toBeCloseTo(0.001);
+    // 500.5 - 0 - 500 funding = 0.5, not +500.5.
+    expect(summary?.dayPnl).toBeCloseTo(0.5);
+  });
+
+  it("skips an incomplete close rather than showing its partial sum", () => {
+    const summary = potWealthSummary([
+      point("2026-09-21", "504", "4"),
+      point("2026-09-22", "490", "-10", "0", false),
+    ]);
+    expect(summary?.date).toBe("2026-09-21");
+    expect(summary?.totalPnl).toBe(4);
+    expect(summary?.dayPnl).toBeNull();
+  });
+
+  it("returns null when no close is complete", () => {
+    expect(potWealthSummary([])).toBeNull();
+    expect(potWealthSummary([point("2026-09-22", "490", "-10", "0", false)])).toBeNull();
   });
 });

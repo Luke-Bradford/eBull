@@ -476,8 +476,8 @@ function approvedOverview(): StrategyOverviewResponse {
  * lens under test keeps each test's original intent and proves the routing
  * that puts the panel in front of them.
  */
-function renderStrategies(view: "portfolio" | "research" = "research") {
-  const entry = view === "research" ? "/strategies?view=research" : "/strategies";
+function renderStrategies(view: "portfolio" | "setup" | "research" = "research") {
+  const entry = view === "portfolio" ? "/strategies" : `/strategies?view=${view}`;
   return render(
     <MemoryRouter initialEntries={[entry]}>
       <StrategiesHubPage />
@@ -949,7 +949,7 @@ describe("StrategiesPage", () => {
 
   it("uses a compact capital control while still allowing the limit to be saved", async () => {
     const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({ ...OVERVIEW.paper_pool, capital_limit: "1500" });
-    renderStrategies("portfolio");
+    renderStrategies("setup");
     const input = await screen.findByLabelText("Trading capital (USD)");
     expect(input.parentElement).toHaveClass("w-48");
     fireEvent.change(input, { target: { value: "1500" } });
@@ -966,7 +966,7 @@ describe("StrategiesPage", () => {
       ...OVERVIEW.paper_pool,
       approval_mode: "autonomous",
     });
-    renderStrategies("portfolio");
+    renderStrategies("setup");
     const approval = await screen.findByLabelText("Promotion approval");
     fireEvent.change(approval, { target: { value: "autonomous" } });
     expect(approval).toHaveValue("autonomous");
@@ -986,7 +986,7 @@ describe("StrategiesPage", () => {
       ...OVERVIEW.paper_pool,
       mandate: { ...OVERVIEW.paper_pool.mandate, risk_profile: "growth" },
     });
-    renderStrategies("portfolio");
+    renderStrategies("setup");
     expect(await screen.findByText("Policy ceilings, not return forecasts. Long-only and unleveraged in this version.")).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "growth");
     expect(screen.getByText("+18.00%")).toBeInTheDocument();
@@ -1002,7 +1002,7 @@ describe("StrategiesPage", () => {
       ...approvedOverview(),
       execution_enabled: false,
     });
-    renderStrategies("portfolio");
+    renderStrategies("setup");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).not.toBeChecked();
   });
@@ -1021,7 +1021,7 @@ describe("StrategiesPage", () => {
       ...ready.paper_pool,
       enabled: true,
     });
-    renderStrategies("portfolio");
+    renderStrategies("setup");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).not.toBeChecked();
     expect(master).not.toBeDisabled();
@@ -1043,7 +1043,7 @@ describe("StrategiesPage", () => {
       paper_pool: { ...ready.paper_pool, enabled: false },
       automation_readiness: { ...ready.automation_readiness, ready: false, state: "no_capital_candidates", blockers: ["no_capital_candidates"] },
     });
-    renderStrategies("portfolio");
+    renderStrategies("setup");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).toBeDisabled();
     expect(screen.getByText("New entries stay off until an alpha strategy passes validation or the evidence-selected core sleeve has an enabled mandate.")).toBeInTheDocument();
@@ -1059,7 +1059,7 @@ describe("StrategiesPage", () => {
       execution_enabled: false,
       paper_pool: { ...ready.paper_pool, enabled: false },
     });
-    renderStrategies("portfolio");
+    renderStrategies("setup");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).toBeDisabled();
     expect(screen.getByText("This account cannot run strategy automation. Connect the demo account, or complete real-money activation first.")).toBeInTheDocument();
@@ -1092,7 +1092,7 @@ describe("StrategiesPage", () => {
   // display and the control it justifies are now asserted on their own lenses.
   it("enables the entries control once automation is ready", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
-    renderStrategies("portfolio");
+    renderStrategies("setup");
 
     expect(await screen.findByRole("checkbox", { name: "Allow new automated entries" })).not.toBeDisabled();
   });
@@ -1233,13 +1233,44 @@ describe("StrategiesPage", () => {
       live_quote_instrument_ids: [101],
     });
     renderStrategies("portfolio");
-    const section = (await screen.findByText("Open automated positions")).closest("section")!;
-    expect(within(section).getByText("ACME")).toBeInTheDocument();
-    expect(within(section).getByText("US$100.00")).toBeInTheDocument();
-    expect(within(section).getByText("US$110.00")).toBeInTheDocument();
-    expect(within(section).getByText("+10.00%")).toBeInTheDocument();
-    expect(within(section).getByText("US$9.00")).toBeInTheDocument();
-    expect(within(section).getByText("US$14.00")).toBeInTheDocument();
+    const section = (await screen.findByText("Engine positions")).closest("section")!;
+    const row = within(section).getByText("ACME").closest("tr")!;
+    const cells = within(row).getAllByRole("cell").map((cell) => cell.textContent);
+    // #3334: units · entry · current · value (with cost) · P&L £ and % ·
+    // SL / TP as a price AND a distance from the CURRENT price (9/12-1, 14/12-1).
+    expect(cells).toEqual(expect.arrayContaining([
+      "5",
+      "US$10.00",
+      "US$12.00",
+      "US$110.00cost US$100.00",
+      "US$10.00+10.00%",
+      "US$9.00-25.00% from current price (stop loss)",
+      "US$14.00+16.67% from current price (take profit)",
+    ]));
+    // A strategy position shows ITS strategy's declared exit timing as the horizon.
+    expect(within(row).getByText("Until the trend turns")).toBeInTheDocument();
+  });
+
+  it("labels a core-mandate position a long-term hold and explains its levels from the row itself", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [{
+        ...OWNED_POSITION,
+        strategy_id: null,
+        strategy_version: null,
+        strategy_title: "Core / cash mandate",
+        open_rate: "100",
+        current_price: "100",
+        stop_loss_rate: "50",
+        take_profit_rate: "300",
+      }],
+      live_quote_instrument_ids: [101],
+    });
+    renderStrategies("portfolio");
+    const horizon = await screen.findByText("Long-term index hold");
+    // Derived from THIS row's levels against its entry, never a hard-coded constant.
+    expect(horizon.getAttribute("title")).toContain("stop (-50.00% from entry)");
+    expect(horizon.getAttribute("title")).toContain("target (+200.00%)");
   });
 
   it("submits an exact strategy-aware close and explains that manual positions are untouched", async () => {

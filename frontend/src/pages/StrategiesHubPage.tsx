@@ -2,6 +2,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { StrategiesPage } from "@/pages/StrategiesPage";
 import { StrategyPortfolioLens } from "@/pages/StrategyPortfolioLens";
+import { StrategySetupLens } from "@/pages/StrategySetupLens";
 
 /**
  * Strategies hub (#2868) — the fenced-off pot and the candidate pipeline are
@@ -22,17 +23,26 @@ import { StrategyPortfolioLens } from "@/pages/StrategyPortfolioLens";
  *
  * Landing lens = Portfolio: it is what the operator opens the page to see, and
  * the research lens is where they go deliberately.
+ *
+ * Setup (#3334) split off Portfolio for the same reason Research did: monitor
+ * and configure are two jobs. Portfolio is read-only apart from closing
+ * positions; every write that configures the pot lives on Setup.
  */
-type ViewKey = "portfolio" | "research";
+type ViewKey = "portfolio" | "setup" | "research";
 
-const VIEW_ORDER: ViewKey[] = ["portfolio", "research"];
+const VIEW_ORDER: ViewKey[] = ["portfolio", "setup", "research"];
 const DEFAULT_VIEW: ViewKey = "portfolio";
 
 const PRESETS: Record<ViewKey, { label: string; hint: string; Component: () => JSX.Element }> = {
   portfolio: {
     label: "Portfolio",
-    hint: "The fenced-off pot: status, capital, positions",
+    hint: "The fenced-off pot: status, P&L, positions",
     Component: StrategyPortfolioLens,
+  },
+  setup: {
+    label: "Setup",
+    hint: "Funding, risk profile, core sleeve, and the rules set by policy",
+    Component: StrategySetupLens,
   },
   research: {
     label: "Research",
@@ -42,7 +52,7 @@ const PRESETS: Record<ViewKey, { label: string; hint: string; Component: () => J
 };
 
 function isViewKey(value: string | null): value is ViewKey {
-  return value === "portfolio" || value === "research";
+  return value === "portfolio" || value === "setup" || value === "research";
 }
 
 /**

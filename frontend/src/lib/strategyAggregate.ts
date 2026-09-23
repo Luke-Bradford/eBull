@@ -1,4 +1,4 @@
-import type { StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
+import type { StrategyOverviewResponse, StrategyOwnedPosition, StrategyPnlHistoryPoint } from "@/api/types";
 import { number } from "@/lib/strategyFormat";
 
 /**
@@ -36,6 +36,44 @@ export function positionsOutsideStrategyPnl(
   positions: readonly StrategyOwnedPosition[],
 ): StrategyOwnedPosition[] {
   return positions.filter((position) => position.strategy_id === null);
+}
+
+/**
+ * The summary strip's figures, all from the LAST complete end-of-day point of
+ * the pot's NAV series (#3334).
+ *
+ * ⚠ An incomplete point (a missing mark or snapshot — `complete: false`) is
+ * skipped rather than shown: its `total_pnl` is a partial sum that reads as
+ * whole. The day change is only computed between two ADJACENT complete points,
+ * and nets out `external_flow` (a funding change is not a gain).
+ */
+export function potWealthSummary(points: readonly StrategyPnlHistoryPoint[]): {
+  date: string;
+  potValue: number | null;
+  totalPnl: number | null;
+  totalReturn: number | null;
+  dayPnl: number | null;
+  dayReturn: number | null;
+} | null {
+  let index = points.length - 1;
+  while (index >= 0 && !points[index]!.complete) index -= 1;
+  if (index < 0) return null;
+  const last = points[index]!;
+  const potValue = number(last.pot_value);
+  const totalPnl = number(last.total_pnl);
+  const principal = number(last.principal);
+  const previous = index > 0 && points[index - 1]!.complete ? points[index - 1]! : null;
+  const previousValue = previous ? number(previous.pot_value) : null;
+  const flow = number(last.external_flow);
+  const dayPnl = potValue !== null && previousValue !== null && flow !== null ? potValue - previousValue - flow : null;
+  return {
+    date: last.date,
+    potValue,
+    totalPnl,
+    totalReturn: totalPnl !== null && principal ? totalPnl / principal : null,
+    dayPnl,
+    dayReturn: dayPnl !== null && previousValue ? dayPnl / previousValue : null,
+  };
 }
 
 /** How many distinct entries `namedList` will name before counting the rest. */

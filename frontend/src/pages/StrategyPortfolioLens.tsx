@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { postKillSwitch } from "@/api/config";
 import {
@@ -7,8 +7,6 @@ import {
   fetchStrategyOverview,
   fetchStrategyOwnedPositions,
   fetchStrategyPnlHistory,
-  rebalanceCoreSleeve,
-  updateCoreMandate,
 } from "@/api/strategies";
 import type { CoreSleeveResponse, StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
 import { ApiError } from "@/api/client";
@@ -19,382 +17,98 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
 import {
   AccountEvidence,
-  AutomationControl,
   BenchmarkRefusals,
+  BlockerRow,
   EmptyPnlChart,
   PnlChart,
 } from "@/components/strategies/StrategyPortfolioPanels";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
-import { aggregate, namedList, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
+import { aggregate, namedList, positionsOutsideStrategyPnl, potWealthSummary } from "@/lib/strategyAggregate";
 import { number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
 import { useAsync } from "@/lib/useAsync";
 
-// The server currently returns exactly the three preregistered #2833
-// candidates. Keep a defensive render cap anyway: API array types carry no
-// size bound, and a malformed response must not create an unbounded DOM.
-const CORE_CANDIDATE_RENDER_CAP = 10;
-
-/**
- * One badge per sleeve state (#3037).
- *
- * ⚠⚠ The badge this replaced was `state === "ready" ? "Ready" : "Cash"`, so every
- * non-ready state rendered as **Cash** — and `cash` is not "not ready", it is one of the
- * two TERMINAL answers the sealed #2833 verifier emits. At 1 of 5 common dates the card
- * was asserting the study's result before the study could be opened.
- *
- * Derived state is the trap here: a verdict must be REPORTED, never inferred from the
- * absence of readiness.
- */
-const CORE_SLEEVE_BADGE: Record<CoreSleeveResponse["state"], { label: string; tone: "ok" | "warn" }> = {
-  ready: { label: "Ready", tone: "ok" },
-  cash: { label: "Cash", tone: "warn" },
-  awaiting_verdict: { label: "Verdict due", tone: "warn" },
-  evidence_collecting: { label: "Collecting evidence", tone: "warn" },
-  unavailable: { label: "Unavailable", tone: "warn" },
-};
-
-/**
- * Whether #2833's declared window has CLOSED — a fact about coverage, deliberately
- * independent of `state`.
- *
- * ⚠ Keying the window copy on `state !== "evidence_collecting"` is wrong (caught at Codex
- * checkpoint 2): `unavailable` is reachable with the window still OPEN — a missing
- * candidate row, or inconsistent verdict constants — and would then render "Window closed"
- * over a bound in the future. Server-side the window is closed iff the REQUIRED-th common
- * date exists, which is exactly `observed_trading_days >= required_trading_days`: both
- * derive from the same `common_dates` CTE, and both are zeroed when a candidate is missing.
- */
-function coreWindowClosed(sleeve: CoreSleeveResponse): boolean {
-  return sleeve.observed_trading_days >= sleeve.required_trading_days;
-}
-
-/** The `Instrument` tile says "Cash" only when the verdict actually said cash. */
-function coreInstrumentTile(sleeve: CoreSleeveResponse): { value: string; hint: string } {
-  if (sleeve.selected_symbol) return { value: sleeve.selected_symbol, hint: "Evidence-selected" };
-  if (sleeve.state === "cash") return { value: "Cash", hint: "#2833 adopted no sleeve" };
-  if (sleeve.state === "awaiting_verdict") return { value: "—", hint: "Verdict can be opened now" };
-  if (sleeve.state === "unavailable") return { value: "—", hint: "Selection cannot be used" };
-  return { value: "—", hint: "Decided when the verdict opens" };
+function toneOf(value: number | null): "muted" | "positive" | "negative" {
+  if (value === null || value === 0) return "muted";
+  return value > 0 ? "positive" : "negative";
 }
 
 /**
- * The fenced-off pot — a control panel, not a status page (#2868, reshaped on
- * operator feedback 2026-08-23: *"This looks more like a wiki, a guide, not a
- * user interface. Toggles and summaries. What can be configured, not
- * narrated."*).
+ * The engine's working orders, as far as the app can see them (#3334).
  *
- * The intended use is small: put money in, turn it on, say what happens to
- * profits, and then watch numbers and be able to stop. Everything else is the
- * scripts' job. So the page is ordered controls → numbers → holdings, and
- * anything that cannot be acted on is one line, not a paragraph.
- *
- * ⚠ Blockers are ACTIONS or FACTS, never instructions. A blocker the operator
- * can clear carries its own control (the kill switch); one they cannot (no
- * strategy has earned capital yet) is a single line of fact. The previous
- * version narrated all five as an ordered lesson, which is what the feedback
- * above was about.
+ * ⚠ Derived, not a broker order book: a close the engine submitted and has not
+ * yet reconciled (`trade_status = closing`), and the core sleeve's unresolved
+ * order (`pending_order_id`). Those are the only engine order states any
+ * endpoint exposes today; a pending ENTRY order for an alpha strategy has no
+ * read surface, which is why the empty copy says "none the engine is tracking"
+ * rather than "no orders".
  */
-function BlockerRow({
-  tone,
-  label,
-  action,
+function EngineOrders({
+  positions,
+  coreSleeve,
 }: {
-  tone: "risk" | "warn";
-  label: string;
-  action?: React.ReactNode;
+  positions: readonly StrategyOwnedPosition[];
+  coreSleeve: CoreSleeveResponse | null;
 }) {
+  const closing = positions.filter((position) => position.trade_status === "closing");
+  const corePending = coreSleeve?.pending_order_id ?? null;
   return (
-    <div className="flex min-h-11 flex-wrap items-center justify-between gap-3 border-t border-slate-200 py-2 text-sm dark:border-slate-800">
-      <span className="flex items-center gap-2">
-        {/* Not "halted" — the header badge already says that. These name the
-            KIND of blocker: something switched off vs something not set up. */}
-        <Badge tone={tone}>{tone === "risk" ? "blocked" : "setup"}</Badge>
-        <span className="text-slate-700 dark:text-slate-200">{label}</span>
-      </span>
-      {action}
-    </div>
-  );
-}
-
-function CoreCandidateCoverageTable({ sleeve }: { sleeve: CoreSleeveResponse }) {
-  return (
-    <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Candidate coverage</h3>
-      <p className="mt-1 text-xs text-slate-500">Overall evidence counts only dates shared by every candidate.</p>
-      <div className="mt-2 overflow-x-auto">
-        <table className="w-full text-left text-sm" aria-label="Core candidate evidence coverage">
-          <thead className="text-xs text-slate-500">
-            <tr>
-              <th scope="col" className="py-1 pr-4 font-medium">Instrument</th>
-              <th scope="col" className="py-1 pr-4 font-medium">Dates seen</th>
-              <th scope="col" className="py-1 font-medium">Prospective dates</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sleeve.candidates.slice(0, CORE_CANDIDATE_RENDER_CAP).map((candidate) => (
-              <tr key={candidate.instrument_id} className="border-t border-slate-100 dark:border-slate-800">
-                <th scope="row" className="py-2 pr-4 font-semibold">{candidate.symbol}</th>
-                <td className="py-2 pr-4 tabular-nums">
-                  {candidate.observed_trading_days} / {sleeve.required_trading_days}
-                </td>
-                <td className="py-2 text-slate-500">
-                  {candidate.first_observed_date && candidate.last_observed_date
-                    ? `${formatDate(candidate.first_observed_date)} – ${formatDate(candidate.last_observed_date)}`
-                    : "Awaiting first date"}
-                </td>
-              </tr>
-            ))}
-            {sleeve.candidates.length === 0 ? (
-              <tr className="border-t border-slate-100 dark:border-slate-800">
-                <td colSpan={3} className="py-2 text-slate-500">
-                  No candidate coverage is available; the blocker above names what must be restored.
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-      {sleeve.candidates.length > CORE_CANDIDATE_RENDER_CAP ? (
-        <p className="mt-2 text-xs text-slate-500">
-          Showing {CORE_CANDIDATE_RENDER_CAP} of {sleeve.candidates.length} candidates.
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-function CoreSleeveControl({
-  sleeve,
-  busy,
-  setBusy,
-  onError,
-  onUpdated,
-}: {
-  sleeve: CoreSleeveResponse;
-  busy: boolean;
-  setBusy: (busy: boolean) => void;
-  onError: (message: string | null) => void;
-  onUpdated: () => void;
-}) {
-  const mandate = sleeve.mandate;
-  const [enabled, setEnabled] = useState(mandate.enabled ?? false);
-  const [target, setTarget] = useState(mandate.core_target_pct ?? "80");
-  const [reserve, setReserve] = useState(mandate.liquidity_reserve_pct ?? "10");
-  const [band, setBand] = useState(mandate.rebalance_band_pct ?? "5");
-  const [minimum, setMinimum] = useState(mandate.min_rebalance_amount ?? "25");
-  const [reason, setReason] = useState("");
-  const [confirmRebalance, setConfirmRebalance] = useState(false);
-  const [outcome, setOutcome] = useState<string | null>(null);
-  const policyUpgradeRequired = sleeve.blockers.some(
-    (blocker) => blocker.code === "core_mandate_policy_unsupported",
-  );
-  const mandateDirty =
-    policyUpgradeRequired ||
-    enabled !== (mandate.enabled ?? false) ||
-    Number(target) !== Number(mandate.core_target_pct ?? "80") ||
-    Number(reserve) !== Number(mandate.liquidity_reserve_pct ?? "10") ||
-    Number(band) !== Number(mandate.rebalance_band_pct ?? "5") ||
-    Number(minimum) !== Number(mandate.min_rebalance_amount ?? "25");
-
-  async function saveMandate() {
-    setBusy(true);
-    onError(null);
-    setOutcome(null);
-    try {
-      await updateCoreMandate({
-        enabled,
-        core_instrument_id: sleeve.selected_instrument_id ?? mandate.core_instrument_id ?? null,
-        core_target_pct: target,
-        liquidity_reserve_pct: reserve,
-        rebalance_band_pct: band,
-        min_rebalance_amount: minimum,
-        reason: reason.trim(),
-        provider: "etoro",
-        environment: "demo",
-      });
-      setReason("");
-      onUpdated();
-    } catch (error) {
-      onError(error instanceof ApiError ? error.message : "The core mandate could not be saved.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function rebalance() {
-    setBusy(true);
-    onError(null);
-    setOutcome(null);
-    try {
-      const result = await rebalanceCoreSleeve();
-      const label =
-        // #2603 sell leg: a sell executes as a WHOLE close of the core position, and a
-        // later rebalance buys back to the band's lower edge.
-        result.reason_code === "core_rebalance_close_submitted"
-          ? "Broker accepted the whole close of the core position; the next rebalance resolves it."
-          : result.state === "closed"
-            ? "The core position was closed whole; rebalance again to buy back to the band's lower edge."
-            : result.state === "reconcile_required"
-              ? `The core close needs reconciliation (${result.reason_code}); no core buy is admitted until it resolves.`
-              : result.state === "submitted"
-          ? "Broker accepted; fill reconciliation is pending."
-          : result.state === "submission_uncertain"
-            ? "Submission outcome is uncertain; reconciliation is required before retrying."
-            : result.reason_code === "core_order_reconciled"
-              ? "The existing broker order was reconciled; holdings and fill state have been refreshed."
-              : // ⚠ `core_resume_already_resolved` is `held`, and it does NOT mean the
-                // band was evaluated — the click loaded an unresolved order and
-                // something else resolved it first, so no sleeve observation ran at
-                // all. It fell through to the band sentence below, which is a claim
-                // about evidence this response does not carry. #2962 turned that from
-                // a two-operator race into the ordinary case: the scheduled cycle now
-                // reconciles core orders every five minutes.
-                result.reason_code === "core_resume_already_resolved"
-                ? "That order was already reconciled by the scheduled cycle. The sleeve was not re-evaluated — rebalance again to check the band."
-                : // ⚠ `below_min_rebalance_amount` is also `held`, and it means the OPPOSITE
-                  // of the band sentence below: the sleeve is OUTSIDE the band and the gap
-                  // is smaller than the mandate's `min_rebalance_amount`, so the floor wins
-                  // and the breach is reported rather than traded through
-                  // (`strategy_core_allocator.py`: "The floor wins and the breach, if any,
-                  // is reported"). Reachable since #3123 re-enabled the affordance while
-                  // the sleeve holds a position, which is the state a small drift lives in.
-                  //
-                  // ⚠⚠ `state === "held"` is load-bearing, not defensive. The SAME reason
-                  // code arrives as `refused` from `assess_core_broker_preflight`, where
-                  // it is the BROKER's minimum biting, not the operator's. Naming the
-                  // mandate there would send them to lower a setting that cannot resolve
-                  // it. The executor evaluates the allocator without `broker_minimum` on
-                  // the held path, so a held one is unambiguously the mandate floor; a
-                  // refused one falls through to the generic line, because this response
-                  // carries no `floor_source` to say which minimum bound.
-                  result.state === "held" && result.reason_code === "below_min_rebalance_amount"
-                  ? "The sleeve is outside its band, but the gap is below the mandate's minimum rebalance amount, so no trade was placed."
-                  : result.state === "held"
-                    ? "No trade required; the sleeve remains inside its band."
-                    : `Rebalance refused: ${result.reason_code}.`;
-      setOutcome(label);
-      onUpdated();
-    } catch (error) {
-      onError(error instanceof ApiError ? error.message : "The demo rebalance could not be evaluated.");
-    } finally {
-      setBusy(false);
-      setConfirmRebalance(false);
-    }
-  }
-
-  return (
-    <>
-      <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
-        {!sleeve.can_configure ? (
-          <p className="mb-3 text-xs text-slate-500">
-            Save these values as a disabled draft now.{" "}
-            {sleeve.state === "cash"
-              ? "#2833 returned cash, so no core instrument is adopted and enabling stays locked."
-              : "Enabling and demo rebalancing remain locked until a core instrument passes #2833."}
-          </p>
-        ) : null}
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {[
-            ["Core target %", target, setTarget],
-            ["Minimum cash reserve %", reserve, setReserve],
-            ["Rebalance band (pp)", band, setBand],
-            ["Minimum amount (USD)", minimum, setMinimum],
-          ].map(([label, value, setter]) => (
-            <label key={label as string} className="text-xs font-medium text-slate-600 dark:text-slate-300">
-              {label as string}
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={value as string}
-                onChange={(event) => (setter as (value: string) => void)(event.target.value)}
-                className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
-              />
-            </label>
+    <section aria-labelledby="engine-orders" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
+      <h2 id="engine-orders" className="text-sm font-semibold">Engine orders</h2>
+      {closing.length === 0 && corePending === null ? (
+        <p className="mt-2 text-sm text-slate-500">No engine order is working. Closes and core-sleeve orders appear here until the broker confirms them.</p>
+      ) : (
+        <ul className="mt-2 divide-y divide-slate-200 text-sm dark:divide-slate-800">
+          {corePending !== null ? (
+            <li className="flex flex-wrap justify-between gap-2 py-2">
+              <span>Core sleeve order #{corePending}{coreSleeve?.selected_symbol ? ` · ${coreSleeve.selected_symbol}` : ""}</span>
+              <span className="text-xs text-amber-700 dark:text-amber-300">Awaiting broker reconciliation</span>
+            </li>
+          ) : null}
+          {closing.map((position) => (
+            <li key={`${position.strategy_trade_id}:${position.broker_position_id}`} className="flex flex-wrap justify-between gap-2 py-2">
+              <span>Close {position.symbol} · {position.strategy_title}</span>
+              <span className="text-xs text-slate-500">Submitted, awaiting fill</span>
+            </li>
           ))}
-        </div>
-        <label className="mt-3 flex min-h-11 items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={!sleeve.can_configure && !enabled}
-            onChange={(event) => setEnabled(event.target.checked)}
-            className="disabled:cursor-not-allowed disabled:opacity-50"
-          />
-          Enable demo core sleeve
-        </label>
-        <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
-          Audit reason
-          <input
-            value={reason}
-            onChange={(event) => setReason(event.target.value)}
-            className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
-          />
-        </label>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            disabled={busy || reason.trim().length === 0 || (enabled && !sleeve.can_configure) || (mandate.configured && !mandateDirty)}
-            onClick={() => void saveMandate()}
-            className="min-h-11 rounded-md border border-slate-300 px-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700"
-          >
-            {busy ? "Saving…" : "Save mandate"}
-          </button>
-          <button
-            type="button"
-            disabled={busy || (!sleeve.can_rebalance && !sleeve.can_resume) || (!sleeve.can_resume && mandateDirty)}
-            onClick={() => setConfirmRebalance(true)}
-            className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {/*
-              ⚠⚠ #3222 residual 1. This said "Resume demo order", which reads as a
-              trading action and so contradicted a "Not trading" headline beside it.
-              Both sentences were true; the label was the lie. The backend proves the
-              action cannot trade -- `resume_core_submission` is "Reconcile one
-              committed authority WITHOUT EVER RETRYING ITS MUTATION", a broker lookup
-              -- see the comment on `can_resume` in `app/api/strategies.py`. "Settle"
-              is not a new word either: `strategyPortfolioStatus` already renders
-              "Settling a core order" for this exact state.
-            */}
-            {sleeve.can_resume ? "Settle demo order" : "Rebalance demo now"}
-          </button>
-        </div>
-      </div>
-      {outcome ? <p role="status" className="mt-3 text-sm text-slate-700 dark:text-slate-200">{outcome}</p> : null}
-      <Modal isOpen={confirmRebalance} onRequestClose={() => setConfirmRebalance(false)} labelledBy="core-rebalance-title">
-        <h2 id="core-rebalance-title" className="text-base font-semibold">
-          {sleeve.can_resume ? `Settle demo order ${sleeve.pending_order_id}?` : `Rebalance ${sleeve.selected_symbol} in demo?`}
-        </h2>
-        <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-          {sleeve.can_resume
-            ? "The server will look up and reconcile the already-authorised order using its original request ID and account credentials. It cannot create a second order."
-            : `The server will size within the ${target}% core mandate and every live guard. This path can buy only; it cannot sell or use alpha signals.`}
-        </p>
-        <div className="mt-4 flex justify-end gap-2">
-          <button type="button" onClick={() => setConfirmRebalance(false)} className="min-h-11 rounded-md border border-slate-300 px-3 text-sm dark:border-slate-700">Cancel</button>
-          <button type="button" disabled={busy} onClick={() => void rebalance()} className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Evaluating…" : sleeve.can_resume ? "Check with broker" : "Confirm demo rebalance"}</button>
-        </div>
-      </Modal>
-    </>
+        </ul>
+      )}
+    </section>
   );
 }
 
+/**
+ * Portfolio lens of `/strategies` — READ-ONLY apart from closing positions (#3334).
+ *
+ * Operator feedback 2026-09-23: the page opened on configuration and made them
+ * scroll past a form to see results. Inverted pyramid now: status and the
+ * summary strip, then what is held, then what is working, then performance.
+ * Every write that configures the pot lives on the Setup lens; closing stays
+ * here, separated to the right and always confirmed, because it acts on what
+ * this lens shows.
+ *
+ * ⚠ The kill-switch Clear stays here too. It is not configuration: it is the
+ * control attached to a blocker (the `BlockerRow` rule — a blocker the operator
+ * can clear carries its own control), and a halted pot is exactly what this lens
+ * must lead with.
+ */
 export function StrategyPortfolioLens() {
   const overview = useAsync(fetchStrategyOverview, []);
   const coreSleeve = useAsync(fetchCoreSleeve, [], { preserveOnRefetch: true });
-  /** ⚠ `preserveOnRefetch` so the `Open` tile's honest `—` (#3222) is the FIRST
-   *  load only. A close refetches this list, and without it the count would
-   *  blink to `—` every time — an honest answer, but a distracting one for a
-   *  value the page already knew a moment ago (review NITPICK on PR #3223). */
+  /** ⚠ `preserveOnRefetch` so the positions count's honest `—` (#3222) is the
+   *  FIRST load only; a close refetches this list. */
   const ownedPositions = useAsync(fetchStrategyOwnedPositions, [], { preserveOnRefetch: true });
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const exitTimingById = useMemo(
+    () => new Map((overview.data?.strategies ?? []).map((strategy) => [strategy.strategy_id, strategy.exit_timing])),
+    [overview.data],
+  );
 
   if (overview.loading) return <SectionSkeleton rows={6} />;
   if (overview.error || !overview.data) return <SectionError onRetry={overview.refetch} />;
@@ -404,22 +118,15 @@ export function StrategyPortfolioLens() {
   const summary = aggregate(data);
   const pool = data.paper_pool;
   const positions = ownedPositions.data?.positions ?? [];
-  /** What the `Strategy P&L` tile above cannot account for. Derived from the
-   *  page's own position list — the same operand #3222 re-pointed the `Open`
-   *  tile at — so the caveat and the count it sits beside can never disagree.
-   *  Empty while the fetch is unresolved, which is correct here: the caveat
-   *  asserts an exclusion, and asserting one before the list is known would be
-   *  a claim about positions nobody has read yet. */
+  /** What the `Strategy total P&L` tile cannot account for. Derived from the
+   *  page's own position list so the caveat and the table can never disagree.
+   *  Empty while the fetch is unresolved: the caveat asserts an exclusion, and
+   *  asserting one before the list is known would be a claim about positions
+   *  nobody has read yet. */
   const outsideStrategyPnl = positionsOutsideStrategyPnl(positions);
   const excludedTitles = namedList(outsideStrategyPnl.map((position) => position.strategy_title));
   /** ⚠ Only the currencies this total genuinely CANNOT take, i.e. those that
-   *  differ from the pool's (review WARNING on PR #3226). The exclusion and the
-   *  conversion problem are two different facts: a position is left out because
-   *  it is outside the strategy roll-up — ALWAYS true of it — whereas currency
-   *  is only why it cannot simply be added, which is true only sometimes. The
-   *  core position is natively USD and the pre-#3222 fixture reports it as such,
-   *  so "reported in USD, which this USD total cannot convert" is a reachable
-   *  sentence, and it asserts an FX conflict that does not exist. */
+   *  differ from the pool's (review WARNING on PR #3226). */
   const unconvertibleCurrencies = namedList(
     outsideStrategyPnl.map((position) => position.currency).filter((code) => code !== pool.currency),
   );
@@ -429,6 +136,8 @@ export function StrategyPortfolioLens() {
    *  would strand every genuinely open position behind it (Codex ckpt-2). */
   const closable = positions.filter((position) => position.trade_status !== "closing");
   const killActive = data.entry_block.global_kill_active;
+  const wealth = potWealthSummary(pnlHistory.data?.points ?? []);
+  const sp500Refusal = data.benchmark_refusals.find((refusal) => refusal.benchmark === "sp500_total_return");
 
   async function clearKillSwitch() {
     setBusy(true);
@@ -474,72 +183,55 @@ export function StrategyPortfolioLens() {
   return (
     <div className="space-y-8">
       <section aria-labelledby="pot-state">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 id="pot-state" className="flex items-center gap-2 text-lg font-semibold">
-            {status.headline}
-            {/* ⚠ Four states, not two (#3222), and the verdict names its own
-                badge rather than the component deriving one from `trading`:
-                `checking` is "not yet known" and `settling` is a recovery that
-                is neither live nor halted. */}
-            <Badge tone={status.tone}>{status.badge}</Badge>
-          </h2>
-          {closable.length > 0 ? (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setConfirmCloseAll(true)}
-              className="min-h-11 rounded-md border border-rose-300 px-3 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-950/40"
-            >
-              Close all {closable.length} positions
-            </button>
-          ) : null}
-        </div>
+        <h2 id="pot-state" className="flex items-center gap-2 text-lg font-semibold">
+          {status.headline}
+          {/* ⚠ Four states, not two (#3222), and the verdict names its own
+              badge rather than the component deriving one from `trading`:
+              `checking` is "not yet known" and `settling` is a recovery that
+              is neither live nor halted. */}
+          <Badge tone={status.tone}>{status.badge}</Badge>
+        </h2>
 
-        <div className="mt-4 grid grid-cols-2 gap-x-6 lg:grid-cols-4">
-          <StatTile label="Pot" value={formatMoney(number(pool.effective_capital), pool.currency)} hint={pool.capital_mode === "compound" ? "Compounding" : "Fixed limit"} />
-          {/* ⚠ "Strategy P&L", not "P&L" — this sums `pnl.total_pnl` over
-              `overview.strategies` and nothing else, while the three tiles
-              beside it are pot-level. The core sleeve is in no strategy's
-              block, so the unqualified label claimed a pot-wide total the
-              figure never was: measured 2026-09-19, all 11 strategies report
-              `0`, so it rendered a confident `$0.00` against a pot holding an
-              open position with non-zero P&L. The number is RIGHT for what it
-              covers; the label was the defect (#3222 residual 2), the same
-              shape as residual 1. Folding the position in is refused, not
-              deferred — see `positionsOutsideStrategyPnl`. */}
+        <div className="mt-4 grid grid-cols-2 gap-x-6 sm:grid-cols-3 lg:grid-cols-5">
+          {/* #3334: the strip reads ONE series — the end-of-day mark-to-market
+              NAV (`/strategies/wealth-history`) — so pot value, P&L and the
+              day's change can never disagree with each other or the chart.
+              The positions table below is live; this is the last close, and
+              every hint says which close. */}
           <StatTile
-            label="Strategy P&L"
-            value={formatMoney(summary.totalPnl, pool.currency)}
-            hint={formatPct(summary.averageReturn) + " / trade"}
-            tone={summary.totalPnl === null || summary.totalPnl === 0 ? "muted" : summary.totalPnl > 0 ? "positive" : "negative"}
+            label="Pot value"
+            value={pnlHistory.error ? "—" : formatMoney(wealth?.potValue ?? null, pool.currency)}
+            hint={wealth ? `${formatDate(wealth.date)} close · ${pool.capital_mode === "compound" ? "moving" : "fixed"} budget ${formatMoney(number(pool.capital_limit), pool.currency)}` : pnlHistory.error ? "History unavailable" : "No close recorded yet"}
+          />
+          <StatTile
+            label="P&L since start"
+            value={pnlHistory.error ? "—" : formatMoney(wealth?.totalPnl ?? null, pool.currency)}
+            hint={wealth ? `${formatPct(wealth.totalReturn)} on principal · realised + open` : "—"}
+            tone={toneOf(wealth?.totalPnl ?? null)}
             toneHint
           />
-          {/* ⚠ #3222 — counted off the SAME list the `Close all` button uses, not
-              off `aggregate(overview).activePositions`. That sum is per registered
-              strategy, and the core sleeve's row carries `strategy_id: null`
-              (`strategy_title: "Core / cash mandate"`), so it was in no strategy's
-              count: the tile read 0 while the button beside it read 1. ⚠ `null`
-              until the fetch resolves — a 0 drawn during loading is the same wrong
-              number, just briefer. */}
-          <StatTile label="Open" value={formatNumber(ownedPositions.data ? positions.length : null, 0)} hint={`${formatNumber(summary.approved, 0)} strategies approved`} />
-          <StatTile label="Available" value={formatMoney(number(pool.capital_observation_complete === false ? null : pool.remaining_capital), pool.currency)} hint={pool.capital_observation_complete === false ? "Checked at action" : "To deploy"} />
+          <StatTile
+            label="Last day"
+            value={pnlHistory.error ? "—" : formatMoney(wealth?.dayPnl ?? null, pool.currency)}
+            hint={wealth?.dayPnl != null ? `${formatPct(wealth.dayReturn)} · ${formatDate(wealth.date)} vs prior close` : "Needs two closes"}
+            tone={toneOf(wealth?.dayPnl ?? null)}
+            toneHint
+          />
+          {/* No number, and the tile says why by the refusal's own label
+              (#2602 item 5): a tracking ETF's price is not the index's total
+              return, and substituting one is the mislabelling that refusal
+              exists to prevent. The full reasons render under the chart. */}
+          <StatTile
+            label="vs S&P 500"
+            value="—"
+            hint={sp500Refusal ? "No licensed benchmark" : "Not reported"}
+          />
+          <StatTile
+            label="Cash available"
+            value={formatMoney(number(pool.capital_observation_complete === false ? null : pool.remaining_capital), pool.currency)}
+            hint={pool.capital_observation_complete === false ? "Checked at each order" : "Within the budget"}
+          />
         </div>
-
-        {/* The exclusion, stated rather than implied by the label alone —
-            the #2129 caveat pattern `SummaryCards` uses for its own
-            unconvertible rows. Rendered only when such a position is actually
-            held, so it is evidence about the pot's current contents and not
-            standing boilerplate the operator learns to skip. */}
-        {outsideStrategyPnl.length > 0 ? (
-          <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
-            ⚠ Excludes {formatNumber(outsideStrategyPnl.length, 0)}{" "}
-            {outsideStrategyPnl.length === 1 ? "position" : "positions"} held outside the
-            strategies ({excludedTitles.join(", ")}).
-            {unconvertibleCurrencies.length > 0
-              ? ` Reported in ${unconvertibleCurrencies.join(" / ")}, which this ${pool.currency} total cannot convert.`
-              : ""}
-          </p>
-        ) : null}
 
         {actionError ? (
           <p role="alert" className="mt-3 text-sm text-rose-700 dark:text-rose-300">
@@ -565,12 +257,9 @@ export function StrategyPortfolioLens() {
                 }
               />
             ) : null}
-            {/* Only what the Setup form below does NOT already show. Capital,
-                mandate and the on/off switch are all fields down there, so
-                listing them here too is narration of a control the operator can
-                already see — which is exactly the feedback this panel answers.
-                What stays is what no field can fix: evidence a strategy has
-                not earned yet. */}
+            {/* Only what the Setup lens does NOT already show. Capital,
+                mandate and the on/off switch are fields there. What stays is
+                what no field can fix: evidence a strategy has not earned yet. */}
             {status.blockers
               .filter((blocker) => blocker.key === "no_approved_strategies")
               .map((blocker) => (
@@ -584,128 +273,43 @@ export function StrategyPortfolioLens() {
         ) : null}
       </section>
 
-      <section aria-labelledby="pot-setup">
-        <h2 id="pot-setup" className="sr-only">
-          Setup
-        </h2>
-        <div className="space-y-4">
-          {coreSleeve.loading ? <SectionSkeleton rows={3} /> : null}
-          {coreSleeve.error ? <SectionError onRetry={coreSleeve.refetch} /> : null}
-          {coreSleeve.data ? (
-            <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-semibold">Core &amp; cash</h2>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Deterministic fallback when no strategy has earned capital.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  {coreSleeve.isRevalidating ? (
-                    <span className="text-xs text-amber-700 dark:text-amber-300">Status is stale — refreshing</span>
-                  ) : null}
-                  <button
-                    type="button"
-                    disabled={coreSleeve.isRevalidating}
-                    onClick={coreSleeve.refetch}
-                    className="min-h-11 rounded-md border border-slate-300 px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700"
-                  >
-                    {coreSleeve.isRevalidating ? "Refreshing…" : "Refresh status"}
-                  </button>
-                  <Badge tone={CORE_SLEEVE_BADGE[coreSleeve.data.state].tone}>
-                    {CORE_SLEEVE_BADGE[coreSleeve.data.state].label}
-                  </Badge>
-                </div>
-              </div>
-              <div className="mt-5 grid grid-cols-2 gap-x-6 lg:grid-cols-4">
-                <StatTile
-                  size="md"
-                  label="Common dates seen"
-                  value={`${coreSleeve.data.observed_trading_days} / ${coreSleeve.data.required_trading_days}`}
-                  hint={
-                    coreWindowClosed(coreSleeve.data)
-                      ? "The declared window is complete"
-                      : "Provisional until the sealed verifier opens"
-                  }
-                />
-                <StatTile size="md" label="Instrument" {...coreInstrumentTile(coreSleeve.data)} />
-                <StatTile
-                  size="md"
-                  label={coreWindowClosed(coreSleeve.data) ? "Window closed" : "Earliest verdict"}
-                  value={formatDate(coreSleeve.data.earliest_possible_verdict_at)}
-                  hint={
-                    coreWindowClosed(coreSleeve.data)
-                      ? "The fifth common session closed here"
-                      : "Lower bound if all five common sessions complete"
-                  }
-                />
-                <StatTile
-                  size="md"
-                  label="Cost ceiling"
-                  value={`${(coreSleeve.data.max_cost_bps / 100).toFixed(2)}%`}
-                  hint="Preregistered #2833 bar"
-                />
-              </div>
-              <div className="mt-4">
-                {coreSleeve.data.blockers.map((blocker) => (
-                  <BlockerRow key={blocker.code} tone="warn" label={blocker.detail} />
-                ))}
-              </div>
-              <CoreCandidateCoverageTable sleeve={coreSleeve.data} />
-              <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
-                Demo only · buy only · no alpha signal. {coreSleeve.data.household_tax_caveat}{" "}
-                {coreSleeve.data.household_currency_caveat}
-              </p>
-              <CoreSleeveControl
-                sleeve={coreSleeve.data}
-                busy={busy || coreSleeve.isRevalidating}
-                setBusy={setBusy}
-                onError={setActionError}
-                onUpdated={() => {
-                  void coreSleeve.refetch();
-                  void ownedPositions.refetch();
-                  void overview.refetch();
-                  void pnlHistory.refetch();
-                }}
-              />
-            </section>
+      <section aria-labelledby="pot-holdings" className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 id="pot-holdings" className="text-sm font-semibold">
+            Holdings{" "}
+            <span className="font-normal text-slate-500">
+              · {formatNumber(ownedPositions.data ? positions.length : null, 0)} open
+            </span>
+          </h2>
+          {/* Destructive, so set apart on the right and always confirmed. */}
+          {closable.length > 0 ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setConfirmCloseAll(true)}
+              className="min-h-11 rounded-md border border-rose-300 px-3 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-950/40"
+            >
+              Close all {closable.length} positions
+            </button>
           ) : null}
-          <AutomationControl
-            overview={data}
-            // A preserved core snapshot is visibly stale during revalidation
-            // and must not authorise the independent core activation lane.
-            // Alpha readiness remains available from `overview` on its own.
-            coreSleeve={coreSleeve.isRevalidating ? null : coreSleeve.data}
-            onUpdated={() => {
-              void overview.refetch();
-              void coreSleeve.refetch();
-            }}
-          />
         </div>
+        {ownedPositions.loading ? <SectionSkeleton rows={3} /> : null}
+        {ownedPositions.error ? <SectionError onRetry={ownedPositions.refetch} /> : null}
+        {ownedPositions.data && positions.length > 0 ? (
+          <LiveQuoteProvider instrumentIds={ownedPositions.data.live_quote_instrument_ids}>
+            <OpenStrategyPositions positions={positions} exitTimingById={exitTimingById} onClose={setCloseFor} />
+          </LiveQuoteProvider>
+        ) : null}
+        {ownedPositions.data && positions.length === 0 ? (
+          <EmptyState title="Nothing held" description="Positions opened by an approved strategy appear here." />
+        ) : null}
+        {ownedPositions.data ? <EngineOrders positions={positions} coreSleeve={coreSleeve.data ?? null} /> : null}
       </section>
 
       <section aria-labelledby="pot-performance">
         <h2 id="pot-performance" className="text-sm font-semibold">
           Portfolio performance
         </h2>
-        {/* The pot's trade record, as numbers rather than sentences. Automated
-            positions only; research backtests are excluded by `aggregate`. */}
-        <div className="mt-3 grid grid-cols-2 gap-x-6 sm:grid-cols-3">
-          {/* Same operand, same scope, so the same name — a "Total P&L" here
-              beside a "Strategy P&L" above reads as two different figures
-              when it is one `summary.totalPnl`. The section's own comment
-              already limits it to automated positions; this limits it to the
-              strategies. */}
-          <StatTile size="md" label="Strategy total P&L" value={formatMoney(summary.totalPnl, pool.currency)} hint="Realised + open" />
-          <StatTile size="md" label="Average / trade" value={formatPct(summary.averageReturn)} hint="Completed outcomes" />
-          {/* UNSIGNED, and it sits beside a SIGNED expectancy on purpose. A win
-              rate is the share of completed outcomes that won — a composition,
-              not a return — so `formatPct`'s `exceptZero` sign rendered it
-              "+27.97%" next to "Average / trade -0.03%", making the one honest
-              figure look like the bad news (#3032). Tile presence is compliant:
-              ta-operator-surface bans win rate only as a LONE headline. */}
-          <StatTile size="md" label="Win rate" value={formatUnsignedPct(summary.successRate)} hint={`${formatNumber(summary.resolved, 0)} completed`} />
-        </div>
         {pnlHistory.loading ? (
           <div className="flex h-52 items-center justify-center text-xs text-slate-500">Loading…</div>
         ) : pnlHistory.error ? (
@@ -719,26 +323,32 @@ export function StrategyPortfolioLens() {
             component. A benchmark that is absent must say so by name in every
             branch above, including the error one. */}
         <BenchmarkRefusals refusals={data.benchmark_refusals} />
-        {/* Whether our P&L agrees with the broker's own equity. Kept when the
-            page was trimmed to a control panel: it is the reason to trust the
-            number above it, not commentary about it. */}
+        {/* The strategies' own trade record. Automated positions only;
+            research backtests are excluded by `aggregate`. */}
+        <div className="mt-5 grid grid-cols-2 gap-x-6 sm:grid-cols-3">
+          {/* "Strategy", not pot-wide: this sums `pnl.total_pnl` over
+              `overview.strategies` only, and the core sleeve is in no
+              strategy's block (#3222 residual 2). The caveat below names what
+              it leaves out. */}
+          <StatTile size="md" label="Strategy total P&L" value={formatMoney(summary.totalPnl, pool.currency)} hint="Realised + open" />
+          <StatTile size="md" label="Average / trade" value={formatPct(summary.averageReturn)} hint="Completed outcomes" />
+          {/* UNSIGNED beside a SIGNED expectancy on purpose (#3032): a win rate
+              is a composition, not a return. */}
+          <StatTile size="md" label="Win rate" value={formatUnsignedPct(summary.successRate)} hint={`${formatNumber(summary.resolved, 0)} completed`} />
+        </div>
+        {outsideStrategyPnl.length > 0 ? (
+          <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+            ⚠ Strategy figures exclude {formatNumber(outsideStrategyPnl.length, 0)}{" "}
+            {outsideStrategyPnl.length === 1 ? "position" : "positions"} held outside the
+            strategies ({excludedTitles.join(", ")}).
+            {unconvertibleCurrencies.length > 0
+              ? ` Reported in ${unconvertibleCurrencies.join(" / ")}, which this ${pool.currency} total cannot convert.`
+              : ""}
+          </p>
+        ) : null}
+        {/* Whether our P&L agrees with the broker's own equity — the reason to
+            trust the numbers above, not commentary about them. */}
         <AccountEvidence overview={data} />
-      </section>
-
-      <section aria-labelledby="pot-holdings">
-        <h2 id="pot-holdings" className="sr-only">
-          Holdings
-        </h2>
-        {ownedPositions.loading ? <SectionSkeleton rows={3} /> : null}
-        {ownedPositions.error ? <SectionError onRetry={ownedPositions.refetch} /> : null}
-        {ownedPositions.data && positions.length > 0 ? (
-          <LiveQuoteProvider instrumentIds={ownedPositions.data.live_quote_instrument_ids}>
-            <OpenStrategyPositions positions={positions} onClose={setCloseFor} />
-          </LiveQuoteProvider>
-        ) : null}
-        {ownedPositions.data && positions.length === 0 ? (
-          <EmptyState title="Nothing held" description="Positions opened by an approved strategy appear here." />
-        ) : null}
       </section>
 
       <StrategyCloseModal
@@ -758,7 +368,7 @@ export function StrategyPortfolioLens() {
           </h2>
           <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
             Each is submitted to the broker one at a time. Manual positions are not touched. This
-            does not stop the strategies — turn automation off if you also want new entries to stop.
+            does not stop the strategies — turn automation off on the Setup lens if you also want new entries to stop.
           </p>
           <div className="mt-4 flex justify-end gap-2">
             <button
