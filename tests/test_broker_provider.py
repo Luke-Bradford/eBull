@@ -1227,6 +1227,70 @@ class TestDemoStrategyPositionMutations:
         # The persisted/audited payload stays plain JSON.
         assert detail.raw_payload["positions"][0]["units"] == 0.323024
 
+    # #3331 — wire text of close order 383424950 (#2603 acceptance A, 2026-09-23 13:35Z)
+    # as posted on the issue; ``orderID`` added, which the issue's excerpt elided.
+    _REPEATED_POSITION_CLOSE = (
+        '{"orderID":383424950,"statusID":3,"errorCode":0,"proceeds":228.75,"assetCurrencyID":1,'
+        '"accountCurrencyID":1,"instrumentID":3417,"positions":[{"positionID":3601264304,'
+        '"occurred":"2026-09-23T13:35:31.583Z","rate":772.4,"units":0.296155,"conversionRate":1.0,'
+        '"amount":225.04},{"positionID":3601264304}]}'
+    )
+
+    def test_an_executed_close_that_repeats_its_position_bare_is_filled(self) -> None:
+        """#3331: the broker listed the executed position twice, once bare. Judged per
+        distinct id, it is filled, with one id and one fill, so the whole-close
+        consumers (``position_ids == (owned,)``, one-fill late EXIT booking) see
+        the shape they already accept."""
+        detail = self._close_order_from_wire(self._REPEATED_POSITION_CLOSE, "383424950")
+        assert detail.status == "filled"
+        assert detail.position_ids == (3601264304,)
+        (fill,) = detail.positions
+        assert (fill.rate, fill.units, fill.occurred) == (
+            Decimal("772.4"),
+            Decimal("0.296155"),
+            "2026-09-23T13:35:31.583Z",
+        )
+        # The audited payload keeps both entries verbatim.
+        assert len(detail.raw_payload["positions"]) == 2
+
+    @pytest.mark.parametrize(
+        ("positions", "expected_ids"),
+        [
+            # The statusID 2 shape, repeated: still nothing executed.
+            ([{"positionID": 7}, {"positionID": 7}], (7,)),
+            # An executed entry vouches only for its own id.
+            (
+                [
+                    {"positionID": 7, "occurred": "2026-09-23T13:35:31Z", "rate": 1.0, "units": 1.0},
+                    {"positionID": 8},
+                ],
+                (7, 8),
+            ),
+            # A PARTIAL repeat is not bare: it keeps the order pending.
+            (
+                [
+                    {"positionID": 7, "occurred": "2026-09-23T13:35:31Z", "rate": 1.0, "units": 1.0},
+                    {"positionID": 7, "rate": 1.0},
+                ],
+                (7,),
+            ),
+        ],
+    )
+    def test_a_bare_repeat_does_not_complete_an_unexecuted_position(
+        self, positions: list[dict[str, object]], expected_ids: tuple[int, ...]
+    ) -> None:
+        body = {"orderID": 383424950, "statusID": 3, "errorCode": 0, "proceeds": 1.0, "positions": positions}
+        detail = self._close_order_from_wire(json.dumps(body), "383424950")
+        assert detail.status == "pending"
+        assert detail.position_ids == expected_ids
+
+    def test_a_malformed_duplicate_id_still_fails_the_lookup(self) -> None:
+        """Dropping a bare duplicate must not drop its id check first."""
+        body = json.loads(self._REPEATED_POSITION_CLOSE)
+        body["positions"][1]["positionID"] = True
+        with pytest.raises(BrokerPositionMutationUncertain, match="malformed"):
+            self._close_order_from_wire(json.dumps(body), "383424950")
+
     @pytest.mark.parametrize(
         "patch",
         [
