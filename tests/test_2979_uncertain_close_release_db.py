@@ -118,8 +118,7 @@ def _manage(conn: psycopg.Connection[Any], broker: FileBackedFakeBroker, trade_i
 
 def _stamps(conn: psycopg.Connection[Any]) -> list[bool]:
     rows = conn.execute(
-        "SELECT broker_close_witnessed_at IS NOT NULL FROM strategy_position_operations "
-        "ORDER BY position_operation_id"
+        "SELECT broker_close_witnessed_at IS NOT NULL FROM strategy_position_operations ORDER BY position_operation_id"
     ).fetchall()
     conn.commit()
     return [bool(row[0]) for row in rows]
