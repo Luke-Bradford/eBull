@@ -38,8 +38,9 @@ boundary: a true figure, but not a reported period.
 
 Primary end = max `period_end` of the accession's mapped fp=FY facts: the same population the existing
 fiscal-year anchor uses, so the gate and the anchor cannot disagree (ckpt-1 finding 21). Every accession
-with mapped FY facts has one; there is no fail-open branch. Facts that do not mint still contribute values to
-a row that a presented fact mints. Quarterly path is untouched.
+with mapped FY facts has one; there is no fail-open branch. A 10-K/A instead takes the primary of the fiscal
+year it amends (see A/B section). Facts that do not mint still contribute values to a row that a presented fact
+mints. Quarterly derivation is untouched except the derived-Q4 chronology guard below.
 
 Effect on canonical: a period no longer minted is not re-upserted, so its canonical row keeps whatever
 history it holds. Nothing is deleted.
@@ -51,10 +52,21 @@ history it holds. Nothing is deleted.
 
 | | rows |
 |---|---:|
-| A rows / B rows | 74,542 / 67,877 |
-| FY rows no longer minted | 6,664 (4,405 instruments) |
-| rows changed in value | **0** |
-| Q4 | 2 removed, 1 added: derived Q4 re-keyed off a crumb FY end (one value-less, one moved 2024-02-01 → the real FY end 2024-01-31) |
+| A rows / B rows | 74,820 / 68,066 |
+| FY rows no longer minted | 6,661 |
+| Q4 rows no longer derived | 93 — every one is a residual that is not a quarter (43 end before they start; the rest span outside 60–120 days) |
+| rows added / changed in value | **0 / 0** |
+
+The Q4 guard (`q4_end − q3_end` inside `_FLOW_DURATION_DAYS["Q4"]`) was added at ckpt-2: without it the FY
+gate re-pointed one label's Q4 at another real year's quarters (fabricated flows). Main already emits the 93;
+canonical copies of them are not deleted by this PR.
+
+A 10-K/A takes the primary of the fiscal year it amends (its `fy` stamp; Rule 12b-15), because a partial
+amendment's latest context can be a comparative (ckpt-2). Measured: of 972 retained 10-K/A accessions, 3 have a
+latest context more than 300 days behind their same-`fy` original.
+
+(First-pass figures quoted below, 6,664 / 3,101, were measured before the panel restore changed raw for 5
+instruments.)
 
 Gain-side inspection of the 6,664:
 - 6 carry a duration column. All are duration concepts tagged as instants on a non-fiscal date (JXN
