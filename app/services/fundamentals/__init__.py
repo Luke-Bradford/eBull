@@ -1059,6 +1059,36 @@ def _resolve_period_fiscal_year(
     return stamped_fy if _is_plausible_fiscal_year(stamped_fy) else period_end.year
 
 
+def _fy_period_is_presented(facts: Sequence[FactRow], primary_end_by_accession: dict[str, date]) -> bool:
+    """Whether any filing actually REPORTS this FY period, rather than only touching it (#2182).
+
+    Source rule (Reg S-X): a 10-K presents balance sheets for the two most recent
+    fiscal years (Rule 3-01(a)) and income / cash-flow statements for three
+    (Rule 3-02(a)). The equity rollforward (Rule 3-04) and the cash-flow statement
+    also carry the OPENING balance of the earliest year, i.e. an instant fact at an
+    end date up to three years before the filing's primary year. Those opening
+    balances are true figures but they do not report that year; with
+    ``financial_facts_raw`` retention-swept to the latest 3 10-Ks, they are the only
+    facts left for aged years, and minting a row from them overwrites the durable
+    canonical history with a near-empty row (AAPL FY2020 from the FY2023 10-K).
+
+    So a period is presented when any of its facts is an annual DURATION (always a
+    reported statement — deliberately not distance-bounded, so transition periods
+    and recast years are never dropped), or an INSTANT no more than one fiscal year
+    before its own accession's primary end. "One fiscal year" is the annual window
+    upper bound already used to admit annual durations, so 52/53-week years pass.
+    Non-presented facts still contribute values to a row that a presented fact mints.
+    """
+    max_year_days = _FLOW_DURATION_DAYS["FY"][1]
+    for fact in facts:
+        if fact.period_start is not None:
+            return True
+        primary_end = primary_end_by_accession.get(fact.accession_number)
+        if primary_end is None or (primary_end - fact.period_end).days <= max_year_days:
+            return True
+    return False
+
+
 def _build_period_row(
     *,
     period_type: str,
@@ -1183,6 +1213,25 @@ def _derive_periods_from_facts(
             _anchor_best[key] = cand
     anchor_fy: dict[tuple[str, date], int] = {k: v[2] for k, v in _anchor_best.items()}
 
+    # #2182 — each accession's primary FY end, from the SAME population the
+    # anchors above use (mapped facts, fp=FY), so the minting gate below and the
+    # fiscal-year anchor can never disagree about which period a filing reports.
+    fy_primary_end: dict[str, date] = {
+        acc: max(f.period_end for f in fs) for (acc, fp), fs in _acc_fp_facts.items() if fp == "FY"
+    }
+    # A 10-K/A amends the report for its own fiscal year (Exchange Act Rule 12b-15)
+    # and need not repeat the primary statements, so its latest context can be a
+    # comparative. Its ``fy`` stamp (the filing's DocumentFiscalYearFocus) names the
+    # year it amends: take the latest primary among accessions sharing that stamp.
+    primary_by_stamp: dict[int, date] = {}
+    for (acc, fp), fs in _acc_fp_facts.items():
+        if fp == "FY":
+            stamp = fs[0].fiscal_year
+            primary_by_stamp[stamp] = max(primary_by_stamp.get(stamp, date.min), fy_primary_end[acc])
+    for (acc, fp), fs in _acc_fp_facts.items():
+        if fp == "FY" and fs[0].form_type.endswith("/A"):
+            fy_primary_end[acc] = primary_by_stamp[fs[0].fiscal_year]
+
     # Build period rows.
     #
     # Quarterly periods keep the original per-(stamped_fy, fp) single-row
@@ -1263,6 +1312,8 @@ def _derive_periods_from_facts(
     # period_end itself (the SEC stamp is only reliable for a filing's own primary
     # period; comparatives inherit the filing's stamp — #682).
     for period_end, mapped_facts in fy_facts_by_end.items():
+        if not _fy_period_is_presented(mapped_facts, fy_primary_end):
+            continue
         canonical_facts = sorted(mapped_facts, key=lambda f: (f.filed_date, f.accession_number), reverse=True)
         fiscal_year = _resolve_period_fiscal_year(anchor_fy, "FY", period_end, canonical_facts[0].fiscal_year)
         periods.append(
@@ -1397,8 +1448,15 @@ def _derive_periods_from_facts(
 
         # Determine Q4 period dates
         q3_end = q3.period_end_date
-        q4_start = date(q3_end.year, q3_end.month + 1, 1) if q3_end.month < 12 else date(q3_end.year + 1, 1, 1)
         q4_end = fy_row.period_end_date
+        # #2182 — the quarters are matched to the FY row by fiscal_year label only.
+        # When the label's FY row and quarters belong to different real years
+        # (a fiscal-year relabel), the "Q4" would end before Q3 does and carry
+        # fabricated flows. Derive only when the residual is itself a quarter.
+        q4_lo, q4_hi = _FLOW_DURATION_DAYS["Q4"]
+        if not q4_lo <= (q4_end - q3_end).days <= q4_hi:
+            continue
+        q4_start = date(q3_end.year, q3_end.month + 1, 1) if q3_end.month < 12 else date(q3_end.year + 1, 1, 1)
 
         q4 = PeriodRow(
             period_end_date=q4_end,
