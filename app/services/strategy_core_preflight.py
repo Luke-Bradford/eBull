@@ -332,8 +332,10 @@ class CorePreflightObservation:
     """#2603 sell leg §4: an operation on ANY core ownership (active or released) is
     unresolved, or is a close in ``reconcile_required``.  A core close can stay
     ``submitted`` after its hold ends and a ``reconcile_required`` one indefinitely; no
-    core trade may follow either until it resolves.  Defaulted so pure fixtures that
-    predate it read as "none outstanding"."""
+    core trade may follow either until it resolves.  #2979: a ``reconcile_required``
+    close stamped ``broker_close_witnessed_at`` HAS resolved -- its position was witnessed
+    closed whole, so it has nothing left to act on (``sql/414``).  Defaulted so pure
+    fixtures that predate it read as "none outstanding"."""
 
 
 # One statement, so the kill switch, execution block, instrument, exchange, halt
@@ -374,7 +376,8 @@ SELECT (i.instrument_id IS NOT NULL) AS instrument_present,
            JOIN strategy_trades ct ON ct.strategy_trade_id = own.strategy_trade_id
            WHERE ct.core_rebalance_intent_id IS NOT NULL
              AND (op.status IN ('intent_persisted', 'submitting', 'submitted')
-                  OR (op.operation_type = 'close' AND op.status = 'reconcile_required'))
+                  OR (op.operation_type = 'close' AND op.status = 'reconcile_required'
+                      AND op.broker_close_witnessed_at IS NULL))
        ) AS core_operation_outstanding
 FROM (SELECT %(core_instrument_id)s::bigint AS target) t
 LEFT JOIN instruments i ON i.instrument_id = t.target

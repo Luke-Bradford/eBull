@@ -1146,6 +1146,87 @@ def close_state_report(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     }
 
 
+def entry_broker_order_ref(conn: psycopg.Connection[Any], strategy_trade_id: int) -> int:
+    """The entry order's broker reference, which the #2965 witness keys on."""
+    row = conn.execute(
+        """
+        SELECT o.broker_order_ref FROM strategy_trade_orders link
+        JOIN orders o ON o.order_id=link.order_id
+        WHERE link.strategy_trade_id=%s AND link.purpose='entry'
+        """,
+        (strategy_trade_id,),
+    ).fetchone()
+    conn.commit()
+    assert row is not None
+    return int(row[0])
+
+
+def record_whole_close_witness(
+    conn: psycopg.Connection[Any],
+    *,
+    position_id: int,
+    order_ref: int,
+    close_units: str = "0.500000",
+    units: str = "0.500000",
+    dollars: str = "250.00",
+) -> None:
+    """Write the ``etoro_sync`` open row + ``etoro_history`` close row the #2965 key reads.
+
+    ``close_units == units`` is a whole one-shot close; anything less is a partial.
+    """
+    from psycopg.types.json import Jsonb
+
+    opened = CLOCK - timedelta(days=2)
+    open_raw = {
+        "positionID": position_id,
+        "orderID": order_ref,
+        "instrumentID": CORE_INSTRUMENT_ID,
+        "isBuy": True,
+        "leverage": 1,
+        "units": float(units),
+        "initialUnits": float(units),
+        "isPartiallyAltered": False,
+        "initialAmountInDollars": float(dollars),
+    }
+    close_raw = {
+        "positionId": position_id,
+        "orderId": order_ref,
+        "instrumentId": CORE_INSTRUMENT_ID,
+        "isBuy": True,
+        "leverage": 1,
+        "units": float(close_units),
+        "investment": float(dollars),
+        "initialInvestment": float(dollars),
+        "openTimestamp": opened.isoformat(),
+    }
+    conn.execute(
+        """
+        INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
+                                  executed_at,investment_usd,order_id,source,raw_payload)
+        VALUES (%s,%s,%s,'open','buy',%s,%s,%s,NULL,'etoro_sync',%s)
+        """,
+        (position_id, CORE_INSTRUMENT_ID, CORE_INSTRUMENT_ID, units, opened, dollars, Jsonb(open_raw)),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
+                                  executed_at,realized_pnl_usd,investment_usd,order_id,source,raw_payload)
+        VALUES (%s,%s,%s,'close','sell',%s,%s,-12.5,%s,%s,'etoro_history',%s)
+        """,
+        (
+            position_id,
+            CORE_INSTRUMENT_ID,
+            CORE_INSTRUMENT_ID,
+            close_units,
+            CLOCK - timedelta(hours=1),
+            dollars,
+            order_ref,
+            Jsonb(close_raw),
+        ),
+    )
+    conn.commit()
+
+
 __all__ = [
     "ACCOUNT_CASH",
     "API_CREDENTIAL_ID",
@@ -1153,6 +1234,8 @@ __all__ = [
     "CLOCK",
     "CORE_INSTRUMENT_ID",
     "ChildMode",
+    "entry_broker_order_ref",
+    "record_whole_close_witness",
     "FaultPoint",
     "FileBackedFakeBroker",
     "OPERATOR_ID",
