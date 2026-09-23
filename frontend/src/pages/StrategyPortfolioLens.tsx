@@ -287,6 +287,9 @@ export function StrategyPortfolioLens() {
   const closable = positions.filter((position) => position.trade_status !== "closing");
   const killActive = data.entry_block.global_kill_active;
   const wealth = potWealthSummary(pnlHistory.data?.points ?? []);
+  // #3334 item 3: the server dates the time-weighted return. It is inception
+  // only when inception is inside the history window, so it is always labelled.
+  const returnSince = pnlHistory.data?.return_since ?? null;
   const sp500Refusal = data.benchmark_refusals.find((refusal) => refusal.benchmark === "sp500_total_return");
 
   async function clearKillSwitch() {
@@ -357,14 +360,31 @@ export function StrategyPortfolioLens() {
           <StatTile
             label="P&L since start"
             value={pnlHistory.error ? "—" : formatMoney(wealth?.totalPnl ?? null, pool.currency)}
-            hint={wealth ? "Realised + open · return % not yet published" : "—"}
+            hint={
+              wealth
+                ? wealth.cumulativeReturn !== null && returnSince
+                  ? `${formatPct(wealth.cumulativeReturn)} time-weighted since ${formatDate(returnSince)}`
+                  : "Realised + open · no return % yet"
+                : "—"
+            }
             tone={toneOf(wealth?.totalPnl ?? null)}
             toneHint
           />
           <StatTile
             label="Last day"
             value={pnlHistory.error ? "—" : formatMoney(wealth?.dayPnl ?? null, pool.currency)}
-            hint={wealth?.dayPnl != null ? `${formatDate(wealth.date)} vs prior close, net of funding` : "Needs two closes"}
+            hint={(() => {
+              // The server's period return can span a bridged incomplete close,
+              // where the adjacent-close money change is unknown — show it anyway.
+              const pct =
+                wealth?.periodReturn != null && wealth.periodStart
+                  ? `${formatPct(wealth.periodReturn)} since ${formatDate(wealth.periodStart)} close`
+                  : null;
+              if (wealth?.dayPnl != null) {
+                return `${formatDate(wealth.date)} vs prior close, net of funding${pct ? ` · ${pct}` : ""}`;
+              }
+              return pct ?? "Needs two closes";
+            })()}
             tone={toneOf(wealth?.dayPnl ?? null)}
             toneHint
           />

@@ -3201,6 +3201,14 @@ export interface StrategyPnlHistoryPoint {
   pot_value: string | null;
   complete: boolean;
   incomplete_reasons: string[];
+  /**
+   * #3334 item 3 — time-weighted returns as FRACTIONS. `period_return` runs
+   * from the `period_start` close to this close (more than one session when an
+   * incomplete point was bridged). Null where no honest return exists.
+   */
+  period_return: string | null;
+  period_start: string | null;
+  cumulative_return: string | null;
 }
 
 /**
@@ -3211,7 +3219,11 @@ export interface StrategyPnlHistoryPoint {
  */
 export interface StrategyPnlHistoryResponse {
   basis: "exact_owned_mark_to_market_nav";
-  total_return_available: false;
+  /** Describes the LAST COMPLETE point; the return runs from `return_since`. */
+  total_return_available: boolean;
+  return_basis: "time_weighted_start_of_period_flows";
+  return_since: string | null;
+  return_unavailable_reason: "no_complete_point" | "unfunded" | "insufficient_history" | "chain_broken" | null;
   benchmark_comparison_available: false;
   /** #2602 item 5 — the flag above says there is no benchmark; this says why. */
   benchmark_refusals: BenchmarkRefusal[];

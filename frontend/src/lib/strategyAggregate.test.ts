@@ -148,6 +148,9 @@ describe("potWealthSummary (#3334)", () => {
     pot_value: pot,
     complete,
     incomplete_reasons: complete ? [] : ["owned_position_mark_missing"],
+    period_return: complete ? "0.001" : null,
+    period_start: complete ? "2026-09-17" : null,
+    cumulative_return: complete ? "0.001" : null,
   });
 
   it("reads the last close and nets a funding flow out of the day's change", () => {
@@ -160,6 +163,10 @@ describe("potWealthSummary (#3334)", () => {
     expect(summary?.totalPnl).toBe(0.5);
     // 500.5 - 0 - 500 funding = 0.5, not +500.5.
     expect(summary?.dayPnl).toBeCloseTo(0.5);
+    // Returns are passed through from the server, never derived here.
+    expect(summary?.periodReturn).toBe(0.001);
+    expect(summary?.periodStart).toBe("2026-09-17");
+    expect(summary?.cumulativeReturn).toBe(0.001);
   });
 
   it("skips an incomplete close rather than showing its partial sum", () => {

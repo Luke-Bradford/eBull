@@ -103,9 +103,17 @@ def test_the_constant_cannot_be_mutated_in_place() -> None:
         BENCHMARK_REFUSALS[0].reasons[0].code = "anything"  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("model", [StrategyPnlHistoryResponse, StrategyWealthHistoryResponse])
-def test_availability_flags_cannot_be_flipped_to_true(model: type[BaseModel]) -> None:
-    for field in ("benchmark_comparison_available", "total_return_available"):
+@pytest.mark.parametrize(
+    ("model", "fields"),
+    [
+        (StrategyPnlHistoryResponse, ("benchmark_comparison_available", "total_return_available")),
+        # #3334 item 3: the wealth series now publishes a time-weighted return,
+        # so only its benchmark flag stays pinned.
+        (StrategyWealthHistoryResponse, ("benchmark_comparison_available",)),
+    ],
+)
+def test_availability_flags_cannot_be_flipped_to_true(model: type[BaseModel], fields: tuple[str, ...]) -> None:
+    for field in fields:
         with pytest.raises(ValidationError):
             model(points=[], **{field: True})
 

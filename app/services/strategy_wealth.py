@@ -9,10 +9,11 @@ coerced to zero.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
@@ -143,4 +144,118 @@ def load_strategy_wealth_history(conn: psycopg.Connection[Any], *, days: int = 3
     return points
 
 
-__all__ = ["StrategyWealthPoint", "load_strategy_wealth_history"]
+ReturnUnavailableReason = Literal["no_complete_point", "unfunded", "insufficient_history", "chain_broken"]
+
+
+@dataclass(frozen=True)
+class PointReturn:
+    period_return: Decimal | None
+    period_start: date | None
+    cumulative_return: Decimal | None
+
+
+@dataclass(frozen=True)
+class TimeWeightedReturns:
+    points: tuple[PointReturn, ...]
+    #: Describes the LAST COMPLETE point — the one the UI summary strip reads.
+    total_return_available: bool
+    return_since: date | None
+    unavailable_reason: ReturnUnavailableReason | None
+
+
+def time_weighted_returns(points: Sequence[StrategyWealthPoint]) -> TimeWeightedReturns:
+    """Geometrically linked sub-period returns over the pot NAV (#3334 item 3).
+
+    Spec: ``docs/specs/metrics/2026-09-23-3334-pot-time-weighted-return.md``.
+    GIPS 2020 2.A.24(f) links sub-periods; flow timing is the firm's policy
+    (2.A.24(e)).  Ours, by construction: a flow reported on a point arrives at
+    the START of the sub-period ending there (``D = V_base + F``) — the only
+    treatment defined at inception, where ``V_base = 0``.
+
+    ⚠ Any flow inside an unvalued span (an incomplete point) breaks the chain,
+    and so does a pot valued at or below zero: neither sub-period can be
+    isolated honestly.  After a break ``cumulative_return`` stays NULL for the
+    rest of the window, but ``period_return`` keeps being computed.
+    """
+    out: list[PointReturn] = []
+    null = PointReturn(None, None, None)
+    base: StrategyWealthPoint | None = None
+    growth = Decimal("1")
+    started = broken = gap = gap_flow = False
+    pending_flow = Decimal("0")
+    return_since: date | None = None
+    last_complete_cumulative: Decimal | None = None
+    last_complete_reason: ReturnUnavailableReason | None = "no_complete_point"
+
+    for point in points:
+        if not point.complete or point.pot_value is None:
+            if base is not None:
+                gap = True
+                gap_flow = gap_flow or point.external_flow != 0
+                pending_flow += point.external_flow
+            out.append(null)
+            continue
+
+        value = point.pot_value
+        if base is None:
+            # The first complete point is the base; flows up to it are what it
+            # is valued at, so they are not returns.
+            base = point
+            out.append(null)
+            last_complete_cumulative = None
+            last_complete_reason = "unfunded" if point.principal == 0 and value == 0 else "insufficient_history"
+            continue
+
+        assert base.pot_value is not None
+        base_value = base.pot_value
+        flow = pending_flow + point.external_flow
+        denominator = base_value + flow
+        result = null
+        if not started and point.principal == 0 and value == 0:
+            last_complete_reason = "unfunded"
+        elif (
+            (gap and (gap_flow or point.external_flow != 0))
+            or base_value < 0
+            or (started and base_value == 0)
+            or denominator <= 0
+            or value <= 0
+        ):
+            broken = True
+        else:
+            period_return = value / denominator - 1
+            cumulative: Decimal | None = None
+            if not broken:
+                growth *= 1 + period_return
+                cumulative = growth - 1
+                if not started:
+                    started = True
+                    return_since = base.date if base_value > 0 else point.date
+            result = PointReturn(period_return, base.date, cumulative)
+
+        if broken:
+            last_complete_reason = "chain_broken"
+        elif result.cumulative_return is not None:
+            last_complete_reason = None
+        last_complete_cumulative = result.cumulative_return
+        out.append(result)
+        base = point
+        gap = gap_flow = False
+        pending_flow = Decimal("0")
+
+    available = last_complete_cumulative is not None
+    return TimeWeightedReturns(
+        points=tuple(out),
+        total_return_available=available,
+        return_since=return_since if available else None,
+        unavailable_reason=None if available else last_complete_reason,
+    )
+
+
+__all__ = [
+    "PointReturn",
+    "ReturnUnavailableReason",
+    "StrategyWealthPoint",
+    "TimeWeightedReturns",
+    "load_strategy_wealth_history",
+    "time_weighted_returns",
+]
