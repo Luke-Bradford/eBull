@@ -107,7 +107,7 @@ def test_presented_row_overwrites_every_cell_including_null(
 
 
 def test_preserved_set_is_the_instant_balance_sheet_columns() -> None:
-    # The merge SQL spells these 21 columns out; keep the constant and the SQL in step.
+    # The merge SQL spells these columns out; keep the constant and the SQL in step.
     import inspect
 
     src = " ".join(inspect.getsource(_canonical_merge_instrument).split())

@@ -1924,7 +1924,7 @@ def _canonical_merge_instrument(
         -- (balance_sheet_presented = FALSE; the Rule 3-02 P−2 year) keeps the
         -- canonical balance-sheet cells and only FILLS a NULL from raw. A presented
         -- balance sheet overwrites every cell, NULLs included, so nothing sticks.
-        -- These 21 columns are _PRESERVED_WHEN_UNPRESENTED_COLUMNS (test-pinned).
+        -- The CASE columns are exactly _PRESERVED_WHEN_UNPRESENTED_COLUMNS (test-pinned).
         SELECT
             %(iid)s, b.period_end_date, b.period_type,
             b.fiscal_year, b.fiscal_quarter, b.period_start_date, b.months_covered,
