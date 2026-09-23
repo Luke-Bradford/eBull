@@ -1422,7 +1422,7 @@ def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
 class _CleanupPlan:
     """Session-cached derivation of what per-test cleanup must touch."""
 
-    __slots__ = ("delete_order", "owned_sequences", "probe_sql", "seed_tables")
+    __slots__ = ("delete_guarded", "delete_order", "owned_sequences", "probe_sql", "seed_tables")
 
     def __init__(
         self,
@@ -1430,11 +1430,13 @@ class _CleanupPlan:
         probe_sql: sql.Composed,
         owned_sequences: frozenset[str],
         seed_tables: tuple[str, ...],
+        delete_guarded: frozenset[str],
     ) -> None:
         self.delete_order = delete_order
         self.probe_sql = probe_sql
         self.owned_sequences = owned_sequences
         self.seed_tables = seed_tables
+        self.delete_guarded = delete_guarded
 
 
 # Keyed by database name: one worker process only ever talks to one test DB,
@@ -1707,6 +1709,16 @@ def _derive_wipe_set(roots: set[str], seed_tables: tuple[str, ...]) -> set[str]:
     }
 
 
+# #3323 — roots carrying an enabled BEFORE DELETE row trigger (tgtype bits
+# ROW=1, BEFORE=2, DELETE=8). Only a dirty one of these needs ``replica``.
+_DELETE_GUARDED_SQL: Final = """
+SELECT DISTINCT root.relname
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_class root ON root.oid = COALESCE(pg_partition_root(c.oid), c.oid)
+WHERE n.nspname = 'public' AND NOT t.tgisinternal AND t.tgenabled <> 'D' AND (t.tgtype & 11) = 11
+"""
 _FK_TOPOLOGY_SQL: Final = "SELECT count(*), coalesce(max(oid::bigint), 0) FROM pg_constraint WHERE contype = 'f'"
 _FK_TOPOLOGY_CHANGED: Final = "<fk topology changed since the cleanup plan was cached>"
 
@@ -1722,6 +1734,8 @@ def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
         cur.execute(_OWNED_SEQUENCES_SQL)
         sequence_owners = [(row[0], row[1]) for row in cur.fetchall()]
         seed_tables = _read_seed_manifest(cur, roots)
+        cur.execute(_DELETE_GUARDED_SQL)
+        delete_guarded = {row[0] for row in cur.fetchall()}
         cur.execute(_FK_TOPOLOGY_SQL)
         fk_row = cur.fetchone()
     conn.rollback()
@@ -1789,7 +1803,7 @@ def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
     )
     probe_sql = sql.SQL(" UNION ALL ").join(probe_branches)
     owned = frozenset(seq for seq, owner in sequence_owners if owner in closure)
-    return _CleanupPlan(delete_order, probe_sql, owned, seed_tables)
+    return _CleanupPlan(delete_order, probe_sql, owned, seed_tables, frozenset(delete_guarded & closure))
 
 
 def _cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
@@ -1873,11 +1887,18 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
             # is closed under inbound FKs, every dirty member is emptied here,
             # and the probe's topology branch (above) routes a plan that no
             # longer matches the catalog to the fallback first.
-            cur.execute("SET LOCAL session_replication_role = replica")
+            #
+            # Toggled ONLY when a guarded table is dirty: changing the role
+            # discards the backend's cached plans, and re-planning the probe
+            # costs several times its warm execution (measurement on PR #3329).
+            suspend = bool(dirty & plan.delete_guarded)
+            if suspend:
+                cur.execute("SET LOCAL session_replication_role = replica")
             for table in plan.delete_order:
                 if table in dirty:
                     cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))
-            cur.execute("SET LOCAL session_replication_role = origin")
+            if suspend:
+                cur.execute("SET LOCAL session_replication_role = origin")
             # #2224 cause 3 — seeded tables are restored, not emptied, and only
             # when the probe says they differ from their snapshot. AFTER the
             # delete loop so a restored parent cannot be re-orphaned by it.
