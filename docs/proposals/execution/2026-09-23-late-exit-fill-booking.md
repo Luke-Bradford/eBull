@@ -1,6 +1,9 @@
 # Book a confirmed late EXIT fill on a recommendation order (#3007 part 2)
 
 Status: proposal (spec), rev 3, 2026-09-23. Refs #3007, #2942 (slice C), #2965.
+**Parked at Codex ckpt-1 round 3.** Findings per round: 37, then 23, then 32.
+See [Verdict](#verdict-after-ckpt-1-round-3) for what is built now and what
+waits.
 
 ## Problem
 
@@ -286,3 +289,61 @@ each with `position_id`, `rate`, `units` and `occurred`.
   the would-book decision.
 - **Flag flip (separate PR, attended):** the (a)/(b)/(c) observation described
   above.
+
+## Verdict after ckpt-1 round 3
+
+The booking write does not converge on today's evidence. Round 3's lead
+findings go deeper than wording:
+
+- **Terminality (r3 #1).** "Non-empty `positions[]` means filled" is a shape
+  heuristic. Knowing what the fields mean would not prove completion.
+- **Evidence (r3 #2).** A single attended whole close cannot settle (b) or
+  (c). Echoed units equal executed units on a whole close, and a USD
+  instrument never exercises `conversionRate`.
+
+The remaining booking-slice findings all hang off that unmeasured input. They
+are listed here so the next revision starts from them:
+
+- **Sticky evidence** (r3 #3-6): parse and identity refusals, and booking
+  exceptions, are unparked today.
+- **Timestamps as ordering markers** (#9-11).
+- **Duplicate and account scope** (#12-15, #17).
+- **Top-level id coercion** (#16).
+- **CAS inputs** (#18).
+- **Transaction boundary against committing helpers** (#19-20).
+- **Numeric range and representability** (#21-24).
+- **Fallback chronology** (#25).
+- **Backlog after the flag flips** (#31).
+- **Test matrix** (#32).
+
+r3 #26-30 restate the accepted pre-existing gaps: `updated_at`, sync netting,
+the stale mirror lot, fees, and attribution. They stay out of scope.
+
+**Built now (slice 1).** This is the part-1 shape: data that exists only at
+submission time must be persisted at submission time. No observation can
+recover it later.
+
+1. **`sql/413`**, `orders.recommendation_exit_avg_cost`, as in the Schema
+   section:
+   - it is read with `SELECT avg_cost FROM positions WHERE instrument_id = …
+     FOR SHARE` inside the claim transaction, so no concurrent position writer
+     can move the pool between the read and the claim commit (r3 #8);
+   - it gets its own CHECK;
+   - an unusable cost is refused before the claim.
+2. **Evidence capture for the first real observation.** `get_close_order`
+   keeps the raw `positions[]` it already stores in `raw_payload`, and
+   `_record_unbooked_fill`'s audit gains:
+   - the per-position `rate` / `units` / `occurred` / `conversionRate` /
+     `amount`, verbatim and unparsed;
+   - the submission `avg_cost`.
+
+   Its "not implemented" text is corrected to point here. No booking, no new
+   verdict, no flag: those land with the booking slice.
+
+**Waits (booking slice), wake condition.** An attended session posts on #3007
+one recommendation-origin EXIT close. The post must include the verbatim
+close-order lookup and the trade-history row for the same position (`closeRate`
+/ `units`). ⚠ The close must be **partial, on a non-USD instrument**; otherwise
+it cannot distinguish executed from echoed data (r3 #2). The same attended
+protocol produces that on demand
+(`docs/proposals/execution/2026-09-14-attended-demo-session-protocol.md`).
