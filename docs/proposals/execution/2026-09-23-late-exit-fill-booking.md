@@ -125,7 +125,7 @@ meantime: a BUY/ADD fill, an external re-open that the sync imports with a new
 `avg_cost` (`:764-807`), or an unbooked acquisition.
 
 - **New column:** `orders.recommendation_exit_avg_cost NUMERIC(18,6)` (the
-  `positions.avg_cost` grain). It is read in the claim transaction and written
+  `positions.avg_cost` grain). It is read by the claim INSERT itself and written
   by the same claim INSERT that records the lot.
 - **Constraint:** a new, separate CHECK. The column is either NULL, or it is
   on an EXIT row that carries a lot and is `> 0 AND <> 'NaN'`. The existing
@@ -143,7 +143,7 @@ meantime: a BUY/ADD fill, an external re-open that the sync imports with a new
   2026-09-23): `select count(*) from positions where current_units > 0 and
   (avg_cost is null or avg_cost <= 0 or avg_cost = 'NaN')` = **0** of 6 open
   positions.
-- **Residual, stated:** the cost is captured when the claim commits, and the
+- **Residual, stated:** the cost is read by the claim INSERT, and the
   close executes after the broker call returns, seconds later. A pool change
   inside that window from a DIFFERENT recommendation's BUY is refused by
   discriminator 8. An external acquisition inside the window is not visible to
@@ -328,9 +328,12 @@ recover it later.
 
 1. **`sql/413`**, `orders.recommendation_exit_avg_cost`, as in the Schema
    section:
-   - it is read with `SELECT avg_cost FROM positions WHERE instrument_id = …
-     FOR SHARE` inside the claim transaction, so no concurrent position writer
-     can move the pool between the read and the claim commit (r3 #8);
+   - it is read by a scalar subquery inside the claim INSERT itself, so the
+     value is that statement's snapshot. There is deliberately no `FOR SHARE`:
+     the window that matters runs from the claim read to the broker's
+     execution, which is after the claim commits. A lock held until commit
+     cannot close that window (r3 #8), and it would add waits against
+     `portfolio_sync`. The residual is stated in the Schema section;
    - it gets its own CHECK;
    - an unusable cost is stored as NULL, and the EXIT is never refused for it.
 2. **Evidence capture for the first real observation.** `get_close_order`
