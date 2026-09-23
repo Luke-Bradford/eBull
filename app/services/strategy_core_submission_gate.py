@@ -50,7 +50,13 @@ from app.services.strategy_core_mandate import (
 #: is sourced from ``strategy_order_reconciliation_state``'s own terminal set
 #: rather than from ``strategy_trades.status`` names; and a rebalance sell
 #: requires ``allow_partial_close_position``.
-CORE_SUBMISSION_POLICY_VERSION: Final = "core-submission-v1"
+#:
+#: v2 (#2603 sell leg): a sell is executed as a WHOLE close, so it requires
+#: ``allow_close_position`` instead; and the in-flight blocker reads ENTRY links only
+#: (an exit order carries no reconciliation row, so counting it wedged every later
+#: rebalance after one rejected close -- the exit side is quarantined by the DB
+#: preflight's ``core_operation_outstanding`` instead).
+CORE_SUBMISSION_POLICY_VERSION: Final = "core-submission-v2"
 
 #: Submissions against each other.  ``(2603, 1)`` is the mandate writers' key and
 #: is taken FIRST by :func:`core_submission_lock` -- see its docstring.
@@ -75,7 +81,7 @@ CoreSubmissionRefusal = Literal[
     "core_intent_already_submitted",
     "core_trade_in_flight",
     "core_eligibility_unproved",
-    "core_partial_close_unproved",
+    "core_close_unproved",
 ]
 """The closed vocabulary of reasons admission is refused.
 
@@ -180,7 +186,13 @@ LEFT JOIN LATERAL (
                'no_order'
            ) AS blocking_state
     FROM strategy_trades t
-    LEFT JOIN strategy_trade_orders link ON link.strategy_trade_id = t.strategy_trade_id
+    -- ⚠ ENTRY links only (core-submission-v2, #2603 sell leg).  An EXIT order is
+    -- written by the position manager with NO reconciliation row, so counting it made
+    -- one rejected close block every later rebalance forever.  The exit side is
+    -- quarantined on its OPERATION instead (the DB preflight's
+    -- `core_operation_outstanding`).
+    LEFT JOIN strategy_trade_orders link
+           ON link.strategy_trade_id = t.strategy_trade_id AND link.purpose = 'entry'
     LEFT JOIN strategy_order_reconciliation_state recon ON recon.order_id = link.order_id
     WHERE t.core_rebalance_intent_id IS NOT NULL
       AND t.status <> ALL (%(terminal_trade_statuses)s)
@@ -459,16 +471,17 @@ def admit_core_rebalance_intent(
         # the message distinguishes them, so it is carried rather than dropped.
         return _refused(intent_id, "core_eligibility_unproved", str(exc), **context)
 
-    if verdict_action == "sell_core" and proof.allow_partial_close_position is not True:
-        # A rebalance sell can never be a full close: `validate_core_mandate`
-        # requires `core_target_pct - rebalance_band_pct > 0` and the allocator
-        # sells only down to the lower band edge, so post-trade core value is
-        # strictly positive.  `is not True` rather than `not ...`: the column is
-        # nullable and None means the response did not say.
+    if verdict_action == "sell_core" and proof.allow_close_position is not True:
+        # #2603 sell leg: a `sell_core` is executed as a WHOLE close of the one owned core
+        # position, then a rebuy to `lower` (spec
+        # `docs/proposals/ta/2026-09-23-core-sell-leg-close-rebuy.md`).  So the proved
+        # capability is the whole close; the partial-close one this used to require
+        # belonged to the superseded trim model.  `is not True` rather than `not ...`:
+        # the column is nullable and None means the response did not say.
         return _refused(
             intent_id,
-            "core_partial_close_unproved",
-            f"proof {proof.proof_id} allow_partial_close_position={proof.allow_partial_close_position!r}",
+            "core_close_unproved",
+            f"proof {proof.proof_id} allow_close_position={proof.allow_close_position!r}",
             **context,
         )
 

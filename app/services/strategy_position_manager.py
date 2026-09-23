@@ -46,6 +46,8 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
 )
 from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
+from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK
+from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK, core_lock_held
 from app.services.strategy_position_repair_streak import record_repair_visit
 
 logger = logging.getLogger(__name__)
@@ -1004,7 +1006,8 @@ def _submit_close(
     *,
     broker: BrokerProvider,
     owned: _OwnedPosition,
-    trigger_code: Literal["timeout", "strategy_exit", "emergency_risk", "operator_close"],
+    trigger_code: Literal["timeout", "strategy_exit", "emergency_risk", "operator_close", "core_rebalance"],
+    core_rebalance_intent_id: int | None = None,
 ) -> PositionManagerResult:
     request_id = uuid4()
     with conn.transaction():
@@ -1024,11 +1027,12 @@ def _submit_close(
         operation = conn.execute(
             """
             INSERT INTO strategy_position_operations (
-                ownership_id, order_id, operation_type, trigger_code, request_id, status
-            ) VALUES (%s,%s,'close',%s,%s,'intent_persisted')
+                ownership_id, order_id, operation_type, trigger_code, request_id, status,
+                core_rebalance_intent_id
+            ) VALUES (%s,%s,'close',%s,%s,'intent_persisted',%s)
             RETURNING position_operation_id
             """,
-            (owned.ownership_id, order_id, trigger_code, request_id),
+            (owned.ownership_id, order_id, trigger_code, request_id, core_rebalance_intent_id),
         ).fetchone()
         assert operation is not None
         operation_id = int(operation[0])
@@ -1313,21 +1317,51 @@ def manage_owned_position(
     strategy_trade_id: int,
     broker_position_id: int,
     ratchet_bar: RatchetBar | None = None,
-    close_reason: Literal["strategy_exit", "emergency_risk", "operator_close"] | None = None,
+    close_reason: Literal["strategy_exit", "emergency_risk", "operator_close", "core_rebalance"] | None = None,
     now: datetime | None = None,
+    core_rebalance_intent_id: int | None = None,
+    expected_ownership_id: int | None = None,
 ) -> PositionManagerResult:
     """Verify or de-risk one exact owned position.
 
     Kill switches intentionally do not block this path: they block new risk,
     while fixed-stop repair, ratcheting, timeout and explicit closes reduce
     already-owned risk. Live credentials are refused by the provider adapter.
+
+    ``close_reason="core_rebalance"`` (#2603 sell leg) is the attended core executor's
+    whole close of the one owned core position.  ⚠ It is NOT de-risking, so the kill
+    switch is enforced for it -- by the executor's preflight, inside the
+    ``core_submission_lock`` hold this function then requires (the kill-switch
+    activation takes the core key, so it cannot flip while the hold stands).  The guard
+    below is an accident control against a confused caller, as ``unattended_guard`` is.
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPositionManagerError("position management requires an idle connection")
+    if (close_reason == "core_rebalance") != (core_rebalance_intent_id is not None):
+        raise StrategyPositionManagerError("a core_rebalance close and a core rebalance intent id go together")
+    if close_reason == "core_rebalance":
+        if expected_ownership_id is None:
+            raise StrategyPositionManagerError("a core_rebalance close must name the ownership it closes")
+        # ALL THREE keys, so this function's own allocator acquire is always a re-entry.
+        # A caller holding only the core key would wait here on the allocator while a real
+        # `core_submission_lock` holder waits on core -- a cycle.
+        held = all(
+            core_lock_held(conn, key)
+            for key in (PAPER_ALLOCATOR_ADVISORY_LOCK, CORE_MANDATE_ADVISORY_LOCK, CORE_SUBMISSION_ADVISORY_LOCK)
+        )
+        conn.commit()
+        if not held:
+            raise StrategyPositionManagerError("a core_rebalance close requires core_submission_lock to be held")
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     with _paper_allocator_lock(conn), _position_lock(conn, broker_position_id):
         owned = _load_owned(conn, strategy_trade_id=strategy_trade_id, broker_position_id=broker_position_id)
         conn.commit()
+        if (close_reason == "core_rebalance" and not owned.is_core) or (
+            expected_ownership_id is not None and owned.ownership_id != expected_ownership_id
+        ):
+            return PositionManagerResult(
+                strategy_trade_id, broker_position_id, "rejected", "core_rebalance_ownership_mismatch"
+            )
         # ⚠ #3284 item 4a records from INSIDE `_resume_operation`, not from here: that is
         # the function which already holds the fetched position, and re-fetching it to
         # classify the visit adds a broker call that can raise AFTER a valid result and
@@ -1385,6 +1419,7 @@ def manage_owned_position(
                 broker=broker,
                 owned=owned,
                 trigger_code=close_reason or "timeout",
+                core_rebalance_intent_id=core_rebalance_intent_id,
             )
 
         # ⚠⚠ THE CORE ARM USED TO RETURN "exempt" HERE.  Reversed by operator

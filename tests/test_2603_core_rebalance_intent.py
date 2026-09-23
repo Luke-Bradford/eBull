@@ -187,7 +187,12 @@ def test_only_the_trade_arc_references_the_intents_table() -> None:
         for path in Path("sql").glob("*.sql")
         if re.search(rf"REFERENCES\s+{_TABLE}\b", path.read_text(encoding="utf-8"))
     )
-    assert referencing == ["349_core_trade_arc.sql"], (
+    # ⚠ ``sql/411`` (#2603 sell leg) adds two more, and neither is a second ENTRY arc:
+    # a ``core_rebalance`` close operation names the ``sell_core`` intent that asked for
+    # it, and the close quote records what that intent was quoted.  Both act on a
+    # position the arc already owns, so no arm-agnostic consumer is dual-written.
+    # Spec: docs/proposals/ta/2026-09-23-core-sell-leg-close-rebuy.md §5.
+    assert referencing == ["349_core_trade_arc.sql", "411_core_rebalance_close.sql"], (
         f"the set of tables referencing {_TABLE} changed: {referencing}. "
         "The arc is deliberately the only one — see docs/proposals/ta/2026-08-14-core-trade-arc.md."
     )

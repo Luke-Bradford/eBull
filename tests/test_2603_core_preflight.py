@@ -188,6 +188,8 @@ def test_the_untraded_side_is_validated_too() -> None:
 _DEFECT_BY_CODE: dict[str, dict[str, Any]] = {
     "core_kill_switch_active_or_missing": {"kill_switch_active": True},
     "core_execution_block_active": {"execution_blocked": True},
+    # #2603 sell leg §4: an unresolved core close quarantines every core trade.
+    "core_operation_outstanding": {"core_operation_outstanding": True},
     "core_instrument_missing": {"instrument_present": False},
     "core_instrument_not_tradable": {"is_tradable": False},
     "core_unsupported_market_session": {"asset_class": "crypto"},
@@ -382,7 +384,7 @@ def test_the_two_preflight_bounds_are_the_values_the_policy_version_froze() -> N
     ``CORE_PREFLIGHT_POLICY_VERSION`` bump, which is the point.
     """
     assert (CORE_MAX_QUOTE_AGE_SECONDS, CORE_MAX_HALT_FEED_AGE_SECONDS) == (750, 450)
-    assert CORE_PREFLIGHT_POLICY_VERSION == "core-preflight-v3"
+    assert CORE_PREFLIGHT_POLICY_VERSION == "core-preflight-v4"
 
 
 def test_the_generalised_bound_reduces_to_the_pre_3157_rule_when_no_loss_is_tolerated() -> None:

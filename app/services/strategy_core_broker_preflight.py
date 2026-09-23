@@ -315,6 +315,9 @@ def assess_core_broker_preflight(
             f"decision.action is {decision.action!r}; only a trade can be submission-preflighted"
         )
     if decision.action == "sell_core":
+        # ⚠ #2603 sell leg: the executor no longer calls this for a sell -- it quotes the
+        # CLOSE arm of the whole position itself (`strategy_core_executor._execute_core_sell`).
+        # Kept as a backstop so a trim-sized sell verdict can never be admitted here.
         # Decided before any broker call: a request we know returns 400, or a quote we
         # know does not bound the cost, is not worth spending against the write lane.
         return _refused("core_close_side_cost_quote_unavailable")

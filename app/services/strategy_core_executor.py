@@ -6,7 +6,7 @@ import logging
 import os
 import socket
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
@@ -16,23 +16,33 @@ import psycopg
 from psycopg.pq import TransactionStatus
 
 from app.providers.broker import (
+    BrokerAccountRiskSnapshot,
     BrokerCoreOrder,
     BrokerOrderSubmissionError,
     BrokerOrderSubmissionUncertain,
     BrokerProvider,
+    BrokerWhatIfOrder,
 )
-from app.services.core_exit_levels import CoreExitLevelsUnderivable, core_exit_levels
+from app.services.broker_closed_release import RELEASE_REASON
+from app.services.broker_settlement_arms import (
+    UNDERLYING_SETTLEMENT_TYPE,
+    UNLEVERAGED_LEVERAGE,
+    effective_open_minimum,
+)
+from app.services.core_exit_levels import CoreExitLevels, CoreExitLevelsUnderivable, core_exit_levels
 from app.services.strategy_control_plane import link_strategy_order, load_paper_pool
-from app.services.strategy_core_allocator import evaluate_core_rebalance
+from app.services.strategy_core_allocator import CoreMandate, CoreSleeveState, evaluate_core_rebalance
 from app.services.strategy_core_broker_preflight import (
     CORE_BROKER_PREFLIGHT_POLICY_VERSION,
+    CORE_MAX_ACCOUNT_RISK_AGE_SECONDS,
     assess_core_broker_preflight,
 )
-from app.services.strategy_core_eligibility import require_core_eligibility
+from app.services.strategy_core_eligibility import CoreEligibilityProof, require_core_eligibility
 from app.services.strategy_core_mandate import load_core_mandate
 from app.services.strategy_core_preflight import CORE_PREFLIGHT_POLICY_VERSION, preflight_core_submission
-from app.services.strategy_core_rebalance_intent import record_core_rebalance_intent
+from app.services.strategy_core_rebalance_intent import CoreRebalanceIntent, record_core_rebalance_intent
 from app.services.strategy_core_selection import require_selected_core_instrument
+from app.services.strategy_core_sizing import QuotedTradeCost, decode_quoted_trade_cost
 from app.services.strategy_core_sleeve import observe_core_sleeve
 from app.services.strategy_core_submission_gate import (
     CORE_SUBMISSION_POLICY_VERSION,
@@ -41,6 +51,7 @@ from app.services.strategy_core_submission_gate import (
 )
 from app.services.strategy_engine_capital import (
     EngineCapitalObservationError,
+    EngineCapitalUsage,
     load_engine_capital_authority,
     resolve_engine_capital_usage,
 )
@@ -48,8 +59,9 @@ from app.services.strategy_order_reconciliation import (
     reconcile_strategy_order,
     reconciliation_order_lock,
 )
+from app.services.strategy_position_manager import manage_owned_position
 
-CoreExecutionState = Literal["held", "refused", "submitted", "submission_uncertain"]
+CoreExecutionState = Literal["held", "refused", "submitted", "submission_uncertain", "closed", "reconcile_required"]
 
 CoreOrderLinkPurpose = Literal["entry", "exit"]
 
@@ -67,23 +79,15 @@ def core_order_shape_for(action: str) -> tuple[str, CoreOrderLinkPurpose] | None
     ``None`` means the action has no submission path and MUST be refused before durable
     order authority exists.
 
-    ⚠⚠ This is a fail-closed backstop, and the reason it is needed is that every other
-    layer here is buy-shaped while the gates ahead of it are sell-AWARE.
-    ``admit_core_rebalance_intent`` admits ``sell_core`` (it spends a dedicated
-    ``core_partial_close_unproved`` check on it), ``preflight_core_submission`` accepts it
-    as a known action, and ``orders.action`` is bare ``TEXT`` with no CHECK -- so the only
-    thing refusing a sell is one ``return`` in ``strategy_core_broker_preflight``, upstream
-    of the write.  Lifting that refusal is step one of the sell leg (#2603 item 3), and
-    without this map the next layer down would persist the sell as a ``'BUY'`` linked
-    ``purpose="entry"`` and hand it to ``place_demo_core_order`` -- whose
-    ``BrokerCoreOrder`` says in its own docstring that it is the buy-only shape.  A
-    rebalance meant to REDUCE exposure would increase it, every field internally
-    consistent and no refusal reachable (#3003).
+    ⚠⚠ This is a fail-closed backstop.  ``orders.action`` is bare ``TEXT`` with no CHECK,
+    and ``place_demo_core_order``'s ``BrokerCoreOrder`` is the buy-only shape, so a
+    ``sell_core`` reaching the authority write would be persisted as a ``'BUY'`` linked
+    ``purpose="entry"`` -- a rebalance meant to REDUCE exposure would increase it, every
+    field internally consistent (#3003).
 
-    ⚠ Today this changes nothing: ``sell_core`` never reaches the caller's check, because
-    the broker preflight refuses it first with the more informative
-    ``core_close_side_cost_quote_unavailable``.  That ordering is deliberate -- a backstop
-    that pre-empts the specific refusal would cost the operator the diagnosis.
+    ⚠ Since the #2603 sell leg a ``sell_core`` never reaches this: it branches to
+    ``_execute_core_sell`` (a whole close through the position manager) before the buy
+    remainder runs.  The map stays buy-only so that branch is the ONLY sell path.
     """
     return _CORE_ORDER_SHAPE.get(action)
 
@@ -626,6 +630,398 @@ def _submit_core_authority_locked(
     )
 
 
+#: The only currency ``effective_open_minimum`` states a broker floor in (its docstring:
+#: exposure "is always calculated in USD").
+_OPEN_MINIMUM_CURRENCY: Final = "USD"
+
+#: An operation the manager has not yet driven to a terminal state.
+_UNRESOLVED_OPERATION_STATUSES: Final = ("intent_persisted", "submitting", "submitted")
+
+
+@dataclass(frozen=True)
+class _LinkedClose:
+    """The close operation linked to one ``sell_core`` intent (sql/411)."""
+
+    operation_id: int
+    status: str
+    last_error_code: str | None
+
+
+def map_core_close_outcome(
+    *,
+    linked: _LinkedClose | None,
+    manager_state: str | None,
+    manager_reason: str | None,
+    manager_operation_id: int | None,
+) -> tuple[CoreExecutionState, str]:
+    """The executor's verdict for one rebalance close, read off the LINKED operation.
+
+    Spec §1 step 6.  The manager's result is trusted only to say what happened when no
+    operation is linked to this intent; once one is, its stored status decides, so a
+    result that belongs to a different operation (a resumed repair, a changed ownership)
+    can never be reported as this intent's close.
+
+    ``manager_state`` is ``None`` when the manager RAISED: the id comparison is then
+    skipped (there is no result to compare), and a linked row maps by its status alone.
+    """
+    if linked is None:
+        if manager_state == "reconcile_required":
+            return "reconcile_required", manager_reason or "core_rebalance_close_unresolved"
+        if manager_state == "applied" and manager_reason == RELEASE_REASON:
+            return "refused", "core_position_closed_by_broker"
+        return "refused", "core_rebalance_close_not_started"
+    if manager_state is not None and manager_operation_id != linked.operation_id:
+        return "reconcile_required", "core_rebalance_result_mismatch"
+    if linked.status == "submitted":
+        return "submitted", "core_rebalance_close_submitted"
+    if linked.status == "applied":
+        return "closed", "core_rebalance_close_applied"
+    if linked.status == "rejected":
+        return "refused", linked.last_error_code or "core_rebalance_close_rejected"
+    # `reconcile_required`, or `intent_persisted`/`submitting` -- which a normal return
+    # never leaves behind, so seeing one means the call raised midway: uncertain.
+    return "reconcile_required", linked.last_error_code or "core_rebalance_close_unresolved"
+
+
+def _load_linked_close(conn: psycopg.Connection[Any], *, intent_id: int) -> _LinkedClose | None:
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
+    with conn.transaction():
+        row = conn.execute(
+            """
+            SELECT position_operation_id, status, last_error_code
+            FROM strategy_position_operations
+            WHERE core_rebalance_intent_id = %s
+            """,
+            (intent_id,),
+        ).fetchone()
+    return None if row is None else _LinkedClose(int(row[0]), str(row[1]), row[2])
+
+
+def _drive_core_close(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    intent_id: int,
+    strategy_trade_id: int,
+    broker_position_id: int,
+    ownership_id: int,
+    submit: bool,
+) -> CoreExecutionResult:
+    """Hand one core close to the manager and map the outcome through the linked row.
+
+    ``submit`` distinguishes the sell path (a new ``core_rebalance`` close) from step 0
+    (resume the one already in flight: the paper runtime's call shape).  Called only
+    inside ``core_submission_lock``; the manager's allocator acquire is then a re-entry.
+    """
+    try:
+        result = manage_owned_position(
+            conn,
+            broker=broker,
+            strategy_trade_id=strategy_trade_id,
+            broker_position_id=broker_position_id,
+            close_reason="core_rebalance" if submit else None,
+            core_rebalance_intent_id=intent_id if submit else None,
+            expected_ownership_id=ownership_id,
+        )
+    except Exception as exc:
+        linked = _load_linked_close(conn, intent_id=intent_id)
+        if linked is None:
+            # Nothing reached the broker for THIS intent (a `_load_owned` failure lands
+            # here).  The caller gets the fault, not a verdict.
+            raise StrategyCoreExecutionError("the core rebalance close failed before its operation existed") from exc
+        state, reason = map_core_close_outcome(
+            linked=linked, manager_state=None, manager_reason=None, manager_operation_id=None
+        )
+        logger.warning(
+            "core rebalance close for intent %d raised %s; operation %d is %s",
+            intent_id,
+            type(exc).__name__,
+            linked.operation_id,
+            linked.status,
+            exc_info=True,
+        )
+        return _result(state, reason, intent_id=intent_id, trade_id=strategy_trade_id)
+    linked = _load_linked_close(conn, intent_id=intent_id)
+    state, reason = map_core_close_outcome(
+        linked=linked,
+        manager_state=result.state,
+        manager_reason=result.reason_code,
+        manager_operation_id=result.position_operation_id,
+    )
+    if linked is None:
+        logger.warning(
+            "core rebalance close for intent %d did not start: manager %s/%s",
+            intent_id,
+            result.state,
+            result.reason_code,
+        )
+    return _result(state, reason, intent_id=intent_id, trade_id=strategy_trade_id)
+
+
+def _resolve_outstanding_core_rebalance_close(
+    conn: psycopg.Connection[Any], *, broker: BrokerProvider, credentials: tuple[UUID, UUID]
+) -> CoreExecutionResult | None:
+    """Spec §1 step 0: drive an in-flight ``core_rebalance`` close before anything else.
+
+    Runs BEFORE the mandate/eligibility block, so a disabled mandate or a changed proof
+    cannot block resolving what was already sent.  Only this trigger: repairs and
+    operator/emergency closes belong to the paper runtime and the operator endpoint,
+    and the sell path's preconditions refuse while any of them is unresolved.
+
+    ⚠ Bound to the credentials the position was bought under.  An exit order carries no
+    reconciliation row, so ``sql/373``'s rotation guard does not cover it; driving the
+    close through another account's credentials would query the wrong book.  A mismatch
+    RAISES (a 409 at the endpoint): nothing is driven, and the close stays quarantined.
+    """
+    with core_submission_lock(conn):
+        with conn.transaction():
+            row = conn.execute(
+                """
+                SELECT op.core_rebalance_intent_id, own.ownership_id, own.status,
+                       own.strategy_trade_id, own.broker_position_id,
+                       proof.api_key_credential_id, proof.user_key_credential_id
+                FROM strategy_position_operations op
+                JOIN strategy_position_ownership own ON own.ownership_id = op.ownership_id
+                JOIN strategy_trades t ON t.strategy_trade_id = own.strategy_trade_id
+                LEFT JOIN strategy_core_eligibility_proofs proof
+                       ON proof.core_eligibility_proof_id = t.core_eligibility_proof_id
+                WHERE op.trigger_code = 'core_rebalance' AND op.status = ANY(%s)
+                ORDER BY op.position_operation_id
+                LIMIT 1
+                """,
+                (list(_UNRESOLVED_OPERATION_STATUSES),),
+            ).fetchone()
+        if row is None:
+            return None
+        intent_id, ownership_id, ownership_status, trade_id, position_id, api_key_id, user_key_id = row
+        if (api_key_id, user_key_id) != credentials:
+            raise StrategyCoreExecutionError(
+                "the in-flight core rebalance close belongs to other broker credentials; it is not driven through these"
+            )
+        if ownership_status != "active":
+            # Unreachable by construction (`_finish_close` terminalises then releases in
+            # one transaction; the #3312 release runs only when nothing resumed).
+            return _result("reconcile_required", "core_operation_unloadable", intent_id=int(intent_id))
+        return _drive_core_close(
+            conn,
+            broker=broker,
+            intent_id=int(intent_id),
+            strategy_trade_id=int(trade_id),
+            broker_position_id=int(position_id),
+            ownership_id=int(ownership_id),
+            submit=False,
+        )
+
+
+@dataclass(frozen=True)
+class _CoreSellTarget:
+    ownership_id: int
+    strategy_trade_id: int
+    broker_position_id: int
+    credentials: tuple[UUID, UUID] | None
+    """The (api, user) credential ids of the proof the position was BOUGHT under."""
+
+
+def _core_sell_target(conn: psycopg.Connection[Any]) -> _CoreSellTarget | str:
+    """Spec §1 step 3's DB preconditions, in one committed read: the target or a refusal."""
+    with conn.transaction():
+        owned = conn.execute(
+            """
+            SELECT own.ownership_id, own.strategy_trade_id, own.broker_position_id,
+                   proof.api_key_credential_id, proof.user_key_credential_id
+            FROM strategy_position_ownership own
+            JOIN strategy_trades t ON t.strategy_trade_id = own.strategy_trade_id
+            LEFT JOIN strategy_core_eligibility_proofs proof
+                   ON proof.core_eligibility_proof_id = t.core_eligibility_proof_id
+            WHERE own.status = 'active' AND t.core_rebalance_intent_id IS NOT NULL
+            """
+        ).fetchall()
+        outstanding = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM strategy_position_operations op
+                JOIN strategy_position_ownership own ON own.ownership_id = op.ownership_id
+                JOIN strategy_trades t ON t.strategy_trade_id = own.strategy_trade_id
+                WHERE t.core_rebalance_intent_id IS NOT NULL
+                  AND (op.status = ANY(%s)
+                       OR (op.operation_type = 'close' AND op.status = 'reconcile_required'))
+            )
+            """,
+            (list(_UNRESOLVED_OPERATION_STATUSES),),
+        ).fetchone()
+        # Every ENTRY order on ANY core trade has a terminal reconciliation state; a
+        # missing row counts as non-terminal (the admission gate's rule, sql/285).
+        entry_open = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM strategy_trades t
+                JOIN strategy_trade_orders link
+                  ON link.strategy_trade_id = t.strategy_trade_id AND link.purpose = 'entry'
+                LEFT JOIN strategy_order_reconciliation_state recon ON recon.order_id = link.order_id
+                WHERE t.core_rebalance_intent_id IS NOT NULL
+                  AND (recon.state IS NULL OR recon.state NOT IN ('resolved', 'rejected'))
+            )
+            """
+        ).fetchone()
+    if len(owned) != 1:
+        return "core_sell_spans_positions"
+    if outstanding is None or outstanding[0]:
+        return "core_operation_outstanding"
+    if entry_open is None or entry_open[0]:
+        return "core_entry_not_terminal"
+    ownership_id, trade_id, position_id, api_key_id, user_key_id = owned[0]
+    credentials = None if api_key_id is None or user_key_id is None else (api_key_id, user_key_id)
+    return _CoreSellTarget(int(ownership_id), int(trade_id), int(position_id), credentials)
+
+
+def _evidence_fresh(observed_at: datetime, *, now: datetime) -> bool:
+    age = (now - observed_at).total_seconds()
+    return 0 <= age <= CORE_MAX_ACCOUNT_RISK_AGE_SECONDS
+
+
+def _execute_core_sell(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    mandate: CoreMandate,
+    intent: CoreRebalanceIntent,
+    snapshot: BrokerAccountRiskSnapshot,
+    usage: EngineCapitalUsage,
+    state: CoreSleeveState,
+    proof: CoreEligibilityProof,
+    clock: Callable[[], datetime],
+) -> CoreExecutionResult:
+    """Spec §1 steps 3-6: a ``sell_core`` becomes a WHOLE close of the one core position.
+
+    Called inside the caller's ``core_submission_lock`` hold with an idle connection,
+    after the common re-proof, drawdown observation, admission, eligibility re-proof and
+    DB preflight (kill switch included).  Every refusal precedes the close-quote INSERT,
+    so a quote row exists only for an intent handed to the manager.  The rebuy is NOT
+    here: the next attended POST sees 0% core and the unchanged allocator buys to
+    ``lower`` (spec §3).
+    """
+    intent_id = intent.core_rebalance_intent_id
+
+    def refuse(code: str) -> CoreExecutionResult:
+        return _result("refused", code, intent_id=intent_id)
+
+    target = _core_sell_target(conn)
+    if isinstance(target, str):
+        return refuse(target)
+    if target.credentials != (proof.api_key_credential_id, proof.user_key_credential_id):
+        # The position was bought under another account's proof: closing it through this
+        # one would act on the wrong book (or on a colliding position id).
+        return refuse("core_credential_provenance_changed")
+    lower_pct = intent.decision.lower_pct
+    if lower_pct is None or lower_pct <= 0:
+        # With `lower = 0` the post-close 0% is in-band and the allocator never rebuys.
+        return refuse("core_sell_would_strand_at_zero_lower")
+    if mandate.rebalance_band_pct <= 0:
+        # A zero-width band leaves the rebuy's cost bracket no room.
+        return refuse("core_sell_zero_width_band")
+    positions = [row for row in snapshot.direct_positions if row.position_id == target.broker_position_id]
+    if len(positions) != 1:
+        # `resolve_engine_capital_usage` already refused an unwitnessed active position,
+        # so this is defensive: never quote or close a position this snapshot lacks.
+        return refuse("core_sell_position_unobserved")
+    position = positions[0]
+    if position.market_value <= 0 or position.units <= 0:
+        return refuse("core_sell_position_unobserved")
+
+    # Step 4: the close-arm quote, bound to the selected position.  An open-arm quote
+    # never bounds a close (`BrokerWhatIfOrder` docstring, #2712), so it is quoted here.
+    if proof.response_currency.strip().upper() != mandate.base_currency.strip().upper():
+        return refuse("core_close_side_cost_quote_unavailable")
+    # Before any broker call, as in the buy preflight, which refuses the same case with
+    # the same code: `effective_open_minimum` is USD-only and contracts that its callers
+    # refuse a mismatch first.
+    if proof.response_currency.strip().upper() != _OPEN_MINIMUM_CURRENCY:
+        return refuse("core_minimum_currency_unsupported")
+    try:
+        response = broker.get_what_if_costs(
+            BrokerWhatIfOrder(
+                instrument_id=position.instrument_id,
+                transaction="sell",
+                settlement_type=UNDERLYING_SETTLEMENT_TYPE,
+                amount=position.market_value,
+                leverage=UNLEVERAGED_LEVERAGE,
+                action="close",
+                position_ids=(target.broker_position_id,),
+            )
+        )
+    except Exception:
+        logger.warning("core sell: close-side what-if quote unavailable", exc_info=True)
+        return refuse("core_close_side_cost_quote_unavailable")
+    cost = decode_quoted_trade_cost(
+        response,
+        instrument_id=position.instrument_id,
+        ticket_amount=position.market_value,
+        base_currency=mandate.base_currency,
+        valuation_as_of=snapshot.observed_at,
+    )
+    if not isinstance(cost, QuotedTradeCost):
+        logger.warning("core sell: close-side quote undecodable (%s)", cost)
+        return refuse("core_close_side_cost_quote_unavailable")
+    if cost.rate >= 1:
+        return refuse("core_close_cost_implausible")
+
+    # The lower-edge rebuy from the post-close state must clear the allocator's own
+    # floor, computed by the allocator.  The UNCLAMPED headroom, so an over-bound
+    # sleeve's deficit is netted rather than hidden by the observation clamp.
+    broker_minimum = effective_open_minimum(
+        response_currency=proof.response_currency,
+        min_position_exposure=proof.min_position_exposure,
+        min_position_amount=proof.min_position_amount,
+    )
+    if broker_minimum is None:
+        return refuse("core_broker_open_minimum_unquoted")
+    post_close = replace(
+        state,
+        core_market_value=Decimal("0"),
+        cash_balance=min(snapshot.available_cash, usage.headroom.remaining)
+        + usage.core_market_value
+        - cost.cost_upper_bound,
+    )
+    if evaluate_core_rebalance(mandate, post_close, broker_minimum=broker_minimum).action != "buy_core":
+        return refuse("core_rebuy_below_minimum")
+
+    # Step 5: the evidence ages once more, right before the manager call.
+    now = clock()
+    if not _evidence_fresh(snapshot.observed_at, now=now) or not _evidence_fresh(cost.last_updated, now=now):
+        return refuse("core_account_risk_stale")
+
+    with conn.transaction():
+        conn.execute(
+            """
+            INSERT INTO strategy_core_rebalance_close_quotes (
+                core_rebalance_intent_id, broker_position_id, units, ticket_amount,
+                cost_upper_bound, currency, quoted_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                intent_id,
+                target.broker_position_id,
+                position.units,
+                cost.ticket_amount,
+                cost.cost_upper_bound,
+                cost.currency,
+                cost.last_updated,
+            ),
+        )
+    return _drive_core_close(
+        conn,
+        broker=broker,
+        intent_id=intent_id,
+        strategy_trade_id=target.strategy_trade_id,
+        broker_position_id=target.broker_position_id,
+        ownership_id=target.ownership_id,
+        submit=True,
+    )
+
+
 def execute_core_rebalance(
     conn: psycopg.Connection[Any],
     *,
@@ -649,6 +1045,14 @@ def execute_core_rebalance(
         raise StrategyCoreExecutionError("core execution requires an idle connection")
     if environment != "demo":
         raise StrategyCoreExecutionError("core execution is demo-only")
+
+    # #2603 sell leg, spec step 0: drive an in-flight rebalance close first, with no
+    # evaluation, no new intent and no quote.
+    outstanding = _resolve_outstanding_core_rebalance_close(
+        conn, broker=broker, credentials=(api_key_credential_id, user_key_credential_id)
+    )
+    if outstanding is not None:
+        return outstanding
 
     # Preliminary DB facts are deliberately re-proved under the submission lock
     # below. This short transaction exists only to source the broker reads without
@@ -675,6 +1079,7 @@ def execute_core_rebalance(
     trade_id: int | None = None
     order_id: int | None = None
     amount = Decimal("0")
+    exit_levels: CoreExitLevels | None = None
     with core_submission_lock(conn):
         try:
             capital_authority = load_engine_capital_authority(conn)
@@ -701,13 +1106,14 @@ def execute_core_rebalance(
                 snapshot,
                 core_instrument_id=mandate.core_instrument_id,
             )
-            if not usage.headroom.within_bound:
-                return _result("refused", "sandbox_exceeded")
+            # ⚠ Only the HEADROOM term is clamped: over the bound `remaining` is
+            # negative, and a close must still be observable there (#2603 sell leg).  A
+            # negative broker `available_cash` still flows through unchanged.
             state = observe_core_sleeve(
                 snapshot,
                 core_instrument_id=mandate.core_instrument_id,
                 exact_owned_market_value=usage.core_market_value,
-                assigned_cash_available=min(snapshot.available_cash, usage.headroom.remaining),
+                assigned_cash_available=min(snapshot.available_cash, max(Decimal("0"), usage.headroom.remaining)),
             )
         except EngineCapitalObservationError as exc:
             # ⚠ This arm MUST precede the blanket one below and must not absorb it.  The
@@ -727,8 +1133,15 @@ def execute_core_rebalance(
         except Exception as exc:
             raise StrategyCoreExecutionError("the broker account snapshot could not describe the core sleeve") from exc
         decision = evaluate_core_rebalance(mandate, state)
+        # The sandbox refuses only a BUY.  A close reduces exposure; refusing it over the
+        # bound would pin the sleeve there.  Curing a breach is not the rebalancer's job
+        # (#2844 refuses, #2843 alerts).
+        if decision.action == "buy_core" and not usage.headroom.within_bound:
+            return _result("refused", "sandbox_exceeded")
         broker_verdict = None
-        if decision.action in ("buy_core", "sell_core"):
+        # A sell is quoted on the CLOSE arm inside `_execute_core_sell`; the trim-sized
+        # preflight describes a ticket that is never sent.
+        if decision.action == "buy_core":
             broker_verdict = assess_core_broker_preflight(
                 broker,
                 mandate=mandate,
@@ -776,7 +1189,9 @@ def execute_core_rebalance(
                 observed_at=snapshot.observed_at,
                 max_drawdown_pct=drawdown_limit,
             )
-            if initial_drawdown_refusal is not None:
+            # The drawdown refusal blocks new risk; a rebalance close reduces it.  The
+            # observation above is recorded either way.
+            if initial_drawdown_refusal is not None and intent.decision.action != "sell_core":
                 return _result("refused", initial_drawdown_refusal, intent_id=intent_id)
             if intent.decision.action == "hold":
                 return _result("held", intent.decision.reason_code or "core_hold", intent_id=intent_id)
@@ -818,138 +1233,158 @@ def execute_core_rebalance(
             )
             if not db_preflight.admitted:
                 return _result("refused", db_preflight.reason_code or "core_preflight_refused", intent_id=intent_id)
-            if broker_verdict is None or not broker_verdict.admitted:
-                reason = None if broker_verdict is None else broker_verdict.reason_code
-                return _result("refused", reason or "core_broker_preflight_refused", intent_id=intent_id)
-            snapshot_observed_at = broker_verdict.snapshot_observed_at
-            broker_evidence_age = (
-                None if snapshot_observed_at is None else (clock() - snapshot_observed_at).total_seconds()
-            )
-            if broker_evidence_age is None or not (
-                0 <= broker_evidence_age <= broker_verdict.max_account_risk_age_seconds
-            ):
-                return _result("refused", "core_account_risk_stale", intent_id=intent_id)
-            account_equity = broker_verdict.account_equity
-            if account_equity is None or snapshot_observed_at is None:
-                return _result("refused", "core_account_risk_unobservable", intent_id=intent_id)
-            drawdown_refusal = _observe_core_portfolio_drawdown(
-                conn,
-                equity=account_equity,
-                observed_at=snapshot_observed_at,
-                max_drawdown_pct=drawdown_limit,
-            )
-            if drawdown_refusal is not None:
-                return _result("refused", drawdown_refusal, intent_id=intent_id)
+            # ⚠ The sell branch leaves this transaction (committed) before touching the
+            # broker; the buy remainder stays in it, unchanged, so admission's FOR SHARE
+            # on the credential rows still spans the authority INSERT.
+            sell_intent = intent if intent.decision.action == "sell_core" else None
+            if sell_intent is None:
+                if broker_verdict is None or not broker_verdict.admitted:
+                    reason = None if broker_verdict is None else broker_verdict.reason_code
+                    return _result("refused", reason or "core_broker_preflight_refused", intent_id=intent_id)
+                snapshot_observed_at = broker_verdict.snapshot_observed_at
+                broker_evidence_age = (
+                    None if snapshot_observed_at is None else (clock() - snapshot_observed_at).total_seconds()
+                )
+                if broker_evidence_age is None or not (
+                    0 <= broker_evidence_age <= broker_verdict.max_account_risk_age_seconds
+                ):
+                    return _result("refused", "core_account_risk_stale", intent_id=intent_id)
+                account_equity = broker_verdict.account_equity
+                if account_equity is None or snapshot_observed_at is None:
+                    return _result("refused", "core_account_risk_unobservable", intent_id=intent_id)
+                drawdown_refusal = _observe_core_portfolio_drawdown(
+                    conn,
+                    equity=account_equity,
+                    observed_at=snapshot_observed_at,
+                    max_drawdown_pct=drawdown_limit,
+                )
+                if drawdown_refusal is not None:
+                    return _result("refused", drawdown_refusal, intent_id=intent_id)
 
-            # Last gate before durable authority: the write derives its own side.  See
-            # `core_order_shape_for` for why an upstream-only refusal is not enough.
-            order_shape = core_order_shape_for(intent.decision.action)
-            if order_shape is None:
-                return _result("refused", "core_submission_action_unbuilt", intent_id=intent_id)
-            order_action, order_purpose = order_shape
+                # Last gate before durable authority: the write derives its own side.  See
+                # `core_order_shape_for` for why an upstream-only refusal is not enough.
+                order_shape = core_order_shape_for(intent.decision.action)
+                if order_shape is None:
+                    return _result("refused", "core_submission_action_unbuilt", intent_id=intent_id)
+                order_action, order_purpose = order_shape
 
-            # #3284 item 1 -- the exit levels are derived BEFORE the durable authority
-            # exists, so a body that cannot carry them is never committed.
-            #
-            # ⚠ The anchor is `db_preflight.price`, which for `buy_core` is the ASK, read
-            # inside THIS hold of `core_submission_lock` and already refused as
-            # `core_quote_stale` beyond `CORE_MAX_QUOTE_AGE_SECONDS` -- the very constant
-            # `CORE_EXIT_MAX_QUOTE_AGE_SECONDS` re-exports.  So the anchor's freshness
-            # bound and the repair's are ONE policy rather than two that happen to agree,
-            # and no second quote read is needed.  This mirrors the signal arm, which
-            # anchors on `intent.ask` (`strategy_paper_executor`).
-            #
-            # ⚠ The anchor is NOT the fill.  A market order fills where it fills, so the
-            # submitted stop is approximately -50% of the fill rather than exactly; the
-            # five-minute repair re-anchors on `broker_positions.open_price` (the true
-            # fill) and corrects it. That approximation is the price of protecting the
-            # position from the first instant, and it is the right trade: the alternative
-            # is exactness with a naked window.
-            anchor_rate = db_preflight.price
-            anchor_quoted_at = db_preflight.quoted_at
-            # An admitted verdict always carries both -- `_age_ok` cannot pass on a NULL
-            # `quoted_at` and the price refusals precede it.  Re-checked anyway, because
-            # "cannot happen" is how a naked position gets opened: the refusal costs one
-            # cycle, the alternative is an unguarded `None` reaching the INSERT.
-            if anchor_rate is None or not anchor_rate.is_finite() or anchor_rate <= 0 or anchor_quoted_at is None:
-                return _result("refused", "core_exit_anchor_unavailable", intent_id=intent_id)
-            try:
-                exit_levels = core_exit_levels(anchor_rate)
-            except CoreExitLevelsUnderivable:
-                # ⚠ The SPECIFIC exception, not a bare `ValueError` -- a bare catch would map
-                # any future failure inside `core_exit_levels` to this same refusal, which
-                # reads as a handled condition when it is an unhandled one (review bot,
-                # PR #3289).
+                # #3284 item 1 -- the exit levels are derived BEFORE the durable authority
+                # exists, so a body that cannot carry them is never committed.
                 #
-                # ⚠ A REFUSAL, not an exception, and the case is real rather than defensive:
-                # `core_exit_levels` quantizes the stop DOWN to a cent, so any anchor under
-                # two cents derives a stop of 0.00 and raises.  SPY cannot reach there, but
-                # the mandate instrument is configurable and an executor that raises where
-                # it could refuse turns a bad candidate into a failed attended request.
-                return _result("refused", "core_exit_levels_underivable", intent_id=intent_id)
+                # ⚠ The anchor is `db_preflight.price`, which for `buy_core` is the ASK, read
+                # inside THIS hold of `core_submission_lock` and already refused as
+                # `core_quote_stale` beyond `CORE_MAX_QUOTE_AGE_SECONDS` -- the very constant
+                # `CORE_EXIT_MAX_QUOTE_AGE_SECONDS` re-exports.  So the anchor's freshness
+                # bound and the repair's are ONE policy rather than two that happen to agree,
+                # and no second quote read is needed.  This mirrors the signal arm, which
+                # anchors on `intent.ask` (`strategy_paper_executor`).
+                #
+                # ⚠ The anchor is NOT the fill.  A market order fills where it fills, so the
+                # submitted stop is approximately -50% of the fill rather than exactly; the
+                # five-minute repair re-anchors on `broker_positions.open_price` (the true
+                # fill) and corrects it. That approximation is the price of protecting the
+                # position from the first instant, and it is the right trade: the alternative
+                # is exactness with a naked window.
+                anchor_rate = db_preflight.price
+                anchor_quoted_at = db_preflight.quoted_at
+                # An admitted verdict always carries both -- `_age_ok` cannot pass on a NULL
+                # `quoted_at` and the price refusals precede it.  Re-checked anyway, because
+                # "cannot happen" is how a naked position gets opened: the refusal costs one
+                # cycle, the alternative is an unguarded `None` reaching the INSERT.
+                if anchor_rate is None or not anchor_rate.is_finite() or anchor_rate <= 0 or anchor_quoted_at is None:
+                    return _result("refused", "core_exit_anchor_unavailable", intent_id=intent_id)
+                try:
+                    exit_levels = core_exit_levels(anchor_rate)
+                except CoreExitLevelsUnderivable:
+                    # ⚠ The SPECIFIC exception, not a bare `ValueError` -- a bare catch would map
+                    # any future failure inside `core_exit_levels` to this same refusal, which
+                    # reads as a handled condition when it is an unhandled one (review bot,
+                    # PR #3289).
+                    #
+                    # ⚠ A REFUSAL, not an exception, and the case is real rather than defensive:
+                    # `core_exit_levels` quantizes the stop DOWN to a cent, so any anchor under
+                    # two cents derives a stop of 0.00 and raises.  SPY cannot reach there, but
+                    # the mandate instrument is configurable and an executor that raises where
+                    # it could refuse turns a bad candidate into a failed attended request.
+                    return _result("refused", "core_exit_levels_underivable", intent_id=intent_id)
 
-            amount = broker_verdict.amount
-            request_id = uuid4()
-            trade_row = conn.execute(
-                """
-                INSERT INTO strategy_trades (
-                    core_rebalance_intent_id, core_eligibility_proof_id,
-                    instrument_id, status
-                ) VALUES (%s, %s, %s, 'planned')
-                RETURNING strategy_trade_id
-                """,
-                (intent_id, binding_proof.proof_id, current.core_instrument_id),
-            ).fetchone()
-            if trade_row is None:
-                raise StrategyCoreExecutionError("core trade INSERT did not return an id")
-            trade_id = int(trade_row[0])
-            order_row = conn.execute(
-                """
-                INSERT INTO orders (
-                    instrument_id, action, order_type, requested_amount, status,
-                    raw_payload_json, execution_origin, strategy_request_id
-                ) VALUES (%s, %s, 'MARKET', %s, 'submitted', NULL, 'strategy', %s)
-                RETURNING order_id
-                """,
-                (current.core_instrument_id, order_action, amount, request_id),
-            ).fetchone()
-            if order_row is None:
-                raise StrategyCoreExecutionError("core order INSERT did not return an id")
-            order_id = int(order_row[0])
-            # ⚠ INSIDE the authority transaction, with the order and the reconciliation
-            # row.  All three commit together or none do, so "a durable core authority
-            # exists" and "its exit levels are known" are the same fact -- which is what
-            # lets the submit path read them rather than re-derive them (#3284 item 1).
-            conn.execute(
-                """
-                INSERT INTO strategy_core_entry_exit_levels (
-                    order_id, anchor_rate, anchor_quoted_at,
-                    stop_loss_rate, take_profit_rate, policy_version
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    order_id,
-                    anchor_rate,
-                    anchor_quoted_at,
-                    exit_levels.stop_loss_rate,
-                    exit_levels.take_profit_rate,
-                    exit_levels.policy_version,
-                ),
-            )
-            link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose=order_purpose)
-            # ⚠ `submission_phase` is declared HERE, in the authority transaction,
-            # and advanced by `mark_core_submission_entered` in a SEPARATE commit
-            # before the broker verb (#2961).  Two distinct commits is the whole
-            # of the separation: folding the marker into this statement would make
-            # every core entry read as "may have reached the broker", which is the
-            # vacuous shape `strategy_position_manager.py:854-857` warns about.
-            conn.execute(
-                "INSERT INTO strategy_order_reconciliation_state (order_id, submission_phase) "
-                "VALUES (%s, 'authority_committed')",
-                (order_id,),
+                amount = broker_verdict.amount
+                request_id = uuid4()
+                trade_row = conn.execute(
+                    """
+                    INSERT INTO strategy_trades (
+                        core_rebalance_intent_id, core_eligibility_proof_id,
+                        instrument_id, status
+                    ) VALUES (%s, %s, %s, 'planned')
+                    RETURNING strategy_trade_id
+                    """,
+                    (intent_id, binding_proof.proof_id, current.core_instrument_id),
+                ).fetchone()
+                if trade_row is None:
+                    raise StrategyCoreExecutionError("core trade INSERT did not return an id")
+                trade_id = int(trade_row[0])
+                order_row = conn.execute(
+                    """
+                    INSERT INTO orders (
+                        instrument_id, action, order_type, requested_amount, status,
+                        raw_payload_json, execution_origin, strategy_request_id
+                    ) VALUES (%s, %s, 'MARKET', %s, 'submitted', NULL, 'strategy', %s)
+                    RETURNING order_id
+                    """,
+                    (current.core_instrument_id, order_action, amount, request_id),
+                ).fetchone()
+                if order_row is None:
+                    raise StrategyCoreExecutionError("core order INSERT did not return an id")
+                order_id = int(order_row[0])
+                # ⚠ INSIDE the authority transaction, with the order and the reconciliation
+                # row.  All three commit together or none do, so "a durable core authority
+                # exists" and "its exit levels are known" are the same fact -- which is what
+                # lets the submit path read them rather than re-derive them (#3284 item 1).
+                conn.execute(
+                    """
+                    INSERT INTO strategy_core_entry_exit_levels (
+                        order_id, anchor_rate, anchor_quoted_at,
+                        stop_loss_rate, take_profit_rate, policy_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        order_id,
+                        anchor_rate,
+                        anchor_quoted_at,
+                        exit_levels.stop_loss_rate,
+                        exit_levels.take_profit_rate,
+                        exit_levels.policy_version,
+                    ),
+                )
+                link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose=order_purpose)
+                # ⚠ `submission_phase` is declared HERE, in the authority transaction,
+                # and advanced by `mark_core_submission_entered` in a SEPARATE commit
+                # before the broker verb (#2961).  Two distinct commits is the whole
+                # of the separation: folding the marker into this statement would make
+                # every core entry read as "may have reached the broker", which is the
+                # vacuous shape `strategy_position_manager.py:854-857` warns about.
+                conn.execute(
+                    "INSERT INTO strategy_order_reconciliation_state (order_id, submission_phase) "
+                    "VALUES (%s, 'authority_committed')",
+                    (order_id,),
+                )
+
+        if sell_intent is not None:
+            # Still inside the hold: the manager needs an idle connection, and session
+            # advisory locks survive the commit.
+            return _execute_core_sell(
+                conn,
+                broker=broker,
+                mandate=current,
+                intent=sell_intent,
+                snapshot=snapshot,
+                usage=usage,
+                state=state,
+                proof=binding_proof,
+                clock=clock,
             )
 
-        if request_id is None or trade_id is None or order_id is None:
+        if request_id is None or trade_id is None or order_id is None or exit_levels is None:
             raise StrategyCoreExecutionError("core submission authority was not persisted")
         return _submit_core_authority(
             conn,

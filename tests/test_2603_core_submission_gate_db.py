@@ -75,6 +75,7 @@ def _seed_proof(
     account: tuple[UUID, UUID, UUID],
     *,
     allow_partial_close: bool | None = True,
+    allow_close: bool | None = True,
 ) -> None:
     operator_id, api_key_id, user_key_id = account
     conn.execute(
@@ -90,7 +91,7 @@ def _seed_proof(
             %s, %s, 'etoro', 'demo', %s, %s,
             'underlying', NULL, 'USD', 'USD',
             'real', 'long', ARRAY[1], 1,
-            TRUE, TRUE, %s, %s, %s, 'test'
+            TRUE, %s, %s, %s, %s, 'test'
         )
         """,
         (
@@ -98,6 +99,7 @@ def _seed_proof(
             operator_id,
             api_key_id,
             user_key_id,
+            allow_close,
             allow_partial_close,
             "0" * 64,
             CORE_ELIGIBILITY_POLICY_VERSION,
@@ -532,26 +534,30 @@ def test_an_unproved_instrument_is_refused_and_the_cause_survives(
     assert "no etoro demo eligibility proof" in (verdict.detail or "")
 
 
-@pytest.mark.parametrize("allow_partial_close", [False, None])
-def test_a_sell_without_a_partial_close_capability_is_refused(
-    ebull_test_conn: psycopg.Connection[Any], allow_partial_close: bool | None
+@pytest.mark.parametrize("allow_close", [False, None])
+def test_a_sell_without_a_close_capability_is_refused(
+    ebull_test_conn: psycopg.Connection[Any], allow_close: bool | None
 ) -> None:
-    """⚠ A passing verdict proves ``allow_open_position`` — a different capability.
-
-    A rebalance sell can never be a full close: ``validate_core_mandate`` requires
-    ``core_target_pct - rebalance_band_pct > 0`` and the allocator sells only down
-    to the lower band edge, so post-trade core value is strictly positive.
+    """#2603 sell leg: a ``sell_core`` executes as a WHOLE close, so the proved
+    capability is ``allow_close_position`` -- partial close is not required.
 
     ``None`` is parameterised alongside ``False`` because the column is nullable
-    and means "the response did not say" — a truthiness test would read the same,
-    a ``not`` on a future inversion would not.
+    and means "the response did not say".
     """
     _seed_instrument(ebull_test_conn)
     account = _seed_account(ebull_test_conn)
-    _seed_proof(ebull_test_conn, account, allow_partial_close=allow_partial_close)
+    _seed_proof(ebull_test_conn, account, allow_close=allow_close, allow_partial_close=False)
     intent_id = _seed_intent(ebull_test_conn, event_id=_seed_mandate(ebull_test_conn), action="sell_core")
     verdict = _admit(ebull_test_conn, intent_id, account)
-    assert (verdict.admitted, verdict.reason_code) == (False, "core_partial_close_unproved")
+    assert (verdict.admitted, verdict.reason_code) == (False, "core_close_unproved")
+
+
+def test_a_sell_needs_no_partial_close_capability(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    _seed_instrument(ebull_test_conn)
+    account = _seed_account(ebull_test_conn)
+    _seed_proof(ebull_test_conn, account, allow_partial_close=False)
+    intent_id = _seed_intent(ebull_test_conn, event_id=_seed_mandate(ebull_test_conn), action="sell_core")
+    assert _admit(ebull_test_conn, intent_id, account).admitted is True
 
 
 def test_a_buy_is_unaffected_by_the_partial_close_capability(

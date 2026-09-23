@@ -231,7 +231,15 @@ function CoreSleeveControl({
     try {
       const result = await rebalanceCoreSleeve();
       const label =
-        result.state === "submitted"
+        // #2603 sell leg: a sell executes as a WHOLE close of the core position, and a
+        // later rebalance buys back to the band's lower edge.
+        result.reason_code === "core_rebalance_close_submitted"
+          ? "Broker accepted the whole close of the core position; the next rebalance resolves it."
+          : result.state === "closed"
+            ? "The core position was closed whole; rebalance again to buy back to the band's lower edge."
+            : result.state === "reconcile_required"
+              ? `The core close needs reconciliation (${result.reason_code}); no core buy is admitted until it resolves.`
+              : result.state === "submitted"
           ? "Broker accepted; fill reconciliation is pending."
           : result.state === "submission_uncertain"
             ? "Submission outcome is uncertain; reconciliation is required before retrying."

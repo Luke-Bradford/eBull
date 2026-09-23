@@ -1151,7 +1151,7 @@ def _core_pool_activation_ready(
 
 
 class CoreRebalanceResponse(BaseModel):
-    state: Literal["held", "refused", "submitted", "submission_uncertain"]
+    state: Literal["held", "refused", "submitted", "submission_uncertain", "closed", "reconcile_required"]
     reason_code: str
     intent_id: int | None
     trade_id: int | None

@@ -161,6 +161,7 @@ def _run(
     preflight_price: Decimal | None = Decimal("759.86"),
     preflight_quoted_at: datetime | None = None,
     broker_sink: list[object] | None = None,
+    within_bound: bool = True,
 ) -> tuple[CoreExecutionResult, list[str]]:
     events: list[str] = []
     conn = FakeConn(events)
@@ -200,7 +201,7 @@ def _run(
     )
     capital_usage = SimpleNamespace(
         core_market_value=Decimal("500"),
-        headroom=SimpleNamespace(within_bound=True, remaining=Decimal("500")),
+        headroom=SimpleNamespace(within_bound=within_bound, remaining=Decimal("500" if within_bound else "-80")),
     )
 
     def observe_drawdown(*_args: object, **_kwargs: object) -> str | None:
@@ -208,6 +209,15 @@ def _run(
         return drawdown_refusal
 
     with (
+        # #2603 sell leg step 0 has its own DB test; here there is never a close in flight.
+        patch("app.services.strategy_core_executor._resolve_outstanding_core_rebalance_close", return_value=None),
+        patch(
+            "app.services.strategy_core_executor._execute_core_sell",
+            side_effect=lambda *_a, **_k: (
+                events.append("sell_branch")
+                or CoreExecutionResult("submitted", "core_rebalance_close_submitted", 11, None, None, Decimal("0"))
+            ),
+        ),
         patch("app.services.strategy_core_executor.load_core_mandate", return_value=mandate),
         # `side_effect=None` is the default, so one patch covers both the healthy and
         # the refusing case without a conditional kwargs dict.
@@ -321,21 +331,39 @@ def test_only_a_buy_has_a_built_order_shape() -> None:
         assert core_order_shape_for(unbuilt) is None
 
 
-def test_a_sell_refuses_at_the_write_even_when_every_upstream_gate_admits() -> None:
-    # #3003. `_run` patches `assess_core_broker_preflight` to ADMIT, which is exactly the
-    # state the sell leg creates the moment it lifts
-    # `core_close_side_cost_quote_unavailable` -- so this is not a hypothetical future.
-    # Before the derived order shape this reached the INSERT and persisted the sell as a
-    # 'BUY' linked `purpose="entry"`, then submitted it as an OPEN.
+def test_a_sell_branches_to_the_whole_close_and_never_reaches_the_entry_write() -> None:
+    # #3003 then #2603 sell leg. A sell used to be refused at the write by the buy-only
+    # order-shape map; it now branches to `_execute_core_sell` after the common gates, and
+    # must still never persist a trade/order or reach the entry verb.
     result, events = _run(AssertionError("must not submit"), action="sell_core")
 
-    assert result.state == "refused"
-    assert result.reason_code == "core_submission_action_unbuilt"
-    assert result.order_id is None
-    assert result.trade_id is None
+    assert (result.state, result.reason_code) == ("submitted", "core_rebalance_close_submitted")
+    assert events.count("sell_branch") == 1
     assert "persist_trade" not in events
     assert "persist_order" not in events
     assert "broker_submit" not in events
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("buy_core", ("refused", "sandbox_exceeded")), ("sell_core", ("submitted", "core_rebalance_close_submitted"))],
+)
+def test_over_the_sandbox_bound_only_a_buy_is_refused(action: str, expected: tuple[str, str]) -> None:
+    """A close reduces exposure; refusing it over the bound would pin the sleeve there."""
+    result, events = _run(AssertionError("must not submit"), action=action, within_bound=False)
+
+    assert (result.state, result.reason_code) == expected
+    assert "persist_order" not in events
+
+
+def test_a_drawdown_refusal_does_not_block_a_sell_but_is_still_observed() -> None:
+    result, events = _run(
+        AssertionError("must not submit"), action="sell_core", drawdown_refusal="portfolio_drawdown_limit"
+    )
+
+    assert events.count("drawdown_observation") == 1
+    assert "sell_branch" in events
+    assert result.reason_code == "core_rebalance_close_submitted"
 
 
 def test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target() -> None:

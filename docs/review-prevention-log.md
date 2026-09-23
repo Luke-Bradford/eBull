@@ -11106,3 +11106,18 @@ neighbouring container and match it.**
 - Enforced in: `app/services/strategies/s2_cross_sectional_momentum.py::momentum_series`;
   `tests/test_strategy_s2.py::TestMomentumSeries::test_a_split_corrected_ratio_ties_exactly_with_its_as_traded_twin`
   (fails on the float-first code); `scripts/verify_2240_s2_cross_sectional.py` `_RANKING_SQL` (30-digit `ln`, float8 score). `--ranking` PASS 0 mismatches on both universes.
+
+#### 2026-09-23 (#2603 sell leg) — an append-only DELETE trigger must not land on an FK parent the test harness DELETEs
+
+- Symptom (caught before push): sql/411's spec asked for `BEFORE UPDATE OR DELETE` refusal
+  on `strategy_core_rebalance_intents`. The test harness empties tables with `DELETE`
+  (`tests/fixtures/ebull_test_db.py`), and only FK LEAVES can join its TRUNCATE-first set
+  (`_TRUNCATE_BEFORE_DELETE`) — `TRUNCATE` of a referenced table fails whatever its
+  children hold. A DELETE trigger on the intents table (parent of `strategy_trades`) would
+  have failed every core test's cleanup into the slow whole-schema recovery path.
+- Prevention: before adding a row trigger that refuses DELETE, check the table's inbound
+  FKs (`select conrelid::regclass from pg_constraint where confrelid='<t>'::regclass and
+  contype='f'`). A leaf goes into `_TRUNCATE_BEFORE_DELETE` in the same PR; a parent refuses
+  UPDATE only and relies on its children's `ON DELETE RESTRICT` for the rows that
+  authorised anything. State which in the migration header.
+- Enforced in: `sql/411_core_rebalance_close.sql` header; `tests/fixtures/ebull_test_db.py::_TRUNCATE_BEFORE_DELETE`.
