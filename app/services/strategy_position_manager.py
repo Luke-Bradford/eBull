@@ -8,6 +8,7 @@ intents are persisted; unchanged bars and polling heartbeats write no rows.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -28,6 +29,11 @@ from app.providers.broker import (
     BrokerPositionMutationUncertain,
     BrokerProvider,
 )
+from app.services.broker_closed_release import (
+    RELEASE_REASON,
+    evaluate_whole_close,
+    load_whole_close_evidence,
+)
 from app.services.core_exit_levels import (
     CORE_EXIT_MAX_QUOTE_AGE_SECONDS,
     core_exit_level_satisfied,
@@ -41,6 +47,8 @@ from app.services.strategy_control_plane import (
 )
 from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
 from app.services.strategy_position_repair_streak import record_repair_visit
+
+logger = logging.getLogger(__name__)
 
 _RATE_QUANTUM = Decimal("0.000001")
 _ADVISORY_HASH_SEED = 0
@@ -454,6 +462,66 @@ def _finish_close(conn: psycopg.Connection[Any], *, owned: _OwnedPosition, opera
         "UPDATE strategy_trades SET status=%s, updated_at=now() WHERE strategy_trade_id=%s",
         ("closed" if int(remaining[0]) == 0 else "open", owned.strategy_trade_id),
     )
+
+
+def _release_whole_broker_close(conn: psycopg.Connection[Any], *, owned: _OwnedPosition, observed_at: datetime) -> bool:
+    """Release an absent position's ownership iff the broker recorded ONE whole close (#2965).
+
+    ⚠ Unlike ``_finish_close`` this writes ``released_at`` as the broker's close time, not
+    ``now()`` -- NAV is marked by that date -- and it never writes the trade ``open``: a
+    sibling ownership's own visit decides that.  Any refusal leaves today's behaviour
+    (``reconcile_required``) for a human; the reason is logged with the witness ids.
+    """
+    evidence = load_whole_close_evidence(
+        conn,
+        ownership_id=owned.ownership_id,
+        strategy_trade_id=owned.strategy_trade_id,
+        broker_position_id=owned.broker_position_id,
+        instrument_id=owned.instrument_id,
+    )
+    conn.commit()
+    verdict = evaluate_whole_close(evidence, observed_at=observed_at)
+    if not verdict.release or verdict.released_at is None:
+        logger.info(
+            "strategy position %d (trade %d) absent; whole-close release refused: %s",
+            owned.broker_position_id,
+            owned.strategy_trade_id,
+            verdict.reason_code,
+        )
+        return False
+    with conn.transaction():
+        released = conn.execute(
+            """
+            UPDATE strategy_position_ownership
+            SET status='released', released_at=%s, release_reason=%s
+            WHERE ownership_id=%s AND status='active'
+            RETURNING ownership_id
+            """,
+            (verdict.released_at, RELEASE_REASON, owned.ownership_id),
+        ).fetchone()
+        if released is None:
+            return False
+        conn.execute(
+            "SELECT 1 FROM strategy_trades WHERE strategy_trade_id=%s FOR UPDATE",
+            (owned.strategy_trade_id,),
+        )
+        remaining = conn.execute(
+            "SELECT count(*) FROM strategy_position_ownership WHERE strategy_trade_id=%s AND status='active'",
+            (owned.strategy_trade_id,),
+        ).fetchone()
+        assert remaining is not None
+        if int(remaining[0]) == 0:
+            conn.execute(
+                "UPDATE strategy_trades SET status='closed', updated_at=now() WHERE strategy_trade_id=%s",
+                (owned.strategy_trade_id,),
+            )
+    logger.info(
+        "strategy position %d (trade %d) released: broker closed it whole at %s",
+        owned.broker_position_id,
+        owned.strategy_trade_id,
+        verdict.released_at.isoformat(),
+    )
+    return True
 
 
 def _persist_operation_response(
@@ -1263,6 +1331,8 @@ def manage_owned_position(
             return resumed
         position = _exact_broker_position(broker, owned)
         if position is None:
+            if _release_whole_broker_close(conn, owned=owned, observed_at=observed_at):
+                return PositionManagerResult(strategy_trade_id, broker_position_id, "applied", RELEASE_REASON)
             with conn.transaction():
                 conn.execute(
                     "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "
