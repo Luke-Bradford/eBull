@@ -11132,3 +11132,13 @@ neighbouring container and match it.**
   `database = (SELECT oid FROM pg_database WHERE datname = current_database())`. Run a new
   lock-probing DB test under `-n 4` before pushing, not only `-n 0`.
 - Enforced in: `tests/fixtures/recommendation_window_b.py::key_held_elsewhere`.
+
+### Two same-named columns read positionally are a silent field swap (#2942, PR #3317)
+
+- Symptom (review NITPICK): a candidate SELECT returned `api_cred.created_at, user_cred.created_at`
+  — two columns both named `created_at` — consumed by `_Candidate(*row)`. Reordering either
+  join or the SELECT list would move values between dataclass fields with no error.
+- Prevention: a row consumed by a dataclass/constructor is read with `dict_row` and every column
+  aliased to its field name (`_Candidate(**row)`), so a mismatch raises `TypeError` instead of
+  shifting. Any SELECT with duplicate output names gets explicit aliases.
+- Enforced in: `app/services/recommendation_window_b_release.py::_read_candidate`.

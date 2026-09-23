@@ -564,7 +564,10 @@ class _ClaimCredentialsRevoked(Exception):
     """The claim INSERT matched no row: a recorded credential is revoked (#2942)."""
 
     def __init__(self, credential_ids: tuple[UUID, UUID]) -> None:
-        super().__init__(f"broker credentials {credential_ids[0]} / {credential_ids[1]} are not both unrevoked")
+        super().__init__(
+            f"broker credentials {credential_ids[0]} / {credential_ids[1]} are not one unrevoked "
+            "api_key/user_key pair of one account"
+        )
         self.credential_ids = credential_ids
 
 
@@ -615,7 +618,9 @@ def _persist_submitted_intent(
     #2942 (sql/412): ``broker_credential_ids`` = ``(api_key id, user_key id)``
     of the plaintext the broker was built with — the account this attempt is
     sent to, which the attended window-B release binds its witness to. The
-    INSERT is conditional on both rows being unrevoked IN THE SAME STATEMENT,
+    INSERT is conditional, IN THE SAME STATEMENT, on the two rows being one
+    unrevoked ``api_key`` / ``user_key`` pair of one operator, provider and
+    environment (the shape the release's witness factory demands),
     and raises ``_ClaimCredentialsRevoked`` when they are not, so the caller
     can refuse pre-I/O without taking the claim. ``None`` ids (the non-live path, and direct test
     callers) write NULL and skip the condition.
@@ -641,9 +646,17 @@ def _persist_submitted_intent(
                  %(exit_units)s, %(context)s,
                  %(api_cred)s::uuid, %(user_cred)s::uuid
             WHERE %(api_cred)s::uuid IS NULL
-               OR (SELECT count(*) FROM broker_credentials bc
-                   WHERE bc.id IN (%(api_cred)s::uuid, %(user_cred)s::uuid)
-                     AND bc.revoked_at IS NULL) = 2
+               OR EXISTS (
+                   SELECT 1
+                   FROM broker_credentials api_cred
+                   JOIN broker_credentials user_cred
+                     ON user_cred.operator_id = api_cred.operator_id
+                    AND user_cred.provider = api_cred.provider
+                    AND user_cred.environment = api_cred.environment
+                   WHERE api_cred.id = %(api_cred)s::uuid AND api_cred.label = 'api_key'
+                     AND user_cred.id = %(user_cred)s::uuid AND user_cred.label = 'user_key'
+                     AND api_cred.revoked_at IS NULL AND user_cred.revoked_at IS NULL
+               )
             RETURNING order_id
             """,
             {
@@ -1596,13 +1609,13 @@ def _claim_submission(
             recommendation_id=recommendation_id,
             explanation=explanation,
             evidence={
-                "refusal": "broker_credential_revoked",
+                "refusal": "broker_credentials_not_live_pair",
                 "api_key_credential_id": str(exc.credential_ids[0]),
                 "user_key_credential_id": str(exc.credential_ids[1]),
             },
             now=now,
         )
-        raise SubmissionControlsRevokedError(explanation, ["broker_credential_revoked"]) from exc
+        raise SubmissionControlsRevokedError(explanation, ["broker_credentials_not_live_pair"]) from exc
     except psycopg.errors.UniqueViolation as exc:
         # Match the claim index by name. Catching every UniqueViolation here
         # would silently reinterpret an unrelated constraint failure as "a
@@ -2329,6 +2342,9 @@ def execute_order(
                 now=now,
             )
     except Exception:
+        # `result` is assigned only from `_execute_under_key`'s RETURN, which
+        # happens after its top-level step-4/5 commit — so a non-None result here
+        # means the only thing that can have raised is the key helper's cleanup.
         if result is None:
             raise
         # The step-4/5 transaction committed; only the key's cleanup failed, and

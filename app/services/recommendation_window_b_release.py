@@ -42,6 +42,7 @@ from typing import Any, Final, LiteralString
 from uuid import UUID
 
 import psycopg
+import psycopg.rows
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
@@ -90,12 +91,19 @@ RecommendationBrokerFactory = Callable[[UUID, UUID], AbstractContextManager[Brok
 #: Everything the act relies on is read here, before the lock and again under it.
 _CANDIDATE_SQL: Final[LiteralString] = """
 SELECT o.status, o.recommendation_id, o.recommendation_request_id, o.created_at,
-       o.instrument_id, o.action, o.broker_environment, o.raw_payload_json,
-       o.recommendation_park_message, o.recommendation_api_key_credential_id,
-       o.recommendation_user_key_credential_id, o.recommendation_submission_entered_at,
-       o.recommendation_submission_entered_pid, o.recommendation_submission_entered_host,
-       o.recommendation_parked_at, o.recommendation_exit_position_id,
-       o.recommendation_exit_units, api_cred.created_at, user_cred.created_at
+       o.instrument_id, o.action, o.broker_environment,
+       o.raw_payload_json AS raw_payload,
+       o.recommendation_park_message AS park_message,
+       o.recommendation_api_key_credential_id AS api_credential_id,
+       o.recommendation_user_key_credential_id AS user_credential_id,
+       o.recommendation_submission_entered_at AS entered_at,
+       o.recommendation_submission_entered_pid AS entered_pid,
+       o.recommendation_submission_entered_host AS entered_host,
+       o.recommendation_parked_at AS parked_at,
+       o.recommendation_exit_position_id AS exit_position_id,
+       o.recommendation_exit_units AS exit_units,
+       api_cred.created_at AS api_credential_created_at,
+       user_cred.created_at AS user_credential_created_at
 FROM orders o
 JOIN trade_recommendations tr ON tr.recommendation_id = o.recommendation_id
 LEFT JOIN broker_credentials api_cred ON api_cred.id = o.recommendation_api_key_credential_id
@@ -344,9 +352,12 @@ def evaluate_recommendation_exit_witness(
 
 
 def _read_candidate(conn: psycopg.Connection[Any], order_id: int) -> _Candidate | None:
-    row = conn.execute(_CANDIDATE_SQL, {"order_id": order_id}).fetchone()
+    # By NAME: every column is aliased to its `_Candidate` field, so a reordered
+    # SELECT cannot silently shift values between fields.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        row = cur.execute(_CANDIDATE_SQL, {"order_id": order_id}).fetchone()
     conn.commit()
-    return None if row is None else _Candidate(*row)
+    return None if row is None else _Candidate(**row)
 
 
 def describe_candidate(conn: psycopg.Connection[Any], order_id: int) -> dict[str, Any] | None:

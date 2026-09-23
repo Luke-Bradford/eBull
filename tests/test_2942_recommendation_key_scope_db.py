@@ -395,19 +395,29 @@ def test_both_park_arms_persist_the_exception_text(
         assert row[3]["exception"] == "ValueError" and row[3]["str"] == "decoder exploded"
 
 
-def test_a_claim_against_a_revoked_credential_refuses_before_io(
-    ebull_test_conn: psycopg.Connection[Any], creds: Credentials, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("defect", ["revoked", "swapped_labels", "mixed_operators"])
+def test_a_claim_against_a_credential_pair_that_is_not_one_live_account_refuses_before_io(
+    ebull_test_conn: psycopg.Connection[Any], creds: Credentials, monkeypatch: pytest.MonkeyPatch, defect: str
 ) -> None:
     _set_live(monkeypatch, True)
     rec = seed_recommendation(ebull_test_conn)
-    ebull_test_conn.execute("UPDATE broker_credentials SET revoked_at = now() WHERE id = %s", (creds.user,))
-    ebull_test_conn.commit()
+    ids = creds
+    if defect == "revoked":
+        ebull_test_conn.execute("UPDATE broker_credentials SET revoked_at = now() WHERE id = %s", (creds.user,))
+        ebull_test_conn.commit()
+    elif defect == "swapped_labels":
+        ids = Credentials(api=creds.user, user=creds.api)
+    else:
+        from uuid import UUID
+
+        other = seed_world(ebull_test_conn, operator_id=UUID("2942a0b0-0000-4000-8000-00000000beef"))
+        ids = Credentials(api=creds.api, user=other.user)
     broker = _Broker("filled")
     with pytest.raises(SubmissionControlsRevokedError):
-        _execute(ebull_test_conn, rec, broker=broker, creds=creds)
+        _execute(ebull_test_conn, rec, broker=broker, creds=ids)
     assert broker.calls == []
     assert _orders_for(rec) == []
-    assert _refusal_audits(ebull_test_conn, rec) == ["broker_credential_revoked"]
+    assert _refusal_audits(ebull_test_conn, rec) == ["broker_credentials_not_live_pair"]
 
 
 def test_rotation_refuses_while_a_recommendation_claim_needs_the_account(
