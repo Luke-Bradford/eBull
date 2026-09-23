@@ -1111,8 +1111,9 @@ def _fy_balance_sheet_is_presented(facts: Sequence[FactRow], primary_end_by_acce
     3-04 / cash-flow opening balances, and whose balance-sheet columns are therefore
     UNOBSERVED in raw rather than absent from the filing record.
 
-    Evidence of a presented balance sheet is an ``Assets`` instant (the Rule 5-02.18
-    total-assets caption; a 3-04 rollforward reconciles equity captions only) within one fiscal year of
+    Evidence of a presented balance sheet is an instant of a concept mapped to
+    ``total_assets`` (today only ``Assets``: the Rule 5-02.18 total-assets caption; a
+    3-04 rollforward reconciles equity captions only) within one fiscal year of
     its own accession's primary end, the same window ``_fy_period_is_presented``
     uses. Fail-closed: without a known primary end the answer is False, which only
     makes the canonical merge keep a cell it already holds, never NULL one.
