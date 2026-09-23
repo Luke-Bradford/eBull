@@ -481,8 +481,10 @@ export function AutomationControl({
     <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-sm font-semibold">Automation</h2>
-          <p className="mt-1 text-xs text-slate-500">One capital limit shared by approved strategies.</p>
+          <h2 className="text-sm font-semibold">Funding</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            How much of the eToro account the engine may use. One limit, shared by the core sleeve and every approved strategy.
+          </p>
         </div>
         <Badge tone={enabled ? "ok" : "neutral"}>{enabled ? "On" : "Off"}</Badge>
       </div>
@@ -510,21 +512,21 @@ export function AutomationControl({
             />
           </label>
           <label className="w-52 text-xs font-medium text-slate-600 dark:text-slate-300">
-            Profit treatment
+            Budget mode
             <select
               value={capitalMode}
               onChange={(event) => setCapitalMode(event.target.value as "fixed" | "compound")}
               className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
             >
-              <option value="fixed">Keep principal limit fixed</option>
-              <option value="compound">Reinvest realised P&amp;L</option>
+              <option value="fixed">Fixed</option>
+              <option value="compound">Moving</option>
             </select>
           </label>
           {/* #2843. This selects WHO may approve a stage promotion, never WHAT
               qualifies — every evidence bar is identical under both values.
               `autonomous` needs a configured risk profile, mirroring the
               server's own refusal rather than restating its reasoning. */}
-          <label className="w-56 text-xs font-medium text-slate-600 dark:text-slate-300">
+          <label className="w-72 text-xs font-medium text-slate-600 dark:text-slate-300">
             Promotion approval
             <select
               value={effectiveApprovalMode}
@@ -555,6 +557,15 @@ export function AutomationControl({
           </button>
         </div>
       </form>
+      {/* #3334 / #2844: Fixed = the capped sandbox, Moving = the expanding one.
+          Worded from `strategy_capital_sandbox.effective_realised_delta`, which
+          is asymmetric on purpose: a fixed pot takes realised losses but never
+          realised profits. Open (unrealised) P&L moves neither. */}
+      <p className="mt-3 text-xs text-slate-500">
+        {capitalMode === "fixed"
+          ? "Fixed: the engine may never use more than this amount. Realised profits are set aside as cash, not reinvested; realised losses reduce what it may use."
+          : "Moving: realised profits raise what the engine may use and realised losses lower it, so gains are reinvested."}
+      </p>
       {selectedMandate ? (
         <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
           <p className="text-xs text-slate-500">Policy ceilings, not return forecasts. Long-only and unleveraged in this version.</p>
@@ -597,5 +608,37 @@ export function AutomationControl({
       ) : null}
       {failed ? <p className="mt-4 text-xs text-red-700 dark:text-red-300">The automation settings were not changed.</p> : null}
     </section>
+  );
+}
+
+/**
+ * One blocking condition on the pot, shared by the Portfolio and Setup lenses (#3334).
+ *
+ * ⚠ Blockers are ACTIONS or FACTS, never instructions. A blocker the operator
+ * can clear carries its own control (the kill switch); one they cannot (no
+ * strategy has earned capital yet) is a single line of fact. The previous
+ * version narrated all five as an ordered lesson, which drew the operator's
+ * 2026-08-23 feedback (#2868): *"This looks more like a wiki, a guide, not a
+ * user interface."*
+ */
+export function BlockerRow({
+  tone,
+  label,
+  action,
+}: {
+  tone: "risk" | "warn";
+  label: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-h-11 flex-wrap items-center justify-between gap-3 border-t border-slate-200 py-2 text-sm dark:border-slate-800">
+      <span className="flex items-center gap-2">
+        {/* Not "halted" — the header badge already says that. These name the
+            KIND of blocker: something switched off vs something not set up. */}
+        <Badge tone={tone}>{tone === "risk" ? "blocked" : "setup"}</Badge>
+        <span className="text-slate-700 dark:text-slate-200">{label}</span>
+      </span>
+      {action}
+    </div>
   );
 }

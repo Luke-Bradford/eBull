@@ -9,6 +9,7 @@ import type { CoreSleeveResponse, StrategyOverviewResponse } from "@/api/types";
 import { BENCHMARK_REFUSALS } from "@/components/strategies/__fixtures__/benchmarkRefusals";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 import { StrategyPortfolioLens } from "@/pages/StrategyPortfolioLens";
+import { StrategySetupLens } from "@/pages/StrategySetupLens";
 
 /** The state the operator actually has today: kill switch on, nothing funded. */
 const BLOCKED = {
@@ -191,6 +192,15 @@ function renderLens() {
   );
 }
 
+/** #3334: funding, the core sleeve and its mandate moved to the Setup lens. */
+function renderSetup() {
+  return render(
+    <MemoryRouter>
+      <StrategySetupLens />
+    </MemoryRouter>,
+  );
+}
+
 describe("StrategyPortfolioLens", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -204,7 +214,7 @@ describe("StrategyPortfolioLens", () => {
   });
 
   it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
-    renderLens();
+    renderSetup();
     expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
     expect(screen.getByText("Common dates seen")).toBeInTheDocument();
     expect(screen.getByText("Provisional until the sealed verifier opens")).toBeInTheDocument();
@@ -246,7 +256,7 @@ describe("StrategyPortfolioLens", () => {
       state,
       declared_outcome: outcome,
     } as never);
-    renderLens();
+    renderSetup();
     const heading = await screen.findByRole("heading", { name: "Core & cash" });
     // Scoped to the card header: in the `cash` state the Instrument tile ALSO reads
     // "Cash", which is correct — the badge is the assertion under test.
@@ -263,7 +273,7 @@ describe("StrategyPortfolioLens", () => {
       state: "unavailable",
       observed_trading_days: 1,
     } as never);
-    renderLens();
+    renderSetup();
     expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
     expect(screen.getByText("Provisional until the sealed verifier opens")).toBeInTheDocument();
     expect(screen.queryByText("Window closed")).not.toBeInTheDocument();
@@ -275,7 +285,7 @@ describe("StrategyPortfolioLens", () => {
       state: "awaiting_verdict",
       observed_trading_days: 5,
     } as never);
-    renderLens();
+    renderSetup();
     expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
     expect(screen.getByText("Window closed")).toBeInTheDocument();
     expect(screen.getByText("The declared window is complete")).toBeInTheDocument();
@@ -283,7 +293,7 @@ describe("StrategyPortfolioLens", () => {
   });
 
   it("never says Cash while the verdict is still sealed", async () => {
-    renderLens();
+    renderSetup();
     expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
     // ⚠ Scoped to the card's verdict surfaces, NOT the page: "Cash reserve" is a
     // legitimate mandate label elsewhere, and a page-wide assertion would fail for the
@@ -313,7 +323,7 @@ describe("StrategyPortfolioLens", () => {
       .mockImplementationOnce(() => new Promise((resolve) => {
         finishRefresh = resolve;
       }));
-    renderLens();
+    renderSetup();
 
     await waitFor(() => expect(screen.getAllByText("1 / 5")).toHaveLength(2));
     await userEvent.click(screen.getByRole("button", { name: "Refresh status" }));
@@ -335,7 +345,7 @@ describe("StrategyPortfolioLens", () => {
       .mockImplementationOnce(() => new Promise((resolve) => {
         finishRefresh = resolve;
       }));
-    renderLens();
+    renderSetup();
 
     const rebalance = await screen.findByRole("button", { name: "Rebalance demo now" });
     await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "balanced");
@@ -362,10 +372,10 @@ describe("StrategyPortfolioLens", () => {
         detail: "#2833 cannot collect evidence because candidate instrument ids are missing: 3417.",
       }],
     } as never);
-    renderLens();
+    renderSetup();
 
     expect(await screen.findByText(/candidate instrument ids are missing: 3417/i)).toBeInTheDocument();
-    expect(screen.getByText(/No candidate coverage is available; the blocker above names what must be restored/i)).toBeInTheDocument();
+    expect(screen.getByText(/No candidate coverage is available; the core sleeve's blockers name what must be restored/i)).toBeInTheDocument();
   });
 
   it("lets the operator save a disabled draft while evidence is still collecting", async () => {
@@ -396,7 +406,7 @@ describe("StrategyPortfolioLens", () => {
       rebalance_band_pct: "5",
       min_rebalance_amount: "25",
     } as never);
-    renderLens();
+    renderSetup();
 
     expect(await screen.findByText(/Save these values as a disabled draft now/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Enable demo core sleeve")).toBeDisabled();
@@ -420,7 +430,7 @@ describe("StrategyPortfolioLens", () => {
   it("saves a materially changed ready mandate with an explicit audit reason", async () => {
     vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
     const save = vi.spyOn(strategiesApi, "updateCoreMandate").mockResolvedValue(CORE_READY.mandate as never);
-    renderLens();
+    renderSetup();
 
     const target = await screen.findByLabelText("Core target %");
     await userEvent.clear(target);
@@ -446,7 +456,7 @@ describe("StrategyPortfolioLens", () => {
       enabled: true,
       capital_limit: "1000.000000",
     } as never);
-    renderLens();
+    renderSetup();
 
     const entries = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "balanced");
@@ -465,7 +475,7 @@ describe("StrategyPortfolioLens", () => {
 
   it("does not offer a reason-only save for an unchanged configured mandate", async () => {
     vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
-    renderLens();
+    renderSetup();
 
     await userEvent.type(await screen.findByLabelText("Audit reason"), "No material change");
 
@@ -485,7 +495,7 @@ describe("StrategyPortfolioLens", () => {
       }],
     } as never);
     const save = vi.spyOn(strategiesApi, "updateCoreMandate").mockResolvedValue(CORE_READY.mandate as never);
-    renderLens();
+    renderSetup();
 
     await userEvent.type(await screen.findByLabelText("Audit reason"), "Advance reviewed policy stamp");
     const button = screen.getByRole("button", { name: "Save mandate" });
@@ -500,7 +510,7 @@ describe("StrategyPortfolioLens", () => {
 
   it("cannot confirm a rebalance against unsaved mandate edits", async () => {
     vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
-    renderLens();
+    renderSetup();
 
     const target = await screen.findByLabelText("Core target %");
     await userEvent.clear(target);
@@ -522,7 +532,7 @@ describe("StrategyPortfolioLens", () => {
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
-    renderLens();
+    renderSetup();
 
     await userEvent.click(await screen.findByRole("button", { name: "Rebalance demo now" }));
     expect(rebalance).not.toHaveBeenCalled();
@@ -552,7 +562,7 @@ describe("StrategyPortfolioLens", () => {
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
-    renderLens();
+    renderSetup();
 
     expect(await screen.findByText("Order 31 is unresolved.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Rebalance demo now" })).not.toBeInTheDocument();
@@ -588,7 +598,7 @@ describe("StrategyPortfolioLens", () => {
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
-    renderLens();
+    renderSetup();
 
     await userEvent.click(await screen.findByRole("button", { name: "Settle demo order" }));
     await userEvent.click(screen.getByRole("button", { name: "Check with broker" }));
@@ -616,7 +626,7 @@ describe("StrategyPortfolioLens", () => {
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
-    renderLens();
+    renderSetup();
 
     await userEvent.click(await screen.findByRole("button", { name: "Rebalance demo now" }));
     await userEvent.click(screen.getByRole("button", { name: "Confirm demo rebalance" }));
@@ -644,7 +654,7 @@ describe("StrategyPortfolioLens", () => {
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
-    renderLens();
+    renderSetup();
 
     await userEvent.click(await screen.findByRole("button", { name: "Rebalance demo now" }));
     await userEvent.click(screen.getByRole("button", { name: "Confirm demo rebalance" }));
@@ -688,18 +698,26 @@ describe("StrategyPortfolioLens", () => {
     await waitFor(() => expect(strategiesApi.fetchStrategyOverview).toHaveBeenCalledTimes(2));
   });
 
-  it("summarises the pot in four numbers", async () => {
+  it("leads with the pot's summary strip and no configuration form", async () => {
     renderLens();
-    // Scoped to the state section: the setup form below carries its own
-    // "Available"/"Reserved" breakdown, so an unscoped query is ambiguous.
     const state = (await screen.findByText("Not trading")).closest("section")!;
-    // ⚠ "Strategy P&L", not "P&L" (#3222 residual 2) — the tile sums
-    // `pnl.total_pnl` over the registered strategies only, and the unqualified
-    // label claimed a pot-wide total in a row whose other three tiles are
-    // pot-level.
-    for (const label of ["Pot", "Strategy P&L", "Open", "Available"]) {
+    // #3334: results first. Every tile is pot-level; the strategy-only roll-up
+    // ("Strategy total P&L", #3222 residual 2) moved down into performance.
+    for (const label of ["Pot value", "P&L since start", "Last day", "vs S&P 500", "Budget available"]) {
       expect(within(state).getByText(label)).toBeInTheDocument();
     }
+    // Monitor ≠ configure: no funding or mandate write lives on this lens.
+    expect(screen.queryByLabelText("Trading capital (USD)")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save mandate" })).not.toBeInTheDocument();
+  });
+
+  it("never reports no working engine order while the core-sleeve read has failed", async () => {
+    // Codex ckpt-2 on #3334: a null core sleeve is UNKNOWN, not "no pending order".
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockRejectedValue(new Error("boom"));
+    renderLens();
+    const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
+    await waitFor(() => expect(within(orders).getByRole("button", { name: /retry/i })).toBeInTheDocument());
+    expect(within(orders).queryByText(/No engine order is working/)).not.toBeInTheDocument();
   });
 
   it("renders a real empty state instead of a zeroed positions table", async () => {
@@ -763,8 +781,8 @@ describe("StrategyPortfolioLens", () => {
     // ⚠ The VALUE div, not the tile: the hint reads "0 strategies approved", so
     // a `toContain("0")` over the whole tile can never fail and would be a test
     // that passes by construction.
-    const value = (await screen.findByText("Open")).nextElementSibling!;
-    expect(value.textContent).toBe("—");
+    const holdings = await screen.findByRole("heading", { name: /Holdings/ });
+    await waitFor(() => expect(holdings.textContent).toContain("· — open"));
   });
 
   it("counts the core sleeve's position, which belongs to no registered strategy", async () => {
@@ -787,8 +805,8 @@ describe("StrategyPortfolioLens", () => {
     } as unknown as StrategyOverviewResponse);
 
     renderLens();
-    const value = (await screen.findByText("Open")).nextElementSibling!;
-    await waitFor(() => expect(value.textContent).toBe("1"));
+    const holdings = await screen.findByRole("heading", { name: /Holdings/ });
+    await waitFor(() => expect(holdings.textContent).toContain("· 1 open"));
     expect(await screen.findByText("Close all 1 positions")).toBeInTheDocument();
   });
 
@@ -807,7 +825,7 @@ describe("StrategyPortfolioLens", () => {
     } as never);
 
     renderLens();
-    const caveat = await screen.findByText(/Excludes 1 position held outside the strategies/);
+    const caveat = await screen.findByText(/exclude 1 position held outside the strategies/);
     expect(caveat.textContent).toContain("Core / cash mandate");
     // The currency IS the reason, so it must be in the sentence: "excluded" on
     // its own reads as an oversight rather than a refusal with a cause.
@@ -831,7 +849,7 @@ describe("StrategyPortfolioLens", () => {
     } as never);
 
     renderLens();
-    const caveat = await screen.findByText(/Excludes 1 position held outside the strategies/);
+    const caveat = await screen.findByText(/exclude 1 position held outside the strategies/);
     // Still excluded, and still said so — only the CAUSE clause drops.
     expect(caveat.textContent).toContain("Core / cash mandate");
     expect(caveat.textContent).not.toContain("cannot convert");
@@ -849,7 +867,7 @@ describe("StrategyPortfolioLens", () => {
 
     renderLens();
     // Anchored on the tile so this cannot pass by rendering nothing at all.
-    expect(await screen.findByText("Strategy P&L")).toBeInTheDocument();
+    expect(await screen.findByText("Strategy total P&L")).toBeInTheDocument();
     expect(screen.queryByText(/held outside the strategies/)).not.toBeInTheDocument();
   });
 
@@ -968,6 +986,30 @@ describe("StrategiesHubPage", () => {
     await waitFor(() => {
       expect(screen.getByRole("tab", { name: "Research" })).toHaveAttribute("aria-selected", "true");
     });
+    expect(screen.queryByText("Not trading")).not.toBeInTheDocument();
+  });
+
+  it("moves every pot write to the Setup lens, with policy-fixed rules labelled read-only", async () => {
+    vi.spyOn(strategiesApi, "fetchCoreSleeve").mockResolvedValue(CORE_COLLECTING as never);
+    render(
+      <MemoryRouter initialEntries={["/strategies"]}>
+        <StrategiesHubPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText("Not trading");
+    await userEvent.click(screen.getByRole("tab", { name: "Setup" }));
+    expect(await screen.findByLabelText("Trading capital (USD)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Budget mode")).toHaveValue("fixed");
+    expect(screen.getByText(/Fixed: the engine may never use more than this amount/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save mandate" })).toBeInTheDocument();
+    const policy = screen.getByRole("heading", { name: "Set by policy" }).closest("section")!;
+    expect(within(policy).getByText("Stop loss / take profit")).toBeInTheDocument();
+    // The BLOCKED fixture has the kill switch on; the policy row reports it, the
+    // Clear control stays with the blocker on the Portfolio lens.
+    expect(within(policy).getByText("Kill switch").nextElementSibling?.textContent).toBe("On");
+    expect(within(policy).getByText("Demo")).toBeInTheDocument();
+    expect(within(policy).getByRole("table", { name: "Core candidate evidence coverage" })).toBeInTheDocument();
+    expect(within(policy).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.queryByText("Not trading")).not.toBeInTheDocument();
   });
 
