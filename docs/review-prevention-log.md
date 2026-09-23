@@ -11247,5 +11247,20 @@ neighbouring container and match it.**
   in the filing's own statements (opening balances, rollforward boundaries) must not create a period.
   An overwrite-all upsert turns every such edge row into lost history.
 - Enforced in: `app/services/fundamentals/__init__.py::_fy_period_is_presented`;
-  `tests/test_financial_normalization.py::TestFyPresentationScope2182`. The P−2 balance-sheet overwrite is
-  still open on #2182 (part B).
+  `tests/test_financial_normalization.py::TestFyPresentationScope2182`. Part B (P−2 balance sheet) is the
+  entry below.
+
+### An overwrite-all merge must not write a statement the source row never observed (#2182 part B)
+
+- Symptom (2026-09-23): the P−2 year (third Rule 3-02 income statement, no Rule 3-01(a) balance sheet)
+  of the oldest retained 10-K rightly mints a FY row, but its balance-sheet cells are UNOBSERVED, not
+  absent. The `col = EXCLUDED.col` merge overwrote them with NULL, or with the NCI-inclusive rollforward
+  equity, on every re-normalize. A real two-arm A/B found 1,127 instruments and 15,207 cells affected.
+  A plain COALESCE merge had been rejected at ckpt-1, because it makes wrong cells sticky.
+- Prevention: carry "observed" at the grain the SOURCE RULE works at (per statement). An unobserved
+  statement keeps the durable cells and fills only NULLs. An observed one overwrites everything,
+  NULLs included, so no cell is sticky. Validate the A/B by executing BOTH merge SQL paths, rolled back,
+  never by a Python classification of what the SQL would do.
+- Enforced in: `app/services/fundamentals/__init__.py::_fy_balance_sheet_is_presented` +
+  `_canonical_merge_instrument` (`_PRESERVED_WHEN_UNPRESENTED_COLUMNS`);
+  `tests/test_canonical_merge_p2_balance_sheet_2182.py`; `scripts/ab_2182_p2_merge_arms.py`.

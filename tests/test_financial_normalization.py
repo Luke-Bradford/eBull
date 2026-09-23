@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from app.services.fundamentals import (
     FactRow,
+    PeriodRow,
     _derive_periods_from_facts,
     _is_plausible_fiscal_year,
     _resolve_period_fiscal_year,
@@ -2418,3 +2419,79 @@ class TestQ4ChronologyGuard2182:
         # Same label, but the FY row is the PRIOR real year (ends before Q1 starts).
         periods = _derive_periods_from_facts([*self._quarters(), self._fy("2023-02-01", "2024-01-31")])
         assert not [p for p in periods if p.period_type == "Q4"]
+
+
+class TestBalanceSheetPresented2182PartB:
+    """#2182 part B — the Rule 3-02 P−2 year has an income statement but no Rule
+    3-01(a) balance sheet in that filing, so its row must say its balance-sheet
+    cells are unobserved (the canonical merge then keeps durable history)."""
+
+    def _by_end(self) -> dict[date, PeriodRow]:
+        facts = TestFyPresentationScope2182()._aapl_fy2023_10k()
+        return {p.period_end_date: p for p in _derive_periods_from_facts(facts)}
+
+    def test_p2_year_is_flagged_unpresented(self) -> None:
+        # Its only instant is the 3-04 closing equity, two years before the primary.
+        by_end = self._by_end()
+        assert by_end[date(2021, 9, 25)].balance_sheet_presented is False
+
+    def test_primary_and_comparative_years_are_presented(self) -> None:
+        by_end = self._by_end()
+        assert by_end[date(2023, 9, 30)].balance_sheet_presented is True
+        assert by_end[date(2022, 9, 24)].balance_sheet_presented is True
+
+    def test_older_10k_balance_sheet_makes_the_year_presented(self) -> None:
+        # The FY2022 10-K presents FY2021 as its prior-year comparative balance sheet.
+        facts = [
+            *TestFyPresentationScope2182()._aapl_fy2023_10k(),
+            _fact(
+                concept="Assets",
+                val=Decimal("351002000000"),
+                period_end="2021-09-25",
+                period_start=None,
+                frame=None,
+                fiscal_year=2022,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="0000320193-22-000108",
+                filed_date="2022-10-28",
+            ),
+            _fact(
+                concept="Revenues",
+                val=Decimal("394328000000"),
+                period_end="2022-09-24",
+                period_start="2021-09-26",
+                frame=None,
+                fiscal_year=2022,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="0000320193-22-000108",
+                filed_date="2022-10-28",
+            ),
+        ]
+        fy2021 = {p.period_end_date: p for p in _derive_periods_from_facts(facts)}[date(2021, 9, 25)]
+        assert fy2021.balance_sheet_presented is True
+        assert fy2021.total_assets == Decimal("351002000000")
+
+    def test_derived_q4_inherits_the_fy_flag(self) -> None:
+        def q(fp: str, start: str, end: str) -> FactRow:
+            return _fact(
+                concept="Revenues",
+                period_start=start,
+                period_end=end,
+                frame=None,
+                fiscal_year=2021,
+                fiscal_period=fp,
+                accession_number=f"accn-{fp}",
+                filed_date="2021-08-01",
+            )
+
+        facts = [
+            *TestFyPresentationScope2182()._aapl_fy2023_10k(),
+            q("Q1", "2020-09-27", "2020-12-26"),
+            q("Q2", "2020-12-27", "2021-03-27"),
+            q("Q3", "2021-03-28", "2021-06-26"),
+        ]
+        q4 = [p for p in _derive_periods_from_facts(facts) if p.period_type == "Q4"]
+        assert len(q4) == 1 and q4[0].is_derived
+        assert q4[0].balance_sheet_presented is False

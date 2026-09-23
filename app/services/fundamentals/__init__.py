@@ -767,6 +767,12 @@ _BALANCE_SHEET_COLUMNS: frozenset[str] = frozenset(
     }
 )
 
+# #2182 part B — the balance-sheet cells a row with ``balance_sheet_presented=False``
+# must not overwrite in canonical. Excludes antidilutive_securities: it sits in
+# _BALANCE_SHEET_COLUMNS only for the Q4 copy, but its concept is a DURATION fact
+# (reported with every income statement, so it IS observed on a P−2 row).
+_PRESERVED_WHEN_UNPRESENTED_COLUMNS: frozenset[str] = _BALANCE_SHEET_COLUMNS - {"antidilutive_securities"}
+
 # Fiscal period label -> (period_type, fiscal_quarter)
 _FP_MAP: dict[str, tuple[str, int | None]] = {
     "Q1": ("Q1", 1),
@@ -881,6 +887,10 @@ class PeriodRow:
     filed_date: date | None = None
     is_restated: bool = False
     is_derived: bool = False
+    # #2182 part B — False when no retained filing PRESENTS a balance sheet at this
+    # period_end (Reg S-X 3-01(a)): the row's instant columns are then unobserved,
+    # not absent, and the canonical merge must not overwrite durable history with them.
+    balance_sheet_presented: bool = True
 
 
 def _months_between(start: date | None, end: date) -> int | None:
@@ -1088,6 +1098,31 @@ def _fy_period_is_presented(facts: Sequence[FactRow], primary_end_by_accession: 
             return True
         primary_end = primary_end_by_accession.get(fact.accession_number)
         if primary_end is None or (primary_end - fact.period_end).days <= max_year_days:
+            return True
+    return False
+
+
+def _fy_balance_sheet_is_presented(facts: Sequence[FactRow], primary_end_by_accession: dict[str, date]) -> bool:
+    """Whether any retained filing presents a BALANCE SHEET at this FY period_end (#2182 part B).
+
+    Rule 3-01(a) balance sheets cover the two most recent fiscal years, one year
+    fewer than the Rule 3-02(a) income statements. So the earliest income-statement
+    year of the oldest retained 10-K (P−2) mints a row whose only instants are
+    3-04 / cash-flow opening balances, and whose balance-sheet columns are therefore
+    UNOBSERVED in raw rather than absent from the filing record.
+
+    Evidence of a presented balance sheet is an ``Assets`` instant (the Rule 5-02.18
+    total-assets caption; a 3-04 rollforward reconciles equity captions only) within one fiscal year of
+    its own accession's primary end, the same window ``_fy_period_is_presented``
+    uses. Fail-closed: without a known primary end the answer is False, which only
+    makes the canonical merge keep a cell it already holds, never NULL one.
+    """
+    max_year_days = _FLOW_DURATION_DAYS["FY"][1]
+    for fact in facts:
+        if fact.period_start is not None or _TAG_TO_COLUMN.get(fact.concept, ("",))[0] != "total_assets":
+            continue
+        primary_end = primary_end_by_accession.get(fact.accession_number)
+        if primary_end is not None and 0 <= (primary_end - fact.period_end).days <= max_year_days:
             return True
     return False
 
@@ -1319,16 +1354,16 @@ def _derive_periods_from_facts(
             continue
         canonical_facts = sorted(mapped_facts, key=lambda f: (f.filed_date, f.accession_number), reverse=True)
         fiscal_year = _resolve_period_fiscal_year(anchor_fy, "FY", period_end, canonical_facts[0].fiscal_year)
-        periods.append(
-            _build_period_row(
-                period_type="FY",
-                fiscal_quarter=_fy_fiscal_quarter,
-                fiscal_year=fiscal_year,
-                period_end=period_end,
-                canonical_facts=canonical_facts,
-                reported_currency=reported_currency,
-            )
+        fy_row = _build_period_row(
+            period_type="FY",
+            fiscal_quarter=_fy_fiscal_quarter,
+            fiscal_year=fiscal_year,
+            period_end=period_end,
+            canonical_facts=canonical_facts,
+            reported_currency=reported_currency,
         )
+        fy_row.balance_sheet_presented = _fy_balance_sheet_is_presented(mapped_facts, fy_primary_end)
+        periods.append(fy_row)
 
     # #735 — DEI public-float overlay. EntityPublicFloat is a 10-K cover-page fact
     # (period_end = issuer Q2-end, kept out of _TAG_TO_COLUMN per #558). It is a
@@ -1474,6 +1509,7 @@ def _derive_periods_from_facts(
             form_type=fy_row.form_type,
             filed_date=fy_row.filed_date,
             is_derived=True,
+            balance_sheet_presented=fy_row.balance_sheet_presented,
         )
 
         # Derive flow columns: Q4 = FY - Q1 - Q2 - Q3
@@ -1544,7 +1580,7 @@ def _upsert_period_raw(
             antidilutive_securities,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
-            ingestion_run_id
+            balance_sheet_presented, ingestion_run_id
         ) VALUES (
             %(instrument_id)s, %(period_end_date)s, %(period_type)s,
             %(fiscal_year)s, %(fiscal_quarter)s, %(period_start_date)s, %(months_covered)s,
@@ -1566,7 +1602,7 @@ def _upsert_period_raw(
             %(antidilutive_securities)s,
             %(source)s, %(source_ref)s, %(reported_currency)s,
             %(form_type)s, %(filed_date)s, %(is_restated)s, %(is_derived)s,
-            %(ingestion_run_id)s
+            %(balance_sheet_presented)s, %(ingestion_run_id)s
         )
         ON CONFLICT (instrument_id, period_end_date, period_type, source, source_ref)
         DO UPDATE SET
@@ -1623,6 +1659,7 @@ def _upsert_period_raw(
             filed_date = EXCLUDED.filed_date,
             is_restated = EXCLUDED.is_restated,
             is_derived = EXCLUDED.is_derived,
+            balance_sheet_presented = EXCLUDED.balance_sheet_presented,
             ingestion_run_id = EXCLUDED.ingestion_run_id,
             fetched_at = NOW()
         """,
@@ -1690,6 +1727,7 @@ def _upsert_period_raw(
             "filed_date": period.filed_date,
             "is_restated": period.is_restated,
             "is_derived": period.is_derived,
+            "balance_sheet_presented": period.balance_sheet_presented,
             "ingestion_run_id": ingestion_run_id,
         },
     )
@@ -1866,44 +1904,90 @@ def _canonical_merge_instrument(
             sga_expense, depreciation_amort, interest_expense, income_tax,
             shares_basic, shares_diluted, sbc_expense,
             total_assets, total_liabilities, shareholders_equity, cash,
-            long_term_debt, short_term_debt, shares_outstanding,
-            inventory, receivables, payables, goodwill, ppe_net,
+            long_term_debt, short_term_debt, shares_outstanding, inventory,
+            receivables, payables, goodwill, ppe_net,
+            treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            assets_current, liabilities_current, cash_restricted,
+            additional_paid_in_capital, accumulated_oci,
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
-            treasury_shares, shares_authorized, shares_issued, retained_earnings,
             public_float_usd,
-            assets_current, liabilities_current, cash_restricted,
             comprehensive_income, intangible_amortization,
             deferred_income_tax, other_nonoperating_income,
-            additional_paid_in_capital, accumulated_oci,
             antidilutive_securities,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
             normalization_status
         )
+        -- #2182 part B: a row whose balance sheet no retained filing presents
+        -- (balance_sheet_presented = FALSE; the Rule 3-02 P−2 year) keeps the
+        -- canonical balance-sheet cells and only FILLS a NULL from raw. A presented
+        -- balance sheet overwrites every cell, NULLs included, so nothing sticks.
+        -- These 21 columns are _PRESERVED_WHEN_UNPRESENTED_COLUMNS (test-pinned).
         SELECT
-            %(iid)s, period_end_date, period_type,
-            fiscal_year, fiscal_quarter, period_start_date, months_covered,
-            revenue, cost_of_revenue, gross_profit, operating_income,
-            net_income, eps_basic, eps_diluted, research_and_dev,
-            sga_expense, depreciation_amort, interest_expense, income_tax,
-            shares_basic, shares_diluted, sbc_expense,
-            total_assets, total_liabilities, shareholders_equity, cash,
-            long_term_debt, short_term_debt, shares_outstanding,
-            inventory, receivables, payables, goodwill, ppe_net,
-            operating_cf, investing_cf, financing_cf, capex,
-            dividends_paid, dps_declared, buyback_spend,
-            treasury_shares, shares_authorized, shares_issued, retained_earnings,
-            public_float_usd,
-            assets_current, liabilities_current, cash_restricted,
-            comprehensive_income, intangible_amortization,
-            deferred_income_tax, other_nonoperating_income,
-            additional_paid_in_capital, accumulated_oci,
-            antidilutive_securities,
-            source, source_ref, reported_currency,
-            form_type, filed_date, is_restated, is_derived,
+            %(iid)s, b.period_end_date, b.period_type,
+            b.fiscal_year, b.fiscal_quarter, b.period_start_date, b.months_covered,
+            b.revenue, b.cost_of_revenue, b.gross_profit, b.operating_income,
+            b.net_income, b.eps_basic, b.eps_diluted, b.research_and_dev,
+            b.sga_expense, b.depreciation_amort, b.interest_expense, b.income_tax,
+            b.shares_basic, b.shares_diluted, b.sbc_expense,
+            CASE WHEN b.balance_sheet_presented THEN b.total_assets
+                 ELSE COALESCE(c.total_assets, b.total_assets) END,
+            CASE WHEN b.balance_sheet_presented THEN b.total_liabilities
+                 ELSE COALESCE(c.total_liabilities, b.total_liabilities) END,
+            CASE WHEN b.balance_sheet_presented THEN b.shareholders_equity
+                 ELSE COALESCE(c.shareholders_equity, b.shareholders_equity) END,
+            CASE WHEN b.balance_sheet_presented THEN b.cash
+                 ELSE COALESCE(c.cash, b.cash) END,
+            CASE WHEN b.balance_sheet_presented THEN b.long_term_debt
+                 ELSE COALESCE(c.long_term_debt, b.long_term_debt) END,
+            CASE WHEN b.balance_sheet_presented THEN b.short_term_debt
+                 ELSE COALESCE(c.short_term_debt, b.short_term_debt) END,
+            CASE WHEN b.balance_sheet_presented THEN b.shares_outstanding
+                 ELSE COALESCE(c.shares_outstanding, b.shares_outstanding) END,
+            CASE WHEN b.balance_sheet_presented THEN b.inventory
+                 ELSE COALESCE(c.inventory, b.inventory) END,
+            CASE WHEN b.balance_sheet_presented THEN b.receivables
+                 ELSE COALESCE(c.receivables, b.receivables) END,
+            CASE WHEN b.balance_sheet_presented THEN b.payables
+                 ELSE COALESCE(c.payables, b.payables) END,
+            CASE WHEN b.balance_sheet_presented THEN b.goodwill
+                 ELSE COALESCE(c.goodwill, b.goodwill) END,
+            CASE WHEN b.balance_sheet_presented THEN b.ppe_net
+                 ELSE COALESCE(c.ppe_net, b.ppe_net) END,
+            CASE WHEN b.balance_sheet_presented THEN b.treasury_shares
+                 ELSE COALESCE(c.treasury_shares, b.treasury_shares) END,
+            CASE WHEN b.balance_sheet_presented THEN b.shares_authorized
+                 ELSE COALESCE(c.shares_authorized, b.shares_authorized) END,
+            CASE WHEN b.balance_sheet_presented THEN b.shares_issued
+                 ELSE COALESCE(c.shares_issued, b.shares_issued) END,
+            CASE WHEN b.balance_sheet_presented THEN b.retained_earnings
+                 ELSE COALESCE(c.retained_earnings, b.retained_earnings) END,
+            CASE WHEN b.balance_sheet_presented THEN b.assets_current
+                 ELSE COALESCE(c.assets_current, b.assets_current) END,
+            CASE WHEN b.balance_sheet_presented THEN b.liabilities_current
+                 ELSE COALESCE(c.liabilities_current, b.liabilities_current) END,
+            CASE WHEN b.balance_sheet_presented THEN b.cash_restricted
+                 ELSE COALESCE(c.cash_restricted, b.cash_restricted) END,
+            CASE WHEN b.balance_sheet_presented THEN b.additional_paid_in_capital
+                 ELSE COALESCE(c.additional_paid_in_capital, b.additional_paid_in_capital) END,
+            CASE WHEN b.balance_sheet_presented THEN b.accumulated_oci
+                 ELSE COALESCE(c.accumulated_oci, b.accumulated_oci) END,
+            b.operating_cf, b.investing_cf, b.financing_cf, b.capex,
+            b.dividends_paid, b.dps_declared, b.buyback_spend,
+            b.public_float_usd,
+            b.comprehensive_income, b.intangible_amortization,
+            b.deferred_income_tax, b.other_nonoperating_income,
+            b.antidilutive_securities,
+            b.source, b.source_ref, b.reported_currency,
+            b.form_type, b.filed_date, b.is_restated, b.is_derived,
             'normalized'
-        FROM best_source
+        FROM best_source b
+        LEFT JOIN financial_periods c
+          ON c.instrument_id = %(iid)s
+         AND c.period_end_date = b.period_end_date
+         AND c.period_type = b.period_type
+         AND c.superseded_at IS NULL
         ON CONFLICT (instrument_id, period_end_date, period_type)
         DO UPDATE SET
             fiscal_year = EXCLUDED.fiscal_year,
