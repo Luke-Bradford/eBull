@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -2602,6 +2603,89 @@ class TestPerShareShareCountMistag:
     def test_non_per_share_column_unaffected_by_bound(self) -> None:
         [p] = _derive_periods_from_facts([_fact(val=Decimal("5e11"))])
         assert p.revenue == Decimal("5e11")
+
+
+class TestEpsIdentityCheck:
+    """#3344 — an EPS fact its own filing's NI ÷ weighted shares refutes by >= 10^5 is dropped."""
+
+    @staticmethod
+    def _filing(
+        eps: str, *, ni: str = "680000000", sh: str = "900000000", cover: str | None = "890000000"
+    ) -> list[FactRow]:
+        facts = [
+            _fact(concept="EarningsPerShareDiluted", val=Decimal(eps), unit="USD/shares"),
+            _fact(concept="NetIncomeLoss", val=Decimal(ni)),
+            _fact(concept="WeightedAverageNumberOfDilutedSharesOutstanding", val=Decimal(sh), unit="shares"),
+        ]
+        if cover is not None:
+            cover_fact = _fact(
+                concept="EntityCommonStockSharesOutstanding",
+                val=Decimal(cover),
+                unit="shares",
+                period_start=None,
+                period_end="2024-04-20",
+            )
+            facts.append(cover_fact)
+        return facts
+
+    def test_millions_scale_eps_dropped_and_later_comparative_fills(self) -> None:
+        # HAL shape: the 10-Q files $0.68 as 680,000; next year's comparative is right.
+        later = _fact(
+            concept="EarningsPerShareDiluted",
+            val=Decimal("0.68"),
+            unit="USD/shares",
+            accession_number="accn-later",
+            filed_date="2025-05-01",
+        )
+        [p] = _derive_periods_from_facts([*self._filing("680000"), later])
+        assert p.eps_diluted == Decimal("0.68")
+
+    def test_millions_scale_eps_alone_leaves_column_null(self) -> None:
+        [p] = _derive_periods_from_facts(self._filing("680000"))
+        assert p.eps_diluted is None
+        assert p.net_income == Decimal("680000000")
+
+    def test_correct_eps_kept(self) -> None:
+        [p] = _derive_periods_from_facts(self._filing("0.76"))
+        assert p.eps_diluted == Decimal("0.76")
+
+    def test_thousands_gap_kept(self) -> None:
+        # Near-zero NI vs income available to common (preferred dividends): EPS is right.
+        [p] = _derive_periods_from_facts(self._filing("-0.16", ni="-6000", sh="35838442", cover="36000000"))
+        assert p.eps_diluted == Decimal("-0.16")
+
+    def test_share_count_scale_error_keeps_eps(self) -> None:
+        # AIG/BV shape: the share count is the wrong fact; the cover page disagrees with it.
+        [p] = _derive_periods_from_facts(self._filing("0.76", sh="900000000000000"))
+        assert p.eps_diluted == Decimal("0.76")
+
+    def test_no_cover_page_keeps_eps(self) -> None:
+        [p] = _derive_periods_from_facts(self._filing("680000", cover=None))
+        assert p.eps_diluted == Decimal("680000")
+
+    def test_cover_page_in_non_share_unit_does_not_corroborate(self) -> None:
+        facts = [
+            f if f.concept != "EntityCommonStockSharesOutstanding" else replace(f, unit="USD")
+            for f in self._filing("680000")
+        ]
+        [p] = _derive_periods_from_facts(facts)
+        assert p.eps_diluted == Decimal("680000")
+
+    def test_disagreeing_cover_values_keep_eps(self) -> None:
+        extra = _fact(
+            concept="EntityCommonStockSharesOutstanding",
+            val=Decimal("20000000"),
+            unit="shares",
+            period_start=None,
+            period_end="2024-04-20",
+        )
+        [p] = _derive_periods_from_facts([*self._filing("680000"), extra])
+        assert p.eps_diluted == Decimal("680000")
+
+    def test_ambiguous_net_income_keeps_eps(self) -> None:
+        facts = [*self._filing("680000"), _fact(concept="NetIncomeLoss", val=Decimal("1"))]
+        [p] = _derive_periods_from_facts(facts)
+        assert p.eps_diluted == Decimal("680000")
 
 
 def test_per_share_bound_matches_financial_periods_ddl() -> None:

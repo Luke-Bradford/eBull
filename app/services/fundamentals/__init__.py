@@ -779,6 +779,12 @@ _PER_SHARE_COLUMNS: frozenset[str] = frozenset({"eps_basic", "eps_diluted", "dps
 _PER_SHARE_VALUE_BOUND = Decimal("1e8")
 _PER_SHARE_SCALE = Decimal("0.0001")
 
+# #3344 — EPS column -> the weighted-average share column it divides by (ASC 260).
+# See _eps_facts_contradicting_identity.
+_EPS_SHARES_COLUMN: dict[str, str] = {"eps_basic": "shares_basic", "eps_diluted": "shares_diluted"}
+_EPS_IDENTITY_BOUND = Decimal("1e5")
+_DEI_SHARES_OUTSTANDING_CONCEPT = "EntityCommonStockSharesOutstanding"
+
 # Fiscal period label -> (period_type, fiscal_quarter)
 _FP_MAP: dict[str, tuple[str, int | None]] = {
     "Q1": ("Q1", 1),
@@ -1202,6 +1208,67 @@ def _per_share_value_is_representable(fact: FactRow) -> bool:
     return abs(fact.val).quantize(_PER_SHARE_SCALE, rounding=ROUND_HALF_UP) < _PER_SHARE_VALUE_BOUND
 
 
+def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
+    """Indexes of EPS facts the same filing's own earnings and share count refute.
+
+    #3344 — filers also tag EPS that fits NUMERIC(12,4) but is off by the
+    statement's "in millions" scale (HAL 2024 10-Qs: 680,000 for $0.68; BBWI
+    2010–2015; HIG, SKYT, WH, KLXE) or is a share count (SGRP, EPOW, NXPL). The
+    unit is ``USD/shares`` on every one of them, so the unit cannot discriminate.
+
+    Source rule: ASC 260-10-45-10 — basic EPS = income available to common ÷
+    weighted-average shares (diluted: ASC 260-10-45-16). The check reads the
+    same accession and period's ``NetIncomeLoss`` and weighted-average share
+    count and drops the EPS fact when ``|EPS × shares ÷ NI| ≥ 10^5``.
+
+    The bound is fixed by construction, one decade inside the 10^6 "in
+    millions" scale error it targets. The 10^3 ("in thousands") class is NOT
+    caught on purpose: NetIncomeLoss is not the ASC 260 numerator (preferred
+    dividends and NCI sit between them, ASC 260-10-45-11), so a near-zero NI
+    puts EPS-correct facts at 10^3–10^4 (GNLN, PSEC, LAND, BGDE).
+
+    The identity says one of three facts is wrong, not which one. Most failures
+    are a share count scaled by 10^3 or 10^6 with EPS correct (FRHC, AIG, BV).
+    So EPS is dropped only when the cover page's
+    ``dei:EntityCommonStockSharesOutstanding`` in the same accession is within
+    10× of the share count. A split between the period end and the cover date
+    breaks that match, and the fact is then kept. Missing inputs also keep it.
+    """
+    # A key holding two different values in one filing is ambiguous; it is skipped.
+    numerators: dict[tuple[str, date | None, date], set[Decimal]] = defaultdict(set)
+    shares: dict[tuple[str, str, date | None, date], set[Decimal]] = defaultdict(set)
+    cover_shares: dict[str, set[Decimal]] = defaultdict(set)
+    for f in facts:
+        mapping = _TAG_TO_COLUMN.get(f.concept)
+        column = mapping[0] if mapping is not None else None
+        if column == "net_income" and f.unit == "USD":
+            numerators[(f.accession_number, f.period_start, f.period_end)].add(f.val)
+        elif column is not None and column in _EPS_SHARES_COLUMN.values() and f.unit == "shares":
+            shares[(column, f.accession_number, f.period_start, f.period_end)].add(f.val)
+        elif f.concept == _DEI_SHARES_OUTSTANDING_CONCEPT and f.unit == "shares" and f.val > 0:
+            cover_shares[f.accession_number].add(f.val)
+
+    refuted: set[int] = set()
+    for i, f in enumerate(facts):
+        mapping = _TAG_TO_COLUMN.get(f.concept)
+        if mapping is None or mapping[0] not in _EPS_SHARES_COLUMN or f.unit != "USD/shares" or f.val == 0:
+            continue
+        ni_vals = numerators.get((f.accession_number, f.period_start, f.period_end), set())
+        sh_vals = shares.get((_EPS_SHARES_COLUMN[mapping[0]], f.accession_number, f.period_start, f.period_end), set())
+        covers = cover_shares.get(f.accession_number)
+        if len(ni_vals) != 1 or len(sh_vals) != 1 or not covers:
+            continue
+        [ni], [sh] = ni_vals, sh_vals
+        if ni == 0 or sh == 0:
+            continue
+        if abs(f.val * sh) < _EPS_IDENTITY_BOUND * abs(ni):
+            continue
+        # Several cover values (one per share class) must ALL corroborate.
+        if max(covers) / 10 < abs(sh) < min(covers) * 10:
+            refuted.add(i)
+    return refuted
+
+
 def _build_period_row(
     *,
     period_type: str,
@@ -1270,6 +1337,8 @@ def _derive_periods_from_facts(
     """
     # Filtered once here: the YTD pool below reads ``facts`` too, not only ``grouped``.
     facts = [f for f in facts if _per_share_value_is_representable(f)]
+    refuted = _eps_facts_contradicting_identity(facts)
+    facts = [f for i, f in enumerate(facts) if i not in refuted]
 
     # Group facts by (fiscal_year, fiscal_period)
     grouped: dict[tuple[int, str], list[FactRow]] = defaultdict(list)

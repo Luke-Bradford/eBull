@@ -11301,3 +11301,19 @@ neighbouring container and match it.**
   A/B and the re-mint dry-run BEFORE the first push, because nothing is rolled back afterwards.
 - Enforced in: `sql/417_delete_unpresented_fy_ghost_rows.sql`;
   `tests/test_migration_417_fy_ghost_rows_2182.py`.
+
+### A broken accounting identity names three suspects, not one (#3344)
+
+- Symptom (2026-09-23): the ticket proposed separating "share counts tagged as EPS" by unit
+  (`shares` vs `USD/shares`). On the full population every bad EPS fact carries `USD/shares`, and
+  most are not share counts: they are "in millions" scale errors (HAL 680,000 for $0.68). The
+  ASC 260 identity `EPS × weighted shares ≈ net income` catches them. But among facts off by
+  ≥10^3 the usual wrong fact is the SHARE COUNT (FRHC, AIG, BV), and at 10^3–10^4
+  `NetIncomeLoss` differs from the ASC 260 numerator (preferred dividends) while EPS is correct
+  (GNLN, PSEC). Dropping EPS on the ratio alone would have deleted correct figures.
+- Prevention: when an identity over N facts fails, name the wrong one with an independent
+  corroborator before acting. Here that is the cover-page `dei:EntityCommonStockSharesOutstanding`
+  from the same accession. Bin the full-population ratio by powers of ten and inspect each
+  bin's instruments before fixing a bound.
+- Enforced in: `app/services/fundamentals/__init__.py::_eps_facts_contradicting_identity`;
+  `tests/test_financial_normalization.py::TestEpsIdentityCheck`.
