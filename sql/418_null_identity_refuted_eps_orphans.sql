@@ -16,10 +16,10 @@
 --      is governed by the fact-level filter on its next normalize, not by this.
 --   2. net_income <> 0 and |eps × weighted shares| ≥ 10^5 × |net_income| (the same
 --      bound as `_EPS_IDENTITY_BOUND`).
---   3. The weighted share count is within 10× of the instrument's shares_outstanding
---      at the nearest period_end within 400 days. A share count scaled by 10^3 or 10^6
---      is the more common way the identity fails, and EPS is correct then (LNC, NTRS,
---      IOR, LARK). This clause keeps those rows. The row's own shares_outstanding is
+--   3. The weighted share count is within 10× of EVERY shares_outstanding the
+--      instrument holds at the nearest period_end within 400 days. A share count
+--      scaled by 10^3 or 10^6 is the more common way the identity fails, and EPS is
+--      correct then (LNC, NTRS, IOR, LARK). This clause keeps those rows. The row's own shares_outstanding is
 --      often NULL on quarters, hence the nearest one.
 --
 -- Measured on dev 2026-09-23 after re-normalizing every instrument with a failing
@@ -30,16 +30,24 @@ WITH candidates AS (
     SELECT
         p.instrument_id, p.period_type, p.period_end_date, p.net_income,
         p.eps_basic, p.shares_basic, p.eps_diluted, p.shares_diluted,
-        (
-            SELECT q.shares_outstanding
-            FROM financial_periods q
-            WHERE q.instrument_id = p.instrument_id
-              AND q.shares_outstanding > 0
-              AND abs(q.period_end_date - p.period_end_date) <= 400
-            ORDER BY abs(q.period_end_date - p.period_end_date), q.period_end_date
-            LIMIT 1
-        ) AS near_shares_outstanding
+        near.lo AS near_lo,
+        near.hi AS near_hi
     FROM financial_periods p
+    -- Every shares_outstanding at the nearest distance; ties (FY + Q4, a date on
+    -- each side) must ALL corroborate, so an ambiguous nearest value keeps EPS.
+    CROSS JOIN LATERAL (
+        SELECT min(q.shares_outstanding) AS lo, max(q.shares_outstanding) AS hi
+        FROM financial_periods q
+        WHERE q.instrument_id = p.instrument_id
+          AND q.shares_outstanding > 0
+          AND abs(q.period_end_date - p.period_end_date) = (
+              SELECT min(abs(q2.period_end_date - p.period_end_date))
+              FROM financial_periods q2
+              WHERE q2.instrument_id = p.instrument_id
+                AND q2.shares_outstanding > 0
+                AND abs(q2.period_end_date - p.period_end_date) <= 400
+          )
+    ) near
     WHERE p.source = 'sec_edgar'
       AND p.net_income <> 0
       AND NOT EXISTS (
@@ -54,13 +62,13 @@ UPDATE financial_periods fp
 SET
     eps_basic = CASE
         WHEN abs(c.eps_basic * c.shares_basic) >= 1e5 * abs(c.net_income)
-         AND c.shares_basic > c.near_shares_outstanding / 10
-         AND c.shares_basic < c.near_shares_outstanding * 10
+         AND c.shares_basic > c.near_hi / 10
+         AND c.shares_basic < c.near_lo * 10
         THEN NULL ELSE fp.eps_basic END,
     eps_diluted = CASE
         WHEN abs(c.eps_diluted * c.shares_diluted) >= 1e5 * abs(c.net_income)
-         AND c.shares_diluted > c.near_shares_outstanding / 10
-         AND c.shares_diluted < c.near_shares_outstanding * 10
+         AND c.shares_diluted > c.near_hi / 10
+         AND c.shares_diluted < c.near_lo * 10
         THEN NULL ELSE fp.eps_diluted END
 FROM candidates c
 WHERE fp.instrument_id = c.instrument_id
@@ -69,9 +77,9 @@ WHERE fp.instrument_id = c.instrument_id
   AND fp.source = 'sec_edgar'
   AND (
       (abs(c.eps_basic * c.shares_basic) >= 1e5 * abs(c.net_income)
-       AND c.shares_basic > c.near_shares_outstanding / 10
-       AND c.shares_basic < c.near_shares_outstanding * 10)
+       AND c.shares_basic > c.near_hi / 10
+       AND c.shares_basic < c.near_lo * 10)
    OR (abs(c.eps_diluted * c.shares_diluted) >= 1e5 * abs(c.net_income)
-       AND c.shares_diluted > c.near_shares_outstanding / 10
-       AND c.shares_diluted < c.near_shares_outstanding * 10)
+       AND c.shares_diluted > c.near_hi / 10
+       AND c.shares_diluted < c.near_lo * 10)
   );

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -2660,6 +2661,14 @@ class TestEpsIdentityCheck:
 
     def test_no_cover_page_keeps_eps(self) -> None:
         [p] = _derive_periods_from_facts(self._filing("680000", cover=None))
+        assert p.eps_diluted == Decimal("680000")
+
+    def test_cover_page_in_non_share_unit_does_not_corroborate(self) -> None:
+        facts = [
+            f if f.concept != "EntityCommonStockSharesOutstanding" else replace(f, unit="USD")
+            for f in self._filing("680000")
+        ]
+        [p] = _derive_periods_from_facts(facts)
         assert p.eps_diluted == Decimal("680000")
 
     def test_ambiguous_net_income_keeps_eps(self) -> None:

@@ -1245,7 +1245,7 @@ def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
             numerators[(f.accession_number, f.period_start, f.period_end)].add(f.val)
         elif column is not None and column in _EPS_SHARES_COLUMN.values() and f.unit == "shares":
             shares[(column, f.accession_number, f.period_start, f.period_end)].add(f.val)
-        elif f.concept == _DEI_SHARES_OUTSTANDING_CONCEPT and f.val > 0:
+        elif f.concept == _DEI_SHARES_OUTSTANDING_CONCEPT and f.unit == "shares" and f.val > 0:
             cover_shares[f.accession_number] = max(f.val, cover_shares.get(f.accession_number, f.val))
 
     refuted: set[int] = set()
