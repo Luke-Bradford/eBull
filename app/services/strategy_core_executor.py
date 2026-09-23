@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -476,6 +478,10 @@ def mark_core_submission_entered(conn: psycopg.Connection[Any], *, order_id: int
     ⚠ Requires EXACTLY ONE affected row.  A zero-row UPDATE must not be allowed to
     fall through into the submission: a row that could not record "about to call"
     must not then call.
+
+    The sender's pid, host and the marker's commit instant are written in the same
+    UPDATE (``sql/410``). The attended window-B release reads them to prove the
+    sender is dead and to time its wait (#2961).
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyCoreExecutionError("the core submission marker requires an idle connection")
@@ -483,10 +489,12 @@ def mark_core_submission_entered(conn: psycopg.Connection[Any], *, order_id: int
         updated = conn.execute(
             """
             UPDATE strategy_order_reconciliation_state
-            SET submission_phase='broker_verb_entered', updated_at=now()
+            SET submission_phase='broker_verb_entered', updated_at=now(),
+                submission_entered_at=clock_timestamp(),
+                submission_entered_pid=%s, submission_entered_host=%s
             WHERE order_id=%s AND submission_phase='authority_committed'
             """,
-            (order_id,),
+            (os.getpid(), socket.gethostname(), order_id),
         ).rowcount
     if updated != 1:
         raise StrategyCoreExecutionError(

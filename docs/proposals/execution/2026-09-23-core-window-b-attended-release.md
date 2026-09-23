@@ -21,7 +21,8 @@ after which the process died before the broker response was persisted. So:
 
 - `orders.broker_order_ref` is NULL;
 - the reconciliation `state` is non-terminal;
-- `strategy_trades.status` is `submitted`.
+- `strategy_trades.status` is `planned`. (The first draft said `submitted`; the executor writes
+  `submitted` only together with `broker_order_ref`, and the #2949 harness's real crash reads `planned`.)
 
 Window A (`authority_committed`) is already terminalised on write-ordering evidence by
 `terminalise_unsubmitted_core_entry` (`app/services/strategy_order_reconciliation.py:808-892`,
@@ -125,7 +126,7 @@ Every condition must hold, and each failure is a named refusal. Checks run in th
 3. **Demo only.** Refuse unless all three hold: `settings.etoro_env == 'demo'`,
    `orders.broker_environment = 'demo'`, and the credential environment is `demo`.
 4. **Candidacy, read before any lock.** Use the window-A predicate with the phase as a parameter,
-   **plus** `trade.status = 'submitted'`, `o.status` non-terminal, and `(SELECT count(*) FROM
+   **plus** `trade.status = 'planned'`, `o.status = 'submitted'`, and `(SELECT count(*) FROM
    strategy_trade_orders WHERE order_id = o.order_id) = 1`. That last clause closes the
    one-order-many-trades case.
 5. **Locks.** The connection must be IDLE with no transaction open; otherwise refuse and never
