@@ -85,6 +85,7 @@ from app.services.sync_orchestrator.dispatcher import (
     reset_stale_in_flight,
 )
 from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
+from app.system.api_wedge_probe import run_periodic_probe
 
 logger = logging.getLogger(__name__)
 
@@ -1250,6 +1251,18 @@ def serve(stop_event: threading.Event | None = None) -> int:
         threading.Thread(
             target=_run_boot_freshness_sweep_thread,
             name="jobs-boot-sweep",
+            daemon=True,
+        ).start()
+
+        # #3119 — dev-only API wedge / stale-code probe. A plain daemon thread,
+        # NOT a ScheduledJob: the scheduled path waits on the single general
+        # execution permit and a Postgres JobLock + prelude before running, and
+        # either can stall the one detector of a wedge. It touches no DB; see
+        # ``run_periodic_probe``. Exits on stop_event; a no-op outside dev.
+        threading.Thread(
+            target=run_periodic_probe,
+            args=(stop_event,),
+            name="jobs-api-wedge-probe",
             daemon=True,
         ).start()
 
