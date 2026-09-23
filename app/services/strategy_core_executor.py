@@ -630,6 +630,10 @@ def _submit_core_authority_locked(
     )
 
 
+#: The only currency ``effective_open_minimum`` states a broker floor in (its docstring:
+#: exposure "is always calculated in USD").
+_OPEN_MINIMUM_CURRENCY: Final = "USD"
+
 #: An operation the manager has not yet driven to a terminal state.
 _UNRESOLVED_OPERATION_STATUSES: Final = ("intent_persisted", "submitting", "submitted")
 
@@ -931,6 +935,11 @@ def _execute_core_sell(
     # never bounds a close (`BrokerWhatIfOrder` docstring, #2712), so it is quoted here.
     if proof.response_currency.strip().upper() != mandate.base_currency.strip().upper():
         return refuse("core_close_side_cost_quote_unavailable")
+    # Before any broker call, as in the buy preflight, which refuses the same case with
+    # the same code: `effective_open_minimum` is USD-only and contracts that its callers
+    # refuse a mismatch first.
+    if proof.response_currency.strip().upper() != _OPEN_MINIMUM_CURRENCY:
+        return refuse("core_minimum_currency_unsupported")
     try:
         response = broker.get_what_if_costs(
             BrokerWhatIfOrder(
@@ -962,14 +971,10 @@ def _execute_core_sell(
     # The lower-edge rebuy from the post-close state must clear the allocator's own
     # floor, computed by the allocator.  The UNCLAMPED headroom, so an over-bound
     # sleeve's deficit is netted rather than hidden by the observation clamp.
-    broker_minimum = (
-        effective_open_minimum(
-            response_currency=proof.response_currency,
-            min_position_exposure=proof.min_position_exposure,
-            min_position_amount=proof.min_position_amount,
-        )
-        if proof.response_currency.strip().upper() == "USD"
-        else None
+    broker_minimum = effective_open_minimum(
+        response_currency=proof.response_currency,
+        min_position_exposure=proof.min_position_exposure,
+        min_position_amount=proof.min_position_amount,
     )
     if broker_minimum is None:
         return refuse("core_broker_open_minimum_unquoted")

@@ -150,6 +150,7 @@ def _sell(
     market_value: str = "550",
     remaining: str = "450",
     min_position_amount: Decimal = Decimal("10"),
+    currency: str = "USD",
 ) -> tuple[Any, _Conn, Any]:
     conn = _Conn()
     position = BrokerDirectPositionInvestment(
@@ -172,7 +173,7 @@ def _sell(
     state = CoreSleeveState(_INSTRUMENT_ID, Decimal(market_value), Decimal("450"), "USD", _NOW)
     intent = SimpleNamespace(core_rebalance_intent_id=11, decision=SimpleNamespace(lower_pct=lower_pct))
     proof = SimpleNamespace(
-        response_currency="USD",
+        response_currency=currency,
         min_position_exposure=Decimal("10"),
         min_position_amount=min_position_amount,
         api_key_credential_id=_CREDS[0],
@@ -230,6 +231,11 @@ def test_a_sell_quotes_the_close_arm_of_the_whole_position_then_hands_it_over() 
         ({"target": "core_sell_spans_positions"}, "core_sell_spans_positions"),
         ({"target": "core_operation_outstanding"}, "core_operation_outstanding"),
         ({"lower_pct": Decimal("0")}, "core_sell_would_strand_at_zero_lower"),
+        # A non-USD mandate refuses by name, as the buy preflight does.
+        (
+            {"currency": "EUR", "mandate": _mandate(base_currency="EUR")},
+            "core_minimum_currency_unsupported",
+        ),
         ({"mandate": _mandate(rebalance_band_pct=Decimal("0"))}, "core_sell_zero_width_band"),
         ({"target": _CoreSellTarget(3, 21, 1, _CREDS)}, "core_sell_position_unobserved"),
         ({"target": _CoreSellTarget(3, 21, _POSITION_ID, (uuid4(), _CREDS[1]))}, "core_credential_provenance_changed"),
