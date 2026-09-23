@@ -11224,3 +11224,20 @@ neighbouring container and match it.**
   socket down), not abandon it.
 - Enforced in: `app/system/api_wedge_probe.py::run_periodic_probe` (DB-free daemon thread,
   started in `app/jobs/__main__.py`); `tests/test_3119_api_wedge_periodic.py::test_probe_releases_a_dribbling_peer_at_the_deadline`.
+
+### A re-derivation over a retention-swept store must not mint rows for periods it cannot see (#2182)
+
+- Symptom (2026-09-23): `financial_facts_raw` keeps the latest 3 10-Ks. Each re-normalize re-derived
+  FY rows from those 3, and a year that a retained 10-K touches only through its equity-rollforward
+  opening balance (Reg S-X 3-04, three years back) got a near-empty FY row. The canonical upsert
+  (`col = EXCLUDED.col`) then overwrote the durable history row with it. A/B: 3,101 canonical FY rows
+  still holding real history were queued to be overwritten on their next re-normalize, and 1,689 already
+  had been (AAPL FY2020). Two earlier row-SHAPE discriminators had been falsified on the same ticket;
+  the right key was presentation SCOPE (Reg S-X 3-01(a)/3-02(a)), relative to each fact's own filing.
+- Prevention: when a derivation reads a store that is swept to a window, and the table it writes into
+  is the durable history, check what the window's EDGE produces. A fact that is true but not reported
+  in the filing's own statements (opening balances, rollforward boundaries) must not create a period.
+  An overwrite-all upsert turns every such edge row into lost history.
+- Enforced in: `app/services/fundamentals/__init__.py::_fy_period_is_presented`;
+  `tests/test_financial_normalization.py::TestFyPresentationScope2182`. The P−2 balance-sheet overwrite is
+  still open on #2182 (part B).

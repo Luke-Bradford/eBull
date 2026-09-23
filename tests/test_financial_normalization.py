@@ -2204,3 +2204,217 @@ class TestFiscalYearRangeGuard2192:
         q1 = [p for p in periods if p.period_type == "Q1"]
         assert len(q1) == 1
         assert q1[0].fiscal_year == 2023
+
+
+class TestFyPresentationScope2182:
+    """#2182 — a FY row is minted only for a period some filing REPORTS (Reg S-X
+    3-01(a) two balance sheets, 3-02(a) three income statements). An equity-
+    rollforward opening balance three years back must not mint a row, because once
+    raw retention has evicted that year's own 10-K the near-empty row overwrites
+    the durable canonical history (AAPL FY2020 from the FY2023 10-K)."""
+
+    _ACC = "0000320193-23-000106"
+
+    def _k(self, *, concept: str, end: str, start: str | None, val: str = "1") -> FactRow:
+        return _fact(
+            concept=concept,
+            val=Decimal(val),
+            period_end=end,
+            period_start=start,
+            frame=None,
+            fiscal_year=2023,
+            fiscal_period="FY",
+            form_type="10-K",
+            accession_number=self._ACC,
+            filed_date="2023-11-03",
+        )
+
+    def _fy_ends(self, facts: list[FactRow]) -> set[date]:
+        return {p.period_end_date for p in _derive_periods_from_facts(facts) if p.period_type == "FY"}
+
+    def _aapl_fy2023_10k(self) -> list[FactRow]:
+        return [
+            # Three income statements (3-02(a)): FY2023, FY2022, FY2021.
+            self._k(concept="Revenues", end="2023-09-30", start="2022-10-01", val="383285000000"),
+            self._k(concept="Revenues", end="2022-09-24", start="2021-09-26", val="394328000000"),
+            self._k(concept="Revenues", end="2021-09-25", start="2020-09-27", val="365817000000"),
+            # Two balance sheets (3-01(a)): FY2023, FY2022.
+            self._k(concept="Assets", end="2023-09-30", start=None, val="352583000000"),
+            self._k(concept="Assets", end="2022-09-24", start=None, val="352755000000"),
+            # Equity rollforward (3-04): closing FY2021, opening FY2021 (= end FY2020).
+            self._k(concept="StockholdersEquity", end="2021-09-25", start=None, val="63090000000"),
+            self._k(concept="StockholdersEquity", end="2020-09-26", start=None, val="65339000000"),
+        ]
+
+    def test_opening_balance_three_years_back_does_not_mint(self) -> None:
+        ends = self._fy_ends(self._aapl_fy2023_10k())
+        assert date(2020, 9, 26) not in ends
+        assert ends == {date(2023, 9, 30), date(2022, 9, 24), date(2021, 9, 25)}
+
+    def test_prior_year_comparative_balance_sheet_alone_is_kept(self) -> None:
+        """The falsified #2182 'require a duration fact' gate dropped these —
+        the Rule 3-01(a) prior-year balance sheet carries only instants."""
+        facts = [
+            self._k(concept="Revenues", end="2023-09-30", start="2022-10-01"),
+            self._k(concept="Assets", end="2023-09-30", start=None),
+            self._k(concept="Assets", end="2022-09-24", start=None),
+        ]
+        assert date(2022, 9, 24) in self._fy_ends(facts)
+
+    def test_third_income_statement_year_is_kept(self) -> None:
+        facts = [
+            self._k(concept="Revenues", end="2023-09-30", start="2022-10-01"),
+            self._k(concept="Revenues", end="2021-09-25", start="2020-09-27"),
+        ]
+        assert date(2021, 9, 25) in self._fy_ends(facts)
+
+    def test_rollforward_value_still_contributes_to_a_presented_row(self) -> None:
+        by_end = {p.period_end_date: p for p in _derive_periods_from_facts(self._aapl_fy2023_10k())}
+        fy2021 = by_end[date(2021, 9, 25)]
+        assert fy2021.revenue == Decimal("365817000000")
+        assert fy2021.shareholders_equity == Decimal("63090000000")
+
+    def test_fifty_three_week_prior_year_is_within_one_fiscal_year(self) -> None:
+        # 371-day gap between consecutive 52/53-week year ends.
+        facts = [
+            self._k(concept="Revenues", end="2023-09-30", start="2022-10-01"),
+            self._k(concept="Assets", end="2023-09-30", start=None),
+            self._k(concept="Assets", end="2022-09-24", start=None),
+        ]
+        assert (date(2023, 9, 30) - date(2022, 9, 24)).days == 371
+        assert date(2022, 9, 24) in self._fy_ends(facts)
+
+    def test_instant_presented_by_any_accession_mints(self) -> None:
+        """A period that one filing only touches via a rollforward but another
+        filing presents as a balance sheet is still minted."""
+        older = _fact(
+            concept="Assets",
+            val=Decimal("323888000000"),
+            period_end="2020-09-26",
+            period_start=None,
+            frame=None,
+            fiscal_year=2021,
+            fiscal_period="FY",
+            form_type="10-K",
+            accession_number="0000320193-21-000105",
+            filed_date="2021-10-29",
+        )
+        older_primary = _fact(
+            concept="Assets",
+            val=Decimal("351002000000"),
+            period_end="2021-09-25",
+            period_start=None,
+            frame=None,
+            fiscal_year=2021,
+            fiscal_period="FY",
+            form_type="10-K",
+            accession_number="0000320193-21-000105",
+            filed_date="2021-10-29",
+        )
+        assert date(2020, 9, 26) in self._fy_ends([*self._aapl_fy2023_10k(), older, older_primary])
+
+    def test_partial_amendment_uses_its_fiscal_years_primary(self) -> None:
+        """A 10-K/A that repeats only the prior-year balance sheet must not pull the
+        window back a year: its fy stamp names the year it amends (Rule 12b-15)."""
+        amendment = [
+            _fact(
+                concept=concept,
+                val=Decimal("1"),
+                period_end=end,
+                period_start=None,
+                frame=None,
+                fiscal_year=2023,
+                fiscal_period="FY",
+                form_type="10-K/A",
+                accession_number="amend",
+                filed_date="2024-02-01",
+            )
+            for concept, end in (("Assets", "2022-09-24"), ("StockholdersEquity", "2021-09-25"))
+        ]
+        ends = self._fy_ends([*self._aapl_fy2023_10k(), *amendment])
+        assert date(2022, 9, 24) in ends
+        # 2021-09-25 is still minted by the original's third income statement; the
+        # amendment's opening instant there must not be what mints anything new.
+        assert date(2020, 9, 26) not in ends
+        only_amendment_crumb = [
+            *self._aapl_fy2023_10k()[:5],
+            _fact(
+                concept="StockholdersEquity",
+                val=Decimal("1"),
+                period_end="2021-09-25",
+                period_start=None,
+                frame=None,
+                fiscal_year=2023,
+                fiscal_period="FY",
+                form_type="10-K/A",
+                accession_number="amend",
+                filed_date="2024-02-01",
+            ),
+            _fact(
+                concept="Assets",
+                val=Decimal("1"),
+                period_end="2022-09-24",
+                period_start=None,
+                frame=None,
+                fiscal_year=2023,
+                fiscal_period="FY",
+                form_type="10-K/A",
+                accession_number="amend",
+                filed_date="2024-02-01",
+            ),
+        ]
+        # Drop the original's FY2021 revenue: only the amendment's instant (2 years
+        # before the amended year's primary) now touches 2021-09-25.
+        only_amendment_crumb = [
+            f for f in only_amendment_crumb if f.period_end != date(2021, 9, 25) or f.accession_number == "amend"
+        ]
+        assert date(2021, 9, 25) not in self._fy_ends(only_amendment_crumb)
+
+
+class TestQ4ChronologyGuard2182:
+    """#2182 ckpt-2 — Q4 = FY − ΣQ only when the residual is itself a quarter."""
+
+    def _q(self, fp: str, start: str, end: str) -> FactRow:
+        return _fact(
+            concept="Revenues",
+            val=Decimal("100"),
+            period_start=start,
+            period_end=end,
+            frame=None,
+            fiscal_year=2024,
+            fiscal_period=fp,
+            form_type="10-Q",
+            accession_number=f"q-{fp}",
+            filed_date="2024-12-01",
+        )
+
+    def _quarters(self) -> list[FactRow]:
+        return [
+            self._q("Q1", "2024-02-01", "2024-04-30"),
+            self._q("Q2", "2024-05-01", "2024-07-31"),
+            self._q("Q3", "2024-08-01", "2024-10-31"),
+        ]
+
+    def _fy(self, start: str, end: str) -> FactRow:
+        return _fact(
+            concept="Revenues",
+            val=Decimal("500"),
+            period_start=start,
+            period_end=end,
+            frame=None,
+            fiscal_year=2024,
+            fiscal_period="FY",
+            form_type="10-K",
+            accession_number="k",
+            filed_date="2025-03-01",
+        )
+
+    def test_q4_derived_when_fy_ends_one_quarter_after_q3(self) -> None:
+        periods = _derive_periods_from_facts([*self._quarters(), self._fy("2024-02-01", "2025-01-31")])
+        q4 = [p for p in periods if p.period_type == "Q4"]
+        assert len(q4) == 1 and q4[0].revenue == Decimal("200")
+
+    def test_no_q4_when_fy_row_ends_before_q3(self) -> None:
+        # Same label, but the FY row is the PRIOR real year (ends before Q1 starts).
+        periods = _derive_periods_from_facts([*self._quarters(), self._fy("2023-02-01", "2024-01-31")])
+        assert not [p for p in periods if p.period_type == "Q4"]
