@@ -78,6 +78,10 @@ def _arm(conn: psycopg.Connection[Any], refresher: Any, ids: list[int]) -> dict[
 def _insider_view(
     conn: psycopg.Connection[Any], symbol: str, iid: int
 ) -> tuple[Decimal, Decimal, bool, dict[str, Decimal]]:
+    # main() runs the connection at REPEATABLE READ and each arm is one transaction, so this render
+    # reads one snapshot. snapshot_read() is unusable here: it COMMITS the open transaction first,
+    # which would persist the arm's refresh.
+    # ownership-rollup-snapshot: caller-owned — see above
     r = get_ownership_rollup(conn, symbol, iid)
     ins = next((s for s in r.slices if s.category == "insiders"), None)
     total = ins.total_shares if ins else Decimal(0)
@@ -93,6 +97,7 @@ def main() -> int:
     args = ap.parse_args()
 
     with psycopg.connect(settings.database_url) as conn:
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ  # one snapshot per arm
         conn.execute("SET jit = off")
         ids = [
             int(r[0])
