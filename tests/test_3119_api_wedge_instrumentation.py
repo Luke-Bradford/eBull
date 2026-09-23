@@ -29,8 +29,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 
 from app.system import served_build
+from app.system.api_wedge_probe import _parse_etime, dump_threads, freshness, probe
 from app.system.git_identity import WATCHED_SUBTREE, app_tree_hash, head_commit, is_dirty
-from scripts.probe_api_wedge import _parse_etime, dump_threads, freshness, probe
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -161,7 +161,7 @@ def test_freshness_matches_the_live_tree() -> None:
 
 def test_freshness_is_unknown_when_the_live_read_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both sides missing is ``unknown``, not a ``None == None`` match."""
-    monkeypatch.setattr("scripts.probe_api_wedge.app_tree_hash", lambda: None)
+    monkeypatch.setattr("app.system.api_wedge_probe.app_tree_hash", lambda: None)
     assert freshness({"app_tree": None})[0] == "unknown"
     assert freshness({"app_tree": "0" * 40})[0] == "unknown"
 
