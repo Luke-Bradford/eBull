@@ -375,6 +375,117 @@ INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
                         source_document_id ASC
 """
 
+# #3227 item 3a — a winning ``:NDH:`` (holdings) line is replaced by the SUM of its
+# accession's Table I lines for that owner, when those lines are provably distinct holdings of
+# ONE class. ``LEFT JOIN LATERAL`` fragment; the caller aliases the winner row ``w`` (exposing
+# ``instrument_id, holder_identity_key, ownership_nature, source, period_end,
+# source_document_id``) and selects ``COALESCE(ls.line_sum, w.shares)``.
+#
+# Why. On a ``:NDH:`` row ``ownership_nature`` is the DERA relationship flag, not the line's D/I
+# (sec-edgar skill §2.3), so every Table I line an owner reports on one accession lands on ONE
+# ``_current`` key and DISTINCT ON kept one of them — MNSO's founder rendered 314,290,482 of
+# the 789,541,061 his five holding vehicles report.
+#
+# Source rule. Form 3 General Instruction 5(b)(iii), and Forms 4/5 Instruction 4(b)(iii) to the
+# same effect: "Report securities beneficially owned directly on a separate line from those
+# beneficially owned indirectly. Report different forms of indirect ownership on separate
+# lines." Table I's header: "Report on a separate line for each class of securities". So one
+# person's holding of ONE class is the sum of that class's lines — the #905 rule (direct +
+# indirect are distinct Section-16 holdings and SUM) applied at the line grain.
+#
+# Every condition is load-bearing; failing any one keeps the winner line's own value (the
+# pre-#3227 behaviour), never a partial sum:
+#   * >1 line — otherwise there is nothing to sum;
+#   * every line carries non-negative shares, a non-blank title and a D/I — an unknown line
+#     cannot be proved distinct;
+#   * ONE ``security_title`` — lines of different classes never sum (CNH's common + special
+#     voting shares; ADS vs ordinary). Exact string match, so a re-spelled title refuses;
+#   * lines pairwise distinct on ``(title, D/I, nature)`` — each is a separate form of ownership
+#     as the instruction requires; a repeated form is not something the rule explains. ⚠ The
+#     SUM is invariant to a permutation of ``nature_of_ownership`` across one accession's lines
+#     (the 18.5% DERA-vs-XML discordance on #3227); this distinctness TEST is not — a permutation
+#     across D and I lines can create or remove a duplicate triple, so it can move eligibility;
+#   * no two lines carry the same amount. Form 3 Instr. 5(b)(iv) lets an indirect line report
+#     the entity's ENTIRE holding, so one block can legitimately appear twice — YPF's
+#     ``0000903423-08-000197`` reports the same 58,603,606 ADSs once ``D`` and once ``I``
+#     ("indirectly owned by shareholders of Petersen Energia"), and a sum would double it.
+#     Equal amounts are the one shape where a restatement and two genuinely equal holdings
+#     cannot be told apart from the table alone, so they refuse, fixed BY CONSTRUCTION — no
+#     published rule separates them. The cost is real and accepted: LYEL's two ARCH funds
+#     hold equal blocks and stay on today's single-line value;
+#   * ONE reporting owner among the accession's ``:NDH:`` rows on this instrument — on a joint
+#     filing ``<nonDerivativeTable>`` names no holder (TACO precedent, prevention-log), and the
+#     owner fan-out writes every line against every co-filer, so a sum there would credit each
+#     co-filer with the whole block. Holdings are written per ACCESSION (the ingest skips an
+#     accession with transactions whole, never some of its lines), so a stored ``:NDH:``
+#     accession carries all of its owners and lines;
+#   * NOT a ``direct``-labelled winner whose holder has a live ``indirect`` observation here. A
+#     ``:NDH:`` nature is ``direct`` or ``beneficial`` (the relationship flag), so the total
+#     contains the owner's I lines while still reading ``direct`` — and the rollup SUMs
+#     ``direct`` + ``indirect`` (#905, ``ownership_rollup._source_rows_and_total``), which would
+#     count those indirect holdings twice against an XML ``indirect`` row from another filing
+#     (Codex ckpt-1 on #3227). A ``beneficial`` winner is MAXed
+#     against the additive sum there, so it needs no such guard.
+# The winner's provenance is unchanged: ``source_document_id`` still names one line of the
+# accession, and ``shares`` becomes that accession's single-class total for the owner.
+#
+# ⚠ THREE readers share this, like ``INSIDER_WINNER_ORDER_TAIL`` (#3232): both ``_current``
+# refreshers and ``ownership_history._insiders_history``, so the chart and the projection cannot
+# disagree about the same filing. Re-derive the population with
+#   PYTHONPATH=. uv run python -m scripts.census_3227_insider_holding_line_collapse
+INSIDER_HOLDING_LINE_SUM_LATERAL: Final[LiteralString] = """
+                LEFT JOIN LATERAL (
+                    SELECT sum(o.shares) AS line_sum
+                      FROM ownership_insiders_observations o
+                     WHERE w.source_document_id ~ ':NDH:[0-9]+$'
+                       AND o.instrument_id       = w.instrument_id
+                       AND o.holder_identity_key = w.holder_identity_key
+                       AND o.ownership_nature    = w.ownership_nature
+                       AND o.source              = w.source
+                       AND o.period_end          = w.period_end
+                       AND o.known_to IS NULL
+                       AND o.source_document_id LIKE split_part(w.source_document_id, ':', 1) || ':NDH:%%'
+                    HAVING count(*) > 1
+                       AND count(o.shares)          = count(*)
+                       AND count(o.security_title)  = count(*)
+                       AND count(o.direct_indirect) = count(*)
+                       AND min(o.shares) >= 0
+                       AND min(length(btrim(o.security_title))) > 0
+                       AND count(DISTINCT o.security_title) = 1
+                       AND count(DISTINCT (o.security_title, o.direct_indirect,
+                                           COALESCE(o.nature_of_ownership, ''))) = count(*)
+                       AND count(DISTINCT o.shares) = count(*)
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM ownership_insiders_observations x
+                            WHERE x.instrument_id = w.instrument_id
+                              AND x.known_to IS NULL
+                              AND x.source_document_id LIKE split_part(w.source_document_id, ':', 1) || ':NDH:%%'
+                              AND x.holder_identity_key <> w.holder_identity_key
+                       )
+                       AND NOT (
+                           w.ownership_nature = 'direct'
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM ownership_insiders_observations y
+                                WHERE y.instrument_id       = w.instrument_id
+                                  AND y.holder_identity_key = w.holder_identity_key
+                                  AND y.ownership_nature    = 'indirect'
+                                  AND y.known_to IS NULL
+                           )
+                       )
+                ) ls ON TRUE
+"""
+
+# Column list of the winner row with ``shares`` replaced by the #3227 line sum. Shared by both
+# ``_current`` refreshers so the MERGE source shape cannot drift between them.
+_INSIDER_WINNER_COLUMNS_WITH_LINE_SUM: Final[LiteralString] = """
+                w.instrument_id, w.holder_cik, w.holder_name, w.holder_identity_key,
+                w.ownership_nature, w.source, w.source_document_id, w.source_accession,
+                w.source_url, w.filed_at, w.period_start, w.period_end,
+                COALESCE(ls.line_sum, w.shares) AS shares
+"""
+
 
 def refresh_insiders_current(
     conn: psycopg.Connection[Any],
@@ -451,7 +562,9 @@ def refresh_insiders_current(
                         source ASC,
                         {INSIDER_WINNER_ORDER_TAIL}
                 )
-                SELECT w.* FROM winners w
+                SELECT {_INSIDER_WINNER_COLUMNS_WITH_LINE_SUM}
+                  FROM winners w
+                {INSIDER_HOLDING_LINE_SUM_LATERAL}
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
             ) AS src
             ON tgt.instrument_id = %(iid)s
@@ -2172,7 +2285,9 @@ def refresh_insiders_current_batch(
                         source ASC,
                         {INSIDER_WINNER_ORDER_TAIL}
                 )
-                SELECT w.* FROM winners w
+                SELECT {_INSIDER_WINNER_COLUMNS_WITH_LINE_SUM}
+                  FROM winners w
+                {INSIDER_HOLDING_LINE_SUM_LATERAL}
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
             ) AS src
             ON tgt.instrument_id = src.instrument_id

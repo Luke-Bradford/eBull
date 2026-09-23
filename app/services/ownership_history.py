@@ -52,7 +52,7 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
-from app.services.ownership_observations import INSIDER_WINNER_ORDER_TAIL
+from app.services.ownership_observations import INSIDER_HOLDING_LINE_SUM_LATERAL, INSIDER_WINNER_ORDER_TAIL
 
 HistoryCategory = Literal["insiders", "blockholders", "institutions", "treasury", "def14a"]
 
@@ -198,23 +198,33 @@ def _insiders_history(
         where_extra += " AND period_end <= %(to_date)s"
         params["to_date"] = to_date
 
+    # #3227 — the bucket winner's ``shares`` goes through the same holding-line sum as the
+    # ``_current`` projection (``INSIDER_HOLDING_LINE_SUM_LATERAL``), for the same reason #3232
+    # shares the order tail: a second rule here is how the chart and the pie drift apart.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""
-            SELECT DISTINCT ON (period_end, ownership_nature)
-                period_end, ownership_nature,
-                source, source_accession, filed_at, shares
-            FROM ownership_insiders_observations
-            WHERE instrument_id = %(iid)s
-              AND known_to IS NULL
-              AND shares IS NOT NULL
-              {where_extra}
-            ORDER BY
-                period_end,
-                ownership_nature,
-                CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN 'def14a' THEN 4 ELSE 10 END ASC,
-                filed_at DESC,
-                {INSIDER_WINNER_ORDER_TAIL}
+            SELECT w.period_end, w.ownership_nature,
+                   w.source, w.source_accession, w.filed_at,
+                   COALESCE(ls.line_sum, w.shares) AS shares
+              FROM (
+                SELECT DISTINCT ON (period_end, ownership_nature)
+                    instrument_id, holder_identity_key, period_end, ownership_nature,
+                    source, source_document_id, source_accession, filed_at, shares
+                FROM ownership_insiders_observations
+                WHERE instrument_id = %(iid)s
+                  AND known_to IS NULL
+                  AND shares IS NOT NULL
+                  {where_extra}
+                ORDER BY
+                    period_end,
+                    ownership_nature,
+                    CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN 'def14a' THEN 4 ELSE 10 END ASC,
+                    filed_at DESC,
+                    {INSIDER_WINNER_ORDER_TAIL}
+              ) w
+            {INSIDER_HOLDING_LINE_SUM_LATERAL}
+            ORDER BY w.period_end, w.ownership_nature
             """,
             params,
         )
