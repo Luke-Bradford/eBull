@@ -573,3 +573,15 @@ def test_the_recommendation_factory_refuses_a_pair_that_is_not_one_live_demo_acc
     with pytest.raises(WindowBRefused) as raised, _recommendation_account_broker(api, user):
         pass
     assert raised.value.slug == "recommendation_release_credentials_unresolved"
+
+
+def test_show_prints_the_digest_the_release_accepts(
+    ebull_test_conn: psycopg.Connection[Any], creds: Credentials
+) -> None:
+    from app.services.recommendation_window_b_release import describe_candidate
+
+    order_id, _ = seed_stranded(ebull_test_conn, state="U", credentials=creds)
+    shown = describe_candidate(ebull_test_conn, order_id)
+    assert shown is not None
+    assert (shown["candidate_state"], shown["park_message"]) == ("U", "HTTP 504 from /orders")
+    assert _release(ebull_test_conn, order_id, digest=shown["payload_sha256"])[0].passed

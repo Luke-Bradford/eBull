@@ -362,31 +362,30 @@ def _read_candidate(conn: psycopg.Connection[Any], order_id: int) -> _Candidate 
 
 def describe_candidate(conn: psycopg.Connection[Any], order_id: int) -> dict[str, Any] | None:
     """What ``--show`` prints. Takes no lock and writes nothing (the read is committed)."""
-    row = conn.execute(
-        """
-        SELECT o.status, o.recommendation_id, o.instrument_id, o.action, o.broker_environment,
-               o.recommendation_submission_phase, o.broker_order_ref, o.created_at,
-               o.raw_payload_json, o.recommendation_park_message, o.recommendation_parked_at,
-               o.recommendation_submission_entered_at, o.recommendation_submission_entered_pid,
-               o.recommendation_submission_entered_host, o.recommendation_exit_position_id,
-               o.recommendation_exit_units, tr.status
-        FROM orders o LEFT JOIN trade_recommendations tr ON tr.recommendation_id = o.recommendation_id
-        WHERE o.order_id = %s
-        """,
-        (order_id,),
-    ).fetchone()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        row = cur.execute(
+            """
+            SELECT o.status, o.recommendation_id, o.instrument_id, o.action, o.broker_environment,
+                   o.recommendation_submission_phase AS submission_phase, o.broker_order_ref,
+                   o.created_at, o.raw_payload_json, o.recommendation_park_message AS park_message,
+                   o.recommendation_parked_at AS parked_at,
+                   o.recommendation_submission_entered_at AS entered_at,
+                   o.recommendation_submission_entered_pid AS entered_pid,
+                   o.recommendation_submission_entered_host AS entered_host,
+                   o.recommendation_exit_position_id AS exit_position_id,
+                   o.recommendation_exit_units AS exit_units, tr.status AS recommendation_status
+            FROM orders o LEFT JOIN trade_recommendations tr ON tr.recommendation_id = o.recommendation_id
+            WHERE o.order_id = %s
+            """,
+            (order_id,),
+        ).fetchone()
     candidate = _read_candidate(conn, order_id)
     if row is None:
         return None
-    names = (
-        "status recommendation_id instrument_id action broker_environment submission_phase broker_order_ref "
-        "created_at raw_payload_json park_message parked_at entered_at entered_pid entered_host "
-        "exit_position_id exit_units recommendation_status"
-    ).split()
-    described: dict[str, Any] = {str(name): value for name, value in zip(names, row, strict=True)}
+    described: dict[str, Any] = dict(row)
     described["order_id"] = order_id
     described["candidate_state"] = None if candidate is None else candidate.state
-    described["payload_sha256"] = payload_digest(row[8], row[9])
+    described["payload_sha256"] = payload_digest(row["raw_payload_json"], row["park_message"])
     return described
 
 
