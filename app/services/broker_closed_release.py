@@ -87,6 +87,7 @@ def _refuse(reason_code: str) -> WholeCloseVerdict:
 
 
 def _int(value: Any) -> int | None:
+    # ``bool`` subclasses ``int``: refused FIRST, so the int branch never sees one.
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
