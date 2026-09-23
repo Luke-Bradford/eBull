@@ -472,14 +472,19 @@ def _release_whole_broker_close(conn: psycopg.Connection[Any], *, owned: _OwnedP
     sibling ownership's own visit decides that.  Any refusal leaves today's behaviour
     (``reconcile_required``) for a human; the reason is logged with the witness ids.
     """
-    evidence = load_whole_close_evidence(
-        conn,
-        ownership_id=owned.ownership_id,
-        strategy_trade_id=owned.strategy_trade_id,
-        broker_position_id=owned.broker_position_id,
-        instrument_id=owned.instrument_id,
-    )
-    conn.commit()
+    # The reads get their OWN transaction, never a commit of whatever is open: an open
+    # transaction here would also have swallowed the caller's `reconcile_required` write
+    # into a savepoint that the lock exit rolls back.
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise StrategyPositionManagerError("whole-close release requires an idle connection")
+    with conn.transaction():
+        evidence = load_whole_close_evidence(
+            conn,
+            ownership_id=owned.ownership_id,
+            strategy_trade_id=owned.strategy_trade_id,
+            broker_position_id=owned.broker_position_id,
+            instrument_id=owned.instrument_id,
+        )
     verdict = evaluate_whole_close(evidence, observed_at=observed_at)
     if not verdict.release or verdict.released_at is None:
         logger.info(
@@ -509,7 +514,8 @@ def _release_whole_broker_close(conn: psycopg.Connection[Any], *, owned: _OwnedP
             "SELECT count(*) FROM strategy_position_ownership WHERE strategy_trade_id=%s AND status='active'",
             (owned.strategy_trade_id,),
         ).fetchone()
-        assert remaining is not None
+        if remaining is None:
+            raise StrategyPositionManagerError("active ownership count returned no row")
         if int(remaining[0]) == 0:
             conn.execute(
                 "UPDATE strategy_trades SET status='closed', updated_at=now() WHERE strategy_trade_id=%s",
