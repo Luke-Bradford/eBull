@@ -47,7 +47,14 @@ def _lot(**overrides: Any) -> dict[str, Any]:
     return {key: value for key, value in entry.items() if value is not _DROP}
 
 
-_DROP = object()
+class _Drop:
+    """Sentinel: omit the key. A stable ``repr`` keeps xdist workers' test ids equal."""
+
+    def __repr__(self) -> str:
+        return "<absent>"
+
+
+_DROP = _Drop()
 
 
 def _pnl(positions: list[Any], orders_for_open: list[Any] | None = None, orders: list[Any] | None = None) -> Any:
