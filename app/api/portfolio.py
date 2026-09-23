@@ -43,6 +43,7 @@ from app.services.broker_settlement_arms import position_investment_type_label, 
 from app.services.fx import MINOR_UNITS, FxRateNotFound, convert, load_live_fx_rates_with_metadata
 from app.services.portfolio_value_history import (
     carry_forward_rate_map,
+    native_amount,
     native_cost_basis,
     overlay_persisted,
     position_equity,
@@ -403,17 +404,15 @@ def get_portfolio(
         native_ccy = str(br.get("currency") or "USD")
         cp_raw, _ = price_by_instrument.get(iid, (None, native_ccy))
         units = float(br["units"])
-        # eToro's ``amount`` is the pre-converted USD cost basis
-        # (app/providers/broker.py BrokerPosition docstring), not native money:
-        # the attended IUSA.L row has amount 25.00 = units × open_rate (pence) ×
-        # open_conversion_rate. Bring it to native with the broker's own
-        # open-time rate before it meets a native price delta (#3322).
-        open_conv = float(br["open_conversion_rate"] or 0)
-        amount = float(br["amount"]) / open_conv if open_conv > 0 else float(br["amount"])
-
         is_buy = br["is_buy"]
         open_rate_raw = float(br["open_rate"])
-
+        # eToro's ``amount`` is the pre-converted USD cost basis, not native money;
+        # bring it to native before it meets a native price delta (#3322). With no
+        # usable open rate, fall back to the unleveraged native cost
+        # (units × open_rate) — the same fallback ``native_cost_basis`` uses —
+        # never to the USD figure.
+        amount_native = native_amount(Decimal(str(br["amount"])), Decimal(str(br["open_conversion_rate"])))
+        amount = float(amount_native) if amount_native is not None else units * open_rate_raw
         if cp_raw is not None:
             if is_buy:
                 # Long: invested capital + leveraged price delta.

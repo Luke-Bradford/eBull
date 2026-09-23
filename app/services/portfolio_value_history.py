@@ -50,6 +50,19 @@ def reconstruct_units_at_day(
     return open_units - closed
 
 
+def native_amount(amount_usd: Decimal, open_conversion_rate: Decimal) -> Decimal | None:
+    """eToro's ``amount`` (USD cost basis) in the instrument's native price unit.
+
+    Uses the broker's own open-time native→USD rate (#3322: the attended IUSA.L row
+    has amount 25.00 = units × open_rate (pence) × open_conversion_rate). ``None``
+    when that rate is unusable — the caller must fail closed, never add the USD
+    amount to a native price delta.
+    """
+    if not open_conversion_rate.is_finite() or open_conversion_rate <= 0:
+        return None
+    return amount_usd / open_conversion_rate
+
+
 def native_cost_basis(
     investment_usd: Decimal | None,
     open_units: Decimal,

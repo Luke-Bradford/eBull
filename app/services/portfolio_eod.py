@@ -27,6 +27,7 @@ import psycopg.rows
 from app.db.snapshot import snapshot_read
 from app.services.fx import FxRateNotFound, convert
 from app.services.fx_history import ensure_fx_history, load_fx_rates_for_date
+from app.services.portfolio_value_history import native_amount
 from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -222,19 +223,17 @@ def compute_eod_equity(
         # Long: invested + leveraged price gain; short: invested + gain on a
         # fall. Equals close*units only for unleveraged long (the v1 universe),
         # but stays correct if a leveraged/short row ever appears.
-        # ``amount`` is eToro's USD cost basis (app/providers/broker.py
-        # BrokerPosition docstring); bring it to native with the broker's own
-        # open-time rate before adding a native price delta (#3322).
-        amount_native = p.amount / p.open_conversion_rate if p.open_conversion_rate > 0 else p.amount
+        # ``amount`` is eToro's USD cost basis; bring it to native before adding a
+        # native price delta (#3322). An unusable open rate is a no_fx row below.
+        amount_native = native_amount(p.amount, p.open_conversion_rate)
         if p.is_buy:
-            value_native = amount_native + p.units * (p.close - p.open_rate)
             pnl_native = p.units * (p.close - p.open_rate)
         else:
-            value_native = amount_native + p.units * (p.open_rate - p.close)
             pnl_native = p.units * (p.open_rate - p.close)
         unrealised_pnl_usd = pnl_native * p.open_conversion_rate
-        if p.native_ccy is None:
-            # No currency to convert from → cannot price into display ccy.
+        if p.native_ccy is None or amount_native is None:
+            # No currency to convert from, or no rate to bring the USD amount to
+            # native → cannot price into display ccy.
             no_fx += 1
             results.append(
                 PositionResult(
@@ -251,6 +250,7 @@ def compute_eod_equity(
                 )
             )
             continue
+        value_native = amount_native + pnl_native
         try:
             value_display = (
                 value_native if p.native_ccy == display_ccy else convert(value_native, p.native_ccy, display_ccy, rates)

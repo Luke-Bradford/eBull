@@ -80,3 +80,17 @@ def test_two_candidates_within_tolerance_is_ambiguous() -> None:
 def test_tax_fx_treats_gbx_as_gbp_without_a_query() -> None:
     # A GBX label must not abort the tax ingest batch on a missing GBX row.
     assert _load_fx_rate(None, NOW.date(), "GBX") == Decimal("1")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("rate", [Decimal(0), Decimal(-1), Decimal("NaN")])
+def test_native_amount_refuses_an_unusable_open_rate(rate: Decimal) -> None:
+    from app.services.portfolio_value_history import native_amount
+
+    assert native_amount(Decimal("25"), rate) is None
+
+
+def test_native_amount_uses_the_broker_open_rate() -> None:
+    from app.services.portfolio_value_history import native_amount
+
+    # IUSA.L: $25 at 0.013303 → 1879.28p.
+    assert native_amount(Decimal("25"), Decimal("0.013303")) == pytest.approx(Decimal("1879.2753"), rel=Decimal("1e-6"))
