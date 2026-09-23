@@ -492,6 +492,9 @@ describe("StrategiesPage", () => {
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({
       basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
+      return_basis: "time_weighted_start_of_period_flows",
+      return_since: null,
+      return_unavailable_reason: "no_complete_point",
       benchmark_comparison_available: false,
       benchmark_refusals: BENCHMARK_REFUSALS,
       points: [],
@@ -1167,6 +1170,9 @@ describe("StrategiesPage", () => {
     vi.mocked(strategiesApi.fetchStrategyPnlHistory).mockResolvedValue({
       basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
+      return_basis: "time_weighted_start_of_period_flows",
+      return_since: null,
+      return_unavailable_reason: "insufficient_history",
       benchmark_comparison_available: false,
       benchmark_refusals: BENCHMARK_REFUSALS,
       points: [{
@@ -1179,6 +1185,9 @@ describe("StrategiesPage", () => {
         pot_value: "1050",
         complete: true,
         incomplete_reasons: [],
+        period_return: null,
+        period_start: null,
+        cumulative_return: null,
       }],
     });
     // Split across the two lenses by #2868: the measures render on the

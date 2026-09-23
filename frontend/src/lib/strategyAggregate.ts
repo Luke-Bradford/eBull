@@ -47,17 +47,19 @@ export function positionsOutsideStrategyPnl(
  * whole. The day change is only computed between two ADJACENT complete points,
  * and nets out `external_flow` (a funding change is not a gain).
  *
- * ⚠ Money only, NO return percentages. The same response declares
- * `total_return_available: false`: dividing by the current principal is not a
- * since-start return once principal has changed, and the server has not
- * published a flow-adjusted one. Deriving one here would overrule that refusal
- * (Codex ckpt-2 on #3334).
+ * Return percentages are the SERVER's time-weighted figures for that same
+ * point (#3334 item 3) — never derived here. Dividing P&L by principal is not
+ * a since-start return once principal has changed; the server nets flows out
+ * and nulls a figure it cannot compute honestly.
  */
 export function potWealthSummary(points: readonly StrategyPnlHistoryPoint[]): {
   date: string;
   potValue: number | null;
   totalPnl: number | null;
   dayPnl: number | null;
+  periodReturn: number | null;
+  periodStart: string | null;
+  cumulativeReturn: number | null;
 } | null {
   let index = points.length - 1;
   while (index >= 0 && !points[index]!.complete) index -= 1;
@@ -74,6 +76,9 @@ export function potWealthSummary(points: readonly StrategyPnlHistoryPoint[]): {
     potValue,
     totalPnl,
     dayPnl,
+    periodReturn: number(last.period_return),
+    periodStart: last.period_start,
+    cumulativeReturn: number(last.cumulative_return),
   };
 }
 

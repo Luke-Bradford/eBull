@@ -166,7 +166,7 @@ from app.services.strategy_walk_forward_evidence import (
     StrategyWalkForwardSplit,
     derive_walk_forward_split,
 )
-from app.services.strategy_wealth import load_strategy_wealth_history
+from app.services.strategy_wealth import ReturnUnavailableReason, load_strategy_wealth_history, time_weighted_returns
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
@@ -1206,11 +1206,23 @@ class StrategyWealthHistoryPoint(BaseModel):
     pot_value: Decimal | None
     complete: bool
     incomplete_reasons: list[str]
+    #: #3334 item 3 — time-weighted, as FRACTIONS (0.01 = 1%).  ``period_return``
+    #: spans ``period_start`` close → this close, which is more than one session
+    #: when an incomplete point was bridged.
+    period_return: Decimal | None = None
+    period_start: date | None = None
+    cumulative_return: Decimal | None = None
 
 
 class StrategyWealthHistoryResponse(BaseModel):
     basis: Literal["exact_owned_mark_to_market_nav"] = "exact_owned_mark_to_market_nav"
-    total_return_available: Literal[False] = False
+    #: #3334 item 3 — describes the LAST COMPLETE point.  The return runs from
+    #: ``return_since``, which is inception only when inception is inside the
+    #: ``days`` window.  Spec: docs/specs/metrics/2026-09-23-3334-pot-time-weighted-return.md
+    total_return_available: bool = False
+    return_basis: Literal["time_weighted_start_of_period_flows"] = "time_weighted_start_of_period_flows"
+    return_since: date | None = None
+    return_unavailable_reason: ReturnUnavailableReason | None = None
     benchmark_comparison_available: Literal[False] = False
     #: #2602 item 5 — the flag above says there is no benchmark; this says why.
     benchmark_refusals: tuple[BenchmarkRefusal, ...] = BENCHMARK_REFUSALS
@@ -3735,7 +3747,12 @@ def get_strategy_wealth_history(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyWealthHistoryResponse:
     """Return principal plus realised and historical open marks for the sleeve."""
+    history = load_strategy_wealth_history(conn, days=days)
+    returns = time_weighted_returns(history)
     return StrategyWealthHistoryResponse(
+        total_return_available=returns.total_return_available,
+        return_since=returns.return_since,
+        return_unavailable_reason=returns.unavailable_reason,
         points=[
             StrategyWealthHistoryPoint(
                 date=point.date,
@@ -3747,9 +3764,12 @@ def get_strategy_wealth_history(
                 pot_value=point.pot_value,
                 complete=point.complete,
                 incomplete_reasons=list(point.incomplete_reasons),
+                period_return=twr.period_return,
+                period_start=twr.period_start,
+                cumulative_return=twr.cumulative_return,
             )
-            for point in load_strategy_wealth_history(conn, days=days)
-        ]
+            for point, twr in zip(history, returns.points, strict=True)
+        ],
     )
 
 
