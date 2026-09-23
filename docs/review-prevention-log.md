@@ -11205,3 +11205,18 @@ neighbouring container and match it.**
   `app/services/portfolio_eod.py`);
   `tests/test_3322_instrument_price_currency.py`; `tests/test_3322_price_currency_db.py`;
   `tests/test_api_portfolio.py::TestGetPortfolio::test_gbx_broker_trade_brings_usd_amount_to_native_before_the_price_delta`.
+
+### A detector must not queue behind what it detects (#3119)
+
+- Symptom (Codex ckpt-2, 2026-09-23): the first cut of the periodic API wedge probe was a
+  `ScheduledJob`. A scheduled fire waits on its execution-lane permit (the general lane has ONE,
+  held for hours by backfills), then takes a Postgres `JobLock` and runs the DB prelude, all
+  before the body runs. A stalled Postgres, a plausible wedge cause, would have silenced the
+  detector. The same cut reused the CLI's abandon-the-thread deadline, which in a long-lived
+  process leaks one socket per pass against a peer that dribbles bytes.
+- Prevention: before putting a health detector on shared machinery, list what that machinery
+  waits on before your code runs (permit, lock, DB) and check that none of it is in the failure
+  set being detected. A total deadline in a long-lived process must END the work (shut the
+  socket down), not abandon it.
+- Enforced in: `app/system/api_wedge_probe.py::run_periodic_probe` (DB-free daemon thread,
+  started in `app/jobs/__main__.py`); `tests/test_3119_api_wedge_periodic.py::test_probe_releases_a_dribbling_peer_at_the_deadline`.
