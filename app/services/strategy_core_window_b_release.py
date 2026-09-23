@@ -664,6 +664,9 @@ def _release_locked(
             (trade_id,),
             "strategy_trades",
         )
+        # The PASS audit row comes LAST on purpose: it is written only once all three
+        # asserted UPDATEs have succeeded, and the shared transaction makes the row and
+        # the release commit or roll back together.
         evidence["_decision_id"] = _write_audit(
             conn,
             instrument_id=instrument_id,
