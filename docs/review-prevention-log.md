@@ -11140,7 +11140,13 @@ neighbouring container and match it.**
   DB-defaulted timestamp, pass `now=` read from the DB (`SELECT clock_timestamp()`), or
   write the timestamp explicitly. Exclusion assertions on far-past/far-future dates are
   immune.
-- Enforced in: `tests/test_data_freshness.py::TestIterators::test_due_for_poll_includes_unknown_state`.
+- Same push, second shape: a `now() - interval '2 hours'` anchor against an hourly-at-:30
+  cadence with a one-cadence overdue threshold. That left `schedule_missed` false for the
+  30 seconds before every :30. The hook hit it at 12:30Z. A relative offset in a
+  cadence test must clear `offset > 2 x cadence + slack`, and the reason belongs in the
+  test's docstring.
+- Enforced in: `tests/test_data_freshness.py::TestIterators::test_due_for_poll_includes_unknown_state`;
+  `tests/test_scheduled_adapter.py::test_schedule_missed_when_terminal_run_predates_cadence_window` (+3 siblings).
 
 ### `pg_locks` is cluster-wide: a lock probe in a test must filter by database (#2942)
 
