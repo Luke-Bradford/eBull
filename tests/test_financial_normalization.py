@@ -2495,3 +2495,63 @@ class TestBalanceSheetPresented2182PartB:
         q4 = [p for p in _derive_periods_from_facts(facts) if p.period_type == "Q4"]
         assert len(q4) == 1 and q4[0].is_derived
         assert q4[0].balance_sheet_presented is False
+
+
+class TestQuarterLabelConflict2182Item3:
+    """Two filings stamping one real quarter with different ``fy`` yield ONE row (#2182 item 3).
+
+    Before the fix each stamp minted its own row with the same (period_end, period_type)
+    primary key, and the canonical upsert failed the whole instrument with
+    ``CardinalityViolation`` (full-population: see scripts/ab_2182_quarter_label_conflicts.py).
+    """
+
+    @staticmethod
+    def _q3(fy: int, end: str, acc: str, filed: str, val: str) -> FactRow:
+        start = date.fromisoformat(end).replace(day=1, month=10).isoformat()
+        return _fact(
+            val=Decimal(val),
+            period_end=end,
+            period_start=start,
+            frame=None,
+            fiscal_year=fy,
+            fiscal_period="Q3",
+            accession_number=acc,
+            filed_date=filed,
+        )
+
+    def test_conflict_takes_issuer_convention_label_and_merges_facts(self) -> None:
+        facts = [
+            # the period's own 10-Q
+            self._q3(2014, "2014-12-31", "acc-own", "2015-02-05", "100"),
+            # a later 10-Q whose only retained Q3 facts are this comparative, stamped with ITS fy
+            self._q3(2015, "2014-12-31", "acc-later", "2016-02-05", "110"),
+            # an unconflicted Q3 fixing the issuer's convention: Dec-2015 quarter is fy=2016
+            self._q3(2016, "2015-12-31", "acc-2015", "2016-02-06", "120"),
+        ]
+        q3 = [p for p in _derive_periods_from_facts(facts) if p.period_type == "Q3"]
+        by_end = {p.period_end_date: p for p in q3}
+        assert len(q3) == 2
+        conflicted = by_end[date(2014, 12, 31)]
+        # anchor Dec-2015 = fy 2016 -> Dec-2014 = fy 2015 by calendar delta
+        assert conflicted.fiscal_year == 2015
+        # facts from both stamps merge; latest-filed wins per concept
+        assert conflicted.revenue == Decimal("110")
+        assert conflicted.source_ref == "acc-later,acc-own"
+
+    def test_convention_picks_the_older_stamp_when_it_matches(self) -> None:
+        facts = [
+            self._q3(2014, "2014-12-31", "acc-own", "2015-02-05", "100"),
+            self._q3(2015, "2014-12-31", "acc-later", "2016-02-05", "110"),
+            self._q3(2016, "2016-12-31", "acc-2016", "2017-02-06", "130"),
+        ]
+        q3 = {p.period_end_date: p for p in _derive_periods_from_facts(facts) if p.period_type == "Q3"}
+        # anchor Dec-2016 = fy 2016 -> Dec-2014 = fy 2014: the latest-filed stamp (2015) loses
+        assert q3[date(2014, 12, 31)].fiscal_year == 2014
+
+    def test_no_anchor_falls_back_to_latest_filed_stamp(self) -> None:
+        facts = [
+            self._q3(2014, "2014-12-31", "acc-own", "2015-02-05", "100"),
+            self._q3(2015, "2014-12-31", "acc-later", "2016-02-05", "110"),
+        ]
+        q3 = [p for p in _derive_periods_from_facts(facts) if p.period_type == "Q3"]
+        assert [(p.period_end_date, p.fiscal_year) for p in q3] == [(date(2014, 12, 31), 2015)]

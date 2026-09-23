@@ -1069,6 +1069,52 @@ def _resolve_period_fiscal_year(
     return stamped_fy if _is_plausible_fiscal_year(stamped_fy) else period_end.year
 
 
+def _resolve_quarter_label_conflicts(
+    candidates: dict[tuple[str, date], list[tuple[int, list[FactRow]]]],
+) -> list[tuple[str, date, int, list[FactRow]]]:
+    """One quarter row per real period ``(period_type, period_end)`` (#2182 item 3).
+
+    The quarter path builds one row per ``(stamped fy, fp)``. When two filings stamp
+    the SAME quarter with different ``fy`` — a later 10-Q whose only retained facts
+    for that fp are its prior-year comparative (Rule 10-01(c)), or a 10-Q/A that
+    re-tags the year — both rows reach the canonical merge as winners of distinct
+    labels with one primary key, and the upsert fails with ``CardinalityViolation``,
+    dropping the whole instrument.
+
+    The stamp is only authoritative for a filing's own primary period (#682), so it
+    cannot arbitrate here. The label is the one the issuer's convention gives this
+    period_end: the calendar-year delta from the nearest unconflicted quarter of the
+    same period_type (``_resolve_period_fiscal_year``). If that names none of the
+    candidates, the latest-filed candidate wins (the #1914 anchor tiebreak). Facts of
+    every candidate merge into the one row, latest-filed first per concept, as the
+    FY path does. Keys with a single candidate pass through unchanged.
+
+    Input maps key -> [(fiscal_year, canonical_facts sorted filed DESC)]; output is
+    (period_type, period_end, fiscal_year, canonical_facts) in input key order.
+    """
+    anchors = {key: cands[0][0] for key, cands in candidates.items() if len(cands) == 1}
+    out: list[tuple[str, date, int, list[FactRow]]] = []
+    for (period_type, period_end), cands in candidates.items():
+        if len(cands) == 1:
+            out.append((period_type, period_end, cands[0][0], cands[0][1]))
+            continue
+        latest_fy = max(cands, key=lambda c: (c[1][0].filed_date, c[1][0].accession_number))[0]
+        expected = _resolve_period_fiscal_year(anchors, period_type, period_end, latest_fy)
+        fiscal_year = expected if expected in {c[0] for c in cands} else latest_fy
+        merged = sorted(
+            (f for c in cands for f in c[1]), key=lambda f: (f.filed_date, f.accession_number), reverse=True
+        )
+        logger.info(
+            "quarter fiscal_year conflict (#2182): %s %s stamped %s; keeping fy=%s",
+            period_type,
+            period_end,
+            sorted(c[0] for c in cands),
+            fiscal_year,
+        )
+        out.append((period_type, period_end, fiscal_year, merged))
+    return out
+
+
 def _fy_period_is_presented(facts: Sequence[FactRow], primary_end_by_accession: dict[str, date]) -> bool:
     """Whether any filing actually REPORTS this FY period, rather than only touching it (#2182).
 
@@ -1285,10 +1331,11 @@ def _derive_periods_from_facts(
     periods: list[PeriodRow] = []
     fy_facts_by_end: dict[date, list[FactRow]] = defaultdict(list)
     fy_float_facts: list[FactRow] = []
+    quarter_candidates: dict[tuple[str, date], list[tuple[int, list[FactRow]]]] = defaultdict(list)
     _, _fy_fiscal_quarter = _FP_MAP["FY"]
 
     for (stamped_fy, fp), period_facts in grouped.items():
-        period_type, fiscal_quarter = _FP_MAP[fp]
+        period_type, _ = _FP_MAP[fp]
 
         # Boundary derivation uses financial-line-item facts only. DEI facts carry
         # an "as-of" context endDate = the filing date (~6 weeks after the real
@@ -1334,10 +1381,13 @@ def _derive_periods_from_facts(
             if _is_plausible_fiscal_year(stamped_fy)
             else _resolve_period_fiscal_year(anchor_fy, period_type, period_end, stamped_fy)
         )
+        quarter_candidates[(period_type, period_end)].append((quarter_fy, canonical_facts))
+
+    for period_type, period_end, quarter_fy, canonical_facts in _resolve_quarter_label_conflicts(quarter_candidates):
         periods.append(
             _build_period_row(
                 period_type=period_type,
-                fiscal_quarter=fiscal_quarter,
+                fiscal_quarter=_FP_MAP[period_type][1],
                 fiscal_year=quarter_fy,
                 period_end=period_end,
                 canonical_facts=canonical_facts,
