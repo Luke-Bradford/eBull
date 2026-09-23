@@ -7,7 +7,7 @@ import type { BenchmarkRefusal, CoreSleeveResponse, StrategyOverviewResponse } f
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatMoney, formatNumber } from "@/lib/format";
-import { money, number, pctPoints } from "@/lib/strategyFormat";
+import { money, moneyInput, number, pctPointsUnsigned } from "@/lib/strategyFormat";
 import { useChartTheme } from "@/lib/useChartTheme";
 
 /**
@@ -400,7 +400,7 @@ export function AutomationControl({
 }) {
   const pool = overview.paper_pool;
   const [enabled, setEnabled] = useState(pool.enabled && overview.execution_enabled);
-  const [limit, setLimit] = useState(pool.capital_limit);
+  const [limit, setLimit] = useState(moneyInput(pool.capital_limit));
   const [capitalMode, setCapitalMode] = useState(pool.capital_mode);
   const [approvalMode, setApprovalMode] = useState(pool.approval_mode);
   const [riskProfile, setRiskProfile] = useState(pool.mandate.risk_profile);
@@ -408,7 +408,7 @@ export function AutomationControl({
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     setEnabled(pool.enabled && overview.execution_enabled);
-    setLimit(pool.capital_limit);
+    setLimit(moneyInput(pool.capital_limit));
     setCapitalMode(pool.capital_mode);
     setApprovalMode(pool.approval_mode);
     setRiskProfile(pool.mandate.risk_profile);
@@ -432,7 +432,7 @@ export function AutomationControl({
   // an invalid pair and then surfacing a raw 409 for it.
   const effectiveApprovalMode = riskProfile === "unconfigured" ? "manual" : approvalMode;
   const dirty = enabled !== effectiveEnabled
-    || parsed !== Number(pool.capital_limit)
+    || parsed !== Number(moneyInput(pool.capital_limit))
     || capitalMode !== pool.capital_mode
     || effectiveApprovalMode !== pool.approval_mode
     || riskProfile !== pool.mandate.risk_profile;
@@ -570,12 +570,12 @@ export function AutomationControl({
         <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
           <p className="text-xs text-slate-500">Policy ceilings, not return forecasts. Long-only and unleveraged in this version.</p>
           <dl className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
-            <div><dt className="text-slate-500">Target volatility</dt><dd className="font-semibold">{pctPoints(selectedMandate.target_volatility_pct)}</dd></div>
-            <div><dt className="text-slate-500">Max drawdown</dt><dd className="font-semibold">{pctPoints(selectedMandate.max_portfolio_drawdown_pct)}</dd></div>
-            <div><dt className="text-slate-500">Max loss / position</dt><dd className="font-semibold">{pctPoints(selectedMandate.max_loss_per_position_pct)}</dd></div>
-            <div><dt className="text-slate-500">Max daily loss</dt><dd className="font-semibold">{pctPoints(selectedMandate.max_daily_loss_pct)}</dd></div>
-            <div><dt className="text-slate-500">Active risk budget</dt><dd className="font-semibold">{pctPoints(selectedMandate.active_risk_budget_pct)}</dd></div>
-            <div><dt className="text-slate-500">Cash reserve</dt><dd className="font-semibold">{pctPoints(selectedMandate.cash_reserve_pct)}</dd></div>
+            <div><dt className="text-slate-500">Target volatility</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.target_volatility_pct)}</dd></div>
+            <div><dt className="text-slate-500">Max drawdown</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.max_portfolio_drawdown_pct)}</dd></div>
+            <div><dt className="text-slate-500">Max loss / position</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.max_loss_per_position_pct)}</dd></div>
+            <div><dt className="text-slate-500">Max daily loss</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.max_daily_loss_pct)}</dd></div>
+            <div><dt className="text-slate-500">Active risk budget</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.active_risk_budget_pct)}</dd></div>
+            <div><dt className="text-slate-500">Cash reserve</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.cash_reserve_pct)}</dd></div>
             <div><dt className="text-slate-500">Concurrent positions</dt><dd className="font-semibold">{selectedMandate.max_concurrent_positions}</dd></div>
             <div><dt className="text-slate-500">Authority</dt><dd className="font-semibold">Long only · No leverage</dd></div>
           </dl>

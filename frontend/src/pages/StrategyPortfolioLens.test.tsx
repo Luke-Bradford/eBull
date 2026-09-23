@@ -958,6 +958,58 @@ describe("StrategyPortfolioLens", () => {
     expect(caveat.textContent).toContain("GBP");
   });
 
+  it("names the holdings currency when it differs from the pot's (#3336)", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [
+        { strategy_trade_id: 2, broker_position_id: "3601264304", strategy_id: null, strategy_title: "Core / cash mandate", instrument_id: 3417, symbol: "SPY.RTH", currency: "GBP", units: "0.296155", assigned_value: "168.64", current_value: "169.00", current_price: "570.72", trade_status: "open", valuation_available: true },
+      ],
+      live_quote_instrument_ids: [3417],
+    } as never);
+
+    renderLens();
+    const note = await screen.findByText(/Holdings are in GBP, your display currency/);
+    expect(note.textContent).toContain("in USD, the pot's own currency");
+  });
+
+  it("renders policy ceilings unsigned and trading capital to 2 dp (#3336)", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...BLOCKED,
+      paper_pool: {
+        ...BLOCKED.paper_pool,
+        configured: true,
+        capital_limit: "500.000000",
+        mandate: {
+          configured: true,
+          policy_version: "portfolio-mandate-v1",
+          risk_profile: "balanced",
+          target_volatility_pct: "8.00",
+          max_portfolio_drawdown_pct: "10.00",
+          max_loss_per_position_pct: "0.50",
+          max_daily_loss_pct: "2.00",
+          active_risk_budget_pct: "3.00",
+          cash_reserve_pct: "5.00",
+          max_concurrent_positions: 10,
+        },
+      },
+    } as never);
+    renderSetup();
+
+    expect(await screen.findByLabelText("Trading capital (USD)")).toHaveValue(500);
+    expect((screen.getByLabelText("Trading capital (USD)") as HTMLInputElement).value).toBe("500.00");
+    expect(screen.getByText("Max drawdown").nextElementSibling?.textContent).toBe("10.00%");
+    expect(screen.getByText("Max loss / position").nextElementSibling?.textContent).toBe("0.50%");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("keeps the sleeve's ISA / FX caveats behind a closed disclosure (#3336)", async () => {
+    renderSetup();
+    const summary = await screen.findByText(/About this sleeve: demo only/);
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain("this engine does not hedge it");
+  });
+
   it("claims no conversion problem when the excluded position is already in the pool's currency", async () => {
     // Review WARNING on PR #3226. The exclusion and the conversion problem are
     // two different facts: a position is left out because it sits outside the

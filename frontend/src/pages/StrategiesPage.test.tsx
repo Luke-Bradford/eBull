@@ -995,7 +995,9 @@ describe("StrategiesPage", () => {
     renderStrategies("setup");
     expect(await screen.findByText("Policy ceilings, not return forecasts. Long-only and unleveraged in this version.")).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "growth");
-    expect(screen.getByText("+18.00%")).toBeInTheDocument();
+    // #3336: a ceiling is unsigned — "+18.00%" read as a gain.
+    expect(screen.getByText("18.00%")).toBeInTheDocument();
+    expect(screen.queryByText("+18.00%")).not.toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(update).toHaveBeenCalledWith(expect.objectContaining({
