@@ -738,6 +738,10 @@ def _apply_detail(
 #: never-submitted.  Writer assumptions are NOT schema guarantees, so each is
 #: re-read under both locks rather than inferred from "the executor only writes
 #: this shape" (Codex checkpoint 1, #2961).
+#:
+#: ``%(phase)s`` is a parameter so the attended window-B release
+#: (``strategy_core_window_b_release``) shares this predicate and ADDS to it
+#: rather than restating it.  Window A always passes ``'authority_committed'``.
 _UNSUBMITTED_CORE_ENTRY_SQL: Final[LiteralString] = """
 SELECT trade.strategy_trade_id
 FROM strategy_order_reconciliation_state state
@@ -745,7 +749,7 @@ JOIN orders o ON o.order_id = state.order_id
 JOIN strategy_trade_orders link ON link.order_id = o.order_id
 JOIN strategy_trades trade ON trade.strategy_trade_id = link.strategy_trade_id
 WHERE state.order_id = %(order_id)s
-  AND state.submission_phase = 'authority_committed'
+  AND state.submission_phase = %(phase)s
   AND state.state NOT IN ('resolved', 'rejected')
   AND o.execution_origin = 'strategy'
   AND o.broker_order_ref IS NULL
@@ -856,7 +860,9 @@ def terminalise_unsubmitted_core_entry(
             )
         # Per-order lock is ALWAYS last (see this module's stated lock ordering).
         with try_reconciliation_order_lock(conn, order_id):
-            candidate = conn.execute(_UNSUBMITTED_CORE_ENTRY_SQL, {"order_id": order_id}).fetchone()
+            candidate = conn.execute(
+                _UNSUBMITTED_CORE_ENTRY_SQL, {"order_id": order_id, "phase": "authority_committed"}
+            ).fetchone()
             conn.commit()
             if candidate is None:
                 return None
