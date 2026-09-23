@@ -277,6 +277,13 @@ export function StrategyPortfolioLens() {
    *  already `closing` disables its own Close button, and resubmitting it makes
    *  the endpoint reject — which, because the loop stops on first failure,
    *  would strand every genuinely open position behind it (Codex ckpt-2). */
+  /** Valued holdings reported in a currency other than the pot's (#3336).
+   *  Unvalued rows render only dashes, so their placeholder label is skipped. */
+  const holdingCurrencies = namedList(
+    positions
+      .filter((position) => position.valuation_available && position.currency !== pool.currency)
+      .map((position) => position.currency),
+  );
   const closable = positions.filter((position) => position.trade_status !== "closing");
   const killActive = data.entry_block.global_kill_active;
   const wealth = potWealthSummary(pnlHistory.data?.points ?? []);
@@ -442,6 +449,15 @@ export function StrategyPortfolioLens() {
         </div>
         {ownedPositions.loading ? <SectionSkeleton rows={3} /> : null}
         {ownedPositions.error ? <SectionError onRetry={ownedPositions.refetch} /> : null}
+        {/* #3336: holdings arrive in the operator's display currency (converted in
+            `app/api/portfolio.py`), the pot above in its USD contract currency.
+            Nothing on this page converts between them, so say which is which. */}
+        {holdingCurrencies.length > 0 ? (
+          <p className="text-xs text-slate-500">
+            Holdings are in {holdingCurrencies.join(" / ")}, your display currency. The pot figures above are in{" "}
+            {pool.currency}, the pot&apos;s own currency, so the two are not directly comparable.
+          </p>
+        ) : null}
         {ownedPositions.data && positions.length > 0 ? (
           <LiveQuoteProvider instrumentIds={ownedPositions.data.live_quote_instrument_ids}>
             <OpenStrategyPositions positions={positions} exitTimingById={exitTimingById} onClose={setCloseFor} />

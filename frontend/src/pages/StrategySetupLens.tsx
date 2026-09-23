@@ -14,6 +14,7 @@ import { AutomationControl, BlockerRow } from "@/components/strategies/StrategyP
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate } from "@/lib/format";
+import { decimalInput, moneyInput } from "@/lib/strategyFormat";
 import { useAsync } from "@/lib/useAsync";
 
 /**
@@ -138,10 +139,10 @@ function CoreSleeveControl({
 }) {
   const mandate = sleeve.mandate;
   const [enabled, setEnabled] = useState(mandate.enabled ?? false);
-  const [target, setTarget] = useState(mandate.core_target_pct ?? "80");
-  const [reserve, setReserve] = useState(mandate.liquidity_reserve_pct ?? "10");
-  const [band, setBand] = useState(mandate.rebalance_band_pct ?? "5");
-  const [minimum, setMinimum] = useState(mandate.min_rebalance_amount ?? "25");
+  const [target, setTarget] = useState(decimalInput(mandate.core_target_pct ?? "80"));
+  const [reserve, setReserve] = useState(decimalInput(mandate.liquidity_reserve_pct ?? "10"));
+  const [band, setBand] = useState(decimalInput(mandate.rebalance_band_pct ?? "5"));
+  const [minimum, setMinimum] = useState(moneyInput(mandate.min_rebalance_amount ?? "25"));
   const [reason, setReason] = useState("");
   const [confirmRebalance, setConfirmRebalance] = useState(false);
   const [outcome, setOutcome] = useState<string | null>(null);
@@ -154,7 +155,7 @@ function CoreSleeveControl({
     Number(target) !== Number(mandate.core_target_pct ?? "80") ||
     Number(reserve) !== Number(mandate.liquidity_reserve_pct ?? "10") ||
     Number(band) !== Number(mandate.rebalance_band_pct ?? "5") ||
-    Number(minimum) !== Number(mandate.min_rebalance_amount ?? "25");
+    Number(minimum) !== Number(moneyInput(mandate.min_rebalance_amount ?? "25"));
 
   async function saveMandate() {
     setBusy(true);
@@ -492,10 +493,15 @@ export function StrategySetupLens() {
               <BlockerRow key={blocker.code} tone="warn" label={blocker.detail} />
             ))}
           </div>
-          <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
-            Demo only · buy only · no alpha signal. {coreSleeve.data.household_tax_caveat}{" "}
-            {coreSleeve.data.household_currency_caveat}
-          </p>
+          {/* #3336: the ISA / FX caveats are reference text, not a control, so
+              they sit behind a disclosure instead of a wall above the form. */}
+          <details className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
+            <summary className="min-h-11 cursor-pointer py-2 font-medium text-slate-700 dark:text-slate-200">
+              About this sleeve: demo only · buy only · no alpha signal
+            </summary>
+            <p className="mt-1">{coreSleeve.data.household_tax_caveat}</p>
+            <p className="mt-2">{coreSleeve.data.household_currency_caveat}</p>
+          </details>
           <CoreSleeveControl
             sleeve={coreSleeve.data}
             busy={busy || coreSleeve.isRevalidating}
