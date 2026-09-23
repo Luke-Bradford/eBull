@@ -11276,3 +11276,18 @@ neighbouring container and match it.**
   where a good fact outranks it. That case passed with the filter in the wrong place.
 - Enforced in: `app/services/fundamentals/__init__.py::_per_share_value_is_representable` (applied
   at the top of `_derive_periods_from_facts`); `tests/test_financial_normalization.py::TestPerShareShareCountMistag`.
+
+### A minting gate does not clean the rows it used to mint, and "thin" is not "ghost" (#2182 item 2)
+
+- Symptom (2026-09-23): after the #3333 presentation gate, 3,726 canonical FY rows with no revenue,
+  net income or total assets remained, because a normalize never deletes canonical history. The ticket
+  called them all "pre-first-10-K ghosts" from a sample. Applying the gate's own rule to the canonical
+  rows split them: some carry a duration column (a presented year with a mapping gap), some sit within
+  one year of their filing's primary end (a presented balance sheet), and 50 sit in mid-history (a real
+  year whose content an older re-normalize overwrote). Only the rest are opening balances of a year no
+  filing reports; most predate the 2009 XBRL mandate, so "pre-first-10-K" is really "pre-first-XBRL".
+- Prevention: clean up with the SAME rule the gate applies, evaluated on the stored row, and
+  fail-closed wherever an input is unknown. Do not key the cleanup on the symptom (the NULL trio).
+  Deleting a mid-history thin row drops a real year, so keep it and name it as lost history instead.
+- Enforced in: `sql/417_delete_unpresented_fy_ghost_rows.sql`;
+  `tests/test_migration_417_fy_ghost_rows_2182.py`.
