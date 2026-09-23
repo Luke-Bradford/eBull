@@ -134,9 +134,12 @@ meantime: a BUY/ADD fill, an external re-open that the sync imports with a new
   (discriminator 1).
 - **Rollout order:** a worker running the pre-413 code simply leaves the
   column NULL, which is legal.
-- **Claim-time refusal:** a live EXIT whose `positions.avg_cost` is NULL, zero,
-  negative or NaN is refused before the claim, with a refusal audit
-  `exit_avg_cost_unusable`, and is never claimed without a cost. Census (dev,
+- **An unusable cost is stored as NULL. It never refuses the EXIT.** A
+  `positions.avg_cost` that is NULL, zero, negative or NaN is recorded as NULL,
+  and the booking slice later refuses that row by parking it (discriminator 1).
+  A claim-time refusal would block an EXIT, and **EXIT is never blocked**
+  (`.claude/skills/execution-guard/SKILL.md:119`, `docs/settled-decisions.md:1167`).
+  Census (dev,
   2026-09-23): `select count(*) from positions where current_units > 0 and
   (avg_cost is null or avg_cost <= 0 or avg_cost = 'NaN')` = **0** of 6 open
   positions.
@@ -329,7 +332,7 @@ recover it later.
      FOR SHARE` inside the claim transaction, so no concurrent position writer
      can move the pool between the read and the claim commit (r3 #8);
    - it gets its own CHECK;
-   - an unusable cost is refused before the claim.
+   - an unusable cost is stored as NULL, and the EXIT is never refused for it.
 2. **Evidence capture for the first real observation.** `get_close_order`
    keeps the raw `positions[]` it already stores in `raw_payload`, and
    `_record_unbooked_fill`'s audit gains:
