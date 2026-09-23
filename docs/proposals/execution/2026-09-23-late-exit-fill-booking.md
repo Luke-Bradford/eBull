@@ -344,9 +344,14 @@ recover it later.
    verdict, no flag: those land with the booking slice.
 
 **Waits (booking slice), wake condition.** An attended session posts on #3007
-one recommendation-origin EXIT close. The post must include the verbatim
-close-order lookup and the trade-history row for the same position (`closeRate`
-/ `units`). ⚠ The close must be **partial, on a non-USD instrument**; otherwise
-it cannot distinguish executed from echoed data (r3 #2). The same attended
-protocol produces that on demand
-(`docs/proposals/execution/2026-09-14-attended-demo-session-protocol.md`).
+one **partial close (`UnitsToDeduct`) of any demo position on a non-USD
+instrument**. The post must include the verbatim close-order lookup for that
+close and the trade-history row for the same position (`closeRate` / `units`).
+
+- The route's semantics do not depend on who submitted the close. A
+  recommendation EXIT always closes the whole lot (`UnitsToDeduct=null`), so it
+  could never produce the observation.
+- A whole close cannot distinguish executed units from echoed ones, and a USD
+  instrument never exercises `conversionRate` (r3 #2).
+- It is producible on demand: the supervisor ran exactly this shape on a USD
+  instrument at 2026-09-23 00:01Z (#2965, `attended_2026-09-23-01_partial_close.jsonl`).
