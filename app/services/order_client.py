@@ -1334,6 +1334,10 @@ def _write_execution_audit(
     if exit_completion is not None:
         evidence["exit_completion"] = exit_completion
     if extra_evidence is not None:
+        # Additive only: a caller must never silently overwrite the audit's own keys.
+        clobbered = evidence.keys() & extra_evidence.keys()
+        if clobbered:
+            raise ValueError(f"extra_evidence would overwrite audit keys: {sorted(clobbered)}")
         evidence.update(extra_evidence)
     conn.execute(
         """

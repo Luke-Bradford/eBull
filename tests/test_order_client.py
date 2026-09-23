@@ -2656,3 +2656,23 @@ class TestContainedPollErrorsAreNotSilent:
         from app.services.order_client import _PARKING_POLL_VERDICTS
 
         assert "identity_mismatch" not in _PARKING_POLL_VERDICTS
+
+
+def test_execution_audit_extra_evidence_cannot_overwrite_its_own_keys() -> None:
+    """#3007 part 2 (review NITPICK, PR #3326): ``extra_evidence`` is additive only."""
+    from app.services.order_client import _write_execution_audit
+
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="order_id"):
+        _write_execution_audit(
+            conn,
+            instrument_id=1,
+            recommendation_id=2,
+            order_id=3,
+            passed=True,
+            explanation="x",
+            raw_payload={},
+            now=datetime(2026, 9, 23, tzinfo=UTC),
+            extra_evidence={"order_id": 99},
+        )
+    conn.execute.assert_not_called()
