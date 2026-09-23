@@ -48,16 +48,32 @@ function toneOf(value: number | null): "muted" | "positive" | "negative" {
 function EngineOrders({
   positions,
   coreSleeve,
+  coreSleeveFailed,
+  onRetryCore,
 }: {
   positions: readonly StrategyOwnedPosition[];
+  /** `null` while the core-sleeve read is unresolved or failed — NOT "no order". */
   coreSleeve: CoreSleeveResponse | null;
+  coreSleeveFailed: boolean;
+  onRetryCore: () => void;
 }) {
   const closing = positions.filter((position) => position.trade_status === "closing");
   const corePending = coreSleeve?.pending_order_id ?? null;
+  // ⚠ Unknown is not empty (Codex ckpt-2 on #3334): until the core-sleeve read
+  // resolves, "No engine order is working" would be a claim about an order
+  // nobody has looked for.
+  const coreUnknown = coreSleeve === null;
   return (
     <section aria-labelledby="engine-orders" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
       <h2 id="engine-orders" className="text-sm font-semibold">Engine orders</h2>
-      {closing.length === 0 && corePending === null ? (
+      {coreSleeveFailed ? (
+        <div className="mt-2">
+          <SectionError onRetry={onRetryCore} />
+        </div>
+      ) : coreUnknown ? (
+        <p className="mt-2 text-sm text-slate-500">Checking the core sleeve for a working order…</p>
+      ) : null}
+      {coreUnknown && closing.length === 0 ? null : closing.length === 0 && corePending === null ? (
         <p className="mt-2 text-sm text-slate-500">No engine order is working. Closes and core-sleeve orders appear here until the broker confirms them.</p>
       ) : (
         <ul className="mt-2 divide-y divide-slate-200 text-sm dark:divide-slate-800">
@@ -206,14 +222,14 @@ export function StrategyPortfolioLens() {
           <StatTile
             label="P&L since start"
             value={pnlHistory.error ? "—" : formatMoney(wealth?.totalPnl ?? null, pool.currency)}
-            hint={wealth ? `${formatPct(wealth.totalReturn)} on principal · realised + open` : "—"}
+            hint={wealth ? "Realised + open · return % not yet published" : "—"}
             tone={toneOf(wealth?.totalPnl ?? null)}
             toneHint
           />
           <StatTile
             label="Last day"
             value={pnlHistory.error ? "—" : formatMoney(wealth?.dayPnl ?? null, pool.currency)}
-            hint={wealth?.dayPnl != null ? `${formatPct(wealth.dayReturn)} · ${formatDate(wealth.date)} vs prior close` : "Needs two closes"}
+            hint={wealth?.dayPnl != null ? `${formatDate(wealth.date)} vs prior close, net of funding` : "Needs two closes"}
             tone={toneOf(wealth?.dayPnl ?? null)}
             toneHint
           />
@@ -226,10 +242,13 @@ export function StrategyPortfolioLens() {
             value="—"
             hint={sp500Refusal ? "No licensed benchmark" : "Not reported"}
           />
+          {/* Budget, not broker cash: `remaining_capital` is the pot's
+              assignment minus committed authority and never reads the
+              broker's cash balance (Codex ckpt-2 on #3334). */}
           <StatTile
-            label="Cash available"
+            label="Budget available"
             value={formatMoney(number(pool.capital_observation_complete === false ? null : pool.remaining_capital), pool.currency)}
-            hint={pool.capital_observation_complete === false ? "Checked at each order" : "Within the budget"}
+            hint={pool.capital_observation_complete === false ? "Checked at each order" : "Budget less commitments"}
           />
         </div>
 
@@ -303,7 +322,14 @@ export function StrategyPortfolioLens() {
         {ownedPositions.data && positions.length === 0 ? (
           <EmptyState title="Nothing held" description="Positions opened by an approved strategy appear here." />
         ) : null}
-        {ownedPositions.data ? <EngineOrders positions={positions} coreSleeve={coreSleeve.data ?? null} /> : null}
+        {ownedPositions.data ? (
+          <EngineOrders
+            positions={positions}
+            coreSleeve={coreSleeve.data ?? null}
+            coreSleeveFailed={coreSleeve.error !== null && !coreSleeve.data}
+            onRetryCore={coreSleeve.refetch}
+          />
+        ) : null}
       </section>
 
       <section aria-labelledby="pot-performance">

@@ -703,12 +703,21 @@ describe("StrategyPortfolioLens", () => {
     const state = (await screen.findByText("Not trading")).closest("section")!;
     // #3334: results first. Every tile is pot-level; the strategy-only roll-up
     // ("Strategy total P&L", #3222 residual 2) moved down into performance.
-    for (const label of ["Pot value", "P&L since start", "Last day", "vs S&P 500", "Cash available"]) {
+    for (const label of ["Pot value", "P&L since start", "Last day", "vs S&P 500", "Budget available"]) {
       expect(within(state).getByText(label)).toBeInTheDocument();
     }
     // Monitor ≠ configure: no funding or mandate write lives on this lens.
     expect(screen.queryByLabelText("Trading capital (USD)")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save mandate" })).not.toBeInTheDocument();
+  });
+
+  it("never reports no working engine order while the core-sleeve read has failed", async () => {
+    // Codex ckpt-2 on #3334: a null core sleeve is UNKNOWN, not "no pending order".
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockRejectedValue(new Error("boom"));
+    renderLens();
+    const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
+    await waitFor(() => expect(within(orders).getByRole("button", { name: /retry/i })).toBeInTheDocument());
+    expect(within(orders).queryByText(/No engine order is working/)).not.toBeInTheDocument();
   });
 
   it("renders a real empty state instead of a zeroed positions table", async () => {

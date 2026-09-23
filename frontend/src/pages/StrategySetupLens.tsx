@@ -384,7 +384,7 @@ function PolicyRules({
         />
         <PolicyRow
           label="Account"
-          value={overview.live_execution_enabled ? "Real money" : "Demo"}
+          value={overview.demo_connection ? "Demo" : "No demo connection"}
           why="Real-money strategy activation stays locked until the broker contract is validated and the capital boundary holds (#2843, #2844)."
         />
         <PolicyRow

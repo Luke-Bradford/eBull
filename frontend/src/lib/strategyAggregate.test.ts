@@ -157,7 +157,7 @@ describe("potWealthSummary (#3334)", () => {
     ]);
     expect(summary?.date).toBe("2026-09-18");
     expect(summary?.potValue).toBe(500.5);
-    expect(summary?.totalReturn).toBeCloseTo(0.001);
+    expect(summary?.totalPnl).toBe(0.5);
     // 500.5 - 0 - 500 funding = 0.5, not +500.5.
     expect(summary?.dayPnl).toBeCloseTo(0.5);
   });
