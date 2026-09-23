@@ -710,9 +710,15 @@ def test_mid_flight_stuck_does_not_fire_on_first_tick_lag(
 def test_schedule_missed_when_terminal_run_predates_cadence_window(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """``retry_deferred_recommendations`` runs every 5 minutes. A
-    successful terminal run from 2 hours ago means we should have
-    fired ~24 more times since — schedule_missed must surface.
+    """``retry_deferred_recommendations`` runs hourly at :30. A successful
+    terminal run from 3 hours ago means at least two fires were missed, so
+    schedule_missed must surface.
+
+    #3323 — 3 hours, not 2. The rule is ``next :30 after anchor < now - 1h``,
+    and a 2-hour anchor (``now - 2h + 30s``) left it false whenever the wall
+    clock read HH:29:30-HH:30:00, a 30-second window every hour. With 3 hours
+    the next fire is at most ``now - 2h + 30s``, so the rule holds at any
+    instant. The same anchor is used by the skip-anchor tests below.
 
     Codex pre-push BLOCKING: the rule must compare against the
     cadence-occurrence after the latest run, not the strictly-future
@@ -724,8 +730,8 @@ def test_schedule_missed_when_terminal_run_predates_cadence_window(
         """
         INSERT INTO job_runs
                (job_name, started_at, finished_at, status)
-        VALUES (%s, now() - interval '2 hours',
-                now() - interval '2 hours' + interval '30 seconds',
+        VALUES (%s, now() - interval '3 hours',
+                now() - interval '3 hours' + interval '30 seconds',
                 'success')
         """,
         (JOB_RETRY_DEFERRED,),
@@ -1136,8 +1142,8 @@ def test_lane_busy_skip_does_not_reset_schedule_missed_anchor(
     ebull_test_conn.execute(
         """
         INSERT INTO job_runs (job_name, started_at, finished_at, status)
-        VALUES (%s, now() - interval '2 hours',
-                now() - interval '2 hours' + interval '30 seconds', 'success')
+        VALUES (%s, now() - interval '3 hours',
+                now() - interval '3 hours' + interval '30 seconds', 'success')
         """,
         (JOB_RETRY_DEFERRED,),
     )
@@ -1166,8 +1172,8 @@ def test_all_lane_busy_history_falls_back_to_first_seen_anchor(
     ebull_test_conn.execute(
         """
         INSERT INTO job_first_seen (job_name, first_seen)
-        VALUES (%s, now() - interval '2 hours')
-        ON CONFLICT (job_name) DO UPDATE SET first_seen = now() - interval '2 hours'
+        VALUES (%s, now() - interval '3 hours')
+        ON CONFLICT (job_name) DO UPDATE SET first_seen = now() - interval '3 hours'
         """,
         (JOB_RETRY_DEFERRED,),
     )
@@ -1197,8 +1203,8 @@ def test_misfire_skip_does_not_reset_schedule_missed_anchor(
     ebull_test_conn.execute(
         """
         INSERT INTO job_runs (job_name, started_at, finished_at, status)
-        VALUES (%s, now() - interval '2 hours',
-                now() - interval '2 hours' + interval '30 seconds', 'success')
+        VALUES (%s, now() - interval '3 hours',
+                now() - interval '3 hours' + interval '30 seconds', 'success')
         """,
         (JOB_RETRY_DEFERRED,),
     )

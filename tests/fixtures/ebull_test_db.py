@@ -49,7 +49,7 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlparse, urlunparse
 
 import psycopg
@@ -473,21 +473,6 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "capital_events",
     "report_snapshots",
 )
-
-# DELETE intentionally cannot remove these immutable audit children. Test DB
-# cleanup is allowed to empty them, but must do so explicitly before deleting
-# their parents; otherwise every test that stores real promotion evidence falls
-# through to the much slower whole-schema TRUNCATE recovery path (#2737).
-_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset(
-    {
-        "strategy_result_universe",
-        # #2603 (sql/411) — a core_rebalance close operation and its close quote are
-        # permanent. Both are FK leaves, so TRUNCATE needs no cascade.
-        "strategy_position_operations",
-        "strategy_core_rebalance_close_quotes",
-    }
-)
-
 
 # ---------------------------------------------------------------------------
 # #2224 cause 3 — migration-SEED tables are RESTORED, not emptied.
@@ -1437,7 +1422,7 @@ def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
 class _CleanupPlan:
     """Session-cached derivation of what per-test cleanup must touch."""
 
-    __slots__ = ("delete_order", "owned_sequences", "probe_sql", "seed_tables")
+    __slots__ = ("delete_guarded", "delete_order", "owned_sequences", "probe_sql", "seed_tables")
 
     def __init__(
         self,
@@ -1445,11 +1430,13 @@ class _CleanupPlan:
         probe_sql: sql.Composed,
         owned_sequences: frozenset[str],
         seed_tables: tuple[str, ...],
+        delete_guarded: frozenset[str],
     ) -> None:
         self.delete_order = delete_order
         self.probe_sql = probe_sql
         self.owned_sequences = owned_sequences
         self.seed_tables = seed_tables
+        self.delete_guarded = delete_guarded
 
 
 # Keyed by database name: one worker process only ever talks to one test DB,
@@ -1722,6 +1709,24 @@ def _derive_wipe_set(roots: set[str], seed_tables: tuple[str, ...]) -> set[str]:
     }
 
 
+# #3323 — roots carrying an enabled BEFORE DELETE row trigger (tgtype bits
+# ROW=1, BEFORE=2, DELETE=8). Only a dirty one of these needs ``replica``.
+_DELETE_GUARDED_SQL: Final = """
+SELECT DISTINCT root.relname
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_class root ON root.oid = COALESCE(pg_partition_root(c.oid), c.oid)
+WHERE n.nspname = 'public' AND NOT t.tgisinternal AND t.tgenabled <> 'D' AND (t.tgtype & 11) = 11
+"""
+_FK_TOPOLOGY_SQL: Final = "SELECT count(*), coalesce(max(oid::bigint), 0) FROM pg_constraint WHERE contype = 'f'"
+_FK_TOPOLOGY_CHANGED: Final = "<fk topology changed since the cleanup plan was cached>"
+
+
+class _StaleCleanupPlan(Exception):
+    """The catalog's FK topology no longer matches the cached plan (#3323)."""
+
+
 def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
     """Derive the wipe set, delete order, owned sequences and seed set."""
     roots, referencing = _read_topology(conn)
@@ -1729,7 +1734,13 @@ def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
         cur.execute(_OWNED_SEQUENCES_SQL)
         sequence_owners = [(row[0], row[1]) for row in cur.fetchall()]
         seed_tables = _read_seed_manifest(cur, roots)
+        cur.execute(_DELETE_GUARDED_SQL)
+        delete_guarded = {row[0] for row in cur.fetchall()}
+        cur.execute(_FK_TOPOLOGY_SQL)
+        fk_row = cur.fetchone()
     conn.rollback()
+    assert fk_row is not None
+    fk_count, fk_max_oid = int(fk_row[0]), int(fk_row[1])
 
     closure = _derive_wipe_set(roots, seed_tables)
     delete_order = _topological_delete_order(closure, referencing)
@@ -1776,9 +1787,23 @@ def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
         )
         for table in seed_tables
     )
+    # #3323 — the DELETE loop runs with FK enforcement suspended, which is safe
+    # only while this plan's FK topology is still the catalog's. A test that adds
+    # an FK-bearing table after the plan was cached would otherwise have its
+    # referenced parent emptied under it without error. This branch reports the
+    # drift so ``_reset_planner_tables`` takes the TRUNCATE ... CASCADE fallback.
+    probe_branches.append(
+        sql.SQL(
+            "SELECT {sentinel} FROM (" + _FK_TOPOLOGY_SQL + ") fk(n, max_oid) WHERE fk.n <> {n} OR fk.max_oid <> {m}"
+        ).format(
+            sentinel=sql.Literal(_FK_TOPOLOGY_CHANGED),
+            n=sql.Literal(fk_count),
+            m=sql.Literal(fk_max_oid),
+        )
+    )
     probe_sql = sql.SQL(" UNION ALL ").join(probe_branches)
     owned = frozenset(seq for seq, owner in sequence_owners if owner in closure)
-    return _CleanupPlan(delete_order, probe_sql, owned, seed_tables)
+    return _CleanupPlan(delete_order, probe_sql, owned, seed_tables, frozenset(delete_guarded & closure))
 
 
 def _cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
@@ -1849,12 +1874,31 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
         with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute(plan.probe_sql)
             dirty = {row[0] for row in cur.fetchall()}
-            for table in sorted(_TRUNCATE_BEFORE_DELETE & dirty):
-                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(table)))
-                dirty.remove(table)
+            if _FK_TOPOLOGY_CHANGED in dirty:
+                raise _StaleCleanupPlan("FK topology changed since the cleanup plan was cached")
+            # #3323 — ``replica`` suspends user triggers, as in
+            # ``_restore_seed_tables``. Immutable audit tables refuse DELETE with
+            # a BEFORE DELETE row trigger (sql/299, 327, 333, 334, 339, 355,
+            # 411, ...; list them with ``pg_trigger`` where ``tgtype & 11 = 11``).
+            # Under ``origin`` each one sent every test that wrote it down the
+            # slow TRUNCATE fallback. The TRUNCATE-first hand list this replaces
+            # missed most of them and could never take an FK parent.
+            # FK enforcement is suspended too. That is safe because the wipe set
+            # is closed under inbound FKs, every dirty member is emptied here,
+            # and the probe's topology branch (above) routes a plan that no
+            # longer matches the catalog to the fallback first.
+            #
+            # Toggled ONLY when a guarded table is dirty: changing the role
+            # discards the backend's cached plans, and re-planning the probe
+            # costs several times its warm execution (measurement on PR #3329).
+            suspend = bool(dirty & plan.delete_guarded)
+            if suspend:
+                cur.execute("SET LOCAL session_replication_role = replica")
             for table in plan.delete_order:
                 if table in dirty:
                     cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))
+            if suspend:
+                cur.execute("SET LOCAL session_replication_role = origin")
             # #2224 cause 3 — seeded tables are restored, not emptied, and only
             # when the probe says they differ from their snapshot. AFTER the
             # delete loop so a restored parent cannot be re-orphaned by it.
@@ -1867,7 +1911,7 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
             for sequence in sorted(advanced):
                 cur.execute(sql.SQL("ALTER SEQUENCE {} RESTART").format(sql.Identifier(sequence)))
         conn.commit()
-    except psycopg.Error as exc:
+    except (psycopg.Error, _StaleCleanupPlan) as exc:
         # A test that CREATEd its own FK-bearing table, or a schema change since
         # the plan was cached. Drop the plan so the next test rebuilds it, and
         # let TRUNCATE ... CASCADE — which needs no precomputed order — clean up.
