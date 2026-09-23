@@ -1252,6 +1252,56 @@ class StrategyOwnedPositionsResponse(BaseModel):
     live_quote_instrument_ids: list[int]
 
 
+class StrategyFill(BaseModel):
+    """One broker-observed open/close of an engine-owned position (#3334)."""
+
+    event_id: int
+    broker_position_id: int
+    strategy_trade_id: int
+    # NULL on the core arm, as on `StrategyOwnedPosition`; the title carries the label.
+    strategy_id: str | None
+    strategy_title: str
+    instrument_id: int
+    symbol: str
+    event_kind: Literal["open", "close"]
+    side: Literal["buy", "sell"]
+    units: Decimal
+    # Instrument-native price; `price_currency` is the instrument's, not the pot's.
+    price: Decimal | None
+    price_currency: str | None
+    executed_at: datetime
+    # USD at rest (`trade_events.*_usd`), which is the pot's contract currency.
+    realised_pnl: Decimal | None
+    fees: Decimal | None
+
+
+class StrategyPendingEntry(BaseModel):
+    """An alpha entry the engine has planned or submitted but not yet filled."""
+
+    strategy_trade_id: int
+    strategy_id: str
+    strategy_title: str
+    instrument_id: int
+    symbol: str
+    trade_status: Literal["planned", "submitted", "reconcile_required"]
+    # NULL only before an order row exists.  ⚠ A `planned` trade CAN carry one:
+    # the executor commits the order row before the broker call and flips the
+    # trade to `submitted` only on the response, so `planned` + order id means
+    # "possibly at the broker", never "not sent".
+    order_id: int | None
+    order_status: str | None
+    funded_amount: Decimal | None
+    created_at: datetime
+
+
+class StrategyOrderActivityResponse(BaseModel):
+    money_currency: Literal["USD"] = "USD"
+    fills: list[StrategyFill]
+    pending_entries: list[StrategyPendingEntry]
+    # True when more working entries exist than `limit` returned.
+    pending_entries_truncated: bool
+
+
 class StrategyPositionCloseResponse(BaseModel):
     strategy_trade_id: int
     broker_position_id: int
@@ -3379,6 +3429,138 @@ def get_strategy_owned_positions(
     return StrategyOwnedPositionsResponse(
         positions=positions,
         live_quote_instrument_ids=sorted({position.instrument_id for position in positions}),
+    )
+
+
+@router.get("/order-activity", response_model=StrategyOrderActivityResponse)
+def get_strategy_order_activity(
+    limit: int = Query(default=20, ge=1, le=200),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyOrderActivityResponse:
+    """Recent engine fills plus alpha entries the broker has not filled yet (#3334).
+
+    Fills are broker-observed ``trade_events`` rows reached ONLY through
+    ``strategy_position_ownership`` -- the exact-ownership rule every other
+    strategy read uses, so a manual trade in the same instrument never appears.
+    ``broker_position_id`` is UNIQUE there, so the join cannot duplicate an event.
+
+    Pending entries are alpha trades still ``planned`` or ``submitted``, plus
+    ``reconcile_required`` ones that own no position (outcome unknown).  The core
+    arm is excluded on purpose: its one unresolved order is already published as
+    ``/strategies/core-sleeve`` ``pending_order_id``, and listing it twice would
+    show the operator two orders where the engine has one.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        fill_rows = list(
+            cur.execute(
+                """
+                SELECT event.event_id, event.position_id, event.event_kind, event.side,
+                       event.units, event.price, event.executed_at,
+                       event.realized_pnl_usd, event.fees_usd,
+                       ownership.strategy_trade_id, trade.core_rebalance_intent_id,
+                       signal.strategy_id, instrument.instrument_id, instrument.symbol,
+                       instrument.currency AS price_currency
+                FROM strategy_position_ownership ownership
+                JOIN strategy_trades trade ON trade.strategy_trade_id=ownership.strategy_trade_id
+                LEFT JOIN strategy_funding_decisions funding
+                  ON funding.funding_decision_id=trade.funding_decision_id
+                LEFT JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
+                JOIN trade_events event ON event.position_id=ownership.broker_position_id
+                JOIN instruments instrument ON instrument.instrument_id=trade.instrument_id
+                ORDER BY event.executed_at DESC, event.event_id DESC
+                LIMIT %(limit)s
+                """,
+                {"limit": limit},
+            ).fetchall()
+        )
+    # Separate cursor: the two reads are independent (prevention log, "Shared
+    # cursor across unrelated queries").
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        pending_rows = list(
+            cur.execute(
+                """
+                SELECT trade.strategy_trade_id, trade.status, trade.created_at,
+                       funding.amount AS funded_amount, signal.strategy_id,
+                       instrument.instrument_id, instrument.symbol,
+                       entry.order_id, entry.order_status
+                FROM strategy_trades trade
+                JOIN strategy_funding_decisions funding
+                  ON funding.funding_decision_id=trade.funding_decision_id
+                JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
+                JOIN instruments instrument ON instrument.instrument_id=trade.instrument_id
+                LEFT JOIN LATERAL (
+                    SELECT sto.order_id, ord.status AS order_status
+                    FROM strategy_trade_orders sto
+                    JOIN orders ord ON ord.order_id=sto.order_id
+                    WHERE sto.strategy_trade_id=trade.strategy_trade_id AND sto.purpose='entry'
+                    ORDER BY sto.linked_at DESC, sto.order_id DESC
+                    LIMIT 1
+                ) entry ON TRUE
+                -- `reconcile_required` WITHOUT an owned position is an entry
+                -- whose broker outcome is unknown (the executor parks an
+                -- uncertain submission there): the broker may hold it, so it
+                -- is listed, not hidden.  With a position it is a holding and
+                -- already shows on `/strategies/positions`.
+                WHERE trade.status IN ('planned','submitted')
+                   OR (trade.status='reconcile_required' AND NOT EXISTS (
+                        SELECT 1 FROM strategy_position_ownership ownership
+                        WHERE ownership.strategy_trade_id=trade.strategy_trade_id))
+                ORDER BY trade.created_at DESC, trade.strategy_trade_id DESC
+                LIMIT %(limit)s + 1
+                """,
+                {"limit": limit},
+            ).fetchall()
+        )
+    # One row past the cap proves truncation without a COUNT; the flag is
+    # published because a silently cut working-order list hides live orders.
+    pending_truncated = len(pending_rows) > limit
+    pending_rows = pending_rows[:limit]
+
+    def _title(strategy_id: str | None, is_core: bool) -> str:
+        if is_core:
+            return CORE_MANDATE_SERIES_TITLE
+        return _TITLES.get(strategy_id or "", strategy_id or "")
+
+    fills = [
+        StrategyFill(
+            event_id=int(row["event_id"]),
+            broker_position_id=int(row["position_id"]),
+            strategy_trade_id=int(row["strategy_trade_id"]),
+            strategy_id=None if row["strategy_id"] is None else str(row["strategy_id"]),
+            strategy_title=_title(
+                None if row["strategy_id"] is None else str(row["strategy_id"]),
+                row["core_rebalance_intent_id"] is not None,
+            ),
+            instrument_id=int(row["instrument_id"]),
+            symbol=str(row["symbol"]),
+            event_kind=cast(Literal["open", "close"], row["event_kind"]),
+            side=cast(Literal["buy", "sell"], row["side"]),
+            units=Decimal(str(row["units"])),
+            price=None if row["price"] is None else Decimal(str(row["price"])),
+            price_currency=None if row["price_currency"] is None else str(row["price_currency"]),
+            executed_at=row["executed_at"],
+            realised_pnl=None if row["realized_pnl_usd"] is None else Decimal(str(row["realized_pnl_usd"])),
+            fees=None if row["fees_usd"] is None else Decimal(str(row["fees_usd"])),
+        )
+        for row in fill_rows
+    ]
+    pending = [
+        StrategyPendingEntry(
+            strategy_trade_id=int(row["strategy_trade_id"]),
+            strategy_id=str(row["strategy_id"]),
+            strategy_title=_title(str(row["strategy_id"]), False),
+            instrument_id=int(row["instrument_id"]),
+            symbol=str(row["symbol"]),
+            trade_status=cast(Literal["planned", "submitted", "reconcile_required"], row["status"]),
+            order_id=None if row["order_id"] is None else int(row["order_id"]),
+            order_status=None if row["order_status"] is None else str(row["order_status"]),
+            funded_amount=None if row["funded_amount"] is None else Decimal(str(row["funded_amount"])),
+            created_at=row["created_at"],
+        )
+        for row in pending_rows
+    ]
+    return StrategyOrderActivityResponse(
+        fills=fills, pending_entries=pending, pending_entries_truncated=pending_truncated
     )
 
 

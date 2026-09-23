@@ -21,6 +21,7 @@ from app.api.strategies import (
     _current_versions,
     close_strategy_owned_position,
     get_fired_signals,
+    get_strategy_order_activity,
     get_strategy_overview,
     get_strategy_owned_positions,
     get_strategy_pnl_history,
@@ -268,6 +269,93 @@ def test_realised_history_keeps_retired_versions_and_excludes_manual_positions(
     assert len(response.points) == 1
     assert response.points[0].total_pnl == Decimal("7")
     assert response.points[0].strategy_pnl == {strategy_id: Decimal("7")}
+
+
+def test_order_activity_shows_owned_fills_and_unfilled_alpha_entries_only(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3334: fills reach the page only through exact ownership; pending = planned/submitted."""
+    strategy_id = "activity-strategy"
+    strategy_version = "activity-strategy-v1"
+    instrument_id = 3334001
+    _instrument(ebull_test_conn, instrument_id)
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+
+    def trade(signal_date: str, status: str) -> int:
+        signal_id = _signal(
+            ebull_test_conn,
+            instrument_id=instrument_id,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            signal_date=signal_date,
+            fill_price=Decimal("10"),
+        )
+        trade_id = _funded_trade(
+            ebull_test_conn, signal_id=signal_id, deployment_id=deployment_id, instrument_id=instrument_id
+        )
+        ebull_test_conn.execute("UPDATE strategy_trades SET status=%s WHERE strategy_trade_id=%s", (status, trade_id))
+        return trade_id
+
+    owned = trade("2026-08-01", "closed")
+    submitted = trade("2026-08-02", "submitted")
+    planned = trade("2026-08-03", "planned")
+    # Uncertain entry, no position: broker may hold it -> listed.  With a
+    # position it is a holding (on /strategies/positions) -> not listed here.
+    uncertain = trade("2026-08-04", "reconcile_required")
+    held_uncertain = trade("2026-08-05", "reconcile_required")
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id)"
+        " VALUES (%s, 3334101), (%s, 3334103)",
+        (owned, held_uncertain),
+    )
+    order = ebull_test_conn.execute(
+        """
+        INSERT INTO orders (instrument_id, action, order_type, requested_amount, status, execution_origin)
+        VALUES (%s, 'BUY', 'MARKET', 100, 'submitted', 'strategy') RETURNING order_id
+        """,
+        (instrument_id,),
+    ).fetchone()
+    assert order is not None
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_trade_orders (strategy_trade_id, order_id, purpose) VALUES (%s, %s, 'entry')",
+        (submitted, order[0]),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id, etoro_instrument_id, instrument_id, event_kind, side,
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+        ) VALUES
+          (3334101, %s, %s, 'open', 'buy', 2, 10, now() - interval '1 day', NULL, NULL, 'etoro_history', '{}'::jsonb),
+          (3334101, %s, %s, 'close', 'sell', 2, 13, now(), 0.5, 6, 'etoro_history', '{}'::jsonb),
+          (3334102, %s, %s, 'close', 'sell', 1, 900, now(), 1, 890, 'etoro_history', '{}'::jsonb)
+        """,
+        (instrument_id,) * 6,
+    )
+
+    response = get_strategy_order_activity(limit=20, conn=ebull_test_conn)
+
+    # The manual position 3334102 in the same instrument never appears.
+    assert [(fill.broker_position_id, fill.event_kind) for fill in response.fills] == [
+        (3334101, "close"),
+        (3334101, "open"),
+    ]
+    close = response.fills[0]
+    assert close.strategy_id == strategy_id
+    assert close.realised_pnl == Decimal("6")
+    assert close.fees == Decimal("0.5")
+    assert close.price_currency == "USD"
+    assert [(entry.strategy_trade_id, entry.trade_status, entry.order_id) for entry in response.pending_entries] == [
+        (uncertain, "reconcile_required", None),
+        (planned, "planned", None),
+        (submitted, "submitted", order[0]),
+    ]
+    assert response.pending_entries[2].order_status == "submitted"
+    assert response.pending_entries_truncated is False
+
+    capped = get_strategy_order_activity(limit=2, conn=ebull_test_conn)
+    assert [entry.strategy_trade_id for entry in capped.pending_entries] == [uncertain, planned]
+    assert capped.pending_entries_truncated is True
 
 
 def test_wealth_history_combines_principal_realised_and_eod_open_marks_without_manual_positions(

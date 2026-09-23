@@ -211,6 +211,12 @@ describe("StrategyPortfolioLens", () => {
       live_quote_instrument_ids: [],
     } as never);
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [] } as never);
+    vi.spyOn(strategiesApi, "fetchStrategyOrderActivity").mockResolvedValue({
+      money_currency: "USD",
+      fills: [],
+      pending_entries: [],
+      pending_entries_truncated: false,
+    });
   });
 
   it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
@@ -718,6 +724,126 @@ describe("StrategyPortfolioLens", () => {
     const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
     await waitFor(() => expect(within(orders).getByRole("button", { name: /retry/i })).toBeInTheDocument());
     expect(within(orders).queryByText(/No engine order is working/)).not.toBeInTheDocument();
+  });
+
+  it("never reports no working engine order while the order-activity read has failed", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOrderActivity).mockRejectedValue(new Error("boom"));
+    renderLens();
+    const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
+    await waitFor(() => expect(within(orders).getByRole("button", { name: /retry/i })).toBeInTheDocument());
+    expect(within(orders).queryByText(/No engine order is working/)).not.toBeInTheDocument();
+    const fills = screen.getByRole("heading", { name: "Recent fills" }).closest("section")!;
+    expect(within(fills).queryByText(/No fill yet/)).not.toBeInTheDocument();
+  });
+
+  it("lists an unfilled alpha entry as a working engine order", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOrderActivity).mockResolvedValue({
+      money_currency: "USD",
+      fills: [],
+      pending_entries: [
+        {
+          strategy_trade_id: 9,
+          strategy_id: "s4",
+          strategy_title: "Reversion",
+          instrument_id: 1,
+          symbol: "AAPL",
+          // ⚠ `planned` WITH an order row: the executor commits the order
+          // before the broker call, so this may already be at the broker.
+          trade_status: "planned",
+          order_id: 77,
+          order_status: "submitted",
+          funded_amount: "100",
+          created_at: "2026-09-23T14:00:00Z",
+        },
+      ],
+      pending_entries_truncated: false,
+    });
+    renderLens();
+    const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
+    expect(await within(orders).findByText(/Buy AAPL · Reversion/)).toBeInTheDocument();
+    expect(within(orders).getByText("Order #77 sent, awaiting fill")).toBeInTheDocument();
+    expect(within(orders).queryByText(/not yet sent/)).not.toBeInTheDocument();
+    expect(within(orders).queryByText(/No engine order is working/)).not.toBeInTheDocument();
+  });
+
+  it("keeps pending entries visible when the positions read fails", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockRejectedValue(new Error("boom"));
+    vi.mocked(strategiesApi.fetchStrategyOrderActivity).mockResolvedValue({
+      money_currency: "USD",
+      fills: [],
+      pending_entries: [
+        {
+          strategy_trade_id: 9,
+          strategy_id: "s4",
+          strategy_title: "Reversion",
+          instrument_id: 1,
+          symbol: "AAPL",
+          trade_status: "reconcile_required",
+          order_id: 77,
+          order_status: "submitted",
+          funded_amount: null,
+          created_at: "2026-09-23T14:00:00Z",
+        },
+      ],
+      pending_entries_truncated: false,
+    });
+    renderLens();
+    const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
+    expect(await within(orders).findByText("Order #77 outcome unknown, reconciling")).toBeInTheDocument();
+    expect(within(orders).queryByText(/No engine order is working/)).not.toBeInTheDocument();
+  });
+
+  it("shows realised P&L on a close fill and a dash on an open", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOrderActivity).mockResolvedValue({
+      money_currency: "USD",
+      fills: [
+        {
+          event_id: 2,
+          broker_position_id: 5,
+          strategy_trade_id: 2,
+          strategy_id: null,
+          strategy_title: "Core / cash mandate",
+          instrument_id: 3417,
+          symbol: "SPY.RTH",
+          event_kind: "close",
+          side: "sell",
+          units: "0.29615500",
+          price: "772.40",
+          price_currency: "USD",
+          executed_at: "2026-09-23T13:35:31Z",
+          realised_pnl: "3.71",
+          fees: "0",
+        },
+        {
+          event_id: 1,
+          broker_position_id: 5,
+          strategy_trade_id: 2,
+          strategy_id: null,
+          strategy_title: "Core / cash mandate",
+          instrument_id: 3417,
+          symbol: "SPY.RTH",
+          event_kind: "open",
+          side: "buy",
+          units: "0.29615500",
+          price: "759.86",
+          price_currency: "USD",
+          executed_at: "2026-09-18T15:36:45Z",
+          realised_pnl: null,
+          fees: null,
+        },
+      ],
+      pending_entries: [],
+      pending_entries_truncated: false,
+    });
+    renderLens();
+    const fills = (await screen.findByRole("heading", { name: "Recent fills" })).closest("section")!;
+    const rows = await within(fills).findAllByRole("row");
+    // header + two fills, newest first
+    expect(rows).toHaveLength(3);
+    expect(within(rows[1]!).getByText("Close SPY.RTH")).toBeInTheDocument();
+    expect(within(rows[1]!).getByText(/3\.71/)).toBeInTheDocument();
+    expect(within(rows[2]!).getByText("Open SPY.RTH")).toBeInTheDocument();
+    expect(within(rows[2]!).getByText("—")).toBeInTheDocument();
   });
 
   it("renders a real empty state instead of a zeroed positions table", async () => {
