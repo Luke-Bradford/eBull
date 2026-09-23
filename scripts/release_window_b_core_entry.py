@@ -27,6 +27,7 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg.pq import TransactionStatus
 
 from app.config import settings
 from app.providers.broker import BrokerProvider
@@ -61,8 +62,14 @@ def _order_account_broker(operator_id: UUID, api_key_id: UUID, user_key_id: UUID
                     )
                 )
                 conn.commit()
-        except CredentialNotFound as exc:
-            raise WindowBRefused("window_b_credentials_unresolved", "no live demo credential") from exc
+        except Exception as exc:
+            # Without an `audit_pool` the loader writes its failed-access audit row
+            # into THIS transaction; commit it so the refusal keeps its forensic trail.
+            if conn.info.transaction_status == TransactionStatus.INTRANS:
+                conn.commit()
+            if isinstance(exc, CredentialNotFound):
+                raise WindowBRefused("window_b_credentials_unresolved", "no live demo credential") from exc
+            raise
     if (loaded[0].id, loaded[1].id) != (api_key_id, user_key_id):
         raise WindowBRefused(
             "window_b_credentials_unresolved",
