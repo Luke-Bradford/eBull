@@ -55,7 +55,10 @@ from app.services.strategy_order_reconciliation import (
 
 logger = logging.getLogger(__name__)
 
-WINDOW_B_RELEASE_RULE_VERSION: Final = "core-window-b-v1"
+#: v2 (#2942 spec, "Shared evaluator hardening"): strict per-alias ids, positive
+#: position / non-negative mirror ids, an aware ``observed_at``. Each change only
+#: adds refusals. The recommendation release derives its own version from this one.
+WINDOW_B_RELEASE_RULE_VERSION: Final = "core-window-b-v2"
 
 #: ``T``: by CONSTRUCTION, not measurement. The repo holds one timed lag (order
 #: ``382257232``, 3.77 s from authority commit to broker ``openDateTime``) and no
@@ -259,12 +262,61 @@ def _strict_int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _entry_instrument_id(entry: dict[str, Any]) -> int | None:
-    documented = entry.get("instrumentId")
-    legacy = entry.get("instrumentID")
-    if documented is not None and legacy is not None and documented != legacy:
+#: Sentinel: no alias of the field is present in the entry.
+_ABSENT: Final = object()
+
+
+def _alias_int(entry: dict[str, Any], *names: str) -> int | None | object:
+    """The field's value across its aliases (#2942 hardening), strictly.
+
+    Returns ``_ABSENT`` when no alias key is present, ``None`` when any PRESENT
+    alias is not a strict ``int`` (``bool``, ``float`` and ``null`` included) or
+    two present aliases disagree, and the ``int`` otherwise.
+    """
+    values = [entry[name] for name in names if name in entry]
+    if not values:
+        return _ABSENT
+    ints = [_strict_int(value) for value in values]
+    if any(value is None for value in ints) or len(set(ints)) != 1:
         return None
-    return _strict_int(documented if documented is not None else legacy)
+    return ints[0]
+
+
+def _entry_instrument_id(entry: dict[str, Any]) -> int | None:
+    value = _alias_int(entry, "instrumentId", "instrumentID")
+    return value if isinstance(value, int) else None
+
+
+def entry_position_id(entry: dict[str, Any]) -> int | None:
+    """A strictly positive ``positionID``, or ``None`` (malformed or absent)."""
+    value = _alias_int(entry, "positionID", "positionId")
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def entry_mirror_id(entry: dict[str, Any]) -> int | None:
+    """``mirrorID`` (absent reads 0, as the provider parser does), ``None`` if malformed."""
+    value = _alias_int(entry, "mirrorID", "mirrorId")
+    if value is _ABSENT:
+        return 0
+    return value if isinstance(value, int) and value >= 0 else None
+
+
+def observed_at_refusal(observed_at: Any) -> str | None:
+    if not isinstance(observed_at, datetime) or observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        return "window_b_witness_observed_at_invalid"
+    return None
+
+
+def witness_arrays(raw_payload: Any) -> dict[str, list[Any]] | None:
+    """The three ``clientPortfolio`` arrays, or ``None`` when any is missing."""
+    portfolio = raw_payload.get("clientPortfolio") if isinstance(raw_payload, dict) else None
+    arrays: dict[str, list[Any]] = {}
+    if isinstance(portfolio, dict):
+        for key in ("positions", "ordersForOpen", "orders"):
+            value = portfolio.get(key)
+            if isinstance(value, list):
+                arrays[key] = value
+    return arrays if len(arrays) == 3 else None
 
 
 def _aware_datetime(value: Any) -> datetime | None:
@@ -303,16 +355,13 @@ def evaluate_window_b_witness(
     own ``openDateTime``.
     """
     refusals: list[str] = []
-    if observed_at < not_before:
+    observed_refusal = observed_at_refusal(observed_at)
+    if observed_refusal is not None:
+        refusals.append(observed_refusal)
+    elif observed_at < not_before:
         refusals.append("window_b_witness_before_deadline")
-    portfolio = raw_payload.get("clientPortfolio") if isinstance(raw_payload, dict) else None
-    arrays: dict[str, list[Any]] = {}
-    if isinstance(portfolio, dict):
-        for key in ("positions", "ordersForOpen", "orders"):
-            value = portfolio.get(key)
-            if isinstance(value, list):
-                arrays[key] = value
-    if len(arrays) != 3:
+    arrays = witness_arrays(raw_payload)
+    if arrays is None:
         refusals.append("window_b_witness_incomplete")
         return WindowBWitness(tuple(refusals), (), (), (), None, None)
 
@@ -331,13 +380,12 @@ def evaluate_window_b_witness(
             if entry_instrument != instrument_id:
                 continue
             on_instrument[key].append(entry)
-            mirror_raw = entry.get("mirrorID", entry.get("mirrorId", 0))
-            mirror_id = _strict_int(mirror_raw)
+            mirror_id = entry_mirror_id(entry)
             if mirror_id is None:
                 refusals.append("window_b_witness_malformed")
                 continue
             if key == "positions":
-                position_id = _strict_int(entry.get("positionID", entry.get("positionId")))
+                position_id = entry_position_id(entry)
                 opened = _aware_datetime(entry.get("openDateTime"))
                 if position_id is None or opened is None:
                     refusals.append("window_b_witness_malformed")

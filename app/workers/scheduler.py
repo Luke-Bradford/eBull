@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString, cast
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -47,7 +48,12 @@ from app.providers.implementations.companies_house import CompaniesHouseFilingsP
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
-from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
+from app.services.broker_credentials import (
+    CredentialNotFound,
+    LoadedCredential,
+    load_credential_for_provider_use,
+    load_credential_with_id_for_provider_use,
+)
 from app.services.canonical_instrument_redirects import JOB_POPULATE_CANONICAL_REDIRECTS
 from app.services.coverage import (
     bootstrap_missing_coverage_rows,
@@ -77,6 +83,7 @@ from app.services.ops_monitor import (
 )
 from app.services.order_client import (
     BrokerSubmissionUncertainError,
+    ConcurrentSubmissionInFlightError,
     PriorSubmissionUnresolvedError,
     SubmissionControlsRevokedError,
     execute_order,
@@ -3234,6 +3241,48 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
     return (api_key, user_key)
 
 
+def _load_etoro_credentials_with_ids(job_name: str) -> tuple[LoadedCredential, LoadedCredential] | None:
+    """``_load_etoro_credentials`` plus each credential's immutable row id (#2942).
+
+    ``execute_approved_orders`` builds its broker from these two objects'
+    plaintext and passes their ids to ``execute_order`` in the same function,
+    so the ids recorded on a claim row are, by construction, those of the
+    account the attempt was sent to. Same transaction and failure model as
+    ``_load_etoro_credentials``, which stays unchanged for its other callers.
+    """
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            from app.security.master_key import ensure_broker_key_loaded
+
+            ensure_broker_key_loaded(conn)
+            op_id = sole_operator_id(conn)
+            api_key = load_credential_with_id_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="api_key",
+                environment=settings.etoro_env,
+                caller=job_name,
+            )
+            conn.commit()  # api_key audit row durable
+            user_key = load_credential_with_id_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="user_key",
+                environment=settings.etoro_env,
+                caller=job_name,
+            )
+            conn.commit()  # user_key audit row durable
+    except (NoOperatorError, AmbiguousOperatorError) as exc:
+        logger.error("%s: %s, skipping", job_name, exc)
+        return None
+    except CredentialNotFound as exc:
+        logger.error("%s: %s, skipping", job_name, exc)
+        return None
+    return (api_key, user_key)
+
+
 def _record_prereq_skip(job_name: str, detail: str) -> None:
     """Write a PREREQ_SKIP-marked job_runs row for a job that cannot run
     due to a missing prerequisite (credentials, API key, etc.).
@@ -5568,18 +5617,22 @@ def execute_approved_orders() -> None:
         # When credentials are absent broker stays None — execute_order
         # reads enable_live_trading from runtime_config and generates
         # synthetic fills when live trading is disabled.
-        creds = _load_etoro_credentials(JOB_EXECUTE_APPROVED_ORDERS)
+        creds = _load_etoro_credentials_with_ids(JOB_EXECUTE_APPROVED_ORDERS)
         broker: EtoroBrokerProvider | None = None
         broker_ctx: EtoroBrokerProvider | None = None
+        # #2942 Delta 3 construction contract: the ids passed to execute_order
+        # are those of the SAME two objects whose plaintext built the broker.
+        broker_credential_ids: tuple[UUID, UUID] | None = None
 
         if creds is not None:
-            api_key, user_key = creds
+            api_cred, user_cred = creds
             broker_ctx = EtoroBrokerProvider(
-                api_key=api_key,
-                user_key=user_key,
+                api_key=api_cred.plaintext,
+                user_key=user_cred.plaintext,
                 env=settings.etoro_env,
             )
             broker = broker_ctx.__enter__()
+            broker_credential_ids = (api_cred.id, user_cred.id)
 
         try:
             executed = 0
@@ -5603,8 +5656,13 @@ def execute_approved_orders() -> None:
                             # when no broker was opened, which is also the
                             # branch that never writes an intent row.
                             broker_env=settings.etoro_env if broker is not None else None,
+                            broker_credential_ids=broker_credential_ids,
                         )
-                        conn.commit()
+                        # #2942: a committed execution whose key cleanup failed
+                        # comes back with its connection CLOSED (so no key
+                        # survives). Its step-4/5 work already committed.
+                        if not conn.closed:
+                            conn.commit()
                     if result.outcome == "filled":
                         executed += 1
                         logger.info(
@@ -5651,6 +5709,17 @@ def execute_approved_orders() -> None:
                         "execute_approved_orders: recommendation_id=%d parked — unresolved attempt order_id=%s",
                         rec_id,
                         exc.order_id,
+                    )
+                except ConcurrentSubmissionInFlightError as exc:
+                    # #2942 Delta 4: another session holds this recommendation's
+                    # submission key (a live submitter, the pending-order poller or
+                    # an attended release). Nothing was submitted; the next pass
+                    # re-evaluates. Not a broker failure.
+                    unresolved += 1
+                    logger.warning(
+                        "execute_approved_orders: recommendation_id=%d skipped — %s",
+                        rec_id,
+                        exc,
                     )
                 except BrokerSubmissionUncertainError as exc:
                     # #2942: the broker call's outcome is unknown. The intent

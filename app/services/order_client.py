@@ -25,13 +25,16 @@ Demo mode:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import socket
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Final, Literal, LiteralString
+from typing import Any, Final, Literal, LiteralString, NoReturn
 from uuid import UUID, uuid4
 
 import psycopg
@@ -144,7 +147,17 @@ def _load_approved_recommendation(
     if row is None:
         raise ValueError(f"recommendation_id={recommendation_id} not found")
     if row["status"] != "approved":
-        raise ValueError(f"recommendation_id={recommendation_id} status={row['status']!r}; expected 'approved'")
+        # #2942: an existing recommendation that has moved on is a refusal, not a
+        # programmer error. An attended window-B release can make it terminal
+        # between the scheduler's selection and this read, and that must count
+        # `refused`, not `failed`.
+        _refuse_not_approved(
+            conn,
+            recommendation_id=recommendation_id,
+            instrument_id=int(row["instrument_id"]),
+            status=str(row["status"]),
+            now=_utcnow(),
+        )
     return dict(row)
 
 
@@ -547,6 +560,14 @@ def _synthetic_fill(
 _SUBMITTED_INTENT_PAYLOAD: dict[str, Any] = {"intent": "submitted_pre_broker_call"}
 
 
+class _ClaimCredentialsRevoked(Exception):
+    """The claim INSERT matched no row: a recorded credential is revoked (#2942)."""
+
+    def __init__(self, credential_ids: tuple[UUID, UUID]) -> None:
+        super().__init__(f"broker credentials {credential_ids[0]} / {credential_ids[1]} are not both unrevoked")
+        self.credential_ids = credential_ids
+
+
 def _persist_submitted_intent(
     conn: psycopg.Connection[Any],
     *,
@@ -560,6 +581,7 @@ def _persist_submitted_intent(
     order_params: OrderParams | None,
     exit_lot: ExitLot | None,
     now: datetime,
+    broker_credential_ids: tuple[UUID, UUID] | None = None,
 ) -> tuple[int, UUID]:
     """Insert a durable order-intent row BEFORE the broker call (#243).
 
@@ -589,6 +611,14 @@ def _persist_submitted_intent(
     response, because the environment is a property of the ATTEMPT — it has to
     survive the crash this row exists to survive. ``None`` writes NULL, which
     the poller reads as "not recorded" and polls exactly as it does today.
+
+    #2942 (sql/412): ``broker_credential_ids`` = ``(api_key id, user_key id)``
+    of the plaintext the broker was built with — the account this attempt is
+    sent to, which the attended window-B release binds its witness to. The
+    INSERT is conditional on both rows being unrevoked IN THE SAME STATEMENT,
+    and raises ``_ClaimCredentialsRevoked`` when they are not, so the caller
+    can refuse pre-I/O without taking the claim. ``None`` ids (the non-live path, and direct test
+    callers) write NULL and skip the condition.
     """
     request_id = uuid4()
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -600,14 +630,20 @@ def _persist_submitted_intent(
                  status, broker_order_ref, raw_payload_json, created_at,
                  recommendation_request_id, recommendation_submission_phase,
                  broker_environment, recommendation_exit_position_id,
-                 recommendation_exit_units, recommendation_submission_context)
-            VALUES
-                (%(iid)s, %(rid)s, %(did)s,
+                 recommendation_exit_units, recommendation_submission_context,
+                 recommendation_api_key_credential_id, recommendation_user_key_credential_id)
+            SELECT
+                 %(iid)s, %(rid)s, %(did)s,
                  %(action)s, %(otype)s, %(amt)s, %(units)s,
                  'submitted', NULL, %(payload)s, %(now)s,
                  %(request_id)s, 'claim_committed',
                  %(broker_env)s, %(exit_position_id)s,
-                 %(exit_units)s, %(context)s)
+                 %(exit_units)s, %(context)s,
+                 %(api_cred)s::uuid, %(user_cred)s::uuid
+            WHERE %(api_cred)s::uuid IS NULL
+               OR (SELECT count(*) FROM broker_credentials bc
+                   WHERE bc.id IN (%(api_cred)s::uuid, %(user_cred)s::uuid)
+                     AND bc.revoked_at IS NULL) = 2
             RETURNING order_id
             """,
             {
@@ -625,10 +661,14 @@ def _persist_submitted_intent(
                 "exit_position_id": None if exit_lot is None else exit_lot.position_id,
                 "exit_units": None if exit_lot is None else exit_lot.units,
                 "context": Jsonb(order_params_context(order_params)),
+                "api_cred": None if broker_credential_ids is None else broker_credential_ids[0],
+                "user_cred": None if broker_credential_ids is None else broker_credential_ids[1],
             },
         )
         row = cur.fetchone()
     if row is None:
+        if broker_credential_ids is not None:
+            raise _ClaimCredentialsRevoked(broker_credential_ids)
         raise RuntimeError("orders INSERT (submitted intent) returned no row")
     return int(row["order_id"]), request_id
 
@@ -1283,6 +1323,22 @@ class SubmissionControlsRevokedError(RuntimeError):
         self.failed_rules = failed_rules
 
 
+class RecommendationNoLongerApprovedError(SubmissionControlsRevokedError):
+    """The recommendation stopped being ``approved`` before this submission (#2942).
+
+    Raised at step 1, and again under the per-recommendation key immediately
+    before the claim, so a paused executor holding a stale approval cannot
+    submit after an attended window-B release has made the recommendation
+    terminal. A ``SubmissionControlsRevokedError`` because it is the same kind
+    of statement — the authority to submit no longer holds — and the scheduler
+    already counts that class ``refused``. Always raised after a committed
+    ``_write_refusal_audit`` row, like every raise of its parent.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, ["recommendation_no_longer_approved"])
+
+
 class PriorSubmissionUnresolvedError(RuntimeError):
     """This recommendation already holds an unresolved submission claim (#2942).
 
@@ -1497,6 +1553,7 @@ def _claim_submission(
     order_params: OrderParams | None,
     exit_lot: ExitLot | None,
     now: datetime,
+    broker_credential_ids: tuple[UUID, UUID] | None = None,
 ) -> tuple[int, UUID]:
     """Take the single submission claim for this recommendation (#2942).
 
@@ -1509,6 +1566,11 @@ def _claim_submission(
     submission previously left the recommendation ``approved``, and the next
     scheduler pass minted a fresh intent and a fresh ``x-request-id`` and
     submitted a SECOND economic order.
+
+    Raises ``SubmissionControlsRevokedError`` (audited, no claim taken) when a
+    recorded ``broker_credential_ids`` row is revoked at INSERT time (#2942,
+    sql/412): the attended release could never bind its witness to that
+    account, so the attempt must not start.
     """
     try:
         order_id, request_id = _persist_submitted_intent(
@@ -1523,7 +1585,24 @@ def _claim_submission(
             order_params=order_params,
             exit_lot=exit_lot,
             now=now,
+            broker_credential_ids=broker_credential_ids,
         )
+    except _ClaimCredentialsRevoked as exc:
+        conn.rollback()
+        explanation = f"Submission refused before broker I/O — {exc}; no claim taken"
+        _write_refusal_audit(
+            conn,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            explanation=explanation,
+            evidence={
+                "refusal": "broker_credential_revoked",
+                "api_key_credential_id": str(exc.credential_ids[0]),
+                "user_key_credential_id": str(exc.credential_ids[1]),
+            },
+            now=now,
+        )
+        raise SubmissionControlsRevokedError(explanation, ["broker_credential_revoked"]) from exc
     except psycopg.errors.UniqueViolation as exc:
         # Match the claim index by name. Catching every UniqueViolation here
         # would silently reinterpret an unrelated constraint failure as "a
@@ -1637,13 +1716,147 @@ def _release_claim_after_pre_io_refusal(
     )
 
 
+#: #2942: the claim index's own predicate (sql/375), for one recommendation.
+#: Run under the per-recommendation key by the branches that do not INSERT a
+#: claim (synthetic, live no-lot EXIT) and ahead of the claim INSERT on the live
+#: branches, so an outstanding W/U attempt is never overtaken.
+_OUTSTANDING_CLAIM_SQL: Final[LiteralString] = """
+    SELECT order_id, status, recommendation_request_id
+    FROM orders
+    WHERE recommendation_id = %(rid)s
+      AND status IN ('submitted', 'pending', 'uncertain')
+    ORDER BY order_id
+    LIMIT 1
+"""
+
+#: #2942 Delta 4: the recommendation's status, re-read under the key.
+_RECOMMENDATION_STATUS_SQL: Final[LiteralString] = (
+    "SELECT status FROM trade_recommendations WHERE recommendation_id = %(rid)s"
+)
+
+
+def _refuse_not_approved(
+    conn: psycopg.Connection[Any],
+    *,
+    recommendation_id: int,
+    instrument_id: int,
+    status: str | None,
+    now: datetime,
+) -> NoReturn:
+    """Audit and raise ``RecommendationNoLongerApprovedError`` (#2942 Delta 4)."""
+    explanation = f"Submission refused — recommendation {recommendation_id} status is {status!r}, no longer 'approved'"
+    if conn.info.transaction_status == TransactionStatus.INERROR:
+        conn.rollback()
+    _write_refusal_audit(
+        conn,
+        instrument_id=instrument_id,
+        recommendation_id=recommendation_id,
+        explanation=explanation,
+        evidence={"refusal": "recommendation_no_longer_approved", "status": status},
+        now=now,
+    )
+    logger.warning("execute_order: %s", explanation)
+    raise RecommendationNoLongerApprovedError(explanation)
+
+
+def _assert_no_outstanding_claim(
+    conn: psycopg.Connection[Any],
+    *,
+    recommendation_id: int,
+    instrument_id: int,
+    now: datetime,
+) -> None:
+    """Refuse, audited, while any attempt holds this recommendation's claim (#2942)."""
+    held = conn.execute(_OUTSTANDING_CLAIM_SQL, {"rid": recommendation_id}).fetchone()
+    if held is None:
+        return
+    held_order_id = int(held[0])
+    explanation = (
+        f"Submission refused — recommendation {recommendation_id} already holds an "
+        f"unresolved submission claim (order_id={held_order_id}); resolve it before re-submitting"
+    )
+    _write_refusal_audit(
+        conn,
+        instrument_id=instrument_id,
+        recommendation_id=recommendation_id,
+        explanation=explanation,
+        evidence={
+            "refusal": "prior_submission_unresolved",
+            "held_order_id": held_order_id,
+            "held_status": str(held[1]),
+            "held_request_id": None if held[2] is None else str(held[2]),
+        },
+        now=now,
+    )
+    logger.error(
+        "execute_order: refusing recommendation_id=%d — unresolved attempt order_id=%d",
+        recommendation_id,
+        held_order_id,
+    )
+    raise PriorSubmissionUnresolvedError(explanation, held_order_id)
+
+
+def _assert_still_approved(
+    conn: psycopg.Connection[Any],
+    *,
+    recommendation_id: int,
+    instrument_id: int,
+    now: datetime,
+) -> None:
+    """Delta 4: re-read the status under the key; refuse unless still ``approved``.
+
+    ``execute_order`` read ``approved`` at step 1, before the key. An attended
+    window-B release changes the status only while holding the same key, so
+    under it this read sees the pre- or the post-release status, never a torn
+    one, and a paused executor cannot submit a stale approval.
+    """
+    row = conn.execute(_RECOMMENDATION_STATUS_SQL, {"rid": recommendation_id}).fetchone()
+    status = None if row is None else str(row[0])
+    if status != "approved":
+        _refuse_not_approved(
+            conn,
+            recommendation_id=recommendation_id,
+            instrument_id=instrument_id,
+            status=status,
+            now=now,
+        )
+
+
+#: A ``repr`` longer than this is not stored; the park records
+#: ``{"repr_truncated": true}`` instead, which the attended release's payload
+#: scan refuses by name (spec Delta 1).
+_PARK_REPR_MAX_CHARS: Final = 64 * 1024
+
+
+def unexpected_exception_park_payload(exc: BaseException) -> dict[str, Any]:
+    """The evidence an unexpected provider exception is parked with (#2942 Delta 1).
+
+    ``str``, ``repr`` and any ``raw_payload`` the exception carried, untruncated,
+    so the release's reference scan sees everything it said. A ``raw_payload``
+    that is not JSON-serialisable is stored as its ``repr``.
+    """
+    exc_repr = repr(exc)
+    raw = getattr(exc, "raw_payload", None)
+    try:
+        json.dumps(raw)
+    except TypeError, ValueError:
+        raw = repr(raw)
+    return {
+        "exception": type(exc).__name__,
+        "repr": exc_repr if len(exc_repr) <= _PARK_REPR_MAX_CHARS else {"repr_truncated": True},
+        "str": str(exc),
+        "raw_payload": raw,
+    }
+
+
 def _park_uncertain_submission(
     conn: psycopg.Connection[Any],
     *,
     order_id: int,
     instrument_id: int,
     recommendation_id: int,
-    exc: BrokerOrderSubmissionUncertain,
+    payload: Any,
+    message: str,
     now: datetime,
 ) -> None:
     """Park an attempt whose outcome the broker never told us, and COMMIT.
@@ -1656,15 +1869,23 @@ def _park_uncertain_submission(
 
     No fill, position or cash-ledger write happens on this path — we do not
     know that anything executed.
+
+    #2942 (sql/412): the same UPDATE records ``recommendation_parked_at`` from
+    ``clock_timestamp()`` and ``recommendation_park_message`` = ``message``
+    (``str(exc)``). This runs only after the provider call has returned by
+    raising, so its sends are over: the park commit IS the attended release's
+    sends-ended proof, and the two columns are written together or not at all.
     """
     with conn.transaction():
         conn.execute(
             """
             UPDATE orders
-            SET status = 'uncertain', raw_payload_json = %(payload)s
+            SET status = 'uncertain', raw_payload_json = %(payload)s,
+                recommendation_parked_at = clock_timestamp(),
+                recommendation_park_message = %(message)s
             WHERE order_id = %(oid)s
             """,
-            {"oid": order_id, "payload": Jsonb(exc.raw_payload)},
+            {"oid": order_id, "payload": Jsonb(payload), "message": message},
         )
         conn.execute(
             "UPDATE trade_recommendations SET status = 'execution_pending' WHERE recommendation_id = %(rid)s",
@@ -1674,15 +1895,15 @@ def _park_uncertain_submission(
         conn,
         instrument_id=instrument_id,
         recommendation_id=recommendation_id,
-        explanation=f"Submission outcome unknown — order_id={order_id} parked as uncertain: {exc}",
-        evidence={"refusal": "broker_submission_uncertain", "order_id": order_id, "response": exc.raw_payload},
+        explanation=f"Submission outcome unknown — order_id={order_id} parked as uncertain: {message}",
+        evidence={"refusal": "broker_submission_uncertain", "order_id": order_id, "response": payload},
         now=now,
     )
     logger.error(
         "execute_order: recommendation_id=%d order_id=%d parked uncertain — %s",
         recommendation_id,
         order_id,
-        exc,
+        message,
     )
 
 
@@ -1708,18 +1929,26 @@ def _concurrent_submission_error(recommendation_id: int, consequence: str) -> Co
     )
 
 
+def _close_quietly(conn: psycopg.Connection[Any]) -> None:
+    """Close ``conn`` so Postgres drops every session lock its backend held."""
+    try:
+        conn.close()
+    except Exception:
+        logger.exception("closing a connection after an advisory-lock failure failed")
+
+
 @contextmanager
 def _recommendation_submission_try_lock(conn: psycopg.Connection[Any], recommendation_id: int) -> Iterator[bool]:
     """Take the per-recommendation submission key without waiting (#2942 half 2).
 
     ⚠⚠ What success proves, exactly: **no OTHER session holds the key**. Advisory
     locks are reentrant, so ``execute_order`` — which holds it across the claim,
-    the marker and the provider call — succeeds on its own nested try inside
-    ``terminalise_unsubmitted_recommendation_attempt``. That is correct rather
-    than a hole: the proof happens at ``execute_order``'s own acquire, which
-    fails if another session holds the key, and the lock is held continuously
-    from that instant to the end of the span. But it is a reasoned exemption and
-    is asserted by test, not assumed.
+    the marker, the provider call and the step-4/5 commit — succeeds on its own
+    nested try inside ``terminalise_unsubmitted_recommendation_attempt``. That is
+    correct rather than a hole: the proof happens at ``execute_order``'s own
+    acquire, which fails if another session holds the key, and the lock is held
+    continuously from that instant to the end of the span. But it is a reasoned
+    exemption and is asserted by test, not assumed.
 
     The release decrements the reference count, so an outer holder keeps the key.
 
@@ -1728,34 +1957,40 @@ def _recommendation_submission_try_lock(conn: psycopg.Connection[Any], recommend
     also outlives the request if it is not released, and ``execute_order``'s
     connection comes from a pool, so every exit path releases in ``finally``.
 
-    ⚠ A FAILED release only logs, deliberately (bot NITPICK, PR #3165). Raising
-    there would replace the body's exception — the one that says what actually
-    went wrong — with a cleanup error. The residual is bounded and points the
-    safe way: the key stays held until that backend goes away, and a later
-    submission for the same recommendation then *refuses*
-    (``ConcurrentSubmissionInFlightError``) rather than placing a second order.
-    No metrics surface exists in this module to emit to; the ``logger.error``
-    matches the landed core equivalent (``_core_submission_try_lock``), and
-    inventing a second reporting channel for one line is not this slice's work.
+    ⚠⚠ A lock-path failure CLOSES the connection (#2942 spec Delta 4). If the
+    acquire ``execute``/``fetchone``, the acquire commit, the cleanup
+    ``rollback()`` or the unlock raises, the key's state on this backend is
+    unknown — ``pg_try_advisory_lock`` takes the key server-side before its
+    result is consumed. Closing makes Postgres drop every session lock the
+    backend held, so no key can leak onto a reused connection. The BODY's
+    exception, when there is one, is the one that propagates; with no body
+    exception the cleanup error propagates, after the close, and a caller whose
+    work already committed (``execute_order``) logs it and keeps its result.
+    An unlock that returns ``false`` (ownership lost) only logs, as before.
     """
     key = (RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS, recommendation_id)
-    acquired = conn.execute("SELECT pg_try_advisory_lock(%s, %s)", key).fetchone()
-    conn.commit()
+    try:
+        acquired = conn.execute("SELECT pg_try_advisory_lock(%s, %s)", key).fetchone()
+        conn.commit()
+    except BaseException:
+        _close_quietly(conn)
+        raise
     if acquired != (True,):
         yield False
         return
+    body_raised = False
     try:
         yield True
+    except BaseException:
+        body_raised = True
+        raise
     finally:
-        # Only READS can be outstanding here — every write inside the span
-        # commits (the claim, the marker, a refusal audit) — so this rollback
-        # discards nothing. It exists so the unlock below cannot run inside a
-        # dirty or aborted transaction and silently fail to release the key.
-        if conn.info.transaction_status != TransactionStatus.IDLE:
-            conn.rollback()
-        # Never let a release failure replace the body's exception, and never
-        # leave the key held on the way out of a pooled connection.
         try:
+            # Only READS can be outstanding here — every write inside the span
+            # commits — so this rollback discards nothing. It exists so the
+            # unlock below cannot run inside a dirty or aborted transaction.
+            if conn.info.transaction_status != TransactionStatus.IDLE:
+                conn.rollback()
             released = conn.execute("SELECT pg_advisory_unlock(%s, %s)", key).fetchone()
             conn.commit()
             if released != (True,):
@@ -1764,7 +1999,10 @@ def _recommendation_submission_try_lock(conn: psycopg.Connection[Any], recommend
                     recommendation_id,
                 )
         except Exception:
-            logger.exception("releasing the recommendation submission advisory lock failed")
+            logger.exception("releasing the recommendation submission advisory lock failed; closing the connection")
+            _close_quietly(conn)
+            if not body_raised:
+                raise
 
 
 def mark_recommendation_submission_entered(conn: psycopg.Connection[Any], *, order_id: int) -> None:
@@ -1779,14 +2017,22 @@ def mark_recommendation_submission_entered(conn: psycopg.Connection[Any], *, ord
     ⚠ Its own commit, separate from the claim's. Folding the two together would
     make every committed row read the same and the discriminator would be
     vacuous.
+
+    #2942 (sql/412): the same UPDATE records WHO entered the verb and WHEN —
+    ``clock_timestamp()``, ``os.getpid()``, ``socket.gethostname()`` — so the
+    attended window-B release can prove the sender dead by ESRCH and time its
+    wait from this commit, as ``mark_core_submission_entered`` does for core.
     """
     conn.execute(
         """
         UPDATE orders
-        SET recommendation_submission_phase = 'broker_verb_entered'
+        SET recommendation_submission_phase = 'broker_verb_entered',
+            recommendation_submission_entered_at = clock_timestamp(),
+            recommendation_submission_entered_pid = %(sender_pid)s,
+            recommendation_submission_entered_host = %(sender_host)s
         WHERE order_id = %(oid)s
         """,
-        {"oid": order_id},
+        {"oid": order_id, "sender_pid": os.getpid(), "sender_host": socket.gethostname()},
     )
     conn.commit()
 
@@ -1895,12 +2141,21 @@ def terminalise_unsubmitted_recommendation_attempt(
         return order_id
 
 
+class _RecommendationStatusMoved(Exception):
+    """The step-5 compare-and-set on ``approved`` missed (#2942 Delta 4)."""
+
+    def __init__(self, status: str | None) -> None:
+        super().__init__(f"recommendation status moved to {status!r}")
+        self.status = status
+
+
 def execute_order(
     conn: psycopg.Connection[Any],
     recommendation_id: int,
     decision_id: int,
     broker: BrokerProvider | None = None,
     broker_env: str | None = None,
+    broker_credential_ids: tuple[UUID, UUID] | None = None,
 ) -> ExecuteResult:
     """
     Execute a guard-approved order.
@@ -1919,6 +2174,22 @@ def execute_order(
          Demo / live-EXIT-no-position: INSERT a fresh order row.
       5. If filled: persist fill, update position, record cash ledger entry.
       DB writes in steps 4-5 are inside a single transaction.
+
+    #2942 (spec Delta 4): on EVERY branch — live claim, live no-lot EXIT and
+    synthetic — the per-recommendation key is taken once, before any check, and
+    released only after the step-4/5 transaction has made a TOP-LEVEL commit.
+    Under the key the order is: release a provable window-A row; refuse an
+    outstanding claim (``PriorSubmissionUnresolvedError``); refuse a status
+    that is no longer ``approved`` (``RecommendationNoLongerApprovedError``).
+    A check alone would race a claim or an attended release committing after
+    it; the key's span is what serialises them. If the key's cleanup fails
+    after the step-4/5 commit returned, the helper has closed the connection
+    (so no key survives) and the committed result is returned regardless.
+
+    ``broker_credential_ids`` = ``(api_key id, user_key id)`` of the plaintext
+    ``broker`` was built with. REQUIRED on the live path, like ``broker_env``,
+    and recorded on the claim row (sql/412) so the attended window-B release
+    can bind its witness to the account the attempt was sent to.
 
     No external I/O is performed inside any DB transaction.
 
@@ -2007,12 +2278,6 @@ def execute_order(
 
     is_live = runtime.enable_live_trading
 
-    quote_data: dict[str, Any] | None = None
-    submitted_order_id: int | None = None
-    # #3006: set only on the live EXIT path, and only once a lot is resolved.
-    exit_lot: ExitLot | None = None
-    exit_completion: dict[str, Any] | None = None
-
     if is_live:
         if broker is None:
             raise ValueError("enable_live_trading is True but no broker provider supplied")
@@ -2028,136 +2293,157 @@ def execute_order(
                 "enable_live_trading is True but no broker_env supplied — a live order whose "
                 "environment is not recorded can never be reconciled by the pending-order poller"
             )
-        # #2942 half 2. The evidence lock. Session-scoped and held across the
-        # claim commit, the marker commit and the provider call, so a row still
-        # reading 'claim_committed' while this key is free is one whose submitter
-        # is gone -- Postgres drops the key when the backend dies. Released as
-        # soon as the provider call returns: from that instant the row reads
-        # 'broker_verb_entered' and is no longer terminalisable by anyone.
+        # #2942 Delta 3: REQUIRED on the live path and refused here, before the
+        # key and the claim, exactly as `broker_env` is. An attempt whose account
+        # is not recorded could never be released by the attended window-B act.
+        if broker_credential_ids is None or len(broker_credential_ids) != 2 or None in broker_credential_ids:
+            raise ValueError(
+                "enable_live_trading is True but no broker_credential_ids supplied — a live order whose "
+                "account is not recorded can never be released by the attended window-B act"
+            )
+
+    result: ExecuteResult | None = None
+    try:
+        # #2942 half 2 + Delta 4. The evidence key, session-scoped and held from
+        # before the first check to the step-4/5 commit, on every branch. A row
+        # still reading 'claim_committed' while this key is free is one whose
+        # submitter is gone -- Postgres drops the key when the backend dies.
         with _recommendation_submission_try_lock(conn, recommendation_id) as submission_idle:
             if not submission_idle:
                 raise _concurrent_submission_error(
                     recommendation_id, "refusing rather than risking a second economic order"
                 )
-            # Release a claim whose broker verb was provably never entered, so a
-            # process death inside the window below does not park this
-            # recommendation for ever. Returns None in the ordinary case.
-            terminalise_unsubmitted_recommendation_attempt(conn, recommendation_id=recommendation_id, now=now)
-            if action == "EXIT":
-                exit_lot = _load_exit_lot(conn, instrument_id)
-                if exit_lot is None:
-                    # Pre-024 position without broker_positions row, or no
-                    # broker-closeable LONG lot — a synthetic-id row or a short
-                    # lot is not something this path can close (#3006) — or every
-                    # candidate lot belongs to the strategy engine (#3025).
-                    # Distinguish the last case: it is the only one an operator
-                    # fixes by closing through the engine rather than by waiting
-                    # for a sync.
-                    engine_owned = _engine_owned_long_lot_count(conn, instrument_id)
-                    if engine_owned:
-                        error = (
-                            f"All {engine_owned} broker-closeable long broker_positions rows for "
-                            f"instrument {instrument_id} are owned by the strategy engine "
-                            f"(strategy_position_ownership.status='active'); a recommendation EXIT "
-                            f"must not close an engine-owned lot — close it through the engine"
-                        )
-                    else:
-                        error = f"No broker-closeable long broker_positions row for instrument {instrument_id}"
-                    logger.error("EXIT for instrument_id=%d: %s", instrument_id, error)
-                    broker_result = BrokerOrderResult(
-                        broker_order_ref=None,
-                        status="failed",
-                        filled_price=None,
-                        filled_units=None,
-                        fees=Decimal("0"),
-                        raw_payload={"error": error, "engine_owned_long_lots": engine_owned},
+            result = _execute_under_key(
+                conn,
+                recommendation_id=recommendation_id,
+                decision_id=decision_id,
+                instrument_id=instrument_id,
+                action=action,
+                requested_amount=requested_amount,
+                requested_units=requested_units,
+                order_params=order_params,
+                is_live=is_live,
+                broker=broker,
+                broker_env=broker_env,
+                broker_credential_ids=broker_credential_ids,
+                now=now,
+            )
+    except Exception:
+        if result is None:
+            raise
+        # The step-4/5 transaction committed; only the key's cleanup failed, and
+        # the helper closed the connection so the key cannot survive. A filled or
+        # pending order must never be counted `failed` for an unlock hiccup.
+        logger.exception(
+            "execute_order: recommendation_id=%d order_id=%d committed, but releasing the submission key "
+            "failed; the connection was closed and the committed result stands",
+            recommendation_id,
+            result.order_id,
+        )
+    assert result is not None
+    return result
+
+
+def _execute_under_key(
+    conn: psycopg.Connection[Any],
+    *,
+    recommendation_id: int,
+    decision_id: int,
+    instrument_id: int,
+    action: str,
+    requested_amount: Decimal | None,
+    requested_units: Decimal | None,
+    order_params: OrderParams | None,
+    is_live: bool,
+    broker: BrokerProvider | None,
+    broker_env: str | None,
+    broker_credential_ids: tuple[UUID, UUID] | None,
+    now: datetime,
+) -> ExecuteResult:
+    """Steps 3-5 of ``execute_order``, with the per-recommendation key HELD.
+
+    Returns only after the step-4/5 transaction has made a top-level commit.
+    """
+    quote_data: dict[str, Any] | None = None
+    submitted_order_id: int | None = None
+    # #3006: set only on the live EXIT path, and only once a lot is resolved.
+    exit_lot: ExitLot | None = None
+    exit_completion: dict[str, Any] | None = None
+
+    # #2942 Delta 4: the three checks, under the key, on every branch.
+    # Window A first, so a provable never-submitted row is released rather than
+    # wedging the claim check behind it.
+    terminalise_unsubmitted_recommendation_attempt(conn, recommendation_id=recommendation_id, now=now)
+    _assert_no_outstanding_claim(conn, recommendation_id=recommendation_id, instrument_id=instrument_id, now=now)
+    _assert_still_approved(conn, recommendation_id=recommendation_id, instrument_id=instrument_id, now=now)
+
+    if is_live:
+        assert broker is not None  # execute_order refused a live call without one
+        if action == "EXIT":
+            exit_lot = _load_exit_lot(conn, instrument_id)
+            if exit_lot is None:
+                # Pre-024 position without broker_positions row, or no
+                # broker-closeable LONG lot — a synthetic-id row or a short
+                # lot is not something this path can close (#3006) — or every
+                # candidate lot belongs to the strategy engine (#3025).
+                # Distinguish the last case: it is the only one an operator
+                # fixes by closing through the engine rather than by waiting
+                # for a sync.
+                engine_owned = _engine_owned_long_lot_count(conn, instrument_id)
+                if engine_owned:
+                    error = (
+                        f"All {engine_owned} broker-closeable long broker_positions rows for "
+                        f"instrument {instrument_id} are owned by the strategy engine "
+                        f"(strategy_position_ownership.status='active'); a recommendation EXIT "
+                        f"must not close an engine-owned lot — close it through the engine"
                     )
                 else:
-                    # #3006: record what is actually asked of the broker. Step 2
-                    # sized this from ``positions.current_units``, the aggregate
-                    # across every open lot, while the call below closes exactly
-                    # ONE lot — so the aggregate described a request the broker
-                    # never received.
-                    #
-                    # ⚠ Descriptive only. ``close_position`` is called with
-                    # ``units_to_deduct=None``, i.e. close the lot WHOLE; sending a
-                    # units figure derived from a possibly-stale ``broker_positions``
-                    # row would only add a rejection mode.
-                    requested_units = exit_lot.units
-                    exit_pos_id = exit_lot.position_id
-                    # ``broker_positions.units`` is numeric(20,8) and
-                    # ``orders.requested_units`` is numeric(18,6), so the column
-                    # rounds this on the way in. Tolerable — nothing consumes it as
-                    # a control input — but a SILENT loss of precision in an audit
-                    # record is the part worth refusing, so say so when it actually
-                    # happens rather than only in a comment. Decimal compares by
-                    # VALUE, so a lot that is merely stored with trailing zeros
-                    # (1305.05709600) does not trip this; one with genuine 7th/8th
-                    # decimals does.
-                    if requested_units != requested_units.quantize(_REQUESTED_UNITS_STEP):
-                        logger.warning(
-                            "execute_order: EXIT lot %d units %s do not survive the "
-                            "numeric(18,6) orders column — recording %s",
-                            exit_lot.position_id,
-                            requested_units,
-                            requested_units.quantize(_REQUESTED_UNITS_STEP),
-                        )
-                    # #243: persist the order intent BEFORE the broker
-                    # side effect, then commit so a crash mid-call leaves
-                    # a durable ``status='submitted'`` row that a
-                    # reconciler can chase against the broker.
-                    # #2942: that row now also carries the durable
-                    # ``x-request-id`` and takes the single submission claim.
-                    submitted_order_id, request_id = _claim_submission(
-                        conn,
-                        instrument_id=instrument_id,
-                        recommendation_id=recommendation_id,
-                        decision_id=decision_id,
-                        action=action,
-                        requested_amount=requested_amount,
-                        requested_units=requested_units,
-                        broker_env=broker_env,
-                        # What is SENT: `close_position` below takes no OrderParams,
-                        # so none are recorded, whatever the recommendation carries.
-                        order_params=None,
-                        exit_lot=exit_lot,
-                        now=now,
-                    )
-                    # #2942 half 2: its OWN commit, immediately before the verb.
-                    # Everything after this line -- the unattended guard, the
-                    # credential read, body construction, ResilientClient's
-                    # throttle -- is on the unprovable side, which is why the
-                    # value means "may subsequently have been entered".
-                    mark_recommendation_submission_entered(conn, order_id=submitted_order_id)
-                    try:
-                        broker_result = broker.close_position(
-                            exit_pos_id,
-                            instrument_id=instrument_id,
-                            request_id=request_id,
-                        )
-                    except UnattendedExecutionRefused as exc:
-                        _release_claim_after_pre_io_refusal(
-                            conn,
-                            order_id=submitted_order_id,
-                            instrument_id=instrument_id,
-                            recommendation_id=recommendation_id,
-                            reason=str(exc),
-                            now=now,
-                        )
-                        raise
-                    except BrokerOrderSubmissionUncertain as exc:
-                        _park_uncertain_submission(
-                            conn,
-                            order_id=submitted_order_id,
-                            instrument_id=instrument_id,
-                            recommendation_id=recommendation_id,
-                            exc=exc,
-                            now=now,
-                        )
-                        raise BrokerSubmissionUncertainError(str(exc), submitted_order_id) from exc
+                    error = f"No broker-closeable long broker_positions row for instrument {instrument_id}"
+                logger.error("EXIT for instrument_id=%d: %s", instrument_id, error)
+                broker_result = BrokerOrderResult(
+                    broker_order_ref=None,
+                    status="failed",
+                    filled_price=None,
+                    filled_units=None,
+                    fees=Decimal("0"),
+                    raw_payload={"error": error, "engine_owned_long_lots": engine_owned},
+                )
             else:
-                # #243: durable order intent before the broker call.
-                # #2942: it carries the request identity and the claim.
+                # #3006: record what is actually asked of the broker. Step 2
+                # sized this from ``positions.current_units``, the aggregate
+                # across every open lot, while the call below closes exactly
+                # ONE lot — so the aggregate described a request the broker
+                # never received.
+                #
+                # ⚠ Descriptive only. ``close_position`` is called with
+                # ``units_to_deduct=None``, i.e. close the lot WHOLE; sending a
+                # units figure derived from a possibly-stale ``broker_positions``
+                # row would only add a rejection mode.
+                requested_units = exit_lot.units
+                exit_pos_id = exit_lot.position_id
+                # ``broker_positions.units`` is numeric(20,8) and
+                # ``orders.requested_units`` is numeric(18,6), so the column
+                # rounds this on the way in. Tolerable — nothing consumes it as
+                # a control input — but a SILENT loss of precision in an audit
+                # record is the part worth refusing, so say so when it actually
+                # happens rather than only in a comment. Decimal compares by
+                # VALUE, so a lot that is merely stored with trailing zeros
+                # (1305.05709600) does not trip this; one with genuine 7th/8th
+                # decimals does.
+                if requested_units != requested_units.quantize(_REQUESTED_UNITS_STEP):
+                    logger.warning(
+                        "execute_order: EXIT lot %d units %s do not survive the "
+                        "numeric(18,6) orders column — recording %s",
+                        exit_lot.position_id,
+                        requested_units,
+                        requested_units.quantize(_REQUESTED_UNITS_STEP),
+                    )
+                # #243: persist the order intent BEFORE the broker
+                # side effect, then commit so a crash mid-call leaves
+                # a durable ``status='submitted'`` row that a
+                # reconciler can chase against the broker.
+                # #2942: that row now also carries the durable
+                # ``x-request-id`` and takes the single submission claim.
                 submitted_order_id, request_id = _claim_submission(
                     conn,
                     instrument_id=instrument_id,
@@ -2167,21 +2453,23 @@ def execute_order(
                     requested_amount=requested_amount,
                     requested_units=requested_units,
                     broker_env=broker_env,
-                    order_params=order_params,
-                    exit_lot=None,
+                    # What is SENT: `close_position` below takes no OrderParams,
+                    # so none are recorded, whatever the recommendation carries.
+                    order_params=None,
+                    exit_lot=exit_lot,
                     now=now,
+                    broker_credential_ids=broker_credential_ids,
                 )
                 # #2942 half 2: its OWN commit, immediately before the verb.
-                # See the EXIT arm above for why the marker cannot claim more
-                # than the instant it commits.
+                # Everything after this line -- the unattended guard, the
+                # credential read, body construction, ResilientClient's
+                # throttle -- is on the unprovable side, which is why the
+                # value means "may subsequently have been entered".
                 mark_recommendation_submission_entered(conn, order_id=submitted_order_id)
                 try:
-                    broker_result = broker.place_order(
+                    broker_result = broker.close_position(
+                        exit_pos_id,
                         instrument_id=instrument_id,
-                        action=action,
-                        amount=requested_amount,
-                        units=requested_units,
-                        params=order_params,
                         request_id=request_id,
                     )
                 except UnattendedExecutionRefused as exc:
@@ -2200,10 +2488,94 @@ def execute_order(
                         order_id=submitted_order_id,
                         instrument_id=instrument_id,
                         recommendation_id=recommendation_id,
-                        exc=exc,
+                        payload=exc.raw_payload,
+                        message=str(exc),
                         now=now,
                     )
                     raise BrokerSubmissionUncertainError(str(exc), submitted_order_id) from exc
+                except Exception as exc:
+                    # #2942 Delta 1: any OTHER exception out of the provider call also
+                    # returned by raising, so its sends are over and the outcome is
+                    # unknown -- which is what `uncertain` means. Left to propagate, it
+                    # would strand a W row the attended release refuses while the
+                    # daemon (the sender) lives.
+                    _park_uncertain_submission(
+                        conn,
+                        order_id=submitted_order_id,
+                        instrument_id=instrument_id,
+                        recommendation_id=recommendation_id,
+                        payload=unexpected_exception_park_payload(exc),
+                        message=str(exc),
+                        now=now,
+                    )
+                    raise BrokerSubmissionUncertainError(str(exc), submitted_order_id) from exc
+        else:
+            # #243: durable order intent before the broker call.
+            # #2942: it carries the request identity and the claim.
+            submitted_order_id, request_id = _claim_submission(
+                conn,
+                instrument_id=instrument_id,
+                recommendation_id=recommendation_id,
+                decision_id=decision_id,
+                action=action,
+                requested_amount=requested_amount,
+                requested_units=requested_units,
+                broker_env=broker_env,
+                order_params=order_params,
+                exit_lot=None,
+                now=now,
+                broker_credential_ids=broker_credential_ids,
+            )
+            # #2942 half 2: its OWN commit, immediately before the verb.
+            # See the EXIT arm above for why the marker cannot claim more
+            # than the instant it commits.
+            mark_recommendation_submission_entered(conn, order_id=submitted_order_id)
+            try:
+                broker_result = broker.place_order(
+                    instrument_id=instrument_id,
+                    action=action,
+                    amount=requested_amount,
+                    units=requested_units,
+                    params=order_params,
+                    request_id=request_id,
+                )
+            except UnattendedExecutionRefused as exc:
+                _release_claim_after_pre_io_refusal(
+                    conn,
+                    order_id=submitted_order_id,
+                    instrument_id=instrument_id,
+                    recommendation_id=recommendation_id,
+                    reason=str(exc),
+                    now=now,
+                )
+                raise
+            except BrokerOrderSubmissionUncertain as exc:
+                _park_uncertain_submission(
+                    conn,
+                    order_id=submitted_order_id,
+                    instrument_id=instrument_id,
+                    recommendation_id=recommendation_id,
+                    payload=exc.raw_payload,
+                    message=str(exc),
+                    now=now,
+                )
+                raise BrokerSubmissionUncertainError(str(exc), submitted_order_id) from exc
+            except Exception as exc:
+                # #2942 Delta 1: any OTHER exception out of the provider call also
+                # returned by raising, so its sends are over and the outcome is
+                # unknown -- which is what `uncertain` means. Left to propagate, it
+                # would strand a W row the attended release refuses while the
+                # daemon (the sender) lives.
+                _park_uncertain_submission(
+                    conn,
+                    order_id=submitted_order_id,
+                    instrument_id=instrument_id,
+                    recommendation_id=recommendation_id,
+                    payload=unexpected_exception_park_payload(exc),
+                    message=str(exc),
+                    now=now,
+                )
+                raise BrokerSubmissionUncertainError(str(exc), submitted_order_id) from exc
     else:
         quote_data = _load_quote_for_execution(conn, instrument_id)
         # Floor last/bid/ask to strictly-positive (#1439): a 0.00 row is not
@@ -2232,216 +2604,255 @@ def execute_order(
     order_status = broker_result.status
     fill_id: int | None = None
 
-    with conn.transaction():
-        if submitted_order_id is not None:
-            # #243 live path: pre-call intent already exists. UPDATE
-            # the same row with the broker response so reconciliation
-            # keys on a single durable identity.
-            order_id = submitted_order_id
-            _update_order_with_broker_result(
-                conn,
-                order_id=order_id,
-                status=order_status,
-                broker_order_ref=broker_result.broker_order_ref,
-                raw_payload=broker_result.raw_payload,
-            )
-        else:
-            # Demo path (no external side effect to lose) or live
-            # EXIT with no broker_positions row (broker not called).
-            order_id = _persist_order(
-                conn,
-                instrument_id=instrument_id,
-                recommendation_id=recommendation_id,
-                decision_id=decision_id,
-                action=action,
-                requested_amount=requested_amount,
-                requested_units=requested_units,
-                status=order_status,
-                broker_order_ref=broker_result.broker_order_ref,
-                raw_payload=broker_result.raw_payload,
-                now=now,
-            )
-
-        # Record estimated cost for BUY/ADD only (entry cost is meaningless
-        # for EXIT orders).  Best-effort: any failure here must not block the
-        # order or abort the enclosing transaction.  The savepoint ensures a
-        # DB error during cost recording rolls back only the cost INSERT,
-        # leaving the outer transaction intact for _persist_fill.
-        if action in ("BUY", "ADD"):
-            try:
-                with conn.transaction():
-                    cost_config = get_transaction_cost_config(conn)
-                    cost_model_row = load_instrument_cost(conn, instrument_id)
-                    if cost_model_row is not None:
-                        s_bps = cost_model_row["spread_bps"]
-                        o_rate = cost_model_row["overnight_rate"]
-                        fx_bps = cost_model_row["fx_markup_bps"]
-                    else:
-                        # No cost_model row — fall back to quote spread_pct.
-                        # In live mode quote_data is not loaded for the fill,
-                        # so load it here for cost recording.
-                        qd = quote_data if quote_data is not None else _load_quote_for_execution(conn, instrument_id)
-                        if qd is not None and qd.get("spread_pct") is not None:
-                            s_bps = spread_pct_to_bps(Decimal(str(qd["spread_pct"])))
-                        else:
-                            s_bps = None
-                        o_rate = Decimal("0")
-                        fx_bps = Decimal("0")
-
-                    if s_bps is not None:
-                        cost_est = estimate_cost(
-                            spread_bps=s_bps,
-                            overnight_rate=o_rate,
-                            fx_markup_bps=fx_bps,
-                            hold_days=cost_config["default_hold_days"],
-                            max_total_cost_bps=cost_config["max_total_cost_bps"],
-                            min_return_vs_cost_ratio=cost_config["min_return_vs_cost_ratio"],
-                            expected_return_pct=None,
-                        )
-                        record_estimated_cost(
-                            conn,
-                            order_id=order_id,
-                            recommendation_id=recommendation_id,
-                            instrument_id=instrument_id,
-                            estimate=cost_est,
-                        )
-            except Exception:
-                logger.warning(
-                    "cost recording failed for order_id=%d — continuing without cost record",
-                    order_id,
-                    exc_info=True,
-                )
-
-        fp = broker_result.filled_price
-        fu = broker_result.filled_units
-
-        # Guard: a fill must have a strictly-positive price AND units to be
-        # persisted. A zero-unit fill (demo mode, no quote) is not a real
-        # fill; neither is a zero-PRICE fill — a units-based demo BUY/ADD with
-        # no usable bid/ask/last would otherwise persist free holdings at
-        # price 0 (#1439, prevention-log "Zero-value fills persisted as real
-        # fills" #68). _synthetic_fill only fail-closes zero-price EXIT; this
-        # guard closes the same hole for every action.
-        if order_status == "filled" and fp is not None and fp > 0 and fu is not None and fu > 0:
-            fill_id = _persist_fill(
-                conn,
-                order_id=order_id,
-                price=fp,
-                units=fu,
-                fees=broker_result.fees,
-                now=now,
-            )
-
-            if action in ("BUY", "ADD"):
-                _update_position_buy(
-                    conn,
-                    instrument_id=instrument_id,
-                    filled_price=fp,
-                    filled_units=fu,
-                    now=now,
-                )
-                _persist_broker_position(
+    # #2942 Delta 4: the step-4/5 transaction must be TOP-LEVEL, so that it
+    # commits before the key is released. The checks above opened an implicit
+    # read transaction; end it (it carries no write) so `conn.transaction()`
+    # below is not a savepoint nested inside it.
+    conn.commit()
+    try:
+        with conn.transaction():
+            if submitted_order_id is not None:
+                # #243 live path: pre-call intent already exists. UPDATE
+                # the same row with the broker response so reconciliation
+                # keys on a single durable identity.
+                order_id = submitted_order_id
+                _update_order_with_broker_result(
                     conn,
                     order_id=order_id,
+                    status=order_status,
+                    broker_order_ref=broker_result.broker_order_ref,
+                    raw_payload=broker_result.raw_payload,
+                )
+            else:
+                # Demo path (no external side effect to lose) or live
+                # EXIT with no broker_positions row (broker not called).
+                order_id = _persist_order(
+                    conn,
                     instrument_id=instrument_id,
-                    filled_price=fp,
-                    filled_units=fu,
-                    fees=broker_result.fees,
-                    order_params=order_params,
+                    recommendation_id=recommendation_id,
+                    decision_id=decision_id,
+                    action=action,
+                    requested_amount=requested_amount,
+                    requested_units=requested_units,
+                    status=order_status,
+                    broker_order_ref=broker_result.broker_order_ref,
                     raw_payload=broker_result.raw_payload,
                     now=now,
                 )
-            elif action == "EXIT":
-                _update_position_exit(
+
+            # Record estimated cost for BUY/ADD only (entry cost is meaningless
+            # for EXIT orders).  Best-effort: any failure here must not block the
+            # order or abort the enclosing transaction.  The savepoint ensures a
+            # DB error during cost recording rolls back only the cost INSERT,
+            # leaving the outer transaction intact for _persist_fill.
+            if action in ("BUY", "ADD"):
+                try:
+                    with conn.transaction():
+                        cost_config = get_transaction_cost_config(conn)
+                        cost_model_row = load_instrument_cost(conn, instrument_id)
+                        if cost_model_row is not None:
+                            s_bps = cost_model_row["spread_bps"]
+                            o_rate = cost_model_row["overnight_rate"]
+                            fx_bps = cost_model_row["fx_markup_bps"]
+                        else:
+                            # No cost_model row — fall back to quote spread_pct.
+                            # In live mode quote_data is not loaded for the fill,
+                            # so load it here for cost recording.
+                            qd = (
+                                quote_data if quote_data is not None else _load_quote_for_execution(conn, instrument_id)
+                            )
+                            if qd is not None and qd.get("spread_pct") is not None:
+                                s_bps = spread_pct_to_bps(Decimal(str(qd["spread_pct"])))
+                            else:
+                                s_bps = None
+                            o_rate = Decimal("0")
+                            fx_bps = Decimal("0")
+
+                        if s_bps is not None:
+                            cost_est = estimate_cost(
+                                spread_bps=s_bps,
+                                overnight_rate=o_rate,
+                                fx_markup_bps=fx_bps,
+                                hold_days=cost_config["default_hold_days"],
+                                max_total_cost_bps=cost_config["max_total_cost_bps"],
+                                min_return_vs_cost_ratio=cost_config["min_return_vs_cost_ratio"],
+                                expected_return_pct=None,
+                            )
+                            record_estimated_cost(
+                                conn,
+                                order_id=order_id,
+                                recommendation_id=recommendation_id,
+                                instrument_id=instrument_id,
+                                estimate=cost_est,
+                            )
+                except Exception:
+                    logger.warning(
+                        "cost recording failed for order_id=%d — continuing without cost record",
+                        order_id,
+                        exc_info=True,
+                    )
+
+            fp = broker_result.filled_price
+            fu = broker_result.filled_units
+
+            # Guard: a fill must have a strictly-positive price AND units to be
+            # persisted. A zero-unit fill (demo mode, no quote) is not a real
+            # fill; neither is a zero-PRICE fill — a units-based demo BUY/ADD with
+            # no usable bid/ask/last would otherwise persist free holdings at
+            # price 0 (#1439, prevention-log "Zero-value fills persisted as real
+            # fills" #68). _synthetic_fill only fail-closes zero-price EXIT; this
+            # guard closes the same hole for every action.
+            if order_status == "filled" and fp is not None and fp > 0 and fu is not None and fu > 0:
+                fill_id = _persist_fill(
                     conn,
-                    instrument_id=instrument_id,
-                    filled_price=fp,
-                    filled_units=fu,
+                    order_id=order_id,
+                    price=fp,
+                    units=fu,
+                    fees=broker_result.fees,
                     now=now,
                 )
-                # #3020: the mirror row for the lot the broker just closed.
-                # Only on the live path — a demo EXIT resolves no lot, and its
-                # `broker_positions` rows carry synthetic negative ids that
-                # `_load_exit_lot` already excludes. AFTER `positions`, to keep
-                # the lock order `portfolio_sync` uses.
-                if exit_lot is not None:
-                    _deduct_closed_exit_lot(
+
+                if action in ("BUY", "ADD"):
+                    _update_position_buy(
                         conn,
-                        position_id=exit_lot.position_id,
+                        instrument_id=instrument_id,
+                        filled_price=fp,
                         filled_units=fu,
                         now=now,
                     )
-                # Check if position is fully closed → trigger attribution
-                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                    cur.execute(
-                        "SELECT current_units FROM positions WHERE instrument_id = %(iid)s",
-                        {"iid": instrument_id},
+                    _persist_broker_position(
+                        conn,
+                        order_id=order_id,
+                        instrument_id=instrument_id,
+                        filled_price=fp,
+                        filled_units=fu,
+                        fees=broker_result.fees,
+                        order_params=order_params,
+                        raw_payload=broker_result.raw_payload,
+                        now=now,
                     )
-                    pos_row = cur.fetchone()
-                units_after = Decimal(str(pos_row["current_units"])) if pos_row else Decimal("0")
-                _maybe_trigger_attribution(conn, instrument_id, units_after)
-
-                # #3006: an EXIT closes ONE lot but expresses an
-                # instrument-wide intent. Record how much of the position is
-                # still open so a partial de-risk is visible in the audit trail
-                # instead of reading as a completed one. Only on the live path,
-                # where a lot was resolved — demo has no lot to be partial about.
-                if exit_lot is not None:
-                    exit_completion = describe_exit_completion(
-                        lot_units_selected=exit_lot.units,
-                        units_closed=fu,
-                        units_open_after=units_after,
+                elif action == "EXIT":
+                    _update_position_exit(
+                        conn,
+                        instrument_id=instrument_id,
+                        filled_price=fp,
+                        filled_units=fu,
+                        now=now,
                     )
-                    if not exit_completion["position_fully_closed"]:
-                        logger.warning(
-                            "execute_order: EXIT recommendation_id=%d instrument_id=%d closed lot %d "
-                            "(%s units) but %s units remain open — the position is NOT fully exited",
-                            recommendation_id,
-                            instrument_id,
-                            exit_lot.position_id,
-                            fu,
-                            units_after,
+                    # #3020: the mirror row for the lot the broker just closed.
+                    # Only on the live path — a demo EXIT resolves no lot, and its
+                    # `broker_positions` rows carry synthetic negative ids that
+                    # `_load_exit_lot` already excludes. AFTER `positions`, to keep
+                    # the lock order `portfolio_sync` uses.
+                    if exit_lot is not None:
+                        _deduct_closed_exit_lot(
+                            conn,
+                            position_id=exit_lot.position_id,
+                            filled_units=fu,
+                            now=now,
                         )
+                    # Check if position is fully closed → trigger attribution
+                    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                        cur.execute(
+                            "SELECT current_units FROM positions WHERE instrument_id = %(iid)s",
+                            {"iid": instrument_id},
+                        )
+                        pos_row = cur.fetchone()
+                    units_after = Decimal(str(pos_row["current_units"])) if pos_row else Decimal("0")
+                    _maybe_trigger_attribution(conn, instrument_id, units_after)
 
-            gross_amount = fp * fu
-            _record_cash_ledger(conn, action, gross_amount, broker_result.fees, now)
+                    # #3006: an EXIT closes ONE lot but expresses an
+                    # instrument-wide intent. Record how much of the position is
+                    # still open so a partial de-risk is visible in the audit trail
+                    # instead of reading as a completed one. Only on the live path,
+                    # where a lot was resolved — demo has no lot to be partial about.
+                    if exit_lot is not None:
+                        exit_completion = describe_exit_completion(
+                            lot_units_selected=exit_lot.units,
+                            units_closed=fu,
+                            units_open_after=units_after,
+                        )
+                        if not exit_completion["position_fully_closed"]:
+                            logger.warning(
+                                "execute_order: EXIT recommendation_id=%d instrument_id=%d closed lot %d "
+                                "(%s units) but %s units remain open — the position is NOT fully exited",
+                                recommendation_id,
+                                instrument_id,
+                                exit_lot.position_id,
+                                fu,
+                                units_after,
+                            )
 
-        # Update recommendation status to reflect execution outcome
-        if fill_id is not None:
-            exec_status = "executed"
-        elif order_status == "pending":
-            exec_status = "execution_pending"
-        else:
-            exec_status = "execution_failed"
-        conn.execute(
-            """
-            UPDATE trade_recommendations
-            SET status = %(status)s
-            WHERE recommendation_id = %(rid)s
-            """,
-            {"status": exec_status, "rid": recommendation_id},
-        )
+                gross_amount = fp * fu
+                _record_cash_ledger(conn, action, gross_amount, broker_result.fees, now)
 
-        # Write execution outcome to decision_audit (every path, success or failure).
-        # pass_fail uses PASS/FAIL vocabulary consistent with the execution guard.
-        # Detailed status goes in explanation.
-        _write_execution_audit(
+            # Update recommendation status to reflect execution outcome
+            if fill_id is not None:
+                exec_status = "executed"
+            elif order_status == "pending":
+                exec_status = "execution_pending"
+            else:
+                exec_status = "execution_failed"
+            if submitted_order_id is not None:
+                # The live claim branch stays UNCONDITIONAL: it runs under the key
+                # after its own claim, and rolling it back would discard a real
+                # broker response.
+                conn.execute(
+                    """
+                    UPDATE trade_recommendations
+                    SET status = %(status)s
+                    WHERE recommendation_id = %(rid)s
+                    """,
+                    {"status": exec_status, "rid": recommendation_id},
+                )
+            else:
+                # #2942 Delta 4: synthetic and live no-lot EXIT have no broker
+                # response to lose, so their step-5 UPDATE is compare-and-set on
+                # 'approved' and a miss rolls the whole transaction back.
+                moved = conn.execute(
+                    """
+                    UPDATE trade_recommendations
+                    SET status = %(status)s
+                    WHERE recommendation_id = %(rid)s AND status = 'approved'
+                    RETURNING recommendation_id
+                    """,
+                    {"status": exec_status, "rid": recommendation_id},
+                ).fetchone()
+                if moved is None:
+                    current = conn.execute(_RECOMMENDATION_STATUS_SQL, {"rid": recommendation_id}).fetchone()
+                    raise _RecommendationStatusMoved(None if current is None else str(current[0]))
+
+            # Write execution outcome to decision_audit (every path, success or failure).
+            # pass_fail uses PASS/FAIL vocabulary consistent with the execution guard.
+            # Detailed status goes in explanation.
+            _write_execution_audit(
+                conn,
+                instrument_id=instrument_id,
+                recommendation_id=recommendation_id,
+                order_id=order_id,
+                passed=exec_status == "executed",
+                explanation=(
+                    f"status={exec_status} order_status={order_status} broker_ref={broker_result.broker_order_ref}"
+                ),
+                raw_payload=broker_result.raw_payload,
+                now=now,
+                exit_completion=exit_completion,
+            )
+
+            # Filled trade → queue an immediate portfolio sync so the
+            # broker-observed event lands in trade_events within seconds
+            # (#1593). Same transaction: NOTIFY fires only at commit.
+            if fill_id is not None:
+                enqueue_post_trade_sync(conn, requested_by="execute_order")
+    except _RecommendationStatusMoved as exc:
+        # The CAS missed and the transaction rolled back, so nothing persisted.
+        _refuse_not_approved(
             conn,
-            instrument_id=instrument_id,
             recommendation_id=recommendation_id,
-            order_id=order_id,
-            passed=exec_status == "executed",
-            explanation=f"status={exec_status} order_status={order_status} broker_ref={broker_result.broker_order_ref}",
-            raw_payload=broker_result.raw_payload,
+            instrument_id=instrument_id,
+            status=exc.status,
             now=now,
-            exit_completion=exit_completion,
         )
-
-        # Filled trade → queue an immediate portfolio sync so the
-        # broker-observed event lands in trade_events within seconds
-        # (#1593). Same transaction: NOTIFY fires only at commit.
-        if fill_id is not None:
-            enqueue_post_trade_sync(conn, requested_by="execute_order")
 
     # --- Build explanation ---
     if order_status == "filled" and fill_id is not None:

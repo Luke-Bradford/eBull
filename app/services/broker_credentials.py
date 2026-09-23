@@ -330,13 +330,25 @@ def revoke_credential(
                 WHERE %s IN (proof.api_key_credential_id, proof.user_key_credential_id)
                   AND state.state NOT IN ('resolved','rejected')
             )
+            -- #2942 Delta 3: a recommendation attempt holding its claim records the
+            -- account it was sent to (sql/412); the attended window-B release binds
+            -- its witness to exactly that pair. No extra lock: a claim INSERT racing
+            -- this check is a named residual that fails closed (the release refuses).
+            OR EXISTS (
+                SELECT 1
+                FROM orders o
+                WHERE o.recommendation_id IS NOT NULL
+                  AND o.status IN ('submitted','pending','uncertain')
+                  AND %s IN (o.recommendation_api_key_credential_id, o.recommendation_user_key_credential_id)
+            )
             """,
-            (credential_id,),
+            (credential_id, credential_id),
         )
         in_use = cur.fetchone()
         if in_use == (True,):
             raise CredentialInUse(
-                "credential rotation is refused while an unresolved core order requires this exact account"
+                "credential rotation is refused while an unresolved core or recommendation order "
+                "requires this exact account"
             )
         cur.execute(
             """
