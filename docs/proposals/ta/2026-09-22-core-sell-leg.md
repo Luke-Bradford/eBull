@@ -1,338 +1,549 @@
 # Core sell leg — partial close of one owned core position (#2603)
 
-Status: **PARKED at Codex ckpt-1 round 2 (2026-09-22). Not built.** Queue: #2437 Tier A
-item 2. Revision 2 answers round 1's 33 findings, cited below as `C1-n`. Round 2's verdict
-is at the end, and a revision 3 must start there.
+Status: **SUPERSEDED (2026-09-23) by revision 5,
+`docs/proposals/ta/2026-09-23-core-sell-leg-close-rebuy.md`. The partial-close model was
+replaced after Codex ckpt-1 round 4 raised 38 findings, 20 of them marked SAFETY. The
+reasons are recorded there.** This file is kept as the record of revisions 1–4 and of the
+U1–U3 observations.
+
+Round 4 was run on revision 4 (below). Queue: #2437
+Tier A item 2. Round 2 parked the spec on U3, the realised P&L a partial close leaves
+behind. The attended session of 2026-09-23 has since observed U1, U2 and U3. Revision 3
+applied those observations. Revision 4 answers Codex round 3's 46 findings.
+
+Findings are cited as follows:
+
+- `C1-n` for round 1;
+- `r2-n` for round 2;
+- `#n` for round 3.
 
 ## What is missing
 
 `evaluate_core_rebalance` returns `sell_core` when the core weight is strictly above the
-band's upper edge (`strategy_core_allocator.py:311-339`). Nothing can execute that sell:
+band's upper edge. Four things stop that sell from executing:
 
-- `assess_core_broker_preflight` refuses it before any broker call with
-  `core_close_side_cost_quote_unavailable` (`strategy_core_broker_preflight.py:317-320`).
-- `core_order_shape_for` has no `sell_core` entry (`strategy_core_executor.py:57-59`).
-- The only close mutation, `close_demo_strategy_position`, sends `UnitsToDeduct: None`
-  and so closes the whole position (`etoro_broker.py:826`).
+- `assess_core_broker_preflight` refuses it with `core_close_side_cost_quote_unavailable`
+  before any broker call (`strategy_core_broker_preflight.py:320`).
+- `_CORE_ORDER_SHAPE` has no `sell_core` entry (`strategy_core_executor.py:59`).
+- The strategy close verb, `close_demo_strategy_position`, sends `UnitsToDeduct: None`
+  (`etoro_broker.py:826`).
+- **New in r3 (found here, not in r1/r2):** `resolve_engine_capital_usage` refuses every
+  partially altered core position with `engine_capital_ownership_mismatched`
+  (`strategy_engine_capital.py:428`). A successful trim therefore wedges the capital
+  reader on every later cycle. The sell leg has to lift this refusal for a trim it
+  witnessed itself, and only for that (§6).
 
-The preflight docstring (`:196-205`) says to build this as one slice (preflight quote plus
-submission) and not to lift the refusal alone.
+## Observations (attended demo, 2026-09-23; evidence posted on #2965)
 
-## Premise checks (dev DB and source, 2026-09-22)
+The evidence file is `tests/fixtures/etoro/attended_2026-09-23-01_partial_close.jsonl`,
+lines 4–10 and 49. The position was a non-engine $50 AAPL position, id `3602886855`,
+opening order `383320185`, `units` 0.147071. The session partially closed it with
+`UnitsToDeduct: 0.073536` and then closed the remainder.
+
+- **U1: the position id is retained.** After the partial close the snapshot carries the
+  same `positionID`. The changes are `units` 0.147071 → 0.073535, `amount` 50 → 25 and
+  `isPartiallyAltered` false → true. `initialUnits`, `orderID`, `openDateTime`,
+  `stopLossRate` and `takeProfitRate` are unchanged.
+- **U2: 6 dp was accepted and executed exactly.** The ack echoes `unitsToDeduct: 0.073536`
+  under a new close `orderID` (383287588). The slice's history row has `units` 0.073536,
+  and the residual is exactly 0.147071 − 0.073536. The session did **not** fetch the
+  close-order detail, so `positions[].units` for a partial close is still unobserved. §5
+  therefore does not depend on it.
+- **U3: a partial close writes a close row under a NEW position id.**
+  `events_from_history` groups rows by `position_id` (`trade_events.py:209`). The slice
+  therefore lands as its own `open` plus `close` pair under `3602887089`. That id never
+  appeared in the portfolio. The row has `order_id` 383320185 (the opening order) and
+  `parent_position_id` 0. The history row existed on its own at 00:07:56, before the
+  remainder's row appeared. Its fields are slice-local: `investment` 25, `units` equal to
+  the slice, and `initialInvestment` 50 as the only whole-position field. It carries a
+  non-NULL `realized_pnl_usd`.
+
+  Reproduce with: `SELECT position_id, event_kind, units, realized_pnl_usd, order_id FROM
+  trade_events WHERE order_id = 383320185` → 4 rows (2 open, 2 close). Close P&L is 0.0000
+  on `3602887089` and −0.0100 on `3602886855`.
+
+What U3 settles, against round 2's three cases:
+
+- **"No row written"** is false. A row is written, but `_load_realised_delta` joins close
+  rows `ON event.position_id = owned.broker_position_id` (`strategy_engine_capital.py:
+  136-137`), so it **never counts the slice**. The unsafe direction (a loss omitted, so
+  capital is overstated) is real, and it comes from the join, not from absence.
+- **"NULL P&L"** is not observed on the slice row.
+- **"Cumulative"** is **not discriminated** by this observation. Per-slice P&L is
+  (339.87 − 339.94) × 0.073535 = −0.00515. Cumulative P&L is −0.00883. Both round to
+  −0.01. The documented reading is per-row: the history item's `netProfit` is *"The net
+  profit of the trade"* (`openapi_v1.375.0.json`, `/api/v1/trading/info/trade/demo/history`),
+  and every other field on the row is slice-local. §6d's `min(reported, reconstructed)`
+  and its deviation guard bound the error if that reading is wrong, so the design does
+  not rest on it.
+
+Full-population note (#41): exactly one `order_id` in `trade_events` spans more than one
+`position_id` across open **and** close rows:
+
+```sql
+SELECT count(*)
+FROM (
+  SELECT order_id FROM trade_events
+  WHERE order_id IS NOT NULL
+  GROUP BY order_id
+  HAVING count(DISTINCT position_id) > 1
+) g
+```
+
+It returns 1, and that one is this order. So no other partial close exists in the ledger
+to measure against. Every contract in U1-U3 is a single observation (#42), which is why §7
+re-witnesses each one on every operation and fails closed when it does not hold.
+
+## Premise checks (carried from r2, re-verified 2026-09-23)
 
 - **One caller.** `execute_core_rebalance` is called only from the attended endpoint
-  (`app/api/strategies.py:4057`). Nothing unattended reaches the sell path.
-- **One owned core position.** `strategy_position_ownership` joined to core trades has
-  1 `active` row (position `3601264304`). The realistic sell is therefore a trim of a
-  single position. A whole-position-only design would take the sleeve to 0% core, below
-  the lower edge, and the next cycle would buy it back. That rules out avoiding a partial
+  (`app/api/strategies.py`, `POST /core-sleeve/rebalance`). Nothing unattended reaches the
+  sell path.
+- **One owned core position** (`3601264304`). A whole-close-only design would take the
+  sleeve to 0% core and the next cycle would buy it back, so the sell must be a partial
   close.
-- **Ownership carries no units.** Its columns are `ownership_id, strategy_trade_id,
-  broker_position_id, status, claimed_at, released_at, release_reason`. Capital usage
-  values the owned ids from the live snapshot (`resolve_engine_capital_usage`). So if a
-  partial close keeps the position id, no ownership write is needed.
-- **Capital population.** The core row query counts only `purpose='entry'` links
-  (`strategy_engine_capital.py:288-297`), so an `exit` link on the entry trade does not
-  trip `entry_count != 1`. `core_active_recorded_committed` keeps the entry's full
-  `requested_amount` after a trim. That overstates committed capital, which is the
-  conservative direction (`strategy_control_plane.py:384`). Accepted and stated, not fixed
-  here.
-- **Realised P&L** comes from `trade_events` `close` rows keyed by `position_id`
-  (`_load_realised_delta`, `:112-160`). Whether a partial close writes one is the #2965
-  unknown. If it does, the rule counts it. If it does not, realised P&L under-reports until
-  the position is fully closed. The attended acceptance observes which.
+- **Committed capital follows the broker.** `core_committed` is the snapshot row's
+  `amount` (`strategy_engine_capital.py:432`). After a trim it falls to the residual
+  invested amount. So the realised P&L of the slice must be counted (§6), or a loss is
+  lost.
+- **Over-limit sleeve (r2-24).** `headroom_from_bound` clamps `remaining` at 0
+  (`strategy_capital_sandbox.py`). An over-limit sleeve therefore observes
+  `assigned_cash_available = 0`, and weight 100% classifies as `sell_core`. No change
+  needed.
 
-## Source rule (eToro, `tests/fixtures/etoro/openapi_v1.375.0.json` + `etoro-api.md`)
+## Source rule
+
+eToro, from `openapi_v1.375.0.json` and `etoro-api.md`:
 
 - Market close by position: *"If `UnitsToDeduct` is provided, only the specified portion
   will be closed … A 200 response means the close order was submitted, not that the
-  position was closed. Confirm the outcome with GET …/info/demo/close-orders/{orderId},
-  using the orderID returned under orderForClose."*
-- `OrderForClose.unitsToDeduct`: *"The number of units closed in this order."*
-- `OrderForCloseInfoResponse.positions[]`: `positionID` (required); `units`: *"Number of
-  position units closed, when available"*; `rate`; `amount`.
+  position was closed. Confirm the outcome with GET …/info/demo/close-orders/{orderId}."*
+- `OrderForCloseInfoResponse.positions[]`: `positionID` (required); `units` is *"Number of
+  position units closed, when available"*.
 - `InstrumentEligibility.allowPartialClosePosition` is already enforced
   (`core_partial_close_unproved`, `strategy_core_submission_gate.py:462-470`).
-- What-if close arm: needs `positionIds`, measured with an amount ticket. An open-arm quote
-  does not bound close cost (`etoro-api.md` close-arm section, #2712).
-- Close-side minimum: none documented. Every spec minimum is open-side
-  (`strategy_core_broker_preflight.py:186-194`), so `broker_minimum=None` on a sell and the
-  floor is the mandate's `min_rebalance_amount`.
-
-**Not documented, so not guessed:** (U1) whether a partial close keeps the `positionID`;
-(U2) what unit increment `UnitsToDeduct` accepts. The design fails closed on both, and the
-attended acceptance observes both.
+- What-if close arm: requires `positionIds`, and is measured with an amount ticket
+  (#2712).
+- Close-side minimum: none is documented, so `broker_minimum=None` on a sell and the floor
+  is the mandate's `min_rebalance_amount`.
+- Trade history `netProfit`: *"The net profit of the trade"*; `units`: *"The number of
+  units traded"*.
+- Increment: not documented. 6 dp is the only observed value (U2). §1 fixes the scale by
+  construction at 6 dp, the scale the broker echoed and executed.
 
 ## Design
 
-### 1. Selection and units — inside the broker preflight, from ONE snapshot (C1-20, C1-21)
+### 1. Selection, units and rounding
 
-All of these come from the single `get_account_risk_snapshot()` the sell arm already takes:
-the selected position's `units`, the position's own marked value, and `units_before`. The
-verdict carries `position_id`, `units_before` and `units_to_deduct`. The DB-preflight bid is
-not used, so the dataflow is not circular.
+All inputs come from ONE `get_account_risk_snapshot()`, taken under the locks (§4).
 
-- **Selection:** the owned core position (from `capital_authority.core_active_position_ids`)
-  with the largest snapshot `units`. Ties go to the lowest id. Choosing a lot does not
-  change tax, because same-class shares pool into one s104 holding (`tax-ledger` skill).
-- **Conversion uses the position's own mark, not the bid (C1-16).** The sizer's sell amount
-  `S` is marked value removed (`strategy_core_sizing.py:365-372`). The units that remove `S`
-  of marked value are `S × units / position_market_value`, where both are the selected
-  position's figures in the same snapshot. This keeps the submitted quantity inside the
-  model the sizer checked.
-- **Increment (C1-14):** U2 is undocumented. Construction: round down to 6 decimal places,
-  the scale of our stored units (the migration fixes `units_to_deduct NUMERIC(18,6)`,
-  matching `strategy_core_sizing`'s amount shape). This is our storage scale, not a claim
-  about eToro. If the broker needs a coarser increment, it either rejects the order (a
-  clean `rejected` outcome) or rounds it, and a rounded fill shows up as a units mismatch
-  in §4 → `reconcile_required`. Both fail closed.
-- **Re-check after rounding (C1-15, C1-18):** recompute the realised ticket
-  `A' = units_to_deduct × position_market_value / units`. Refuse
-  `below_min_rebalance_amount` if `A' < min_rebalance_amount`. Re-run the sizer's band
-  endpoint check (`resolve_core_trade_size`'s `at_zero`/`at_bound` bracket) on `A'` with the
-  quoted rate, and refuse `cost_breaches_far_edge` if it fails. `A' ≤ S`, so the ticket
-  extrapolation ratio against the quote only shrinks.
-- **Bounds (C1-13, C1-28):** `0 < units_to_deduct < units_before`, both finite, else refuse
-  `core_sell_spans_positions`. Above `max_units_per_order`, refuse
-  `core_sell_exceeds_max_units`. There is no broker-side "expected units" condition, so an
-  external reduction between the snapshot and execution is not prevented. If it happens,
-  the order may close more than intended. That outcome is detected in §4, because the id
-  is absent or the units mismatch, and it goes to `reconcile_required`. It is stated as a
-  residual risk, and the sell path is attended-only.
+- **Selection:** the owned core position (`capital_authority.core_active_position_ids`)
+  with the largest snapshot `units`. Ties go to the lowest id. Today exactly one exists.
+- **Refuse before dividing (r2-5):** `core_sell_position_unmarkable` if `units` or
+  `market_value` is missing, non-finite or ≤ 0.
+- **Conversion (C1-16):** `raw_units = S × units / market_value`. `S` is the sizer's sell
+  amount, and both other figures come from the selected position in the same snapshot.
+- **Round UP to 6 dp (r2-1, r2-2).** The sizer quantises amounts up
+  (`strategy_core_sizing.py:375`), and rounding units down could leave the weight above
+  `upper`. The 6 dp scale is by construction: it is the only scale observed accepted and
+  executed exactly (U2), and every later operation re-witnesses it (§7, conditions 4-5).
+- **Re-check on the rounded ticket (r2-4):** `A' = units_to_deduct × market_value /
+  units`. Because `A' ≥ S`, nothing checked on `S` is inherited. These are re-run on `A'`:
+  - `A' ≥ min_rebalance_amount`, else refuse `below_min_rebalance_amount`;
+  - the extrapolation ratio against the quote ticket, else refuse
+    `cost_quote_ticket_mismatch`;
+  - the sizer's `at_zero` / `at_bound` bracket, else refuse `cost_breaches_far_edge`.
+- **Bounds:**
+  - `0 < units_to_deduct < units_before`, else refuse `core_sell_spans_positions`;
+  - above `max_units_per_order`, refuse `core_sell_exceeds_max_units`.
+- **Entry reference (#12):** the owning trade must have exactly one `purpose='entry'`
+  order with a positive integer `broker_order_ref`, read as `load_whole_close_evidence`
+  reads it. Otherwise refuse `core_sell_entry_ref_ambiguous`. §7 binds the slice through
+  this reference.
 
-### 2. Close-side cost quote (C1-17, C1-19)
+**Capped-pot sizing (#20, #21): stated, not changed.** In `fixed` (capped) mode, which is
+today's pot (`strategy_paper_pool_events`: `fixed`, 500), the sleeve's cash term is the
+pot headroom. Headroom excludes realised gains and absorbs any over-limit deficit first.
+So a sell of `S` shrinks the sleeve by the skimmed gain, or by the deficit absorbed,
+where the sizer assumes the sleeve is conserved (net of cost).
 
-Same shape as the buy arm: fresh snapshot, age check, `observe_core_sleeve`, and a fresh
-`evaluate_core_rebalance` that must return `sell_core` with the same amount (else
-`core_sleeve_moved_since_decision`). Then
-`get_what_if_costs(BrokerWhatIfOrder(action="close", transaction="sell",
-position_ids=(pid,), amount=fresh.amount, …))` → `decode_quoted_trade_cost` →
-`resolve_core_trade_size` (sell arm) → §1's units and re-check.
+Both effects push the post-trade core weight **above** the sizer's prediction, never
+below. The sell under-shoots `upper` and does not overshoot `lower`. The next attended
+cycle sells again, on fresh observation, and the sequence converges from above. No
+buy-back churn is possible, because weight stays above `upper`, which is above `lower`.
 
-The quote uses an amount ticket because that is the only close-arm form measured
-(#2712). Using its rate for the units order is the same model the buy arm already relies
-on, since a what-if rate is applied to an executed ticket. Nothing here bounds slippage or
-market movement, which the sizer's contract already excludes (`strategy_core_sizing.py:
-325-328`). This is inherited, not new.
+Codex's example: basis 100, mark 200, sell 40 → 88.9% where 80% was predicted. That is a
+second attended sell, not a safety issue. A sizer term for the skim is deferred until a
+drift is observed that the loop cannot close in two cycles.
 
-### 3. Refusals that must not block a reduction (C1-33)
+### 2. Close-side cost quote
 
-A sell reduces exposure. `sandbox_exceeded` (broker preflight and executor) and the
-executor's drawdown refusal therefore do **not** refuse a `sell_core`. The drawdown
-**observation** is still recorded. This matches `manage_owned_position`'s stated rule that
-kill switches block new risk, not de-risking (`strategy_position_manager.py:1245-1249`).
-All other refusals apply.
+This is the buy arm's shape, run under the locks:
 
-### 4. Authority, locking and submission — a position-manager operation (C1-8, C1-9, C1-10)
+1. a fresh snapshot and the age check;
+2. `observe_core_sleeve`;
+3. a fresh `evaluate_core_rebalance`, which must return `sell_core` with the same amount
+   as the recorded intent, else refuse `core_sleeve_moved_since_decision`;
+4. `get_what_if_costs(BrokerWhatIfOrder(action="close", transaction="sell",
+   position_ids=(pid,), amount=fresh.amount, …))`;
+5. `decode_quoted_trade_cost`;
+6. `resolve_core_trade_size` (sell arm);
+7. §1.
 
-The sell is submitted by a new `strategy_position_manager.submit_core_reduce(...)`, not by
-the executor's buy tail. That function:
+Slippage and market movement stay excluded, as the sizer's contract already states.
 
-- Takes `_paper_allocator_lock` then `_position_lock(pid)`, the same pair
-  `manage_owned_position` takes. The executor already holds `core_submission_lock`. The
-  implementation must show that no path takes `core_submission_lock` while holding either
-  of the other two, so the order is total (core → allocator → position). If that cannot be
-  shown, the sell is refused. It is not built around.
-- Re-proves under those locks, in one transaction, before inserting anything: ownership is
-  `active`; there is **no operation on any core-owned position** with status in
-  (`intent_persisted`, `submitting`, `submitted`); and there is **no `reduce` operation in
-  `reconcile_required`** on any core-owned position. The check is sleeve-wide, not
-  per-position, so a pending reduction elsewhere or an unresolved one blocks sizing
-  (C1-4, C1-11, C1-12). Refusal: `core_sell_operation_outstanding`.
-- The authority transaction inserts an `orders` row (`action='EXIT'`, `order_type='MARKET'`,
-  `requested_amount = A'`, `status='submitted'`), and links it to the **owning entry
-  trade** with `purpose='exit'` (the existing close convention,
-  `strategy_position_manager.py:942-949`). It also inserts a `strategy_position_operations`
-  row: `operation_type='reduce'`, `trigger_code='core_rebalance'`, `status=
-  'intent_persisted'`, with `units_before`, `units_to_deduct`,
-  `core_rebalance_intent_id` and `core_eligibility_proof_id` (C1-31). It writes **no**
-  `strategy_order_reconciliation_state` row, because `reconcile_backlog` must never see
-  this order (C1-9). It writes **no** `strategy_core_entry_exit_levels` row, because a
-  reduce opens nothing and the position's SL/TP stand.
-- `mark_close_submitting` runs in its own commit. Then comes the new provider verb
-  `reduce_demo_strategy_position(position_id, instrument_id, units_to_deduct, request_id,
-  persist_response)`: the whole-close adapter with `UnitsToDeduct` set. It uses the same
-  `refuse_broker_mutation_if_unattended`, demo-only check and quota lane (same endpoint, so
-  the same `etoro_quota_lanes.CALL_SITES` lane). The adapter refuses a non-finite,
-  non-positive or `None` quantity before any I/O, and serialises it as a JSON number from
-  the `Decimal` string. It never omits the key and never sends `null` (C1-28).
-- Submission outcomes mirror `_submit_close` (`:977-1000`, C1-27):
-  `BrokerPositionMutationUncertain` → operation `reconcile_required`
-  (`broker_reduce_uncertain`), trade status unchanged. Definite rejection → operation
-  `rejected`, order `rejected`, trade stays `open`. The executor's buy error path is
-  **not** reused, because it would mark the owning trade `failed` (C1-8). Ack → store
-  `orderForClose.orderID` as `broker_order_ref`, and set operation `submitted`. If the
-  ack's `unitsToDeduct` is present and not numerically equal to the request →
-  `reconcile_required` (`reduce_ack_units_mismatch`).
-- The executor records the intent as today, then calls `submit_core_reduce` in place of
-  the buy tail. `_CORE_ORDER_SHAPE` stays buy-only. The sell never passes through
-  `core_order_shape_for`, and that function's backstop still refuses any action sent to the
-  buy tail by mistake.
+### 3. Which refusals apply to a sell (C1-33, r2-25)
 
-### 5. Resolution — its own resume branch, dispatched FIRST (C1-3, C1-6, C1-7)
+- `sandbox_exceeded` (both the broker preflight and the executor) and the executor's
+  drawdown refusal do **not** refuse a `sell_core`. A sell reduces exposure. The drawdown
+  **observation** is still recorded.
+- **A disabled mandate or pot still refuses.** The sell is an allocator action, not
+  emergency de-risking. De-risking has its own path: the manager close with
+  `emergency_risk` / `operator_close`.
+- All other refusals apply unchanged.
 
-In `_resume_operation`, a `reduce` operation is dispatched **before** the pre-marker
-special case, the edit logic and the close branch.
+### 4. Locks, lifetime and re-proof (r2-6, 7, 8; #22-26)
 
-- `intent_persisted` (pre-marker): the operation provably never entered submission →
-  `rejected` (`reduce_abandoned_before_submission`). Units are not inspected (C1-3).
-- `submitting` with no `broker_order_ref` (a crash after the marker, before the ack):
-  → `reconcile_required` (`reduce_crash_before_identity`). Unchanged units do **not**
-  prove the broker never saw it, because the order may be pending or the snapshot may lag,
-  so it is never `rejected` (C1-1, C1-2).
-- `submitted`: `get_close_order(orderId)`.
-  - `pending` → stays `submitted` (pending), resumed next cycle.
-  - Broker status rejected/cancelled and `positions` empty → `rejected`. No exposure
-    changed.
-  - **Landed** iff `status == "filled"`, `position_ids == (owned id,)`, reference and
-    instrument match (the close branch's rules, `:648-669`), **and** the affected
-    position's `units` is present and numerically equal to `units_to_deduct`. The witness
-    is the broker's record **of this order**. No snapshot arithmetic is used (C1-22,
-    C1-23). Then U1: the snapshot must still carry the owned id → operation `applied`,
-    order `filled`, ownership untouched, trade `open`.
-  - Filled but the id is absent from the snapshot → `reconcile_required`
-    (`reduce_position_id_not_retained`). Filled with `units` absent or unequal →
-    `reconcile_required` (`reduce_units_unwitnessed`). Any other combination →
-    `reconcile_required` (`reduce_outcome_unclassified`) (C1-26).
-- **`reconcile_required` on a reduce is sticky.** It blocks every later core sell (§4) until
-  an operator resolves it. This is deliberate. The manager stops resuming it (C1-5),
-  because a later automatic reading could not tell a late fill from an external action.
-  The operator-facing reason codes above are the refusal surface. Clearing it is manual
-  and out of scope, the same as the close path today.
-- `_finish_close` gains a guard: it raises unless the operation row is `operation_type =
-  'close'` (C1-7).
+**Order.** `core_submission_lock` → `_paper_allocator_lock` → `_position_lock(pid)`.
 
-### 6. Migration (C1-29, C1-30)
+Acquisition sites, re-grepped for this revision:
 
-One file:
+- `PAPER_ALLOCATOR_ADVISORY_LOCK` is taken in:
+  - `strategy_position_manager._paper_allocator_lock`, which is used by
+    `manage_owned_position` and, after this change, by `submit_core_reduce`;
+  - `app/api/config.py:258`;
+  - `app/api/strategies.py:3600`;
+  - `app/workers/scheduler.py:6763`.
+- `CORE_SUBMISSION_ADVISORY_LOCK` is taken in:
+  - `core_submission_lock` (the executor);
+  - `app/api/broker_credentials.py:924`.
 
-- widen `operation_type` CHECK to add `'reduce'`, and `trigger_code` CHECK to add
-  `'core_rebalance'`;
-- the per-type `order_id` clause: `reduce` requires `order_id IS NOT NULL`, like `close`;
-- add nullable `units_before NUMERIC(18,6)`, `units_to_deduct NUMERIC(18,6)`,
-  `core_rebalance_intent_id` FK, `core_eligibility_proof_id` FK;
-- conditional CHECK: `(operation_type = 'reduce') = (units_before IS NOT NULL AND
-  units_to_deduct IS NOT NULL AND core_rebalance_intent_id IS NOT NULL AND
-  core_eligibility_proof_id IS NOT NULL)`, and `units_to_deduct > 0 AND units_to_deduct <
-  units_before` when present. Existing rows are all non-reduce with NULLs, so they satisfy
-  the CHECK and need no backfill;
-- the existing status, timestamp and one-unresolved-per-ownership unique index are reused
-  unchanged. The implementation re-reads `sql/289` and every later migration that alters
-  them (`377`, `378`, `392`, `406`, `408`) and states the resulting constraint set in the
-  migration header.
+The implementation PR lists what each allocator-lock site calls while holding it, and
+shows none reaches `core_submission_lock`. It adds a test asserting that
+`strategy_position_manager` and the three xact sites do not import `core_submission_lock`
+or `CORE_SUBMISSION_ADVISORY_LOCK`. That test is drift detection only; the listed audit is
+the proof. If the audit fails, the sell is refused, not built around.
 
-### 7. What stays refused
+**Selection before locking (#22).** The executor selects the candidate `pid` from its
+pre-lock snapshot (the one its DB preflight already used). Under the position lock,
+`submit_core_reduce` takes a new snapshot and re-runs selection. A different `pid` →
+refuse `core_sleeve_moved_since_decision`.
 
-Multi-position sells, whole closes through the allocator, the real environment (the
-executor is demo-only, `:642`), units above `max_units_per_order`, and any sell while §4's
-sleeve-wide outstanding check is true.
+**Re-proof (#23).** Under the locks, `submit_core_reduce` re-runs the executor's **whole**
+DB preflight: mandate enabled, pot enabled, capital authority, ownership `active`, the
+quarantine (§5), and eligibility (`allow_close_position` AND
+`allow_partial_close_position`, r2-9). It then runs §2 and §1 before any insert. It never
+re-checks a subset.
 
-### 8. U1 residual (C1-24, C1-25)
+**Lifetime (#24).** Both locks are held from re-proof through:
 
-If eToro assigns a successor id on partial close, §5 marks the reduce `reconcile_required`.
-Capital resolution then raises `engine_capital_ownership_unwitnessed` for the vanished id,
-which is the existing, visible fail-closed wedge. The successor position is **not** claimed
-or managed by the engine until an operator resolves it. It is a demo, attended-only path,
-and the successor carries whatever SL/TP eToro copies over. The acceptance below
-therefore checks SL/TP on the post-trim position explicitly. One observed transition does
-not prove retention forever, so every reduce re-checks U1 (§5). No run relies on an
-earlier observation.
+1. the intent insert;
+2. `mark_close_submitting`;
+3. the broker call;
+4. outcome persistence.
+
+This matches `manage_owned_position` → `_submit_close`. Recovery (§7) runs under the same
+pair, so it cannot abandon an intent whose submitter is still inside the call.
+
+**Transaction boundaries.**
+
+1. The executor commits its intent row under `core_submission_lock`, and keeps holding
+   that lock.
+2. `submit_core_reduce` opens its own transactions, under the lock order above.
+
+**Marker (#25).** `mark_close_submitting` checks the UPDATE's rowcount and raises unless
+it is 1. A no-op transition then prevents broker I/O. The same fix is applied to the
+existing close path, where the defect also lives (`strategy_position_manager.py:994-999`).
+
+### 5. Authority, quarantine and submission — `strategy_position_manager.submit_core_reduce`
+
+**Quarantine predicate** (sleeve-wide, r2-10, 11, 12). It is true when any core-owned
+position has either:
+
+- an operation in (`intent_persisted`, `submitting`, `submitted`); or
+- a `reduce` or `close` operation in `reconcile_required`.
+
+Where it applies:
+
+- It refuses a core **sell** (`core_sell_operation_outstanding`) and a core **buy**
+  (`core_operation_outstanding`).
+- Other allocators on the shared pot are covered by capital resolution (#19). From the
+  moment a reduce fills until it is `applied`, the owned position is partially altered
+  with no witnessed conservation (§6b). `resolve_engine_capital_usage` therefore raises,
+  and every allocation path on the pot is refused. Before the fill, exposure is
+  unchanged, and the pending order can only reduce it.
+
+**A reduce never writes `strategy_trades.status` (#29-31).** Every reduce outcome touches
+only the operation row and its `orders` row. The trade stays whatever it was, so no
+unrelated state is erased and the close path's trade-status guards are unchanged.
+
+**Emergency / operator close (r2-13, #27, #28).**
+
+- **While a reduce is in flight:** `manage_owned_position` resumes the in-flight
+  operation first and returns (the `_resume_operation` early return in `manage_owned_position`). An emergency close therefore waits for the
+  reduce to resolve. That wait is bounded by the broker's order lifetime and is the same
+  wait any in-flight close or edit imposes today. It is stated, not changed.
+- **After a reduce is `reconcile_required`:** the reduce is not in-flight, so the
+  emergency close proceeds. The manager's repair, ratchet and timeout arms return
+  `reduce_unresolved` without writing, but an explicit `close_reason` is admitted.
+- **After an emergency close of a partially altered position:** #3312's whole-close
+  release refuses, because an unowned slice row exists under the entry order. The trade
+  goes to `reconcile_required` through the existing branch. Capital raises
+  `engine_capital_ownership_unwitnessed` for the vanished id until a human resolves it.
+  Fail closed, visible, no new code.
+
+**Inserts, in one transaction after re-proof:**
+
+- an `orders` row: `action='EXIT'`, `order_type='MARKET'`, `requested_amount = A'`,
+  `status='submitted'`, linked to the owning entry trade with `purpose='exit'`;
+- the operation row: `operation_type='reduce'`, `trigger_code='core_rebalance'`,
+  `status='intent_persisted'`, with `units_before`, `units_to_deduct`,
+  `core_rebalance_intent_id` and `core_eligibility_proof_id`.
+
+The authority transaction verifies that the proof belongs to the intent, as the buy arm
+does (#39). It writes no `strategy_order_reconciliation_state` row and no
+`strategy_core_entry_exit_levels` row.
+
+**Submission:**
+
+- `mark_close_submitting`, with the rowcount check.
+- New provider verb `reduce_demo_strategy_position(position_id, instrument_id,
+  units_to_deduct, request_id, persist_response)`. It is `close_demo_strategy_position`
+  with `UnitsToDeduct` set: same endpoint, same quota lane, same
+  `refuse_broker_mutation_if_unattended`, same demo-only check. It refuses a `None`,
+  non-finite or non-positive quantity before I/O, and sends a JSON number from the 6-dp
+  `Decimal`, never `null`.
+- Outcomes, mirroring `_submit_close` minus any trade-status write:
+  - uncertain → `reconcile_required` (`broker_reduce_uncertain`);
+  - definite rejection → operation and `orders` row both `rejected`, in one transaction;
+  - ack → store `broker_order_ref` and set status `submitted`. An ack `unitsToDeduct` that
+    is present but unequal → `reconcile_required` (`reduce_ack_units_mismatch`).
+
+### 6. Capital: witnessed-trim admission and per-operation slice P&L
+
+**6a. Snapshot fields (#43).** Parse `initialUnits` and `initialAmountInDollars` onto the
+risk-snapshot direct row. Both are documented as *"This value does not change in case the
+position was partially closed"* (`openapi_v1.375.0.json`, portfolio position schema), and
+both were observed unchanged (U1).
+
+**6b. Admission of a reduced core row** (`resolve_engine_capital_usage`, #16, #17).
+These checks apply whenever the ownership has ≥ 1 `applied` reduce, **whatever
+`is_partially_altered` says**:
+
+- no reduce on the ownership is in a non-terminal status or in `reconcile_required`;
+- `initial_units − units` equals Σ `units_to_deduct` over its applied reduces, as an exact
+  Decimal comparison at full precision (#37);
+- every applied reduce has a bound slice row (6c).
+
+A core row that is partially altered with no applied reduce keeps today's
+`engine_capital_ownership_mismatched`. So does any row failing the checks above.
+Examples: an operator's manual trim, a split, or broker-side rounding.
+
+For an admitted reduced row, committed capital is
+`max(row.amount, initial_amount_in_dollars × units / initial_units)`. This is the larger
+of the broker's residual amount and the proportional basis, so a broker `amount` that
+drops faster than units cannot free headroom (#17).
+
+**6c. Per-operation slice binding** (#8-#15, replacing r3's aggregate rule). A new column
+`strategy_position_operations.slice_position_id BIGINT`, with a partial UNIQUE index,
+binds each reduce to exactly one broker slice. The binding is written by §7 when it
+marks the reduce `applied`, and only then.
+
+A **candidate** is a `trade_events` row that satisfies every one of these:
+
+- `event_kind='close'` and `source='etoro_history'`;
+- `order_id` = the ownership's single entry `broker_order_ref`;
+- `position_id` is no `strategy_position_ownership.broker_position_id` (any trade, any
+  status);
+- `position_id` is bound to no other operation;
+- `units` equals `units_to_deduct` exactly;
+- `executed_at ≥ operation.created_at − 60 s`.
+
+The 60 s allowance is by construction. `created_at` is DB time written before the broker
+call, so a genuine fill is later on a synced clock, and 60 s absorbs clock skew between
+our host and the broker. No published rule exists.
+
+Exactly one candidate → bind. Zero → the reduce stays `submitted` (history not yet
+ingested). More than one → `reconcile_required` (`reduce_slice_ambiguous`). This ends
+#8/#9: two ownerships under one entry order cannot claim the same slice, because the
+binding is unique and ambiguity fails closed. It also ends the aggregate-compensation
+problem (#10, #11). Nothing depends on `submitted_at` (#13, #14).
+
+**6d. Realised P&L** (`_load_realised_delta`). There is one query in the same
+transaction as the authority's other reads (#18). It sums:
+
+- today's per-position close rows, unchanged;
+- for each **bound** slice of an applied reduce on an eligible ownership, that slice's
+  close row.
+
+For every slice row, and for the final close row of a position with ≥ 1 applied reduce:
+
+- **Required fields (#7):** `realized_pnl_usd`, `units`, `price`, and `openRate` in the
+  raw payload must be present and finite, and `fees_usd` must equal 0. A missing field or
+  non-zero fees → `engine_capital_population_incomplete`. Fees are 0 on every observed
+  row. How fees combine with `netProfit` is undocumented (#3), so a fee'd row refuses
+  rather than guessing.
+- **Instrument currency (#6):** `instruments.currency` for the core instrument must be
+  `USD`, else `engine_capital_snapshot_unusable`.
+- **Contribution:** `min(realized_pnl_usd, (price − openRate) × units)`. This takes the
+  lower of the broker's figure and its own-rate reconstruction, so neither a rounding
+  difference nor a cumulative reading can raise capital above the reconstruction (#1,
+  #2, #4).
+- **Deviation guard:** `|realized_pnl_usd − (price − openRate) × units| > 0.01` →
+  `engine_capital_population_incomplete`. The 0.01 figure is by construction, as the
+  observed 2-dp resolution of `netProfit`, and it is frozen as a module constant. The
+  guard makes a cumulative reading visible once it matters rather than silent.
+- The x1, unleveraged, long-only premise that the reconstruction needs (#5) is already
+  enforced for core rows (`is_buy` required; the executor opens at leverage 1). The
+  implementation also requires `leverage = 1` on each counted row.
+
+**6e.** A released, reduced ownership never reaches this sum automatically. #3312 refuses
+to release a partially altered position, so final-close completeness (#15) is a human
+resolution.
+
+### 7. Resolution — a `reduce` branch at the TOP of `_resume_operation` (#32-36)
+
+The branch is dispatched **before** `_exact_broker_position` is called
+(`strategy_position_manager.py:620`), and so before every existing branch.
+
+- **`intent_persisted`** → `rejected` (`reduce_abandoned_before_submission`), with the
+  `orders` row `rejected` in the same transaction.
+- **`submitting` without `broker_order_ref`** → `reconcile_required`
+  (`reduce_crash_before_identity`).
+- **`submitting` with `broker_order_ref`** (#33): unreachable, because the reference and
+  `submitted` are written in one UPDATE. If it is seen anyway, it is handled as
+  `submitted`.
+- **`submitted`:**
+  1. Validate the stored reference and instrument.
+  2. Fetch `get_close_order(orderId)`, **then** take the snapshot.
+  3. Validate that the returned detail's order id and instrument equal ours (#34). A
+     mismatch → `reconcile_required` (`reduce_identity_mismatch`).
+  4. Classify the outcome:
+     - Lookup transport failure → stays `submitted`.
+     - `pending` → stays `submitted`.
+     - Broker `rejected`/`cancelled` **and** snapshot `units == units_before` → `rejected`,
+       with the `orders` row. Any other cancelled shape → `reconcile_required`
+       (`reduce_cancel_unproved`).
+     - `filled`, and `positions` names exactly the owned id. Then look at the snapshot:
+       - the id is absent → `reduce_position_id_not_retained`;
+       - `units == units_before` (snapshot lagging the fill, #35) → stays `submitted`, and
+         the next cycle re-reads it;
+       - `units == units_before − units_to_deduct` exactly **and**
+         `initial_units − units` equals Σ applied plus this one **and** detail
+         `positions[].units`, when present, equals `units_to_deduct` → go to slice binding
+         (6c). One candidate → `applied` + bind, with the order `filled`. Zero → stays
+         `submitted`. More than one → `reduce_slice_ambiguous`;
+       - anything else → `reduce_outcome_unclassified`.
+- **SL/TP (#36, r2-15)** are not a landing condition. The manager's fixed-exit repair arm
+  already compares the broker's SL/TP to the persisted exit levels on every cycle and
+  repairs any gap. That arm stays the single owner of SL/TP.
+- **`reconcile_required` on a reduce is sticky.** It quarantines the sleeve (§5). Clearing
+  it is manual and out of scope.
+- `_finish_close` raises unless `operation_type = 'close'`.
+
+**Residual risks (stated):**
+
+- An external trim between the snapshot and the fill fails the residual check →
+  `reconcile_required`.
+- A broker-side rounding of the quantity is caught by the ack echo and the residual check.
+- A reduce whose slice row never appears stays `submitted` and quarantined. That is
+  visible on the operation and blocks further core sells and buys.
+
+### 8. Migration `sql/411_core_reduce_operation.sql`
+
+- **`operation_type` CHECK** → add `'reduce'`. The sql/289 inline CHECK is dropped by the
+  catalog name read from `pg_constraint`, then re-added as
+  `strategy_position_operations_operation_type_vocabulary`.
+- **`strategy_position_operations_trigger_code_check`** (sql/292) → add
+  `'core_rebalance'`.
+- **Per-type shape CHECK** (sql/289, unnamed) → re-added as
+  `strategy_position_operations_type_shape`, with
+  `(operation_type='reduce' AND order_id IS NOT NULL AND desired_stop_rate IS NULL AND
+  desired_take_profit_rate IS NULL)` added.
+- **New nullable columns:**
+  - `units_before NUMERIC`;
+  - `units_to_deduct NUMERIC(18,6)`;
+  - `core_rebalance_intent_id` FK;
+  - `core_eligibility_proof_id` FK;
+  - `slice_position_id BIGINT`.
+- **`strategy_position_operations_reduce_shape`:**
+  - reduce ⇒ the four intent columns are NOT NULL; `units_before` is finite
+    (`units_before < 'Infinity'` and `units_before <> 'NaN'`, since PostgreSQL `NUMERIC`
+    admits both, #38); and `0 < units_to_deduct < units_before`;
+  - non-reduce ⇒ all five new columns are NULL (r2-26);
+  - `slice_position_id IS NOT NULL` ⇒ `status = 'applied'`.
+- **New unique indexes:** `slice_position_id` WHERE NOT NULL, and
+  `core_rebalance_intent_id` WHERE `operation_type='reduce'` (one reduce per intent, #39).
+- **Carried unchanged** (the effective set after sql/289, 292, 377, 378 and 406; r2-27):
+  - `strategy_position_operations_status_vocabulary` (sql/377);
+  - `strategy_position_operations_resolution_shape` (sql/377);
+  - `idx_strategy_position_one_unresolved_operation` UNIQUE `(ownership_id)` WHERE status
+    IN (`intent_persisted`,`submitting`,`submitted`) (sql/377). It covers `reduce`
+    as-is.
+  - `idx_strategy_position_operation_material_identity`, which is limited to
+    `fixed_exit_repair`/`stop_ratchet` and `status <> 'applied'` (sql/406).
+  - sql/378 is a data-only backfill. sql/392 and 408 alter other tables.
+
+### 9. What stays refused
+
+- multi-position sells and whole closes through the allocator;
+- the real environment;
+- units above `max_units_per_order`;
+- an ambiguous entry reference;
+- any core sell or buy while the §5 quarantine is true;
+- a reduced core row the engine did not fully witness (§6b).
 
 ## Attended acceptance (loop-ineligible)
 
-One demo session. Tighten the core mandate's band so SPY.RTH sits above `upper`, then
-`POST /core-sleeve/rebalance`. Record: the ack body, the close-order detail, and the
-snapshot `positionID` / `units` / `stopLossRate` / `takeProfitRate` before and after.
-Also record any `trade_events` row written for the position.
+One demo session. Tighten the core band so SPY.RTH sits above `upper`, then call
+`POST /core-sleeve/rebalance`. Record:
 
-- **Pass** = operation `applied`, same `positionID` present with reduced units, SL/TP
-  unchanged, ownership `active`.
-- **Safe fail** = operation `reconcile_required` with one of §5's codes, and no second sell
-  admitted.
+- the ack;
+- the close-order detail (`positions[].units`, unobserved for a partial);
+- the snapshot `positionID` / `units` / `initialUnits` / `initialAmountInDollars` / SL /
+  TP, before and after;
+- every `trade_events` row under the opening order after the next sync;
+- the bound `slice_position_id`;
+- the next capital resolution.
 
-This also answers #2965's open question, since it observes the fields after a partial
-close.
+Outcomes:
+
+- **Pass** = operation `applied` with one bound slice; same `positionID` with the residual
+  units; ownership `active`; the next capital resolution succeeds and includes the
+  slice's contribution (6d).
+- **Safe fail** = any §1/§4/§5 refusal, a clean `rejected`, or `reconcile_required` with a
+  §5/§7 code. In every case the same intent is never submitted twice (#45).
+- **Cumulative vs per-slice `netProfit`** cannot be discriminated by one trim (#44). It
+  is discriminated the first time a reduced position is closed whole with slice P&L above
+  1 cent. Until then, 6d's `min(·)` and deviation guard bound it.
 
 ## Delivery
 
-One PR: pure units/selection/re-check with table tests; the preflight sell arm; the
-migration; the provider verb with guard and lane wiring; `submit_core_reduce` and the
-resume branch; DB tests for the authority transaction, landed, id-not-retained,
-units-unwitnessed, pre-marker abandon, crash-before-identity, and the sleeve-wide
-outstanding refusal. The acceptance is recorded as pending on #2603.
+One PR, containing:
 
-## Verdict — Codex ckpt-1 round 2 (2026-09-22): PARKED on U3
+- pure units/selection/rounding/re-check and the pure 6c/6d rules, with table tests. These
+  include a cumulative-reading fixture that the deviation guard must refuse and a
+  two-ownership-one-order fixture that must go ambiguous;
+- the preflight sell arm and the executor `sell_core` branch calling
+  `submit_core_reduce`, with intent terminal states mirroring the buy arm (#40);
+- the migration;
+- the snapshot field parse;
+- the provider verb with guard and lane wiring;
+- the marker rowcount fix;
+- the quarantine;
+- the `reduce` resume branch and binding;
+- DB tests, one per new SQL mechanism: the authority transaction; `_load_realised_delta`
+  with a bound slice (the 2026-09-23 rows); the binding uniqueness; the quarantine.
 
-Round 2 raised 29 findings. They split into two groups.
+Acceptance is recorded as pending on #2603.
 
-### Blocking: U3, the realised-P&L event semantics after a partial close (r2-21, 22, 23)
+## History
 
-`_load_realised_delta` sums `trade_events` `close` rows per owned `position_id`
-(`strategy_engine_capital.py:112-160`). The capital authority, and so the #2844 sandbox
-bound, depends on that sum. What a partial close writes there is **undocumented and
-unobserved on dev**:
-
-- **No row written:** a realised **loss** is omitted, so capital is **overstated** and
-  the sandbox admits exposure above the pot. This is the unsafe direction. The claim in
-  "Premise checks" that it only "under-reports" is wrong.
-- **Row written with NULL P&L:** `engine_capital_population_incomplete` fires on every
-  later cycle. That is a persistent wedge.
-- **Rows written cumulatively** (the partial row and then the final row both carry the
-  running P&L): the sum double-counts.
-
-Only an observation can tell these apart. This is the same unknown that refused #2965
-twice ("what the broker reports after a partial close"), and the #2965 doc says not to try
-a third key against it. Designing the sell leg around a guess here would put the
-operator's only safety net on that guess. **No revision 3 until U3 is observed.**
-
-### Mechanical: resolve in revision 3 (no observation needed)
-
-- **Rounding (r2-1, 2, 4, 5):** round units UP to the increment, as the sizer does
-  (`strategy_core_sizing.py:375`), not down. Rounding down can leave the weight above
-  `upper`. Re-validate the extrapolation ratio on `A'` explicitly. Persist `units_before` at
-  the snapshot's full precision, not NUMERIC(18,6). Refuse a missing, zero or non-finite
-  mark or units before any division.
-- **Increment (r2-3):** a broker-rounded fill has already changed exposure before §5 sees
-  it, so 6 dp is not "fail closed". U2 joins the observation list.
-- **Locking and transactions (r2-6, 7, 8):** take the manager's locks BEFORE sizing, or
-  re-take the snapshot under them. Re-check snapshot age after acquiring them. Name the
-  transaction boundary: the executor's authority transaction must commit before
-  `submit_core_reduce` opens its own, and authority is re-proved under the new locks.
-- **Authority (r2-9):** keep the manager's `allow_close_position` check alongside
-  `allow_partial_close_position`.
-- **Quarantine (r2-10, 11, 12, 13):** the outstanding check must also block on a `close` in
-  `reconcile_required`. An unresolved reduce must quarantine the POSITION from every
-  manager mutation, and block core BUYS as well as sells. Specify what happens to an
-  emergency/operator close while a reduce is pending. Today it is blocked indefinitely
-  (`strategy_position_manager.py:1261-1263`).
-- **Resolution (r2-14 to 20):** fetch the close-order detail BEFORE the snapshot, so a
-  pre-fill snapshot cannot certify retention. On `applied`, require the residual units and
-  unchanged SL/TP. Validate reference and instrument before ANY terminal classification. A
-  cancelled status with empty `positions` does not prove zero execution, so it goes to
-  `reconcile_required`. On a lookup transport failure, stay pending. Reject the `orders`
-  row atomically with the operation. The external-trim case (r2-14) is undetectable
-  without a broker-side expected-units condition, so it is a stated residual risk.
-- **De-risk refusals (r2-24, 25):** define an over-limit sleeve (negative headroom →
-  `assigned_cash_available = 0`, sell still classified). Decide whether a disabled mandate
-  or pot blocks a reduction. The manager rule says de-risking is never blocked.
-- **Migration (r2-26, 27):** for non-reduce rows, require all four reduce columns NULL, not
-  just "not all populated". Write out the effective status/timestamp/unique-index set from
-  `289` + `377`/`378`/`392`/`406`/`408` in the spec, not a promise to read them.
-- **Acceptance (r2-28, 29):** "safe fail" also covers §4's codes and a clean `rejected`.
-  C1-32 (partial realised P&L) is now U3 above.
-
-### Wake condition (per-ticket, producible, split)
-
-**Wake:** an operator-attended demo session partially closes a NON-engine position via
-`UnitsToDeduct`. The operator can do this on demand. #2965 already asks for exactly this.
-The session posts on #2603 or #2965:
-
-- (U1) the snapshot `positionID` and `units` before and after;
-- (U2) the requested versus executed units (the close-order detail's `positions[].units`),
-  with a requested quantity carrying more than 2 decimal places;
-- (U3) every `trade_events` row for that position after the partial close, and again
-  after the remainder is closed, with `realized_pnl_usd` on each.
-
-**Split:** nothing in the sell leg is safely buildable ahead of U3. The provider verb alone
-has no caller, and the operator's observation does not need it (a manual partial close in
-the eToro UI is enough). #2603's other halves are unaffected by this park.
+- **r1:** 33 findings (`C1-n`).
+- **r2:** 29 findings (`r2-n`), parked on U3.
+- **r3:** U1/U2/U3 observed; the capital-reader lift added. Codex r3 raised 46 findings
+  (`#n` above). The main one was aggregate slice matching, which could double-count
+  across ownerships sharing an entry order (sql/282).
+- **r4:** per-operation unique binding replaces aggregate matching; `min(reported,
+  reconstructed)`; full lock lifetime and re-proof; capped-pot under-shoot stated;
+  reduces never write trade status.
