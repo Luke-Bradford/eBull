@@ -11289,5 +11289,15 @@ neighbouring container and match it.**
 - Prevention: clean up with the SAME rule the gate applies, evaluated on the stored row, and
   fail-closed wherever an input is unknown. Do not key the cleanup on the symptom (the NULL trio).
   Deleting a mid-history thin row drops a real year, so keep it and name it as lost history instead.
+- ⚠ **A stored row cannot fully replay a gate that reads FACTS.** The gate counts an annual
+  duration of ANY tracked concept as presentation, but some tracked concepts have no
+  `financial_periods` column (`effective_tax_rate`). So 417 over-deleted 30 of 3,740 rows
+  relative to the gate. A per-instrument rolled-back re-normalize over the 3,460 instruments with
+  raw-only FY periods found them, and a real normalize of those 28 instruments restored them. The
+  check that catches this is: **after a cleanup migration, dry-run the minting path over the affected
+  instruments and count what it re-mints.** Anything re-minted means the cleanup disagrees with the gate.
+- ⚠ **The pre-push smoke boot applies a branch's migrations to the shared dev DB before review**
+  (417 landed at 19:50Z, before the bot ran). For a DELETE migration, run the full-population
+  A/B and the re-mint dry-run BEFORE the first push, because nothing is rolled back afterwards.
 - Enforced in: `sql/417_delete_unpresented_fy_ghost_rows.sql`;
   `tests/test_migration_417_fy_ghost_rows_2182.py`.
