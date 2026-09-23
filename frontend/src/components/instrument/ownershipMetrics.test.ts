@@ -442,7 +442,8 @@ describe("oversubscribedCopy (#2226)", () => {
       const copy = oversubscribedCopy({ ...base, oversubscribed: true, short_interest_cover: cover });
       expect(copy).not.toBeNull();
       expect(copy).not.toMatch(/stale 13F|snapshot lag|next 13F cycle/i);
-      expect(copy).toContain("Short interest does not cover");
+      // null cover can mean "no FINRA figure", so the copy must not claim SI is insufficient.
+      expect(copy).not.toMatch(/does not cover/i);
     }
   });
 });

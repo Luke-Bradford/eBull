@@ -289,7 +289,9 @@ export function ownershipSuppressedDenominatorCopy(
  * one cause the server attributes from data is short-lending
  * (``short_interest_cover``): Form 13F reports long positions only and a
  * lender keeps reporting loaned shares (SEC 13F FAQ Q41/Q42), so the buyer of
- * a shorted share and its lender both report it.
+ * a shorted share and its lender both report it. Its ABSENCE is not a
+ * negative — no FINRA figure in window and a figure too small are both
+ * ``null`` — so the generic copy makes no short-interest claim.
  */
 export function oversubscribedCopy(
   residual: OwnershipRollupResponse["residual"],
@@ -299,5 +301,5 @@ export function oversubscribedCopy(
   if (cover !== null) {
     return `Category totals exceed shares outstanding by ${formatShares(parseShareCount(cover.overage_shares))} shares — within FINRA short interest of ${formatShares(parseShareCount(cover.short_interest_shares))} (settlement ${cover.settlement_date}). Shares lent to short sellers are reported on Form 13F by both the lender and the buyer, so institutional totals can legitimately exceed shares outstanding. Public float cannot be derived from filings here.`;
   }
-  return "Category totals exceed shares outstanding, so public float cannot be derived from filings here. Short interest does not cover the overage. Known contributors are holdings from filers that have stopped filing and the same shares attributed to several reporting persons.";
+  return "Category totals exceed shares outstanding, so public float cannot be derived from filings here. Known contributors: shares lent to short sellers (reported on Form 13F by both lender and buyer), holdings from filers that have stopped filing, and the same shares attributed to several reporting persons.";
 }
