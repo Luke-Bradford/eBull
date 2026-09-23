@@ -8,6 +8,7 @@ import type {
   CoreRebalanceResponse,
   FiredSignalsResponse,
   StrategyAdvanceResponse,
+  StrategyOrderActivityResponse,
   StrategyOperatorAction,
   StrategyOverviewResponse,
   StrategyEvidenceRefreshResponse,
@@ -52,6 +53,10 @@ export function fetchFiredSignals(cursor: number | null, strategyId?: string): P
 
 export function fetchStrategyPnlHistory(): Promise<StrategyPnlHistoryResponse> {
   return apiFetch("/strategies/wealth-history");
+}
+
+export function fetchStrategyOrderActivity(): Promise<StrategyOrderActivityResponse> {
+  return apiFetch("/strategies/order-activity");
 }
 
 export function fetchStrategyOwnedPositions(): Promise<StrategyOwnedPositionsResponse> {

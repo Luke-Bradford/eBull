@@ -3253,6 +3253,50 @@ export interface StrategyOwnedPositionsResponse {
   live_quote_instrument_ids: number[];
 }
 
+/** One broker-observed open/close of an engine-owned position (#3334). */
+export interface StrategyFill {
+  event_id: number;
+  broker_position_id: number;
+  strategy_trade_id: number;
+  /** Null on the core/cash arm; `strategy_title` carries the mandate label. */
+  strategy_id: string | null;
+  strategy_title: string;
+  instrument_id: number;
+  symbol: string;
+  event_kind: "open" | "close";
+  side: "buy" | "sell";
+  units: string;
+  /** Instrument-native; `price_currency` is the instrument's, not the pot's. */
+  price: string | null;
+  price_currency: string | null;
+  executed_at: string;
+  /** In `StrategyOrderActivityResponse.money_currency`. */
+  realised_pnl: string | null;
+  fees: string | null;
+}
+
+/** An alpha entry the engine planned or submitted that has not filled yet. */
+export interface StrategyPendingEntry {
+  strategy_trade_id: number;
+  strategy_id: string;
+  strategy_title: string;
+  instrument_id: number;
+  symbol: string;
+  trade_status: "planned" | "submitted" | "reconcile_required";
+  /** Null only before an order row exists. A `planned` trade with an order id
+   *  may already be at the broker — never read it as "not sent". */
+  order_id: number | null;
+  order_status: string | null;
+  funded_amount: string | null;
+  created_at: string;
+}
+
+export interface StrategyOrderActivityResponse {
+  money_currency: "USD";
+  fills: StrategyFill[];
+  pending_entries: StrategyPendingEntry[];
+}
+
 export interface StrategyPositionCloseResponse {
   strategy_trade_id: number;
   broker_position_id: number;

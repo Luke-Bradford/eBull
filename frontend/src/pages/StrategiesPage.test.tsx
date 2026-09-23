@@ -501,6 +501,11 @@ describe("StrategiesPage", () => {
       live_quote_instrument_ids: [],
     });
     vi.spyOn(strategiesApi, "fetchFiredSignals").mockResolvedValue({ items: [], next_cursor: null });
+    vi.spyOn(strategiesApi, "fetchStrategyOrderActivity").mockResolvedValue({
+      money_currency: "USD",
+      fills: [],
+      pending_entries: [],
+    });
   });
 
   it("keeps unapproved backtests out of portfolio performance", async () => {

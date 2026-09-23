@@ -4,11 +4,18 @@ import { postKillSwitch } from "@/api/config";
 import {
   closeStrategyOwnedPosition,
   fetchCoreSleeve,
+  fetchStrategyOrderActivity,
   fetchStrategyOverview,
   fetchStrategyOwnedPositions,
   fetchStrategyPnlHistory,
 } from "@/api/strategies";
-import type { CoreSleeveResponse, StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
+import type {
+  CoreSleeveResponse,
+  StrategyOrderActivityResponse,
+  StrategyOverviewResponse,
+  StrategyOwnedPosition,
+  StrategyPendingEntry,
+} from "@/api/types";
 import { ApiError } from "@/api/client";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { StatTile } from "@/components/dashboard/StatTile";
@@ -24,9 +31,9 @@ import {
 } from "@/components/strategies/StrategyPortfolioPanels";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
-import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
+import { formatDate, formatDateTime, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
 import { aggregate, namedList, positionsOutsideStrategyPnl, potWealthSummary } from "@/lib/strategyAggregate";
-import { number } from "@/lib/strategyFormat";
+import { money, number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
 import { useAsync } from "@/lib/useAsync";
 
@@ -39,30 +46,53 @@ function toneOf(value: number | null): "muted" | "positive" | "negative" {
  * The engine's working orders, as far as the app can see them (#3334).
  *
  * ⚠ Derived, not a broker order book: a close the engine submitted and has not
- * yet reconciled (`trade_status = closing`), and the core sleeve's unresolved
- * order (`pending_order_id`). Those are the only engine order states any
- * endpoint exposes today; a pending ENTRY order for an alpha strategy has no
- * read surface, which is why the empty copy says "none the engine is tracking"
- * rather than "no orders".
+ * yet reconciled (`trade_status = closing`), the core sleeve's unresolved order
+ * (`pending_order_id`), and alpha entries still `planned` or `submitted`
+ * (`/strategies/order-activity`). The endpoint leaves the core arm out of
+ * `pending_entries` precisely so the core order is listed once, here.
  */
+/** ⚠ A `planned` trade with an order row may already be at the broker (the
+ *  executor commits the order before the call), so only a trade with NO order
+ *  row is "not yet sent" (Codex ckpt-2 on #3334 slice B). */
+function entryState(entry: StrategyPendingEntry): string {
+  if (entry.trade_status === "reconcile_required") {
+    return entry.order_id === null ? "Outcome unknown, reconciling" : `Order #${entry.order_id} outcome unknown, reconciling`;
+  }
+  if (entry.order_id === null) return "Planned, not yet sent";
+  return `Order #${entry.order_id} sent, awaiting fill`;
+}
+
 function EngineOrders({
   positions,
   coreSleeve,
   coreSleeveFailed,
   onRetryCore,
+  pendingEntries,
+  activityFailed,
+  onRetryActivity,
+  positionsFailed,
 }: {
-  positions: readonly StrategyOwnedPosition[];
+  /** `null` while the positions read is unresolved or failed — NOT "no closes". */
+  positions: readonly StrategyOwnedPosition[] | null;
   /** `null` while the core-sleeve read is unresolved or failed — NOT "no order". */
   coreSleeve: CoreSleeveResponse | null;
   coreSleeveFailed: boolean;
   onRetryCore: () => void;
+  /** `null` while the activity read is unresolved or failed — NOT "no entries". */
+  pendingEntries: readonly StrategyPendingEntry[] | null;
+  activityFailed: boolean;
+  onRetryActivity: () => void;
+  /** The positions error renders once, on Holdings; here it only blocks "empty". */
+  positionsFailed: boolean;
 }) {
-  const closing = positions.filter((position) => position.trade_status === "closing");
+  const closing = (positions ?? []).filter((position) => position.trade_status === "closing");
   const corePending = coreSleeve?.pending_order_id ?? null;
-  // ⚠ Unknown is not empty (Codex ckpt-2 on #3334): until the core-sleeve read
-  // resolves, "No engine order is working" would be a claim about an order
-  // nobody has looked for.
-  const coreUnknown = coreSleeve === null;
+  const entries = pendingEntries ?? [];
+  // ⚠ Unknown is not empty (Codex ckpt-2 on #3334): until ALL three reads resolve,
+  // "No engine order is working" would be a claim about orders nobody has looked for.
+  const unknown = coreSleeve === null || pendingEntries === null || positions === null;
+  const failed = coreSleeveFailed || activityFailed || positionsFailed;
+  const nothing = closing.length === 0 && corePending === null && entries.length === 0;
   return (
     <section aria-labelledby="engine-orders" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
       <h2 id="engine-orders" className="text-sm font-semibold">Engine orders</h2>
@@ -70,11 +100,17 @@ function EngineOrders({
         <div className="mt-2">
           <SectionError onRetry={onRetryCore} />
         </div>
-      ) : coreUnknown ? (
-        <p className="mt-2 text-sm text-slate-500">Checking the core sleeve for a working order…</p>
       ) : null}
-      {coreUnknown && closing.length === 0 ? null : closing.length === 0 && corePending === null ? (
-        <p className="mt-2 text-sm text-slate-500">No engine order is working. Closes and core-sleeve orders appear here until the broker confirms them.</p>
+      {activityFailed ? (
+        <div className="mt-2">
+          <SectionError onRetry={onRetryActivity} />
+        </div>
+      ) : null}
+      {unknown && !failed ? <p className="mt-2 text-sm text-slate-500">Checking for working orders…</p> : null}
+      {nothing ? (
+        unknown ? null : (
+          <p className="mt-2 text-sm text-slate-500">No engine order is working. Entries, closes and core-sleeve orders appear here until the broker confirms them.</p>
+        )
       ) : (
         <ul className="mt-2 divide-y divide-slate-200 text-sm dark:divide-slate-800">
           {corePending !== null ? (
@@ -83,6 +119,17 @@ function EngineOrders({
               <span className="text-xs text-amber-700 dark:text-amber-300">Awaiting broker reconciliation</span>
             </li>
           ) : null}
+          {entries.map((entry) => (
+            <li key={`entry:${entry.strategy_trade_id}`} className="flex flex-wrap justify-between gap-2 py-2">
+              <span>
+                Buy {entry.symbol} · {entry.strategy_title}
+                {entry.funded_amount !== null ? <span className="text-slate-500"> · {money(entry.funded_amount)}</span> : null}
+              </span>
+              <span className="text-xs text-slate-500">
+                {entryState(entry)}
+              </span>
+            </li>
+          ))}
           {closing.map((position) => (
             <li key={`${position.strategy_trade_id}:${position.broker_position_id}`} className="flex flex-wrap justify-between gap-2 py-2">
               <span>Close {position.symbol} · {position.strategy_title}</span>
@@ -90,6 +137,80 @@ function EngineOrders({
             </li>
           ))}
         </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Recent broker-confirmed fills on engine-owned positions (#3334), newest first.
+ *
+ * Money is the pot's USD (`money_currency`); the fill price is the instrument's
+ * own currency, labelled as such. P&L and fees exist on closes only — an open
+ * shows a dash rather than a zero it never had.
+ */
+function RecentFills({
+  activity,
+  loading,
+  failed,
+  onRetry,
+}: {
+  activity: StrategyOrderActivityResponse | null;
+  loading: boolean;
+  failed: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <section aria-labelledby="recent-fills" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
+      <h2 id="recent-fills" className="text-sm font-semibold">Recent fills</h2>
+      {failed ? (
+        <div className="mt-2">
+          <SectionError onRetry={onRetry} />
+        </div>
+      ) : loading || activity === null ? (
+        <SectionSkeleton rows={2} />
+      ) : activity.fills.length === 0 ? (
+        <p className="mt-2 text-sm text-slate-500">No fill yet. Opens and closes the broker confirms appear here.</p>
+      ) : (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs text-slate-500">
+              <tr>
+                <th className="py-1 pr-3 font-medium">When</th>
+                <th className="py-1 pr-3 font-medium">Fill</th>
+                <th className="py-1 pr-3 font-medium">Strategy</th>
+                <th className="py-1 pr-3 text-right font-medium">Units</th>
+                <th className="py-1 pr-3 text-right font-medium">Price</th>
+                <th className="py-1 text-right font-medium">Realised P&L</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+              {activity.fills.map((fill) => {
+                const pnl = number(fill.realised_pnl);
+                return (
+                  <tr key={fill.event_id}>
+                    <td className="py-1.5 pr-3 whitespace-nowrap">{formatDateTime(fill.executed_at)}</td>
+                    <td className="py-1.5 pr-3">
+                      {fill.event_kind === "open" ? "Open" : "Close"} {fill.symbol}
+                    </td>
+                    <td className="py-1.5 pr-3 text-slate-600 dark:text-slate-300">{fill.strategy_title}</td>
+                    <td className="py-1.5 pr-3 text-right tabular-nums">{formatNumber(number(fill.units), 4)}</td>
+                    <td className="py-1.5 pr-3 text-right tabular-nums">
+                      {fill.price_currency ? formatMoney(number(fill.price), fill.price_currency) : formatNumber(number(fill.price), 2)}
+                    </td>
+                    <td
+                      className={`py-1.5 text-right tabular-nums ${
+                        pnl === null || pnl === 0 ? "" : pnl > 0 ? "text-emerald-700 dark:text-emerald-400" : "text-rose-700 dark:text-rose-400"
+                      }`}
+                    >
+                      {fill.event_kind === "close" ? formatMoney(pnl, activity.money_currency) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );
@@ -117,6 +238,7 @@ export function StrategyPortfolioLens() {
    *  FIRST load only; a close refetches this list. */
   const ownedPositions = useAsync(fetchStrategyOwnedPositions, [], { preserveOnRefetch: true });
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
+  const activity = useAsync(fetchStrategyOrderActivity, [], { preserveOnRefetch: true });
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -193,6 +315,7 @@ export function StrategyPortfolioLens() {
       void ownedPositions.refetch();
       void overview.refetch();
       void pnlHistory.refetch();
+      void activity.refetch();
     }
   }
 
@@ -322,14 +445,24 @@ export function StrategyPortfolioLens() {
         {ownedPositions.data && positions.length === 0 ? (
           <EmptyState title="Nothing held" description="Positions opened by an approved strategy appear here." />
         ) : null}
-        {ownedPositions.data ? (
-          <EngineOrders
-            positions={positions}
-            coreSleeve={coreSleeve.data ?? null}
-            coreSleeveFailed={coreSleeve.error !== null && !coreSleeve.data}
-            onRetryCore={coreSleeve.refetch}
-          />
-        ) : null}
+        {/* Mounted independently of the positions read (Codex ckpt-2): an
+            unrelated broker-position failure must not hide pending entries. */}
+        <EngineOrders
+          positions={ownedPositions.data ? positions : null}
+          positionsFailed={ownedPositions.error !== null && !ownedPositions.data}
+          coreSleeve={coreSleeve.data ?? null}
+          coreSleeveFailed={coreSleeve.error !== null && !coreSleeve.data}
+          onRetryCore={coreSleeve.refetch}
+          pendingEntries={activity.data?.pending_entries ?? null}
+          activityFailed={activity.error !== null && !activity.data}
+          onRetryActivity={activity.refetch}
+        />
+        <RecentFills
+          activity={activity.data ?? null}
+          loading={activity.loading}
+          failed={activity.error !== null && !activity.data}
+          onRetry={activity.refetch}
+        />
       </section>
 
       <section aria-labelledby="pot-performance">
@@ -385,6 +518,7 @@ export function StrategyPortfolioLens() {
           void ownedPositions.refetch();
           void overview.refetch();
           void pnlHistory.refetch();
+          void activity.refetch();
         }}
       />
 
