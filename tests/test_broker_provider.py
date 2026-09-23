@@ -9,6 +9,7 @@ No network calls — all HTTP interactions are mocked.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ import httpx
 import pytest
 
 from app.providers.broker import (
+    BrokerCloseOrderDetail,
     BrokerCoreOrder,
     BrokerMirror,
     BrokerMirrorPosition,
@@ -26,6 +28,7 @@ from app.providers.broker import (
     BrokerOrderSubmissionUncertain,
     BrokerPortfolio,
     BrokerPositionMutationError,
+    BrokerPositionMutationUncertain,
     BrokerStrategyOrder,
     BrokerWhatIfOrder,
     OrderParams,
@@ -1181,6 +1184,77 @@ class TestDemoStrategyPositionMutations:
             resolved = broker.get_close_order(order_id="383344846")
         assert resolved.status == expected
         assert resolved.broker_status == str(payload["statusID"])
+
+    @staticmethod
+    def _close_order_from_wire(body: str, order_id: str) -> BrokerCloseOrderDetail:
+        """``get_close_order`` against a real ``httpx.Response`` built from wire text."""
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = httpx.Response(
+                200, content=body.encode(), request=httpx.Request("GET", f"https://x/{order_id}")
+            )
+            return broker.get_close_order(order_id=order_id)
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            # Verbatim wire text of both attended closes (#3007, 2026-09-23): the partial
+            # 383344846 at statusID 3, and the whole close 383339190.
+            (
+                '{"orderID":383344846,"statusID":3,"errorCode":0,"instrumentID":3075,"proceeds":24.99,'
+                '"positions":[{"positionID":3602947861,"occurred":"2026-09-23T07:59:23.223Z","rate":5816.7,'
+                '"units":0.323024,"conversionRate":0.013303,"amount":25.0}]}',
+                (3602947861, Decimal("5816.7"), Decimal("0.323024"), "2026-09-23T07:59:23.223Z"),
+            ),
+            (
+                '{"orderID":383339190,"statusID":3,"errorCode":0,"instrumentID":3075,"proceeds":24.99,'
+                '"positions":[{"positionID":3602947846,"occurred":"2026-09-23T08:01:53.83Z","rate":5817.29,'
+                '"units":0.323024,"conversionRate":0.013303,"amount":25.0}]}',
+                (3602947846, Decimal("5817.29"), Decimal("0.323024"), "2026-09-23T08:01:53.83Z"),
+            ),
+        ],
+    )
+    def test_close_order_positions_carry_the_raw_fill_fields_as_decimals(
+        self, body: str, expected: tuple[object, ...]
+    ) -> None:
+        """#3007 part 2: decoded with ``parse_float=Decimal`` so the booking's exact
+        units check holds against the wire digits, and otherwise UNPARSED."""
+        detail = self._close_order_from_wire(body, str(json.loads(body)["orderID"]))
+        (fill,) = detail.positions
+        assert (fill.position_id, fill.rate, fill.units, fill.occurred) == expected
+        assert isinstance(fill.units, Decimal)
+        assert detail.position_ids == (expected[0],)
+        # The persisted/audited payload stays plain JSON.
+        assert detail.raw_payload["positions"][0]["units"] == 0.323024
+
+    @pytest.mark.parametrize(
+        "patch",
+        [
+            {"orderID": True},
+            {"orderID": "383339190.0"},
+            {"orderID": 383339190.0},
+            {"instrumentID": True},
+            {"instrumentID": "٣٠٧٥"},
+            {"instrumentID": 0},
+            {"instrumentID": 3075.5},
+            {"positions": [{"positionID": True}]},
+            {"positions": [{"positionID": -1}]},
+            {"positions": [{"positionID": " 3602947846"}]},
+        ],
+    )
+    def test_close_order_ids_are_strict(self, patch: dict[str, object]) -> None:
+        """A bool, a float, a non-ASCII digit string or a non-positive value is not an
+        id; ``int()`` would have turned each into a plausible one."""
+        body = {"orderID": 383339190, "statusID": 3, "errorCode": 0, "instrumentID": 3075, "positions": []}
+        body.update(patch)
+        with pytest.raises(BrokerPositionMutationUncertain, match="malformed|identity"):
+            self._close_order_from_wire(json.dumps(body), "383339190")
+
+    def test_close_order_accepts_ids_as_ascii_digit_strings_and_an_absent_instrument(self) -> None:
+        body = {"orderID": "383339190", "statusID": 3, "positions": [{"positionID": "3602947846"}]}
+        detail = self._close_order_from_wire(json.dumps(body), "383339190")
+        assert detail.position_ids == (3602947846,)
+        assert detail.instrument_id is None
 
     def test_an_unknown_environment_cannot_invent_a_close_order_path(self) -> None:
         """The path interpolates ``self._env``, so an environment outside the

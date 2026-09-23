@@ -43,6 +43,7 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import (
+    BrokerCloseOrderDetail,
     BrokerOrderLookupError,
     BrokerOrderNotFound,
     BrokerOrderResult,
@@ -54,6 +55,12 @@ from app.providers.broker import (
 )
 from app.security.unattended_guard import UnattendedExecutionRefused
 from app.services.execution_guard import decide_submission_controls, load_kill_switch
+from app.services.late_exit_booking import (
+    NUMERIC_18_6_BOUND,
+    LateExitBooking,
+    LateExitRefusal,
+    decide_late_exit_booking,
+)
 from app.services.quote_marks import directional_fill_price, positive_decimal_or_none
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import RuntimeConfig, get_runtime_config
@@ -803,9 +810,19 @@ def _persist_fill(
     units: Decimal,
     fees: Decimal,
     now: datetime,
+    *,
+    gross_amount: Decimal | None = None,
+    filled_at: datetime | None = None,
 ) -> int:
-    """Insert a fills row and return the fill_id."""
-    gross_amount = price * units
+    """Insert a fills row and return the fill_id.
+
+    ``gross_amount`` / ``filled_at`` default to today's behaviour (``price ×
+    units``, ``now``). The late-EXIT booking passes both (#3007 part 2): the
+    gross its bound check approved, and the broker's execution time, which is
+    the disposal's time and can be an hour before ``now``.
+    """
+    if gross_amount is None:
+        gross_amount = price * units
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -817,7 +834,7 @@ def _persist_fill(
             """,
             {
                 "oid": order_id,
-                "filled_at": now,
+                "filled_at": now if filled_at is None else filled_at,
                 "price": price,
                 "units": units,
                 "gross": gross_amount,
@@ -1296,9 +1313,14 @@ def _write_execution_audit(
     raw_payload: dict[str, Any],
     now: datetime,
     exit_completion: dict[str, Any] | None = None,
+    extra_evidence: dict[str, Any] | None = None,
 ) -> None:
     """
     Write a decision_audit row recording the execution outcome.
+
+    ``extra_evidence`` is merged into the evidence as given; the caller must
+    already have made it JSON-serialisable (the late-EXIT booking stringifies
+    every Decimal and datetime).
 
     Uses the same PASS/FAIL vocabulary as the execution guard so the
     pass_fail column is semantically consistent across stages.  The
@@ -1311,6 +1333,12 @@ def _write_execution_audit(
     evidence: dict[str, Any] = {"order_id": order_id, "raw_payload": raw_payload}
     if exit_completion is not None:
         evidence["exit_completion"] = exit_completion
+    if extra_evidence is not None:
+        # Additive only: a caller must never silently overwrite the audit's own keys.
+        clobbered = evidence.keys() & extra_evidence.keys()
+        if clobbered:
+            raise ValueError(f"extra_evidence would overwrite audit keys: {sorted(clobbered)}")
+        evidence.update(extra_evidence)
     conn.execute(
         """
         INSERT INTO decision_audit
@@ -2972,6 +3000,7 @@ def _execute_under_key(
 PendingOrderVerdict = Literal[
     "terminalised_rejected",
     "still_pending",
+    "filled_booked",
     "filled_not_booked",
     "not_found",
     "lookup_error",
@@ -2994,6 +3023,8 @@ PendingOrderVerdict = Literal[
 #: constant makes the typo a name error instead (measured: reportUndefinedVariable).
 _TERMINALISED_REJECTED: Final[PendingOrderVerdict] = "terminalised_rejected"
 _FILLED_NOT_BOOKED: Final[PendingOrderVerdict] = "filled_not_booked"
+_FILLED_BOOKED: Final[PendingOrderVerdict] = "filled_booked"
+_NO_LONGER_PENDING: Final[PendingOrderVerdict] = "no_longer_pending"
 
 #: Verdicts that describe a PERMANENT property of the row, so re-asking cannot
 #: change the answer. Parking them is what stops an unresolvable order polling
@@ -3044,8 +3075,8 @@ def pending_order_verdict(reconciliation_state: str) -> PendingOrderVerdict:
     if reconciliation_state == "pending":
         return "still_pending"
     if reconciliation_state == "resolved":
-        # The broker filled it. We deliberately do NOT book the fill here —
-        # see ``_record_unbooked_fill`` for why, and what would unblock it.
+        # The broker filled it. Only a late EXIT is booked (#3007 part 2,
+        # ``_book_late_exit_fill``); every other fill parks (``_park_unbooked_fill``).
         return "filled_not_booked"
     raise ValueError(f"unmapped reconciliation state: {reconciliation_state}")
 
@@ -3231,95 +3262,136 @@ def _terminalise_rejected_order(
     return True
 
 
-def _record_unbooked_fill(
+@dataclass(frozen=True)
+class _PolledOrderIdentity:
+    """The columns a pending order was DECIDED on, re-read under the lock (#3007 part 2).
+
+    Every write the poller makes after its broker round-trip — the booking's order
+    CAS and the conditional park — matches all of them, so a row that changed while
+    the lookup ran outside any transaction is never written on a stale decision
+    (spec r5 #26, #30, #34).
+    """
+
+    order_id: int
+    broker_order_ref: str
+    broker_environment: str
+    instrument_id: int
+    recommendation_id: int
+    exit_position_id: int | None
+    exit_units: Decimal | None
+    exit_avg_cost: Decimal | None
+
+    def params(self) -> dict[str, Any]:
+        return {
+            "oid": self.order_id,
+            "ref": self.broker_order_ref,
+            "benv": self.broker_environment,
+            "iid": self.instrument_id,
+            "rid": self.recommendation_id,
+            "xpos": self.exit_position_id,
+            "xunits": self.exit_units,
+            "xcost": self.exit_avg_cost,
+        }
+
+
+#: The identity half of every post-lookup write on a polled order. The casts are
+#: load-bearing: a bare NULL parameter inside ``IS NOT DISTINCT FROM`` has no type,
+#: and psycopg 3 raises ``AmbiguousParameter`` on it. A static literal: nothing
+#: interpolates into it.
+_POLLED_ORDER_IDENTITY_SQL: Final[LiteralString] = """
+    order_id = %(oid)s
+    AND status = 'pending'
+    AND recommendation_poll_parked_reason IS NULL
+    AND broker_order_ref = %(ref)s
+    AND broker_environment = %(benv)s
+    AND instrument_id = %(iid)s
+    AND recommendation_id = %(rid)s
+    AND recommendation_exit_position_id IS NOT DISTINCT FROM %(xpos)s::bigint
+    AND recommendation_exit_units IS NOT DISTINCT FROM %(xunits)s::numeric
+    AND recommendation_exit_avg_cost IS NOT DISTINCT FROM %(xcost)s::numeric
+"""
+
+
+def _park_unbooked_fill(
     conn: psycopg.Connection[Any],
     *,
-    order_id: int,
-    instrument_id: int,
-    recommendation_id: int,
+    identity: _PolledOrderIdentity,
+    context: RecommendationSubmissionContext,
     broker_status: str,
     raw_payload: dict[str, Any],
+    reason: str,
+    check: dict[str, Any] | None,
     now: datetime,
-) -> None:
-    """Record that the broker filled an order our books have not booked.
+) -> PendingOrderVerdict:
+    """Park a fill the broker reports and our books do not hold — CONDITIONALLY.
 
-    ⛔ **Deliberately does not book the fill, and the claim stays held.**
-    Booking a late fill is ``_persist_fill`` -> ``_update_position_buy`` /
-    ``_update_position_exit`` -> ``_persist_broker_position`` ->
-    ``_deduct_closed_exit_lot`` -> ``_record_cash_ledger`` -> attribution ->
-    ``enqueue_post_trade_sync``, plus estimated-cost recording — a path that
-    closes over ``order_params`` and ``exit_lot``, locals that exist only at
-    submission time.  (``quote_data`` is not one of them on this path: the live
-    branch never loads it before the broker call, and cost recording loads it
-    lazily afterwards.)
+    Reached for every broker-filled order that is not booked: a BUY/ADD late fill
+    (#2942 slice C proper, not built), a rejection that still lists executions
+    (#3189 finding 3), and a late EXIT the booking refused (#3007 part 2, whose
+    ``reason`` names the failed check). The claim stays held — ``status`` is left
+    ``pending`` — and the park (``sql/395``) removes the row from
+    ``_POLLABLE_ORDER_PREDICATE``, so no later answer can release it. A parked
+    fill belongs to a human.
 
-    * **Submission context: RESOLVED by ``sql/409`` (#3007 part 1).** The claim
-      INSERT now records the exact lot an EXIT closed and the ``OrderParams``
-      sent; :func:`load_recommendation_submission_context` reads them back, and
-      the audit row below carries them.  ⚠ A pre-409 row reads
-      ``recorded=False``, and booking MUST refuse it rather than re-select a lot,
-      because re-selecting at poll time is the instrument/time/FIFO guess for
-      broker ownership that #2942 forbids.
-    * **Pool cost: RESOLVED by ``sql/413``.** The claim also records
-      ``positions.avg_cost``, because the pool may have moved by the time a late
-      fill is booked.
-    * **Still blocking: the close-order fill fields are unmeasured.**
-      ``positions[].rate`` / ``units`` / ``occurred`` are "when available" in the
-      contract and have never been recorded live, so whether they are executed
-      values, echoes of the position, or in ``avg_cost``'s currency is unknown.
-      Booking money on them would be a guess
-      (``docs/proposals/execution/2026-09-23-late-exit-fill-booking.md``, Verdict).
-      That spec also records why a late booking must NOT move units, cost basis
-      or cash: ``portfolio_sync`` already does.
+    ⚠⚠ CONDITIONAL (spec r4 #30, r5 #26/#30/#34). The UPDATE matches the same
+    identity the decision was taken on, plus ``status='pending'`` and "not yet
+    parked". Only on ``rowcount == 1`` is the audit written, and the two commit
+    together (``_write_refusal_audit`` commits). A miss means the row was
+    resolved or changed concurrently: nothing is written, nothing is audited,
+    and the verdict is ``no_longer_pending`` — a concurrent resolution is never
+    overwritten.
 
-    So this leaves the status quo (claim held, nothing double-submits) plus the
-    two things the status quo lacked: an ERROR log and a durable audit row.
-    **Unblock for the booking slice: one attended PARTIAL close
-    (``UnitsToDeduct``) of any demo position on a NON-USD instrument**, with the
-    close-order lookup and the trade-history row for that position captured
-    verbatim. The route's semantics do not depend on who submitted the close. A
-    whole close cannot tell executed units from echoed ones, and a USD instrument
-    never exercises ``conversionRate``.
+    ⚠ ``context`` is the one the caller already loaded; it is never re-read here
+    (spec r5 #28). ``filled_unbooked`` stays the stored park value; the specific
+    ``reason`` goes in the audit evidence.
 
-    ⚠ Written ONCE, then parked. The order is terminal at the broker, so
-    re-asking every hour could only spend a shared eToro read and append another
-    identical audit row for ever (PR #3168 WARNING). ``sql/395``'s park is what
-    bounds it, and it deliberately leaves ``status='pending'`` — a terminal
-    status would release the claim on an order that demonstrably executed.
+    A failure of the park itself propagates to the poller's per-row containment,
+    which stamps the row and leaves it pending and unparked — the posture of
+    every poll failure, which never releases a claim.
     """
-    conn.execute(
-        """
-        UPDATE orders
-        SET recommendation_last_polled_at = %(now)s,
-            recommendation_poll_parked_reason = %(park)s
-        WHERE order_id = %(oid)s
-        """,
-        {"now": now, "oid": order_id, "park": _PARKING_POLL_VERDICTS["filled_not_booked"]},
-    )
-    # The context the booking slice will consume, recorded now so the operator
-    # reconciling this fill by hand sees which lot it addressed.
-    context = load_recommendation_submission_context(conn, order_id=order_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE orders
+            SET recommendation_last_polled_at = GREATEST(recommendation_last_polled_at, %(now)s),
+                recommendation_poll_parked_reason = %(park)s
+            WHERE {_POLLED_ORDER_IDENTITY_SQL}
+            """,  # noqa: S608
+            {**identity.params(), "now": now, "park": _PARKING_POLL_VERDICTS["filled_not_booked"]},
+        )
+        parked = cur.rowcount == 1
+    if not parked:
+        conn.rollback()
+        logger.warning(
+            "reconcile_pending_recommendation_orders: order_id=%d changed or resolved while the broker's %s answer "
+            "came back; not parked (%s) and nothing audited",
+            identity.order_id,
+            broker_status,
+            reason,
+        )
+        return _NO_LONGER_PENDING
+    lot = context.exit_lot
     _write_refusal_audit(
         conn,
-        instrument_id=instrument_id,
-        recommendation_id=recommendation_id,
+        instrument_id=identity.instrument_id,
+        recommendation_id=identity.recommendation_id,
         explanation=(
-            f"Broker reports order_id={order_id} as {broker_status} but the fill is NOT booked — "
-            f"late-fill booking is not built (BUY/ADD: #2942 slice C; EXIT: waits on an attended "
-            f"observation of the close-order fields, docs/proposals/execution/2026-09-23-late-exit-fill-booking.md); "
-            f"the submission claim stays held"
+            f"Broker reports order_id={identity.order_id} as {broker_status} but the fill is NOT booked "
+            f"({reason}) — the submission claim stays held and the row is parked for a human"
         ),
         evidence={
             "refusal": "pending_order_filled_not_booked",
-            "order_id": order_id,
+            "reason": reason,
+            "check": check,
+            "order_id": identity.order_id,
             "broker_status": broker_status,
             "response": raw_payload,
             "submission_context_recorded": context.recorded,
-            "exit_position_id": None if context.exit_lot is None else context.exit_lot.position_id,
-            "exit_units": None if context.exit_lot is None else str(context.exit_lot.units),
+            "exit_position_id": None if lot is None else lot.position_id,
+            "exit_units": None if lot is None else str(lot.units),
             # sql/413: the cost the lot is disposed against. With `response` (which
-            # carries `positions[]` verbatim, incl. any `rate`/`units`/`occurred`), this
-            # is everything a hand reconciliation, or the booking slice, needs.
+            # carries `positions[]` verbatim), this is everything a hand
+            # reconciliation needs.
             "exit_avg_cost": None if context.exit_avg_cost is None else str(context.exit_avg_cost),
             **order_params_context(context.order_params),
         },
@@ -3327,11 +3399,291 @@ def _record_unbooked_fill(
     )
     logger.error(
         "reconcile_pending_recommendation_orders: recommendation_id=%d order_id=%d is %s at the broker "
-        "and is NOT booked locally — fills/positions/cash are behind the broker for this instrument",
-        recommendation_id,
-        order_id,
+        "and is NOT booked locally (%s) — parked for a human",
+        identity.recommendation_id,
+        identity.order_id,
         broker_status,
+        reason,
     )
+    return _FILLED_NOT_BOOKED
+
+
+class _LateBookingRefused(Exception):
+    """A locked check or a compare-and-set inside the booking transaction refused."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+def _book_late_exit_fill(
+    conn: psycopg.Connection[Any],
+    *,
+    identity: _PolledOrderIdentity,
+    context: RecommendationSubmissionContext,
+    close_detail: BrokerCloseOrderDetail,
+    order_created_at: datetime,
+    now: datetime,
+) -> PendingOrderPollResult:
+    """Book a confirmed late EXIT fill, or park it (#3007 part 2).
+
+    Spec: ``docs/proposals/execution/2026-09-23-late-exit-fill-booking.md``.
+
+    ⛔ Writes ONLY what ``portfolio_sync`` cannot: the ``fills`` row, the
+    ``realized_pnl`` accrual and the terminal order + recommendation states.
+    ``current_units``, ``cost_basis``, ``unrealized_pnl``, ``cash_ledger`` and the
+    ``broker_positions`` mirror stay with the sync, which has usually applied the
+    close already; re-running the synchronous sequence would double-count them.
+
+    Checks 1-6 are pure (``late_exit_booking``). Checks 7-9 run under
+    ``positions … FOR UPDATE``. Lock order: ``positions`` → ``orders`` →
+    ``trade_recommendations`` → ``decision_audit``.
+
+    Failure handling:
+
+    * a refusal, a CAS miss, or a non-operational exception → the transaction
+      rolls back and the row is CONDITIONALLY parked (``_park_unbooked_fill``);
+    * ⚠ a ``psycopg.OperationalError`` (lock timeout, serialization failure,
+      deadlock, a lost connection, an unknown commit outcome) is TRANSIENT and
+      never parks (spec r5 #31, #33). It propagates to the per-row containment,
+      which stamps and leaves the row pending and unparked for the next poll.
+    """
+    decision = decide_late_exit_booking(
+        context=context,
+        positions=close_detail.positions,
+        order_created_at=order_created_at,
+        booking_at=now,
+    )
+    broker_status = close_detail.broker_status
+    if isinstance(decision, LateExitRefusal):
+        verdict = _park_unbooked_fill(
+            conn,
+            identity=identity,
+            context=context,
+            broker_status=broker_status,
+            raw_payload=close_detail.raw_payload,
+            reason=decision.reason,
+            check={"detail": decision.detail},
+            now=now,
+        )
+        return PendingOrderPollResult(identity.order_id, identity.recommendation_id, verdict, broker_status)
+
+    check = {
+        "position_id": decision.position_id,
+        "price": str(decision.price),
+        "units": str(decision.units),
+        "filled_at": decision.filled_at.isoformat(),
+        "gross_amount": str(decision.gross_amount),
+        "realized_pnl_delta": str(decision.realized_pnl_delta),
+        "exit_avg_cost": str(decision.exit_avg_cost),
+    }
+    # ⚠ A real transaction, never a savepoint (spec r4 #16): `conn.transaction()`
+    # on a connection already inside one opens a SAVEPOINT, whose "commit" is only
+    # a release. Every read above committed; this makes it certain.
+    conn.commit()
+    try:
+        with conn.transaction():
+            _book_late_exit_fill_locked(
+                conn, identity=identity, close_detail=close_detail, booking=decision, check=check, now=now
+            )
+    except psycopg.OperationalError:
+        raise
+    except _LateBookingRefused as refused:
+        verdict = _park_unbooked_fill(
+            conn,
+            identity=identity,
+            context=context,
+            broker_status=broker_status,
+            raw_payload=close_detail.raw_payload,
+            reason=refused.reason,
+            check={**check, "detail": refused.detail},
+            now=now,
+        )
+        return PendingOrderPollResult(identity.order_id, identity.recommendation_id, verdict, broker_status)
+    except Exception as exc:
+        logger.exception(
+            "reconcile_pending_recommendation_orders: booking order_id=%d raised; rolled back and parking",
+            identity.order_id,
+        )
+        verdict = _park_unbooked_fill(
+            conn,
+            identity=identity,
+            context=context,
+            broker_status=broker_status,
+            raw_payload=close_detail.raw_payload,
+            reason="booking_exception",
+            check={**check, "detail": f"{type(exc).__name__}: {exc}"},
+            now=now,
+        )
+        return PendingOrderPollResult(identity.order_id, identity.recommendation_id, verdict, broker_status)
+
+    # Best-effort, after the commit, as the synchronous path treats it: a lost
+    # enqueue is covered by the 5-minute sync tick (spec r5 #32).
+    try:
+        enqueue_post_trade_sync(conn, requested_by="recommendation_order_reconcile")
+        conn.commit()
+    except Exception:
+        logger.exception(
+            "reconcile_pending_recommendation_orders: post-trade sync enqueue failed for order_id=%d; "
+            "the scheduled sync covers it",
+            identity.order_id,
+        )
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+    logger.info(
+        "reconcile_pending_recommendation_orders: recommendation_id=%d order_id=%d late EXIT booked — "
+        "%s units at %s, realized_pnl %+s",
+        identity.recommendation_id,
+        identity.order_id,
+        decision.units,
+        decision.price,
+        decision.realized_pnl_delta,
+    )
+    return PendingOrderPollResult(identity.order_id, identity.recommendation_id, _FILLED_BOOKED, broker_status)
+
+
+def _book_late_exit_fill_locked(
+    conn: psycopg.Connection[Any],
+    *,
+    identity: _PolledOrderIdentity,
+    close_detail: BrokerCloseOrderDetail,
+    booking: LateExitBooking,
+    check: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Checks 7-9 and writes 1-6, inside the caller's transaction. Commits nothing."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT avg_cost, realized_pnl FROM positions WHERE instrument_id = %(iid)s FOR UPDATE",
+            {"iid": identity.instrument_id},
+        )
+        position = cur.fetchone()
+    # 7. The ledger row exists, and the accrual fits the column.
+    if position is None:
+        raise _LateBookingRefused("no_position_row", f"instrument_id={identity.instrument_id}")
+    prior_pnl = Decimal(str(position["realized_pnl"] if position["realized_pnl"] is not None else 0))
+    if abs(prior_pnl + booking.realized_pnl_delta) >= NUMERIC_18_6_BOUND:
+        raise _LateBookingRefused("realized_pnl_out_of_range", f"prior={prior_pnl}")
+    # 8. The pool's average did not move. P&L depends only on the average, and no
+    #    disposal writer changes it, so equality witnesses that the P&L struck at
+    #    the submission cost matches the pool now. ⚠ The sync does NOT move
+    #    `avg_cost` on a units increase (#3017), so an external acquisition is
+    #    invisible here — a residual shared with the synchronous path.
+    pool_avg = None if position["avg_cost"] is None else Decimal(str(position["avg_cost"]))
+    if pool_avg != booking.exit_avg_cost:
+        raise _LateBookingRefused("avg_cost_moved", f"pool={pool_avg} submission={booking.exit_avg_cost}")
+    # 9. The lot was not already disposed of — by any EXIT order, this one
+    #    included. A broker position is closed at most once and belongs to one
+    #    instrument, so the `positions` lock above serialises every booking of it.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM fills f
+            JOIN orders o ON o.order_id = f.order_id
+            WHERE o.action = 'EXIT'
+              AND o.broker_environment = %(benv)s
+              AND o.recommendation_exit_position_id = %(xpos)s
+            LIMIT 1
+            """,
+            {"benv": identity.broker_environment, "xpos": booking.position_id},
+        )
+        if cur.fetchone() is not None:
+            raise _LateBookingRefused("lot_already_disposed", f"position_id={booking.position_id}")
+
+    # Write 2: the order CAS, on the identity the decision was taken on.
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE orders
+            SET status = 'filled',
+                raw_payload_json = %(payload)s,
+                recommendation_last_polled_at = GREATEST(recommendation_last_polled_at, %(now)s)
+            WHERE {_POLLED_ORDER_IDENTITY_SQL}
+              AND action = 'EXIT'
+            """,  # noqa: S608
+            {**identity.params(), "payload": Jsonb(close_detail.raw_payload), "now": now},
+        )
+        if cur.rowcount != 1:
+            raise _LateBookingRefused("order_cas_miss", f"rowcount={cur.rowcount}")
+
+    # Write 3: the fill, at the broker's execution time and the checked gross.
+    fill_id = _persist_fill(
+        conn,
+        identity.order_id,
+        booking.price,
+        booking.units,
+        Decimal("0"),
+        now,
+        gross_amount=booking.gross_amount,
+        filled_at=booking.filled_at,
+    )
+
+    # Write 4: realized P&L only. Units, cost basis, cash and the mirror are the
+    # sync's (spec, "Finding that shapes the design").
+    conn.execute(
+        """
+        UPDATE positions
+        SET realized_pnl = COALESCE(realized_pnl, 0) + %(delta)s,
+            updated_at = GREATEST(updated_at, %(now)s)
+        WHERE instrument_id = %(iid)s
+        """,
+        {"delta": booking.realized_pnl_delta, "now": now, "iid": identity.instrument_id},
+    )
+
+    # Write 5: the recommendation CAS. A miss rolls the whole booking back — half
+    # a claim resolution is worse than none (`_terminalise_rejected_order`).
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE trade_recommendations SET status = 'executed' "
+            "WHERE recommendation_id = %(rid)s AND status = 'execution_pending'",
+            {"rid": identity.recommendation_id},
+        )
+        if cur.rowcount != 1:
+            raise _LateBookingRefused("recommendation_cas_miss", f"rowcount={cur.rowcount}")
+
+    # Write 6: the PASS audit. Every Decimal and datetime is already a string.
+    raw = close_detail.raw_payload
+    _write_execution_audit(
+        conn,
+        instrument_id=identity.instrument_id,
+        recommendation_id=identity.recommendation_id,
+        order_id=identity.order_id,
+        passed=True,
+        explanation=(
+            f"status=executed order_status=filled broker_ref={identity.broker_order_ref} "
+            f"late EXIT booked by the pending-order poller (fill_id={fill_id})"
+        ),
+        raw_payload=raw,
+        now=now,
+        exit_completion={
+            "exit_scope": "lot",
+            "lot_units": str(booking.units),
+            "units_closed": str(booking.units),
+            # Unknown here: units are the sync's, and the booking never reads them.
+            "position_fully_closed": None,
+        },
+        extra_evidence={
+            "late_exit_booking": check,
+            "fill_id": fill_id,
+            # No fee field on the close-order response. Any real fee reaches cash
+            # through the sync's delta, as on the synchronous close path.
+            "fees_source": "not_reported",
+            # Account-currency figures, recorded verbatim for reconciliation only;
+            # the ledger is native, so none of them enters the arithmetic.
+            "conversion_rate": _first_position_field(raw, "conversionRate"),
+            "amount": _first_position_field(raw, "amount"),
+            "proceeds": raw.get("proceeds"),
+        },
+    )
+
+
+def _first_position_field(raw: dict[str, Any], field: str) -> Any:
+    positions = raw.get("positions")
+    if isinstance(positions, list) and positions and isinstance(positions[0], dict):
+        return positions[0].get(field)
+    return None
 
 
 def reconcile_pending_recommendation_orders(
@@ -3499,12 +3851,32 @@ def _poll_one_pending_order(
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT status, action, broker_order_ref, broker_environment FROM orders WHERE order_id = %(oid)s",
+                """
+                SELECT status, action, broker_order_ref, broker_environment, created_at,
+                       recommendation_poll_parked_reason, instrument_id, recommendation_id,
+                       recommendation_exit_position_id, recommendation_exit_units,
+                       recommendation_exit_avg_cost
+                FROM orders WHERE order_id = %(oid)s
+                """,
                 {"oid": order_id},
             )
             current = cur.fetchone()
+        # Read in the SAME transaction as the identity above, before the broker
+        # call, so the booking's checks and its CAS are decided on one state.
+        context = None if current is None else load_recommendation_submission_context(conn, order_id=order_id)
         conn.commit()
-        if current is None or current["status"] != "pending" or current["broker_order_ref"] is None:
+        # ⚠ Parked, re-addressed or re-owned since the batch selection (#3007 part
+        # 2, spec r4 #28 / r5 #27): each is outside what this poll was selected
+        # to decide, so no broker call is spent and nothing is written.
+        if (
+            current is None
+            or current["status"] != "pending"
+            or current["broker_order_ref"] is None
+            or current["recommendation_poll_parked_reason"] is not None
+            or current["instrument_id"] != instrument_id
+            or current["recommendation_id"] != recommendation_id
+            or context is None
+        ):
             return PendingOrderPollResult(order_id, recommendation_id, "no_longer_pending")
 
         # ⚠⚠ BROKER ORDER IDS ARE NAMESPACED PER ENVIRONMENT (#3189 finding 4b).
@@ -3550,6 +3922,18 @@ def _poll_one_pending_order(
             return PendingOrderPollResult(order_id, recommendation_id, "environment_mismatch")
 
         ref = str(current["broker_order_ref"])
+        exit_units = current["recommendation_exit_units"]
+        exit_avg_cost = current["recommendation_exit_avg_cost"]
+        identity = _PolledOrderIdentity(
+            order_id=order_id,
+            broker_order_ref=ref,
+            broker_environment=row_env,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            exit_position_id=current["recommendation_exit_position_id"],
+            exit_units=None if exit_units is None else Decimal(str(exit_units)),
+            exit_avg_cost=None if exit_avg_cost is None else Decimal(str(exit_avg_cost)),
+        )
         # ⚠ From the row re-read UNDER the lock, not from the batch selection —
         # the same reason `status` and `broker_order_ref` are. It decides WHICH
         # broker route is asked, so a stale read would ask the wrong one.
@@ -3559,7 +3943,9 @@ def _poll_one_pending_order(
         # submission echo, a demo synthetic id), and that is a permanent
         # property of the row, not a transient failure — so it is PARKED and
         # reported rather than retried hourly for ever.
-        if not ref.isdigit() or int(ref) <= 0:
+        # ⚠ ASCII digits only: `str.isdigit` accepts `"²"`, which `int()` then
+        # rejects with a ValueError that would escape as `poll_error` for ever.
+        if not (ref.isascii() and ref.isdigit()) or int(ref) <= 0:
             _stamp_polled(
                 conn,
                 order_id=order_id,
@@ -3642,14 +4028,22 @@ def _poll_one_pending_order(
             # contract is an opaque integer with no enum (#3007 half 1). Mapped
             # through `pending_order_verdict` rather than a second table, so one
             # place decides what a resolved order licenses.
-            close_state = "resolved" if close_detail.status == "filled" else close_detail.status
+            if close_detail.status == "filled":
+                # #3007 part 2: a confirmed whole close of the recorded lot is
+                # BOOKED; anything the checks refuse parks for a human.
+                return _book_late_exit_fill(
+                    conn,
+                    identity=identity,
+                    context=context,
+                    close_detail=close_detail,
+                    order_created_at=current["created_at"],
+                    now=now,
+                )
             return _apply_pending_order_verdict(
                 conn,
-                verdict=pending_order_verdict(close_state),
-                order_id=order_id,
-                instrument_id=instrument_id,
-                recommendation_id=recommendation_id,
-                broker_order_ref=ref,
+                verdict=pending_order_verdict(close_detail.status),
+                identity=identity,
+                context=context,
                 broker_status=close_detail.broker_status,
                 position_execution_count=len(close_detail.position_ids),
                 raw_payload=close_detail.raw_payload,
@@ -3746,10 +4140,8 @@ def _poll_one_pending_order(
         return _apply_pending_order_verdict(
             conn,
             verdict=verdict,
-            order_id=order_id,
-            instrument_id=instrument_id,
-            recommendation_id=recommendation_id,
-            broker_order_ref=ref,
+            identity=identity,
+            context=context,
             broker_status=detail.broker_status,
             position_execution_count=len(detail.position_executions),
             raw_payload=detail.raw_payload,
@@ -3761,10 +4153,8 @@ def _apply_pending_order_verdict(
     conn: psycopg.Connection[Any],
     *,
     verdict: PendingOrderVerdict,
-    order_id: int,
-    instrument_id: int,
-    recommendation_id: int,
-    broker_order_ref: str,
+    identity: _PolledOrderIdentity,
+    context: RecommendationSubmissionContext,
     broker_status: str,
     position_execution_count: int,
     raw_payload: dict[str, Any],
@@ -3800,7 +4190,7 @@ def _apply_pending_order_verdict(
     proof of an economic execution. The observation has to be durable, not just
     this attempt.
 
-    ``_record_unbooked_fill`` is that mechanism and it already exists: it parks
+    ``_park_unbooked_fill`` is that mechanism and it already exists: it parks
     (``sql/395``), which removes the row from ``_POLLABLE_ORDER_PREDICATE`` so a
     later omission can never terminalise it; it deliberately leaves
     ``status='pending'``, so the claim stays held; and it writes a
@@ -3811,7 +4201,10 @@ def _apply_pending_order_verdict(
     The verdict is the honest one: positions exist and we have not booked them,
     whatever word the status carried.
     """
-    if verdict == _TERMINALISED_REJECTED and position_execution_count:
+    order_id = identity.order_id
+    recommendation_id = identity.recommendation_id
+    rejected_with_executions = verdict == _TERMINALISED_REJECTED and position_execution_count > 0
+    if rejected_with_executions:
         logger.error(
             "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r is rejected but carries "
             "%d position execution(s); parking with the claim held rather than terminalising",
@@ -3832,22 +4225,24 @@ def _apply_pending_order_verdict(
         if not _terminalise_rejected_order(
             conn,
             order_id=order_id,
-            instrument_id=instrument_id,
+            instrument_id=identity.instrument_id,
             recommendation_id=recommendation_id,
-            broker_order_ref=broker_order_ref,
+            broker_order_ref=identity.broker_order_ref,
             broker_status=broker_status,
             raw_payload=raw_payload,
             now=now,
         ):
             return PendingOrderPollResult(order_id, recommendation_id, "no_longer_pending", broker_status)
     elif verdict == _FILLED_NOT_BOOKED:
-        _record_unbooked_fill(
+        verdict = _park_unbooked_fill(
             conn,
-            order_id=order_id,
-            instrument_id=instrument_id,
-            recommendation_id=recommendation_id,
+            identity=identity,
+            context=context,
             broker_status=broker_status,
             raw_payload=raw_payload,
+            # BUY/ADD late-fill booking is #2942 slice C proper, not built.
+            reason="rejected_with_executions" if rejected_with_executions else "late_fill_booking_not_built",
+            check=None,
             now=now,
         )
     else:

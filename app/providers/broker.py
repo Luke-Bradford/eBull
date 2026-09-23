@@ -135,6 +135,25 @@ class BrokerPositionCloseSubmission:
 
 
 @dataclass(frozen=True)
+class CloseOrderPositionFill:
+    """One ``positions[]`` entry of a close-order lookup, fields UNPARSED (#3007).
+
+    ``rate`` / ``units`` / ``occurred`` are the wire values as decoded with
+    ``parse_float=Decimal`` (so a JSON number arrives as ``Decimal`` or ``int``,
+    never a binary float), or whatever else the broker sent. Deliberately not
+    validated here: the late-EXIT booking checks
+    (``app/services/late_exit_booking.py``) are the one parser, so exactly one
+    place decides what is bookable
+    (``docs/proposals/execution/2026-09-23-late-exit-fill-booking.md``).
+    """
+
+    position_id: int
+    rate: object
+    units: object
+    occurred: object
+
+
+@dataclass(frozen=True)
 class BrokerCloseOrderDetail:
     """Current exact close-order result and the positions it affected.
 
@@ -159,6 +178,10 @@ class BrokerCloseOrderDetail:
     reference_id: UUID | None
     raw_payload: dict[str, Any]
     instrument_id: int | None
+    #: The same entries as ``position_ids``, with their execution fields. Defaults
+    #: empty so the fakes that predate #3007 part 2 stay source compatible; the
+    #: eToro adapter always fills it.
+    positions: tuple[CloseOrderPositionFill, ...] = ()
 
 
 @dataclass(frozen=True)
