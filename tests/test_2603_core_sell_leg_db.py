@@ -14,12 +14,17 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import psycopg
 import pytest
 
 from app.providers.broker import BrokerProvider
-from app.services.strategy_core_executor import CoreExecutionResult, execute_core_rebalance
+from app.services.strategy_core_executor import (
+    CoreExecutionResult,
+    StrategyCoreExecutionError,
+    execute_core_rebalance,
+)
 from app.services.strategy_core_mandate import CORE_MANDATE_MODE, CORE_MANDATE_POLICY_VERSION
 from app.services.strategy_core_submission_gate import core_submission_lock
 from app.services.strategy_order_reconciliation import reconcile_backlog
@@ -263,11 +268,49 @@ def test_an_unresolved_rebalance_close_quarantines_every_core_trade(
     assert (sold.state, sold.reason_code) == ("reconcile_required", "broker_close_uncertain")
     assert close_state_report(conn)["close_statuses"] == ["reconcile_required"]
     again = _post(conn, broker)
-    # Admission's in-flight blocker fires first (the exit order has no reconciliation
-    # row and the trade is not terminal); the DB preflight's `core_operation_outstanding`
-    # is the second, independent refusal, pinned in `test_2603_core_sell_leg.py`.
-    assert (again.state, again.reason_code) == ("refused", "core_trade_in_flight")
+    assert (again.state, again.reason_code) == ("refused", "core_operation_outstanding")
     # `uncertain_not_taken`: the broker never recorded the close, which our side cannot tell.
     assert broker.read()["close_calls"] == 0
     assert broker.read()["mutation_calls"] == 1
+    assert _held_advisory_locks(conn) == 0
+
+
+def test_a_rejected_rebalance_close_does_not_wedge_the_next_rebalance(
+    ebull_test_conn: psycopg.Connection[Any], broker: FileBackedFakeBroker
+) -> None:
+    """A definite rejection is terminal: the exit order has no reconciliation row, and
+    admission must not read that as an entry in flight (Codex ckpt-2 P1)."""
+    conn = ebull_test_conn
+    _own_core_position(conn, broker)
+    _tighten_mandate(conn, target=30, band=5)
+    broker.close_failure = "rejected"
+
+    first = _post(conn, broker)
+    assert (first.state, first.reason_code) == ("refused", "broker_close_rejected")
+
+    broker.close_failure = None
+    second = _post(conn, broker)
+    assert (second.state, second.reason_code) == ("submitted", "core_rebalance_close_submitted")
+    assert close_state_report(conn)["close_statuses"] == ["rejected", "submitted"]
+
+
+def test_an_in_flight_close_is_not_driven_through_other_credentials(
+    ebull_test_conn: psycopg.Connection[Any], broker: FileBackedFakeBroker
+) -> None:
+    conn = ebull_test_conn
+    _own_core_position(conn, broker)
+    _tighten_mandate(conn, target=30, band=5)
+    assert _post(conn, broker).state == "submitted"
+
+    with pytest.raises(StrategyCoreExecutionError, match="other broker credentials"):
+        execute_core_rebalance(
+            conn,
+            broker=cast(BrokerProvider, broker),
+            operator_id=OPERATOR_ID,
+            api_key_credential_id=uuid4(),
+            user_key_credential_id=USER_CREDENTIAL_ID,
+            recorded_by="sell-leg-test",
+            clock=lambda: CLOCK,
+        )
+    assert close_state_report(conn)["close_statuses"] == ["submitted"]
     assert _held_advisory_locks(conn) == 0

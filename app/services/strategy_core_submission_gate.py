@@ -50,7 +50,13 @@ from app.services.strategy_core_mandate import (
 #: is sourced from ``strategy_order_reconciliation_state``'s own terminal set
 #: rather than from ``strategy_trades.status`` names; and a rebalance sell
 #: requires ``allow_partial_close_position``.
-CORE_SUBMISSION_POLICY_VERSION: Final = "core-submission-v1"
+#:
+#: v2 (#2603 sell leg): a sell is executed as a WHOLE close, so it requires
+#: ``allow_close_position`` instead; and the in-flight blocker reads ENTRY links only
+#: (an exit order carries no reconciliation row, so counting it wedged every later
+#: rebalance after one rejected close -- the exit side is quarantined by the DB
+#: preflight's ``core_operation_outstanding`` instead).
+CORE_SUBMISSION_POLICY_VERSION: Final = "core-submission-v2"
 
 #: Submissions against each other.  ``(2603, 1)`` is the mandate writers' key and
 #: is taken FIRST by :func:`core_submission_lock` -- see its docstring.
@@ -180,7 +186,13 @@ LEFT JOIN LATERAL (
                'no_order'
            ) AS blocking_state
     FROM strategy_trades t
-    LEFT JOIN strategy_trade_orders link ON link.strategy_trade_id = t.strategy_trade_id
+    -- ⚠ ENTRY links only (core-submission-v2, #2603 sell leg).  An EXIT order is
+    -- written by the position manager with NO reconciliation row, so counting it made
+    -- one rejected close block every later rebalance forever.  The exit side is
+    -- quarantined on its OPERATION instead (the DB preflight's
+    -- `core_operation_outstanding`).
+    LEFT JOIN strategy_trade_orders link
+           ON link.strategy_trade_id = t.strategy_trade_id AND link.purpose = 'entry'
     LEFT JOIN strategy_order_reconciliation_state recon ON recon.order_id = link.order_id
     WHERE t.core_rebalance_intent_id IS NOT NULL
       AND t.status <> ALL (%(terminal_trade_statuses)s)

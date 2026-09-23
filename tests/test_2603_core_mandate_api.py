@@ -329,7 +329,7 @@ def test_rebalance_passes_the_exact_loaded_credential_ids_to_the_executor(
     response = rebalance_core_sleeve(request=request, session=session, conn=cast(Any, conn))
 
     assert response.state == "held"
-    assert response.submission_policy_version == "core-submission-v1"
+    assert response.submission_policy_version == "core-submission-v2"
     # Read from the module rather than re-typed: this assertion is about the API
     # SURFACING the version it ran under, and a literal here re-breaks on every
     # policy bump for no coverage (#3157 moved it v2 -> v3). The value itself is

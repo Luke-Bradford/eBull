@@ -12,6 +12,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
+from uuid import UUID, uuid4
 
 import pytest
 from psycopg.pq import TransactionStatus
@@ -30,6 +31,7 @@ from app.services.strategy_core_mandate import CORE_MANDATE_POLICY_VERSION
 _NOW = datetime(2026, 9, 11, 14, 30, tzinfo=UTC)
 _POSITION_ID = 950001
 _INSTRUMENT_ID = 3417
+_CREDS = (UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"), UUID("f7306e0b-9494-415e-85fd-97874510cc83"))
 
 
 @pytest.mark.parametrize(
@@ -170,13 +172,17 @@ def _sell(
     state = CoreSleeveState(_INSTRUMENT_ID, Decimal(market_value), Decimal("450"), "USD", _NOW)
     intent = SimpleNamespace(core_rebalance_intent_id=11, decision=SimpleNamespace(lower_pct=lower_pct))
     proof = SimpleNamespace(
-        response_currency="USD", min_position_exposure=Decimal("10"), min_position_amount=min_position_amount
+        response_currency="USD",
+        min_position_exposure=Decimal("10"),
+        min_position_amount=min_position_amount,
+        api_key_credential_id=_CREDS[0],
+        user_key_credential_id=_CREDS[1],
     )
     drive = SimpleNamespace(state="submitted", reason_code="core_rebalance_close_submitted")
     with (
         patch(
             "app.services.strategy_core_executor._core_sell_target",
-            return_value=target or _CoreSellTarget(3, 21, _POSITION_ID),
+            return_value=target or _CoreSellTarget(3, 21, _POSITION_ID, _CREDS),
         ),
         patch("app.services.strategy_core_executor._drive_core_close", return_value=drive) as driven,
     ):
@@ -225,7 +231,9 @@ def test_a_sell_quotes_the_close_arm_of_the_whole_position_then_hands_it_over() 
         ({"target": "core_operation_outstanding"}, "core_operation_outstanding"),
         ({"lower_pct": Decimal("0")}, "core_sell_would_strand_at_zero_lower"),
         ({"mandate": _mandate(rebalance_band_pct=Decimal("0"))}, "core_sell_zero_width_band"),
-        ({"target": _CoreSellTarget(3, 21, 1)}, "core_sell_position_unobserved"),
+        ({"target": _CoreSellTarget(3, 21, 1, _CREDS)}, "core_sell_position_unobserved"),
+        ({"target": _CoreSellTarget(3, 21, _POSITION_ID, (uuid4(), _CREDS[1]))}, "core_credential_provenance_changed"),
+        ({"target": _CoreSellTarget(3, 21, _POSITION_ID, None)}, "core_credential_provenance_changed"),
         # The lower-edge rebuy (25% of a ~$100 post-close sleeve) is below a $50 floor.
         (
             {"market_value": "100", "remaining": "0", "mandate": _mandate(min_rebalance_amount=Decimal("50"))},

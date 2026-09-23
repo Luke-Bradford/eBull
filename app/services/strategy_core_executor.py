@@ -756,7 +756,7 @@ def _drive_core_close(
 
 
 def _resolve_outstanding_core_rebalance_close(
-    conn: psycopg.Connection[Any], *, broker: BrokerProvider
+    conn: psycopg.Connection[Any], *, broker: BrokerProvider, credentials: tuple[UUID, UUID]
 ) -> CoreExecutionResult | None:
     """Spec §1 step 0: drive an in-flight ``core_rebalance`` close before anything else.
 
@@ -764,15 +764,24 @@ def _resolve_outstanding_core_rebalance_close(
     cannot block resolving what was already sent.  Only this trigger: repairs and
     operator/emergency closes belong to the paper runtime and the operator endpoint,
     and the sell path's preconditions refuse while any of them is unresolved.
+
+    ⚠ Bound to the credentials the position was bought under.  An exit order carries no
+    reconciliation row, so ``sql/373``'s rotation guard does not cover it; driving the
+    close through another account's credentials would query the wrong book.  A mismatch
+    RAISES (a 409 at the endpoint): nothing is driven, and the close stays quarantined.
     """
     with core_submission_lock(conn):
         with conn.transaction():
             row = conn.execute(
                 """
                 SELECT op.core_rebalance_intent_id, own.ownership_id, own.status,
-                       own.strategy_trade_id, own.broker_position_id
+                       own.strategy_trade_id, own.broker_position_id,
+                       proof.api_key_credential_id, proof.user_key_credential_id
                 FROM strategy_position_operations op
                 JOIN strategy_position_ownership own ON own.ownership_id = op.ownership_id
+                JOIN strategy_trades t ON t.strategy_trade_id = own.strategy_trade_id
+                LEFT JOIN strategy_core_eligibility_proofs proof
+                       ON proof.core_eligibility_proof_id = t.core_eligibility_proof_id
                 WHERE op.trigger_code = 'core_rebalance' AND op.status = ANY(%s)
                 ORDER BY op.position_operation_id
                 LIMIT 1
@@ -781,7 +790,11 @@ def _resolve_outstanding_core_rebalance_close(
             ).fetchone()
         if row is None:
             return None
-        intent_id, ownership_id, ownership_status, trade_id, position_id = row
+        intent_id, ownership_id, ownership_status, trade_id, position_id, api_key_id, user_key_id = row
+        if (api_key_id, user_key_id) != credentials:
+            raise StrategyCoreExecutionError(
+                "the in-flight core rebalance close belongs to other broker credentials; it is not driven through these"
+            )
         if ownership_status != "active":
             # Unreachable by construction (`_finish_close` terminalises then releases in
             # one transaction; the #3312 release runs only when nothing resumed).
@@ -802,6 +815,8 @@ class _CoreSellTarget:
     ownership_id: int
     strategy_trade_id: int
     broker_position_id: int
+    credentials: tuple[UUID, UUID] | None
+    """The (api, user) credential ids of the proof the position was BOUGHT under."""
 
 
 def _core_sell_target(conn: psycopg.Connection[Any]) -> _CoreSellTarget | str:
@@ -809,9 +824,12 @@ def _core_sell_target(conn: psycopg.Connection[Any]) -> _CoreSellTarget | str:
     with conn.transaction():
         owned = conn.execute(
             """
-            SELECT own.ownership_id, own.strategy_trade_id, own.broker_position_id
+            SELECT own.ownership_id, own.strategy_trade_id, own.broker_position_id,
+                   proof.api_key_credential_id, proof.user_key_credential_id
             FROM strategy_position_ownership own
             JOIN strategy_trades t ON t.strategy_trade_id = own.strategy_trade_id
+            LEFT JOIN strategy_core_eligibility_proofs proof
+                   ON proof.core_eligibility_proof_id = t.core_eligibility_proof_id
             WHERE own.status = 'active' AND t.core_rebalance_intent_id IS NOT NULL
             """
         ).fetchall()
@@ -850,8 +868,9 @@ def _core_sell_target(conn: psycopg.Connection[Any]) -> _CoreSellTarget | str:
         return "core_operation_outstanding"
     if entry_open is None or entry_open[0]:
         return "core_entry_not_terminal"
-    ownership_id, trade_id, position_id = owned[0]
-    return _CoreSellTarget(int(ownership_id), int(trade_id), int(position_id))
+    ownership_id, trade_id, position_id, api_key_id, user_key_id = owned[0]
+    credentials = None if api_key_id is None or user_key_id is None else (api_key_id, user_key_id)
+    return _CoreSellTarget(int(ownership_id), int(trade_id), int(position_id), credentials)
 
 
 def _evidence_fresh(observed_at: datetime, *, now: datetime) -> bool:
@@ -888,6 +907,10 @@ def _execute_core_sell(
     target = _core_sell_target(conn)
     if isinstance(target, str):
         return refuse(target)
+    if target.credentials != (proof.api_key_credential_id, proof.user_key_credential_id):
+        # The position was bought under another account's proof: closing it through this
+        # one would act on the wrong book (or on a colliding position id).
+        return refuse("core_credential_provenance_changed")
     lower_pct = intent.decision.lower_pct
     if lower_pct is None or lower_pct <= 0:
         # With `lower = 0` the post-close 0% is in-band and the allocator never rebuys.
@@ -1020,7 +1043,9 @@ def execute_core_rebalance(
 
     # #2603 sell leg, spec step 0: drive an in-flight rebalance close first, with no
     # evaluation, no new intent and no quote.
-    outstanding = _resolve_outstanding_core_rebalance_close(conn, broker=broker)
+    outstanding = _resolve_outstanding_core_rebalance_close(
+        conn, broker=broker, credentials=(api_key_credential_id, user_key_credential_id)
+    )
     if outstanding is not None:
         return outstanding
 

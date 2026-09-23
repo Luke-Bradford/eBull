@@ -518,7 +518,7 @@ describe("StrategyPortfolioLens", () => {
       trade_id: 21,
       order_id: 31,
       amount: "49.9",
-      submission_policy_version: "core-submission-v1",
+      submission_policy_version: "core-submission-v2",
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
@@ -548,7 +548,7 @@ describe("StrategyPortfolioLens", () => {
       trade_id: 21,
       order_id: 31,
       amount: "49.9",
-      submission_policy_version: "core-submission-v1",
+      submission_policy_version: "core-submission-v2",
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
@@ -584,7 +584,7 @@ describe("StrategyPortfolioLens", () => {
       trade_id: 21,
       order_id: 31,
       amount: "49.9",
-      submission_policy_version: "core-submission-v1",
+      submission_policy_version: "core-submission-v2",
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
@@ -612,7 +612,7 @@ describe("StrategyPortfolioLens", () => {
       trade_id: null,
       order_id: null,
       amount: "0",
-      submission_policy_version: "core-submission-v1",
+      submission_policy_version: "core-submission-v2",
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });
@@ -640,7 +640,7 @@ describe("StrategyPortfolioLens", () => {
       trade_id: null,
       order_id: null,
       amount: "0",
-      submission_policy_version: "core-submission-v1",
+      submission_policy_version: "core-submission-v2",
       preflight_policy_version: "core-preflight-v2",
       broker_preflight_policy_version: "core-broker-preflight-v2",
     });

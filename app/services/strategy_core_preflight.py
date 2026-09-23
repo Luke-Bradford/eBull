@@ -61,7 +61,11 @@ from app.services.strategy_halts import MAX_SOURCE_LAG
 #: ``quotes_refresh`` (3600 s), moving it 5400 -> 750 s.  Nothing else in the rule set
 #: moves: the halt bound, the ``us_equity`` allow-list, the precedence order and the
 #: halt-symbol identity rule are byte-identical.
-CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v3"
+#:
+#: v4 (#2603 sell leg): ``core_operation_outstanding`` joins the precedence order after
+#: ``core_execution_block_active`` -- an unresolved core position operation, or a close in
+#: ``reconcile_required``, refuses every core trade.
+CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v4"
 
 #: The venue allow-list and the session predicate both live in
 #: ``app/services/market_session_support.py``.

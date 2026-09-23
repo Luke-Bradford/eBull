@@ -384,7 +384,7 @@ def test_the_two_preflight_bounds_are_the_values_the_policy_version_froze() -> N
     ``CORE_PREFLIGHT_POLICY_VERSION`` bump, which is the point.
     """
     assert (CORE_MAX_QUOTE_AGE_SECONDS, CORE_MAX_HALT_FEED_AGE_SECONDS) == (750, 450)
-    assert CORE_PREFLIGHT_POLICY_VERSION == "core-preflight-v3"
+    assert CORE_PREFLIGHT_POLICY_VERSION == "core-preflight-v4"
 
 
 def test_the_generalised_bound_reduces_to_the_pre_3157_rule_when_no_loss_is_tolerated() -> None:
