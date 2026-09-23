@@ -2602,3 +2602,24 @@ class TestPerShareShareCountMistag:
     def test_non_per_share_column_unaffected_by_bound(self) -> None:
         [p] = _derive_periods_from_facts([_fact(val=Decimal("5e11"))])
         assert p.revenue == Decimal("5e11")
+
+
+def test_per_share_bound_matches_financial_periods_ddl() -> None:
+    """The bound mirrors the per-share columns' DDL (#2182 review): fail if a migration changes it."""
+    import re
+    from pathlib import Path
+
+    from app.services.fundamentals import _PER_SHARE_SCALE, _PER_SHARE_VALUE_BOUND
+
+    pattern = re.compile(r"\b(?:eps_basic|eps_diluted|dps_declared)\s+(?:TYPE\s+)?NUMERIC\s*\((\d+),\s*(\d+)\)", re.I)
+    sql_dir = Path(__file__).resolve().parents[1] / "sql"
+    types = {
+        (int(p), int(s))
+        for path in sorted(sql_dir.glob("*.sql"))
+        if "financial_periods" in (text := path.read_text())
+        for p, s in pattern.findall(text)
+    }
+    assert len(types) == 1, types
+    [(precision, scale)] = types
+    assert _PER_SHARE_VALUE_BOUND == Decimal(10) ** (precision - scale)
+    assert _PER_SHARE_SCALE == Decimal(10) ** -scale
