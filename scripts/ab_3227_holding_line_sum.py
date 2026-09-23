@@ -49,6 +49,11 @@ SELECT instrument_id, holder_identity_key, ownership_nature,
 
 
 def _load_control(ref: str) -> ModuleType:
+    """Import ``app/services/ownership_observations.py`` as it stands at ``ref``.
+
+    ⚠ This EXECUTES that ref's code with the runner's privileges. Local git objects can hold
+    fetched code nobody reviewed, so pass only a ref you trust (the default, ``origin/main``, is
+    the merged, reviewed tree)."""
     src = subprocess.run(
         ["git", "show", f"{ref}:app/services/ownership_observations.py"],
         check=True,
@@ -92,7 +97,7 @@ def _insider_view(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="origin/main")
+    ap.add_argument("--ref", default="origin/main", help="control ref; its code is EXECUTED — trusted refs only")
     ap.add_argument("--apply", action="store_true", help="refresh _current with the new projection and commit")
     args = ap.parse_args()
 
