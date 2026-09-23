@@ -176,3 +176,31 @@ def test_a_partial_close_under_the_live_id_stays_wedged(
     refused = _manage(ebull_test_conn, broker, trade_id, position_id)
     assert (refused.state, refused.reason_code) == ("reconcile_required", "owned_position_missing")
     assert close_state_report(ebull_test_conn)["active_ownership"] == 1
+
+
+def test_an_unowned_slice_under_the_entry_order_is_a_partial_close_and_refuses(
+    ebull_test_conn: psycopg.Connection[Any], core_world: Path
+) -> None:
+    """The attended 2026-09-23 shape: the partial slice is booked under a NEW position id."""
+    broker, trade_id, position_id, order_ref = _owned_then_stopped_out(ebull_test_conn, core_world)
+    _record_events(ebull_test_conn, position_id=position_id, order_ref=order_ref, close_units=UNITS)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
+                                  executed_at,realized_pnl_usd,order_id,source,raw_payload)
+        VALUES (%s,%s,%s,'close','sell',0.1,%s,0,%s,'etoro_history',%s)
+        """,
+        (
+            position_id + 1,
+            CORE_INSTRUMENT_ID,
+            CORE_INSTRUMENT_ID,
+            CLOCK - timedelta(hours=2),
+            order_ref,
+            Jsonb({"orderId": order_ref, "positionId": position_id + 1}),
+        ),
+    )
+    ebull_test_conn.commit()
+
+    refused = _manage(ebull_test_conn, broker, trade_id, position_id)
+    assert (refused.state, refused.reason_code) == ("reconcile_required", "owned_position_missing")
+    assert close_state_report(ebull_test_conn)["active_ownership"] == 1

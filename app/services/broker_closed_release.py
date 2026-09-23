@@ -230,8 +230,15 @@ def load_whole_close_evidence(
                 SELECT count(*) AS n FROM trade_events
                 WHERE event_kind='close' AND position_id<>%s
                   AND (order_id=%s OR raw_payload->>'orderId'=%s)
+                  -- ⚠ One entry order can yield several OWNED executions (sql/282);
+                  -- each is its own position with its own whole close.  A partial
+                  -- slice is a NEW id nobody owns.
+                  AND position_id NOT IN (
+                      SELECT broker_position_id FROM strategy_position_ownership
+                      WHERE strategy_trade_id=%s
+                  )
                 """,
-                (broker_position_id, entry_ref, str(entry_ref)),
+                (broker_position_id, entry_ref, str(entry_ref), strategy_trade_id),
             ).fetchone()
             siblings = int(sibling_row["n"]) if sibling_row is not None else 0
     return WholeCloseEvidence(

@@ -53,7 +53,9 @@ Each refusal logs a reason code + the witness ids, so the human resolving a wedg
    `instrument_id` = the trade's; `raw.isBuy = true`; `raw.leverage = 1`;
    `raw.initialAmountInDollars` finite > 0.
 4. **Close witness R**: exactly one `close` row for P (no time filter), AND no close row for
-   ANY other position id with `order_id = E` OR `raw.orderId = E` (a partial slice ⇒ refuse).
+   ANY other position id with `order_id = E` OR `raw.orderId = E` that this trade does not
+   itself own (a partial slice is a NEW, unowned id ⇒ refuse; an owned execution of a
+   multi-execution entry, `sql/282`, is its own position — Codex ckpt-2).
    R: `source = 'etoro_history'`; `order_id = E` and `raw.orderId = E`; `raw.positionId = P`;
    `raw.instrumentId = R.etoro_instrument_id = O.etoro_instrument_id`; `instrument_id` = the
    trade's; `raw.openTimestamp` (parsed) = `O.executed_at` (same opening); `side = 'sell'`;
