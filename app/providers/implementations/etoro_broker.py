@@ -60,6 +60,7 @@ from app.providers.broker import (
     BrokerStrategyOrder,
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
+    CloseOrderPositionFill,
     OrderParams,
     OrderStatus,
 )
@@ -892,20 +893,37 @@ class EtoroBrokerProvider(BrokerProvider):
             if persist_response is not None:
                 persist_response(raw)
             response.raise_for_status()
-            returned_order_id = int(raw["orderID"])
-            raw_positions = raw.get("positions") or []
+            # ⚠ Decoded a SECOND time with `parse_float=Decimal` (#3007 part 2).
+            # `raw` stays the plain decode because it is persisted and audited as
+            # JSON; the booking reads `units` from this one, so its exact-equality
+            # check holds against the wire digits rather than their nearest double.
+            exact = response.json(parse_float=Decimal)
+            if not isinstance(exact, dict):
+                raise TypeError("close-order response must be an object")
+            returned_order_id = _strict_positive_id(exact["orderID"])
+            raw_positions = exact.get("positions") or []
             if not isinstance(raw_positions, list):
                 raise TypeError("positions must be a list")
             if any(not isinstance(row, dict) for row in raw_positions):
                 raise TypeError("every affected position must be an object")
-            position_ids = tuple(int(row["positionID"]) for row in raw_positions)
-            # ⚠ LENIENT ON PURPOSE. The contract marks `instrumentID` required
-            # on this response, but we have observed the route once, so a
-            # strict parse would break `strategy_position_manager`'s close
-            # recovery on an unmeasured field. Absence is carried as `None`
-            # and the CONSUMER fails closed on it (Codex checkpoint 2, #3007).
-            raw_instrument = raw.get("instrumentID")
-            instrument_id = int(raw_instrument) if isinstance(raw_instrument, (int, str)) else None
+            positions = tuple(
+                CloseOrderPositionFill(
+                    position_id=_strict_positive_id(row["positionID"]),
+                    rate=row.get("rate"),
+                    units=row.get("units"),
+                    occurred=row.get("occurred"),
+                )
+                for row in raw_positions
+            )
+            position_ids = tuple(fill.position_id for fill in positions)
+            # ⚠ LENIENT ON ABSENCE, STRICT ON SHAPE. The contract marks
+            # `instrumentID` required on this response, but a strict presence
+            # check would break `strategy_position_manager`'s close recovery on
+            # a field it does not need. Absence is carried as `None` and the
+            # CONSUMER fails closed on it (Codex checkpoint 2, #3007). A value
+            # that IS present must be a real id (#3007 part 2).
+            raw_instrument = exact.get("instrumentID")
+            instrument_id = None if raw_instrument is None else _strict_positive_id(raw_instrument)
             error_code = raw.get("errorCode")
             raw_status = str(raw.get("statusID", "unknown"))
             reference = raw.get("referenceID")
@@ -945,6 +963,7 @@ class EtoroBrokerProvider(BrokerProvider):
             reference_id=reference_id,
             raw_payload=raw,
             instrument_id=instrument_id,
+            positions=positions,
         )
 
     def get_order_status(self, broker_order_ref: str) -> BrokerOrderResult:
@@ -1311,6 +1330,27 @@ def _normalise_open_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
 _CLOSE_EXECUTION_FIELDS = ("rate", "units", "occurred")
 
 
+def _strict_positive_id(value: object) -> int:
+    """A broker id: a non-bool ``int`` or a string of ASCII digits, ``> 0`` (#3007 part 2).
+
+    ``int()`` alone accepts ``True`` (→ 1), ``1.9`` (→ 1), ``" 7 "`` and
+    non-ASCII digit strings such as ``"٣"``; each would turn a malformed answer
+    into a plausible id. Raises ``ValueError`` so the caller's
+    existing malformed-response path reports it.
+    """
+    if isinstance(value, bool):
+        raise ValueError("a bool is not a broker id")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.isascii() and value.isdigit():
+        parsed = int(value)
+    else:
+        raise ValueError(f"not a broker id: {value!r}")
+    if parsed <= 0:
+        raise ValueError(f"broker id must be positive: {parsed}")
+    return parsed
+
+
 def _close_order_carries_execution(raw: dict[str, Any], positions: list[dict[str, Any]]) -> bool:
     """Whether a close-order lookup carries its own evidence of execution (#3320).
 
@@ -1355,10 +1395,10 @@ def _normalise_close_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
 
     Since #3007 half 2 the recommendation poller
     (``order_client.reconcile_pending_recommendation_orders``) routes an EXIT's
-    pending row to that lookup rather than to v2 ``orders:lookup``. ⚠ It
-    RESOLVES the order; it does not BOOK the fill — the lot an EXIT closed is
-    not persisted (#3006), so a late fill still parks as ``filled_unbooked``
-    with the submission claim held.
+    pending row to that lookup rather than to v2 ``orders:lookup``. Since #3007
+    part 2 it BOOKS a confirmed whole close of the recorded lot (fill, realized
+    P&L, terminal states only — ``order_client._book_late_exit_fill``); any
+    other shape parks as ``filled_unbooked`` with the submission claim held.
     """
     order_data = raw.get("orderForClose") or raw
     return _build_result(order_data, raw)

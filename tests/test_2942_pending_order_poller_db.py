@@ -1109,9 +1109,9 @@ def test_an_exit_is_resolved_through_the_close_order_route(
 
     assert [r.verdict for r in results] == ["filled_not_booked"]
     assert broker.get_close_order.call_args.kwargs == {"order_id": _REF}
-    # Booking a late EXIT fill is still the deliberate gap: the close-order fill
-    # fields are unmeasured (docs/proposals/execution/2026-09-23-late-exit-fill-booking.md),
-    # so the claim stays held and nothing is booked.
+    # A late EXIT fill is booked only on a recorded submission context (#3007 part
+    # 2, check 1). This row was not claimed, so it parks: the claim stays held and
+    # nothing is booked. Booking itself: tests/test_3007_late_exit_booking_db.py.
     assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
     assert _parked_reason(ebull_test_conn, order_id) == "filled_unbooked"
     fills = ebull_test_conn.execute("SELECT count(*) FROM fills WHERE order_id=%s", (order_id,)).fetchone()
@@ -1125,6 +1125,7 @@ def test_an_exit_is_resolved_through_the_close_order_route(
     ).fetchone()
     assert audit is not None
     assert "exit_avg_cost" in audit[0] and audit[0]["exit_avg_cost"] is None
+    assert audit[0]["reason"] == "context_not_recorded"
     assert audit[0]["response"] == broker.get_close_order.return_value.raw_payload
     with pytest.raises(psycopg.errors.UniqueViolation):
         _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
