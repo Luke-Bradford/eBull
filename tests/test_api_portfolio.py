@@ -233,6 +233,45 @@ class TestGetPortfolio:
         assert item["unrealized_pnl"] == 0.0  # no price signal
         assert body["total_aum"] == 6800.0  # 1800 + 5000
 
+    def test_gbx_broker_trade_brings_usd_amount_to_native_before_the_price_delta(self) -> None:
+        """#3322: eToro's ``amount`` is USD; the price delta is in pence (GBX).
+
+        Numbers from the attended IUSA.L trade (#3007): 0.323024 units opened at
+        5817.71p for $25.00 at conversion rate 0.013303.
+        """
+        pos = _make_position_row(currency="GBX", current_units=0.323024, cost_basis=1879.3, last=5900.0)
+        broker = {
+            "position_id": 1,
+            "instrument_id": 1,
+            "is_buy": True,
+            "units": 0.323024,
+            "amount": 25.0,
+            "open_rate": 5817.71,
+            "open_conversion_rate": 0.013303,
+            "open_date_time": _NOW,
+            "stop_loss_rate": None,
+            "take_profit_rate": None,
+            "is_tsl_enabled": False,
+            "leverage": 1,
+            "total_fees": 0.0,
+            "settlement_type_id": 1,
+            "currency": "GBX",
+        }
+        with patch(
+            "app.services.valuation.load_live_fx_rates_with_metadata",
+            return_value={("USD", "GBP"): {"rate": Decimal("0.75"), "quoted_at": _NOW}},
+        ):
+            _with_conn([[pos], [_make_cash_row(0.0)], [broker]])
+            resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        trade = resp.json()["positions"][0]["trades"][0]
+        amount_native = 25.0 / 0.013303  # pence
+        mv_native = amount_native + 0.323024 * (5900.0 - 5817.71)
+        assert trade["currency"] == "USD"
+        assert trade["market_value"] == pytest.approx(mv_native / 100 / 0.75)
+        assert trade["amount"] == pytest.approx(amount_native / 100 / 0.75)
+        assert trade["current_price"] == pytest.approx(59.0 / 0.75)
+
     def test_zero_last_uses_bid_ask_mid_not_zero(self) -> None:
         """#1428: quotes.last=0.00 (not freshly traded) must NOT mark the
         position at 0 → fake −100%. Fall back to live bid/ask mid."""
@@ -1378,3 +1417,16 @@ class TestInstrumentPositionsOpenConversionRate:
         # mid 697.19; mv = 6000 + 10 * (697.19 - 600) * 1.0 = 6971.9
         assert body["trades"][0]["market_value"] == pytest.approx(6971.9)
         assert body["trades"][0]["current_price"] == pytest.approx(697.19)
+
+
+def test_fx_rates_used_reports_gbx_through_the_scaled_gbp_pair() -> None:
+    """#3322: a GBX holding consumed the GBP pair; GBX→GBP consumed none."""
+    from app.api.portfolio import _build_fx_rates_used
+
+    meta = {
+        ("USD", "GBP"): {"rate": Decimal("0.75"), "quoted_at": _NOW},
+        ("GBP", "GBP"): {"rate": Decimal("1"), "quoted_at": _NOW},
+    }
+    to_usd = _build_fx_rates_used([{"currency": "GBX"}], False, 0.0, "USD", meta)
+    assert to_usd["GBX"]["rate"] == pytest.approx(0.01 / 0.75)
+    assert _build_fx_rates_used([{"currency": "GBX"}], False, 0.0, "GBP", meta) == {}

@@ -254,8 +254,12 @@ def _load_fx_rate(
     """Look up FX rate for from_currency -> GBP on the given date.
 
     Returns Decimal("1") for GBP. Raises RuntimeError if missing.
+
+    GBX (pence, #3322) keys as GBP: fill money reaching this path is not in the
+    instrument's price unit, so only the currency matters, and a pence label must
+    not abort the whole ingest batch on a missing ``GBX`` row.
     """
-    if from_currency.upper() == "GBP":
+    if from_currency.upper() in ("GBP", "GBX"):
         return _D("1")
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:

@@ -3409,6 +3409,19 @@ def nightly_universe_sync() -> None:
                     reclass.classified,
                 )
 
+            # #3322: the venue default just written is wrong for LSE pence
+            # lines and for USD/EUR lines on GBP/EUR venues. Re-derive from
+            # the broker's conversion rate; unclassifiable rows keep their value.
+            from app.services.instrument_price_currency import derive_instrument_price_currencies
+
+            # A rates-endpoint failure must not roll back the universe sync
+            # above; the previous derived values stand until the next night.
+            try:
+                ccy_counts = derive_instrument_price_currencies(conn, provider, lambda: datetime.now(UTC))
+                logger.info("Universe sync: instrument price currency %s", dict(ccy_counts))
+            except Exception:
+                logger.exception("Universe sync: instrument price currency derivation failed")
+
             # First-run bootstrap: if the coverage table is empty after a
             # successful universe sync, seed all tradable instruments at
             # Tier 3.  This is a no-op on subsequent runs (seed_coverage

@@ -40,9 +40,10 @@ from app.db import get_conn
 from app.db.snapshot import snapshot_read
 from app.domain.positions import PositionSource
 from app.services.broker_settlement_arms import position_investment_type_label, position_is_underlying
-from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
+from app.services.fx import MINOR_UNITS, FxRateNotFound, convert, load_live_fx_rates_with_metadata
 from app.services.portfolio_value_history import (
     carry_forward_rate_map,
+    native_amount,
     native_cost_basis,
     overlay_persisted,
     position_equity,
@@ -299,20 +300,27 @@ def _build_fx_rates_used(
 
     result: dict[str, dict[str, object]] = {}
     for ccy in sorted(source_currencies):
-        key = (ccy, display_currency)
-        inv_key = (display_currency, ccy)
+        # A minor unit (GBX) consumed its major currency's live pair (#3322): report
+        # that pair, scaled, so the audit field names the rate that moved the value.
+        # GBX→GBP uses no live rate and is not reported. ``display_currency`` is an
+        # ISO major (runtime_config.SUPPORTED_CURRENCIES), so only the source needs resolving.
+        major, scale = MINOR_UNITS.get(ccy, (ccy, Decimal("1")))
+        if major == display_currency:
+            continue
+        key = (major, display_currency)
+        inv_key = (display_currency, major)
         if key in rates_meta:
             meta = rates_meta[key]
             quoted_at = meta["quoted_at"]
             result[ccy] = {
-                "rate": float(meta["rate"]),
+                "rate": float(scale * meta["rate"]),
                 "quoted_at": quoted_at.isoformat() if hasattr(quoted_at, "isoformat") else str(quoted_at),
             }
         elif inv_key in rates_meta:
             meta = rates_meta[inv_key]
             quoted_at = meta["quoted_at"]
             result[ccy] = {
-                "rate": float(Decimal("1") / meta["rate"]),
+                "rate": float(scale / meta["rate"]),
                 "quoted_at": quoted_at.isoformat() if hasattr(quoted_at, "isoformat") else str(quoted_at),
             }
         # If no rate found, skip — conversion was skipped for those positions too.
@@ -357,7 +365,7 @@ def get_portfolio(
     # -- Broker positions (individual trades per instrument) ----------------
     broker_sql = """
         SELECT bp.position_id, bp.instrument_id, bp.is_buy,
-               bp.units, bp.amount, bp.open_rate,
+               bp.units, bp.amount, bp.open_rate, bp.open_conversion_rate,
                bp.open_date_time,
                bp.stop_loss_rate, bp.take_profit_rate,
                bp.is_tsl_enabled, bp.leverage, bp.total_fees,
@@ -399,11 +407,19 @@ def get_portfolio(
         native_ccy = str(br.get("currency") or "USD")
         cp_raw, _ = price_by_instrument.get(iid, (None, native_ccy))
         units = float(br["units"])
-        amount = float(br["amount"])
-
         is_buy = br["is_buy"]
         open_rate_raw = float(br["open_rate"])
-
+        # eToro's ``amount`` is the pre-converted USD cost basis, not native money;
+        # bring it to native before it meets a native price delta (#3322). With no
+        # usable open rate, fall back to the unleveraged native cost
+        # (units × open_rate) — the same fallback ``native_cost_basis`` uses —
+        # never to the USD figure.
+        # NOT NULL in broker_positions today; guarded so the helper decides, not str(None).
+        open_conv = br["open_conversion_rate"]
+        amount_native = native_amount(
+            Decimal(str(br["amount"])), None if open_conv is None else Decimal(str(open_conv))
+        )
+        amount = float(amount_native) if amount_native is not None else units * open_rate_raw
         if cp_raw is not None:
             if is_buy:
                 # Long: invested capital + leveraged price delta.

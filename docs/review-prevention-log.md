@@ -11158,3 +11158,24 @@ neighbouring container and match it.**
   fields decide, never the code.
 - Enforced in: `app/providers/implementations/etoro_broker.py::_close_order_carries_execution`;
   `tests/test_broker_provider.py::test_close_order_is_filled_only_on_its_own_execution_fields`.
+
+### A venue default is not a price currency, and a broker amount is not native money (#3322)
+
+- Symptom (2026-09-23): `instruments.currency` was the exchange's curated currency, so every
+  LSE line read GBP. The broker's own `conversionRate` shows 546 fresh LSE quotes in pence, 268 in
+  USD and only 3 in GBP. Separately, `get_portfolio` added eToro's `amount` (USD, per the
+  `BrokerPosition` docstring) to a native price delta; on a pence line that is 100× off.
+- Prevention: a currency label keyed on the venue is a default, not evidence. Derive it from the
+  source's per-instrument signal, and let a consumer that has not learnt a minor unit (GBX) fail
+  closed at the FX chokepoint, never silently. Before adding two money terms, name each one's
+  unit from its SOURCE docstring. Also: take a freshness clock AFTER a batch fetch, not before it.
+  Quotes stamped during a 30-request fetch otherwise read as future-dated (the first census run
+  refused 849 fresh quotes for exactly this). When the rate that makes two units compatible is missing or ≤ 0, fail closed
+  (no_fx row, or a same-unit fallback such as `units × open_rate`); never fall back to the raw
+  figure in the other unit, which reintroduces the bug the conversion exists to fix. Coerce a
+  DB value to `Decimal` only after an explicit `is None` check: `Decimal(str(None))` raises.
+- Enforced in: `app/services/instrument_price_currency.py`; `app/services/fx.py::_pair_rate`;
+  `app/services/portfolio_value_history.py::native_amount` (used by `app/api/portfolio.py` and
+  `app/services/portfolio_eod.py`);
+  `tests/test_3322_instrument_price_currency.py`; `tests/test_3322_price_currency_db.py`;
+  `tests/test_api_portfolio.py::TestGetPortfolio::test_gbx_broker_trade_brings_usd_amount_to_native_before_the_price_delta`.

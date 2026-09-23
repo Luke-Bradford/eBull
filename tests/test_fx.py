@@ -132,3 +132,44 @@ class TestConvertQuoteFields:
             rates={},
         )
         assert result is None
+
+
+class TestMinorUnitGbx:
+    """#3322: LSE pence lines are labelled GBX; 1 GBX = 0.01 GBP."""
+
+    rates = {("USD", "GBP"): Decimal("0.75")}
+
+    def test_gbx_to_gbp_needs_no_rate(self) -> None:
+        assert convert(Decimal("12678"), "GBX", "GBP", {}) == Decimal("126.78")
+
+    def test_gbp_to_gbx_multiplies(self) -> None:
+        assert convert(Decimal("126.78"), "GBP", "GBX", {}) == Decimal("12678")
+
+    def test_gbx_to_gbx_is_identity(self) -> None:
+        assert convert(Decimal("5"), "GBX", "GBX", {}) == Decimal("5")
+
+    def test_gbx_to_usd_divides_by_100_then_converts(self) -> None:
+        # 7500 pence = £75 = $100 at USD→GBP 0.75 (inverse path).
+        assert convert(Decimal("7500"), "GBX", "USD", self.rates) == pytest.approx(Decimal("100"))
+
+    def test_usd_to_gbx_multiplies_by_100(self) -> None:
+        assert convert(Decimal("100"), "USD", "GBX", self.rates) == Decimal("7500")
+
+    def test_gbx_without_a_gbp_pair_raises(self) -> None:
+        with pytest.raises(FxRateNotFound):
+            convert(Decimal("1"), "GBX", "EUR", self.rates)
+
+    def test_quote_fields_gbx_to_usd(self) -> None:
+        out = convert_quote_fields(
+            Decimal("7500"), Decimal("7515"), None, native_ccy="GBX", display_ccy="USD", rates=self.rates
+        )
+        assert out is not None
+        assert out[0] == pytest.approx(Decimal("100"))
+        assert out[1] == pytest.approx(Decimal("100.2"))
+        assert out[2] is None
+
+    def test_quote_fields_gbx_to_gbp(self) -> None:
+        out = convert_quote_fields(
+            Decimal("100"), Decimal("101"), Decimal("100.5"), native_ccy="GBX", display_ccy="GBP", rates={}
+        )
+        assert out == (Decimal("1.00"), Decimal("1.01"), Decimal("1.005"))

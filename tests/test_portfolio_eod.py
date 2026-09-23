@@ -112,6 +112,18 @@ class TestComputeEodEquity:
         assert eq.position_results[0].price_status == "no_fx"
         assert eq.position_results[0].unrealised_pnl_usd == Decimal("11.00")
 
+    def test_gbx_line_brings_usd_amount_to_native_before_the_delta(self) -> None:
+        # #3322: amount is eToro's USD cost basis; close/open_rate are pence.
+        # $25 at conv 0.0125 (GBP/USD 1.25 ÷ 100) = 2000p; +10 units × 10p = 2100p
+        # = £21.00. Adding $25 to a pence delta instead gave £1.25.
+        eq = compute_eod_equity(
+            [_pos(1, "10", "GBX", "210", amount="25", open_rate="200", open_conversion_rate="0.0125")],
+            [],
+            "GBP",
+            RATES,
+        )
+        assert eq.positions_value == Decimal("21.00")
+
     def test_mtm_equals_units_close_for_unleveraged_long(self) -> None:
         # amount == units*open_rate → MTM collapses to units*mark (the v1 case).
         eq = compute_eod_equity([_pos(1, "2", "GBP", "10", amount="16", open_rate="8")], [], "GBP", RATES)
@@ -242,3 +254,16 @@ class TestSummariseMarks:
     def test_every_priced_mark_stale_counts_all_of_them(self) -> None:
         marks = summarise_marks([_result("priced", EARLIER), _result("priced", EARLIER)], SNAPSHOT)
         assert (marks.oldest_mark_date, marks.stale_mark_positions) == (EARLIER, 2)
+
+
+def test_unusable_open_conversion_rate_is_no_fx_not_a_unit_mix() -> None:
+    # #3322 review: a zero rate must not fall back to adding the USD amount to a
+    # native delta — it is an unpriceable (no_fx) row.
+    eq = compute_eod_equity(
+        [_pos(1, "10", "GBX", "210", amount="25", open_rate="200", open_conversion_rate="0")],
+        [],
+        "GBP",
+        RATES,
+    )
+    assert eq.position_results[0].price_status == "no_fx"
+    assert eq.positions_value == Decimal("0")
