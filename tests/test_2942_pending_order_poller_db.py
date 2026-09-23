@@ -1109,12 +1109,23 @@ def test_an_exit_is_resolved_through_the_close_order_route(
 
     assert [r.verdict for r in results] == ["filled_not_booked"]
     assert broker.get_close_order.call_args.kwargs == {"order_id": _REF}
-    # Booking a late EXIT fill is still the deliberate gap — the lot it closed
-    # is not persisted (#3006) — so the claim stays held and nothing is booked.
+    # Booking a late EXIT fill is still the deliberate gap: the close-order fill
+    # fields are unmeasured (docs/proposals/execution/2026-09-23-late-exit-fill-booking.md),
+    # so the claim stays held and nothing is booked.
     assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
     assert _parked_reason(ebull_test_conn, order_id) == "filled_unbooked"
     fills = ebull_test_conn.execute("SELECT count(*) FROM fills WHERE order_id=%s", (order_id,)).fetchone()
     assert fills is not None and int(fills[0]) == 0
+    # The audit carries what a hand reconciliation needs: the lookup verbatim and
+    # the submission cost (sql/413; NULL here, as this row was not claimed).
+    audit = ebull_test_conn.execute(
+        "SELECT evidence_json FROM decision_audit WHERE evidence_json->>'refusal' = 'pending_order_filled_not_booked' "
+        "AND (evidence_json->>'order_id')::bigint = %s",
+        (order_id,),
+    ).fetchone()
+    assert audit is not None
+    assert "exit_avg_cost" in audit[0] and audit[0]["exit_avg_cost"] is None
+    assert audit[0]["response"] == broker.get_close_order.return_value.raw_payload
     with pytest.raises(psycopg.errors.UniqueViolation):
         _seed_order(ebull_test_conn, recommendation_id=rec, action="EXIT")
     ebull_test_conn.rollback()

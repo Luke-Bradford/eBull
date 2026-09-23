@@ -266,6 +266,10 @@ class RecommendationSubmissionContext:
     recorded: bool
     order_params: OrderParams | None
     exit_lot: ExitLot | None
+    #: ``positions.avg_cost`` when the claim recorded the lot (``sql/413``). ``None``
+    #: = not recorded: pre-413, no lot, or an unusable cost at claim time. The
+    #: booking slice must refuse ``None`` rather than read today's ``avg_cost``.
+    exit_avg_cost: Decimal | None = None
 
 
 def load_recommendation_submission_context(
@@ -280,7 +284,7 @@ def load_recommendation_submission_context(
         cur.execute(
             """
             SELECT recommendation_exit_position_id, recommendation_exit_units,
-                   recommendation_submission_context
+                   recommendation_submission_context, recommendation_exit_avg_cost
             FROM orders WHERE order_id = %(oid)s
             """,
             {"oid": order_id},
@@ -312,7 +316,13 @@ def load_recommendation_submission_context(
             leverage=int(raw["leverage"]),
         )
     )
-    return RecommendationSubmissionContext(recorded=True, order_params=params, exit_lot=exit_lot)
+    exit_avg_cost = row["recommendation_exit_avg_cost"]
+    return RecommendationSubmissionContext(
+        recorded=True,
+        order_params=params,
+        exit_lot=exit_lot,
+        exit_avg_cost=None if exit_avg_cost is None else Decimal(str(exit_avg_cost)),
+    )
 
 
 #: The lots a recommendation EXIT could close at the broker, before ownership.
@@ -624,6 +634,12 @@ def _persist_submitted_intent(
     and raises ``_ClaimCredentialsRevoked`` when they are not, so the caller
     can refuse pre-I/O without taking the claim. ``None`` ids (the non-live path, and direct test
     callers) write NULL and skip the condition.
+
+    #3007 (sql/413): an EXIT that records a lot also records ``positions.avg_cost``,
+    read by this same statement: the cost the lot is disposed against, which a late
+    fill books realized P&L from after the pool may have moved. An unusable cost
+    (NULL, non-positive, NaN) writes NULL and never refuses the EXIT, because EXIT
+    is never blocked. The booking slice refuses a NULL instead.
     """
     request_id = uuid4()
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -636,7 +652,8 @@ def _persist_submitted_intent(
                  recommendation_request_id, recommendation_submission_phase,
                  broker_environment, recommendation_exit_position_id,
                  recommendation_exit_units, recommendation_submission_context,
-                 recommendation_api_key_credential_id, recommendation_user_key_credential_id)
+                 recommendation_api_key_credential_id, recommendation_user_key_credential_id,
+                 recommendation_exit_avg_cost)
             SELECT
                  %(iid)s, %(rid)s, %(did)s,
                  %(action)s, %(otype)s, %(amt)s, %(units)s,
@@ -644,7 +661,12 @@ def _persist_submitted_intent(
                  %(request_id)s, 'claim_committed',
                  %(broker_env)s, %(exit_position_id)s,
                  %(exit_units)s, %(context)s,
-                 %(api_cred)s::uuid, %(user_cred)s::uuid
+                 %(api_cred)s::uuid, %(user_cred)s::uuid,
+                 CASE WHEN %(record_exit_cost)s THEN (
+                     SELECT p.avg_cost FROM positions p
+                     WHERE p.instrument_id = %(iid)s
+                       AND p.avg_cost > 0 AND p.avg_cost <> 'NaN'::numeric
+                 ) END
             WHERE %(api_cred)s::uuid IS NULL
                OR EXISTS (
                    SELECT 1
@@ -674,6 +696,7 @@ def _persist_submitted_intent(
                 "exit_position_id": None if exit_lot is None else exit_lot.position_id,
                 "exit_units": None if exit_lot is None else exit_lot.units,
                 "context": Jsonb(order_params_context(order_params)),
+                "record_exit_cost": exit_lot is not None,
                 "api_cred": None if broker_credential_ids is None else broker_credential_ids[0],
                 "user_cred": None if broker_credential_ids is None else broker_credential_ids[1],
             },
@@ -3237,14 +3260,26 @@ def _record_unbooked_fill(
       ``recorded=False``, and booking MUST refuse it rather than re-select a lot,
       because re-selecting at poll time is the instrument/time/FIFO guess for
       broker ownership that #2942 forbids.
-    * **Still blocking: it cannot be dev-verified.** Producing a real
-      pending->filled recommendation order needs an attended demo session, and
-      today none is producible (zero approved BUY/ADD recommendations; see #3007).
+    * **Pool cost: RESOLVED by ``sql/413``.** The claim also records
+      ``positions.avg_cost``, because the pool may have moved by the time a late
+      fill is booked.
+    * **Still blocking: the close-order fill fields are unmeasured.**
+      ``positions[].rate`` / ``units`` / ``occurred`` are "when available" in the
+      contract and have never been recorded live, so whether they are executed
+      values, echoes of the position, or in ``avg_cost``'s currency is unknown.
+      Booking money on them would be a guess
+      (``docs/proposals/execution/2026-09-23-late-exit-fill-booking.md``, Verdict).
+      That spec also records why a late booking must NOT move units, cost basis
+      or cash: ``portfolio_sync`` already does.
 
     So this leaves the status quo (claim held, nothing double-submits) plus the
     two things the status quo lacked: an ERROR log and a durable audit row.
-    **Unblock for the booking slice: one attended pending->fill observation on a
-    recommendation-origin order** — the same observation #2965 needs.
+    **Unblock for the booking slice: one attended PARTIAL close
+    (``UnitsToDeduct``) of any demo position on a NON-USD instrument**, with the
+    close-order lookup and the trade-history row for that position captured
+    verbatim. The route's semantics do not depend on who submitted the close. A
+    whole close cannot tell executed units from echoed ones, and a USD instrument
+    never exercises ``conversionRate``.
 
     ⚠ Written ONCE, then parked. The order is terminal at the broker, so
     re-asking every hour could only spend a shared eToro read and append another
@@ -3270,7 +3305,9 @@ def _record_unbooked_fill(
         recommendation_id=recommendation_id,
         explanation=(
             f"Broker reports order_id={order_id} as {broker_status} but the fill is NOT booked — "
-            f"late-fill booking is not implemented (#2942 slice C); the submission claim stays held"
+            f"late-fill booking is not built (BUY/ADD: #2942 slice C; EXIT: waits on an attended "
+            f"observation of the close-order fields, docs/proposals/execution/2026-09-23-late-exit-fill-booking.md); "
+            f"the submission claim stays held"
         ),
         evidence={
             "refusal": "pending_order_filled_not_booked",
@@ -3280,6 +3317,10 @@ def _record_unbooked_fill(
             "submission_context_recorded": context.recorded,
             "exit_position_id": None if context.exit_lot is None else context.exit_lot.position_id,
             "exit_units": None if context.exit_lot is None else str(context.exit_lot.units),
+            # sql/413: the cost the lot is disposed against. With `response` (which
+            # carries `positions[]` verbatim, incl. any `rate`/`units`/`occurred`), this
+            # is everything a hand reconciliation, or the booking slice, needs.
+            "exit_avg_cost": None if context.exit_avg_cost is None else str(context.exit_avg_cost),
             **order_params_context(context.order_params),
         },
         now=now,
