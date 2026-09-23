@@ -36,6 +36,7 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+import psycopg.rows
 
 from app.config import settings
 from app.providers.broker import BrokerProvider
@@ -61,31 +62,41 @@ def _recommendation_account_broker(api_key_id: UUID, user_key_id: UUID) -> Itera
     operator, and are each still that operator's live row for the label (checked by
     the shared core factory body).
     """
-    with psycopg.connect(settings.database_url) as conn:
-        rows = conn.execute(
+    with psycopg.connect(settings.database_url) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        rows = cur.execute(
             """
             SELECT id, operator_id, provider, label, environment, revoked_at
             FROM broker_credentials WHERE id = ANY(%s)
             """,
             ([api_key_id, user_key_id],),
         ).fetchall()
-    by_id = {row[0]: row for row in rows}
+    by_id = {row["id"]: row for row in rows}
     api, user = by_id.get(api_key_id), by_id.get(user_key_id)
+
+    def _live(row: dict[str, Any] | None, label: str) -> bool:
+        return (
+            row is not None
+            and row["revoked_at"] is None
+            and (row["provider"], row["label"], row["environment"]) == ("etoro", label, "demo")
+        )
+
     if (
         api is None
         or user is None
-        or api[5] is not None
-        or user[5] is not None
-        or (api[2], api[3], api[4]) != ("etoro", "api_key", "demo")
-        or (user[2], user[3], user[4]) != ("etoro", "user_key", "demo")
-        or api[1] != user[1]
+        or not _live(api, "api_key")
+        or not _live(user, "user_key")
+        or api["operator_id"] != user["operator_id"]
     ):
         raise WindowBRefused(
             CREDENTIALS_UNRESOLVED, "the order's recorded credentials are not one operator's unrevoked demo pair"
         )
     try:
         with _order_account_broker(
-            api[1], api_key_id, user_key_id, caller=_CALLER, refusal_slug=CREDENTIALS_UNRESOLVED
+            api["operator_id"],
+            api_key_id,
+            user_key_id,
+            caller=_CALLER,
+            refusal_slug=CREDENTIALS_UNRESOLVED,
         ) as broker:
             yield broker
     except WindowBRefused as exc:

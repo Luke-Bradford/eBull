@@ -11138,7 +11138,11 @@ neighbouring container and match it.**
 - Symptom (review NITPICK): a candidate SELECT returned `api_cred.created_at, user_cred.created_at`
   — two columns both named `created_at` — consumed by `_Candidate(*row)`. Reordering either
   join or the SELECT list would move values between dataclass fields with no error.
-- Prevention: a row consumed by a dataclass/constructor is read with `dict_row` and every column
-  aliased to its field name (`_Candidate(**row)`), so a mismatch raises `TypeError` instead of
-  shifting. Any SELECT with duplicate output names gets explicit aliases.
-- Enforced in: `app/services/recommendation_window_b_release.py::_read_candidate`.
+- Prevention: a row read by more than one or two fields is read with `dict_row` — including
+  ad-hoc tuple-indexed reads in scripts (`row[5]`), and rows zipped against a hand-written name
+  list. A row consumed by a dataclass is aliased to its field names (`_Candidate(**row)`), so a
+  mismatch raises `TypeError` instead of shifting. Any SELECT with duplicate output names gets
+  explicit aliases. (The review found three sites in one PR, one per round — sweep the diff for
+  the whole class once, not the flagged line.)
+- Enforced in: `app/services/recommendation_window_b_release.py::_read_candidate` /
+  `describe_candidate`; `scripts/release_recommendation_window_b.py::_recommendation_account_broker`.
