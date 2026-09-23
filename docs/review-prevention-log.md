@@ -11333,3 +11333,21 @@ neighbouring container and match it.**
   One copy source serves both surfaces (`oversubscribedCopy`).
 - Enforced in: `tests/test_ownership_short_interest_cover.py`;
   `frontend/src/components/instrument/ownershipMetrics.test.ts` ("never asserts the retired stale-13F cause").
+
+### A repair that SUMS must have its gain side read for exact doubles (#3227)
+
+- Symptom (2026-09-23): the #3227 item-3a holding-line sum passed every structural guard (one
+  class, distinct `(title, D/I, nature)` triples, one reporting owner) and its A/B was
+  monotone-up with no non-share column moving. Reading the gain list, several holders had moved
+  by EXACTLY 2×. YPF `0000903423-08-000197` reports the same 58,603,606 ADSs once `D` and once `I`
+  ("indirectly owned by shareholders of Petersen Energia") — Form 3 Instr. 5(b)(iv) permits an
+  indirect line to carry the entity's whole holding, so the block appears twice and a sum doubles
+  it. LYEL's two ARCH funds are the same shape and genuinely distinct (the proxy's own 36.7M for
+  Nelsen corroborates the sum), so nothing in the table separates the two cases.
+- Prevention: before shipping any aggregation that adds rows, list the largest gains and look for
+  a new value that is an integer multiple of the old one; each hit is either a restatement or a
+  coincidence, and the table alone may not say which. Where it cannot, refuse by construction
+  (here: no two summed lines may carry the same amount) and name the accepted false refusal.
+- Enforced in: `app/services/ownership_observations.py::INSIDER_HOLDING_LINE_SUM_LATERAL`;
+  `tests/test_3227_holding_line_sum.py` (`equal_amounts_refuse`);
+  `scripts/ab_3227_holding_line_sum.py` (prints the gain side).
