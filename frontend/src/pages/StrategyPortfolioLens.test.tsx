@@ -215,6 +215,7 @@ describe("StrategyPortfolioLens", () => {
       money_currency: "USD",
       fills: [],
       pending_entries: [],
+      pending_entries_truncated: false,
     });
   });
 
@@ -755,6 +756,7 @@ describe("StrategyPortfolioLens", () => {
           created_at: "2026-09-23T14:00:00Z",
         },
       ],
+      pending_entries_truncated: false,
     });
     renderLens();
     const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
@@ -783,6 +785,7 @@ describe("StrategyPortfolioLens", () => {
           created_at: "2026-09-23T14:00:00Z",
         },
       ],
+      pending_entries_truncated: false,
     });
     renderLens();
     const orders = (await screen.findByRole("heading", { name: "Engine orders" })).closest("section")!;
@@ -830,6 +833,7 @@ describe("StrategyPortfolioLens", () => {
         },
       ],
       pending_entries: [],
+      pending_entries_truncated: false,
     });
     renderLens();
     const fills = (await screen.findByRole("heading", { name: "Recent fills" })).closest("section")!;

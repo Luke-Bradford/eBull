@@ -351,6 +351,11 @@ def test_order_activity_shows_owned_fills_and_unfilled_alpha_entries_only(
         (submitted, "submitted", order[0]),
     ]
     assert response.pending_entries[2].order_status == "submitted"
+    assert response.pending_entries_truncated is False
+
+    capped = get_strategy_order_activity(limit=2, conn=ebull_test_conn)
+    assert [entry.strategy_trade_id for entry in capped.pending_entries] == [uncertain, planned]
+    assert capped.pending_entries_truncated is True
 
 
 def test_wealth_history_combines_principal_realised_and_eod_open_marks_without_manual_positions(

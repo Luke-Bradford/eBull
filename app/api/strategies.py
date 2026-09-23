@@ -1298,6 +1298,8 @@ class StrategyOrderActivityResponse(BaseModel):
     money_currency: Literal["USD"] = "USD"
     fills: list[StrategyFill]
     pending_entries: list[StrategyPendingEntry]
+    # True when more working entries exist than `limit` returned.
+    pending_entries_truncated: bool
 
 
 class StrategyPositionCloseResponse(BaseModel):
@@ -3471,6 +3473,9 @@ def get_strategy_order_activity(
                 {"limit": limit},
             ).fetchall()
         )
+    # Separate cursor: the two reads are independent (prevention log, "Shared
+    # cursor across unrelated queries").
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         pending_rows = list(
             cur.execute(
                 """
@@ -3501,9 +3506,15 @@ def get_strategy_order_activity(
                         SELECT 1 FROM strategy_position_ownership ownership
                         WHERE ownership.strategy_trade_id=trade.strategy_trade_id))
                 ORDER BY trade.created_at DESC, trade.strategy_trade_id DESC
-                """
+                LIMIT %(limit)s + 1
+                """,
+                {"limit": limit},
             ).fetchall()
         )
+    # One row past the cap proves truncation without a COUNT; the flag is
+    # published because a silently cut working-order list hides live orders.
+    pending_truncated = len(pending_rows) > limit
+    pending_rows = pending_rows[:limit]
 
     def _title(strategy_id: str | None, is_core: bool) -> str:
         if is_core:
@@ -3548,7 +3559,9 @@ def get_strategy_order_activity(
         )
         for row in pending_rows
     ]
-    return StrategyOrderActivityResponse(fills=fills, pending_entries=pending)
+    return StrategyOrderActivityResponse(
+        fills=fills, pending_entries=pending, pending_entries_truncated=pending_truncated
+    )
 
 
 def _load_strategy_broker_credentials(

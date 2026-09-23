@@ -68,6 +68,7 @@ function EngineOrders({
   coreSleeveFailed,
   onRetryCore,
   pendingEntries,
+  pendingTruncated,
   activityFailed,
   onRetryActivity,
   positionsFailed,
@@ -80,6 +81,7 @@ function EngineOrders({
   onRetryCore: () => void;
   /** `null` while the activity read is unresolved or failed — NOT "no entries". */
   pendingEntries: readonly StrategyPendingEntry[] | null;
+  pendingTruncated: boolean;
   activityFailed: boolean;
   onRetryActivity: () => void;
   /** The positions error renders once, on Holdings; here it only blocks "empty". */
@@ -138,6 +140,9 @@ function EngineOrders({
           ))}
         </ul>
       )}
+      {pendingTruncated ? (
+        <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">More engine entries are working than this list shows.</p>
+      ) : null}
     </section>
   );
 }
@@ -454,6 +459,7 @@ export function StrategyPortfolioLens() {
           coreSleeveFailed={coreSleeve.error !== null && !coreSleeve.data}
           onRetryCore={coreSleeve.refetch}
           pendingEntries={activity.data?.pending_entries ?? null}
+          pendingTruncated={activity.data?.pending_entries_truncated ?? false}
           activityFailed={activity.error !== null && !activity.data}
           onRetryActivity={activity.refetch}
         />

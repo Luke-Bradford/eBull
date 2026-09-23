@@ -505,6 +505,7 @@ describe("StrategiesPage", () => {
       money_currency: "USD",
       fills: [],
       pending_entries: [],
+      pending_entries_truncated: false,
     });
   });
 

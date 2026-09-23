@@ -216,6 +216,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### A list endpoint bounds EVERY query, and says when it cut one
+- First seen in: #3334 (PR #3337)
+- Symptom: `/strategies/order-activity` bound its `fills` query to `limit` but left the sibling `pending_entries` query unbounded — an ever-growing read on every page load.
+- Prevention: for every new read endpoint, grep each SQL block for a `LIMIT` tied to the request's bound, not just the first one. Where the list is an ACTIVE set whose truncation would hide something live (working orders), fetch `limit + 1` and publish a `*_truncated` flag the UI renders, rather than cutting silently.
+- Enforced in: `app/api/strategies.py::get_strategy_order_activity`; `tests/test_strategy_monitoring.py::test_order_activity_shows_owned_fills_and_unfilled_alpha_entries_only`
+
+---
+
 ### Shared cursor across unrelated queries
 - First seen in: #77
 - Symptom: Two logically independent queries (positions, cash) shared a single cursor. After `fetchall()` on the first, reusing the cursor for the second relies on psycopg v3 internal state. Mock tests paper over this by resetting return values per `execute`.

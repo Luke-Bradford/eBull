@@ -3295,6 +3295,8 @@ export interface StrategyOrderActivityResponse {
   money_currency: "USD";
   fills: StrategyFill[];
   pending_entries: StrategyPendingEntry[];
+  /** More working entries exist than were returned — the list is NOT complete. */
+  pending_entries_truncated: boolean;
 }
 
 export interface StrategyPositionCloseResponse {
