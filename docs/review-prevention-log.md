@@ -11179,11 +11179,15 @@ neighbouring container and match it.**
   with no `errorCode` to `filled`. At `statusID 2` the entry carried only `positionID` and
   `proceeds 0.0`, so an unexecuted close normalised to `filled` and core ownership released on it.
 - Prevention: an outcome of `filled` needs the response's own execution fields (price, units,
-  timestamp, proceeds) on EVERY affected row. A list of ids says which rows the order touches,
-  not that it has executed. Pairs with the opaque-integer-status entry above: with no enum, the
+  timestamp, proceeds) for EVERY distinct affected position. A list of ids says which rows the
+  order touches, not that it has executed. ⚠ Per distinct position, not per row (#3331): an
+  executed close at `statusID 3` repeated its position as a fully BARE second entry, and the
+  per-row rule read it `pending` for ever. Drop only a fully bare repeat of an executed id; a
+  PARTIAL repeat still holds the order pending. Pairs with the opaque-integer-status entry above: with no enum, the
   fields decide, never the code.
 - Enforced in: `app/providers/implementations/etoro_broker.py::_close_order_carries_execution`;
-  `tests/test_broker_provider.py::test_close_order_is_filled_only_on_its_own_execution_fields`.
+  `tests/test_broker_provider.py::test_close_order_is_filled_only_on_its_own_execution_fields`,
+  `::test_an_executed_close_that_repeats_its_position_bare_is_filled`.
 
 ### A venue default is not a price currency, and a broker amount is not native money (#3322)
 

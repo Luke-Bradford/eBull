@@ -1266,6 +1266,14 @@ class TestDemoStrategyPositionMutations:
                 ],
                 (7, 8),
             ),
+            # A PARTIAL repeat is not bare: it keeps the order pending.
+            (
+                [
+                    {"positionID": 7, "occurred": "2026-09-23T13:35:31Z", "rate": 1.0, "units": 1.0},
+                    {"positionID": 7, "rate": 1.0},
+                ],
+                (7,),
+            ),
         ],
     )
     def test_a_bare_repeat_does_not_complete_an_unexecuted_position(
