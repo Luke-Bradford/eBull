@@ -474,21 +474,6 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "report_snapshots",
 )
 
-# DELETE intentionally cannot remove these immutable audit children. Test DB
-# cleanup is allowed to empty them, but must do so explicitly before deleting
-# their parents; otherwise every test that stores real promotion evidence falls
-# through to the much slower whole-schema TRUNCATE recovery path (#2737).
-_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset(
-    {
-        "strategy_result_universe",
-        # #2603 (sql/411) — a core_rebalance close operation and its close quote are
-        # permanent. Both are FK leaves, so TRUNCATE needs no cascade.
-        "strategy_position_operations",
-        "strategy_core_rebalance_close_quotes",
-    }
-)
-
-
 # ---------------------------------------------------------------------------
 # #2224 cause 3 — migration-SEED tables are RESTORED, not emptied.
 #
@@ -1849,12 +1834,21 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
         with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute(plan.probe_sql)
             dirty = {row[0] for row in cur.fetchall()}
-            for table in sorted(_TRUNCATE_BEFORE_DELETE & dirty):
-                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(table)))
-                dirty.remove(table)
+            # #3323 — ``replica`` suspends user triggers, as in
+            # ``_restore_seed_tables``. Immutable audit tables refuse DELETE with
+            # a BEFORE DELETE row trigger (sql/299, 327, 333, 334, 339, 355,
+            # 411, ...; list them with ``pg_trigger`` where ``tgtype & 11 = 11``).
+            # Under ``origin`` each one sent every test that wrote it down the
+            # slow TRUNCATE fallback. The TRUNCATE-first hand list this replaces
+            # missed most of them and could never take an FK parent.
+            # FK enforcement is suspended too; that is safe
+            # because the wipe set is closed under inbound FKs and every dirty
+            # member of it is emptied here.
+            cur.execute("SET LOCAL session_replication_role = replica")
             for table in plan.delete_order:
                 if table in dirty:
                     cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))
+            cur.execute("SET LOCAL session_replication_role = origin")
             # #2224 cause 3 — seeded tables are restored, not emptied, and only
             # when the probe says they differ from their snapshot. AFTER the
             # delete loop so a restored parent cannot be re-orphaned by it.

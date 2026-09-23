@@ -489,7 +489,19 @@ class TestIterators:
             )
         ebull_test_conn.commit()
 
-        rows = list(subjects_due_for_poll(ebull_test_conn, source="sec_form4", limit=10))
+        # #3323 — ``next_poll_at`` took ``DEFAULT now()`` on the DB server's
+        # clock; the reader's own default is the host's. Comparing across the
+        # two made this flake to ``assert 0 == 1`` whenever the DB clock led
+        # the host's by more than the insert-to-read gap. Read "now" from the
+        # same clock that wrote it.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT clock_timestamp()")
+            row = cur.fetchone()
+        assert row is not None
+        db_now = row[0]
+        ebull_test_conn.commit()
+
+        rows = list(subjects_due_for_poll(ebull_test_conn, source="sec_form4", limit=10, now=db_now))
         assert len(rows) == 1
         assert rows[0].state == "unknown"
 

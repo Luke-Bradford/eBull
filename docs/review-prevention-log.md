@@ -11121,6 +11121,26 @@ neighbouring container and match it.**
   UPDATE only and relies on its children's `ON DELETE RESTRICT` for the rows that
   authorised anything. State which in the migration header.
 - Enforced in: `sql/411_core_rebalance_close.sql` header; `tests/fixtures/ebull_test_db.py::_TRUNCATE_BEFORE_DELETE`.
+- ⚠ **SUPERSEDED 2026-09-23 (#3323).** `_TRUNCATE_BEFORE_DELETE` is gone. `_reset_planner_tables`
+  now runs its DELETE loop under `SET LOCAL session_replication_role = replica`, like
+  `_restore_seed_tables`, so a DELETE-refusing trigger no longer affects test cleanup,
+  whether it sits on a leaf or a parent. The hand list had covered 3 of the tables
+  that carry such a trigger. `strategy_preregistration_declarations` (sql/333, an FK
+  parent) was sending every test that wrote it down the TRUNCATE fallback. Whether a
+  parent refuses DELETE is now a schema question only; the harness does not constrain it.
+
+#### 2026-09-23 (#3323) — a test comparing a `DEFAULT now()` column against a Python `datetime.now()` compares two clocks
+
+- Symptom: `test_due_for_poll_includes_unknown_state` failed `assert 0 == 1` in the pre-push
+  db tier and passed alone. `next_poll_at` took `DEFAULT now()`, which runs on the Postgres
+  server's clock. The reader then filtered `next_poll_at <= %s` using the host's
+  `datetime.now()`. Once the DB clock led the host's by more than the insert-to-read gap
+  (a few ms), the fresh row was "not yet due".
+- Prevention: when a test asserts a row IS selected by a `<= now` predicate on a
+  DB-defaulted timestamp, pass `now=` read from the DB (`SELECT clock_timestamp()`), or
+  write the timestamp explicitly. Exclusion assertions on far-past/far-future dates are
+  immune.
+- Enforced in: `tests/test_data_freshness.py::TestIterators::test_due_for_poll_includes_unknown_state`.
 
 ### `pg_locks` is cluster-wide: a lock probe in a test must filter by database (#2942)
 
