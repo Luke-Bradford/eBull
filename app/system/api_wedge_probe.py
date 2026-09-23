@@ -420,10 +420,10 @@ def run_periodic_probe(stop_event: threading.Event, interval_s: float = PERIODIC
         try:
             obs = observe()
             failure, previous_stale = periodic_decision(obs, previous_stale)
-            if obs.wedged:
-                logger.error("api wedge probe (#3119): %s", dump_threads(obs.sidecar))
             if failure is not None:
-                logger.error("api wedge probe (#3119): %s", failure)
+                # Dump BEFORE logging: the stacks are the evidence, the line is the alarm.
+                dump = f"; dump: {dump_threads(obs.sidecar)}" if obs.wedged else ""
+                logger.error("api wedge probe (#3119): %s%s", failure, dump)
             else:
                 logger.debug(
                     "api wedge probe: live=%s health=%s app_tree=%s", obs.live.status, obs.health.status, obs.verdict

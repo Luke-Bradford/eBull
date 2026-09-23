@@ -98,7 +98,8 @@ def test_loop_dumps_threads_and_alarms_on_a_wedge(loop) -> None:
     obs = _obs(live=None, health=None)
     errors = loop(obs)
     assert loop.dumps == [obs.sidecar]
-    assert any("wedged" in e for e in errors)
+    assert len(errors) == 1
+    assert "wedged" in errors[0] and "dump: sent" in errors[0]
 
 
 def test_loop_needs_two_consecutive_stale_passes(loop) -> None:
