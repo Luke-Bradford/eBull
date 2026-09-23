@@ -11146,3 +11146,15 @@ neighbouring container and match it.**
   the whole class once, not the flagged line.)
 - Enforced in: `app/services/recommendation_window_b_release.py::_read_candidate` /
   `describe_candidate`; `scripts/release_recommendation_window_b.py::_recommendation_account_broker`.
+
+### An identity list is not execution evidence (#3320)
+
+- Symptom (attended demo read, 2026-09-23): `get_close_order` mapped any non-empty `positions[]`
+  with no `errorCode` to `filled`. At `statusID 2` the entry carried only `positionID` and
+  `proceeds 0.0`, so an unexecuted close normalised to `filled` and core ownership released on it.
+- Prevention: an outcome of `filled` needs the response's own execution fields (price, units,
+  timestamp, proceeds) on EVERY affected row. A list of ids says which rows the order touches,
+  not that it has executed. Pairs with the opaque-integer-status entry above: with no enum, the
+  fields decide, never the code.
+- Enforced in: `app/providers/implementations/etoro_broker.py::_close_order_carries_execution`;
+  `tests/test_broker_provider.py::test_close_order_is_filled_only_on_its_own_execution_fields`.

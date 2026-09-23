@@ -189,8 +189,9 @@ def _map_textual_order_status(raw_status: Any) -> OrderStatus:
     resolves to ``pending``: acknowledged, outcome unknown.
 
     ⚠ The outcome belongs to ``get_close_order``, which derives it from the
-    response SHAPE (``errorCode`` -> rejected, non-empty ``positions[]`` ->
-    filled) and keeps the integer as opaque evidence. Copy that, not a map.
+    response SHAPE (``errorCode`` -> rejected, every ``positions[]`` entry
+    carrying ``rate``/``units``/``occurred`` plus ``proceeds`` -> filled,
+    #3320) and keeps the integer as opaque evidence. Copy that, not a map.
 
     Rationale and the live evidence: #3007, #2961, and the "status typed as an
     opaque integer must abstain" entry in ``docs/review-prevention-log.md``.
@@ -928,9 +929,13 @@ class EtoroBrokerProvider(BrokerProvider):
         status: OrderStatus
         if error_code not in (None, 0, "0"):
             status = "rejected"
-        elif position_ids:
+        elif position_ids and _close_order_carries_execution(raw, raw_positions):
             status = "filled"
         else:
+            # ⚠ Includes a non-empty `positions[]` WITHOUT execution fields (#3320).
+            # The attended read at `statusID 2` listed the position with no
+            # `rate`/`units`/`occurred` and `proceeds 0.0`; the close had not
+            # executed yet, and calling it `filled` released core ownership.
             status = "pending"
         return BrokerCloseOrderDetail(
             broker_order_ref=order_id,
@@ -1301,6 +1306,25 @@ def _normalise_open_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
     """
     order_data = raw.get("orderForOpen") or raw
     return _build_result(order_data, raw)
+
+
+_CLOSE_EXECUTION_FIELDS = ("rate", "units", "occurred")
+
+
+def _close_order_carries_execution(raw: dict[str, Any], positions: list[dict[str, Any]]) -> bool:
+    """Whether a close-order lookup carries its own evidence of execution (#3320).
+
+    ``statusID`` is an ``integer`` with no ``enum`` in
+    ``tests/fixtures/etoro/openapi_v1.375.0.json``, so no code table is
+    invented. The source rule is the response's own fields: the attended read
+    on 2026-09-23 (#3007, order ``383344846``) listed the position at
+    ``statusID 2`` with only ``positionID`` and ``proceeds 0.0``, and with
+    ``rate``, ``units``, ``occurred`` and ``proceeds`` once executed. The 2→3
+    transition corroborates this on one order; it is not the rule.
+    """
+    if raw.get("proceeds") is None:
+        return False
+    return all(row.get(field) is not None for row in positions for field in _CLOSE_EXECUTION_FIELDS)
 
 
 def _normalise_close_order_response(raw: dict[str, Any]) -> BrokerOrderResult:

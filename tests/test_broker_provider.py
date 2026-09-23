@@ -1052,7 +1052,10 @@ class TestDemoStrategyPositionMutations:
             "statusID": 1,
             "referenceID": str(request_id),
             "errorCode": None,
-            "positions": [{"positionID": 9001}],
+            "proceeds": 24.99,
+            "positions": [
+                {"positionID": 9001, "occurred": "2026-09-23T07:59:23.223Z", "rate": 5816.7, "units": 0.323024}
+            ],
         }
         persisted: list[dict[str, object]] = []
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
@@ -1105,6 +1108,79 @@ class TestDemoStrategyPositionMutations:
             call = broker._http_read.get.call_args
         assert call.args[0] == expected_path
         assert resolved.status == "pending"
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            # Verbatim attended reads of close order 383344846 (#3007, 2026-09-23).
+            (
+                {
+                    "orderID": 383344846,
+                    "statusID": 2,
+                    "errorCode": 0,
+                    "proceeds": 0.0,
+                    "positions": [{"positionID": 3602947846}],
+                },
+                "pending",
+            ),
+            (
+                {
+                    "orderID": 383344846,
+                    "statusID": 3,
+                    "errorCode": 0,
+                    "proceeds": 24.99,
+                    "positions": [
+                        {
+                            "positionID": 3602947861,
+                            "occurred": "2026-09-23T07:59:23.223Z",
+                            "rate": 5816.7,
+                            "units": 0.323024,
+                            "conversionRate": 0.013303,
+                            "amount": 25.0,
+                        }
+                    ],
+                },
+                "filled",
+            ),
+            # One executed entry does not vouch for another.
+            (
+                {
+                    "orderID": 383344846,
+                    "statusID": 3,
+                    "errorCode": 0,
+                    "proceeds": 24.99,
+                    "positions": [
+                        {"positionID": 1, "occurred": "2026-09-23T07:59:23Z", "rate": 1.0, "units": 1.0},
+                        {"positionID": 2, "occurred": "2026-09-23T07:59:23Z", "rate": None, "units": 1.0},
+                    ],
+                },
+                "pending",
+            ),
+            (
+                {
+                    "orderID": 383344846,
+                    "statusID": 3,
+                    "errorCode": 0,
+                    "positions": [{"positionID": 1, "occurred": "2026-09-23T07:59:23Z", "rate": 1.0, "units": 1.0}],
+                },
+                "pending",
+            ),
+        ],
+    )
+    def test_close_order_is_filled_only_on_its_own_execution_fields(
+        self, payload: dict[str, object], expected: str
+    ) -> None:
+        """#3320: ``statusID 2`` listed the position with no execution fields and
+        normalised to ``filled``, which released core ownership on a close that
+        had not executed. ``statusID`` has no enum, so the fields decide."""
+        detail = MagicMock()
+        detail.json.return_value = payload
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = detail
+            resolved = broker.get_close_order(order_id="383344846")
+        assert resolved.status == expected
+        assert resolved.broker_status == str(payload["statusID"])
 
     def test_an_unknown_environment_cannot_invent_a_close_order_path(self) -> None:
         """The path interpolates ``self._env``, so an environment outside the

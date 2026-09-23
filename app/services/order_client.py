@@ -3636,7 +3636,8 @@ def _poll_one_pending_order(
                     order_id, recommendation_id, "identity_mismatch", close_detail.broker_status
                 )
             # `get_close_order` derives the outcome from the response SHAPE
-            # (`errorCode` -> rejected, non-empty `positions[]` -> filled),
+            # (`errorCode` -> rejected, `positions[]` carrying execution
+            # fields -> filled, #3320),
             # which is the only reading available: every ack status in this
             # contract is an opaque integer with no enum (#3007 half 1). Mapped
             # through `pending_order_verdict` rather than a second table, so one
