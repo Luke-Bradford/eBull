@@ -4895,12 +4895,21 @@ class _SliceModel(BaseModel):
     mixed_period: bool = False
 
 
+class _ShortInterestCoverModel(BaseModel):
+    short_interest_shares: Decimal
+    settlement_date: date
+    overage_shares: Decimal
+
+
 class _ResidualModel(BaseModel):
     shares: Decimal
     pct_outstanding: Decimal
     label: str
     tooltip: str
     oversubscribed: bool
+    # #2226 — set only when the overage fits inside FINRA short interest at the
+    # 13F as-of (lent shares are reported by lender AND buyer; SEC 13F FAQ Q41/Q42).
+    short_interest_cover: _ShortInterestCoverModel | None = None
 
 
 class _CategoryCoverageModel(BaseModel):
@@ -5203,6 +5212,15 @@ def _rollup_to_response(
             label=rollup.residual.label,
             tooltip=rollup.residual.tooltip,
             oversubscribed=rollup.residual.oversubscribed,
+            short_interest_cover=(
+                _ShortInterestCoverModel(
+                    short_interest_shares=cover.short_interest_shares,
+                    settlement_date=cover.settlement_date,
+                    overage_shares=cover.overage_shares,
+                )
+                if (cover := rollup.residual.short_interest_cover) is not None
+                else None
+            ),
         ),
         concentration=_ConcentrationModel(
             pct_outstanding_known=rollup.concentration.pct_outstanding_known,

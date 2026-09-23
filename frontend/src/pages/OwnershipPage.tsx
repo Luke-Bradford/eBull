@@ -47,6 +47,7 @@ import type { WedgeClick } from "@/components/instrument/OwnershipSunburst";
 import {
   formatPct,
   formatShares,
+  oversubscribedCopy,
   ownershipSuppressedDenominatorCopy,
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
@@ -392,8 +393,13 @@ function OwnershipBody({
               {formatPct(parseShareCount(rollup.residual.pct_outstanding) ?? 0)}
             </span>
             {rollup.residual.oversubscribed && (
-              <span className="ml-1.5 text-amber-700 dark:text-amber-400">
-                · category totals exceed shares outstanding (snapshot lag)
+              <span
+                className="ml-1.5 text-amber-700 dark:text-amber-400"
+                title={oversubscribedCopy(rollup.residual) ?? undefined}
+                data-test="oversubscribed-chip"
+              >
+                · category totals exceed shares outstanding
+                {rollup.residual.short_interest_cover ? " (within short interest)" : ""}
               </span>
             )}
           </p>

@@ -7,6 +7,7 @@ import {
   computeOwnership,
   formatPct,
   formatShares,
+  oversubscribedCopy,
   ownershipSuppressedDenominatorCopy,
   parseShareCount,
   topHoldersByShares,
@@ -405,5 +406,43 @@ describe("ownershipSuppressedDenominatorCopy (#1581, #2232)", () => {
       ownershipSuppressedDenominatorCopy("no_data", undefined, "2011-04-29"),
     ).toContain("too stale");
     expect(ownershipSuppressedDenominatorCopy("no_data", null, null)).toBeNull();
+  });
+});
+
+describe("oversubscribedCopy (#2226)", () => {
+  const base = {
+    shares: "0",
+    pct_outstanding: "0",
+    label: "Public / unattributed",
+    tooltip: "",
+  };
+
+  it("returns null when the pie is not oversubscribed", () => {
+    expect(oversubscribedCopy({ ...base, oversubscribed: false })).toBeNull();
+  });
+
+  it("names short lending only when the server attributed it", () => {
+    const copy = oversubscribedCopy({
+      ...base,
+      oversubscribed: true,
+      short_interest_cover: {
+        short_interest_shares: "1500000",
+        settlement_date: "2026-06-30",
+        overage_shares: "1200000",
+      },
+    });
+    expect(copy).toContain("1,200,000");
+    expect(copy).toContain("1,500,000");
+    expect(copy).toContain("2026-06-30");
+    expect(copy).toContain("lender and the buyer");
+  });
+
+  it("never asserts the retired stale-13F cause", () => {
+    for (const cover of [null, undefined]) {
+      const copy = oversubscribedCopy({ ...base, oversubscribed: true, short_interest_cover: cover });
+      expect(copy).not.toBeNull();
+      expect(copy).not.toMatch(/stale 13F|snapshot lag|next 13F cycle/i);
+      expect(copy).toContain("Short interest does not cover");
+    }
   });
 });
