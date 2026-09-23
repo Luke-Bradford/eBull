@@ -22,7 +22,7 @@ from app.services.fundamentals import FactRow, _derive_periods_from_facts
 
 _FACTS_SQL = """
 SELECT concept, unit, period_start, period_end, val, frame, form_type, fiscal_year,
-       fiscal_period, accession_number, filed_date
+       fiscal_period, accession_number, filed_date  -- column names = FactRow fields
 FROM financial_facts_raw
 WHERE instrument_id = %(iid)s AND fiscal_year IS NOT NULL AND fiscal_period IS NOT NULL
 ORDER BY period_end, concept
@@ -34,7 +34,9 @@ def main(out_path: str) -> None:
     with psycopg.connect(settings.database_url) as conn, open(out_path, "w") as out:
         iids = [r[0] for r in conn.execute("SELECT DISTINCT instrument_id FROM financial_facts_raw ORDER BY 1")]
         for n, iid in enumerate(iids):
-            facts = [FactRow(*r) for r in conn.execute(_FACTS_SQL, {"iid": iid})]
+            cur = conn.execute(_FACTS_SQL, {"iid": iid})
+            names = [d.name for d in cur.description or []]
+            facts = [FactRow(**dict(zip(names, r, strict=True))) for r in cur]
             if not facts:
                 continue
             rows = _derive_periods_from_facts(facts)
