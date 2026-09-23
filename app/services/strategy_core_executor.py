@@ -23,7 +23,7 @@ from app.providers.broker import (
     BrokerProvider,
     BrokerWhatIfOrder,
 )
-from app.services.broker_closed_release import RELEASE_REASON
+from app.services.broker_closed_release import RELEASE_REASON, UNCERTAIN_CLOSE_RELEASE_REASON
 from app.services.broker_settlement_arms import (
     UNDERLYING_SETTLEMENT_TYPE,
     UNLEVERAGED_LEVERAGE,
@@ -667,7 +667,7 @@ def map_core_close_outcome(
     if linked is None:
         if manager_state == "reconcile_required":
             return "reconcile_required", manager_reason or "core_rebalance_close_unresolved"
-        if manager_state == "applied" and manager_reason == RELEASE_REASON:
+        if manager_state == "applied" and manager_reason in (RELEASE_REASON, UNCERTAIN_CLOSE_RELEASE_REASON):
             return "refused", "core_position_closed_by_broker"
         return "refused", "core_rebalance_close_not_started"
     if manager_state is not None and manager_operation_id != linked.operation_id:
@@ -846,7 +846,8 @@ def _core_sell_target(conn: psycopg.Connection[Any]) -> _CoreSellTarget | str:
                 JOIN strategy_trades t ON t.strategy_trade_id = own.strategy_trade_id
                 WHERE t.core_rebalance_intent_id IS NOT NULL
                   AND (op.status = ANY(%s)
-                       OR (op.operation_type = 'close' AND op.status = 'reconcile_required'))
+                       OR (op.operation_type = 'close' AND op.status = 'reconcile_required'
+                           AND op.broker_close_witnessed_at IS NULL))
             )
             """,
             (list(_UNRESOLVED_OPERATION_STATUSES),),

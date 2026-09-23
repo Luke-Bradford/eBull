@@ -27,6 +27,7 @@ from tests.fixtures.core_restart import (
     close_state_report,
     core_ownership_coordinates,
     core_state_report,
+    record_whole_close_witness,
     run_engine_until_fault,
     seed_core_execution_world,
     select_core_instrument,
@@ -74,55 +75,9 @@ def _owned_then_stopped_out(conn: psycopg.Connection[Any], workdir: Path) -> tup
 
 
 def _record_events(conn: psycopg.Connection[Any], *, position_id: int, order_ref: int, close_units: str) -> None:
-    opened = CLOCK - timedelta(days=2)
-    open_raw = {
-        "positionID": position_id,
-        "orderID": order_ref,
-        "instrumentID": CORE_INSTRUMENT_ID,
-        "isBuy": True,
-        "leverage": 1,
-        "units": float(UNITS),
-        "initialUnits": float(UNITS),
-        "isPartiallyAltered": False,
-        "initialAmountInDollars": float(DOLLARS),
-    }
-    close_raw = {
-        "positionId": position_id,
-        "orderId": order_ref,
-        "instrumentId": CORE_INSTRUMENT_ID,
-        "isBuy": True,
-        "leverage": 1,
-        "units": float(close_units),
-        "investment": float(DOLLARS),
-        "initialInvestment": float(DOLLARS),
-        "openTimestamp": opened.isoformat(),
-    }
-    conn.execute(
-        """
-        INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
-                                  executed_at,investment_usd,order_id,source,raw_payload)
-        VALUES (%s,%s,%s,'open','buy',%s,%s,%s,NULL,'etoro_sync',%s)
-        """,
-        (position_id, CORE_INSTRUMENT_ID, CORE_INSTRUMENT_ID, UNITS, opened, DOLLARS, Jsonb(open_raw)),
+    record_whole_close_witness(
+        conn, position_id=position_id, order_ref=order_ref, close_units=close_units, units=UNITS, dollars=DOLLARS
     )
-    conn.execute(
-        """
-        INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
-                                  executed_at,realized_pnl_usd,investment_usd,order_id,source,raw_payload)
-        VALUES (%s,%s,%s,'close','sell',%s,%s,-12.5,%s,%s,'etoro_history',%s)
-        """,
-        (
-            position_id,
-            CORE_INSTRUMENT_ID,
-            CORE_INSTRUMENT_ID,
-            close_units,
-            CLOCK - timedelta(hours=1),
-            DOLLARS,
-            order_ref,
-            Jsonb(close_raw),
-        ),
-    )
-    conn.commit()
 
 
 def _manage(conn: psycopg.Connection[Any], broker: FileBackedFakeBroker, trade_id: int, position_id: int) -> Any:

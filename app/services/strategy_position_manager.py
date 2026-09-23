@@ -30,9 +30,9 @@ from app.providers.broker import (
     BrokerProvider,
 )
 from app.services.broker_closed_release import (
-    RELEASE_REASON,
     evaluate_whole_close,
     load_whole_close_evidence,
+    stamp_uncertain_closes,
 )
 from app.services.core_exit_levels import (
     CORE_EXIT_MAX_QUOTE_AGE_SECONDS,
@@ -447,6 +447,15 @@ def _terminal(
 
 def _finish_close(conn: psycopg.Connection[Any], *, owned: _OwnedPosition, operation_id: int, reason: str) -> None:
     _terminal(conn, operation_id=operation_id, status="applied")
+    # #2979 §4b: this close FILLED on exactly this position, and our close verb is whole,
+    # so an earlier uncertain close on it has nothing left to act on.  Unstamped, it would
+    # hold `core_operation_outstanding` for ever -- the same wedge from the other side.
+    stamp_uncertain_closes(
+        conn,
+        ownership_id=owned.ownership_id,
+        broker_position_id=owned.broker_position_id,
+        operation_ids=None,
+    )
     conn.execute(
         """
         UPDATE strategy_position_ownership
@@ -466,8 +475,14 @@ def _finish_close(conn: psycopg.Connection[Any], *, owned: _OwnedPosition, opera
     )
 
 
-def _release_whole_broker_close(conn: psycopg.Connection[Any], *, owned: _OwnedPosition, observed_at: datetime) -> bool:
+def _release_whole_broker_close(
+    conn: psycopg.Connection[Any], *, owned: _OwnedPosition, observed_at: datetime
+) -> str | None:
     """Release an absent position's ownership iff the broker recorded ONE whole close (#2965).
+
+    Returns the release reason, or ``None`` when nothing was released.  #2979: an
+    uncertain close of ours on the position no longer blocks; the release then carries
+    ``UNCERTAIN_CLOSE_RELEASE_REASON`` and stamps exactly the ops the verdict evaluated.
 
     ⚠ Unlike ``_finish_close`` this writes ``released_at`` as the broker's close time, not
     ``now()`` -- NAV is marked by that date -- and it never writes the trade ``open``: a
@@ -495,7 +510,7 @@ def _release_whole_broker_close(conn: psycopg.Connection[Any], *, owned: _OwnedP
             owned.strategy_trade_id,
             verdict.reason_code,
         )
-        return False
+        return None
     with conn.transaction():
         released = conn.execute(
             """
@@ -504,10 +519,25 @@ def _release_whole_broker_close(conn: psycopg.Connection[Any], *, owned: _OwnedP
             WHERE ownership_id=%s AND status='active'
             RETURNING ownership_id
             """,
-            (verdict.released_at, RELEASE_REASON, owned.ownership_id),
+            (verdict.released_at, verdict.reason_code, owned.ownership_id),
         ).fetchone()
         if released is None:
-            return False
+            return None
+        # ⚠ AFTER the ownership UPDATE, so a lost guard above writes no stamp.  A count
+        # that differs from the evaluated set means an op changed since the evidence read:
+        # raise, and the whole transaction (ownership included) rolls back.
+        if evidence.uncertain_close_operation_ids:
+            stamped = stamp_uncertain_closes(
+                conn,
+                ownership_id=owned.ownership_id,
+                broker_position_id=owned.broker_position_id,
+                operation_ids=evidence.uncertain_close_operation_ids,
+            )
+            if stamped != len(evidence.uncertain_close_operation_ids):
+                raise StrategyPositionManagerError(
+                    f"uncertain close set changed under release: stamped {stamped} of "
+                    f"{len(evidence.uncertain_close_operation_ids)}"
+                )
         conn.execute(
             "SELECT 1 FROM strategy_trades WHERE strategy_trade_id=%s FOR UPDATE",
             (owned.strategy_trade_id,),
@@ -524,12 +554,13 @@ def _release_whole_broker_close(conn: psycopg.Connection[Any], *, owned: _OwnedP
                 (owned.strategy_trade_id,),
             )
     logger.info(
-        "strategy position %d (trade %d) released: broker closed it whole at %s",
+        "strategy position %d (trade %d) released (%s): broker closed it whole at %s",
         owned.broker_position_id,
         owned.strategy_trade_id,
+        verdict.reason_code,
         verdict.released_at.isoformat(),
     )
-    return True
+    return verdict.reason_code
 
 
 def _persist_operation_response(
@@ -1371,8 +1402,9 @@ def manage_owned_position(
             return resumed
         position = _exact_broker_position(broker, owned)
         if position is None:
-            if _release_whole_broker_close(conn, owned=owned, observed_at=observed_at):
-                return PositionManagerResult(strategy_trade_id, broker_position_id, "applied", RELEASE_REASON)
+            release_reason = _release_whole_broker_close(conn, owned=owned, observed_at=observed_at)
+            if release_reason is not None:
+                return PositionManagerResult(strategy_trade_id, broker_position_id, "applied", release_reason)
             with conn.transaction():
                 conn.execute(
                     "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "

@@ -43,6 +43,12 @@ _CREDS = (UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"), UUID("f7306e0b-9494-415e
             ("reconcile_required", "owned_position_missing"),
         ),
         (None, ("applied", RELEASE_REASON, None), ("refused", "core_position_closed_by_broker")),
+        # #2979: the same witness after an uncertain close of ours maps the same way.
+        (
+            None,
+            ("applied", "broker_closed_after_uncertain_close", None),
+            ("refused", "core_position_closed_by_broker"),
+        ),
         (None, ("applied", "position_protected", 4), ("refused", "core_rebalance_close_not_started")),
         (
             None,

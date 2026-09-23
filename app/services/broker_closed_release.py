@@ -15,6 +15,13 @@ slice is written under a NEW position id sharing the opening ``orderId``) is wha
 
 The verdict is a pure function over fetched rows.  Every missing, malformed, non-finite or
 mistyped field REFUSES; nothing here raises on bad data.
+
+#2979 half a (``2026-09-23-uncertain-close-witness-release.md``): an ENGINE close whose
+outcome we lost no longer blocks the release.  Our close verb is addressed to the position
+by path and closes it whole, so once the witness proves that position closed whole
+exactly once, the close has nothing left to act on -- whoever's close it was.  The
+release then says so (``UNCERTAIN_CLOSE_RELEASE_REASON``) and stamps the op; it never
+claims the close was ours.
 """
 
 from __future__ import annotations
@@ -23,12 +30,35 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Final, LiteralString
 
 import psycopg
 import psycopg.rows
 
 RELEASE_REASON = "broker_closed_externally"
+#: The same witness, released while one or more of OUR closes on the position stood
+#: uncertain.  Not necessarily external, so not ``RELEASE_REASON``.
+UNCERTAIN_CLOSE_RELEASE_REASON = "broker_closed_after_uncertain_close"
+#: The two codes meaning "our close verb may have been entered; what the broker did is
+#: unknown".  Written by ``strategy_position_manager`` (resume of a ``submitting`` close,
+#: and ``BrokerPositionMutationUncertain``).  Named in ``sql/414``'s CHECK as well.
+UNCERTAIN_CLOSE_ERROR_CODES: Final = ("crash_before_submission_identity", "broker_close_uncertain")
+
+#: An op that the witness may settle: an unstamped uncertain close whose persisted close
+#: response (if any) does not name ANOTHER position.  ``broker_close_uncertain`` also
+#: covers "response identity does not match intent", and ``persist_response`` stores that
+#: body before the raise, so a response naming another position is a broker divergence
+#: and keeps blocking.  Any text other than P's decimal counts as "another" (fails closed).
+#: Binds ``%(position_text)s`` and ``%(uncertain_codes)s``; qualifies ``op`` / ``o``.
+_UNCERTAIN_ELIGIBLE_SQL: Final[LiteralString] = """
+    op.operation_type = 'close'
+    AND op.status = 'reconcile_required'
+    AND op.broker_close_witnessed_at IS NULL
+    AND op.last_error_code = ANY(%(uncertain_codes)s)
+    AND o.order_id IS NOT NULL
+    AND COALESCE(o.raw_payload_json -> 'orderForClose' ->> 'positionID', %(position_text)s)
+        = %(position_text)s
+"""
 
 
 @dataclass(frozen=True)
@@ -41,6 +71,8 @@ class WholeCloseEvidence:
     sibling_close_count: int
     blocking_operation_count: int
     entry_reconciliation_states: Sequence[Any]
+    #: #2979: the exact uncertain close ops the witness would settle (see module doc).
+    uncertain_close_operation_ids: Sequence[int] = ()
 
 
 @dataclass(frozen=True)
@@ -59,8 +91,13 @@ def _int(value: Any) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
+    # ⚠ ``"²".isdigit()`` is True and ``int("²")`` raises, and so does a digit string past
+    # Python's int-conversion limit.  "Nothing here raises on bad data" (#2979 r1-30/r2-9).
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        try:
+            return int(value)
+        except ValueError:
+            return None
     return None
 
 
@@ -179,7 +216,8 @@ def evaluate_whole_close(evidence: WholeCloseEvidence, *, observed_at: datetime)
         return _refuse("close_witness_out_of_time")
     if _finite(closed.get("realized_pnl_usd")) is None:
         return _refuse("close_witness_unpriced")
-    return WholeCloseVerdict(True, RELEASE_REASON, closed_at)
+    reason = UNCERTAIN_CLOSE_RELEASE_REASON if evidence.uncertain_close_operation_ids else RELEASE_REASON
+    return WholeCloseVerdict(True, reason, closed_at)
 
 
 _EVENT_COLUMNS = (
@@ -212,15 +250,28 @@ def load_whole_close_evidence(
             f"SELECT {_EVENT_COLUMNS} FROM trade_events WHERE position_id=%s",
             (broker_position_id,),
         ).fetchall()
-        blocking = cur.execute(
+        # #2979: an uncertain close the witness may settle is split out BY ID; every other
+        # in-flight op or unstamped `reconcile_required` close still blocks.
+        ops = cur.execute(
             """
-            SELECT count(*) AS n FROM strategy_position_operations
-            WHERE ownership_id=%s
-              AND (status IN ('intent_persisted','submitting','submitted')
-                   OR (status='reconcile_required' AND operation_type='close'))
+            SELECT op.position_operation_id AS id,
+                   (op.status IN ('intent_persisted','submitting','submitted')
+                    OR (op.status='reconcile_required' AND op.operation_type='close'
+                        AND op.broker_close_witnessed_at IS NULL)) AS unresolved,
+                   COALESCE(("""
+            + _UNCERTAIN_ELIGIBLE_SQL
+            + """), false) AS eligible
+            FROM strategy_position_operations op
+            -- LEFT: an edit op may carry no order, and must still count as blocking.
+            LEFT JOIN orders o ON o.order_id = op.order_id
+            WHERE op.ownership_id=%(ownership_id)s
             """,
-            (ownership_id,),
-        ).fetchone()
+            {
+                "ownership_id": ownership_id,
+                "position_text": str(broker_position_id),
+                "uncertain_codes": list(UNCERTAIN_CLOSE_ERROR_CODES),
+            },
+        ).fetchall()
         siblings = 0
         refs = [row["broker_order_ref"] for row in entry_rows]
         entry_ref = _int(refs[0]) if len(refs) == 1 else None
@@ -248,6 +299,43 @@ def load_whole_close_evidence(
         open_rows=[row for row in events if row["event_kind"] == "open"],
         close_rows=[row for row in events if row["event_kind"] == "close"],
         sibling_close_count=siblings,
-        blocking_operation_count=int(blocking["n"]) if blocking is not None else 1,
+        blocking_operation_count=sum(1 for row in ops if row["unresolved"] and not row["eligible"]),
         entry_reconciliation_states=[row["state"] for row in entry_rows],
+        uncertain_close_operation_ids=sorted(int(row["id"]) for row in ops if row["eligible"]),
     )
+
+
+def stamp_uncertain_closes(
+    conn: psycopg.Connection[Any],
+    *,
+    ownership_id: int,
+    broker_position_id: int,
+    operation_ids: Sequence[int] | None,
+) -> int:
+    """Stamp ``broker_close_witnessed_at`` on eligible uncertain closes; return the count.
+
+    Call ONLY inside the transaction that releases ``ownership_id`` (``sql/414``).
+    ``operation_ids`` restricts the stamp to the ids a verdict evaluated, so the caller can
+    compare the count and refuse a set that changed; ``None`` stamps every eligible row
+    (``_finish_close``, which holds no evidence set).  The eligibility predicate is
+    re-applied either way.
+    """
+    params: dict[str, Any] = {
+        "ownership_id": ownership_id,
+        "position_text": str(broker_position_id),
+        "uncertain_codes": list(UNCERTAIN_CLOSE_ERROR_CODES),
+        "ids": None if operation_ids is None else list(operation_ids),
+    }
+    stamped = conn.execute(
+        """
+        UPDATE strategy_position_operations op
+        SET broker_close_witnessed_at = now(), updated_at = now()
+        FROM orders o
+        WHERE o.order_id = op.order_id
+          AND op.ownership_id = %(ownership_id)s
+          AND (%(ids)s::bigint[] IS NULL OR op.position_operation_id = ANY(%(ids)s::bigint[]))
+          AND """
+        + _UNCERTAIN_ELIGIBLE_SQL,
+        params,
+    )
+    return stamped.rowcount

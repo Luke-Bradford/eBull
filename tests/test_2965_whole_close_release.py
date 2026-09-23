@@ -17,7 +17,9 @@ import pytest
 
 from app.services.broker_closed_release import (
     RELEASE_REASON,
+    UNCERTAIN_CLOSE_RELEASE_REASON,
     WholeCloseEvidence,
+    _int,
     evaluate_whole_close,
 )
 
@@ -169,3 +171,38 @@ def test_every_other_shape_refuses(overrides: dict[str, Any], reason: str) -> No
     assert verdict.release is False
     assert verdict.reason_code == reason
     assert verdict.released_at is None
+
+
+# --- #2979 half a: an uncertain close of ours no longer blocks ---------------------------
+
+
+@pytest.mark.parametrize("ids", [[11], [11, 12]])
+def test_uncertain_closes_release_under_their_own_reason(ids: list[int]) -> None:
+    verdict = evaluate_whole_close(_evidence(uncertain_close_operation_ids=ids), observed_at=OBSERVED)
+    assert (verdict.release, verdict.reason_code, verdict.released_at) == (
+        True,
+        UNCERTAIN_CLOSE_RELEASE_REASON,
+        CLOSED,
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"blocking_operation_count": 1}, "operation_unresolved"),
+        ({"close_rows": [{**_close(), "realized_pnl_usd": None}]}, "close_witness_unpriced"),
+        ({"close_rows": [_close(units=0.073535)]}, "close_not_whole_units"),
+        ({"sibling_close_count": 1}, "partial_close_slice_present"),
+    ],
+)
+def test_uncertain_closes_do_not_relax_the_witness(overrides: dict[str, Any], reason: str) -> None:
+    verdict = evaluate_whole_close(_evidence(uncertain_close_operation_ids=[11], **overrides), observed_at=OBSERVED)
+    assert (verdict.release, verdict.reason_code) == (False, reason)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("123", 123), (123, 123), ("²", None), ("9" * 5000, None), ("-1", None), (True, None), ("", None)],
+)
+def test_int_never_raises(value: Any, expected: int | None) -> None:
+    assert _int(value) == expected

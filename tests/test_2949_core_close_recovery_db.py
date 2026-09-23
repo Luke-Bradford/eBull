@@ -87,6 +87,8 @@ from tests.fixtures.core_restart import (
     close_state_report,
     core_ownership_coordinates,
     core_state_report,
+    entry_broker_order_ref,
+    record_whole_close_witness,
     run_engine_until_fault,
     seed_core_execution_world,
     select_core_instrument,
@@ -383,58 +385,31 @@ def test_scenario_7a_close_intent_without_submission_costs_the_request_not_the_p
 # ---------------------------------------------------------------------------
 
 
-def test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader(
+def test_scenario_7b_lost_close_acceptance_is_released_on_the_whole_close_witness(
     ebull_test_conn: psycopg.Connection[Any],
     core_world: Path,
 ) -> None:
-    """Classification: SAFELY STOPPED AT THE BROKER, WEDGED IN ACCOUNTING.
+    """Classification: WEDGED UNTIL THE BROKER'S HISTORY LANDS, then released (#2979 half a).
 
-    The exit-side twin of #2961, and the more consequential half of matrix 7.
-    The broker executed the close; the engine died before anything on our side
-    recorded its identity.  ``_resume_operation`` produces the SAME row as 7a —
-    that is fact 2 of the module docstring, and it is why these two scenarios
-    cannot be merged — but here it sits on top of a position that no longer
-    exists.
+    The exit-side twin of #2961.  The broker executed the close; the engine died before
+    anything on our side recorded its identity.  ``_resume_operation`` produces the SAME
+    row as 7a (``submitting`` → ``reconcile_required`` /
+    ``crash_before_submission_identity``), because nothing on our side can tell them
+    apart.  What separates them is the account: here the position is gone.
 
-    What is safe:
+    Until the broker's history records the close, nothing changes -- the ownership stays
+    ``active`` and every pass reports ``owned_position_missing``.  Once the ``etoro_sync``
+    open row and the ``etoro_history`` whole-close row exist, the #2965 witness proves the
+    position closed whole exactly once.  Our close verb addresses that position by path
+    and closes it whole, so it has nothing left to act on, whoever's close it was.  The
+    ownership is released under ``broker_closed_after_uncertain_close``, the op is stamped
+    ``broker_close_witnessed_at`` and KEEPS ``reconcile_required`` (we still do not know it
+    was ours), and the exit order stays ``submitted`` (no fill is invented).
 
-    * no second close reaches the broker, on the resume pass or on a fresh
-      close request (``close_calls`` never leaves 1);
-    * nothing invents a fill or releases ownership on an unverified assumption.
-
-    What is wedged, and this is the finding:
-
-    * ``strategy_position_ownership`` stays ``active`` naming a position the
-      account no longer carries, and nothing terminalises it — the exit order is
-      invisible to ``reconcile_backlog`` (fact 1), and every later
-      ``manage_owned_position`` pass returns ``owned_position_missing`` without
-      releasing anything;
-    * ``resolve_engine_capital_usage`` refuses that join by design
-      (``strategy_engine_capital.py``), on this and every subsequent cycle.
-
-    ⚠ **What #2979 half b changed, and what it did not.**  The allocator no longer
-    RAISES on that refusal: it returns ``refused`` /
-    ``engine_capital_ownership_unwitnessed``, so the core arm degrades legibly instead
-    of surfacing a 409 whose only text is the outer sentence.  The wedge itself is
-    untouched — ownership is still ``active``, the join still refuses, and nothing
-    terminalises the row — which is why #2979 stays open on its other half.  The caller
-    that reached this refusal on every UNATTENDED tick was the paper cycle, which used
-    to abort entirely; it now rejects the signal (``strategy_paper_executor``).
-
-    ⚠ The fail-closed behaviour is correct in isolation: an ownership row the
-    account cannot witness must not be silently marked good, and #2602 owns the
-    question of what may release it.  The defect is that no path exists to
-    resolve it at all, which is the same shape #2961 records for the entry side.
-
-    ⚠⚠ "Permanent" is NOT established by the three repeats below, and repeating
-    more would not establish it either — that is round 1's lesson about G-1,
-    restated.  What establishes it is structural: the only reader that could
-    terminalise the ownership is ``_resume_operation``, which has already run and
-    written a terminal operation row, and the only other scheduled reconciler
-    cannot see an EXIT order at all (fact 1).  The repeats show the loop is
-    stable, not that it is eternal.  Recorded as #2979.
+    Spec: ``docs/proposals/execution/2026-09-23-uncertain-close-witness-release.md``.
     """
     coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    strategy_trade_id, broker_position_id = coordinates
 
     process = _run_close_child(core_world, coordinates, fault="after_close_accept")
     assert process.returncode == SIGKILL_RETURNCODE
@@ -446,10 +421,8 @@ def test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader(
     assert all(record.get("closed") for record in broker_state["orders"])
 
     crashed = close_state_report(ebull_test_conn)
-    # Still indistinguishable from 7a, and that remains the point: both faults land
-    # AFTER `mark_close_submitting`, so both read `submitting`.  #2979's marker
-    # separates 7c from this pair; it does not separate 7a from 7b, because nothing
-    # on our side can.
+    # Still indistinguishable from 7a on our side: both faults land AFTER
+    # `mark_close_submitting`, so both read `submitting`.
     assert crashed["close_statuses"] == ["submitting"]
     assert crashed["trade_statuses"] == ["closing"]
 
@@ -458,69 +431,50 @@ def test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader(
     assert resumed.state == "reconcile_required"
     assert resumed.reason_code == "crash_before_submission_identity"
     assert broker.read()["close_calls"] == 1
-
-    stranded = close_state_report(ebull_test_conn)
-    assert stranded["close_statuses"] == ["reconcile_required"]
-    assert stranded["active_ownership"] == 1
-    assert stranded["released_ownership"] == 0
     # Fact 1: the one scheduled reconciler that exists cannot see this order.
     _assert_exit_order_is_invisible_to_the_backlog(ebull_test_conn, broker)
 
-    # The allocator now REFUSES rather than raising (#2979 half b). The wedge itself
-    # is unchanged -- ownership is still `active` and the join still refuses -- but the
-    # arm degrades with a reason code instead of disappearing behind a 409 whose only
-    # text is the outer sentence.
-    #
-    # ⚠ The IDENTITY evidence is kept, and deliberately not left to the code alone:
-    # `engine_capital_ownership_unwitnessed` is a bucket, and a broken account read or
-    # a snapshot of the wrong account would produce the same bucket. The reader is
-    # therefore called directly below, so the position id this scenario stranded is
-    # still what ties the refusal to the ownership row.
-    refusal = _execute_core(ebull_test_conn, broker)
-    assert refusal.state == "refused"
-    assert refusal.reason_code == "engine_capital_ownership_unwitnessed"
-    assert refusal.intent_id is None
-    assert refusal.trade_id is None
-    assert refusal.order_id is None
-    ebull_test_conn.rollback()
-
-    authority = load_engine_capital_authority(ebull_test_conn)
-    assert authority is not None
-    assert coordinates[1] in authority.core_active_position_ids
-    with pytest.raises(EngineCapitalObservationError) as raised:
-        resolve_engine_capital_usage(
-            authority,
-            _provider(broker).get_account_risk_snapshot(),
-            core_instrument_id=CORE_INSTRUMENT_ID,
-        )
-    assert str(raised.value) == f"active core position {coordinates[1]} is absent from broker snapshot"
-    assert raised.value.reason_code == "engine_capital_ownership_unwitnessed"
-    ebull_test_conn.rollback()
-
-    # A later scheduled pass reaches it, reports the truth, and still cannot
-    # release it -- the entry-side #2961 shape, on the exit side.
-    for _ in range(2):
-        later = _manage(ebull_test_conn, broker, coordinates)
-        assert later.state == "reconcile_required"
-        assert later.reason_code == "owned_position_missing"
+    # No history yet: today's behaviour, and the capital reader still refuses the join.
+    waiting = _manage(ebull_test_conn, broker, coordinates)
+    assert (waiting.state, waiting.reason_code) == ("reconcile_required", "owned_position_missing")
     assert close_state_report(ebull_test_conn)["active_ownership"] == 1
+    refusal = _execute_core(ebull_test_conn, broker)
+    assert (refusal.state, refusal.reason_code) == ("refused", "engine_capital_ownership_unwitnessed")
+    ebull_test_conn.rollback()
 
-    # An explicit re-close does not place a second close either: the position is
-    # gone, so the manager refuses before reaching the broker.
-    strategy_trade_id, broker_position_id = coordinates
-    refused = manage_owned_position(
+    record_whole_close_witness(
         ebull_test_conn,
-        broker=_provider(broker),
-        strategy_trade_id=strategy_trade_id,
-        broker_position_id=broker_position_id,
-        close_reason="operator_close",
-        now=CLOCK,
+        position_id=broker_position_id,
+        order_ref=entry_broker_order_ref(ebull_test_conn, strategy_trade_id),
     )
-    assert refused.state == "reconcile_required"
-    assert refused.reason_code == "owned_position_missing"
+    released = _manage(ebull_test_conn, broker, coordinates)
+    assert (released.state, released.reason_code) == ("applied", "broker_closed_after_uncertain_close")
     assert broker.read()["close_calls"] == 1
     assert broker.read()["mutation_calls"] == 1
-    assert close_state_report(ebull_test_conn)["close_operations"] == 1
+
+    report = close_state_report(ebull_test_conn)
+    assert report["active_ownership"] == 0
+    assert report["release_reasons"] == ["broker_closed_after_uncertain_close"]
+    assert report["close_statuses"] == ["reconcile_required"]
+    assert report["close_error_codes"] == ["crash_before_submission_identity"]
+    assert report["exit_order_statuses"] == ["submitted"]
+    assert report["trade_statuses"] == ["closed"]
+    stamped = ebull_test_conn.execute(
+        "SELECT count(*) FROM strategy_position_operations WHERE broker_close_witnessed_at IS NOT NULL"
+    ).fetchone()
+    ebull_test_conn.commit()
+    assert stamped == (1,)
+
+    # The wedge is gone: the reader no longer iterates the id, and the allocator returns
+    # a verdict that is not the ownership refusal.
+    authority = load_engine_capital_authority(ebull_test_conn)
+    ebull_test_conn.rollback()
+    assert authority is not None
+    assert broker_position_id not in authority.core_active_position_ids
+    after = _execute_core(ebull_test_conn, broker)
+    ebull_test_conn.rollback()
+    assert after.reason_code != "engine_capital_ownership_unwitnessed"
+    assert broker.read()["close_calls"] == 1
 
 
 # ---------------------------------------------------------------------------
