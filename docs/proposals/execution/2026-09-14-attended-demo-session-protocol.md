@@ -348,8 +348,9 @@ positive-id, `is_buy`, `units > 0`, and — if the session is to describe its ow
    record which of the three is the binding one.
 2. `get_demo_close_order(order_id=<ref>)`, **repeated until executed/rejected or a stated
    deadline**. A single 200 pending is not close-completion evidence.
-   ⚠ It marks any non-empty affected-position list `filled` when no error code is
-   present, so match the **specific** position id and its units — do not trust the
+   ⚠ Before #3320 it marked any non-empty affected-position list `filled` when no
+   error code was present; it now requires `rate`/`units`/`occurred` on every entry
+   plus `proceeds`. Still match the **specific** position id and its units — do not trust the
    normalised status. ⚠ Compare any returned `referenceID` to the submitted UUID for
    equality; the adapter requires a UUID and will reject an otherwise-informative
    non-UUID string, so capture the raw value too.

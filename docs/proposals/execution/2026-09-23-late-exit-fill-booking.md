@@ -92,7 +92,8 @@ So three facts the booking needs are **unmeasured**:
   `conversionRate`).
 
 The existing shape heuristic in `get_close_order` ("no `errorCode` plus a
-non-empty `positions[]` means filled", `etoro_broker.py:928-934`) is safe
+non-empty `positions[]` means filled", `etoro_broker.py:928-934`; since #3320
+it also requires the execution fields) is safe
 today only because its consequence is a park. It must not start moving money
 until (a), (b) and (c) are observed.
 
