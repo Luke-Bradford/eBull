@@ -335,17 +335,20 @@ point-in-time cover does not list them at all:
 | STRC / STRD / STRF | 0001193125-25-100720 (2025-04-28) | `0000950170-25-021814`: MSTR, STRK only |
 | XRXDW | 0001770450-25-000017 (2025-04-09) | `0001770450-25-000010`: XRX only |
 
-Each security had not been issued at that cover's date; the writers fan the older proxy
-out by CIK to every sibling that exists today. Reproduce: the A/B script's
+The older cover does not list the security; the writers fan the older proxy out by CIK
+to every sibling that exists today. Reproduce: the A/B script's
 `fallback_to_older_accession`, and `sec_cover_12b_pairs` joined to
 `sec_cover_12b_fetches` for CIKs 0001801169 / 0001050446 / 0001770450.
 
 ### Source rule
 
-Unchanged from slice 2: Item 403 reports per class; Rule 13d-3(d)(1)(i) counts warrants
-into the underlying common figure, so an Item 403 figure is NEVER a warrant's or a
-preferred's own holding — whichever proxy it came from. An `instrument_id` is one security
-and its class does not change over time. So positive class evidence for instrument I from
+Unchanged from slice 2 (§ "Source rule for …" above): warrants enter Item 403 through the
+underlying common figure (Rule 13d-3(d)(1)(i)); a preferred sibling owns a figure only when
+the parser read the preferred column, which it cannot identify (slice 3) — slice 2's
+accepted limit. Re-measured for the three new preferred targets: the MSTR 2025 proxy
+`0001193125-25-100720` rows fanned to STRC/STRD/STRF are the class A common column
+(Vanguard 16,303,720 = 6.5%), identical to MSTR's. An `instrument_id` is one security and
+its class does not change over time. So positive class evidence for instrument I from
 ANY cover of I's issuer applies to every accession fanned to I. No published rule governs
 cross-cover evidence; the veto below is fixed by construction under rule version 2.
 
@@ -358,10 +361,14 @@ For each instrument I with ≥1 point-in-time suppression in this run:
    symbol key to a title set that is not exactly one `non_common` title (i.e. it lists I as
    `common`, `other`, or ambiguously). The cover resolved for a proxy is the only cover the
    run reads for it; covers outside those are not consulted.
-3. **Targets** = I's other accessions that have a proxy date, were not unresolved this run,
-   and got no point-in-time suppression. No-date and unresolved accessions keep their
-   stored rows exactly as in slice 2.
-4. Each target gets a row with `reason = 'non_common_sibling_other_cover'` and the
+3. **Targets** = accessions I itself holds rows for (typed holdings or either observation
+   table — not the sibling group's union) that got no point-in-time suppression for I.
+4. **Blocked** — if any accession I holds has no proxy date or an unresolved cover this
+   run, I gets no pass-2 rows AND none of I's stored rows are deleted (the missing cover
+   may be the evidence or the veto). This also replaces slice 2's accession-wide `keep`
+   with a key-level one: an unresolved/undated accession keeps the stored rows of its own
+   sibling group only.
+5. Each target gets a row with `reason = 'non_common_sibling_other_cover'` and the
    evidence's cover/witness columns (so `cover_accession` may post-date the proxy — that is
    the audit trail of which cover proved the class).
 
@@ -377,15 +384,29 @@ that symbol anything else.
 
 `sql/421_def14a_recipient_other_cover.sql`: widen the `reason` CHECK to
 `('non_common_sibling', 'non_common_sibling_other_cover')`. No other change.
-`RECIPIENT_RULE_VERSION` → 2, so every stored row is rewritten once (whole-row diff) and
-its instrument refreshed — expected, and those instruments are the suppressed set anyway.
+`RECIPIENT_RULE_VERSION` → 2, so every stored row not held by a blocked key/instrument is
+rewritten once (whole-row diff) and its instrument refreshed. Evidence switching between
+runs (a later proxy's decision appearing) rewrites pass-2 rows without changing keys.
+
+### Accepted limits (ckpt-1, classified by the author)
+
+All can only fail to suppress, or extend an existing pass-1 decision of the SAME instrument:
+- The veto sees only covers resolved this run; `cover_pairs` drops ambiguous symbols
+  before caching, so an ambiguous listing is absence, not a veto. Dev: 0 vetoes.
+- A veto does not undo pass-1 rows (slice 2 semantics); `instruments_vetoed` is reported.
+- A pass-1 ticker-reuse mismatch (slice 2's limit) is extended to the instrument's other
+  accessions. Distance between evidence and target is unbounded by design: the claim is
+  about the instrument, not the date.
+- Different non-common titles across covers (warrant series renamed) do not veto.
+- Apply counts are incremented before apply; `instruments_failed` is the failure signal
+  and the A/B fails on it.
 
 ### Tests
 
 Pure: pass 2 over (a) OPEN-shaped — older cover lacks the warrant → older accession
 suppressed with the newer cover's evidence; (b) veto — an older cover lists the symbol as
-common → no pass-2 row; (c) an unresolved older accession → untouched; (d) an instrument
-with no pass-1 suppression → nothing. Existing DB test unchanged (the views do not move).
+common → no pass-2 row; (c) a blocked instrument → nothing; (d) an instrument with no pass-1 suppression →
+nothing; (e) an accession the instrument holds no rows for → not a target. Existing DB test unchanged (the views do not move).
 
 ### Acceptance (corpus rung)
 

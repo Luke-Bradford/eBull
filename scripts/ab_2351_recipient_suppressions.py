@@ -9,9 +9,11 @@ hashes each operator-visible DEF 14A surface BEFORE and AFTER one job run:
 - ``def14a_drift_alerts`` rows;
 - the ownership-history DEF 14A series source (attributed observations).
 
-Pass condition (first run on an empty ledger): the set of instruments whose hashes changed EQUALS the set of
-instruments holding a suppression after the run. Also lists instruments whose latest
-attributed accession fell back to an older, unsuppressed one.
+Pass condition: the set of instruments whose hashes changed EQUALS the set of
+instruments whose ledger KEYS ``(instrument_id, accession_number)`` the run added or
+removed (on an empty ledger: every suppressed instrument), and no instrument's apply
+failed. Also lists instruments whose latest attributed accession fell back to an older,
+unsuppressed one.
 
 Usage (applies the job's writes to the connected DB)::
 
@@ -75,6 +77,13 @@ def _latest_accession(conn: psycopg.Connection[Any], iid: int, *, attributed: bo
     return str(row[0]) if row else None
 
 
+def _ledger_keys(conn: psycopg.Connection[Any]) -> set[tuple[int, str]]:
+    return {
+        (int(i), str(a))
+        for i, a in conn.execute("SELECT instrument_id, accession_number FROM def14a_recipient_suppressions").fetchall()
+    }
+
+
 def snapshot(conn: psycopg.Connection[Any], iids: list[int]) -> dict[int, dict[str, str]]:
     out: dict[int, dict[str, str]] = {}
     for iid in iids:
@@ -94,7 +103,8 @@ def main() -> int:
         population = load_population(conn)
         symbols = {s.instrument_id: s.symbol for sibs in population.values() for s in sibs}
         iids = sorted(symbols)
-        stored_before = conn.execute("SELECT count(*) FROM def14a_recipient_suppressions").fetchone()
+        keys_before = _ledger_keys(conn)
+        iids = sorted(set(iids) | {k[0] for k in keys_before})
         before = snapshot(conn, iids)
         report = run_with_sec_provider(conn)
         after = snapshot(conn, iids)
@@ -104,6 +114,8 @@ def main() -> int:
         ).fetchall()
 
         suppressed_iids = {int(r[0]) for r in suppressions}
+        key_delta = keys_before ^ _ledger_keys(conn)
+        delta_iids = {k[0] for k in key_delta}
         changed = {iid: sorted(k for k in before[iid] if before[iid][k] != after[iid][k]) for iid in iids}
         changed = {iid: v for iid, v in changed.items() if v}
         fallback = []
@@ -118,7 +130,8 @@ def main() -> int:
     result = {
         "population_ciks": len(population),
         "population_instruments": len(iids),
-        "ledger_rows_before": stored_before[0] if stored_before else None,
+        "ledger_rows_before": len(keys_before),
+        "ledger_keys_added_or_removed": sorted(f"{symbols.get(i)} {a}" for i, a in key_delta),
         "run_report": vars(report),
         "suppressions": [
             {
@@ -131,15 +144,15 @@ def main() -> int:
             for r in suppressions
         ],
         "changed_instruments": {symbols.get(i): v for i, v in sorted(changed.items())},
-        "changed_not_suppressed": sorted(str(symbols.get(i)) for i in set(changed) - suppressed_iids),
-        "suppressed_not_changed": sorted(str(symbols.get(i)) for i in suppressed_iids - set(changed)),
+        "changed_without_key_delta": sorted(str(symbols.get(i)) for i in set(changed) - delta_iids),
+        "key_delta_not_changed": sorted(str(symbols.get(i)) for i in delta_iids - set(changed)),
         "fallback_to_older_accession": fallback,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({k: v for k, v in result.items() if k != "suppressions"}, indent=2, default=str))
-    ok = not result["changed_not_suppressed"] and not result["suppressed_not_changed"]
-    print("PASS" if ok else "FAIL: changed set != suppressed set")
+    ok = not (result["changed_without_key_delta"] or result["key_delta_not_changed"] or report.instruments_failed)
+    print("PASS" if ok else "FAIL: changed set != key-delta set, or an apply failed")
     return 0 if ok else 1
 
 
