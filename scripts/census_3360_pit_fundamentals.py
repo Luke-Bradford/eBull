@@ -63,7 +63,8 @@ OUTCOME_HORIZON_DAYS: Final = 730
 RECENCY_DAYS: Final = 548  # descriptive 18-month window, stated as such by the spec
 
 EQUITY_DELISTING: Final = "equity_delisting"
-assert EQUITY_DELISTING in PROVISION_CLASSES
+if EQUITY_DELISTING not in PROVISION_CLASSES:
+    raise ImportError(f"{EQUITY_DELISTING!r} is not a sec_form25_register provision class")
 
 #: Raw ``rule_provision`` labels reported individually; anything else is ``other``.
 NAMED_LABELS: Final = ("(b)", "(a)(4)", "(a)(3)")
@@ -282,7 +283,8 @@ def _population(name: str) -> tuple[str, str | None, int]:
     subs: zipfile.ZipFile = _STATE["subs"]
     names: set[str] = _STATE["names"]
     match = _MAIN_MEMBER.fullmatch(name)
-    assert match is not None
+    if match is None:
+        raise ValueError(f"not a submissions main member: {name!r}")
     cik10 = match.group(1)
 
     def read_page(page: str) -> object | None:
