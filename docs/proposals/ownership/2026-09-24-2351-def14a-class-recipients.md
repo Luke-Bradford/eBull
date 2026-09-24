@@ -322,6 +322,81 @@ of the same issuer CIK.
 - The scheduler never runs two instances of one job concurrently (one lane permit), so
   mixed-version / overlapping runs do not arise.
 
+## Slice 2b — class evidence from another proxy's cover (`RECIPIENT_RULE_VERSION = 2`)
+
+### Problem (measured on dev after slice 2's first run)
+
+7 suppressed instruments now show an OLDER proxy's common holders, because that proxy's
+point-in-time cover does not list them at all:
+
+| instrument | older accession (proxy date) | its point-in-time cover lists |
+| --- | --- | --- |
+| OPENL / OPENW / OPENZ | 0001140361-25-022644 (2025-06-16) | `0001801169-25-000038`: OPEN only |
+| STRC / STRD / STRF | 0001193125-25-100720 (2025-04-28) | `0000950170-25-021814`: MSTR, STRK only |
+| XRXDW | 0001770450-25-000017 (2025-04-09) | `0001770450-25-000010`: XRX only |
+
+Each security had not been issued at that cover's date; the writers fan the older proxy
+out by CIK to every sibling that exists today. Reproduce: the A/B script's
+`fallback_to_older_accession`, and `sec_cover_12b_pairs` joined to
+`sec_cover_12b_fetches` for CIKs 0001801169 / 0001050446 / 0001770450.
+
+### Source rule
+
+Unchanged from slice 2: Item 403 reports per class; Rule 13d-3(d)(1)(i) counts warrants
+into the underlying common figure, so an Item 403 figure is NEVER a warrant's or a
+preferred's own holding — whichever proxy it came from. An `instrument_id` is one security
+and its class does not change over time. So positive class evidence for instrument I from
+ANY cover of I's issuer applies to every accession fanned to I. No published rule governs
+cross-cover evidence; the veto below is fixed by construction under rule version 2.
+
+### Rule (pass 2 in `compute_desired`, after the unchanged point-in-time pass)
+
+For each instrument I with ≥1 point-in-time suppression in this run:
+1. **Evidence** = I's point-in-time suppression from the accession with the latest proxy
+   date (tie → greater accession number). Its `cover_*` and `witness_*` are copied.
+2. **Veto** — no pass-2 rows for I if any cover resolved in this run for I's CIK maps I's
+   symbol key to a title set that is not exactly one `non_common` title (i.e. it lists I as
+   `common`, `other`, or ambiguously). The cover resolved for a proxy is the only cover the
+   run reads for it; covers outside those are not consulted.
+3. **Targets** = I's other accessions that have a proxy date, were not unresolved this run,
+   and got no point-in-time suppression. No-date and unresolved accessions keep their
+   stored rows exactly as in slice 2.
+4. Each target gets a row with `reason = 'non_common_sibling_other_cover'` and the
+   evidence's cover/witness columns (so `cover_accession` may post-date the proxy — that is
+   the audit trail of which cover proved the class).
+
+Direction is symmetric (older and newer accessions); only the older direction occurs on
+dev today.
+
+**Bound (why this cannot suppress a common instrument):** a pass-2 row needs a pass-1
+suppression of the SAME instrument (exact symbol match to a warrant/preferred title plus a
+different common witness on a same-CIK cover), and no resolved cover of that CIK calling
+that symbol anything else.
+
+### Schema
+
+`sql/421_def14a_recipient_other_cover.sql`: widen the `reason` CHECK to
+`('non_common_sibling', 'non_common_sibling_other_cover')`. No other change.
+`RECIPIENT_RULE_VERSION` → 2, so every stored row is rewritten once (whole-row diff) and
+its instrument refreshed — expected, and those instruments are the suppressed set anyway.
+
+### Tests
+
+Pure: pass 2 over (a) OPEN-shaped — older cover lacks the warrant → older accession
+suppressed with the newer cover's evidence; (b) veto — an older cover lists the symbol as
+common → no pass-2 row; (c) an unresolved older accession → untouched; (d) an instrument
+with no pass-1 suppression → nothing. Existing DB test unchanged (the views do not move).
+
+### Acceptance (corpus rung)
+
+The A/B script's pass condition is generalised so it holds on a non-empty ledger: the set
+of instruments whose surface hashes changed EQUALS the set of instruments whose ledger
+KEYS `(instrument_id, accession_number)` were added or removed by the run (on an empty
+ledger this reduces to slice 2's condition). Re-run it after deploy: inserted = 7 (the
+table above), updated = 11 (version bump), changed instruments = {OPENL, OPENW, OPENZ,
+STRC, STRD, STRF, XRXDW}, `fallback_to_older_accession` empty. Smoke `/instruments/{OPENW,STRF,XRXDW}` ownership:
+no DEF 14A holders; `OPEN`, `MSTR`, `XRX` unchanged.
+
 ## Slice 3 — scoped only
 
 Bind the column the parser READ (H-shape group header, V-shape class cell, per-table
