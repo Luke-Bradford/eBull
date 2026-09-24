@@ -233,9 +233,9 @@ def load_cover(
         return cached, False
     url = instance_url(primary_document_url) if primary_document_url else None
     if url is None:
-        cached = CachedCover(outcome="not_found", entity_cik=None, pairs=frozenset())
-        _write_cache(conn, cover_accession, cached)
-        return cached, False
+        # Not cached: ``primary_document_url`` is mutable filing metadata that a later
+        # ingest can fill in, so a miss here is not a property of the filing.
+        return CachedCover(outcome="not_found", entity_cik=None, pairs=frozenset()), False
     try:
         body = fetch_text(url)
     except httpx.HTTPError as exc:  # transport error, 3xx/401/403/429/5xx (raise_for_status)

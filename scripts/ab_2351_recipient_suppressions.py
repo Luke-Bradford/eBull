@@ -9,7 +9,7 @@ hashes each operator-visible DEF 14A surface BEFORE and AFTER one job run:
 - ``def14a_drift_alerts`` rows;
 - the ownership-history DEF 14A series source (attributed observations).
 
-Pass condition: the set of instruments whose hashes changed EQUALS the set of
+Pass condition (first run on an empty ledger): the set of instruments whose hashes changed EQUALS the set of
 instruments holding a suppression after the run. Also lists instruments whose latest
 attributed accession fell back to an older, unsuppressed one.
 
@@ -138,8 +138,8 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({k: v for k, v in result.items() if k != "suppressions"}, indent=2, default=str))
-    ok = not result["changed_not_suppressed"]
-    print("PASS" if ok else "FAIL: instruments changed without a suppression")
+    ok = not result["changed_not_suppressed"] and not result["suppressed_not_changed"]
+    print("PASS" if ok else "FAIL: changed set != suppressed set")
     return 0 if ok else 1
 
 
