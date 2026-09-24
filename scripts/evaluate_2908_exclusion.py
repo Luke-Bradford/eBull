@@ -73,6 +73,8 @@ def _verify_mirror(root: Path, expected_commit: str) -> None:
 
 def _portfolio_payload(result: PortfolioResult) -> dict[str, Any]:
     value = dataclasses.asdict(result)
+    # #3362 added the realisation log; #2908's frozen payload keeps its original keys.
+    del value["realisations"]
     value["traded_notional_over_initial_capital"] = result.traded_notional_over_initial_capital
     value["spread_cost_over_initial_capital"] = result.spread_cost_over_initial_capital
     return value

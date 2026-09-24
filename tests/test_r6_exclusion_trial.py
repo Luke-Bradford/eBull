@@ -411,3 +411,47 @@ def test_census_and_identity() -> None:
     assert identity["evidence_sha256"] == evidence_sha256(evidence)
     assert evidence_sha256(evidence) != evidence_sha256(_evidence(REPLAY_PRICES))
     assert identity["linkage_provenance"]["artefact_sha256"].startswith("63bb68ee")
+
+
+def test_alive_at_capture_series_is_a_gap_before_the_window_end() -> None:
+    prices = {
+        "LIV": _bars(
+            "LIV", (("2024-09-19", 10, 10), ("2024-09-20", 10, 10), ("2024-09-26", 10, 10), ("2024-09-27", 10, 10))
+        ),
+        "ALV": _bars("ALV", (("2024-09-19", 10, 10), ("2024-09-20", 10, 10), ("2024-09-23", 11, 11))),
+    }
+    schedule = (
+        (datetime(2024, 9, 19, 16), frozenset({"LIV", "ALV"})),
+        (datetime(2024, 9, 25, 16), frozenset({"LIV"})),
+    )
+    result = simulate_portfolio(
+        schedule=schedule, prices=prices, policy=CLASSIFIED_WORST, half_spread=0.0, evidence=_evidence(prices)
+    )
+    (item,) = result.realisations
+    assert (item.session, item.symbol, item.status, item.termination_class) == (date(2024, 9, 26), "ALV", "gap", None)
+    assert item.realised_value == 0.0
+
+
+def test_execution_after_the_window_end_is_refused() -> None:
+    prices = {"LIV": _bars("LIV", (("2024-09-19", 10, 10), ("2024-09-30", 10, 10)))}
+    with pytest.raises(RuntimeError, match="after the window end"):
+        simulate_portfolio(
+            schedule=((datetime(2024, 9, 25, 16), frozenset({"LIV"})),),
+            prices=prices,
+            policy=LEGACY_WORST,
+            half_spread=0.0,
+            window_end=date(2024, 9, 27),
+        )
+
+
+def test_2908_payload_keeps_its_original_keys() -> None:
+    from scripts.evaluate_2908_exclusion import _portfolio_payload
+
+    result = simulate_legacy_case(schedule=REPLAY_SCHEDULE, prices=REPLAY_PRICES, case="worst", half_spread=HALF_SPREAD)
+    assert result.realisations
+    assert set(_portfolio_payload(result)) == {
+        "total_return",
+        "events",
+        "traded_notional_over_initial_capital",
+        "spread_cost_over_initial_capital",
+    }

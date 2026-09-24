@@ -377,12 +377,14 @@ def _holding_value(
         if evidence is None:
             raise RuntimeError(f"policy {policy.label!r} needs series evidence")
         stored = evidence[symbol]
-        if stored.last_bar > day:
-            status, fraction = "gap", policy.gap_fraction
-        elif day == window_end and stored.last_bar > INTRADER_CAPTURE_DATE - timedelta(days=ALIVE_CUT_DAYS):
+        alive_at_capture = stored.last_bar > INTRADER_CAPTURE_DATE - timedelta(days=ALIVE_CUT_DAYS)
+        if alive_at_capture and day == window_end:
             # Alive at capture (``universe_selection``'s rule): missing the final bar is capture
             # timing, not a termination.
             status, fraction = "alive_at_capture", 1.0
+        elif alive_at_capture or stored.last_bar > day:
+            # An alive series never terminates; any earlier missing session is a gap.
+            status, fraction = "gap", policy.gap_fraction
         else:
             termination_class = stored.termination_class
             status, fraction = "terminated", policy.terminal_fraction(termination_class)
@@ -466,6 +468,10 @@ def simulate_portfolio(
 
     for formation, target in schedule:
         day = _execution_day(formation, target, prices)
+        if day > window_end:
+            raise RuntimeError(
+                f"formation {formation.isoformat()} executes on {day}, after the window end {window_end}"
+            )
         current = value_holdings(day, "open")
         censored = sum(day not in prices[symbol].by_date for symbol in holdings)
         pre_cost = cash + sum(current.values())
