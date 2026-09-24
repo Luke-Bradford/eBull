@@ -64,9 +64,13 @@ Declared residuals, for #2901's declaration to consume (not fixed here):
 
 ## Class evidence and its linkage provenance
 Evidence comes from the same stored columns the TA path uses (`research_price_series.delisting_source`,
-`delisting_provision`, `vendor_symbol`, `first_bar`, `last_bar`). It is read by one new reader in
-`universe_selection.py` that reuses `_SERIES_ROWS_SQL` **and `_assert_capture`**. One classifier and one
-evidence read serve both paths.
+`delisting_provision`, `vendor_symbol`, `first_bar`, `last_bar`), with the same capture assertion
+(`max(last_bar) = INTRADER_CAPTURE_DATE`). The reader lives in `r6_exclusion_trial.py`, **not**
+`universe_selection.py`: that module is hashed into `UNIVERSE_SELECTION_RULE_VERSION` exactly as
+`series_termination.py` is, so editing it would move every strategy identity. The evidence construction
+is therefore spelled twice. The guard is a full-population parity check
+(`scripts/measure_3362_termination_census.py`): the reader's evidence equals `load_universe_selection`'s on
+every terminating series (12,636 of 12,636, 0 failures, 2026-09-24).
 
 It is **not** re-derived from the #3361 bundle's `Form25Flag`s. Those carry no provision, and the #3361 spec
 (lines 61-68) says a Form 25 flag is never given economic meaning. The stored association is symbol-based
@@ -79,12 +83,14 @@ Artefact: `crosscheck-2026-09-24-f6ae1edd.json`, sha256
 `32a281d8e3188aed9a8b985b06a838f2a1a116a2d9b676918c5cf84cc80d4eb6`.
 This is a source cross-check on a subset. It does not certify the population. CIK agreement is also
 entity-level, not security-level (share class, ADR). The three disagreements keep their stored
-`operation_of_law` class. None of this affects the verdict, because the verdict policy uses no class.
+`operation_of_law` class. Class evidence can only pull the binding figure **below** the zero-recovery one,
+never above it (see Verdict), so a class error cannot manufacture a pass.
 
 Symbol mapping: price-mirror file stem ↔ `research_price_series.vendor_symbol`, vendor `icyDenev/Intrader`,
 one-to-one. The loaded file must match its row's **stored `first_bar` and `last_bar`** (the first and last
 valid bars as loaded). A missing, duplicated or mismatched symbol raises. That refuses a mirror/DB snapshot
-drift and a window-clipped load, which would otherwise move the termination clock.
+drift and a window-clipped load, which would otherwise move the termination clock. Measured over the
+whole mirror (2026-09-24): 22,879 of 22,879 series match their stored bounds.
 
 ## Construction
 1. **Evidence-bound status** at a valuation session `day`, for a held symbol with shares > 0 and no bar on
