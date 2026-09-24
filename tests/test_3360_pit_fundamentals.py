@@ -428,3 +428,17 @@ def test_event_count_mismatch_is_refused(built: Path) -> None:
     bundle = load_pit_fundamentals(built, expected_manifest_sha256=sha)
     with pytest.raises(pf.PitFundamentalsError, match="events"):
         bundle.verify_all()
+
+
+def test_policy_files_cover_every_repo_module_the_builder_and_reader_import() -> None:
+    # Drift guard (review #3367): logic moved into a new repo module must join POLICY_FILES,
+    # or an edit to it would escape the bundle's POLICY pin.
+    import ast
+
+    root = Path(pf.__file__).resolve().parents[2]
+    imported: set[str] = set()
+    for relative in ("app/services/pit_fundamentals.py", "scripts/build_3360_pit_fundamentals.py"):
+        for node in ast.walk(ast.parse((root / relative).read_text())):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] in {"app", "scripts"}:
+                imported.add(node.module.replace(".", "/") + ".py")
+    assert imported <= set(pf.POLICY_FILES)
