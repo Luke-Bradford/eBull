@@ -891,8 +891,7 @@ def _apply_instrument(
                     cover_symbol = EXCLUDED.cover_symbol,
                     witness_instrument_id = EXCLUDED.witness_instrument_id,
                     witness_title = EXCLUDED.witness_title,
-                    class_cell = EXCLUDED.class_cell,
-                    created_at = now()
+                    class_cell = EXCLUDED.class_cell
                 """,
                 row,
             )
@@ -916,8 +915,7 @@ def _apply_instrument(
                     cover_title = EXCLUDED.cover_title,
                     cover_symbol = EXCLUDED.cover_symbol,
                     witness_instrument_id = EXCLUDED.witness_instrument_id,
-                    witness_title = EXCLUDED.witness_title,
-                    created_at = now()
+                    witness_title = EXCLUDED.witness_title
                 """,
                 row,
             )
