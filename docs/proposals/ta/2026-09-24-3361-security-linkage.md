@@ -1,70 +1,76 @@
 # #3361 — dated series ↔ CIK linkage with an abstention census
 
 Step 2 of `docs/proposals/ta/2026-09-24-selection-programme-v2.md` ("Security linkage"). Refs #2899, #2721,
-#3360 (the fundamentals bundle this joins to), #3362 (termination). Codex ckpt-1 round 1 (67 findings,
-2026-09-24) is folded in; see "Design history".
+#3360 (the fundamentals bundle this joins to), #3362 (termination). Codex ckpt-1 rounds 1 (67 findings) and
+2 (60) ran on 2026-09-24 and are folded in; see "Design history".
 
 ## Contract (deliberately narrow)
-> For research price series S and decision date D: which SEC entity (CIK) did the evidence **public strictly
-> before D** name as S's issuer, or a typed abstention.
+> For research price series S and decision date D: which SEC entity (CIK) did the SEC evidence **accepted
+> strictly before D** name as S's issuer, or a typed abstention.
 
 - It links a **series** (one vendor file under one vendor symbol) to an **entity** (a CIK). It does not pick a
   primary class, merge series, split a series, classify instrument type (ETF, fund, ADR), or give a
   succession or delisting any economic meaning. Those belong to each arm's declaration (#2901 first) or to
   #3362.
-- **Scope: the `icyDenev/Intrader` vendor only.** The symbol grammar in rule 3 is that vendor's. Every other
-  vendor returns `vendor_out_of_scope` until it declares its own grammar.
-- **What it cannot prove, stated up front:**
-  - The vendor symbol is the vendor's capture-time label for the whole file, and a file may stitch two issuers
-    together (ticker reuse). The linkage detects such stitches as successions; it cannot certify that a file
-    is one security.
-  - The legal filing obligation does not certify that the archive is complete.
-  - A causal-equality test proves no look-ahead. It does not prove identity is correct (acceptance item 3
-    measures that, partially).
+- **Scope: `icyDenev/Intrader` series.** Every other vendor's series are in the inventory and return
+  `vendor_out_of_scope` until that vendor declares its own grammar.
+
+**Declared residuals. The reader cannot remove these, and every arm inherits them:**
+- **The series inventory is capture-time metadata.** A vendor symbol and bar bounds are the vendor's labels
+  at capture (2023-11 for Intrader: research-price-corpus skill). They are applied to every earlier date, so
+  a renamed file carries its later name backwards. No dated vendor-symbol history exists. The same holds for
+  corpus-level survivorship: files the vendor never captured are absent. #2346 measured the 2023 Form 25
+  cohort at 258/259 across the three archives, which covers only that cohort.
+- A file that stitches two issuers together *may* surface as a succession. That is not guaranteed: the
+  predecessor's evidence can be absent, carry another symbol, or expire first.
+- The filing obligation (below) explains which issuers usually have evidence. It does not certify that the
+  archive is complete, and nothing is gated on it.
+- The causal-equality test (acceptance item 2) proves the reader uses no SEC evidence accepted on or after D,
+  **given** the snapshotted inventory and archives. It proves nothing about identity correctness; item 3
+  measures that on subsets only.
 
 ## Why causal
-A link at D that used evidence filed after D would condition on the issuer existing after D, i.e. on
-survival. The programme forbids this ("the universe never depends on eventual survival or future mapping
-success"). Every rule below uses only evidence public before D. There are no intervals, end dates or lifetime
-summaries in the reader; those are future information at their start. The cost is abstention and stale
-links around identity changes, and the census measures both.
+A link at D that used evidence accepted after D would condition on the issuer existing after D, i.e. on
+survival. The programme forbids this. So the reader has no intervals, end dates or lifetime summaries: each
+of those is future information at its start. The cost is abstention and stale links around identity
+changes, and the census describes them. The census does not measure their correctness.
 
 ## Source rules
 - **Evidence: SEC Insider Transactions Data Sets** (`<YYYY>q<N>_form345.zip`, served from `2006q1`;
   `app/services/sec_bulk_download.py`). From `SUBMISSION.tsv`: `ACCESSION_NUMBER`, `DOCUMENT_TYPE`,
   `ISSUERCIK`, `ISSUERTRADINGSYMBOL`.
-  - **Who files.** Exchange Act §16(a) requires Forms 3/4/5 from the insiders of every issuer with an equity
-    class registered under §12. Investment Company Act §30(h) extends this to closed-end funds. Rule 3a12-3(b)
-    (17 CFR 240.3a12-3, read 2026-09-24 via LII) exempts foreign private issuers. So the evidence population
-    is §12 registrants and closed-end funds, and it does not depend on our broker list. Open-end ETFs and FPIs
-    typically have no evidence and abstain (`no_recent_evidence`). The linkage does not classify them.
-    - None of these citations is in sec-edgar skill §2.3 yet. `.claude/**` is not writable from the loop
-      worktree, so the skill text is parked on #2403.
-  - **What the symbol is.** `issuerTradingSymbol` is filer-entered and issuer-level: the Form 4 XML carries one
-    symbol per filing (sec-edgar skill §2.3). It is evidence, never a label. An amendment (`4/A`) is a separate
-    observation at its own acceptance; a symbol is not a restated value, so nothing is replaced.
-- **Clock: acceptance, as in #3360.** `acceptanceDateTime` of the accession in the **issuer CIK's**
-  `submissions` index (sec-edgar skill §7.4 pages, §7.8 UTC → New York) is used; public iff acceptance NY date
-  < D. The `submissions.zip` is the #3360 bundle's snapshotted copy, pinned by its digest. `FILING_DATE` is
-  not a clock. Measured over all 4,402,307 rows (see Premise measurements), its acceptance is later than
-  `FILING_DATE` on 752 accessions, so `FILING_DATE` would call those filings public too early.
-- **Delisting flag: `sec_form25_register`** (sec-edgar skill §2.6), `provision_class = 'equity_delisting'`.
-  - A Form 25 **ends an exchange listing, not an issuer's identity** (Rule 12d2-2; the security can trade OTC
-    afterwards), so it never ends or changes a link.
-  - It surfaces as a flag, public iff `filed_date` < D. `filed_date` is the only date the register stores. For
-    a 25-NSE the accession sits under the exchange CIK, so the issuer index gives no acceptance.
-  - `resolved_symbol` came from a cover filed before the Form 25 (skill §2.6 trap 4). By construction its
-    provenance accession is therefore public no later than the Form 25 itself.
-- **Not evidence (deliberately):**
-  - `submissions.zip` `tickers` and `company_tickers*.json`: today's mapping, which drops delisted names
-    (skill trap 4).
-  - eToro `instrument_id` and `instrument_cik_history`: today's broker universe. These are a cross-check
-    only (acceptance item 3).
-  - `sec_cover_12b_pairs`: a def14a-driven subset of about 1,000 covers.
-- **Vendor symbol grammar.** No published grammar for the Intrader file names was found (repo layout
-  `Data/Day/<symbol>`, headerless: research-price-corpus skill). The grammar is fixed **by construction** in
-  rule 3 from the measured suffix census and frozen in the policy hash. It is an interpretation, and rule 3
-  abstains on every shape it does not recognise.
+  - The data sets are SEC extractions of the filed XML. That the extracted issuer/symbol fields equal the
+    originally accepted content is a property of the source, not verified here.
+  - **Who files (explanatory only):** Exchange Act §16(a) (insiders of issuers with a §12-registered equity
+    class); Investment Company Act §30(h) (closed-end funds); Rule 3a12-3(b) exempts foreign private issuers
+    (17 CFR 240.3a12-3, current text read 2026-09-24 via LII; its effective history across 2006–2026 was not
+    researched, because nothing depends on it). None of these is in sec-edgar skill §2.3 yet; `.claude/**` is
+    not writable from the loop worktree, so the text is parked on #2403.
+  - `issuerTradingSymbol` is filer-entered and issuer-level: one symbol per filing (sec-edgar skill §2.3). It
+    is evidence, never a label.
+  - **Amendments, by construction:** a `/A` is a separate observation at its own acceptance and replaces
+    nothing. There is no documented rule tying an amendment's issuer symbol to its original's, and replacing
+    retroactively would leak.
+- **Clock: acceptance, as in #3360.** The clock is `acceptanceDateTime` of the accession in the **issuer
+  CIK's** `submissions` index (skill §7.4, §7.8), validated by #3360's `normalise_acceptance`; public iff
+  acceptance NY date < D. The index is the #3360 bundle's snapshotted `submissions.zip`, pinned by that
+  bundle's manifest digest. `FILING_DATE` is not a clock: its acceptance is later on 752 accessions
+  (measured below).
+- **Form 25: an informational flag, never an input to the link.** Source: `sec_form25_register` (skill §2.6).
+  - A Form 25 ends an exchange listing, not an issuer's identity (Rule 12d2-2).
+  - Its clock is `filed_date` (< D). That is the only date the register stores, and a 25-NSE accession sits
+    under the exchange CIK. It is **weaker than the link's clock**, which is acceptable only because the flag
+    never feeds a link.
+  - Register rows are today's enrichment (`issuer_cik`, `resolved_symbol`, `provision_class`). They are a
+    snapshot property, stated as such.
+- **Not evidence:**
+  - `submissions` `tickers` and `company_tickers*.json`: today's mapping, which drops delisted names
+    (trap 4);
+  - eToro `instrument_id` and `instrument_cik_history`: today's broker universe, used as a cross-check only;
+  - `sec_cover_12b_pairs`: a def14a-driven subset.
+- **Vendor grammar (by construction).** No published Intrader naming rule was found. Rule 3 is an
+  interpretation of the measured suffix census, frozen in `POLICY`. It abstains on every unrecognised shape.
+  The result carries its grammar class, so an arm can refuse `class` series or `q_alias` links.
 - **Prior-art shape** (not a rule for our data): CRSP/Compustat CCM dated links with a link-type code.
 
 ## Premise measurements
@@ -74,212 +80,260 @@ Command:
 PYTHONPATH=. uv run python scripts/measure_3361_symbol_evidence.py --submissions <#3360 bundle>/inputs/submissions.zip
 ```
 
-Run 2026-09-24 over 81 quarters (`2006q1`–`2026q1`), 4,402,307 `SUBMISSION` rows, 27,388 distinct normalised
-symbols. It measures raw spans inside each series' whole bar range, **not the causal reader**. The reader's
-own counts are the census.
+Run 2026-09-24. This run is unpinned (live DB, the on-disk bulk directory): it motivates the design, and the
+implementation's census supersedes it.
 
-- **Series:** `research_price_series` has 0 rows with a CIK. Intrader has 22,879 series. By suffix: 19,994
-  plain; 1,324 `P`, 579 `WS`, 351 `U`, 288 `W`, 113 `CL`, 111 `R`, 17 `WD`, and 104 single-letter or other
-  groups.
-- **Plain series vs evidence in their bar range:**
+- **Form 3/4/5 archives:** 81 quarters (`2006q1`–`2026q1`), 4,402,307 `SUBMISSION` rows.
+- **Series:** `research_price_series` has 0 rows with a CIK. Intrader has 22,879 series. By the script's suffix
+  regex, 19,994 have no suffix; the largest suffix groups are `P` 1,324, `WS` 579, `U` 351, `W` 288, `CL` 113
+  and `R` 111. The script's "plain" means "the suffix regex did not match", not rule 3's plain.
+- **Evidence in each series' whole bar range** (not the causal reader):
+  - Unsuffixed series: 8,170 with one CIK, 790 with several, 1,553 whose symbol appears only outside the
+    range, 9,481 whose symbol never appears.
+  - Suffixed series: 65 with one CIK, 0 with several.
+  - All 790 multi-CIK series are therefore unsuffixed. Of them, 267 are disjoint in time and 523 overlap.
+  - Examples found by hand, not validated:
+    - `ACET`: CIK 2034 until 2019-02, then CIK 1720580 from 2020-09.
+    - `AB`: the Holding and the LP both cite `AB`.
+    - `ACM`: one stray 2023 filing under another CIK.
+- **Clock:** every row is a unique (issuer, accession) pair. By acceptance NY date vs `FILING_DATE`:
 
-  | outcome | series |
+  | acceptance vs `FILING_DATE` | accessions |
   |---|---:|
-  | one CIK | 8,170 |
-  | several CIKs | 790 |
-  | symbol seen only outside the range | 1,553 |
-  | symbol never seen | 9,481 |
-
-  Of the 790 with several CIKs, 267 are disjoint in time and 523 overlap. Examples found by hand, not
-  validated:
-  - `ACET`: CIK 2034 until 2019-02, then CIK 1720580 from 2020-09.
-  - `AB`: the Holding and the LP both cite `AB`.
-  - `ACM`: one stray 2023 filing under another CIK.
-- **Clock:** acceptance NY date = `FILING_DATE` on 4,400,949 accessions, later on 752, earlier on 1. Not
-  found: 76 accessions are missing from the issuer's index, and 529 belong to issuers whose submissions fail
-  #3360 integrity.
+  | equal | 4,400,949 |
+  | later | 752 |
+  | earlier | 1 |
+  | missing from the issuer's index | 76 |
+  | issuer fails #3360 integrity | 529 |
 
 ## Construction rules
-1. **Inputs (snapshotted, hashed, as in #3360):**
-   - every Form 3/4/5 quarter zip, contiguous from `2006q1` to the last quarter present; a gap or a missing or
-     malformed `SUBMISSION.tsv` header fails the BUILD;
-   - the #3360 bundle's `submissions.zip`, by digest;
-   - the sorted `sec_form25_register` equity-delisting rows read;
-   - the sorted Intrader `research_price_series` rows read (`series_id, vendor_symbol, first_bar, last_bar`).
+1. **Inputs (snapshotted, hashed; the build fails on any violation):**
+   - **Form 3/4/5 quarter zips.** Contiguous from `2006q1`. Member names unique. Exactly one `SUBMISSION.tsv`,
+     whose header has unique names including the five columns used. Strict UTF-8.
+     - Completeness of a quarter is **not certified**: SEC publishes no watermark.
+   - **#3360 submissions.zip**, pinned by that bundle's manifest digest.
+   - **Form 25 rows:** the sorted `sec_form25_register` equity-delisting rows read, plus the register's
+     `[min, max](filed_date)`.
+   - **Series inventory:** the sorted `research_price_series` rows of **every** vendor (`series_id, vendor,
+     vendor_symbol, first_bar, last_bar`). `series_id` must be unique, the symbol non-empty, and `first_bar ≤
+     last_bar`.
 
-   TSV decoding is strict UTF-8; an undecodable file fails the build.
+   Derived bounds:
+   - `capture_end` = max `last_bar` per vendor.
+   - `coverage_start` = 2006-01-01.
+   - `supported_through` = the earliest of: the last quarter's end, the #3360 bundle's `supported_through`,
+     and Intrader's `capture_end`.
+2. **Observation admission.** Canonicalisation comes first:
+   - CIK = int of ASCII digits → 10-digit zero-padded string.
+   - Symbol = trimmed and upper-cased.
+   - Placeholders `""`, `NONE`, `N/A`, `NA` are checked on that string **before** separators are unified. They
+     are evidence-side conventions only; vendor roots are never tested against them.
 
-   `supported_through` = the earliest of: the last quarter's end, the #3360 submissions horizon, and the
-   series capture end. Reads after it return `after_capture`.
-2. **Observation admission.** Every `SUBMISSION` row gets exactly one outcome; the first match wins.
+   Every row then gets one outcome, in this precedence (first match wins):
+   1. `malformed_row`: wrong column count, or the accession does not match ASCII `[0-9]{10}-[0-9]{2}-[0-9]{6}`.
+   2. `malformed_cik`: not 1–10 ASCII digits, or zero.
+   3. `unsupported_document_type`: not in `{3, 3/A, 4, 4/A, 5, 5/A}`.
+   4. `empty_symbol`.
+   5. `multi_symbol`: the symbol contains `,`, `;` or internal whitespace.
 
-   Outcomes, in precedence order:
-   1. `malformed_row`: wrong column count, or an accession not of the form `\d{10}-\d{2}-\d{6}`.
-   2. `malformed_cik`: not 1–10 digits, or zero.
-   3. `empty_symbol`: after trimming and upper-casing, the symbol is `""`, `NONE`, `N/A` or `NA`, tested
-      **before** separator unification.
-   4. `multi_symbol`: the symbol contains `,` `;` or whitespace between tokens.
-   5. `issuer_integrity_excluded`: the issuer's submissions fail #3360 rule 5.
-   6. `no_acceptance`: the accession is not in the issuer's index, or has no acceptance.
-   7. `stored`.
+   Accession-level integrity, next:
+   - Rows surviving 1–5 are grouped by accession on (CIK, unified symbol, document type).
+   - Equal tuples collapse into one observation with a multiplicity.
+   - An accession whose tuples differ is excluded whole as `accession_conflict`, which replaces those rows'
+     outcomes.
 
-   Identical duplicate rows collapse, and their multiplicity is counted. An accession whose rows disagree on
-   (CIK, symbol, document type) is excluded whole as `accession_conflict`. That is a **snapshot-integrity**
-   exclusion, applied to every D, exactly like #3360 rule 5, and stated as such: an answer is a function of
-   (snapshot integrity state, public prefix).
+   Then, per observation:
+   - `issuer_integrity_excluded`: the issuer's submissions fail #3360 rule 5.
+   - `no_acceptance`: the accession is absent from the issuer's index, has no valid acceptance, or its index
+     form's family is not 3/4/5.
+   - Otherwise `stored`.
 
-   The ledger reconciles rows in = Σ outcomes.
+   Accession conflicts and issuer integrity are **snapshot-integrity** properties, applied at every D exactly
+   like #3360 rule 5. An answer is a function of (snapshot integrity state, public prefix). The ledger keeps a
+   (quarter, row index) locator for every non-stored row, and reconciles rows in = Σ outcomes.
 3. **Series grammar (Intrader).** The vendor symbol is split on `_`.
-   - `root` must be 1–5 of `[A-Z0-9]` and `.` is not allowed; otherwise the result is
-     `unparsed_symbol_form`. The remaining tokens `T` decide:
-     - `T` empty → plain.
-     - `T` = one single letter **not** in `{P, W, U, R}` → class `c`.
-     - The first token of `T` in `{P, WS, W, U, R, WD, CL}` → abstain whole as
-       `non_common_symbol_form:<token>`. This also covers `P_A_CL`, `R_W` and the like.
-     - Anything else → `unparsed_symbol_form`.
-   - Exchange test issues (`universe_selection.EXCHANGE_TEST_ISSUE_SYMBOLS`, the #2912 rule) →
-     `vendor_test_symbol`.
-   - **Collision guard:** two in-scope series whose match keys (rule 4) coincide are both abstained whole as
-     `vendor_symbol_collision`. The census counts them.
-4. **Matching.** Evidence symbol `e` is separator-unified (`. - / _ space` → `.`).
-   - A plain series with root `r` matches `e = r`, or `e = r + "Q"` (**Q alias**, research-price-corpus
-     skill §bankruptcy suffix). By construction the alias applies only when `len(r) = 4`,
-     which is the shape of every Q example in that skill (`BBBYQ`, `YELLQ`, `SRNEQ`). Other root lengths
-     get no alias, and the census counts what this rule misses as `never_seen`. The observation is marked `q_alias`, and if another in-scope series has symbol
-     `r + "Q"`, the collision guard applies.
-   - A class series `r_c` matches only `e = r.c` (from `BF.B`, `BF-B`, `BF/B`, `BF B`, `BF_B`). It never
-     matches `BFB` or `r`, and a plain series never matches `r.c`.
-5. **Link at D.** Let W be S's matching stored observations with acceptance NY date in `[D − 730 days, D)`.
-   The window is fixed **by construction**: 730 days is the #3360 census population window, so "recent" means
-   the same thing on both sides of the join. It is frozen in the policy. There is no insider-filing cadence
-   rule to derive it from.
-   - W empty → `no_recent_evidence`, with sub-reason `never_seen` when no matching observation precedes D.
-   - One CIK in W → `linked(cik, single_cik)`.
-   - Several CIKs in W that form a **clean succession** (ordered by first observation in W, every observation
-     of each precedes every observation of the next) → `linked(last cik, succession)`.
-   - Any interleaving → `conflicting_evidence`.
-   - There is no majority, count or recency weighting; none has a source rule. The known costs are measured
-     by the census, not argued away:
+   - `root` must be 1–5 characters of `[A-Z0-9]`; otherwise the result is `unparsed_symbol_form`. The
+     remaining tokens `T` decide:
+     - `T` empty → `plain`.
+     - `T` = one single letter not in `{P, W, U, R}` → `class c`.
+     - The first token of `T` in `{P, WS, W, U, R, WD, CL}` → `non_common_symbol_form:<token>`.
+     - Else → `unparsed_symbol_form`.
+   - The single-letter-means-class reading is an interpretation. The result exposes it so an arm can refuse
+     it.
+   - Exchange test issues (`universe_selection.EXCHANGE_TEST_ISSUE_SYMBOLS`, #2912) → `vendor_test_symbol`.
+4. **Matching.** Evidence symbols are separator-unified (`.`, `-`, `/`, `_` → `.`).
+   - **Plain `r`:** matches `r`, or `rQ` when `len(r) = 4` (the **Q alias**: research-price-corpus skill
+     §bankruptcy suffix; by construction the length is the shape of every example there, `BBBYQ`, `YELLQ`,
+     `SRNEQ`). Alias observations are marked `q_alias`. What the rule misses is not measurable here.
+   - **Class `r_c`:** matches only `r.c` (`BF.B`, `BF-B`, `BF/B`, `BF_B`). Never `rc`, never `r`. A plain
+     series never matches `r.c`.
+   - **Collision guard:** two in-scope series with an overlapping match set are both abstained whole as
+     `vendor_symbol_collision`. For example, a plain `ABCD` and a plain `ABCDQ` both match `ABCDQ`. This is a
+     property of the whole captured inventory, applied at every D, and declared as the same kind of
+     snapshot-integrity exception.
+5. **Link at D.** W = S's matching stored observations with acceptance NY date in `[D − 730 days, D)`.
+   - **The window, by construction.** 730 days is the #3360 census population window, frozen in `POLICY`. No
+     insider-cadence rule exists to derive one. It bounds the age of the **supporting evidence**, not the time
+     since an identity change.
+   - **Outcomes:**
+     - W empty → `no_recent_evidence`, with sub-reason `never_seen` when no matching stored observation
+       precedes D.
+     - One CIK → `linked(cik, single_cik)`.
+     - Several CIKs forming a **strict succession** (the CIKs ordered by first acceptance; each CIK's last
+       acceptance is strictly earlier than the next CIK's first) → `linked(last cik, succession)`.
+     - Otherwise, including equal acceptance timestamps across CIKs → `conflicting_evidence`.
+   - **Accepted costs.** There is no majority, count or recency weighting; none has a source rule. The costs:
      - one stray later filing flips a link;
-     - a stale predecessor can persist for up to 730 days after an unobserved change;
-     - a conflict expires silently when its observations age out of W.
+     - a stale predecessor persists while its evidence is under 730 days old;
+     - a conflict lapses when its observations age out.
 6. **Result algebra.** Precedence, first match wins:
    1. `series_not_in_bundle`
    2. `vendor_out_of_scope`
-   3. `after_capture`
-   4. `outside_series` (D outside `[first_bar, last_bar]`; bar presence ON D is the consumer's read)
+   3. `after_capture` (D > `supported_through`)
+   4. `outside_series` (D ∉ `[first_bar, last_bar]`; bar presence ON D is the consumer's read)
    5. `vendor_test_symbol`
    6. `unparsed_symbol_form`
    7. `non_common_symbol_form:<token>`
    8. `vendor_symbol_collision`
-   9. `no_recent_evidence[:never_seen]`
-   10. `conflicting_evidence`
-   11. `linked(cik, basis)`
+   9. `before_coverage` (D − 730 < `coverage_start`)
+   10. `no_recent_evidence[:never_seen]`
+   11. `conflicting_evidence`
+   12. `linked(cik, basis)`
 
-   Every result from `no_recent_evidence` on carries:
-   - the W observations: accession, CIK, acceptance, `q_alias`;
-   - the flag `form25` = the register rows with `filed_date < D` whose `issuer_cik` is any CIK in W, each
-     marked `symbol_match` / `symbol_other` / `symbol_null`. Informational only.
-7. **Reader** `link_as_of(series_id, D)` returns the rule-6 result. Cross-series facts (two series linked to
-   one CIK) are not reader output; the census computes them.
+   Results 10–12 carry:
+   - the grammar class;
+   - the W observations: accession, CIK, acceptance, multiplicity, `q_alias`;
+   - `form25`: the register rows with `filed_date < D` whose `issuer_cik` is a CIK in W. Each is marked
+     `symbol_match` (its `resolved_symbol` passes rule 4 against S), `symbol_other` or `symbol_null`.
+     `form25_unobserved` is returned instead when D is outside the register span.
+7. **Reader** `link_as_of(series_id, D)` returns the rule-6 result. Cross-series facts are census-only.
 
 ## Artefact
 Content-addressed like #3360 (`r6_pit_bundle.read_verified_document`, exclusive publish, policy-bound
 loader):
-- `<bundle>/inputs/` holds the snapshotted zips and row dumps.
-- `<bundle>/series/<series_id>.json` holds the series row, its grammar result and its matching stored
-  observations in total order (acceptance, accession, CIK).
+- `<bundle>/inputs/` holds the snapshotted zips and row dumps, including the cross-check inputs:
+  `instrument_id`, `instrument_cik_history`, and each series' `delisting_provision` / `delisting_filed_date`.
+- `<bundle>/series/<series_id>.json` holds:
+  - the series row and its grammar result;
+  - its matching stored observations in total order (acceptance, accession, CIK);
+  - the Form 25 rows of their CIKs.
 - `<bundle>/manifest.json` holds:
-  - `POLICY`: sha over the constants (grammar tokens, window, placeholders, precedence), the builder, the
-    reader, `pit_fundamentals.py`, `universe_selection.py` (test-issue list), `r6_pit_bundle.py`, Python and
-    `tzdata`;
-  - the input digests, including the #3360 bundle manifest digest;
+  - `POLICY`: sha over the constants, the builder, the reader, `pit_fundamentals.py`,
+    `universe_selection.py`, `r6_pit_bundle.py`, Python and `tzdata`;
+  - the input digests, including the #3360 manifest digest;
   - `supported_through`, the ledger, and the per-series digests.
 
 ## Census (descriptive; before any strategy look)
-- **Formations:** the #3360 grid (the last NYSE session of each June, 2011–2024).
-- **Population at D:** in-scope series with `first_bar ≤ D ≤ last_bar`. They split into:
-  - a bar ON D (the primary counts);
-  - no bar ON D, counted separately: halts and gaps are exactly the distress-linked missingness in question.
+- **Formations:** the #3360 grid (the last NYSE session of each June, 2011–2024). Every descriptive is
+  counted on this grid only, one observation per (series, formation), so no statistic is date-weighted.
+- **Population at D:** in-scope Intrader series, in three groups. Groups 2 and 3 are the missingness that
+  matters here.
+  1. `bar_on_d`: primary.
+  2. `no_bar_on_d`: `first_bar ≤ D ≤ last_bar`, no bar ON D.
+  3. `ended_in_window`: `last_bar` in `[D − 730, D)`.
 
-  Bars are read from `research_price_daily`, and the rows read are hashed into the evidence manifest.
-- **Per formation, cross-tabulated** result reason (rule 6) × traded-value decile × vendor capture status
-  (the issue's year × reason × size × outcome):
-  - **Traded-value decile.** This measures **liquidity, not company size**. It is the median over the last
-    21 bars before D of close × volume, as stored; bars with NULL or zero volume are skipped. Fewer than 21
-    usable bars → `traded_value_unavailable`. Rank over (value, series_id), decile ⌊10·rank/n⌋.
-  - **Vendor capture status.** `runs_to_capture` means `last_bar` ≥ the vendor capture end minus 7 days;
-    otherwise `ends_before_capture`. This is not an economic outcome.
-  - **Form 25.** For linked results, whether the linked CIK has a register row in (D, D+730], with #3360's
-    observed-span rule (`unobserved_horizon` outside the register span).
+  The bars read from `research_price_daily` (dates, close, volume) are written into the census evidence
+  directory, and that is the snapshot the census reads. Series bounds come from the bundle inventory. A bar
+  outside its series' bounds fails the census.
+- **Cross-tab per formation:** result reason × liquidity decile × capture status. This is the issue's year ×
+  reason × size × outcome.
+  - **Liquidity decile** (liquidity, not company size):
+    - Take the bars strictly before D.
+    - Drop bars with NULL or non-positive close or volume.
+    - Take the latest 21 that remain. Their oldest must be ≥ D − 42 calendar days (by construction: twice the
+      count); otherwise `liquidity_unavailable`.
+    - Value = the median of close × volume, as stored. The vendor's split-adjustment of volume is
+      unverified, so the products are comparable only as far as it holds.
+    - Zero-based rank over (value, series_id) within `bar_on_d` series that have a value; decile =
+      ⌊10·rank/n⌋ (0–9); n = 0 → no deciles.
+  - **Capture status:** `runs_to_capture` if `last_bar ≥ capture_end − 7 days`, else `ends_before_capture`.
+    This is a vendor property, not an economic outcome.
+  - **Form 25 outcome.** Rows filed in `[D, D + 730]`, reported per match kind:
+    - for `linked` results, by the linked CIK;
+    - for every result, by rule-4 symbol match on `resolved_symbol`, so abstentions are covered too;
+    - with #3360's observed-span rule (`unobserved_horizon`). Completeness inside the span is not
+      certified.
 - **Counts:**
-  - both series and distinct linked CIKs;
-  - CIKs linked by more than one series at D (classes or vendor duplicates);
+  - series and distinct linked CIKs;
+  - CIKs with more than one linked series;
   - `q_alias` links;
-  - `vendor_symbol_collision`;
-  - `form25` flag counts by match kind.
-- **Identity-quality descriptives (full population, no subset):**
-  - the age distribution of the latest supporting observation for linked results;
-  - successions that **revert** (the predecessor CIK reappears within 730 days after the switch);
-  - conflicts that later resolve to a link by expiry alone.
-- **Join to #3360:** linked CIKs at D that are, or are not, members of the #3360 census population; and
-  #3360 members at D with no linked series. Both directions are reported.
+  - collisions;
+  - form25 flag kinds.
+- **Identity descriptives (full population, formation grid; not correctness measures):**
+  - the age of the newest supporting observation for linked results;
+  - successions whose predecessor CIK is linked again at a later formation, reported with right-censoring:
+    `reverted`, `not_reverted`, or `unobservable` (fewer than 730 days of later coverage).
+- **Join to #3360:** linked CIKs at D that are, or are not, #3360 census members, and #3360 members with no
+  linked series. Both directions are reported.
 
 ## Acceptance (this ticket)
 1. **Pure fixtures:**
-   - single CIK;
-   - clean succession, and succession later reverted (the reader follows the prefix);
-   - an interleaved stray filing → `conflicting_evidence`, which expires after 730 days;
-   - acceptance on D is not public at D;
-   - acceptance later than `FILING_DATE` → public by acceptance;
-   - `no_acceptance` and `accession_conflict` are ledgered and not used;
-   - the `N/A` placeholder;
-   - a `q_alias` with a 4-letter root, and none with a 3-letter root;
-   - class `BF_B` matches `BF.B` and `BF-B`, not `BFB` or `BF`;
-   - `P_A_CL` / `WS` / `R_W` abstain whole;
-   - an unrecognised shape → `unparsed_symbol_form`;
-   - `vendor_symbol_collision`;
-   - a Form 25 is flagged only once `filed_date` < D and never changes the link;
-   - `outside_series`, `after_capture`, `vendor_out_of_scope`;
-   - ledger reconciliation;
-   - loader refusals (policy, digest, path), and rebuild determinism.
+   - **Linking:** single CIK; strict succession, and a later reversion (the reader follows the prefix); equal
+     timestamps across CIKs → `conflicting_evidence`; an interleaved stray → conflict, which lapses after 730
+     days.
+   - **Clock:** acceptance on D is not public at D; acceptance later than `FILING_DATE` → public by
+     acceptance.
+   - **Admission:** `no_acceptance`, invalid acceptance, index form not 3/4/5, `accession_conflict` and
+     collapse-with-multiplicity; the `N/A` placeholder, and root `NA` still parsed as a vendor root;
+     `unsupported_document_type`; `multi_symbol` (`BF B`).
+   - **Matching:** `q_alias` for a 4-character root, none for 3; `BF_B` matches `BF.B`, `BF-B` and `BF/B`,
+     not `BFB` or `BF`.
+   - **Grammar:** `P_A_CL`, `WS`, `R_W` abstain; an unrecognised shape → `unparsed_symbol_form`.
+   - **Collisions:** `ABCD` vs `ABCDQ`.
+   - **Form 25:** flagged only when `filed_date < D`; `form25_unobserved` outside the span; never changes the
+     link.
+   - **Bounds:** `outside_series`, `before_coverage`, `after_capture`, `vendor_out_of_scope`,
+     `series_not_in_bundle`.
+   - **Build:** ledger reconciliation with locators; build failures (duplicate member or header, gap quarter,
+     bad UTF-8, duplicate `series_id`, reversed bounds); loader refusals; rebuild determinism.
 2. **Causal reference** (full population, as #3360 item 2):
-   - **Decision dates.** For every series, test each D in {every matching observation's acceptance NY date
-     + 1, the same + 731 (window expiry), every flagged Form 25 `filed_date` + 1, `first_bar`,
-     `last_bar` + 1, one day before the first observation}. For a series with no observations, test
-     {`first_bar`, `last_bar` + 1}. All are calendar dates; no session calendar applies.
-   - **Independent path.** Rebuild from the raw inputs filtered to acceptance < D first, then apply rules 2–6
-     independently (without calling the reader).
-   - Assert the **entire** rule-6 result is equal, flags and observations included.
-3. **Cross-checks** (reported; subsets, so they cannot establish safety on the rest of the population). Each is
-   reported as agree / disagree / not comparable, with denominators and every disagreement listed:
-   - (a) eToro: series with `instrument_id` whose `instrument_cik_history` interval contains `last_bar` —
-     does the link at `last_bar` agree with that CIK?
-   - (b) Form 25: series with `delisting_provision` — does a link built **without** the Form 25 input agree
-     with `issuer_cik` on `filed_date`? The existing series↔Form 25 association is itself symbol-based
-     (`symbol_exact`), so this is an independent **source**, not an independent association.
-4. Census evidence manifest written.
-5. Registry (`app/services/research_point_in_time.py`): the cells citing #3361 stay **fail**. This ticket
-   adds the linkage's clock and causal evidence to the reasons. **Nothing becomes admissible.** How an arm
-   consumes abstentions and `succession` is that arm's declaration.
+   - **Integrity first.** Snapshot integrity (accession conflicts, issuer integrity, collisions) is computed
+     on the **full** snapshot. Only then are the stored observations filtered to acceptance < D, and rules 5–6
+     recomputed independently (without calling the reader).
+   - **Decision dates.** Every observation acceptance NY date + 1 and + 731; every flagged Form 25
+     `filed_date` + 1; `first_bar`; `last_bar` + 1; `supported_through` + 1; `coverage_start` + 730; and the
+     day before the first observation. A series without observations gets the non-observation dates only.
+   - Assert the **entire** result is equal.
+3. **Cross-checks** (reported; subsets, so they establish nothing about the rest of the population). Each
+   reports agree / disagree / not comparable with denominators, and lists every disagreement:
+   - (a) **eToro:** series with `instrument_id` where exactly one `instrument_cik_history` row has
+     `effective_from ≤ last_bar` and (`effective_to` NULL or `last_bar < effective_to`). Several rows or none →
+     not comparable.
+   - (b) **Form 25:** series with `delisting_provision`. The link is built **without** the Form 25 input and
+     compared with `issuer_cik` at `delisting_filed_date`. The series↔Form 25 association is itself
+     symbol-based (`symbol_exact`), so this is an independent **source**, not an independent association.
+4. Census evidence manifest written, hashing: the bundle manifest, the bars snapshot, code and parameters.
+5. **Registry** (`app/services/research_point_in_time.py`): the cells citing #3361 stay **fail**, with the
+   clock and causal evidence added to their reasons. **Nothing becomes admissible.** How an arm consumes
+   abstentions, `succession`, `class` and `q_alias` is that arm's declaration.
 
 ## Design history
-Round 1 (67 findings) changed the design as follows:
-- **Clock:** `FILING_DATE` was replaced by the issuer-index acceptance clock, after measurement (752 later).
-- **Form 25:** no longer terminates a link; delisting ≠ identity. It is a public-dated flag.
-- **Removed from the reader:** interval compression (look-ahead at its start) and `shared_cik`
-  (cross-series).
-- **Scope:** restricted to the Intrader vendor.
-- **Grammar:** now a closed rule that abstains on unknown shapes.
-- **Q alias:** restricted to 4-letter roots.
-- **Collision guard added.**
-- **`first_bar` clip on evidence dropped.**
-- **Snapshot-integrity exception declared.**
-- **Census:** no longer promises a fund/ETF/FPI split it has no source for; traded value is renamed to
-  liquidity; capture status is not called an outcome; the no-bar-on-D population is added; the
-  identity-quality descriptives are full-population.
-- **Causal test:** covers expiries, Form 25 dates and bar bounds.
-- **Fixed:** the `N/A` normalisation bug in the measurement script.
+**Round 1 (67 findings):**
+- The acceptance clock replaced `FILING_DATE`, after measurement.
+- A Form 25 no longer terminates a link.
+- Interval compression and `shared_cik` were removed from the reader.
+- Scope was restricted to Intrader.
+- The grammar became closed.
+- The `first_bar` clip on evidence was dropped.
+- The snapshot-integrity exception was declared.
+- The census stopped promising an FPI/ETF split it has no source for.
+- The `N/A` bug in the script was fixed.
 
-Kept and stated as costs, because no source rule exists for an alternative: the 730-day window and
-any-interleaving-abstains.
+**Round 2 (60 findings):**
+- The residuals are stated honestly: inventory labels, corpus survivorship, and what the causal test proves.
+- `BF B` vs `multi_symbol` contradiction resolved (space removed from the separators).
+- Admission tightened: CIK canonicalisation, a document-type check, collapse vs conflict, and per-row
+  locators.
+- Input validation added: archive validation, series-inventory validation, and every vendor in the inventory.
+- New result `before_coverage`.
+- Succession defined strictly, with ties counted as conflicts.
+- Form 25: its weaker clock is confined to a flag, and `form25_unobserved` added.
+- Causal test: integrity is computed on the full snapshot first, and the date set now covers expiry, capture,
+  coverage and Form 25.
+- Census: bars are snapshotted; liquidity is defined exactly; the population is three groups; outcomes
+  include abstentions; descriptives sit on the formation grid with right-censoring.
+- Cross-check inputs are snapshotted, and interval containment is defined.
+- The count error was fixed (the old "104 other" figure).
+
+**Kept as stated costs** (no source rule exists for an alternative): the 730-day window, any interleaving
+abstains, the Q-alias length, and the grammar interpretation.
