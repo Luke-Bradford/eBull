@@ -3195,7 +3195,8 @@ Two things S-4 adds to the prevention above:
   departures from the pandas reference carry the measured accession that forced
   them), `::_row_contributes_only_inherited_values`, `::_CITY_STATE_ZIP_ONLY_RE`,
   `::_resolve_columns` (the mirrored percent-caption guard) and the
-  `expand_spans=False` comment at the SCT call site;
+  `expand_spans=False` comment at the SCT call site (pin removed by #2350 — see
+  the #2350 entry below);
   `tests/test_sec_def14a_parser.py::TestRowSpanExpansion` (8 revert-probed
   invariants); `scripts/audit_def14a_rowspan.py` (arm-3 mechanism audit).
 
@@ -11352,3 +11353,33 @@ neighbouring container and match it.**
 - Enforced in: `app/services/ownership_observations.py::INSIDER_HOLDING_LINE_SUM_LATERAL`;
   `tests/test_3227_holding_line_sum.py` (`equal_amounts_refuse`);
   `scripts/ab_3227_holding_line_sum.py` (prints the gain side).
+
+### Restoring the table model for a second caller re-exposes every policy the first caller layered on it (#2350)
+
+- Symptom: #2175 restored `rowspan` in the shared `_parse_table_html` and pinned the
+  Item 402(c) SCT caller to the old grid, because 580 accessions drifted. Removing the pin
+  with only the obvious fix (a carried title cell is not a new title) still drifted 60.
+  The remainder were not SCT bugs in the new grid; they were **Item 403 policy that lived
+  inside the shared extractor** and **SCT assumptions the flat grid had hidden**: the
+  403 value-continuation row drop removed an NEO's title row (`0000050863-25-000054`); a
+  malformed span carried a year cell into a row that had its own, before it (re-dated the
+  row, `0000064996-25-000022`) or after it (read as salary, `0001376339-26-000033`); a
+  group subtotal caption (`Stock Awards: PSUs | RSUs | Total (3)`) resolved as the SCT
+  Total mid-row (`0001193125-25-078453`); and a span-restored sub-caption row was promoted
+  as the label row without Salary, so a supplemental realized-pay table won selection
+  (`0001140361-25-011887`).
+- Prevention: (1) before changing a shared extractor's grid for a new caller, list every
+  row/cell decision the extractor makes and ask whose policy each is — a drop rule written
+  for one Item is a caller option, not a table-model fact; (2) a carried (`rowspan`) cell
+  is the row above's content — it is never the row's own year, name or title, so a caller
+  that keys on "the first cell matching X" must read OWN cells; (3) where a reg fixes a
+  column's POSITION (§ 229.402(c)(2)(x): Total is the rightmost), bind the caption to that
+  position, not to the first matching text.
+- Measured: `scripts/ab_2350_sct_full_rows.py --out` in an `origin/main` worktree and on
+  the branch, then `--diff` (full `def14a_body` population, every SCT field + the selected
+  score). The #2350 PR records the run's figures; re-run the command rather than trusting
+  a copy here.
+- Enforced in: `app/providers/implementations/sec_def14a.py::_sct_fields_for`,
+  `::_resolve_sct_fields` (rightmost Total), `::_parse_table_html`
+  (`drop_value_continuations`), `_RawTable.inherited_at`;
+  `tests/test_sec_def14a_sct_parser.py` (six revert-probed #2350 tests).

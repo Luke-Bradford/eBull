@@ -812,6 +812,11 @@ class _RawTable:
     # which is what keeps ``scripts/ab_2140_def14a_parser.py``'s reconstruction
     # of this dataclass valid.
     table_html: str = ""
+    # Per row of ``rows`` (index-aligned), the cell positions a live ``rowspan``
+    # placed there rather than the row's own ``<td>``s (#2350). Read by the Item
+    # 402(c) SCT loop only, to tell a carried NEO name cell from a new one.
+    # Defaulted for the same reason as ``table_html``; empty means "none known".
+    inherited_at: tuple[frozenset[int], ...] = ()
 
 
 _NUMERIC_LIKE_RE: Final[re.Pattern[str]] = re.compile(r"\d{2,}")
@@ -953,11 +958,13 @@ class _ExpandedRow(NamedTuple):
     ``own_cells`` is the row's own ``<td>``s, unshifted; ``inherited_cells`` is
     what a live ``rowspan`` places into the row; ``cells`` is both, in layout
     order. ``inherited_cells`` is empty exactly when the row inherited nothing.
+    ``inherited_at`` is the positions in ``cells`` those inherited cells occupy.
     """
 
     cells: tuple[str, ...]
     own_cells: tuple[str, ...]
     inherited_cells: tuple[str, ...]
+    inherited_at: frozenset[int] = frozenset()
 
 
 def _expand_row_spans(rows: list[tuple[tuple[str, int, int], ...]]) -> list[_ExpandedRow]:
@@ -1035,6 +1042,7 @@ def _expand_row_spans(rows: list[tuple[tuple[str, int, int], ...]]) -> list[_Exp
             continue
         texts: list[str] = []
         inherited: list[str] = []
+        inherited_at: set[int] = set()
         next_remainder: list[tuple[int, int, str, int]] = []
         column = 0
         pending = iter(remainder)
@@ -1043,6 +1051,7 @@ def _expand_row_spans(rows: list[tuple[tuple[str, int, int], ...]]) -> list[_Exp
             # Layout slots claimed by an earlier row's spanning cell come first.
             while carried is not None and carried[0] <= column:
                 col, width, prev_text, left = carried
+                inherited_at.add(len(texts))
                 texts.append(prev_text)
                 inherited.append(prev_text)
                 column = max(column, col) + width
@@ -1055,12 +1064,15 @@ def _expand_row_spans(rows: list[tuple[tuple[str, int, int], ...]]) -> list[_Exp
             column += colspan
         while carried is not None:
             col, width, prev_text, left = carried
+            inherited_at.add(len(texts))
             texts.append(prev_text)
             inherited.append(prev_text)
             if left > 1:
                 next_remainder.append((col, width, prev_text, left - 1))
             carried = next(pending, None)
-        out.append(_ExpandedRow(tuple(texts), tuple(text for text, _, _ in cells), tuple(inherited)))
+        out.append(
+            _ExpandedRow(tuple(texts), tuple(text for text, _, _ in cells), tuple(inherited), frozenset(inherited_at))
+        )
         # A span opened by THIS row can start left of one carried into it, so the
         # append order is not sorted; the drain above requires that it is.
         next_remainder.sort(key=lambda entry: entry[0])
@@ -1135,7 +1147,7 @@ def _table_inner_html(table_html: str) -> str | None:
     return "".join(pieces)
 
 
-def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTable | None:
+def _parse_table_html(table_html: str, *, drop_value_continuations: bool = True) -> _RawTable | None:
     """Extract one ``<table>`` block. Mirrors the helper in
     business_summary but kept inlined so this module is provider-
     side / self-contained (parsers should not import from
@@ -1192,26 +1204,29 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
     # asks ``_parse_share_count``, and a glued ``'118,028 165,426'`` parses on
     # the flat side and does not on the line side — which is the whole point of
     # the second grid.
-    if expand_spans:
-        flat_expanded = _expand_row_spans(spanned_rows)
-        line_expanded = _expand_row_spans(line_spanned_rows)
-        kept = [
-            index
-            for index, row in enumerate(flat_expanded)
-            if any(row.cells) and not _row_contributes_only_inherited_values(row)
-        ]
-        cells_per_row: list[tuple[str, ...]] = [flat_expanded[index].cells for index in kept]
-        line_per_row: list[tuple[str, ...]] = [line_expanded[index].cells for index in kept]
-    else:
-        kept = [index for index, row in enumerate(spanned_rows) if any(text for text, _, _ in row)]
-        cells_per_row = [tuple(text for text, _, _ in spanned_rows[index]) for index in kept]
-        line_per_row = [tuple(text for text, _, _ in line_spanned_rows[index]) for index in kept]
+    flat_expanded = _expand_row_spans(spanned_rows)
+    line_expanded = _expand_row_spans(line_spanned_rows)
+    # ``drop_value_continuations=False`` is the Item 402(c) SCT caller (#2350).
+    # The drop is Item 403 policy: there the continuation row is a holder's
+    # ADDRESS and must not store as a second holder. In an SCT the same markup
+    # shape (value cells spanning the name row and the row under it) puts the
+    # NEO's TITLE on the continuation row -- 0000050863-25-000054's 'Former EVP
+    # and GM, DCAI' under 'Justin Hotard' -- and dropping it loses the title.
+    kept = [
+        index
+        for index, row in enumerate(flat_expanded)
+        if any(row.cells) and not (drop_value_continuations and _row_contributes_only_inherited_values(row))
+    ]
+    cells_per_row: list[tuple[str, ...]] = [flat_expanded[index].cells for index in kept]
+    line_per_row: list[tuple[str, ...]] = [line_expanded[index].cells for index in kept]
+    inherited_per_row: list[frozenset[int]] = [flat_expanded[index].inherited_at for index in kept]
     if not cells_per_row:
         return None
 
     parent_headers = cells_per_row[0]
     body = cells_per_row[1:]
     line_body = line_per_row[1:]
+    inherited_body = inherited_per_row[1:]
     column_headers = parent_headers
     score_headers = parent_headers
 
@@ -1272,6 +1287,7 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
             score_headers = parent_headers + body[0]
             body = body[1:]
             line_body = line_body[1:]
+            inherited_body = inherited_body[1:]
 
     return _RawTable(
         score_headers=score_headers,
@@ -1279,6 +1295,7 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
         rows=tuple(body),
         line_rows=tuple(line_body),
         table_html=table_html,
+        inherited_at=tuple(inherited_body),
     )
 
 
@@ -3731,15 +3748,22 @@ def _resolve_sct_fields(headers: tuple[str, ...]) -> tuple[str, ...]:
     Total anchor (mismatch branch) assumes the reg's Total-is-last rule, and it
     guards for it explicitly.
     """
+    per_cell = [
+        next((field for field, needles in _SCT_FIELD_MATCHERS if any(n in cell.lower() for n in needles)), None)
+        for cell in headers
+    ]
+    # § 229.402(c)(2)(x): Total is the RIGHTMOST SCT column, so it binds to the
+    # last cell that reads as one (#2350). An earlier "Total" is the subtotal of
+    # a caption group -- Quanta's 'Stock Awards' over 'PSUs | RSUs | Total (3)',
+    # Goldman's over 'Year-End Awards | SVC Award | Total' -- which the table
+    # model surfaces once the sub-caption row is span-restored. Resolving it as
+    # ``total_comp`` put Total mid-row and cost the real one (0001193125-25-078453).
+    last_total = max((i for i, field in enumerate(per_cell) if field == "total_comp"), default=None)
     ordered: list[str] = []
-    for cell in headers:
-        low = cell.lower()
-        for field, needles in _SCT_FIELD_MATCHERS:
-            if field in ordered:
-                continue
-            if any(n in low for n in needles):
-                ordered.append(field)
-                break
+    for i, field in enumerate(per_cell):
+        if field is None or field in ordered or (field == "total_comp" and i != last_total):
+            continue
+        ordered.append(field)
     return tuple(ordered)
 
 
@@ -4407,6 +4431,28 @@ def _find_sct_windows(html_text: str) -> list[tuple[int, int]]:
     return windows
 
 
+def _sct_fields_for(table: _RawTable) -> tuple[str, ...]:
+    """The SCT fields TABLE's header resolves to (#2350).
+
+    Normally the label row ``_parse_table_html`` chose. Once spans are restored, a
+    sub-caption row under a spanning caption can be promoted as that label row
+    and carry the rowspan captions but not the colspan parents it sits under --
+    0001140361-25-011887's 'Compensation Paid in …' row under 'Salary' / 'Bonus'
+    -- so it lacks the mandatory Salary (§ 229.402(c)(2)(iii)) or Total
+    ((c)(2)(x)) column and the real SCT lost selection to a supplemental
+    realized-pay table. The parent caption row is then the header.
+    """
+    fields = _resolve_sct_fields(table.column_headers)
+    if "salary" in fields and "total_comp" in fields:
+        return fields
+    cols, score = table.column_headers, table.score_headers
+    if len(score) > len(cols) and score[-len(cols) :] == cols:
+        parent = _resolve_sct_fields(score[: len(score) - len(cols)])
+        if "salary" in parent and "total_comp" in parent:
+            return parent
+    return fields
+
+
 # Score floor: a genuine SCT (name/position + salary + stock/option + total)
 # scores well above this; the director-comp / plan-awards look-alikes lack
 # the salary keyword and score below it.
@@ -4439,21 +4485,7 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
     best_table: _RawTable | None = None
     for window_start, window_end in _find_sct_windows(html_text):
         for start, end in _scan_outer_tables(html_text, start=window_start, end=window_end):
-            # ``expand_spans=False``: the Item 402(c) path carries its OWN
-            # compensation for rowspan-shifted rows (see the module comment above
-            # `Def14AExecCompRow` — "name-cell rowspan → continuation-year rows
-            # are index-shifted (AAPL/MSFT)"), built and tuned across #1945,
-            # #1967, #2088, #2094 and #2097. Feeding it the span-restored rows
-            # re-bases that machinery, and the full-population A/B measured the
-            # result: **580 accessions** drifted, every one of them the same way
-            # — ``executive_name``, ``fiscal_year``, ``salary`` and ``total_comp``
-            # identical, and ``principal_position`` repeated once per
-            # continuation year ('Executive Vice President and Chief Financial
-            # Officer' ×3 on 0000004904-25-000043). Re-basing this arm on the
-            # table model is the right end state and is NOT this ticket — #2175
-            # is Item 403. Keeping the SCT input byte-identical is what makes
-            # that separable. See the follow-up issue in the PR description.
-            parsed = _parse_table_html(html_text[start:end], expand_spans=False)
+            parsed = _parse_table_html(html_text[start:end], drop_value_continuations=False)
             if parsed is None:
                 continue
             score = _score_sct_headers(parsed.score_headers)
@@ -4471,7 +4503,7 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
             header_join = " ".join(parsed.score_headers).lower()
             if "name" not in header_join:
                 continue
-            candidate_fields = _resolve_sct_fields(parsed.column_headers)
+            candidate_fields = _sct_fields_for(parsed)
             if "salary" not in candidate_fields or "total_comp" not in candidate_fields:
                 continue
             best_score = score
@@ -4481,14 +4513,14 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
         logger.debug("DEF 14A: no valid SCT met score floor; best_score=%d", best_score)
         return Def14ASummaryCompTable(rows=(), raw_table_score=best_score)
 
-    fields = _resolve_sct_fields(best_table.column_headers)
+    fields = _sct_fields_for(best_table)
 
     rows: list[Def14AExecCompRow] = []
     current_name = ""
     current_position: str | None = None
     prev_row_year: int | None = None
 
-    for raw_row in best_table.rows:
+    for row_index, raw_row in enumerate(best_table.rows):
         cells = [_sct_norm(c) for c in raw_row]
         if not any(cells):
             continue
@@ -4496,19 +4528,31 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
         first_nonempty_idx = next((i for i, c in enumerate(cells) if c), None)
         if first_nonempty_idx is None:
             continue
+        inherited_at = best_table.inherited_at[row_index] if row_index < len(best_table.inherited_at) else frozenset()
 
         # Fiscal-year token first — the name-cell decision below needs THIS
         # row's year to detect wrapped-title continuations (#2094).
+        # The row's OWN year only (#2350). A year cell a malformed ``rowspan``
+        # carries down lands BEFORE the row's own year and would re-date it and
+        # shift every value one column (0000064996-25-000022: the 2022 row read
+        # as fiscal 2023 with salary '2022').
         year_idx = None
         for i, c in enumerate(cells):
+            if i in inherited_at:
+                continue
             if _YEAR_RE.match(_FOOTNOTE_RE.sub("", c).strip()):
                 year_idx = i
                 break
         row_year = int(_FOOTNOTE_RE.sub("", cells[year_idx]).strip()) if year_idx is not None else None
 
-        # Leading name cell? (present on the first row per NEO; absent on
-        # rowspan continuation rows.)
-        if _looks_like_name_cell(cells[first_nonempty_idx]):
+        # Leading name cell? Present on the first row per NEO. On a continuation
+        # row of a name cell with ``rowspan="N"`` the table model (#2350) places
+        # the SAME cell again; it is the carried NEO, never a new name or a
+        # further title fragment, so it is not read as one. Reading it as one is
+        # what repeated ``principal_position`` once per continuation year
+        # ('… Chief Financial Officer' ×3 on 0000004904-25-000043) when the
+        # spans were first restored for this path.
+        if first_nonempty_idx not in inherited_at and _looks_like_name_cell(cells[first_nonempty_idx]):
             first_cell = cells[first_nonempty_idx]
             cleaned = _normalize_first_cell(first_cell)
             position_fragment = _position_only_cell(first_cell)
@@ -4565,7 +4609,15 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
             continue  # values with no NEO context yet — skip defensively.
 
         fiscal_year = row_year
-        values = _extract_sct_row_values(cells[year_idx + 1 :])
+        # A year cell a malformed span carries in AFTER the own year is not a
+        # dollar value (0001376339-26-000033: '2024' read as fiscal 2023 salary).
+        values = _extract_sct_row_values(
+            [
+                c
+                for i, c in enumerate(cells[year_idx + 1 :], start=year_idx + 1)
+                if not (i in inherited_at and _YEAR_RE.match(_FOOTNOTE_RE.sub("", c).strip()))
+            ]
+        )
         if not values:
             continue
 
