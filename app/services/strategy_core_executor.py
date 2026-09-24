@@ -759,6 +759,31 @@ def _drive_core_close(
     return _result(state, reason, intent_id=intent_id, trade_id=strategy_trade_id)
 
 
+def core_recovery_pending(conn: psycopg.Connection[Any]) -> bool:
+    """Is there already-sent core work that a cycle must settle whatever the mandate says?
+
+    True when ``load_core_resume_authority`` would return an unresolved core order, or
+    ``_resolve_outstanding_core_rebalance_close`` would find an in-flight rebalance
+    close.  Both run BEFORE the mandate block in their callers, so a scheduled caller
+    that skips on mandate or session state must ask this first or it strands them
+    (#3359, Codex ckpt-2).  Unlocked and advisory: the dispatch it gates re-reads both
+    under ``core_submission_lock``.  Commits its read, leaving ``conn`` idle.
+    """
+    if load_core_resume_authority(conn) is not None:
+        return True
+    row = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM strategy_position_operations
+            WHERE trigger_code = 'core_rebalance' AND status = ANY(%s)
+        )
+        """,
+        (list(_UNRESOLVED_OPERATION_STATUSES),),
+    ).fetchone()
+    conn.commit()
+    return bool(row and row[0])
+
+
 def _resolve_outstanding_core_rebalance_close(
     conn: psycopg.Connection[Any], *, broker: BrokerProvider, credentials: tuple[UUID, UUID]
 ) -> CoreExecutionResult | None:
@@ -1414,6 +1439,7 @@ __all__ = [
     "CoreResumeAuthority",
     "StrategyCoreExecutionError",
     "core_order_shape_for",
+    "core_recovery_pending",
     "execute_core_rebalance",
     "load_core_resume_authority",
     "mark_core_submission_entered",

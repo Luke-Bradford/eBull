@@ -6985,8 +6985,9 @@ def core_rebalance_execution() -> None:
     ``enable_auto_trading``, the execution block, session, halt, quote and
     account-risk freshness, the #2844 sandbox bound, the drawdown limit and the
     #3284 exit levels are all re-proved under ``core_submission_lock``. What this
-    job adds is only the ordering of cheap refusals ahead of the secrets decrypt,
-    and one gate that is its own: ``settings.etoro_env == 'demo'``, with the
+    job adds is only the ordering of cheap refusals ahead of the secrets decrypt
+    (never applied to already-sent work -- ``core_recovery_pending``), and one
+    gate that is its own: ``settings.etoro_env == 'demo'``, with the
     provider pinned to the literal ``"demo"`` so the setting is not re-read
     between check and use. Live execution is a separate #2843/#2844 decision.
 
@@ -7005,6 +7006,7 @@ def core_rebalance_execution() -> None:
     """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
     from app.services.strategy_core_executor import (
+        core_recovery_pending,
         execute_core_rebalance,
         load_core_resume_authority,
         resume_core_submission,
@@ -7023,7 +7025,14 @@ def core_rebalance_execution() -> None:
     operator_id: UUID | None = None
     with connect_job() as pre_conn:
         mandate = load_core_mandate(pre_conn)
-        if mandate is None or mandate.core_instrument_id is None:
+        # ⚠ Already-sent work is settled FIRST and is exempt from every skip below
+        # (Codex ckpt-2 P2). The executor's step 0 and the resume path both run
+        # before its own mandate block, precisely so a disabled or revised mandate
+        # cannot strand a close or an order that already reached the broker; a
+        # mandate or session skip here would re-create that hole one layer up.
+        if core_recovery_pending(pre_conn):
+            pass
+        elif mandate is None or mandate.core_instrument_id is None:
             skip = "no core mandate configured" if mandate is None else "core mandate has no core instrument"
         elif not mandate.enabled:
             # ⚠ Unlike the observation, a DISABLED mandate skips: this job acts, and

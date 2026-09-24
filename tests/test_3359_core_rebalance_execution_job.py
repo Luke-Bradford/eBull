@@ -85,6 +85,7 @@ class _Harness:
         venue_skip: str | None = None,
         creds: tuple[LoadedCredential, LoadedCredential] | None = (_API, _USER),
         resume: Any = None,
+        recovery_pending: bool = False,
         result: CoreExecutionResult | None = None,
     ) -> dict[str, MagicMock]:
         if mandate is _UNSET:
@@ -100,6 +101,7 @@ class _Harness:
             patch("app.providers.implementations.etoro_broker.EtoroBrokerProvider", return_value=self.broker) as prov,
             patch("app.services.strategy_core_mandate.load_core_mandate", return_value=mandate),
             patch("app.services.strategy_core_executor.load_core_resume_authority", return_value=resume),
+            patch("app.services.strategy_core_executor.core_recovery_pending", return_value=recovery_pending),
             patch(
                 "app.services.strategy_core_executor.resume_core_submission",
                 return_value=result or _result(),
@@ -133,6 +135,22 @@ class TestRefusalsBeforeAnySecretOrRequest:
         calls["execute"].assert_not_called()
         assert calls["skip"].call_args[0][0] == JOB_CORE_REBALANCE_EXECUTION
         assert expected in calls["skip"].call_args[0][1]
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"mandate": None},
+            {"mandate": _mandate(enabled=False)},
+            {"venue_skip": "core venue session is closed"},
+        ],
+    )
+    def test_already_sent_work_is_settled_whatever_the_mandate_or_session(self, kwargs: dict[str, Any]) -> None:
+        """Codex ckpt-2 P2: the executor's step 0 runs BEFORE its mandate block so a
+        disabled or revised mandate cannot strand a close already sent. Skipping on
+        mandate or session here would re-create that hole one layer up."""
+        calls = _Harness().run(recovery_pending=True, **kwargs)
+        calls["skip"].assert_not_called()
+        calls["execute"].assert_called_once()
 
     def test_missing_credentials_skip_without_touching_the_broker(self) -> None:
         calls = _Harness().run(creds=None)
@@ -184,6 +202,7 @@ class TestDispatchMirrorsTheEndpoint:
             patch("app.providers.implementations.etoro_broker.EtoroBrokerProvider", return_value=harness.broker) as p,
             patch("app.services.strategy_core_mandate.load_core_mandate", return_value=_mandate()),
             patch("app.services.strategy_core_executor.load_core_resume_authority", return_value=None),
+            patch("app.services.strategy_core_executor.core_recovery_pending", return_value=False),
             patch("app.services.strategy_core_executor.execute_core_rebalance", return_value=_result()),
         ):
             core_rebalance_execution()
