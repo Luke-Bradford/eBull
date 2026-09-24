@@ -60,13 +60,11 @@ def test_real_geode_cik_in_seed_list() -> None:
     assert "Geode" in label
 
 
-def test_real_geode_cik_in_etf_override_list() -> None:
+def test_no_13f_manager_cik_in_etf_override_list() -> None:
+    """#2214: a 13F manager's book mixes ETF and non-ETF mandates, so tagging its CIK
+    ETF mislabels the whole book (`scripts/audit_ncen_etf_advisers`, sections 5-6)."""
     etf_ciks = {cik for cik, _label in _ETF_OVERRIDES}
-    assert _REAL_GEODE_CIK in etf_ciks, (
-        f"Real Geode CIK {_REAL_GEODE_CIK} missing from _ETF_OVERRIDES — "
-        f"Geode operates Fidelity's passive-index franchise and IS an "
-        f"ETF issuer for the chart's filer_type split."
-    )
+    assert etf_ciks.isdisjoint({_REAL_GEODE_CIK, "0000102909", "0001086364"})
 
 
 def test_migration_104_present_and_addresses_both_ciks() -> None:

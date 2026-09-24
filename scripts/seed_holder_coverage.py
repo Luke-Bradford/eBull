@@ -134,30 +134,13 @@ _INSTITUTIONAL_SEEDS: list[tuple[str, str, str]] = [
     ("0000902219", "Wellington Management Group LLP", "Wellington Management Group LLP"),
 ]
 
-# CIKs from above to also tag as ETFs. Two issuers are clearly
-# pure-ETF operationally: Vanguard's CIK files most of its ETFs
-# under one umbrella, BlackRock's iShares CIK is the dedicated
-# ETF-issuer entity, and Geode runs Fidelity's passive-index
-# franchise so its 13F holdings track the ETF basket.
-#
-# State Street (CIK 0000093751) is deliberately NOT tagged ETF
-# even though it's the SPDR sponsor — its 13F-HR aggregates the
-# whole institutional asset-management business, and tagging it
-# ETF would route every State-Street-held position into the ETF
-# bucket rather than the Institutions bucket on the ownership
-# card. Operators who want the SPDR-only slice can refine via
-# fund-level CIKs (each SPDR series has its own CIK) in a
-# follow-up curation pass.
-_ETF_OVERRIDES: list[tuple[str, str]] = [
-    ("0000102909", "Vanguard ETF franchise"),
-    # See _INSTITUTIONAL_SEEDS comment — BlackRock canonical CIK
-    # corrected from 0001364742 to 0001086364 by migration 111.
-    ("0001086364", "iShares (BlackRock) ETF franchise"),
-    # Soros / Geode disambig (#790 P2 — migration 104). The real
-    # Geode Capital Management LLC is CIK 0001214717. Soros (CIK
-    # 0001029160) is intentionally NOT in the ETF override list.
-    ("0001214717", "Geode Capital (Fidelity index-fund engine)"),
-]
+# CIKs to tag as ETFs. Deliberately EMPTY (#2214, migration 419): Form 13F is filed
+# per MANAGER with no fund breakdown (Rule 13f-1), so no 13F filer CIK can mean "shares
+# held by ETFs". Vanguard, BlackRock and Geode were listed here; each one's own N-CEN
+# series are a mixed ETF / non-ETF book (`scripts/audit_ncen_etf_advisers`, sections 5-6). Fund-level ETF
+# holdings come from N-PORT (the `funds` overlay), per sec-edgar skill §2.2.1. Only a
+# CIK whose whole 13F book is ETF mandates may be added.
+_ETF_OVERRIDES: list[tuple[str, str]] = []
 
 # Curated (instrument_symbol, CUSIP) seed list. Without these in
 # ``external_identifiers``, every 13F-HR holding for the named
@@ -276,14 +259,17 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
     # CIKs" constant because the migration is the canonical record;
     # this DELETE is a script-level convergence guarantee, not a
     # source-of-truth list.
-    _STALE_ETF_CIKS: tuple[str, ...] = ("0001029160",)
+    # #2214 (migration 419) adds the three retired manager overrides.
+    _STALE_ETF_CIKS: tuple[str, ...] = ("0001029160", "0001214717", "0000102909", "0001086364")
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM etf_filer_cik_seeds WHERE cik = ANY(%s)",
             (list(_STALE_ETF_CIKS),),
         )
         if cur.rowcount and cur.rowcount > 0:
-            print(f"  removed {cur.rowcount} stale ETF override(s): {list(_STALE_ETF_CIKS)} (Soros mis-seed cleanup)")
+            print(
+                f"  removed {cur.rowcount} stale ETF override(s): {list(_STALE_ETF_CIKS)} (retired manager overrides)"
+            )
 
     print("Seeding etf_filer_cik_seeds...")
     for cik, label in _ETF_OVERRIDES:
