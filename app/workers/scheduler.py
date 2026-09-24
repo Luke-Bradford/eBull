@@ -617,6 +617,7 @@ JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
 JOB_SEC_DEF14A_INGEST = "sec_def14a_ingest"
 JOB_SEC_DEF14A_BOOTSTRAP = "sec_def14a_bootstrap"
+JOB_DEF14A_RECIPIENT_SUPPRESSIONS = "def14a_recipient_suppressions"
 JOB_DRS_DISCLOSURE_REFRESH = "drs_disclosure_refresh"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
@@ -1649,6 +1650,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=3, minute=30),
         catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
+    ),
+    ScheduledJob(
+        name=JOB_DEF14A_RECIPIENT_SUPPRESSIONS,
+        display_name="DEF 14A recipient suppressions",
+        # #2351 — fetches 10-K/10-Q/20-F cover instances from SEC, so it rides the
+        # shared ``sec_rate`` lane (no new lane). Steady state is all cache hits.
+        source="sec_rate",
+        description=(
+            "#2351 — a warrant / preferred sibling of a multi-instrument issuer CIK "
+            "does not own the DEF 14A Item 403 rows its CIK fans out to it. "
+            "Recomputes def14a_recipient_suppressions from each proxy's point-in-time "
+            "cover 12(b) table (cached in sec_cover_12b_*), diffs against the ledger, "
+            "and per changed instrument refreshes ownership_def14a_current / "
+            "ownership_esop_current and DEF 14A drift alerts. Positive evidence only: "
+            "an unresolvable cover never creates or removes a suppression. "
+            "Cadence: daily 04:15 UTC."
+        ),
+        cadence=Cadence.daily(hour=4, minute=15),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
@@ -8895,6 +8916,21 @@ def sec_def14a_bootstrap() -> None:
             result.rows_inserted,
             result.rows_updated,
         )
+
+
+def def14a_recipient_suppressions() -> None:
+    """``_INVOKERS['def14a_recipient_suppressions']`` — #2351 slice 2 (daily 04:15 UTC)."""
+    from app.services.def14a_recipients import run_with_sec_provider
+
+    with _tracked_job(JOB_DEF14A_RECIPIENT_SUPPRESSIONS) as tracker:
+        with connect_job(autocommit=True) as conn:
+            report = run_with_sec_provider(conn)
+        tracker.row_count = report.inserted + report.updated + report.deleted
+        logger.info("def14a_recipient_suppressions: %s", report)
+        if report.instruments_failed:
+            raise RuntimeError(
+                f"def14a_recipient_suppressions: apply failed for instruments {report.instruments_failed}"
+            )
 
 
 def drs_disclosure_refresh() -> None:

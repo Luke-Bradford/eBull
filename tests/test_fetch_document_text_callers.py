@@ -56,6 +56,9 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/drs_disclosure.py",
         "app/services/ncen_classifier.py",
         "app/services/n_port_ingest.py",
+        # #2351 — cover 12(b) instance → sec_cover_12b_fetches / _pairs, raw
+        # stored first (xbrl_cover_instance).
+        "app/services/def14a_recipients.py",
         # Manifest-worker adapters (#1126 / #1128 / #1129 / #1130 /
         # #1133 / #1134 / #1151). Each one wraps a legacy service-layer
         # ingester whose SQL normalisation already lives on this allow-

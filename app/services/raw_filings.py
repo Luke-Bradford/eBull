@@ -92,6 +92,11 @@ DocumentKind = Literal[
     # population (~1.8k) → swept (born-compacted); a rewash re-fetches the
     # full population in ~3 min at the shared 10 req/s. sql/224.
     "tender_body",
+    # #2351 — 10-K/10-Q/20-F cover XBRL instance (``<stem>_htm.xml``), read for
+    # its 12(b) (title, symbol) pairs. Parsed pairs are cached in
+    # ``sec_cover_12b_pairs``; the body is write-only and can be MBs → swept.
+    # sql/420.
+    "xbrl_cover_instance",
 ]
 # submissions.json / companyfacts.json are keyed by CIK, not by SEC
 # accession number — they belong in their own per-CIK store, not in
@@ -107,7 +112,7 @@ DocumentKind = Literal[
 # which a born-compacted row lacks). Canonical here (single source of
 # truth); ``raw_payload_retention`` imports it.
 SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset(
-    {"primary_doc", "prospectus_body", "tender_body", "pre14a_body"}
+    {"primary_doc", "prospectus_body", "tender_body", "pre14a_body", "xbrl_cover_instance"}
 )
 # Future PR adds a sibling ``cik_raw_documents`` table for those.
 

@@ -42,10 +42,23 @@ pytestmark = pytest.mark.db
 # None of the four writes a watermark, a *_current table, data_freshness_index or
 # sec_filing_manifest, so no ordering-sensitive write is involved. Self-overlap
 # stays covered by the per-job-name in-process lock (§4).
+#
+# Write-safety audit, 2026-09-24 (#2351) — def14a_recipient_suppressions:
+#   def14a_recipient_suppressions, sec_cover_12b_fetches/_pairs → sole writer.
+#     Cover cache rows come from immutable filings, ON CONFLICT DO NOTHING. Safe.
+#   filing_raw_documents (kind xbrl_cover_instance only) → sole writer of that kind;
+#     store_raw is an idempotent UPSERT on (accession, kind). Safe.
+#   ownership_def14a_current / ownership_esop_current → via refresh_def14a_current /
+#     refresh_esop_current, which take the same per-instrument
+#     pg_advisory_xact_lock as every live writer's refresh. Ordering-safe by the lock,
+#     not the lane. Safe.
+#   def14a_drift_alerts → via detect_drift, whose _upsert_alert is guarded on the
+#     accession still being the holder's latest attributed row (#966). Safe.
 EXPECTED_SEC_RATE_MEMBERS = frozenset(
     {
         "cusip_universe_backfill",
         "daily_cik_refresh",
+        "def14a_recipient_suppressions",
         "daily_financial_facts",
         "daily_research_refresh",
         "drs_disclosure_refresh",
