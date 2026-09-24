@@ -50,6 +50,8 @@ from app.services.def14a_recipients import (
 )
 
 SLICE2: tuple[str, ...] = (REASON_NON_COMMON_SIBLING, REASON_OTHER_COVER)
+# A blocked row keeps the shipped decision and exposure (spec step 1).
+BLOCKED = Decision("keep", "shipped:blocked")
 
 
 def _m1(item: tuple[str, str]) -> tuple[str, str, list[Item403Line] | None]:
@@ -173,7 +175,7 @@ def bind(lines_path: Path, out: Path, fetch_text: FetchText) -> int:
                 if not cik:
                     d = Decision("keep", "abstained:cik")
                 elif r.instrument_id in desired.keep_instruments or key in desired.keep:
-                    d = Decision("keep", "shipped:blocked")
+                    d = BLOCKED
                 elif key in slice2:
                     d = Decision("withhold", "other_class:non_common_instrument")
                     rec["slice2_row"] = desired.accessions[key]
@@ -188,7 +190,7 @@ def bind(lines_path: Path, out: Path, fetch_text: FetchText) -> int:
                             covers[(cik, accession)] = _cover(conn, fetch_text, cik, sibs, dates.get(accession), report)
                         cover = covers[(cik, accession)]
                         if isinstance(cover, str) or cover is None:
-                            d = Decision("keep", f"shipped:{cover}" if cover == "blocked" else "abstained:no_cover")
+                            d = BLOCKED if cover == "blocked" else Decision("keep", "abstained:no_cover")
                         else:
                             me = next(s for s in sibs if s.instrument_id == r.instrument_id)
                             ident = common_identity(me, sibs, cover)
@@ -213,7 +215,7 @@ def bind(lines_path: Path, out: Path, fetch_text: FetchText) -> int:
                 rec["new_shares"] = None if d.shares is None else str(d.shares)
                 shipped_hidden = key in acc_ledger or (r.instrument_id, accession, r.holder) in row_ledger
                 rec["shipped_hidden"] = shipped_hidden
-                rec["category"] = _category(d, r.shares, shipped_hidden, blocked=d.reason == "shipped:blocked")
+                rec["category"] = _category(d, r.shares, shipped_hidden, blocked=d == BLOCKED)
                 decisions.append(rec)
     return _report(decisions, legacy, acc_ledger, row_ledger, out, m1_sha, ledger_hash)
 
@@ -252,7 +254,7 @@ def _category(d: Decision, legacy_shares: Decimal | None, shipped_hidden: bool, 
 
 def _shown(rec: dict[str, Any]) -> str | None:
     """The M2 exposure of a decided row: the shown share count, or None when hidden."""
-    if rec["outcome"] == "withhold" or (rec["reason"] == "shipped:blocked" and rec["shipped_hidden"]):
+    if rec["outcome"] == "withhold" or (rec["reason"] == BLOCKED.reason and rec["shipped_hidden"]):
         return None
     shares = rec["new_shares"] if rec["outcome"] == "rebind" else rec["legacy_shares"]
     return None if shares is None else format(Decimal(shares).normalize(), "f")
