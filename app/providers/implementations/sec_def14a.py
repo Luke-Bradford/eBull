@@ -4483,6 +4483,7 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
     # "Compensation Actually Paid" values) from beating the real SCT.
     best_score = 0
     best_table: _RawTable | None = None
+    best_fields: tuple[str, ...] = ()
     for window_start, window_end in _find_sct_windows(html_text):
         for start, end in _scan_outer_tables(html_text, start=window_start, end=window_end):
             parsed = _parse_table_html(html_text[start:end], drop_value_continuations=False)
@@ -4508,12 +4509,13 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
                 continue
             best_score = score
             best_table = parsed
+            best_fields = candidate_fields
 
     if best_table is None:
         logger.debug("DEF 14A: no valid SCT met score floor; best_score=%d", best_score)
         return Def14ASummaryCompTable(rows=(), raw_table_score=best_score)
 
-    fields = _sct_fields_for(best_table)
+    fields = best_fields
 
     rows: list[Def14AExecCompRow] = []
     current_name = ""
