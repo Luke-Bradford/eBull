@@ -1474,7 +1474,7 @@ def refresh_def14a_current(
                     source, source_document_id, source_accession, source_url,
                     filed_at, period_start, period_end,
                     shares, percent_of_class
-                FROM ownership_def14a_observations
+                FROM ownership_def14a_observations_attributed
                 WHERE instrument_id = %(iid)s
                   AND known_to IS NULL
                   AND shares IS NOT NULL
@@ -1942,7 +1942,7 @@ def refresh_esop_current(
                     source, source_document_id, source_accession, source_url,
                     filed_at, period_start, period_end,
                     shares, percent_of_class
-                FROM ownership_esop_observations
+                FROM ownership_esop_observations_attributed
                 WHERE instrument_id = %(iid)s AND known_to IS NULL
                 ORDER BY
                     plan_name,
@@ -2844,7 +2844,7 @@ def refresh_def14a_current_batch(
                     source, source_document_id, source_accession, source_url,
                     filed_at, period_start, period_end,
                     shares, percent_of_class
-                FROM ownership_def14a_observations
+                FROM ownership_def14a_observations_attributed
                 WHERE instrument_id = ANY(%(ids)s::bigint[])
                   AND known_to IS NULL
                   AND shares IS NOT NULL
@@ -2963,7 +2963,7 @@ def refresh_esop_current_batch(
                     source, source_document_id, source_accession, source_url,
                     filed_at, period_start, period_end,
                     shares, percent_of_class
-                FROM ownership_esop_observations
+                FROM ownership_esop_observations_attributed
                 WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
                 ORDER BY
                     instrument_id,

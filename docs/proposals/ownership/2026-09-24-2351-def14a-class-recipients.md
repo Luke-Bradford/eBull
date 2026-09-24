@@ -88,9 +88,9 @@ findings). Three changes of model, one per failed finding group:
   of class*), with beneficial ownership determined under Rule 13d-3 (Item 403
   Instruction 1 / 17 CFR 240.13d-3).
 - **Warrants:** Rule 13d-3(d)(1)(i) deems a holder the beneficial owner of the securities
-  it can acquire within 60 days — i.e. warrant holdings are counted INTO the underlying
-  common class's figure, not reported as the warrant's own class. A warrant instrument
-  therefore never owns the Item 403 row.
+  it can acquire within 60 days, so warrant holdings enter the Item 403 table through the
+  UNDERLYING common class's figure. The parsed figure is a common-class amount and
+  percent; it is not the warrant instrument's holding, whatever the table layout.
 - **Preferred:** Item 403(b) may report a preferred class as its own column. A preferred
   sibling correctly owns a figure only when the parser read that column. Measured for
   every suppression in the population (below): the stored rows are the common column
@@ -185,13 +185,18 @@ every instrument where this happens.
 
 ### Rule (pure, `app/services/def14a_recipients.py`, `RECIPIENT_RULE_VERSION = 1`)
 
-**Title kind** — the FIRST match of
-`\b(common|ordinary|capital\s+(?:stock|shares?)|warrants?|preferred|preference|units?|rights?)\b`
-(case-insensitive) in the title decides: warrant/preferred/preference → `non_common`;
-common/ordinary/capital stock|shares → `common`; unit/right, or no match → `other`.
-So `Warrants to purchase Common Stock` → non_common, `Common Stock and associated
-preferred stock purchase rights` → common, `Units, each consisting of one share …` →
-other, `Capital Securities` → other.
+**Title kind** (case-insensitive, word-bounded, checked in this order):
+1. contains `units?` or `rights?` → `other` (a bundle or a rights instrument is neither
+   a clean witness nor a clean suppression);
+2. contains `warrants?` → `non_common`;
+3. else the FIRST of `preferred|preference` / `common|ordinary|capital (stock|shares?)`
+   decides → `non_common` / `common`;
+4. no match → `other`.
+
+So `Warrants to purchase Common Stock` and `Common Stock Purchase Warrants` → non_common;
+`Common Stock and associated preferred stock purchase rights` and `Preferred Stock
+Purchase Rights` → other; `Units, each consisting of one share … and one warrant` →
+other; `Capital Securities` → other. `other` never suppresses and never witnesses.
 
 **Symbol match** — eToro symbol trimmed, upper-cased, trailing `.US` dropped, compared
 for EQUALITY with the cover `TradingSymbol` (trimmed, upper-cased). No punctuation
@@ -211,26 +216,33 @@ witness each other.
 
 ### Cover resolution (lifted from the census)
 
-For accession A with filing date D (the `filing_events` row for A itself; NULL → A is
-skipped this run): candidates are `filing_events` rows for any sibling with
+For accession A with filing date D = `min(filing_date)` over `filing_events` rows with
+`provider = 'sec'` and `provider_filing_id = A` (none → A is skipped and keeps its
+stored rows, exactly like unresolved): candidates are `provider = 'sec'` `filing_events`
+rows for any sibling with
 `filing_type IN ('10-K','10-Q','20-F')` (originals only — no amendment semantics),
 `filing_date < D` (strictly before: no same-day ordering question) and
 `filing_date >= D - 400 days` (the annual cover cycle plus slack; older is no evidence),
-distinct accessions, newest first, at most 4 considered (every candidate counts,
+distinct accessions (the row with the lowest `filing_event_id` represents a duplicate),
+ordered `filing_date DESC, provider_filing_id DESC`, at most 4 considered (every candidate counts,
 including ones without an `.htm` primary).
 
 Per candidate, cached by `sec_cover_12b_fetches` when terminal:
 - no `.htm` primary document → `not_found`, next candidate;
 - GET `<stem>_htm.xml` via the shared SEC client + rate gate: 404/410 → `not_found`,
-  next candidate; 200 with an XML root → store raw, parse; anything else (transport
-  error, 3xx left unresolved, 401/403/429/5xx, 200 non-XML, XML parse error) →
-  **unresolved**: stop, and A keeps its existing suppression rows unchanged this run.
+  next candidate; any 200 → `store_raw` the decoded body (committed), then parse — a
+  root element other than `xbrl`, or an XML parse error, is **unresolved**; anything
+  else (transport error, unfollowed 3xx, 401/403/429/5xx) → **unresolved**. Unresolved
+  stops the walk, and A keeps its existing suppression rows unchanged this run.
 - Parse = `parse_cover_contexts`, lifted into `app/services/sec_cover_identity.py`
   (bytes in; the census-2900 script imports it from there), plus: facts must be in the
-  `dei` namespace, `dei:EntityCentralIndexKey` must equal the issuer CIK (else
-  `not_found` — a wrong-issuer cover is no evidence), singleton (title, symbol) per
+  `dei` namespace, `dei:EntityCentralIndexKey` is cached as `entity_cik` and compared
+  at USE time (a cover whose entity CIK ≠ the issuer CIK is skipped as a candidate, so
+  the cache is issuer-independent), singleton (title, symbol) per
   context; a symbol that ALSO appears in a context with several titles/symbols is
-  dropped from the pairs (ambiguous). No pairs → `no_pairs`, next candidate.
+  dropped from the pairs (ambiguous); titles whitespace-collapsed, symbols trimmed and
+  upper-cased, empty values dropped. No pairs → `no_pairs`, next candidate. The fetch
+  row and its pairs are written in ONE transaction.
 - First candidate with `pairs` is the cover. None within the budget → A has no cover.
 
 ### Job — full recompute, diff, apply
@@ -244,18 +256,24 @@ neighbours. Each run:
    `ownership_(def14a|esop)_observations.source_accession` over those instruments.
 2. Per accession: resolve the cover (steady state: all cache hits, zero fetches), run
    `decide` → desired suppression set. Unresolved accessions keep their current rows.
-3. Diff desired vs stored per instrument. For each instrument with any change, ONE
-   transaction: insert/delete its suppression rows, call `refresh_def14a_current` and
-   `refresh_esop_current` (they nest as savepoints), and `_reconcile_alert_rows`
-   for that instrument. Ledger and materialisations commit together, so a crash leaves
-   either both or neither — a later run re-diffs and retries.
+3. Diff desired vs stored per instrument, comparing the WHOLE row (evidence columns and
+   `rule_version` included). For each instrument with any insert/update/delete, ONE
+   transaction: apply its ledger changes, call `refresh_def14a_current`,
+   `refresh_esop_current` (they nest as savepoints) and `detect_drift(instrument_id=…)`
+   (purges alerts whose accession is no longer the latest attributed one AND re-mints
+   the ones that now apply). Ledger and materialisations commit together, so a crash
+   leaves both or neither and a later run re-diffs. An instrument whose transaction
+   raises is logged and skipped; the rest continue; the run reports failure if any
+   instrument failed.
 4. A stored row whose accession/instrument dropped out of the population is deleted in
    step 3 (it is not in the desired set). Rows from an older `rule_version` are
    recomputed like any other.
 5. Job output: per-run counts (accessions, unresolved, fetches, inserted, deleted,
    instruments refreshed). The job is the only writer of the ledger.
 
-Reversal = disable the job and delete the rows (the next run would recreate them).
+Reversal = disable the job, delete the rows, and run `refresh_def14a_current` /
+`refresh_esop_current` / `detect_drift` for the affected instruments (the ledger rows
+name them).
 A newly ingested DEF 14A shows on a warrant sibling until the next successful run.
 
 ### Tests
@@ -275,12 +293,33 @@ A newly ingested DEF 14A shows on a warrant sibling until the next successful ru
 - Full-population A/B over every multi-sibling CIK: for every instrument, the full row
   set (hash) of `ownership_def14a_current`, `ownership_esop_current`, the typed
   latest-holders read, the CSV export and `def14a_drift_alerts`, before/after the job's
-  first run. The ONLY instruments that change are the suppressed set; every other
-  instrument's hashes are identical. Instruments falling back to an older accession are
-  listed.
-- Smoke `/instruments/{HTZWW,STRK.US,OPENW}` ownership: no DEF 14A holders; `HTZ`, `MSTR`,
-  `OPEN`, `GOOGL`, `AAPL` unchanged.
-- Cross-source: `HTZWW`'s cover title vs the 12(b) table on EDGAR.
+  first run, plus `ownership_history` def14a series. The ONLY instruments that change
+  are the suppressed set; every other instrument's hashes are identical. Instruments
+  falling back to an older accession are listed.
+- Smoke `/instruments/{HTZWW,STRK.US,OPENW}` ownership: no DEF 14A holders from any
+  suppressed accession (an unsuppressed older accession may still show and is listed);
+  `HTZ`, `MSTR`, `OPEN`, `GOOGL`, `AAPL` unchanged.
+- Cross-source: `HTZWW` and `STRK` cover titles vs the 12(b) table on EDGAR.
+
+### Accepted limits (ckpt-1 round 2, classified by the author)
+
+Every item below can only FAIL TO SUPPRESS or leave today's figure; none can suppress a
+common instrument, because a suppression needs an exact symbol match to a warrant/
+preferred title AND an exact match of a different sibling to a common title on a cover
+of the same issuer CIK.
+- XBRL context periods/dimensions, exchange, nil/placeholder facts: the census-2900
+  same-context reader is the source rule (Reg S-T Rule 406 / Item 601(b)(104)); context
+  dimensions beyond it are not modelled.
+- Instance discovery assumes `<stem>_htm.xml` (the iXBRL extracted-instance convention);
+  a miss is `not_found` → no evidence → no suppression. `not_found` is cached: an
+  accession's derived files are immutable once published.
+- Current symbols against historical covers: bounded by the same-CIK and 400-day
+  requirements; ticker reuse inside one issuer within 400 days is not modelled.
+- Amended covers (10-K/A) are ignored; a corrective amendment of the 12(b) table is not
+  modelled.
+- Decision history: deletions are logged in the job output, not kept in a history table.
+- The scheduler never runs two instances of one job concurrently (one lane permit), so
+  mixed-version / overlapping runs do not arise.
 
 ## Slice 3 — scoped only
 

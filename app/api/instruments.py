@@ -3299,7 +3299,7 @@ def get_def14a_drill(
             """
             WITH latest AS (
                 SELECT accession_number, as_of_date AS holders_as_of
-                FROM def14a_beneficial_holdings
+                FROM def14a_beneficial_holdings_attributed
                 WHERE instrument_id = %s
                 ORDER BY as_of_date DESC NULLS LAST, accession_number DESC
                 LIMIT 1
@@ -3307,7 +3307,7 @@ def get_def14a_drill(
             SELECT holder_name, holder_role, shares, percent_of_class,
                    h.as_of_date, h.accession_number, issuer_cik,
                    latest.holders_as_of
-            FROM def14a_beneficial_holdings h
+            FROM def14a_beneficial_holdings_attributed h
             JOIN latest USING (accession_number)
             WHERE instrument_id = %s
             ORDER BY shares DESC NULLS LAST, holder_name
@@ -3528,7 +3528,7 @@ def get_def14a_csv(
             """
             SELECT accession_number, issuer_cik, holder_name, holder_role,
                    shares, percent_of_class, as_of_date
-            FROM def14a_beneficial_holdings
+            FROM def14a_beneficial_holdings_attributed
             WHERE instrument_id = %s
             ORDER BY as_of_date DESC NULLS LAST, accession_number DESC,
                      shares DESC NULLS LAST, holder_name

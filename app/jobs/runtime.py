@@ -597,6 +597,7 @@ _INVOKERS[_scheduler.JOB_CUSIP_RESOLVER_POST_BULK_SWEEP] = _scheduler.cusip_reso
 # binding in MANUAL_TRIGGER_JOB_SOURCES at sources.py).
 _INVOKERS[_scheduler.JOB_SEC_ATOM_FAST_LANE] = _adapt_zero_arg(_scheduler.sec_atom_fast_lane)
 _INVOKERS[_scheduler.JOB_SEC_DAILY_INDEX_RECONCILE] = _adapt_zero_arg(_scheduler.sec_daily_index_reconcile)
+_INVOKERS[_scheduler.JOB_DEF14A_RECIPIENT_SUPPRESSIONS] = _adapt_zero_arg(_scheduler.def14a_recipient_suppressions)
 _INVOKERS[_scheduler.JOB_SEC_PER_CIK_POLL] = _adapt_zero_arg(_scheduler.sec_per_cik_poll)
 # #1639 — daily 13F-NT supersession capture (scheduled, lane sec_rate).
 _INVOKERS[_scheduler.JOB_SEC_13F_NOTICE_SYNC] = _adapt_zero_arg(_scheduler.sec_13f_notice_sync)

@@ -433,7 +433,7 @@ def _def14a_history(
             SELECT DISTINCT ON (period_end, ownership_nature)
                 period_end, ownership_nature,
                 source, source_accession, filed_at, shares
-            FROM ownership_def14a_observations
+            FROM ownership_def14a_observations_attributed
             WHERE instrument_id = %(iid)s
               AND known_to IS NULL
               AND shares IS NOT NULL

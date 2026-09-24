@@ -37,8 +37,10 @@ import httpx
 import lxml.etree as ET
 
 from app.config import settings
+from app.services.sec_cover_identity import SECURITY_FACTS as _SECURITY_FACTS
+from app.services.sec_cover_identity import parse_cover_contexts_root
 from app.services.sec_pipelined_fetcher import FetchTask, PipelinedSecFetcher
-from app.services.xbrl_instance import SAFE_XML_PARSER, context_dimensions, context_period
+from app.services.xbrl_instance import SAFE_XML_PARSER
 
 ANNUAL_FORMS: Final = frozenset({"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"})
 FORMATION_CLOSES: Final = (
@@ -47,8 +49,6 @@ FORMATION_CLOSES: Final = (
     datetime(2024, 6, 28, 16, 0, 0),
 )
 PARSER_VERSION: Final = "r6-sec-cover-identity-census-v2"
-_SECURITY_FACTS: Final = frozenset({"Security12bTitle", "TradingSymbol", "SecurityExchangeName"})
-_COVER_FACTS: Final = _SECURITY_FACTS | {"DocumentPeriodEndDate"}
 
 
 @dataclass(frozen=True)
@@ -202,50 +202,7 @@ def download_instances(rows: tuple[Submission, ...], cache_root: Path, *, chunk_
 def parse_cover_contexts(path: Path) -> list[dict[str, Any]]:
     with gzip.open(path, "rb") as handle:
         root = ET.parse(handle, parser=SAFE_XML_PARSER).getroot()
-    contexts: dict[str, ET._Element] = {}
-    for element in root.iter():
-        if not isinstance(element.tag, str) or ET.QName(element.tag).localname != "context":
-            continue
-        context_id = element.get("id")
-        if context_id:
-            contexts[context_id] = element
-
-    values: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
-    for element in root.iter():
-        if not isinstance(element.tag, str):
-            continue
-        local = ET.QName(element.tag).localname
-        context_ref = element.get("contextRef")
-        text = " ".join("".join(element.itertext()).split())
-        if local in _COVER_FACTS and context_ref and text:
-            values[context_ref][local].append(text)
-
-    document_periods = sorted({value for facts in values.values() for value in facts.get("DocumentPeriodEndDate", [])})
-    if len(document_periods) != 1:
-        return []
-
-    out: list[dict[str, Any]] = []
-    for context_ref, facts in sorted(values.items()):
-        # The three security facts identify one listed class through their
-        # shared context. DocumentPeriodEndDate is document-level and may use
-        # the default context, so require one unique value across the instance.
-        if not _SECURITY_FACTS.issubset(facts):
-            continue
-        context = contexts.get(context_ref)
-        if context is None:
-            continue
-        out.append(
-            {
-                "context_ref": context_ref,
-                "dimensions": context_dimensions(context),
-                "period": context_period(context),
-                "facts": {
-                    "DocumentPeriodEndDate": document_periods,
-                    **{key: sorted(set(facts[key])) for key in sorted(_SECURITY_FACTS)},
-                },
-            }
-        )
-    return out
+    return parse_cover_contexts_root(root)
 
 
 def parse_cover_cache(

@@ -250,7 +250,7 @@ def _reconcile_alert_rows(
         WHERE (%(iid)s::BIGINT IS NULL OR a.instrument_id = %(iid)s::BIGINT)
           AND a.accession_number IS DISTINCT FROM (
             SELECT h.accession_number
-            FROM def14a_beneficial_holdings h
+            FROM def14a_beneficial_holdings_attributed h
             WHERE h.instrument_id = a.instrument_id
               AND h.holder_name = a.holder_name
               AND h.issuer_cik <> %(sentinel)s
@@ -289,7 +289,7 @@ def _upsert_alert(conn: psycopg.Connection[tuple], alert: DriftAlert) -> None:
             %(severity)s, %(accession)s, %(as_of)s
         WHERE %(accession)s = (
             SELECT h.accession_number
-            FROM def14a_beneficial_holdings h
+            FROM def14a_beneficial_holdings_attributed h
             WHERE h.instrument_id = %(iid)s
               AND h.holder_name = %(name)s
               AND h.issuer_cik <> %(sentinel)s
@@ -351,7 +351,7 @@ def _select_latest_def14a_holders(
             SELECT DISTINCT ON (instrument_id, holder_name)
                 instrument_id, holder_name, holder_role,
                 shares, accession_number, as_of_date
-            FROM def14a_beneficial_holdings
+            FROM def14a_beneficial_holdings_attributed
             WHERE issuer_cik <> %(sentinel)s
               AND instrument_id IS NOT NULL
               AND shares IS NOT NULL
