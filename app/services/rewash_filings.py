@@ -994,7 +994,9 @@ def _rewash_exec_comp_all_instruments(
     ``RewashParseError`` from any sibling propagates → the whole
     accession fails + retries, matching the single-instrument contract.
 
-    Returns total comp rows written across siblings.
+    Returns total comp rows written across siblings -- plus, for a sibling whose
+    parse withheld every row (#2350), the stale rows cleared there. Any non-zero
+    total means the accession was applied.
     """
     # Function-local import per this file's def14a convention (and the
     # #1731 manifest_parsers init-order trap).
