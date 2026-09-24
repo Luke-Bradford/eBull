@@ -157,7 +157,18 @@ PROBE_MATRIX: Final[Mapping[RankingFamily, Mapping[Condition, ConditionEvidence]
                     qualification="acceptance clock; public from the next NY date; dissemination lag not proven",
                 ),
                 "system_versions": _cell("fail", "C2"),
-                "historical_population": _cell("fail", "P2", "P5"),
+                # #3361: the series<->CIK linkage exists and is causal, but it abstains and its
+                # identity correctness is unmeasured, so the population still fails. Evidence:
+                # scripts/causal_3361_security_linkage.py over bundle manifest 32a281d8...4eb6.
+                "historical_population": _cell(
+                    "fail",
+                    "P2",
+                    "P5",
+                    qualification=(
+                        "#3361 series-CIK linkage: acceptance clock; full-population causal reference equal;"
+                        " typed abstentions; identity correctness unmeasured"
+                    ),
+                ),
                 "causal_transform": _cell("pass", "C1"),
             }
         ),
@@ -180,7 +191,8 @@ _REASONS: Final[Mapping[RankingFamily, str]] = MappingProxyType(
         ),
         RankingFamily.COMPANYFACTS_PIT: (
             "no independent vintage witness: companyfacts is today's extraction, and DERA FSDS was reprocessed"
-            " in 2024-12 so historical quarters are not original vintages; CIK-to-security linkage is #3361"
+            " in 2024-12 so historical quarters are not original vintages; the #3361 CIK-to-series linkage is causal"
+            " but abstains and is not identity-verified"
         ),
     }
 )
