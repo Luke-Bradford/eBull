@@ -25,9 +25,11 @@ Step 2 of `docs/proposals/ta/2026-09-24-selection-programme-v2.md` ("Security li
   predecessor's evidence can be absent, carry another symbol, or expire first.
 - The filing obligation (below) explains which issuers usually have evidence. It does not certify that the
   archive is complete, and nothing is gated on it.
-- The causal-equality test (acceptance item 2) proves the reader uses no SEC evidence accepted on or after D,
-  **given** the snapshotted inventory and archives. It proves nothing about identity correctness; item 3
-  measures that on subsets only.
+- The causal-equality test (acceptance item 2) proves the reader uses no SEC evidence accepted on or after D
+  **except through the snapshot-integrity mask** (accession conflicts, issuer integrity, collisions), which is
+  computed on the full snapshot. That is conditional causality, as in #3360, given the snapshotted inventory
+  and archives. It proves nothing about identity correctness; item 3
+  measures agreement with two non-ground-truth comparators on subsets only.
 
 ## Why causal
 A link at D that used evidence accepted after D would condition on the issuer existing after D, i.e. on
@@ -109,7 +111,7 @@ implementation's census supersedes it.
 ## Construction rules
 1. **Inputs (snapshotted, hashed; the build fails on any violation):**
    - **Form 3/4/5 quarter zips.** Contiguous from `2006q1`. Member names unique. Exactly one `SUBMISSION.tsv`,
-     whose header has unique names including the five columns used. Strict UTF-8.
+     whose header has unique names including the four columns used. Strict UTF-8.
      - Completeness of a quarter is **not certified**: SEC publishes no watermark.
    - **#3360 submissions.zip**, pinned by that bundle's manifest digest.
    - **Form 25 rows:** the sorted `sec_form25_register` equity-delisting rows read, plus the register's
@@ -200,13 +202,12 @@ implementation's census supersedes it.
    11. `conflicting_evidence`
    12. `linked(cik, basis)`
 
-   Results 10–12 carry:
-   - the grammar class;
+   Every result from 5 on carries the grammar class. Results 10–12 also carry:
    - the W observations: accession, CIK, acceptance, multiplicity, `q_alias`;
    - `form25`: the register rows with `filed_date < D` whose `issuer_cik` is a CIK in W. Each is marked
      `symbol_match` (its `resolved_symbol` passes rule 4 against S), `symbol_other` or `symbol_null`.
      `form25_unobserved` is returned instead when D is outside the register span.
-7. **Reader** `link_as_of(series_id, D)` returns the rule-6 result. Cross-series facts are census-only.
+7. **Reader** `link_as_of(series_id, D)` returns the rule-6 result. Cross-series facts are census-only, except the collision guard (rule 4), a declared inventory-integrity exception.
 
 ## Artefact
 Content-addressed like #3360 (`r6_pit_bundle.read_verified_document`, exclusive publish, policy-bound
@@ -278,7 +279,7 @@ loader):
      `unsupported_document_type`; `multi_symbol` (`BF B`).
    - **Matching:** `q_alias` for a 4-character root, none for 3; `BF_B` matches `BF.B`, `BF-B` and `BF/B`,
      not `BFB` or `BF`.
-   - **Grammar:** `P_A_CL`, `WS`, `R_W` abstain; an unrecognised shape → `unparsed_symbol_form`.
+   - **Grammar:** `ABC_P_A_CL`, `ABC_WS`, `ABC_R_W` abstain; an unrecognised shape → `unparsed_symbol_form`.
    - **Collisions:** `ABCD` vs `ABCDQ`.
    - **Form 25:** flagged only when `filed_date < D`; `form25_unobserved` outside the span; never changes the
      link.
@@ -307,6 +308,77 @@ loader):
    clock and causal evidence added to their reasons. **Nothing becomes admissible.** How an arm consumes
    abstentions, `succession`, `class` and `q_alias` is that arm's declaration.
 
+## Implementation-precision rules (round 3)
+Each resolves one round-3 finding; the number in brackets is that finding.
+
+**Admission and inputs**
+- **Order [4].** Validate, then canonicalise. The ledger keeps the raw CIK string.
+- **Quarter files [5].** Each quarter name appears once; a duplicate fails the build.
+- **TSV parsing [6].** Tab-separated, no quoting (`QUOTE_NONE`), no BOM (a BOM fails the build), `\n` line
+  ends. Blank lines are `malformed_row`.
+- **Form 25 admission [7, 8, 9].**
+  - Rows are selected by `provision_class = 'equity_delisting'` exactly.
+  - `issuer_cik` is canonicalised by rule 2. A malformed `issuer_cik` or NULL `filed_date` fails the build.
+  - A `resolved_symbol` that is empty or a placeholder counts as `symbol_null`.
+  - An empty register makes every flag `form25_unobserved`.
+- **No Intrader series [10].** The build fails.
+- **Identifiers and sort order [11, 12].**
+  - `series_id` is a positive bigint; its file name is its decimal form.
+  - Every dump is sorted by its full column tuple, NULLs first. Form 25 rows on a result are sorted by
+    (`filed_date`, accession).
+
+**Grammar**
+- **Letters [13].** Single letters are ASCII `A–Z` only.
+- **Exchange test issues [14].** The test applies to the full vendor symbol and to its root.
+
+**Links and flags**
+- **Q alias [18].** A link is `q_alias` iff any W observation of the linked CIK is an alias.
+- **Optional Form 25 input [19].** The builder accepts `--without-form25` for cross-check (b). Such a bundle's
+  `POLICY` differs, and its manifest records the mode.
+- **Series that ended before D [20].** For `ended_in_window` series the census reports `link_as_of(S,
+  last_bar)` as the diagnostic.
+
+**Liquidity**
+- **Fewer than 21 bars [21].** `liquidity_unavailable`.
+- **Groups 2 and 3 [22].** Liquidity `not_applicable`.
+- **Bar rejections [23, 24].** Duplicate (series, date) bars, or non-finite values, fail the census.
+- **Endpoint bars [25].** Every series must have its endpoint bars in the snapshot; otherwise the census fails.
+
+**Form 25 outcome channels**
+- **Two channels [26, 27, 28].** The Form 25 outcome is reported separately:
+  - by the linked CIK;
+  - by symbol match, only where rule 4 defines a match set.
+
+  Channels are never merged. The unit is **series with ≥1 row** (binary); row counts are separate.
+- **Counting units [29, 30].**
+  - Collisions are counted in series and in groups, by final result.
+  - Flag counts use results 10–12 as the denominator.
+
+**Identity descriptives**
+- **Observation age [31].** Measured in days, as D minus the observation's acceptance NY date.
+- **Reversion [32–35].** For the same series, reversion means "the **immediate** predecessor CIK is linked at
+  a later formation within 730 days of the switch formation". Coverage means grid formations ≤
+  `supported_through`. Precedence: `reverted` > `unobservable` > `not_reverted`.
+
+**Join to #3360**
+- **Membership [36].** Recomputed from the same pinned `submissions.zip` with the #3360 census code
+  (`scripts/census_3360_pit_fundamentals.py::membership_mask`).
+
+**Cross-checks**
+- **Query dates [37, 41].** Queries run at `min(last_bar, date)`: eToro at `last_bar`; Form 25 at
+  `min(last_bar, delisting_filed_date)`.
+- **Classification [38].** Reader abstentions and a missing comparator are `not_comparable`, each reported by
+  reason.
+- **History-row validity [39].** Malformed `instrument_cik_history` rows are `not_comparable`.
+- **Register join [40].** Joined on `(issuer_cik)` of rows with `resolved_symbol` matching the series under
+  rule 4 and `filed_date = delisting_filed_date`. Zero or several distinct CIKs → `not_comparable`.
+
+**Causal test dates [42, 43, 44]**
+- Add each acceptance date itself, `+730` (the last day inside the window), `first_bar − 1`, `last_bar`, and
+  `supported_through`.
+- Add the register span's `min` and `max + 1`.
+- Form 25 dates come from the candidate rows of every CIK ever observed for the series, independent of D.
+
 ## Design history
 **Round 1 (67 findings):**
 - The acceptance clock replaced `FILING_DATE`, after measurement.
@@ -334,6 +406,8 @@ loader):
   include abstentions; descriptives sit on the formation grid with right-censoring.
 - Cross-check inputs are snapshotted, and interval containment is defined.
 - The count error was fixed (the old "104 other" figure).
+
+**Round 3 (44 findings):** the section above resolves each one.
 
 **Kept as stated costs** (no source rule exists for an alternative): the 730-day window, any interleaving
 abstains, the Q-alias length, and the grammar interpretation.
