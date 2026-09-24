@@ -11408,3 +11408,19 @@ neighbouring container and match it.**
 - Enforced in: `app/services/sec_cover_identity.py::entity_ciks`,
   `app/services/def14a_recipients.py::resolve_cover`,
   `tests/test_def14a_recipients.py::test_parse_cover_instance_keeps_every_co_registrant_cik`.
+
+### `_build_slice` rebuilds every `Holder` field by field — a new field is dropped unless named there (#3227 item 4)
+
+- Failure (caught at write time, not shipped): #3227 item 4 added `Holder.joint_filing_lines`
+  and carried it through `_dedup_by_priority` and `_collapse_owner_lots`, both of which
+  construct or `replace` the holder. `_build_slice` then re-constructs each holder with an
+  explicit keyword list to set `pct_outstanding`, and any field absent from that list
+  reverts to its default — so the API would have served 0 on every holder while the
+  upstream passes and their unit tests were correct. `ownership_nature`,
+  `is_ten_percent_owner` and `nature_from_table_i` are already dropped there deliberately
+  (they matter only before the slice is built).
+- Prevention: a new `Holder` field that must reach the API is added to the `Holder(...)`
+  call in `_build_slice`, and a test drives the value through `_build_slice`, not only
+  through the pass that sets it.
+- Enforced in: `app/services/ownership_rollup.py::_build_slice`,
+  `tests/test_3227_joint_filing_lines.py::test_build_slice_carries_the_count_to_the_api_holder`.

@@ -81,6 +81,10 @@ export interface FilerRow {
    *  lots were collapsed to one line (#1942). Display-only — already summed
    *  into ``shares``. Empty/absent for single-lot rows. */
   readonly lots?: readonly FilerLotRow[];
+  /** #3227 item 4 — the figure was read from a joint holdings filing on which
+   *  the owner has this many Table I lines (not attributed or summed: the filing
+   *  names no holder per line). Absent when not applicable. */
+  readonly joint_filing_lines?: number;
 }
 
 /** One sub-CIK breakdown row under a collapsed family (#1644 / #1649). */
@@ -100,6 +104,8 @@ export interface FilerLotRow {
   readonly source: OwnershipSourceTag;
   readonly source_url: string | null;
   readonly as_of_date: string | null;
+  /** #3227 item 4 — see ``FilerRow.joint_filing_lines``. */
+  readonly joint_filing_lines?: number;
 }
 
 const CATEGORY_LABELS: Record<CategoryKey, string> = {
@@ -605,7 +611,12 @@ function FilerTable({
                               {l.nature ?? "—"}
                               <span className="ml-1 text-slate-400">({l.source})</span>
                             </span>
-                            <span className="font-mono">{formatShares(l.shares)}</span>
+                            <span className="font-mono">
+                              {formatShares(l.shares)}
+                              {l.joint_filing_lines !== undefined && (
+                                <JointFilingMark lines={l.joint_filing_lines} />
+                              )}
+                            </span>
                           </li>
                         ))}
                       </ul>
@@ -619,6 +630,10 @@ function FilerTable({
                 </td>
                 <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
                   {formatShares(row.shares)}
+                  {/* A lot-collapsed owner marks the lot it applies to instead. */}
+                  {row.joint_filing_lines !== undefined && row.lots === undefined && (
+                    <JointFilingMark lines={row.joint_filing_lines} />
+                  )}
                 </td>
                 <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
                   {row.pct_outstanding === null ? "—" : formatPct(row.pct_outstanding)}
@@ -648,6 +663,22 @@ function FilerTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/**
+ * #3227 item 4 — a joint filing's Table I names no holder per line, so the
+ * owner's lines are neither attributed nor summed; say so rather than hide it.
+ */
+function JointFilingMark({ lines }: { readonly lines: number }): JSX.Element {
+  return (
+    <span
+      data-test="joint-filing-lines"
+      className="ml-1 font-sans text-xs text-amber-600 dark:text-amber-400"
+      title={`Read from a joint filing that reports ${lines} holding lines for this owner without saying which co-filer holds each. The lines are not added together here, so this figure may leave some out; others may be a different share class.`}
+    >
+      (joint filing, {lines} lines)
+    </span>
   );
 }
 
@@ -717,6 +748,9 @@ export function rollupToFilerRows(
             source: l.source,
             source_url: l.edgar_url,
             as_of_date: l.as_of_date,
+            ...((l.joint_filing_lines ?? 0) > 0
+              ? { joint_filing_lines: l.joint_filing_lines }
+              : {}),
           };
         })
         .filter((l): l is FilerLotRow => l !== null)
@@ -733,6 +767,9 @@ export function rollupToFilerRows(
         as_of_date: h.as_of_date,
         ...(members.length > 0 ? { family_members: members } : {}),
         ...(lots.length > 0 ? { lots } : {}),
+        ...((h.joint_filing_lines ?? 0) > 0
+          ? { joint_filing_lines: h.joint_filing_lines }
+          : {}),
       });
     }
   }

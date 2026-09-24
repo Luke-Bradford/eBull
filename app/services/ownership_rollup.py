@@ -272,6 +272,9 @@ class HolderLot:
     accession_number: str
     edgar_url: str | None
     as_of_date: date | None
+    # This lot's own :attr:`Holder.joint_filing_lines` (#3227 item 4), so the marker
+    # names the lot it applies to rather than the summed owner figure.
+    joint_filing_lines: int = 0
 
 
 @dataclass(frozen=True)
@@ -321,6 +324,14 @@ class Holder:
     # aggregate of the individual rows, so summing it double-counts (I21/#1659).
     # ``None`` for every non-DEF-14A holder and for unlabelled proxy rows.
     holder_role: str | None = None
+    # #3227 item 4 — non-zero when this figure was read from a joint Form 3/4/5 holdings
+    # accession on which the owner has this many Table I lines. A joint filing names no
+    # holder per line, so those lines are not attributed or summed; this is the visible
+    # form of that refusal, NOT a claim the figure is understated (a line may be another
+    # class, or the entity's whole holding). Taken from the winning row. A lot-collapsed
+    # holder carries the largest of its lots' and each :class:`HolderLot` its own, so a
+    # consumer can tell which counted component the flag belongs to. 0 otherwise.
+    joint_filing_lines: int = 0
 
 
 @dataclass(frozen=True)
@@ -876,6 +887,9 @@ class _Candidate:
     # ten-percent-owner → ``beneficial``) and never reads the D/I field at all.
     # ``False`` for every non-Section-16 source, whose nature is not Table I either.
     nature_from_table_i: bool = False
+    # Table I lines this owner reports on a joint ``:NDH:`` accession, of which
+    # ``shares`` is one (#3227 item 4, ``_INSIDER_JOINT_FILING_LINES_SQL``). 0 otherwise.
+    joint_filing_lines: int = 0
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -1115,6 +1129,45 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION_SQL: Final = """
     )
 """
 
+# #3227 item 4 — a row whose accession is a JOINT holdings filing (live ``:NDH:`` lines from
+# more than one reporting owner) on which this owner has more than one Table I line: the
+# number of those lines, else 0. On a joint filing ``<nonDerivativeTable>`` is a sibling of
+# ``<reportingOwner>`` and names no holder (prevention-log, TACO), so the figure cannot be
+# the owner's attributed total: ``INSIDER_HOLDING_LINE_SUM_LATERAL`` refuses to sum there
+# (its one-owner test), and the XML path gives every line to ``filers[0]``, one row per D/I.
+# This column makes that visible instead of silent.
+#
+# Keyed on ``source_accession``, NOT on the winning row's document-id format: when both
+# pipelines parsed the accession, the de-collision above keeps the XML row (a bare
+# accession id) and drops the owner's ``:NDH:`` rows from the read, but the ambiguity is
+# the filing's, not the pipeline's (Codex ckpt-2). The ``:NDH:`` rows are still the only
+# per-line record, so they are what is counted.
+#
+# Not a claim of understatement: a line may be another class (CNH's common + special
+# voting) or the entity's whole holding restated (Form 3 Instr. 5(b)(iv)).
+#
+# One aggregate over the instrument's ``:NDH:`` rows, joined in as ``jf``: a correlated
+# scalar per ``_current`` row fanned out across every quarterly partition and cost ~0.4s a
+# rollup (review NITPICK on #3356, measured against a constant-0 control).
+_INSIDER_JOINT_FILING_LINES_SQL: Final = """
+    WITH ndh AS (
+        SELECT split_part(o.source_document_id, ':', 1) AS accession,
+               o.holder_identity_key,
+               count(*) AS lines
+          FROM ownership_insiders_observations o
+         WHERE o.instrument_id = %(iid)s
+           AND o.known_to IS NULL
+           AND o.source_document_id ~ ':NDH:'
+         GROUP BY 1, 2
+    )
+    SELECT n.accession, n.holder_identity_key, n.lines
+      FROM ndh n
+     WHERE n.lines > 1
+       AND EXISTS (SELECT 1 FROM ndh m
+                    WHERE m.accession = n.accession
+                      AND m.holder_identity_key <> n.holder_identity_key)
+"""
+
 
 def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
     """Build the canonical-holder candidate set from the per-source
@@ -1163,11 +1216,15 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                    -- relationship-derived one. A dataset row only survives that predicate
                    -- when no manifest parse of its accession exists, so the two are not
                    -- redundant: this flags the survivors.
-                   (oc.source_document_id !~ ':(NDT|NDH):') AS nature_from_table_i
+                   (oc.source_document_id !~ ':(NDT|NDH):') AS nature_from_table_i,
+                   COALESCE(jf.lines, 0) AS joint_filing_lines
             FROM ownership_insiders_current oc
             LEFT JOIN insider_filers f
               ON f.accession_number = oc.source_accession
              AND f.filer_cik = oc.holder_cik
+            LEFT JOIN ({_INSIDER_JOINT_FILING_LINES_SQL}) jf
+              ON jf.accession = oc.source_accession
+             AND jf.holder_identity_key = oc.holder_identity_key
             WHERE oc.instrument_id = %(iid)s
               AND oc.shares IS NOT NULL
               AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
@@ -1200,6 +1257,7 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                     ownership_nature=str(row["ownership_nature"]),
                     is_ten_percent_owner=bool(row["is_ten_percent_owner"]),
                     nature_from_table_i=bool(row["nature_from_table_i"]),
+                    joint_filing_lines=int(row["joint_filing_lines"]),
                 )
             )
 
@@ -2099,6 +2157,9 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 # the corpus mixes the two provenances. Re-check with the mixed-group
                 # query recorded on #2386 before assuming otherwise.
                 nature_from_table_i=any(c.nature_from_table_i for c in cands),
+                # The WINNER's, unlike the two flags above: it describes the row whose
+                # ``shares`` is shown, and a loser's figure is not counted (#3227 item 4).
+                joint_filing_lines=winner.joint_filing_lines,
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,
@@ -4094,6 +4155,7 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
                 accession_number=h.winning_accession,
                 edgar_url=h.winning_edgar_url,
                 as_of_date=h.as_of_date,
+                joint_filing_lines=h.joint_filing_lines,
             )
             for h in rows_desc
         )
@@ -4111,7 +4173,17 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
                     continue
                 seen.add(dkey)
                 merged_dropped.append(d)
-        out.append(replace(primary, shares=total, lots=lots, dropped_sources=tuple(merged_dropped)))
+        out.append(
+            replace(
+                primary,
+                shares=total,
+                lots=lots,
+                dropped_sources=tuple(merged_dropped),
+                # Every lot is counted in ``total``, so a joint-filing lot anywhere in
+                # the owner flags the collapsed figure; ``lots`` says which (#3227 item 4).
+                joint_filing_lines=max(h.joint_filing_lines for h in rows_desc),
+            )
+        )
     return out
 
 
@@ -4405,6 +4477,7 @@ def _build_slice(
             family_members=h.family_members,  # display breakdown of a collapsed family (#1644/#1649)
             lots=h.lots,  # per-lot breakdown of a collapsed direct/indirect owner (#1942)
             holder_role=h.holder_role,  # DEF 14A proxy display label (#2121); None off the overlay
+            joint_filing_lines=h.joint_filing_lines,  # unsummed joint-filing lines (#3227 item 4)
         )
         for h in holders
     )

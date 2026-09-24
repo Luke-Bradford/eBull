@@ -141,6 +141,14 @@ export interface OwnershipHolder {
    * "directors & officers as a group" aggregate, so it is never summed.
    */
   readonly holder_role?: string | null;
+  /**
+   * #3227 item 4 — non-zero when this figure was read from a joint Form 3/4/5
+   * holdings filing on which the owner has this many Table I lines. The filing
+   * names no holder per line, so they are not attributed or summed. Not a claim
+   * the figure is understated (a line may be another class). On a lot-collapsed
+   * owner, ``lots[].joint_filing_lines`` names the lot. 0/absent otherwise.
+   */
+  readonly joint_filing_lines?: number;
 }
 
 /** One additive Section-16 lot (direct / indirect) of a collapsed owner
@@ -153,6 +161,8 @@ export interface OwnershipLot {
   readonly accession_number: string;
   readonly edgar_url: string | null;
   readonly as_of_date: string | null;
+  /** #3227 item 4 — this lot's own joint-filing line count (see the holder's). */
+  readonly joint_filing_lines?: number;
 }
 
 /** One constituent row inside a collapsed institutional family

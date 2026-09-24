@@ -4834,6 +4834,8 @@ class _HolderLotModel(BaseModel):
     accession_number: str
     edgar_url: str | None
     as_of_date: date | None
+    # #3227 item 4 — this lot's own joint-filing line count; see ``_HolderModel``.
+    joint_filing_lines: int = 0
 
 
 class _HolderModel(BaseModel):
@@ -4854,6 +4856,11 @@ class _HolderModel(BaseModel):
     # DEF 14A proxy role tag (#2121) — display label only, present solely on the
     # non-additive ``def14a_unmatched`` memo overlay; ``None`` everywhere else.
     holder_role: str | None = None
+    # #3227 item 4 — non-zero when this figure was read from a joint Form 3/4/5 holdings
+    # filing on which the owner has this many Table I lines; the filing names no holder
+    # per line, so they are not attributed or summed. Not a claim of understatement. On a
+    # lot-collapsed owner, ``lots[].joint_filing_lines`` names the lot. 0 everywhere else.
+    joint_filing_lines: int = 0
 
 
 class _SliceModel(BaseModel):
@@ -5196,10 +5203,12 @@ def _rollup_to_response(
                                 accession_number=lot.accession_number,
                                 edgar_url=lot.edgar_url,
                                 as_of_date=lot.as_of_date,
+                                joint_filing_lines=lot.joint_filing_lines,
                             )
                             for lot in h.lots
                         ],
                         holder_role=h.holder_role,
+                        joint_filing_lines=h.joint_filing_lines,
                     )
                     for h in s.holders
                 ],
