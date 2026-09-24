@@ -93,8 +93,8 @@ def _intrader(inventory: Sequence[Sequence[Any]]) -> dict[int, tuple[str, date]]
 
 def _valid_history(row: Sequence[Any]) -> tuple[str, date, date | None] | None:
     """Precision rule [39]: a malformed history row is not comparable."""
-    _, cik, start, end, _ = row
     try:
+        _, cik, start, end, _ = row
         start_d = date.fromisoformat(start)
         end_d = None if end is None else date.fromisoformat(end)
     except TypeError, ValueError:

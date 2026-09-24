@@ -803,3 +803,12 @@ def test_registry_cell_citing_3361_stays_fail() -> None:
     cell = PROBE_MATRIX[RankingFamily.COMPANYFACTS_PIT]["historical_population"]
     assert cell.outcome == "fail" and cell.qualification is not None and "#3361" in cell.qualification
     assert FIELD_REGISTRY[RankingFamily.COMPANYFACTS_PIT].status == "refused"
+
+
+def test_malformed_history_rows_are_not_comparable_not_errors() -> None:
+    from scripts.crosscheck_3361_security_linkage import _valid_history  # pyright: ignore[reportPrivateUsage]
+
+    assert _valid_history([1, C1, "2020-01-01", None, "imported"]) == (C1, date(2020, 1, 1), None)
+    for row in ([1, C1, "2020-01-01"], [1, 7, "2020-01-01", None, "x"], [1, C1, 20200101, None, "x"]):
+        assert _valid_history(row) is None
+    assert _valid_history([1, C1, "2020-01-02", "2020-01-01", "x"]) is None  # reversed interval
