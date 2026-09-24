@@ -37,7 +37,7 @@ def main() -> int:
     with psycopg.connect(settings.database_url) as conn:
         symbols = {s.instrument_id: s.symbol for sibs in load_population(conn).values() for s in sibs}
         report = RunReport()
-        desired, _, _ = compute_desired(conn, _no_fetch, report)
+        desired = compute_desired(conn, _no_fetch, report).accessions
         hits = sorted(
             (k[0], symbols[k[0]], k[1], row[9]) for k, row in desired.items() if row[3] == REASON_CLASS_COLUMN
         )
@@ -47,7 +47,7 @@ def main() -> int:
         )
         print(f"{REASON_CLASS_COLUMN}: {len(hits)} (instrument, accession) pairs")
         for iid, symbol, accession, witness_title in hits:
-            rows = load_row_locations(conn, accession, [iid])[iid]
+            rows = [locs for _, locs in load_row_locations(conn, accession, [iid])[iid]]
             letters = Counter(row_label(locs) for locs in rows)
             captions = sorted({" / ".join(loc.captions) for locs in rows for loc in locs if location_label(loc)})
             print(f"  {symbol:10} {accession}  witness: {witness_title}")

@@ -1,14 +1,20 @@
-"""#2351 slice 2 — the suppression job against the real schema (views, refresh, cache)."""
+"""#2351 slices 2 / 3b — the suppression job against the real schema (views, refresh, cache)."""
 
 from __future__ import annotations
 
 from datetime import date
+from typing import LiteralString
 
 import httpx
 import psycopg
 import pytest
 
-from app.services.def14a_recipients import run_recipient_suppressions
+from app.services.def14a_recipients import (
+    REASON_CLASS_ROW,
+    RECIPIENT_RULE_VERSION,
+    _apply_instrument,
+    run_recipient_suppressions,
+)
 from app.services.ownership_observations import refresh_def14a_current
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 from tests.test_def14a_recipients import cover_xml
@@ -140,4 +146,78 @@ def test_warrant_suppressed_walk_back_and_unresolved_keeps_rows(
     report = run_recipient_suppressions(conn, fetch_none)
     assert report.deleted == 1
     assert _attributed(conn) == {1, 2}
+    assert _current_holders(conn) == {1: 1, 2: 1}
+
+
+def test_row_suppression_withholds_one_holder_from_one_sibling(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Slice 3b: a row ledger entry hides that (instrument, accession, holder) from all
+    three views and ``_current``; the sibling and the other holder are untouched; deleting
+    it restores the row."""
+    conn = ebull_test_conn
+    conn.autocommit = True
+    _seed(conn)
+    conn.execute(
+        """
+        INSERT INTO def14a_beneficial_holdings (
+            instrument_id, accession_number, issuer_cik, holder_name, holder_role, shares, percent_of_class, as_of_date)
+        VALUES (1, %s, %s, 'Plan', 'principal', 5, 1.0, '2026-03-01')
+        """,
+        (PROXY, CIK),
+    )
+    conn.execute(
+        """
+        INSERT INTO ownership_esop_observations (
+            instrument_id, plan_name, ownership_nature, source, source_document_id, source_accession,
+            filed_at, period_end, known_from, ingest_run_id, shares, percent_of_class)
+        VALUES (1, 'Plan', 'beneficial', 'def14a', %s, %s, '2026-04-01', '2026-03-01', '2026-04-01',
+                gen_random_uuid(), 5, 1.0)
+        """,
+        (PROXY, PROXY),
+    )
+    row = (
+        1,
+        PROXY,
+        "Knighthead Capital",
+        CIK,
+        REASON_CLASS_ROW,
+        RECIPIENT_RULE_VERSION,
+        "c-1",
+        "Class A Common Stock",
+        "HTZ",
+        2,
+        "Class B Common Stock",
+        "Class B Common Stock",
+    )
+    plan = (1, PROXY, "Plan", *row[3:])
+    _apply_instrument(conn, 1, upserts=[], deletes=[], row_upserts=[row, plan], row_deletes=[])
+
+    queries: dict[str, LiteralString] = {
+        "holdings": "SELECT instrument_id, holder_name FROM def14a_beneficial_holdings_attributed",
+        "def14a": "SELECT instrument_id, holder_name FROM ownership_def14a_observations_attributed",
+        "esop": "SELECT instrument_id, plan_name FROM ownership_esop_observations_attributed",
+    }
+
+    def names(view: str) -> set[tuple[int, str]]:
+        return {(int(r[0]), str(r[1])) for r in conn.execute(queries[view])}
+
+    assert names("holdings") == {(2, "Knighthead Capital")}
+    assert names("def14a") == {(2, "Knighthead Capital")}
+    assert names("esop") == set()
+    assert _current_holders(conn) == {2: 1}
+
+    _apply_instrument(
+        conn,
+        1,
+        upserts=[],
+        deletes=[],
+        row_upserts=[],
+        row_deletes=[(PROXY, "Knighthead Capital"), (PROXY, "Plan")],
+    )
+    assert names("def14a") == {
+        (1, "Knighthead Capital"),
+        (2, "Knighthead Capital"),
+    }
+    assert names("esop") == {(1, "Plan")}
     assert _current_holders(conn) == {1: 1, 2: 1}

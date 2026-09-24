@@ -10,9 +10,11 @@ hashes each operator-visible DEF 14A surface BEFORE and AFTER one job run:
 - the ownership-history DEF 14A series source (attributed observations).
 
 Pass condition: the set of instruments whose hashes changed EQUALS the set of
-instruments whose ledger KEYS ``(instrument_id, accession_number)`` the run added or
-removed (on an empty ledger: every suppressed instrument), and no instrument's apply
-failed. Also lists instruments whose latest attributed accession fell back to an older,
+instruments whose ledger KEYS the run added or removed — ``(instrument_id,
+accession_number)`` and, slice 3b, the row ledger's ``(instrument_id, accession_number,
+holder_name)`` — and no instrument's apply failed. Every ``ownership_def14a_current`` row
+that changed is listed (slice 3b: a withheld row may fall back to an older accession's). Also lists
+instruments whose latest attributed accession fell back to an older,
 unsuppressed one.
 
 Usage (applies the job's writes to the connected DB)::
@@ -77,10 +79,28 @@ def _latest_accession(conn: psycopg.Connection[Any], iid: int, *, attributed: bo
     return str(row[0]) if row else None
 
 
-def _ledger_keys(conn: psycopg.Connection[Any]) -> set[tuple[int, str]]:
-    return {
+def _ledger_keys(conn: psycopg.Connection[Any]) -> set[tuple[Any, ...]]:
+    keys: set[tuple[Any, ...]] = {
         (int(i), str(a))
         for i, a in conn.execute("SELECT instrument_id, accession_number FROM def14a_recipient_suppressions").fetchall()
+    }
+    keys |= {
+        (int(i), str(a), str(h))
+        for i, a, h in conn.execute(
+            "SELECT instrument_id, accession_number, holder_name FROM def14a_recipient_row_suppressions"
+        ).fetchall()
+    }
+    return keys
+
+
+def _current_rows(conn: psycopg.Connection[Any], iid: int) -> set[tuple[Any, ...]]:
+    return {
+        tuple(r)
+        for r in conn.execute(
+            """SELECT holder_name, ownership_nature, source_accession, shares, percent_of_class
+                 FROM ownership_def14a_current WHERE instrument_id = %s""",
+            (iid,),
+        ).fetchall()
     }
 
 
@@ -106,6 +126,7 @@ def main() -> int:
         keys_before = _ledger_keys(conn)
         iids = sorted(set(iids) | {k[0] for k in keys_before})
         before = snapshot(conn, iids)
+        current_before = {iid: _current_rows(conn, iid) for iid in iids}
         report = run_with_sec_provider(conn)
         after = snapshot(conn, iids)
         suppressions = conn.execute(
@@ -118,6 +139,18 @@ def main() -> int:
         delta_iids = {k[0] for k in key_delta}
         changed = {iid: sorted(k for k in before[iid] if before[iid][k] != after[iid][k]) for iid in iids}
         changed = {iid: v for iid, v in changed.items() if v}
+        current_changes = {}
+        for iid in sorted(changed):
+            now = _current_rows(conn, iid)
+            if now != current_before[iid]:
+                current_changes[str(symbols.get(iid))] = {
+                    "removed": sorted(current_before[iid] - now),
+                    "added": sorted(now - current_before[iid]),
+                }
+        row_suppressions = conn.execute(
+            """SELECT instrument_id, accession_number, holder_name, class_cell, witness_instrument_id
+                 FROM def14a_recipient_row_suppressions ORDER BY 1, 2, 3"""
+        ).fetchall()
         fallback = []
         for iid in sorted(suppressed_iids):
             raw_latest = _latest_accession(conn, iid, attributed=False)
@@ -131,7 +164,7 @@ def main() -> int:
         "population_ciks": len(population),
         "population_instruments": len(iids),
         "ledger_rows_before": len(keys_before),
-        "ledger_keys_added_or_removed": sorted(f"{symbols.get(i)} {a}" for i, a in key_delta),
+        "ledger_keys_added_or_removed": sorted(" ".join(map(str, (symbols.get(k[0]), *k[1:]))) for k in key_delta),
         "run_report": vars(report),
         "suppressions": [
             {
@@ -143,6 +176,17 @@ def main() -> int:
             }
             for r in suppressions
         ],
+        "row_suppressions": [
+            {
+                "symbol": symbols.get(int(r[0])),
+                "accession": r[1],
+                "holder": r[2],
+                "class_cell": r[3],
+                "witness": symbols.get(int(r[4])),
+            }
+            for r in row_suppressions
+        ],
+        "current_row_changes": current_changes,
         "changed_instruments": {symbols.get(i): v for i, v in sorted(changed.items())},
         "changed_without_key_delta": sorted(str(symbols.get(i)) for i in set(changed) - delta_iids),
         "key_delta_not_changed": sorted(str(symbols.get(i)) for i in delta_iids - set(changed)),
@@ -150,7 +194,8 @@ def main() -> int:
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, default=str))
-    print(json.dumps({k: v for k, v in result.items() if k != "suppressions"}, indent=2, default=str))
+    skip = {"suppressions", "row_suppressions", "current_row_changes", "ledger_keys_added_or_removed"}
+    print(json.dumps({k: v for k, v in result.items() if k not in skip}, indent=2, default=str))
     ok = not (result["changed_without_key_delta"] or result["key_delta_not_changed"] or report.instruments_failed)
     print("PASS" if ok else "FAIL: changed set != key-delta set, or an apply failed")
     return 0 if ok else 1

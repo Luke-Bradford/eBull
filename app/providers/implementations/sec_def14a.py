@@ -2555,11 +2555,21 @@ class ShareLocation(NamedTuple):
     ``interior`` — the column's non-numeric texts between the header block and the
     holder's row (a mid-table section label or a second header). ``row_texts`` — the
     holder row's other non-empty cells (a V-shape *Title of class* cell lands here).
+    ``class_captions`` / ``class_cells`` (#2351 slice 3b) — the header texts of the
+    table's *Title of class* columns (Item 403 column (1), found by its own caption), and
+    the holder row's distinct non-empty texts in those columns, excluding any column that
+    holds the matched name cell.
     """
 
     captions: tuple[str, ...]
     interior: tuple[str, ...]
     row_texts: tuple[str, ...]
+    class_captions: tuple[str, ...] = ()
+    class_cells: tuple[str, ...] = ()
+
+
+# Item 403 column (1), "Title of class" (17 CFR 229.403(a)/(b)), by its own caption.
+_TITLE_OF_CLASS = re.compile(r"\btitle\s+of\s+(?:class|series)\b", re.IGNORECASE)
 
 
 def _is_share_cell(text: str) -> bool:
@@ -2586,6 +2596,12 @@ def share_locations(table_htmls: list[str], holders: list[tuple[str, Decimal]]) 
         header_end = next((r for r, row in enumerate(grid) if any(_is_share_cell(t) for t in row.values())), None)
         if header_end is None:
             continue
+        header_texts: dict[int, list[str]] = {}
+        for above in grid[:header_end]:
+            for c, text in above.items():
+                if text and text not in header_texts.setdefault(c, []):
+                    header_texts[c].append(text)
+        class_cols = {c for c, texts in header_texts.items() if _TITLE_OF_CLASS.search(" ".join(texts))}
         for r, row in enumerate(grid):
             name_cols = {c for c, text in row.items() if text and _layout_name_key(text)}
             for h, (key, (_, shares)) in enumerate(zip(keys, holders, strict=True)):
@@ -2605,7 +2621,10 @@ def share_locations(table_htmls: list[str], holders: list[tuple[str, Decimal]]) 
                         t for mid in grid[header_end:r] if (t := mid.get(c, "")) and _parse_share_count(t) is None
                     )
                     row_texts = tuple(t for col, t in sorted(row.items()) if t and col != c)
-                    out[h].append(ShareLocation(tuple(captions), interior, row_texts))
+                    cols = sorted(class_cols - matched - {c})
+                    class_captions = tuple(dict.fromkeys(t for col in cols for t in header_texts[col]))
+                    class_cells = tuple(dict.fromkeys(t for col in cols if (t := row.get(col, ""))))
+                    out[h].append(ShareLocation(tuple(captions), interior, row_texts, class_captions, class_cells))
     return out
 
 
