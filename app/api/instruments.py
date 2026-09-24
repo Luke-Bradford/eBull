@@ -4854,6 +4854,10 @@ class _HolderModel(BaseModel):
     # DEF 14A proxy role tag (#2121) — display label only, present solely on the
     # non-additive ``def14a_unmatched`` memo overlay; ``None`` everywhere else.
     holder_role: str | None = None
+    # #3227 item 4 — non-zero when ``shares`` is ONE of this many Table I lines the
+    # owner reported on a joint Form 3/4/5 holdings filing, which names no holder per
+    # line and so is not summed. Not a claim of understatement. 0 everywhere else.
+    joint_filing_lines: int = 0
 
 
 class _SliceModel(BaseModel):
@@ -5200,6 +5204,7 @@ def _rollup_to_response(
                             for lot in h.lots
                         ],
                         holder_role=h.holder_role,
+                        joint_filing_lines=h.joint_filing_lines,
                     )
                     for h in s.holders
                 ],

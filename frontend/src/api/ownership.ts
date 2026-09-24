@@ -141,6 +141,13 @@ export interface OwnershipHolder {
    * "directors & officers as a group" aggregate, so it is never summed.
    */
   readonly holder_role?: string | null;
+  /**
+   * #3227 item 4 — non-zero when ``shares`` is ONE of this many Table I lines
+   * the owner reported on a joint Form 3/4/5 holdings filing. The filing names
+   * no holder per line, so the lines are not summed. Not a claim the figure is
+   * understated (a line may be another class). 0/absent everywhere else.
+   */
+  readonly joint_filing_lines?: number;
 }
 
 /** One additive Section-16 lot (direct / indirect) of a collapsed owner

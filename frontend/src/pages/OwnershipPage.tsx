@@ -81,6 +81,10 @@ export interface FilerRow {
    *  lots were collapsed to one line (#1942). Display-only — already summed
    *  into ``shares``. Empty/absent for single-lot rows. */
   readonly lots?: readonly FilerLotRow[];
+  /** #3227 item 4 — ``shares`` is ONE of this many Table I lines the owner
+   *  reported on a joint holdings filing (not summed: the filing names no
+   *  holder per line). Absent when not applicable. */
+  readonly joint_filing_lines?: number;
 }
 
 /** One sub-CIK breakdown row under a collapsed family (#1644 / #1649). */
@@ -619,6 +623,17 @@ function FilerTable({
                 </td>
                 <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
                   {formatShares(row.shares)}
+                  {row.joint_filing_lines !== undefined && (
+                    // #3227 item 4 — a joint filing's Table I names no holder per
+                    // line, so the lines are not summed; say so rather than hide it.
+                    <span
+                      data-test="joint-filing-lines"
+                      className="ml-1 font-sans text-xs text-amber-600 dark:text-amber-400"
+                      title={`Joint filing: this owner's filing reports ${row.joint_filing_lines} holding lines and does not say which co-filer holds each, so one line is shown, not their sum. The others may be a different share class.`}
+                    >
+                      (1 of {row.joint_filing_lines} lines)
+                    </span>
+                  )}
                 </td>
                 <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
                   {row.pct_outstanding === null ? "—" : formatPct(row.pct_outstanding)}
@@ -733,6 +748,9 @@ export function rollupToFilerRows(
         as_of_date: h.as_of_date,
         ...(members.length > 0 ? { family_members: members } : {}),
         ...(lots.length > 0 ? { lots } : {}),
+        ...((h.joint_filing_lines ?? 0) > 1
+          ? { joint_filing_lines: h.joint_filing_lines }
+          : {}),
       });
     }
   }

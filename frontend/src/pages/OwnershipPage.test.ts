@@ -350,6 +350,23 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     expect(rollupToFilerRows(rollup)[0]!.lots).toBeUndefined();
   });
 
+  it("carries a joint filing's unsummed line count (#3227 item 4), omitted at 0", () => {
+    const rollup = _baseRollup({
+      slices: [
+        _slice({
+          category: "insiders",
+          holders: [
+            _holder({ filer_name: "Exor N.V.", joint_filing_lines: 2 }),
+            _holder({ filer_cik: "2", filer_name: "Solo", joint_filing_lines: 0 }),
+          ],
+        }),
+      ],
+    });
+    const rows = rollupToFilerRows(rollup);
+    expect(rows.find((r) => r.label === "Exor N.V.")!.joint_filing_lines).toBe(2);
+    expect(rows.find((r) => r.label === "Solo")!.joint_filing_lines).toBeUndefined();
+  });
+
   it("skips zero / unparseable share counts (same predicate as the chart)", () => {
     const rollup = _baseRollup({
       slices: [

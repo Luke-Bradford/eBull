@@ -218,3 +218,23 @@ def test_beneficial_winner_sums_despite_an_indirect_row(conn: psycopg.Connection
     _indirect_row(conn, iid)
     oo.refresh_insiders_current(conn, instrument_id=iid)
     assert _shares_for(conn, iid, "beneficial") == Decimal("1000")
+
+
+@pytest.mark.parametrize(("lines", "expected"), _CASES)
+def test_rollup_reader_sees_the_joint_filing_refusal(
+    conn: psycopg.Connection[Any], lines: tuple[_Line, ...], expected: str
+) -> None:
+    """#3227 item 4 — the joint-filing refusal is visible to the rollup reader, and ONLY it.
+
+    Every other refusal above (two classes, equal amounts, unknown title) keeps a single line
+    too, but for a reason the line data states; only a joint filing leaves the reader unable to
+    tell which co-filer holds a line. The co-filer with one line has nothing unsummed."""
+    from app.services.ownership_rollup import _collect_canonical_holders_from_current
+
+    iid = 932_274
+    _seed(conn, iid, lines)
+    oo.refresh_insiders_current(conn, instrument_id=iid)
+    got = {c.filer_cik: c.joint_filing_lines for c in _collect_canonical_holders_from_current(conn, iid)}
+    joint = len({ln.holder_cik for ln in lines}) > 1
+    assert got[_CIK] == (sum(1 for ln in lines if ln.holder_cik == _CIK) if joint else 0)
+    assert all(v == 0 for cik, v in got.items() if cik != _CIK)
