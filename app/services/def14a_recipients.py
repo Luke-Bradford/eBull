@@ -5,7 +5,7 @@ the issuer CIK. This module maintains ``def14a_recipient_suppressions``: the
 (instrument, accession) pairs that readers exclude through the ``*_attributed`` views
 (sql/420). The writers and the fact tables are untouched.
 
-Spec: docs/proposals/ownership/2026-09-24-2351-def14a-class-recipients.md (slices 2, 2b, 3).
+Spec: docs/proposals/ownership/2026-09-24-2351-def14a-class-recipients.md (slices 2, 2b, 3, 3b).
 
 Source rule. Item 403 reports beneficial ownership per class, determined under Rule
 13d-3; Rule 13d-3(d)(1)(i) counts warrants into the UNDERLYING common class's figure,
@@ -21,6 +21,8 @@ create a suppression; an unresolvable cover also never removes one. Slice 2b car
 such a decision to the same instrument's other accessions (``extend_by_class``). Slice 3
 suppresses a lettered COMMON sibling (GOOG beside GOOGL) for a proxy when every row it
 holds sits under another class letter's column caption (``decide_class_column``).
+Slice 3b withholds single rows (``def14a_recipient_row_suppressions``): a row whose Item
+403 *Title of class* cell names another sibling's class (``decide_class_rows``).
 """
 
 from __future__ import annotations
@@ -46,10 +48,11 @@ from app.services.xbrl_instance import SAFE_XML_PARSER
 
 logger = logging.getLogger(__name__)
 
-RECIPIENT_RULE_VERSION: Final = 3
+RECIPIENT_RULE_VERSION: Final = 4
 REASON_NON_COMMON_SIBLING: Final = "non_common_sibling"
 REASON_OTHER_COVER: Final = "non_common_sibling_other_cover"
 REASON_CLASS_COLUMN: Final = "other_common_class_column"
+REASON_CLASS_ROW: Final = "other_common_class_row"
 
 COVER_FORMS: Final = ("10-K", "10-Q", "20-F")  # originals only
 MAX_COVER_CANDIDATES: Final = 4
@@ -159,7 +162,7 @@ def decide(*, accession_number: str, issuer_cik: str, siblings: Iterable[Sibling
 # followed by a word character or hyphen ("Class A-1", "Class II") is not a designator.
 _LETTER = r"[a-z](?![\w-])"
 _DESIGNATOR = re.compile(
-    rf"\b(?:class|series)(?:es)?\s+({_LETTER}(?:\s*(?:,|and|or|&|/)\s*(?:(?:class|series)\s+)?{_LETTER})*)",
+    rf"\b(class|series)(?:es)?\s+({_LETTER}(?:\s*(?:,|and|or|&|/)\s*(?:(?:class|series)\s+)?{_LETTER})*)",
     re.IGNORECASE,
 )
 _SINGLE_LETTER = re.compile(r"(?<![\w-])[a-z](?![\w-])", re.IGNORECASE)
@@ -170,7 +173,17 @@ _NON_COMMON_CAPTION = re.compile(
 
 
 def designators(text: str) -> frozenset[str]:
-    return frozenset(letter.upper() for group in _DESIGNATOR.findall(text) for letter in _SINGLE_LETTER.findall(group))
+    return frozenset(letter for _, letter in keyed_designators(text))
+
+
+def keyed_designators(text: str) -> frozenset[tuple[str, str]]:
+    """``(keyword, letter)`` pairs, keyword ``class`` or ``series`` (a Series B line is not
+    a Class B line)."""
+    return frozenset(
+        (keyword.lower(), letter.upper())
+        for keyword, group in _DESIGNATOR.findall(text)
+        for letter in _SINGLE_LETTER.findall(group)
+    )
 
 
 @dataclass(frozen=True)
@@ -275,6 +288,113 @@ def decide_class_column(
                     reason=REASON_CLASS_COLUMN,
                 )
             )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Slice 3b — V-shape: the Item 403 *Title of class* cell of the row a stored figure sits in
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RowSuppression:
+    instrument_id: int
+    accession_number: str
+    holder_name: str
+    issuer_cik: str
+    cover_accession: str
+    cover_title: str
+    cover_symbol: str
+    witness_instrument_id: int
+    witness_title: str
+    class_cell: str
+    rule_version: int = RECIPIENT_RULE_VERSION
+    reason: str = REASON_CLASS_ROW
+
+
+def row_class_label(loc: ShareLocation) -> tuple[str, str, str] | None:
+    """``(keyword, letter, class cell)`` of the Item 403 *Title of class* cell on the
+    located row; None = unlabelled.
+
+    Unlabelled when the share column is itself class-captioned or re-headed with a class
+    or a non-common security (H-shape, slice 3; a ``Preferred Stockholders`` section),
+    when a class caption or the class cell names a non-common security or a ``%`` rate (a
+    preferred series), or when the row has zero or several class cells, or the cell zero
+    or several designators.
+    """
+    if any(designators(t) or _NON_COMMON_CAPTION.search(t) for t in loc.captions):
+        return None
+    if any(designators(t) or _NON_COMMON_CAPTION.search(t) for t in loc.interior):
+        return None
+    if any(_NON_COMMON_CAPTION.search(t) or "%" in t for t in loc.class_captions):
+        return None
+    if len(loc.class_cells) != 1:
+        return None
+    cell = loc.class_cells[0]
+    if _NON_COMMON_CAPTION.search(cell) or "%" in cell:
+        return None
+    keyed = keyed_designators(cell)
+    if len(keyed) != 1:
+        return None
+    keyword, letter = next(iter(keyed))
+    return keyword, letter, cell
+
+
+def row_class_key(locations: list[ShareLocation]) -> tuple[str, str, str] | None:
+    """A stored row's class over ALL its locations; None = unbound."""
+    labels = {row_class_label(loc) for loc in locations}
+    if len(labels) != 1:
+        return None
+    return next(iter(labels))
+
+
+def decide_class_rows(
+    *,
+    accession_number: str,
+    issuer_cik: str,
+    siblings: Iterable[Sibling],
+    cover: Cover,
+    row_locations: dict[int, list[tuple[str, list[ShareLocation]]]],
+    whole: set[int],
+) -> list[RowSuppression]:
+    """Slice 3b: withhold a sibling's stored row whose *Title of class* cell names another
+    sibling's class (same keyword, the witness's usable letter). ``whole``: siblings
+    already suppressed for the whole accession — skipped."""
+    usable = usable_common_classes(siblings, cover)
+    out: list[RowSuppression] = []
+    for letter, classes in sorted(usable.items()):
+        for cc in classes:
+            if cc.sibling.instrument_id in whole:
+                continue
+            for holder_name, locs in row_locations.get(cc.sibling.instrument_id, []):
+                label = row_class_key(locs) if locs else None
+                if label is None:
+                    continue
+                keyword, row_letter, cell = label
+                if row_letter == letter:
+                    continue
+                witnesses = [
+                    w
+                    for w in usable.get(row_letter, [])
+                    if w.key != cc.key and (keyword, row_letter) in keyed_designators(w.title)
+                ]
+                if not witnesses:
+                    continue
+                witness = min(witnesses, key=lambda w: w.sibling.instrument_id)
+                out.append(
+                    RowSuppression(
+                        instrument_id=cc.sibling.instrument_id,
+                        accession_number=accession_number,
+                        holder_name=holder_name,
+                        issuer_cik=issuer_cik,
+                        cover_accession=cover.accession,
+                        cover_title=cc.title,
+                        cover_symbol=cc.key,
+                        witness_instrument_id=witness.sibling.instrument_id,
+                        witness_title=witness.title,
+                        class_cell=cell,
+                    )
+                )
     return out
 
 
@@ -498,6 +618,9 @@ class RunReport:
     inserted: int = 0
     updated: int = 0
     deleted: int = 0
+    rows_inserted: int = 0
+    rows_updated: int = 0
+    rows_deleted: int = 0
     instruments_refreshed: int = 0
     instruments_failed: list[int] = field(default_factory=list)
 
@@ -565,8 +688,9 @@ def _accessions_with_dates(
 
 def load_row_locations(
     conn: psycopg.Connection[Any], accession: str, sibling_ids: list[int]
-) -> dict[int, list[list[ShareLocation]]]:
-    """Slice 3 evidence: per sibling, the locations of each of its stored rows for ACCESSION.
+) -> dict[int, list[tuple[str, list[ShareLocation]]]]:
+    """Slice 3/3b evidence: per sibling, ``(holder_name, locations)`` of each of its stored
+    rows for ACCESSION.
 
     A row with a NULL share count gets no location, so it keeps the accession. A body
     that fails to parse is no evidence (logged): parsing is deterministic, so the failure
@@ -591,11 +715,11 @@ def load_row_locations(
         rows_by_instrument.setdefault(int(iid), []).append((str(name), None if shares is None else Decimal(shares)))
     try:
         tables = item403_table_htmls(body)
-        out: dict[int, list[list[ShareLocation]]] = {}
+        out: dict[int, list[tuple[str, list[ShareLocation]]]] = {}
         for iid, rows in rows_by_instrument.items():
             counted = [(name, shares) for name, shares in rows if shares is not None]
             located = iter(share_locations(tables, counted))
-            out[iid] = [next(located) if shares is not None else [] for _, shares in rows]
+            out[iid] = [(name, next(located) if shares is not None else []) for name, shares in rows]
         return out
     except Exception:
         logger.exception("def14a_recipients: class-column evidence failed for %s", accession)
@@ -621,13 +745,45 @@ def _row(s: Suppression) -> tuple[Any, ...]:
     return tuple(getattr(s, c) for c in _LEDGER_COLS)
 
 
-def compute_desired(
-    conn: psycopg.Connection[Any], fetch_text: FetchText, report: RunReport
-) -> tuple[dict[tuple[int, str], tuple[Any, ...]], set[tuple[int, str]], set[int]]:
-    """Desired ledger rows; the keys, and the instruments, whose stored rows are kept as-is."""
-    desired: dict[tuple[int, str], tuple[Any, ...]] = {}
-    keep: set[tuple[int, str]] = set()
-    keep_instruments: set[int] = set()
+# Column order of the row-ledger SELECT / INSERT below; must match both.
+_ROW_LEDGER_COLS: Final = (
+    "instrument_id",
+    "accession_number",
+    "holder_name",
+    "issuer_cik",
+    "reason",
+    "rule_version",
+    "cover_accession",
+    "cover_title",
+    "cover_symbol",
+    "witness_instrument_id",
+    "witness_title",
+    "class_cell",
+)
+
+
+def _row_row(s: RowSuppression) -> tuple[Any, ...]:
+    return tuple(getattr(s, c) for c in _ROW_LEDGER_COLS)
+
+
+@dataclass
+class Desired:
+    """``compute_desired``'s result. ``keep`` / ``keep_instruments``: the (instrument,
+    accession) pairs and instruments whose stored ledger rows — in both ledgers — are
+    never deleted this run."""
+
+    accessions: dict[tuple[int, str], tuple[Any, ...]] = field(default_factory=dict)
+    rows: dict[tuple[int, str, str], tuple[Any, ...]] = field(default_factory=dict)
+    keep: set[tuple[int, str]] = field(default_factory=set)
+    keep_instruments: set[int] = field(default_factory=set)
+
+
+def compute_desired(conn: psycopg.Connection[Any], fetch_text: FetchText, report: RunReport) -> Desired:
+    """Desired rows of both ledgers; the keys, and the instruments, whose stored rows are kept."""
+    result = Desired()
+    desired = result.accessions
+    keep = result.keep
+    keep_instruments = result.keep_instruments
     for cik, siblings in load_population(conn).items():
         ids = [s.instrument_id for s in siblings]
         accessions, by_instrument = _accessions_with_dates(conn, ids)
@@ -635,6 +791,7 @@ def compute_desired(
         covers: list[Cover] = []
         point_in_time: list[Suppression] = []
         class_column: list[Suppression] = []
+        class_rows: list[RowSuppression] = []
         blocked_accessions: set[str] = set()
         for accession, proxy_date in accessions:
             report.accessions += 1
@@ -652,14 +809,25 @@ def compute_desired(
             if res.cover is None:
                 continue
             covers.append(res.cover)
-            point_in_time.extend(decide(accession_number=accession, issuer_cik=cik, siblings=siblings, cover=res.cover))
-            class_column.extend(
-                decide_class_column(
+            pit = decide(accession_number=accession, issuer_cik=cik, siblings=siblings, cover=res.cover)
+            point_in_time.extend(pit)
+            located = load_row_locations(conn, accession, ids)
+            whole_column = decide_class_column(
+                accession_number=accession,
+                issuer_cik=cik,
+                siblings=siblings,
+                cover=res.cover,
+                row_locations={iid: [locs for _, locs in rows] for iid, rows in located.items()},
+            )
+            class_column.extend(whole_column)
+            class_rows.extend(
+                decide_class_rows(
                     accession_number=accession,
                     issuer_cik=cik,
                     siblings=siblings,
                     cover=res.cover,
-                    row_locations=load_row_locations(conn, accession, ids),
+                    row_locations=located,
+                    whole={s.instrument_id for s in [*pit, *whole_column]},
                 )
             )
         keep.update((iid, acc) for iid in ids for acc in blocked_accessions)
@@ -680,7 +848,12 @@ def compute_desired(
         # common sibling cannot also hold a slice-2 (warrant/preferred) row.
         for s in [*point_in_time, *extended, *class_column]:
             desired[(s.instrument_id, s.accession_number)] = _row(s)
-    return desired, keep, keep_instruments
+        # A row suppression is redundant under a whole-accession one (incl. slice 2b's
+        # extension, which is only known here).
+        for r in class_rows:
+            if (r.instrument_id, r.accession_number) not in desired:
+                result.rows[(r.instrument_id, r.accession_number, r.holder_name)] = _row_row(r)
+    return result
 
 
 def _apply_instrument(
@@ -689,8 +862,40 @@ def _apply_instrument(
     *,
     upserts: list[tuple[Any, ...]],
     deletes: list[str],
+    row_upserts: list[tuple[Any, ...]],
+    row_deletes: list[tuple[str, str]],
 ) -> None:
     with conn.transaction():
+        for accession, holder_name in row_deletes:
+            conn.execute(
+                """
+                DELETE FROM def14a_recipient_row_suppressions
+                 WHERE instrument_id = %s AND accession_number = %s AND holder_name = %s
+                """,
+                (instrument_id, accession, holder_name),
+            )
+        for row in row_upserts:
+            conn.execute(
+                """
+                INSERT INTO def14a_recipient_row_suppressions (
+                    instrument_id, accession_number, holder_name, issuer_cik, reason, rule_version,
+                    cover_accession, cover_title, cover_symbol, witness_instrument_id, witness_title,
+                    class_cell)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (instrument_id, accession_number, holder_name) DO UPDATE SET
+                    issuer_cik = EXCLUDED.issuer_cik,
+                    reason = EXCLUDED.reason,
+                    rule_version = EXCLUDED.rule_version,
+                    cover_accession = EXCLUDED.cover_accession,
+                    cover_title = EXCLUDED.cover_title,
+                    cover_symbol = EXCLUDED.cover_symbol,
+                    witness_instrument_id = EXCLUDED.witness_instrument_id,
+                    witness_title = EXCLUDED.witness_title,
+                    class_cell = EXCLUDED.class_cell,
+                    created_at = now()
+                """,
+                row,
+            )
         for accession in deletes:
             conn.execute(
                 "DELETE FROM def14a_recipient_suppressions WHERE instrument_id = %s AND accession_number = %s",
@@ -721,6 +926,14 @@ def _apply_instrument(
         detect_drift(conn, instrument_id=instrument_id)
 
 
+@dataclass
+class _InstrumentDiff:
+    upserts: list[tuple[Any, ...]] = field(default_factory=list)
+    deletes: list[str] = field(default_factory=list)
+    row_upserts: list[tuple[Any, ...]] = field(default_factory=list)
+    row_deletes: list[tuple[str, str]] = field(default_factory=list)
+
+
 def run_recipient_suppressions(conn: psycopg.Connection[Any], fetch_text: FetchText) -> RunReport:
     """Recompute every suppression, diff against the ledger, apply per instrument.
 
@@ -728,7 +941,8 @@ def run_recipient_suppressions(conn: psycopg.Connection[Any], fetch_text: FetchT
     apply commits on its own.
     """
     report = RunReport()
-    desired, keep, keep_instruments = compute_desired(conn, fetch_text, report)
+    want = compute_desired(conn, fetch_text, report)
+    desired, keep, keep_instruments = want.accessions, want.keep, want.keep_instruments
     stored = {
         (int(r[0]), str(r[1])): tuple(r)
         for r in conn.execute(
@@ -740,22 +954,52 @@ def run_recipient_suppressions(conn: psycopg.Connection[Any], fetch_text: FetchT
         ).fetchall()
     }
 
-    per_instrument: dict[int, tuple[list[tuple[Any, ...]], list[str]]] = {}
+    stored_rows = {
+        (int(r[0]), str(r[1]), str(r[2])): tuple(r)
+        for r in conn.execute(
+            """
+            SELECT instrument_id, accession_number, holder_name, issuer_cik, reason, rule_version,
+                   cover_accession, cover_title, cover_symbol, witness_instrument_id, witness_title,
+                   class_cell
+              FROM def14a_recipient_row_suppressions
+            """
+        ).fetchall()
+    }
+
+    per_instrument: dict[int, _InstrumentDiff] = {}
     for key, row in desired.items():
         if stored.get(key) != row:
-            per_instrument.setdefault(key[0], ([], []))[0].append(row)
+            per_instrument.setdefault(key[0], _InstrumentDiff()).upserts.append(row)
             if key in stored:
                 report.updated += 1
             else:
                 report.inserted += 1
     for key in stored:
         if key not in desired and key not in keep and key[0] not in keep_instruments:
-            per_instrument.setdefault(key[0], ([], []))[1].append(key[1])
+            per_instrument.setdefault(key[0], _InstrumentDiff()).deletes.append(key[1])
             report.deleted += 1
+    for rkey, row in want.rows.items():
+        if stored_rows.get(rkey) != row:
+            per_instrument.setdefault(rkey[0], _InstrumentDiff()).row_upserts.append(row)
+            if rkey in stored_rows:
+                report.rows_updated += 1
+            else:
+                report.rows_inserted += 1
+    for rkey in stored_rows:
+        if rkey not in want.rows and rkey[:2] not in keep and rkey[0] not in keep_instruments:
+            per_instrument.setdefault(rkey[0], _InstrumentDiff()).row_deletes.append((rkey[1], rkey[2]))
+            report.rows_deleted += 1
 
-    for instrument_id, (upserts, deletes) in sorted(per_instrument.items()):
+    for instrument_id, diff in sorted(per_instrument.items()):
         try:
-            _apply_instrument(conn, instrument_id, upserts=upserts, deletes=deletes)
+            _apply_instrument(
+                conn,
+                instrument_id,
+                upserts=diff.upserts,
+                deletes=diff.deletes,
+                row_upserts=diff.row_upserts,
+                row_deletes=diff.row_deletes,
+            )
             report.instruments_refreshed += 1
         except Exception:
             logger.exception("def14a_recipients: apply failed for instrument %d", instrument_id)

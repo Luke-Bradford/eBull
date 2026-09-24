@@ -2,7 +2,7 @@
 
 Status: slice 1 (census) shipped (#3352). Slice 2 is the suppression-ledger reframe
 (2026-09-24, third pass); the writer-side withhold version failed ckpt-1 three times
-(49 → 78 → 88 findings; #2351 handoffs 03:56Z and 04:21Z). Slice 2b shipped (#3354). Slice 3 (H-shape, dual-class common) is below; slice 3b (V-shape) is scoped only.
+(49 → 78 → 88 findings; #2351 handoffs 03:56Z and 04:21Z). Slice 2b shipped (#3354). Slice 3 (H-shape, dual-class common) shipped (#3355); slice 3b (V-shape, per-row withhold) is below.
 
 ## Problem
 
@@ -556,11 +556,136 @@ cover + witness, the probe reproduces the rest (35); `_layout_rows` HTML-model g
 the harmful side is the full population), 32 (full-corpus parser comparison added), 37
 (runner is transactional).
 
-## Slice 3b — V-shape per-row class (scoped only)
+## Slice 3b — V-shape: withhold a row read from another class's line (`RECIPIENT_RULE_VERSION = 4`)
 
-Needs the parser to emit the row's class cell and to de-duplicate on (holder, class), a
-store key that includes the class, and writer routing per class across the three DEF 14A
-writers (the shape that failed ckpt-1 three times in slice 2). Own spec + ckpt-1.
+### Problem (measured on dev, 2026-09-24, at `4ecfe483`)
+
+A V-shape table has a *Title of class* cell per row. The parser keeps a holder's FIRST
+row (`seen`, first-wins) and every sibling receives it. On Lennar's 2026 proxy
+(`0001193125-26-073504`) `LEN` (Class A) shows Stuart Miller 21,851,560 at 70.2% — his
+Class B line — and `LEN.B` shows BlackRock 16,936,080 at 7.8% — a Class A line.
+
+Slice 3 treats a row class cell as a veto, so every V-shape proxy keeps all rows. The
+stored row DOES sit on one grid row, and that row's class cell names its class; what is
+lost is the holder's OTHER lines (the de-dup), not the class of the line that was kept.
+
+**Scope of this slice: withhold the misattributed rows.** Restoring the discarded lines
+needs the writer-side change (parser de-dup on (holder, class), class-aware store key,
+routing across three writers) and stays out; it is the shape that failed ckpt-1 three
+times in slice 2. Failure direction here: a sibling loses a wrong-class figure, it never
+gains one.
+
+### Source rule
+
+Item 403(a)/(b) column (1) *Title of class* (§ Source rule at the top): in a V-shape table
+it is a row cell, and the amount and percent in that row are figures of that class.
+Which class the instrument is: the point-in-time cover 12(b) title (slice 2). Class-letter
+equality is fixed by construction (slice 3) and frozen in `RECIPIENT_RULE_VERSION`.
+
+### Rule
+
+**Class column** (locator, `share_locations`): a column whose header-block text matches
+`title of (class|series)` — Item 403's column (1) by its own caption. `ShareLocation`
+gains `class_captions` (those columns' header texts) and `class_cells` (the distinct
+non-empty texts of the holder's row in those columns, excluding any column holding the
+matched name cell). Slice 3's fields are unchanged, so slice 3 is unaffected.
+
+Per location, `row_class_label(loc)` is `None` unless ALL hold:
+- the share column is not class-captioned: no caption carries a designator or a
+  non-common word (H-shape is slice 3's), and no interior text carries a designator;
+- no class caption carries a non-common word or `%` (Seneca's class column is headed
+  `6% Preferred Stock` in one table);
+- exactly one class cell; it carries exactly one designator `(keyword, letter)`
+  (keyword ∈ class / series), no non-common word and no `%` (Seneca's `10% Series B`
+  preferred line).
+Otherwise the label is `(keyword, letter)`. A row's label = the single label over ALL its
+locations; unbound otherwise (no location, a `None` location, two labels).
+
+**Decision** (`decide_class_rows`) — for a sibling S with usable letter L (slice 3's
+`usable_common_classes`), and a stored row r of S for accession A: withhold r iff r's
+label is `(k, M)` with M ≠ L, M the usable letter of a sibling with a different key (the
+witness, lowest `instrument_id`), and the witness's cover title carries the designator
+with the same keyword k (a `Series B` line is not a `Class B` line). Skipped when (S, A)
+is suppressed whole by slice 3 or slice 2. Everything else keeps.
+
+### Measured reach
+
+`PYTHONPATH=. uv run python -m scripts.probe_2351_row_class` (offline, rolled back) on dev:
+103 accessions, 0 unresolved, **148 rows** — `LBTYB` 45, `LBTYK` 44, `SENEB` 20, `LBTYA` 11,
+`GEF` 7, `GEF.B` 7, `BELFB` 4, `LEN` 4, `LEN.B` 4, `SENEA` 2. `LEN`: Miller + GAMCO
+withheld (Class B lines); `LEN.B`: BlackRock + Vanguard withheld (Class A lines). The
+first draft's rule (any designator in the row) reached 160; the class-column rule drops
+Seneca's `10% Series B` preferred lines among others. Several Liberty rows are parser
+artefacts named after a role or an address line (`Director`, `Clarendon House, …`): they
+are stored rows fanned to every sibling and are withheld on the same evidence.
+
+### Schema (`sql/423_def14a_recipient_row_suppressions.sql`)
+
+`def14a_recipient_row_suppressions`: `instrument_id`, `accession_number`, `holder_name`,
+`issuer_cik`, `reason` (`CHECK = 'other_common_class_row'`), `rule_version`,
+`cover_accession`, `cover_title`, `cover_symbol`, `witness_instrument_id`,
+`witness_title`, `class_cell` (the *Title of class* cell, evidence), `created_at`; PK
+`(instrument_id, accession_number, holder_name)`. The three `*_attributed` views gain a
+second `NOT EXISTS` on `(instrument_id, accession, holder_name)` (`plan_name` for ESOP;
+88 of 91 ESOP observations match a holdings name exactly). Column lists unchanged, so
+`CREATE OR REPLACE VIEW` is valid and no reader changes.
+
+### Job
+
+`compute_desired` also returns the row keys; the diff/apply is per instrument for both
+ledgers in the same transaction, with the same `keep` / `keep_instruments` semantics
+(an unresolved or undated accession keeps its row suppressions). Version bump → every
+existing ledger row updates.
+
+### Tests
+
+Pure (`tests/test_def14a_class_column.py`): `row_class_label` — V-shape class cell labels;
+class-captioned column → None; non-common row text → None; two letters in the row → None;
+re-header → None. `decide_class_rows` — LEN-shaped withhold both ways; own letter keeps;
+unbound keeps; letter with no witness keeps; whole-accession suppression skips.
+DB (`tests/test_def14a_recipients_db.py`, one test): all three views and `_current`
+exclude a row-suppressed holder (ESOP by `plan_name`) and keep the sibling's row;
+deleting the ledger row restores it. The parser's output is untouched (only
+`share_locations` gained fields), so no full-corpus parse comparison is needed.
+
+### Acceptance (corpus rung)
+
+- `scripts/ab_2351_recipient_suppressions.py` after deploy: changed instruments == the
+  10 above; the row ledger equals the probe's 148 identities; accession ledger rows
+  updated (version); every `_current` row change listed and read.
+- Smoke `/instruments/LEN` and `/instruments/LEN.B` ownership: Miller absent from `LEN`,
+  present on `LEN.B`; BlackRock the reverse. Golden panel unchanged.
+- Cross-source: Lennar 2026 proxy on EDGAR — Miller's Class B line 21,851,560.
+
+### Accepted limits (ckpt-1, 49 findings, classified by the author)
+
+Fixed in the rule above: designator from any row cell / the name cell (1, 2, 3, 9) →
+class column by caption, name column excluded; non-common or `%` security in the class
+caption or cell (4, 5, 8; Seneca's Series A/B preferred, found by this check); class vs
+series namespace (14); lowest-id witness (42); loader returns names (26); `keep`
+projected to `(instrument, accession)` (34); a row-only diff schedules the refresh (40);
+ledger NOT NULL / FK / CHECKs + the class cell as evidence (43). Accepted, each
+fail-to-withhold: rows vetoed by a non-common word in a name (11); bare / split / roman
+classes (13); NULL shares (24); no witness (25); `Class A and B-1` (12, would need a
+class cell that names two classes, and `designators` still returns A for it — accepted,
+no such cell in the reach). Accepted as slice 3: name-key collision with an equal count
+(18, 19); subsidiary letters (15); letter renames (16); selection ≠ historical
+provenance and `_layout_rows` gaps (21, 22, 23 — the probe prints every one of the
+withheld rows, and the A/B lists them); ledger staleness ≤ one run (32, 33); keep
+semantics protect deletes only (35, 36, inherited); a missing body is permanent (38).
+Per-row not per-accession (17): mitigated by requiring the Item 403 *Title of class*
+column itself. Observation match by exact `holder_name` (27-31): the observation writer
+copies the holdings name; in the reach accessions 384 of 392 def14a observations match,
+and the 8 that do not are closed (`known_to` set) pre-normalisation names; ESOP matches
+on `plan_name`. `_current` fallback to an older accession's row (41): measured in the
+A/B, every `_current` change is listed. Stored percent not compared (20): the location
+is the holder's own row, so the percent sits beside it. Parser comment (44): writer-side,
+out of scope. Acceptance lists identities, not counts (45, 46); `instruments_failed`
+must be empty (47). Tests widened (48, 49) below.
+
+The holder's other-class lines stay missing (writer-side, out of scope). Unbound rows
+keep today's fan-out. A parser artefact row named like a class (`SENEA` "Class B Common
+Stock") is not a class-column cell and keeps.
 
 ## Security
 
