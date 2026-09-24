@@ -221,6 +221,14 @@ def main() -> int:
     parser.add_argument("--processes", type=int, default=max(1, (multiprocessing.cpu_count() or 2) - 2))
     args = parser.parse_args()
     bundle = pf.load_pit_fundamentals(args.bundle, expected_manifest_sha256=args.manifest_sha256)
+    # The reference re-reads the retained raw inputs, so they must be the bytes the manifest
+    # pinned -- a replaced archive would otherwise be "verified" against shards it never made.
+    manifest = json.loads((args.bundle / pf.MANIFEST_FILENAME).read_bytes())
+    for name, expected in sorted(manifest["input_sha256"].items()):
+        with (args.bundle / "inputs" / f"{name}.zip").open("rb") as handle:
+            measured = hashlib.file_digest(handle, "sha256").hexdigest()
+        if measured != expected:
+            raise SystemExit(f"input {name}.zip digest {measured} != manifest {expected}")
     total = Tally()
     with multiprocessing.get_context("spawn").Pool(
         args.processes, initializer=_init, initargs=(str(args.bundle), args.manifest_sha256)
