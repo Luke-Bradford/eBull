@@ -167,13 +167,13 @@ def instance_url(primary_document_url: str) -> str | None:
 @dataclass(frozen=True)
 class CachedCover:
     outcome: Literal["pairs", "no_pairs", "not_found"]
-    entity_cik: str | None
+    entity_ciks: frozenset[str]
     pairs: frozenset[tuple[str, str]]
 
 
 def _read_cache(conn: psycopg.Connection[Any], cover_accession: str) -> CachedCover | None:
     row = conn.execute(
-        "SELECT outcome, entity_cik FROM sec_cover_12b_fetches WHERE cover_accession = %s",
+        "SELECT outcome, entity_ciks FROM sec_cover_12b_fetches WHERE cover_accession = %s",
         (cover_accession,),
     ).fetchone()
     if row is None:
@@ -185,17 +185,17 @@ def _read_cache(conn: psycopg.Connection[Any], cover_accession: str) -> CachedCo
             (cover_accession,),
         ).fetchall()
     )
-    return CachedCover(outcome=row[0], entity_cik=row[1], pairs=pairs)
+    return CachedCover(outcome=row[0], entity_ciks=frozenset(row[1]), pairs=pairs)
 
 
 def _write_cache(conn: psycopg.Connection[Any], cover_accession: str, cached: CachedCover) -> None:
     with conn.transaction():
         conn.execute(
             """
-            INSERT INTO sec_cover_12b_fetches (cover_accession, outcome, entity_cik)
+            INSERT INTO sec_cover_12b_fetches (cover_accession, outcome, entity_ciks)
             VALUES (%s, %s, %s) ON CONFLICT (cover_accession) DO NOTHING
             """,
-            (cover_accession, cached.outcome, cached.entity_cik),
+            (cover_accession, cached.outcome, sorted(cached.entity_ciks)),
         )
         for title, symbol in sorted(cached.pairs):
             conn.execute(
@@ -219,7 +219,7 @@ def parse_cover_instance(body: str) -> CachedCover:
     pairs = cover_pairs(parse_cover_contexts_root(root, require_dei=True))
     return CachedCover(
         outcome="pairs" if pairs else "no_pairs",
-        entity_cik=next(iter(ciks)) if len(ciks) == 1 else None,
+        entity_ciks=ciks,
         pairs=pairs,
     )
 
@@ -235,13 +235,13 @@ def load_cover(
     if url is None:
         # Not cached: ``primary_document_url`` is mutable filing metadata that a later
         # ingest can fill in, so a miss here is not a property of the filing.
-        return CachedCover(outcome="not_found", entity_cik=None, pairs=frozenset()), False
+        return CachedCover(outcome="not_found", entity_ciks=frozenset(), pairs=frozenset()), False
     try:
         body = fetch_text(url)
     except httpx.HTTPError as exc:  # transport error, 3xx/401/403/429/5xx (raise_for_status)
         raise CoverUnresolved(f"fetch {url}: {exc}") from exc
     if body is None:  # 404 / 410
-        cached = CachedCover(outcome="not_found", entity_cik=None, pairs=frozenset())
+        cached = CachedCover(outcome="not_found", entity_ciks=frozenset(), pairs=frozenset())
     else:
         # Raw before parse; committed on its own (the job connection is autocommit).
         store_raw(
@@ -295,7 +295,7 @@ def resolve_cover(
             res.unresolved = True
             return res
         res.fetches += int(fetched)
-        if cached.outcome != "pairs" or cached.entity_cik != issuer_cik:
+        if cached.outcome != "pairs" or issuer_cik not in cached.entity_ciks:
             continue
         res.cover = Cover(accession=accession, pairs=cached.pairs)
         return res

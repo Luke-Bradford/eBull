@@ -11392,3 +11392,19 @@ neighbouring container and match it.**
   `::_resolve_sct_fields` (rightmost Total), `::_parse_table_html`
   (`drop_value_continuations`), `_RawTable.inherited_at`;
   `tests/test_sec_def14a_sct_parser.py` (six revert-probed #2350 tests).
+
+### A cover's issuer CIK is a SET — co-registrant 10-Ks carry two `dei:EntityCentralIndexKey` (#2351)
+
+- Failure: the #2351 recipient job first cached the cover's entity CIK only when the
+  instance carried exactly one, and required it to EQUAL the issuer CIK. Hertz Global
+  Holdings + The Hertz Corporation and Xerox Holdings + Xerox Corp each file one 10-K as
+  co-registrants, so every HTZ / XRX cover resolved to "no issuer" and three warrant
+  suppressions (HTZWW ×2, XRXDW) silently vanished. The census had not checked the CIK at
+  all, so its 11-decision set looked like a regression target the job "missed" — the
+  full-population A/B (`scripts/ab_2351_recipient_suppressions`) is what surfaced it.
+- Prevention: when validating a filing against an issuer, read every
+  `dei:EntityCentralIndexKey` and test MEMBERSHIP. Any "exactly one" assumption about
+  entity identity in an XBRL instance needs a full-population count first.
+- Enforced in: `app/services/sec_cover_identity.py::entity_ciks`,
+  `app/services/def14a_recipients.py::resolve_cover`,
+  `tests/test_def14a_recipients.py::test_parse_cover_instance_keeps_every_co_registrant_cik`.

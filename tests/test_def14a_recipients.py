@@ -145,7 +145,7 @@ def test_sibling_matching_two_titles_is_ambiguous() -> None:
 def test_parse_cover_instance_pairs_and_cik() -> None:
     parsed = parse_cover_instance(cover_xml([("Common Stock", "htz"), ("Warrants to purchase  Common Stock", "HTZWW")]))
     assert parsed.outcome == "pairs"
-    assert parsed.entity_cik == "0001657853"
+    assert parsed.entity_ciks == frozenset({"0001657853"})
     assert parsed.pairs == frozenset({("Common Stock", "HTZ"), ("Warrants to purchase Common Stock", "HTZWW")})
 
 
@@ -167,7 +167,7 @@ def test_parse_cover_instance_ignores_non_dei_facts() -> None:
     body = cover_xml([("Common Stock", "HTZ")]).replace("xbrl.sec.gov/dei/2024", "example.com/ext")
     parsed = parse_cover_instance(body)
     assert parsed.outcome == "no_pairs"
-    assert parsed.entity_cik is None
+    assert parsed.entity_ciks == frozenset()
 
 
 def test_parse_cover_instance_unresolved_on_non_xbrl() -> None:
@@ -175,3 +175,12 @@ def test_parse_cover_instance_unresolved_on_non_xbrl() -> None:
         parse_cover_instance("<html><body>Request Rate Threshold Exceeded</body></html>")
     with pytest.raises(CoverUnresolved):
         parse_cover_instance("not xml at all")
+
+
+def test_parse_cover_instance_keeps_every_co_registrant_cik() -> None:
+    # Hertz Global Holdings and The Hertz Corporation file one 10-K; the cover carries both.
+    body = cover_xml([("Common Stock", "HTZ")]).replace(
+        "</xbrli:xbrl>",
+        '<dei:EntityCentralIndexKey contextRef="d">0000047129</dei:EntityCentralIndexKey></xbrli:xbrl>',
+    )
+    assert parse_cover_instance(body).entity_ciks == frozenset({"0001657853", "0000047129"})

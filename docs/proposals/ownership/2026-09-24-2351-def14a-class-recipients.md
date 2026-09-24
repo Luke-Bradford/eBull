@@ -133,7 +133,7 @@ def14a_recipient_suppressions(            -- only suppressions exist; no 'receiv
 sec_cover_12b_fetches(                     -- cache of IMMUTABLE filings; terminal outcomes only
   cover_accession text PRIMARY KEY,
   outcome         text NOT NULL CHECK (outcome IN ('pairs','no_pairs','not_found')),
-  entity_cik      text NULL,
+  entity_ciks     text[] NOT NULL DEFAULT '{}',  -- >1 on a co-registrant cover
   fetched_at      timestamptz NOT NULL DEFAULT now())
 
 sec_cover_12b_pairs(
@@ -236,8 +236,9 @@ Per candidate, cached by `sec_cover_12b_fetches` when terminal:
   stops the walk, and A keeps its existing suppression rows unchanged this run.
 - Parse = `parse_cover_contexts`, lifted into `app/services/sec_cover_identity.py`
   (bytes in; the census-2900 script imports it from there), plus: facts must be in the
-  `dei` namespace, `dei:EntityCentralIndexKey` is cached as `entity_cik` and compared
-  at USE time (a cover whose entity CIK ≠ the issuer CIK is skipped as a candidate, so
+  `dei` namespace, `dei:EntityCentralIndexKey` values are cached as `entity_ciks` and
+  checked at USE time (a cover whose entity CIKs do not include the issuer CIK is skipped
+  as a candidate — co-registrant covers such as Hertz and Xerox carry two, so
   the cache is issuer-independent), singleton (title, symbol) per
   context; a symbol that ALSO appears in a context with several titles/symbols is
   dropped from the pairs (ambiguous); titles whitespace-collapsed, symbols trimmed and

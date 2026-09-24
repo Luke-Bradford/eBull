@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS def14a_recipient_suppressions (
 CREATE TABLE IF NOT EXISTS sec_cover_12b_fetches (
     cover_accession TEXT        PRIMARY KEY,
     outcome         TEXT        NOT NULL CHECK (outcome IN ('pairs', 'no_pairs', 'not_found')),
-    entity_cik      TEXT        NULL,
+    -- dei:EntityCentralIndexKey values; >1 on a co-registrant cover (e.g. a holdco and
+    -- its operating subsidiary filing one 10-K).
+    entity_ciks     TEXT[]      NOT NULL DEFAULT '{}',
     fetched_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
