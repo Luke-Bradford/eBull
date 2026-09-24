@@ -11,7 +11,7 @@ import hashlib
 import json
 import shutil
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -447,3 +447,41 @@ def test_policy_files_cover_every_repo_module_the_builder_and_reader_import() ->
                 continue
             imported |= {m.replace(".", "/") + ".py" for m in modules if m.split(".")[0] in {"app", "scripts"}}
     assert imported <= set(pf.POLICY_FILES)
+
+
+# ------------------------------------------------------------------ causal reference (item 2)
+
+
+def _causal(tmp_path: Path) -> tuple[pf.PitFundamentalsBundle, dict[str, Any], dict[str, Any]]:
+    rows: dict[tuple[str, str, str], list[Any]] = {
+        A: [_row(100, "a1"), _row(105, "a1"), _row(110, "a2"), _row("bad", "a3"), _row(1, "a1", end="2020-06-30")],
+        R: [_row(5, "a1", start="2019-01-01"), _row(6, "a3", start="2019-01-01"), _row(7, "e1", start="2019-01-01")],
+    }
+    filings = [
+        ("a1", T1, "10-K"),
+        ("a2", T2, "10-K/A"),
+        ("a3", "2020-06-01T21:00:00.000Z", "10-K/A"),
+        ("e1", T2, "8-K"),
+    ]
+    bundle, _ = _one(tmp_path, rows, filings)
+    return bundle, _facts(rows), _subs(filings)
+
+
+def test_causal_reference_agrees_with_the_bundle(tmp_path: Path) -> None:
+    from scripts.causal_3360_pit_fundamentals import verify_cik
+
+    bundle, facts, subs = _causal(tmp_path)
+    tally = verify_cik(bundle, CIK, facts, subs, lambda _: None)
+    assert tally.mismatches == []
+    assert tally.counts["value_compared"] > 0 and tally.counts["prefix_compared"] > 0
+    assert tally.counts["decisions"] == 3  # before the first date, after each of the two dates
+
+
+def test_causal_reference_catches_a_reader_that_leaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Negative control: a reader that looks one day ahead must be caught.
+    from scripts.causal_3360_pit_fundamentals import verify_cik
+
+    bundle, facts, subs = _causal(tmp_path)
+    honest = bundle.value_as_of
+    monkeypatch.setattr(bundle, "value_as_of", lambda cik, key, d: honest(cik, key, d + timedelta(days=1)))
+    assert verify_cik(bundle, CIK, facts, subs, lambda _: None).counts["value_mismatch"] > 0

@@ -132,6 +132,21 @@ class Evidence:
 
 _PROBE_ANCHORS: Final[Mapping[str, tuple[SourceAnchor, ...]]] = {
     "D0": (SourceAnchor("sql/032_financial_data_enrichment_p1.sql", "filed_date           DATE,", minimum=2),),
+    # #3360 COMPANYFACTS_PIT: strict-before acceptance-date read, the independent-path
+    # causal reference, and the recorded absence of a vintage witness.
+    "C0": (SourceAnchor("app/services/pit_fundamentals.py", 'shard.ny_dates[e["acceptance"]] < decision', minimum=1),),
+    "C1": (
+        SourceAnchor(
+            "scripts/causal_3360_pit_fundamentals.py", "public = rows[: bisect_left(ny, decision)]", minimum=1
+        ),
+    ),
+    "C2": (
+        SourceAnchor(
+            "docs/proposals/ta/2026-09-24-3360-companyfacts-pit-bundle.md",
+            "DERA FSDS was reprocessed in 2024-12",
+            minimum=1,
+        ),
+    ),
     "F0": (
         SourceAnchor("app/services/fundamentals/__init__.py", '"filed_date",', minimum=1),
         SourceAnchor("sql/032_financial_data_enrichment_p1.sql", "filed_date           DATE NOT NULL", maximum=1),

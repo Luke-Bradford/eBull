@@ -31,6 +31,7 @@ EXPECTED_FAMILIES = {
     "finra_short_interest",
     "live_etoro_state",
     "historical_population",
+    "companyfacts_pit",
 }
 EXPECTED_PROBES = {
     "D0",
@@ -58,6 +59,9 @@ EXPECTED_PROBES = {
     "P3",
     "P4",
     "P5",
+    "C0",
+    "C1",
+    "C2",
 }
 
 

@@ -55,7 +55,7 @@ def test_declared_probes_are_non_vacuous_and_derive_fail_verdict(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
     probes = run_source_probes(ebull_test_conn)
-    assert len(probes) == 25
+    assert len(probes) == 28  # 25 frozen #2900 probes + C0-C2 (#3360 COMPANYFACTS_PIT)
     assert all(probe.passed and probe.anchor_counts and probe.source_sha256 for probe in probes)
     assert derive_verdict(probes) == "FAIL — NO ADMISSIBLE HISTORICAL FIELD"
 
