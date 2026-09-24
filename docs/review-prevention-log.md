@@ -11424,3 +11424,18 @@ neighbouring container and match it.**
   through the pass that sets it.
 - Enforced in: `app/services/ownership_rollup.py::_build_slice`,
   `tests/test_3227_joint_filing_lines.py::test_build_slice_carries_the_count_to_the_api_holder`.
+
+### A recovery exemption must precede EVERY cheap skip, not only the ones it was written for (#3359)
+
+- Failure: the scheduled core execution job skips before decrypting secrets when the
+  mandate is absent/disabled or the venue is closed. Codex ckpt-2 caught that those skips
+  stranded already-sent work (the executor's step 0 runs BEFORE its own mandate block for
+  exactly that reason), so `core_recovery_pending` was added to exempt it. The review bot
+  then caught a fourth skip — "no single operator" — computed after the exemption and still
+  able to refuse ahead of recovery.
+- Prevention: when a caller front-runs a callee's refusals as cheap skips, list every skip
+  and state, for each, whether it may refuse already-sent work. Only a refusal that also
+  makes recovery impossible (here: no credentials, hence no account) may; fold the rest
+  into the exemption or remove them.
+- Enforced in: `app/workers/scheduler.py::core_rebalance_execution`,
+  `tests/test_3359_core_rebalance_execution_job.py::TestRefusalsBeforeAnySecretOrRequest`.

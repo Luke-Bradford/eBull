@@ -560,6 +560,10 @@ RECONCILE_ERROR_VERDICTS: Final[tuple[str, ...]] = (
 # verdict. Produces submission-gate INPUT, never authority: nothing invokes
 # the gate, and the only provider call is informational.
 JOB_CORE_REBALANCE_OBSERVATION = "core_rebalance_observation"
+# #3359 — the core sleeve rebalances itself: once per US session, demo-only,
+# through the same executor as the attended endpoint. The ACTING consumer of
+# the submission gate that the observation above only feeds.
+JOB_CORE_REBALANCE_EXECUTION = "core_rebalance_execution"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -2737,6 +2741,40 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # claiming it does. Admitted because one verdict an hour late beats the
         # zero verdicts this job produced on each of those 4 days.
         rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_CORE_REBALANCE_EXECUTION,
+        display_name="Core/cash rebalance execution (#3359)",
+        # Shares ``etoro_core_rebalance`` with the observation, deliberately: both
+        # evaluate the same sleeve and write the same intents table, and 15:37 vs
+        # 22:45 never overlap on schedule. Still dispatched on the GENERAL execution
+        # lane (a source buys no lane -- ``execution_lane_for``), where admission
+        # waits of up to ~1033 s were measured on 2026-09-18. A late admission is
+        # SAFE here: the executor re-proves quote age, account-risk age and the open
+        # session under the submission lock, so a fire admitted after the close is
+        # refused ``core_market_session_closed`` rather than acted on.
+        source="etoro_core_rebalance",
+        description=(
+            "Daily, acting only while the core venue's session is open — settle an unresolved core order, else "
+            "evaluate the core sleeve against its mandate and submit at most one "
+            "guarded rebalance order through the same executor as the attended "
+            "endpoint. Demo-only; skips without credentials or a broker call when "
+            "no enabled mandate exists or the core venue is closed."
+        ),
+        # 15:37 UTC is inside EVERY NYSE regular session in both DST regimes
+        # (09:30-16:00 ET = 13:30-20:00 UTC in summer, 14:30-21:00 UTC in winter) and
+        # before the 13:00 ET half-day close (17:00/18:00 UTC). It is off the
+        # five-minute grid so it does not land on the same tick as
+        # ``strategy_paper_cycle`` (the other core-order reconciler), and two minutes
+        # after a ``core_candidate_quote_refresh`` fire, so the quote the preflight
+        # reads is post-open (the 09-23 acceptance's pre-open POST refused
+        # ``core_quote_stale``).
+        cadence=Cadence.daily(hour=15, minute=37),
+        # Submits orders: never as a surprise catch-up on boot, and never re-armed
+        # (``rearm_on_lost_fire`` stays False -- same contract as
+        # ``execute_approved_orders``). A lost fire costs one session's evaluation.
+        catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -6898,6 +6936,165 @@ def core_rebalance_observation() -> None:
             f"reason={intent.decision.reason_code or '-'} instrument={core_instrument_id} "
             f"mandate_event={intent.core_mandate_event_id}"
         )
+
+
+#: ``e.asset_class`` via ``i.exchange`` -- the same join ``_PREFLIGHT_SQL`` uses,
+#: because the session question must be answered for the venue the preflight
+#: will later answer it for.
+_CORE_VENUE_ASSET_CLASS_SQL: Final[LiteralString] = """
+SELECT e.asset_class
+FROM instruments i
+LEFT JOIN exchanges e ON e.exchange_id = i.exchange
+WHERE i.instrument_id = %s
+"""
+
+
+def core_venue_skip_reason(asset_class: str | None, now: datetime) -> str | None:
+    """Why the scheduled core execution should not run now, or ``None`` to run.
+
+    Pure, so the calendar decision is table-tested without a database. Uses the
+    SAME predicates as ``preflight_core_submission`` (``session_support_reason``
+    then ``venue_session_is_open``), so this skip can never admit a session the
+    preflight would refuse or refuse one it would admit; it only moves the answer
+    ahead of the credential decrypt and the broker round-trip.
+    """
+    from app.services.market_session_support import session_support_reason, venue_session_is_open
+
+    unsupported = session_support_reason(asset_class)
+    if unsupported is not None:
+        return f"core venue is not session-supported: {unsupported}"
+    if not venue_session_is_open(asset_class, now):
+        return "core venue session is closed"
+    return None
+
+
+def core_rebalance_execution() -> None:
+    """Rebalance the core sleeve on a schedule, unattended, demo-only (#3359).
+
+    Until this job, ``execute_core_rebalance`` had one caller -- the attended
+    ``POST /strategies/core-sleeve/rebalance`` -- so nothing traded on its own.
+    This body is that endpoint's dispatch, verbatim in shape: load the one
+    unresolved core order; if there is one, reconcile it with the credentials
+    that own it (``resume_core_submission`` -- a broker LOOKUP, never a retried
+    mutation); otherwise run ``execute_core_rebalance``, whose own step 0 drives
+    an in-flight rebalance close. ⚠ It is mirrored rather than shared because the
+    endpoint's tests patch those three names on ``app.api.strategies``; a change
+    to either dispatch must be made to both.
+
+    Every trading guard is the EXECUTOR's, not this job's: kill switch,
+    ``enable_auto_trading``, the execution block, session, halt, quote and
+    account-risk freshness, the #2844 sandbox bound, the drawdown limit and the
+    #3284 exit levels are all re-proved under ``core_submission_lock``. What this
+    job adds is only the ordering of cheap refusals ahead of the secrets decrypt
+    (never applied to already-sent work -- ``core_recovery_pending``), and one
+    gate that is its own: ``settings.etoro_env == 'demo'``, with the
+    provider pinned to the literal ``"demo"`` so the setting is not re-read
+    between check and use. Live execution is a separate #2843/#2844 decision.
+
+    Outcomes. ``held`` / ``refused`` / ``submitted`` / ``submission_uncertain`` /
+    ``closed`` are normal results and finish the run as a success whose note
+    carries the state and ``reason_code``. ``reconcile_required`` RAISES after the
+    note is written: it is the one state no later cycle clears on its own, and a
+    failed ``job_runs`` row is the refusal surface the admin health verdict
+    already reads. Any exception propagates for the same reason
+    ``core_rebalance_observation`` gives: a job that no-ops and reports success is
+    invisible to every automated check this repo has.
+
+    ⚠ The broker session holds this job's DB connection across HTTP. That is the
+    executor's contract (the observation, preflight and mutation must share one
+    ``core_submission_lock`` hold), not an oversight of #1593's rule.
+    """
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.strategy_core_executor import (
+        core_recovery_pending,
+        execute_core_rebalance,
+        load_core_resume_authority,
+        resume_core_submission,
+    )
+    from app.services.strategy_core_mandate import load_core_mandate
+
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_CORE_REBALANCE_EXECUTION, "scheduled core execution requires demo environment")
+        return
+
+    # Everything that can refuse without a secret or a request, on one short-lived
+    # connection, BEFORE the credential load (same ordering reason as
+    # `core_rebalance_observation`: the load decrypts two secrets and appends two
+    # audit rows).
+    skip: str | None = None
+    with connect_job() as pre_conn:
+        mandate = load_core_mandate(pre_conn)
+        # ⚠ Already-sent work is settled FIRST and is exempt from every skip below
+        # (Codex ckpt-2 P2). The executor's step 0 and the resume path both run
+        # before its own mandate block, precisely so a disabled or revised mandate
+        # cannot strand a close or an order that already reached the broker; a
+        # mandate or session skip here would re-create that hole one layer up.
+        if core_recovery_pending(pre_conn):
+            pass
+        elif mandate is None or mandate.core_instrument_id is None:
+            skip = "no core mandate configured" if mandate is None else "core mandate has no core instrument"
+        elif not mandate.enabled:
+            # ⚠ Unlike the observation, a DISABLED mandate skips: this job acts, and
+            # the executor would only raise "an enabled core mandate is required".
+            # The observation still records the disabled window.
+            skip = "core mandate is disabled"
+        else:
+            row = pre_conn.execute(_CORE_VENUE_ASSET_CLASS_SQL, (mandate.core_instrument_id,)).fetchone()
+            skip = core_venue_skip_reason(None if row is None else row[0], datetime.now(UTC))
+    if skip is not None:
+        _record_prereq_skip(JOB_CORE_REBALANCE_EXECUTION, skip)
+        return
+
+    # ⚠ No separate "no single operator" skip (review WARNING, PR #3365): it would
+    # sit outside the recovery exemption above. Credentials are per-operator and
+    # this loader resolves `sole_operator_id` itself, so "no operator" already
+    # arrives here as "credentials missing" -- the one refusal that genuinely
+    # applies to recovery too, because without an account there is nothing to
+    # reconcile against.
+
+    creds = _load_etoro_credentials_with_ids(JOB_CORE_REBALANCE_EXECUTION)
+    if creds is None:
+        _record_prereq_skip(JOB_CORE_REBALANCE_EXECUTION, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_CORE_REBALANCE_EXECUTION) as tracker:
+        with connect_job() as conn:
+            # Resolved here, after the credential load proved a single operator
+            # exists; a race that removes it fails this tracked run loudly.
+            operator_id = sole_operator_id(conn)
+            # Commits (its own read and the one above), so `conn` is idle again --
+            # both executor entry points refuse a connection with an open transaction.
+            resume_authority = load_core_resume_authority(conn)
+            if resume_authority is not None and (api_key.id, user_key.id) != (
+                resume_authority.api_key_credential_id,
+                resume_authority.user_key_credential_id,
+            ):
+                raise RuntimeError(
+                    f"unresolved core order {resume_authority.order_id} belongs to credentials that are no "
+                    "longer live; reconciliation against a different account is refused"
+                )
+            with EtoroBrokerProvider(api_key=api_key.plaintext, user_key=user_key.plaintext, env="demo") as broker:
+                if resume_authority is not None:
+                    result = resume_core_submission(conn, broker=broker, authority=resume_authority)
+                else:
+                    result = execute_core_rebalance(
+                        conn,
+                        broker=broker,
+                        operator_id=operator_id,
+                        api_key_credential_id=api_key.id,
+                        user_key_credential_id=user_key.id,
+                        recorded_by=JOB_CORE_REBALANCE_EXECUTION,
+                    )
+
+        tracker.row_count = 0 if result.intent_id is None and result.order_id is None else 1
+        tracker.note = (
+            f"state={result.state} reason={result.reason_code} "
+            f"path={'resume' if resume_authority is not None else 'rebalance'} "
+            f"intent_id={result.intent_id} order_id={result.order_id} amount={result.amount}"
+        )
+        if result.state == "reconcile_required":
+            raise RuntimeError(f"core order needs reconciliation: {tracker.note}")
 
 
 class _CredentialsRotatedMidBatch(RuntimeError):
