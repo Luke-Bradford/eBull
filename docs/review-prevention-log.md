@@ -11439,3 +11439,16 @@ neighbouring container and match it.**
   into the exemption or remove them.
 - Enforced in: `app/workers/scheduler.py::core_rebalance_execution`,
   `tests/test_3359_core_rebalance_execution_job.py::TestRefusalsBeforeAnySecretOrRequest`.
+
+### A `StrEnum` outcome is a `str` — `isinstance(x, str)` cannot tell it from a value (#3361)
+
+- Failure: `admit_observation` returned `str | RowOutcome` (an acceptance timestamp, or a
+  rejection outcome). The builder branched on `isinstance(result, str)`, which is true for
+  BOTH arms because `RowOutcome` subclasses `str`, so every `no_acceptance` observation was
+  stored with the acceptance `"no_acceptance"`. Caught only because the builder re-reads each
+  document through the loader, which refused the non-canonical acceptance.
+- Prevention: never return a `StrEnum` in a union with `str`. Return a pair
+  `(outcome, value | None)` or test `isinstance(x, TheEnum)` FIRST; pyright does not flag the
+  overlap.
+- Enforced in: `app/services/security_linkage.py::admit_observation` (returns a pair),
+  `tests/test_3361_security_linkage.py::test_admission_outcomes_are_ledgered_with_locators_and_reconcile`.
