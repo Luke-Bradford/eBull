@@ -272,6 +272,9 @@ class HolderLot:
     accession_number: str
     edgar_url: str | None
     as_of_date: date | None
+    # This lot's own :attr:`Holder.joint_filing_lines` (#3227 item 4), so the marker
+    # names the lot it applies to rather than the summed owner figure.
+    joint_filing_lines: int = 0
 
 
 @dataclass(frozen=True)
@@ -321,12 +324,13 @@ class Holder:
     # aggregate of the individual rows, so summing it double-counts (I21/#1659).
     # ``None`` for every non-DEF-14A holder and for unlabelled proxy rows.
     holder_role: str | None = None
-    # #3227 item 4 — non-zero when ``shares`` is ONE of this many Table I lines the
-    # owner reported on a joint Form 3/4/5 holdings accession. The XML names no holder
-    # per line on a joint filing, so the lines are not summed; this is the visible form
-    # of that refusal, NOT a claim the figure is understated (a line may be another
-    # class, or the entity's whole holding). Taken from the winning row; a lot-collapsed
-    # holder carries the largest of its lots'. 0 for every other holder.
+    # #3227 item 4 — non-zero when this figure was read from a joint Form 3/4/5 holdings
+    # accession on which the owner has this many Table I lines. A joint filing names no
+    # holder per line, so those lines are not attributed or summed; this is the visible
+    # form of that refusal, NOT a claim the figure is understated (a line may be another
+    # class, or the entity's whole holding). Taken from the winning row. A lot-collapsed
+    # holder carries the largest of its lots' and each :class:`HolderLot` its own, so a
+    # consumer can tell which counted component the flag belongs to. 0 otherwise.
     joint_filing_lines: int = 0
 
 
@@ -1125,31 +1129,34 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION_SQL: Final = """
     )
 """
 
-# #3227 item 4 — a ``:NDH:`` row on a JOINT holdings accession whose owner reports more
-# than one Table I line: the number of lines, else 0. On a joint filing
-# ``<nonDerivativeTable>`` is a sibling of ``<reportingOwner>`` and names no holder
-# (prevention-log, TACO), so ``INSIDER_HOLDING_LINE_SUM_LATERAL`` refuses to sum there and
-# ``shares`` is ONE of those lines. This column makes that refusal visible instead of silent.
-# Its two counts are the lateral's own: ``lines`` uses its seven-column match, ``owners``
-# its other-holder test — so non-zero here implies the sum refused. Not a claim of
-# understatement: a line may be another class (CNH's common + special voting) or the
-# entity's whole holding restated (Form 3 Instr. 5(b)(iv)).
+# #3227 item 4 — a row whose accession is a JOINT holdings filing (live ``:NDH:`` lines from
+# more than one reporting owner) on which this owner has more than one Table I line: the
+# number of those lines, else 0. On a joint filing ``<nonDerivativeTable>`` is a sibling of
+# ``<reportingOwner>`` and names no holder (prevention-log, TACO), so the figure cannot be
+# the owner's attributed total: ``INSIDER_HOLDING_LINE_SUM_LATERAL`` refuses to sum there
+# (its one-owner test), and the XML path gives every line to ``filers[0]``, one row per D/I.
+# This column makes that visible instead of silent.
+#
+# Keyed on ``source_accession``, NOT on the winning row's document-id format: when both
+# pipelines parsed the accession, the de-collision above keeps the XML row (a bare
+# accession id) and drops the owner's ``:NDH:`` rows from the read, but the ambiguity is
+# the filing's, not the pipeline's (Codex ckpt-2). The ``:NDH:`` rows are still the only
+# per-line record, so they are what is counted.
+#
+# Not a claim of understatement: a line may be another class (CNH's common + special
+# voting) or the entity's whole holding restated (Form 3 Instr. 5(b)(iv)).
 _INSIDER_JOINT_FILING_LINES_SQL: Final = """
-    CASE WHEN oc.source_document_id ~ ':NDH:[0-9]+$'
-          AND (SELECT count(DISTINCT x.holder_identity_key)
+    CASE WHEN (SELECT count(DISTINCT x.holder_identity_key)
                  FROM ownership_insiders_observations x
                 WHERE x.instrument_id = oc.instrument_id
                   AND x.known_to IS NULL
-                  AND x.source_document_id LIKE split_part(oc.source_document_id, ':', 1) || ':NDH:%%') > 1
+                  AND x.source_document_id LIKE oc.source_accession || ':NDH:%%') > 1
     THEN (SELECT CASE WHEN count(*) > 1 THEN count(*) ELSE 0 END
             FROM ownership_insiders_observations o
            WHERE o.instrument_id       = oc.instrument_id
              AND o.holder_identity_key = oc.holder_identity_key
-             AND o.ownership_nature    = oc.ownership_nature
-             AND o.source              = oc.source
-             AND o.period_end          = oc.period_end
              AND o.known_to IS NULL
-             AND o.source_document_id LIKE split_part(oc.source_document_id, ':', 1) || ':NDH:%%')
+             AND o.source_document_id LIKE oc.source_accession || ':NDH:%%')
     ELSE 0 END
 """
 
@@ -4137,6 +4144,7 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
                 accession_number=h.winning_accession,
                 edgar_url=h.winning_edgar_url,
                 as_of_date=h.as_of_date,
+                joint_filing_lines=h.joint_filing_lines,
             )
             for h in rows_desc
         )
@@ -4161,7 +4169,7 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
                 lots=lots,
                 dropped_sources=tuple(merged_dropped),
                 # Every lot is counted in ``total``, so a joint-filing lot anywhere in
-                # the owner makes the collapsed figure one-line-of-N (#3227 item 4).
+                # the owner flags the collapsed figure; ``lots`` says which (#3227 item 4).
                 joint_filing_lines=max(h.joint_filing_lines for h in rows_desc),
             )
         )

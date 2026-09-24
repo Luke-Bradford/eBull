@@ -238,3 +238,37 @@ def test_rollup_reader_sees_the_joint_filing_refusal(
     joint = len({ln.holder_cik for ln in lines}) > 1
     assert got[_CIK] == (sum(1 for ln in lines if ln.holder_cik == _CIK) if joint else 0)
     assert all(v == 0 for cik, v in got.items() if cik != _CIK)
+
+
+def test_rollup_reader_sees_the_refusal_when_the_xml_row_wins(conn: psycopg.Connection[Any]) -> None:
+    """Both pipelines parsed the joint accession: the de-collision keeps the owner's XML row
+    (bare accession id) and drops their ``:NDH:`` rows from the read. The XML path gives every
+    Table I line to ``filers[0]``, so the figure is no more attributed than the dataset's — the
+    count is keyed on the ACCESSION, not on which pipeline's row won (Codex ckpt-2)."""
+    from app.services.ownership_rollup import _collect_canonical_holders_from_current
+
+    iid = 932_275
+    joint = next(p.values[0] for p in _CASES if p.id == "joint_filing_refuses")
+    _seed(conn, iid, joint)  # type: ignore[arg-type]
+    oo.record_insider_observation(
+        conn,
+        instrument_id=iid,
+        holder_cik=_CIK,
+        holder_name=f"Holder {_CIK}",
+        ownership_nature="indirect",
+        source="form3",
+        source_document_id=_ACCN,
+        source_accession=_ACCN,
+        source_field=None,
+        source_url=None,
+        filed_at=_FILED_AT,
+        period_start=None,
+        period_end=_PERIOD_END,
+        ingest_run_id=uuid4(),
+        shares=Decimal("900"),
+    )
+    conn.commit()
+    oo.refresh_insiders_current(conn, instrument_id=iid)
+    [xml] = [c for c in _collect_canonical_holders_from_current(conn, iid) if c.filer_cik == _CIK]
+    assert xml.nature_from_table_i  # the XML row won the de-collision
+    assert xml.joint_filing_lines == 2

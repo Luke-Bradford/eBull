@@ -60,6 +60,11 @@ def test_lot_collapse_keeps_a_non_primary_lots_count() -> None:
     [collapsed] = _collapse_owner_lots(holders)
     assert collapsed.shares == Decimal("1000")
     assert collapsed.joint_filing_lines == 4
+    # The lots name WHICH counted component the flag belongs to (Codex ckpt-2).
+    assert [(lot.ownership_nature, lot.joint_filing_lines) for lot in collapsed.lots] == [
+        ("direct", 0),
+        ("indirect", 4),
+    ]
 
 
 def test_build_slice_carries_the_count_to_the_api_holder() -> None:

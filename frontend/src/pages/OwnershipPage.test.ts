@@ -367,6 +367,38 @@ describe("rollupToFilerRows — row shape and category mapping", () => {
     expect(rows.find((r) => r.label === "Solo")!.joint_filing_lines).toBeUndefined();
   });
 
+  it("carries a lot's own joint-filing line count (#3227 item 4)", () => {
+    const lot = (nature: string, shares: string, joint: number) => ({
+      ownership_nature: nature,
+      shares,
+      source: "form3" as const,
+      accession_number: nature,
+      edgar_url: null,
+      as_of_date: "2026-01-01",
+      joint_filing_lines: joint,
+    });
+    const rollup = _baseRollup({
+      slices: [
+        _slice({
+          category: "insiders",
+          holders: [
+            _holder({
+              filer_name: "Jane Director",
+              shares: "1000",
+              joint_filing_lines: 4,
+              lots: [lot("direct", "900", 0), lot("indirect", "100", 4)],
+            }),
+          ],
+        }),
+      ],
+    });
+    const row = rollupToFilerRows(rollup)[0]!;
+    expect(row.lots?.map((l) => [l.nature, l.joint_filing_lines])).toEqual([
+      ["direct", undefined],
+      ["indirect", 4],
+    ]);
+  });
+
   it("skips zero / unparseable share counts (same predicate as the chart)", () => {
     const rollup = _baseRollup({
       slices: [
