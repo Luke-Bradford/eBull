@@ -455,3 +455,29 @@ def test_loader_refuses_a_moved_document_and_a_foreign_policy(tmp_path: Path, mo
     monkeypatch.setattr(build, "policy_sha256", lambda: "other")
     with pytest.raises(build.QualityInputError, match="policy"):
         build.load_quality_input(root, expected_manifest_sha256=sha)
+
+
+def test_census_counts_only_true_alias_disagreements() -> None:
+    def row(cik: str, fields: dict[str, str]) -> dict[str, Any]:
+        return {
+            "cik": cik,
+            "liquidity": None,
+            "components": {},
+            "fields": fields,
+            "rung": "no_public_annual_period",
+            "last_bar": "2020-01-02",
+            "alive_at_capture": False,
+            "termination_class": "unknown_termination",
+            "form25_horizon": [],
+        }
+
+    document = {
+        "formation": "2013-06-28",
+        "counts": {},
+        "rows": [
+            row("1", {"revenue_aliases_disagree_at_latest": "true"}),
+            row("2", {"revenue_aliases_disagree_at_latest": "false"}),
+            row("3", {"cogs": "value"}),
+        ],
+    }
+    assert census.formation_census(document, None)["alias_disagreement"] == {"revenue": 1}

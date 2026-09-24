@@ -136,7 +136,7 @@ def formation_census(document: Mapping[str, Any], span: Sequence[str] | None) ->
         sizes = {"liquidity": liquidity[cik], "assets": assets[cik]}
         for key, value in r["fields"].items():
             fields[f"{key}={value}"] += 1
-            if key.endswith("_aliases_disagree_at_latest"):
+            if key.endswith("_aliases_disagree_at_latest") and value == "true":
                 disagreement[key.removesuffix("_aliases_disagree_at_latest")] += 1
         for size, bucket in sizes.items():
             for channel, outcome in outcomes.items():
