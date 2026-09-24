@@ -1172,3 +1172,30 @@ def test_camel_split_ignores_script_and_style_text() -> None:
     doc = f"<html><body>{sct}<script>var x = 'Jon Smith';</script><style>/* Jon Smith */</style></body></html>"
     result = parse_summary_compensation_table(doc)
     assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]
+
+
+def test_neo_owning_a_fiscal_year_twice_is_dropped_not_misattributed() -> None:
+    """#2350 — 17 CFR 229.402(c)(2)(ii): one row per NEO per fiscal year. Goldman's
+    2026 proxy (0001193125-26-117433) prints each NEO's name on the MIDDLE year
+    row, so the carry absorbed the next NEOs' blocks and 'David Solomon' served
+    another executive's total. An NEO owning a year twice cannot be attributed:
+    all of that NEO's rows go, and a correctly carried NEO's rows stand."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    table = (
+        f"<table>{header}"
+        + _row("", "2025", "2,000,000", "39,000,000")
+        + _row("David Solomon", "2024", "2,000,000", "31,290,110")
+        + _row("Chairman and CEO", "2023", "2,000,000", "27,003,260")
+        + _row("", "2025", "1,850,000", "118,135,674")
+        + _row("John Waldron", "2024", "1,850,000", "30,971,548")
+        + _row("President and COO", "2023", "1,850,000", "26,301,684")
+        + _row("John Rogers\nExecutive Vice President", "2025", "1,500,000", "16,721,240")
+        + _row("", "2024", "1,500,000", "14,077,913")
+        + "</table>"
+    )
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.fiscal_year, r.total_comp) for r in result.rows] == [
+        ("John Rogers", 2025, Decimal("16721240")),
+        ("John Rogers", 2024, Decimal("14077913")),
+    ]

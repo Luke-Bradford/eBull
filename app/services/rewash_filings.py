@@ -994,7 +994,9 @@ def _rewash_exec_comp_all_instruments(
     ``RewashParseError`` from any sibling propagates → the whole
     accession fails + retries, matching the single-instrument contract.
 
-    Returns total comp rows written across siblings.
+    Returns total comp rows written across siblings -- plus, for a sibling whose
+    parse withheld every row (#2350), the stale rows cleared there. Any non-zero
+    total means the accession was applied.
     """
     # Function-local import per this file's def14a convention (and the
     # #1731 manifest_parsers init-order trap).
@@ -1077,7 +1079,9 @@ def _rewash_exec_comp(
     never had comp is expected — many bodies carry no SCT.)
 
     Returns the number of comp rows written (0 on absence or on a
-    swallowed unexpected failure).
+    swallowed unexpected failure) -- or, when the parser WITHHELD every row
+    (#2350), the stale rows it cleared, so the caller counts the accession as
+    applied (version bump, NULL-instrument sweep) rather than as absent.
 
     Function-local imports match this file's convention for the def14a
     parser/upsert helpers: the heavy sec_def14a + def14a_ingest modules
@@ -1099,7 +1103,10 @@ def _rewash_exec_comp(
                 had_comp_rows = cur.fetchone() is not None
 
             comp = parse_summary_compensation_table(raw_doc.require_payload())
-            if not comp.rows and had_comp_rows:
+            # An empty parse that WITHHELD rows (#2350: every NEO owned a fiscal
+            # year twice) is the parser failing closed on misattributed rows, and
+            # the stale rows must be cleared, so it is not the regression signal.
+            if not comp.rows and had_comp_rows and not comp.withheld_rows:
                 raise RewashParseError(
                     f"DEF 14A re-parse produced zero exec-comp rows for accession="
                     f"{raw_doc.accession_number} (best_score={comp.raw_table_score}); "
@@ -1115,6 +1122,8 @@ def _rewash_exec_comp(
                     "DELETE FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s",
                     (raw_doc.accession_number, instrument_id),
                 )
+                if not comp.rows and comp.withheld_rows:
+                    written = cur.rowcount  # the withheld parse's effect: stale rows cleared
             for comp_row in comp.rows:
                 _upsert_comp(
                     conn,

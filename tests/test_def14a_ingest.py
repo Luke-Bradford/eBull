@@ -1049,6 +1049,37 @@ class TestExecCompensation:
             count = cur.fetchone()
         assert count is not None and count[0] == 2  # still 2, not 4
 
+    def test_apply_exec_comp_replaces_rows_a_reparse_no_longer_emits(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#2350 — a manifest re-drive (``sec_rebuild``) must supersede a stored
+        NEO/year row the current parse no longer emits, e.g. a name a broken
+        carry produced. Upsert-only left it served."""
+        from app.services.def14a_ingest import apply_exec_comp_best_effort
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=1_945_003, symbol="STALE")
+        acc = "0001945003-26-000001"
+        conn.execute(
+            """
+            INSERT INTO def14a_exec_compensation (
+                instrument_id, accession_number, issuer_cik, executive_name, fiscal_year, total_comp
+            ) VALUES (1945003, %s, '0001945003', 'Trans', 2025, 1.00)
+            """,
+            (acc,),
+        )
+        apply_exec_comp_best_effort(
+            conn, accession_number=acc, issuer_cik="0001945003", body=self._SCT_HTML, instrument_ids=[1_945_003]
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT executive_name FROM def14a_exec_compensation WHERE accession_number = %s ORDER BY fiscal_year",
+                (acc,),
+            )
+            names = [r[0] for r in cur.fetchall()]
+        assert names == ["Jane Roe", "Jane Roe"]
+
     def test_apply_exec_comp_no_sct_writes_nothing(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

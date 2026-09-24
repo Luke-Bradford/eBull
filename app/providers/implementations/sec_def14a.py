@@ -62,6 +62,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -3608,6 +3609,10 @@ class Def14ASummaryCompTable:
 
     rows: tuple[Def14AExecCompRow, ...]
     raw_table_score: int
+    # Rows withheld because their NEO owned a fiscal year twice (#2350,
+    # :func:`_drop_broken_neo_carries`). Non-zero with empty ``rows`` is a
+    # deliberate fail-closed zero, not a parse regression.
+    withheld_rows: int = 0
 
 
 # Section anchor for the SCT. Kept SEPARATE from ``_SECTION_HEADING_RE`` so
@@ -4655,4 +4660,23 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
     except Exception:  # pragma: no cover - defensive; parser must not raise
         logger.exception("SCT name repair failed; keeping unrepaired names")
 
-    return Def14ASummaryCompTable(rows=tuple(rows), raw_table_score=best_score)
+    kept = _drop_broken_neo_carries(rows)
+    return Def14ASummaryCompTable(rows=tuple(kept), raw_table_score=best_score, withheld_rows=len(rows) - len(kept))
+
+
+def _drop_broken_neo_carries(rows: list[Def14AExecCompRow]) -> list[Def14AExecCompRow]:
+    """Drop every row of an NEO that owns the same fiscal year twice.
+
+    17 CFR 229.402(c)(2)(ii) gives each named executive officer one row per
+    fiscal year, so a repeated ``(executive_name, fiscal_year)`` in one table
+    proves the name carry broke and absorbed another NEO's block. Goldman's 2026
+    proxy (0001193125-26-117433) prints each name on the MIDDLE year row, so
+    'David Solomon' took every later NEO's rows and served Ruemmler's
+    22,288,701 as his own total (#2350). Downstream the rows upsert on
+    ``(instrument, executive, fiscal_year)``, so the survivor would be arbitrary.
+    That NEO's rows cannot be attributed, so none are emitted; the other NEOs'
+    rows stand.
+    """
+    counts = Counter((row.executive_name, row.fiscal_year) for row in rows)
+    broken = {name for (name, _), n in counts.items() if n > 1}
+    return [row for row in rows if row.executive_name not in broken]
