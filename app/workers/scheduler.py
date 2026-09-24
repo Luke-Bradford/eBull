@@ -7022,7 +7022,6 @@ def core_rebalance_execution() -> None:
     # `core_rebalance_observation`: the load decrypts two secrets and appends two
     # audit rows).
     skip: str | None = None
-    operator_id: UUID | None = None
     with connect_job() as pre_conn:
         mandate = load_core_mandate(pre_conn)
         # ⚠ Already-sent work is settled FIRST and is exempt from every skip below
@@ -7042,14 +7041,16 @@ def core_rebalance_execution() -> None:
         else:
             row = pre_conn.execute(_CORE_VENUE_ASSET_CLASS_SQL, (mandate.core_instrument_id,)).fetchone()
             skip = core_venue_skip_reason(None if row is None else row[0], datetime.now(UTC))
-        if skip is None:
-            try:
-                operator_id = sole_operator_id(pre_conn)
-            except (NoOperatorError, AmbiguousOperatorError) as exc:
-                skip = f"no single operator: {exc}"
-    if skip is not None or operator_id is None:
-        _record_prereq_skip(JOB_CORE_REBALANCE_EXECUTION, skip or "no operator")
+    if skip is not None:
+        _record_prereq_skip(JOB_CORE_REBALANCE_EXECUTION, skip)
         return
+
+    # ⚠ No separate "no single operator" skip (review WARNING, PR #3365): it would
+    # sit outside the recovery exemption above. Credentials are per-operator and
+    # this loader resolves `sole_operator_id` itself, so "no operator" already
+    # arrives here as "credentials missing" -- the one refusal that genuinely
+    # applies to recovery too, because without an account there is nothing to
+    # reconcile against.
 
     creds = _load_etoro_credentials_with_ids(JOB_CORE_REBALANCE_EXECUTION)
     if creds is None:
@@ -7059,8 +7060,11 @@ def core_rebalance_execution() -> None:
 
     with _tracked_job(JOB_CORE_REBALANCE_EXECUTION) as tracker:
         with connect_job() as conn:
-            # Commits its own read, so `conn` is idle again -- both executor entry
-            # points refuse a connection with an open transaction.
+            # Resolved here, after the credential load proved a single operator
+            # exists; a race that removes it fails this tracked run loudly.
+            operator_id = sole_operator_id(conn)
+            # Commits (its own read and the one above), so `conn` is idle again --
+            # both executor entry points refuse a connection with an open transaction.
             resume_authority = load_core_resume_authority(conn)
             if resume_authority is not None and (api_key.id, user_key.id) != (
                 resume_authority.api_key_credential_id,

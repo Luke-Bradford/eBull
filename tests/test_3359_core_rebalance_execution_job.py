@@ -152,6 +152,15 @@ class TestRefusalsBeforeAnySecretOrRequest:
         calls["skip"].assert_not_called()
         calls["execute"].assert_called_once()
 
+    def test_recovery_still_needs_an_account_to_reconcile_against(self) -> None:
+        """Review WARNING, PR #3365. The one skip that binds recovery too is
+        "credentials missing" -- which is also how "no single operator" arrives,
+        because the loader resolves ``sole_operator_id`` itself. Nothing else may
+        refuse ahead of already-sent work."""
+        calls = _Harness().run(recovery_pending=True, mandate=None, creds=None)
+        calls["provider"].assert_not_called()
+        assert "credentials" in calls["skip"].call_args[0][1]
+
     def test_missing_credentials_skip_without_touching_the_broker(self) -> None:
         calls = _Harness().run(creds=None)
         calls["provider"].assert_not_called()
