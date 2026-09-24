@@ -290,3 +290,17 @@ def test_targets_only_accessions_the_instrument_holds_and_evidence_is_latest_pro
         blocked=set(),
     )
     assert [s.accession_number for s in rows] == [OLD_PROXY]
+
+
+def test_a_cover_with_two_non_common_titles_for_the_symbol_vetoes() -> None:
+    old = Cover(OLD_COVER.accession, OLD_COVER.pairs | {("Series A Warrants", "OPENW"), ("Series B Warrants", "OPENW")})
+    pit = _pit((OLD_PROXY, old), (NEW_PROXY, NEW_COVER))
+    rows, vetoed = extend_by_class(
+        point_in_time=pit,
+        proxy_dates=DATES,
+        accessions_by_instrument=BOTH,
+        symbols=SYMBOLS,
+        covers=[old, NEW_COVER],
+        blocked=set(),
+    )
+    assert rows == [] and vetoed == {2}

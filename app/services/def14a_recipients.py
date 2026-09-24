@@ -168,18 +168,22 @@ def extend_by_class(
     for s in point_in_time:
         by_instrument.setdefault(s.instrument_id, []).append(s)
 
-    titles_by_key: dict[str, set[str]] = {}
+    # Per cover: key → its title set there. Ambiguity is judged within one cover.
+    per_cover: list[dict[str, set[str]]] = []
     for cover in covers:
+        titles_by_key: dict[str, set[str]] = {}
         for title, symbol in cover.pairs:
             titles_by_key.setdefault(symbol, set()).add(title)
+        per_cover.append(titles_by_key)
 
     out: list[Suppression] = []
     vetoed: set[int] = set()
     for iid, sups in sorted(by_instrument.items()):
         if iid in blocked:
             continue
-        titles = titles_by_key.get(symbol_key(symbols[iid]), set())
-        if any(title_kind(t) != "non_common" for t in titles):
+        key = symbol_key(symbols[iid])
+        listed = [c[key] for c in per_cover if key in c]
+        if any(len(ts) != 1 or title_kind(next(iter(ts))) != "non_common" for ts in listed):
             vetoed.add(iid)
             continue
         evidence = max(sups, key=lambda s: (proxy_dates[s.accession_number], s.accession_number))
