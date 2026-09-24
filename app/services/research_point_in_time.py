@@ -32,6 +32,7 @@ class RankingFamily(StrEnum):
     FINRA_SHORT_INTEREST = "finra_short_interest"
     LIVE_ETORO_STATE = "live_etoro_state"
     HISTORICAL_POPULATION = "historical_population"
+    COMPANYFACTS_PIT = "companyfacts_pit"
 
 
 class R6RankingIdentity(StrEnum):
@@ -144,6 +145,22 @@ PROBE_MATRIX: Final[Mapping[RankingFamily, Mapping[Condition, ConditionEvidence]
                 "causal_transform": _cell("pass", "H2", qualification="prospective coverage only"),
             }
         ),
+        # #3360: the acceptance-dated companyfacts event store (app/services/pit_fundamentals.py).
+        # A file artefact beside FUNDAMENTAL_FACTS (the DB path, unchanged); nothing becomes
+        # admissible. Whether an arm proceeds with ``system_versions`` as a stated residual is
+        # that arm's #2829 declaration, not this registry's.
+        RankingFamily.COMPANYFACTS_PIT: MappingProxyType(
+            {
+                "public_clock": _cell(
+                    "pass",
+                    "C0",
+                    qualification="acceptance clock; public from the next NY date; dissemination lag not proven",
+                ),
+                "system_versions": _cell("fail", "C2"),
+                "historical_population": _cell("fail", "P2", "P5"),
+                "causal_transform": _cell("pass", "C1"),
+            }
+        ),
     }
 )
 
@@ -160,6 +177,10 @@ _REASONS: Final[Mapping[RankingFamily, str]] = MappingProxyType(
         RankingFamily.LIVE_ETORO_STATE: "live broker state is not historical evidence",
         RankingFamily.HISTORICAL_POPULATION: (
             "forward membership begins after the frozen archive and has unknown imports"
+        ),
+        RankingFamily.COMPANYFACTS_PIT: (
+            "no independent vintage witness: companyfacts is today's extraction, and DERA FSDS was reprocessed"
+            " in 2024-12 so historical quarters are not original vintages; CIK-to-security linkage is #3361"
         ),
     }
 )
@@ -190,6 +211,7 @@ IDENTITY_FAMILIES: Final[Mapping[R6RankingIdentity, frozenset[RankingFamily]]] =
         R6RankingIdentity.QUALITY: frozenset(
             {
                 RankingFamily.FUNDAMENTAL_FACTS,
+                RankingFamily.COMPANYFACTS_PIT,
                 RankingFamily.DERIVED_FUNDAMENTALS,
                 RankingFamily.HISTORICAL_POPULATION,
             }
@@ -197,6 +219,7 @@ IDENTITY_FAMILIES: Final[Mapping[R6RankingIdentity, frozenset[RankingFamily]]] =
         R6RankingIdentity.SHAREHOLDER_YIELD: frozenset(
             {
                 RankingFamily.FUNDAMENTAL_FACTS,
+                RankingFamily.COMPANYFACTS_PIT,
                 RankingFamily.DERIVED_FUNDAMENTALS,
                 RankingFamily.HISTORICAL_POPULATION,
             }
@@ -206,6 +229,7 @@ IDENTITY_FAMILIES: Final[Mapping[R6RankingIdentity, frozenset[RankingFamily]]] =
         R6RankingIdentity.VALUATION: frozenset(
             {
                 RankingFamily.FUNDAMENTAL_FACTS,
+                RankingFamily.COMPANYFACTS_PIT,
                 RankingFamily.DERIVED_FUNDAMENTALS,
                 RankingFamily.DIMENSIONAL_XBRL,
                 RankingFamily.LIVE_ETORO_STATE,
