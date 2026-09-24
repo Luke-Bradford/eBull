@@ -748,7 +748,7 @@ export function rollupToFilerRows(
             source: l.source,
             source_url: l.edgar_url,
             as_of_date: l.as_of_date,
-            ...((l.joint_filing_lines ?? 0) > 1
+            ...((l.joint_filing_lines ?? 0) > 0
               ? { joint_filing_lines: l.joint_filing_lines }
               : {}),
           };
@@ -767,7 +767,7 @@ export function rollupToFilerRows(
         as_of_date: h.as_of_date,
         ...(members.length > 0 ? { family_members: members } : {}),
         ...(lots.length > 0 ? { lots } : {}),
-        ...((h.joint_filing_lines ?? 0) > 1
+        ...((h.joint_filing_lines ?? 0) > 0
           ? { joint_filing_lines: h.joint_filing_lines }
           : {}),
       });

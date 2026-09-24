@@ -1145,19 +1145,27 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION_SQL: Final = """
 #
 # Not a claim of understatement: a line may be another class (CNH's common + special
 # voting) or the entity's whole holding restated (Form 3 Instr. 5(b)(iv)).
+#
+# One aggregate over the instrument's ``:NDH:`` rows, joined in as ``jf``: a correlated
+# scalar per ``_current`` row fanned out across every quarterly partition and cost ~0.4s a
+# rollup (review NITPICK on #3356, measured against a constant-0 control).
 _INSIDER_JOINT_FILING_LINES_SQL: Final = """
-    CASE WHEN (SELECT count(DISTINCT x.holder_identity_key)
-                 FROM ownership_insiders_observations x
-                WHERE x.instrument_id = oc.instrument_id
-                  AND x.known_to IS NULL
-                  AND x.source_document_id LIKE oc.source_accession || ':NDH:%%') > 1
-    THEN (SELECT CASE WHEN count(*) > 1 THEN count(*) ELSE 0 END
-            FROM ownership_insiders_observations o
-           WHERE o.instrument_id       = oc.instrument_id
-             AND o.holder_identity_key = oc.holder_identity_key
-             AND o.known_to IS NULL
-             AND o.source_document_id LIKE oc.source_accession || ':NDH:%%')
-    ELSE 0 END
+    WITH ndh AS (
+        SELECT split_part(o.source_document_id, ':', 1) AS accession,
+               o.holder_identity_key,
+               count(*) AS lines
+          FROM ownership_insiders_observations o
+         WHERE o.instrument_id = %(iid)s
+           AND o.known_to IS NULL
+           AND o.source_document_id ~ ':NDH:'
+         GROUP BY 1, 2
+    )
+    SELECT n.accession, n.holder_identity_key, n.lines
+      FROM ndh n
+     WHERE n.lines > 1
+       AND EXISTS (SELECT 1 FROM ndh m
+                    WHERE m.accession = n.accession
+                      AND m.holder_identity_key <> n.holder_identity_key)
 """
 
 
@@ -1209,11 +1217,14 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                    -- when no manifest parse of its accession exists, so the two are not
                    -- redundant: this flags the survivors.
                    (oc.source_document_id !~ ':(NDT|NDH):') AS nature_from_table_i,
-                   {_INSIDER_JOINT_FILING_LINES_SQL} AS joint_filing_lines
+                   COALESCE(jf.lines, 0) AS joint_filing_lines
             FROM ownership_insiders_current oc
             LEFT JOIN insider_filers f
               ON f.accession_number = oc.source_accession
              AND f.filer_cik = oc.holder_cik
+            LEFT JOIN ({_INSIDER_JOINT_FILING_LINES_SQL}) jf
+              ON jf.accession = oc.source_accession
+             AND jf.holder_identity_key = oc.holder_identity_key
             WHERE oc.instrument_id = %(iid)s
               AND oc.shares IS NOT NULL
               AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
