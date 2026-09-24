@@ -128,6 +128,8 @@ def _build(
     name: str = "bundle",
     quarters: list[Path] | None = None,
     submissions: dict[str, Any] | None = None,
+    crosscheck_series: list[list[Any]] | None = None,
+    instrument_cik_history: list[list[Any]] | None = None,
 ) -> tuple[sl.SecurityLinkageBundle, dict[str, Any], dict[str, Any]]:
     src = tmp_path / f"src-{name}"
     (src / "pit" / "inputs").mkdir(parents=True)
@@ -150,8 +152,8 @@ def _build(
             "rows": rows,
             "span": form25_span if form25_span else (["2013-01-01", "2021-12-31"] if rows else None),
         },
-        "crosscheck_series": [],
-        "instrument_cik_history": [],
+        "crosscheck_series": crosscheck_series or [],
+        "instrument_cik_history": instrument_cik_history or [],
     }
     out = tmp_path / name
     manifest = build(
@@ -675,3 +677,129 @@ def test_policy_files_cover_every_repo_module_the_builder_and_reader_import() ->
             imported |= {m.replace(".", "/") + ".py" for m in modules if m.split(".")[0] in {"app", "scripts"}}
     # ``app.config`` / ``app.security.master_key`` are CLI-only (paths + DB URL), not logic.
     assert imported - {"app/config.py", "app/security/master_key.py"} <= set(sl.POLICY_FILES)
+
+
+# ------------------------------------------------------------------ causal reference (item 2)
+
+
+def _causal_corpus() -> tuple[Corpus, list[list[Any]], list[list[Any]]]:
+    corpus = Corpus()
+    corpus.file(C1, "ACET", _ny4pm("2015-01-05"))
+    corpus.file(C2, "ACETQ", _ny4pm("2016-01-05"))
+    corpus.file(C1, "ACET", _ny4pm("2016-01-05"))  # same acceptance as C2: a cross-CIK tie -> conflict
+    corpus.file(C3, "ABC", _ny4pm("2019-03-01"))
+    corpus.file(C3, "ABC", _ny4pm("2019-03-01"), in_index=False)
+    series = [
+        _series(1, "ACET"),
+        _series(2, "ABC", first="2007-01-02", last="2020-12-31"),
+        _series(3, "ABC_WS"),
+        _series(4, "XYZ", vendor="cboe"),
+        _series(5, "ABCD"),
+        _series(6, "ABCDQ"),
+    ]
+    form25 = [["0000000000-19-000001", "2019-05-01", C3, "ABC"], ["0000000000-16-000001", "2016-02-01", C2, None]]
+    return corpus, series, form25
+
+
+def test_causal_reference_agrees_with_the_bundle(tmp_path: Path) -> None:
+    from scripts.causal_3361_security_linkage import load_reference, verify
+
+    corpus, series, form25 = _causal_corpus()
+    bundle, manifest, _ = _build(tmp_path, corpus, series, form25_rows=form25)
+    tally = verify(bundle, load_reference(tmp_path / "bundle", manifest))
+    assert tally.mismatches == []
+    assert tally.counts["compared"] > 50
+    for reason in (
+        "linked",
+        "conflicting_evidence",
+        "no_recent_evidence",
+        "vendor_symbol_collision",
+        "before_coverage",
+    ):
+        assert tally.counts[f"reason_{reason}"] > 0, reason
+
+
+def test_causal_reference_catches_a_reader_that_leaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Negative control: a reader that looks one day ahead must be caught.
+    from scripts.causal_3361_security_linkage import load_reference, verify
+
+    corpus, series, form25 = _causal_corpus()
+    bundle, manifest, _ = _build(tmp_path, corpus, series, form25_rows=form25)
+    honest = bundle.link_as_of
+    monkeypatch.setattr(bundle, "link_as_of", lambda sid, d: honest(sid, d + timedelta(days=1)))
+    assert verify(bundle, load_reference(tmp_path / "bundle", manifest)).counts["mismatch"] > 0
+
+
+# ------------------------------------------------------------------ cross-checks (item 3)
+
+
+def test_etoro_crosscheck_classifies_by_history_containment(tmp_path: Path) -> None:
+    from scripts.crosscheck_3361_security_linkage import check_etoro
+
+    corpus = Corpus()
+    for symbol, cik in (("AAA", C1), ("BBB", C2), ("CCC", C1), ("DDD", C1)):
+        corpus.file(cik, symbol, _ny4pm("2021-03-01"))
+    series = [_series(i, s) for i, s in enumerate(("AAA", "BBB", "CCC", "DDD", "EEE"), start=1)]
+    crosscheck = [
+        [1, 11, None, None],
+        [2, 12, None, None],
+        [3, 13, None, None],
+        [4, 14, None, None],
+        [5, 15, None, None],
+    ]
+    history = [
+        [11, C1, "2020-01-01", None, "imported"],  # agree
+        [12, C1, "2020-01-01", None, "imported"],  # disagree: the link says C2
+        [13, C1, "2022-01-01", None, "imported"],  # starts after last_bar
+        [14, "1", "2020-01-01", None, "imported"],  # malformed CIK
+        [15, C1, "2020-01-01", None, "imported"],  # reader: never seen
+    ]
+    bundle, _, _ = _build(tmp_path, corpus, series, crosscheck_series=crosscheck, instrument_cik_history=history)
+    inventory = json.loads((tmp_path / "bundle" / "inputs" / "series_inventory.json").read_bytes())
+    report = check_etoro(bundle, inventory, crosscheck, history).to_json()
+    assert (report["population"], report["agree"], report["disagree"]) == (5, 1, 1)
+    assert report["disagreements"][0] | {} == {
+        "series_id": 2,
+        "at": "2021-12-31",
+        "link": C2,
+        "basis": "single_cik",
+        "comparator": C1,
+    }
+    assert report["not_comparable_by_reason"] == {
+        "comparator:malformed_history_row": 1,
+        "comparator:no_history_row_contains_last_bar": 1,
+        "reader:no_recent_evidence:never_seen": 1,
+    }
+
+
+def test_form25_crosscheck_uses_the_register_filed_on_the_delisting_date(tmp_path: Path) -> None:
+    from scripts.crosscheck_3361_security_linkage import check_form25
+
+    corpus = Corpus()
+    corpus.file(C1, "AAA", _ny4pm("2019-03-01"))
+    corpus.file(C2, "BBB", _ny4pm("2019-03-01"))
+    series = [_series(1, "AAA"), _series(2, "BBB"), _series(3, "CCC_WS"), _series(4, "DDD", last="2019-02-01")]
+    crosscheck = [[1, None, "(b)", "2019-06-03"], [2, None, "(a)(3)", "2019-06-03"], [3, None, "(b)", "2019-06-03"]]
+    crosscheck.append([4, None, None, None])  # no provision: outside the population
+    register = [
+        ["0000000000-19-000001", "2019-06-03", C1, "AAA"],
+        ["0000000000-19-000002", "2019-06-03", C1, "BBB"],
+        ["0000000000-19-000003", "2019-06-04", C2, "BBB"],  # filed another day: not the comparator
+    ]
+    without, _, _ = _build(tmp_path, corpus, series, form25_rows=register, form25=False, crosscheck_series=crosscheck)
+    inventory = json.loads((tmp_path / "bundle" / "inputs" / "series_inventory.json").read_bytes())
+    report = check_form25(without, inventory, crosscheck, register).to_json()
+    assert (report["population"], report["agree"], report["disagree"]) == (3, 1, 1)
+    assert report["disagreements"][0]["series_id"] == 2
+    assert report["not_comparable_by_reason"] == {"comparator:no_rule4_match_set": 1}
+
+
+# ------------------------------------------------------------------ registry (item 5)
+
+
+def test_registry_cell_citing_3361_stays_fail() -> None:
+    from app.services.research_point_in_time import FIELD_REGISTRY, PROBE_MATRIX, RankingFamily
+
+    cell = PROBE_MATRIX[RankingFamily.COMPANYFACTS_PIT]["historical_population"]
+    assert cell.outcome == "fail" and cell.qualification is not None and "#3361" in cell.qualification
+    assert FIELD_REGISTRY[RankingFamily.COMPANYFACTS_PIT].status == "refused"
