@@ -1,8 +1,8 @@
 # #3361 — dated series ↔ CIK linkage with an abstention census
 
 Step 2 of `docs/proposals/ta/2026-09-24-selection-programme-v2.md` ("Security linkage"). Refs #2899, #2721,
-#3360 (the fundamentals bundle this joins to), #3362 (termination). Codex ckpt-1 rounds 1 (67 findings) and
-2 (60) ran on 2026-09-24 and are folded in; see "Design history".
+#3360 (the fundamentals bundle this joins to), #3362 (termination). Codex ckpt-1 rounds 1 (67 findings),
+2 (60) and 3 (44) ran on 2026-09-24 and are folded in; see "Design history".
 
 ## Contract (deliberately narrow)
 > For research price series S and decision date D: which SEC entity (CIK) did the SEC evidence **accepted
