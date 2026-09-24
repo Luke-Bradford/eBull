@@ -26,6 +26,7 @@ import multiprocessing
 import sys
 import zipfile
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -124,10 +125,15 @@ def read_component(
     return "value", Decimal(winner.values[0]), winner.accns, disagree
 
 
+def accession_index(bundle: pf.PitFundamentalsBundle, cik10: str, d: date) -> tuple[Mapping[str, Any], ...]:
+    """The CIK's whole public accession index at D (#3360 rule 6). ``public_events`` returns the
+    shard-wide index whichever concept is named; ``REVENUE[0]`` only satisfies its policy gate."""
+    return bundle.public_events(cik10, "us-gaap", REVENUE[0], d).accessions
+
+
 def annual_period(bundle: pf.PitFundamentalsBundle, cik10: str, d: date) -> tuple[str, str] | str:
     """Rule 4: (start, end) or the rung that stops it."""
-    prefix = bundle.public_events(cik10, "us-gaap", REVENUE[0], d)
-    forms = {a["accn"]: pf.form_family(a["form"]) for a in prefix.accessions}
+    forms = {a["accn"]: pf.form_family(a["form"]) for a in accession_index(bundle, cik10, d)}
     starts: dict[str, set[str]] = defaultdict(set)
     for concept in (*REVENUE, *COGS):
         read = bundle.public_events(cik10, "us-gaap", concept, d)
@@ -148,7 +154,7 @@ def annual_period(bundle: pf.PitFundamentalsBundle, cik10: str, d: date) -> tupl
 def is_foreign_private_issuer(bundle: pf.PitFundamentalsBundle, cik10: str, d: date, winners: set[str]) -> bool:
     """Rule 6: the latest public ORIGINAL annual-report accession is a 20-F/40-F (any FPI form at
     that acceptance counts), or any winning component accession is."""
-    accessions = bundle.public_events(cik10, "us-gaap", REVENUE[0], d).accessions
+    accessions = accession_index(bundle, cik10, d)
     forms = {a["accn"]: pf.form_family(a["form"]) for a in accessions}
     originals = [
         (a["acceptance"], pf.form_family(a["form"]))
