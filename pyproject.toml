@@ -40,6 +40,10 @@ dependencies = [
   "numpy>=2.0",
   "numba>=0.66,<0.67",
   "openpyxl>=3.1.5",
+  # #3360: the PIT fundamentals bundle loads America/New_York from THIS package
+  # file (spec rule 7), not the OS zone path, and binds its version into the
+  # bundle POLICY hash -- so it is pinned exactly; a bump invalidates bundles.
+  "tzdata==2026.1",
 ]
 
 [tool.uv]
