@@ -31,6 +31,7 @@ Sections, in the order they matter:
   4. IMPACT — what share of the observations layer would move into the `etfs`
      wedge, pooled and on the golden panel, and how much of that is a single
      multi-mandate filer.
+  5/6. OVER-ATTRIBUTION — Vanguard's and Geode's series-filings by `IS_ETF`.
 
 Run from repo root:
 
@@ -317,13 +318,8 @@ def _section_impact(conn: psycopg.Connection[tuple], matched: dict[str, str]) ->
     print()
 
 
-def _section_vanguard_series(archives: list[Path]) -> None:
-    """Vanguard-advised series by IS_ETF — a COUNT of series-filings, not AUM.
-
-    The point is not the ratio's precision; it is that the ratio is nowhere
-    near 1. A filer-level `ETF` type assigns 100% of this manager's 13F book
-    to the ETF wedge.
-    """
+def _adviser_series_counts(archives: list[Path], name: str, *, types: frozenset[str]) -> collections.Counter[str]:
+    """Series-filings whose ADVISER_NAME contains ``name`` (case-insensitive), by IS_ETF."""
     counts: collections.Counter[str] = collections.Counter()
     for archive in archives:
         is_etf = {
@@ -331,12 +327,37 @@ def _section_vanguard_series(archives: list[Path]) -> None:
             for row in _read_tsv(archive, "FUND_REPORTED_INFO.tsv")
         }
         for row in _read_tsv(archive, "ADVISER.tsv"):
-            if (row.get("ADVISER_TYPE") or "").strip().lower() != "advisor":
+            if (row.get("ADVISER_TYPE") or "").strip().lower() not in types:
                 continue
-            if "VANGUARD" not in (row.get("ADVISER_NAME") or "").upper():
+            if name not in (row.get("ADVISER_NAME") or "").upper():
                 continue
             counts[is_etf.get(row["FUND_ID"], "?") or "(blank)"] += 1
+    return counts
+
+
+def _section_vanguard_series(archives: list[Path]) -> None:
+    """Vanguard-advised series by IS_ETF — a COUNT of series-filings, not AUM.
+
+    The point is not the ratio's precision; it is that the ratio is nowhere
+    near 1. A filer-level `ETF` type assigns 100% of this manager's 13F book
+    to the ETF wedge.
+    """
+    counts = _adviser_series_counts(archives, "VANGUARD", types=frozenset({"advisor"}))
     print("5. OVER-ATTRIBUTION — Vanguard-advised series-filings by IS_ETF")
+    print("   (COUNT of series-filings across the window, NOT assets)")
+    for flag, n in sorted(counts.items()):
+        print(f"     IS_ETF={flag:8s} {n:,}")
+    print()
+
+
+def _section_geode_series(archives: list[Path]) -> None:
+    """Geode — the one CIK ever seeded ``ETF`` (migration 104, retired by 419, #2214).
+
+    Geode is mostly a SUBadviser (Fidelity index funds), so both active adviser
+    roles count; ``Terminated …`` rows do not.
+    """
+    counts = _adviser_series_counts(archives, "GEODE", types=frozenset({"advisor", "subadvisor"}))
+    print("6. Geode-advised or -subadvised series-filings by IS_ETF (#2214)")
     print("   (COUNT of series-filings across the window, NOT assets)")
     for flag, n in sorted(counts.items()):
         print(f"     IS_ETF={flag:8s} {n:,}")
@@ -372,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         _section_consolidation(conn, matched)
         _section_impact(conn, matched)
     _section_vanguard_series(archives)
+    _section_geode_series(archives)
     return 0
 
 

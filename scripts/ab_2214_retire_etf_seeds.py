@@ -66,10 +66,10 @@ def main() -> int:
             " WHERE c.filer_type = 'ETF' AND c.filer_cik = ANY(%(ciks)s) ORDER BY 1",
             {"ciks": _CIKS},
         ).fetchall()
-        conn.rollback()
         print(f"instruments carrying a re-typed _current row    {len(rows):>8,}")
 
-        conn.execute("SELECT 1")
+        # Population, control, migration and treatment share ONE snapshot: nothing ingested
+        # mid-run can enter the migration's reach without entering the population.
         try:
             control = {iid: _view(conn, sym, iid) for iid, sym in rows}
             ep_a = {r[0]: (r[1], r[2]) for r in conn.execute(_ENDPOINT_SPLIT_SQL).fetchall()}

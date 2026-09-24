@@ -136,8 +136,8 @@ _INSTITUTIONAL_SEEDS: list[tuple[str, str, str]] = [
 
 # CIKs to tag as ETFs. Deliberately EMPTY (#2214, migration 419): Form 13F is filed
 # per MANAGER with no fund breakdown (Rule 13f-1), so no 13F filer CIK can mean "shares
-# held by ETFs". Vanguard, BlackRock and Geode were listed here; Geode's own N-CEN
-# records name it adviser on 25 ETF series-filings against 107 non-ETF. Fund-level ETF
+# held by ETFs". Vanguard, BlackRock and Geode were listed here; each one's own N-CEN
+# series are a mixed ETF / non-ETF book (`scripts/audit_ncen_etf_advisers`, sections 5-6). Fund-level ETF
 # holdings come from N-PORT (the `funds` overlay), per sec-edgar skill §2.2.1. Only a
 # CIK whose whole 13F book is ETF mandates may be added.
 _ETF_OVERRIDES: list[tuple[str, str]] = []

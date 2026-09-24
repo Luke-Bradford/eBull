@@ -8,20 +8,22 @@
 -- #1577, "ETF identity = series/class"), and they already render as the `funds`
 -- memo overlay. See `.claude/skills/data-sources/sec-edgar.md` §2.2.1.
 --
--- Measured on the source itself: Geode's own N-CEN records (DERA N-CEN data sets
--- 2025q1–2026q1, ADVISER.tsv × FUND_REPORTED_INFO.tsv, adviser name ~ 'GEODE') name it
--- adviser/subadviser on 25 series-filings with IS_ETF = 'Y' and 107 without. The seed
--- script's other two overrides (Vanguard 0000102909, BlackRock 0001086364) are the
--- same shape. Vanguard's own split is 137 Y / 138 not (`scripts/audit_ncen_etf_advisers`).
--- They were never applied on dev: etf_filer_cik_seeds held Geode alone.
+-- Measured on the source itself: in Geode's own N-CEN records, most of the series it
+-- advises or subadvises carry IS_ETF blank, not 'Y' (2026-09-24: 25 Y / 106 not). The
+-- seed script's other two overrides (Vanguard 0000102909, BlackRock 0001086364) are the
+-- same shape (Vanguard: 137 Y / 138 not). Reproduce both splits with
+-- `uv run python -m scripts.audit_ncen_etf_advisers` (sections 5 and 6). Those two
+-- overrides were never applied on dev, where etf_filer_cik_seeds held Geode alone.
 --
 -- Re-typed value is 'INV': with the seed gone, `compose_filer_type` falls to its
 -- N-CEN tier, which writes nothing for a 13F-manager CIK (the N-CEN registrant is the
 -- trust, never the manager — sec-edgar §2.2.1), so it lands on the 'INV' default. The
 -- UPDATEs are scoped to rows still tagged 'ETF', so a re-run is a no-op.
 --
--- This is a split move, not a re-count: every re-typed row leaves the `etfs` wedge and
--- enters `institutions`, so institutions + etfs is unchanged per instrument
+-- This is a split move, not a re-count. On `/instruments/{symbol}/institutional-holdings`
+-- every re-typed share leaves `etfs_shares` and enters `institutions_shares`, so the sum is
+-- unchanged per instrument. The ownership rollup already routed Geode to `institutions`
+-- through its `geode` family collapse, and does not move
 -- (`scripts/ab_2214_retire_etf_seeds`).
 
 DELETE FROM etf_filer_cik_seeds
@@ -37,7 +39,8 @@ UPDATE ownership_institutions_observations
  WHERE filer_type = 'ETF'
    AND filer_cik IN ('0001214717', '0000102909', '0001086364');
 
+-- refreshed_at advances whenever a business column changes (current-table contract).
 UPDATE ownership_institutions_current
-   SET filer_type = 'INV'
+   SET filer_type = 'INV', refreshed_at = NOW()
  WHERE filer_type = 'ETF'
    AND filer_cik IN ('0001214717', '0000102909', '0001086364');

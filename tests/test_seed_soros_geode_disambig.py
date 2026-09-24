@@ -62,7 +62,7 @@ def test_real_geode_cik_in_seed_list() -> None:
 
 def test_no_13f_manager_cik_in_etf_override_list() -> None:
     """#2214: a 13F manager's book mixes ETF and non-ETF mandates, so tagging its CIK
-    ETF mislabels the whole book. Geode's own N-CEN: 25 ETF series-filings vs 107 not."""
+    ETF mislabels the whole book (`scripts/audit_ncen_etf_advisers`, sections 5-6)."""
     etf_ciks = {cik for cik, _label in _ETF_OVERRIDES}
     assert etf_ciks.isdisjoint({_REAL_GEODE_CIK, "0000102909", "0001086364"})
 
