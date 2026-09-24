@@ -2514,6 +2514,104 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     if not html_text:
         return Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=0)
 
+    qualifying, best_score, chosen_window = _select_item403_tables(html_text)
+    if not qualifying or chosen_window is None:
+        return Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=best_score)
+
+    window_start, window_end = chosen_window
+    as_of_date = _extract_as_of_date(html_text, window_start=window_start, window_end=window_end)
+
+    rows: list[Def14ABeneficialHolder] = []
+    seen: set[str] = set()
+    # Best-captioned table first, so when two tables report the same holder the
+    # figures from the one with the strongest Item 403 header survive. Stable,
+    # so document order breaks ties.
+    for table in sorted(qualifying, key=lambda t: -_score_table_headers(t.score_headers)):
+        _extract_table_holders(table, rows=rows, seen=seen)
+    return Def14ABeneficialOwnershipTable(
+        as_of_date=as_of_date,
+        rows=rows,
+        raw_table_score=best_score,
+    )
+
+
+def item403_table_htmls(html_text: str) -> list[str]:
+    """The markup of every table :func:`parse_beneficial_ownership_table` reads rows from.
+
+    Read by the #2351 class-column binder (``app.services.def14a_recipients``), which
+    needs the parser's OWN table selection to say which caption governs a stored figure.
+    """
+    if not html_text:
+        return []
+    return [t.table_html for t in _select_item403_tables(html_text)[0]]
+
+
+class ShareLocation(NamedTuple):
+    """One table-model cell holding a stored holder's share count (#2351 slice 3).
+
+    ``captions`` — the column's texts in the table's HEADER BLOCK (the rows above its
+    first row carrying any share-count cell), minus any text that also sits above the
+    holder's name cell in that row (a spanning table title, not a column caption).
+    ``interior`` — the column's non-numeric texts between the header block and the
+    holder's row (a mid-table section label or a second header). ``row_texts`` — the
+    holder row's other non-empty cells (a V-shape *Title of class* cell lands here).
+    """
+
+    captions: tuple[str, ...]
+    interior: tuple[str, ...]
+    row_texts: tuple[str, ...]
+
+
+def _is_share_cell(text: str) -> bool:
+    return "%" not in text and _parse_share_count(text) is not None
+
+
+def share_locations(table_htmls: list[str], holders: list[tuple[str, Decimal]]) -> list[list[ShareLocation]]:
+    """Per ``(holder_name, shares)``: every table-model cell that holds it.
+
+    A location is a cell of :func:`_layout_rows` whose text parses to exactly ``shares``
+    (and carries no ``%``) on a row where some cell has the holder's
+    :func:`_layout_name_key`. Source rule: the HTML table model (see :func:`_layout_rows`).
+    A holder whose name key is empty has no location.
+
+    Cost is tables × rows × holders × columns. Its only caller is the daily
+    ``def14a_recipient_suppressions`` job over multi-sibling issuers' proxies (Item 403
+    tables of tens of rows and columns). Time the whole population with
+    ``scripts/probe_2351_read_column`` before giving it an online caller.
+    """
+    keys = [_layout_name_key(name) for name, _ in holders]
+    out: list[list[ShareLocation]] = [[] for _ in holders]
+    for table_html in table_htmls:
+        grid = _layout_rows(table_html)
+        header_end = next((r for r, row in enumerate(grid) if any(_is_share_cell(t) for t in row.values())), None)
+        if header_end is None:
+            continue
+        for r, row in enumerate(grid):
+            name_cols = {c for c, text in row.items() if text and _layout_name_key(text)}
+            for h, (key, (_, shares)) in enumerate(zip(keys, holders, strict=True)):
+                matched = {c for c in name_cols if _layout_name_key(row[c]) == key}
+                if not key or not matched:
+                    continue
+                for c, text in sorted(row.items()):
+                    if not text or not _is_share_cell(text) or _parse_share_count(text) != shares:
+                        continue
+                    captions: list[str] = []
+                    for above in grid[:header_end]:
+                        cap = above.get(c, "")
+                        if cap and _parse_share_count(cap) is None and cap not in captions:
+                            if not any(above.get(n) == cap for n in matched):
+                                captions.append(cap)
+                    interior = tuple(
+                        t for mid in grid[header_end:r] if (t := mid.get(c, "")) and _parse_share_count(t) is None
+                    )
+                    row_texts = tuple(t for col, t in sorted(row.items()) if t and col != c)
+                    out[h].append(ShareLocation(tuple(captions), interior, row_texts))
+    return out
+
+
+def _select_item403_tables(html_text: str) -> tuple[list[_RawTable], int, tuple[int, int] | None]:
+    """``(qualifying tables, best header score, chosen window)`` — the table selection
+    half of :func:`parse_beneficial_ownership_table`, unchanged."""
     candidate_windows = _find_section_windows(html_text)
     best_score = 0
     best_table: _RawTable | None = None
@@ -2608,23 +2706,8 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             len(candidate_windows),
             best_score,
         )
-        return Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=best_score)
-
-    window_start, window_end = chosen_window
-    as_of_date = _extract_as_of_date(html_text, window_start=window_start, window_end=window_end)
-
-    rows: list[Def14ABeneficialHolder] = []
-    seen: set[str] = set()
-    # Best-captioned table first, so when two tables report the same holder the
-    # figures from the one with the strongest Item 403 header survive. Stable,
-    # so document order breaks ties.
-    for table in sorted(qualifying, key=lambda t: -_score_table_headers(t.score_headers)):
-        _extract_table_holders(table, rows=rows, seen=seen)
-    return Def14ABeneficialOwnershipTable(
-        as_of_date=as_of_date,
-        rows=rows,
-        raw_table_score=best_score,
-    )
+        return [], best_score, None
+    return qualifying, best_score, chosen_window
 
 
 def _pad_row(raw_row: tuple[str, ...], *, name_idx: int, shares_idx: int, percent_idx: int) -> list[str]:
