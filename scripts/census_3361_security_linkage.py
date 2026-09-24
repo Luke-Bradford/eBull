@@ -36,6 +36,7 @@ import argparse
 import hashlib
 import json
 import multiprocessing
+import shutil
 import sys
 import zipfile
 from collections import Counter, defaultdict
@@ -342,8 +343,19 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, required=True, help="evidence directory; must not exist")
     parser.add_argument("--processes", type=int, default=max(1, (multiprocessing.cpu_count() or 2) - 2))
     args = parser.parse_args()
-    args.out_dir.mkdir(parents=False)  # exclusive
+    args.out_dir.mkdir(parents=False)  # exclusive: an existing evidence directory is refused
+    try:
+        receipt = _run(args)
+    except BaseException:
+        # Created above by the exclusive mkdir, so it holds only this run's partial output;
+        # leaving it would block a retry with the same path.
+        shutil.rmtree(args.out_dir, ignore_errors=True)
+        raise
+    json.dump(receipt, sys.stdout, indent=1)
+    return 0
 
+
+def _run(args: argparse.Namespace) -> dict[str, Any]:
     bundle = sl.load_security_linkage(args.bundle, expected_manifest_sha256=args.manifest_sha256)
     manifest = json.loads((args.bundle / sl.MANIFEST_FILENAME).read_bytes())
     inputs = args.bundle / "inputs"
@@ -471,8 +483,7 @@ def main() -> int:
     }
     with (args.out_dir / "manifest.json").open("x") as handle:
         handle.write(json.dumps(receipt, sort_keys=True, indent=1) + "\n")
-    json.dump(receipt, sys.stdout, indent=1)
-    return 0
+    return receipt
 
 
 if __name__ == "__main__":

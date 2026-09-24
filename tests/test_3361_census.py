@@ -149,3 +149,14 @@ def test_tabulate_counts_ended_diagnostics_but_keeps_them_out_of_at_d_links(tmp_
         "bar_on_d|linked:single_cik|liquidity_unavailable|runs_to_capture": 1,
         "ended_in_window|linked:single_cik|not_applicable|ends_before_capture": 1,
     }
+
+
+def test_failed_run_leaves_no_evidence_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.r6_pit_bundle import R6PitBundleError
+
+    out = tmp_path / "evidence"
+    argv = ["census", "--bundle", str(tmp_path / "missing"), "--manifest-sha256", "0" * 64, "--out-dir", str(out)]
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(R6PitBundleError):
+        census.main()
+    assert not out.exists()  # a retry with the same path is not blocked
