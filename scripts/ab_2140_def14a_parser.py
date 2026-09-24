@@ -51,8 +51,9 @@ def _scan(limit: int | None) -> dict[str, Any]:
     original_parse_table = parser_mod._parse_table_html
     pending: dict[str, Any] = {}
 
-    # ``**kwargs`` is load-bearing, not defensive (#2175). The SCT call site passes
-    # ``expand_spans=False``; a tracer that accepted only the positional argument
+    # ``**kwargs`` is load-bearing, not defensive (#2175). The SCT call site passed
+    # ``expand_spans=False`` then (``drop_value_continuations=False`` since #2350); a
+    # tracer that accepted only the positional argument
     # raised TypeError inside the SCT arm, the harness swallowed it, and the run
     # reported ``sct_rows: 67,828 -> 0`` — a total-collapse figure produced entirely
     # by the harness while the parser itself returned 17 rows for the same filing.
@@ -304,6 +305,10 @@ def _audit(limit: int | None) -> int:
                 column_headers=table.column_headers,
                 rows=table.rows,
                 line_rows=table.line_rows,
+                table_html=table.table_html,
+                # The SCT reads rowspan provenance (#2350); dropping it re-creates
+                # the repeated-title drift in this arm only (Codex ckpt-2).
+                inherited_at=table.inherited_at,
             )
         return table
 

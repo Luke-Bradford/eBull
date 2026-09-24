@@ -168,7 +168,13 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # which table wins. Fails closed on more than one distinct percent caption, on
 # two non-contiguous percent runs (dual-class), on an ambiguous name prefix, and
 # on a percent equal to the row's own share count.
-_PARSER_VERSION_DEF14A = "def14a-v14"
+# v15 (#2350): the Item 402(c) SCT reads the HTML table model too. Its
+# ``expand_spans=False`` pin is gone: a carried (rowspan) cell is never a new
+# NEO name/title or the row's year, the Item 403 value-continuation row drop no
+# longer removes an NEO's title row, and Total binds to the RIGHTMOST total
+# caption (17 CFR 229.402(c)(2)(x)). Full-population A/B: 21 of 43,286 accessions
+# change, no salary or total moves to a different value (#2350 PR).
+_PARSER_VERSION_DEF14A = "def14a-v15"
 
 logger = logging.getLogger(__name__)
 

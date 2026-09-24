@@ -106,6 +106,132 @@ def test_aapl_rowspan_continuation_shift() -> None:
     assert cook_2024.salary == Decimal("3000000")
 
 
+def test_real_rowspan_title_cell_is_carried_not_reread() -> None:
+    """#2350 — a REAL ``rowspan`` title cell, read through the HTML table model.
+
+    Layout of 0000004904-25-000043 (AEP): the NEO's name sits on its own row and
+    the title cell carries ``rowspan`` over the NEO's fiscal-year rows. The table
+    model places that cell into every year row it covers, and read as a fresh
+    title fragment on a year-descending row the #2094 wrapped-title arm appended
+    it once per year — 'Executive Vice President and Chief Financial Officer' ×3
+    (580 accessions in #2175's full-population A/B). A carried cell is the
+    carried NEO, never new text. The value cells are each row's own, so every
+    year's figures must stay aligned too."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Stock Awards ($)", "Total ($)")
+    table = (
+        f"<table>{header}"
+        "<tr><td>Charles E. Zebula</td><td></td><td></td><td></td><td></td></tr>"
+        '<tr><td rowspan="3">Executive Vice President and Chief Financial Officer</td>'
+        "<td>2024</td><td>750,000</td><td>2,000,000</td><td>3,842,733</td></tr>"
+        "<tr><td>2023</td><td>700,000</td><td>1,900,000</td><td>3,986,981</td></tr>"
+        "<tr><td>2022</td><td>650,000</td><td>1,200,000</td><td>2,773,018</td></tr>"
+        "<tr><td>Greg B. Hall</td><td></td><td></td><td></td><td></td></tr>"
+        '<tr><td rowspan="2">Executive Vice President and Chief Commercial Officer</td>'
+        "<td>2024</td><td>600,000</td><td>1,500,000</td><td>3,899,524</td></tr>"
+        "<tr><td>2023</td><td>550,000</td><td>900,000</td><td>2,164,319</td></tr>"
+        "</table>"
+    )
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    cfo = "Executive Vice President and Chief Financial Officer"
+    cco = "Executive Vice President and Chief Commercial Officer"
+    assert [(r.executive_name, r.principal_position, r.fiscal_year, r.total_comp) for r in result.rows] == [
+        ("Charles E. Zebula", cfo, 2024, Decimal("3842733")),
+        ("Charles E. Zebula", cfo, 2023, Decimal("3986981")),
+        ("Charles E. Zebula", cfo, 2022, Decimal("2773018")),
+        ("Greg B. Hall", cco, 2024, Decimal("3899524")),
+        ("Greg B. Hall", cco, 2023, Decimal("2164319")),
+    ]
+    assert result.rows[2].salary == Decimal("650000")
+
+
+def test_title_row_under_spanning_value_cells_is_kept() -> None:
+    """#2350 — value cells ``rowspan="2"`` over the NEO's name row and the title
+    row under it (0000050863-25-000054, 'Former EVP and GM, DCAI' under 'Justin
+    Hotard'). Item 403 drops such a row as an address continuation; the SCT must
+    keep it, or the title is lost."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    table = (
+        f"<table>{header}"
+        '<tr><td>Justin Hotard</td><td rowspan="2">2024</td><td rowspan="2">721,900</td>'
+        '<td rowspan="2">12,575,800</td></tr>'
+        "<tr><td>Former EVP and GM, DCAI</td></tr>"
+        "</table>"
+    )
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year, r.total_comp) for r in result.rows] == [
+        ("Justin Hotard", "Former EVP and GM, DCAI", 2024, Decimal("12575800")),
+    ]
+
+
+@pytest.mark.parametrize(
+    "row_2023_open",
+    [
+        # Title AND year span down: the carried 2023 lands BEFORE the own 2022.
+        '<tr><td rowspan="2">Chairman of the Board</td><td rowspan="2">2023</td>',
+        # Only the year spans: the own 2022 takes column 0, the carried 2023 lands AFTER it.
+        '<tr><td>Chairman of the Board</td><td rowspan="2">2023</td>',
+    ],
+)
+def test_carried_year_cell_is_not_the_rows_year_or_a_value(row_2023_open: str) -> None:
+    """#2350 — a malformed ``rowspan`` carries the row above's year into a row
+    that has its own. Before the own year it re-dated the row and shifted every
+    value (0000064996-25-000022); after it, it was read as salary
+    (0001376339-26-000033). The row's own year and values stand."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Other ($)", "Total ($)")
+    table = (
+        f"<table>{header}"
+        "<tr><td>George Joseph</td><td>2024</td><td>1,317,802</td><td>18,650</td><td>3,595,477</td></tr>"
+        f"{row_2023_open}<td>1,197,741</td><td>81,192</td><td>1,629,078</td></tr>"
+        "<tr><td>2022</td><td>1,152,503</td><td>76,841</td><td>1,278,568</td></tr>"
+        "</table>"
+    )
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.fiscal_year, r.salary, r.total_comp) for r in result.rows] == [
+        (2024, Decimal("1317802"), Decimal("3595477")),
+        (2023, Decimal("1197741"), Decimal("1629078")),
+        (2022, Decimal("1152503"), Decimal("1278568")),
+    ]
+
+
+def test_group_subtotal_caption_is_not_the_total_column() -> None:
+    """#2350 / 17 CFR 229.402(c)(2)(x): Total is the RIGHTMOST column. Quanta
+    (0001193125-25-078453) groups 'PSUs | RSUs | Total (3)' under Stock Awards;
+    that subtotal must not resolve as ``total_comp`` ahead of the real Total."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "PSUs ($)", "RSUs ($)", "Total ($)",
+                  "All Other Compensation ($)", "Total ($)")  # fmt: skip
+    row = _row("Jayshree Desai\nChief Financial Officer", "2024", "809,250", "2,067,852", "1,273,885",
+               "3,341,737", "75,745", "4,935,740")  # fmt: skip
+    result = parse_summary_compensation_table(_sct_doc(f"<table>{header}{row}</table>"))
+
+    assert len(result.rows) == 1
+    assert result.rows[0].salary == Decimal("809250")
+    assert result.rows[0].total_comp == Decimal("4935740")
+
+
+def test_sub_caption_label_row_falls_back_to_parent_captions() -> None:
+    """#2350 — a span-restored sub-caption row under 'Salary' / 'Bonus' is
+    promoted as the label row but carries neither Salary nor Total
+    (0001140361-25-011887), which rejected the real SCT. The parent caption row
+    then supplies the header."""
+    table = (
+        "<table>"
+        '<tr><td rowspan="2">Name and Position</td><td rowspan="2">Year</td><td colspan="2">Salary</td>'
+        '<td colspan="2">Bonus</td><td rowspan="2">Stock Awards</td><td rowspan="2">Total</td></tr>'
+        "<tr><td>Paid in Cash</td><td>Paid in Stock</td><td>Paid in Cash</td><td>Paid in Stock</td></tr>"
+        "<tr><td>Andrew Spodek\nChief Executive Officer</td><td>2024</td><td>—</td><td>385,532</td>"
+        "<td>—</td><td>921,212</td><td>1,925,860</td><td>3,282,812</td></tr>"
+        "</table>"
+    )
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.fiscal_year, r.total_comp) for r in result.rows] == [
+        ("Andrew Spodek", 2024, Decimal("3282812")),
+    ]
+
+
 def test_gme_stacked_name_position_rows() -> None:
     """Stacked name/position layout (#2088 — GME): the title renders on its
     OWN physical row (the second year-row per NEO) and the third year-row's
