@@ -21,7 +21,7 @@ import math
 import statistics
 import zipfile
 from collections import Counter, defaultdict
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -81,6 +81,7 @@ _EVIDENCE_SQL: Final = """
     FROM research_price_series
     WHERE vendor = %(vendor)s
       AND bar_count IS NOT NULL
+      AND upper(trim(vendor_symbol)) = ANY(%(symbols)s)
     ORDER BY series_id
 """
 
@@ -102,11 +103,9 @@ def load_series_evidence(conn: psycopg.Connection[Any], *, symbols: Collection[s
     wanted = {symbol.upper() for symbol in symbols}
     found: dict[str, SeriesEvidence] = {}
     for series_id, vendor_symbol, first_bar, last_bar, source, provision in conn.execute(
-        _EVIDENCE_SQL, {"vendor": SURVIVORSHIP_FREE_VENDOR}
+        _EVIDENCE_SQL, {"vendor": SURVIVORSHIP_FREE_VENDOR, "symbols": sorted(wanted)}
     ):
         symbol = str(vendor_symbol).strip().upper()
-        if symbol not in wanted:
-            continue
         if symbol in found:
             raise RuntimeError(f"two Intrader series carry symbol {symbol}")
         found[symbol] = SeriesEvidence(
@@ -167,7 +166,7 @@ class TerminationPolicy:
         }
 
 
-def _by_class(fraction: Any) -> tuple[tuple[TerminationClass, float], ...]:
+def _by_class(fraction: Callable[[TerminationClass], float]) -> tuple[tuple[TerminationClass, float], ...]:
     return tuple((c, float(fraction(c))) for c in sorted(TerminationClass))
 
 
