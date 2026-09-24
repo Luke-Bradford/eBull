@@ -1122,9 +1122,8 @@ def _rewash_exec_comp(
                     "DELETE FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s",
                     (raw_doc.accession_number, instrument_id),
                 )
-                cleared = cur.rowcount
-            if not comp.rows and comp.withheld_rows:
-                written = cleared
+                if not comp.rows and comp.withheld_rows:
+                    written = cur.rowcount  # the withheld parse's effect: stale rows cleared
             for comp_row in comp.rows:
                 _upsert_comp(
                     conn,
