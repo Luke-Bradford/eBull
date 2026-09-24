@@ -2,7 +2,7 @@
 
 Status: slice 1 (census) shipped (#3352). Slice 2 is the suppression-ledger reframe
 (2026-09-24, third pass); the writer-side withhold version failed ckpt-1 three times
-(49 → 78 → 88 findings; #2351 handoffs 03:56Z and 04:21Z). Slice 3 is scoped only.
+(49 → 78 → 88 findings; #2351 handoffs 03:56Z and 04:21Z). Slice 2b shipped (#3354). Slice 3 (H-shape, dual-class common) is below; slice 3b (V-shape) is scoped only.
 
 ## Problem
 
@@ -418,11 +418,149 @@ table above), updated = 11 (version bump), changed instruments = {OPENL, OPENW, 
 STRC, STRD, STRF, XRXDW}, `fallback_to_older_accession` empty. Smoke `/instruments/{OPENW,STRF,XRXDW}` ownership:
 no DEF 14A holders; `OPEN`, `MSTR`, `XRX` unchanged.
 
-## Slice 3 — scoped only
+## Slice 3 — dual-class common siblings (`RECIPIENT_RULE_VERSION = 3`)
 
-Bind the column the parser READ (H-shape group header, V-shape class cell, per-table
-caption) to a cover title, emit per-class rows keyed by instrument, and withhold the
-unbound sibling. Needs its own spec + ckpt-1. The census records give its test set.
+### Problem (measured on dev, 2026-09-24)
+
+The census's 63 `legacy_multiclass` proxies (two or more COMMON siblings on one cover)
+come in two table shapes (read from each proxy's selected tables on dev, 2026-09-24).
+
+- **H-shape** — one column group per class (`Class A Common Stock | Class B Common Stock`,
+  each over `Shares | Percent`). The parser reads ONE shares column (`_resolve_columns`:
+  leftmost of the top tier), so every sibling receives that one class's figures.
+  `GOOG` (Class C) shows Alphabet's Class A / Class B column figures; `FOX` (Class B)
+  shows FOXA's Class A figures.
+- **V-shape** — a *Title of Class* / *Title of Series* column, one row per (holder,
+  class). The parser de-duplicates holders by name across rows (`seen`, first-wins) and
+  the store key is `(instrument_id, accession_number, holder_name)`, so a holder's
+  per-class rows reach every sibling as ONE row of one class (`LEN`/`LEN.B`,
+  `GEF`/`GEF.B`, the Liberty entities). No stored row carries its class, so no
+  reader-side rule can recover it. **Slice 3b (scoped only, below).**
+
+### Source rule
+
+- Item 403(a)/(b) columns are per class (*Title of class*, *Percent of class*) — § Source
+  rule at the top. A figure read from the column captioned `Class A Common Stock` is a
+  Class A figure; it is not a Class C holding.
+- Which caption sits above a cell: the HTML table model (HTML Living Standard §4.9.12
+  "Forming a table"), as implemented by `sec_def14a._layout_rows` (verified against
+  `pandas.read_html`; see its docstring). DEF 14A has no structured-data mandate
+  (`sec-edgar.md` §2.2), so the markup is the source. The standard's header-ASSOCIATION
+  algorithm (`headers`/`scope`) is not used: EDGAR proxies rarely carry those attributes,
+  so the rule reads the column's header block positionally and adds the vetoes below.
+- Which class an instrument is: the point-in-time cover 12(b) title (slice 2).
+- **No published rule** maps a caption's class wording to a 12(b) title. Fixed by
+  construction below (class-letter equality) and frozen in `RECIPIENT_RULE_VERSION`.
+
+### Rule
+
+**Designators** — `designators(text)`: the letters of `class|series` (optionally
+`classes`) followed by a single letter or a list of them (`Class A and B`, `Classes A and
+B`, `Class A, B or C`). A letter followed by a word character or `-` (`Class A-1`,
+`Class II`) is not a designator.
+
+**Cover side** (`usable_common_classes`) — a letter L is usable iff exactly one cover title
+of ANY kind carries it, that title is `common` naming only L, and exactly one sibling key
+maps to it (the sibling's key maps to exactly one cover title). Undesignated common titles
+(`Common stock`) are never usable: such a sibling is never suppressed and never a witness.
+
+**Table side** (`sec_def14a.share_locations`) — the tables are the ones the parser selects
+for A's stored `def14a_body` (`item403_table_htmls`, a behaviour-preserving extraction from
+`parse_beneficial_ownership_table`). A *location* of stored row r (S's own
+`def14a_beneficial_holdings` rows for A) is a cell of `_layout_rows(table)` whose text has
+no `%` and parses to exactly `r.shares`, on a grid row where some cell's
+`_layout_name_key` equals r's. Per location:
+- *captions* — the column's non-numeric texts in the table's header block (rows above the
+  first row carrying ANY share-count cell — independent of which rows are stored), minus
+  any text that also sits above the holder's name cell in that header row (a spanning
+  table title, not a column caption);
+- *interior* — the column's non-numeric texts between the header block and r's row;
+- *row texts* — r's row's other non-empty cells.
+
+A location's label is the single letter of the union of `designators` over its captions;
+it is unlabelled when that union is empty or has several letters, when any caption names
+a non-common security (`preferred|preference|warrants?|rights?|units?|notes?|debentures?`),
+or when any interior or row text carries a designator (a mid-table re-header, a V-shape
+class cell). r's label = the single label over ALL its locations; r is *unbound* with no
+location (including every NULL-share row), an unlabelled location, or two labels.
+
+**Decision** (`decide_class_column`) — S with usable letter L is suppressed for A iff S
+has ≥1 stored row for A, every row is bound, no row's label is L, and ≥1 row's label is
+the usable letter of a DIFFERENT sibling key (the witness). A letter the cover does not
+list (Alphabet's unregistered Class B) still proves "not Class C". Ledger row:
+`reason = 'other_common_class_column'`, `cover_*` = A's point-in-time cover and S's title,
+`witness_*` = the lowest-`instrument_id` witness.
+
+No cross-accession extension (per-proxy evidence). Unresolved cover → slice-2 `keep`.
+Missing body, or a parse exception (logged; parsing is deterministic) → no evidence.
+0 of 43,291 `def14a_body` rows have a NULL payload.
+
+**Failure direction.** A suppression needs every row S shows for A to sit, in the
+parser's own tables, under header captions naming exactly one class letter that is not
+S's, with no class word in the row or the column below the header, and one row naming a
+sibling on the cover. Everything else keeps today's rows.
+
+### Measured reach
+
+`PYTHONPATH=. uv run python -m scripts.probe_2351_read_column` (the job's `compute_desired`,
+offline, rolled back) on dev at `2cc7f698` + this branch: 103 accessions, 0 unresolved,
+**10 suppressions** — `GOOG` ×2, `FOX.US` ×3, `Z` ×2, `DGICB` ×2, `RUSHB.US` ×1. The probe
+prints each one's rows per letter and captions; all 10 were read: every row sits under
+`Class A …` (GOOG: 9 A + 2 B, 8 A + 1 B; FOX: `Non-Voting Class A Common Stock`, FOX being
+voting Class B). Not reached, fail-open: every V-shape proxy; mixed tables (`MOG`,
+`BELFA`); undesignated siblings (`UHAL.B`'s column is `Voting Common Stock`, no letter);
+`BIO-B` / `WSO-B` (eToro `-B` vs cover `.B` / `B`, slice 2's exact key). The A/B's output
+is the acceptance set.
+
+### Schema
+
+`sql/422_def14a_recipient_class_column.sql`: widen the `reason` CHECK. Views and readers
+unchanged. (The migration runner applies each file in one transaction.)
+
+### Tests
+
+`tests/test_def14a_class_column.py` (pure): designators incl. lists / `A-1` / `II`;
+cover usability (undesignated, a letter shared with a preferred title); decision —
+GOOG-shaped suppress, own-letter row keeps, unlocated / unlabelled / conflicting row
+keeps, no witness keeps, undesignated never, `.US` duplicates together. Locator: H-shape
+group caption, mid-table re-header → unlabelled, V-shape → unlabelled, spanning title
+ignored, percent cell never matched.
+
+### Acceptance (corpus rung)
+
+- Parser extraction: `parse_beneficial_ownership_table` output (rows, as-of date, score)
+  identical old-vs-new on all 43,291 stored `def14a_body` payloads.
+- `scripts/ab_2351_recipient_suppressions.py` after deploy: changed instruments ==
+  instruments whose ledger keys changed; inserted = the 10 above; updated = every existing
+  row (version bump). Smoke `/instruments/{GOOG,FOX,Z}` DEF 14A holders: none from a
+  suppressed accession; `GOOGL`, `FOXA`, `ZG`, `MOG.A`, `LEN` unchanged.
+- Cross-source: one GOOGL holder's stored figure against the Class A column of the
+  Alphabet 2026 proxy on EDGAR.
+
+### Accepted limits (ckpt-1, 37 findings, classified by the author)
+
+Fixed in the rule above: undesignated captions (1), mid-table re-headers (2, 4), spanning
+titles and prose (3), V-shape class cells (6), percent cells (7), class lists and `A-1`
+(14, 15), preferred/warrant captions (17), cover-wide letter uniqueness (19), NULL-share
+rows (23), per-accession error boundary (36), 3b's parser de-dup (33). Accepted, each
+fail-to-suppress or bounded by the all-rows + witness requirement: name-key prefix
+collisions needing an equal share count (9); name in a non-name cell (10); lossy count
+normalisation (8); locations the grid cannot see (11); selection ≠ historical provenance
+(12, unlocated rows block); percent not compared (13); class/series share one letter space
+(16); a parent/subsidiary class lettered like the registrant's in the same table (18);
+letter renamed between cover and proxy (20, 21, 22); ESOP/observation rows share the
+accession's column (24); ledger staleness ≤ one daily run, as slice 2 (25); ledger keeps
+cover + witness, the probe reproduces the rest (35); `_layout_rows` HTML-model gaps (28,
+29) and its one-case oracle (30). Rebutted: 26 (missing body is permanent, not transient),
+27 (non-usable letters are deliberately not suppressed), 31 (all 10 suppressions read —
+the harmful side is the full population), 32 (full-corpus parser comparison added), 37
+(runner is transactional).
+
+## Slice 3b — V-shape per-row class (scoped only)
+
+Needs the parser to emit the row's class cell and to de-duplicate on (holder, class), a
+store key that includes the class, and writer routing per class across the three DEF 14A
+writers (the shape that failed ckpt-1 three times in slice 2). Own spec + ckpt-1.
 
 ## Security
 

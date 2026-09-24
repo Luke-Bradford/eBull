@@ -1,11 +1,11 @@
-"""#2351 slice 2 — which DEF 14A Item 403 rows a warrant / preferred sibling must not own.
+"""#2351 — which DEF 14A Item 403 rows a sibling instrument must not own.
 
 Every DEF 14A writer fans an accession's Item 403 rows out to every instrument sharing
 the issuer CIK. This module maintains ``def14a_recipient_suppressions``: the
 (instrument, accession) pairs that readers exclude through the ``*_attributed`` views
 (sql/420). The writers and the fact tables are untouched.
 
-Spec: docs/proposals/ownership/2026-09-24-2351-def14a-class-recipients.md (slices 2, 2b).
+Spec: docs/proposals/ownership/2026-09-24-2351-def14a-class-recipients.md (slices 2, 2b, 3).
 
 Source rule. Item 403 reports beneficial ownership per class, determined under Rule
 13d-3; Rule 13d-3(d)(1)(i) counts warrants into the UNDERLYING common class's figure,
@@ -18,7 +18,9 @@ Positive evidence only: a sibling is suppressed only when its OWN point-in-time 
 title is a warrant / preferred AND a different sibling's title on the same cover is
 common. Absence, ambiguity, an unrecognised title and an unresolvable cover never
 create a suppression; an unresolvable cover also never removes one. Slice 2b carries
-such a decision to the same instrument's other accessions (``extend_by_class``).
+such a decision to the same instrument's other accessions (``extend_by_class``). Slice 3
+suppresses a lettered COMMON sibling (GOOG beside GOOGL) for a proxy when every row it
+holds sits under another class letter's column caption (``decide_class_column``).
 """
 
 from __future__ import annotations
@@ -28,23 +30,26 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any, Final, Literal
 
 import httpx
 import lxml.etree as ET
 import psycopg
 
+from app.providers.implementations.sec_def14a import ShareLocation, item403_table_htmls, share_locations
 from app.services.def14a_drift import detect_drift
 from app.services.ownership_observations import refresh_def14a_current, refresh_esop_current
-from app.services.raw_filings import store_raw
+from app.services.raw_filings import store_raw, stored_body
 from app.services.sec_cover_identity import cover_pairs, entity_ciks, parse_cover_contexts_root
 from app.services.xbrl_instance import SAFE_XML_PARSER
 
 logger = logging.getLogger(__name__)
 
-RECIPIENT_RULE_VERSION: Final = 2
+RECIPIENT_RULE_VERSION: Final = 3
 REASON_NON_COMMON_SIBLING: Final = "non_common_sibling"
 REASON_OTHER_COVER: Final = "non_common_sibling_other_cover"
+REASON_CLASS_COLUMN: Final = "other_common_class_column"
 
 COVER_FORMS: Final = ("10-K", "10-Q", "20-F")  # originals only
 MAX_COVER_CANDIDATES: Final = 4
@@ -143,6 +148,133 @@ def decide(*, accession_number: str, issuer_cik: str, siblings: Iterable[Sibling
                 witness_title=witness[1],
             )
         )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 — dual-class common siblings: the class of the column a stored figure sits in
+# ---------------------------------------------------------------------------
+
+# "Class A", "Series C", and lists ("Classes A and B", "Class A, B or C"). A letter
+# followed by a word character or hyphen ("Class A-1", "Class II") is not a designator.
+_LETTER = r"[a-z](?![\w-])"
+_DESIGNATOR = re.compile(
+    rf"\b(?:class|series)(?:es)?\s+({_LETTER}(?:\s*(?:,|and|or|&|/)\s*(?:(?:class|series)\s+)?{_LETTER})*)",
+    re.IGNORECASE,
+)
+_SINGLE_LETTER = re.compile(r"(?<![\w-])[a-z](?![\w-])", re.IGNORECASE)
+# A caption naming a non-common security cannot label a common class's column.
+_NON_COMMON_CAPTION = re.compile(
+    r"\b(?:preferred|preference|warrants?|rights?|units?|notes?|debentures?)\b", re.IGNORECASE
+)
+
+
+def designators(text: str) -> frozenset[str]:
+    return frozenset(letter.upper() for group in _DESIGNATOR.findall(text) for letter in _SINGLE_LETTER.findall(group))
+
+
+@dataclass(frozen=True)
+class CommonClass:
+    sibling: Sibling
+    key: str
+    title: str
+    letter: str
+
+
+def usable_common_classes(siblings: Iterable[Sibling], cover: Cover) -> dict[str, list[CommonClass]]:
+    """Class letter → the common siblings it identifies on this cover.
+
+    A letter is usable only when exactly one cover title (of ANY kind) carries it, that
+    title is ``common`` and names exactly that one letter, and exactly one sibling KEY
+    holds it (``.US`` duplicates share a key and are both returned). A sibling qualifies
+    only when its key maps to exactly one cover title.
+    """
+    titles_by_symbol: dict[str, set[str]] = {}
+    for title, symbol in cover.pairs:
+        titles_by_symbol.setdefault(symbol, set()).add(title)
+    all_titles = {title for title, _ in cover.pairs}
+    by_letter: dict[str, list[CommonClass]] = {}
+    for sib in sorted(siblings, key=lambda s: s.instrument_id):
+        key = symbol_key(sib.symbol)
+        titles = titles_by_symbol.get(key, set())
+        if len(titles) != 1:
+            continue
+        title = next(iter(titles))
+        letters = designators(title)
+        if title_kind(title) != "common" or len(letters) != 1:
+            continue
+        letter = next(iter(letters))
+        if sum(1 for t in all_titles if letter in designators(t)) != 1:
+            continue
+        by_letter.setdefault(letter, []).append(CommonClass(sibling=sib, key=key, title=title, letter=letter))
+    return {letter: ccs for letter, ccs in by_letter.items() if len({c.key for c in ccs}) == 1}
+
+
+def location_label(loc: ShareLocation) -> str | None:
+    """The class letter a located cell is captioned with; None = unlabelled.
+
+    Unlabelled when the holder's own row or a mid-table row in that column names a class
+    (V-shape class cell, section re-header), when a caption names a non-common security,
+    or when the header captions name zero or several letters.
+    """
+    if any(designators(t) for t in (*loc.interior, *loc.row_texts)):
+        return None
+    if any(_NON_COMMON_CAPTION.search(t) for t in loc.captions):
+        return None
+    letters = frozenset().union(*(designators(t) for t in loc.captions))
+    return next(iter(letters)) if len(letters) == 1 else None
+
+
+def row_label(locations: list[ShareLocation]) -> str | None:
+    """A stored row's class letter over ALL its locations; None = unbound."""
+    labels = {location_label(loc) for loc in locations}
+    return next(iter(labels)) if len(labels) == 1 else None
+
+
+def decide_class_column(
+    *,
+    accession_number: str,
+    issuer_cik: str,
+    siblings: Iterable[Sibling],
+    cover: Cover,
+    row_locations: dict[int, list[list[ShareLocation]]],
+) -> list[Suppression]:
+    """Slice 3: suppress a lettered common sibling every one of whose stored rows for the
+    accession sits, in the parser's own tables, under a DIFFERENT class letter's caption.
+
+    ``row_locations``: instrument_id → per stored row the locations of its share count
+    (``sec_def14a.share_locations``); a row with a NULL share count has none. Any row that
+    is unbound, or carries the sibling's own letter, keeps the accession. A letter the
+    cover does not list (Alphabet's unregistered Class B) still proves "not Class C", but
+    at least one row must carry the letter of another sibling on the cover (the witness).
+    """
+    usable = usable_common_classes(siblings, cover)
+    out: list[Suppression] = []
+    for letter, classes in sorted(usable.items()):
+        for cc in classes:
+            rows = row_locations.get(cc.sibling.instrument_id, [])
+            if not rows:
+                continue
+            labels = [row_label(locs) for locs in rows]
+            if any(lab is None or lab == letter for lab in labels):
+                continue
+            witnesses = [w for lab in set(labels) if lab in usable for w in usable[lab] if w.key != cc.key]
+            if not witnesses:
+                continue
+            witness = min(witnesses, key=lambda w: w.sibling.instrument_id)
+            out.append(
+                Suppression(
+                    instrument_id=cc.sibling.instrument_id,
+                    accession_number=accession_number,
+                    issuer_cik=issuer_cik,
+                    cover_accession=cover.accession,
+                    cover_title=cc.title,
+                    cover_symbol=cc.key,
+                    witness_instrument_id=witness.sibling.instrument_id,
+                    witness_title=witness.title,
+                    reason=REASON_CLASS_COLUMN,
+                )
+            )
     return out
 
 
@@ -431,6 +563,45 @@ def _accessions_with_dates(
     return sorted(dates.items()), by_instrument
 
 
+def load_row_locations(
+    conn: psycopg.Connection[Any], accession: str, sibling_ids: list[int]
+) -> dict[int, list[list[ShareLocation]]]:
+    """Slice 3 evidence: per sibling, the locations of each of its stored rows for ACCESSION.
+
+    A row with a NULL share count gets no location, so it keeps the accession. A body
+    that fails to parse is no evidence (logged): parsing is deterministic, so the failure
+    is a property of the document, not of this run.
+    """
+    held = conn.execute(
+        """
+        SELECT instrument_id, holder_name, shares
+          FROM def14a_beneficial_holdings
+         WHERE accession_number = %s AND instrument_id = ANY(%s)
+         ORDER BY instrument_id, holder_name
+        """,
+        (accession, sibling_ids),
+    ).fetchall()
+    if not held:
+        return {}
+    body = stored_body(conn, accession_number=accession, document_kind="def14a_body")
+    if not body:
+        return {}
+    rows_by_instrument: dict[int, list[tuple[str, Decimal | None]]] = {}
+    for iid, name, shares in held:
+        rows_by_instrument.setdefault(int(iid), []).append((str(name), None if shares is None else Decimal(shares)))
+    try:
+        tables = item403_table_htmls(body)
+        out: dict[int, list[list[ShareLocation]]] = {}
+        for iid, rows in rows_by_instrument.items():
+            counted = [(name, shares) for name, shares in rows if shares is not None]
+            located = iter(share_locations(tables, counted))
+            out[iid] = [next(located) if shares is not None else [] for _, shares in rows]
+        return out
+    except Exception:
+        logger.exception("def14a_recipients: class-column evidence failed for %s", accession)
+        return {}
+
+
 # Column order of the ledger SELECT / INSERT below; must match both.
 _LEDGER_COLS: Final = (
     "instrument_id",
@@ -463,6 +634,7 @@ def compute_desired(
         proxy_dates: dict[str, date] = {}
         covers: list[Cover] = []
         point_in_time: list[Suppression] = []
+        class_column: list[Suppression] = []
         blocked_accessions: set[str] = set()
         for accession, proxy_date in accessions:
             report.accessions += 1
@@ -481,6 +653,15 @@ def compute_desired(
                 continue
             covers.append(res.cover)
             point_in_time.extend(decide(accession_number=accession, issuer_cik=cik, siblings=siblings, cover=res.cover))
+            class_column.extend(
+                decide_class_column(
+                    accession_number=accession,
+                    issuer_cik=cik,
+                    siblings=siblings,
+                    cover=res.cover,
+                    row_locations=load_row_locations(conn, accession, ids),
+                )
+            )
         keep.update((iid, acc) for iid in ids for acc in blocked_accessions)
         # An instrument with an unreadable or undated accession may be missing its
         # evidence or its veto this run: keep all its stored rows, extend nothing.
@@ -495,7 +676,9 @@ def compute_desired(
             blocked=blocked,
         )
         report.instruments_vetoed += len(vetoed)
-        for s in [*point_in_time, *extended]:
+        # Slice 3 is per-proxy table evidence: never extended across accessions, and a
+        # common sibling cannot also hold a slice-2 (warrant/preferred) row.
+        for s in [*point_in_time, *extended, *class_column]:
             desired[(s.instrument_id, s.accession_number)] = _row(s)
     return desired, keep, keep_instruments
 
