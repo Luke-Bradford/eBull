@@ -25,7 +25,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 VENDOR = "icyDenev/Intrader"
-DEFAULT_BULK = Path.home() / "Library" / "Application Support" / "eBull" / "sec" / "bulk"
 _SEPARATORS = re.compile(r"[.\-/_ ]")
 #: Intrader symbol grammar: a trailing ``_<CLASS>`` group (``_WS``, ``_U``, ``_P_B``, ``_B``).
 _SUFFIX = re.compile(r"_([A-Z]+)(?:_[A-Z0-9]+)*$")
@@ -113,15 +112,16 @@ def acceptance_vs_filing_date(by_issuer: dict[str, dict[str, date]], submissions
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bulk-dir", type=Path, default=DEFAULT_BULK)
+    parser.add_argument("--bulk-dir", type=Path, help="default: the bulk downloader's <data dir>/sec/bulk")
     parser.add_argument("--submissions", type=Path, help="submissions.zip (e.g. the #3360 bundle's inputs copy)")
     args = parser.parse_args()
 
     import psycopg
 
     from app.config import settings
+    from app.security.master_key import resolve_data_dir
 
-    evidence, meta, by_issuer = load_evidence(args.bulk_dir)
+    evidence, meta, by_issuer = load_evidence(args.bulk_dir or resolve_data_dir() / "sec" / "bulk")
     with psycopg.connect(settings.database_url) as conn:
         meta["series_with_cik"] = conn.execute(
             "SELECT count(*) FILTER (WHERE cik IS NOT NULL) FROM research_price_series"
