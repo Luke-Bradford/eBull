@@ -439,6 +439,11 @@ def test_policy_files_cover_every_repo_module_the_builder_and_reader_import() ->
     imported: set[str] = set()
     for relative in ("app/services/pit_fundamentals.py", "scripts/build_3360_pit_fundamentals.py"):
         for node in ast.walk(ast.parse((root / relative).read_text())):
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] in {"app", "scripts"}:
-                imported.add(node.module.replace(".", "/") + ".py")
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules = [node.module]
+            elif isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            else:
+                continue
+            imported |= {m.replace(".", "/") + ".py" for m in modules if m.split(".")[0] in {"app", "scripts"}}
     assert imported <= set(pf.POLICY_FILES)
