@@ -34,8 +34,12 @@ market value, IFRS reporters.
   outcome (stored, or one named rejection).
 - **Forms admitted** (policy, not an audit-status claim; basis: operator steer 2026-08-22 "audited periodic
   accounts stay in scope for valuation"): `10-K`, `10-KT`, `10-Q`, `10-QT`, `20-F`, `40-F` and the `/A` of each.
-  Form is taken from **submissions** (authoritative for the accession); a companyfacts `form` that disagrees is
-  counted `form_mismatch` and the row rejected.
+  Form is taken from **submissions** (authoritative for the accession); a companyfacts `form` whose **family**
+  (`/A` stripped, `10-KT`→`10-K`, `10-QT`→`10-Q`) disagrees is counted `form_mismatch` and the row rejected
+  (blocking). Implementation-time measurement (2026-09-24 full build, `/tmp/probe3360b.py` shape in PR A): 3,214
+  admitted amendment/transition accessions carry their base form as the companyfacts label and none disagree on
+  family, so a literal compare would block every value those filings restated; those rows are stored and counted
+  in the ledger's `form_label_variants`.
 - **Mandate phase-in** (§2.4.1) is not assumed: voluntary and pre-mandate XBRL is admitted on its own clock. The
   parent's "2011-06 = full mandate coverage" premise is reported by the census against an independent filer
   population, not inherited.
