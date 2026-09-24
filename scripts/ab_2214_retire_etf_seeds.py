@@ -6,7 +6,9 @@ REPEATABLE READ transaction: render every instrument (control), apply the migrat
 render every instrument again (treatment), then ROLLBACK, so nothing is written.
 
 The invariant is a split, not a re-count: per instrument, ``institutions + etfs`` shares and
-the pie total must be unchanged, and ``etfs`` must reach zero. Checked on both read paths that
+the pie total must be unchanged, and ``etfs`` must reach zero. That zero is global on purpose:
+#2214's decision is that NO 13F filer is typed ``ETF``, so any ETF-typed row left after the
+migration is a failure whoever it belongs to. Checked on both read paths that
 bucket by ``filer_type``: the ownership rollup, and ``/instruments/{symbol}/institutional-holdings``
 (``_ENDPOINT_SPLIT_SQL`` mirrors its totals query at ``app/api/instruments.py``, every instrument
 at its own latest ``period_of_report``).
@@ -86,7 +88,7 @@ def main() -> int:
             ib, eb, pb, ob = treated[iid]
             etfs_before += ea > 0
             inst_up += ib > ia
-            shifted += ea
+            shifted += ea - eb
             sum_moved += (ia + ea) != (ib + eb)
             total_moved += pa != pb
             etfs_left += eb != 0
@@ -103,7 +105,7 @@ def main() -> int:
         print(f"oversubscribed flag flipped                      {oversub_flip:>8,}   (must be 0)")
 
         ep_etf_before = sum(1 for e, _ in ep_a.values() if e > 0)
-        ep_etf_shares = sum((e for e, _ in ep_a.values()), Decimal(0))
+        ep_etf_shares = sum((e - ep_b.get(k, (Decimal(0), Decimal(0)))[0] for k, (e, _) in ep_a.items()), Decimal(0))
         ep_sum_moved = sum(1 for k in ep_a.keys() | ep_b.keys() if sum(ep_a.get(k, (0, 0))) != sum(ep_b.get(k, (0, 0))))
         ep_etf_after = sum(1 for e, _ in ep_b.values() if e > 0)
         print("\n=== /institutional-holdings totals, every instrument at its latest period ===")
