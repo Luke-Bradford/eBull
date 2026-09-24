@@ -128,7 +128,12 @@ the rate — it does not.
   ``adapters.py::_run_legacy`` holds the lock across its WHOLE body, measured at
   **3.2-3.8 hours** (dev, 09-15 -> 09-18). Anything landing in that window skips.
   Do not add a job here whose missed cadence is expensive.
-* ``etoro_core_rebalance`` — ``core_rebalance_observation`` (#2603 step 3b-3).
+* ``etoro_core_rebalance`` — ``core_rebalance_observation`` (#2603 step 3b-3)
+  plus ``core_rebalance_execution`` (#3359, daily 15:37 UTC). Sharing is
+  deliberate: both evaluate the same sleeve and append the same intents table,
+  and the lane serialises a manual dispatch of one against the other. The
+  executor re-proves capital authority under ``core_submission_lock`` and
+  raises on change, so the ``trade_events`` note below binds it too.
   ⚠ The split gave up one exclusion the shared lane provided incidentally:
   ``load_engine_capital_authority`` READS ``trade_events``, which its former
   lanemate ``daily_portfolio_sync`` WRITES. Guarded, not merely accepted — the

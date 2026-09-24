@@ -33,6 +33,7 @@ from app.jobs.runtime import (
 from app.jobs.sources import get_job_name_to_source, source_for
 from app.workers.scheduler import (
     JOB_CORE_ELIGIBILITY_REFRESH,
+    JOB_CORE_REBALANCE_EXECUTION,
     JOB_CORE_REBALANCE_OBSERVATION,
 )
 
@@ -46,6 +47,14 @@ _CORE_LANES: tuple[tuple[str, str], ...] = (
 #: The lane that starves them, and the job that holds it. Pinned so a future
 #: change that moves the HOLDER instead has to update this test in lockstep
 #: rather than leaving a test that passes for the wrong reason.
+#: Lanemates admitted by review, each named so a further join still fails the
+#: ownership test below. #3359: the scheduled core EXECUTION shares the
+#: observation's lane on purpose -- one short broker cycle at 15:37 UTC against a
+#: 22:45 observation, both over the same sleeve and intents table. Neither holds
+#: the lane for hours, which is the starvation the split exists to prevent.
+_REVIEWED_LANEMATES: dict[str, set[str]] = {
+    "etoro_core_rebalance": {JOB_CORE_REBALANCE_EXECUTION},
+}
 _STARVED_LANE = "etoro"
 _HOLDER = "daily_candle_refresh"
 
@@ -92,7 +101,8 @@ def test_each_core_lane_is_owned_by_exactly_one_job() -> None:
     registry = get_job_name_to_source()
     for job_name, lane in _CORE_LANES:
         holders = {name for name, src in registry.items() if src == lane}
-        assert holders == {job_name}, f"lane {lane!r} owned by {sorted(holders)!r}; expected just {job_name!r}"
+        expected = {job_name} | _REVIEWED_LANEMATES.get(lane, set())
+        assert holders == expected, f"lane {lane!r} owned by {sorted(holders)!r}; expected {sorted(expected)!r}"
 
 
 def test_the_split_adds_no_execution_permit() -> None:
