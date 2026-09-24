@@ -172,6 +172,8 @@ def verify_cik(
                     r["accn"],
                     r["acceptance"],
                     r["reason"],
+                    # As stored: ``build_shard`` writes ascending row indices and the reference
+                    # side sorts its own, so an unsorted shard surfaces here as a mismatch.
                     tuple(r["rows"]),
                 )
                 for r in prefix.rejections
