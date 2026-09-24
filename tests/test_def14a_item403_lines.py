@@ -215,3 +215,24 @@ def test_a_zero_width_space_inside_an_amount_is_ignored() -> None:
 <tr><td>Glenn Reed</td><td>​17,779</td></tr>
 </table>"""
     assert _lines(table, "Glenn Reed")[0].amount_cells[0].shares == Decimal(17779)
+
+
+def test_a_replaced_section_label_stops_counting_as_evidence() -> None:
+    table = """<table>
+<tr><td>Name</td><td>Shares</td><td>Percent</td></tr>
+<tr><td colspan="3">Class B Common Stock</td></tr>
+<tr><td>Jane</td><td>2</td><td>2%</td></tr>
+<tr><td colspan="3">Common Stock</td></tr>
+<tr><td>Joe</td><td>3</td><td>3%</td></tr>
+</table>"""
+    joe = _lines(table, "Jane", "Joe")[1]
+    assert (joe.section_label, joe.group_evidence) == ("Common Stock", frozenset())
+
+
+def test_a_percent_only_table_still_yields_lines() -> None:
+    table = """<table>
+<tr><td>Name</td><td>Shares</td><td>Percent of Class</td></tr>
+<tr><td>Jane Founder</td><td>&#8212;</td><td>5.0%</td></tr>
+</table>"""
+    # The dash sits in a column that never holds a figure, so it is not provably an amount.
+    assert [c.raw_text for c in _lines(table, "Jane Founder")[0].amount_cells] == ["5.0%"]

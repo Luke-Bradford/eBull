@@ -133,7 +133,7 @@ def check_lines(accession: str, payload: str) -> dict[str, Any]:
     import time
 
     from app.providers.implementations.sec_def14a import parse_beneficial_ownership_table
-    from app.services.def14a_item403_lines import _full_key, item403_lines
+    from app.services.def14a_item403_lines import _full_key, class_evidence, item403_lines
 
     started = time.perf_counter()
     rec: dict[str, Any] = {"accession": accession, "error": None}
@@ -158,7 +158,11 @@ def check_lines(accession: str, payload: str) -> dict[str, Any]:
             by_holder.setdefault(_full_key(line.holder_name), set()).add(cell.shares)
             owners.setdefault((line.table_ordinal, line.grid_row, cell.first_column), set()).add(line.holder_name)
         if line.class_state == "labelled" and any(c.shares for c in line.amount_cells):
-            ev = frozenset(line.group_evidence | frozenset(line.row_class_cells))
+            ev = (
+                line.group_evidence
+                | class_evidence(line.row_class_cells)
+                | class_evidence([line.section_label] if line.section_label else [])
+            ) - {"common"}
             labelled_groups.setdefault(line.holder_name, set()).add(ev)
     rec["misses"] = [
         [h.holder_name, str(h.shares)]

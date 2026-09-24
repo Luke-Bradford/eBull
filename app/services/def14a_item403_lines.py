@@ -174,7 +174,16 @@ def item403_lines(html_text: str) -> Item403Extraction:
 
 def _table_lines(ordinal: int, table_html: str, by_key: dict[str, list[tuple[str, str | None]]]) -> list[Item403Line]:
     grid = _layout_rows(table_html)
-    first_share = next((r for r, row in enumerate(grid) if any(_is_share_cell(t) for t in row.values() if t)), None)
+    # First row carrying a figure: a share count, or a %-signed percent (a table whose
+    # share cells are all dashes still reports its holders by percent).
+    first_share = next(
+        (
+            r
+            for r, row in enumerate(grid)
+            if any(_is_share_cell(t) or ("%" in t and _parse_percent(t) is not None) for t in row.values() if t)
+        ),
+        None,
+    )
     if first_share is None:
         return []
     # The header block ends at the first share cell, or earlier at an accepted holder's
@@ -215,6 +224,9 @@ def _table_lines(ordinal: int, table_html: str, by_key: dict[str, list[tuple[str
 
     lines: list[Item403Line] = []
     label: str | None = None
+    # Interior evidence (a mid-table re-header over one column) is read only below the
+    # ACTIVE section label, so a label that a later one replaced stops counting.
+    section_start = 0
     label_evidence: frozenset[str] = frozenset()
     # (holder_name, role) of the last holder row, for V continuations; reset by any
     # non-empty row that is neither.
@@ -253,6 +265,10 @@ def _table_lines(ordinal: int, table_html: str, by_key: dict[str, list[tuple[str
             )
             if is_label:
                 label, label_evidence = next(iter(dict.fromkeys(cells.values()))), ev
+                section_start = r + 1
+            elif r >= header_end and _is_full_row(cells):
+                # An ignored full-row title (two designators) closes the section too.
+                section_start = r + 1
             if r >= header_end:
                 last_holder = None
                 if matches and not others and not is_label:
@@ -293,7 +309,11 @@ def _table_lines(ordinal: int, table_html: str, by_key: dict[str, list[tuple[str
             caps = tuple(
                 t for t in header_texts.get(first, []) if owner_col is None or t not in header_texts.get(owner_col, [])
             )
-            interior = tuple(t for mid in grid[header_end:r] if (t := mid.get(first, "")) and amount(first, t) is None)
+            interior = tuple(
+                t
+                for mid in grid[max(header_end, section_start) : r]
+                if (t := mid.get(first, "")) and amount(first, t) is None and not _is_full_row(mid)
+            )
             shares, percent = amounts[first]
             cell = AmountCell(first, caps, interior, text, shares, percent)
             # Group by designator and non-common kind; ``common`` is the default kind and
@@ -316,6 +336,11 @@ def _table_lines(ordinal: int, table_html: str, by_key: dict[str, list[tuple[str
                 )
             )
     return lines
+
+
+def _is_full_row(cells: dict[int, str]) -> bool:
+    """One distinct non-empty text across the row: a section title, never a column caption."""
+    return len({t for t in cells.values() if t}) == 1
 
 
 def _is_row_label(cells: dict[int, str], class_cols: set[int]) -> bool:

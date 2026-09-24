@@ -197,10 +197,10 @@ labels). Inherited from shipped helpers, accepted as in slices 3/3b: 5–8, 19�
 correctness — M2's ledger gate). Census is a sizing tool, not an oracle: 72–73, 76–79,
 81–86 accepted; 80 fixed in § measurement.
 
-### M1 result (dev, full population, run 4)
+### M1 result (dev, full population, run 5)
 
-`PYTHONPATH=. uv run python -m scripts.census_2351_class_grain --lines --out var/census_2351/lines4.jsonl`
-then `--lines-summary var/census_2351/lines4.jsonl` (exit 0):
+`PYTHONPATH=. uv run python -m scripts.census_2351_class_grain --lines --out var/census_2351/lines5.jsonl`
+then `--lines-summary var/census_2351/lines5.jsonl` (exit 0):
 
 | check | result |
 | --- | --- |
@@ -208,18 +208,18 @@ then `--lines-summary var/census_2351/lines4.jsonl` (exit 0):
 | 0 — legacy parser | untouched by construction: the branch adds files only, no line of `sec_def14a.py` changes |
 | 1 — coverage misses | **516 of 110,415 parser rows (0.47%), 107 bodies**; 14 bodies miss every row (159 rows) |
 | 3 — cells attached to two holders | **0** |
-| 4 — no-shape bodies | 87,017 unlabelled · 14,442 labelled · **81 conflict** · 41 holders with ≥2 labelled groups |
-| 4 — multi-class bodies | 11,307 unlabelled · 22,168 labelled · 587 conflict · **2,630 holders with ≥2 labelled groups** |
+| 4 — no-shape bodies | 87,266 unlabelled · 14,503 labelled · **81 conflict** · 37 holders with ≥2 labelled groups |
+| 4 — multi-class bodies | 11,311 unlabelled · 22,204 labelled · 587 conflict · **2,632 holders with ≥2 labelled groups** |
 | 5 — META / LEN / GOOGL | Zuckerberg `class:B` 342,606,985 / 99.8; Miller `Class B Common Stock` 21,851,560 / 70.2%; Page `class:B` 389,051,160 / 46.5 (his `class:A` cells are `—`: the legacy row's 389,051,160 on GOOGL is this Class B cell) |
-| 6 — runtime per body | median 2.0 ms, p99 602 ms, max 11.3 s |
+| 6 — runtime per body | median 2.0 ms, p99 603 ms, max 11.3 s |
 
 Read from the stored EDGAR primary documents. **Deviation from gate 1:** the 516 misses were
-not each read. Four runs moved them 6,742 → 1,863 → 772 → 516 by fixing mechanisms found in
+not each read. Five runs moved them 6,742 → 1,863 → 772 → 516 → 516 by fixing mechanisms found in
 random samples (owner cell on a zero-width cell, full-name key, `Title of class` column left
 of the name, name row with figures on the row below, zero-width space inside an amount).
 The remaining sampled one is a caption/column misalignment that parses a share count as a
 percent. A miss means that holder has no line, so M2 must treat "no line" as "legacy row,
-binding abstained" — never as absence. The list is `var/census_2351/misses4.tsv`.
+binding abstained" — never as absence. The list is `var/census_2351/misses5.tsv`.
 
 **Deviation from gate 2:** 81 `conflict` lines remain on bodies the census shows no shape
 for. The census detector misses layouts (see § measurement), so these are not all
@@ -235,7 +235,10 @@ Amendments measured into the rule above during implementation:
   rows between);
 - in an amount caption only designators and `preferred` are class evidence; warrant / unit /
   right words describe the nature of ownership (Rule 13d-3(d)(1)(i)); `common` never splits
-  a shares column from its percent column.
+  a shares column from its percent column;
+- (ckpt-2) interior evidence is read only below the active section label, so a replaced
+  label stops counting; a %-signed percent also opens the table body (percent-only tables);
+  the census counts recovered groups on normalised evidence including section labels.
 
 ## M2 — binding (pure, measured; outline, its own spec + ckpt-1)
 
