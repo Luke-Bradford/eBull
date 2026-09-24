@@ -78,8 +78,11 @@ def main() -> int:
     args = parser.parse_args()
 
     input_sha = {"companyfacts": _sha256(args.companyfacts), "submissions": _sha256(args.submissions)}
-    companyfacts = zipfile.ZipFile(args.companyfacts)
-    submissions = zipfile.ZipFile(args.submissions)
+    with zipfile.ZipFile(args.companyfacts) as companyfacts, zipfile.ZipFile(args.submissions) as submissions:
+        return _measure(companyfacts, submissions, input_sha)
+
+
+def _measure(companyfacts: zipfile.ZipFile, submissions: zipfile.ZipFile, input_sha: dict[str, str]) -> int:
     submission_names = set(submissions.namelist())
     counts: Counter[str] = Counter()
     relation: Counter[str] = Counter()
@@ -100,6 +103,11 @@ def main() -> int:
             for concept, body in (section or {}).items():
                 for unit, rows in ((body or {}).get("units") or {}).items():
                     for row in rows or []:
+                        # A row missing an identity field is COUNTED, not a crash: the
+                        # full-population figures must reconcile to every raw row.
+                        if not isinstance(row, dict) or any(not row.get(f) for f in ("accn", "filed", "form")):
+                            counts["rows_missing_accn_filed_or_form"] += 1
+                            continue
                         metadata[row["accn"]].add((row["filed"], row["form"]))
                         if taxonomy == "us-gaap":
                             key_values[(concept, unit, row.get("start"), row.get("end"))].add((row["accn"], row["val"]))
