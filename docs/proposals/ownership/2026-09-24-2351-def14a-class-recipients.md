@@ -1,10 +1,8 @@
 # #2351 — DEF 14A Item 403 rows go only to the sibling whose class they report
 
-Status: **DRAFT — do not build from slice 2 as written.** Slice 1 (the census) is measured
-and shipped. Slice 2 failed Codex ckpt-1 round 1 (88 findings, 2026-09-24); the grouped
-findings and the recommended reframe are in the #2351 handoff comment of the same date.
-Supersedes the general binder spec that failed ckpt-1 twice (49 → 78 findings; #2351
-handoff, 2026-09-24 03:56Z).
+Status: slice 1 (census) shipped (#3352). Slice 2 is the suppression-ledger reframe
+(2026-09-24, third pass); the writer-side withhold version failed ckpt-1 three times
+(49 → 78 → 88 findings; #2351 handoffs 03:56Z and 04:21Z). Slice 3 is scoped only.
 
 ## Problem
 
@@ -34,7 +32,7 @@ shares the issuer CIK (`siblings_for_issuer_cik`). Three writers do this:
   classifies a cover title (common vs non-common) the rule is fixed by construction below
   and frozen in `RECIPIENT_RULE_VERSION`.
 
-## Slice 1 — census (this PR, measurement only)
+## Slice 1 — census (shipped #3352, measurement only)
 
 `scripts/census_2351_def14a_class_binding.py`. Population: the 49 CIKs with >1 instrument
 and stored DEF 14A holdings, 103 accessions. For each proxy it takes the latest
@@ -69,104 +67,220 @@ At `97e20ec6` the run printed (every figure below is from that one run):
   `ABL`; `NXH` on 1130713 → `BYON`/`BBBY`). Withholding there is correct: those holders
   are not the instrument's. The identifier defect itself is outside #2351.
 
-## Slice 2 — cover-identity store + non-common / unregistered withhold
+## Slice 2 — suppression ledger for warrant / preferred siblings (reframe, 2026-09-24)
 
-### Schema (one migration)
+Replaces the writer-side withhold spec that failed ckpt-1 three times (49 → 78 → 88
+findings). Three changes of model, one per failed finding group:
 
-`sec_cover_securities` — one row per (cover accession, 12(b) pair):
-`accession_number text`, `issuer_cik text`, `filing_date date`, `form text`,
-`security_title text`, `trading_symbol text`, `exchange_name text`,
-`fetched_at timestamptz`; PK `(accession_number, trading_symbol, security_title)`.
-Plus `sec_cover_fetch_log(accession_number PK, status text, fetched_at)` so "fetched, no
-12(b) pairs" and "HTTP 404 (pre-iXBRL)" are recorded states distinct from "never fetched".
-Raw instance bytes go to `filing_raw_documents` (`document_kind = 'xbrl_cover_instance'`)
-BEFORE parsing (prevention log: raw before parse).
+1. **Readers, not writers.** The three DEF 14A writers, the fan-out and the parser are
+   untouched. Suppression is a ledger that readers anti-join. No row is deleted from any
+   fact table, so there is no cross-writer cleanup, rewash cohort or orphan handling.
+2. **Positive evidence only.** A sibling is suppressed only when its OWN point-in-time
+   cover title says it is a warrant or preferred AND another sibling on that cover is
+   common. "Not on the cover", an unrecognised title, an ambiguous match or an
+   unresolvable cover never CREATE a suppression. The rule never infers from absence.
+3. **Dual-class is out.** Siblings that are both common (`GOOG`/`GOOGL`) keep today's
+   behaviour; binding the column the parser read is slice 3.
 
-### Fetch
+### Source rule for "a warrant / preferred sibling does not own these rows"
 
-A helper `ensure_cover_for_proxy(conn, *, issuer_cik, proxy_filing_date) -> CoverState`
-picks the newest `filing_events` row for any sibling with `filing_type` in
-{10-K, 10-K/A, 10-Q, 10-Q/A, 20-F, 20-F/A} and `filing_date <= proxy_filing_date`, and
-fetches its instance through the existing SEC HTTP client + shared rate gate if not
-already logged. It is called ONLY for multi-sibling CIKs, OUTSIDE the per-accession write
-transaction (both live writers already fetch before taking the accession lock).
-`rewash_filings` does no network I/O: it reads the store and treats "not fetched" as
-unknown. A one-shot `scripts/backfill_2351_cover_store.py` populates the store for every
-multi-sibling CIK before the rewash.
+- Item 403(a)/(b) report beneficial ownership per **class** (*Title of class*, *Percent
+  of class*), with beneficial ownership determined under Rule 13d-3 (Item 403
+  Instruction 1 / 17 CFR 240.13d-3).
+- **Warrants:** Rule 13d-3(d)(1)(i) deems a holder the beneficial owner of the securities
+  it can acquire within 60 days — i.e. warrant holdings are counted INTO the underlying
+  common class's figure, not reported as the warrant's own class. A warrant instrument
+  therefore never owns the Item 403 row.
+- **Preferred:** Item 403(b) may report a preferred class as its own column. A preferred
+  sibling correctly owns a figure only when the parser read that column. Measured for
+  every suppression in the population (below): the stored rows are the common column
+  (MSTR `0001193125-26-186895`: Vanguard 24,062,886 = 7.4% of class A common; XRX
+  `0001770450-26-000020`: DD Revocable Trust 15,283,672 = 11.7% common). ⚠ A future
+  proxy whose parsed column IS the preferred would lose correct rows on the preferred
+  sibling — a new loss this slice can cause, accepted because the parser cannot
+  identify the column it read (slice 3), and the common sibling is never touched.
+- Which class an instrument is: the cover 12(b) table (`## Source rule` above).
+- The title classifier and the witness requirement are fixed by construction; no
+  published rule classifies a 12(b) title.
 
-States: `known(pairs)` | `unknown` (no eligible cover row, fetch not attempted, transport
-error, 5xx/403/429) | `absent` (404 / no 12(b) pairs — recorded, not retried).
-Walk-back to an older cover happens only past `absent`, never past `unknown`
-(unknown is not absence).
+### Population effect
 
-### Recipient rule (pure function, `RECIPIENT_RULE_VERSION = 1`)
+Re-running the rule below over the census records (`var/census_2351/report.json`, run at
+`97e20ec6`, script in the PR as `scripts/ab_2351_recipient_suppressions.py`): all 106
+distinct cover titles classify as 80 `common`, 20 `non_common` (warrants/preferred), 6
+`other` (notes). **11 of 220 sibling decisions suppress, 172 parsed holder rows** —
+`HTZWW` ×2 proxies, `XRXDW`, `OPENL`/`OPENW`/`OPENZ`, `STRK.US` ×2, `STRC`, `STRD`,
+`STRF`. The census is a population snapshot, not a guarantee; the A/B (acceptance) is
+the full-population check on the implemented job.
 
-`def14a_holding_recipients(siblings: [(instrument_id, symbol)], cover: CoverState) ->
-{instrument_id: (receive: bool, reason)}`. Symbols compare as
-`norm_symbol` = upper-case, drop a trailing eToro `.US`, strip `.`/`-`/`/`/space.
+### Schema (one migration, `sql/420_def14a_recipient_suppressions.sql`)
 
-Evaluated in order, first match wins (the census's `recipient_decisions` is the
-reference implementation):
+```
+def14a_recipient_suppressions(            -- only suppressions exist; no 'receive' rows
+  instrument_id         bigint NOT NULL REFERENCES instruments,
+  accession_number      text   NOT NULL,     -- the DEF 14A / DEFA14A
+  issuer_cik            text   NOT NULL,
+  reason                text   NOT NULL CHECK (reason = 'non_common_sibling'),
+  rule_version          int    NOT NULL CHECK (rule_version > 0),
+  cover_accession       text   NOT NULL,
+  cover_title           text   NOT NULL,     -- the sibling's Security12bTitle
+  cover_symbol          text   NOT NULL,
+  witness_instrument_id bigint NOT NULL REFERENCES instruments,
+  witness_title         text   NOT NULL,
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (instrument_id, accession_number))
 
-1. Single sibling → receive (`single_sibling`; byte-identical path).
-2. Cover `unknown` or `absent` → receive (`legacy_no_cover`). Today's behaviour; counted
-   and logged so the gap is visible.
-3. Sibling's `norm_symbol` matches >1 pair (one symbol, several titles) → receive
-   (`legacy_ambiguous_cover`). 0 in the census.
-4. Sibling's `norm_symbol` matches no pair → withhold (`withhold_not_on_cover`), with
-   `no_sibling_matched = true` when no sibling matches any pair (cover is another
-   company's). An eToro `.US` duplicate never lands here: `norm_symbol` drops `.US`, so it
-   matches its listed base.
-5. Matched title is **non-common** → withhold (`withhold_non_common`).
-6. The matched COMMON titles across all siblings number ≥2 → receive
-   (`legacy_multiclass`, deferred to slice 3). Unchanged from today.
-7. Two siblings share the `norm_symbol` (`BALY`/`BALY.US`) → receive (`legacy_duplicate`).
-8. Otherwise → receive (`receive`).
+sec_cover_12b_fetches(                     -- cache of IMMUTABLE filings; terminal outcomes only
+  cover_accession text PRIMARY KEY,
+  outcome         text NOT NULL CHECK (outcome IN ('pairs','no_pairs','not_found')),
+  entity_cik      text NULL,
+  fetched_at      timestamptz NOT NULL DEFAULT now())
 
-"Non-common", by construction: the title matches
-`warrant|preferred|preference|unit|note|depositary|right|debenture|bond`
-(case-insensitive), or does not match `common|ordinary|capital stock`. ⚠ A depositary
-share over ordinary shares is therefore non-common, so a CIK whose only listed class is an
-ADS would withhold from every sibling. Guard: rule 5 applies only when at least one
-sibling matches a COMMON title; otherwise the non-common-matched siblings fall through to
-receive (`legacy_no_common_on_cover`). The census population has no such CIK; the guard
-exists for the general population.
+sec_cover_12b_pairs(
+  cover_accession text NOT NULL REFERENCES sec_cover_12b_fetches,
+  security_title  text NOT NULL,           -- whitespace-collapsed
+  trading_symbol  text NOT NULL,           -- upper-cased, trimmed
+  PRIMARY KEY (cover_accession, trading_symbol, security_title))
+```
 
-⚠ Rule 4's all-withhold also fires on a ticker rename between the cover and eToro's
-symbol. The cost is a missing figure until the next cover/rename sync, and it is counted
-(`withhold_not_on_cover` with `no_sibling_matched = true`). Accepted: a wrong issuer's
-holders is the worse state.
+Plus `document_kind = 'xbrl_cover_instance'` in the `filing_raw_documents` CHECK,
+`DocumentKind` and `SWEPT_DOCUMENT_KINDS` (born-compacted: hash + mandatory `source_url`,
+rehydratable). `store_raw` commits in its own transaction BEFORE parsing
+(`docs/review-prevention-log.md:1252`).
 
-### Writers
+Three views, the single shared predicate:
 
-All three writers call the rule once per accession, then:
-- receivers: unchanged write path;
-- **withheld** siblings: delete the accession's `def14a_beneficial_holdings` rows for that
-  instrument, supersede its DEF 14A observations for that accession, refresh
-  `def14a_current` and ESOP current. The withheld set is
-  `siblings ∪ instruments already holding rows for this accession` so a sibling that lost
-  its CIK link is also cleaned.
-- the ingest log row records `recipient_rule_version` and per-reason counts.
+- `def14a_beneficial_holdings_attributed` = `def14a_beneficial_holdings h` WHERE NOT
+  EXISTS a suppression on `(h.instrument_id, h.accession_number)`.
+- `ownership_def14a_observations_attributed`, `ownership_esop_observations_attributed`
+  — same anti-join on `(instrument_id, source_accession)`. Measured: 0 NULL
+  `source_accession` in either table (126,237 / 91 rows).
 
-Parser output is unchanged, so `_PARSER_VERSION_DEF14A` does not bump; the rewash is
-scoped to the multi-sibling CIKs' accessions.
+### Readers switched to the views
+
+Located by grep `FROM def14a_beneficial_holdings` / `FROM ownership_(def14a|esop)_observations`.
+
+- `app/services/ownership_observations.py` — the `USING` source of
+  `refresh_def14a_current` (:1477), `refresh_esop_current` (:1945),
+  `refresh_def14a_current_batch` (:2847), `refresh_esop_current_batch` (:2966). The
+  `MAX(ingested_at)` watermark reads stay on base tables (they track observation
+  arrival, not attribution).
+- `app/services/ownership_history.py:436`.
+- `app/api/instruments.py` :3302/:3310 (latest holders), :3531 (CSV export).
+- `app/services/def14a_drift.py` :253 (`_reconcile_alert_rows` purge), :292
+  (`_upsert_alert` guard), :354 (`_select_latest_def14a_holders`) — all three, so the
+  purge, the guard and the detector agree on "latest attributed accession".
+
+NOT switched, deliberately — they are ingest diagnostics that report what was STORED:
+`instruments.py` :3358 (typed row count), :3376 (tombstone count),
+`ownership_drillthrough.py` :502/:517, and the `filing_events` latest-known-filing query
+(:3334; a filed proxy exists whether or not its rows are attributed). Also not switched:
+the writers, `rewash_filings.py:951`, `ownership_observations_sync.py:761` (observations
+stay the complete fact log), census/A-B scripts.
+
+⚠ Suppressing an instrument's latest accession makes its latest ATTRIBUTED accession an
+older one. If that older accession is not itself suppressed (no resolvable cover), its
+holders surface. That is today's wrong figure, older — never a new one. The A/B lists
+every instrument where this happens.
+
+### Rule (pure, `app/services/def14a_recipients.py`, `RECIPIENT_RULE_VERSION = 1`)
+
+**Title kind** — the FIRST match of
+`\b(common|ordinary|capital\s+(?:stock|shares?)|warrants?|preferred|preference|units?|rights?)\b`
+(case-insensitive) in the title decides: warrant/preferred/preference → `non_common`;
+common/ordinary/capital stock|shares → `common`; unit/right, or no match → `other`.
+So `Warrants to purchase Common Stock` → non_common, `Common Stock and associated
+preferred stock purchase rights` → common, `Units, each consisting of one share …` →
+other, `Capital Securities` → other.
+
+**Symbol match** — eToro symbol trimmed, upper-cased, trailing `.US` dropped, compared
+for EQUALITY with the cover `TradingSymbol` (trimmed, upper-cased). No punctuation
+stripping (`ABC.D` ≠ `ABCD`). A sibling's pair set = the distinct titles whose symbol
+equals its key.
+
+**Siblings** — distinct `instrument_id`s sharing the (sec, cik) identifier. An
+instrument that carries more than one sec CIK (17 in dev) is excluded from both roles.
+
+`decide(siblings, cover) -> list[Suppression]`, for each sibling S:
+- S suppresses iff S has exactly one pair, its title is `non_common`, AND some other
+  sibling W with a DIFFERENT symbol key has exactly one pair whose title is `common`.
+- Otherwise S is not suppressed.
+
+`.US` duplicates share a key, so `STRK`/`STRK.US` are decided identically and never
+witness each other.
+
+### Cover resolution (lifted from the census)
+
+For accession A with filing date D (the `filing_events` row for A itself; NULL → A is
+skipped this run): candidates are `filing_events` rows for any sibling with
+`filing_type IN ('10-K','10-Q','20-F')` (originals only — no amendment semantics),
+`filing_date < D` (strictly before: no same-day ordering question) and
+`filing_date >= D - 400 days` (the annual cover cycle plus slack; older is no evidence),
+distinct accessions, newest first, at most 4 considered (every candidate counts,
+including ones without an `.htm` primary).
+
+Per candidate, cached by `sec_cover_12b_fetches` when terminal:
+- no `.htm` primary document → `not_found`, next candidate;
+- GET `<stem>_htm.xml` via the shared SEC client + rate gate: 404/410 → `not_found`,
+  next candidate; 200 with an XML root → store raw, parse; anything else (transport
+  error, 3xx left unresolved, 401/403/429/5xx, 200 non-XML, XML parse error) →
+  **unresolved**: stop, and A keeps its existing suppression rows unchanged this run.
+- Parse = `parse_cover_contexts`, lifted into `app/services/sec_cover_identity.py`
+  (bytes in; the census-2900 script imports it from there), plus: facts must be in the
+  `dei` namespace, `dei:EntityCentralIndexKey` must equal the issuer CIK (else
+  `not_found` — a wrong-issuer cover is no evidence), singleton (title, symbol) per
+  context; a symbol that ALSO appears in a context with several titles/symbols is
+  dropped from the pairs (ambiguous). No pairs → `no_pairs`, next candidate.
+- First candidate with `pairs` is the cover. None within the budget → A has no cover.
+
+### Job — full recompute, diff, apply
+
+`def14a_recipient_suppressions` ScheduledJob, source `sec_rate` (it fetches from SEC; no
+new lane), daily 04:15 UTC, `catch_up_on_boot=True`, bootstrap-gated like its
+neighbours. Each run:
+
+1. Population: multi-sibling CIKs (count DISTINCT instrument_id > 1); accessions = the
+   union of `def14a_beneficial_holdings.accession_number` and
+   `ownership_(def14a|esop)_observations.source_accession` over those instruments.
+2. Per accession: resolve the cover (steady state: all cache hits, zero fetches), run
+   `decide` → desired suppression set. Unresolved accessions keep their current rows.
+3. Diff desired vs stored per instrument. For each instrument with any change, ONE
+   transaction: insert/delete its suppression rows, call `refresh_def14a_current` and
+   `refresh_esop_current` (they nest as savepoints), and `_reconcile_alert_rows`
+   for that instrument. Ledger and materialisations commit together, so a crash leaves
+   either both or neither — a later run re-diffs and retries.
+4. A stored row whose accession/instrument dropped out of the population is deleted in
+   step 3 (it is not in the desired set). Rows from an older `rule_version` are
+   recomputed like any other.
+5. Job output: per-run counts (accessions, unresolved, fetches, inserted, deleted,
+   instruments refreshed). The job is the only writer of the ledger.
+
+Reversal = disable the job and delete the rows (the next run would recreate them).
+A newly ingested DEF 14A shows on a warrant sibling until the next successful run.
 
 ### Tests
 
-Pure table test of `def14a_holding_recipients` over the census shapes (HTZ/HTZWW,
-MSTR+preferred, ATRO/ATROB, ABX/ABX.US wrong-issuer, BALY/BALY.US duplicate, GOOG/GOOGL
-legacy_multiclass, unknown cover). One DB test that a withheld sibling's existing typed
-rows + observations are superseded and its `_current` no longer carries the accession.
+- Pure table tests: title kind (the examples above + every census title class), `decide`
+  over HTZ/HTZWW, MSTR + four preferred incl. `STRK`/`STRK.US`, OPEN + three warrant
+  series, GOOG/GOOGL (none), `BALY`/`BALY.US` (none), wrong-issuer CIK (none), notes-only
+  second pair (none), `ABC.D` vs `ABCD`, a sibling matching two titles (none).
+- Cover resolution with a fake client: 404 → next; 503 → unresolved, stored rows kept;
+  CIK mismatch → next; ambiguous-context symbol dropped.
+- ONE DB test: a suppression removes the accession from `ownership_def14a_current`, the
+  typed latest-holders read and the drift purge for that instrument only; deleting it
+  and re-running the diff restores them.
 
-### Acceptance (DoD 8-12)
+### Acceptance (DoD 8-12, corpus rung)
 
-- Full-population A/B over every multi-sibling CIK accession: per-instrument
-  `def14a_current` holder count before/after; the ONLY instruments losing rows are those
-  the census lists as `withhold_*`; receivers are byte-identical.
-- Smoke: `HTZ` unchanged, `HTZWW` ownership panel shows no DEF 14A holders; `MSTR`
-  unchanged; `GOOGL` unchanged (slice 3).
-- Cross-source: `HTZWW`'s cover title "Warrants to purchase Common Stock" on
-  `0001657853-26-…` 10-K vs EDGAR.
+- Full-population A/B over every multi-sibling CIK: for every instrument, the full row
+  set (hash) of `ownership_def14a_current`, `ownership_esop_current`, the typed
+  latest-holders read, the CSV export and `def14a_drift_alerts`, before/after the job's
+  first run. The ONLY instruments that change are the suppressed set; every other
+  instrument's hashes are identical. Instruments falling back to an older accession are
+  listed.
+- Smoke `/instruments/{HTZWW,STRK.US,OPENW}` ownership: no DEF 14A holders; `HTZ`, `MSTR`,
+  `OPEN`, `GOOGL`, `AAPL` unchanged.
+- Cross-source: `HTZWW`'s cover title vs the 12(b) table on EDGAR.
 
 ## Slice 3 — scoped only
 
