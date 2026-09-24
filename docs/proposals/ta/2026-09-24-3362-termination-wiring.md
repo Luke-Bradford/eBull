@@ -98,7 +98,8 @@ whole mirror (2026-09-24): 22,879 of 22,879 series match their stored bounds.
    - **terminated** ⇔ stored `last_bar < day` and the series is not alive at capture;
    - **alive at capture** (stored `last_bar` in the alive cut) and `day` is the window end ⇔ valued at its last
      close under every policy. It did not terminate; it is missing the final bar because of capture timing;
-   - otherwise a **gap** (later bars exist). "Gap" is the neutral name: a missing bar may be a halt, a vendor
+   - otherwise a **gap**: later bars exist, or the series is alive at capture and `day` is before the window
+     end (an alive series never terminates). "Gap" is the neutral name: a missing bar may be a halt, a vendor
      omission or an invalid row. The harness does not claim which.
    A bar on `day` is always an ordinary price. Termination never overrides an existing bar, including a fill
    or liquidation on the last bar itself.
