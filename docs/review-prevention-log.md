@@ -11374,7 +11374,16 @@ neighbouring container and match it.**
   is the row above's content — it is never the row's own year, name or title, so a caller
   that keys on "the first cell matching X" must read OWN cells; (3) where a reg fixes a
   column's POSITION (§ 229.402(c)(2)(x): Total is the rightmost), bind the caption to that
-  position, not to the first matching text.
+  position, not to the first matching text; (4) a SELECTION gain is also an exposure of
+  every downstream heuristic to tables it never saw — Goldman 2026 went 0 → 13 rows with
+  one NEO absorbing four others' blocks and served on `/instruments/GS/exec-compensation`
+  after the backfill. Read the gain side on the operator endpoint, not only in the
+  dump; where the reg fixes a uniqueness (one row per NEO per fiscal year), enforce it
+  and fail closed per entity. A fail-closed ZERO then needs its own signal
+  (`Def14ASummaryCompTable.withheld_rows`) through every write path — the rewash
+  zero-row regression guard, the rescue path's applied/skipped count and the manifest
+  `sec_rebuild` upsert (which never superseded dropped rows) each read "no rows" as
+  "nothing to do" (Codex ckpt-2, two passes).
 - Measured: `scripts/ab_2350_sct_full_rows.py --out` in an `origin/main` worktree and on
   the branch, then `--diff` (full `def14a_body` population, every SCT field + the selected
   score). The #2350 PR records the run's figures; re-run the command rather than trusting

@@ -174,7 +174,10 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # longer removes an NEO's title row, and Total binds to the RIGHTMOST total
 # caption (17 CFR 229.402(c)(2)(x)). Full-population A/B: 21 of 43,286 accessions
 # change, no salary or total moves to a different value (#2350 PR).
-_PARSER_VERSION_DEF14A = "def14a-v15"
+# v16 (#2350 follow-up): an NEO owning one fiscal year twice in one SCT (17 CFR
+# 229.402(c)(2)(ii) allows one row per NEO per year) proves a broken name carry;
+# that NEO's rows are dropped, not upserted last-wins.
+_PARSER_VERSION_DEF14A = "def14a-v16"
 
 logger = logging.getLogger(__name__)
 
@@ -930,7 +933,7 @@ def apply_exec_comp_best_effort(
         logger.exception("def14a exec-comp: parse raised accession=%s", accession_number)
         return 0
 
-    if not comp.rows:
+    if not comp.rows and not comp.withheld_rows:
         if comp.raw_table_score >= _SCT_PLAUSIBLE_SCORE:
             # A plausible SCT scored but no rows extracted — the real yield
             # gap against heterogeneous HTML. Surface it (no silent truncation).
@@ -948,6 +951,16 @@ def apply_exec_comp_best_effort(
             # accession (same xact-lock key the holdings writers use).
             raw_filings.acquire_filing_accession_write_lock(conn, accession_number)
             for instrument_id in instrument_ids:
+                # Replace, not upsert-only (#2350), as ``_rewash_exec_comp`` does:
+                # an NEO/year row a newer parse no longer emits -- including one
+                # withheld as misattributed -- would otherwise stay served on a
+                # manifest re-drive (``sec_rebuild``). Reached only with rows to
+                # write or rows deliberately withheld; an unexplained empty parse
+                # returned above and leaves stored rows alone.
+                conn.execute(
+                    "DELETE FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s",
+                    (accession_number, instrument_id),
+                )
                 for comp_row in comp.rows:
                     _upsert_comp(
                         conn,

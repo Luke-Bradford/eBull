@@ -1287,6 +1287,78 @@ def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
     ]
 
 
+@pytest.mark.parametrize(("withheld", "cleared"), [(4, True), (0, False)])
+def test_def14a_rewash_clears_comp_when_the_parser_withheld_every_row(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+    withheld: int,
+    cleared: bool,
+) -> None:
+    """#2350 — an SCT whose every NEO owned a fiscal year twice parses to zero
+    rows ON PURPOSE (misattributed rows withheld). The rewash must clear the
+    stale stored rows rather than read the zero as a parse regression. A zero
+    with nothing withheld is still the regression signal and changes nothing."""
+    from app.providers.implementations.sec_def14a import Def14ABeneficialOwnershipTable, Def14ASummaryCompTable
+
+    conn = ebull_test_conn
+    iid = 950_095
+    accession = "0001234567-26-000095"
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, 'D14WH', 'DEF 14A Withheld', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid,),
+    )
+    # Rescue path (no stored holdings): the comp count alone decides whether the
+    # accession is applied, which is where a withheld-only zero was skipped forever.
+    conn.execute(
+        "INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status) VALUES (%s, '0000999095', 'partial')",
+        (accession,),
+    )
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type, source_url,
+            provider, provider_filing_id, primary_document_url
+        ) VALUES (%s, '2025-03-01', 'DEF 14A', 'https://example.com/w', 'sec', %s, 'https://example.com/w')
+        """,
+        (iid, accession),
+    )
+    conn.execute(
+        """
+        INSERT INTO def14a_exec_compensation (
+            instrument_id, accession_number, issuer_cik, executive_name, fiscal_year, total_comp
+        ) VALUES (%s, %s, '0000999095', 'Global', 2025, 1.00)
+        """,
+        (iid, accession),
+    )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    ownership = Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=3)
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table", lambda _html: ownership
+    )
+    sct = Def14ASummaryCompTable(rows=(), raw_table_score=20, withheld_rows=withheld)
+    monkeypatch.setattr("app.providers.implementations.sec_def14a.parse_summary_compensation_table", lambda _html: sct)
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(document_kind="def14a_body", current_version="def14a-v1", apply_fn=rewash_filings._apply_def14a)
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM def14a_exec_compensation WHERE accession_number = %s", (accession,))
+        remaining = cur.fetchone()
+    assert remaining == ((0,) if cleared else (1,))
+    # Applied, not skipped: the version bump means the next sweep does not redo it.
+    assert result.rows_reparsed == (1 if cleared else 0)
+
+
 def test_blockholders_apply_raises_on_parse_failure(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
