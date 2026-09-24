@@ -23,7 +23,7 @@ from app.services.r6_exclusion_trial import (
     load_required_prices,
     read_global_q_nsi,
     signal_sets,
-    simulate_portfolio,
+    simulate_legacy_case,
     validate_factor,
 )
 from app.services.r6_pit_bundle import load_r6_pit_bundle
@@ -116,8 +116,8 @@ def main() -> int:
     for case in ("best", "worst"):
         measured: dict[str, dict[str, Any]] = {}
         for name, schedule in schedules.items():
-            gross = simulate_portfolio(schedule=schedule, prices=prices, case=case, half_spread=0.0)
-            net = simulate_portfolio(schedule=schedule, prices=prices, case=case, half_spread=HALF_SPREAD)
+            gross = simulate_legacy_case(schedule=schedule, prices=prices, case=case, half_spread=0.0)
+            net = simulate_legacy_case(schedule=schedule, prices=prices, case=case, half_spread=HALF_SPREAD)
             measured[name] = {
                 "gross": _portfolio_payload(gross),
                 "net": _portfolio_payload(net),
