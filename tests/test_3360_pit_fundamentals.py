@@ -110,8 +110,8 @@ def _one(tmp_path: Path, rows: dict[tuple[str, str, str], list[Any]], filings: l
     return _build(tmp_path, {f"CIK{CIK}.json": _facts(rows)}, {f"CIK{CIK}.json": _subs(filings)})
 
 
-A = ("us-gaap", "Assets", "USD")
-R = ("us-gaap", "Revenues", "USD")
+A: tuple[str, str, str] = ("us-gaap", "Assets", "USD")
+R: tuple[str, str, str] = ("us-gaap", "Revenues", "USD")
 
 
 def test_restatement_is_public_only_from_the_next_ny_date(tmp_path: Path) -> None:
@@ -156,8 +156,10 @@ def test_same_day_later_timestamp_wins_and_exact_tie_is_ambiguous(tmp_path: Path
 
 
 def test_frame_fy_fp_and_filed_are_inert(tmp_path: Path) -> None:
-    plain = {A: [_row(100, "a1")]}
-    decorated = {A: [_row(100, "a1", frame="CY2019Q4I", fy=2019, fp="FY", filed="2020-01-01")]}
+    plain: dict[tuple[str, str, str], list[Any]] = {A: [_row(100, "a1")]}
+    decorated: dict[tuple[str, str, str], list[Any]] = {
+        A: [_row(100, "a1", frame="CY2019Q4I", fy=2019, fp="FY", filed="2020-01-01")]
+    }
     filings = [("a1", T1, "10-K")]
     one = _build(tmp_path, {f"CIK{CIK}.json": _facts(plain)}, {f"CIK{CIK}.json": _subs(filings)}, "one")[1]
     two = _build(tmp_path, {f"CIK{CIK}.json": _facts(decorated)}, {f"CIK{CIK}.json": _subs(filings)}, "two")[1]
@@ -225,6 +227,31 @@ def test_form_mismatch_between_archives_blocks(tmp_path: Path) -> None:
     )
     assert bundle.value_as_of(CIK, ASSETS, date(2020, 7, 1)).status is ReadStatus.BLOCKED_BY_REJECTION
     assert manifest["ledger"]["rows"]["us-gaap/Assets/USD"]["form_mismatch"] == 1
+
+
+def test_base_form_label_on_an_amendment_is_stored_not_blocked(tmp_path: Path) -> None:
+    # Measured 2026-09-24: 3,214 amendment/transition accessions carry their base form as the
+    # companyfacts label. Same family, so the restated value is stored and ledgered.
+    bundle, manifest = _one(
+        tmp_path,
+        {A: [_row(100, "a1"), _row(110, "a2", form="10-K"), _row(120, "a3", form="10-K")]},
+        [("a1", T1, "10-K"), ("a2", T2, "10-K/A"), ("a3", "2020-09-01T20:00:00.000Z", "10-KT")],
+    )
+    assert bundle.value_as_of(CIK, ASSETS, date(2020, 7, 1)).values == ("110",)
+    assert bundle.value_as_of(CIK, ASSETS, date(2020, 9, 2)).values == ("120",)
+    assert manifest["ledger"]["form_label_variants"] == {"us-gaap/Assets/USD": 2}
+
+
+def test_crashed_build_leaves_nothing_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.build_3360_pit_fundamentals as builder
+
+    def boom(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(builder, "build_shard", boom)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _one(tmp_path, {A: [_row(100, "a1")]}, [("a1", T1, "10-K")])
+    assert not (tmp_path / "bundle").exists()
 
 
 def test_no_acceptance_and_unit_outside_policy_are_ledgered_not_stored(tmp_path: Path) -> None:

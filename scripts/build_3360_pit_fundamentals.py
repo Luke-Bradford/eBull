@@ -75,17 +75,23 @@ def _unique_names(archive: zipfile.ZipFile, label: str) -> set[str]:
 def build(companyfacts: Path, submissions: Path, out: Path) -> dict[str, Any]:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.mkdir()  # exclusive: an existing bundle directory is refused, never resumed
-    inputs = out / "inputs"
-    inputs.mkdir()
-    input_sha = {
-        "companyfacts": _snapshot(companyfacts, inputs / "companyfacts.zip"),
-        "submissions": _snapshot(submissions, inputs / "submissions.zip"),
-    }
-    with (
-        zipfile.ZipFile(inputs / "companyfacts.zip") as facts_zip,
-        zipfile.ZipFile(inputs / "submissions.zip") as subs_zip,
-    ):
-        return _build(facts_zip, subs_zip, out, input_sha)
+    try:
+        inputs = out / "inputs"
+        inputs.mkdir()
+        input_sha = {
+            "companyfacts": _snapshot(companyfacts, inputs / "companyfacts.zip"),
+            "submissions": _snapshot(submissions, inputs / "submissions.zip"),
+        }
+        with (
+            zipfile.ZipFile(inputs / "companyfacts.zip") as facts_zip,
+            zipfile.ZipFile(inputs / "submissions.zip") as subs_zip,
+        ):
+            return _build(facts_zip, subs_zip, out, input_sha)
+    except BaseException:
+        # A crashed build is deleted, never resumed. ``out`` was created by the exclusive
+        # mkdir above, so it holds nothing but this build's own partial output.
+        shutil.rmtree(out, ignore_errors=True)
+        raise
 
 
 def _build(
@@ -94,6 +100,7 @@ def _build(
     fact_names = _unique_names(facts_zip, "companyfacts")
     sub_names = _unique_names(subs_zip, "submissions")
     ledger: Counter[tuple[str, str]] = Counter()
+    label_variants: Counter[str] = Counter()
     no_acceptance: dict[str, int] = {}
     failures: list[dict[str, str]] = []
     shards: list[dict[str, Any]] = []
@@ -133,6 +140,7 @@ def _build(
             ledger[(key, "raw")] += count
         built = build_shard(cik10, payload, index)
         ledger.update(built.ledger)
+        label_variants.update(built.form_label_variants)
         missing = sum(n for (_, outcome), n in built.ledger.items() if outcome == Outcome.NO_ACCEPTANCE)
         if missing:
             no_acceptance[cik10] = missing
@@ -150,6 +158,10 @@ def _build(
         load_shard(out / relative, entry)  # re-read through the loader's own checks
         shards.append(entry)
 
+    # Horizons: companyfacts = latest acceptance of ANY accession its rows cite (any
+    # outcome); submissions = latest acceptance in every index this build parsed. A CIK the
+    # build never reads can only make the true archive maximum later, so this bound errs
+    # toward ``after_capture``.
     if max_fact is None or max_sub is None:
         raise RuntimeError("no admitted fact or no parseable acceptance: nothing to support")
     rows = _reconcile(ledger)
@@ -163,6 +175,7 @@ def _build(
         "ledger": {
             "rows": rows,
             "no_acceptance_by_cik": no_acceptance,
+            "form_label_variants": dict(sorted(label_variants.items())),
             "ignored_companyfacts_members": ignored_members,
         },
     }

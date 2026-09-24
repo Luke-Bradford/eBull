@@ -95,11 +95,25 @@ class Outcome(StrEnum):
     STORED = "stored"
 
 
+#: Transition reports share their base form's family (the companyfacts label for a 10-KT
+#: is sometimes ``10-K``); ``/A`` is stripped before this map.
+_FORM_FAMILY: Final = {"10-KT": "10-K", "10-QT": "10-Q"}
+
+
+def form_family(form: str) -> str:
+    base = form.removesuffix("/A")
+    return _FORM_FAMILY.get(base, base)
+
+
 #: Rejections that are dated and keyed and that the reader honours (rule 8).
 #: ⚠ ``form_mismatch`` is not in the spec's rule-4 list but the spec says the row is
 #: "rejected"; it is made BLOCKING because a non-blocking rejection on an admitted
 #: accession would let the reader fall back past that filing to an older value -- the
-#: one thing rule 8 forbids.
+#: one thing rule 8 forbids. It fires on a FAMILY disagreement only: on the 2026-09-24
+#: full build, 3,214 amendment/transition accessions carried their base form as the
+#: companyfacts label (e.g. ``10-Q`` on a ``10-Q/A``) and none disagreed on family, so a
+#: literal string compare would have blocked every value those filings restated. Those
+#: rows are stored and counted as ``form_label_variants`` in the ledger.
 BLOCKING: Final = frozenset({Outcome.FORM_MISMATCH, Outcome.CHOKEPOINT_REJECT, Outcome.PROSPECTIVE_PERIOD})
 
 
@@ -268,6 +282,7 @@ def _key_date(raw: object) -> str | None:
 class ShardBuild:
     shard: dict[str, Any]
     ledger: Counter[tuple[str, str]] = field(default_factory=Counter)  # (ledger_key, outcome|"raw")
+    form_label_variants: Counter[str] = field(default_factory=Counter)  # ledger_key -> rows
     max_fact_acceptance: str | None = None
 
 
@@ -328,9 +343,12 @@ def build_shard(cik10: str, payload: Mapping[str, Any], submissions: Submissions
         lk = ledger_key(taxonomy, concept, unit)
         outcome, record = _admit(taxonomy, concept, unit, row, submissions)
         build.ledger[(lk, outcome.value)] += 1
+        if isinstance(row, dict) and isinstance(accn := cast(dict[str, Any], row).get("accn"), str):
+            fact_accessions.add(accn)  # any outcome: the archive's horizon, not the admitted one
         if outcome is Outcome.STORED:
             events[record] += 1
-            fact_accessions.add(record[5])
+            if cast(dict[str, Any], row)["form"] != submissions.filings[record[5]].form:
+                build.form_label_variants[lk] += 1
         elif outcome in BLOCKING:
             rejections.setdefault((*record, outcome.value), []).append(index)
 
@@ -375,7 +393,7 @@ def build_shard(cik10: str, payload: Mapping[str, Any], submissions: Submissions
         "rejections": rejection_rows,
         "accessions": [{"accn": f.accn, "form": f.form, "acceptance": f.acceptance} for f in admitted],
     }
-    accepted = [submissions.filings[a].acceptance for a in fact_accessions]
+    accepted = [f.acceptance for a in fact_accessions if (f := submissions.filings.get(a)) is not None]
     build.max_fact_acceptance = max((a for a in accepted if a is not None), default=None)
     return build
 
@@ -399,7 +417,7 @@ def _admit(
     acceptance = filing.acceptance
     raw_key = (taxonomy, concept, unit, _key_date(row.get("start")), _key_date(row.get("end")), accn, acceptance)
     form = row.get("form")
-    if isinstance(form, str) and form != filing.form:
+    if isinstance(form, str) and form_family(form) != form_family(filing.form):
         return Outcome.FORM_MISMATCH, raw_key
     # The chokepoint only walks ``_UNIT_PRIORITY`` units, so a row in any other unit is
     # probed under a policy unit: rule 4 puts ``chokepoint_reject`` BEFORE
@@ -458,6 +476,7 @@ def policy_constants() -> dict[str, Any]:
     return {
         "admitted_forms": sorted(ADMITTED_FORMS),
         "blocking": sorted(BLOCKING),
+        "form_family": dict(sorted(_FORM_FAMILY.items())),
         "concept_set": [list(pair) for pair in CONCEPT_SET],
         "manifest_schema": MANIFEST_SCHEMA,
         "outcome_precedence": [o.value for o in Outcome],
