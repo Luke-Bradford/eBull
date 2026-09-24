@@ -2573,6 +2573,11 @@ def share_locations(table_htmls: list[str], holders: list[tuple[str, Decimal]]) 
     (and carries no ``%``) on a row where some cell has the holder's
     :func:`_layout_name_key`. Source rule: the HTML table model (see :func:`_layout_rows`).
     A holder whose name key is empty has no location.
+
+    Cost is tables × rows × holders × columns. Its only caller is the daily
+    ``def14a_recipient_suppressions`` job over multi-sibling issuers' proxies (Item 403
+    tables of tens of rows and columns). Time the whole population with
+    ``scripts/probe_2351_read_column`` before giving it an online caller.
     """
     keys = [_layout_name_key(name) for name, _ in holders]
     out: list[list[ShareLocation]] = [[] for _ in holders]
