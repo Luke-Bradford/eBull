@@ -1,14 +1,18 @@
-"""#2351 slice 2 — pure tests for the DEF 14A recipient-suppression rule."""
+"""#2351 slices 2 / 2b — pure tests for the DEF 14A recipient-suppression rule."""
 
 from __future__ import annotations
+
+from datetime import date
 
 import pytest
 
 from app.services.def14a_recipients import (
+    REASON_OTHER_COVER,
     Cover,
     CoverUnresolved,
     Sibling,
     decide,
+    extend_by_class,
     instance_url,
     parse_cover_instance,
     symbol_key,
@@ -184,3 +188,119 @@ def test_parse_cover_instance_keeps_every_co_registrant_cik() -> None:
         '<dei:EntityCentralIndexKey contextRef="d">0000047129</dei:EntityCentralIndexKey></xbrli:xbrl>',
     )
     assert parse_cover_instance(body).entity_ciks == frozenset({"0001657853", "0000047129"})
+
+
+# --- slice 2b: extend_by_class ------------------------------------------------
+
+OPEN_SIBS = [Sibling(1, "OPEN"), Sibling(2, "OPENW")]
+OLD_PROXY, NEW_PROXY = "0001140361-25-022644", "0001140361-26-017460"
+OLD_COVER = Cover("0001801169-25-000038", frozenset({("Common stock, $0.0001 par value", "OPEN")}))
+NEW_COVER = Cover(
+    "0001801169-26-000010",
+    frozenset({("Common stock, $0.0001 par value", "OPEN"), ("Series K Warrants", "OPENW")}),
+)
+DATES = {OLD_PROXY: date(2025, 6, 16), NEW_PROXY: date(2026, 4, 28)}
+BOTH = {1: {OLD_PROXY, NEW_PROXY}, 2: {OLD_PROXY, NEW_PROXY}}
+SYMBOLS = {1: "OPEN", 2: "OPENW"}
+
+
+def _pit(*covers: tuple[str, Cover]) -> list:
+    return [
+        s for acc, c in covers for s in decide(accession_number=acc, issuer_cik="1801169", siblings=OPEN_SIBS, cover=c)
+    ]
+
+
+def test_older_proxy_whose_cover_lacks_the_warrant_is_suppressed() -> None:
+    pit = _pit((OLD_PROXY, OLD_COVER), (NEW_PROXY, NEW_COVER))
+    assert [(s.instrument_id, s.accession_number) for s in pit] == [(2, NEW_PROXY)]
+    rows, vetoed = extend_by_class(
+        point_in_time=pit,
+        proxy_dates=DATES,
+        accessions_by_instrument=BOTH,
+        symbols=SYMBOLS,
+        covers=[OLD_COVER, NEW_COVER],
+        blocked=set(),
+    )
+    assert vetoed == set()
+    assert [(s.instrument_id, s.accession_number, s.reason, s.cover_accession) for s in rows] == [
+        (2, OLD_PROXY, REASON_OTHER_COVER, NEW_COVER.accession)
+    ]
+
+
+def test_a_cover_calling_the_symbol_common_vetoes() -> None:
+    old = Cover(OLD_COVER.accession, OLD_COVER.pairs | {("Common stock", "OPENW")})
+    pit = _pit((OLD_PROXY, old), (NEW_PROXY, NEW_COVER))
+    rows, vetoed = extend_by_class(
+        point_in_time=pit,
+        proxy_dates=DATES,
+        accessions_by_instrument=BOTH,
+        symbols=SYMBOLS,
+        covers=[old, NEW_COVER],
+        blocked=set(),
+    )
+    assert rows == [] and vetoed == {2}
+
+
+def test_blocked_instrument_is_not_extended() -> None:
+    pit = _pit((NEW_PROXY, NEW_COVER))
+    rows, vetoed = extend_by_class(
+        point_in_time=pit,
+        proxy_dates=DATES,
+        accessions_by_instrument=BOTH,
+        symbols=SYMBOLS,
+        covers=[NEW_COVER],
+        blocked={2},
+    )
+    assert rows == [] and vetoed == set()
+
+
+def test_no_point_in_time_decision_means_nothing() -> None:
+    rows, _ = extend_by_class(
+        point_in_time=_pit((OLD_PROXY, OLD_COVER)),
+        proxy_dates=DATES,
+        accessions_by_instrument=BOTH,
+        symbols=SYMBOLS,
+        covers=[OLD_COVER],
+        blocked=set(),
+    )
+    assert rows == []
+
+
+def test_targets_only_accessions_the_instrument_holds_and_evidence_is_latest_proxy() -> None:
+    mid = "0001140361-25-099999"
+    dates = {**DATES, mid: date(2025, 12, 1)}
+    pit = _pit((mid, NEW_COVER), (NEW_PROXY, NEW_COVER))
+    held = {1: {OLD_PROXY, mid, NEW_PROXY}, 2: {mid, NEW_PROXY}}  # OPENW holds no OLD_PROXY rows
+    rows, _ = extend_by_class(
+        point_in_time=pit,
+        proxy_dates=dates,
+        accessions_by_instrument=held,
+        symbols=SYMBOLS,
+        covers=[NEW_COVER],
+        blocked=set(),
+    )
+    assert rows == []
+    held[2].add(OLD_PROXY)
+    rows, _ = extend_by_class(
+        point_in_time=pit,
+        proxy_dates=dates,
+        accessions_by_instrument=held,
+        symbols=SYMBOLS,
+        covers=[NEW_COVER],
+        blocked=set(),
+    )
+    assert [s.accession_number for s in rows] == [OLD_PROXY]
+
+
+def test_a_cover_with_two_non_common_titles_for_the_symbol_vetoes() -> None:
+    old = Cover(OLD_COVER.accession, OLD_COVER.pairs | {("Series A Warrants", "OPENW"), ("Series B Warrants", "OPENW")})
+    pit = _pit((OLD_PROXY, old), (NEW_PROXY, NEW_COVER))
+    rows, vetoed = extend_by_class(
+        point_in_time=pit,
+        proxy_dates=DATES,
+        accessions_by_instrument=BOTH,
+        symbols=SYMBOLS,
+        covers=[old, NEW_COVER],
+        blocked=set(),
+    )
+    assert rows == [] and vetoed == {2}

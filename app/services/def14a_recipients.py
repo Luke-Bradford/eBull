@@ -5,7 +5,7 @@ the issuer CIK. This module maintains ``def14a_recipient_suppressions``: the
 (instrument, accession) pairs that readers exclude through the ``*_attributed`` views
 (sql/420). The writers and the fact tables are untouched.
 
-Spec: docs/proposals/ownership/2026-09-24-2351-def14a-class-recipients.md (slice 2).
+Spec: docs/proposals/ownership/2026-09-24-2351-def14a-class-recipients.md (slices 2, 2b).
 
 Source rule. Item 403 reports beneficial ownership per class, determined under Rule
 13d-3; Rule 13d-3(d)(1)(i) counts warrants into the UNDERLYING common class's figure,
@@ -17,7 +17,8 @@ published rule classifies a 12(b) title — and frozen by ``RECIPIENT_RULE_VERSI
 Positive evidence only: a sibling is suppressed only when its OWN point-in-time cover
 title is a warrant / preferred AND a different sibling's title on the same cover is
 common. Absence, ambiguity, an unrecognised title and an unresolvable cover never
-create a suppression; an unresolvable cover also never removes one.
+create a suppression; an unresolvable cover also never removes one. Slice 2b carries
+such a decision to the same instrument's other accessions (``extend_by_class``).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import Any, Final, Literal
 
@@ -41,8 +42,9 @@ from app.services.xbrl_instance import SAFE_XML_PARSER
 
 logger = logging.getLogger(__name__)
 
-RECIPIENT_RULE_VERSION: Final = 1
+RECIPIENT_RULE_VERSION: Final = 2
 REASON_NON_COMMON_SIBLING: Final = "non_common_sibling"
+REASON_OTHER_COVER: Final = "non_common_sibling_other_cover"
 
 COVER_FORMS: Final = ("10-K", "10-Q", "20-F")  # originals only
 MAX_COVER_CANDIDATES: Final = 4
@@ -142,6 +144,53 @@ def decide(*, accession_number: str, issuer_cik: str, siblings: Iterable[Sibling
             )
         )
     return out
+
+
+def extend_by_class(
+    *,
+    point_in_time: Iterable[Suppression],
+    proxy_dates: dict[str, date],
+    accessions_by_instrument: dict[int, set[str]],
+    symbols: dict[int, str],
+    covers: Iterable[Cover],
+    blocked: set[int],
+) -> tuple[list[Suppression], set[int]]:
+    """Slice 2b: carry a point-in-time class decision to the instrument's other accessions.
+
+    An ``instrument_id`` is one security, so a cover proving it warrant / preferred
+    proves it for every proxy fanned to it — including a proxy whose own cover does not
+    list it yet. Evidence = the suppression from the latest proxy. Vetoed when any cover
+    read this run maps the instrument's key to anything but exactly one non-common
+    title. ``blocked`` instruments (an unresolved or undated accession) get nothing.
+    Returns ``(rows, vetoed instrument ids)``.
+    """
+    by_instrument: dict[int, list[Suppression]] = {}
+    for s in point_in_time:
+        by_instrument.setdefault(s.instrument_id, []).append(s)
+
+    # Per cover: key → its title set there. Ambiguity is judged within one cover.
+    per_cover: list[dict[str, set[str]]] = []
+    for cover in covers:
+        titles_by_key: dict[str, set[str]] = {}
+        for title, symbol in cover.pairs:
+            titles_by_key.setdefault(symbol, set()).add(title)
+        per_cover.append(titles_by_key)
+
+    out: list[Suppression] = []
+    vetoed: set[int] = set()
+    for iid, sups in sorted(by_instrument.items()):
+        if iid in blocked:
+            continue
+        key = symbol_key(symbols[iid])
+        listed = [c[key] for c in per_cover if key in c]
+        if any(len(ts) != 1 or title_kind(next(iter(ts))) != "non_common" for ts in listed):
+            vetoed.add(iid)
+            continue
+        evidence = max(sups, key=lambda s: (proxy_dates[s.accession_number], s.accession_number))
+        decided = {s.accession_number for s in sups}
+        for accession in sorted(accessions_by_instrument.get(iid, set()) - decided):
+            out.append(replace(evidence, accession_number=accession, reason=REASON_OTHER_COVER))
+    return out, vetoed
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +361,7 @@ class RunReport:
     accessions: int = 0
     accessions_unresolved: int = 0
     accessions_no_date: int = 0
+    instruments_vetoed: int = 0
     fetches: int = 0
     inserted: int = 0
     updated: int = 0
@@ -349,27 +399,36 @@ def load_population(conn: psycopg.Connection[Any]) -> dict[str, list[Sibling]]:
     return out
 
 
-def _accessions_with_dates(conn: psycopg.Connection[Any], sibling_ids: list[int]) -> list[tuple[str, date | None]]:
-    return [
-        (str(acc), filed)
-        for acc, filed in conn.execute(
-            """
-            WITH acc AS (
-                SELECT accession_number AS a FROM def14a_beneficial_holdings WHERE instrument_id = ANY(%(iids)s)
-                UNION
-                SELECT source_accession FROM ownership_def14a_observations WHERE instrument_id = ANY(%(iids)s)
-                UNION
-                SELECT source_accession FROM ownership_esop_observations WHERE instrument_id = ANY(%(iids)s))
-            SELECT acc.a,
-                   (SELECT min(f.filing_date) FROM filing_events f
-                     WHERE f.provider = 'sec' AND f.provider_filing_id = acc.a)
-              FROM acc
-             WHERE acc.a IS NOT NULL
-             ORDER BY acc.a
-            """,
-            {"iids": sibling_ids},
-        ).fetchall()
-    ]
+def _accessions_with_dates(
+    conn: psycopg.Connection[Any], sibling_ids: list[int]
+) -> tuple[list[tuple[str, date | None]], dict[int, set[str]]]:
+    """The group's accessions with their proxy dates, and which instruments hold rows of each."""
+    rows = conn.execute(
+        """
+        WITH acc AS (
+            SELECT instrument_id AS i, accession_number AS a
+              FROM def14a_beneficial_holdings WHERE instrument_id = ANY(%(iids)s)
+            UNION
+            SELECT instrument_id, source_accession
+              FROM ownership_def14a_observations WHERE instrument_id = ANY(%(iids)s)
+            UNION
+            SELECT instrument_id, source_accession
+              FROM ownership_esop_observations WHERE instrument_id = ANY(%(iids)s))
+        SELECT acc.i, acc.a,
+               (SELECT min(f.filing_date) FROM filing_events f
+                 WHERE f.provider = 'sec' AND f.provider_filing_id = acc.a)
+          FROM acc
+         WHERE acc.a IS NOT NULL
+         ORDER BY acc.a, acc.i
+        """,
+        {"iids": sibling_ids},
+    ).fetchall()
+    dates: dict[str, date | None] = {}
+    by_instrument: dict[int, set[str]] = {}
+    for iid, acc, filed in rows:
+        dates[str(acc)] = filed
+        by_instrument.setdefault(int(iid), set()).add(str(acc))
+    return sorted(dates.items()), by_instrument
 
 
 # Column order of the ledger SELECT / INSERT below; must match both.
@@ -393,29 +452,52 @@ def _row(s: Suppression) -> tuple[Any, ...]:
 
 def compute_desired(
     conn: psycopg.Connection[Any], fetch_text: FetchText, report: RunReport
-) -> tuple[dict[tuple[int, str], tuple[Any, ...]], set[str]]:
-    """Desired ledger rows, and the accessions whose stored rows must be kept as-is."""
+) -> tuple[dict[tuple[int, str], tuple[Any, ...]], set[tuple[int, str]], set[int]]:
+    """Desired ledger rows; the keys, and the instruments, whose stored rows are kept as-is."""
     desired: dict[tuple[int, str], tuple[Any, ...]] = {}
-    keep: set[str] = set()
+    keep: set[tuple[int, str]] = set()
+    keep_instruments: set[int] = set()
     for cik, siblings in load_population(conn).items():
         ids = [s.instrument_id for s in siblings]
-        for accession, proxy_date in _accessions_with_dates(conn, ids):
+        accessions, by_instrument = _accessions_with_dates(conn, ids)
+        proxy_dates: dict[str, date] = {}
+        covers: list[Cover] = []
+        point_in_time: list[Suppression] = []
+        blocked_accessions: set[str] = set()
+        for accession, proxy_date in accessions:
             report.accessions += 1
             if proxy_date is None:
                 report.accessions_no_date += 1
-                keep.add(accession)
+                blocked_accessions.add(accession)
                 continue
+            proxy_dates[accession] = proxy_date
             res = resolve_cover(conn, fetch_text, issuer_cik=cik, sibling_ids=ids, proxy_date=proxy_date)
             report.fetches += res.fetches
             if res.unresolved:
                 report.accessions_unresolved += 1
-                keep.add(accession)
+                blocked_accessions.add(accession)
                 continue
             if res.cover is None:
                 continue
-            for s in decide(accession_number=accession, issuer_cik=cik, siblings=siblings, cover=res.cover):
-                desired[(s.instrument_id, s.accession_number)] = _row(s)
-    return desired, keep
+            covers.append(res.cover)
+            point_in_time.extend(decide(accession_number=accession, issuer_cik=cik, siblings=siblings, cover=res.cover))
+        keep.update((iid, acc) for iid in ids for acc in blocked_accessions)
+        # An instrument with an unreadable or undated accession may be missing its
+        # evidence or its veto this run: keep all its stored rows, extend nothing.
+        blocked = {iid for iid in ids if by_instrument.get(iid, set()) & blocked_accessions}
+        keep_instruments |= blocked
+        extended, vetoed = extend_by_class(
+            point_in_time=point_in_time,
+            proxy_dates=proxy_dates,
+            accessions_by_instrument=by_instrument,
+            symbols={s.instrument_id: s.symbol for s in siblings},
+            covers=covers,
+            blocked=blocked,
+        )
+        report.instruments_vetoed += len(vetoed)
+        for s in [*point_in_time, *extended]:
+            desired[(s.instrument_id, s.accession_number)] = _row(s)
+    return desired, keep, keep_instruments
 
 
 def _apply_instrument(
@@ -463,7 +545,7 @@ def run_recipient_suppressions(conn: psycopg.Connection[Any], fetch_text: FetchT
     apply commits on its own.
     """
     report = RunReport()
-    desired, keep = compute_desired(conn, fetch_text, report)
+    desired, keep, keep_instruments = compute_desired(conn, fetch_text, report)
     stored = {
         (int(r[0]), str(r[1])): tuple(r)
         for r in conn.execute(
@@ -484,7 +566,7 @@ def run_recipient_suppressions(conn: psycopg.Connection[Any], fetch_text: FetchT
             else:
                 report.inserted += 1
     for key in stored:
-        if key not in desired and key[1] not in keep:
+        if key not in desired and key not in keep and key[0] not in keep_instruments:
             per_instrument.setdefault(key[0], ([], []))[1].append(key[1])
             report.deleted += 1
 
