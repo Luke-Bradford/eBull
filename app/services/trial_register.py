@@ -154,7 +154,7 @@ from typing import Final
 #: bump: the SAME five (version, purpose) groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
 #:
-#: r11 (2026-09-25, #2901) adds #2908's three exclusion arms, which ran on
+#: r11 (2026-09-25, #2901) adds #2908's nine exposed searches, which ran on
 #: 2026-08-24 after the cutoff below without charging this register, and #2901's
 #: quality arm. Measured the same way before the bump: the SAME five groups, 488
 #: rows, every one `harness_validation`. It strands nothing that could have promoted.
@@ -811,17 +811,17 @@ TRIAL_REGISTER: Final = TrialRegister(
             description=(
                 "R6 #2908: dilution exclusion (primary), filing-risk exclusion and their union, 2022-07 to "
                 "2024-09; pass rule against literal buy-and-hold, scientific control the identical annual 1/N. "
-                "THREE arms, all emitted. ⚠ searches=3, "
-                "not the 9 (configuration, arm) rows #2901's declaration counts: this register counts variants "
-                "selected between, and #2908's corrections re-ran the same three variants. It ran after the "
-                "cutoff without a #2599 declaration, so it is charged here, late."
+                "THREE arms x THREE configurations (original, halt-bound correction 1, resolver correction 3). "
+                "⚠ searches=9: a recompute counts when the earlier number was exposed (reconstruction policy, "
+                "2026-08-12-trial-register-reconstruction.md), and these are the same 9 rows #2901's declaration "
+                "counts as H. It ran after the cutoff without a #2599 declaration, so it is charged here, late."
             ),
             evidence=(
                 "docs/proposals/ta/2026-08-24-r6-exclusion-preregistration.md, corrections 1-4 and "
                 "2026-08-24-r6-exclusion-result.md; strategy_holdout_accesses 640, 641; issue #2908"
             ),
             exactness=TrialExactness.EXACT,
-            searches=3,
+            searches=9,
         ),
         DeclaredTrial(
             trial_id="r6-2901-quality-gpa-2026-09-25",

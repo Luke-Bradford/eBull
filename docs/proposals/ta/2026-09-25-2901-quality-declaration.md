@@ -206,10 +206,10 @@ under #2908's rules, and no claim is made about their error rate (R22). A later 
   `declared_for = ("r6-quality-gpa", "r6-2901-quality-v1")`. That is the identity the runner writes its holdout row
   under (`run_2901_quality_trial.STRATEGY_ID` / `STRATEGY_VERSION`).
 - **#2908 is charged in the same bump.** It ran after `TRIAL_REGISTER_CUTOFF` without charging the register. Its
-  entry is `r6-2908-exclusion-arms-2026-08-24` (searches = 3, one per variant). The register counts variants
-  selected between, and H counts (configuration, arm) rows under this programme's rule; the two numbers answer
-  different questions and are not reconciled. #2901's `searches = 2` follows its own first-run rows, which is the
-  conservative direction for the register.
+  entry is `r6-2908-exclusion-arms-2026-08-24` with searches = 9. That is H: the register's reconstruction policy
+  (`2026-08-12-trial-register-reconstruction.md`, "a recompute counts when … the pre-correction number was already
+  quoted") counts the same exposed recomputes this programme's rule does. #2901's `searches = 2` is its own
+  first-run rows.
 - **Preregistration row.** `scripts/freeze_2901_quality_declaration.py` freezes it:
   - purpose `capital_candidate`, universe basis `survivorship_free`, carry and FX unmodelled both `false`, so the
     expected structural refusals are empty;

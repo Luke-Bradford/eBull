@@ -48,9 +48,10 @@ class TestTheRegisterEntries:
         assert trial.searches == 2
         assert DECLARATION.name in trial.evidence
 
-    def test_2908_is_charged_once_per_arm_without_a_declaration(self) -> None:
+    def test_2908_is_charged_its_nine_exposed_rows_without_a_declaration(self) -> None:
+        """The register's reconstruction policy counts an exposed recompute, so it agrees with H."""
         trial = _trial("r6-2908-exclusion-arms-2026-08-24")
-        assert trial.searches == 3
+        assert trial.searches == 9
         assert trial.declared_for is None
         assert "640, 641" in trial.evidence
 
