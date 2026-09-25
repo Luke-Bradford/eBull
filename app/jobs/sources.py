@@ -149,6 +149,8 @@ the rate — it does not.
   dataset eToro serves no history for, and both core lanes pin exclusive
   ownership. A source lane is a job-overlap bucket, not an execution permit, so
   it costs no pool connection (``tests/test_etoro_core_lane_starvation.py``).
+  Shared with ``etoro_investor_snapshot`` (#3381 slice 2, daily 22:07 UTC,
+  quotas G and H): the lane serialises the two recorders.
 * ``etoro_core_eligibility`` — ``core_eligibility_refresh`` (#2603 item 2).
   Both split off ``etoro`` because the multi-hour candle sweep spans their fire
   times: the daily 22:45 observation lost 4 of 4 fires and had **never completed

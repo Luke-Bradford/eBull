@@ -190,6 +190,18 @@ LANES: dict[str, QuotaLane] = {
         witnesses=2,
         source_url="https://api-portal.etoro.com/api-reference/trading--demo/list-trading-history",
     ),
+    # #3381 slice 2 — added 2026-09-25 from the per-endpoint page and the committed
+    # OpenAPI fixture (`x-ratelimit`: 60/60 s, shared false, defaultPool false).
+    "H_user_live_portfolio": QuotaLane(
+        key="H_user_live_portfolio",
+        title="public live portfolio (dedicated, pooled with nothing)",
+        scope="dedicated",
+        documented_per_minute=60,
+        # The path carries no environment segment.
+        env_separation="neutral",
+        witnesses=1,
+        source_url="https://api-portal.etoro.com/api-reference/users-info/get-user-live-portfolio",
+    ),
 }
 
 
@@ -234,6 +246,7 @@ class CallSite:
 
 _BROKER = "app/providers/implementations/etoro_broker.py"
 _MARKET = "app/providers/implementations/etoro.py"
+_SOCIAL = "app/providers/implementations/etoro_social.py"
 
 CALL_SITES: tuple[CallSite, ...] = (
     # --- lane A: order-write pool -------------------------------------------
@@ -408,6 +421,19 @@ CALL_SITES: tuple[CallSite, ...] = (
         60,
     ),
     CallSite(_MARKET, "get_quotes", "_http", "GET", "/api/v1/market-data/instruments/rates", "F_market_data", 60),
+    # --- #3381 slice 2: the investor-cohort recorder's two read endpoints ----
+    CallSite(
+        _SOCIAL, "get_rankings_page", "_http_rankings", "GET", "/api/v2/portfolios/rankings", "G_default_shared", 60
+    ),
+    CallSite(
+        _SOCIAL,
+        "get_live_portfolio",
+        "_http_live",
+        "GET",
+        "/api/v1/user-info/people/{username}/portfolio/live",
+        "H_user_live_portfolio",
+        60,
+    ),
 )
 
 # Throttled call EXPRESSIONS per (module, client attribute), measured by AST on
@@ -422,6 +448,8 @@ EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
     # endpoint has its own client.
     (_BROKER, "_http_history"): 1,
     (_MARKET, "_http"): 8,
+    (_SOCIAL, "_http_rankings"): 1,
+    (_SOCIAL, "_http_live"): 1,
 }
 
 # Which module-level constant configures each client's floor.  The floor VALUES
@@ -437,6 +465,8 @@ FLOOR_CONSTANT_NAMES: dict[tuple[str, str], tuple[str, str]] = {
     # note on the `get_trade_history` call site for the test that can.
     (_BROKER, "_http_history"): ("app.providers.implementations.etoro_broker", "_ETORO_HISTORY_INTERVAL_S"),
     (_MARKET, "_http"): ("app.providers.implementations.etoro", "_ETORO_READ_INTERVAL_S"),
+    (_SOCIAL, "_http_rankings"): ("app.providers.implementations.etoro_social", "_ETORO_SOCIAL_INTERVAL_S"),
+    (_SOCIAL, "_http_live"): ("app.providers.implementations.etoro_social", "_ETORO_SOCIAL_INTERVAL_S"),
 }
 
 
