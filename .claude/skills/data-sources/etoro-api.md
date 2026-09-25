@@ -269,6 +269,24 @@ every other market-data call. A cross-sectional intraday study is therefore a
 *scheduled harvest*, not an ad-hoc query — budget for it in the design, and
 prefer `FourHours` (deepest history per request) when bootstrapping.
 
+## ⚠ OPTIONS: the product exists for UK accounts; the public API does not reach it — MEASURED 2026-09-25
+
+Do not write "UK cannot trade options" (the operator sees eToro Options on the account; eToro's help centre
+has a "UK customer … eToro Options account" article), and do not write "we can trade options" either:
+
+- `GET /api/v1/market-data/instrument-types` defines type `9` = `"Options"`.
+- `GET /api/v1/market-data/instruments` returned **0 of 16,153** instruments of type 9 (5 stocks 12,681 ·
+  6 ETF 1,652 · 10 crypto 710 · 2 commodity 625 · 4 indices 280 · 1 FX 205).
+- `llms.txt` lists no options endpoint (no chains, quotes, greeks or orders).
+
+⇒ No automated options strategy or hedge is possible through the API today. Re-probe the instruments list
+and `llms.txt` before claiming otherwise, in either direction.
+
+Separate, and also measured 2026-09-25: `GET /api/v2/portfolios/{username}/exposure/history` returns daily
+points back to 2021-02-02, but `exposureItems` came back EMPTY for the top popular investors probed, so the
+per-instrument history is not served. Crowd positioning (`buyHoldingPct`/`sellHoldingPct` on search) and
+`portfolio/live` are forward-only: record them, never "backfill" them. See #3381.
+
 ## Scope boundary — what this file is NOT
 
 This file documents **eToro's** behaviour: endpoints, limits, payload shapes,
