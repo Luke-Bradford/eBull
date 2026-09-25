@@ -214,6 +214,15 @@ def compose_gate(readouts: Mapping[str, GateReadout | Refused]) -> Tri:
 # --- Mean and HAC t (headline) -------------------------------------------------------------------------------
 
 
+def _finite_sum(terms: Iterable[float]) -> float | None:
+    """``math.fsum``, or ``None`` when an intermediate or the result is not finite (fsum raises on overflow)."""
+    try:
+        total = math.fsum(terms)
+    except OverflowError, ValueError:
+        return None
+    return total if math.isfinite(total) else None
+
+
 def mean_active(active: Sequence[float], *, ruined: bool) -> float | Refused:
     """mean(a). ``ruined`` is a ruin of A or of the comparator inside the 134 months."""
     if len(active) < 2:
@@ -222,7 +231,10 @@ def mean_active(active: Sequence[float], *, ruined: bool) -> float | Refused:
         return Refused("a non-finite monthly active return")
     if ruined:
         return Refused("a ruin of A or of the comparator inside the statistic months")
-    return math.fsum(active) / len(active)
+    total = _finite_sum(active)
+    if total is None:
+        return Refused("the sum of the active returns is not finite")
+    return total / len(active)
 
 
 def newey_west_lag(observations: int) -> int:
@@ -253,19 +265,21 @@ def hac_t(active: Sequence[float], *, ruined: bool) -> HacEstimate | Refused:
     count = len(active)
     lag = newey_west_lag(count)
     centred = [value - mean for value in active]
-
-    def autocovariance(shift: int) -> float:
-        return math.fsum(centred[t] * centred[t - shift] for t in range(shift, count)) / count
-
-    variance = autocovariance(0)
+    sums = [_finite_sum(centred[t] * centred[t - shift] for t in range(shift, count)) for shift in range(lag + 1)]
+    if not all(math.isfinite(value) for value in centred) or any(total is None for total in sums):
+        return Refused("a HAC autocovariance is not finite")
+    autocovariances = [total / count for total in sums if total is not None]
+    variance = autocovariances[0]
     if variance == 0.0:
         return Refused("γ̂₀ = 0: the active series is constant")
-    long_run = variance + 2.0 * math.fsum(
-        (1.0 - shift / (lag + 1)) * autocovariance(shift) for shift in range(1, lag + 1)
+    long_run = _finite_sum(
+        [variance, *(2.0 * (1.0 - shift / (lag + 1)) * autocovariances[shift] for shift in range(1, lag + 1))]
     )
-    if not (math.isfinite(long_run) and long_run > 0.0):
+    if long_run is None or not long_run > 0.0:
         return Refused(f"the HAC variance is not positive and finite: {long_run}")
     standard_error = math.sqrt(long_run / count)
+    if not (standard_error > 0.0 and math.isfinite(mean / standard_error)):
+        return Refused("the HAC t is not finite")
     return HacEstimate(
         observations=count,
         lag=lag,
@@ -377,16 +391,20 @@ def holding_year(month: Month) -> int:
 
 
 def cohort_active_returns(
-    arm: Mapping[Month, float],
-    comparator: Mapping[Month, float],
+    arm_factors: Mapping[Month, float],
+    comparator_factors: Mapping[Month, float],
     months: Sequence[Month] = STATISTIC_MONTHS,
 ) -> dict[int, float]:
-    """∏(1 + r(A)) − ∏(1 + r(C)) per COMPLETE (12-month) holding-year cohort. Over 134 months: 2013 … 2023."""
+    """∏ g(A) − ∏ g(C) per COMPLETE (12-month) holding-year cohort. Over 134 months: 2013 … 2023.
+
+    Compounded from the stored gross factors g_m = W(mark_m) / W(mark_{m−1}), never from 1 + r_m, so a positive
+    factor below 2^-53 cannot become a total loss.
+    """
     grouped: dict[int, list[Month]] = defaultdict(list)
     for month in months:
         grouped[holding_year(month)].append(month)
     return {
-        year: math.prod(1.0 + arm[m] for m in members) - math.prod(1.0 + comparator[m] for m in members)
+        year: math.prod(arm_factors[m] for m in members) - math.prod(comparator_factors[m] for m in members)
         for year, members in sorted(grouped.items())
         if len(members) == 12
     }
@@ -410,12 +428,18 @@ def cohort_t(active: Mapping[int, float], *, ruined: bool) -> CohortTest | Refus
         return Refused("a non-finite cohort active return")
     if ruined:
         return Refused("a ruin of A or of the comparator inside the statistic months")
-    spread = statistics.stdev(values)
+    try:
+        spread = statistics.stdev(values)
+        mean = statistics.fmean(values)
+    except OverflowError:
+        return Refused("the cohort moments are not finite")
     if spread == 0.0:
         return Refused("the cohort active returns have zero spread")
-    mean = statistics.fmean(values)
+    t_stat = mean / (spread / math.sqrt(len(values)))
+    if not (math.isfinite(spread) and math.isfinite(t_stat)):
+        return Refused("the cohort t is not finite")
     df = len(values) - 1
-    return CohortTest(len(values), df, mean, mean / (spread / math.sqrt(len(values))), cohort_t_bar(df))
+    return CohortTest(len(values), df, mean, t_stat, cohort_t_bar(df))
 
 
 # --- Haircut margins -----------------------------------------------------------------------------------------
@@ -474,26 +498,31 @@ class PolicyStatistics:
 
 def summarise_policy(
     *,
-    arm: Mapping[Month, float],
-    control: Mapping[Month, float],
-    complete_case: Mapping[Month, float],
+    arm_factors: Mapping[Month, float],
+    control_factors: Mapping[Month, float],
+    complete_case_factors: Mapping[Month, float],
     totals: TotalReturns,
     ruined: frozenset[Portfolio],
     months: Sequence[Month] = STATISTIC_MONTHS,
 ) -> PolicyStatistics:
-    """Every statistic of the spec for one termination policy, on net monthly returns.
+    """Every statistic of the spec for one termination policy, on net monthly gross factors g_m.
 
-    ``ruined`` names the books ruined inside ``months``. Each series must cover exactly ``months``: anything else is
-    a runner defect and raises.
+    a_m = r_m(A) − r_m(C) is formed as g_m(A) − g_m(C), the same number without the rounded r_m; cohort returns
+    compound the factors. ``ruined`` names the books ruined inside ``months``. Each series must cover exactly
+    ``months``: anything else is a runner defect and raises.
     """
     window = set(months)
-    for name, series in (("arm", arm), ("control", control), ("complete_case", complete_case)):
+    for name, series in (
+        ("arm", arm_factors),
+        ("control", control_factors),
+        ("complete_case", complete_case_factors),
+    ):
         if set(series) != window:
             raise ValueError(f"the {name} monthly series does not cover exactly the statistic months")
     headline_ruin = bool(ruined & {Portfolio.ARM, Portfolio.CONTROL})
     diagnostic_ruin = bool(ruined & {Portfolio.ARM, Portfolio.COMPLETE_CASE})
-    active = [arm[m] - control[m] for m in months]
-    diagnostic = [arm[m] - complete_case[m] for m in months]
+    active = [arm_factors[m] - control_factors[m] for m in months]
+    diagnostic = [arm_factors[m] - complete_case_factors[m] for m in months]
     margins: dict[tuple[Comparator, float], HaircutMargins | Refused] = {}
     for which in Comparator:
         gross, net = totals.comparator(which)
@@ -508,7 +537,7 @@ def summarise_policy(
     return PolicyStatistics(
         mean_active=mean_active(active, ruined=headline_ruin),
         hac=hac_t(active, ruined=headline_ruin),
-        cohort=cohort_t(cohort_active_returns(arm, control, months), ruined=headline_ruin),
+        cohort=cohort_t(cohort_active_returns(arm_factors, control_factors, months), ruined=headline_ruin),
         diagnostic_mean=mean_active(diagnostic, ruined=diagnostic_ruin),
         margins=margins,
     )

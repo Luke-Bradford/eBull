@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.r6_exclusion_trial import CLASSIFIED_BEST, CLASSIFIED_WORST, ZERO_RECOVERY
+from app.services.r6_exclusion_trial import CLASSIFIED_BEST, CLASSIFIED_WORST, ZERO_RECOVERY, month_pairs
 from app.services.r6_monthly_trial import (
     CONTINGENT_HAIRCUT,
     GATING_CONDITIONS,
@@ -110,9 +110,13 @@ def test_hac_t_refuses(series: list[float], ruined: bool) -> None:
     assert isinstance(hac_t(series, ruined=ruined), Refused)
 
 
-def test_hac_t_refuses_a_non_finite_long_run_variance() -> None:
-    # Finite inputs whose squared deviations overflow: γ̂₀ = inf and Ω̂ = nan.
-    assert isinstance(hac_t([1e300, -1e300, 1e300, -1e300], ruined=False), Refused)
+@pytest.mark.parametrize(
+    "series",
+    [[1e300, -1e300, 1e300, -1e300], [1e300, -1e300, -1e300, 1e300], [1e308, 1e308, 1e308], [1e308, -1e308, 1e308]],
+    ids=["alternating", "paired", "sum-overflows", "centred-overflows"],
+)
+def test_hac_t_refuses_finite_inputs_whose_intermediates_overflow(series: list[float]) -> None:
+    assert isinstance(hac_t(series, ruined=False), Refused)
 
 
 def test_mean_active_refusals_and_value() -> None:
@@ -189,11 +193,28 @@ def test_cohort_bar_is_3_957_and_matches_numerical_integration() -> None:
 
 
 def test_cohort_active_returns_keeps_only_complete_holding_years() -> None:
-    arm = dict.fromkeys(STATISTIC_MONTHS, 0.01)
-    control = dict.fromkeys(STATISTIC_MONTHS, 0.0)
+    arm = dict.fromkeys(STATISTIC_MONTHS, 1.01)
+    control = dict.fromkeys(STATISTIC_MONTHS, 1.0)
     cohorts = cohort_active_returns(arm, control)
     assert list(cohorts) == list(range(2013, 2024))
     assert cohorts[2013] == pytest.approx(1.01**12 - 1.0)
+
+
+def test_cohort_active_returns_compound_factors_not_rounded_returns() -> None:
+    # g = 2^-54 > 0 rounds to r = −1.0, so 1 + r would read a total loss; the factor keeps the wealth.
+    tiny = 2.0**-54
+    assert tiny - 1.0 == -1.0
+    months = month_pairs((2020, 7), (2021, 6))
+    cohorts = cohort_active_returns(
+        {m: tiny if m == (2020, 7) else 1.0 for m in months}, dict.fromkeys(months, 1.0), months
+    )
+    assert cohorts[2020] == tiny - 1.0 and tiny > 0.0
+    assert math.prod([tiny, *[1.0] * 11]) > 0.0
+
+
+def test_cohort_t_refuses_overflowing_moments() -> None:
+    # statistics.stdev is exact, but an sd above the float maximum cannot be returned.
+    assert isinstance(cohort_t({2013: 1.7e308, 2014: -1.7e308, 2015: 1.7e308}, ruined=False), Refused)
 
 
 def test_cohort_t_hand_computed() -> None:
@@ -399,7 +420,8 @@ def test_gate_requires_the_governing_policy() -> None:
 
 
 def _synthetic() -> tuple[dict[tuple[int, int], float], ...]:
-    control = {month: 0.01 * math.sin(0.9 * i) for i, month in enumerate(STATISTIC_MONTHS)}
+    """Gross factors g_m."""
+    control = {month: 1.0 + 0.01 * math.sin(0.9 * i) for i, month in enumerate(STATISTIC_MONTHS)}
     arm = {month: value + 0.004 + 0.01 * math.sin(2.3 * i) for i, (month, value) in enumerate(control.items())}
     complete_case = {month: value + 0.001 for month, value in control.items()}
     return arm, control, complete_case
@@ -410,7 +432,9 @@ TOTALS = TotalReturns(1.2, 1.1, 0.8, 0.75, 0.85, 0.8)
 
 def test_summarise_policy_runs_every_statistic_on_synthetic_series() -> None:
     arm, control, complete_case = _synthetic()
-    result = summarise_policy(arm=arm, control=control, complete_case=complete_case, totals=TOTALS, ruined=frozenset())
+    result = summarise_policy(
+        arm_factors=arm, control_factors=control, complete_case_factors=complete_case, totals=TOTALS, ruined=frozenset()
+    )
     assert isinstance(result.hac, HacEstimate) and result.hac.lag == 4
     assert isinstance(result.cohort, CohortTest) and result.cohort.cohorts == 11
     assert result.mean_active == pytest.approx(0.004, abs=1e-3)
@@ -421,9 +445,9 @@ def test_summarise_policy_runs_every_statistic_on_synthetic_series() -> None:
 def test_summarise_policy_ruin_refuses_only_the_statistics_on_that_book() -> None:
     arm, control, complete_case = _synthetic()
     result = summarise_policy(
-        arm=arm,
-        control=control,
-        complete_case=complete_case,
+        arm_factors=arm,
+        control_factors=control,
+        complete_case_factors=complete_case,
         totals=TOTALS,
         ruined=frozenset({Portfolio.COMPLETE_CASE}),
     )
@@ -431,17 +455,25 @@ def test_summarise_policy_ruin_refuses_only_the_statistics_on_that_book() -> Non
     assert isinstance(result.hac, HacEstimate) and isinstance(result.cohort, CohortTest)
     assert all(isinstance(m, HaircutMargins) for m in result.margins.values())
     headline = summarise_policy(
-        arm=arm, control=control, complete_case=complete_case, totals=TOTALS, ruined=frozenset({Portfolio.ARM})
+        arm_factors=arm,
+        control_factors=control,
+        complete_case_factors=complete_case,
+        totals=TOTALS,
+        ruined=frozenset({Portfolio.ARM}),
     )
     assert all(isinstance(s, Refused) for s in (headline.mean_active, headline.hac, headline.cohort))
     assert isinstance(headline.diagnostic_mean, Refused)
 
 
 def test_summarise_policy_refuses_a_series_with_the_partial_month() -> None:
-    series = dict.fromkeys(STATISTIC_MONTHS, 0.0)
+    series = dict.fromkeys(STATISTIC_MONTHS, 1.0)
     with pytest.raises(ValueError):
         summarise_policy(
-            arm={**series, (2024, 9): 0.0}, control=series, complete_case=series, totals=TOTALS, ruined=frozenset()
+            arm_factors={**series, (2024, 9): 1.0},
+            control_factors=series,
+            complete_case_factors=series,
+            totals=TOTALS,
+            ruined=frozenset(),
         )
 
 
