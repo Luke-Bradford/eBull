@@ -55,7 +55,10 @@ The skill text is amended on #2403 (`.claude/**` is write-refused from the loop 
   and is NOT folded in (#31).
 - `long_x1_settlement`: settlement of the first `available` long x1 config in the total order `real, cfd,
   realFutures, marginTrade` (#30).
-- `max_short_leverage`: max `leverageValues` over non-potential `cfd` short configs; NULL if none.
+- `max_short_leverage`: max `leverageValues` over non-potential `cfd` short configs; NULL if none, or if an
+  unreadable config could be a non-potential `cfd` short. An unreadable config makes unknown only the
+  projections it could belong to: a readable direction, settlement or leverage array that rules it out of an arm
+  leaves that arm alone (Codex ckpt-3).
 - Numbers: JSON int/float/numeric-string → NUMERIC; bool, non-finite, anything else → NULL (#40). Timestamps:
   timezone-aware ISO-8601 → value; else NULL (#60). No validity filter on bid/ask (zero, crossed kept, #41);
   spread is a READER computation — the skill's convention is the full spread `(ask − bid)` over mid (#42).

@@ -105,6 +105,21 @@ def test_a_malformed_config_makes_its_side_unknown_never_false() -> None:
     assert arm_capacity([_config("mystery", "long", [1])]).long_x1 is None
 
 
+def test_a_malformed_config_leaves_projections_it_cannot_belong_to() -> None:
+    # A long x2 config cannot be the long x1 arm, whatever its isPotential says.
+    not_x1 = [*AAPL_CONFIGS, {"settlementType": "cfd", "direction": "long", "leverageValues": [2]}]
+    assert arm_capacity(not_x1) == ArmCapacity("available", "available", "real", 20)
+    # A non-CFD short is not an eToro short, so it cannot make the short arm or its leverage unknown.
+    not_cfd = [*AAPL_CONFIGS, {"settlementType": "real", "direction": "short", "leverageValues": [1]}]
+    assert arm_capacity(not_cfd) == ArmCapacity("available", "available", "real", 20)
+    # A cfd short x5 of unknown potential cannot be the x1 arm but could raise the max leverage.
+    unknown_max = [*AAPL_CONFIGS, {"settlementType": "cfd", "direction": "short", "leverageValues": [5]}]
+    assert arm_capacity(unknown_max) == ArmCapacity("available", "available", "real", None)
+    # Known potential cannot count toward the max, so it leaves the max alone.
+    potential_max = [*AAPL_CONFIGS, {"settlementType": "cfd", "leverageValues": [5], "isPotential": True}]
+    assert arm_capacity(potential_max) == ArmCapacity("available", "available", "real", 20)
+
+
 def test_parse_eligibility_found_not_found_and_omitted() -> None:
     body = {
         "eligibilities": [

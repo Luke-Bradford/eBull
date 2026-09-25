@@ -140,27 +140,30 @@ def arm_capacity(configs: object) -> ArmCapacity:
     long_states: list[tuple[SettlementType, bool]] = []  # (settlement, is_potential) of long x1 configs
     short_states: list[bool] = []  # is_potential of cfd short x1 configs
     short_leverages: list[int] = []
-    long_malformed = short_malformed = False
+    long_malformed = short_malformed = max_short_malformed = False
     for config in configs:
-        direction = config.get("direction") if isinstance(config, dict) else None
-        settlement = _settlement(config.get("settlementType")) if isinstance(config, dict) else None
-        leverages = config.get("leverageValues") if isinstance(config, dict) else None
-        potential = config.get("isPotential") if isinstance(config, dict) else None
-        well_formed = (
-            direction in ("long", "short")
-            and settlement is not None
-            and isinstance(leverages, list)
-            and all(isinstance(v, int) and not isinstance(v, bool) for v in leverages)
-            and isinstance(potential, bool)
+        fields = config if isinstance(config, dict) else {}
+        direction = fields.get("direction") if fields.get("direction") in ("long", "short") else None
+        settlement = _settlement(fields.get("settlementType"))
+        raw_leverages = fields.get("leverageValues")
+        leverages = (
+            raw_leverages
+            if isinstance(raw_leverages, list)
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in raw_leverages)
+            else None
         )
-        if not well_formed:
-            # A config we cannot read could be the x1 arm on either side.
-            if direction != "short":
+        potential = _boolean(fields.get("isPotential"))
+        if direction is None or settlement is None or leverages is None or potential is None:
+            # Unreadable: it makes unknown only the projections it could belong to (spec #28 — a config
+            # of that direction with 1 in its leverage values; short reads cfd only).
+            x1_possible = leverages is None or 1 in leverages
+            cfd_possible = settlement is None or settlement == "cfd"
+            if direction != "short" and x1_possible:
                 long_malformed = True
-            if direction != "long":
-                short_malformed = True
+            if direction != "long" and cfd_possible:
+                short_malformed = short_malformed or x1_possible
+                max_short_malformed = max_short_malformed or potential is not True
             continue
-        assert isinstance(leverages, list) and isinstance(potential, bool) and settlement is not None
         if direction == "long":
             if 1 in leverages:
                 long_states.append((settlement, potential))
@@ -183,7 +186,7 @@ def arm_capacity(configs: object) -> ArmCapacity:
         available = {s for s, potential in long_states if not potential}
         chosen = next(s for s in SETTLEMENT_ORDER if s in available)
     short_x1 = status(short_states, short_malformed)
-    max_short = None if short_malformed or not short_leverages else max(short_leverages)
+    max_short = None if max_short_malformed or not short_leverages else max(short_leverages)
     return ArmCapacity(long_x1, short_x1, chosen, max_short)
 
 
