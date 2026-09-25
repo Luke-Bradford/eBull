@@ -477,6 +477,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # keeps the child-to-parent reading order.
     "etoro_crowd_observations",
     "etoro_crowd_snapshots",
+    # #3381 slice 2, child-to-parent.
+    "etoro_investor_positions",
+    "etoro_investor_fetches",
+    "etoro_investor_cohort",
+    "etoro_investor_rankings",
+    "etoro_investor_snapshots",
 )
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ from app.jobs.job_connection import connect_job, job_application_name, job_state
 from app.jobs.sources import Lane
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import BROAD_MARKET_SEARCH_REQUEST, EtoroMarketDataProvider
+from app.providers.implementations.etoro_social import LIVE_PORTFOLIO_PATH, RANKINGS_PATH, EtoroSocialProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import (
@@ -69,6 +70,7 @@ from app.services.exchange_directory import refresh_exchange_directory
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
+from app.services.investor_cohort_recorder import record_investor_snapshot
 from app.services.job_heartbeat import REPORTING_WRITE_TIMEOUT_MS
 from app.services.job_progress import JobProgress, degradation_reason
 from app.services.job_telemetry import JobTelemetryAggregator, flush_to_job_run
@@ -568,6 +570,9 @@ JOB_CORE_REBALANCE_EXECUTION = "core_rebalance_execution"
 # #3381 — the forward-only eToro crowd-positioning record. eToro serves no
 # history for it, so a day this job does not run is a day the dataset lacks.
 JOB_ETORO_CROWD_SNAPSHOT = "etoro_crowd_snapshot"
+# #3381 slice 2 — the forward-only top-investor cohort record (ranking + live
+# positions). Same reason as above: eToro serves no position history.
+JOB_ETORO_INVESTOR_SNAPSHOT = "etoro_investor_snapshot"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -2799,6 +2804,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=21, minute=52),
         # A late snapshot is honestly stamped by its own fetch time and appends a
         # new row, never an edit, so a missed day is better recorded late than lost.
+        catch_up_on_boot=True,
+        rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_INVESTOR_SNAPSHOT,
+        display_name="eToro top-investor cohort snapshot (#3381)",
+        # Reuses the crowd recorder's SOURCE lane (#3381: no new lane), which
+        # serialises the two recorders. 22:07 UTC follows the 21:52 crowd fire,
+        # is after the NYSE close in both DST regimes and is off the 5-minute grid.
+        source="etoro_crowd",
+        description=(
+            "Daily — record eToro's popular-investor ranking and the live positions of a sticky top-investor "
+            "cohort (docs/proposals/etl/2026-09-25-3381-investor-cohort-recorder.md). Forward-only: eToro serves "
+            "no position history. Failed and partial collections are recorded too."
+        ),
+        cadence=Cadence.daily(hour=22, minute=7),
+        # Same argument as the crowd snapshot: a late snapshot is honestly
+        # stamped and appended, a lost day is unrecoverable.
         catch_up_on_boot=True,
         rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
@@ -7131,6 +7155,42 @@ class _CredentialsRotatedMidBatch(RuntimeError):
     would still be made with the superseded plaintext keys, so this is a run-level
     abort and not one instrument's failure.
     """
+
+
+def etoro_investor_snapshot() -> None:
+    """Append one top-investor cohort snapshot (#3381 slice 2).
+
+    Read-only: the popular-investor ranking plus each cohort member's public live portfolio. A failed run
+    commits its own ``failed`` snapshot with everything it collected; a ``partial`` one commits and then
+    raises, so the run never reports success for lost members.
+    """
+    creds = _load_etoro_credentials(JOB_ETORO_INVESTOR_SNAPSHOT)
+    if creds is None:
+        _record_prereq_skip(JOB_ETORO_INVESTOR_SNAPSHOT, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_ETORO_INVESTOR_SNAPSHOT) as tracker:
+        with (
+            EtoroSocialProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            connect_job() as conn,
+        ):
+            result = record_investor_snapshot(
+                conn,
+                provider,
+                request_params={"rankings_path": RANKINGS_PATH, "live_portfolio_path": LIVE_PORTFOLIO_PATH},
+            )
+        tracker.row_count = result.positions_recorded
+        logger.info(
+            "etoro_investor_snapshot: snapshot %d — ranking %d rows, %d of %d members fetched "
+            "(%d unavailable), %d positions",
+            result.snapshot_id,
+            result.ranking_recorded,
+            result.investors_fetched,
+            result.investors_expected,
+            result.investors_unavailable,
+            result.positions_recorded,
+        )
 
 
 def etoro_crowd_snapshot() -> None:
