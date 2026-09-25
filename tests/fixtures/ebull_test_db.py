@@ -472,6 +472,11 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "cash_ledger",
     "capital_events",
     "report_snapshots",
+    # #3381 crowd recorder: no FK to instruments (eToro ids we may not hold), so
+    # listed explicitly. Observations first is irrelevant for TRUNCATE CASCADE but
+    # keeps the child-to-parent reading order.
+    "etoro_crowd_observations",
+    "etoro_crowd_snapshots",
 )
 
 # ---------------------------------------------------------------------------

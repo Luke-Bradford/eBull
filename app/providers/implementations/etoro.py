@@ -21,10 +21,13 @@ epic #585 and reviewed by Codex pre-implementation.
 
 ``get_broad_market_snapshot`` is the second narrow exception (#2523). It is a
 two-page, collection-time screening cross-section with no per-row source
-timestamp or bid/ask. Routine rows are never evidence and are not persisted;
-only aggregate coverage and the existing compact fired/refused decision context
-may survive. A shortlisted instrument still requires a timestamped quote. Any
-additional exception requires reopening this design.
+timestamp or bid/ask. For STRATEGY use, routine rows are never evidence and are
+not persisted: only aggregate coverage and the existing compact fired/refused
+decision context may survive, and a shortlisted instrument still requires a
+timestamped quote. #3381 reopened this for one purpose only: the crowd recorder
+(``app/services/crowd_recorder.py``) persists every row of a complete snapshot,
+raw item included, because eToro serves no history for crowd positioning. That
+record is research data keyed by its own fetch time, never a quote.
 
 Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
 Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
@@ -84,8 +87,19 @@ _SEARCH_FIELDS = (
     "instrumentId,currentRate,dailyPriceChange,weeklyPriceChange,"
     "monthlyPriceChange,isCurrentlyTradable,isExchangeOpen,"
     "isActiveInPlatform,isBuyEnabled,internalIndustryId,sectorNameId,"
-    "popularityUniques7Day,traders7DayChange,buyHoldingPct,sellHoldingPct"
+    "popularityUniques7Day,traders7DayChange,buyHoldingPct,sellHoldingPct,"
+    # #3381: the crowd recorder's remaining fields.
+    "holdingPct,popularityUniques14Day,popularityUniques30Day,traders14DayChange,traders30DayChange"
 )
+#: What the crowd recorder stores as each snapshot's request parameters (#3381).
+BROAD_MARKET_SEARCH_REQUEST: Final[Mapping[str, object]] = {
+    "method": "GET",
+    "path": "/api/v1/market-data/search",
+    "fields": _SEARCH_FIELDS,
+    "pageSize": _SEARCH_PAGE_SIZE,
+    "pagination_param": "page",
+    "max_pages": _SEARCH_MAX_PAGES,
+}
 
 
 class EtoroMarketDataProvider(MarketDataProvider):
@@ -198,6 +212,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
             )
             response.raise_for_status()
             raw = response.json()
+            page_observed_at = datetime.now(UTC)
             if not isinstance(raw, dict):
                 raise ValueError(f"Expected dict from eToro search endpoint, got {type(raw)}")
 
@@ -219,7 +234,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
             raw_item_count += len(items)
             for item in items:
-                record = _normalise_market_snapshot_instrument(item)
+                record = _normalise_market_snapshot_instrument(item, observed_at=page_observed_at)
                 if record is None:
                     discarded_items += 1
                     continue
@@ -248,6 +263,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
             reported_total_items=expected_total,
             discarded_items=discarded_items,
             instruments=tuple(records),
+            pages=page,
         )
 
     def get_instrument_types(self) -> list[InstrumentTypeRecord]:
@@ -539,8 +555,10 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
     )
 
 
-def _normalise_market_snapshot_instrument(item: object) -> MarketSnapshotInstrument | None:
-    """Normalise one projected search row without inventing absent values."""
+def _normalise_market_snapshot_instrument(
+    item: object, *, observed_at: datetime | None = None
+) -> MarketSnapshotInstrument | None:
+    """Normalise one projected search row without inventing absent values. The raw item is kept as served."""
     if not isinstance(item, Mapping):
         return None
     instrument_id = _positive_int_or_none(item.get("instrumentId"))
@@ -565,6 +583,13 @@ def _normalise_market_snapshot_instrument(item: object) -> MarketSnapshotInstrum
         traders_7d_change=_decimal_or_none(item.get("traders7DayChange")),
         buy_holding_pct=_decimal_or_none(item.get("buyHoldingPct")),
         sell_holding_pct=_decimal_or_none(item.get("sellHoldingPct")),
+        holding_pct=_decimal_or_none(item.get("holdingPct")),
+        popularity_uniques_14d=_decimal_or_none(item.get("popularityUniques14Day")),
+        popularity_uniques_30d=_decimal_or_none(item.get("popularityUniques30Day")),
+        traders_14d_change=_decimal_or_none(item.get("traders14DayChange")),
+        traders_30d_change=_decimal_or_none(item.get("traders30DayChange")),
+        observed_at=observed_at,
+        raw=dict(item),
     )
 
 

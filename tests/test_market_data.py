@@ -140,6 +140,11 @@ FIXTURE_MARKET_SNAPSHOT = {
     "traders7DayChange": -3,
     "buyHoldingPct": 91.5,
     "sellHoldingPct": 8.5,
+    "holdingPct": 0.42,
+    "popularityUniques14Day": 2345,
+    "popularityUniques30Day": 3456,
+    "traders14DayChange": -5,
+    "traders30DayChange": 7,
 }
 
 
@@ -714,6 +719,18 @@ class TestGetBroadMarketSnapshot:
         assert snapshot.discarded_items == 1
         assert [row.instrument_id for row in snapshot.instruments] == [1001]
         assert snapshot.observed_from <= snapshot.observed_to
+        # #3381 crowd-recorder fields: parsed, page-stamped, raw kept as served.
+        (row,) = snapshot.instruments
+        assert (row.holding_pct, row.popularity_uniques_14d, row.popularity_uniques_30d) == (
+            Decimal("0.42"),
+            Decimal("2345"),
+            Decimal("3456"),
+        )
+        assert (row.traders_14d_change, row.traders_30d_change) == (Decimal("-5"), Decimal("7"))
+        assert row.raw == FIXTURE_MARKET_SNAPSHOT
+        assert row.observed_at is not None and snapshot.observed_from <= row.observed_at <= snapshot.observed_to
+        assert snapshot.pages == 1
+        assert "holdingPct" in params["fields"] and "traders30DayChange" in params["fields"]
 
     def test_fetches_every_reported_page(self) -> None:
         from app.providers.implementations.etoro import EtoroMarketDataProvider
@@ -742,6 +759,7 @@ class TestGetBroadMarketSnapshot:
 
         assert len(snapshot.instruments) == 10_001
         assert requested_pages == [1, 2]
+        assert snapshot.pages == 2
 
     def test_refuses_incomplete_pagination(self) -> None:
         from app.providers.implementations.etoro import EtoroMarketDataProvider

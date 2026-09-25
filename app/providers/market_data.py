@@ -6,7 +6,8 @@ never the concrete provider.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -150,6 +151,16 @@ class MarketSnapshotInstrument:
     traders_7d_change: Decimal | None
     buy_holding_pct: Decimal | None
     sell_holding_pct: Decimal | None
+    # #3381 crowd-recorder fields. Defaulted so screening callers are unchanged.
+    holding_pct: Decimal | None = None
+    popularity_uniques_14d: Decimal | None = None
+    popularity_uniques_30d: Decimal | None = None
+    traders_14d_change: Decimal | None = None
+    traders_30d_change: Decimal | None = None
+    #: Fetch time of the page this row arrived on; search rows carry no source timestamp.
+    observed_at: datetime | None = None
+    #: The item exactly as served.
+    raw: Mapping[str, object] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -168,6 +179,7 @@ class BroadMarketSnapshot:
     reported_total_items: int
     discarded_items: int
     instruments: tuple[MarketSnapshotInstrument, ...]
+    pages: int = 1
 
 
 class MarketDataProvider(ABC):

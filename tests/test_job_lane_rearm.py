@@ -19,6 +19,7 @@ from app.services.processes.health_verdict import compute_verdict
 from app.workers.scheduler import (
     JOB_CORE_ELIGIBILITY_REFRESH,
     JOB_CORE_REBALANCE_OBSERVATION,
+    JOB_ETORO_CROWD_SNAPSHOT,
     JOB_EXECUTE_APPROVED_ORDERS,
     SCHEDULED_JOBS,
     Cadence,
@@ -262,20 +263,26 @@ def test_execute_approved_orders_is_never_rearmed() -> None:
         assert lost_fire_rearm_delay_seconds(job, lateness_seconds=lateness) is None
 
 
-def test_exactly_the_two_core_producers_opt_in() -> None:
-    """Pin the admitted set so a third job cannot join it unnoticed.
+def test_exactly_the_admitted_jobs_opt_in() -> None:
+    """Pin the admitted set so another job cannot join it unnoticed.
 
     Widening this set is a per-job judgement about idempotence and
     fire-time-indifference (see ``ScheduledJob.rearm_on_lost_fire``). Changing
     this assertion is the moment to make that argument in writing.
+
+    ``etoro_crowd_snapshot`` (#3381) joined on this argument: it is read-only against
+    the broker; it only APPENDS a snapshot stamped with its own page fetch times, so a
+    re-fire adds an honestly dated row and never edits one; and eToro
+    serves no history for the data, so a late snapshot is the only recovery a lost day
+    has. (It runs on its own ``etoro_crowd`` lane, so its likeliest loss is a misfire.)
     """
     opted_in = {job.name for job in SCHEDULED_JOBS if job.rearm_on_lost_fire}
-    assert opted_in == {JOB_CORE_REBALANCE_OBSERVATION, JOB_CORE_ELIGIBILITY_REFRESH}
+    assert opted_in == {JOB_CORE_REBALANCE_OBSERVATION, JOB_CORE_ELIGIBILITY_REFRESH, JOB_ETORO_CROWD_SNAPSHOT}
 
 
-def test_both_admitted_jobs_actually_arm() -> None:
-    """The flag is inert unless the cadence guard also passes — check both."""
-    for name in (JOB_CORE_REBALANCE_OBSERVATION, JOB_CORE_ELIGIBILITY_REFRESH):
+def test_every_admitted_job_actually_arms() -> None:
+    """The flag is inert unless the cadence guard also passes — check each."""
+    for name in (JOB_CORE_REBALANCE_OBSERVATION, JOB_CORE_ELIGIBILITY_REFRESH, JOB_ETORO_CROWD_SNAPSHOT):
         assert lost_fire_rearm_delay_seconds(_BY_NAME[name]) == RETRY_BASE_SECONDS
 
 

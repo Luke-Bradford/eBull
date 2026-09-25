@@ -45,7 +45,7 @@ from app.db.background_write import background_write_connection
 from app.jobs.job_connection import connect_job, job_application_name, job_statement_timeout_ms
 from app.jobs.sources import Lane
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
-from app.providers.implementations.etoro import EtoroMarketDataProvider
+from app.providers.implementations.etoro import BROAD_MARKET_SEARCH_REQUEST, EtoroMarketDataProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import (
@@ -61,6 +61,7 @@ from app.services.coverage import (
     review_frequency_for_tier,
     seed_coverage,
 )
+from app.services.crowd_recorder import record_crowd_snapshot
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.entry_timing import evaluate_entry_conditions
 from app.services.etoro_lookups import refresh_etoro_lookups
@@ -564,6 +565,9 @@ JOB_CORE_REBALANCE_OBSERVATION = "core_rebalance_observation"
 # through the same executor as the attended endpoint. The ACTING consumer of
 # the submission gate that the observation above only feeds.
 JOB_CORE_REBALANCE_EXECUTION = "core_rebalance_execution"
+# #3381 — the forward-only eToro crowd-positioning record. eToro serves no
+# history for it, so a day this job does not run is a day the dataset lacks.
+JOB_ETORO_CROWD_SNAPSHOT = "etoro_crowd_snapshot"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -2775,6 +2779,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # (``rearm_on_lost_fire`` stays False -- same contract as
         # ``execute_approved_orders``). A lost fire costs one session's evaluation.
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_CROWD_SNAPSHOT,
+        display_name="eToro crowd positioning snapshot (#3381)",
+        # Its own SOURCE lane: a source is a job-overlap bucket, not an execution
+        # permit, so it costs no pool connection (#1472 has zero headroom on
+        # permits, none on sources), and no other job can hold it at fire time.
+        # One paged search on market-data quota F, ~6 s. 21:52 UTC is after the
+        # NYSE close in both DST regimes (20:00 / 21:00 UTC) and off the 5-minute
+        # grid.
+        source="etoro_crowd",
+        description=(
+            "Daily after the US close — record eToro's per-instrument crowd positioning (buy/sell/holding %, "
+            "popularity and trader-change windows) with each row's raw item and page fetch time. Forward-only: "
+            "eToro serves no history, so the recording clock is the dataset. Failed collections are recorded too."
+        ),
+        cadence=Cadence.daily(hour=21, minute=52),
+        # A late snapshot is honestly stamped by its own fetch time and appends a
+        # new row, never an edit, so a missed day is better recorded late than lost.
+        catch_up_on_boot=True,
+        rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -7105,6 +7131,35 @@ class _CredentialsRotatedMidBatch(RuntimeError):
     would still be made with the superseded plaintext keys, so this is a run-level
     abort and not one instrument's failure.
     """
+
+
+def etoro_crowd_snapshot() -> None:
+    """Append one eToro crowd-positioning snapshot (#3381).
+
+    Read-only: one paged ``/api/v1/market-data/search`` collection. A failed collection commits its own
+    ``failed`` snapshot row and fails the run.
+    """
+    creds = _load_etoro_credentials(JOB_ETORO_CROWD_SNAPSHOT)
+    if creds is None:
+        _record_prereq_skip(JOB_ETORO_CROWD_SNAPSHOT, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_ETORO_CROWD_SNAPSHOT) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            connect_job() as conn,
+        ):
+            result = record_crowd_snapshot(
+                conn, provider.get_broad_market_snapshot, request_params=BROAD_MARKET_SEARCH_REQUEST
+            )
+        tracker.row_count = result.recorded_items
+        logger.info(
+            "etoro_crowd_snapshot: snapshot %d recorded %d instruments (%d with buy and sell %%)",
+            result.snapshot_id,
+            result.recorded_items,
+            result.buy_sell_covered,
+        )
 
 
 def core_eligibility_refresh() -> None:
