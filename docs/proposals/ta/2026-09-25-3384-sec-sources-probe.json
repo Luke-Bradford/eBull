@@ -1,0 +1,4993 @@
+{
+ "ftd": {
+  "clock": {
+   "files": [
+    {
+     "bytes": 526644,
+     "label": "2004q1",
+     "lag_days_upper": 6107,
+     "last_modified": "2020-12-19",
+     "period_end": "2004-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsp_sec_fails_2004q1.zip"
+    },
+    {
+     "bytes": 3576752,
+     "label": "2004q2",
+     "lag_days_upper": 6016,
+     "last_modified": "2020-12-19",
+     "period_end": "2004-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2004q2.zip"
+    },
+    {
+     "bytes": 3500072,
+     "label": "2004q3",
+     "lag_days_upper": 5924,
+     "last_modified": "2020-12-19",
+     "period_end": "2004-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2004q3.zip"
+    },
+    {
+     "bytes": 3393447,
+     "label": "2004q4",
+     "lag_days_upper": 5832,
+     "last_modified": "2020-12-19",
+     "period_end": "2004-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2004q4.zip"
+    },
+    {
+     "bytes": 3275688,
+     "label": "2005q1",
+     "lag_days_upper": 5742,
+     "last_modified": "2020-12-19",
+     "period_end": "2005-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2005q1.zip"
+    },
+    {
+     "bytes": 3250448,
+     "label": "2005q2",
+     "lag_days_upper": 5651,
+     "last_modified": "2020-12-19",
+     "period_end": "2005-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2005q2.zip"
+    },
+    {
+     "bytes": 3267640,
+     "label": "2005q3",
+     "lag_days_upper": 5559,
+     "last_modified": "2020-12-19",
+     "period_end": "2005-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2005q3.zip"
+    },
+    {
+     "bytes": 3083054,
+     "label": "2005q4",
+     "lag_days_upper": 5467,
+     "last_modified": "2020-12-19",
+     "period_end": "2005-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2005q4.zip"
+    },
+    {
+     "bytes": 3423675,
+     "label": "2006q1",
+     "lag_days_upper": 5377,
+     "last_modified": "2020-12-19",
+     "period_end": "2006-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2006q1.zip"
+    },
+    {
+     "bytes": 3733331,
+     "label": "2006q2",
+     "lag_days_upper": 5286,
+     "last_modified": "2020-12-19",
+     "period_end": "2006-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2006q2.zip"
+    },
+    {
+     "bytes": 3354418,
+     "label": "2006q3",
+     "lag_days_upper": 5194,
+     "last_modified": "2020-12-19",
+     "period_end": "2006-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2006q3.zip"
+    },
+    {
+     "bytes": 3444461,
+     "label": "2006q4",
+     "lag_days_upper": 5102,
+     "last_modified": "2020-12-19",
+     "period_end": "2006-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2006q4.zip"
+    },
+    {
+     "bytes": 3599191,
+     "label": "2007q1",
+     "lag_days_upper": 5012,
+     "last_modified": "2020-12-19",
+     "period_end": "2007-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2007q1.zip"
+    },
+    {
+     "bytes": 4534080,
+     "label": "2007q2",
+     "lag_days_upper": 4921,
+     "last_modified": "2020-12-19",
+     "period_end": "2007-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2007q2.zip"
+    },
+    {
+     "bytes": 4722604,
+     "label": "2007q3",
+     "lag_days_upper": 4829,
+     "last_modified": "2020-12-19",
+     "period_end": "2007-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2007q3.zip"
+    },
+    {
+     "bytes": 4597457,
+     "label": "2007q4",
+     "lag_days_upper": 4737,
+     "last_modified": "2020-12-19",
+     "period_end": "2007-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2007q4.zip"
+    },
+    {
+     "bytes": 4847155,
+     "label": "2008q1",
+     "lag_days_upper": 4646,
+     "last_modified": "2020-12-19",
+     "period_end": "2008-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2008q1.zip"
+    },
+    {
+     "bytes": 5093848,
+     "label": "2008q2",
+     "lag_days_upper": 4555,
+     "last_modified": "2020-12-19",
+     "period_end": "2008-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2008q2.zip"
+    },
+    {
+     "bytes": 5901160,
+     "label": "2008q3",
+     "lag_days_upper": -14152,
+     "last_modified": "1970-01-01",
+     "period_end": "2008-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2008q3.zip"
+    },
+    {
+     "bytes": 5667652,
+     "label": "2008q4",
+     "lag_days_upper": 4371,
+     "last_modified": "2020-12-19",
+     "period_end": "2008-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2008q4.zip"
+    },
+    {
+     "bytes": 4801841,
+     "label": "2009q1",
+     "lag_days_upper": 4281,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2009q1.zip"
+    },
+    {
+     "bytes": 5043605,
+     "label": "2009q2",
+     "lag_days_upper": 4190,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsp_sec_fails_2009q2.zip"
+    },
+    {
+     "bytes": 1330592,
+     "label": "200907a",
+     "lag_days_upper": 4175,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200907a.zip"
+    },
+    {
+     "bytes": 1884029,
+     "label": "200907b",
+     "lag_days_upper": 4159,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200907b.zip"
+    },
+    {
+     "bytes": 1479127,
+     "label": "200908a",
+     "lag_days_upper": 4144,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200908a.zip"
+    },
+    {
+     "bytes": 1600145,
+     "label": "200908b",
+     "lag_days_upper": 4128,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200908b.zip"
+    },
+    {
+     "bytes": 1316041,
+     "label": "200909a",
+     "lag_days_upper": 4113,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200909a.zip"
+    },
+    {
+     "bytes": 1832256,
+     "label": "200909b",
+     "lag_days_upper": 4098,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200909b.zip"
+    },
+    {
+     "bytes": 1368740,
+     "label": "200910a",
+     "lag_days_upper": 4083,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200910a.zip"
+    },
+    {
+     "bytes": 1770236,
+     "label": "200910b",
+     "lag_days_upper": 4067,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200910b.zip"
+    },
+    {
+     "bytes": 1319474,
+     "label": "200911a",
+     "lag_days_upper": 4052,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200911a.zip"
+    },
+    {
+     "bytes": 1451810,
+     "label": "200911b",
+     "lag_days_upper": 4037,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200911b.zip"
+    },
+    {
+     "bytes": 1470771,
+     "label": "200912a",
+     "lag_days_upper": 4022,
+     "last_modified": "2020-12-19",
+     "period_end": "2009-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200912a.zip"
+    },
+    {
+     "bytes": 1772676,
+     "label": "200912b",
+     "lag_days_upper": -14609,
+     "last_modified": "1970-01-01",
+     "period_end": "2009-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails200912b.zip"
+    },
+    {
+     "bytes": 1337743,
+     "label": "201001a",
+     "lag_days_upper": 3991,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201001a.zip"
+    },
+    {
+     "bytes": 1484356,
+     "label": "201001b",
+     "lag_days_upper": 3975,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201001b.zip"
+    },
+    {
+     "bytes": 1446375,
+     "label": "201002a",
+     "lag_days_upper": 3960,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201002a.zip"
+    },
+    {
+     "bytes": 1416298,
+     "label": "201002b",
+     "lag_days_upper": 3947,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201002b.zip"
+    },
+    {
+     "bytes": 1464746,
+     "label": "201003a",
+     "lag_days_upper": 3932,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201003a.zip"
+    },
+    {
+     "bytes": 1912070,
+     "label": "201003b",
+     "lag_days_upper": 3916,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201003b.zip"
+    },
+    {
+     "bytes": 1332194,
+     "label": "201004a",
+     "lag_days_upper": 3901,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201004a.zip"
+    },
+    {
+     "bytes": 1779082,
+     "label": "201004b",
+     "lag_days_upper": 3886,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201004b.zip"
+    },
+    {
+     "bytes": 1512583,
+     "label": "201005a",
+     "lag_days_upper": 3871,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201005a.zip"
+    },
+    {
+     "bytes": 1480543,
+     "label": "201005b",
+     "lag_days_upper": 3855,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201005b.zip"
+    },
+    {
+     "bytes": 1437362,
+     "label": "201006a",
+     "lag_days_upper": 3840,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201006a.zip"
+    },
+    {
+     "bytes": 1746005,
+     "label": "201006b",
+     "lag_days_upper": 3825,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201006b.zip"
+    },
+    {
+     "bytes": 1283901,
+     "label": "201007a",
+     "lag_days_upper": 3810,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201007a.zip"
+    },
+    {
+     "bytes": 1713015,
+     "label": "201007b",
+     "lag_days_upper": 3794,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201007b.zip"
+    },
+    {
+     "bytes": 1424279,
+     "label": "201008a",
+     "lag_days_upper": 3779,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201008a.zip"
+    },
+    {
+     "bytes": 1697847,
+     "label": "201008b",
+     "lag_days_upper": -14852,
+     "last_modified": "1970-01-01",
+     "period_end": "2010-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201008b.zip"
+    },
+    {
+     "bytes": 1308856,
+     "label": "201009a",
+     "lag_days_upper": 3748,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201009a.zip"
+    },
+    {
+     "bytes": 1743135,
+     "label": "201009b",
+     "lag_days_upper": 3733,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201009b.zip"
+    },
+    {
+     "bytes": 1359352,
+     "label": "201010a",
+     "lag_days_upper": -14897,
+     "last_modified": "1970-01-01",
+     "period_end": "2010-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201010a.zip"
+    },
+    {
+     "bytes": 1698134,
+     "label": "201010b",
+     "lag_days_upper": 3702,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201010b.zip"
+    },
+    {
+     "bytes": 1406670,
+     "label": "201011a",
+     "lag_days_upper": 3687,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201011a.zip"
+    },
+    {
+     "bytes": 1649570,
+     "label": "201011b",
+     "lag_days_upper": 3672,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201011b.zip"
+    },
+    {
+     "bytes": 1433509,
+     "label": "201012a",
+     "lag_days_upper": 3657,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201012a.zip"
+    },
+    {
+     "bytes": 1723897,
+     "label": "201012b",
+     "lag_days_upper": 3641,
+     "last_modified": "2020-12-19",
+     "period_end": "2010-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201012b.zip"
+    },
+    {
+     "bytes": 1504503,
+     "label": "201101a",
+     "lag_days_upper": 3626,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201101a.zip"
+    },
+    {
+     "bytes": 1531901,
+     "label": "201101b",
+     "lag_days_upper": 3610,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201101b.zip"
+    },
+    {
+     "bytes": 1552364,
+     "label": "201102a",
+     "lag_days_upper": -15020,
+     "last_modified": "1970-01-01",
+     "period_end": "2011-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201102a.zip"
+    },
+    {
+     "bytes": 1361015,
+     "label": "201102b",
+     "lag_days_upper": -15033,
+     "last_modified": "1970-01-01",
+     "period_end": "2011-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201102b.zip"
+    },
+    {
+     "bytes": 1511499,
+     "label": "201103a",
+     "lag_days_upper": 3567,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201103a.zip"
+    },
+    {
+     "bytes": 1946046,
+     "label": "201103b",
+     "lag_days_upper": 3551,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201103b.zip"
+    },
+    {
+     "bytes": 1454775,
+     "label": "201104a",
+     "lag_days_upper": 3536,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201104a.zip"
+    },
+    {
+     "bytes": 1463203,
+     "label": "201104b",
+     "lag_days_upper": 3521,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201104b.zip"
+    },
+    {
+     "bytes": 1498990,
+     "label": "201105a",
+     "lag_days_upper": 3506,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201105a.zip"
+    },
+    {
+     "bytes": 1646677,
+     "label": "201105b",
+     "lag_days_upper": 3490,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201105b.zip"
+    },
+    {
+     "bytes": 1451156,
+     "label": "201106a",
+     "lag_days_upper": -15140,
+     "last_modified": "1970-01-01",
+     "period_end": "2011-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201106a.zip"
+    },
+    {
+     "bytes": 1745922,
+     "label": "201106b",
+     "lag_days_upper": 3460,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201106b.zip"
+    },
+    {
+     "bytes": 1354410,
+     "label": "201107a",
+     "lag_days_upper": 3445,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201107a.zip"
+    },
+    {
+     "bytes": 1558133,
+     "label": "201107b",
+     "lag_days_upper": 3429,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201107b.zip"
+    },
+    {
+     "bytes": 1477111,
+     "label": "201108a",
+     "lag_days_upper": 3414,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201108a.zip"
+    },
+    {
+     "bytes": 1960377,
+     "label": "201108b",
+     "lag_days_upper": 3398,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201108b.zip"
+    },
+    {
+     "bytes": 1309573,
+     "label": "201109a",
+     "lag_days_upper": 3383,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201109a.zip"
+    },
+    {
+     "bytes": 1675496,
+     "label": "201109b",
+     "lag_days_upper": -15247,
+     "last_modified": "1970-01-01",
+     "period_end": "2011-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201109b.zip"
+    },
+    {
+     "bytes": 1243555,
+     "label": "201110a",
+     "lag_days_upper": 3353,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201110a.zip"
+    },
+    {
+     "bytes": 1484680,
+     "label": "201110b",
+     "lag_days_upper": 3337,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201110b.zip"
+    },
+    {
+     "bytes": 1161393,
+     "label": "201111a",
+     "lag_days_upper": -15293,
+     "last_modified": "1970-01-01",
+     "period_end": "2011-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201111a.zip"
+    },
+    {
+     "bytes": 1375817,
+     "label": "201111b",
+     "lag_days_upper": 3307,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201111b.zip"
+    },
+    {
+     "bytes": 1328143,
+     "label": "201112a",
+     "lag_days_upper": 3292,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201112a.zip"
+    },
+    {
+     "bytes": 1444640,
+     "label": "201112b",
+     "lag_days_upper": 3276,
+     "last_modified": "2020-12-19",
+     "period_end": "2011-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201112b.zip"
+    },
+    {
+     "bytes": 1253623,
+     "label": "201201a",
+     "lag_days_upper": 3261,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201201a.zip"
+    },
+    {
+     "bytes": 1521656,
+     "label": "201201b",
+     "lag_days_upper": 3245,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201201b.zip"
+    },
+    {
+     "bytes": 1391660,
+     "label": "201202a",
+     "lag_days_upper": 3230,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201202a.zip"
+    },
+    {
+     "bytes": 1412631,
+     "label": "201202b",
+     "lag_days_upper": 3216,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-02-29",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201202b.zip"
+    },
+    {
+     "bytes": 1395301,
+     "label": "201203a",
+     "lag_days_upper": 3201,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201203a.zip"
+    },
+    {
+     "bytes": 1632705,
+     "label": "201203b",
+     "lag_days_upper": 3185,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201203b.zip"
+    },
+    {
+     "bytes": 1248006,
+     "label": "201204a",
+     "lag_days_upper": 3170,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201204a.zip"
+    },
+    {
+     "bytes": 1503488,
+     "label": "201204b",
+     "lag_days_upper": 3155,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201204b.zip"
+    },
+    {
+     "bytes": 1387367,
+     "label": "201205a",
+     "lag_days_upper": 3140,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201205a.zip"
+    },
+    {
+     "bytes": 1681568,
+     "label": "201205b",
+     "lag_days_upper": 3124,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201205b.zip"
+    },
+    {
+     "bytes": 1375807,
+     "label": "201206a",
+     "lag_days_upper": 3109,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201206a.zip"
+    },
+    {
+     "bytes": 1504603,
+     "label": "201206b",
+     "lag_days_upper": 3094,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201206b.zip"
+    },
+    {
+     "bytes": 1236311,
+     "label": "201207a",
+     "lag_days_upper": 3079,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201207a.zip"
+    },
+    {
+     "bytes": 1573339,
+     "label": "201207b",
+     "lag_days_upper": 3063,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201207b.zip"
+    },
+    {
+     "bytes": 1437834,
+     "label": "201208a",
+     "lag_days_upper": 3048,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201208a.zip"
+    },
+    {
+     "bytes": 1696579,
+     "label": "201208b",
+     "lag_days_upper": 3032,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201208b.zip"
+    },
+    {
+     "bytes": 1194530,
+     "label": "201209a",
+     "lag_days_upper": 3017,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201209a.zip"
+    },
+    {
+     "bytes": 1298426,
+     "label": "201209b",
+     "lag_days_upper": 3002,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201209b.zip"
+    },
+    {
+     "bytes": 1167978,
+     "label": "201210a",
+     "lag_days_upper": 2987,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201210a.zip"
+    },
+    {
+     "bytes": 1717759,
+     "label": "201210b",
+     "lag_days_upper": 2971,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201210b.zip"
+    },
+    {
+     "bytes": 1062723,
+     "label": "201211a",
+     "lag_days_upper": 2956,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201211a.zip"
+    },
+    {
+     "bytes": 1392572,
+     "label": "201211b",
+     "lag_days_upper": 2941,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201211b.zip"
+    },
+    {
+     "bytes": 1259404,
+     "label": "201212a",
+     "lag_days_upper": 2926,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201212a.zip"
+    },
+    {
+     "bytes": 1317566,
+     "label": "201212b",
+     "lag_days_upper": 2910,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201212b.zip"
+    },
+    {
+     "bytes": 1202560,
+     "label": "201301a",
+     "lag_days_upper": 2895,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201301a.zip"
+    },
+    {
+     "bytes": 1541874,
+     "label": "201301b",
+     "lag_days_upper": 2879,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201301b.zip"
+    },
+    {
+     "bytes": 1282096,
+     "label": "201302a",
+     "lag_days_upper": 2864,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201302a.zip"
+    },
+    {
+     "bytes": 1150323,
+     "label": "201302b",
+     "lag_days_upper": 2851,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201302b.zip"
+    },
+    {
+     "bytes": 1313504,
+     "label": "201303a",
+     "lag_days_upper": 2836,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201303a.zip"
+    },
+    {
+     "bytes": 1342224,
+     "label": "201303b",
+     "lag_days_upper": 2820,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201303b.zip"
+    },
+    {
+     "bytes": 1298238,
+     "label": "201304a",
+     "lag_days_upper": 2805,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201304a.zip"
+    },
+    {
+     "bytes": 1571918,
+     "label": "201304b",
+     "lag_days_upper": 2790,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201304b.zip"
+    },
+    {
+     "bytes": 1362885,
+     "label": "201305a",
+     "lag_days_upper": 2775,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201305a.zip"
+    },
+    {
+     "bytes": 1575235,
+     "label": "201305b",
+     "lag_days_upper": 2759,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201305b.zip"
+    },
+    {
+     "bytes": 1313666,
+     "label": "201306a",
+     "lag_days_upper": 2744,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201306a.zip"
+    },
+    {
+     "bytes": 1343061,
+     "label": "201306b",
+     "lag_days_upper": 2729,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201306b.zip"
+    },
+    {
+     "bytes": 1207153,
+     "label": "201307a",
+     "lag_days_upper": 2714,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201307a.zip"
+    },
+    {
+     "bytes": 1687424,
+     "label": "201307b",
+     "lag_days_upper": 2698,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201307b.zip"
+    },
+    {
+     "bytes": 1296307,
+     "label": "201308a",
+     "lag_days_upper": 2683,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201308a.zip"
+    },
+    {
+     "bytes": 1550778,
+     "label": "201308b",
+     "lag_days_upper": 2667,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201308b.zip"
+    },
+    {
+     "bytes": 1153363,
+     "label": "201309a",
+     "lag_days_upper": 2652,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201309a.zip"
+    },
+    {
+     "bytes": 1393848,
+     "label": "201309b",
+     "lag_days_upper": 2637,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201309b.zip"
+    },
+    {
+     "bytes": 1098171,
+     "label": "201310a",
+     "lag_days_upper": 2622,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201310a.zip"
+    },
+    {
+     "bytes": 1745541,
+     "label": "201310b",
+     "lag_days_upper": 2606,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201310b.zip"
+    },
+    {
+     "bytes": 1297186,
+     "label": "201311a",
+     "lag_days_upper": 2591,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201311a.zip"
+    },
+    {
+     "bytes": 1304026,
+     "label": "201311b",
+     "lag_days_upper": 2576,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201311b.zip"
+    },
+    {
+     "bytes": 1299305,
+     "label": "201312a",
+     "lag_days_upper": 2561,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201312a.zip"
+    },
+    {
+     "bytes": 1612279,
+     "label": "201312b",
+     "lag_days_upper": 2545,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201312b.zip"
+    },
+    {
+     "bytes": 1312120,
+     "label": "201401a",
+     "lag_days_upper": 2530,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201401a.zip"
+    },
+    {
+     "bytes": 1816530,
+     "label": "201401b",
+     "lag_days_upper": 2514,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201401b.zip"
+    },
+    {
+     "bytes": 1503337,
+     "label": "201402a",
+     "lag_days_upper": 2499,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201402a.zip"
+    },
+    {
+     "bytes": 1321141,
+     "label": "201402b",
+     "lag_days_upper": 2486,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201402b.zip"
+    },
+    {
+     "bytes": 1395325,
+     "label": "201403a",
+     "lag_days_upper": -16144,
+     "last_modified": "1970-01-01",
+     "period_end": "2014-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201403a.zip"
+    },
+    {
+     "bytes": 1531137,
+     "label": "201403b",
+     "lag_days_upper": 2455,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201403b.zip"
+    },
+    {
+     "bytes": 1374522,
+     "label": "201404a",
+     "lag_days_upper": -16175,
+     "last_modified": "1970-01-01",
+     "period_end": "2014-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201404a.zip"
+    },
+    {
+     "bytes": 1499328,
+     "label": "201404b",
+     "lag_days_upper": 2425,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201404b.zip"
+    },
+    {
+     "bytes": 1399256,
+     "label": "201405a",
+     "lag_days_upper": 2410,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201405a.zip"
+    },
+    {
+     "bytes": 1577028,
+     "label": "201405b",
+     "lag_days_upper": -16221,
+     "last_modified": "1970-01-01",
+     "period_end": "2014-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201405b.zip"
+    },
+    {
+     "bytes": 1447372,
+     "label": "201406a",
+     "lag_days_upper": 2379,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201406a.zip"
+    },
+    {
+     "bytes": 1604429,
+     "label": "201406b",
+     "lag_days_upper": 2364,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201406b.zip"
+    },
+    {
+     "bytes": 1314642,
+     "label": "201407a",
+     "lag_days_upper": 2349,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201407a.zip"
+    },
+    {
+     "bytes": 1780962,
+     "label": "201407b",
+     "lag_days_upper": 2333,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201407b.zip"
+    },
+    {
+     "bytes": 1412202,
+     "label": "201408a",
+     "lag_days_upper": 2318,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201408a.zip"
+    },
+    {
+     "bytes": 1530412,
+     "label": "201408b",
+     "lag_days_upper": 2302,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201408b.zip"
+    },
+    {
+     "bytes": 1237200,
+     "label": "201409a",
+     "lag_days_upper": 2287,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201409a.zip"
+    },
+    {
+     "bytes": 1624158,
+     "label": "201409b",
+     "lag_days_upper": 2272,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201409b.zip"
+    },
+    {
+     "bytes": 1277662,
+     "label": "201410a",
+     "lag_days_upper": 2257,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201410a.zip"
+    },
+    {
+     "bytes": 1884451,
+     "label": "201410b",
+     "lag_days_upper": 2241,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201410b.zip"
+    },
+    {
+     "bytes": 1317829,
+     "label": "201411a",
+     "lag_days_upper": 2226,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201411a.zip"
+    },
+    {
+     "bytes": 1295101,
+     "label": "201411b",
+     "lag_days_upper": 2211,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201411b.zip"
+    },
+    {
+     "bytes": 1466210,
+     "label": "201412a",
+     "lag_days_upper": 2196,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201412a.zip"
+    },
+    {
+     "bytes": 1783574,
+     "label": "201412b",
+     "lag_days_upper": 2180,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201412b.zip"
+    },
+    {
+     "bytes": 1290734,
+     "label": "201501a",
+     "lag_days_upper": 2165,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201501a.zip"
+    },
+    {
+     "bytes": 1660829,
+     "label": "201501b",
+     "lag_days_upper": 2149,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201501b.zip"
+    },
+    {
+     "bytes": 1509433,
+     "label": "201502a",
+     "lag_days_upper": 2134,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201502a.zip"
+    },
+    {
+     "bytes": 1365182,
+     "label": "201502b",
+     "lag_days_upper": 2121,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201502b.zip"
+    },
+    {
+     "bytes": 1512639,
+     "label": "201503a",
+     "lag_days_upper": 2106,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201503a.zip"
+    },
+    {
+     "bytes": 1779990,
+     "label": "201503b",
+     "lag_days_upper": 2090,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201503b.zip"
+    },
+    {
+     "bytes": 1347108,
+     "label": "201504a",
+     "lag_days_upper": 2075,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201504a.zip"
+    },
+    {
+     "bytes": 1761535,
+     "label": "201504b",
+     "lag_days_upper": 2060,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201504b.zip"
+    },
+    {
+     "bytes": 1522830,
+     "label": "201505a",
+     "lag_days_upper": 2045,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201505a.zip"
+    },
+    {
+     "bytes": 1484495,
+     "label": "201505b",
+     "lag_days_upper": 2029,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201505b.zip"
+    },
+    {
+     "bytes": 1495636,
+     "label": "201506a",
+     "lag_days_upper": 2014,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201506a.zip"
+    },
+    {
+     "bytes": 1692005,
+     "label": "201506b",
+     "lag_days_upper": 1999,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201506b.zip"
+    },
+    {
+     "bytes": 1314603,
+     "label": "201507a",
+     "lag_days_upper": 1984,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201507a.zip"
+    },
+    {
+     "bytes": 1822747,
+     "label": "201507b",
+     "lag_days_upper": 1968,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201507b.zip"
+    },
+    {
+     "bytes": 1411340,
+     "label": "201508a",
+     "lag_days_upper": 1953,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201508a.zip"
+    },
+    {
+     "bytes": 1581880,
+     "label": "201508b",
+     "lag_days_upper": 1937,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201508b.zip"
+    },
+    {
+     "bytes": 1316204,
+     "label": "201509a",
+     "lag_days_upper": 1922,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201509a.zip"
+    },
+    {
+     "bytes": 1656075,
+     "label": "201509b",
+     "lag_days_upper": 1907,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201509b.zip"
+    },
+    {
+     "bytes": 1232655,
+     "label": "201510a",
+     "lag_days_upper": 1892,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201510a.zip"
+    },
+    {
+     "bytes": 1683219,
+     "label": "201510b",
+     "lag_days_upper": 1876,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201510b.zip"
+    },
+    {
+     "bytes": 1240169,
+     "label": "201511a",
+     "lag_days_upper": 1861,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201511a.zip"
+    },
+    {
+     "bytes": 1361817,
+     "label": "201511b",
+     "lag_days_upper": 1846,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201511b.zip"
+    },
+    {
+     "bytes": 1337989,
+     "label": "201512a",
+     "lag_days_upper": 1831,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201512a.zip"
+    },
+    {
+     "bytes": 1667669,
+     "label": "201512b",
+     "lag_days_upper": 1815,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201512b.zip"
+    },
+    {
+     "bytes": 1199576,
+     "label": "201601a",
+     "lag_days_upper": 1800,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201601a.zip"
+    },
+    {
+     "bytes": 1332951,
+     "label": "201601b",
+     "lag_days_upper": 1784,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201601b.zip"
+    },
+    {
+     "bytes": 1307835,
+     "label": "201602a",
+     "lag_days_upper": 1769,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201602a.zip"
+    },
+    {
+     "bytes": 1313234,
+     "label": "201602b",
+     "lag_days_upper": 1755,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-02-29",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201602b.zip"
+    },
+    {
+     "bytes": 1353997,
+     "label": "201603a",
+     "lag_days_upper": 1740,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201603a.zip"
+    },
+    {
+     "bytes": 1588144,
+     "label": "201603b",
+     "lag_days_upper": 1724,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201603b.zip"
+    },
+    {
+     "bytes": 1297044,
+     "label": "201604a",
+     "lag_days_upper": 1709,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201604a.zip"
+    },
+    {
+     "bytes": 1389462,
+     "label": "201604b",
+     "lag_days_upper": 1694,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201604b.zip"
+    },
+    {
+     "bytes": 1249732,
+     "label": "201605a",
+     "lag_days_upper": 1679,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201605a.zip"
+    },
+    {
+     "bytes": 1319163,
+     "label": "201605b",
+     "lag_days_upper": 1663,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201605b.zip"
+    },
+    {
+     "bytes": 1051070,
+     "label": "201606a",
+     "lag_days_upper": -16967,
+     "last_modified": "1970-01-01",
+     "period_end": "2016-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201606a.zip"
+    },
+    {
+     "bytes": 1249735,
+     "label": "201606b",
+     "lag_days_upper": 1633,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201606b.zip"
+    },
+    {
+     "bytes": 954625,
+     "label": "201607a",
+     "lag_days_upper": 1618,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201607a.zip"
+    },
+    {
+     "bytes": 1091163,
+     "label": "201607b",
+     "lag_days_upper": 1602,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201607b.zip"
+    },
+    {
+     "bytes": 1004532,
+     "label": "201608a",
+     "lag_days_upper": 1587,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201608a.zip"
+    },
+    {
+     "bytes": 1277376,
+     "label": "201608b",
+     "lag_days_upper": 1571,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201608b.zip"
+    },
+    {
+     "bytes": 928582,
+     "label": "201609a",
+     "lag_days_upper": 1556,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201609a.zip"
+    },
+    {
+     "bytes": 1168835,
+     "label": "201609b",
+     "lag_days_upper": 1541,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201609b.zip"
+    },
+    {
+     "bytes": 894785,
+     "label": "201610a",
+     "lag_days_upper": 1526,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201610a.zip"
+    },
+    {
+     "bytes": 1058897,
+     "label": "201610b",
+     "lag_days_upper": 1510,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201610b.zip"
+    },
+    {
+     "bytes": 845577,
+     "label": "201611a",
+     "lag_days_upper": 1495,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201611a.zip"
+    },
+    {
+     "bytes": 1105054,
+     "label": "201611b",
+     "lag_days_upper": 1480,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201611b.zip"
+    },
+    {
+     "bytes": 1041264,
+     "label": "201612a",
+     "lag_days_upper": 1465,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201612a.zip"
+    },
+    {
+     "bytes": 1135528,
+     "label": "201612b",
+     "lag_days_upper": 1449,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201612b.zip"
+    },
+    {
+     "bytes": 891301,
+     "label": "201701a",
+     "lag_days_upper": 1434,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201701a.zip"
+    },
+    {
+     "bytes": 1116586,
+     "label": "201701b",
+     "lag_days_upper": 1418,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201701b.zip"
+    },
+    {
+     "bytes": 1055163,
+     "label": "201702a",
+     "lag_days_upper": 1403,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201702a.zip"
+    },
+    {
+     "bytes": 950062,
+     "label": "201702b",
+     "lag_days_upper": 1390,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201702b.zip"
+    },
+    {
+     "bytes": 1029223,
+     "label": "201703a",
+     "lag_days_upper": 1375,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201703a.zip"
+    },
+    {
+     "bytes": 1333083,
+     "label": "201703b",
+     "lag_days_upper": 1359,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201703b.zip"
+    },
+    {
+     "bytes": 903642,
+     "label": "201704a",
+     "lag_days_upper": 1344,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201704a.zip"
+    },
+    {
+     "bytes": 1039356,
+     "label": "201704b",
+     "lag_days_upper": 1329,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201704b.zip"
+    },
+    {
+     "bytes": 994971,
+     "label": "201705a",
+     "lag_days_upper": -17301,
+     "last_modified": "1970-01-01",
+     "period_end": "2017-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201705a.zip"
+    },
+    {
+     "bytes": 1197490,
+     "label": "201705b",
+     "lag_days_upper": 1298,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201705b.zip"
+    },
+    {
+     "bytes": 1004412,
+     "label": "201706a",
+     "lag_days_upper": 1283,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/frequently-requested-foia-document-fails-deliver-data/cnsfails201706a.zip"
+    },
+    {
+     "bytes": 1214051,
+     "label": "201706b",
+     "lag_days_upper": 1268,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201706b.zip"
+    },
+    {
+     "bytes": 889601,
+     "label": "201707a",
+     "lag_days_upper": 1253,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201707a.zip"
+    },
+    {
+     "bytes": 1074057,
+     "label": "201707b",
+     "lag_days_upper": 1237,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201707b.zip"
+    },
+    {
+     "bytes": 1047018,
+     "label": "201708a",
+     "lag_days_upper": 1222,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201708a.zip"
+    },
+    {
+     "bytes": 1302079,
+     "label": "201708b",
+     "lag_days_upper": -17409,
+     "last_modified": "1970-01-01",
+     "period_end": "2017-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201708b.zip"
+    },
+    {
+     "bytes": 909262,
+     "label": "201709a",
+     "lag_days_upper": 1191,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201709a.zip"
+    },
+    {
+     "bytes": 1108672,
+     "label": "201709b",
+     "lag_days_upper": 1176,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201709b.zip"
+    },
+    {
+     "bytes": 953759,
+     "label": "201710a",
+     "lag_days_upper": 1161,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201710a.zip"
+    },
+    {
+     "bytes": 1199294,
+     "label": "201710b",
+     "lag_days_upper": 1145,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201710b.zip"
+    },
+    {
+     "bytes": 1059895,
+     "label": "201711a",
+     "lag_days_upper": -17485,
+     "last_modified": "1970-01-01",
+     "period_end": "2017-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201711a.zip"
+    },
+    {
+     "bytes": 1156135,
+     "label": "201711b",
+     "lag_days_upper": -17500,
+     "last_modified": "1970-01-01",
+     "period_end": "2017-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201711b.zip"
+    },
+    {
+     "bytes": 1046613,
+     "label": "201712a",
+     "lag_days_upper": 1100,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201712a.zip"
+    },
+    {
+     "bytes": 1085391,
+     "label": "201712b",
+     "lag_days_upper": 1084,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201712b.zip"
+    },
+    {
+     "bytes": 982383,
+     "label": "201801a",
+     "lag_days_upper": 1069,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201801a.zip"
+    },
+    {
+     "bytes": 1359344,
+     "label": "201801b",
+     "lag_days_upper": 1053,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201801b.zip"
+    },
+    {
+     "bytes": 1131736,
+     "label": "201802a",
+     "lag_days_upper": 1038,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201802a.zip"
+    },
+    {
+     "bytes": 1014797,
+     "label": "201802b",
+     "lag_days_upper": 1025,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201802b.zip"
+    },
+    {
+     "bytes": 1100605,
+     "label": "201803a",
+     "lag_days_upper": 1010,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201803a.zip"
+    },
+    {
+     "bytes": 1212726,
+     "label": "201803b",
+     "lag_days_upper": 994,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201803b.zip"
+    },
+    {
+     "bytes": 1065888,
+     "label": "201804a",
+     "lag_days_upper": -17636,
+     "last_modified": "1970-01-01",
+     "period_end": "2018-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201804a.zip"
+    },
+    {
+     "bytes": 1136230,
+     "label": "201804b",
+     "lag_days_upper": 964,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201804b.zip"
+    },
+    {
+     "bytes": 1068172,
+     "label": "201805a",
+     "lag_days_upper": 949,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201805a.zip"
+    },
+    {
+     "bytes": 1274294,
+     "label": "201805b",
+     "lag_days_upper": 933,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201805b.zip"
+    },
+    {
+     "bytes": 1133675,
+     "label": "201806a",
+     "lag_days_upper": 918,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201806a.zip"
+    },
+    {
+     "bytes": 1262944,
+     "label": "201806b",
+     "lag_days_upper": 903,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201806b.zip"
+    },
+    {
+     "bytes": 1007397,
+     "label": "201807a",
+     "lag_days_upper": 888,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201807a.zip"
+    },
+    {
+     "bytes": 1270215,
+     "label": "201807b",
+     "lag_days_upper": 872,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201807b.zip"
+    },
+    {
+     "bytes": 1073483,
+     "label": "201808a",
+     "lag_days_upper": 857,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201808a.zip"
+    },
+    {
+     "bytes": 1352535,
+     "label": "201808b",
+     "lag_days_upper": 841,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201808b.zip"
+    },
+    {
+     "bytes": 971365,
+     "label": "201809a",
+     "lag_days_upper": 826,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201809a.zip"
+    },
+    {
+     "bytes": 1104387,
+     "label": "201809b",
+     "lag_days_upper": 811,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201809b.zip"
+    },
+    {
+     "bytes": 971204,
+     "label": "201810a",
+     "lag_days_upper": 796,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201810a.zip"
+    },
+    {
+     "bytes": 1359230,
+     "label": "201810b",
+     "lag_days_upper": 780,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201810b.zip"
+    },
+    {
+     "bytes": 971954,
+     "label": "201811a",
+     "lag_days_upper": 765,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201811a.zip"
+    },
+    {
+     "bytes": 1138374,
+     "label": "201811b",
+     "lag_days_upper": 750,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201811b.zip"
+    },
+    {
+     "bytes": 1025564,
+     "label": "201812a",
+     "lag_days_upper": 735,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201812a.zip"
+    },
+    {
+     "bytes": 1048581,
+     "label": "201812b",
+     "lag_days_upper": 719,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201812b.zip"
+    },
+    {
+     "bytes": 903178,
+     "label": "201901a",
+     "lag_days_upper": 704,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201901a.zip"
+    },
+    {
+     "bytes": 1208937,
+     "label": "201901b",
+     "lag_days_upper": 688,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201901b.zip"
+    },
+    {
+     "bytes": 1003585,
+     "label": "201902a",
+     "lag_days_upper": 673,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201902a.zip"
+    },
+    {
+     "bytes": 933433,
+     "label": "201902b",
+     "lag_days_upper": 660,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201902b.zip"
+    },
+    {
+     "bytes": 1002939,
+     "label": "201903a",
+     "lag_days_upper": 645,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201903a.zip"
+    },
+    {
+     "bytes": 1072044,
+     "label": "201903b",
+     "lag_days_upper": 629,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201903b.zip"
+    },
+    {
+     "bytes": 964576,
+     "label": "201904a",
+     "lag_days_upper": 614,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201904a.zip"
+    },
+    {
+     "bytes": 1052311,
+     "label": "201904b",
+     "lag_days_upper": 599,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201904b.zip"
+    },
+    {
+     "bytes": 956492,
+     "label": "201905a",
+     "lag_days_upper": 584,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201905a.zip"
+    },
+    {
+     "bytes": 1155221,
+     "label": "201905b",
+     "lag_days_upper": 568,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201905b.zip"
+    },
+    {
+     "bytes": 979333,
+     "label": "201906a",
+     "lag_days_upper": 553,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201906a.zip"
+    },
+    {
+     "bytes": 989248,
+     "label": "201906b",
+     "lag_days_upper": 538,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201906b.zip"
+    },
+    {
+     "bytes": 924279,
+     "label": "201907a",
+     "lag_days_upper": 523,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201907a.zip"
+    },
+    {
+     "bytes": 1210757,
+     "label": "201907b",
+     "lag_days_upper": 507,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201907b.zip"
+    },
+    {
+     "bytes": 1005386,
+     "label": "201908a",
+     "lag_days_upper": 492,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201908a.zip"
+    },
+    {
+     "bytes": 1195174,
+     "label": "201908b",
+     "lag_days_upper": 476,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201908b.zip"
+    },
+    {
+     "bytes": 835630,
+     "label": "201909a",
+     "lag_days_upper": 461,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201909a.zip"
+    },
+    {
+     "bytes": 1075506,
+     "label": "201909b",
+     "lag_days_upper": 446,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201909b.zip"
+    },
+    {
+     "bytes": 776219,
+     "label": "201910a",
+     "lag_days_upper": 431,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201910a_0.zip"
+    },
+    {
+     "bytes": 1032873,
+     "label": "201910b",
+     "lag_days_upper": 415,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201910b.zip"
+    },
+    {
+     "bytes": 780338,
+     "label": "201911a",
+     "lag_days_upper": 400,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201911a.zip"
+    },
+    {
+     "bytes": 863418,
+     "label": "201911b",
+     "lag_days_upper": 385,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201911b.zip"
+    },
+    {
+     "bytes": 845886,
+     "label": "201912a",
+     "lag_days_upper": 370,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201912a.zip"
+    },
+    {
+     "bytes": 1017222,
+     "label": "201912b",
+     "lag_days_upper": 354,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails201912b.zip"
+    },
+    {
+     "bytes": 796920,
+     "label": "202001a",
+     "lag_days_upper": 339,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202001a.zip"
+    },
+    {
+     "bytes": 1086331,
+     "label": "202001b",
+     "lag_days_upper": 323,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202001b.zip"
+    },
+    {
+     "bytes": 872413,
+     "label": "202002a",
+     "lag_days_upper": 308,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/node/add/data_distribution/cnsfails202002a.zip"
+    },
+    {
+     "bytes": 824183,
+     "label": "202002b",
+     "lag_days_upper": 294,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-02-29",
+     "status": 200,
+     "url": "https://www.sec.gov/files/node/add/data_distribution/cnsfails202002b.zip"
+    },
+    {
+     "bytes": 1102080,
+     "label": "202003a",
+     "lag_days_upper": 279,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/node/add/data_distribution/cnsfails202003a.zip"
+    },
+    {
+     "bytes": 1461632,
+     "label": "202003b",
+     "lag_days_upper": 263,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/node/add/data_distribution/cnsfails202003b.zip"
+    },
+    {
+     "bytes": 1021007,
+     "label": "202004a",
+     "lag_days_upper": 248,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/node/add/data_distribution/cnsfails202004a.zip"
+    },
+    {
+     "bytes": 1322723,
+     "label": "202004b",
+     "lag_days_upper": 233,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/node/add/data_distribution/cnsfails202004b.zip"
+    },
+    {
+     "bytes": 1093990,
+     "label": "202005a",
+     "lag_days_upper": 218,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202005a.zip"
+    },
+    {
+     "bytes": 1091128,
+     "label": "202005b",
+     "lag_days_upper": 202,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202005b.zip"
+    },
+    {
+     "bytes": 1139041,
+     "label": "202006a",
+     "lag_days_upper": 187,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202006a.zip"
+    },
+    {
+     "bytes": 1360795,
+     "label": "202006b",
+     "lag_days_upper": 172,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202006b.zip"
+    },
+    {
+     "bytes": 981370,
+     "label": "202007a",
+     "lag_days_upper": 157,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202007a.zip"
+    },
+    {
+     "bytes": 1355952,
+     "label": "202007b",
+     "lag_days_upper": 141,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202007b.zip"
+    },
+    {
+     "bytes": 1074518,
+     "label": "202008a",
+     "lag_days_upper": 126,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202008a.zip"
+    },
+    {
+     "bytes": 1183058,
+     "label": "202008b",
+     "lag_days_upper": 110,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202008b.zip"
+    },
+    {
+     "bytes": 969312,
+     "label": "202009a",
+     "lag_days_upper": 95,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202009a.zip"
+    },
+    {
+     "bytes": 1293760,
+     "label": "202009b",
+     "lag_days_upper": 80,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202009b.zip"
+    },
+    {
+     "bytes": 979135,
+     "label": "202010a",
+     "lag_days_upper": 65,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202010a.zip"
+    },
+    {
+     "bytes": 1304212,
+     "label": "202010b",
+     "lag_days_upper": 49,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202010b.zip"
+    },
+    {
+     "bytes": 1016519,
+     "label": "202011a",
+     "lag_days_upper": 34,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202011a.zip"
+    },
+    {
+     "bytes": 1155672,
+     "label": "202011b",
+     "lag_days_upper": 19,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202011b.zip"
+    },
+    {
+     "bytes": 1213162,
+     "label": "202012a",
+     "lag_days_upper": 16,
+     "last_modified": "2020-12-31",
+     "period_end": "2020-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202012a.zip"
+    },
+    {
+     "bytes": 1474423,
+     "label": "202012b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-01-15",
+     "period_end": "2020-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202012b.zip"
+    },
+    {
+     "bytes": 1080948,
+     "label": "202101a",
+     "lag_days_upper": 17,
+     "last_modified": "2021-02-01",
+     "period_end": "2021-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202101a.zip"
+    },
+    {
+     "bytes": 1253425,
+     "label": "202101b",
+     "lag_days_upper": 16,
+     "last_modified": "2021-02-16",
+     "period_end": "2021-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202101b.zip"
+    },
+    {
+     "bytes": 1324168,
+     "label": "202102a",
+     "lag_days_upper": 14,
+     "last_modified": "2021-03-01",
+     "period_end": "2021-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202102a.zip"
+    },
+    {
+     "bytes": 1223717,
+     "label": "202102b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-03-15",
+     "period_end": "2021-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202102b.zip"
+    },
+    {
+     "bytes": 1306890,
+     "label": "202103a",
+     "lag_days_upper": 16,
+     "last_modified": "2021-03-31",
+     "period_end": "2021-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202103a.zip"
+    },
+    {
+     "bytes": 1674012,
+     "label": "202103b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-04-15",
+     "period_end": "2021-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202103b.zip"
+    },
+    {
+     "bytes": 1177974,
+     "label": "202104a",
+     "lag_days_upper": 15,
+     "last_modified": "2021-04-30",
+     "period_end": "2021-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202104a.zip"
+    },
+    {
+     "bytes": 1532547,
+     "label": "202104b",
+     "lag_days_upper": 17,
+     "last_modified": "2021-05-17",
+     "period_end": "2021-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202104b.zip"
+    },
+    {
+     "bytes": 1334188,
+     "label": "202105a",
+     "lag_days_upper": 18,
+     "last_modified": "2021-06-02",
+     "period_end": "2021-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202105a.zip"
+    },
+    {
+     "bytes": 1324239,
+     "label": "202105b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-06-15",
+     "period_end": "2021-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202105b.zip"
+    },
+    {
+     "bytes": 1348255,
+     "label": "202106a",
+     "lag_days_upper": 15,
+     "last_modified": "2021-06-30",
+     "period_end": "2021-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202106a.zip"
+    },
+    {
+     "bytes": 1615662,
+     "label": "202106b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-07-15",
+     "period_end": "2021-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202106b.zip"
+    },
+    {
+     "bytes": 1152213,
+     "label": "202107a",
+     "lag_days_upper": 18,
+     "last_modified": "2021-08-02",
+     "period_end": "2021-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202107a.zip"
+    },
+    {
+     "bytes": 1536022,
+     "label": "202107b",
+     "lag_days_upper": 16,
+     "last_modified": "2021-08-16",
+     "period_end": "2021-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202107b.zip"
+    },
+    {
+     "bytes": 1279776,
+     "label": "202108a",
+     "lag_days_upper": 17,
+     "last_modified": "2021-09-01",
+     "period_end": "2021-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202108a.zip"
+    },
+    {
+     "bytes": 1506102,
+     "label": "202108b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-09-15",
+     "period_end": "2021-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202108b.zip"
+    },
+    {
+     "bytes": 1134889,
+     "label": "202109a",
+     "lag_days_upper": 15,
+     "last_modified": "2021-09-30",
+     "period_end": "2021-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202109a.zip"
+    },
+    {
+     "bytes": 1534885,
+     "label": "202109b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-10-15",
+     "period_end": "2021-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202109b.zip"
+    },
+    {
+     "bytes": 1143501,
+     "label": "202110a",
+     "lag_days_upper": 18,
+     "last_modified": "2021-11-02",
+     "period_end": "2021-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202110a.zip"
+    },
+    {
+     "bytes": 1389502,
+     "label": "202110b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-11-15",
+     "period_end": "2021-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202110b.zip"
+    },
+    {
+     "bytes": 1189147,
+     "label": "202111a",
+     "lag_days_upper": 15,
+     "last_modified": "2021-11-30",
+     "period_end": "2021-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202111a.zip"
+    },
+    {
+     "bytes": 1496910,
+     "label": "202111b",
+     "lag_days_upper": 15,
+     "last_modified": "2021-12-15",
+     "period_end": "2021-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202111b.zip"
+    },
+    {
+     "bytes": 1396248,
+     "label": "202112a",
+     "lag_days_upper": 15,
+     "last_modified": "2021-12-30",
+     "period_end": "2021-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202112a.zip"
+    },
+    {
+     "bytes": 1617151,
+     "label": "202112b",
+     "lag_days_upper": 18,
+     "last_modified": "2022-01-18",
+     "period_end": "2021-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202112b.zip"
+    },
+    {
+     "bytes": 1282572,
+     "label": "202201a",
+     "lag_days_upper": 16,
+     "last_modified": "2022-01-31",
+     "period_end": "2022-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202201a.zip"
+    },
+    {
+     "bytes": 1360444,
+     "label": "202201b",
+     "lag_days_upper": 16,
+     "last_modified": "2022-02-16",
+     "period_end": "2022-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202201b.zip"
+    },
+    {
+     "bytes": 1370616,
+     "label": "202202a",
+     "lag_days_upper": 13,
+     "last_modified": "2022-02-28",
+     "period_end": "2022-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202202a.zip"
+    },
+    {
+     "bytes": 1239713,
+     "label": "202202b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-03-15",
+     "period_end": "2022-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202202b.zip"
+    },
+    {
+     "bytes": 1406048,
+     "label": "202203a",
+     "lag_days_upper": 17,
+     "last_modified": "2022-04-01",
+     "period_end": "2022-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202203a.zip"
+    },
+    {
+     "bytes": 1803567,
+     "label": "202203b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-04-15",
+     "period_end": "2022-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202203b.zip"
+    },
+    {
+     "bytes": 1342541,
+     "label": "202204a",
+     "lag_days_upper": 18,
+     "last_modified": "2022-05-03",
+     "period_end": "2022-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202204a.zip"
+    },
+    {
+     "bytes": 1339747,
+     "label": "202204b",
+     "lag_days_upper": 16,
+     "last_modified": "2022-05-16",
+     "period_end": "2022-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202204b.zip"
+    },
+    {
+     "bytes": 1335789,
+     "label": "202205a",
+     "lag_days_upper": 17,
+     "last_modified": "2022-06-01",
+     "period_end": "2022-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202205a.zip"
+    },
+    {
+     "bytes": 1565189,
+     "label": "202205b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-06-15",
+     "period_end": "2022-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202205b.zip"
+    },
+    {
+     "bytes": 1335249,
+     "label": "202206a",
+     "lag_days_upper": 15,
+     "last_modified": "2022-06-30",
+     "period_end": "2022-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202206a.zip"
+    },
+    {
+     "bytes": 1532828,
+     "label": "202206b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-07-15",
+     "period_end": "2022-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202206b.zip"
+    },
+    {
+     "bytes": 1200073,
+     "label": "202207a",
+     "lag_days_upper": 14,
+     "last_modified": "2022-07-29",
+     "period_end": "2022-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202207a.zip"
+    },
+    {
+     "bytes": 1400074,
+     "label": "202207b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-08-15",
+     "period_end": "2022-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202207b.zip"
+    },
+    {
+     "bytes": 1339695,
+     "label": "202208a",
+     "lag_days_upper": 16,
+     "last_modified": "2022-08-31",
+     "period_end": "2022-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202208a.zip"
+    },
+    {
+     "bytes": 1757940,
+     "label": "202208b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-09-15",
+     "period_end": "2022-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202208b.zip"
+    },
+    {
+     "bytes": 1169938,
+     "label": "202209a",
+     "lag_days_upper": 15,
+     "last_modified": "2022-09-30",
+     "period_end": "2022-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202209a.zip"
+    },
+    {
+     "bytes": 1601015,
+     "label": "202209b",
+     "lag_days_upper": 17,
+     "last_modified": "2022-10-17",
+     "period_end": "2022-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202209b.zip"
+    },
+    {
+     "bytes": 1200209,
+     "label": "202210a",
+     "lag_days_upper": 16,
+     "last_modified": "2022-10-31",
+     "period_end": "2022-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202210a.zip"
+    },
+    {
+     "bytes": 1420023,
+     "label": "202210b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-11-15",
+     "period_end": "2022-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202210b.zip"
+    },
+    {
+     "bytes": 1162673,
+     "label": "202211a",
+     "lag_days_upper": 15,
+     "last_modified": "2022-11-30",
+     "period_end": "2022-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202211a.zip"
+    },
+    {
+     "bytes": 1470042,
+     "label": "202211b",
+     "lag_days_upper": 15,
+     "last_modified": "2022-12-15",
+     "period_end": "2022-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202211b.zip"
+    },
+    {
+     "bytes": 1356456,
+     "label": "202212a",
+     "lag_days_upper": 15,
+     "last_modified": "2022-12-30",
+     "period_end": "2022-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202212a.zip"
+    },
+    {
+     "bytes": 1438457,
+     "label": "202212b",
+     "lag_days_upper": 17,
+     "last_modified": "2023-01-17",
+     "period_end": "2022-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202212b.zip"
+    },
+    {
+     "bytes": 1203911,
+     "label": "202301a",
+     "lag_days_upper": 15,
+     "last_modified": "2023-01-30",
+     "period_end": "2023-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202301a.zip"
+    },
+    {
+     "bytes": 1535426,
+     "label": "202301b",
+     "lag_days_upper": 15,
+     "last_modified": "2023-02-15",
+     "period_end": "2023-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202301b.zip"
+    },
+    {
+     "bytes": 1353521,
+     "label": "202302a",
+     "lag_days_upper": 13,
+     "last_modified": "2023-02-28",
+     "period_end": "2023-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202302a.zip"
+    },
+    {
+     "bytes": 1197911,
+     "label": "202302b",
+     "lag_days_upper": 15,
+     "last_modified": "2023-03-15",
+     "period_end": "2023-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202302b.zip"
+    },
+    {
+     "bytes": 1284730,
+     "label": "202303a",
+     "lag_days_upper": 16,
+     "last_modified": "2023-03-31",
+     "period_end": "2023-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202303a.zip"
+    },
+    {
+     "bytes": 1643720,
+     "label": "202303b",
+     "lag_days_upper": 17,
+     "last_modified": "2023-04-17",
+     "period_end": "2023-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202303b.zip"
+    },
+    {
+     "bytes": 1201951,
+     "label": "202304a",
+     "lag_days_upper": 17,
+     "last_modified": "2023-05-02",
+     "period_end": "2023-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202304a.zip"
+    },
+    {
+     "bytes": 1309582,
+     "label": "202304b",
+     "lag_days_upper": 15,
+     "last_modified": "2023-05-15",
+     "period_end": "2023-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202304b.zip"
+    },
+    {
+     "bytes": 1327725,
+     "label": "202305a",
+     "lag_days_upper": 18,
+     "last_modified": "2023-06-02",
+     "period_end": "2023-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202305a.zip"
+    },
+    {
+     "bytes": 1587839,
+     "label": "202305b",
+     "lag_days_upper": 15,
+     "last_modified": "2023-06-15",
+     "period_end": "2023-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202305b.zip"
+    },
+    {
+     "bytes": 1340209,
+     "label": "202306a",
+     "lag_days_upper": 18,
+     "last_modified": "2023-07-03",
+     "period_end": "2023-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202306a.zip"
+    },
+    {
+     "bytes": 1527655,
+     "label": "202306b",
+     "lag_days_upper": 17,
+     "last_modified": "2023-07-17",
+     "period_end": "2023-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202306b.zip"
+    },
+    {
+     "bytes": 1201592,
+     "label": "202307a",
+     "lag_days_upper": 16,
+     "last_modified": "2023-07-31",
+     "period_end": "2023-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202307a.zip"
+    },
+    {
+     "bytes": 1489197,
+     "label": "202307b",
+     "lag_days_upper": 15,
+     "last_modified": "2023-08-15",
+     "period_end": "2023-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202307b.zip"
+    },
+    {
+     "bytes": 1358900,
+     "label": "202308a",
+     "lag_days_upper": 15,
+     "last_modified": "2023-08-30",
+     "period_end": "2023-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202308a.zip"
+    },
+    {
+     "bytes": 1811310,
+     "label": "202308b",
+     "lag_days_upper": 987,
+     "last_modified": "2026-05-14",
+     "period_end": "2023-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/other/fails-deliver-data/cnsfails202308b_0.zip"
+    },
+    {
+     "bytes": 1209292,
+     "label": "202309a",
+     "lag_days_upper": 17,
+     "last_modified": "2023-10-02",
+     "period_end": "2023-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202309a.zip"
+    },
+    {
+     "bytes": 1435989,
+     "label": "202309b",
+     "lag_days_upper": 16,
+     "last_modified": "2023-10-16",
+     "period_end": "2023-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202309b.zip"
+    },
+    {
+     "bytes": 1159170,
+     "label": "202310a",
+     "lag_days_upper": 37,
+     "last_modified": "2023-11-21",
+     "period_end": "2023-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202310a.zip"
+    },
+    {
+     "bytes": 1328518,
+     "label": "202310b",
+     "lag_days_upper": 15,
+     "last_modified": "2023-11-15",
+     "period_end": "2023-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202310b.zip"
+    },
+    {
+     "bytes": 1200821,
+     "label": "202311a",
+     "lag_days_upper": 15,
+     "last_modified": "2023-11-30",
+     "period_end": "2023-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202311a.zip"
+    },
+    {
+     "bytes": 1265589,
+     "label": "202311b",
+     "lag_days_upper": 15,
+     "last_modified": "2023-12-15",
+     "period_end": "2023-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202311b.zip"
+    },
+    {
+     "bytes": 1209032,
+     "label": "202312a",
+     "lag_days_upper": 14,
+     "last_modified": "2023-12-29",
+     "period_end": "2023-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202312a.zip"
+    },
+    {
+     "bytes": 1284604,
+     "label": "202312b",
+     "lag_days_upper": 16,
+     "last_modified": "2024-01-16",
+     "period_end": "2023-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202312b.zip"
+    },
+    {
+     "bytes": 1050751,
+     "label": "202401a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-01-30",
+     "period_end": "2024-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202401a.zip"
+    },
+    {
+     "bytes": 1458251,
+     "label": "202401b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-02-15",
+     "period_end": "2024-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202401b.zip"
+    },
+    {
+     "bytes": 1249802,
+     "label": "202402a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-03-01",
+     "period_end": "2024-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202402a.zip"
+    },
+    {
+     "bytes": 1232747,
+     "label": "202402b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-03-15",
+     "period_end": "2024-02-29",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202402b.zip"
+    },
+    {
+     "bytes": 1203097,
+     "label": "202403a",
+     "lag_days_upper": 14,
+     "last_modified": "2024-03-29",
+     "period_end": "2024-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202403a.zip"
+    },
+    {
+     "bytes": 1225962,
+     "label": "202403b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-04-15",
+     "period_end": "2024-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202403b.zip"
+    },
+    {
+     "bytes": 1219337,
+     "label": "202404a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-04-30",
+     "period_end": "2024-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202404a.zip"
+    },
+    {
+     "bytes": 1354898,
+     "label": "202404b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-05-15",
+     "period_end": "2024-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202404b.zip"
+    },
+    {
+     "bytes": 1164469,
+     "label": "202405a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-05-30",
+     "period_end": "2024-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202405a.zip"
+    },
+    {
+     "bytes": 1527005,
+     "label": "202405b",
+     "lag_days_upper": 17,
+     "last_modified": "2024-06-17",
+     "period_end": "2024-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202405b.zip"
+    },
+    {
+     "bytes": 1203135,
+     "label": "202406a",
+     "lag_days_upper": 16,
+     "last_modified": "2024-07-01",
+     "period_end": "2024-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202406a.zip"
+    },
+    {
+     "bytes": 1110320,
+     "label": "202406b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-07-15",
+     "period_end": "2024-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202406b.zip"
+    },
+    {
+     "bytes": 1116150,
+     "label": "202407a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-07-30",
+     "period_end": "2024-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202407a.zip"
+    },
+    {
+     "bytes": 1495949,
+     "label": "202407b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-08-15",
+     "period_end": "2024-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202407b.zip"
+    },
+    {
+     "bytes": 1189424,
+     "label": "202408a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-08-30",
+     "period_end": "2024-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202408a.zip"
+    },
+    {
+     "bytes": 1345918,
+     "label": "202408b",
+     "lag_days_upper": 16,
+     "last_modified": "2024-09-16",
+     "period_end": "2024-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202408b.zip"
+    },
+    {
+     "bytes": 1017689,
+     "label": "202409a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-09-30",
+     "period_end": "2024-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202409a.zip"
+    },
+    {
+     "bytes": 1343134,
+     "label": "202409b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-10-15",
+     "period_end": "2024-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202409b.zip"
+    },
+    {
+     "bytes": 1054977,
+     "label": "202410a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-10-30",
+     "period_end": "2024-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202410a.zip"
+    },
+    {
+     "bytes": 1560417,
+     "label": "202410b",
+     "lag_days_upper": 15,
+     "last_modified": "2024-11-15",
+     "period_end": "2024-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202410b.zip"
+    },
+    {
+     "bytes": 1162947,
+     "label": "202411a",
+     "lag_days_upper": 14,
+     "last_modified": "2024-11-29",
+     "period_end": "2024-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202411a.zip"
+    },
+    {
+     "bytes": 1176746,
+     "label": "202411b",
+     "lag_days_upper": 16,
+     "last_modified": "2024-12-16",
+     "period_end": "2024-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202411b.zip"
+    },
+    {
+     "bytes": 1203082,
+     "label": "202412a",
+     "lag_days_upper": 15,
+     "last_modified": "2024-12-30",
+     "period_end": "2024-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202412a.zip"
+    },
+    {
+     "bytes": 1402953,
+     "label": "202412b",
+     "lag_days_upper": 15,
+     "last_modified": "2025-01-15",
+     "period_end": "2024-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202412b.zip"
+    },
+    {
+     "bytes": 1035030,
+     "label": "202501a",
+     "lag_days_upper": 15,
+     "last_modified": "2025-01-30",
+     "period_end": "2025-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202501a.zip"
+    },
+    {
+     "bytes": 1459484,
+     "label": "202501b",
+     "lag_days_upper": 18,
+     "last_modified": "2025-02-18",
+     "period_end": "2025-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202501b.zip"
+    },
+    {
+     "bytes": 1200543,
+     "label": "202502a",
+     "lag_days_upper": 13,
+     "last_modified": "2025-02-28",
+     "period_end": "2025-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202502a.zip"
+    },
+    {
+     "bytes": 1085063,
+     "label": "202502b",
+     "lag_days_upper": 17,
+     "last_modified": "2025-03-17",
+     "period_end": "2025-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202502b.zip"
+    },
+    {
+     "bytes": 1236170,
+     "label": "202503a",
+     "lag_days_upper": 13,
+     "last_modified": "2025-03-28",
+     "period_end": "2025-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202503a.zip"
+    },
+    {
+     "bytes": 1305258,
+     "label": "202503b",
+     "lag_days_upper": 15,
+     "last_modified": "2025-04-15",
+     "period_end": "2025-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202503b.zip"
+    },
+    {
+     "bytes": 1288280,
+     "label": "202504a",
+     "lag_days_upper": 15,
+     "last_modified": "2025-04-30",
+     "period_end": "2025-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202504a.zip"
+    },
+    {
+     "bytes": 1447193,
+     "label": "202504b",
+     "lag_days_upper": 15,
+     "last_modified": "2025-05-15",
+     "period_end": "2025-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202504b.zip"
+    },
+    {
+     "bytes": 1236863,
+     "label": "202505a",
+     "lag_days_upper": 14,
+     "last_modified": "2025-05-29",
+     "period_end": "2025-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202505a.zip"
+    },
+    {
+     "bytes": 1358450,
+     "label": "202505b",
+     "lag_days_upper": 16,
+     "last_modified": "2025-06-16",
+     "period_end": "2025-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202505b.zip"
+    },
+    {
+     "bytes": 1251372,
+     "label": "202506a",
+     "lag_days_upper": 15,
+     "last_modified": "2025-06-30",
+     "period_end": "2025-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202506a.zip"
+    },
+    {
+     "bytes": 1305944,
+     "label": "202506b",
+     "lag_days_upper": 15,
+     "last_modified": "2025-07-15",
+     "period_end": "2025-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202506b.zip"
+    },
+    {
+     "bytes": 1162969,
+     "label": "202507a",
+     "lag_days_upper": 15,
+     "last_modified": "2025-07-30",
+     "period_end": "2025-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202507a.zip"
+    },
+    {
+     "bytes": 1541585,
+     "label": "202507b",
+     "lag_days_upper": 15,
+     "last_modified": "2025-08-15",
+     "period_end": "2025-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202507b.zip"
+    },
+    {
+     "bytes": 1194751,
+     "label": "202508a",
+     "lag_days_upper": 18,
+     "last_modified": "2025-09-02",
+     "period_end": "2025-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202508a.zip"
+    },
+    {
+     "bytes": 1199741,
+     "label": "202508b",
+     "lag_days_upper": 15,
+     "last_modified": "2025-09-15",
+     "period_end": "2025-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202508b.zip"
+    },
+    {
+     "bytes": 1057726,
+     "label": "202509a",
+     "lag_days_upper": 15,
+     "last_modified": "2025-09-30",
+     "period_end": "2025-09-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202509a.zip"
+    },
+    {
+     "bytes": 1525176,
+     "label": "202509b",
+     "lag_days_upper": 15,
+     "last_modified": "2025-10-15",
+     "period_end": "2025-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202509b.zip"
+    },
+    {
+     "bytes": 1195619,
+     "label": "202510a",
+     "lag_days_upper": 29,
+     "last_modified": "2025-11-13",
+     "period_end": "2025-10-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202510a.zip"
+    },
+    {
+     "bytes": 1613201,
+     "label": "202510b",
+     "lag_days_upper": 17,
+     "last_modified": "2025-11-17",
+     "period_end": "2025-10-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202510b.zip"
+    },
+    {
+     "bytes": 1120385,
+     "label": "202511a",
+     "lag_days_upper": 16,
+     "last_modified": "2025-12-01",
+     "period_end": "2025-11-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202511a.zip"
+    },
+    {
+     "bytes": 1076113,
+     "label": "202511b",
+     "lag_days_upper": 67,
+     "last_modified": "2026-02-05",
+     "period_end": "2025-11-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202511b.zip"
+    },
+    {
+     "bytes": 1216110,
+     "label": "202512a",
+     "lag_days_upper": 18,
+     "last_modified": "2026-01-02",
+     "period_end": "2025-12-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202512a.zip"
+    },
+    {
+     "bytes": 1536946,
+     "label": "202512b",
+     "lag_days_upper": 15,
+     "last_modified": "2026-01-15",
+     "period_end": "2025-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202512b.zip"
+    },
+    {
+     "bytes": 1100674,
+     "label": "202601a",
+     "lag_days_upper": 21,
+     "last_modified": "2026-02-05",
+     "period_end": "2026-01-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202601a.zip"
+    },
+    {
+     "bytes": 1388199,
+     "label": "202601b",
+     "lag_days_upper": 17,
+     "last_modified": "2026-02-17",
+     "period_end": "2026-01-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202601b.zip"
+    },
+    {
+     "bytes": 1293337,
+     "label": "202602a",
+     "lag_days_upper": 15,
+     "last_modified": "2026-03-02",
+     "period_end": "2026-02-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202602a.zip"
+    },
+    {
+     "bytes": 1143290,
+     "label": "202602b",
+     "lag_days_upper": 16,
+     "last_modified": "2026-03-16",
+     "period_end": "2026-02-28",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202602b.zip"
+    },
+    {
+     "bytes": 1289454,
+     "label": "202603a",
+     "lag_days_upper": 15,
+     "last_modified": "2026-03-30",
+     "period_end": "2026-03-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202603a.zip"
+    },
+    {
+     "bytes": 1565163,
+     "label": "202603b",
+     "lag_days_upper": 15,
+     "last_modified": "2026-04-15",
+     "period_end": "2026-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202603b.zip"
+    },
+    {
+     "bytes": 1137701,
+     "label": "202604a",
+     "lag_days_upper": 15,
+     "last_modified": "2026-04-30",
+     "period_end": "2026-04-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202604a.zip"
+    },
+    {
+     "bytes": 1484637,
+     "label": "202604b",
+     "lag_days_upper": 15,
+     "last_modified": "2026-05-15",
+     "period_end": "2026-04-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202604b.zip"
+    },
+    {
+     "bytes": 1283728,
+     "label": "202605a",
+     "lag_days_upper": 13,
+     "last_modified": "2026-05-28",
+     "period_end": "2026-05-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/other/fails-deliver-data/cnsfails202605a.zip"
+    },
+    {
+     "bytes": 1269388,
+     "label": "202605b",
+     "lag_days_upper": 15,
+     "last_modified": "2026-06-15",
+     "period_end": "2026-05-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/other/fails-deliver-data/cnsfails202605b.zip"
+    },
+    {
+     "bytes": 1335662,
+     "label": "202606a",
+     "lag_days_upper": 15,
+     "last_modified": "2026-06-30",
+     "period_end": "2026-06-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202606a.zip"
+    },
+    {
+     "bytes": 1594245,
+     "label": "202606b",
+     "lag_days_upper": 15,
+     "last_modified": "2026-07-15",
+     "period_end": "2026-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202606b.zip"
+    },
+    {
+     "bytes": 1242622,
+     "label": "202607a",
+     "lag_days_upper": 15,
+     "last_modified": "2026-07-30",
+     "period_end": "2026-07-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202607a.zip"
+    },
+    {
+     "bytes": 1653974,
+     "label": "202607b",
+     "lag_days_upper": 17,
+     "last_modified": "2026-08-17",
+     "period_end": "2026-07-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202607b.zip"
+    },
+    {
+     "bytes": 1352929,
+     "label": "202608a",
+     "lag_days_upper": 16,
+     "last_modified": "2026-08-31",
+     "period_end": "2026-08-15",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202608a.zip"
+    },
+    {
+     "bytes": 1393881,
+     "label": "202608b",
+     "lag_days_upper": 15,
+     "last_modified": "2026-09-15",
+     "period_end": "2026-08-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/data/fails-deliver-data/cnsfails202608b.zip"
+    }
+   ],
+   "lag_days_upper_excluding_reposts": {
+    "max": 987,
+    "min": 13,
+    "n": 138,
+    "p50": 15,
+    "p90": 18
+   },
+   "repost_dates": {
+    "1970-01-01": 18,
+    "2020-12-19": 278
+   }
+  },
+  "page": "https://www.sec.gov/data-research/sec-markets-data/fails-deliver-data",
+  "samples": [
+   {
+    "admitted_series_with_bar": 3324,
+    "admitted_with_bar_in_source": 446,
+    "cusips": 2826,
+    "date": "2004-04-01",
+    "file": "2004q2",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 446,
+    "matched_to_spanning_series": 596,
+    "source_tickers": 2826,
+    "year": 2004
+   },
+   {
+    "admitted_series_with_bar": 3563,
+    "admitted_with_bar_in_source": 434,
+    "cusips": 2354,
+    "date": "2005-06-01",
+    "file": "2005q2",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 434,
+    "matched_to_spanning_series": 563,
+    "source_tickers": 2354,
+    "year": 2005
+   },
+   {
+    "admitted_series_with_bar": 3816,
+    "admitted_with_bar_in_source": 519,
+    "cusips": 2743,
+    "date": "2006-06-01",
+    "file": "2006q2",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 519,
+    "matched_to_spanning_series": 659,
+    "source_tickers": 2743,
+    "year": 2006
+   },
+   {
+    "admitted_series_with_bar": 4076,
+    "admitted_with_bar_in_source": 537,
+    "cusips": 2728,
+    "date": "2007-04-02",
+    "file": "2007q2",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 537,
+    "matched_to_spanning_series": 727,
+    "source_tickers": 2728,
+    "year": 2007
+   },
+   {
+    "admitted_series_with_bar": 4428,
+    "admitted_with_bar_in_source": 768,
+    "cusips": 3094,
+    "date": "2008-05-01",
+    "file": "2008q2",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 768,
+    "matched_to_spanning_series": 1007,
+    "source_tickers": 3094,
+    "year": 2008
+   },
+   {
+    "admitted_series_with_bar": 4606,
+    "admitted_with_bar_in_source": 2379,
+    "cusips": 6774,
+    "date": "2009-07-01",
+    "file": "200907a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2380,
+    "matched_to_spanning_series": 3061,
+    "source_tickers": 6774,
+    "year": 2009
+   },
+   {
+    "admitted_series_with_bar": 4822,
+    "admitted_with_bar_in_source": 2594,
+    "cusips": 6377,
+    "date": "2010-06-01",
+    "file": "201006a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2595,
+    "matched_to_spanning_series": 3269,
+    "source_tickers": 6377,
+    "year": 2010
+   },
+   {
+    "admitted_series_with_bar": 5199,
+    "admitted_with_bar_in_source": 2486,
+    "cusips": 6334,
+    "date": "2011-06-01",
+    "file": "201106a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2488,
+    "matched_to_spanning_series": 3235,
+    "source_tickers": 6334,
+    "year": 2011
+   },
+   {
+    "admitted_series_with_bar": 5532,
+    "admitted_with_bar_in_source": 2936,
+    "cusips": 6095,
+    "date": "2012-06-01",
+    "file": "201206a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2938,
+    "matched_to_spanning_series": 3693,
+    "source_tickers": 6095,
+    "year": 2012
+   },
+   {
+    "admitted_series_with_bar": 5885,
+    "admitted_with_bar_in_source": 2726,
+    "cusips": 5603,
+    "date": "2013-06-03",
+    "file": "201306a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2727,
+    "matched_to_spanning_series": 3632,
+    "source_tickers": 5603,
+    "year": 2013
+   },
+   {
+    "admitted_series_with_bar": 6419,
+    "admitted_with_bar_in_source": 3242,
+    "cusips": 6128,
+    "date": "2014-06-02",
+    "file": "201406a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 3244,
+    "matched_to_spanning_series": 4165,
+    "source_tickers": 6128,
+    "year": 2014
+   },
+   {
+    "admitted_series_with_bar": 7132,
+    "admitted_with_bar_in_source": 3462,
+    "cusips": 6260,
+    "date": "2015-06-01",
+    "file": "201506a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 3462,
+    "matched_to_spanning_series": 4464,
+    "source_tickers": 6260,
+    "year": 2015
+   },
+   {
+    "admitted_series_with_bar": 7137,
+    "admitted_with_bar_in_source": 2469,
+    "cusips": 4602,
+    "date": "2016-06-01",
+    "file": "201606a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2470,
+    "matched_to_spanning_series": 3223,
+    "source_tickers": 4602,
+    "year": 2016
+   },
+   {
+    "admitted_series_with_bar": 7007,
+    "admitted_with_bar_in_source": 2258,
+    "cusips": 4417,
+    "date": "2017-06-01",
+    "file": "201706a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2259,
+    "matched_to_spanning_series": 3129,
+    "source_tickers": 4417,
+    "year": 2017
+   },
+   {
+    "admitted_series_with_bar": 6986,
+    "admitted_with_bar_in_source": 2514,
+    "cusips": 4953,
+    "date": "2018-06-01",
+    "file": "201806a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2515,
+    "matched_to_spanning_series": 3529,
+    "source_tickers": 4953,
+    "year": 2018
+   },
+   {
+    "admitted_series_with_bar": 6812,
+    "admitted_with_bar_in_source": 2339,
+    "cusips": 4730,
+    "date": "2019-06-03",
+    "file": "201906a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2339,
+    "matched_to_spanning_series": 3484,
+    "source_tickers": 4725,
+    "year": 2019
+   },
+   {
+    "admitted_series_with_bar": 6504,
+    "admitted_with_bar_in_source": 2219,
+    "cusips": 4981,
+    "date": "2020-06-01",
+    "file": "202006a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2220,
+    "matched_to_spanning_series": 3417,
+    "source_tickers": 4981,
+    "year": 2020
+   },
+   {
+    "admitted_series_with_bar": 7883,
+    "admitted_with_bar_in_source": 2927,
+    "cusips": 6328,
+    "date": "2021-06-01",
+    "file": "202106a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2927,
+    "matched_to_spanning_series": 4425,
+    "source_tickers": 6328,
+    "year": 2021
+   },
+   {
+    "admitted_series_with_bar": 8301,
+    "admitted_with_bar_in_source": 2741,
+    "cusips": 5976,
+    "date": "2022-06-01",
+    "file": "202206a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2741,
+    "matched_to_spanning_series": 4477,
+    "source_tickers": 5976,
+    "year": 2022
+   },
+   {
+    "admitted_series_with_bar": 6700,
+    "admitted_with_bar_in_source": 2348,
+    "cusips": 5425,
+    "date": "2023-06-01",
+    "file": "202306a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 2349,
+    "matched_to_spanning_series": 4222,
+    "source_tickers": 5425,
+    "year": 2023
+   },
+   {
+    "admitted_series_with_bar": 5086,
+    "admitted_with_bar_in_source": 1673,
+    "cusips": 5331,
+    "date": "2024-06-03",
+    "file": "202406a",
+    "header": [
+     "SETTLEMENT DATE",
+     "CUSIP",
+     "SYMBOL",
+     "QUANTITY (FAILS)",
+     "DESCRIPTION",
+     "PRICE"
+    ],
+    "matched_to_admitted_series": 1673,
+    "matched_to_spanning_series": 3917,
+    "source_tickers": 5331,
+    "year": 2024
+   }
+  ]
+ },
+ "generated_at": "2026-09-25T21:36:04+00:00",
+ "git_dirty": false,
+ "git_head": "72b59cbfcb55234f002123f87e98588a0d159b0b",
+ "git_status": [],
+ "midas": {
+  "clock": {
+   "files": [
+    {
+     "bytes": 71766633,
+     "label": "2012q1",
+     "lag_days_upper": 3185,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2012_q1.zip"
+    },
+    {
+     "bytes": 75904628,
+     "label": "2012q2",
+     "lag_days_upper": 3094,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2012_q20.zip"
+    },
+    {
+     "bytes": 72962751,
+     "label": "2012q3",
+     "lag_days_upper": 3002,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2012_q30.zip"
+    },
+    {
+     "bytes": 72182396,
+     "label": "2012q4",
+     "lag_days_upper": 2910,
+     "last_modified": "2020-12-19",
+     "period_end": "2012-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2012_q40.zip"
+    },
+    {
+     "bytes": 70794324,
+     "label": "2013q1",
+     "lag_days_upper": 2820,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2013_q10.zip"
+    },
+    {
+     "bytes": 77242650,
+     "label": "2013q2",
+     "lag_days_upper": -15886,
+     "last_modified": "1970-01-01",
+     "period_end": "2013-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2013_q20.zip"
+    },
+    {
+     "bytes": 77423139,
+     "label": "2013q3",
+     "lag_days_upper": 2637,
+     "last_modified": "2020-12-19",
+     "period_end": "2013-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2013_q30.zip"
+    },
+    {
+     "bytes": 77936036,
+     "label": "2013q4",
+     "lag_days_upper": -16070,
+     "last_modified": "1970-01-01",
+     "period_end": "2013-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2013_q43.zip"
+    },
+    {
+     "bytes": 79680040,
+     "label": "2014q1",
+     "lag_days_upper": 2455,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2014_q1.zip"
+    },
+    {
+     "bytes": 81467469,
+     "label": "2014q2",
+     "lag_days_upper": 2364,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2014_q2.zip"
+    },
+    {
+     "bytes": 80362868,
+     "label": "2014q3",
+     "lag_days_upper": 2272,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2014_q3.zip"
+    },
+    {
+     "bytes": 81909343,
+     "label": "2014q4",
+     "lag_days_upper": 2180,
+     "last_modified": "2020-12-19",
+     "period_end": "2014-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2014_q4.zip"
+    },
+    {
+     "bytes": 77933627,
+     "label": "2015q1",
+     "lag_days_upper": 2090,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2015_q1.zip"
+    },
+    {
+     "bytes": 80731845,
+     "label": "2015q2",
+     "lag_days_upper": 1999,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2015_q2.zip"
+    },
+    {
+     "bytes": 84675762,
+     "label": "2015q3",
+     "lag_days_upper": 1907,
+     "last_modified": "2020-12-19",
+     "period_end": "2015-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2015_q3.zip"
+    },
+    {
+     "bytes": 84827761,
+     "label": "2015q4",
+     "lag_days_upper": -16800,
+     "last_modified": "1970-01-01",
+     "period_end": "2015-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2015_q4.zip"
+    },
+    {
+     "bytes": 93597355,
+     "label": "2016q2",
+     "lag_days_upper": 1633,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2016_q2.zip"
+    },
+    {
+     "bytes": 92311758,
+     "label": "2016q3",
+     "lag_days_upper": 1541,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2016_q3.zip"
+    },
+    {
+     "bytes": 91494537,
+     "label": "2016q4",
+     "lag_days_upper": 1449,
+     "last_modified": "2020-12-19",
+     "period_end": "2016-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2016_q4.zip"
+    },
+    {
+     "bytes": 89929961,
+     "label": "2017q1",
+     "lag_days_upper": 1359,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2017_q1.zip"
+    },
+    {
+     "bytes": 91406464,
+     "label": "2017q2",
+     "lag_days_upper": -17347,
+     "last_modified": "1970-01-01",
+     "period_end": "2017-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2017_q2.zip"
+    },
+    {
+     "bytes": 100010758,
+     "label": "2017q3",
+     "lag_days_upper": 1176,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2017_q3.zip"
+    },
+    {
+     "bytes": 101128242,
+     "label": "2017q4",
+     "lag_days_upper": 1084,
+     "last_modified": "2020-12-19",
+     "period_end": "2017-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2017_q4.zip"
+    },
+    {
+     "bytes": 101226104,
+     "label": "2018q1",
+     "lag_days_upper": 994,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2018_q1.zip"
+    },
+    {
+     "bytes": 109791247,
+     "label": "2018q2",
+     "lag_days_upper": -17712,
+     "last_modified": "1970-01-01",
+     "period_end": "2018-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2018_q2.zip"
+    },
+    {
+     "bytes": 116478963,
+     "label": "2018q3",
+     "lag_days_upper": 811,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2018_q3.zip"
+    },
+    {
+     "bytes": 122468388,
+     "label": "2018q4",
+     "lag_days_upper": 719,
+     "last_modified": "2020-12-19",
+     "period_end": "2018-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2018_q4.zip"
+    },
+    {
+     "bytes": 118017607,
+     "label": "2019q1",
+     "lag_days_upper": 629,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2019_q1.zip"
+    },
+    {
+     "bytes": 122342991,
+     "label": "2019q2",
+     "lag_days_upper": 538,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2019_q2.zip"
+    },
+    {
+     "bytes": 126283883,
+     "label": "2019q3",
+     "lag_days_upper": 446,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2019_q3.zip"
+    },
+    {
+     "bytes": 126219647,
+     "label": "2019q4",
+     "lag_days_upper": 354,
+     "last_modified": "2020-12-19",
+     "period_end": "2019-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/node/add/data_distribution/individual_security_exchange_2019_q4.zip"
+    },
+    {
+     "bytes": 129915351,
+     "label": "2020q1",
+     "lag_days_upper": 263,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2020_q1.zip"
+    },
+    {
+     "bytes": 133004297,
+     "label": "2020q2",
+     "lag_days_upper": 172,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2020_q2.zip"
+    },
+    {
+     "bytes": 134605809,
+     "label": "2020q3",
+     "lag_days_upper": 80,
+     "last_modified": "2020-12-19",
+     "period_end": "2020-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2020_q3.zip"
+    },
+    {
+     "bytes": 144991102,
+     "label": "2020q4",
+     "lag_days_upper": 28,
+     "last_modified": "2021-01-28",
+     "period_end": "2020-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2020_q4.zip"
+    },
+    {
+     "bytes": 156490446,
+     "label": "2021q1",
+     "lag_days_upper": 28,
+     "last_modified": "2021-04-28",
+     "period_end": "2021-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2021_q1.zip"
+    },
+    {
+     "bytes": 166781617,
+     "label": "2021q2",
+     "lag_days_upper": 44,
+     "last_modified": "2021-08-13",
+     "period_end": "2021-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2021_q2.zip"
+    },
+    {
+     "bytes": 175413216,
+     "label": "2021q3",
+     "lag_days_upper": 25,
+     "last_modified": "2021-10-25",
+     "period_end": "2021-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2021_q3.zip"
+    },
+    {
+     "bytes": 184842706,
+     "label": "2021q4",
+     "lag_days_upper": 27,
+     "last_modified": "2022-01-27",
+     "period_end": "2021-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2021_q4.zip"
+    },
+    {
+     "bytes": 187974719,
+     "label": "2022q1",
+     "lag_days_upper": 33,
+     "last_modified": "2022-05-03",
+     "period_end": "2022-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2022_q1.zip"
+    },
+    {
+     "bytes": 189893628,
+     "label": "2022q2",
+     "lag_days_upper": 27,
+     "last_modified": "2022-07-27",
+     "period_end": "2022-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2022_q2.zip"
+    },
+    {
+     "bytes": 191031412,
+     "label": "2022q3",
+     "lag_days_upper": 21,
+     "last_modified": "2022-10-21",
+     "period_end": "2022-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2022_q3.zip"
+    },
+    {
+     "bytes": 188394112,
+     "label": "2022q4",
+     "lag_days_upper": 26,
+     "last_modified": "2023-01-26",
+     "period_end": "2022-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2022_q4.zip"
+    },
+    {
+     "bytes": 181960165,
+     "label": "2023q1",
+     "lag_days_upper": 28,
+     "last_modified": "2023-04-28",
+     "period_end": "2023-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2023_q1.zip"
+    },
+    {
+     "bytes": 178169945,
+     "label": "2023q2",
+     "lag_days_upper": 47,
+     "last_modified": "2023-08-16",
+     "period_end": "2023-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2023_q2.zip"
+    },
+    {
+     "bytes": 182248454,
+     "label": "2023q3",
+     "lag_days_upper": 27,
+     "last_modified": "2023-10-27",
+     "period_end": "2023-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2023_q3.zip"
+    },
+    {
+     "bytes": 184222805,
+     "label": "2023q4",
+     "lag_days_upper": 31,
+     "last_modified": "2024-01-31",
+     "period_end": "2023-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2023_q4.zip"
+    },
+    {
+     "bytes": 180674935,
+     "label": "2024q1",
+     "lag_days_upper": 32,
+     "last_modified": "2024-05-02",
+     "period_end": "2024-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-and-exchange/individual_security_exchange_2024_q1.zip"
+    },
+    {
+     "bytes": 186535308,
+     "label": "2024q2",
+     "lag_days_upper": 57,
+     "last_modified": "2024-08-26",
+     "period_end": "2024-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2024_q2.zip"
+    },
+    {
+     "bytes": 190940370,
+     "label": "2024q3",
+     "lag_days_upper": 29,
+     "last_modified": "2024-10-29",
+     "period_end": "2024-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2024_q3.zip"
+    },
+    {
+     "bytes": 190955503,
+     "label": "2024q4",
+     "lag_days_upper": 59,
+     "last_modified": "2025-02-28",
+     "period_end": "2024-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2024_q4.zip"
+    },
+    {
+     "bytes": 174076152,
+     "label": "2025q1",
+     "lag_days_upper": 289,
+     "last_modified": "2026-01-14",
+     "period_end": "2025-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2025_q1.zip"
+    },
+    {
+     "bytes": 181364550,
+     "label": "2025q2",
+     "lag_days_upper": 198,
+     "last_modified": "2026-01-14",
+     "period_end": "2025-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2025_q2.zip"
+    },
+    {
+     "bytes": 190308016,
+     "label": "2025q3",
+     "lag_days_upper": 163,
+     "last_modified": "2026-03-12",
+     "period_end": "2025-09-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2025_q3.zip"
+    },
+    {
+     "bytes": 196531396,
+     "label": "2025q4",
+     "lag_days_upper": 198,
+     "last_modified": "2026-07-17",
+     "period_end": "2025-12-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2025_q4.zip"
+    },
+    {
+     "bytes": 193086779,
+     "label": "2026q1",
+     "lag_days_upper": 128,
+     "last_modified": "2026-08-06",
+     "period_end": "2026-03-31",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2026_q1.zip"
+    },
+    {
+     "bytes": 199194827,
+     "label": "2026q2",
+     "lag_days_upper": 37,
+     "last_modified": "2026-08-06",
+     "period_end": "2026-06-30",
+     "status": 200,
+     "url": "https://www.sec.gov/files/opa/data/market-structure/metrics-individual-security-exchange/individual_security_exchange_2026_q2.zip"
+    }
+   ],
+   "lag_days_upper_excluding_reposts": {
+    "max": 289,
+    "min": 21,
+    "n": 23,
+    "p50": 32,
+    "p90": 198
+   },
+   "repost_dates": {
+    "1970-01-01": 5,
+    "2020-12-19": 29
+   }
+  },
+  "page": "https://www.sec.gov/data-research/sec-markets-data/market-structure-data-security-exchange",
+  "samples": [
+   {
+    "admitted_series_with_bar": 5464,
+    "admitted_with_bar_in_source": 3091,
+    "date": "2012-04-02",
+    "file": "2012q2",
+    "header": [
+     "Date",
+     "Security",
+     "Ticker",
+     "Exchange",
+     "McapRank",
+     "TurnRank",
+     "VolatilityRank",
+     "PriceRank",
+     "Cancels",
+     "Trades",
+     "LitTrades",
+     "OddLots",
+     "Hidden",
+     "TradesForHidden",
+     "OrderVol('000)",
+     "TradeVol('000)",
+     "LitVol('000)",
+     "OddLotVol('000)",
+     "HiddenVol('000)",
+     "TradeVolForHidden('000)"
+    ],
+    "matched_to_admitted_series": 3092,
+    "matched_to_spanning_series": 3887,
+    "source_tickers": 4949,
+    "year": 2012
+   },
+   {
+    "admitted_series_with_bar": 7137,
+    "admitted_with_bar_in_source": 3846,
+    "date": "2016-06-01",
+    "file": "2016q2",
+    "header": [
+     "Date",
+     "Security",
+     "Ticker",
+     "Exchange",
+     "McapRank",
+     "TurnRank",
+     "VolatilityRank",
+     "PriceRank",
+     "Cancels",
+     "Trades",
+     "LitTrades",
+     "OddLots",
+     "Hidden",
+     "TradesForHidden",
+     "OrderVol('000)",
+     "TradeVol('000)",
+     "LitVol('000)",
+     "OddLotVol('000)",
+     "HiddenVol('000)",
+     "TradeVolForHidden('000)"
+    ],
+    "matched_to_admitted_series": 3847,
+    "matched_to_spanning_series": 5016,
+    "source_tickers": 5282,
+    "year": 2016
+   },
+   {
+    "admitted_series_with_bar": 6578,
+    "admitted_with_bar_in_source": 3686,
+    "date": "2020-04-01",
+    "file": "2020q2",
+    "header": [
+     "Date",
+     "Security",
+     "Ticker",
+     "Exchange",
+     "McapRank",
+     "TurnRank",
+     "VolatilityRank",
+     "PriceRank",
+     "Cancels",
+     "Trades",
+     "LitTrades",
+     "OddLots",
+     "Hidden",
+     "TradesForHidden",
+     "OrderVol('000)",
+     "TradeVol('000)",
+     "LitVol('000)",
+     "OddLotVol('000)",
+     "HiddenVol('000)",
+     "TradeVolForHidden('000)"
+    ],
+    "matched_to_admitted_series": 3688,
+    "matched_to_spanning_series": 5357,
+    "source_tickers": 5741,
+    "year": 2020
+   },
+   {
+    "admitted_series_with_bar": 5291,
+    "admitted_with_bar_in_source": 3511,
+    "date": "2024-04-01",
+    "file": "2024q2",
+    "header": [
+     "Date",
+     "Security",
+     "Ticker",
+     "Exchange",
+     "McapRank",
+     "TurnRank",
+     "VolatilityRank",
+     "PriceRank",
+     "Cancels",
+     "Trades",
+     "LitTrades",
+     "OddLots",
+     "Hidden",
+     "TradesForHidden",
+     "OrderVol('000)",
+     "TradeVol('000)",
+     "LitVol('000)",
+     "OddLotVol('000)",
+     "HiddenVol('000)",
+     "TradeVolForHidden('000)"
+    ],
+    "matched_to_admitted_series": 3511,
+    "matched_to_spanning_series": 6644,
+    "source_tickers": 7340,
+    "year": 2024
+   }
+  ]
+ },
+ "probe_version": "sec-sources-probe-v1"
+}
