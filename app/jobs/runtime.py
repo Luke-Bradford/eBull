@@ -118,6 +118,7 @@ from app.workers.scheduler import (
     JOB_ETORO_CROWD_SNAPSHOT,
     JOB_ETORO_INVESTOR_SNAPSHOT,
     JOB_ETORO_LOOKUPS_REFRESH,
+    JOB_ETORO_PERISHABLES_SNAPSHOT,
     JOB_EXCHANGES_METADATA_REFRESH,
     JOB_EXECUTE_APPROVED_ORDERS,
     JOB_FAIR_VALUE_BAND_REFRESH,
@@ -204,6 +205,7 @@ from app.workers.scheduler import (
     etoro_crowd_snapshot,
     etoro_investor_snapshot,
     etoro_lookups_refresh,
+    etoro_perishables_snapshot,
     exchanges_metadata_refresh,
     execute_approved_orders,
     fair_value_band_refresh,
@@ -458,6 +460,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_CORE_REBALANCE_EXECUTION: _adapt_zero_arg(core_rebalance_execution),
     JOB_ETORO_CROWD_SNAPSHOT: _adapt_zero_arg(etoro_crowd_snapshot),
     JOB_ETORO_INVESTOR_SNAPSHOT: _adapt_zero_arg(etoro_investor_snapshot),
+    JOB_ETORO_PERISHABLES_SNAPSHOT: _adapt_zero_arg(etoro_perishables_snapshot),
     JOB_CORE_ELIGIBILITY_REFRESH: _adapt_zero_arg(core_eligibility_refresh),
     JOB_STRATEGY_AUTONOMOUS_PROMOTION: _adapt_zero_arg(strategy_autonomous_promotion),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in

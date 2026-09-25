@@ -250,6 +250,7 @@ class CallSite:
 _BROKER = "app/providers/implementations/etoro_broker.py"
 _MARKET = "app/providers/implementations/etoro.py"
 _SOCIAL = "app/providers/implementations/etoro_social.py"
+_PERISH = "app/providers/implementations/etoro_perishables.py"
 
 CALL_SITES: tuple[CallSite, ...] = (
     # --- lane A: order-write pool -------------------------------------------
@@ -437,6 +438,20 @@ CALL_SITES: tuple[CallSite, ...] = (
         "H_user_live_portfolio",
         60,
     ),
+    # --- #3381 slice 3: the perishables recorder, one client per lane --------
+    CallSite(_PERISH, "get_rates", "_http_rates", "GET", "/api/v1/market-data/instruments/rates", "F_market_data", 60),
+    CallSite(
+        _PERISH,
+        "post_eligibility",
+        "_http_eligibility",
+        "POST",
+        "/api/v2/trading/info/demo/eligibility",
+        "B_eligibility",
+        20,
+    ),
+    CallSite(
+        _PERISH, "post_what_if", "_http_what_if", "POST", "/api/v2/trading/info/demo/costs", "C_what_if_costs", 20
+    ),
 )
 
 # Throttled call EXPRESSIONS per (module, client attribute), measured by AST on
@@ -453,6 +468,9 @@ EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
     (_MARKET, "_http"): 8,
     (_SOCIAL, "_http_rankings"): 1,
     (_SOCIAL, "_http_live"): 1,
+    (_PERISH, "_http_rates"): 1,
+    (_PERISH, "_http_eligibility"): 1,
+    (_PERISH, "_http_what_if"): 1,
 }
 
 # Which module-level constant configures each client's floor.  The floor VALUES
@@ -470,6 +488,9 @@ FLOOR_CONSTANT_NAMES: dict[tuple[str, str], tuple[str, str]] = {
     (_MARKET, "_http"): ("app.providers.implementations.etoro", "_ETORO_READ_INTERVAL_S"),
     (_SOCIAL, "_http_rankings"): ("app.providers.implementations.etoro_social", "_ETORO_SOCIAL_INTERVAL_S"),
     (_SOCIAL, "_http_live"): ("app.providers.implementations.etoro_social", "_ETORO_SOCIAL_INTERVAL_S"),
+    (_PERISH, "_http_rates"): ("app.providers.implementations.etoro_perishables", "_ETORO_RATES_INTERVAL_S"),
+    (_PERISH, "_http_eligibility"): ("app.providers.implementations.etoro_perishables", "_ETORO_PREFLIGHT_INTERVAL_S"),
+    (_PERISH, "_http_what_if"): ("app.providers.implementations.etoro_perishables", "_ETORO_PREFLIGHT_INTERVAL_S"),
 }
 
 

@@ -21,6 +21,7 @@ from app.workers.scheduler import (
     JOB_CORE_REBALANCE_OBSERVATION,
     JOB_ETORO_CROWD_SNAPSHOT,
     JOB_ETORO_INVESTOR_SNAPSHOT,
+    JOB_ETORO_PERISHABLES_SNAPSHOT,
     JOB_EXECUTE_APPROVED_ORDERS,
     SCHEDULED_JOBS,
     Cadence,
@@ -276,7 +277,8 @@ def test_exactly_the_admitted_jobs_opt_in() -> None:
     re-fire adds an honestly dated row and never edits one; and eToro
     serves no history for the data, so a late snapshot is the only recovery a lost day
     has. (It runs on its own ``etoro_crowd`` lane, so its likeliest loss is a misfire.)
-    ``etoro_investor_snapshot`` (#3381 slice 2) joined on the same argument, on the same lane.
+    ``etoro_investor_snapshot`` (#3381 slice 2) and ``etoro_perishables_snapshot`` (slice 3) joined on the
+    same argument, on the same lane.
     """
     opted_in = {job.name for job in SCHEDULED_JOBS if job.rearm_on_lost_fire}
     assert opted_in == {
@@ -284,6 +286,7 @@ def test_exactly_the_admitted_jobs_opt_in() -> None:
         JOB_CORE_ELIGIBILITY_REFRESH,
         JOB_ETORO_CROWD_SNAPSHOT,
         JOB_ETORO_INVESTOR_SNAPSHOT,
+        JOB_ETORO_PERISHABLES_SNAPSHOT,
     }
 
 
@@ -294,6 +297,7 @@ def test_every_admitted_job_actually_arms() -> None:
         JOB_CORE_ELIGIBILITY_REFRESH,
         JOB_ETORO_CROWD_SNAPSHOT,
         JOB_ETORO_INVESTOR_SNAPSHOT,
+        JOB_ETORO_PERISHABLES_SNAPSHOT,
     ):
         assert lost_fire_rearm_delay_seconds(_BY_NAME[name]) == RETRY_BASE_SECONDS
 

@@ -46,6 +46,12 @@ from app.jobs.job_connection import connect_job, job_application_name, job_state
 from app.jobs.sources import Lane
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import BROAD_MARKET_SEARCH_REQUEST, EtoroMarketDataProvider
+from app.providers.implementations.etoro_perishables import (
+    ELIGIBILITY_PATH,
+    RATES_PATH,
+    WHAT_IF_PATH,
+    EtoroPerishablesProvider,
+)
 from app.providers.implementations.etoro_social import LIVE_PORTFOLIO_PATH, RANKINGS_PATH, EtoroSocialProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
@@ -91,6 +97,7 @@ from app.services.order_client import (
     SubmissionControlsRevokedError,
     execute_order,
 )
+from app.services.perishables_recorder import record_perishables_snapshot
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
 from app.services.position_monitor import (
@@ -573,6 +580,9 @@ JOB_ETORO_CROWD_SNAPSHOT = "etoro_crowd_snapshot"
 # #3381 slice 2 — the forward-only top-investor cohort record (ranking + live
 # positions). Same reason as above: eToro serves no position history.
 JOB_ETORO_INVESTOR_SNAPSHOT = "etoro_investor_snapshot"
+# #3381 slice 3 — the forward-only daily record of rates, eligibility (incl. x1
+# short availability) and what-if open costs. eToro serves no history for any of them.
+JOB_ETORO_PERISHABLES_SNAPSHOT = "etoro_perishables_snapshot"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -2823,6 +2833,27 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=22, minute=7),
         # Same argument as the crowd snapshot: a late snapshot is honestly
         # stamped and appended, a lost day is unrecoverable.
+        catch_up_on_boot=True,
+        rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_PERISHABLES_SNAPSHOT,
+        display_name="eToro perishables snapshot — rates, eligibility, what-if costs (#3381)",
+        # Same SOURCE lane as the other two #3381 recorders (no new lane). 19:07 UTC is
+        # inside NYSE regular hours on a full day in both DST regimes, off the 5-minute
+        # grid, and runs eligibility first so it normally clears the :20 fire of
+        # core_eligibility_refresh, the other lane-B client (spec §Quota).
+        source="etoro_crowd",
+        description=(
+            "Daily — record rates for the sticky instrument universe, account eligibility (incl. x1 short "
+            "availability) and what-if open costs for a sticky cohort-held panel "
+            "(docs/proposals/etl/2026-09-25-3381-perishables-recorder.md). Forward-only: eToro serves no "
+            "history. Failed and partial collections are recorded too."
+        ),
+        cadence=Cadence.daily(hour=19, minute=7),
+        # Same argument as the other recorders: a late snapshot is honestly stamped,
+        # a lost day is unrecoverable.
         catch_up_on_boot=True,
         rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
@@ -7190,6 +7221,46 @@ def etoro_investor_snapshot() -> None:
             result.investors_expected,
             result.investors_unavailable,
             result.positions_recorded,
+        )
+
+
+def etoro_perishables_snapshot() -> None:
+    """Append one perishables snapshot (#3381 slice 3).
+
+    Read-only: market-data rates plus the informational eligibility and what-if endpoints. A failed run
+    commits its own ``failed`` snapshot with everything it collected; a ``partial`` one commits and then
+    raises, so the run never reports success for lost requests.
+    """
+    creds = _load_etoro_credentials(JOB_ETORO_PERISHABLES_SNAPSHOT)
+    if creds is None:
+        _record_prereq_skip(JOB_ETORO_PERISHABLES_SNAPSHOT, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_ETORO_PERISHABLES_SNAPSHOT) as tracker:
+        with (
+            EtoroPerishablesProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            connect_job() as conn,
+        ):
+            result = record_perishables_snapshot(
+                conn,
+                provider,
+                request_params={
+                    "environment": settings.etoro_env,
+                    "rates_path": RATES_PATH,
+                    "eligibility_path": ELIGIBILITY_PATH,
+                    "what_if_path": WHAT_IF_PATH,
+                },
+            )
+        tracker.row_count = result.row_count
+        logger.info(
+            "etoro_perishables_snapshot: snapshot %d — universe %d, %d eligibility rows, %d rate rows, "
+            "%d what-if costs",
+            result.snapshot_id,
+            result.universe_size,
+            result.eligibility_rows,
+            result.rate_rows,
+            result.whatif_ok,
         )
 
 

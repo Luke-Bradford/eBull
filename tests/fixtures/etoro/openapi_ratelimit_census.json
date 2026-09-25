@@ -110,7 +110,8 @@
       ],
       "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
       "reached_by": [
-        "get_quotes"
+        "get_quotes",
+        "get_rates"
       ],
       "shared": true,
       "window": 60
@@ -397,7 +398,8 @@
       ],
       "rate_limit_prose": "**Rate limit:** 20 requests per 60 seconds. This is a **dedicated** limit for this endpoint — it is **not shared** with (pooled across) any other endpoint, so the full rate is available to this endpoint alone.",
       "reached_by": [
-        "get_what_if_costs"
+        "get_what_if_costs",
+        "post_what_if"
       ],
       "shared": false,
       "window": 60
@@ -412,14 +414,15 @@
       ],
       "rate_limit_prose": "**Rate limit:** 20 requests per 60 seconds. This is a **dedicated** limit for this endpoint — it is **not shared** with (pooled across) any other endpoint, so the full rate is available to this endpoint alone.",
       "reached_by": [
-        "check_instrument_eligibility"
+        "check_instrument_eligibility",
+        "post_eligibility"
       ],
       "shared": false,
       "window": 60
     }
   },
   "document_sha256": "9a4a63689cceaf9a7c43aa08d5c7befa27619572fe0f8a389a521f54ac20ecd0",
-  "extract_sha256": "ffa70448467040a707d1e5f6ced39a1e6678027b3d07743dda90ebfd33774c4d",
+  "extract_sha256": "dbae796f726bdb5686ad0e3ea7dd890d6b68e787f62f0d5623bca5ffed53deb8",
   "orphan_peer_references": [
     "DELETE /api/v1/trading/execution/demo/limit-orders/{orderId}",
     "DELETE /api/v1/trading/execution/demo/market-open-orders/{orderId}",
@@ -446,7 +449,7 @@
   },
   "provenance": {
     "byte_length": 1787381,
-    "extracted_at": "2026-09-25T14:32:30.542753+00:00",
+    "extracted_at": "2026-09-25T15:41:52.156430+00:00",
     "extractor_version": 1,
     "fetched_at": "2026-09-13T21:02:19.472836+00:00",
     "hashed_bytes": "document_sha256 is over the RAW response body as received, before any decode. extract_sha256 is over canonical(extract) — sorted keys, compact separators, UTF-8 — and covers the blocks below and nothing else. fetched_at is when the bytes were taken from the portal; extracted_at is when this extract was last derived from them, which an --offline re-run moves and a fetch date must not.",
