@@ -8,6 +8,7 @@ Spec: ``docs/proposals/ta/2026-09-24-2901-quality-arm.md`` ("Construction", "Del
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
@@ -481,3 +482,29 @@ def test_census_counts_only_true_alias_disagreements() -> None:
         ],
     }
     assert census.formation_census(document, None)["alias_disagreement"] == {"revenue": 1}
+    # every status field reconciles to P(D), early ladder exits counted as not_evaluated
+    counted = census.formation_census(document, None)["fields"]
+    for key in census.STATUS_FIELDS:
+        assert sum(n for k, n in counted.items() if k.startswith(f"{key}=")) == 3, key
+    assert counted["signs=not_evaluated"] == 3 and counted["cogs=value"] == 1
+
+
+def test_census_module_is_policy_bound() -> None:
+    assert "scripts/census_2901_quality.py" in build.POLICY_FILES
+
+
+def test_mirror_bounds_must_equal_the_stored_series(tmp_path: Path) -> None:
+    good = tmp_path / "abc.csv"
+    good.write_text("2020-07-01,10,11,9,10,100,0,0,10\n2020-07-02,10,11,9,10,100,0,0,10\n")
+    row = {"vendor_symbol": "ABC", "first_bar": "2020-07-01", "last_bar": "2020-07-03", "symbol_unique": True}
+    document = {"vendor_symbol": "ABC", "first_bar": "2020-07-01", "last_bar": "2020-07-03", "form25": None}
+    (tmp_path / "s1.json").write_text(json.dumps(document))
+    with pytest.raises(build.QualityInputError, match="mirror bar bounds differ"):
+        build._series_inputs(
+            1,
+            {1: {"path": "s1.json", "sha256": build.read_verified_document(tmp_path / "s1.json")[0]}},
+            tmp_path,
+            {1: row},
+            {"ABC": [good]},
+            [],
+        )

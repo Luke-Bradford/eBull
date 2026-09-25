@@ -42,6 +42,9 @@ from scripts.build_2901_quality_input import OUTCOME_HORIZON_DAYS, load_quality_
 UNAVAILABLE: Final = "unavailable"
 NO_DECILES: Final = "no_deciles"
 REQUIRED_FIELDS: Final = ("period", "revenue", "cogs", "assets", "equity")
+#: Every status ``classify`` can record; an early ladder exit omits some, and they are counted as
+#: ``not_evaluated`` so each field's total reconciles to P(D).
+STATUS_FIELDS: Final = (*REQUIRED_FIELDS, "gp_tag", "fpi", "sic", "winning_accessions", "signs")
 #: SIC divisions, 1987 SIC Manual (OSHA SIC Division Structure). Ranges are inclusive.
 SIC_DIVISIONS: Final = (
     (100, 999, "A_agriculture"),
@@ -134,8 +137,11 @@ def formation_census(document: Mapping[str, Any], span: Sequence[str] | None) ->
             "form25": form25_outcome(d, r["form25_horizon"], span),
         }
         sizes = {"liquidity": liquidity[cik], "assets": assets[cik]}
+        for key in STATUS_FIELDS:
+            fields[f"{key}={r['fields'].get(key, quality.NOT_EVALUATED)}"] += 1
         for key, value in r["fields"].items():
-            fields[f"{key}={value}"] += 1
+            if key not in STATUS_FIELDS:
+                fields[f"{key}={value}"] += 1
             if key.endswith("_aliases_disagree_at_latest") and value == "true":
                 disagreement[key.removesuffix("_aliases_disagree_at_latest")] += 1
         for size, bucket in sizes.items():

@@ -145,6 +145,7 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 POLICY_FILES: Final = (
     "app/services/r6_quality_universe.py",
     "scripts/build_2901_quality_input.py",
+    "scripts/census_2901_quality.py",
     "app/services/pit_fundamentals.py",
     "app/services/security_linkage.py",
     "app/services/series_termination.py",
@@ -508,6 +509,11 @@ def _series_inputs(
     if len(paths) != 1:
         raise QualityInputError(f"series {sid} ({row['vendor_symbol']}): {len(paths)} mirror files")
     bars = read_mirror_series(paths[0])
+    bounds = (bars[0].day.isoformat(), bars[-1].day.isoformat()) if bars else None
+    if bounds != (str(row["first_bar"]), str(row["last_bar"])):
+        raise QualityInputError(
+            f"series {sid} ({row['vendor_symbol']}): mirror bar bounds differ from the stored series"
+        )
     return {
         "vendor_symbol": row["vendor_symbol"],
         "last_bar": row["last_bar"],
