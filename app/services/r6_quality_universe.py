@@ -178,7 +178,8 @@ def read_component(
     disagree = len({read.values for _, read in top}) > 1 or any(r.status is not pf.ReadStatus.VALUE for _, r in top)
     alias, winner = top[0]
     if winner.status is not pf.ReadStatus.VALUE:
-        return Component(str(winner.status), alias=alias, acceptance=latest, aliases_disagree=disagree)
+        # An ambiguous winner still names its accessions, and rule 6 reads them.
+        return Component(str(winner.status), None, alias, winner.accns, latest, disagree)
     return Component("value", winner.values[0], alias, winner.accns, latest, disagree)
 
 
@@ -208,9 +209,11 @@ def annual_period(bundle: pf.PitFundamentalsBundle, cik10: str, d: date) -> tupl
     for concept in (*REVENUE, *COGS):
         read = _public(bundle, cik10, concept, d)
         for row in (*read.events, *read.rejections):
-            if row["unit"] != UNIT or row["start"] is None or forms.get(row["accn"]) not in ANNUAL_FORMS:
+            if row["unit"] != UNIT or forms.get(row["accn"]) not in ANNUAL_FORMS:
                 continue
-            start, end = date.fromisoformat(row["start"]), date.fromisoformat(row["end"])
+            start, end = _iso_date(row["start"]), _iso_date(row["end"])
+            if start is None or end is None:  # a rejection may keep a raw, unparseable period key
+                continue
             if end.year == d.year - 1 and ANNUAL_DAYS[0] <= (end - start).days + 1 <= ANNUAL_DAYS[1]:
                 starts[row["end"]].add(row["start"])
     if not starts:
@@ -307,6 +310,15 @@ def classify(bundle: pf.PitFundamentalsBundle, cik10: str, sic: int | None, d: d
     else:
         fields["winning_accessions"] = fields["signs"] = "components_unavailable"
     return Classification(ladder[0] if ladder else ELIGIBLE, fields, sic, period, components)
+
+
+def _iso_date(raw: object) -> date | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
 
 
 def _financial(sic: int) -> bool:

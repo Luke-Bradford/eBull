@@ -139,6 +139,15 @@ def test_rejection_only_later_period_blocks_instead_of_falling_back(tmp_path: Pa
     assert result.rung == "gross_profit_unavailable"
 
 
+@pytest.mark.parametrize("bad", [{"start": "2019-13-45"}, {"end": "not-a-date"}, {"end": None}])
+def test_rejection_with_an_unparseable_period_key_is_skipped_not_fatal(tmp_path: Path, bad: dict[str, Any]) -> None:
+    rejected = _row("bad", "a2", start="2019-01-01")
+    rejected.update(bad)
+    rows = _merge(_accounts(), {REV: [rejected]})
+    result = _classify(tmp_path, rows, [("a1", T1, "10-K"), ("a2", T2, "10-K")])
+    assert result.rung == q.ELIGIBLE
+
+
 @pytest.mark.parametrize(
     ("start", "rung"),
     [
@@ -175,6 +184,8 @@ def test_late_filer_has_no_period_and_no_fallback_to_the_prior_year(tmp_path: Pa
         ("20-F/A", {}, False),  # an amendment is never the "latest original"
         ("20-F/A", {AST: [_row(210, "a2")]}, True),  # ...unless it supplies a winning component
         ("20-F", {}, True),  # the latest original annual report is a 20-F
+        # an AMBIGUOUS winning component still names its accessions: FPI precedes the GP rung
+        ("20-F/A", {REV: [_row(105, "a2", start="2019-01-01"), _row(106, "a2", start="2019-01-01")]}, True),
     ],
 )
 def test_foreign_private_issuer(tmp_path: Path, second: str, second_rows: Rows, fpi: bool) -> None:
