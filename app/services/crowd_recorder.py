@@ -54,14 +54,6 @@ class CrowdSnapshotResult:
     buy_sell_covered: int
 
 
-class CrowdSnapshotFailed(RuntimeError):
-    """The collection failed. Its ``failed`` snapshot row is already committed."""
-
-    def __init__(self, snapshot_id: int, error: str) -> None:
-        super().__init__(f"crowd snapshot {snapshot_id} failed: {error}")
-        self.snapshot_id = snapshot_id
-
-
 def _raw_json(record: MarketSnapshotInstrument) -> str:
     # allow_nan=False: a non-JSON value refuses the snapshot instead of storing an unparseable raw.
     return json.dumps(record.raw, allow_nan=False, sort_keys=True, default=str)
@@ -102,9 +94,10 @@ def record_crowd_snapshot(
 ) -> CrowdSnapshotResult:
     """Fetch one broad-market snapshot and append it.
 
-    A failure in the fetch or in building any row commits a ``failed`` snapshot row carrying the error and
-    raises :class:`CrowdSnapshotFailed`, so the job run fails too. Rows are written only for a complete
-    snapshot, in the same transaction as its header.
+    A failure in the fetch or in building any row commits a ``failed`` snapshot row carrying the error, then
+    re-raises the ORIGINAL exception: ``_tracked_job``'s ``classify_exception`` reads its type, so a 401 stays
+    operator-actionable and a 429 keeps its longer backoff. Rows are written only for a complete snapshot, in
+    the same transaction as its header.
     """
     started_at = clock()
     params_json = json.dumps(request_params, sort_keys=True)
@@ -129,7 +122,7 @@ def record_crowd_snapshot(
                 },
             )
         logger.warning("etoro crowd snapshot %d failed: %s", snapshot_id, error)
-        raise CrowdSnapshotFailed(snapshot_id, error) from exc
+        raise
 
     with conn.transaction():
         snapshot_id = _insert_snapshot(
@@ -161,7 +154,6 @@ def record_crowd_snapshot(
 __all__ = [
     "SNAPSHOT_COMPLETE",
     "SNAPSHOT_FAILED",
-    "CrowdSnapshotFailed",
     "CrowdSnapshotResult",
     "record_crowd_snapshot",
 ]

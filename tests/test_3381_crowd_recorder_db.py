@@ -13,7 +13,6 @@ from app.providers.market_data import BroadMarketSnapshot, MarketSnapshotInstrum
 from app.services.crowd_recorder import (
     SNAPSHOT_COMPLETE,
     SNAPSHOT_FAILED,
-    CrowdSnapshotFailed,
     record_crowd_snapshot,
 )
 
@@ -107,21 +106,39 @@ def _boom() -> BroadMarketSnapshot:
     [_boom, lambda: _snapshot(_row(1001, buy="50", observed_at=None))],
     ids=["fetch-raises", "row-without-page-time"],
 )
-def test_failed_collection_is_recorded_and_raises(ebull_test_conn: psycopg.Connection[Any], fetch: Any) -> None:
+def test_failed_collection_is_recorded_and_reraises_the_original(
+    ebull_test_conn: psycopg.Connection[Any], fetch: Any
+) -> None:
     conn = ebull_test_conn
-    with pytest.raises(CrowdSnapshotFailed) as raised:
+    # The ORIGINAL exception propagates, so the job's failure classifier sees its type.
+    with pytest.raises(ValueError):
         record_crowd_snapshot(conn, fetch, request_params=PARAMS, clock=_clock)
     header = conn.execute(
-        "SELECT status, request_params, pages, recorded_items, error FROM etoro_crowd_snapshots WHERE snapshot_id = %s",
-        (raised.value.snapshot_id,),
-    ).fetchone()
-    assert header is not None
-    assert header[:4] == (SNAPSHOT_FAILED, PARAMS, None, 0)
-    assert header[4].startswith("ValueError: ")
-    rows = conn.execute(
-        "SELECT count(*) FROM etoro_crowd_observations WHERE snapshot_id = %s", (raised.value.snapshot_id,)
-    ).fetchone()
-    assert rows == (0,)
+        "SELECT snapshot_id, status, request_params, pages, recorded_items, error FROM etoro_crowd_snapshots"
+    ).fetchall()
+    assert len(header) == 1
+    snapshot_id, *fields, error = header[0]
+    assert fields == [SNAPSHOT_FAILED, PARAMS, None, 0]
+    assert error.startswith("ValueError: ")
+    rows = conn.execute("SELECT count(*) FROM etoro_crowd_observations WHERE snapshot_id = %s", (snapshot_id,))
+    assert rows.fetchone() == (0,)
+
+
+def test_an_http_error_keeps_its_type_for_the_classifier(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    import httpx
+
+    from app.services.sync_orchestrator.exception_classifier import classify_exception
+    from app.services.sync_orchestrator.layer_types import FailureCategory
+
+    request = httpx.Request("GET", "https://public-api.etoro.com/api/v1/market-data/search")
+    response = httpx.Response(401, request=request)
+
+    def unauthorised() -> BroadMarketSnapshot:
+        raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        record_crowd_snapshot(ebull_test_conn, unauthorised, request_params=PARAMS, clock=_clock)
+    assert classify_exception(raised.value) == FailureCategory.AUTH_EXPIRED
 
 
 def test_tables_refuse_update(ebull_test_conn: psycopg.Connection[Any]) -> None:
