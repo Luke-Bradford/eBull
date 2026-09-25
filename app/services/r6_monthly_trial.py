@@ -3,7 +3,7 @@
 Spec: ``docs/proposals/ta/2026-09-25-2901-quality-declaration-spec.md`` ("Identity gate", "Statistics",
 "Composition with termination policies", "Verdict", "Simulator"). Everything here is pure and consumes monthly series
 keyed by ``(year, month)``, so it is fixed and tested before any return exists. ``simulate_monthly`` (part 2a)
-produces those series; the sealed runner is part 2b.
+produces those series and the descriptive censuses (part 2b); the sealed runner is part 2c.
 
 Every statistic returns a value or a :class:`Refused` with a named reason. Conditions over them are three-valued
 (:class:`Tri`) and compose by the weak Kleene conjunction, so a refusal is carried to the verdict boundary instead of
@@ -20,6 +20,7 @@ import io
 import math
 import statistics
 import zipfile
+from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ from app.services.r6_exclusion_trial import (
     month_pairs,
 )
 from app.services.r6_exclusion_trial import validate_factor as _validate_factor
+from app.services.universe_selection import ALIVE_CUT_DAYS, INTRADER_CAPTURE_DATE
 
 Month = tuple[int, int]
 
@@ -841,6 +843,60 @@ class MarkState:
     recognised_cash: float
 
 
+SessionKind = Literal["rebalance", "mark", "final"]
+CellStatus = Literal["bar", "gap", "terminated", "alive_at_capture"]
+CellAction = Literal["priced", "held_stale", "bounded_sold", "recognised", "sold_last_close"]
+
+
+@dataclass(frozen=True)
+class ValuationCell:
+    """One held symbol at one valuation session: exactly one evidence status and one action (spec "Stale-mark
+    census"). An alive-at-capture series missing a bar before the final is a gap (``_holding_value``'s rule)."""
+
+    session: date
+    kind: SessionKind
+    symbol: str
+    status: CellStatus
+    action: CellAction
+    #: The value the cell contributes before any spread: priced, held at last close, or realised (R = f·v).
+    value: float
+    #: For a missing bar: the last valid bar valued from, and v = shares × its adjusted close.
+    last_bar: date | None
+    last_close_value: float | None
+
+
+@dataclass(frozen=True)
+class HoldingPeriod:
+    """A symbol held from its purchase session to its exit: a sale, a recognition, a ruin or the final."""
+
+    symbol: str
+    start: date
+    end: date
+
+
+def _cell_action(kind: SessionKind, status: CellStatus) -> CellAction:
+    if status == "bar":
+        return "priced"
+    if status == "terminated":
+        return "recognised"
+    if status == "alive_at_capture":
+        if kind != "final":
+            raise SimulationError(f"an alive-at-capture valuation at a {kind}")
+        return "sold_last_close"
+    return "held_stale" if kind == "mark" else "bounded_sold"
+
+
+def _cell(kind: SessionKind, symbol: str, day: date, value: float, realisation: Realisation | None) -> ValuationCell:
+    if realisation is None:
+        return ValuationCell(day, kind, symbol, "bar", "priced", value, None, None)
+    status = realisation.status
+    if status == "unsplit":
+        raise SimulationError("a legacy unsplit valuation in the monthly simulator")
+    return ValuationCell(
+        day, kind, symbol, status, _cell_action(kind, status), value, realisation.last_bar, realisation.last_close_value
+    )
+
+
 @dataclass(frozen=True)
 class MonthlyResult:
     """One (portfolio, policy, h) path. Factors, never rounded returns, carry the compounding (spec "Finiteness")."""
@@ -860,6 +916,10 @@ class MonthlyResult:
     realisations: tuple[Realisation, ...]
     #: The first month whose mark wealth is exactly 0.
     ruin_month: Month | None
+    #: Every held-symbol × valuation-session cell, in session then symbol order. None after a ruin.
+    cells: tuple[ValuationCell, ...] = ()
+    #: Every holding, purchase to exit, in exit order.
+    holding_periods: tuple[HoldingPeriod, ...] = ()
 
     @property
     def total_return(self) -> float:
@@ -972,6 +1032,12 @@ def simulate_monthly(
     marks = [MarkState(opening, last_session_of_month(opening), 1.0, 1.0, 0.0, 0.0)]
     factors: dict[Month, float] = {}
     ruin_month: Month | None = None
+    cells: list[ValuationCell] = []
+    held_since: dict[str, date] = {}
+    periods: list[HoldingPeriod] = []
+
+    def exit_holding(symbol: str, day: date) -> None:
+        periods.append(HoldingPeriod(symbol, held_since.pop(symbol), day))
 
     def value(symbol: str, day: date, field: Literal["open", "close"]) -> tuple[float, Realisation | None]:
         """The annual simulator's valuation of one holding, with the finiteness and underflow checks."""
@@ -1002,6 +1068,7 @@ def simulate_monthly(
             current: dict[str, float] = {}
             for symbol in sorted(holdings):
                 current[symbol], realisation = value(symbol, day, "open")
+                cells.append(_cell("rebalance", symbol, day, current[symbol], realisation))
                 if realisation is not None:
                     realisations.append(realisation)
                     if realisation.status == "terminated":
@@ -1014,6 +1081,8 @@ def simulate_monthly(
                 # Ruined: absorbing. No target entries are created (the annual code creates zero-share ones).
                 events.append(RebalanceEvent(day, 0.0, 0.0, 0.0, 0, censored))
                 target_values.append(0.0)
+                for symbol in sorted(holdings):
+                    exit_holding(symbol, day)
                 holdings, cash = {}, 0.0
                 continue
             if target & terminated:
@@ -1033,6 +1102,10 @@ def simulate_monthly(
                     raise SimulationError(f"target {symbol} has no bar on its execution session {day}")
                 open_price = _price(bar.adjusted_open, f"{symbol} adjusted open on {day}")
                 new_holdings[symbol] = _positive_product(target_value / open_price, f"{symbol} shares on {day}")
+            for symbol in sorted(set(holdings) - set(new_holdings)):
+                exit_holding(symbol, day)
+            for symbol in sorted(set(new_holdings) - set(holdings)):
+                held_since[symbol] = day
             holdings, cash = new_holdings, 0.0
             events.append(RebalanceEvent(day, pre_cost, traded, cost, len(target), censored))
             target_values.append(target_value)
@@ -1047,10 +1120,16 @@ def simulate_monthly(
             bar = bar_on(symbol, day)
             if bar is not None:
                 close = _price(bar.adjusted_close, f"{symbol} adjusted close on {day}")
-                held_value += _positive_product(shares * close, f"{symbol} value on {day}")
+                priced = _positive_product(shares * close, f"{symbol} value on {day}")
+                held_value += priced
+                cells.append(_cell("mark", symbol, day, priced, None))
                 continue
             realised, realisation = value(symbol, day, "close")
             assert realisation is not None
+            if realisation.status == "gap":
+                cells.append(_cell("mark", symbol, day, realisation.last_close_value, realisation))
+            else:
+                cells.append(_cell("mark", symbol, day, realised, realisation))
             if realisation.status == "terminated":
                 credit = _finite(realised * (1.0 - half_spread), f"{symbol} recognised cash on {day}")
                 if realised > 0:
@@ -1059,6 +1138,7 @@ def simulate_monthly(
                 realisations.append(realisation)
                 terminated.add(symbol)
                 del holdings[symbol]
+                exit_holding(symbol, day)
             else:
                 # A gap (an alive-at-capture series before the final is a gap): held at last close, no trade.
                 held_value += realisation.last_close_value
@@ -1081,6 +1161,8 @@ def simulate_monthly(
     for symbol in sorted(holdings):
         final_value, realisation = value(symbol, window_end, "close")
         final_values.append(final_value)
+        cells.append(_cell("final", symbol, window_end, final_value, realisation))
+        exit_holding(symbol, window_end)
         if realisation is not None:
             realisations.append(realisation)
     final_mid = _finite(sum(final_values), "final holdings value")
@@ -1103,6 +1185,8 @@ def simulate_monthly(
         target_values=tuple(target_values),
         realisations=tuple(realisations),
         ruin_month=ruin_month,
+        cells=tuple(cells),
+        holding_periods=tuple(periods),
     )
 
 
@@ -1139,7 +1223,232 @@ def check_parity(monthly: MonthlyResult, annual: PortfolioResult, *, window_end:
         raise ParityMismatch("ruin status differs")
 
 
+# --- Descriptive censuses (spec "Turnover", "Stale-mark census"). They never gate. ------------------------------
+
+
+@dataclass(frozen=True)
+class Unavailable:
+    """A descriptive readout that cannot be formed (e.g. a ratio over zero wealth). Never a refusal of the run."""
+
+    reason: str
+
+
+def _month_of(day: date) -> Month:
+    return (day.year, day.month)
+
+
+def _over_wealth(amount: float, wealth: float) -> float | Unavailable:
+    return Unavailable("zero wealth at the previous mark") if wealth == 0 else amount / wealth
+
+
+@dataclass(frozen=True)
+class TurnoverCensus:
+    """Monthly one-way turnover and forced exits, each ÷ W(mark_{m−1}), for the statistic months."""
+
+    turnover: Mapping[Month, float | Unavailable]
+    #: The mean over every month, ``Unavailable`` if any month follows a ruin.
+    mean_turnover: float | Unavailable
+    #: The mean over the months with W(mark_{m−1}) > 0, labelled with those months.
+    surviving_mean_turnover: float | Unavailable
+    surviving_months: tuple[Month, ...]
+    #: The pre-loss last-close value v removed by recognitions in the month.
+    forced_exits: Mapping[Month, float | Unavailable]
+    #: Traded notional after the last mark (the partial month, including the final liquidation).
+    partial_traded: float
+    #: Forced exits after the last mark, ÷ W(last mark).
+    partial_forced_exits: float | Unavailable
+    #: Every traded dollar in the window: the initial purchase, rebalances, recognitions at marks, the final sale.
+    window_traded: float
+
+
+def turnover_census(result: MonthlyResult, months: Sequence[Month] = STATISTIC_MONTHS) -> TurnoverCensus:
+    """Spec "Turnover": (sales + purchases executed in month m) / 2 / W(mark_{m−1}).
+
+    The initial purchase is excluded. A recognition at a mark is a sale of R; a recognition at a rebalance is inside
+    that rebalance's ``traded`` and counted once. The final sale is outside the months (``partial_traded``).
+    """
+    wealth = {mark.month: mark.wealth for mark in result.marks}
+    if [mark.month for mark in result.marks[1:]] != list(months):
+        raise ValueError("the result's marks do not carry exactly the census months")
+    last_mark = result.marks[-1].session
+    traded: dict[Month, float] = defaultdict(float)
+    forced: dict[Month, float] = defaultdict(float)
+    partial_traded = 0.0
+    partial_forced = 0.0
+    for index, event in enumerate(result.events):
+        if event.day > last_mark:
+            partial_traded += event.traded_notional
+        elif index > 0:
+            traded[_month_of(event.day)] += event.traded_notional
+    # Rebalance and final-sale notional (including every final cell, recognised or not) comes from the events
+    # above; cells add only the forced exits and the recognitions at marks, which trade outside any event.
+    for cell in result.cells:
+        if cell.action != "recognised":
+            continue
+        assert cell.last_close_value is not None
+        if cell.session > last_mark:
+            partial_forced += cell.last_close_value
+            continue
+        forced[_month_of(cell.session)] += cell.last_close_value
+        if cell.kind == "mark":
+            traded[_month_of(cell.session)] += cell.value
+    turnover = {month: _over_wealth(traded[month] / 2, wealth[previous_month(month)]) for month in months}
+    evaluable = [(month, value) for month, value in turnover.items() if not isinstance(value, Unavailable)]
+    surviving = tuple(month for month, _ in evaluable)
+    surviving_mean: float | Unavailable = (
+        math.fsum(value for _, value in evaluable) / len(evaluable)
+        if evaluable
+        else Unavailable("no month with positive wealth at its previous mark")
+    )
+    return TurnoverCensus(
+        turnover=turnover,
+        mean_turnover=surviving_mean if len(surviving) == len(months) else Unavailable("a month follows a ruin"),
+        surviving_mean_turnover=surviving_mean,
+        surviving_months=surviving,
+        forced_exits={month: _over_wealth(forced[month], wealth[previous_month(month)]) for month in months},
+        partial_traded=partial_traded,
+        partial_forced_exits=_over_wealth(partial_forced, result.marks[-1].wealth),
+        window_traded=math.fsum(event.traded_notional for event in result.events)
+        + math.fsum(cell.value for cell in result.cells if cell.kind == "mark" and cell.action == "recognised"),
+    )
+
+
+@dataclass(frozen=True)
+class GapEpisode:
+    """NYSE sessions from the first missing session while held (inclusive) to the resumption (exclusive), or to the
+    exit session (inclusive, ``censored``). A closure-dated bar is not on a session, so it is never a resumption."""
+
+    symbol: str
+    first_missing: date
+    sessions: int
+    censored: bool
+
+
+@dataclass(frozen=True)
+class HeldSeriesQuality:
+    symbol: str
+    #: ``read_price_series``' invalid rows: an invalid interior row is a missing bar, and so a gap.
+    invalid_rows: int
+    #: Bars dated on a day the NYSE was closed.
+    closure_dated_bars: int
+
+
+@dataclass(frozen=True)
+class StaleMarkCensus:
+    #: (session kind, evidence status, action) → cells.
+    cells: Mapping[tuple[SessionKind, CellStatus, CellAction], int]
+    #: Σ held-stale value ÷ W at each month-end mark.
+    stale_share: Mapping[Month, float | Unavailable]
+    gaps: tuple[GapEpisode, ...]
+    held_series: tuple[HeldSeriesQuality, ...]
+    #: Missing-bar valuations whose last close comes from a closure-dated bar.
+    closure_dated_valuations: int
+
+
+def _closed(day: date, cache: dict[date, bool]) -> bool:
+    closed = cache.get(day)
+    if closed is None:
+        closed = cache[day] = us_market_status(day) == "closed"
+    return closed
+
+
+def _sessions(start: date, end: date, cache: dict[date, bool]) -> list[date]:
+    days: list[date] = []
+    day = start
+    while day <= end:
+        if not _closed(day, cache):
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def held_symbols(result: MonthlyResult) -> tuple[str, ...]:
+    return tuple(sorted({period.symbol for period in result.holding_periods}))
+
+
+def stale_mark_census(
+    result: MonthlyResult,
+    *,
+    prices: Mapping[str, PriceSeries],
+    evidence: Mapping[str, SeriesEvidence],
+) -> StaleMarkCensus:
+    """Spec "Stale-mark census", over every cell and holding of one (portfolio, policy, h) path.
+
+    A missing session is a gap unless the series is terminated there: not alive at capture and stored
+    ``last_bar`` before the session (``_holding_value``'s rule). A missing final session of an alive-at-capture
+    series continues a gap run to the window end, censored.
+    """
+    cache: dict[date, bool] = {}
+    counts: dict[tuple[SessionKind, CellStatus, CellAction], int] = defaultdict(int)
+    stale: dict[date, float] = defaultdict(float)
+    closure_valuations = 0
+    for cell in result.cells:
+        counts[(cell.kind, cell.status, cell.action)] += 1
+        if cell.action == "held_stale":
+            stale[cell.session] += cell.value
+        if cell.last_bar is not None and _closed(cell.last_bar, cache):
+            closure_valuations += 1
+    stale_share = {mark.month: _over_wealth(stale[mark.session], mark.wealth) for mark in result.marks[1:]}
+
+    gaps: list[GapEpisode] = []
+    if result.holding_periods:
+        first = min(period.start for period in result.holding_periods)
+        last = max(period.end for period in result.holding_periods)
+        sessions = _sessions(first, last, cache)
+        alive_floor = INTRADER_CAPTURE_DATE - timedelta(days=ALIVE_CUT_DAYS)
+        bar_days = {symbol: {bar.day for bar in prices[symbol].bars} for symbol in held_symbols(result)}
+        for period in result.holding_periods:
+            stored = evidence[period.symbol]
+            alive = stored.last_bar > alive_floor
+            days = bar_days[period.symbol]
+            run_start: date | None = None
+            run = 0
+            held = sessions[bisect_right(sessions, period.start) : bisect_right(sessions, period.end)]
+            for day in held:
+                if day in days:
+                    if run_start is not None:
+                        gaps.append(GapEpisode(period.symbol, run_start, run, censored=False))
+                        run_start, run = None, 0
+                    continue
+                if not alive and stored.last_bar < day:
+                    break  # terminated from here: recognised, not a gap
+                if run_start is None:
+                    run_start = day
+                run += 1
+            if run_start is not None:
+                gaps.append(GapEpisode(period.symbol, run_start, run, censored=True))
+
+    held_series = tuple(
+        HeldSeriesQuality(
+            symbol,
+            prices[symbol].invalid_rows,
+            sum(_closed(bar.day, cache) for bar in prices[symbol].bars),
+        )
+        for symbol in held_symbols(result)
+    )
+    return StaleMarkCensus(
+        cells=dict(counts),
+        stale_share=stale_share,
+        gaps=tuple(gaps),
+        held_series=held_series,
+        closure_dated_valuations=closure_valuations,
+    )
+
+
 __all__ = [
+    "CellAction",
+    "CellStatus",
+    "GapEpisode",
+    "HeldSeriesQuality",
+    "HoldingPeriod",
+    "SessionKind",
+    "StaleMarkCensus",
+    "TurnoverCensus",
+    "Unavailable",
+    "ValuationCell",
+    "held_symbols",
+    "stale_mark_census",
+    "turnover_census",
     "MarkState",
     "MonthlyResult",
     "MonthlySchedule",
