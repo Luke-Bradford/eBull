@@ -264,9 +264,12 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
 
         r10 (2026-09-22, #2834) added ARM B stage (i); the same command returned
         the same five groups, 488 rows, all ``harness_validation``.
+
+        r11 (2026-09-25, #2901) added #2908's three arms and #2901's two rows; the
+        same command returned the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 277
-        assert len(TRIAL_REGISTER.trials) == 33
+        assert TRIAL_REGISTER.declared_count == 282
+        assert len(TRIAL_REGISTER.trials) == 35
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

@@ -153,7 +153,12 @@ from typing import Final
 #: r10 (2026-09-22, #2834) adds ARM B stage (i), measured the same way before the
 #: bump: the SAME five (version, purpose) groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-22-r10"
+#:
+#: r11 (2026-09-25, #2901) adds #2908's three exclusion arms, which ran on
+#: 2026-08-24 after the cutoff below without charging this register, and #2901's
+#: quality arm. Measured the same way before the bump: the SAME five groups, 488
+#: rows, every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-25-r11"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -800,6 +805,38 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "scripts/measure_2834_armb_dv_prototype.py; issue #2834"
             ),
             exactness=TrialExactness.EXACT,
+        ),
+        DeclaredTrial(
+            trial_id="r6-2908-exclusion-arms-2026-08-24",
+            description=(
+                "R6 #2908: dilution exclusion (primary), filing-risk exclusion and their union, each against "
+                "the identical annual 1/N control, 2022-07 to 2024-09. THREE arms, all emitted. ⚠ searches=3, "
+                "not the 7 (configuration, arm) rows #2901's declaration counts: this register counts variants "
+                "selected between, and #2908's corrections re-ran the same three variants. It ran after the "
+                "cutoff without a #2599 declaration, so it is charged here, late."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-08-24-r6-exclusion-preregistration.md, corrections 1-4 and "
+                "2026-08-24-r6-exclusion-result.md; strategy_holdout_accesses 640, 641; issue #2908"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=3,
+        ),
+        DeclaredTrial(
+            trial_id="r6-2901-quality-gpa-2026-09-25",
+            description=(
+                "#2901: the top GP/A decile of the complete-case eligible set E(D), 12 June formations "
+                "2013-2024, against the identical annual 1/N control C(D) (headline) and the complete-case "
+                "diagnostic control C'(D). ONE arm, two comparator rows, both gating. The D0 gate leg, the "
+                "buy-and-hold and SPY are frozen readouts, not searches. Charged BEFORE the first run."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-09-25-2901-quality-declaration.md (frozen declaration), "
+                "2026-09-25-2901-quality-declaration-spec.md and 2026-09-24-2901-quality-arm.md; issue #2901"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=2,
+            declared_for=("r6-quality-gpa", "r6-2901-quality-v1"),
         ),
     ),
 )
