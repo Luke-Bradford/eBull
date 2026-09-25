@@ -119,8 +119,9 @@ def identity_gate(
             f"reference months differ from the calendar: missing {sorted(window - in_window)[:3]}, "
             f"extra {sorted(in_window - window)[:3]}"
         )
-    if not all(math.isfinite(ours[key]) for key in expected):
-        raise GateRefusal("our spread has a non-finite month")
+    for side, series in (("our", ours), ("reference", reference)):
+        if not all(math.isfinite(series[key]) for key in expected):
+            raise GateRefusal(f"the {side} spread has a non-finite month")
     validation = _validate_factor({key: ours[key] for key in expected}, {key: reference[key] for key in expected})
     return GateReadout(
         months=validation.months,
@@ -453,7 +454,11 @@ class VerdictResult:
 
 
 def _binding(values: Mapping[str, float | None]) -> tuple[str, float | None]:
-    """The least favourable value across policies; a refusal (``None``) under any policy binds."""
+    """The least favourable value across policies; a refusal (``None``) under any policy binds.
+
+    Refusals carry no magnitude to rank, so among several the reported label is the alphabetically first. That
+    choice only names a provenance; the verdict is the same whichever refused policy is named.
+    """
     if ZERO_RECOVERY.label not in values:
         raise ValueError("the governing zero_recovery statistics are missing")
     refused = sorted(label for label, value in values.items() if value is None)

@@ -234,6 +234,14 @@ def test_identity_gate_refuses_a_missing_month_on_either_side() -> None:
         identity_gate(ours, {k: v for k, v in reference.items() if k != (2020, 3)})
 
 
+@pytest.mark.parametrize("side", ["ours", "reference"])
+def test_identity_gate_refuses_a_non_finite_month_on_either_side(side: str) -> None:
+    ours, reference = _aligned_pair()
+    (ours if side == "ours" else reference)[(2020, 3)] = math.nan
+    with pytest.raises(GateRefusal):
+        identity_gate(ours, reference)
+
+
 def test_identity_gate_refuses_an_extra_month_in_ours() -> None:
     ours, reference = _aligned_pair()
     with pytest.raises(GateRefusal):
