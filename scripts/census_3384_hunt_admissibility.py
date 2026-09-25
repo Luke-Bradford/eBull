@@ -10,26 +10,30 @@ Four parts:
 1. **Population** — the survivorship-free universe exactly as the harness admits it
    (``universe_selection.load_universe_selection`` over ``load_validated_universe``), plus the
    harvested series it does NOT admit, so the exclusion is a counted stratum, not a silent one.
-2. **Coverage by year x size x survival stratum** — per (series, calendar year): bars, dividend
-   prints, zero/null-volume bars, flat bars (open = high = low = close, or open NULL) and the
-   median daily dollar volume. Size = tercile of that median among series trading that year (see
-   "Size stratum" below). Survival stratum = alive at capture, or the series' ``TerminationClass``.
-3. **Identity route** — how each admitted series links to an issuer (eToro instrument, CIK, Form 25).
-4. **Contamination inventory** — every stored result window (``strategy_results_store``), every
-   holdout access (``strategy_holdout_accesses``), every frozen declaration, plus the file-recorded
-   studies in ``FILE_STUDIES`` (each row cites its source document). Rolled up per calendar year and
-   per hunt window.
+2. **Coverage by calendar year x liquidity tercile x survival stratum**, aggregated from per
+   (series, calendar year) counts: bars, dividend-positive bars, NULL/zero-volume bars, NULL-open
+   bars, zero-range bars (open = high = low = close), invalid bars (a non-positive price or a close/
+   open outside [low, high]) and the median positive-volume daily dollar volume. Survival stratum =
+   last bar within ``ALIVE_CUT_DAYS`` of capture (admitted), or the series' ``TerminationClass``.
+   Calendar-year cells are DESCRIPTIVE: a full-year median uses bars after any date inside the year.
+3. **Identity route** — stored links per stratum, the Form 25 register span, and #3361's linkage
+   coverage floor (the constants; ``link_as_of`` is not exercised here).
+4. **Contamination inventory** — stored result windows (``strategy_results_store``, grouped), the
+   holdout access log (grouped), the frozen declarations, and the file-recorded studies in
+   ``FILE_STUDIES`` (transcribed from the cited documents, not re-measured), rolled up per hunt
+   window by date overlap. A strategy with a holdout access but no stored holdout window is listed
+   as ``window_unrecorded``, never dropped.
 
-Size stratum (by construction, no published formulation applies): the programme needs a size axis
-before shares outstanding exist point-in-time (#3360 starts 2011), so size is proxied by median
-daily DOLLAR volume (unadjusted close x unadjusted volume — the Intrader archive is unadjusted, so
-the product is dollars actually traded), cut into terciles among the series with at least
-``MIN_VOLUME_BARS`` positive-volume bars that calendar year. Terciles, not NYSE breakpoints: exchange
-membership is not stored for the archive.
+Liquidity stratum (by construction, no published formulation applies): point-in-time shares
+outstanding do not exist before #3360's 2011 start, so no size axis is available across the span.
+The stratum is liquidity: the median daily close x volume over positive-volume bars (an
+approximation that values the day's volume at the close; the vendor rows are ``unadjusted``), cut
+into terciles among ADMITTED series with at least ``MIN_VOLUME_BARS`` positive-volume bars that year.
+Terciles and the 20-bar floor are construction choices, frozen in ``CENSUS_VERSION``.
 
     PYTHONPATH=. uv run python -m scripts.census_3384_hunt_admissibility --out <path.json>
 
-Prints the tables; writes the full census JSON to ``--out``.
+Writes the census JSON to ``--out`` and prints the population block.
 """
 
 from __future__ import annotations
@@ -53,20 +57,21 @@ from app.services.security_linkage import COVERAGE_START as LINKAGE_COVERAGE_STA
 from app.services.security_linkage import WINDOW_DAYS as LINKAGE_WINDOW_DAYS
 from app.services.series_termination import TerminationEvidence, classify_termination
 from app.services.strategies.validated_universe import load_validated_universe
-from app.services.strategy_result import HOLDOUT_BOUNDARY
+from app.services.strategy_result import EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY
 from app.services.universe_selection import (
     ALIVE_CUT_DAYS,
+    EXCHANGE_TEST_ISSUE_SYMBOLS,
     INTRADER_CAPTURE_DATE,
     SURVIVORSHIP_FREE_VENDOR,
     load_universe_selection,
 )
 
-CENSUS_VERSION: Final = "hunt-admissibility-census-v1"
+CENSUS_VERSION: Final = "hunt-admissibility-census-v2"
 
 #: The programme's windows (pattern-hunt-programme.md, "The rules", rule 1). Validation ends the
 #: day before the repo's HOLDOUT_BOUNDARY; the holdout runs to the archive capture.
 HUNT_WINDOWS: Final[tuple[tuple[str, date, date], ...]] = (
-    ("pre_discovery", date(1962, 1, 1), date(1989, 12, 31)),
+    ("pre_discovery", EVALUATION_WINDOW_START, date(1989, 12, 31)),
     ("discovery", date(1990, 1, 1), date(2008, 12, 31)),
     ("validation", date(2009, 1, 1), HOLDOUT_BOUNDARY - timedelta(days=1)),
     ("holdout", HOLDOUT_BOUNDARY, INTRADER_CAPTURE_DATE),
@@ -77,8 +82,11 @@ HUNT_WINDOWS: Final[tuple[tuple[str, date, date], ...]] = (
 MIN_VOLUME_BARS: Final = 20
 
 ALIVE: Final = "alive_at_capture"
+#: Last bar within ALIVE_CUT_DAYS of capture but not admitted: no link to a validated eToro
+#: instrument. Absence of a link is not proof the name is absent from eToro.
 ALIVE_UNADMITTED: Final = "alive_unadmitted"
-EXCLUDED_TERMINATED: Final = "excluded_terminated_test_issue"
+EXCLUDED_TEST_ISSUE: Final = "excluded_test_issue"
+NOT_ADMITTED: Final = frozenset({ALIVE_UNADMITTED, EXCLUDED_TEST_ISSUE})
 
 
 @dataclass(frozen=True)
@@ -161,17 +169,23 @@ _HARVESTED_SQL: Final = """
     ORDER BY series_id
 """
 
-#: One row per (series, calendar year). ``flat`` counts bars with no usable open-to-close range —
-#: the overnight family's admissibility hinges on real opens.
+#: One row per (series, calendar year). NULL-open and zero-range bars are separate: a NULL open makes
+#: the intraday return unknown, a zero-range bar makes it zero (real, or a stale print — provenance is
+#: not measurable here).
 _SERIES_YEAR_SQL: Final = """
     SELECT d.series_id,
            extract(year FROM d.bar_date)::int AS yr,
            count(*) AS bars,
            count(*) FILTER (WHERE d.dividend > 0) AS dividend_bars,
-           count(*) FILTER (WHERE d.volume IS NULL OR d.volume = 0) AS no_volume_bars,
+           count(*) FILTER (WHERE d.volume IS NULL OR d.volume <= 0) AS no_volume_bars,
+           count(*) FILTER (WHERE d.open IS NULL) AS open_null_bars,
            count(*) FILTER (
-               WHERE d.open IS NULL OR (d.open = d.high AND d.high = d.low AND d.low = d.close)
-           ) AS flat_bars,
+               WHERE d.open = d.high AND d.high = d.low AND d.low = d.close
+           ) AS zero_range_bars,
+           count(*) FILTER (
+               WHERE d.close <= 0 OR d.open <= 0 OR d.low <= 0 OR d.high < d.low
+                  OR d.close > d.high OR d.close < d.low OR d.open > d.high OR d.open < d.low
+           ) AS invalid_bars,
            count(*) FILTER (WHERE d.volume > 0) AS volume_bars,
            percentile_cont(0.5) WITHIN GROUP (ORDER BY d.close * d.volume)
                FILTER (WHERE d.volume > 0) AS median_dollar_volume
@@ -186,7 +200,11 @@ def _stratum(row: tuple[Any, ...], admitted: set[int], alive_floor: date) -> str
     series_id, symbol, _first, last_bar, _iid, _cik, source, provision = row
     alive = last_bar > alive_floor
     if int(series_id) not in admitted:
-        return ALIVE_UNADMITTED if alive else EXCLUDED_TERMINATED
+        if str(symbol).strip().upper() in EXCHANGE_TEST_ISSUE_SYMBOLS:
+            return EXCLUDED_TEST_ISSUE
+        if alive:
+            return ALIVE_UNADMITTED
+        raise RuntimeError(f"terminating series {series_id} is neither admitted nor a test issue")
     if alive:
         return ALIVE
     return str(
@@ -217,17 +235,13 @@ def _terciles(values: list[float]) -> tuple[float, float]:
 
 
 def _coverage(conn: psycopg.Connection[Any], strata: dict[int, str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    by_year: dict[int, list[tuple[int, int, int, int, int, int, float | None]]] = defaultdict(list)
-    for series_id, yr, bars, div, novol, flat, volbars, mdv in conn.execute(
-        _SERIES_YEAR_SQL, {"vendor": SURVIVORSHIP_FREE_VENDOR}
-    ):
+    fields = ("bars", "dividend_bars", "no_volume_bars", "open_null_bars", "zero_range_bars", "invalid_bars")
+    by_year: dict[int, list[tuple[int, dict[str, int], int, float | None]]] = defaultdict(list)
+    for series_id, yr, *counts, volbars, mdv in conn.execute(_SERIES_YEAR_SQL, {"vendor": SURVIVORSHIP_FREE_VENDOR}):
         by_year[int(yr)].append(
             (
                 int(series_id),
-                int(bars),
-                int(div),
-                int(novol),
-                int(flat),
+                dict(zip(fields, (int(c) for c in counts), strict=True)),
                 int(volbars),
                 None if mdv is None else float(mdv),
             )
@@ -237,24 +251,26 @@ def _coverage(conn: psycopg.Connection[Any], strata: dict[int, str]) -> tuple[li
     breakpoints: dict[str, Any] = {}
     for yr in sorted(by_year):
         rows = by_year[yr]
-        sized = [mdv for _, _, _, _, _, vb, mdv in rows if mdv is not None and vb >= MIN_VOLUME_BARS]
+        # Cuts over ADMITTED series only: excluded names must not move the admitted strata.
+        sized = [
+            mdv
+            for sid, _, vb, mdv in rows
+            if mdv is not None and vb >= MIN_VOLUME_BARS and strata[sid] not in NOT_ADMITTED
+        ]
         cuts = _terciles(sized) if len(sized) >= 3 else None
         breakpoints[str(yr)] = None if cuts is None else {"t1_upper": cuts[0], "t2_upper": cuts[1], "n": len(sized)}
         agg: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
-        for series_id, bars, div, novol, flat, vb, mdv in rows:
+        for sid, counts, vb, mdv in rows:
             if cuts is None or mdv is None or vb < MIN_VOLUME_BARS:
-                size = "unsized"
+                tier = "unsized"
             else:
-                size = "small" if mdv < cuts[0] else "mid" if mdv < cuts[1] else "large"
-            c = agg[(strata[series_id], size)]
+                tier = "low" if mdv < cuts[0] else "mid" if mdv < cuts[1] else "high"
+            c = agg[(strata[sid], tier)]
             c["series"] += 1
-            c["bars"] += bars
-            c["dividend_bars"] += div
-            c["dividend_series"] += div > 0
-            c["no_volume_bars"] += novol
-            c["flat_bars"] += flat
-        for (stratum, size), c in sorted(agg.items()):
-            cells.append({"year": yr, "windows": _window_of(yr), "stratum": stratum, "size": size, **c})
+            c["dividend_series"] += counts["dividend_bars"] > 0
+            c.update(counts)
+        for (stratum, tier), c in sorted(agg.items()):
+            cells.append({"year": yr, "windows": _window_of(yr), "stratum": stratum, "liquidity": tier, **c})
     return cells, breakpoints
 
 
@@ -263,7 +279,7 @@ def _terminations_by_year(harvested: list[tuple[Any, ...]], strata: dict[int, st
     out: dict[str, Counter[str]] = defaultdict(Counter)
     for row in harvested:
         stratum = strata[int(row[0])]
-        if stratum not in (ALIVE, ALIVE_UNADMITTED, EXCLUDED_TERMINATED):
+        if stratum != ALIVE and stratum not in NOT_ADMITTED:
             out[str(row[3].year)][stratum] += 1
     return dict(sorted(out.items()))
 
@@ -284,7 +300,7 @@ def _identity(
         c["instrument_linked"] += iid is not None
         c["stored_cik"] += cik is not None
         c["form25_linked"] += source == "sec_form25"
-        c["no_stored_issuer_link"] += iid is None and cik is None and source != "sec_form25"
+        c["no_stored_link"] += iid is None and cik is None and source != "sec_form25"
     span = conn.execute("SELECT min(filed_date), max(filed_date), count(*) FROM sec_form25_register").fetchone()
     return {
         "per_stratum": dict(sorted(per_stratum.items())),
@@ -308,16 +324,22 @@ def _contamination(conn: psycopg.Connection[Any]) -> dict[str, Any]:
             "source": "strategy_results_store",
             "namespace": ns,
             "universe": basis,
-            "start": str(start),
-            "end": str(end),
+            "window_start": str(w0),
+            "window_end": str(w1),
+            "metric_axis_start": None if a0 is None else str(a0),
+            "metric_axis_end": None if a1 is None else str(a1),
+            # The span counted as seen: the metric axis where recorded, else the stored window (an
+            # upper bound on what was evaluated, not a measurement of it).
+            "start": str(a0 if a0 is not None else w0),
+            "end": str(a1 if a1 is not None else w1),
             "rows": int(n),
         }
-        for sid, ver, ns, basis, start, end, n in conn.execute(
+        for sid, ver, ns, basis, w0, w1, a0, a1, n in conn.execute(
             """
             SELECT strategy_id, strategy_version, namespace, universe_basis,
-                   coalesce(metric_axis_start, window_start), coalesce(metric_axis_end, window_end), count(*)
+                   window_start, window_end, metric_axis_start, metric_axis_end, count(*)
             FROM strategy_results_store
-            GROUP BY 1, 2, 3, 4, 5, 6
+            GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
             ORDER BY 1, 2, 3, 5
             """
         )
@@ -332,11 +354,23 @@ def _contamination(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         )
     ]
     declarations = [
-        {"declaration_id": int(i), "strategy": sid, "version": ver, "purpose": purpose, "frozen": str(frozen)}
-        for i, sid, ver, purpose, frozen in conn.execute(
+        {
+            "declaration_id": int(i),
+            "strategy": sid,
+            "version": ver,
+            "purpose": purpose,
+            "frozen": str(frozen),
+            "has_stored_result": bool(has_result),
+            "has_holdout_access": bool(has_access),
+        }
+        for i, sid, ver, purpose, frozen, has_result, has_access in conn.execute(
             """
-            SELECT declaration_id, strategy_id, strategy_version, prereg_purpose, frozen_at::date
-            FROM strategy_preregistration_declarations ORDER BY declaration_id
+            SELECT d.declaration_id, d.strategy_id, d.strategy_version, d.prereg_purpose, d.frozen_at::date,
+                   EXISTS (SELECT 1 FROM strategy_results_store r
+                           WHERE r.strategy_id = d.strategy_id AND r.strategy_version = d.strategy_version),
+                   EXISTS (SELECT 1 FROM strategy_holdout_accesses a
+                           WHERE a.strategy_id = d.strategy_id AND a.strategy_version = d.strategy_version)
+            FROM strategy_preregistration_declarations d ORDER BY d.declaration_id
             """
         )
     ]
@@ -368,6 +402,17 @@ def _contamination(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         name: sorted({label for label, s0, s1 in spans if _overlaps(s0, s1, start, end)})
         for name, start, end in HUNT_WINDOWS
     }
+    # A holdout access with no stored holdout window: the holdout was opened, the dates it read are
+    # not recorded. Listed, never dropped.
+    stored_holdout = {s["study"] for s in stored if s["namespace"] == "hold_out"}
+    per_window["holdout"] = sorted(
+        set(per_window["holdout"])
+        | {
+            f"{a['strategy']}@{a['version']}:holdout_access:window_unrecorded"
+            for a in accesses
+            if f"{a['strategy']}@{a['version']}" not in stored_holdout
+        }
+    )
     return {
         "stored_results": stored,
         "holdout_accesses": accesses,
@@ -390,9 +435,14 @@ def main() -> int:
         selection = load_universe_selection(conn, universe="survivorship_free", validated_ids=frozenset(validated))
         admitted = {s.series_id for s in selection.admitted}
         harvested = conn.execute(_HARVESTED_SQL, {"vendor": SURVIVORSHIP_FREE_VENDOR}).fetchall()
+        unharvested_row = conn.execute(
+            "SELECT count(*) FROM research_price_series WHERE vendor = %(v)s AND bar_count IS NULL",
+            {"v": SURVIVORSHIP_FREE_VENDOR},
+        ).fetchone()
+        unharvested = unharvested_row[0] if unharvested_row else 0
         alive_floor = INTRADER_CAPTURE_DATE - timedelta(days=ALIVE_CUT_DAYS)
         strata = {int(row[0]): _stratum(row, admitted, alive_floor) for row in harvested}
-        if {sid for sid, st in strata.items() if st not in (ALIVE_UNADMITTED, EXCLUDED_TERMINATED)} != admitted:
+        if {sid for sid, st in strata.items() if st not in NOT_ADMITTED} != admitted:
             raise RuntimeError("stratum assignment disagrees with the admitted set")
         cells, breakpoints = _coverage(conn, strata)
         contamination = _contamination(conn)
@@ -403,13 +453,15 @@ def main() -> int:
         "capture_date": str(INTRADER_CAPTURE_DATE),
         "alive_floor": str(alive_floor),
         "harvested": len(harvested),
+        "unharvested": int(unharvested),
         "admitted": len(admitted),
         "validated_instruments": len(validated),
+        "validated_ids_sha256": hashlib.sha256(",".join(map(str, sorted(validated))).encode()).hexdigest(),
         "unlinked_alive_excluded": selection.unlinked_alive_excluded,
         "exchange_test_issues_excluded": selection.exchange_test_issues_excluded,
         "linked_early_reuse_suspect": selection.linked_early_reuse_suspect,
-        # Before this date the archive holds no series that ends: every name trading earlier is
-        # conditioned on surviving to at least here.
+        # No harvested series ends before this date: every name trading earlier is conditioned on
+        # its series continuing to at least here.
         "earliest_last_bar": str(min(row[3] for row in harvested)),
         "strata": dict(Counter(strata.values()).most_common()),
     }
@@ -421,7 +473,7 @@ def main() -> int:
         "min_volume_bars": MIN_VOLUME_BARS,
         "population": population,
         "coverage": cells,
-        "size_breakpoints": breakpoints,
+        "liquidity_breakpoints": breakpoints,
         "terminations_by_last_bar_year": _terminations_by_year(harvested, strata),
         "identity": identity,
         "contamination": contamination,
