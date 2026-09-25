@@ -6,7 +6,7 @@ measured from each source) follows in its own PR.
 
 **Reproduce:** `PYTHONPATH=. uv run python -m scripts.census_3384_hunt_admissibility --out <path.json>`.
 Committed output: `2026-09-25-3384-hunt-admissibility-census.json` (`census_version`
-`hunt-admissibility-census-v2`, git head `9376ee24`, `git_dirty` false, `validated_ids_sha256` `3b6448a1…`). Every figure below is
+`hunt-admissibility-census-v2`, git head `fa0e2837`, `git_dirty` false, `validated_ids_sha256` `3b6448a1…`). Every figure below is
 read from that file. The dev DB is not snapshotted: a re-run moves with `sync_universe` (the validated set) and
 any corpus re-harvest, which is why the validated-id digest is recorded.
 

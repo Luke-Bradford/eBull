@@ -21328,9 +21328,10 @@
    "zero_range_bars": 5674
   }
  ],
- "generated_at": "2026-09-25T21:00:27+00:00",
+ "generated_at": "2026-09-25T21:09:32+00:00",
  "git_dirty": false,
- "git_head": "9376ee2435ddfbd781172c6b16639d52d206f312",
+ "git_head": "fa0e283719d6819391e03e0f8a14f7eb2efd1ed5",
+ "git_status": [],
  "hunt_windows": [
   {
    "end": "1989-12-31",
