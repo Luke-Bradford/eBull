@@ -12,6 +12,7 @@ Sep 27, Sep 30, Oct 1, Oct 25. Jul 4 is a full closure (the closure-dated bar ca
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import date, datetime
 from typing import Any
 
@@ -415,3 +416,23 @@ def test_parity_catches_a_different_terminal_wealth() -> None:
     )
     with pytest.raises(ParityMismatch):
         check_parity(monthly, annual, window_end=SEP27)
+
+
+def test_parity_refuses_a_malformed_annual_result_with_its_own_error() -> None:
+    evidence = _evidence(PLAIN)
+    kwargs: dict[str, Any] = {"prices": PLAIN, "policy": ZERO_RECOVERY, "half_spread": 0.0, "evidence": evidence}
+    monthly = simulate_monthly(schedule=((JUL1, frozenset(PLAIN)),), window_end=SEP27, **kwargs)
+    annual = simulate_portfolio(
+        schedule=((FORMATION[JUL1], frozenset(PLAIN)),),
+        window_end=SEP27,
+        prices=PLAIN,
+        policy=ZERO_RECOVERY,
+        half_spread=0.0,
+        evidence=evidence,
+    )
+    zero_count = replace(annual, events=(replace(annual.events[0], target_count=0), *annual.events[1:]))
+    with pytest.raises(ParityMismatch, match="target count 0"):
+        check_parity(monthly, zero_count, window_end=SEP27)
+    short = replace(monthly, target_values=())
+    with pytest.raises(ParityMismatch, match="monthly targets"):
+        check_parity(short, annual, window_end=SEP27)

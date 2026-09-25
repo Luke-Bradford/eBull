@@ -1122,7 +1122,12 @@ def check_parity(monthly: MonthlyResult, annual: PortfolioResult, *, window_end:
     for event in monthly.marks[1:]:
         if event.session != last_session_of_month(event.month):
             raise ParityMismatch(f"mark {event.month} is not on the month's last session")
+    if len(monthly.target_values) != len(annual.events) - 1:
+        raise ParityMismatch(f"{len(monthly.target_values)} monthly targets for {len(annual.events) - 1} rebalances")
     for index, (event, target) in enumerate(zip(annual.events[:-1], monthly.target_values, strict=True)):
+        if event.target_count <= 0:
+            # The annual path always records len(target) ≥ 1, even on a ruined book; anything else is not its event.
+            raise ParityMismatch(f"annual rebalance {index} on {event.day} has target count {event.target_count}")
         annual_target = (event.pre_cost_wealth - event.spread_cost) / event.target_count
         if not _close(annual_target, target):
             raise ParityMismatch(f"rebalance {index} on {event.day}: target {target!r} vs annual {annual_target!r}")
