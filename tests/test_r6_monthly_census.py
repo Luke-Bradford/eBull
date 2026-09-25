@@ -115,6 +115,10 @@ def test_stale_mark_census_by_hand(policy: TerminationPolicy, h: float) -> None:
     assert turnover.forced_exits == pytest.approx({(2013, 7): 0.0, (2013, 8): 1 / 3, (2013, 9): 0.0}, rel=1e-12)
     # The partial month: the final sale of HLT (priced) and LIV (alive at capture, last close).
     assert turnover.partial_traded == pytest.approx(2 * t, rel=1e-12)
+    # Independent derivation: the final liquidation is every final cell's value, whatever its action.
+    assert turnover.partial_traded == pytest.approx(
+        sum(cell.value for cell in result.cells if cell.kind == "final"), rel=1e-12
+    )
     assert turnover.partial_forced_exits == 0.0
     assert turnover.window_traded == pytest.approx(3 * t + f * t + 2 * t, rel=1e-12)
 
@@ -165,6 +169,8 @@ def test_turnover_counts_rebalances_and_mark_recognitions_once(policy: Terminati
     # Oct 1 (after the last mark) sells AAA down to t3 and buys GAP; then the final sale of both.
     assert census.partial_traded == pytest.approx(t2 + 2 * t3, rel=1e-9)
     assert census.window_traded == pytest.approx(4 * s * 10 + s * 4 * f + sep3_traded + t2 + 2 * t3, rel=1e-9)
+    final_cells = sum(cell.value for cell in result.cells if cell.kind == "final")
+    assert census.partial_traded == pytest.approx(result.events[2].traded_notional + final_cells, rel=1e-12)
 
     cells = {(cell.session, cell.symbol): (cell.kind, cell.status, cell.action) for cell in result.cells}
     assert cells[(SEP3, "AAA")] == ("rebalance", "bar", "priced")

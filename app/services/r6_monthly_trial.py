@@ -1280,6 +1280,8 @@ def turnover_census(result: MonthlyResult, months: Sequence[Month] = STATISTIC_M
             partial_traded += event.traded_notional
         elif index > 0:
             traded[_month_of(event.day)] += event.traded_notional
+    # Rebalance and final-sale notional (including every final cell, recognised or not) comes from the events
+    # above; cells add only the forced exits and the recognitions at marks, which trade outside any event.
     for cell in result.cells:
         if cell.action != "recognised":
             continue
