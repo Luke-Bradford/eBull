@@ -11464,3 +11464,15 @@ neighbouring container and match it.**
   guard's message and check that the new path passes through it.
 - Enforced in: `app/services/r6_quality_universe.py::gpa_of`,
   `tests/test_2901_quality_universe.py::test_gpa_of_refuses_a_missing_operand_with_a_named_error`.
+
+### A checker documented to raise one error type must not leak another from its own arithmetic (#2901)
+
+- Failure: `r6_monthly_trial.check_parity` promised `ParityMismatch` on any disagreement, but divided by
+  the annual event's `target_count` and zipped two lists with `strict=True`. A malformed input would have
+  surfaced as `ZeroDivisionError` or `ValueError`, which a runner mapping `ParityMismatch` to
+  `REFUSED_PRE_GATE` does not catch. (Review bot, PR #3396.)
+- Prevention: before every division or strict zip in a function whose contract names its exception, test
+  the operand or length and raise the named type. Self-review prompt: "which built-in errors can this
+  body raise, and does the docstring promise something else?"
+- Enforced in: `app/services/r6_monthly_trial.py::check_parity`,
+  `tests/test_r6_monthly_simulator.py::test_parity_refuses_a_malformed_annual_result_with_its_own_error`.

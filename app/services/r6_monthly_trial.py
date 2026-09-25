@@ -1,9 +1,9 @@
 """#2901 quality arm: the monthly trial's identity gate, statistics and verdict (PR B, part 1).
 
 Spec: ``docs/proposals/ta/2026-09-25-2901-quality-declaration-spec.md`` ("Identity gate", "Statistics",
-"Composition with termination policies", "Verdict"). Everything here is pure and consumes monthly series keyed by
-``(year, month)``, so it is fixed and tested before any return exists. The simulator (``simulate_monthly``) and the
-sealed runner are part 2.
+"Composition with termination policies", "Verdict", "Simulator"). Everything here is pure and consumes monthly series
+keyed by ``(year, month)``, so it is fixed and tested before any return exists. ``simulate_monthly`` (part 2a)
+produces those series; the sealed runner is part 2b.
 
 Every statistic returns a value or a :class:`Refused` with a named reason. Conditions over them are three-valued
 (:class:`Tri`) and compose by the weak Kleene conjunction, so a refusal is carried to the verdict boundary instead of
@@ -23,11 +23,27 @@ import zipfile
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
-from app.services.r6_exclusion_trial import ZERO_RECOVERY, haircut_net_return, month_pairs
+from app.services.market_calendar import us_market_status
+from app.services.r6_exclusion_trial import (
+    WINDOW_END,
+    ZERO_RECOVERY,
+    PortfolioResult,
+    PriceBar,
+    PriceSeries,
+    Realisation,
+    RebalanceEvent,
+    SeriesEvidence,
+    TerminationPolicy,
+    _holding_value,
+    _target_value,
+    haircut_net_return,
+    month_pairs,
+)
 from app.services.r6_exclusion_trial import validate_factor as _validate_factor
 
 Month = tuple[int, int]
@@ -778,7 +794,362 @@ def decide_verdict(
     return result(Verdict.NOT_PASS_MIXED)
 
 
+# --- Simulator (spec "Simulator") ----------------------------------------------------------------------------
+
+#: (x_date, targets): the rebalance session of each formation and its equal-weight target set. The x_date comes
+#: from the artefact; the annual simulator derives the same session from the formation (parity check 1).
+MonthlySchedule = tuple[tuple[date, frozenset[str]], ...]
+
+
+class SimulationError(RuntimeError):
+    """A finiteness, underflow or schedule violation. The run refuses; it is never read as a ruin or a return."""
+
+
+class ParityMismatch(RuntimeError):
+    """The monthly simulator disagrees with ``simulate_portfolio`` (spec "Parity with the frozen simulator")."""
+
+
+def next_month(month: Month) -> Month:
+    year, number = month
+    return (year + 1, 1) if number == 12 else (year, number + 1)
+
+
+def previous_month(month: Month) -> Month:
+    year, number = month
+    return (year - 1, 12) if number == 1 else (year, number - 1)
+
+
+def last_session_of_month(month: Month) -> date:
+    """The month's last NYSE session (``market_calendar``): its close is the month-end mark."""
+    year, number = next_month(month)
+    day = date(year, number, 1) - timedelta(days=1)
+    while us_market_status(day) == "closed":
+        day -= timedelta(days=1)
+    return day
+
+
+@dataclass(frozen=True)
+class MarkState:
+    """Wealth at one month-end mark, after that month's costs. ``held_value`` includes gaps held at last close."""
+
+    month: Month
+    session: date
+    wealth: float
+    cash: float
+    held_value: float
+    #: Cash credited by recognitions at this mark: Σ realised_value × (1 − h).
+    recognised_cash: float
+
+
+@dataclass(frozen=True)
+class MonthlyResult:
+    """One (portfolio, policy, h) path. Factors, never rounded returns, carry the compounding (spec "Finiteness")."""
+
+    #: W at the opening mark (the month before the first rebalance, cash 1.0) and at every month-end mark.
+    marks: tuple[MarkState, ...]
+    #: g_m = W(mark_m) / W(mark_{m−1}) for every mark after the opening one; 1.0 after a ruin (r_m = 0).
+    factors: Mapping[Month, float]
+    #: W(final) / W(last mark), or 1.0 when W(last mark) = 0.
+    partial_factor: float
+    terminal_wealth: float
+    #: One event per rebalance, then the final sale — the annual simulator's convention.
+    events: tuple[RebalanceEvent, ...]
+    #: Per rebalance, the equal-weight per-name target value (0 on a ruined book).
+    target_values: tuple[float, ...]
+    #: Every missing-bar valuation that traded: sales at rebalances and the final, recognitions at marks.
+    realisations: tuple[Realisation, ...]
+    #: The first month whose mark wealth is exactly 0.
+    ruin_month: Month | None
+
+    @property
+    def total_return(self) -> float:
+        return self.terminal_wealth - 1.0
+
+    @property
+    def partial_return(self) -> float:
+        return self.partial_factor - 1.0
+
+    def ruined_within(self, months: Sequence[Month]) -> bool:
+        return self.ruin_month is not None and self.ruin_month in set(months)
+
+    @property
+    def ruined_in_partial(self) -> bool:
+        """A ruin between the last mark and the final (a September-only ruin in the run)."""
+        return self.marks[-1].wealth > 0 and self.terminal_wealth == 0
+
+
+def _finite(value: float, what: str) -> float:
+    if not math.isfinite(value):
+        raise SimulationError(f"{what} is not finite: {value!r}")
+    return value
+
+
+def _positive_product(value: float, what: str) -> float:
+    """An operation on positive inputs whose exact result is positive: an underflow to 0 raises."""
+    _finite(value, what)
+    if value <= 0:
+        raise SimulationError(f"{what} underflowed to {value!r} from positive inputs")
+    return value
+
+
+def _spread_cost(half_spread: float, notional: float, what: str) -> float:
+    """h × traded notional: positive inputs must give a positive cost (Codex ckpt-2: an underflow is not free)."""
+    cost = _finite(half_spread * notional, what)
+    return _positive_product(cost, what) if half_spread > 0 and notional > 0 else cost
+
+
+def _price(value: float, what: str) -> float:
+    if not (math.isfinite(value) and value > 0):
+        raise SimulationError(f"{what} is not a finite positive price: {value!r}")
+    return value
+
+
+def _fraction(policy: TerminationPolicy, realisation: Realisation) -> float:
+    if realisation.status == "alive_at_capture":
+        return 1.0
+    if realisation.status == "gap":
+        return policy.gap_fraction
+    if realisation.status == "terminated" and realisation.termination_class is not None:
+        return policy.terminal_fraction(realisation.termination_class)
+    raise SimulationError(f"unexpected realisation status {realisation.status!r}")
+
+
+def simulate_monthly(
+    *,
+    schedule: MonthlySchedule,
+    prices: Mapping[str, PriceSeries],
+    policy: TerminationPolicy,
+    half_spread: float,
+    evidence: Mapping[str, SeriesEvidence],
+    window_end: date = WINDOW_END,
+) -> MonthlyResult:
+    """Month-end marks between annual rebalances, with terminated holdings realised into cash at the marks.
+
+    Rebalances and the final sale run the annual simulator's own code path (``_holding_value`` and
+    ``_target_value``), so terminal wealth equals ``simulate_portfolio``'s on the same schedule and policy. At a mark
+    a holding with a bar is valued at its adjusted close, a gap is held at its last close (no trade), and a
+    termination is recognised: its shares are removed and cash is credited R·(1 − h), R = fraction × last close ×
+    shares. Cash earns 0% and rejoins at the next rebalance. W = 0 exactly is a ruin and is absorbing.
+    """
+    if not policy.needs_evidence:
+        raise SimulationError(f"policy {policy.label!r} is a legacy policy; the programme needs a status split")
+    if not (math.isfinite(half_spread) and 0.0 <= half_spread < 1.0):
+        raise SimulationError(f"half spread {half_spread!r} is outside [0, 1)")
+    days = [day for day, _ in schedule]
+    if not days or days != sorted(set(days)) or days[-1] >= window_end:
+        raise SimulationError("the schedule must be non-empty, strictly increasing and before the window end")
+    if any(not target for _, target in schedule):
+        raise SimulationError("a formation has an empty target set")
+
+    opening = previous_month((days[0].year, days[0].month))
+    mark_months: list[Month] = []
+    month = next_month(opening)
+    while month < (window_end.year, window_end.month):
+        mark_months.append(month)
+        month = next_month(month)
+    mark_sessions = {last_session_of_month(m): m for m in mark_months}
+    if set(days) & set(mark_sessions):
+        raise SimulationError("a rebalance session is also a month-end session")
+    if max(mark_sessions, default=days[0]) >= window_end:
+        raise SimulationError("a month-end mark falls on or after the window end")
+    targets_by_day = dict(schedule)
+    timeline = sorted(set(days) | set(mark_sessions))
+
+    bars: dict[str, dict[date, PriceBar]] = {}
+
+    def bar_on(symbol: str, day: date) -> PriceBar | None:
+        cached = bars.get(symbol)
+        if cached is None:
+            cached = bars[symbol] = {bar.day: bar for bar in prices[symbol].bars}
+        return cached.get(day)
+
+    holdings: dict[str, float] = {}
+    terminated: set[str] = set()
+    cash = 1.0
+    events: list[RebalanceEvent] = []
+    target_values: list[float] = []
+    realisations: list[Realisation] = []
+    marks = [MarkState(opening, last_session_of_month(opening), 1.0, 1.0, 0.0, 0.0)]
+    factors: dict[Month, float] = {}
+    ruin_month: Month | None = None
+
+    def value(symbol: str, day: date, field: Literal["open", "close"]) -> tuple[float, Realisation | None]:
+        """The annual simulator's valuation of one holding, with the finiteness and underflow checks."""
+        shares = holdings[symbol]
+        held, realisation = _holding_value(
+            symbol,
+            prices[symbol],
+            shares,
+            day,
+            field=field,
+            policy=policy,
+            evidence=evidence,
+            window_end=window_end,
+        )
+        if realisation is None:
+            bar = bar_on(symbol, day)
+            assert bar is not None
+            _price(bar.adjusted_open if field == "open" else bar.adjusted_close, f"{symbol} {field} on {day}")
+            return _positive_product(held, f"{symbol} value on {day}"), None
+        _positive_product(realisation.last_close_value, f"{symbol} last-close value on {day}")
+        if _fraction(policy, realisation) > 0:
+            _positive_product(held, f"{symbol} realised value on {day}")
+        return _finite(held, f"{symbol} realised value on {day}"), realisation
+
+    for day in timeline:
+        if day in targets_by_day:
+            target = targets_by_day[day]
+            current: dict[str, float] = {}
+            for symbol in sorted(holdings):
+                current[symbol], realisation = value(symbol, day, "open")
+                if realisation is not None:
+                    realisations.append(realisation)
+                    if realisation.status == "terminated":
+                        terminated.add(symbol)
+            censored = sum(bar_on(symbol, day) is None for symbol in holdings)
+            pre_cost = _finite(cash + sum(current.values()), "pre-cost wealth")
+            if pre_cost < 0:
+                raise SimulationError(f"negative wealth {pre_cost!r} on {day}")
+            if pre_cost == 0:
+                # Ruined: absorbing. No target entries are created (the annual code creates zero-share ones).
+                events.append(RebalanceEvent(day, 0.0, 0.0, 0.0, 0, censored))
+                target_values.append(0.0)
+                holdings, cash = {}, 0.0
+                continue
+            if target & terminated:
+                raise SimulationError(f"a terminated symbol is a target on {day}: {sorted(target & terminated)}")
+            target_value = _positive_product(
+                _target_value(pre_cost, current, target, half_spread), f"target value on {day}"
+            )
+            traded = sum(abs(target_value - current.get(symbol, 0.0)) for symbol in target)
+            traded += sum(amount for symbol, amount in current.items() if symbol not in target)
+            cost = _spread_cost(half_spread, traded, f"rebalance cost on {day}")
+            if not math.isclose(len(target) * target_value + cost, pre_cost, rel_tol=1e-10, abs_tol=1e-12):
+                raise SimulationError(f"rebalance cash conservation failed on {day}")
+            new_holdings: dict[str, float] = {}
+            for symbol in sorted(target):
+                bar = bar_on(symbol, day)
+                if bar is None:
+                    raise SimulationError(f"target {symbol} has no bar on its execution session {day}")
+                open_price = _price(bar.adjusted_open, f"{symbol} adjusted open on {day}")
+                new_holdings[symbol] = _positive_product(target_value / open_price, f"{symbol} shares on {day}")
+            holdings, cash = new_holdings, 0.0
+            events.append(RebalanceEvent(day, pre_cost, traded, cost, len(target), censored))
+            target_values.append(target_value)
+            continue
+
+        # A month-end mark: nothing trades except recognitions.
+        mark_month = mark_sessions[day]
+        held_value = 0.0
+        recognised_cash = 0.0
+        for symbol in sorted(holdings):
+            shares = holdings[symbol]
+            bar = bar_on(symbol, day)
+            if bar is not None:
+                close = _price(bar.adjusted_close, f"{symbol} adjusted close on {day}")
+                held_value += _positive_product(shares * close, f"{symbol} value on {day}")
+                continue
+            realised, realisation = value(symbol, day, "close")
+            assert realisation is not None
+            if realisation.status == "terminated":
+                credit = _finite(realised * (1.0 - half_spread), f"{symbol} recognised cash on {day}")
+                if realised > 0:
+                    _positive_product(credit, f"{symbol} recognised cash on {day}")
+                recognised_cash += credit
+                realisations.append(realisation)
+                terminated.add(symbol)
+                del holdings[symbol]
+            else:
+                # A gap (an alive-at-capture series before the final is a gap): held at last close, no trade.
+                held_value += realisation.last_close_value
+        cash = _finite(cash + recognised_cash, f"cash on {day}")
+        wealth = _finite(cash + held_value, f"wealth on {day}")
+        if wealth < 0:
+            raise SimulationError(f"negative wealth {wealth!r} on {day}")
+        previous = marks[-1].wealth
+        if previous == 0:
+            factors[mark_month] = 1.0
+        else:
+            factors[mark_month] = _finite(wealth / previous, f"factor for {mark_month}")
+            if wealth > 0:
+                _positive_product(factors[mark_month], f"factor for {mark_month}")
+            elif ruin_month is None:
+                ruin_month = mark_month
+        marks.append(MarkState(mark_month, day, wealth, cash, held_value, recognised_cash))
+
+    final_values: list[float] = []
+    for symbol in sorted(holdings):
+        final_value, realisation = value(symbol, window_end, "close")
+        final_values.append(final_value)
+        if realisation is not None:
+            realisations.append(realisation)
+    final_mid = _finite(sum(final_values), "final holdings value")
+    final_cost = _spread_cost(half_spread, final_mid, "final sale cost")
+    censored = sum(bar_on(symbol, window_end) is None for symbol in holdings)
+    events.append(RebalanceEvent(window_end, cash + final_mid, final_mid, final_cost, 0, censored))
+    terminal = _finite(cash + final_mid - final_cost, "terminal wealth")
+    if terminal < 0:
+        raise SimulationError(f"negative terminal wealth {terminal!r}")
+    last = marks[-1].wealth
+    partial = 1.0 if last == 0 else _finite(terminal / last, "partial factor")
+    if last > 0 and terminal > 0:
+        _positive_product(partial, "partial factor")
+    return MonthlyResult(
+        marks=tuple(marks),
+        factors=factors,
+        partial_factor=partial,
+        terminal_wealth=terminal,
+        events=tuple(events),
+        target_values=tuple(target_values),
+        realisations=tuple(realisations),
+        ruin_month=ruin_month,
+    )
+
+
+def _close(left: float, right: float) -> bool:
+    return abs(left - right) <= max(1e-9 * max(abs(left), abs(right)), 1e-12)
+
+
+def check_parity(monthly: MonthlyResult, annual: PortfolioResult, *, window_end: date = WINDOW_END) -> None:
+    """Spec parity checks 1–3 against ``simulate_portfolio`` on the same schedule, policy and h. Raises on a miss.
+
+    The annual terminal wealth is its final event's ``pre_cost − cost``, never ``1 + total_return``.
+    """
+    monthly_days = [event.day for event in monthly.events]
+    annual_days = [event.day for event in annual.events]
+    if monthly_days != annual_days or annual_days[-1] != window_end:
+        raise ParityMismatch(f"event sessions differ: monthly {monthly_days}, annual {annual_days}")
+    for event in monthly.marks[1:]:
+        if event.session != last_session_of_month(event.month):
+            raise ParityMismatch(f"mark {event.month} is not on the month's last session")
+    if len(monthly.target_values) != len(annual.events) - 1:
+        raise ParityMismatch(f"{len(monthly.target_values)} monthly targets for {len(annual.events) - 1} rebalances")
+    for index, (event, target) in enumerate(zip(annual.events[:-1], monthly.target_values, strict=True)):
+        if event.target_count <= 0:
+            # The annual path always records len(target) ≥ 1, even on a ruined book; anything else is not its event.
+            raise ParityMismatch(f"annual rebalance {index} on {event.day} has target count {event.target_count}")
+        annual_target = (event.pre_cost_wealth - event.spread_cost) / event.target_count
+        if not _close(annual_target, target):
+            raise ParityMismatch(f"rebalance {index} on {event.day}: target {target!r} vs annual {annual_target!r}")
+    final = annual.events[-1]
+    annual_terminal = final.pre_cost_wealth - final.spread_cost
+    if not _close(annual_terminal, monthly.terminal_wealth):
+        raise ParityMismatch(f"terminal wealth {monthly.terminal_wealth!r} vs annual {annual_terminal!r}")
+    if (annual_terminal == 0) != (monthly.terminal_wealth == 0):
+        raise ParityMismatch("ruin status differs")
+
+
 __all__ = [
+    "MarkState",
+    "MonthlyResult",
+    "MonthlySchedule",
+    "ParityMismatch",
+    "SimulationError",
+    "check_parity",
+    "last_session_of_month",
+    "next_month",
+    "previous_month",
+    "simulate_monthly",
     "CONTINGENT_HAIRCUT",
     "FAMILY_ALPHA",
     "FIRST_RUN_ROWS",
