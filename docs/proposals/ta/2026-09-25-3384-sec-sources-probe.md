@@ -68,8 +68,9 @@ below 10,000 shares or none. Whole-file gaps and identity failure are separate c
   but the served content is revised. Either way, one fixed lag cannot be read off this.
 - **Identity:** tickers matched to a spanning Intrader series: 3,887 / 4,949 (2012-04-02), 5,016 / 5,282
   (2016-06-01), 5,357 / 5,741 (2020-04-01), 6,644 / 7,340 (2024-04-01). Admitted series with a bar that appear
-  in MIDAS: 3,091 / 5,464, 3,846 / 7,137, 3,686 / 6,578, 3,511 / 5,291. Here the last figure is
-  closer to an identity rate: MIDAS lists traded securities, not only those with an event.
+  in MIDAS: 3,091 / 5,464, 3,846 / 7,137, 3,686 / 6,578, 3,511 / 5,291. MIDAS rows are not
+  conditioned on an event the way FTD's are, so this figure is closer to an identity rate. MIDAS's own
+  inclusion rule is not read here.
 - `McapRank` is, by its name, a market-cap rank (its definition is not read here). If so, it is the only size
   axis in any source probed so far, and it exists only from 2012.
 
