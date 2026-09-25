@@ -190,25 +190,25 @@ function PeerSnapshot({
             <HeuristicBadge modelVersion={data?.model_version ?? null} />
           </div>
           <ul className="space-y-1.5 text-xs">
-          {peers.map((p) => (
-            <li
-              key={p.instrument_id}
-              className="flex items-baseline justify-between gap-2"
-            >
-              <Link
-                to={`/instrument/${encodeURIComponent(p.symbol)}`}
-                className="flex items-baseline gap-2 truncate text-blue-700 hover:underline"
+            {peers.map((p) => (
+              <li
+                key={p.instrument_id}
+                className="flex items-baseline justify-between gap-2"
               >
-                <span className="inline-block min-w-[32px] rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-center text-[10px] font-semibold tabular-nums text-slate-600">
-                  #{p.rank ?? "—"}
+                <Link
+                  to={`/instrument/${encodeURIComponent(p.symbol)}`}
+                  className="flex items-baseline gap-2 truncate text-blue-700 hover:underline"
+                >
+                  <span className="inline-block min-w-[32px] rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-center text-[10px] font-semibold tabular-nums text-slate-600">
+                    #{p.rank ?? "—"}
+                  </span>
+                  <span className="truncate font-medium">{p.symbol}</span>
+                </Link>
+                <span className="shrink-0 tabular-nums text-slate-500">
+                  {p.total_score !== null ? p.total_score.toFixed(1) : "—"}
                 </span>
-                <span className="truncate font-medium">{p.symbol}</span>
-              </Link>
-              <span className="shrink-0 tabular-nums text-slate-500">
-                {p.total_score !== null ? p.total_score.toFixed(1) : "—"}
-              </span>
-            </li>
-          ))}
+              </li>
+            ))}
           </ul>
         </>
       )}
