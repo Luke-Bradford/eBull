@@ -8,7 +8,8 @@ in-scope Intrader series whose ``link_as_of(S, D)`` is ``linked`` with ``plain``
 (so D lies inside the series' bar range), de-duplicates to CIKs, and walks each CIK down the spec's
 ladder (construction rules 3-6), counting the first rung it fails. Field statuses are also counted
 independently of the ladder. It stops before the security choice and executability (rules 2 and
-the X(D) bar), so its eligible counts are an UPPER bound on the production E(D).
+the X(D) bar), so its eligible counts are an UPPER bound on the production E(D). The rules
+themselves are ``app/services/r6_quality_universe.py``; this script only drives them.
 
 Usage::
 
@@ -26,48 +27,19 @@ import multiprocessing
 import sys
 import zipfile
 from collections import Counter, defaultdict
-from collections.abc import Mapping
 from datetime import date
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
 from app.services import pit_fundamentals as pf
+from app.services import r6_quality_universe as quality
 from app.services import security_linkage as sl
 from scripts import census_3360_pit_fundamentals as census_3360
 
 YEARS: Final = tuple(range(2012, 2025))
 PRODUCTION_YEARS: Final = tuple(range(2013, 2025))
-REVENUE: Final = (
-    "Revenues",
-    "RevenueFromContractWithCustomerExcludingAssessedTax",
-    "RevenueFromContractWithCustomerIncludingAssessedTax",
-    "SalesRevenueNet",
-)
-COGS: Final = ("CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold")
-ASSETS: Final = ("Assets",)
-EQUITY: Final = ("StockholdersEquity",)
-GROSS_PROFIT: Final = ("GrossProfit",)
-ANNUAL_DAYS: Final = (350, 380)  # by construction: covers 52/53-week and calendar fiscal years
-FPI_FORMS: Final = frozenset({"20-F", "40-F"})
-ANNUAL_FORMS: Final = frozenset({"10-K", *FPI_FORMS})  # form families (``pf.form_family``)
-RUNGS: Final = (
-    "fundamentals_integrity_excluded",
-    "no_companyfacts_entry",
-    "sic_missing",
-    "sic_financial",
-    "no_public_annual_period",
-    "several_annual_starts",
-    "foreign_private_issuer",
-    "gross_profit_unavailable",
-    "component_sign_invalid",
-    "assets_unavailable",
-    "assets_nonpositive",
-    "equity_unavailable",
-    "equity_negative",
-    "eligible",
-)
-NOT_EVALUATED: Final = "not_evaluated"
+#: The premise stops before the X(D) row, so ``not_executable`` is never reached here.
+RUNGS: Final = tuple(rung for rung in quality.RUNGS if rung != quality.NOT_EXECUTABLE)
 
 _STATE: dict[str, Any] = {}
 
@@ -75,162 +47,22 @@ _STATE: dict[str, Any] = {}
 def _init(root: str, sha: str) -> None:
     bundle = pf.load_pit_fundamentals(Path(root), expected_manifest_sha256=sha)
     _STATE["bundle"] = bundle
-    _STATE["ciks"] = frozenset(bundle.ciks)
     _STATE["subs"] = zipfile.ZipFile(Path(root) / "inputs" / "submissions.zip")
 
 
 def _sic(cik10: str) -> int | None:
-    """Rule 3: a 1-4 digit SIC in [100, 9999], as a digit string or an integer; else missing."""
     subs: zipfile.ZipFile = _STATE["subs"]
     try:
         raw = json.loads(subs.read(f"CIK{cik10}.json")).get("sic")
     except KeyError:
         return None
-    if isinstance(raw, str) and raw.isascii() and raw.isdigit() and len(raw) <= 4:
-        value = int(raw)
-    elif isinstance(raw, int) and not isinstance(raw, bool):
-        value = raw
-    else:
-        return None
-    return value if 100 <= value <= 9999 else None
-
-
-Read = tuple[str, Decimal | None, tuple[str, ...], bool]
-
-
-def read_component(
-    bundle: pf.PitFundamentalsBundle, cik10: str, concepts: tuple[str, ...], start: str | None, end: str, d: date
-) -> Read:
-    """Rule 5: among aliases that are not ABSENT, the latest public acceptance decides (the reader
-    returns an acceptance for value, ambiguous and blocked reads alike); at that acceptance the
-    declared alias order decides (broadest concept first: REVT is total revenue). Returns
-    (status, value, winning accns, aliases_disagree)."""
-    reads: list[pf.ValueRead] = []
-    for concept in concepts:
-        read = bundle.value_as_of(cik10, pf.FactKey("us-gaap", concept, "USD", start, end), d)
-        if read.status in (pf.ReadStatus.AFTER_CAPTURE, pf.ReadStatus.CONCEPT_NOT_IN_POLICY):
-            raise RuntimeError(f"configuration read {read.status} for {cik10} {concept} at {d}")
-        if read.status is not pf.ReadStatus.ABSENT:
-            if read.acceptance is None:
-                raise RuntimeError(f"non-absent read without acceptance: {cik10} {concept} {d}")
-            reads.append(read)
-    if not reads:
-        return "absent", None, (), False
-    latest = max(read.acceptance or "" for read in reads)
-    top = [read for read in reads if read.acceptance == latest]  # in declared alias order
-    disagree = len({read.values for read in top}) > 1 or any(r.status is not pf.ReadStatus.VALUE for r in top)
-    winner = top[0]
-    if winner.status is not pf.ReadStatus.VALUE:
-        return str(winner.status), None, (), disagree
-    return "value", Decimal(winner.values[0]), winner.accns, disagree
-
-
-def accession_index(bundle: pf.PitFundamentalsBundle, cik10: str, d: date) -> tuple[Mapping[str, Any], ...]:
-    """The CIK's whole public accession index at D (#3360 rule 6). ``public_events`` returns the
-    shard-wide index whichever concept is named; ``REVENUE[0]`` only satisfies its policy gate."""
-    return bundle.public_events(cik10, "us-gaap", REVENUE[0], d).accessions
-
-
-def annual_period(bundle: pf.PitFundamentalsBundle, cik10: str, d: date) -> tuple[str, str] | str:
-    """Rule 4: (start, end) or the rung that stops it."""
-    forms = {a["accn"]: pf.form_family(a["form"]) for a in accession_index(bundle, cik10, d)}
-    starts: dict[str, set[str]] = defaultdict(set)
-    for concept in (*REVENUE, *COGS):
-        read = bundle.public_events(cik10, "us-gaap", concept, d)
-        for row in (*read.events, *read.rejections):
-            if row["unit"] != "USD" or row["start"] is None or forms.get(row["accn"]) not in ANNUAL_FORMS:
-                continue
-            start, end = date.fromisoformat(row["start"]), date.fromisoformat(row["end"])
-            if end.year == d.year - 1 and ANNUAL_DAYS[0] <= (end - start).days + 1 <= ANNUAL_DAYS[1]:
-                starts[row["end"]].add(row["start"])
-    if not starts:
-        return "no_public_annual_period"
-    end = max(starts)
-    if len(starts[end]) > 1:
-        return "several_annual_starts"
-    return next(iter(starts[end])), end
-
-
-def is_foreign_private_issuer(bundle: pf.PitFundamentalsBundle, cik10: str, d: date, winners: set[str]) -> bool:
-    """Rule 6: the latest public ORIGINAL annual-report accession is a 20-F/40-F (any FPI form at
-    that acceptance counts), or any winning component accession is."""
-    accessions = accession_index(bundle, cik10, d)
-    forms = {a["accn"]: pf.form_family(a["form"]) for a in accessions}
-    originals = [
-        (a["acceptance"], pf.form_family(a["form"]))
-        for a in accessions
-        if not a["form"].endswith("/A") and pf.form_family(a["form"]) in ANNUAL_FORMS
-    ]
-    latest = max((acc for acc, _ in originals), default=None)
-    latest_fpi = any(form in FPI_FORMS for acc, form in originals if acc == latest)
-    return latest_fpi or any(forms.get(accn) in FPI_FORMS for accn in winners)
+    return quality.parse_sic(raw)
 
 
 def classify(cik10: str, d: date) -> tuple[str, dict[str, str]]:
     """The first failing rung (or ``eligible``) plus field statuses counted independently."""
-    bundle: pf.PitFundamentalsBundle = _STATE["bundle"]
-    fields: dict[str, str] = dict.fromkeys(
-        ("period", "revenue", "cogs", "assets", "equity", "gp_tag", "fpi"), NOT_EVALUATED
-    )
-    if cik10 in bundle.integrity_excluded:
-        return "fundamentals_integrity_excluded", fields
-    if cik10 not in _STATE["ciks"]:
-        return "no_companyfacts_entry", fields
-    ladder: list[str] = []
-    sic = _sic(cik10)
-    fields["sic"] = "missing" if sic is None else "financial" if 6000 <= sic <= 6999 else "other"
-    if sic is None:
-        ladder.append("sic_missing")
-    elif 6000 <= sic <= 6999:
-        ladder.append("sic_financial")
-    period = annual_period(bundle, cik10, d)
-    if isinstance(period, str):
-        fields["period"] = period
-        return (ladder + [period])[0], fields
-    fields["period"] = "found"
-    start, end = period
-    rev = read_component(bundle, cik10, REVENUE, start, end, d)
-    cogs = read_component(bundle, cik10, COGS, start, end, d)
-    assets = read_component(bundle, cik10, ASSETS, None, end, d)
-    equity = read_component(bundle, cik10, EQUITY, None, end, d)
-    gp_tag = read_component(bundle, cik10, GROSS_PROFIT, start, end, d)
-    for name, read in (("revenue", rev), ("cogs", cogs), ("assets", assets), ("equity", equity), ("gp_tag", gp_tag)):
-        fields[name] = read[0]
-        if read[3]:
-            fields[f"{name}_aliases_disagree_at_latest"] = "true"
-    winners = {*rev[2], *cogs[2], *assets[2], *equity[2]}
-    fpi = is_foreign_private_issuer(bundle, cik10, d, winners)
-    fields["fpi"] = str(fpi).lower()
-    if fpi:
-        ladder.append("foreign_private_issuer")
-    if rev[1] is None or cogs[1] is None:
-        ladder.append("gross_profit_unavailable")
-    elif rev[1] < 0 or cogs[1] < 0:
-        ladder.append("component_sign_invalid")
-    if assets[1] is None:
-        ladder.append("assets_unavailable")
-    elif assets[1] <= 0:
-        ladder.append("assets_nonpositive")
-    if equity[1] is None:
-        ladder.append("equity_unavailable")
-    elif equity[1] < 0:
-        ladder.append("equity_negative")
-    if rev[1] is not None and cogs[1] is not None and assets[1] is not None and equity[1] is not None:
-        fields["winning_accessions"] = "one" if len(winners) == 1 else "several"
-        bad = [
-            n
-            for n, ok in (
-                ("revenue", rev[1] >= 0),
-                ("cogs", cogs[1] >= 0),
-                ("assets", assets[1] > 0),
-                ("equity", equity[1] >= 0),
-            )
-            if not ok
-        ]
-        fields["signs"] = "ok" if not bad else "+".join(bad)
-    else:
-        fields["winning_accessions"] = fields["signs"] = "components_unavailable"
-    return (ladder[0] if ladder else "eligible"), fields
+    result = quality.classify(_STATE["bundle"], cik10, _sic(cik10), d)
+    return result.rung, result.fields
 
 
 def _job(job: tuple[str, tuple[str, ...]]) -> tuple[str, dict[str, tuple[str, dict[str, str]]]]:
@@ -272,8 +104,8 @@ def main() -> int:
             if result.reason in (sl.Reason.OUTSIDE_SERIES, sl.Reason.VENDOR_OUT_OF_SCOPE):
                 continue
             reasons[result.label] += 1
-            kind = (result.grammar or "").split(":")[0]
-            if result.reason is sl.Reason.LINKED and kind in ("plain", "class") and result.cik is not None:
+            if quality.is_candidate(result):
+                assert result.cik is not None
                 per_cik[result.cik] += 1
         link_reasons[d.isoformat()] = reasons
         linked_series[d.isoformat()] = sum(per_cik.values())
@@ -300,7 +132,7 @@ def main() -> int:
     payload: dict[str, Any] = {
         "code_sha256": {
             path.name: _sha256(path)
-            for path in (here, Path(pf.__file__), Path(sl.__file__), Path(census_3360.__file__))
+            for path in (here, Path(quality.__file__), Path(pf.__file__), Path(sl.__file__), Path(census_3360.__file__))
         },
         "fundamentals_manifest_sha256": args.fundamentals_sha256,
         "linkage_manifest_sha256": args.linkage_sha256,
