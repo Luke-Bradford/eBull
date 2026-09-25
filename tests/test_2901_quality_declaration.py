@@ -8,6 +8,7 @@ writes it: ``sql/333`` bars UPDATE and DELETE, so a wrong row costs a new strate
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date
 from pathlib import Path
 
@@ -116,3 +117,16 @@ class TestTheFreezeEntryPoint:
         monkeypatch.setattr(freeze, "policy_version_report", lambda: {})
         assert freeze.main(["--dry-run"]) == 0
         assert '"digest_matches_published": true' in capsys.readouterr().out
+
+    def test_its_implementation_pins_are_the_files_in_this_tree(self) -> None:
+        """A review fix to any pinned file must move the document's pin with it."""
+        text = DECLARATION.read_text(encoding="utf-8")
+        for path in (
+            "scripts/run_2901_quality_trial.py",
+            "app/services/r6_monthly_trial.py",
+            "app/services/r6_exclusion_trial.py",
+            "scripts/freeze_2901_quality_declaration.py",
+            "scripts/measure_2901_offcalendar.py",
+            "scripts/measure_2901_power.py",
+        ):
+            assert hashlib.sha256(Path(path).read_bytes()).hexdigest() in text, path
