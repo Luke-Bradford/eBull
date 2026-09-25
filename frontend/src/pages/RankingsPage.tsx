@@ -9,6 +9,7 @@ import {
 } from "@/api/rankings";
 import { useAsync } from "@/lib/useAsync";
 import { Section } from "@/components/dashboard/Section";
+import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
 import { RankingsCoverageBanner } from "@/components/rankings/RankingsCoverageBanner";
 import { RankingsFilters } from "@/components/rankings/RankingsFilters";
 import { RankingsTable, type RankingsView } from "@/components/rankings/RankingsTable";
@@ -119,7 +120,10 @@ export function RankingsPage() {
     <div className="flex h-full flex-col gap-6 pt-6">
       <div className="flex flex-shrink-0 items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Rankings</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Rankings</h1>
+            <HeuristicBadge modelVersion={rankings.data?.model_version ?? null} />
+          </div>
           <RankingsCoverageBanner coverage={coverage.data ?? null} />
         </div>
         <span className="text-xs text-slate-500">

@@ -30,6 +30,7 @@ import type {
   RecommendationListItem,
 } from "@/api/types";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
 import { useAsync } from "@/lib/useAsync";
 
 export interface RightRailProps {
@@ -184,7 +185,11 @@ function PeerSnapshot({
         </div>
       )}
       {!loading && error === null && peers !== null && peers.length > 0 && (
-        <ul className="space-y-1.5 text-xs">
+        <>
+          <div className="mb-1.5">
+            <HeuristicBadge modelVersion={data?.model_version ?? null} />
+          </div>
+          <ul className="space-y-1.5 text-xs">
           {peers.map((p) => (
             <li
               key={p.instrument_id}
@@ -204,7 +209,8 @@ function PeerSnapshot({
               </span>
             </li>
           ))}
-        </ul>
+          </ul>
+        </>
       )}
     </Section>
   );

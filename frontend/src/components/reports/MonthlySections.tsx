@@ -22,6 +22,7 @@ import type {
 } from "@/api/reportSnapshot";
 import { DegradedBadge, Fn, NilLine, ScopeCaveat, type NoteIndex } from "@/components/reports/StatementChrome";
 import { dec } from "@/components/reports/snapshotMath";
+import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
 import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
 
 const ROLLING_WINDOWS: ReadonlyArray<readonly [keyof RollingReturnsV2, string]> = [
@@ -309,7 +310,7 @@ export function ModelThesisSection({
 
       <div>
         <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Rank movers
+          Rank movers <HeuristicBadge compact />
           {shown.length > 0 ? (
             <span className="normal-case text-slate-400">
               {" "}

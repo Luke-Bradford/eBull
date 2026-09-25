@@ -66,6 +66,7 @@ import {
   type ThesisStaleItem,
   type Tier,
 } from "./alertModel";
+import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
 import { Badge } from "@/components/ui/Badge";
 
 type FeedState<T> =
@@ -278,8 +279,9 @@ function RankMoveCard({ item }: { item: RankMoveItem }) {
               </Badge>
             ) : null}
           </div>
-          <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+          <span className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
             {up ? "Up" : "Down"} {magnitude} to rank #{item.rank}
+            <HeuristicBadge compact />
           </span>
         </div>
         <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
