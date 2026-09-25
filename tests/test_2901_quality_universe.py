@@ -508,3 +508,10 @@ def test_mirror_bounds_must_equal_the_stored_series(tmp_path: Path) -> None:
             {"ABC": [good]},
             [],
         )
+
+
+@pytest.mark.parametrize("operands", [(None, "1", "2"), ("3", None, "2"), ("3", "1", None)])
+def test_gpa_of_refuses_a_missing_operand_with_a_named_error(operands: tuple[str | None, ...]) -> None:
+    # the builder calls gpa_of directly on artefact rows; the guard must not live only in gpa()
+    with pytest.raises(q.QualityUniverseError, match="without all GP/A operands"):
+        q.gpa_of(*operands)
