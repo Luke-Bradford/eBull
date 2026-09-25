@@ -356,18 +356,19 @@ fi
 # would mask a failing pytest (prevention log, re-committed #2279).
 # The first attempt IS the run (-t 0: take the lock now or exit 75 without
 # running), so the "waiting" line prints exactly when this push is about to wait.
-# pytest never exits 75, so 75 always means the lock.
+# An EMPTY log disambiguates the 75: -s silences lockf, so an untaken lock writes
+# nothing, whereas a pytest that ran has always written output.
 DB_TIER_LOG="$(mktemp -t ebull-prepush-db)"
 DB_TIER_RC=0
 lockf -s -k -t 0 "${DB_TIER_LOCK}" \
   uv run pytest -m db --tb=short -q > "${DB_TIER_LOG}" 2>&1 || DB_TIER_RC=$?
-if [ "${DB_TIER_RC}" -eq 75 ]; then
+if [ "${DB_TIER_RC}" -eq 75 ] && [ ! -s "${DB_TIER_LOG}" ]; then
   echo "==> Another db tier holds ${DB_TIER_LOCK}; waiting up to ${DB_TIER_LOCK_WAIT}s."
   DB_TIER_RC=0
   lockf -k -t "${DB_TIER_LOCK_WAIT}" "${DB_TIER_LOCK}" \
     uv run pytest -m db --tb=short -q > "${DB_TIER_LOG}" 2>&1 || DB_TIER_RC=$?
 fi
-if [ "${DB_TIER_RC}" -eq 75 ]; then
+if [ "${DB_TIER_RC}" -eq 75 ] && [ ! -s "${DB_TIER_LOG}" ]; then
   echo "==> FAIL: waited ${DB_TIER_LOCK_WAIT}s for ${DB_TIER_LOCK} without getting it."
   echo "==>       Check for a hung pytest: pgrep -fl 'pytest -m db'"
   exit 1
