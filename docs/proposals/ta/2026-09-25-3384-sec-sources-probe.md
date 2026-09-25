@@ -29,7 +29,8 @@ next month."*
   `b` = 16th–month end) from 2009-07. Two periods (201910a, 202308b) also have a `_0` re-post file.
 - **Clock:** 278 files share Last-Modified 2020-12-19, covering periods 2004-03 → 2020-11. 18 files return the
   epoch date (1970-01-01), covering periods 2008-09 → 2018-04. **So no per-file release date is observable
-  for any period before 2020-12.** The other 138 files (periods from 2020-12): lag p50 15 days, p90 18. The outliers
+  for any period before 2020-12.** The other 138 files (periods from 2020-12): lag p50 15 days, p90 18. The
+  outliers
   are `202511b` (67 days) and the `202308b` re-post (987). That matches the page's stated schedule; the
   schedule is the only rule for earlier years.
 - **Identity:** each row carries a CUSIP and a ticker. Tickers on the sampled dates:
@@ -62,16 +63,16 @@ shares.
 - **Identity:** tickers matched to a spanning Intrader series: 3,887 / 4,949 (2012-04-02), 5,016 / 5,282
   (2016-06-01), 5,357 / 5,741 (2020-04-01), 6,644 / 7,340 (2024-04-01). Admitted series with a bar that appear
   in MIDAS: 3,091 / 5,464, 3,846 / 7,137, 3,686 / 6,578, 3,511 / 5,291.
-- `McapRank` is a market-cap rank from 2012, the one size axis in any source probed so far. It is
-  validation-era only.
+- `McapRank` is, by its name, a market-cap rank (its definition is not read here). If so, it is the only size
+  axis in any source probed so far, and it exists only from 2012.
 
 ## Inputs this gives #3385 / the FTD and MIDAS ingests
-1. **FTD availability before 2020-11 cannot be measured.** The only rule is the SEC's stated schedule
+1. **FTD availability before 2020-12 cannot be measured.** The only rule is the SEC's stated schedule
    (period end + ~15 days); the measured lags since 2020-12 agree (p50 15, p90 18, one 67-day outlier).
    An availability lag is a construction choice to freeze, and it must be at least as late as the measured
    tail.
 2. **FTD before 2008-09-16 is a different population** (≥ 10,000-share balances only), so a pre-/post-2008-09
-   series is not one variable. The discovery window sees only the censored regime.
+   series is not one variable. Discovery (to 2008-12-31) is censored except for its last 3½ months.
 3. **FTD has a CUSIP; we hold no dated CUSIP↔series map** (slice 1, Finding 4). A ticker-only join reaches
    12–17% of admitted-with-bar series in the 2004–2008 samples and 32–54% in 2009–2024, as symbol matches with reuse
    unresolved.
