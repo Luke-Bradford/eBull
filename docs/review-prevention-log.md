@@ -11452,3 +11452,15 @@ neighbouring container and match it.**
   overlap.
 - Enforced in: `app/services/security_linkage.py::admit_observation` (returns a pair),
   `tests/test_3361_security_linkage.py::test_admission_outcomes_are_ledgered_with_locators_and_reconcile`.
+
+### A guard in the wrapper is bypassed by a caller of the inner helper (#2901)
+
+- Failure: `r6_quality_universe.gpa()` refused an eligible issuer with a missing GP/A operand,
+  but the arithmetic lived in `gpa_of()`, and the artefact builder called `gpa_of()` directly
+  on row values. A missing operand would have surfaced as a bare `TypeError` from
+  `Fraction(None)` and aborted the batch build without naming the issuer's defect.
+- Prevention: put an operand guard in the LOWEST function that does the arithmetic, not the
+  wrapper that happens to be called first. When adding a second entry point, grep for the
+  guard's message and check that the new path passes through it.
+- Enforced in: `app/services/r6_quality_universe.py::gpa_of`,
+  `tests/test_2901_quality_universe.py::test_gpa_of_refuses_a_missing_operand_with_a_named_error`.

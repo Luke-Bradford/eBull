@@ -333,11 +333,15 @@ def gpa(classification: Classification) -> Fraction:
     ``Fraction`` before any arithmetic."""
     if classification.rung != ELIGIBLE:
         raise QualityUniverseError(f"GP/A of a non-eligible issuer ({classification.rung})")
-    operands = {name: classification.components[name].value for name in ("revenue", "cogs", "assets")}
-    if any(value is None for value in operands.values()):
+    return gpa_of(*(classification.components[name].value for name in ("revenue", "cogs", "assets")))
+
+
+def gpa_of(revenue: str | None, cogs: str | None, assets: str | None) -> Fraction:
+    """GP/A from canonical decimal strings, converted to ``Fraction`` before any arithmetic. The
+    operand guard lives HERE, the lowest level, so no caller can reach the arithmetic without it."""
+    if revenue is None or cogs is None or assets is None:
         raise QualityUniverseError("eligible issuer without all GP/A operands")
-    revenue, cogs, assets = (Fraction(str(operands[n])) for n in ("revenue", "cogs", "assets"))
-    return (revenue - cogs) / assets
+    return (Fraction(revenue) - Fraction(cogs)) / Fraction(assets)
 
 
 @dataclass(frozen=True)

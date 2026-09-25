@@ -7,6 +7,8 @@ Spec: ``docs/proposals/ta/2026-09-24-2901-quality-arm.md`` ("Construction", "Del
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
@@ -17,6 +19,8 @@ import pytest
 
 from app.services import r6_quality_universe as q
 from app.services import security_linkage as sl
+from scripts import build_2901_quality_input as build
+from scripts import census_2901_quality as census
 from tests.test_3360_pit_fundamentals import CIK, T1, T2, _build, _facts, _row, _subs
 
 D = date(2020, 6, 30)  # a June formation: the fiscal year must end in 2019
@@ -344,3 +348,170 @@ def test_boundary_ties_join_the_arm_whole() -> None:
 def test_fewer_than_100_eligible_refuses() -> None:
     with pytest.raises(q.QualityUniverseError, match="below 100"):
         q.top_decile(_signal(list(range(99))))
+
+
+# --------------------------------------------------------------------------- builder + census pieces (PR A2)
+
+
+def test_execution_date_skips_weekends_and_holidays() -> None:
+    assert build.execution_date(date(2020, 6, 30)) == date(2020, 7, 1)
+    assert build.execution_date(date(2020, 7, 2)) == date(2020, 7, 6)  # 2020-07-03 observed holiday
+    assert build.execution_date(date(2024, 6, 28)) == date(2024, 7, 1)
+
+
+def test_read_mirror_series_parses_and_refuses_unordered_dates(tmp_path: Path) -> None:
+    good = tmp_path / "ABC.csv"
+    good.write_text("2020-07-01,10,11,9,10.5,1000,1,0,5.25\n2020-07-02,10,11,9,nan,12.5,1,0,5\n")
+    bars = build.read_mirror_series(good)
+    assert bars[0] == build.MirrorBar(date(2020, 7, 1), Decimal(10), Decimal("10.5"), Decimal("5.25"), 1000)
+    assert (bars[1].raw_close, bars[1].volume) == (None, None)  # non-finite close, fractional volume
+    assert not build.x_row_executable(bars, date(2020, 7, 2))
+    assert build.x_row_executable(bars, date(2020, 7, 1))
+    assert not build.x_row_executable(bars, date(2020, 7, 3))  # no row at all
+    bad = tmp_path / "XYZ.csv"
+    bad.write_text("2020-07-02,1,1,1,1,1,1,0,1\n2020-07-02,1,1,1,1,1,1,0,1\n")
+    with pytest.raises(build.QualityInputError, match="strictly increasing"):
+        build.read_mirror_series(bad)
+
+
+def test_form25_horizon_is_strictly_after_d_and_on_the_linked_cik() -> None:
+    def row(accession: str, filed: str, cik: str = CIK, symbol: str | None = "ABC") -> dict[str, Any]:
+        return {"accession": accession, "filed_date": filed, "issuer_cik": cik, "resolved_symbol": symbol}
+
+    rows = [
+        row("on-d", "2020-06-30"),
+        row("in", "2020-07-01"),
+        row("last", "2022-06-30"),  # D + 730
+        row("after", "2022-07-01"),
+        row("other-cik", "2021-01-01", cik="0000000002"),
+        row("other-symbol", "2021-01-02", symbol="XYZ"),
+    ]
+    got = build.form25_in_horizon(rows, CIK, frozenset({"ABC"}), D, {"in": "(b)"})
+    assert [(r["accession"], r["match"], r["rule_provision"]) for r in got] == [
+        ("in", "symbol_match", "(b)"),
+        ("last", "symbol_match", None),
+        ("other-symbol", "symbol_other", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("decision", "last_bar", "alive", "outcome"),
+    [
+        (date(2013, 6, 28), date(2014, 1, 2), False, "exchange_failure"),  # ended inside the horizon
+        (date(2013, 6, 28), date(2020, 1, 2), False, "alive_730"),
+        (date(2013, 6, 28), date(2024, 9, 27), True, "alive_730"),
+        (date(2023, 6, 30), date(2024, 9, 27), True, "censored_alive"),  # horizon passes the capture
+    ],
+)
+def test_price_outcome(decision: date, last_bar: date, alive: bool, outcome: str) -> None:
+    assert census.price_outcome(decision, last_bar, alive, "exchange_failure") == outcome
+
+
+def test_form25_outcome_channels() -> None:
+    span = ["2010-01-04", "2024-09-20"]
+    hit = [{"match": "symbol_other", "filed_date": "2014-01-01", "accession": "x", "rule_provision": "(a)(3)"}]
+    assert census.form25_outcome(date(2013, 6, 28), hit, span) == "no_form25_observed"
+    hit.append({"match": "symbol_match", "filed_date": "2014-02-01", "accession": "y", "rule_provision": "(b)"})
+    assert census.form25_outcome(date(2013, 6, 28), hit, span) == "form25:(b)"
+    assert census.form25_outcome(date(2023, 6, 30), [], span) == "unobserved_horizon"
+    assert census.form25_outcome(date(2013, 6, 28), [], None) == "unobserved_horizon"
+
+
+def test_size_deciles_keep_unavailable_separate_and_need_ten_values() -> None:
+    values: dict[str, Decimal | None] = {f"{i:010d}": Decimal(i) for i in range(20)}
+    values["x"] = None
+    got = census.deciles(values)
+    assert got["x"] == census.UNAVAILABLE
+    assert got["0000000000"] == "0" and got["0000000019"] == "9"
+    assert set(census.deciles({"a": Decimal(1), "b": None}).values()) == {census.NO_DECILES, census.UNAVAILABLE}
+
+
+def test_sic_division() -> None:
+    assert [census.sic_division(s) for s in (None, 100, 3571, 6021, 7372, 9999, 1900)] == [
+        "missing",
+        "A_agriculture",
+        "D_manufacturing",
+        "H_finance",
+        "I_services",
+        "K_nonclassifiable",
+        "unassigned",
+    ]
+
+
+def test_loader_refuses_a_moved_document_and_a_foreign_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "artefact"
+    document = {"schema": build.FORMATION_SCHEMA, "formation": "2013-06-28", "counts": {}, "candidates": [], "rows": []}
+    build._write_exclusive(root / "formations" / "2013-06-28.json", document)
+    digest = hashlib.sha256((root / "formations" / "2013-06-28.json").read_bytes()).hexdigest()
+    manifest = {
+        "schema": build.MANIFEST_SCHEMA,
+        "policy": build.policy_sha256(),
+        "formations": [{"formation": "2013-06-28", "path": "formations/2013-06-28.json", "sha256": digest}],
+    }
+    build._write_exclusive(root / build.MANIFEST_FILENAME, manifest)
+    sha = hashlib.sha256((root / build.MANIFEST_FILENAME).read_bytes()).hexdigest()
+    assert build.load_quality_input(root, expected_manifest_sha256=sha)[1] == [document]
+    with pytest.raises(build.QualityInputError, match="pinned"):
+        build.load_quality_input(root, expected_manifest_sha256="0" * 64)
+    monkeypatch.setattr(build, "policy_sha256", lambda: "other")
+    with pytest.raises(build.QualityInputError, match="policy"):
+        build.load_quality_input(root, expected_manifest_sha256=sha)
+
+
+def test_census_counts_only_true_alias_disagreements() -> None:
+    def row(cik: str, fields: dict[str, str]) -> dict[str, Any]:
+        return {
+            "cik": cik,
+            "liquidity": None,
+            "components": {},
+            "fields": fields,
+            "rung": "no_public_annual_period",
+            "last_bar": "2020-01-02",
+            "alive_at_capture": False,
+            "termination_class": "unknown_termination",
+            "form25_horizon": [],
+        }
+
+    document = {
+        "formation": "2013-06-28",
+        "counts": {},
+        "rows": [
+            row("1", {"revenue_aliases_disagree_at_latest": "true"}),
+            row("2", {"revenue_aliases_disagree_at_latest": "false"}),
+            row("3", {"cogs": "value"}),
+        ],
+    }
+    assert census.formation_census(document, None)["alias_disagreement"] == {"revenue": 1}
+    # every status field reconciles to P(D), early ladder exits counted as not_evaluated
+    counted = census.formation_census(document, None)["fields"]
+    for key in census.STATUS_FIELDS:
+        assert sum(n for k, n in counted.items() if k.startswith(f"{key}=")) == 3, key
+    assert counted["signs=not_evaluated"] == 3 and counted["cogs=value"] == 1
+
+
+def test_census_module_is_policy_bound() -> None:
+    assert "scripts/census_2901_quality.py" in build.POLICY_FILES
+
+
+def test_mirror_bounds_must_equal_the_stored_series(tmp_path: Path) -> None:
+    good = tmp_path / "abc.csv"
+    good.write_text("2020-07-01,10,11,9,10,100,0,0,10\n2020-07-02,10,11,9,10,100,0,0,10\n")
+    row = {"vendor_symbol": "ABC", "first_bar": "2020-07-01", "last_bar": "2020-07-03", "symbol_unique": True}
+    document = {"vendor_symbol": "ABC", "first_bar": "2020-07-01", "last_bar": "2020-07-03", "form25": None}
+    (tmp_path / "s1.json").write_text(json.dumps(document))
+    with pytest.raises(build.QualityInputError, match="mirror bar bounds differ"):
+        build._series_inputs(
+            1,
+            {1: {"path": "s1.json", "sha256": build.read_verified_document(tmp_path / "s1.json")[0]}},
+            tmp_path,
+            {1: row},
+            {"ABC": [good]},
+            [],
+        )
+
+
+@pytest.mark.parametrize("operands", [(None, "1", "2"), ("3", None, "2"), ("3", "1", None)])
+def test_gpa_of_refuses_a_missing_operand_with_a_named_error(operands: tuple[str | None, ...]) -> None:
+    # the builder calls gpa_of directly on artefact rows; the guard must not live only in gpa()
+    with pytest.raises(q.QualityUniverseError, match="without all GP/A operands"):
+        q.gpa_of(*operands)
