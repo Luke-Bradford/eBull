@@ -154,11 +154,13 @@ FILE_STUDIES: Final[tuple[FileStudy, ...]] = (
 )
 
 
-def _git_head() -> str:
-    try:
-        return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-    except OSError, subprocess.CalledProcessError:
-        return "unknown"
+def _git_provenance() -> dict[str, Any]:
+    """HEAD and whether the tree was dirty. Raises rather than recording an unknown provenance."""
+
+    def git(*argv: str) -> str:
+        return subprocess.run(["git", *argv], capture_output=True, text=True, check=True).stdout.strip()
+
+    return {"git_head": git("rev-parse", "HEAD"), "git_dirty": bool(git("status", "--porcelain"))}
 
 
 _HARVESTED_SQL: Final = """
@@ -468,7 +470,7 @@ def main() -> int:
     census = {
         "census_version": CENSUS_VERSION,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "git_head": _git_head(),
+        **_git_provenance(),
         "hunt_windows": [{"name": n, "start": str(s), "end": str(e)} for n, s, e in HUNT_WINDOWS],
         "min_volume_bars": MIN_VOLUME_BARS,
         "population": population,
