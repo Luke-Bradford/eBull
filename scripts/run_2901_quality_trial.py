@@ -26,7 +26,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
@@ -174,7 +174,7 @@ def _symbols(rows: Sequence[Mapping[str, Any]], what: str, formation: date) -> f
 def _first_session_of_july(year: int) -> date:
     day = date(year, 7, 1)
     while us_market_status(day) == "closed":
-        day = date(year, 7, day.day + 1)
+        day += timedelta(days=1)
     return day
 
 
