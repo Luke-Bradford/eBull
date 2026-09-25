@@ -52,6 +52,8 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # See app/jobs/sources.py::Lane.
         "etoro_core_rebalance",
         "etoro_core_eligibility",
+        # #3381 — the crowd recorder: a skipped fire is a lost day of forward-only data.
+        "etoro_crowd",
         "sec_rate",
         # #1478 — sec_manifest_worker extracted from sec_rate into its own
         # lane so the heavy drainer stops starving the SEC producers. A lane

@@ -65,6 +65,7 @@ Lane = Literal[
     "etoro_quotes",
     "etoro_core_rebalance",
     "etoro_core_eligibility",
+    "etoro_crowd",
     "sec_rate",
     "sec_manifest",
     "sec_per_cik",
@@ -143,6 +144,11 @@ the rate — it does not.
   not prove coherent INPUTS. Exposure arithmetic and the measuring queries live
   in ``docs/proposals/execution/2026-09-19-2603-core-lane-starvation.md``
   §4 — kept there rather than restated here, because those figures move.
+* ``etoro_crowd`` — ``etoro_crowd_snapshot`` (#3381, daily 21:52 UTC, ~6 s of
+  market-data quota F). Its own lane because a skipped fire is a lost day of a
+  dataset eToro serves no history for, and both core lanes pin exclusive
+  ownership. A source lane is a job-overlap bucket, not an execution permit, so
+  it costs no pool connection (``tests/test_etoro_core_lane_starvation.py``).
 * ``etoro_core_eligibility`` — ``core_eligibility_refresh`` (#2603 item 2).
   Both split off ``etoro`` because the multi-hour candle sweep spans their fire
   times: the daily 22:45 observation lost 4 of 4 fires and had **never completed

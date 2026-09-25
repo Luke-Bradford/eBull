@@ -115,6 +115,7 @@ from app.workers.scheduler import (
     JOB_DAILY_RESEARCH_REFRESH,
     JOB_DAILY_TAX_RECONCILIATION,
     JOB_DRS_DISCLOSURE_REFRESH,
+    JOB_ETORO_CROWD_SNAPSHOT,
     JOB_ETORO_LOOKUPS_REFRESH,
     JOB_EXCHANGES_METADATA_REFRESH,
     JOB_EXECUTE_APPROVED_ORDERS,
@@ -199,6 +200,7 @@ from app.workers.scheduler import (
     daily_research_refresh,
     daily_tax_reconciliation,
     drs_disclosure_refresh,
+    etoro_crowd_snapshot,
     etoro_lookups_refresh,
     exchanges_metadata_refresh,
     execute_approved_orders,
@@ -452,6 +454,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_STRATEGY_PAPER_CYCLE: _adapt_zero_arg(strategy_paper_cycle),
     JOB_CORE_REBALANCE_OBSERVATION: _adapt_zero_arg(core_rebalance_observation),
     JOB_CORE_REBALANCE_EXECUTION: _adapt_zero_arg(core_rebalance_execution),
+    JOB_ETORO_CROWD_SNAPSHOT: _adapt_zero_arg(etoro_crowd_snapshot),
     JOB_CORE_ELIGIBILITY_REFRESH: _adapt_zero_arg(core_eligibility_refresh),
     JOB_STRATEGY_AUTONOMOUS_PROMOTION: _adapt_zero_arg(strategy_autonomous_promotion),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
