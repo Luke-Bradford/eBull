@@ -160,7 +160,8 @@ def _git_provenance() -> dict[str, Any]:
     def git(*argv: str) -> str:
         return subprocess.run(["git", *argv], capture_output=True, text=True, check=True).stdout.strip()
 
-    return {"git_head": git("rev-parse", "HEAD"), "git_dirty": bool(git("status", "--porcelain"))}
+    status = git("status", "--porcelain")
+    return {"git_head": git("rev-parse", "HEAD"), "git_dirty": bool(status), "git_status": status.splitlines()}
 
 
 _HARVESTED_SQL: Final = """
