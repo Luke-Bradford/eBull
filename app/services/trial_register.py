@@ -809,8 +809,9 @@ TRIAL_REGISTER: Final = TrialRegister(
         DeclaredTrial(
             trial_id="r6-2908-exclusion-arms-2026-08-24",
             description=(
-                "R6 #2908: dilution exclusion (primary), filing-risk exclusion and their union, each against "
-                "the identical annual 1/N control, 2022-07 to 2024-09. THREE arms, all emitted. ⚠ searches=3, "
+                "R6 #2908: dilution exclusion (primary), filing-risk exclusion and their union, 2022-07 to "
+                "2024-09; pass rule against literal buy-and-hold, scientific control the identical annual 1/N. "
+                "THREE arms, all emitted. ⚠ searches=3, "
                 "not the 7 (configuration, arm) rows #2901's declaration counts: this register counts variants "
                 "selected between, and #2908's corrections re-ran the same three variants. It ran after the "
                 "cutoff without a #2599 declaration, so it is charged here, late."
@@ -827,8 +828,9 @@ TRIAL_REGISTER: Final = TrialRegister(
             description=(
                 "#2901: the top GP/A decile of the complete-case eligible set E(D), 12 June formations "
                 "2013-2024, against the identical annual 1/N control C(D) (headline) and the complete-case "
-                "diagnostic control C'(D). ONE arm, two comparator rows, both gating. The D0 gate leg, the "
-                "buy-and-hold and SPY are frozen readouts, not searches. Charged BEFORE the first run."
+                "diagnostic control C'(D). ONE arm, two comparator rows, both gating; searches=2 follows the "
+                "declaration's first-run rows, the conservative direction. The D0 gate leg, the buy-and-hold "
+                "and SPY are frozen readouts, not searches. Charged BEFORE the first run."
             ),
             evidence=(
                 "docs/proposals/ta/2026-09-25-2901-quality-declaration.md (frozen declaration), "

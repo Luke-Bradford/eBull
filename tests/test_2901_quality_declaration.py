@@ -16,6 +16,7 @@ from app.services.r6_monthly_trial import family_size
 from app.services.trial_register import TRIAL_REGISTER, TrialExactness
 from scripts import run_2901_quality_trial as runner
 from scripts.freeze_2901_quality_declaration import (
+    EXPECTED_DECLARATION_SHA256,
     MIN_FORWARD_CALENDAR_WEEKS,
     MIN_FORWARD_DECISION_DATES,
     build_declaration,
@@ -74,12 +75,15 @@ class TestTheDeclaration:
 
 class TestTheDocument:
     def test_it_records_the_digest_the_script_will_freeze(self) -> None:
+        """The script refuses any other digest, so the document, the constant and the build must agree."""
         text = DECLARATION.read_text(encoding="utf-8")
-        assert build_declaration().sha256 in text
+        assert build_declaration().sha256 == EXPECTED_DECLARATION_SHA256
+        assert EXPECTED_DECLARATION_SHA256 in text
 
     def test_its_family_matches_the_runner(self) -> None:
-        """|H| = 7 is passed as ``--history-rows``; M must be what the document states."""
+        """|H| = 9 is passed as ``--history-rows``; M must be what the document states."""
         text = DECLARATION.read_text(encoding="utf-8")
-        assert "--history-rows 7" in text
-        assert family_size(7) == 15
-        assert "**15**" in text
+        assert "--history-rows 9" in text
+        assert family_size(9) == 17
+        assert "**17**" in text
+        assert "**|H| = 9.**" in text

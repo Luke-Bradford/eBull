@@ -3,8 +3,13 @@
 Contract: ``docs/proposals/ta/2026-09-25-2901-quality-declaration.md`` (the frozen declaration), which
 fixes everything else the run applies. Follows ``scripts/freeze_2840_sh_regime_gate_declaration.py``,
 whose preamble warnings apply here verbatim and are not restated: this is a separate script from the
-run; ``--dry-run`` first; it cannot freeze before ``r6-2901-quality-gpa-2026-09-25`` is on ``main``;
-no number below is chosen here.
+run; ``--dry-run`` first; run it from ``main`` once ``r6-2901-quality-gpa-2026-09-25`` has merged
+(``freeze_preregistration`` refuses a declaration the in-tree register does not claim); no number below
+is chosen here.
+
+Two differences from that script, both so the row frozen is exactly the one the declaration document
+publishes: it refuses any digest other than ``EXPECTED_DECLARATION_SHA256``, and it has no
+policy-divergence override.
 
 The identity is imported from the runner, which writes the holdout-access row under it, so the two
 cannot drift apart.
@@ -29,6 +34,8 @@ from scripts._prereg_freeze_guard import assert_policy_version_merged, policy_ve
 from scripts.run_2901_quality_trial import STRATEGY_ID, STRATEGY_VERSION
 
 CONTRACT_VERSION: Final = "r6-2901-quality-declaration-2026-09-25"
+#: The digest ``docs/proposals/ta/2026-09-25-2901-quality-declaration.md`` publishes.
+EXPECTED_DECLARATION_SHA256: Final = "9235ab28186b4a33b59f4580df1af89a2c371ed51724dac5e925e612c4582cc4"
 DECLARED_BY: Final = "scripts/freeze_2901_quality_declaration.py (#2901)"
 
 #: The universe is the Intrader mirror with delisted series kept and terminations applied under
@@ -99,11 +106,6 @@ def build_declaration() -> PreregDeclaration:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="print the declaration and its digest, write nothing")
-    parser.add_argument(
-        "--allow-policy-divergence",
-        action="store_true",
-        help="freeze even though this tree's STRUCTURAL_REFUSAL_POLICY_VERSION is not origin/main's",
-    )
     args = parser.parse_args(argv)
     declaration = build_declaration()
     summary: dict[str, object] = {**declaration.digest_payload, "declaration_sha256": declaration.sha256}
@@ -112,7 +114,19 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write("\n")
         return 0
 
-    summary.update(assert_policy_version_merged(allow_divergence=args.allow_policy_divergence))
+    if declaration.sha256 != EXPECTED_DECLARATION_SHA256:
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "outcome": "digest_not_published",
+                    "digest": declaration.sha256,
+                    "published": EXPECTED_DECLARATION_SHA256,
+                }
+            )
+            + "\n"
+        )
+        return 1
+    summary.update(assert_policy_version_merged(allow_divergence=False))
     with psycopg.connect(settings.database_url) as conn:
         try:
             declaration_id = freeze_preregistration(conn, declaration)

@@ -8,7 +8,7 @@ declaration spec (`2026-09-25-2901-quality-declaration-spec.md`). A conflict bet
 is a defect in this document. Refs #2901, #2908, #3362, #2829, #2599.
 
 ## What has been read before this freeze
-Nothing outcome-dependent. Every item below reads construction facts, dates, or data from before the window:
+Nothing outcome-dependent about #2901. (#2908's outcomes have been read; they enter only as trial rows below.) Every item below reads construction facts, dates, or data from before the window:
 - the pre-look census of the artefact (`census-2026-09-25-2fb142d4.json`, no returns; posted on #2901);
 - `scripts/measure_2901_offcalendar.py`, a date-only audit of the mirror (output below);
 - `scripts/measure_2901_power.py`, which reads global-q months 1967-07 … 2013-06 only (output below);
@@ -35,6 +35,7 @@ The runner has never run past `--census-only` on real data. `strategy_holdout_ac
 | `scripts/measure_2901_offcalendar.py` | `f8ea1324a4eedb4c9f22b9afc75bdd381376f56cd3100667327e90b8ea10e513` |
 | `scripts/measure_2901_power.py` | `f6c4b5a69898a51d3d6875dad1f3815deaea2f2bb284a2e408784eb09f05112d` |
 | `--census-only` stdout | `7c17f3064e7efb4a227831a28645cf65a80b58c1640c9b1af4ed28692c4f04f9` |
+| `scripts/freeze_2901_quality_declaration.py` (writes the #2599 row) | `05fb8623ca1803446ab77bcee3a55a72b7df3a257e72c235b31f7fcc827bcc6d` |
 
 The artefact and the zip live under `~/Library/Application Support/eBull/research/quality_2901/`. The mirror is the
 clone at `~/Dev/eBull/var/research_corpus/mirrors/icyDenev_Intrader`. The canonical JSON is `sort_keys` with
@@ -110,15 +111,19 @@ in the r6/selection programme that exists at this freeze.
   have no r6 rows.
 
 #3360, #3361 and #3362 produced censuses and fixtures only; #3362 excluded "any strategy look" from its scope. #2834
-ARM B is a separate research seat and not in this programme. So H is #2908's rows alone. Reproduce the ledger half
-with:
+ARM B is a separate research seat and not in this programme. Every identity in this programme carries the `r6-`
+prefix (#2908's, and the runner's `r6-quality-gpa`), which is what the ledger queries filter on. So H is #2908's
+rows alone. Reproduce the ledger half with:
 ```
 PYTHONPATH=. uv run python -c "
 import psycopg; from app.config import settings
 with psycopg.connect(settings.database_url) as c:
-    print(c.execute(\"select strategy_id, strategy_version, prereg_purpose from strategy_preregistration_declarations order by declaration_id\").fetchall())
-    print(c.execute(\"select access_id, strategy_id, accessed_by from strategy_holdout_accesses where strategy_id like 'r6%%' order by 1\").fetchall())"
+    print(c.execute(\"select declaration_id, strategy_id, strategy_version, prereg_purpose from strategy_preregistration_declarations order by 1\").fetchall())
+    print(c.execute(\"select access_id, strategy_id, strategy_version, access_kind, accessed_by, purpose, accessed_at from strategy_holdout_accesses where strategy_id like 'r6%%' order by 1\").fetchall())
+    print(c.execute(\"select count(*) from strategy_holdout_access_refusals where strategy_id like 'r6%%'\").fetchall())
+    print(c.execute(\"select count(*) from strategy_results_store where strategy_id like 'r6%%'\").fetchall())"
 ```
+On 2026-09-25 this printed declaration ids 5–11 (none r6), accesses 640 and 641 only, and 0 and 0.
 
 **#2908's configurations.** A configuration is identified by the frozen documents and code that change a computed
 cell. #2908's documents are its preregistration, corrections 1–4 and its result. They give three configurations:
@@ -130,38 +135,47 @@ cell. #2908's documents are its preregistration, corrections 1–4 and its resul
 
 | row | configuration | arm | exposure (evidence) |
 | --- | --- | --- | --- |
-| 1 | K0 | dilution exclusion | the factor identity gate's statistics were opened in K0 (correction 1: "the already opened factor-only PASS"). The gate is Nsi P10−P1, the dilution arm's excluded set, so it exposes that arm — as #2901's own gate exposes A |
-| 2 | K1 | dilution exclusion | outcome `95ff5c23…` (all cells) |
-| 3 | K1 | filing-risk exclusion | outcome `95ff5c23…` |
-| 4 | K1 | union | outcome `95ff5c23…` |
-| 5 | K2 | dilution exclusion | reproduction `1ed032ca…`, audited `99a6fcca…` (access 641); factor `cf05211d…` (access 640) |
-| 6 | K2 | filing-risk exclusion | as row 5 |
-| 7 | K2 | union | as row 5 |
+| row | configuration | arm | exposure (evidence) |
+| --- | --- | --- | --- |
+| 1 | K0 | dilution exclusion | the factor identity gate's statistics (correction 1: "the already opened factor-only PASS"), and the failed outcome run (below) |
+| 2 | K0 | filing-risk exclusion | the failed outcome run (below) |
+| 3 | K0 | union | the failed outcome run (below) |
+| 4 | K1 | dilution exclusion | outcome `95ff5c23…` (all cells) |
+| 5 | K1 | filing-risk exclusion | outcome `95ff5c23…` |
+| 6 | K1 | union | outcome `95ff5c23…` |
+| 7 | K2 | dilution exclusion | reproduction `1ed032ca…`, audited `99a6fcca…` (access 641); factor `cf05211d…` (access 640) |
+| 8 | K2 | filing-risk exclusion | as row 7 |
+| 9 | K2 | union | as row 7 |
 
-**K0's failed outcome run is exempt, under the spec's condition.** Correction 1 records what it produced:
-- zero stdout bytes and no return cell;
-- a missing-bar failure: existing holding YTEN had no bar on 2024-07-01, and its series resumed on 2024-09-03.
+**K0's failed outcome run is not exempt.** The spec exempts it **only if** its recorded exit status, failure category
+and traceback carry no outcome-dependent information. Two things decide it:
+- The recorded exit status and traceback were not retained. What survives is correction 1's summary: zero stdout
+  bytes and no return cell, and the run stopped while valuing the first schedule because existing holding YTEN had no
+  bar on 2024-07-01, although its series resumed on 2024-09-03.
+- Even that summary is not clearly outcome-free. A halt across a rebalance decides the holding's recovery treatment,
+  and the halt/resumption pattern of a held name is outcome risk.
 
-Those are the exit status, the failure category and the traceback's content. They are bar dates and a membership fact,
-which is the same class of evidence as the construction's executability reads and this programme's date-only
-off-calendar audit. None is a price, a return or a flag derived from one. So K0's filing-risk and union arms have no
-exposure. K0's dilution row stands because of the factor gate, not because of this run.
+So the condition cannot be established. K0's exposed arms are rows, and because the summary does not say which
+schedule was first, all three are counted. Row 1's factor gate would expose the dilution arm on its own.
 
 The literal buy-and-hold and the annual 1/N were emitted as comparators, not as arms. The spec's #2908 rows are
-"each arm it actually emitted", so they are not rows.
+"each arm it actually emitted", so they are not rows. Nor does the selection clause (spec line 345) turn them into
+rows. #2901 adopts the annual 1/N as its **control**, which is a comparator role and not a selected candidate, and no
+capital or strategy choice has been made from either comparator's figures.
 
-**|H| = 7.**
+**|H| = 9.**
 
 ## The frozen family
-M = |H| + 2 + 6 = 7 + 2 + 6 = **15**:
-- 7 historical rows (above);
+M = |H| + 2 + 6 = 9 + 2 + 6 = **17**:
+- 9 historical rows (above);
 - 2 observed rows at #2901's first run: A−C (headline) and A−C′ (diagnostic);
 - 6 reserved slots, two for each of the 3 permitted corrections, counted whether used or not.
 
-The runner takes `--history-rows 7` and computes M with `family_size`. It also computes the Bonferroni bar with
+The runner takes `--history-rows 9` and computes M with `family_size`. It also computes the Bonferroni bar with
 `bonferroni_t(M)`. Reproduce the bars with:
-`PYTHONPATH=. uv run python -c "from app.services.r6_monthly_trial import family_size as f, bonferroni_t as b, cohort_t_bar as q; print(f(7), b(f(7)), q(10))"`.
-At M = 15 the Bonferroni term is below 3, so the condition's binding half is t > 3.
+`PYTHONPATH=. uv run python -c "from app.services.r6_monthly_trial import family_size as f, bonferroni_t as b, cohort_t_bar as q; print(f(9), b(f(9)), q(10))"`.
+At M = 17 the Bonferroni term is below 3, so the condition's binding half is t > 3. The conservative K0 count
+therefore moves no bar at t > 3.
 
 The claim is FWER over this frozen family at α = 0.05 and nothing wider. A later declaration (#2902–#2904) inherits
 #2901's **observed** rows only, not its reserved slots.
@@ -172,19 +186,26 @@ The claim is FWER over this frozen family at α = 0.05 and nothing wider. A late
   under (`run_2901_quality_trial.STRATEGY_ID` / `STRATEGY_VERSION`).
 - **#2908 is charged in the same bump.** It ran after `TRIAL_REGISTER_CUTOFF` without charging the register. Its
   entry is `r6-2908-exclusion-arms-2026-08-24` (searches = 3, one per variant). The register counts variants
-  selected between; H counts (configuration, arm) rows under this programme's rule. The two numbers answer different
-  questions and are not reconciled.
+  selected between, and H counts (configuration, arm) rows under this programme's rule; the two numbers answer
+  different questions and are not reconciled. #2901's `searches = 2` follows its own first-run rows, which is the
+  conservative direction for the register.
 - **Preregistration row.** `scripts/freeze_2901_quality_declaration.py` freezes it:
   - purpose `capital_candidate`, universe basis `survivorship_free`, carry and FX unmodelled both `false`, so the
     expected structural refusals are empty;
   - policy `structural-refusal-policy-2026-08-21-v5-cagr-saturation`;
   - forward-shadow floor of 11 decision dates and 574 weeks, derived in the script;
-  - dry-run digest `9235ab28186b4a33b59f4580df1af89a2c371ed51724dac5e925e612c4582cc4`.
+  - digest `9235ab28186b4a33b59f4580df1af89a2c371ed51724dac5e925e612c4582cc4`. The script refuses to freeze any
+    other digest (`EXPECTED_DECLARATION_SHA256`), and it has no policy-divergence override.
 
-  It is run once, after this merges and before the run, and #2599's gate inside `record_holdout_access` then checks
+  It is run once, from `main` after this merges and before the run, and #2599's gate inside `record_holdout_access` then checks
   the run against it. Two things this row does **not** do:
-  - `capital_candidate` does not make QUALITY PIT-admissible. That is a separate gate, and the paper ticket carries
-    it (below).
+  - `capital_candidate` does not make QUALITY PIT-admissible. That is a separate gate, carried by the paper ticket
+    (declaration spec, "Capital boundary": "global admissibility: `R6RankingIdentity.QUALITY` and the shared datasets
+    admissible in the PIT registry").
+  - `survivorship_free` is the stamp this codebase gives the research-corpus admission (`BACKTEST_UNIVERSE`): delisted
+    series are kept and terminated under #3362's policies, and admission never conditions on survival to the window
+    end. It does not claim the population is complete. R1, R5 and R6 and the failing `historical_population` cells
+    below say where it is not.
   - It does not authorise capital; the verdict table decides that.
 
 ## Declared residuals and deviations
@@ -219,7 +240,7 @@ historical_population P2/P5), `derived_fundamentals` (system_versions D1, histor
 causal_transform D1) and `historical_population` (H1/H2/H3). They are listed for completeness. The artefact's
 fundamentals come from the #3360 file store, which is `companyfacts_pit`, not from those database families.
 
-Repeated verbatim from the declaration spec:
+Repeated verbatim from the declaration spec ("above" in R15 refers to that spec's "Portfolios" section):
 - **R10**: gaps at month-end marks are held at the last close. Stale marks relocate losses in time and can bias
   volatility, autocorrelation and covariance, and not necessarily equally across portfolios. The stale-mark census
   reports their exposure and durations.
@@ -256,10 +277,10 @@ PYTHONPATH=. uv run python -m scripts.run_2901_quality_trial --acknowledge-open-
   --exclusion-trial-sha256 bc6d960d233309cdefd1621bc01d4483037e581cc83edc2e7d88db35fa07f2f2 \
   --termination-identity-sha256 86cf27532419cf995bfdce708f2b5bea448d55cebb4d6e1d4f17ddc5157e2569 \
   --power-output-sha256 3c269cabed6a042265a40331a593419be52cf2450ad5e6b869755c8adbcf8040 \
-  --history-rows 7 \
+  --history-rows 9 \
   --sealed-dir "$HOME/Library/Application Support/eBull/research/quality_2901/sealed"
 ```
-Everything the run emits is published: the gate readout, and after a pass every cell, readout and verdict the
+The result document records this declaration's sha256 at its merged commit, which binds the run to this text. Everything the run emits is published: the gate readout, and after a pass every cell, readout and verdict the
 declaration spec names. The same holds when the result destroys the arm. A refusal or raise publishes only what the
 verdict table allows. Any correction follows the spec's rule: a hashed correction declaration frozen before the
 re-run, at most one per stage, and a new `strategy_version` with its own register entry, because a declaration row
