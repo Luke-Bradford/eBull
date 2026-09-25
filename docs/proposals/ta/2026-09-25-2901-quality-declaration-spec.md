@@ -4,7 +4,7 @@ PR B of `docs/proposals/ta/2026-09-24-2901-quality-arm.md` (the construction spe
 spec", lines 177-214). Refs #2899, #2908, #3362, #2829, #2364. Security: none (research harness; no broker, auth or
 order path).
 
-**Status: ckpt-1 rounds 1–4 (60, 57, 51, 55 findings) folded in, 2026-09-25.** No return or factor spread has been
+**Status: ckpt-1 rounds 1–5 (60, 57, 51, 55, 34 findings) folded in, 2026-09-25.** No return or factor spread has been
 read. What has been read: the pre-look census of the published artefact (`census-2026-09-25-2fb142d4.json`, no
 returns; posted on #2901) and a date-only audit of the mirror (closure-dated bars, below). The construction froze
 when PR A2 (#3378) merged (`2fb142d4`). This spec changes no construction rule; its three amendments to the
@@ -42,20 +42,22 @@ sold as a non-target through `_target_value`, and its half-spread is charged onc
 - Holding a gap at a mark trades nothing.
 - Hence **terminal wealth equals `simulate_portfolio`'s** on the same schedule and policy.
 
-The runner checks this for A, C, C′, D₀ and the literal buy-and-hold (a single-formation schedule), under every
-programme policy, **at h = HALF_SPREAD and at h = 0**, before any statistic. It asserts:
-1. `simulate_portfolio`'s rebalance events (all but its last) are dated exactly on the artefact's `x_date`s, its final
-   event on `WINDOW_END`, and the monthly simulator's rebalance, mark and final events on the same sessions
-   (marks on each month's last NYSE session);
-2. at every rebalance, both simulators' per-name target values agree (the cash/recognition representation differs,
-   the target does not);
-3. the terminal wealths W_m and W_a agree: |W_m − W_a| ≤ max(1e-9 · max(|W_m|, |W_a|), 1e-12), which covers W = 0.
+The runner checks this for A, C, C′ and D₀ (gating: a mismatch is `REFUSED_PRE_GATE`), and for the literal
+buy-and-hold (non-gating: a mismatch makes that comparator `unavailable`), under every programme policy, **at
+h = HALF_SPREAD and at h = 0**, before any statistic. With close(x, y) ⇔ |x − y| ≤ max(1e-9 · max(|x|, |y|), 1e-12),
+it asserts:
+1. each simulator's rebalance events fall on **that portfolio's own schedule's** `x_date`s (twelve, or one for the
+   buy-and-hold), its final event on `WINDOW_END`, and the monthly simulator's marks on each month's last NYSE
+   session;
+2. at every rebalance, the two simulators' per-name target values are close (a name absent on one side is 0; after a
+   ruin both are 0);
+3. the terminal wealths are close, **and** their ruin status (W = 0 exactly) is equal.
 
-SPY is checked against its analytic identity: net multiple = G(1 − h)/(1 + h).
+SPY (non-gating) is checked against its analytic identity, net multiple = G(1 − h)/(1 + h); a mismatch makes SPY
+`unavailable`.
 
 The annual side's terminal wealth is taken as its final event's `pre_cost − cost`, never as `1 + total_return`, which
-cancels digits. Parity cannot see *when* a return was booked, so the monthly timing is pinned by fixtures (test 8). A
-mismatch is `REFUSED_PRE_GATE`.
+cancels digits. Parity cannot see *when* a return was booked, so the monthly timing is pinned by fixtures (test 8).
 
 ## Portfolios (all read from the one artefact; identical process, costs and termination)
 At each formation D (the 12 Junes 2013–2024), with X(D) the artefact's `x_date`:
@@ -75,13 +77,15 @@ At each formation D (the 12 Junes 2013–2024), with X(D) the artefact's `x_date
     recorded SIC, without the component-tag condition. It is not "the whole population a live sleeve could hold".
   - **Declared confound (R15):** an unresolved distressed issuer can enter C′ while an otherwise identical resolved
     one cannot. The census tabulates, per formation, every C′ combination of period found, assets resolved/screened,
-    equity resolved/screened, and FPI true/false/not_evaluated. It counts the rows excluded by each reason — no
-    companyfacts entry, integrity-excluded, SIC missing, SIC invalid, SIC financial, FPI, assets ≤ 0, equity < 0, not
-    executable — both exclusively (first reason in that order) and overlapping. Each count ÷ |C′(D)| is the
-    formation-time target weight; marked weights drift after X(D).
-  - **Schema.** Every field C′ reads must be a valid artefact value (`fpi` ∈ {true, false, not_evaluated}; a resolved
-    component is a finite canonical decimal). A corrupt value refuses the run (`REFUSED_PRE_GATE`); only the
-    enumerated unresolved states are admitted.
+    equity resolved/screened, and FPI true/false/not_evaluated; each admitted cell's count ÷ |C′(D)| is its
+    formation-time target weight (the cells are disjoint; marked weights drift after X(D)). It counts the P(D) rows
+    excluded by each reason — no companyfacts entry, integrity-excluded, SIC missing (the artefact records an
+    unparseable or out-of-range SIC as missing, construction rule 3), SIC financial, FPI, assets ≤ 0, equity < 0, not
+    executable — both exclusively (first reason in that order) and overlapping, as counts and ÷ |P(D)|.
+  - **Schema, pinned.** `fields.fpi` ∈ {`true`, `false`, `not_evaluated`}; `fields.sic` ∈ {`missing`, `financial`,
+    `other`} with `sic` an integer in the construction's SIC range or null; a component's `status` ∈ {`value`,
+    `absent`, `ambiguous`, `blocked_by_rejection`}, with `value` a finite canonical decimal string exactly when
+    `status = value`; `executable` a boolean. Anything else refuses the run (`REFUSED_PRE_GATE`).
 - **D₀(D)**: E(D) rows with `decile = 0` under rule 7's frozen formula ⌊10·r/n⌋ on the (GP/A, CIK) order, i.e. ranks
   r < n/10 (⌈n/10⌉ names; the runner asserts the artefact's `decile` field equals the formula). Ties at the decile-0
   boundary are split by CIK; rule 7 keeps ties whole only at the decile-9 boundary. The number tied at
@@ -150,7 +154,7 @@ session is not processed as a mark.
   2013-06 … 2024-09 across 22,879 files, and no file ends on one. The runner counts every valuation that takes its
   last close from such a bar and reports the count. They are kept because dropping them would change
   `read_price_series`' output away from what the frozen simulator and #3362's `evidence_sha256` consumed, and so
-  break parity; stored first/last bounds are not the reason (no file ends on one).
+  break parity. (The audit also reports files that begin on one.)
 - **Why a gap is held at a mark but takes the bound at a rebalance.** A mark trades nothing, so pricing a halted
   holding at zero there would book a −100% month followed by a recovery — a timing artefact of the mark. A rebalance
   and the final sale must trade the holding, so #2908's non-executability bound applies there, identically for every
@@ -180,10 +184,13 @@ session is not processed as a mark.
   - Every price used must be finite and > 0, including the derived adjusted open `raw_open × adjusted_close /
     raw_close`.
   - Every wealth, target, cost, share count and return must be finite.
-  - **Underflow:** any operation whose inputs are all positive (fraction × price, target ÷ price, shares × price,
-    recovered cash, a target value) and whose result is 0 raises. It is never read as ruin.
-  - Returns are derived from the wealth path and never the reverse: the simulator stores W at every mark, and total
-    return, telescoping and ruin are read from W, so r = W_new/W_old − 1 rounding to −1 cannot invent a ruin.
+  - **Underflow:** an operation whose exact result must be positive — a product or quotient of positive values
+    (fraction × price, target ÷ price, shares × price, recovered cash) — raises if it evaluates to 0. It is never read
+    as ruin. (A difference can legitimately be 0 and is not checked this way.)
+  - **Wealth path, not rounded returns.** The simulator stores W at every mark and the gross factor g_m = W(mark_m) /
+    W(mark_{m−1}). Compounding (telescoping, cohort returns, total return) uses the factors or the endpoint wealths,
+    never 1 + r_m after r_m was rounded, so a positive factor below 2^-53 cannot become a total loss. Ruin is read
+    from W = 0 exactly. r_m = g_m − 1 is formed only for the moment statistics.
   - Any violation raises.
 - **Ruin, from total wealth only.** W < 0 is impossible (fractions lie in [0, 1] and h < 1) and raises. W = 0 exactly,
   meaning cash plus holdings, is reachable only when every holding takes an exact-zero fraction and no cash remains.
@@ -193,7 +200,9 @@ session is not processed as a mark.
     and the censuses record no held cells after ruin. (The annual code creates zero-share entries; both terminal
     wealths are 0, so parity holds.)
   - Descriptive ratios over zero wealth (turnover, stale exposure) are `unavailable`.
-  - **Scope.** A ruin flag is keyed by (portfolio, policy, h, interval: the 134 months, or September).
+  - **Scope.** A ruin flag is keyed by (portfolio, policy, h, interval: the 134 months, or September). Wherever this
+    spec says a statistic refuses "on ruin", it means a ruin **inside the 134 months** of a series that statistic
+    uses, unless it says September.
   - **Inference refuses on ruin inside the 134 months** for every monthly statistic that uses that series (HAC t,
     cohort t, the gate's correlations for a gross gate leg A or D₀, the 135-observation descriptive HAC). Post-ruin
     zeros are bookkeeping, not observed returns on capital. A September-only ruin leaves the 134-month statistics
@@ -214,9 +223,10 @@ session is not processed as a mark.
 - **Turnover.** Reported for A, C and C′, and never gating.
   - **Monthly one-way turnover, our conventions:** for each of the 134 months, (sales + purchases executed in the
     month) / 2 / W(mark_{m−1}); the initial purchase is excluded; recognitions at marks count as sales; a recognition
-    at a rebalance is part of that rebalance's trades and counted once. The mean over the 134 months is shown beside
-    Novy-Marx/Velikov's 50%/month bar (`strategy-evidence.md`) as a comparison of form only; these conventions are
-    ours, not a reproduction of their formula.
+    at a rebalance is part of that rebalance's trades and counted once. The mean over the 134 months is reported. It
+    follows the form of Novy-Marx/Velikov's measure (`strategy-evidence.md`), but the conventions are ours and not
+    their formula, so no comparison with their 50%/month cutoff is made or implied; the measure is descriptive only. If any month is post-ruin, the 134-month mean is `unavailable` and a surviving-period mean is
+    shown, labelled with its months.
   - September 2024 and the whole window (including the final liquidation) are reported as separate traded-notional
     figures, outside the 134-month mean.
   - **Forced exits:** in each month, the pre-loss last-close value removed by recognitions, ÷ W(mark_{m−1}). A
@@ -225,13 +235,15 @@ session is not processed as a mark.
 - **Result per (portfolio, policy, h):** the 134-month series, `partial_return`, total return, events and
   realisations (#3362's `Realisation`), `realisation_census`, turnover and forced exits, and the stale-mark census.
 
-**Stale-mark census (full population; R10).** For every portfolio × policy it reports:
-- the count of held-symbol × valuation-session cells, cross-tabulated as **evidence status** (bar, gap, terminated,
-  alive at capture) × **action** (priced, held stale, bounded and sold, recognised), so no cell is counted twice;
+**Stale-mark census (full population; R10).** For every portfolio × policy × h it reports:
+- the count of held-symbol × valuation-session cells, each with exactly one **evidence status** (bar, gap,
+  terminated, alive at capture) and one **action**: a bar → priced; a gap at a mark → held stale; a gap at a
+  rebalance or the final → bounded and sold; a terminated holding at any valuation session → recognised; alive at
+  capture at the final → sold at last close. No cell is counted twice;
 - the share of W in held-stale cells at each mark;
-- gap durations in sessions, from the first missing session while held to the resumption, the sale or the window end,
-  with a censoring flag for the latter two (a gap already running at purchase cannot occur: targets have a bar on
-  `x_date`);
+- gap durations as a count of NYSE sessions: from the first missing session while held (inclusive) to the resumption
+  session (exclusive), or to the sale session or `WINDOW_END` (inclusive, with a censoring flag). A closure-dated bar
+  is not a resumption. A gap already running at purchase cannot occur: targets have a bar on `x_date`;
 - per held series, `read_price_series`'s `invalid_rows` (an invalid interior row becomes a missing bar, and so a gap)
   and its closure-dated bars.
 
@@ -275,9 +287,9 @@ header must be exactly `year,month,rank_GPA,nstocks,ret_vw`, and returns are in 
 - **Reference parsing.** Raw rows are read before any dictionary is built.
   - A duplicate (year, month, rank) raw row refuses.
   - After filtering to ranks 1 and 10 and the 134 months, each used row must have an integer `nstocks` ≥ 1 and a
-    finite `ret_vw` ≥ −100 (exactly −100 is a legitimate total loss). A value outside those domains refuses. No
-    missing-value sentinel is documented for this file; a portfolio with `nstocks` ≥ 1 has a return, so a sentinel
-    inside the domain is not detectable and is not claimed to be.
+    finite `ret_vw` ≥ −100 (exactly −100 is a legitimate total loss). A value outside those domains refuses. The
+    producer documents no missing-value contract for this file, so a missing code inside the domain is not
+    detectable; that is declared (R20), not claimed away.
   - Rank 1 and rank 10 must each cover the 134 months exactly.
 - **Calendar alignment is exact.** Our key set and the reference key set must both equal the 134 months; a missing,
   extra or duplicate key refuses. `validate_factor`'s key intersection is **not** used. The lead/lag correlations
@@ -293,7 +305,8 @@ header must be exactly `year,month,rank_GPA,nstocks,ret_vw`, and returns are in 
 - **Pass**: #2908's frozen rule (correlation ≥ +0.20, OLS beta > 0, |corr| ≥ max(|lag|, |lead|)) under **every**
   programme policy. This is an inherited heuristic, not a calibrated identity test: #2908's declared rule, and its
   constants are not re-derived here.
-- **What the gate publishes**: months, correlation, beta sign, lag and lead correlations, and pass/fail per policy.
+- **What the gate publishes**: months, correlation, beta sign, lag and lead correlations, and true/false/refused per
+  policy with any refusal reason.
   It does **not** publish either leg's mean, the beta's magnitude, the alpha or any cumulative figure.
 - **A failed gate** means the identity is **unvalidated**. That can be a defect, or it can be the deliberate
   differences (EW vs VW, universe, breakpoints, termination). It is not a market finding. Arm outcomes stay sealed.
@@ -309,20 +322,26 @@ header must be exactly `year,month,rank_GPA,nstocks,ret_vw`, and returns are in 
 - **Trial rows.** A trial row is a distinct (configuration, comparator) with exposure. The comparators are A−C
   (headline), A−C′ (diagnostic), and for #2908 each arm it actually emitted. A is shared by the headline and the
   diagnostic, and the gate exposes A (through A−D₀), so any exposure of a #2901 configuration creates **both** its
-  rows. Rows are counted once, whatever number of correction events touched them.
+  rows. Rows are counted once, whatever number of correction events touched them. For #2908, "each arm" means each
+  arm with exposure.
 - **Grounds.** A correction needs an **independently evidenced implementation or data defect**: a failing fixture, a
   mismatched input, a mis-keyed month. It is never a change of construction, threshold or policy made to improve a
   result.
 - **Declaration.** Each correction is a written, hashed declaration frozen before the re-run. It carries the revised
   trial-row table, M and the #2829 register identity. Every run attempt, refused or not, is recorded in the
   holdout-access ledger together with what it exposed.
-- **Frozen family, before exposure.** M is frozen in the declaration **before** the run and covers every permitted
-  attempt: #2908's rows + the #2901 headline and diagnostic rows of the first run (2) + 2 rows for each of the 3
-  permitted corrections (6). Corrections never raise M after the fact, so the Bonferroni bar does not move with
-  outcomes. The family is every #2829 register row of the r6/selection programme with exposure before the
-  declaration freezes (#2908's, and any other the register lists), plus #2901's permitted rows; the declaration
-  enumerates it. Trials registered later (#2902–#2904) are not in this family; each of their declarations counts
-  #2901's rows.
+- **Frozen family, before exposure.** M = |H| + 2 + 6, frozen in the declaration **before** the run:
+  - H = every exposed row, under the rule above, of every #2829 register entry in the r6/selection programme that
+    exists when the declaration freezes (#2908's rows, and any other the register lists), enumerated;
+  - 2 = #2901's headline and diagnostic rows of the first run;
+  - 6 = 2 **reserved** slots for each of the 3 permitted corrections, counted whether used or not.
+  Corrections never raise M after the fact, so the bar does not move with outcomes. The declaration lists observed
+  and reserved rows separately; a later declaration (#2902–#2904) inherits #2901's **observed** rows only.
+  - The claim is limited to FWER over **this frozen family** at α; no programme-wide alpha spending is claimed.
+  - A permitted correction fixes an evidenced defect in the pre-declared hypothesis's implementation; it is not a
+    choice among alternative hypotheses, so the tested hypothesis and its p-value definition do not change. The
+    reserved slots are conservative accounting for re-runs, not a selective-inference correction, and none is
+    claimed.
 - **Descriptive readouts** used later to select anything charge every inspected candidate as a row.
 - **Limit.** At most **one** correction per stage (pre-gate, gate, post-gate), counted persistently across re-runs. A
   correction at a later stage re-runs every earlier stage, and a stage that fails again after its own correction is
@@ -335,8 +354,9 @@ header must be exactly `year,month,rank_GPA,nstocks,ret_vw`, and returns are in 
 - **#2908's rows under the same rule.** Its correction 1 froze after a run that emitted zero bytes and no return
   cell, so there was no exposure. Corrections 2 (JSON encoding) and 4 (audit logging) alter no computed cell. Its
   correction 3 changed the resolver after outcome `95ff5c23…` had been emitted, so both the pre-correction-3 and
-  post-correction-3 configurations have rows, one per arm each exposed. Correction 1's zero-byte run is checked
-  against its recorded exit status and failure category before it is exempted. The frozen declaration builds the
+  post-correction-3 configurations have rows, one per arm each exposed. Correction 1's run is exempt **only if** its
+  recorded exit status, failure category and traceback carry no outcome-dependent information; otherwise its
+  configuration's exposed arms are rows too. The frozen declaration builds the
   table from those documents and the ledger, and states the command.
 
 ## Statistics
@@ -374,15 +394,17 @@ every policy refused the binding value and policy are `unavailable`.
      **Student t with 10 df**. Its assumption is that the 11 values are independent draws from a normal distribution
      — assumed here, not established. (The few-clusters literature — Bester, Conley & Hansen 2011, *J. Econometrics*
      165(2); Cameron & Miller 2015, *J. Human Resources* 50(2), §VI — motivates the t(G − 1) reference for G fixed; it
-     does not validate independence here.) It is used only as an additional refusal.
+     does not validate independence here.) It is an additional conjunct: cohort t ≤ q makes it **false**; it is
+     **refused** only in the table's cases.
    - The bar is q = F⁻¹_t10(Φ(3)), upper tail. It is computed from the closed-form t CDF for integer ν (Abramowitz &
      Stegun 26.7.3/26.7.4), by bisection on [0, 100] to 1e-12. Tests pin 2.228 (0.975), 3.169 (0.995) and the
      operating q ≈ 3.957, cross-checked in the test by independent numerical integration of the t₁₀ density.
    - The 2024 cohort (July–August plus the partial September) is reported separately and never tested.
 3. **Deflation over the trial family: Bonferroni on the HAC t** (Harvey, Liu & Zhu 2016, *Review of Financial Studies*
    29(1):5-68, §4, "Bonferroni's adjustment"; α = 0.05, their level).
-   - With M the frozen family size above, the condition is **t > 3 and p ≤ α/M**, where p = 2(1 − Φ(t)) is the
-     headline's two-sided HAC p-value. Written t_M = max(3, Φ⁻¹(1 − α/(2M))), that is t > t_M when 3 binds and
+   - With M the frozen family size above, the condition is **t > 3 and p ≤ α/M**, where p = 2Φ(−|t|) = erfc(|t|/√2)
+     is the headline's two-sided HAC p-value, evaluated as the survival function (never 1 − Φ, which loses the upper
+     tail); t_M is found by bisection on erfc, not by subtracting from 1. Written t_M = max(3, Φ⁻¹(1 − α/(2M))), that is t > t_M when 3 binds and
      t ≥ t_M when the Bonferroni term binds; the runner evaluates the two inequalities literally. The t > 3 is this
      programme's inherited bar (#2908; motivated by HLZ's recommended hurdle), separate from the Bonferroni
      adjustment itself.
@@ -413,11 +435,13 @@ Every statistic is computed under each of `PROGRAMME_POLICIES`: zero_recovery, w
 classified_best.
 - Each condition is **three-valued per policy**: true (T), false (F) or refused (R).
 - One operator composes everything — across policies, across a haircut's two margins, across C and C′, and across
-  `base`'s conjuncts. It is an intentional **refusal-dominant** conjunction (not strong-Kleene): R if any input is R;
-  otherwise T if every input is T; otherwise F. Truth table for two inputs: (T,T)→T, (T,F)→F, (F,F)→F, (T,R)→R,
+  `base`'s conjuncts. It is the **weak Kleene (Bochvar) conjunction** — Bochvar 1938; Kleene 1952, *Introduction to
+  Metamathematics* §64 — in which an undefined input makes the result undefined: R if any input is R; otherwise T if
+  every input is T; otherwise F. Truth table for two inputs: (T,T)→T, (T,F)→F, (F,F)→F, (T,R)→R,
   (F,R)→R, (R,R)→R. A refusal is never silently read as a failure or a pass.
-- The least-favourable value is taken in the direction of the condition: the minimum for "> bar" conditions, the
-  maximum for "< bar" and "≤ 0" conditions. The report records it and its policy (via `binding_policy`, per
+- The least-favourable value is taken in the direction of the condition: the minimum for a lower-bound predicate
+  (> or ≥ a bar) and the maximum for an upper-bound predicate (< or ≤ a bar), equality treated as the predicate
+  states. The report records it and its policy (via `binding_policy`, per
   condition, with the direction applied), plus any refusing policies. There is no single binding policy for the
   verdict.
 - Adding a policy can only remove **pass eligibility**; it can turn a determinate label into a refusal or a different
@@ -508,7 +532,10 @@ its instrument list are current values, and the historical run cannot apply them
     target weight, checked over the full target list;
     - unmapped weight is **held as cash**;
     - mapped orders whose actual post-cost value falls below `min_position_amount` are also **held as cash**;
-    - after both exclusions, **≥ 95% of target weight must actually be executed**, or the formation deploys nothing;
+    - a **preflight** eligibility rule, applied before any order: after both exclusions, the planned post-cost
+      positions — retained holdings plus planned orders — must cover ≥ 95% of target weight, or no order is sent;
+    - a **fill reconciliation** afterwards, measured against post-cost target quantities including partial fills,
+      with a declared action when coverage falls short (no un-doing of fills is assumed);
     - the mapped-plus-cash portfolio is reconciled against its comparator;
   - global admissibility: `R6RankingIdentity.QUALITY` and the shared datasets admissible in the PIT registry, and no
     target with a failing cell (construction spec, PIT-registry statement);
@@ -550,6 +577,7 @@ verbatim. This spec adds:
 - **R18**: executability reads the X(D) row itself, including its close, so no real-time-executable inference is
   drawn.
 - **R19**: "worst" and "robust" are across the three programme policies only.
+- **R20**: the reference file has no documented missing-value contract; in-domain missing codes are undetectable.
 
 ## Delivery
 - **This PR**: this spec, plus three declaration-scope amendments to the construction spec's carried list: the
