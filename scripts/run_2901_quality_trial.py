@@ -63,6 +63,9 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Final
 
+import psycopg
+
+from app.config import settings
 from app.services import r6_exclusion_trial, r6_monthly_trial
 from app.services import r6_quality_universe as quality
 from app.services.market_calendar import us_market_status
@@ -730,7 +733,7 @@ def descriptives(
         by_policy[policy.label] = {
             "cohorts": _describe(lambda arm=arm, control=control: cohort_readout(arm, control, months)),
             "hac_with_partial_month": _describe(lambda arm=arm, control=control: appended_hac(arm, control, months)),
-            "arm_gbp_net_multiple": arm.terminal_wealth * (1.0 - FX_FEE) ** 2,
+            "arm_gbp_net_multiple": _describe(lambda arm=arm: arm.terminal_wealth * (1.0 - FX_FEE) ** 2),
         }
     path_readouts: dict[str, Any] = {}
     for (label, h), results in paths.items():
@@ -979,10 +982,6 @@ def main() -> int:
     family = family_size(args.history_rows)
     symbols = book_symbols(books)
     seal = sealer(args.sealed_dir)
-
-    import psycopg
-
-    from app.config import settings
 
     with psycopg.connect(settings.database_url) as conn:
         access_id = record_holdout_access(
