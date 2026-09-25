@@ -85,33 +85,24 @@ def _insert_snapshot(conn: psycopg.Connection[Any], params: Mapping[str, object]
     return int(row[0])
 
 
-def record_crowd_snapshot(
+def _record_failure(
     conn: psycopg.Connection[Any],
-    fetch: Callable[[], BroadMarketSnapshot],
     *,
-    request_params: Mapping[str, object],
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-) -> CrowdSnapshotResult:
-    """Fetch one broad-market snapshot and append it.
-
-    A failure in the fetch or in building any row commits a ``failed`` snapshot row carrying the error, then
-    re-raises the ORIGINAL exception: ``_tracked_job``'s ``classify_exception`` reads its type, so a 401 stays
-    operator-actionable and a 429 keeps its longer backoff. Rows are written only for a complete snapshot, in
-    the same transaction as its header.
-    """
-    started_at = clock()
-    params_json = json.dumps(request_params, sort_keys=True)
+    started_at: datetime,
+    finished_at: datetime,
+    params_json: str,
+    exc: BaseException,
+) -> None:
+    """Commit a ``failed`` snapshot row. Best-effort: a connection that cannot take it is logged, never allowed
+    to replace the collection error the caller is about to re-raise."""
+    error = f"{type(exc).__name__}: {exc}"
     try:
-        snapshot = fetch()
-        rows = [_observation_row(record) for record in snapshot.instruments]
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
         with conn.transaction():
             snapshot_id = _insert_snapshot(
                 conn,
                 {
                     "started_at": started_at,
-                    "finished_at": max(started_at, clock()),
+                    "finished_at": max(started_at, finished_at),
                     "status": SNAPSHOT_FAILED,
                     "request_params": params_json,
                     "pages": None,
@@ -121,28 +112,55 @@ def record_crowd_snapshot(
                     "error": error,
                 },
             )
-        logger.warning("etoro crowd snapshot %d failed: %s", snapshot_id, error)
-        raise
+    except Exception:
+        logger.exception("etoro crowd snapshot failed (%s) and its failed row could not be recorded", error)
+        return
+    logger.warning("etoro crowd snapshot %d failed: %s", snapshot_id, error)
 
-    with conn.transaction():
-        snapshot_id = _insert_snapshot(
-            conn,
-            {
-                "started_at": started_at,
-                "finished_at": max(started_at, clock()),
-                "status": SNAPSHOT_COMPLETE,
-                "request_params": params_json,
-                "pages": snapshot.pages,
-                "reported_total_items": snapshot.reported_total_items,
-                "discarded_items": snapshot.discarded_items,
-                "recorded_items": len(rows),
-                "error": None,
-            },
-        )
-        with conn.cursor() as cur:
-            with cur.copy(_COPY_OBSERVATIONS_SQL) as copy:
-                for row in rows:
-                    copy.write_row((snapshot_id, *row))
+
+def record_crowd_snapshot(
+    conn: psycopg.Connection[Any],
+    fetch: Callable[[], BroadMarketSnapshot],
+    *,
+    request_params: Mapping[str, object],
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> CrowdSnapshotResult:
+    """Fetch one broad-market snapshot and append it.
+
+    Any failure — the fetch, building a row, or the write itself (whose transaction rolls back first) — commits
+    a ``failed`` snapshot row carrying the error, then re-raises the ORIGINAL exception: ``_tracked_job``'s
+    ``classify_exception`` reads its type, so a 401 stays operator-actionable and a 429 keeps its longer
+    backoff. Rows are written only for a complete snapshot, in the same transaction as its header.
+
+    ``clock`` is read twice by design: once when the attempt starts and once when it ends.
+    """
+    started_at = clock()
+    params_json = json.dumps(request_params, sort_keys=True)
+    try:
+        snapshot = fetch()
+        rows = [_observation_row(record) for record in snapshot.instruments]
+        with conn.transaction():
+            snapshot_id = _insert_snapshot(
+                conn,
+                {
+                    "started_at": started_at,
+                    "finished_at": max(started_at, clock()),
+                    "status": SNAPSHOT_COMPLETE,
+                    "request_params": params_json,
+                    "pages": snapshot.pages,
+                    "reported_total_items": snapshot.reported_total_items,
+                    "discarded_items": snapshot.discarded_items,
+                    "recorded_items": len(rows),
+                    "error": None,
+                },
+            )
+            with conn.cursor() as cur:
+                with cur.copy(_COPY_OBSERVATIONS_SQL) as copy:
+                    for row in rows:
+                        copy.write_row((snapshot_id, *row))
+    except Exception as exc:
+        _record_failure(conn, started_at=started_at, finished_at=clock(), params_json=params_json, exc=exc)
+        raise
     covered = sum(
         1
         for record in snapshot.instruments

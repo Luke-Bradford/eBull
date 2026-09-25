@@ -151,3 +151,17 @@ def test_tables_refuse_update(ebull_test_conn: psycopg.Connection[Any]) -> None:
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             with conn.transaction():
                 conn.execute(statement, (result.snapshot_id,))
+
+
+def test_a_failed_write_rolls_back_and_is_recorded(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    """A write-phase failure (here the observations PK) leaves no complete header and no rows, and a failed row."""
+    conn = ebull_test_conn
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        record_crowd_snapshot(
+            conn, lambda: _snapshot(_row(1001, buy="50"), _row(1001, buy="51")), request_params=PARAMS, clock=_clock
+        )
+    headers = conn.execute("SELECT status, recorded_items, error FROM etoro_crowd_snapshots").fetchall()
+    assert len(headers) == 1
+    assert headers[0][:2] == (SNAPSHOT_FAILED, 0)
+    assert headers[0][2].startswith("UniqueViolation: ")
+    assert conn.execute("SELECT count(*) FROM etoro_crowd_observations").fetchone() == (0,)
