@@ -190,8 +190,11 @@ LANES: dict[str, QuotaLane] = {
         witnesses=2,
         source_url="https://api-portal.etoro.com/api-reference/trading--demo/list-trading-history",
     ),
-    # #3381 slice 2 — added 2026-09-25 from the per-endpoint page and the committed
-    # OpenAPI fixture (`x-ratelimit`: 60/60 s, shared false, defaultPool false).
+    # #3381 slice 2 — added 2026-09-25 from the per-endpoint portal page (the one
+    # witness: `witnesses` counts portal pages that enumerate the pool, and a
+    # dedicated pool has no peer page). The committed OpenAPI fixture agrees
+    # (`x-ratelimit`: 60/60 s, shared false, defaultPool false), but it is the
+    # cross-check, not a second witness — same standing as lanes B and C.
     "H_user_live_portfolio": QuotaLane(
         key="H_user_live_portfolio",
         title="public live portfolio (dedicated, pooled with nothing)",
