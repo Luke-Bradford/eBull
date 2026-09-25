@@ -310,7 +310,10 @@ export function ModelThesisSection({
 
       <div>
         <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Rank movers <HeuristicBadge compact />
+          Rank movers{" "}
+          <span className="normal-case tracking-normal">
+            <HeuristicBadge compact />
+          </span>
           {shown.length > 0 ? (
             <span className="normal-case text-slate-400">
               {" "}
