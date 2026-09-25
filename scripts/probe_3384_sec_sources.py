@@ -266,9 +266,11 @@ def _first_csv(z: zipfile.ZipFile) -> IO[bytes]:
 
 
 def _parse_day(text: str) -> date:
+    # MIDAS writes some quarters' dates as floats ("20160601.0").
+    cleaned = text.strip().removesuffix(".0")
     for fmt in ("%Y%m%d", "%Y-%m-%d", "%m/%d/%Y"):
         try:
-            return datetime.strptime(text.strip(), fmt).date()
+            return datetime.strptime(cleaned, fmt).date()
         except ValueError:
             continue
     raise ValueError(f"unrecognised date {text!r}")

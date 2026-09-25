@@ -48,6 +48,7 @@ def test_unify_symbol_separators() -> None:
 
 def test_parse_day_formats() -> None:
     assert _parse_day("20240103") == _parse_day("2024-01-03") == _parse_day("01/03/2024") == date(2024, 1, 3)
+    assert _parse_day("20160601.0") == date(2016, 6, 1)
 
 
 def test_quantiles() -> None:
