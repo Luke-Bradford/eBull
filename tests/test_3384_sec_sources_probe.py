@@ -54,3 +54,8 @@ def test_parse_day_formats() -> None:
 def test_quantiles() -> None:
     assert _quantiles([]) == {"n": 0}
     assert _quantiles(list(range(10))) == {"n": 10, "min": 0, "p50": 5, "p90": 9, "max": 9}
+
+
+def test_midas_versioned_file_is_recognised() -> None:
+    f = parse_midas_href("/files/opa/x/individual_security_exchange_2016_q1-v2.zip")
+    assert f is not None and f.label == "2016q1"

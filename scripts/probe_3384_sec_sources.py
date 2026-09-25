@@ -41,6 +41,7 @@ from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import IO, Any, Final
+from urllib.parse import urljoin
 
 import httpx
 import psycopg
@@ -53,7 +54,7 @@ from app.services.universe_selection import (
     load_universe_selection,
 )
 
-PROBE_VERSION: Final = "sec-sources-probe-v1"
+PROBE_VERSION: Final = "sec-sources-probe-v2"
 SEC: Final = "https://www.sec.gov"
 FTD_PAGE: Final = f"{SEC}/data-research/sec-markets-data/fails-deliver-data"
 MIDAS_PAGE: Final = f"{SEC}/data-research/sec-markets-data/market-structure-data-security-exchange"
@@ -61,7 +62,7 @@ REQUEST_INTERVAL_S: Final = 0.25
 
 _FTD_HALF: Final = re.compile(r"cnsfails(\d{4})(\d{2})([ab])(?:_\d+)?\.zip$")
 _FTD_QUARTER: Final = re.compile(r"cnsp_sec_fails_(\d{4})q([1-4])\.zip$")
-_MIDAS: Final = re.compile(r"individual_security_exchange_(\d{4})_q([1-4])\d*\.zip$")
+_MIDAS: Final = re.compile(r"individual_security_exchange_(\d{4})_q([1-4])\d*(?:-v\d+)?\.zip$")
 
 
 @dataclass(frozen=True)
@@ -88,17 +89,17 @@ def parse_ftd_href(href: str) -> SourceFile | None:
         year, month, half = int(m[1]), int(m[2]), m[3]
         start = date(year, month, 1 if half == "a" else 16)
         end = date(year, month, 15) if half == "a" else _month_end(year, month)
-        return SourceFile(SEC + href, start, end, f"{year}{month:02d}{half}")
+        return SourceFile(urljoin(SEC, href), start, end, f"{year}{month:02d}{half}")
     if m := _FTD_QUARTER.search(href):
         start, end = _quarter_bounds(int(m[1]), int(m[2]))
-        return SourceFile(SEC + href, start, end, f"{m[1]}q{m[2]}")
+        return SourceFile(urljoin(SEC, href), start, end, f"{m[1]}q{m[2]}")
     return None
 
 
 def parse_midas_href(href: str) -> SourceFile | None:
     if m := _MIDAS.search(href):
         start, end = _quarter_bounds(int(m[1]), int(m[2]))
-        return SourceFile(SEC + href, start, end, f"{m[1]}q{m[2]}")
+        return SourceFile(urljoin(SEC + "/", href), start, end, f"{m[1]}q{m[2]}")
     return None
 
 
@@ -146,27 +147,47 @@ class _Client:
         return path
 
 
-def _inventory(client: _Client, page: str, parse: Any) -> list[SourceFile]:
+def _inventory(client: _Client, page: str, parse: Any) -> tuple[list[SourceFile], list[str]]:
+    """Parsed files, plus every zip link the parser did NOT recognise (audited, never silently dropped)."""
     html = client.get_text(page)
-    files = {f.url: f for href in re.findall(r'href="([^"]+\.zip)"', html) if (f := parse(href))}
-    return sorted(files.values(), key=lambda f: (f.period_end, f.url))
+    hrefs = sorted(set(re.findall(r"""href=["']([^"']+\.zip)["']""", html, flags=re.IGNORECASE)))
+    files = {f.url: f for href in hrefs if (f := parse(href))}
+    unrecognised = [href for href in hrefs if parse(href) is None]
+    return sorted(files.values(), key=lambda f: (f.period_end, f.url)), unrecognised
+
+
+#: Files sharing one Last-Modified date at or above this count are reported as a shared-date group
+#: (a bulk re-post or a batch release; the header cannot tell which) and kept out of the lag quantiles.
+SHARED_DATE_GROUP: Final = 5
 
 
 def _clock(client: _Client, files: list[SourceFile]) -> dict[str, Any]:
     rows = []
     for f in files:
         h = client.head(f.url)
-        lag = None if h["last_modified"] is None else (h["last_modified"] - f.period_end).days
-        rows.append({"label": f.label, "url": f.url, "period_end": str(f.period_end), **h, "lag_days_upper": lag})
-    by_modified = Counter(str(r["last_modified"]) for r in rows)
-    reposts = {d: n for d, n in by_modified.items() if n >= 5}
-    fresh = sorted(
-        r["lag_days_upper"] for r in rows if r["lag_days_upper"] is not None and str(r["last_modified"]) not in reposts
-    )
+        modified = h["last_modified"]
+        # A Last-Modified before the period even ends (the epoch sentinel included) is not a clock.
+        valid = modified is not None and modified >= f.period_end
+        lag = (modified - f.period_end).days if valid and modified is not None else None
+        rows.append(
+            {
+                "label": f.label,
+                "url": f.url,
+                "period_end": str(f.period_end),
+                **h,
+                "clock_valid": valid,
+                "lag_days_upper": lag,
+            }
+        )
+    by_modified = Counter(str(r["last_modified"]) for r in rows if r["clock_valid"])
+    shared = {d: n for d, n in by_modified.items() if n >= SHARED_DATE_GROUP}
+    fresh = sorted(r["lag_days_upper"] for r in rows if r["clock_valid"] and str(r["last_modified"]) not in shared)
     return {
         "files": rows,
-        "repost_dates": reposts,
-        "lag_days_upper_excluding_reposts": _quantiles(fresh),
+        "invalid_clock_files": sum(not r["clock_valid"] for r in rows),
+        "shared_date_groups": shared,
+        "lag_days_upper_outside_groups": _quantiles(fresh),
+        "lags_outside_groups": fresh,
     }
 
 
@@ -195,7 +216,10 @@ def _match(
     on: date,
     tickers: set[str],
 ) -> dict[str, Any]:
-    spanning = {unify_symbol(sym): sid for sid, sym, first, last in series if first <= on <= last}
+    spanning: dict[str, set[int]] = {}
+    for sid, sym, first, last in series:
+        if first <= on <= last:
+            spanning.setdefault(unify_symbol(sym), set()).add(sid)
     with_bar = {
         int(r[0])
         for r in conn.execute(
@@ -206,26 +230,29 @@ def _match(
     }
     admitted_with_bar = with_bar & admitted
     matched = {t for t in tickers if t in spanning}
-    matched_admitted = {t for t in matched if spanning[t] in admitted}
+    matched_admitted = {t for t in matched if spanning[t] & admitted}
     symbol_of = {sid: unify_symbol(sym) for sid, sym, _, _ in series}
     return {
         "date": str(on),
         "source_tickers": len(tickers),
         "matched_to_spanning_series": len(matched),
         "matched_to_admitted_series": len(matched_admitted),
+        # A unified symbol carried by two spanning series: the match cannot say which one.
+        "ambiguous_matched_symbols": sum(len(spanning[t]) > 1 for t in matched),
         "admitted_series_with_bar": len(admitted_with_bar),
         "admitted_with_bar_in_source": sum(symbol_of[sid] in tickers for sid in admitted_with_bar),
     }
 
 
 def _ftd_sample(path: Path) -> tuple[date, set[str], int, list[str]]:
-    """First settlement date in the file: its tickers, CUSIP count, and the header."""
+    """Earliest settlement date across every member: its tickers, CUSIP count, and the header."""
+    rows: list[list[str]] = []
+    header: list[str] = []
     with zipfile.ZipFile(path) as z:
-        name = z.namelist()[0]
-        text = z.read(name).decode("latin-1")
-    lines = text.splitlines()
-    header = lines[0].split("|")
-    rows = [line.split("|") for line in lines[1:] if line.count("|") >= 5]
+        for name in z.namelist():
+            lines = z.read(name).decode("latin-1").splitlines()
+            header = header or lines[0].split("|")
+            rows += [line.split("|") for line in lines[1:] if line.count("|") >= 5]
     first = min(r[0] for r in rows if r[0].isdigit())
     day = [r for r in rows if r[0] == first]
     return (
@@ -246,9 +273,10 @@ def _midas_sample(path: Path) -> tuple[date, set[str], list[str]]:
         first: str | None = None
         tickers: set[str] = set()
         for row in reader:
+            day = row[i_date].strip().removesuffix(".0")
             if first is None:
-                first = row[i_date]
-            if row[i_date] == first:
+                first = day
+            if day == first and row[i_ticker].strip():
                 tickers.add(unify_symbol(row[i_ticker]))
     if first is None:
         raise RuntimeError(f"{path} has no rows")
@@ -276,6 +304,10 @@ def _parse_day(text: str) -> date:
     raise ValueError(f"unrecognised date {text!r}")
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _git_provenance() -> dict[str, Any]:
     def git(*argv: str) -> str:
         return subprocess.run(["git", *argv], capture_output=True, text=True, check=True).stdout.strip()
@@ -293,8 +325,8 @@ def main() -> int:
     args.cache.mkdir(parents=True, exist_ok=True)
     client = _Client(os.environ.get("SEC_UA") or settings.sec_user_agent, args.cache)
 
-    ftd_files = _inventory(client, FTD_PAGE, parse_ftd_href)
-    midas_files = _inventory(client, MIDAS_PAGE, parse_midas_href)
+    ftd_files, ftd_unrecognised = _inventory(client, FTD_PAGE, parse_ftd_href)
+    midas_files, midas_unrecognised = _inventory(client, MIDAS_PAGE, parse_midas_href)
     ftd_clock = _clock(client, ftd_files)
     midas_clock = _clock(client, midas_files)
 
@@ -309,9 +341,11 @@ def main() -> int:
             if not pick:
                 ftd_samples.append({"year": year, "file": wanted, "missing": True})
                 continue
-            on, tickers, cusips, header = _ftd_sample(client.download(pick[0].url))
+            path = client.download(pick[0].url)
+            on, tickers, cusips, header = _ftd_sample(path)
             ftd_samples.append(
-                {"year": year, "file": pick[0].label, "header": header, "cusips": cusips}
+                {"year": year, "file": pick[0].label, "url": pick[0].url, "sha256": _sha256(path)}
+                | {"header": header, "cusips": cusips}
                 | _match(conn, series, admitted, on, tickers)
             )
         for year in (int(y) for y in args.midas_years.split(",")):
@@ -319,25 +353,40 @@ def main() -> int:
             if not pick:
                 midas_samples.append({"year": year, "missing": True})
                 continue
-            on, tickers, header = _midas_sample(client.download(pick[0].url))
+            path = client.download(pick[0].url)
+            on, tickers, header = _midas_sample(path)
             midas_samples.append(
-                {"year": year, "file": pick[0].label, "header": header} | _match(conn, series, admitted, on, tickers)
+                {"year": year, "file": pick[0].label, "url": pick[0].url, "sha256": _sha256(path), "header": header}
+                | _match(conn, series, admitted, on, tickers)
             )
 
     probe = {
         "probe_version": PROBE_VERSION,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         **_git_provenance(),
-        "ftd": {"page": FTD_PAGE, "clock": ftd_clock, "samples": ftd_samples},
-        "midas": {"page": MIDAS_PAGE, "clock": midas_clock, "samples": midas_samples},
+        "ftd": {
+            "page": FTD_PAGE,
+            "unrecognised_zip_links": ftd_unrecognised,
+            "clock": ftd_clock,
+            "samples": ftd_samples,
+        },
+        "midas": {
+            "page": MIDAS_PAGE,
+            "unrecognised_zip_links": midas_unrecognised,
+            "clock": midas_clock,
+            "samples": midas_samples,
+        },
     }
     body = json.dumps(probe, indent=1, sort_keys=True, default=str) + "\n"
     args.out.write_text(body)
     print(f"wrote {args.out} sha256 {hashlib.sha256(body.encode()).hexdigest()}")
     for name in ("ftd", "midas"):
         clock = probe[name]["clock"]
-        print(name, len(clock["files"]), "files; reposts", clock["repost_dates"])
-        print("  lag (upper, excl. reposts)", clock["lag_days_upper_excluding_reposts"])
+        print(name, len(clock["files"]), "files; invalid clocks", clock["invalid_clock_files"])
+        print(
+            "  shared-date groups", clock["shared_date_groups"], "unrecognised", probe[name]["unrecognised_zip_links"]
+        )
+        print("  lag (upper, outside groups)", clock["lag_days_upper_outside_groups"])
         for s in probe[name]["samples"]:
             print("  ", {k: v for k, v in s.items() if k != "header"})
     return 0
