@@ -812,7 +812,7 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "R6 #2908: dilution exclusion (primary), filing-risk exclusion and their union, 2022-07 to "
                 "2024-09; pass rule against literal buy-and-hold, scientific control the identical annual 1/N. "
                 "THREE arms, all emitted. ⚠ searches=3, "
-                "not the 7 (configuration, arm) rows #2901's declaration counts: this register counts variants "
+                "not the 9 (configuration, arm) rows #2901's declaration counts: this register counts variants "
                 "selected between, and #2908's corrections re-ran the same three variants. It ran after the "
                 "cutoff without a #2599 declaration, so it is charged here, late."
             ),

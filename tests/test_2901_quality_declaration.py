@@ -11,9 +11,12 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from app.services.prereg_contract import declaration_refusals
 from app.services.r6_monthly_trial import family_size
 from app.services.trial_register import TRIAL_REGISTER, TrialExactness
+from scripts import freeze_2901_quality_declaration as freeze
 from scripts import run_2901_quality_trial as runner
 from scripts.freeze_2901_quality_declaration import (
     EXPECTED_DECLARATION_SHA256,
@@ -87,3 +90,29 @@ class TestTheDocument:
         assert family_size(9) == 17
         assert "**17**" in text
         assert "**|H| = 9.**" in text
+
+
+class TestTheFreezeEntryPoint:
+    def test_it_refuses_a_digest_the_document_does_not_publish_before_touching_the_db(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(freeze, "EXPECTED_DECLARATION_SHA256", "0" * 64)
+
+        def _no_db(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("the digest check must run before any connection")
+
+        monkeypatch.setattr(freeze.psycopg, "connect", _no_db)
+        monkeypatch.setattr(freeze, "assert_policy_version_merged", _no_db)
+        assert freeze.main([]) == 1
+        assert "digest_not_published" in capsys.readouterr().err
+
+    def test_it_has_no_policy_divergence_override(self) -> None:
+        with pytest.raises(SystemExit):
+            freeze.main(["--allow-policy-divergence", "--dry-run"])
+
+    def test_the_dry_run_reports_whether_the_digest_is_published(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(freeze, "policy_version_report", lambda: {})
+        assert freeze.main(["--dry-run"]) == 0
+        assert '"digest_matches_published": true' in capsys.readouterr().out

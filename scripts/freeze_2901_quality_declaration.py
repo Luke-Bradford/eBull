@@ -110,7 +110,13 @@ def main(argv: list[str] | None = None) -> int:
     declaration = build_declaration()
     summary: dict[str, object] = {**declaration.digest_payload, "declaration_sha256": declaration.sha256}
     if args.dry_run:
-        sys.stdout.write(json.dumps({**summary, **policy_version_report(), "outcome": "dry_run"}, sort_keys=True))
+        # The digest check is reported, not enforced, so a dry-run shows every reason the freeze would refuse.
+        report = {
+            **summary,
+            **policy_version_report(),
+            "digest_matches_published": declaration.sha256 == EXPECTED_DECLARATION_SHA256,
+        }
+        sys.stdout.write(json.dumps({**report, "outcome": "dry_run"}, sort_keys=True))
         sys.stdout.write("\n")
         return 0
 

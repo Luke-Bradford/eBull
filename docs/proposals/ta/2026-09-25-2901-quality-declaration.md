@@ -2,13 +2,15 @@
 
 Status: **FROZEN BEFORE ANY RETURN, FACTOR SPREAD OR GATE STATISTIC OF THIS ARM WAS COMPUTED.**
 
-This declaration pins every input and implementation of the one run (PR C). The rules it applies are in two
+This declaration pins the inputs and implementation files of the one run (PR C). The run happens on a clean checkout of
+a commit that contains this file, and the result records that commit and this file's sha256. The commit fixes
+everything else, including `uv.lock`, and git history orders this document before the run's holdout-access row. The rules it applies are in two
 specs, pinned by hash below and not restated: the construction spec (`2026-09-24-2901-quality-arm.md`) and the
 declaration spec (`2026-09-25-2901-quality-declaration-spec.md`). A conflict between this document and those specs
 is a defect in this document. Refs #2901, #2908, #3362, #2829, #2599.
 
 ## What has been read before this freeze
-Nothing outcome-dependent about #2901. (#2908's outcomes have been read; they enter only as trial rows below.) Every item below reads construction facts, dates, or data from before the window:
+Nothing outcome-dependent about #2901. (#2908's outcomes have been read; they enter only as trial rows below.) Every item below reads construction facts, dates, or data from before the return window (2013-07 … 2024-09):
 - the pre-look census of the artefact (`census-2026-09-25-2fb142d4.json`, no returns; posted on #2901);
 - `scripts/measure_2901_offcalendar.py`, a date-only audit of the mirror (output below);
 - `scripts/measure_2901_power.py`, which reads global-q months 1967-07 … 2013-06 only (output below);
@@ -35,12 +37,14 @@ The runner has never run past `--census-only` on real data. `strategy_holdout_ac
 | `scripts/measure_2901_offcalendar.py` | `f8ea1324a4eedb4c9f22b9afc75bdd381376f56cd3100667327e90b8ea10e513` |
 | `scripts/measure_2901_power.py` | `f6c4b5a69898a51d3d6875dad1f3815deaea2f2bb284a2e408784eb09f05112d` |
 | `--census-only` stdout | `7c17f3064e7efb4a227831a28645cf65a80b58c1640c9b1af4ed28692c4f04f9` |
-| `scripts/freeze_2901_quality_declaration.py` (writes the #2599 row) | `05fb8623ca1803446ab77bcee3a55a72b7df3a257e72c235b31f7fcc827bcc6d` |
+| `scripts/freeze_2901_quality_declaration.py` (writes the #2599 row) | `eb8e48f025e2001a4ce12efab0e19213f618fdc6692339a6c4a1efa609fc15ee` |
 
 The artefact and the zip live under `~/Library/Application Support/eBull/research/quality_2901/`. The mirror is the
 clone at `~/Dev/eBull/var/research_corpus/mirrors/icyDenev_Intrader`. The canonical JSON is `sort_keys` with
 `(",", ":")` separators (`run_2901_quality_trial.canonical_sha256`). Every value above was recomputed at
-`18f58cdd` on 2026-09-25, and the runner re-verifies each one before it writes its holdout row.
+`18f58cdd` on 2026-09-25. Before it writes its holdout row, the runner re-verifies the ones it takes as arguments: the
+artefact, the mirror commit, the zip, the three implementation files, `termination_identity` and the power output. The
+other rows are pinned by this document and by the commit.
 
 ### Off-calendar audit (verbatim)
 `PYTHONPATH=. uv run python -m scripts.measure_2901_offcalendar --root <mirror>`
@@ -103,17 +107,19 @@ exits 0: every schedule assertion, the C′ schema pin and the D₀ formula chec
 The rule is the declaration spec's "Corrections and trial accounting". H = every exposed row of every register entry
 in the r6/selection programme that exists at this freeze.
 
-**Which entries exist.** Three places were checked on 2026-09-25:
+**Which entries exist.** Four checks were run on 2026-09-25 (database clock 19:51Z):
 - `strategy_preregistration_declarations` holds 7 rows (ids 5–11). None is r6 or selection-programme.
 - `TRIAL_REGISTER` (r10) holds none either.
 - `strategy_holdout_accesses` has r6 rows only for #2908: accesses 640 (factor gate) and 641 (outcome), both
   `r6-dilution-exclusion@r6-2908-exclusion-v1`. `strategy_holdout_access_refusals` and `strategy_results_store`
   have no r6 rows.
+- Every access since `TRIAL_REGISTER_CUTOFF` (2026-08-12T07:00Z), whatever its name: the manifest TA strategies
+  s1–s11, `se-ma-overlay-drawdown-insurance`, and `r6-dilution-exclusion`, the last on 2026-08-24. None but the last
+  is in this programme, so completeness does not rest on the `r6-` prefix.
 
 #3360, #3361 and #3362 produced censuses and fixtures only; #3362 excluded "any strategy look" from its scope. #2834
-ARM B is a separate research seat and not in this programme. Every identity in this programme carries the `r6-`
-prefix (#2908's, and the runner's `r6-quality-gpa`), which is what the ledger queries filter on. So H is #2908's
-rows alone. Reproduce the ledger half with:
+ARM B is a separate research seat and not in this programme. So H is #2908's rows alone. Reproduce the ledger half
+with:
 ```
 PYTHONPATH=. uv run python -c "
 import psycopg; from app.config import settings
@@ -121,20 +127,32 @@ with psycopg.connect(settings.database_url) as c:
     print(c.execute(\"select declaration_id, strategy_id, strategy_version, prereg_purpose from strategy_preregistration_declarations order by 1\").fetchall())
     print(c.execute(\"select access_id, strategy_id, strategy_version, access_kind, accessed_by, purpose, accessed_at from strategy_holdout_accesses where strategy_id like 'r6%%' order by 1\").fetchall())
     print(c.execute(\"select count(*) from strategy_holdout_access_refusals where strategy_id like 'r6%%'\").fetchall())
-    print(c.execute(\"select count(*) from strategy_results_store where strategy_id like 'r6%%'\").fetchall())"
+    print(c.execute(\"select count(*) from strategy_results_store where strategy_id like 'r6%%'\").fetchall())
+    print(c.execute(\"select strategy_id, count(*), max(accessed_at) from strategy_holdout_accesses where accessed_at > '2026-08-12T07:00Z' group by 1 order by 3\").fetchall())"
 ```
-On 2026-09-25 this printed declaration ids 5–11 (none r6), accesses 640 and 641 only, and 0 and 0.
+On 2026-09-25 this printed declaration ids 5–11 (none r6), accesses 640 and 641 only, 0 and 0, and the thirteen
+post-cutoff identities above. Rows added after this freeze do not change H; the next declaration re-counts.
 
 **#2908's configurations.** A configuration is identified by the frozen documents and code that change a computed
-cell. #2908's documents are its preregistration, corrections 1–4 and its result. They give three configurations:
+cell. #2908's documents give three configurations. Their sha256 values, recomputed 2026-09-25, match the ones #2908's
+result document cites:
+
+| document | sha256 |
+| --- | --- |
+| `2026-08-24-r6-exclusion-preregistration.md` | `91ec11351d8851e4b3b89ba51f965b649608916346f2e10d9a7cdede9fd2c62f` |
+| `2026-08-24-r6-exclusion-correction-1.md` | `cd694a39f392cf438e4331a29b9fe8613048127ee37770295c00650758f376fa` |
+| `2026-08-24-r6-exclusion-correction-2.md` | `becf2537852a85becfc0f444dccc56e9b50a16ebf48a339619bc8187b4e5a858` |
+| `2026-08-24-r6-exclusion-correction-3.md` | `f6bbac8492967c881473b30cef3d475252976d9bcea9a75eb6936a5f6c34b425` |
+| `2026-08-24-r6-exclusion-correction-4.md` | `4ce69cf06dc708e23c1c65360736833993c42431fd152037df19bbbf761f08aa` |
+| `2026-08-24-r6-exclusion-result.md` | `2097f8b2038002998b73ebd83a516f380eaec8c710f8f5919c05eb383e30275c` |
+
+The abbreviated hashes below are the full values in those documents.
 - **K0**, the original declaration (`91ec1135…`, harness `aaa64784…`).
 - **K1**, correction 1, the halt bound (harness `bfba9460…`). It changed outcome cells. Correction 2 (ISO date
   encoding) changed no computed cell, so it is also K1.
 - **K2**, correction 3, the cover resolver (manifest `0b25af8c…`). The spec counts it as a new configuration.
   Correction 4 (holdout audit logging) changed no computed cell, so it is also K2.
 
-| row | configuration | arm | exposure (evidence) |
-| --- | --- | --- | --- |
 | row | configuration | arm | exposure (evidence) |
 | --- | --- | --- | --- |
 | 1 | K0 | dilution exclusion | the factor identity gate's statistics (correction 1: "the already opened factor-only PASS"), and the failed outcome run (below) |
@@ -155,7 +173,8 @@ and traceback carry no outcome-dependent information. Two things decide it:
 - Even that summary is not clearly outcome-free. A halt across a rebalance decides the holding's recovery treatment,
   and the halt/resumption pattern of a held name is outcome risk.
 
-So the condition cannot be established. K0's exposed arms are rows, and because the summary does not say which
+So the condition cannot be established. (The spec's own sentence "there was no exposure" for correction 1, line 354,
+is qualified by its line 357 condition, and this applies the condition.) K0's exposed arms are rows, and because the summary does not say which
 schedule was first, all three are counted. Row 1's factor gate would expose the dilution arm on its own.
 
 The literal buy-and-hold and the annual 1/N were emitted as comparators, not as arms. The spec's #2908 rows are
@@ -177,7 +196,9 @@ The runner takes `--history-rows 9` and computes M with `family_size`. It also c
 At M = 17 the Bonferroni term is below 3, so the condition's binding half is t > 3. The conservative K0 count
 therefore moves no bar at t > 3.
 
-The claim is FWER over this frozen family at α = 0.05 and nothing wider. A later declaration (#2902–#2904) inherits
+The claim is FWER over this frozen family at α = 0.05 and nothing wider. It is prospective: #2901's rows are tested
+at α/M. The #2908 rows are counted as members, so that #2901's bar reflects them. Their own verdicts were rendered
+under #2908's rules, and no claim is made about their error rate (R22). A later declaration (#2902–#2904) inherits
 #2901's **observed** rows only, not its reserved slots.
 
 ## The #2829 register row and the #2599 declaration
@@ -198,7 +219,7 @@ The claim is FWER over this frozen family at α = 0.05 and nothing wider. A late
     other digest (`EXPECTED_DECLARATION_SHA256`), and it has no policy-divergence override.
 
   It is run once, from `main` after this merges and before the run, and #2599's gate inside `record_holdout_access` then checks
-  the run against it. Two things this row does **not** do:
+  the run against it. Three things this row does **not** do:
   - `capital_candidate` does not make QUALITY PIT-admissible. That is a separate gate, carried by the paper ticket
     (declaration spec, "Capital boundary": "global admissibility: `R6RankingIdentity.QUALITY` and the shared datasets
     admissible in the PIT registry").
@@ -261,6 +282,8 @@ Repeated verbatim from the declaration spec ("above" in R15 refers to that spec'
 This declaration adds:
 - **R21**: H is reconstructed from #2908's documents and the ledger, not from a register #2908 wrote at the time;
   #2908 had no #2599 declaration. The reconstruction is only as complete as those records.
+- **R22**: Bonferroni controls FWER for the tests made at α/M. The historical rows raise M for #2901; they are not
+  retrospectively re-tested, so the family claim is about #2901's rejections, not #2908's.
 
 ## The run (PR C)
 After the freeze, one command, from a linked worktree:
