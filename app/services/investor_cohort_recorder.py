@@ -259,7 +259,8 @@ def build_fetch_set(
     """Today's top ``COHORT_TOP_N`` by ``_rank_key`` ∪ every ledger member, in rank order then cid.
 
     A ledger member absent from today's ranking with no recorded username cannot be addressed; that would
-    mean a ledger row was written without its fetch row, which the single-transaction write rules out.
+    mean a ledger row was written without the ranking row that selected it, which the single-transaction
+    write rules out.
     """
     selected = {row.cid for row in ranking.rows[:COHORT_TOP_N]}
     by_cid = {row.cid: row for row in ranking.rows}
@@ -395,8 +396,16 @@ VALUES (%s, %s, %s, %s)
 ON CONFLICT (cohort_rule_version, cid) DO NOTHING
 """
 _LEDGER_SQL: Final = "SELECT DISTINCT cid FROM etoro_investor_cohort"
+# Rankings as well as fetches: a run that aborts mid-fetch still commits its ledger rows, whose members
+# may have no fetch row yet — but every ledger row is written with the ranking row that selected it.
 _LAST_USERNAMES_SQL: Final = """
-SELECT DISTINCT ON (cid) cid, username FROM etoro_investor_fetches ORDER BY cid, observed_at DESC
+SELECT DISTINCT ON (cid) cid, username
+FROM (
+    SELECT cid, username, observed_at FROM etoro_investor_fetches
+    UNION ALL
+    SELECT cid, username, observed_at FROM etoro_investor_rankings
+) AS seen
+ORDER BY cid, observed_at DESC
 """
 
 
@@ -534,7 +543,7 @@ def record_investor_snapshot(
     ``InvestorSnapshotPartial`` outside the failure path, so no second header is written.
     """
     started_at = clock()
-    params_json = _json({**request_params, "recorder_version": RECORDER_VERSION})
+    params_json = _json({**request_params, "ranking_params": RANKING_PARAMS, "recorder_version": RECORDER_VERSION})
     run = _Run()
     try:
         ledger, last_usernames = _read_ledger(conn)

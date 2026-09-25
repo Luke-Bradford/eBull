@@ -114,6 +114,26 @@ def test_a_late_401_keeps_the_ranking_membership_and_fetches_so_far(ebull_test_c
     assert conn.execute("SELECT count(*) FROM etoro_investor_rankings").fetchone() == (3,)
 
 
+def test_a_member_selected_by_an_aborted_run_is_still_addressable_later(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Codex ckpt-2: an abort commits ledger rows for members never fetched; the next run must still find
+    their username (from the ranking row) once they leave the ranking."""
+    conn = ebull_test_conn
+    request = httpx.Request("GET", "https://example.invalid")
+    unauthorised = httpx.HTTPStatusError("401", request=request, response=httpx.Response(401, request=request))
+    with pytest.raises(httpx.HTTPStatusError):
+        record_investor_snapshot(
+            conn, _Source([1, 2], live={"u1": unauthorised}), request_params=PARAMS, clock=lambda: T0
+        )
+
+    source = _Source([1])  # cid 2 was never fetched and has left the ranking
+    record_investor_snapshot(conn, source, request_params=PARAMS, clock=lambda: T0)
+    assert source.fetched == ["u1", "u2"]
+    params = conn.execute("SELECT request_params FROM etoro_investor_snapshots ORDER BY snapshot_id").fetchone()
+    assert params is not None and params[0]["ranking_params"]["sort"] == "username"
+
+
 def test_nothing_fetched_is_a_failure_not_a_success(ebull_test_conn: psycopg.Connection[Any]) -> None:
     conn = ebull_test_conn
     private = SocialResponse(403, "", T0)

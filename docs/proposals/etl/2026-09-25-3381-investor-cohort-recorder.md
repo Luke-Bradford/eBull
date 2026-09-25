@@ -52,7 +52,7 @@ investors at large; public-profile and PI-programme filters act before entry, an
 3. **Sticky membership:** the fetch set = today's selection ∪ every `cid` in the membership ledger under ANY
    rule version. Minting a new version never stops observing an old member (#9–#11). Keyed by `cid`.
 4. **Username:** today's ranking username for the `cid` when present (`username_from_ranking = true`),
-   otherwise the most recent username recorded for that `cid` in a fetch row (by `observed_at`). ⚠ The live
+   otherwise the most recent username recorded for that `cid` in a fetch or ranking row (by `observed_at`). ⚠ The live
    response carries no `cid`, so a username reassigned to another account would be undetectable; the flag
    makes every such fetch identifiable (#24/#25).
 5. **Fetch order:** today's local rank, then `cid` for members absent from today's ranking.
