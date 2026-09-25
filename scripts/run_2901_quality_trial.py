@@ -36,7 +36,7 @@ from app.services import r6_quality_universe as quality
 from app.services.market_calendar import us_market_status
 from app.services.pit_fundamentals import canonical_decimal
 from app.services.r6_exclusion_trial import WINDOW_END, Schedule
-from app.services.r6_monthly_trial import MonthlySchedule, Portfolio
+from app.services.r6_monthly_trial import MonthlySchedule, Portfolio, last_session_of_month
 from scripts.build_2901_quality_input import YEARS, load_quality_input
 
 #: Spec lines 85–88: the only values the run accepts.
@@ -228,12 +228,15 @@ def formation_books(document: Mapping[str, Any]) -> FormationBooks:
 def books_from_artefact(
     documents: Sequence[Mapping[str, Any]], *, years: Sequence[int] = YEARS, window_end: date = WINDOW_END
 ) -> tuple[FormationBooks, ...]:
-    """Spec "Schedule assertions", checked from the artefact before any price is read."""
+    """Spec "Schedule assertions", checked from the artefact before any price is read. D is construction rule 1's
+    last NYSE session of June."""
     books = tuple(formation_books(document) for document in documents)
     formations = [book.formation for book in books]
     if formations != sorted(set(formations)) or [d.year for d in formations] != list(years):
         raise ArtefactRefusal(f"the formations are not exactly one per year {years[0]}–{years[-1]}, increasing")
     for index, book in enumerate(books):
+        if book.formation != last_session_of_month((book.formation.year, 6)):
+            raise ArtefactRefusal(f"{book.formation}: the formation is not the last NYSE session of June (rule 1)")
         if us_market_status(book.x_date) == "closed" or book.x_date != _first_session_of_july(book.formation.year):
             raise ArtefactRefusal(f"{book.formation}: x_date {book.x_date} is not the first NYSE session of July")
         later = books[index + 1].formation if index + 1 < len(books) else window_end

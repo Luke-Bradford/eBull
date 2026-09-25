@@ -204,6 +204,10 @@ def test_the_schedule_assertions() -> None:
         books_from_artefact(documents[:1], years=YEARS, window_end=date(2014, 9, 26))
     with pytest.raises(ArtefactRefusal, match="outside"):
         books_from_artefact(documents, years=YEARS, window_end=date(2014, 7, 1))
+    early = copy.deepcopy(documents)
+    early[0]["formation"] = "2013-06-27"
+    with pytest.raises(ArtefactRefusal, match="last NYSE session of June"):
+        books_from_artefact(early, years=YEARS, window_end=date(2014, 9, 26))
     late = copy.deepcopy(documents)
     late[1]["x_date"] = "2014-07-02"
     for row in late[1]["rows"]:
