@@ -1,0 +1,1872 @@
+{
+ "cboe_indices": {
+  "SKEW": {
+   "cadence": {
+    "first": "1990-01-02",
+    "gap_days": {
+     "1": 7226,
+     "2": 92,
+     "3": 1672,
+     "4": 237,
+     "5": 4,
+     "7": 1,
+     "13": 1
+    },
+    "last": "2026-09-24",
+    "n": 9234,
+    "per_year": {
+     "1990": 253,
+     "1991": 253,
+     "1992": 254,
+     "1993": 253,
+     "1994": 252,
+     "1995": 252,
+     "1996": 254,
+     "1997": 253,
+     "1998": 251,
+     "1999": 252,
+     "2000": 244,
+     "2001": 248,
+     "2002": 252,
+     "2003": 250,
+     "2004": 252,
+     "2005": 252,
+     "2006": 251,
+     "2007": 251,
+     "2008": 253,
+     "2009": 252,
+     "2010": 252,
+     "2011": 251,
+     "2012": 250,
+     "2013": 252,
+     "2014": 252,
+     "2015": 252,
+     "2016": 252,
+     "2017": 250,
+     "2018": 250,
+     "2019": 251,
+     "2020": 253,
+     "2021": 252,
+     "2022": 251,
+     "2023": 250,
+     "2024": 251,
+     "2025": 250,
+     "2026": 183
+    },
+    "weekdays": {
+     "Fri": 1846,
+     "Mon": 1741,
+     "Thu": 1859,
+     "Tue": 1895,
+     "Wed": 1893
+    }
+   },
+   "first_row": "1990-01-02",
+   "header": "DATE,SKEW",
+   "last_modified_utc": "2026-09-25T01:51:00+00:00",
+   "last_row": "2026-09-24",
+   "launch": {
+    "first_value": "1990 (white paper chart)",
+    "launch": "2011 (white paper dated January 2011)",
+    "published_from": "2011-01-01",
+    "source": "https://cdn.cboe.com/resources/indices/documents/SKEWwhitepaperjan2011.pdf"
+   },
+   "rows": 9234,
+   "rows_before_published_from": 5284,
+   "sha256": "0c598de661183ccb7071e1275b0456b715fe5870be40f2221a82bfb17cc9f513",
+   "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_History.csv"
+  },
+  "VIX": {
+   "cadence": {
+    "first": "1990-01-02",
+    "gap_days": {
+     "1": 7283,
+     "2": 79,
+     "3": 1700,
+     "4": 214,
+     "5": 2,
+     "7": 1
+    },
+    "last": "2026-09-24",
+    "n": 9280,
+    "per_year": {
+     "1990": 253,
+     "1991": 252,
+     "1992": 254,
+     "1993": 253,
+     "1994": 252,
+     "1995": 252,
+     "1996": 254,
+     "1997": 251,
+     "1998": 252,
+     "1999": 251,
+     "2000": 252,
+     "2001": 248,
+     "2002": 252,
+     "2003": 252,
+     "2004": 253,
+     "2005": 252,
+     "2006": 251,
+     "2007": 251,
+     "2008": 253,
+     "2009": 252,
+     "2010": 252,
+     "2011": 252,
+     "2012": 250,
+     "2013": 252,
+     "2014": 252,
+     "2015": 252,
+     "2016": 252,
+     "2017": 251,
+     "2018": 251,
+     "2019": 252,
+     "2020": 253,
+     "2021": 252,
+     "2022": 256,
+     "2023": 257,
+     "2024": 259,
+     "2025": 258,
+     "2026": 189
+    },
+    "weekdays": {
+     "Fri": 1851,
+     "Mon": 1764,
+     "Thu": 1869,
+     "Tue": 1900,
+     "Wed": 1896
+    }
+   },
+   "first_row": "1990-01-02",
+   "header": "DATE,OPEN,HIGH,LOW,CLOSE",
+   "last_modified_utc": "2026-09-25T00:31:08+00:00",
+   "last_row": "2026-09-24",
+   "launch": {
+    "first_value": "January 1990",
+    "launch": "September 22, 2003",
+    "published_from": "2003-09-01",
+    "source": "https://cdn.cboe.com/api/global/us_indices/governance/Volatility_Index_Methodology_Cboe_Volatility_Index.pdf"
+   },
+   "rows": 9280,
+   "rows_before_published_from": 3443,
+   "sha256": "4c1af3176a904f3a0dd6dcc55b3762283ed0d972f55c863641cd29c03bf6efd6",
+   "stored_vs_served": {
+    "ohlc_differs": 0,
+    "overlap": 1469,
+    "stored_not_served": 0,
+    "stored_rows": 1469
+   },
+   "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+  },
+  "VIX1Y": {
+   "cadence": {
+    "first": "2007-01-03",
+    "gap_days": {
+     "1": 3877,
+     "2": 51,
+     "3": 891,
+     "4": 137,
+     "5": 1
+    },
+    "last": "2026-09-25",
+    "n": 4958,
+    "per_year": {
+     "2007": 249,
+     "2008": 251,
+     "2009": 250,
+     "2010": 252,
+     "2011": 252,
+     "2012": 250,
+     "2013": 252,
+     "2014": 252,
+     "2015": 252,
+     "2016": 252,
+     "2017": 251,
+     "2018": 251,
+     "2019": 252,
+     "2020": 253,
+     "2021": 252,
+     "2022": 251,
+     "2023": 250,
+     "2024": 252,
+     "2025": 250,
+     "2026": 184
+    },
+    "weekdays": {
+     "Fri": 994,
+     "Mon": 927,
+     "Thu": 1000,
+     "Tue": 1019,
+     "Wed": 1018
+    }
+   },
+   "first_row": "2007-01-03",
+   "header": "DATE,OPEN,HIGH,LOW,CLOSE",
+   "last_modified_utc": "2026-09-25T22:01:14+00:00",
+   "last_row": "2026-09-25",
+   "launch": {
+    "first_value": "January 2007",
+    "launch": "2018",
+    "published_from": "2018-01-01",
+    "source": "https://cdn.cboe.com/api/global/us_indices/governance/Volatility_Index_Methodology_Selected_SPX_Target_Expected_Volatility_Term_Indices.pdf"
+   },
+   "rows": 4958,
+   "rows_before_published_from": 2763,
+   "sha256": "e99cbac856e0267caa7415e17e0151f2719177bc8de91dd1092c5be5bc616708",
+   "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX1Y_History.csv"
+  },
+  "VIX3M": {
+   "cadence": {
+    "first": "2009-09-18",
+    "gap_days": {
+     "1": 3350,
+     "2": 42,
+     "3": 771,
+     "4": 116,
+     "5": 1
+    },
+    "last": "2026-09-25",
+    "n": 4281,
+    "per_year": {
+     "2009": 73,
+     "2010": 252,
+     "2011": 252,
+     "2012": 250,
+     "2013": 252,
+     "2014": 252,
+     "2015": 252,
+     "2016": 252,
+     "2017": 251,
+     "2018": 251,
+     "2019": 252,
+     "2020": 253,
+     "2021": 252,
+     "2022": 251,
+     "2023": 250,
+     "2024": 252,
+     "2025": 250,
+     "2026": 184
+    },
+    "weekdays": {
+     "Fri": 858,
+     "Mon": 802,
+     "Thu": 862,
+     "Tue": 881,
+     "Wed": 878
+    }
+   },
+   "first_row": "2009-09-18",
+   "header": "DATE,OPEN,HIGH,LOW,CLOSE",
+   "last_modified_utc": "2026-09-25T22:01:14+00:00",
+   "last_row": "2026-09-25",
+   "launch": {
+    "first_value": "September 2009",
+    "launch": "October 2013",
+    "published_from": "2013-10-01",
+    "source": "https://cdn.cboe.com/api/global/us_indices/governance/Volatility_Index_Methodology_Selected_SPX_Target_Expected_Volatility_Term_Indices.pdf"
+   },
+   "rows": 4281,
+   "rows_before_published_from": 1015,
+   "sha256": "11149cbb1fb55d8eb1dca52009944f757f5b39ff241ed49b94ab668dafbe5160",
+   "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX3M_History.csv"
+  },
+  "VIX6M": {
+   "cadence": {
+    "first": "2008-01-02",
+    "gap_days": {
+     "1": 3690,
+     "2": 45,
+     "3": 848,
+     "4": 128,
+     "5": 1
+    },
+    "last": "2026-09-25",
+    "n": 4713,
+    "per_year": {
+     "2008": 253,
+     "2009": 252,
+     "2010": 252,
+     "2011": 252,
+     "2012": 250,
+     "2013": 252,
+     "2014": 252,
+     "2015": 252,
+     "2016": 252,
+     "2017": 251,
+     "2018": 251,
+     "2019": 252,
+     "2020": 253,
+     "2021": 252,
+     "2022": 251,
+     "2023": 250,
+     "2024": 252,
+     "2025": 250,
+     "2026": 184
+    },
+    "weekdays": {
+     "Fri": 943,
+     "Mon": 883,
+     "Thu": 949,
+     "Tue": 970,
+     "Wed": 968
+    }
+   },
+   "first_row": "2008-01-02",
+   "header": "DATE,OPEN,HIGH,LOW,CLOSE",
+   "last_modified_utc": "2026-09-25T22:01:14+00:00",
+   "last_row": "2026-09-25",
+   "launch": {
+    "first_value": "January 2008",
+    "launch": "November 2013",
+    "published_from": "2013-11-01",
+    "source": "https://cdn.cboe.com/api/global/us_indices/governance/Volatility_Index_Methodology_Selected_SPX_Target_Expected_Volatility_Term_Indices.pdf"
+   },
+   "rows": 4713,
+   "rows_before_published_from": 1470,
+   "sha256": "6c8a9497668dbdd1b22ddfca8fa1a5c8d0bf01e3b3c67ae938f2003cddfd26b0",
+   "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX6M_History.csv"
+  },
+  "VIX9D": {
+   "cadence": {
+    "first": "2011-01-04",
+    "gap_days": {
+     "1": 3094,
+     "2": 40,
+     "3": 712,
+     "4": 107,
+     "5": 1
+    },
+    "last": "2026-09-25",
+    "n": 3955,
+    "per_year": {
+     "2011": 251,
+     "2012": 250,
+     "2013": 252,
+     "2014": 252,
+     "2015": 252,
+     "2016": 252,
+     "2017": 251,
+     "2018": 251,
+     "2019": 252,
+     "2020": 253,
+     "2021": 252,
+     "2022": 251,
+     "2023": 250,
+     "2024": 252,
+     "2025": 250,
+     "2026": 184
+    },
+    "weekdays": {
+     "Fri": 794,
+     "Mon": 739,
+     "Thu": 797,
+     "Tue": 814,
+     "Wed": 811
+    }
+   },
+   "first_row": "2011-01-04",
+   "header": "DATE,OPEN,HIGH,LOW,CLOSE",
+   "last_modified_utc": "2026-09-25T22:01:14+00:00",
+   "last_row": "2026-09-25",
+   "launch": {
+    "first_value": "January 2011",
+    "launch": "October 2013",
+    "published_from": "2013-10-01",
+    "source": "https://cdn.cboe.com/api/global/us_indices/governance/Volatility_Index_Methodology_Selected_SPX_Target_Expected_Volatility_Term_Indices.pdf"
+   },
+   "rows": 3955,
+   "rows_before_published_from": 689,
+   "sha256": "dc3168f50486d70d8c5106088871495d04c26f9c125892efdadb33e78fc7ccbf",
+   "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX9D_History.csv"
+  },
+  "VVIX": {
+   "cadence": {
+    "first": "2006-03-06",
+    "gap_days": {
+     "1": 3993,
+     "2": 52,
+     "3": 919,
+     "4": 137,
+     "5": 3,
+     "6": 1,
+     "8": 1,
+     "9": 1,
+     "13": 2,
+     "21": 2
+    },
+    "last": "2026-09-25",
+    "n": 5112,
+    "per_year": {
+     "2006": 150,
+     "2007": 251,
+     "2008": 253,
+     "2009": 252,
+     "2010": 251,
+     "2011": 252,
+     "2012": 250,
+     "2013": 251,
+     "2014": 252,
+     "2015": 252,
+     "2016": 252,
+     "2017": 251,
+     "2018": 251,
+     "2019": 252,
+     "2020": 253,
+     "2021": 252,
+     "2022": 251,
+     "2023": 250,
+     "2024": 252,
+     "2025": 250,
+     "2026": 184
+    },
+    "weekdays": {
+     "Fri": 1023,
+     "Mon": 961,
+     "Thu": 1027,
+     "Tue": 1052,
+     "Wed": 1049
+    }
+   },
+   "first_row": "2006-03-06",
+   "header": "DATE,VVIX",
+   "last_modified_utc": "2026-09-25T22:01:14+00:00",
+   "last_row": "2026-09-25",
+   "launch": {
+    "first_value": "June 2006 (white paper chart)",
+    "launch": "2012 (white paper (c) 2012)",
+    "published_from": "2012-01-01",
+    "source": "https://cdn.cboe.com/resources/indices/documents/vvix-termstructure.pdf"
+   },
+   "rows": 5112,
+   "rows_before_published_from": 1409,
+   "sha256": "618bf9cdebaa1b54b46b0d6d2b648057862bd20c1b190f16e4ed0262d515ff8e",
+   "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VVIX_History.csv"
+  }
+ },
+ "cboe_putcall": {
+  "archive_last_row": "2019-10-04",
+  "archives": {
+   "equitypc": {
+    "cadence": {
+     "first": "2006-11-01",
+     "gap_days": {
+      "1": 2546,
+      "2": 32,
+      "3": 588,
+      "4": 84,
+      "5": 2
+     },
+     "last": "2019-10-04",
+     "n": 3253,
+     "per_year": {
+      "2006": 41,
+      "2007": 251,
+      "2008": 253,
+      "2009": 252,
+      "2010": 252,
+      "2011": 252,
+      "2012": 250,
+      "2013": 252,
+      "2014": 252,
+      "2015": 252,
+      "2016": 252,
+      "2017": 251,
+      "2018": 251,
+      "2019": 192
+     },
+     "weekdays": {
+      "Fri": 653,
+      "Mon": 610,
+      "Thu": 656,
+      "Tue": 665,
+      "Wed": 669
+     }
+    },
+    "last_modified_utc": "2020-10-30T12:31:08+00:00",
+    "preamble": [
+     "Cboe Volume and Put/Call Ratio data is compiled for the convenience of site visitors and is furnished without responsibility for accuracy and is accepted by the site visitor on the condition that transmission or omissions shall not be made the basis for any claim demand or cause for action.  As of June 11 2012 Equity Volume includes only the volume of equity option products and excludes that of exchange-traded products.  Historical index volume from November 1 2006 through May 31 2012 is based on cleared volume as reported by the OCC. The volume data reflected after May 31 2012 below is based upon preliminary reported volume rather than cleared volume. The information and data was obtained from sources believed to be reliable but accuracy is not guaranteed. Your use of Cboe Volume and Put/Call Ratio data is subject to the Terms and Conditions of Cboe Websites.",
+     "PRODUCT: EQUITY,,EXCHANGE: Cboe"
+    ],
+    "sha256": "2e73b05586b558d6763c8ab110edf9ee8bc1989384bd2b568da93dc80aa29349",
+    "url": "https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/equitypc.csv"
+   },
+   "etppc": {
+    "cadence": {
+     "first": "2006-11-01",
+     "gap_days": {
+      "1": 2546,
+      "2": 32,
+      "3": 588,
+      "4": 84,
+      "5": 2
+     },
+     "last": "2019-10-04",
+     "n": 3253,
+     "per_year": {
+      "2006": 41,
+      "2007": 251,
+      "2008": 253,
+      "2009": 252,
+      "2010": 252,
+      "2011": 252,
+      "2012": 250,
+      "2013": 252,
+      "2014": 252,
+      "2015": 252,
+      "2016": 252,
+      "2017": 251,
+      "2018": 251,
+      "2019": 192
+     },
+     "weekdays": {
+      "Fri": 653,
+      "Mon": 610,
+      "Thu": 656,
+      "Tue": 665,
+      "Wed": 669
+     }
+    },
+    "last_modified_utc": "2020-10-30T12:31:08+00:00",
+    "preamble": [
+     "Cboe Volume and Put/Call Ratio data is compiled for the convenience of site visitors and is furnished without responsibility for accuracy and is accepted by the site visitor on the condition that transmission or omissions shall not be made the basis for any claim demand or cause for action.  As of June 11 2012 the volume of exchange-traded products is represented as a unique product category.  Historical index volume from November 1 2006 through May 31 2012 is based on cleared volume as reported by the OCC. The volume data reflected after May 31 2012 below is based upon preliminary reported volume rather than cleared volume. The information and data was obtained from sources believed to be reliable but accuracy is not guaranteed. Your use of Cboe Volume and Put/Call Ratio data is subject to the Terms and Conditions of Cboe Websites.",
+     "PRODUCT: ETP,,EXCHANGE: Cboe"
+    ],
+    "sha256": "8369274a132ba629169174347b195fb37b919ac6ef3b9c614c45ed07420a5d25",
+    "url": "https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/etppc.csv"
+   },
+   "indexpc": {
+    "cadence": {
+     "first": "2006-11-01",
+     "gap_days": {
+      "1": 2546,
+      "2": 32,
+      "3": 588,
+      "4": 84,
+      "5": 2
+     },
+     "last": "2019-10-04",
+     "n": 3253,
+     "per_year": {
+      "2006": 41,
+      "2007": 251,
+      "2008": 253,
+      "2009": 252,
+      "2010": 252,
+      "2011": 252,
+      "2012": 250,
+      "2013": 252,
+      "2014": 252,
+      "2015": 252,
+      "2016": 252,
+      "2017": 251,
+      "2018": 251,
+      "2019": 192
+     },
+     "weekdays": {
+      "Fri": 653,
+      "Mon": 610,
+      "Thu": 656,
+      "Tue": 665,
+      "Wed": 669
+     }
+    },
+    "last_modified_utc": "2020-10-30T12:31:08+00:00",
+    "preamble": [
+     "Cboe Volume and Put/Call Ratio data is compiled for the convenience of site visitors and is furnished without responsibility for accuracy and is accepted by the site visitor on the condition that transmission or omissions shall not be made the basis for any claim demand or cause for action.  As of June 11 2012 Index Volume includes only the volume of cash-settled index option products and excludes that of exchange-traded products.  Historical index volume from November 1 2006 through May 31 2012 is based on cleared volume as reported by the OCC. The volume data reflected after May 31 2012 below is based upon preliminary reported volume rather than cleared volume. The information and data was obtained from sources believed to be reliable but accuracy is not guaranteed. Your use of Cboe Volume and Put/Call Ratio data is subject to the Terms and Conditions of Cboe Websites.",
+     "PRODUCT:INDEX,,EXCHANGE: Cboe"
+    ],
+    "sha256": "d619345a5ad883c5180ade2e04fd152b463991325bb2001851038b1ce5baa805",
+    "url": "https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/indexpc.csv"
+   },
+   "totalpc": {
+    "cadence": {
+     "first": "2006-11-01",
+     "gap_days": {
+      "1": 2546,
+      "2": 32,
+      "3": 588,
+      "4": 84,
+      "5": 2
+     },
+     "last": "2019-10-04",
+     "n": 3253,
+     "per_year": {
+      "2006": 41,
+      "2007": 251,
+      "2008": 253,
+      "2009": 252,
+      "2010": 252,
+      "2011": 252,
+      "2012": 250,
+      "2013": 252,
+      "2014": 252,
+      "2015": 252,
+      "2016": 252,
+      "2017": 251,
+      "2018": 251,
+      "2019": 192
+     },
+     "weekdays": {
+      "Fri": 653,
+      "Mon": 610,
+      "Thu": 656,
+      "Tue": 665,
+      "Wed": 669
+     }
+    },
+    "last_modified_utc": "2020-10-30T12:31:08+00:00",
+    "preamble": [
+     "Volume and Put/Call Ratio data is compiled for the convenience of site visitors and is furnished without responsibility for accuracy and is accepted by the site visitor on the condition that transmission or omissions shall not be made the basis for any claim demand or cause for action.  Historical index volume from November 1 2006 through May 31 2012 is based on cleared volume as reported by the OCC. The volume data reflected after May 31 2012 below is based upon preliminary reported volume rather than cleared volume. The information and data was obtained from sources believed to be reliable but accuracy is not guaranteed. Your use of Cboe Volume and Put/Call Ratio data is subject to the Terms and Conditions of Cboe Websites.",
+     "PRODUCT: TOTAL,,EXCHANGE: Cboe"
+    ],
+    "sha256": "0c49f75637aa83152d28129edb1fb3593d314e0ea7dff1396a39f1a6f2c56030",
+    "url": "https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/totalpc.csv"
+   },
+   "vixpc": {
+    "cadence": {
+     "first": "2006-02-24",
+     "gap_days": {
+      "1": 2683,
+      "2": 33,
+      "3": 621,
+      "4": 87,
+      "5": 2
+     },
+     "last": "2019-10-04",
+     "n": 3427,
+     "per_year": {
+      "2006": 215,
+      "2007": 251,
+      "2008": 253,
+      "2009": 252,
+      "2010": 252,
+      "2011": 252,
+      "2012": 250,
+      "2013": 252,
+      "2014": 252,
+      "2015": 252,
+      "2016": 252,
+      "2017": 251,
+      "2018": 251,
+      "2019": 192
+     },
+     "weekdays": {
+      "Fri": 688,
+      "Mon": 644,
+      "Thu": 691,
+      "Tue": 700,
+      "Wed": 704
+     }
+    },
+    "last_modified_utc": "2020-10-30T12:31:08+00:00",
+    "preamble": [
+     "Cboe Volume and Put/Call Ratio data is provided for informational purposes only. The volume data reflected below may be based upon preliminary reported volume rather than cleared volume. Cboe makes no guarantee as to the accuracy of the data. Your use of Cboe Volume and Put/Call Ratio data is subject to the\ufffdTerms and Conditions\ufffdof the Cboe Website."
+    ],
+    "sha256": "15bb126d1c48e584036801dbfaaae472cb7dee5e5b0dd467bfda00345f900d27",
+    "url": "https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/vixpc.csv"
+   }
+  },
+  "daily_json": [
+   {
+    "lag_days_upper": null,
+    "last_modified_utc": null,
+    "ratio_names": null,
+    "status": 403,
+    "trade_date": "2019-06-03"
+   },
+   {
+    "lag_days_upper": null,
+    "last_modified_utc": null,
+    "ratio_names": null,
+    "status": 403,
+    "trade_date": "2019-10-01"
+   },
+   {
+    "lag_days_upper": null,
+    "last_modified_utc": null,
+    "ratio_names": null,
+    "status": 403,
+    "trade_date": "2019-10-02"
+   },
+   {
+    "lag_days_upper": null,
+    "last_modified_utc": null,
+    "ratio_names": null,
+    "status": 403,
+    "trade_date": "2019-10-03"
+   },
+   {
+    "lag_days_upper": null,
+    "last_modified_utc": null,
+    "ratio_names": null,
+    "status": 403,
+    "trade_date": "2019-10-04"
+   },
+   {
+    "lag_days_upper": 1772,
+    "last_modified_utc": "2024-08-13T16:43:02+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2019-10-07"
+   },
+   {
+    "lag_days_upper": 1771,
+    "last_modified_utc": "2024-08-13T16:43:28+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2019-10-08"
+   },
+   {
+    "lag_days_upper": 1770,
+    "last_modified_utc": "2024-08-13T16:43:53+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2019-10-09"
+   },
+   {
+    "lag_days_upper": 1534,
+    "last_modified_utc": "2024-08-13T15:29:10+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2020-06-01"
+   },
+   {
+    "lag_days_upper": 1169,
+    "last_modified_utc": "2024-08-13T13:23:07+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2021-06-01"
+   },
+   {
+    "lag_days_upper": 803,
+    "last_modified_utc": "2024-08-12T19:32:00+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2022-06-01"
+   },
+   {
+    "lag_days_upper": 438,
+    "last_modified_utc": "2024-08-12T17:11:15+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2023-06-01"
+   },
+   {
+    "lag_days_upper": 70,
+    "last_modified_utc": "2024-08-12T14:26:06+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2024-06-03"
+   },
+   {
+    "lag_days_upper": 1,
+    "last_modified_utc": "2025-06-03T01:37:10+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO",
+     "CBTX PUT/CALL RATIO",
+     "MBTX PUT/CALL RATIO",
+     "SPEQX PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2025-06-02"
+   },
+   {
+    "lag_days_upper": 15,
+    "last_modified_utc": "2026-06-16T17:50:51+00:00",
+    "ratio_names": [
+     "TOTAL PUT/CALL RATIO",
+     "INDEX PUT/CALL RATIO",
+     "EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+     "EQUITY PUT/CALL RATIO",
+     "CBOE VOLATILITY INDEX (VIX) PUT/CALL RATIO",
+     "SPX + SPXW PUT/CALL RATIO",
+     "OEX PUT/CALL RATIO",
+     "MRUT PUT/CALL RATIO",
+     "MXEA PUT/CALL RATIO",
+     "MXEF PUT/CALL RATIO",
+     "MXACW PUT/CALL RATIO",
+     "MXWLD PUT/CALL RATIO",
+     "MXUSA PUT/CALL RATIO",
+     "CBTX PUT/CALL RATIO",
+     "MBTX PUT/CALL RATIO",
+     "SPEQX PUT/CALL RATIO",
+     "SPEQW PUT/CALL RATIO",
+     "MGTN PUT/CALL RATIO",
+     "MGTNW PUT/CALL RATIO",
+     "DJX PUT/CALL RATIO",
+     "DJXW PUT/CALL RATIO",
+     "XSPBX PUT/CALL RATIO",
+     "XSPBW PUT/CALL RATIO"
+    ],
+    "status": 200,
+    "trade_date": "2026-06-01"
+   }
+  ]
+ },
+ "cot": {
+  "legacy_futures": {
+   "all_markets": {
+    "first": "1986-01-15",
+    "gap_days": {
+     "3": 3,
+     "4": 2,
+     "6": 18,
+     "7": 1734,
+     "8": 17,
+     "11": 1,
+     "13": 5,
+     "14": 41,
+     "15": 66,
+     "16": 21,
+     "17": 19,
+     "18": 9
+    },
+    "last": "2026-09-22",
+    "n": 1937,
+    "per_year": {
+     "1986": 24,
+     "1987": 24,
+     "1988": 24,
+     "1989": 24,
+     "1990": 24,
+     "1991": 24,
+     "1992": 31,
+     "1993": 52,
+     "1994": 52,
+     "1995": 52,
+     "1996": 53,
+     "1997": 53,
+     "1998": 52,
+     "1999": 52,
+     "2000": 52,
+     "2001": 53,
+     "2002": 52,
+     "2003": 53,
+     "2004": 52,
+     "2005": 52,
+     "2006": 52,
+     "2007": 53,
+     "2008": 52,
+     "2009": 52,
+     "2010": 52,
+     "2011": 52,
+     "2012": 53,
+     "2013": 52,
+     "2014": 52,
+     "2015": 52,
+     "2016": 52,
+     "2017": 52,
+     "2018": 53,
+     "2019": 52,
+     "2020": 52,
+     "2021": 52,
+     "2022": 52,
+     "2023": 52,
+     "2024": 53,
+     "2025": 52,
+     "2026": 38
+    },
+    "weekdays": {
+     "Fri": 73,
+     "Mon": 40,
+     "Thu": 24,
+     "Tue": 1774,
+     "Wed": 26
+    }
+   },
+   "emini_sp_500": {
+    "first": "1997-09-16",
+    "gap_days": {
+     "3": 2,
+     "6": 16,
+     "7": 1471,
+     "8": 16,
+     "11": 1,
+     "14": 1,
+     "21": 1,
+     "25": 1
+    },
+    "last": "2026-09-22",
+    "n": 1510,
+    "per_year": {
+     "1997": 15,
+     "1998": 48,
+     "1999": 52,
+     "2000": 52,
+     "2001": 53,
+     "2002": 52,
+     "2003": 52,
+     "2004": 52,
+     "2005": 52,
+     "2006": 52,
+     "2007": 53,
+     "2008": 52,
+     "2009": 52,
+     "2010": 52,
+     "2011": 52,
+     "2012": 53,
+     "2013": 52,
+     "2014": 52,
+     "2015": 52,
+     "2016": 52,
+     "2017": 52,
+     "2018": 53,
+     "2019": 52,
+     "2020": 52,
+     "2021": 52,
+     "2022": 52,
+     "2023": 52,
+     "2024": 53,
+     "2025": 52,
+     "2026": 38
+    },
+    "weekdays": {
+     "Fri": 3,
+     "Mon": 17,
+     "Tue": 1488,
+     "Wed": 2
+    }
+   },
+   "eras": {
+    "1986-1989": {
+     "first": "1986-01-15",
+     "gap_days": {
+      "13": 1,
+      "14": 26,
+      "15": 41,
+      "16": 11,
+      "17": 12,
+      "18": 4
+     },
+     "last": "1989-12-29",
+     "n": 96,
+     "weekdays": {
+      "Fri": 43,
+      "Mon": 12,
+      "Thu": 13,
+      "Tue": 14,
+      "Wed": 14
+     }
+    },
+    "1990-1991": {
+     "first": "1990-01-15",
+     "gap_days": {
+      "13": 4,
+      "14": 10,
+      "15": 17,
+      "16": 8,
+      "17": 4,
+      "18": 4
+     },
+     "last": "1991-12-31",
+     "n": 48,
+     "weekdays": {
+      "Fri": 18,
+      "Mon": 8,
+      "Thu": 10,
+      "Tue": 6,
+      "Wed": 6
+     }
+    },
+    "1992-1999": {
+     "first": "1992-01-15",
+     "gap_days": {
+      "3": 1,
+      "4": 1,
+      "6": 2,
+      "7": 374,
+      "8": 1,
+      "14": 5,
+      "15": 7,
+      "16": 2,
+      "17": 2,
+      "18": 1
+     },
+     "last": "1999-12-28",
+     "n": 397,
+     "weekdays": {
+      "Fri": 9,
+      "Mon": 3,
+      "Thu": 1,
+      "Tue": 380,
+      "Wed": 4
+     }
+    },
+    "2000-2026": {
+     "first": "2000-01-04",
+     "gap_days": {
+      "3": 2,
+      "4": 1,
+      "6": 16,
+      "7": 1359,
+      "8": 16,
+      "11": 1
+     },
+     "last": "2026-09-22",
+     "n": 1396,
+     "weekdays": {
+      "Fri": 3,
+      "Mon": 17,
+      "Tue": 1374,
+      "Wed": 2
+     }
+    }
+   },
+   "files": [
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1986.zip",
+     "report_dates": 24,
+     "sha256": "13811414cb825ca8467476b859205bd233e87f9a6d48abe3038425ecb6050b7e"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1986_2016.zip",
+     "report_dates": 1429,
+     "sha256": "e9221f0f2c819f63c1f611e72f21fca31ee9142316127f9d1d69978d2c684791"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1987.zip",
+     "report_dates": 24,
+     "sha256": "ca3a6d3a47b002a362f78db873f989026b5da28dcd9fd46bc4e7c38ee92ea9fe"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1988.zip",
+     "report_dates": 24,
+     "sha256": "a4171d2bfaeba0a73c18ae158a27fe24eaf44346c844099ded5c7f06c6479f6c"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1989.zip",
+     "report_dates": 24,
+     "sha256": "a000df80ad94b2782b9d5d6be0fbfca017d5ef91c521f6faf4e96b2080cd7838"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1990.zip",
+     "report_dates": 24,
+     "sha256": "34195e38be1b90c0dc2cb0d1fe6f4fae8228c7a48dbb9ba92cc57a5e25610ba7"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1991.zip",
+     "report_dates": 24,
+     "sha256": "69e2c5bbf85486a2a266af2cf9b881163f9d2c8fd91cc0ab1d6339d7a837cd93"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1992.zip",
+     "report_dates": 31,
+     "sha256": "f3de3d85f8f5cf717607caa1f4010cc721f19a671d39448df9e62ae162c5ac76"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1993.zip",
+     "report_dates": 52,
+     "sha256": "d8fefcf9307a9fb1dc5219578c97e3004fa79c96a03b6613e5075883dd851cbb"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1994.zip",
+     "report_dates": 52,
+     "sha256": "8c25bbfa6e5410b2bf35db526322888157a4212a9cb4c0b96747a5bcca135608"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1995.zip",
+     "report_dates": 52,
+     "sha256": "a0e35371645cf6ed0674f46087db73a1d20034ca6df9cd57d5487110ebc63ad5"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1996.zip",
+     "report_dates": 53,
+     "sha256": "c6d5aa72100deab780d0b6a3800fcfb8c40b26370050adb083d35436e750eb0e"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1997.zip",
+     "report_dates": 53,
+     "sha256": "f96c77c777b65b69dfa8061a8ae7147d37141c607b89e28196a8f50dea24b73b"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1998.zip",
+     "report_dates": 52,
+     "sha256": "e8056ea95d3ffbf027c36e837155214a12e50c338070063998bf062374d5934c"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot1999.zip",
+     "report_dates": 52,
+     "sha256": "0c4691c2d780d1eae58933e2194c3d406a7c573ccfaa7f3ddb268d1a1c8a80ab"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2000.zip",
+     "report_dates": 52,
+     "sha256": "b4c06549db2f9a193ea5ee93851c090cdd76917595e76cdd01ca67a792c8277c"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2001.zip",
+     "report_dates": 53,
+     "sha256": "d3227702d8fdbc6684de5f01a4b5652a72ec8950862dedd7f1d42c656453759e"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2002.zip",
+     "report_dates": 52,
+     "sha256": "7cb90880840b5c91519d4eddca3d43ffd77109e645f9e588926b98c3b31f400b"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2003.zip",
+     "report_dates": 53,
+     "sha256": "0290e2148f7adc7b5cece86a2aebd512ddc226d70fa9a79697e5834c1272e300"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2004.zip",
+     "report_dates": 52,
+     "sha256": "e1b4940a7e8a24d381e1ba38c0633bb23e6cf67312631975a6e8356914773e44"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2005.zip",
+     "report_dates": 52,
+     "sha256": "af1d5fdfe6994d33afda5b2c3ff3941f84ea18f9e5f3167969bf2598835624c1"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2006.zip",
+     "report_dates": 52,
+     "sha256": "9e1dfcd978321cc93303f37d3f7f13c5e10b965c72afa6862d93243b87de0901"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2007.zip",
+     "report_dates": 53,
+     "sha256": "5c82366a086509465478014b269f90266e38a82f41c23136e964d71cd7b794a9"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2008.zip",
+     "report_dates": 52,
+     "sha256": "97a76edebe3cf7cc93a6fa862799076e9863fb7cbc42e8dba4c8762c07249fb9"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2009.zip",
+     "report_dates": 52,
+     "sha256": "5558e169e558ee15a861fb623e2a986aaafcdc178d7ab2eaf7dc628ed217b32b"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2010.zip",
+     "report_dates": 52,
+     "sha256": "ba52af024b2cc24f4bf7699950b70b0ae70ce2a123fca63e88c93f5d67561253"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2011.zip",
+     "report_dates": 52,
+     "sha256": "8872d6e7d43cc09d5d5834122dcbf4dd426dc0590faa394d041f603234e8d16a"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2012.zip",
+     "report_dates": 53,
+     "sha256": "018de1a8b9c8c87ccdcac31652f56828f9af3b44f89df2de474fd460a0dfd6de"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2013.zip",
+     "report_dates": 52,
+     "sha256": "881bed5906e156c23dc2036f6b4312f3c2215a7b9aebe51ee7973458ec0bf845"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2014.zip",
+     "report_dates": 52,
+     "sha256": "65e8c7111bc628c1bc2801a246e7872c574fdead67f210a5dd58303b384dba1a"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2015.zip",
+     "report_dates": 52,
+     "sha256": "768b7be61d0f9895dd6c3ddcef9f1449c85773bd61dc8cc656fd43d30531871b"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2016.zip",
+     "report_dates": 52,
+     "sha256": "186c95a12c71fdbd241b83679afcfff2cc900c779b67bfe9bcd091d16a7ca0ce"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2017.zip",
+     "report_dates": 52,
+     "sha256": "5e910b93b5af5e1c8f4006eaeee10109754ee5dd2c7f9d04520bd9770c8ece2b"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2018.zip",
+     "report_dates": 53,
+     "sha256": "adaecbfadf54f117308cc8a135cd9ba827deac3eb1489a5febc642c403728527"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2019.zip",
+     "report_dates": 52,
+     "sha256": "3f2707b5fcab1491329684c82cc03759ab66899839f533e09ff0a5dcf517b0c5"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2020.zip",
+     "report_dates": 52,
+     "sha256": "8c83c820e5f6fd193a0923aa02cfe520d20dbe74bba571a576c92baf7a186317"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2021.zip",
+     "report_dates": 52,
+     "sha256": "423d20412ec3fb629500fcbfbaa7b6973c5868965000d13963e9b63700c90952"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2022.zip",
+     "report_dates": 52,
+     "sha256": "206364f467eb0013b0a5f8e9526426cc6fcfc5bad4e4f91b25e00311a0184cfa"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2023.zip",
+     "report_dates": 52,
+     "sha256": "fd17a44cb7c9acb068515380f5c9ff450052d4a89f45d6b97f0d71ca2d69425c"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2024.zip",
+     "report_dates": 53,
+     "sha256": "3a33564a5677a4dad90b2513b07a81d8d55308318f9dcd6c8e80690a25c6b768"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2025.zip",
+     "report_dates": 52,
+     "sha256": "e5ae323dadda5ebbf69b6989af0d912fb1a4aebd954372f999eccb3a692352f9"
+    },
+    {
+     "date_column": "As of Date in Form YYYY-MM-DD",
+     "href": "/files/dea/history/deacot2026.zip",
+     "report_dates": 38,
+     "sha256": "192510409440dbe7772cda4d36d36a5a390921bec4e493e8f76f3045d9cbf081"
+    }
+   ]
+  },
+  "page": "https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalCompressed/index.htm",
+  "tff_futures": {
+   "all_markets": {
+    "first": "2006-06-13",
+    "gap_days": {
+     "6": 11,
+     "7": 1036,
+     "8": 11
+    },
+    "last": "2026-09-22",
+    "n": 1059,
+    "per_year": {
+     "2006": 29,
+     "2007": 53,
+     "2008": 52,
+     "2009": 52,
+     "2010": 52,
+     "2011": 52,
+     "2012": 53,
+     "2013": 52,
+     "2014": 52,
+     "2015": 52,
+     "2016": 52,
+     "2017": 52,
+     "2018": 53,
+     "2019": 52,
+     "2020": 52,
+     "2021": 52,
+     "2022": 52,
+     "2023": 52,
+     "2024": 53,
+     "2025": 52,
+     "2026": 38
+    },
+    "weekdays": {
+     "Mon": 13,
+     "Tue": 1045,
+     "Wed": 1
+    }
+   },
+   "emini_sp_500": {
+    "first": "2006-06-13",
+    "gap_days": {
+     "6": 11,
+     "7": 1036,
+     "8": 11
+    },
+    "last": "2026-09-22",
+    "n": 1059,
+    "per_year": {
+     "2006": 29,
+     "2007": 53,
+     "2008": 52,
+     "2009": 52,
+     "2010": 52,
+     "2011": 52,
+     "2012": 53,
+     "2013": 52,
+     "2014": 52,
+     "2015": 52,
+     "2016": 52,
+     "2017": 52,
+     "2018": 53,
+     "2019": 52,
+     "2020": 52,
+     "2021": 52,
+     "2022": 52,
+     "2023": 52,
+     "2024": 53,
+     "2025": 52,
+     "2026": 38
+    },
+    "weekdays": {
+     "Mon": 13,
+     "Tue": 1045,
+     "Wed": 1
+    }
+   },
+   "eras": {
+    "2000-2026": {
+     "first": "2006-06-13",
+     "gap_days": {
+      "6": 11,
+      "7": 1036,
+      "8": 11
+     },
+     "last": "2026-09-22",
+     "n": 1059,
+     "weekdays": {
+      "Mon": 13,
+      "Tue": 1045,
+      "Wed": 1
+     }
+    }
+   },
+   "files": [
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fin_fut_txt_2006_2016.zip",
+     "report_dates": 551,
+     "sha256": "c3a8d01765133a24ce9c082de88933816497d06f1b03eec8c53750bdd818f14b"
+    },
+    {
+     "date_column": "Report_Date_as_MM_DD_YYYY",
+     "href": "/files/dea/history/fut_fin_txt_2010.zip",
+     "report_dates": 24,
+     "sha256": "5392a28735d28dcb8feb5e60282c7c686759df9954699b5bcdadcd90db6d7fad"
+    },
+    {
+     "date_column": "Report_Date_as_MM_DD_YYYY",
+     "href": "/files/dea/history/fut_fin_txt_2011.zip",
+     "report_dates": 52,
+     "sha256": "583a93474847f1070b213e2b12cfa73c48d9ba05f24f7d001a338de125468b57"
+    },
+    {
+     "date_column": "Report_Date_as_MM_DD_YYYY",
+     "href": "/files/dea/history/fut_fin_txt_2012.zip",
+     "report_dates": 53,
+     "sha256": "c5b65a8c3e0f597fae6b41eaba9246e2a995b14de3aa8fd12aabee8d05032a58"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2013.zip",
+     "report_dates": 52,
+     "sha256": "682e643683c1ca36f723980544f4ff3bef7e0c3d299bc85c0904ef17b97f2780"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2014.zip",
+     "report_dates": 52,
+     "sha256": "83893048e9a73e8b6e81d9ef7a737f9f86db6bdc28f17d393b8df2e87ab713d6"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2015.zip",
+     "report_dates": 52,
+     "sha256": "a506b8ceb510fb49b8b21a1687fff35903698b8968d079b9e5f12ce92f96b68e"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2016.zip",
+     "report_dates": 52,
+     "sha256": "e8570bcd83df5c3e25aca61a59985001db83a8299a25943525c8d109ffc94a15"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2017.zip",
+     "report_dates": 52,
+     "sha256": "e6e2dd537efcc57cdd6cdcc4e45e567fd47e65d8afc8369d8383bf09195ae7f5"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2018.zip",
+     "report_dates": 53,
+     "sha256": "6843d130a25a17c6248df67463810f02077ef4eeafdd629299d21c18f5125e40"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2019.zip",
+     "report_dates": 52,
+     "sha256": "631b31880d513072aa50d63117c896184dd35db3cc8fcdd6debd80197ee7a661"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2020.zip",
+     "report_dates": 52,
+     "sha256": "c90d98d94db708772d669f263fb8061c75f8a7f681ba231fb21247e5c9798e6b"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2021.zip",
+     "report_dates": 52,
+     "sha256": "5c929991038c70ae2501661b6d442b9e784d3c29d3166ceac2e21b45ac93d56a"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2022.zip",
+     "report_dates": 52,
+     "sha256": "94c9c1fdee9dfbe377a09923ddfe26b88d3460605dd076081f221ad367d88601"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2023.zip",
+     "report_dates": 52,
+     "sha256": "43c3dbdd4d01fceefad5e457003751cdc0974c7cf46097b322e26e9e2fe44d7a"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2024.zip",
+     "report_dates": 53,
+     "sha256": "3f00585741a7cf76c207df640951d644dd91ff22a1106b38ca37a2469c765637"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2025.zip",
+     "report_dates": 52,
+     "sha256": "2ea0cda6395f7dd6501c27422be3763e1f2f5b41b768cfd36b871f092a07d438"
+    },
+    {
+     "date_column": "Report_Date_as_YYYY-MM-DD",
+     "href": "/files/dea/history/fut_fin_txt_2026.zip",
+     "report_dates": 38,
+     "sha256": "0924bc1543dc95aeb7cb48aaf61979e96b5acb090d480ac01afb102e68310cbc"
+    }
+   ]
+  },
+  "zip_links": 338
+ },
+ "fred": {
+  "AAA10Y": {
+   "alfred_first_vintage": "2014-01-27",
+   "current": {
+    "first_observation": "1983-01-03",
+    "last_observation": "2026-09-24",
+    "observations": 11409
+   },
+   "revisions_vs_vintage": {
+    "changed": 0,
+    "common_observations": 8348,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "BAA10Y": {
+   "alfred_first_vintage": "2014-01-27",
+   "current": {
+    "first_observation": "1986-01-02",
+    "last_observation": "2026-09-24",
+    "observations": 10626
+   },
+   "revisions_vs_vintage": {
+    "changed": 0,
+    "common_observations": 7565,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "BAMLC0A0CM": {
+   "alfred_first_vintage": "2023-09-26",
+   "current": {
+    "first_observation": "2023-09-26",
+    "last_observation": "2026-09-24",
+    "observations": 795
+   }
+  },
+  "BAMLH0A0HYM2": {
+   "alfred_first_vintage": "2023-09-26",
+   "current": {
+    "first_observation": "2023-09-26",
+    "last_observation": "2026-09-24",
+    "observations": 795
+   }
+  },
+  "CPIAUCSL": {
+   "alfred_first_vintage": "1972-07-21",
+   "current": {
+    "first_observation": "1947-01-01",
+    "last_observation": "2026-08-01",
+    "observations": 956
+   },
+   "revisions_vs_vintage": {
+    "changed": 48,
+    "common_observations": 816,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "DGS10": {
+   "alfred_first_vintage": "2005-06-28",
+   "current": {
+    "first_observation": "1962-01-02",
+    "last_observation": "2026-09-24",
+    "observations": 16888
+   },
+   "revisions_vs_vintage": {
+    "changed": 1,
+    "common_observations": 13827,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "DTB3": {
+   "alfred_first_vintage": "2005-06-28",
+   "current": {
+    "first_observation": "1954-01-04",
+    "last_observation": "2026-09-24",
+    "observations": 18974
+   },
+   "revisions_vs_vintage": {
+    "changed": 34,
+    "common_observations": 15913,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "ICSA": {
+   "alfred_first_vintage": "2009-05-28",
+   "current": {
+    "first_observation": "1967-01-07",
+    "last_observation": "2026-09-19",
+    "observations": 3116
+   },
+   "revisions_vs_vintage": {
+    "changed": 172,
+    "common_observations": 2504,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "INDPRO": {
+   "alfred_first_vintage": "1940-01-01",
+   "current": {
+    "first_observation": "1919-01-01",
+    "last_observation": "2026-08-01",
+    "observations": 1292
+   },
+   "revisions_vs_vintage": {
+    "changed": 1152,
+    "common_observations": 1152,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "NFCI": {
+   "alfred_first_vintage": "2011-05-25",
+   "current": {
+    "first_observation": "1971-01-08",
+    "last_observation": "2026-09-18",
+    "observations": 2907
+   },
+   "revisions_vs_vintage": {
+    "changed": 2183,
+    "common_observations": 2191,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "PAYEMS": {
+   "alfred_first_vintage": "1955-05-06",
+   "current": {
+    "first_observation": "1939-01-01",
+    "last_observation": "2026-08-01",
+    "observations": 1052
+   },
+   "revisions_vs_vintage": {
+    "changed": 722,
+    "common_observations": 912,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "STLFSI4": {
+   "alfred_first_vintage": "2022-11-10",
+   "current": {
+    "first_observation": "1993-12-31",
+    "last_observation": "2026-09-18",
+    "observations": 1708
+   }
+  },
+  "T10Y2Y": {
+   "alfred_first_vintage": "2014-01-27",
+   "current": {
+    "first_observation": "1976-06-01",
+    "last_observation": "2026-09-25",
+    "observations": 13129
+   },
+   "revisions_vs_vintage": {
+    "changed": 0,
+    "common_observations": 10067,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "T10Y3M": {
+   "alfred_first_vintage": "2014-01-27",
+   "current": {
+    "first_observation": "1982-01-04",
+    "last_observation": "2026-09-25",
+    "observations": 11670
+   },
+   "revisions_vs_vintage": {
+    "changed": 0,
+    "common_observations": 8608,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  },
+  "UNRATE": {
+   "alfred_first_vintage": "1960-03-15",
+   "current": {
+    "first_observation": "1948-01-01",
+    "last_observation": "2026-08-01",
+    "observations": 944
+   },
+   "revisions_vs_vintage": {
+    "changed": 4,
+    "common_observations": 804,
+    "cut": "2014-12-31",
+    "only_in_old": 0,
+    "vintage": "2015-06-01"
+   }
+  }
+ },
+ "generated_at": "2026-09-25T22:35:04+00:00",
+ "git_dirty": false,
+ "git_head": "7656afd9a48d9399fbf2d26e03c78714911e6890",
+ "git_status": [],
+ "probe_version": "market-sources-probe-v1",
+ "wikipedia": {
+  "intrader_symbol_match": {
+   "alive": {
+    "series_symbols": 4630,
+    "symbol_in_wikidata": 2295,
+    "symbol_with_end_dated_statement": 59,
+    "symbol_with_enwiki_article": 2074
+   },
+   "terminating": {
+    "series_symbols": 12636,
+    "symbol_in_wikidata": 1101,
+    "symbol_with_end_dated_statement": 218,
+    "symbol_with_enwiki_article": 1012
+   }
+  },
+  "pageviews": [
+   {
+    "article": "Apple_Inc.",
+    "days": 4104,
+    "first_day": "2015-07-01",
+    "last_day": "2026-09-24",
+    "missing_days_in_span": 0,
+    "status": 200
+   },
+   {
+    "article": "General_Electric",
+    "days": 4104,
+    "first_day": "2015-07-01",
+    "last_day": "2026-09-24",
+    "missing_days_in_span": 0,
+    "status": 200
+   },
+   {
+    "article": "Sears",
+    "days": 4104,
+    "first_day": "2015-07-01",
+    "last_day": "2026-09-24",
+    "missing_days_in_span": 0,
+    "status": 200
+   }
+  ],
+  "wikidata_exchanges": {
+   "NYSE": {
+    "items": 2010,
+    "items_with_enwiki_article": 1887,
+    "qid": "Q13677",
+    "ticker_statements": 2064,
+    "with_end_time": 204,
+    "with_start_time": 742
+   },
+   "Nasdaq": {
+    "items": 1971,
+    "items_with_enwiki_article": 1681,
+    "qid": "Q82059",
+    "ticker_statements": 2033,
+    "with_end_time": 199,
+    "with_start_time": 789
+   }
+  }
+ }
+}
