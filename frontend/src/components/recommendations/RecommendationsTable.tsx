@@ -6,6 +6,7 @@ import type { RecommendationListItem } from "@/api/types";
 import { formatDateTime, formatNumber, formatUnsignedPct } from "@/lib/format";
 import { actionTone, completenessTone, statusTone } from "@/lib/badgeTone";
 import { SectionSkeleton } from "@/components/dashboard/Section";
+import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Badge } from "@/components/ui/Badge";
 
@@ -267,7 +268,10 @@ function ExpandedDetail({
         {detail.loading ? (
           <span className="animate-pulse text-slate-400">Loading score…</span>
         ) : detail.data?.total_score !== null && detail.data?.total_score !== undefined ? (
-          <span>Total score: {formatNumber(detail.data.total_score, 2)}</span>
+          <span className="inline-flex items-center gap-1">
+            Total score: {formatNumber(detail.data.total_score, 2)}
+            <HeuristicBadge modelVersion={item.model_version} />
+          </span>
         ) : null}
       </div>
     </div>

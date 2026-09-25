@@ -31,6 +31,7 @@ import type {
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { Sparkline } from "@/components/instrument/Sparkline";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
+import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
@@ -174,6 +175,7 @@ export function VerdictTab({
             </span>
             <span className="text-xs text-slate-500">total score</span>
           </div>
+          <HeuristicBadge modelVersion={score.model_version} />
           {score.rank !== null && (
             <span className="text-xs text-slate-500">
               rank #{score.rank}
