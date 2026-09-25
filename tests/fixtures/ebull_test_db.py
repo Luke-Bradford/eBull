@@ -483,6 +483,14 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "etoro_investor_cohort",
     "etoro_investor_rankings",
     "etoro_investor_snapshots",
+    # #3381 slice 3, child-to-parent.
+    "etoro_whatif_observations",
+    "etoro_eligibility_observations",
+    "etoro_rate_observations",
+    "etoro_perishable_requests",
+    "etoro_whatif_panel",
+    "etoro_perishable_universe",
+    "etoro_perishable_snapshots",
 )
 
 # ---------------------------------------------------------------------------

@@ -1105,27 +1105,9 @@ class EtoroBrokerProvider(BrokerProvider):
         covered by ``refuse_broker_mutation_if_unattended`` and must not become so: #2645's
         other half was that ruling informational work out was itself the error.
         """
-        body: dict[str, Any] = {
-            "action": order.action,
-            "transaction": order.transaction,
-            "instrumentId": order.instrument_id,
-            "settlementType": order.settlement_type,
-            "orderType": order.order_type,
-            "leverage": order.leverage,
-            "orderCurrency": order.order_currency.lower(),
-        }
-        if order.position_ids:
-            # Required by the close arm, rejected on the open arm; `BrokerWhatIfOrder`
-            # enforces both directions, so the presence of the tuple IS the arm.
-            body["positionIds"] = list(order.position_ids)
-        if order.amount is not None:
-            body["amount"] = float(order.amount)
-        else:
-            body["units"] = float(order.units) if order.units is not None else None
-
         response = self._http_write.post(
             f"{self._v2_info_prefix}/costs",
-            json=body,
+            json=what_if_request_body(order),
             headers=self._request_headers(),
         )
         response.raise_for_status()
@@ -1553,6 +1535,28 @@ def _parse_eligibility_response(raw: dict[str, Any]) -> BrokerEligibilityRespons
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise TradingPreflightParseError(f"malformed eligibility response: {exc}") from exc
+
+
+def what_if_request_body(order: BrokerWhatIfOrder) -> dict[str, Any]:
+    """The v2 what-if request body for *order*; shared with the #3381 perishables recorder."""
+    body: dict[str, Any] = {
+        "action": order.action,
+        "transaction": order.transaction,
+        "instrumentId": order.instrument_id,
+        "settlementType": order.settlement_type,
+        "orderType": order.order_type,
+        "leverage": order.leverage,
+        "orderCurrency": order.order_currency.lower(),
+    }
+    if order.position_ids:
+        # Required by the close arm, rejected on the open arm; `BrokerWhatIfOrder`
+        # enforces both directions, so the presence of the tuple IS the arm.
+        body["positionIds"] = list(order.position_ids)
+    if order.amount is not None:
+        body["amount"] = float(order.amount)
+    else:
+        body["units"] = float(order.units) if order.units is not None else None
+    return body
 
 
 def _parse_what_if_cost_response(raw: dict[str, Any]) -> BrokerWhatIfCostResponse:
