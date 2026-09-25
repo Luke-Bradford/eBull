@@ -283,13 +283,19 @@ def _midas_sample(path: Path) -> tuple[date, set[str], list[str]]:
     return _parse_day(first), tickers, header
 
 
-def _first_csv(z: zipfile.ZipFile) -> IO[bytes]:
+#: MIDAS nests one zip inside another; anything deeper is refused rather than followed.
+MAX_ZIP_DEPTH: Final = 2
+
+
+def _first_csv(z: zipfile.ZipFile, depth: int = 1) -> IO[bytes]:
     """The first CSV member, descending into nested zips (MIDAS ships zip -> zip -> monthly CSVs)."""
     for name in z.namelist():
         if name.lower().endswith(".csv"):
             return z.open(name)
         if name.lower().endswith(".zip"):
-            return _first_csv(zipfile.ZipFile(io.BytesIO(z.read(name))))
+            if depth >= MAX_ZIP_DEPTH:
+                raise RuntimeError(f"zip nesting deeper than {MAX_ZIP_DEPTH} in {z.filename}")
+            return _first_csv(zipfile.ZipFile(io.BytesIO(z.read(name))), depth + 1)
     raise RuntimeError(f"no CSV member in {z.filename}")
 
 

@@ -59,3 +59,24 @@ def test_quantiles() -> None:
 def test_midas_versioned_file_is_recognised() -> None:
     f = parse_midas_href("/files/opa/x/individual_security_exchange_2016_q1-v2.zip")
     assert f is not None and f.label == "2016q1"
+
+
+def test_nested_zip_depth_is_bounded() -> None:
+    import io
+    import zipfile
+
+    import pytest
+
+    from scripts.probe_3384_sec_sources import _first_csv
+
+    def wrap(name: str, payload: bytes) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(name, payload)
+        return buf.getvalue()
+
+    two = wrap("outer.zip", wrap("m.csv", b"Date,Ticker\n"))
+    assert _first_csv(zipfile.ZipFile(io.BytesIO(two))).read() == b"Date,Ticker\n"
+    three = wrap("a.zip", wrap("b.zip", wrap("m.csv", b"x")))
+    with pytest.raises(RuntimeError, match="nesting deeper"):
+        _first_csv(zipfile.ZipFile(io.BytesIO(three)))
