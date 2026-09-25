@@ -44,6 +44,8 @@ def test_putcall_archive_keeps_preamble_and_parses_rows() -> None:
     notes, days = parse_putcall_archive(text)
     assert notes == ["Volume and Put/Call Ratio data is compiled for the convenience", "PRODUCT: TOTAL,,EXCHANGE: Cboe"]
     assert days == [date(2006, 11, 1), date(2019, 10, 4)]
+    with pytest.raises(ValueError, match="no DATE header"):
+        parse_putcall_archive("preamble only\n")
 
 
 def test_cadence_gaps_weekdays_and_duplicates() -> None:
@@ -111,3 +113,5 @@ def test_cot_dates_reads_both_column_conventions(tmp_path: Path) -> None:
     )
     days = {date(2024, 1, 2), date(2016, 12, 27), date(2012, 1, 3)}
     assert _cot_dates(tff)[:2] == (days, days)
+    with pytest.raises(ValueError, match="no report-date or contract-code column"):
+        _cot_dates(zipped("renamed", "Market,Report_Date,Code\nX,2024-01-02,1\n"))

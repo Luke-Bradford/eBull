@@ -205,7 +205,9 @@ def parse_cboe_index_csv(text: str) -> dict[date, tuple[str, ...]]:
 def parse_putcall_archive(text: str) -> tuple[list[str], list[date]]:
     """Put/call archive CSV -> (the preamble lines above the ``DATE`` header, verbatim; the row dates)."""
     lines = text.splitlines()
-    at = next(i for i, line in enumerate(lines) if line.strip().upper().startswith("DATE"))
+    at = next((i for i, line in enumerate(lines) if line.strip().upper().startswith("DATE")), None)
+    if at is None:
+        raise ValueError("put/call archive has no DATE header row")
     notes = [line.strip().strip(",").strip() for line in lines[:at] if line.strip().strip(",").strip()]
     days = [_us_date(line.split(",", 1)[0]) for line in lines[at + 1 :] if line.split(",", 1)[0].strip()]
     return notes, days
@@ -396,8 +398,10 @@ def _cot_dates(path: Path) -> tuple[set[date], set[date], str]:
                 reader = csv.reader(io.TextIOWrapper(raw, encoding="latin-1"))
                 header = [h.strip() for h in next(reader)]
                 # fut_fin_txt_2010 names it Report_Date_as_MM_DD_YYYY; every other file ...YYYY-MM-DD.
-                i_date = next(i for i, h in enumerate(header) if "YYYY-MM-DD" in h or "MM_DD_YYYY" in h)
-                i_code = next(i for i, h in enumerate(header) if "Contract" in h and "Code" in h)
+                i_date = next((i for i, h in enumerate(header) if "YYYY-MM-DD" in h or "MM_DD_YYYY" in h), None)
+                i_code = next((i for i, h in enumerate(header) if "Contract" in h and "Code" in h), None)
+                if i_date is None or i_code is None:
+                    raise ValueError(f"{path.name}/{name}: no report-date or contract-code column in {header}")
                 column = header[i_date]
                 for row in reader:
                     if len(row) <= max(i_date, i_code) or not row[i_date].strip():
