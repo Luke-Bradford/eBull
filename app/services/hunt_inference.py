@@ -42,7 +42,7 @@ SHORT_SAMPLE_LAGS: Final = 10
 MIN_ARM_FORMATIONS: Final = 30
 #: p below this is recorded as ``< 1e-12`` and enters BY as 0.
 P_UNDERFLOW: Final = 1e-12
-P_UNDERFLOW_LABEL: Final = "< 1e-12"
+P_UNDERFLOW_LABEL: Final = f"< {P_UNDERFLOW:g}"
 #: T_eff at or below this refuses ``short_effective_sample``.
 MIN_EFFECTIVE_SAMPLE: Final = 30.0
 #: Fewer distinct finite trial Sharpes refuses ``trial_population_too_small``.
