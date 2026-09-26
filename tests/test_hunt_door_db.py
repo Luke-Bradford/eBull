@@ -337,3 +337,20 @@ def test_the_validation_readout_waits_for_every_pin_then_gives_verdicts(
     assert sum(cast(list[int], counts)) == len(series)
     # The readout verifies stored provenance and opens no fresh access.
     assert _count(ebull_test_conn, reads) == before
+
+
+def test_the_power_script_reproduces_the_declarations_power(
+    ebull_test_conn: psycopg.Connection[Any], discovered: dict[str, Any]
+) -> None:
+    """Slice 4: recomputed from stored discovery outcomes alone, equal to the document's."""
+    from scripts.measure_3385_power import measure
+
+    power, problems = measure(ebull_test_conn, discovered["doc"])
+    assert problems == [] and set(power) == {discovered["pinned"].spec_sha256}
+    tampered = {**discovered["doc"], "numbers": {**discovered["doc"]["numbers"], "power": {}}}
+    assert measure(ebull_test_conn, tampered)[1] == ["numbers_power_differs_from_the_replay"]
+    # Codex ckpt-2: the replay is bound to the outcome the pin names, not merely the candidate's.
+    (pin,) = discovered["doc"]["pins"]
+    repinned = {**discovered["doc"], "pins": [{**pin, "discovery_outcome_sha256": "0" * 64}]}
+    label = discovered["pinned"].spec_sha256[:12]
+    assert measure(ebull_test_conn, repinned)[1] == [f"pin_{label}_discovery_outcome_is_not_the_pinned_one"]
