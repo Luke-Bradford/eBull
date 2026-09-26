@@ -1,4 +1,4 @@
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/layout/AppShell";
 import { ErrorBoundary } from "@/components/states/ErrorBoundary";
 import { RequireAuth } from "@/components/RequireAuth";
@@ -68,8 +68,11 @@ export function App() {
             </RequireAuth>
           }
         >
-          <Route index element={<DashboardPage />} />
-          <Route path="invest" element={<InvestPage />} />
+          {/* #3423: the hands-off Invest page is the landing route; the
+              dashboard and everything else sit under "Advanced". */}
+          <Route index element={<InvestPage />} />
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="invest" element={<Navigate to="/" replace />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="calendar" element={<CalendarPage />} />
           <Route path="strategies" element={<StrategiesHubPage />} />
