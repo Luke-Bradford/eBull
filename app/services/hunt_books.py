@@ -279,7 +279,8 @@ def evaluate_books_fast(
     unknown = set(cohorts) - set(grid.formations)
     if unknown:
         raise ValueError(f"cohorts at formations outside the grid: {sorted(unknown)[:3]}")
-    missing = {name for cohort in cohorts.values() for name in cohort.control} - set(packed.rows)
+    # arm ⊆ control is Cohort's invariant; both are checked so a bypassed one still fails cleanly.
+    missing = {name for cohort in cohorts.values() for name in cohort.control | cohort.arm} - set(packed.rows)
     if missing:
         raise ValueError(f"no prices for series {min(missing)}")
 
