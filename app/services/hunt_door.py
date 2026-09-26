@@ -1304,15 +1304,15 @@ def pin_power(conn: psycopg.Connection[Any], doc: Mapping[str, Any]) -> tuple[di
         if (pin.get("spec_sha256"), pin.get("candidate_sha256")) != (spec.spec_sha256, spec.candidate_sha256):
             problems.append(f"pin_{label}_hashes_are_not_its_spec")
         source = discovery.get(spec.candidate_sha256)
-        active: Sequence[float] | None = None
         if source is None:
+            # As the builders: a pin with no discovery outcome gets no power entry.
             problems.append(f"pin_{label}_has_no_discovery_outcome")
-        else:
-            stored = hh.read_outcome(conn, source.hunt_trial_id)
-            named = (pin.get("discovery_hunt_trial_id"), pin.get("discovery_outcome_sha256"))
-            if split == "validation" and named != (stored.hunt_trial_id, stored.outcome_sha256):
-                problems.append(f"pin_{label}_discovery_outcome_is_not_the_pinned_one")
-            active = stored.active_series
+            continue
+        stored = hh.read_outcome(conn, source.hunt_trial_id)
+        named = (pin.get("discovery_hunt_trial_id"), pin.get("discovery_outcome_sha256"))
+        if split == "validation" and named != (stored.hunt_trial_id, stored.outcome_sha256):
+            problems.append(f"pin_{label}_discovery_outcome_is_not_the_pinned_one")
+        active = stored.active_series
         grid = hh.split_grid(split, lag=spec.lag, h=spec.h, end=end)
         if isinstance(grid, StatRefused):
             power[spec.spec_sha256] = {"blocked": f"target_{grid.reason}"}
