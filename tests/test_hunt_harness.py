@@ -365,3 +365,17 @@ def test_form_is_a_detached_copy_so_the_hashes_cannot_be_mutated() -> None:
     spec.form()["constants"]["window"] = 999
     spec.form()["constants"]["names"].append("c")
     assert (spec.candidate_sha256, spec.spec_sha256) == before
+
+
+def test_the_holdout_end_is_bounded_by_the_archive_capture() -> None:
+    from app.services.universe_selection import INTRADER_CAPTURE_DATE
+
+    assert hh.archive_last_complete_session("survivorship_free") == INTRADER_CAPTURE_DATE
+    assert hh.archive_last_complete_session("survivor_only") is None
+
+
+@pytest.mark.parametrize(("split", "end"), [("discovery", date(2008, 12, 31)), ("holdout", None)])
+def test_compute_trial_takes_an_end_only_for_holdout(split: hh.Split, end: date | None) -> None:
+    # Raises before any database access, so no connection is needed.
+    with pytest.raises(hh.HuntHarnessError, match="end session"):
+        hh.compute_trial(None, trial_spec(split=split), end=end)  # type: ignore[arg-type]

@@ -18,7 +18,7 @@ import pytest
 
 from app.services import hunt_harness as hh
 from app.services import hunt_panel
-from app.services.hunt_harness import ComputedOutcome, HuntOutcome, HuntRefused, TrialSpec
+from app.services.hunt_harness import ComputedOutcome, HoldoutRecorded, HuntOutcome, HuntRefused, TrialSpec
 from app.services.series_termination import TerminationClass, TerminationEvidence
 from app.services.universe_selection import AdmittedSeries, vendor_for
 from tests.test_hunt_harness import trial_spec, universe_identity
@@ -53,11 +53,11 @@ def _spec(bound: dict[str, Any], **overrides: Any) -> TrialSpec:
     return trial_spec(**{**bound, **overrides})
 
 
-def _ok(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+def _ok(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
     return ComputedOutcome("computed", {"t": 1.25, "mean": 0.001, "cells": {"zero_recovery": "ok"}}, (0.001, -0.002))
 
 
-def _run(conn: psycopg.Connection[Any], spec: TrialSpec, compute: Any) -> HuntOutcome | HuntRefused:
+def _run(conn: psycopg.Connection[Any], spec: TrialSpec, compute: Any) -> HuntOutcome | HoldoutRecorded | HuntRefused:
     """``evaluate`` with ``compute_trial`` stubbed: it takes no computation argument."""
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(hh, "compute_trial", compute)
@@ -92,7 +92,7 @@ def test_the_search_is_registered_before_compute_and_survives_a_crash(
     spec = _spec(bound)
     seen: list[list[tuple[Any, ...]]] = []
 
-    def crash(conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+    def crash(conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         # Read from ANOTHER session: only a committed registration is visible there.
         with psycopg.connect(conn.info.dsn, password=conn.info.password) as other:
             seen.append(other.execute("SELECT hunt_id, purpose FROM hunt_trials").fetchall())
@@ -111,7 +111,7 @@ def test_a_retry_reuses_the_registration_even_at_a_full_budget(
     spec = _spec(bound)
     monkeypatch.setattr(hh, "HUNT_BUDGETS", {"hunt-1": 1})
 
-    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         raise _PriceReadRaised
 
     with pytest.raises(_PriceReadRaised):
@@ -131,7 +131,7 @@ def test_a_stored_outcome_is_returned_not_recomputed(
     spec = _spec(bound)
     first = _run(ebull_test_conn, spec, _ok)
 
-    def never(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+    def never(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         raise AssertionError("a cached discovery outcome must not recompute")
 
     relabelled = _spec(bound, family="renamed_family", mechanism="new story")
@@ -149,7 +149,7 @@ def test_a_relabelled_retry_binds_its_outcome_to_the_registered_spec(
 ) -> None:
     spec = _spec(bound)
 
-    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         raise _PriceReadRaised
 
     with pytest.raises(_PriceReadRaised):
@@ -163,7 +163,7 @@ def test_a_relabelled_retry_binds_its_outcome_to_the_registered_spec(
 
 
 def test_a_statistical_refusal_is_an_outcome(ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]) -> None:
-    def refuse(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+    def refuse(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         return ComputedOutcome("refused", {"reasons": ["short_sample"]}, None)
 
     result = _run(ebull_test_conn, _spec(bound), refuse)
@@ -183,7 +183,7 @@ def test_a_candidate_is_owned_by_the_hunt_that_registered_it(
 def test_a_universe_change_during_compute_is_an_infrastructure_error(
     ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def moved(conn: psycopg.Connection[Any], spec: TrialSpec) -> ComputedOutcome:
+    def moved(conn: psycopg.Connection[Any], spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         monkeypatch.setattr(hh, "read_universe_identity", lambda _c, _u: universe_identity(archive_sha256="9" * 64))
         return _ok(conn, spec)
 
@@ -203,7 +203,7 @@ def test_a_universe_change_during_compute_is_an_infrastructure_error(
         ({"h": 1, "entry_point": "close"}, None, "refused_timeline"),
         ({}, ("HUNT_CLOSED", {"hunt-1": "no demonstrated edge"}), "hunt_closed"),
         ({"split": "validation"}, None, "door_refused"),
-        ({"split": "holdout"}, None, "door_unavailable"),
+        ({"split": "holdout"}, None, "door_refused"),
         ({}, ("HUNT_BUDGETS", {}), "no_budget"),
         ({"signal_code_sha256": "b" * 64}, None, "identity_mismatch"),
         ({"calendar_identity": "stale"}, None, "identity_mismatch"),
