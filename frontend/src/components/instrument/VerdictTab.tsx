@@ -428,7 +428,7 @@ export function VerdictTab({
         <RiskInlinePanel symbol={symbol} />
       </Section>
 
-      {/* 6b. Short side (#3390) — short interest and short-sale volume,
+      {/* 7. Short side (#3390) — short interest and short-sale volume,
           each defined on its own card. */}
       <Section title="Short side">
         <ShortSidePanel
@@ -437,7 +437,7 @@ export function VerdictTab({
         />
       </Section>
 
-      {/* 7. Score history */}
+      {/* 8. Score history */}
       <Section title="Score history">
         {history.loading ? (
           <SectionSkeleton rows={1} />
