@@ -1201,8 +1201,8 @@ def holdout_readout(conn: psycopg.Connection[Any], hunt_id: str) -> HoldoutReado
 
     A pin with no outcome shows the refusal ``evaluate`` gives it now (e.g. a burned split),
     as ``NOT_PASS_REFUSED``, whether or not it registered; one ``evaluate`` would run is
-    pending. Deflated against
-    the holdout declaration's frozen M and V[SR]; opens no fresh access.
+    pending. Deflated against the holdout declaration's frozen M and V[SR]; opens no fresh
+    access.
     """
     with hh.hunt_programme_lock(conn):
         _repeatable_read(conn)
@@ -1227,11 +1227,12 @@ def holdout_readout(conn: psycopg.Connection[Any], hunt_id: str) -> HoldoutReado
                 pending.append(spec_sha256)
             else:
                 refused[spec_sha256] = refusal
+        barrier_closed = bool(pending)
         candidates: list[CandidateReadout] = []
         for pin in declaration.doc["pins"]:
             spec_sha256 = str(pin["spec_sha256"])
             trial_id, _has_outcome = rows[spec_sha256]
-            if pending:
+            if barrier_closed:
                 candidates.append(CandidateReadout(spec_sha256, trial_id, None, (), {}, {}))
             elif spec_sha256 in refused:
                 stage = "refused before registration" if trial_id is None else "registered, its retry refused"
