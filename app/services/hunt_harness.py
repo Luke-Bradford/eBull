@@ -12,10 +12,9 @@ What is NOT here yet, and how it fails meanwhile:
   ``hunt_panel`` loads the prices (only this module may import it) and runs
   ``hunt_compute.compute_panel`` over
   ``hunt_evaluator`` and ``hunt_inference``. Their code, the shared statistics they call
-  and the reader rule sets are hashed into ``HUNT_HARNESS_MODEL_ID``. Nothing in
-  production can register a search today
-  regardless: ``HUNT_BUDGETS`` is empty (a hunt with no budget refuses registration)
-  and only ``real_stock_long_x1`` is priced (``HUNT_TARIFF``, re-fetched 2026-09-26).
+  and the reader rule sets are hashed into ``HUNT_HARNESS_MODEL_ID``. A hunt with no
+  ``HUNT_BUDGETS`` entry refuses registration; hunt 1 has one discovery row (#3387), and
+  only ``real_stock_long_x1`` is priced (``HUNT_TARIFF``, re-fetched 2026-09-26).
 - **The audited door.** Validation (slice 2b-i): ``hunt_door`` freezes a hunt's batch
   declaration; ``evaluate`` passes ``result_ledger``'s door with a membership check
   (a spec the frozen declaration did not pin refuses ``spec_not_in_declaration``,
@@ -265,7 +264,8 @@ HUNT_HARNESS_MODEL_ID: Final = f"hunt-harness-v1+{sha256_form(canonical_form(_mo
 
 #: Discovery rows per hunt, both purposes. Set once by the #3387 PR that opens the hunt;
 #: raising it is a new hunt. A hunt with no entry refuses registration.
-HUNT_BUDGETS: Final[Mapping[str, int]] = MappingProxyType({})
+#: hunt-1 = 1: the one frozen trial of spec ``2026-09-26-3387-hunt-1-route-a-spec.md`` (#3387).
+HUNT_BUDGETS: Final[Mapping[str, int]] = MappingProxyType({"hunt-1": 1})
 #: hunt → terminal readout. Adding a hunt here IS the closing event.
 HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType({})
 

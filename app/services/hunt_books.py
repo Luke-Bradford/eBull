@@ -39,6 +39,7 @@ from app.services.hunt_evaluator import (
     Grid,
     HalfSpread,
     Point,
+    PositionTally,
     SeriesPrices,
 )
 
@@ -193,8 +194,9 @@ def _block_values(
     half_spread: HalfSpread,
     terminal_fractions: Mapping[int, float],
     with_dividends: bool,
-) -> tuple[Floats, npt.NDArray[np.bool_]] | None:
-    """ΣV per (group, offset 0 … h − 1) and each position's entered flag; ``None`` on a refusal."""
+) -> tuple[Floats, npt.NDArray[np.bool_], Floats] | None:
+    """ΣV per (group, offset 0 … h − 1), each position's entered flag, and Σ (V(x) − 1) over
+    each group's entered positions (#3387's per-trade readout); ``None`` on a refusal."""
     first = packed.first[block.rows]
     end = first + packed.length[block.rows]
     base = packed.offset[block.rows] - first
@@ -257,7 +259,9 @@ def _block_values(
         if (active & ~(np.isfinite(value) & (value >= 0.0))).any():
             return None
         sums[:, k] = np.add.reduceat(value, block.group_starts)
-    return sums, entered
+    # ``value`` is V(x) now; a position never entered stays 1 and is excluded explicitly.
+    trade_sums = np.add.reduceat(np.where(entered, value - 1.0, 0.0), block.group_starts)
+    return sums, entered, trade_sums
 
 
 def evaluate_books_fast(
@@ -289,6 +293,8 @@ def evaluate_books_fast(
         # Slot factors ΣV(e − 1 + k + 1) / ΣV(e − 1 + k) per formation and offset; 1 when idle.
         factors: dict[Book, Floats] = {book: np.ones((len(grid.formations), h)) for book in BOOKS}
         entered: list[int] = []
+        positions: dict[Book, int] = {book: 0 for book in BOOKS}
+        trade_sums: dict[Book, list[float]] = {book: [] for book in BOOKS}
         for block in _blocks(cohorts, packed, lag):
             result = _block_values(
                 packed,
@@ -302,12 +308,15 @@ def evaluate_books_fast(
             )
             if result is None:
                 return None
-            sums, position_entered = result
+            sums, position_entered, group_trade_sums = result
             if not np.isfinite(sums).all():
                 return None
             sizes = np.diff(np.append(block.group_starts, len(block.names)))
-            arm_entered = np.add.reduceat(position_entered.astype(np.int64), block.group_starts) > 0
+            entered_counts = np.add.reduceat(position_entered.astype(np.int64), block.group_starts)
+            arm_entered = entered_counts > 0
             for group, (t, book) in enumerate(block.groups):
+                positions[book] += int(entered_counts[group])
+                trade_sums[book].append(float(group_trade_sums[group]))
                 chain = np.empty(h + 1)
                 chain[0] = float(sizes[group])
                 chain[1:] = sums[group]
@@ -328,12 +337,22 @@ def evaluate_books_fast(
                     return None
                 returns[book].append(gross - 1.0)
     active = tuple(a - c for a, c in zip(returns["arm"], returns["control"], strict=True))
+    tallies: dict[Book, PositionTally] = {}
+    for book in BOOKS:
+        try:
+            net_sum = math.fsum(trade_sums[book])
+        except OverflowError, ValueError:
+            return None
+        if not math.isfinite(net_sum):
+            return None
+        tallies[book] = PositionTally(positions[book], net_sum)
     return BookSeries(
         sessions=grid.sessions,
         arm=tuple(returns["arm"]),
         control=tuple(returns["control"]),
         active=active,
         entered_formations=tuple(entered),
+        tallies=tallies,
     )
 
 

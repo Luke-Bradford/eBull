@@ -24,6 +24,11 @@ the frozen half-spread band at the as-traded entry price plus the proportional c
 stress charges ARM positions max(base band, ``UNKNOWN_NOMINAL_PRICE_BAND``). The canonical
 cell is base, with dividends, ``zero_recovery``: its active series is stored, and the
 outcome is ``refused`` exactly when its statistics refused.
+
+``per_trade`` (#3387, descriptive): per cell whose books computed, each book's entered
+positions and trade-weighted mean position net return Σ (V_i(x) − 1) / #positions
+(``hunt_evaluator.PositionTally``). A cell whose books refused has no entry. No statistic,
+flag or verdict here reads it; the hunt-1 discovery gate does (spec "Discovery flag").
 """
 
 from __future__ import annotations
@@ -429,6 +434,7 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
     half_spreads = _half_spreads(panel, params)
 
     cells: dict[str, Any] = {}
+    per_trade: dict[str, Any] = {}
     canonical_books: BookSeries | None = None
     canonical_refused = True
     policy: TerminationPolicy
@@ -457,6 +463,9 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
                 if isinstance(books, StatRefused):
                     cells[key] = books.form()
                     continue
+                per_trade[key] = {
+                    book: {"positions": tally.positions, "mean": tally.mean} for book, tally in books.tallies.items()
+                }
                 statistics = hunt_inference.cell_statistics(
                     books.active, h=params.h, entered_formations=books.entered_formations
                 )
@@ -479,6 +488,7 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
         "grid": grid_form,
         "per_formation": per_formation,
         "cells": cells,
+        "per_trade": per_trade,
         "tilts": {
             "log_price": _describe(formations.log_price_tilts),
             "volatility_63": _describe(formations.volatility_tilts),

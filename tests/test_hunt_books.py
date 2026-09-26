@@ -95,6 +95,14 @@ def _case(seed: int) -> tuple[ev.Grid, dict[int, ev.Cohort], dict[int, ev.Series
     return grid, cohorts, prices, timeline
 
 
+def _assert_tallies_match(fast: ev.BookSeries, oracle: ev.BookSeries, seed: int) -> None:
+    """#3387's per-trade readout: counts exact; sums within the sequential-sum bound."""
+    for book in ev.BOOKS:
+        got, want = fast.tallies[book], oracle.tallies[book]
+        assert got.positions == want.positions, f"seed {seed} {book}"
+        assert math.isclose(got.net_sum, want.net_sum, rel_tol=1e-12, abs_tol=1e-12), f"seed {seed} {book}"
+
+
 def test_the_fast_books_match_the_oracle() -> None:
     outcomes: Counter[str] = Counter()
     for seed in SEEDS:
@@ -113,6 +121,7 @@ def test_the_fast_books_match_the_oracle() -> None:
             assert len(got) == len(want)
             for g, w in zip(got, want, strict=True):
                 assert math.isclose(g, w, rel_tol=1e-12, abs_tol=1e-15), f"seed {seed} {field}: {g} != {w}"
+        _assert_tallies_match(fast, oracle, seed)
         outcomes["computed"] += 1
     # The suite must exercise both branches, or it proves half of what it claims.
     assert outcomes["computed"] > 200
@@ -168,3 +177,4 @@ def test_blocks_split_and_every_block_matches_the_oracle(monkeypatch: pytest.Mon
         assert fast.entered_formations == oracle.entered_formations
         for g, w in zip(fast.active, oracle.active, strict=True):
             assert math.isclose(g, w, rel_tol=1e-12, abs_tol=1e-15)
+        _assert_tallies_match(fast, oracle, seed)

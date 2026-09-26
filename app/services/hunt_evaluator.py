@@ -250,6 +250,25 @@ HalfSpread = Callable[[int, int, Book], float]
 
 
 @dataclass(frozen=True)
+class PositionTally:
+    """One book's ENTERED positions over every formation, and Σ (V_i(x) − 1) over them.
+
+    #3387 (spec ``2026-09-26-3387-hunt-1-route-a-spec.md``, "Discovery flag"): the
+    trade-weighted mean position net return is ``net_sum / positions``. V_i(x) is the
+    position's value factor at exit, costs, dividends and terminal haircuts included. A
+    position never entered is not a trade and is not counted. Descriptive only: no
+    statistic reads it.
+    """
+
+    positions: int
+    net_sum: float
+
+    @property
+    def mean(self) -> float | None:
+        return self.net_sum / self.positions if self.positions else None
+
+
+@dataclass(frozen=True)
 class BookSeries:
     """One cell's books on the fixed grid."""
 
@@ -259,6 +278,7 @@ class BookSeries:
     active: tuple[float, ...]
     #: Formations with at least one ENTERED arm position (``sparse_arm``'s input).
     entered_formations: tuple[int, ...]
+    tallies: Mapping[Book, PositionTally]
 
 
 def _finite_sum(terms: Iterable[float]) -> float | None:
@@ -308,6 +328,8 @@ def evaluate_books(
     # book → formation → ΣV on e − 1 … x
     sums: dict[Book, dict[int, list[float]]] = {"arm": {}, "control": {}}
     entered: list[int] = []
+    #: V_i(x) − 1 of every entered position, per book.
+    trades: dict[Book, list[float]] = {"arm": [], "control": []}
     for t, cohort in sorted(cohorts.items()):
         e, x = t + lag, t + lag + h - 1
         by_book: dict[Book, list[PositionPath]] = {"arm": [], "control": []}
@@ -341,6 +363,8 @@ def evaluate_books(
                         return result
                     path = computed[(name, charge)] = result
                 by_book[book].append(path)
+                if path.entered:
+                    trades[book].append(path.values[-1] - 1.0)
                 if book == "arm" and path.entered:
                     arm_entered = True
         for book in BOOKS:
@@ -370,12 +394,19 @@ def evaluate_books(
                 return StatRefused("book_ruin", f"{book} gross factor {gross} at session {d}")
             returns[book].append(gross - 1.0)
     active = tuple(a - c for a, c in zip(returns["arm"], returns["control"], strict=True))
+    tallies: dict[Book, PositionTally] = {}
+    for book in BOOKS:
+        net_sum = _finite_sum(trades[book])
+        if net_sum is None:
+            return StatRefused("non_finite", f"the {book} positions' net returns sum past the float range")
+        tallies[book] = PositionTally(len(trades[book]), net_sum)
     return BookSeries(
         sessions=grid.sessions,
         arm=tuple(returns["arm"]),
         control=tuple(returns["control"]),
         active=active,
         entered_formations=tuple(entered),
+        tallies=tallies,
     )
 
 
@@ -385,6 +416,7 @@ __all__ = [
     "Cohort",
     "Grid",
     "PositionPath",
+    "PositionTally",
     "SeriesPrices",
     "evaluate_books",
     "formation_grid",

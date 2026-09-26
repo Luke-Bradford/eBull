@@ -237,6 +237,30 @@ def stored_screening_p(status: str, statistics: Mapping[str, Any]) -> float:
     return worst
 
 
+def _by_readout(
+    outcomes: Sequence[_DiscoveryOutcome], *, inherited_searches: int, discovery_rows: int
+) -> tuple[hunt_inference.ByReadout, dict[int, float]]:
+    """BY programme-wide over every stored discovery outcome, m = M_inh + discovery rows (spec "BY")."""
+    p_values = {outcome.hunt_trial_id: stored_screening_p(outcome.status, outcome.statistics) for outcome in outcomes}
+    return hunt_inference.by_screen(p_values, m=max(inherited_searches + discovery_rows, 1)), p_values
+
+
+def discovery_by_readout(
+    conn: psycopg.Connection[Any], *, register: TrialRegister = TRIAL_REGISTER
+) -> tuple[hunt_inference.ByReadout, dict[int, float]]:
+    """BY now, by the rule :func:`declaration_numbers` freezes (#3387's discovery flag, condition 1).
+
+    Recomputed on every call, never cached (spec "BY"). Read-only.
+    """
+    totals = conn.execute(_LOG_TOTALS).fetchone()
+    discovery_rows = 0 if totals is None else int(totals[2])
+    return _by_readout(
+        _discovery_outcomes(conn),
+        inherited_searches=register.inherited_floor().searches,
+        discovery_rows=discovery_rows,
+    )
+
+
 def _ruined(statistics: Mapping[str, Any]) -> bool:
     cell = _cells(statistics).get(CANONICAL_CELL)
     return isinstance(cell, Mapping) and cell.get("refused") == "book_ruin"
@@ -330,9 +354,7 @@ def declaration_numbers(
         v_form = variance.form()
 
     # --- BY, programme-wide, at this readout ---
-    m_by = inherited.searches + discovery_rows
-    p_values = {outcome.hunt_trial_id: stored_screening_p(outcome.status, outcome.statistics) for outcome in outcomes}
-    by = hunt_inference.by_screen(p_values, m=max(m_by, 1))
+    by, p_values = _by_readout(outcomes, inherited_searches=inherited.searches, discovery_rows=discovery_rows)
     flagged = sorted(cast(frozenset[int], by.flagged))
 
     # --- pins ---
@@ -1332,6 +1354,7 @@ __all__ = [
     "build_holdout_declaration",
     "build_validation_declaration",
     "declaration_numbers",
+    "discovery_by_readout",
     "discovery_register_evidence",
     "document_bytes",
     "document_sha256",

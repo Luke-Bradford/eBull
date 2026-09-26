@@ -273,8 +273,9 @@ def test_a_tariff_rejects_a_malformed_record() -> None:
         _tariff(proportional_commission_per_side=1)
 
 
-def test_nothing_registers_while_no_hunt_has_a_budget() -> None:
-    assert dict(hh.HUNT_BUDGETS) == {}
+def test_only_hunt_1_has_a_budget_and_it_is_one_look() -> None:
+    """#3387 route-A spec, "Budget and delivery": one discovery row, no variants."""
+    assert dict(hh.HUNT_BUDGETS) == {"hunt-1": 1}
 
 
 def _tariff(**overrides: Any) -> hh.HuntTariff:
