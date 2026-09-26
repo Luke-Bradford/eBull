@@ -267,9 +267,13 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
 
         r11 (2026-09-25, #2901) added #2908's nine searches and #2901's two rows; the
         same command returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r12 (2026-09-26, #3385 slice 1) added the s8 in-sample fan #2840 arm 1's run
+        stored uncharged; the same command returned the same five groups, 488 rows,
+        all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 288
-        assert len(TRIAL_REGISTER.trials) == 35
+        assert TRIAL_REGISTER.declared_count == 289
+        assert len(TRIAL_REGISTER.trials) == 36
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

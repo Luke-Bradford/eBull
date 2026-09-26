@@ -108,10 +108,12 @@ flattering one.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import statistics
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
@@ -158,7 +160,12 @@ from typing import Final
 #: 2026-08-24 after the cutoff below without charging this register, and #2901's
 #: quality arm. Measured the same way before the bump: the SAME five groups, 488
 #: rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-25-r11"
+#:
+#: r12 (2026-09-26, #3385 slice 1) reconciles #2832 and #2840 and adds one
+#: search, the s8 in-sample fan S-H arm 1's job wrote uncharged. Measured the
+#: same way before the bump: the SAME five groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-26-r12"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -208,11 +215,31 @@ class TrialExactness(StrEnum):
 class DeclaredTrial:
     """One traceable declaration of variants evaluated against price data.
 
-    ``searches`` is normally one.  It may be greater than one only when a
-    historical research session recorded the size and construction of a search
-    family but did not retain a durable id for every arm.  Collapsing that
-    family to one would under-count ``M`` in the flattering direction; inventing
-    one id per lost arm would imply provenance the repository does not have.
+    ``searches`` is normally one.  It may be greater than one in exactly three
+    cases:
+
+    - **legacy grouped** — a historical research session recorded the size and
+      construction of a search family but did not retain a durable id for every
+      arm.  Collapsing that family to one would under-count ``M`` in the
+      flattering direction; inventing one id per lost arm would imply provenance
+      the repository does not have.
+    - **log-backed** (#3385, a hunt's discovery split) — every search has a
+      durable id in ``hunt_trials``.  ``evidence`` is built by
+      ``log_backed_evidence``: the query that selects the ids, a closing
+      timestamp read from the DB clock, and the sha256 of the ordered id list,
+      whose length IS ``searches``.  The freeze tripwire re-runs the query and
+      refuses ``register_disagrees_with_log`` on any mismatch.
+    - **declaration-backed** (#3385, a hunt's validation or holdout split) — the
+      searches are the specs pinned by one frozen declaration.  ``evidence`` is
+      built by ``declaration_backed_evidence``: the declaration doc's sha256 and
+      its pinned count, which IS ``searches``; ``declared_for`` names it.
+
+    ⚠ A ``hunt-`` trial id is reserved for the last two, and only in the form
+    ``hunt-<n>-<split>``; ``__post_init__`` refuses anything else.  The
+    inherited floor ``M_inh`` is ``declared_count`` excluding every ``hunt-``
+    entry, so a non-hunt entry that borrowed the prefix would silently drop out
+    of it (#3385 contract decision 121).  A hunt with no searches in a split has
+    no entry — never ``searches=0``.
 
     ⚠ ``evidence`` is REQUIRED and non-empty. A trial count is only honest if
     each declaration's count and construction can be checked. A grouped legacy
@@ -284,6 +311,89 @@ class DeclaredTrial:
         # on an entry that looked correct in the source.
         if not isinstance(self.exactness, TrialExactness):
             raise ValueError(f"exactness must be a TrialExactness, got {self.exactness!r}")
+        if self.trial_id.startswith(HUNT_TRIAL_PREFIX):
+            self._check_hunt_entry()
+
+    def _check_hunt_entry(self) -> None:
+        """#3385: a ``hunt-`` id is a hunt entry, and its evidence carries its count."""
+        id_match = _HUNT_TRIAL_ID.fullmatch(self.trial_id)
+        if id_match is None:
+            raise ValueError(
+                f"{self.trial_id}: the {HUNT_TRIAL_PREFIX!r} prefix is reserved for hunt entries "
+                "'hunt-<n>-<discovery|validation|holdout>' — M_inh excludes every such id"
+            )
+        if id_match["split"] == "discovery":
+            evidence_match = _LOG_BACKED_EVIDENCE.fullmatch(self.evidence)
+            if evidence_match is None or self.declared_for is not None:
+                raise ValueError(f"{self.trial_id}: a discovery entry is log-backed (log_backed_evidence), unclaimed")
+        else:
+            evidence_match = _DECLARATION_BACKED_EVIDENCE.fullmatch(self.evidence)
+            expected_claim = (self.trial_id, _HUNT_DECLARATION_VERSION)
+            if evidence_match is None or self.declared_for != expected_claim:
+                raise ValueError(
+                    f"{self.trial_id}: a {id_match['split']} entry is declaration-backed "
+                    f"(declaration_backed_evidence) and claims {expected_claim!r}"
+                )
+            if self.exactness is not TrialExactness.EXACT:
+                raise ValueError(f"{self.trial_id}: pinned specs are enumerated, so the entry is EXACT")
+        if int(evidence_match["n"]) != self.searches:
+            raise ValueError(
+                f"{self.trial_id}: evidence records {evidence_match['n']} searches but the entry declares "
+                f"{self.searches} — the register would disagree with the log it cites"
+            )
+
+
+#: #3385. Reserved for hunt entries; see ``DeclaredTrial``.
+HUNT_TRIAL_PREFIX: Final = "hunt-"
+#: The hunt spec pins each hunt declaration at ``v1`` (a validation batch is
+#: one declaration; a holdout is ``v1`` only).
+_HUNT_DECLARATION_VERSION: Final = "v1"
+_HUNT_TRIAL_ID: Final = re.compile(r"hunt-[1-9][0-9]*-(?P<split>discovery|validation|holdout)")
+_SHA256: Final = r"[0-9a-f]{64}"
+_LOG_BACKED_EVIDENCE: Final = re.compile(
+    rf"hunt_trials log; query=(?P<query>.+); closed_at=(?P<closed_at>\S+); "
+    rf"ids_sha256=(?P<sha>{_SHA256}); n=(?P<n>[1-9][0-9]*)",
+    re.DOTALL,
+)
+_DECLARATION_BACKED_EVIDENCE: Final = re.compile(
+    rf"declaration (?P<path>\S+) sha256=(?P<sha>{_SHA256}); pinned_specs=(?P<n>[1-9][0-9]*)"
+)
+
+
+def ordered_ids_sha256(trial_ids: Sequence[str]) -> str:
+    """sha256 of the ordered id list, one id per line — the tripwire recomputes this from the log."""
+    return hashlib.sha256("\n".join(trial_ids).encode()).hexdigest()
+
+
+def log_backed_evidence(*, query: str, closed_at: datetime, trial_ids: Sequence[str]) -> str:
+    """Evidence for a discovery entry: ``searches`` must be ``len(trial_ids)``.
+
+    ⚠ ``closed_at`` comes from the DB clock (``now()`` in the closing query), not
+    the host's: the tripwire compares it against ``hunt_trials.registered_at``.
+    """
+    if not query.strip():
+        raise ValueError("log-backed evidence needs the query that selects the ids")
+    if closed_at.utcoffset() != timedelta(0):
+        raise ValueError(f"closed_at must be aware with a zero UTC offset, got {closed_at!r}")
+    if not trial_ids:
+        raise ValueError("a hunt with no searches in a split has no register entry")
+    if len(set(trial_ids)) != len(trial_ids):
+        raise ValueError("duplicate hunt trial ids — one search counted twice")
+    return (
+        f"hunt_trials log; query={query}; closed_at={closed_at.isoformat()}; "
+        f"ids_sha256={ordered_ids_sha256(trial_ids)}; n={len(trial_ids)}"
+    )
+
+
+def declaration_backed_evidence(*, declaration_path: str, declaration_sha256: str, pinned_specs: int) -> str:
+    """Evidence for a validation or holdout entry: ``searches`` must be ``pinned_specs``."""
+    if not re.fullmatch(_SHA256, declaration_sha256):
+        raise ValueError(f"declaration_sha256 must be 64 lowercase hex, got {declaration_sha256!r}")
+    if not declaration_path or any(ch.isspace() for ch in declaration_path):
+        raise ValueError(f"declaration_path must be a non-blank path without whitespace, got {declaration_path!r}")
+    if type(pinned_specs) is not int or pinned_specs < 1:
+        raise ValueError("a declaration pinning no specs has no register entry")
+    return f"declaration {declaration_path} sha256={declaration_sha256}; pinned_specs={pinned_specs}"
 
 
 @dataclass(frozen=True)
@@ -840,15 +950,66 @@ TRIAL_REGISTER: Final = TrialRegister(
             searches=2,
             declared_for=("r6-quality-gpa", "r6-2901-quality-v1"),
         ),
+        # ⚠⚠ #3385 SLICE 1 — #2832 AND #2840 RECONCILED, ONE ENTRY ADDED. Per
+        # candidate, under "a search of the data, not a design":
+        #
+        # - #2832's 32 kills: desk kills. The sweep was web/primary-source
+        #   research plus skeptics applying bars ALREADY measured (turnover, the
+        #   cost bands, #2827's deflation miss); no kill reports a new return
+        #   computation. Not trials. ⚠ The per-verdict journal
+        #   `wf_f24998c8-93a` is not retained, so this rests on #2832's body and
+        #   the kill table in `.claude/skills/quant/strategy-evidence.md` §3.2.
+        # - #2832's six survivors: S-A (#2833) and #2834 ARM A were selected on
+        #   quote SPREADS, not returns; ARM A's one return figure (12.1%/yr
+        #   tracking error of a fixed, unselected sleeve) is a risk readout no
+        #   choice was taken over. S-C (#2835) and S-D (#2836) were cut unrun.
+        #   S-F (#2838) stage 1 read eligibility only; stage 2 is unrun. S-E is
+        #   `se-ma-overlay-2026-08-22`; ARM B stage (i) is
+        #   `armb-12-2-dv-weighted-stage-i-2026-09-22`. ARM B's re-reads of s2's
+        #   stored hold-out rows computed nothing new; its decile-displacement
+        #   censuses read no forward return.
+        # - #2840 arm 1: `sh-volatile-regime-gate-2026-08-22`; S-4 in the same
+        #   job is its declared turnover control. Arm 2
+        #   (`s12-cheapest-band-price-gated-breakout`): outcome-free censuses
+        #   only — never declared or backtested. Arm 3: never built. ⚠ Arm 2's
+        #   $100 band was chosen after the addendum re-costed s4/s8's pooled
+        #   gross populations at the cheapest band — a constant shift of an
+        #   already-exposed number, so not a new search here, but arm 2's
+        #   declaration must disclose it as prior exposure.
+        # - Added below: the s8 fan arm 1's job also computed and stored.
+        #
+        # ⚠ NOT reconciled here (#3385 slice-1 scope is #2832/#2840): #2827's
+        # post-cutoff re-run batches — s1-s4 survivor_only x5 (2026-08-12) and
+        # s1-s10 survivorship_free x7 (2026-08-21/22) in
+        # `strategy_results_store` — and #3238's cost-basis A/B recompute. Both
+        # sit in programme rule 2's inherited count; the handoff is on #3385.
+        DeclaredTrial(
+            trial_id="s8-in-sample-survivorship-free-2026-08-23",
+            description=(
+                "S-8 range mean reversion, in-sample survivorship_free fan (1962-01-02 to 2024-09-27), computed and "
+                "stored by #2840 arm 1's run but charged by no entry: s8 is neither arm 1 nor its declared control. "
+                "One search under the fan-collapse rule."
+            ),
+            evidence=(
+                "strategy_results_store result_id 734-737 (s8-range-mean-reversion @ "
+                "strategy-registry-v1+9052ecd5fb62, namespace in_sample, created 2026-08-23 01:09Z, same run as "
+                "s11's); issue #2840 comment 5383525513 (run 116064)"
+            ),
+            exactness=TrialExactness.EXACT,
+        ),
     ),
 )
 
 
 __all__ = [
+    "HUNT_TRIAL_PREFIX",
     "TRIAL_REGISTER",
     "TRIAL_REGISTER_CUTOFF",
     "TRIAL_REGISTER_VERSION",
     "DeclaredTrial",
     "TrialExactness",
     "TrialRegister",
+    "declaration_backed_evidence",
+    "log_backed_evidence",
+    "ordered_ids_sha256",
 ]

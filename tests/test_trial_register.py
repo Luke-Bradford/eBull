@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
 from app.services.strategy_mt1_trial import NEGATIVE_CONTROL_TRIAL_ID, TRIAL_ID
 from app.services.trial_register import (
+    HUNT_TRIAL_PREFIX,
     TRIAL_REGISTER,
     TRIAL_REGISTER_CUTOFF,
     TRIAL_REGISTER_VERSION,
     DeclaredTrial,
     TrialExactness,
     TrialRegister,
+    declaration_backed_evidence,
+    log_backed_evidence,
+    ordered_ids_sha256,
 )
 
 
@@ -23,7 +27,7 @@ def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> D
 
 class TestTheShippedDeclaration:
     def test_the_register_is_stamped_with_its_version(self) -> None:
-        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-09-25-r11"
+        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-09-26-r12"
 
     def test_every_declared_trial_carries_its_evidence(self) -> None:
         """⚠ An entry nobody can trace is indistinguishable from one invented."""
@@ -71,11 +75,12 @@ class TestTheShippedDeclaration:
         # ⚠ 259 (#2600's Gate D-0.1 reconstruction) + 7 (#2614's C-4 entry) +
         # 6 S-5..S-10 declarations + 2 MT-1 controlled pairs + 1 S-E overlay
         # (#2837, r8) + 1 S-H arm 1 (#2840, r9) + 1 ARM B stage (i) (#2834,
-        # r10) + 9 #2908 exposed searches + 2 #2901 quality rows (r11). Moved
+        # r10) + 9 #2908 exposed searches + 2 #2901 quality rows (r11) + 1 s8
+        # in-sample fan from #2840 arm 1's run (r12, #3385 slice 1). Moved
         # deliberately, not loosened: the pin exists to catch a
         # DROPPED entry, and an addition that raises M is the conservative
         # direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 288
+        assert TRIAL_REGISTER.declared_count == 289
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
     def test_the_two_mt1_controlled_pairs_are_charged_before_outcomes(self) -> None:
@@ -142,6 +147,13 @@ class TestTheShippedDeclaration:
             "s9-squeeze-expansion",
             "s10-relative-strength-leader",
         } <= TRIAL_REGISTER.trial_ids
+
+    def test_the_2832_and_2840_reconciliation(self) -> None:
+        """#3385 slice 1: the s8 fan #2840 arm 1's run stored is charged; the
+        unrun arm 2 (s12) is not — only outcome-free censuses touched it."""
+        s8 = next(t for t in TRIAL_REGISTER.trials if t.trial_id == "s8-in-sample-survivorship-free-2026-08-23")
+        assert (s8.searches, s8.exactness) == (1, TrialExactness.EXACT)
+        assert not any("s12" in t.trial_id or "cheapest-band" in t.trial_id for t in TRIAL_REGISTER.trials)
 
 
 class TestSharpeVariance:
@@ -285,6 +297,122 @@ class TestExactness:
         trial = next(t for t in TRIAL_REGISTER.trials if t.trial_id == trial_id)
         assert trial.searches == searches
         assert trial.exactness is exactness
+
+
+_CLOSED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+_QUERY = "select hunt_trial_id from hunt_trials where hunt_id = 'hunt-1' and split = 'discovery' order by 1"
+_DOC_SHA = "a" * 64
+
+
+def _log_backed(trial_id: str = "hunt-1-discovery", ids: tuple[str, ...] = ("7", "8", "9"), **overrides: object):
+    kwargs: dict[str, object] = {
+        "trial_id": trial_id,
+        "description": "d",
+        "evidence": log_backed_evidence(query=_QUERY, closed_at=_CLOSED_AT, trial_ids=ids),
+        "exactness": TrialExactness.EXACT,
+        "searches": len(ids),
+    }
+    kwargs.update(overrides)
+    return DeclaredTrial(**kwargs)  # type: ignore[arg-type]
+
+
+def _declaration_backed(trial_id: str = "hunt-1-validation", pinned: int = 4, **overrides: object):
+    kwargs: dict[str, object] = {
+        "trial_id": trial_id,
+        "description": "d",
+        "evidence": declaration_backed_evidence(
+            declaration_path="docs/proposals/ta/hunt-1-validation.md", declaration_sha256=_DOC_SHA, pinned_specs=pinned
+        ),
+        "exactness": TrialExactness.EXACT,
+        "searches": pinned,
+        "declared_for": (trial_id, "v1"),
+    }
+    kwargs.update(overrides)
+    return DeclaredTrial(**kwargs)  # type: ignore[arg-type]
+
+
+class TestHuntEntries:
+    """#3385 — the two `searches > 1` cases a hunt adds, and the reserved prefix."""
+
+    def test_a_log_backed_discovery_entry_counts_its_ids(self) -> None:
+        trial = _log_backed(ids=("7", "8", "9"))
+        assert trial.searches == 3
+        assert ordered_ids_sha256(["7", "8", "9"]) in trial.evidence
+        assert "closed_at=2026-10-01T12:00:00+00:00" in trial.evidence
+
+    def test_a_floored_discovery_entry_is_allowed(self) -> None:
+        """A counted `recorded_after` row with `floor = true` makes discovery FLOOR."""
+        assert _log_backed(exactness=TrialExactness.FLOOR).exactness is TrialExactness.FLOOR
+
+    def test_a_log_backed_count_that_disagrees_with_its_ids_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="evidence records 3 searches but the entry declares 4"):
+            _log_backed(searches=4)
+
+    def test_the_id_hash_is_order_sensitive(self) -> None:
+        """The tripwire compares the ORDERED list; a reordering is a different log."""
+        assert ordered_ids_sha256(["1", "2"]) != ordered_ids_sha256(["2", "1"])
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"query": " ", "closed_at": _CLOSED_AT, "trial_ids": ("1",)}, "needs the query"),
+            ({"query": _QUERY, "closed_at": datetime(2026, 10, 1), "trial_ids": ("1",)}, "zero UTC offset"),
+            (
+                {
+                    "query": _QUERY,
+                    "closed_at": datetime(2026, 10, 1, tzinfo=timezone(timedelta(hours=1))),
+                    "trial_ids": ("1",),
+                },
+                "zero UTC offset",
+            ),
+            ({"query": _QUERY, "closed_at": _CLOSED_AT, "trial_ids": ()}, "no register entry"),
+            ({"query": _QUERY, "closed_at": _CLOSED_AT, "trial_ids": ("1", "1")}, "duplicate"),
+        ],
+    )
+    def test_malformed_log_evidence_is_refused(self, kwargs: dict[str, object], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            log_backed_evidence(**kwargs)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("split", ["validation", "holdout"])
+    def test_a_declaration_backed_entry_counts_its_pinned_specs(self, split: str) -> None:
+        trial = _declaration_backed(trial_id=f"hunt-2-{split}", pinned=4)
+        assert trial.searches == 4
+        assert trial.declared_for == (f"hunt-2-{split}", "v1")
+
+    def test_a_declaration_backed_count_that_disagrees_with_its_pins_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="evidence records 4 searches but the entry declares 5"):
+            _declaration_backed(pinned=4, searches=5)
+
+    def test_a_declaration_backed_entry_must_claim_its_own_declaration(self) -> None:
+        with pytest.raises(ValueError, match="declaration-backed"):
+            _declaration_backed(declared_for=("hunt-1-validation", "v2"))
+
+    def test_a_declaration_backed_entry_is_exact(self) -> None:
+        with pytest.raises(ValueError, match="EXACT"):
+            _declaration_backed(exactness=TrialExactness.FLOOR)
+
+    def test_each_split_takes_only_its_own_evidence_form(self) -> None:
+        with pytest.raises(ValueError, match="log-backed"):
+            _declaration_backed(trial_id="hunt-1-discovery", declared_for=None)
+        with pytest.raises(ValueError, match="declaration-backed"):
+            _log_backed(trial_id="hunt-1-validation")
+
+    @pytest.mark.parametrize("pinned", [0, -1, True])
+    def test_a_declaration_pinning_nothing_has_no_entry(self, pinned: object) -> None:
+        with pytest.raises(ValueError, match="no register entry"):
+            declaration_backed_evidence(
+                declaration_path="p.md",
+                declaration_sha256=_DOC_SHA,
+                pinned_specs=pinned,  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.parametrize("trial_id", ["hunt-", "hunt-0-discovery", "hunt-1-screening", "hunt-1", "hunt-x-holdout"])
+    def test_the_hunt_prefix_is_reserved_for_hunt_entries(self, trial_id: str) -> None:
+        """⚠ M_inh excludes every `hunt-` id (contract decision 121), so a non-hunt
+        entry that borrowed the prefix would silently drop out of the inherited floor."""
+        with pytest.raises(ValueError, match="reserved for hunt entries"):
+            _trial(trial_id)
+        assert trial_id.startswith(HUNT_TRIAL_PREFIX)
 
 
 class TestReconstructionCutoff:
