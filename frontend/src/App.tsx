@@ -5,6 +5,7 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { ConfigProvider } from "@/lib/ConfigContext";
 import { DisplayCurrencyProvider } from "@/lib/DisplayCurrencyContext";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { InvestPage } from "@/pages/InvestPage";
 import { ResearchHubPage } from "@/pages/ResearchHubPage";
 import { PresetRedirect } from "@/pages/PresetRedirect";
 import { InstrumentDetailRedirect } from "@/pages/InstrumentDetailRedirect";
@@ -68,6 +69,7 @@ export function App() {
           }
         >
           <Route index element={<DashboardPage />} />
+          <Route path="invest" element={<InvestPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="calendar" element={<CalendarPage />} />
           <Route path="strategies" element={<StrategiesHubPage />} />
