@@ -116,6 +116,6 @@ def test_the_view_module_itself_obeys_the_allowlist() -> None:
     from app.services import hunt_view
 
     source = Path(str(hunt_view.__file__)).read_text()
-    allowed_extra = {"collections.abc", "types"}
+    allowed_extra = {"bisect", "collections.abc", "types"}
     violations = [v for v in _import_violations(source) if v.removeprefix("imports ") not in allowed_extra]
     assert violations == []

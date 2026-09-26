@@ -32,14 +32,14 @@ AS_TRADED_CLOSE = {0: 100.0, 1: 102.0, 2: 104.0, 3: 52.0, 4: 53.0}
 def test_a_split_after_t_cannot_move_the_levels_the_signal_sees() -> None:
     view = hv.rebased_view(2, {7: RATIO}, {7: AS_TRADED_CLOSE[2]})
     bars = view.series[7]
-    assert bars.close == pytest.approx((100.0, 102.0, 104.0))  # the as-traded levels
-    assert bars.volume == pytest.approx((500.0, 500.0, 500.0))  # price × volume unchanged
+    assert tuple(bars.close) == pytest.approx((100.0, 102.0, 104.0))  # the as-traded levels
+    assert tuple(bars.volume) == pytest.approx((500.0, 500.0, 500.0))  # price × volume unchanged
     assert bars.close[-1] * bars.volume[-1] == pytest.approx(RATIO.close[2] * RATIO.volume[2])
 
 
 def test_after_the_split_the_view_is_split_continuous_ending_at_the_as_traded_close() -> None:
     bars = hv.rebased_view(4, {7: RATIO}, {7: AS_TRADED_CLOSE[4]}).series[7]
-    assert bars.close == pytest.approx((50.0, 51.0, 52.0, 52.0, 53.0))
+    assert tuple(bars.close) == pytest.approx((50.0, 51.0, 52.0, 52.0, 53.0))
 
 
 def test_look_ahead_probe_a_signal_indexing_past_t_finds_nothing() -> None:
@@ -74,8 +74,22 @@ def test_a_missing_or_invalid_as_traded_close_refuses() -> None:
 
 
 def test_a_view_cannot_be_built_with_a_series_ending_off_t() -> None:
+    view = hv.rebased_view(2, {7: RATIO}, {7: AS_TRADED_CLOSE[2]})
     with pytest.raises(ValueError):
-        hv.SignalView(t=3, series={7: RATIO})
+        hv.SignalView(t=3, series=view.series)
+
+
+def test_a_prefix_is_a_lazy_bounded_scaled_sequence() -> None:
+    prefix = hv.Prefix((1.0, 2.0, 3.0, 4.0), 3, 10.0)
+    assert len(prefix) == 3
+    assert (prefix[0], prefix[-1]) == (10.0, 30.0)
+    assert prefix[1:] == (20.0, 30.0)
+    assert prefix[-5:] == (10.0, 20.0, 30.0)
+    assert list(prefix) == [10.0, 20.0, 30.0]
+    with pytest.raises(IndexError):
+        prefix[3]
+    with pytest.raises(IndexError):
+        prefix[-4]
 
 
 def test_bars_validate_shape_and_order() -> None:
