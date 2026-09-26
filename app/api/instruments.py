@@ -2763,7 +2763,7 @@ def build_fair_value_band(
         price_as_of=row["price_as_of"],
         computed_at=row["computed_at"],
         stale=(today - as_of).days > FAIR_VALUE_BAND_PRICE_STALE_DAYS,
-        target_basis=str(row["target_basis"]),
+        target_basis=row["target_basis"],
         cross_leg_base_ratio=_opt_float(basis.get("cross_leg_base_ratio")),
         legs=legs,
     )
