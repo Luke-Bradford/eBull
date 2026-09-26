@@ -258,8 +258,11 @@ def test_the_tariff_hash_is_the_recorded_fees_text() -> None:
     assert hh.HUNT_TARIFF is not None
     digest = hashlib.sha256(hh.HUNT_TARIFF_EVIDENCE.encode("utf-8")).hexdigest()
     assert digest == hh.HUNT_TARIFF.text_sha256
-    # The UK row of the stock-commission table: $0 on every exchange, so nothing is fixed-fee.
-    assert "All other exchanges\n$0\t$0" in hh.HUNT_TARIFF_EVIDENCE
+    # The hashed capture names its own selector state, and it is the tariff's residence.
+    selected, _, rest = hh.HUNT_TARIFF_EVIDENCE.partition("\n")
+    assert selected == f"Selected country: {hh.HUNT_TARIFF.residence_country}"
+    # That country's row: $0 on every exchange, so nothing is fixed-fee.
+    assert rest.split("\n\nPlease note")[0].endswith("All other exchanges\n$0\t$0")
     assert hh.HUNT_TARIFF.proportional_commission_per_side == 0.0
 
 

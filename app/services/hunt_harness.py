@@ -243,14 +243,16 @@ class HuntTariff:
         return f"{HUNT_COST_MODEL_PREFIX}+{sha256_form(form)[:16]}"
 
 
-#: The fees page's "Stocks" section as rendered on 2026-09-26 with the country selector at
-#: "United Kingdom" (the selector's own heading and option list removed, and the page's
-#: six U+00A0 no-break spaces written as plain spaces). ``HUNT_TARIFF``'s ``text_sha256`` is
-#: its sha256, computed in the browser on the page's own text; a test recomputes it here. The same fetch read Germany as
-#: $2 / $1 (from 2/3/2025) and Australia as $2 / $2, so the selector was live, not a default.
-#: The "0.15% of trade value" commission on the same page belongs to Stock Margin, which is
-#: leverage and not this lane.
+#: The fees page's "Stocks" section as rendered on 2026-09-26, captured in the browser with
+#: the country selector's SELECTED option written first, then the Germany row from the same
+#: fetch as a control (the selector was live, not a default). Edits to the rendered text:
+#: the selector's own heading and option list removed, and U+00A0 no-break spaces written
+#: as plain spaces. ``HUNT_TARIFF.text_sha256`` is its sha256, computed in the browser on
+#: exactly this string; a test recomputes it here and checks the selected country is the
+#: tariff's residence. The page's "0.15% of trade value" commission belongs to Stock Margin
+#: (leverage), not this lane.
 HUNT_TARIFF_EVIDENCE: Final = (
+    "Selected country: United Kingdom\n"
     "Stocks\n\nA commission fee of $1 or $2 may apply when opening and closing a stock position, depending on "
     "your country of residence and the stock exchange on which the asset is traded.\n\nPositions opened before "
     "the fee implementation date in your country will not incur a fee when closing.\n\nStock commission fees in "
@@ -259,6 +261,9 @@ HUNT_TARIFF_EVIDENCE: Final = (
     "being traded\n– Do not apply to CFD positions\n– Do not apply to ETFs\n– Do not apply to Copy trading or "
     "Smart Portfolios\n– Do not apply to Recurring investment plans on opening a position (may apply on closing "
     "position)\n\n"
+    "Control capture, same fetch:\nSelected country: Germany\n"
+    "Stock Exchange\nAustralia, Hong Kong, Dubai, Abu Dhabi, Tokyo exchanges\tAll other exchanges\t"
+    "Implementation date\n$2\t$1\t2/3/2025\n"
 )
 
 #: Re-fetched 2026-09-26 in a browser (the etoro-api skill's protocol: the portal blocks
@@ -271,7 +276,7 @@ HUNT_TARIFF_EVIDENCE: Final = (
 HUNT_TARIFF: HuntTariff | None = HuntTariff(
     url="https://www.etoro.com/trading/fees/",
     fetched_on=date(2026, 9, 26),
-    text_sha256="3a7fa0bba2bf027d1d2b2a48b90871ecbeddd574006570efd633c07e945a4a46",
+    text_sha256="2ca786e878ebb635386c305f06d6d1bd1928dc11710fdcf9221305ef364a218e",
     residence_country="United Kingdom",
     account_currency="USD",
     proportional_commission_per_side=0.0,
