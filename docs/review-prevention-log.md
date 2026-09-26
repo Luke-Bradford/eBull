@@ -11578,3 +11578,23 @@ neighbouring container and match it.**
   was this row written against, and which one does the reader hold?"
 - Enforced in: `app/services/hunt_harness.py::load_chain_hunt_declaration`,
   `tests/test_hunt_door_db.py::test_the_freeze_writes_the_declaration_and_its_document_together`.
+
+### An identity gate between two deliberately different constructions measures their difference (#2901)
+
+- Failure: #2901's gate correlated our long-only, equal-weight top quintile with global-q's value-weight decile
+  10 − 1 long-short at a 0.20 bar. It failed at +0.193 to +0.199, and the result cannot say whether our data and
+  code are wrong or the constructions simply differ. The spec admitted this in advance. (Supervisor on #2902.)
+- Prevention: an identity gate rebuilds the published construction itself and holds it to a high, derived bar.
+  The arm-vs-control test comes after it, as a separate stage. Self-review prompt: "if our code were perfect, what
+  correlation would this pair show?"
+- Enforced in: `docs/proposals/ta/2026-09-24-selection-programme-v2.md` ("Statistics and bar").
+
+### Compute power at the smallest worthwhile edge before building an arm (#2902)
+
+- Failure: #2901 was built across ten PRs and run, with a power statement showing 50% power only at 7.2%/yr excess,
+  far above any edge a long-only selection tilt could plausibly carry after costs. #2902 would have repeated it: at
+  1.5%/yr net, t > 3 over 134 months, power is 0.018 (`scripts/measure_2902_power.py`).
+- Prevention: before any spec, run the power step at a declared minimum worthwhile edge. Below 0.5, redesign or drop
+  the arm, and record why. Self-review prompt: "what is the chance this test passes if the edge is real but small?"
+- Enforced in: `docs/proposals/ta/2026-09-24-selection-programme-v2.md` ("Statistics and bar"),
+  `docs/proposals/ta/2026-09-26-2902-power-first.md`.

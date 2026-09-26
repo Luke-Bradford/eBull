@@ -75,6 +75,14 @@ control. The verdict binds to the worst case.
   cells; t > 3 on the headline difference versus its control (Harvey/Liu/Zhu).
 - **Power statement before the look**: the minimum detectable annual excess at 13 years. Non-significance is
   reported as "undetermined at this power", not as "no edge".
+- **Power gate before any build (queue rule 1, #2437, 2026-09-26)**: power at the declared smallest worthwhile net
+  edge must reach 0.5 at the bar, or the arm is redesigned or dropped, with the reason recorded. #2902 closed unrun on
+  it (`2026-09-26-2902-power-first.md`: 0.018 at 1.5%/yr, t > 3, 134 months).
+- **Identity gate is two-stage (supervisor on #2902, after #2901's `GATE_FAIL`)**: (1) a replication gate that
+  rebuilds the published factor's OWN construction (weighting, breakpoints, universe filters, long-short, rebalance
+  month) on our PIT data, at a high correlation bar whose derivation is frozen in the declaration; then (2) the
+  declared long-only arm against its matched control. Correlating our arm with a deliberately different published
+  construction tests their difference, not our code.
 - Cost model: the #2908 basis (0.725% half-spread per traded dollar) plus minimum-notional and broker-reachability
   checks at formation; turnover measured one-way on the declared denominator.
 
