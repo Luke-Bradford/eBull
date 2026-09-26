@@ -88,7 +88,8 @@ describe("InvestPage", () => {
     expect(screen.getByText("Fixed budget")).toBeInTheDocument();
     expect(screen.getByText("No licensed benchmark yet")).toBeInTheDocument();
     expect(screen.getByText(/2 strategies are under test/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Change amount, risk or on/off" })).toHaveAttribute(
+    expect(screen.getByRole("heading", { name: "Funding" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Advanced: index sleeve settings/ })).toHaveAttribute(
       "href",
       "/strategies?view=setup",
     );

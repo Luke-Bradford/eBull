@@ -9,7 +9,7 @@ import {
 import type { StrategyOwnedPosition } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { StatTile } from "@/components/dashboard/StatTile";
-import { BenchmarkRefusals, BlockerRow } from "@/components/strategies/StrategyPortfolioPanels";
+import { AutomationControl, BenchmarkRefusals, BlockerRow } from "@/components/strategies/StrategyPortfolioPanels";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatMoney, formatPct } from "@/lib/format";
 import { investNarrative } from "@/lib/investSummary";
@@ -59,8 +59,8 @@ function HoldingRow({ position }: { position: StrategyOwnedPosition }) {
  * Operator north star (2026-09-26): "put money in and then take my hands off
  * the wheel". Everything detailed stays on `/strategies` (linked as Advanced);
  * this page READS the same four endpoints the Portfolio lens reads and adds no
- * machinery. Slice 1 is read-only — the amount, risk and on/off controls land
- * in a later slice, and until then the Setup lens is linked for them.
+ * machinery. The amount, risk and on/off controls are the Setup lens's own
+ * `AutomationControl`, mounted here as well (slice 2).
  *
  * ⚠ The first-class message while it is true is "no strategy has passed yet —
  * your money is in the index sleeve", and it is said only when the positions
@@ -208,9 +208,20 @@ export function InvestPage() {
         <BenchmarkRefusals refusals={data.benchmark_refusals} />
       </section>
 
+      {/* Slice 2: amount, budget mode, risk profile and on/off, via the SAME
+          control the Setup lens mounts — one write path, not a second form. */}
+      <AutomationControl
+        overview={data}
+        coreSleeve={core}
+        onUpdated={() => {
+          void overview.refetch();
+          void coreSleeve.refetch();
+        }}
+      />
+
       <nav aria-label="Advanced" className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
         <Link to="/strategies?view=setup" className="text-blue-700 hover:underline dark:text-blue-400">
-          Change amount, risk or on/off
+          Advanced: index sleeve settings and policy rules
         </Link>
         <Link to="/strategies" className="text-blue-700 hover:underline dark:text-blue-400">
           Advanced: full portfolio and strategy evidence
