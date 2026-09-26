@@ -1346,6 +1346,27 @@ export interface FamilyContribution {
   contribution: number;
 }
 
+/** Per-family data usability recorded at scoring time (#3389 c). `missing` = the family
+ *  observed no input and its stored score is the default fill, not a verdict. */
+export type FamilyUsability = "usable" | "missing" | "stale" | "quarantined";
+
+/** One family's evidence status under the row's model_version (#3389 c). */
+export interface FamilyEvidenceItem {
+  family: string;
+  maturity:
+    | "untested"
+    | "under_test"
+    | "inconclusive"
+    | "failed"
+    | "passed_backtest"
+    | "passed_forward"
+    | "retired";
+  purpose: "return_signal" | "risk_avoid_signal" | "eligibility_constraint" | "context";
+  evidence_ref: string;
+  /** `null` on rows scored before usability was recorded: unknown, never usable. */
+  usability: FamilyUsability | null;
+}
+
 export interface VerdictScore {
   scored_at: string;
   model_version: string;
@@ -1358,6 +1379,8 @@ export interface VerdictScore {
   filings_status: string | null;
   /** Largest first; sums to `raw_total`. */
   contributions: FamilyContribution[];
+  /** One per family; empty for a model_version with no registry. */
+  families: FamilyEvidenceItem[];
   total_score: number | null;
   raw_total: number | null;
   quality_score: number | null;

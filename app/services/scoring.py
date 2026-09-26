@@ -26,7 +26,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
@@ -382,6 +382,79 @@ class FamilyScores:
     confidence: float
 
 
+# ---------------------------------------------------------------------------
+# Per-family evidence status (#3389 slice c; the two axes and the usability
+# vocabulary are `docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md`,
+# "Principle").
+# ---------------------------------------------------------------------------
+
+FAMILIES: tuple[str, ...] = ("quality", "value", "turnaround", "momentum", "sentiment", "confidence")
+
+#: Appended by a family function on every path where it observed NO input and so
+#: returned its default fill (0.25 for quality, 0.5 elsewhere). The stored number
+#: is then not a verdict, and the family's usability is ``missing``.
+NO_INPUT_NOTE = "no usable input; the score is the default fill"
+
+FamilyUsability = Literal["usable", "missing", "stale", "quarantined"]
+
+#: The families a thesis can feed. When the thesis was quarantined (#2436) and such a
+#: family had no other input, its default fill is explained by the rejection, not absence.
+THESIS_FAMILIES: frozenset[str] = frozenset({"value", "confidence"})
+Maturity = Literal["untested", "under_test", "inconclusive", "failed", "passed_backtest", "passed_forward", "retired"]
+Purpose = Literal["return_signal", "risk_avoid_signal", "eligibility_constraint", "context"]
+
+
+@dataclass(frozen=True)
+class FamilyEvidence:
+    maturity: Maturity
+    purpose: Purpose
+    evidence_ref: str
+
+
+#: Validation binds to an exact construction and version, never to a family NAME:
+#: the #2901 quality arm (GATE_FAIL) and the #2902 value arm (not run) tested
+#: different constructions, so they say nothing about these. No v1.x family
+#: construction has been backtested, and each is weighted into ``raw_total`` as a
+#: return signal.
+_UNTESTED_RETURN_SIGNAL = FamilyEvidence(
+    maturity="untested",
+    purpose="return_signal",
+    evidence_ref="docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md",
+)
+
+
+def family_evidence(model_version: str) -> Mapping[str, FamilyEvidence] | None:
+    """Maturity × purpose per family for ``model_version``, or ``None`` if unknown."""
+    if model_version not in _WEIGHT_MODES:
+        return None
+    return {family: _UNTESTED_RETURN_SIGNAL for family in FAMILIES}
+
+
+def family_usability(
+    notes_by_family: Mapping[str, Sequence[str]],
+    *,
+    thesis_fed: frozenset[str],
+    thesis_stale: bool,
+    thesis_quarantined: bool,
+) -> dict[str, FamilyUsability]:
+    """Per family: ``quarantined`` when it observed no input because the thesis was rejected
+    (#2436); ``missing`` when it observed no input otherwise (its notes carry
+    :data:`NO_INPUT_NOTE`); ``stale`` when computed from a thesis older than
+    ``_THESIS_STALE_DAYS``; else ``usable``.
+
+    Pure. ``thesis_fed`` names the families whose score came from the thesis on this row.
+    """
+    usability: dict[str, FamilyUsability] = {}
+    for family in FAMILIES:
+        if NO_INPUT_NOTE in notes_by_family.get(family, ()):
+            usability[family] = "quarantined" if thesis_quarantined and family in THESIS_FAMILIES else "missing"
+        elif thesis_stale and family in thesis_fed:
+            usability[family] = "stale"
+        else:
+            usability[family] = "usable"
+    return usability
+
+
 @dataclass(frozen=True)
 class PenaltyRecord:
     name: str
@@ -426,6 +499,8 @@ class ScoreResult:
     analytics: dict[str, Any] | None = None
     # eToro sector code, carried for the compute_rankings peer-grade pass.
     sector: str | None = None
+    # Per-family data usability (#3389 c), persisted to scores.family_usability.
+    family_usability: Mapping[str, FamilyUsability] | None = None
     # Set after ranking pass
     rank: int | None = None
     rank_delta: int | None = None
@@ -629,6 +704,9 @@ def _quality_score(
         debt_score = 0.25
         notes.append("debt/net_debt missing")
 
+    if operating_margin is None and gross_margin is None and fcf is None and net_debt is None and debt is None:
+        notes.append(NO_INPUT_NOTE)
+
     score = 0.35 * op_score + 0.25 * gm_score + 0.20 * fcf_score + 0.20 * debt_score
     return _clip(score), notes
 
@@ -674,6 +752,7 @@ def _value_score(
             notes.append("bear_value missing")
 
         if current_price is None or current_price <= 0:
+            notes.append(NO_INPUT_NOTE)
             return 0.5, notes  # neutral-by-absence
 
         upside_to_base = (base_value - current_price) / current_price
@@ -705,6 +784,7 @@ def _value_score(
         notes.append("bear_value missing")
 
     if current_price is None or current_price <= 0:
+        notes.append(NO_INPUT_NOTE)
         return 0.5, notes  # neutral-by-absence
 
     components: list[tuple[float, float]] = []  # (score, weight)
@@ -724,6 +804,7 @@ def _value_score(
 
     if not components:
         notes.append(fallback_note)
+        notes.append(NO_INPUT_NOTE)
         return 0.5, notes
 
     total_weight = sum(w for _, w in components)
@@ -788,6 +869,7 @@ def _momentum_score(
         for k in ("sma_200", "macd_histogram", "rsi_14", "stoch_k", "bb_upper", "atr_14")
     ):
         if return_score is None:
+            notes.append(NO_INPUT_NOTE)
             return 0.5, notes
         return _clip(return_score), notes
 
@@ -893,6 +975,7 @@ def _momentum_score(
         final_parts.append((vol_score, 0.15))
 
     if not final_parts:
+        notes.append(NO_INPUT_NOTE)
         return 0.5, notes
 
     total_w = sum(w for _, w in final_parts)
@@ -922,6 +1005,7 @@ def _sentiment_score(
 
     if not valid:
         notes.append("no recent news events; defaulting to neutral 0.5")
+        notes.append(NO_INPUT_NOTE)
         return 0.5, notes
 
     total_weight = sum((w if w is not None else 1.0) for _, w in valid)
@@ -986,6 +1070,11 @@ def _turnaround_score(
     else:
         debt_stress_component = 0.5
         notes.append("net_debt missing; defaulting to neutral")
+
+    # Every component defaulted (fewer than two snapshots gives no trend, so a single
+    # snapshot is not an input to a TREND score).
+    if len(margins) < 2 and len(revenues) < 2 and avg_red_flag_score is None and net_debt is None:
+        notes.append(NO_INPUT_NOTE)
 
     score = (
         0.30 * margin_trend_score
@@ -2055,8 +2144,27 @@ def _score_from_data(
         explanation_parts.append("turnaround: " + "; ".join(t_notes))
 
     c_score = _clip(thesis_confidence) if thesis_confidence is not None else 0.5
+    c_notes = [] if thesis_confidence is not None else [NO_INPUT_NOTE]
     if thesis_confidence is None:
         explanation_parts.append("confidence: no thesis; defaulting to 0.5")
+    family_notes: dict[str, Sequence[str]] = {
+        "quality": q_notes,
+        "value": v_notes,
+        "turnaround": t_notes,
+        "momentum": m_notes,
+        "sentiment": s_notes,
+        "confidence": c_notes,
+    }
+    # Families whose score on this row came from the thesis (a quarantined thesis is
+    # already None here). Value reads the thesis only on its primary path.
+    thesis_fed = frozenset(
+        name
+        for name, fed in (
+            ("value", thesis_row is not None and thesis_row["base_value"] is not None),
+            ("confidence", thesis_confidence is not None),
+        )
+        if fed
+    )
 
     family = FamilyScores(
         quality=q_score,
@@ -2174,6 +2282,12 @@ def _score_from_data(
         completeness_tier=completeness_tier,
         analytics=analytics,
         sector=data.get("sector_code"),  # type: ignore[arg-type]
+        family_usability=family_usability(
+            family_notes,
+            thesis_fed=thesis_fed,
+            thesis_stale=any(p.name == "stale_thesis" for p in penalties),
+            thesis_quarantined=bool(data.get("thesis_quarantined")),
+        ),
     )
 
 
@@ -2398,6 +2512,7 @@ def compute_rankings(
                 data_completeness=result.data_completeness,
                 completeness_tier=result.completeness_tier,
                 analytics=analytics,
+                family_usability=result.family_usability,
                 sector=result.sector,
                 rank=position,
                 rank_delta=rank_delta,
@@ -2448,7 +2563,7 @@ def _insert_score(
             penalties_json, explanation,
             rank, rank_delta,
             data_completeness, completeness_tier,
-            analytics_json
+            analytics_json, family_usability
         )
         VALUES (
             %(instrument_id)s, %(scored_at)s,
@@ -2458,7 +2573,7 @@ def _insert_score(
             %(penalties_json)s, %(explanation)s,
             %(rank)s, %(rank_delta)s,
             %(data_completeness)s, %(completeness_tier)s,
-            %(analytics_json)s
+            %(analytics_json)s, %(family_usability)s
         )
         """,
         {
@@ -2480,5 +2595,6 @@ def _insert_score(
             "data_completeness": result.data_completeness,
             "completeness_tier": result.completeness_tier,
             "analytics_json": Jsonb(result.analytics) if result.analytics is not None else None,
+            "family_usability": Jsonb(dict(result.family_usability)) if result.family_usability is not None else None,
         },
     )

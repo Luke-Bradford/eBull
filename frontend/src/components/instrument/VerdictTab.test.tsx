@@ -26,6 +26,7 @@ function makeVerdict(
       not_ranked_reason: null,
       filings_status: "analysable",
       contributions: [],
+      families: [],
       total_score: 0.82,
       raw_total: 0.87,
       quality_score: 0.9,
@@ -125,6 +126,39 @@ describe("VerdictTab", () => {
     );
     expect(await screen.findByText(/not ranked · not tradable on eToro/)).toBeInTheDocument();
     expect(screen.queryByText(/rank #5/)).not.toBeInTheDocument();
+  });
+
+  it("marks a no-input family as a default fill, not a verdict (#3389 c)", async () => {
+    const ev = (family: string, usability: "usable" | "missing" | "stale" | null) => ({
+      family,
+      maturity: "untested" as const,
+      purpose: "return_signal" as const,
+      evidence_ref: "docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md",
+      usability,
+    });
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({
+        quality_score: 0.25,
+        families: [
+          ev("quality", "missing"),
+          ev("value", "stale"),
+          ev("turnaround", "usable"),
+          ev("momentum", "usable"),
+          ev("sentiment", null),
+          ev("confidence", "usable"),
+        ],
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={null} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.25 default")).toBeInTheDocument();
+    expect(screen.getByText("no input")).toBeInTheDocument();
+    expect(screen.getByText("stale thesis")).toBeInTheDocument();
+    expect(screen.getByText("not recorded")).toBeInTheDocument();
+    expect(screen.getAllByText("untested · return signal")).toHaveLength(6);
   });
 
   it("renders error state on fetch failure", async () => {

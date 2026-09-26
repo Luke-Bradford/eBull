@@ -136,6 +136,7 @@ def _make_verdict_row(
     is_tradable: bool = True,
     filings_status: str | None = "analysable",
     in_latest_run: bool = True,
+    family_usability: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a dict matching the single-instrument verdict query shape."""
     return {
@@ -156,6 +157,7 @@ def _make_verdict_row(
         "penalties_json": penalties_json,
         "explanation": explanation,
         "analytics_json": analytics_json,
+        "family_usability": family_usability,
         "is_tradable": is_tradable,
         "filings_status": filings_status,
         "in_latest_run": in_latest_run,
@@ -807,6 +809,45 @@ class TestGetVerdict:
         assert score["rank"] == 7
         assert score["ranked"] is False
         assert score["not_ranked_reason"] == "not_in_latest_run"
+
+    def test_families_carry_evidence_and_stored_usability(self) -> None:
+        usability = {
+            "quality": "missing",
+            "value": "stale",
+            "turnaround": "usable",
+            "momentum": "usable",
+            "sentiment": "bogus",
+            "confidence": "stale",
+        }
+        _with_conn([[_make_verdict_row(family_usability=usability)]])
+        families = client.get("/rankings/verdict/1").json()["score"]["families"]
+
+        assert [f["family"] for f in families] == [
+            "quality",
+            "value",
+            "turnaround",
+            "momentum",
+            "sentiment",
+            "confidence",
+        ]
+        assert {f["maturity"] for f in families} == {"untested"}
+        assert {f["purpose"] for f in families} == {"return_signal"}
+        by_family = {f["family"]: f["usability"] for f in families}
+        # An out-of-vocabulary stored value reads as unknown, never as a state.
+        assert by_family == {**usability, "sentiment": None}
+
+    def test_row_scored_before_usability_was_recorded_reads_unknown(self) -> None:
+        _with_conn([[_make_verdict_row(family_usability=None)]])
+        families = client.get("/rankings/verdict/1").json()["score"]["families"]
+
+        assert len(families) == 6
+        assert all(f["usability"] is None for f in families)
+
+    def test_unknown_model_version_has_no_family_registry(self) -> None:
+        _with_conn([[_make_verdict_row(model_version="v0-unknown")]])
+        score = client.get("/rankings/verdict/1").json()["score"]
+
+        assert score["families"] == []
 
     def test_query_gates_like_the_rankings_list(self) -> None:
         conn = _with_conn([[]])

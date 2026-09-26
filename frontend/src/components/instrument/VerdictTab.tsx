@@ -21,6 +21,8 @@ import { type JSX } from "react";
 import { fetchScoreHistory } from "@/api/scoreHistory";
 import { fetchScoreVerdict } from "@/api/verdict";
 import type {
+  FamilyEvidenceItem,
+  FamilyUsability,
   IarAltmanZ,
   IarPiotroski,
   IarPositioningSignal,
@@ -67,6 +69,44 @@ interface FamilyScores {
   sentiment_score: number | null;
   confidence_score: number | null;
 }
+
+const MATURITY_LABEL: Record<FamilyEvidenceItem["maturity"], string> = {
+  untested: "untested",
+  under_test: "under test",
+  inconclusive: "inconclusive",
+  failed: "failed",
+  passed_backtest: "passed backtest",
+  passed_forward: "passed forward",
+  retired: "retired",
+};
+
+const PURPOSE_LABEL: Record<FamilyEvidenceItem["purpose"], string> = {
+  return_signal: "return signal",
+  risk_avoid_signal: "risk / avoid",
+  eligibility_constraint: "eligibility",
+  context: "context",
+};
+
+const USABILITY: Record<FamilyUsability, { tone: BadgeTone; label: string; title: string }> = {
+  usable: { tone: "ok", label: "usable", title: "Scored from observed input." },
+  missing: {
+    tone: "warn",
+    label: "no input",
+    title:
+      "No input was observed for this family, so the score is the default fill, not a verdict. It still enters the total.",
+  },
+  stale: {
+    tone: "warn",
+    label: "stale thesis",
+    title: "Scored from a thesis older than the staleness threshold.",
+  },
+  quarantined: {
+    tone: "risk",
+    label: "thesis rejected",
+    title:
+      "The thesis failed subject-identity validation and was not used; with no other input the score is the default fill, not a verdict.",
+  },
+};
 
 function fmt2(v: number | null | undefined): string {
   return v === null || v === undefined ? "—" : v.toFixed(2);
@@ -241,6 +281,8 @@ export function VerdictTab({
             <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500">
               <th className="py-1 pr-4 font-medium">Family</th>
               <th className="py-1 pr-4 font-medium">Score</th>
+              <th className="py-1 pr-4 font-medium">Data</th>
+              <th className="py-1 pr-4 font-medium">Evidence</th>
               <th className="py-1 pr-2 font-medium">
                 Peer percentile <EvidenceTag />
               </th>
@@ -253,6 +295,8 @@ export function VerdictTab({
             {FAMILIES.map((f) => {
               const absolute = score[f.scoreKey];
               const pf = peer?.families?.[f.key];
+              const ev = score.families.find((e) => e.family === f.key);
+              const usability = ev?.usability ?? null;
               return (
                 <tr
                   key={f.key}
@@ -262,7 +306,42 @@ export function VerdictTab({
                     {f.label}
                   </td>
                   <td className="py-1 pr-4 font-medium tabular-nums">
-                    {fmt2(absolute)}
+                    {usability === "missing" || usability === "quarantined" ? (
+                      <span
+                        className="font-normal text-slate-400"
+                        title={USABILITY.missing.title}
+                      >
+                        {fmt2(absolute)} default
+                      </span>
+                    ) : (
+                      fmt2(absolute)
+                    )}
+                  </td>
+                  <td className="py-1 pr-4">
+                    {usability === null ? (
+                      <span
+                        className="text-[11px] text-slate-400"
+                        title="Usability was not recorded for this score row (scored before #3389)."
+                      >
+                        not recorded
+                      </span>
+                    ) : (
+                      <Badge tone={USABILITY[usability].tone} title={USABILITY[usability].title}>
+                        {USABILITY[usability].label}
+                      </Badge>
+                    )}
+                  </td>
+                  <td className="py-1 pr-4">
+                    {ev === undefined ? (
+                      <span className="text-[11px] text-slate-400">—</span>
+                    ) : (
+                      <Badge
+                        tone="neutral"
+                        title={`Maturity of this exact construction under ${score.model_version}. Evidence: ${ev.evidence_ref}`}
+                      >
+                        {MATURITY_LABEL[ev.maturity]} · {PURPOSE_LABEL[ev.purpose]}
+                      </Badge>
+                    )}
                   </td>
                   <td className="py-1 pr-2 tabular-nums text-slate-500">
                     {pf?.percentile !== null && pf?.percentile !== undefined
