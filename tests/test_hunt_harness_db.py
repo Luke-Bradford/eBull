@@ -42,6 +42,8 @@ def bound(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict[str, Any]:
     )
     monkeypatch.setattr(hh, "HUNT_TARIFF", tariff)
     monkeypatch.setattr(hh, "HUNT_BUDGETS", {"hunt-1": 3, "hunt-2": 3})
+    # The fixtures reuse the id ``hunt-1``, which production has closed (#3387).
+    monkeypatch.setattr(hh, "HUNT_CLOSED", {})
     monkeypatch.setattr(hh, "read_universe_identity", lambda _conn, _universe: universe_identity())
     return {
         "signal_code_sha256": hh.signal_code_sha256("overnight_intraday:gap_score"),

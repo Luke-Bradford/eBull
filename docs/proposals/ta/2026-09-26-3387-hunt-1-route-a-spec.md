@@ -143,3 +143,10 @@ into discovery and validation before any crowd outcome is computed.
 lane, budget) registers nothing. Any registered row counts, whatever its outcome. Next PR:
 `app/services/hunt_signals/extreme_move_illiquid.py`, the arm readout, the budget entry and the discovery run.
 It closes hunt 1 or declares its validation.
+
+## Outcome (2026-09-27)
+The one discovery look ran (#3446, `hunt_trial_id` 1; `scripts.run_hunt_1_discovery --readout` reproduces it).
+Conditions: (1) BY flag **met** (m = 378); (2) active mean > 0 **met** in every base cell (+0.00152/session);
+(3) arm per-trade net **not met**: 0.325% (with dividends) / 0.311% (without) against 1.22%, label "below the
+operator bar (point estimate)". Hunt 1 is closed (`HUNT_CLOSED`); validation is not declared, and (b) stays
+unopened (the per-regime active means range 0.00111–0.00172/session, so no regime lifts the arm near the bar).

@@ -267,7 +267,13 @@ HUNT_HARNESS_MODEL_ID: Final = f"hunt-harness-v1+{sha256_form(canonical_form(_mo
 #: hunt-1 = 1: the one frozen trial of spec ``2026-09-26-3387-hunt-1-route-a-spec.md`` (#3387).
 HUNT_BUDGETS: Final[Mapping[str, int]] = MappingProxyType({"hunt-1": 1})
 #: hunt → terminal readout. Adding a hunt here IS the closing event.
-HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType({})
+HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        # #3387 discovery readout 2026-09-27 (hunt_trial_id 1): BY flag met, arm beats control,
+        # arm per-trade net 0.325% < the 1.22% bar in every base cell. Validation not declared.
+        "hunt-1": "below the operator bar (point estimate): arm per-trade net 0.325% vs 1.22% (#3387)",
+    }
+)
 
 
 @dataclass(frozen=True)
