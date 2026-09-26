@@ -113,7 +113,7 @@ import re
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
@@ -373,8 +373,8 @@ def log_backed_evidence(*, query: str, closed_at: datetime, trial_ids: Sequence[
     """
     if not query.strip():
         raise ValueError("log-backed evidence needs the query that selects the ids")
-    if closed_at.tzinfo is None or closed_at.utcoffset() != UTC.utcoffset(None):
-        raise ValueError(f"closed_at must be UTC-aware, got {closed_at!r}")
+    if closed_at.utcoffset() != timedelta(0):
+        raise ValueError(f"closed_at must be aware with a zero UTC offset, got {closed_at!r}")
     if not trial_ids:
         raise ValueError("a hunt with no searches in a split has no register entry")
     if len(set(trial_ids)) != len(trial_ids):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -356,7 +356,15 @@ class TestHuntEntries:
         ("kwargs", "match"),
         [
             ({"query": " ", "closed_at": _CLOSED_AT, "trial_ids": ("1",)}, "needs the query"),
-            ({"query": _QUERY, "closed_at": datetime(2026, 10, 1), "trial_ids": ("1",)}, "UTC-aware"),
+            ({"query": _QUERY, "closed_at": datetime(2026, 10, 1), "trial_ids": ("1",)}, "zero UTC offset"),
+            (
+                {
+                    "query": _QUERY,
+                    "closed_at": datetime(2026, 10, 1, tzinfo=timezone(timedelta(hours=1))),
+                    "trial_ids": ("1",),
+                },
+                "zero UTC offset",
+            ),
             ({"query": _QUERY, "closed_at": _CLOSED_AT, "trial_ids": ()}, "no register entry"),
             ({"query": _QUERY, "closed_at": _CLOSED_AT, "trial_ids": ("1", "1")}, "duplicate"),
         ],
