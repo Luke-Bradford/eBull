@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { CoreSleeveResponse, StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
 import { investNarrative } from "@/lib/investSummary";
 
-function overview(ready: boolean, strategyCount = 11): StrategyOverviewResponse {
+function overview(ready: boolean, strategyCount = 11, blocked = false): StrategyOverviewResponse {
   return {
+    entry_block: { new_entries_blocked: blocked },
     automation_readiness: { ready, state: ready ? "ready" : "no_capital_candidates", capital_candidate_count: 0 },
     strategies: Array.from({ length: strategyCount }, () => ({})),
   } as unknown as StrategyOverviewResponse;
@@ -28,7 +29,7 @@ describe("investNarrative", () => {
     const n = investNarrative(overview(false), core("ready", true), [position(null, "SPY")]);
     expect(n.whereMoney).toBe("No strategy has passed its tests yet. Your money is in the index sleeve (SPY).");
     expect(n.next[0]).toMatch(/checked once a day/);
-    expect(n.next[1]).toBe("11 strategies are under test. None is given money until it passes its evidence bar.");
+    expect(n.next[1]).toBe("11 strategies are under test. None is given new money until it passes its evidence bar.");
   });
 
   it("does not claim the money is invested when the sleeve is on but holds nothing", () => {
@@ -41,6 +42,23 @@ describe("investNarrative", () => {
     const n = investNarrative(overview(false), core("ready", false), [position("s4", "AAPL")]);
     expect(n.whereMoney).toContain("is chosen but switched off, so it holds nothing.");
     expect(n.next).toContain("The index sleeve buys nothing until it is switched on.");
+  });
+
+  it("names strategy positions still held after readiness lapses", () => {
+    const n = investNarrative(overview(false), core("cash", null), [position("s4", "AAPL"), position("s8", "AAPL")]);
+    expect(n.whereMoney).toBe(
+      "No strategy has passed its tests yet. Strategy positions opened earlier are still held (AAPL). The index sleeve's own test chose cash, so it holds nothing.",
+    );
+  });
+
+  it("does not promise a rebalance while trading is blocked", () => {
+    const n = investNarrative(overview(false, 11, true), core("ready", true), [position(null, "SPY")]);
+    expect(n.next[0]).toBe("The index sleeve buys nothing while trading is blocked (see above).");
+  });
+
+  it("does not say the closing window chooses the sleeve", () => {
+    const n = investNarrative(overview(false), core("evidence_collecting", null), []);
+    expect(n.next[0]).toMatch(/can first be judged after .* The result may be an instrument or cash\.$/);
   });
 
   it("warns that a switched-off sleeve still holding a position will not be rebalanced", () => {
@@ -78,7 +96,7 @@ describe("investNarrative", () => {
 
   it("uses the singular for one strategy", () => {
     expect(investNarrative(overview(false, 1), null, null).next).toEqual([
-      "1 strategy is under test. None is given money until it passes its evidence bar.",
+      "1 strategy is under test. None is given new money until it passes its evidence bar.",
     ]);
   });
 });

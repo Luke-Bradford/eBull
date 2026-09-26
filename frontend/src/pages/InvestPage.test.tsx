@@ -115,5 +115,6 @@ describe("InvestPage", () => {
     renderPage();
     expect(await screen.findByText(/Kill switch is on — no order path is open — manual halt/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /Not trading/ })).toBeInTheDocument();
+    expect(screen.getByText("The index sleeve buys nothing while trading is blocked (see above).")).toBeInTheDocument();
   });
 });

@@ -77,6 +77,11 @@ export function investNarrative(
     : "No strategy has passed its tests yet.";
 
   const coreHeld = positions === null ? null : coreSleeveHoldings(positions);
+  // A strategy can hold a position after it stops meeting its bar for NEW money
+  // (Codex ckpt-2): readiness gates entries, not what is already held.
+  const strategyHeld = positions === null ? [] : positions.filter((position) => position.strategy_id !== null);
+  const strategyClause =
+    strategyHeld.length > 0 ? ` Strategy positions opened earlier are still held (${uniqueSymbols(strategyHeld)}).` : "";
   let sleeve: string;
   if (coreHeld !== null && coreHeld.length > 0) {
     sleeve = `Your money is in the index sleeve (${uniqueSymbols(coreHeld)}).`;
@@ -96,12 +101,19 @@ export function investNarrative(
   const next: string[] = [];
   if (core !== null) {
     if (core.state === "ready" && core.mandate.enabled === true) {
+      // ⚠ Never promise a trade the executor can refuse (Codex ckpt-2): the kill
+      // switch and every execution block stop the sleeve too, and a gap below the
+      // mandate's minimum trade is held rather than traded.
       next.push(
-        "The index sleeve is checked once a day while the US market is open, and rebalanced when it drifts outside its band.",
+        overview.entry_block.new_entries_blocked
+          ? "The index sleeve buys nothing while trading is blocked (see above)."
+          : "The index sleeve is checked once a day while the US market is open. It trades only if it has drifted outside its band by at least the minimum trade, and every safety check passes.",
       );
     } else if (core.state === "evidence_collecting") {
+      // The window closing decides nothing by itself: the result is reviewed
+      // first and may be cash (Codex ckpt-2).
       next.push(
-        `The index sleeve is chosen when its evidence window closes, at the earliest ${formatDate(core.earliest_possible_verdict_at)}.`,
+        `The index sleeve's evidence can first be judged after ${formatDate(core.earliest_possible_verdict_at)}. The result may be an instrument or cash.`,
       );
     } else if (core.state === "ready") {
       next.push("The index sleeve buys nothing until it is switched on.");
@@ -112,9 +124,9 @@ export function investNarrative(
     next.push(
       registered === 0
         ? "No strategy is under test."
-        : `${registered} ${registered === 1 ? "strategy is" : "strategies are"} under test. None is given money until it passes its evidence bar.`,
+        : `${registered} ${registered === 1 ? "strategy is" : "strategies are"} under test. None is given new money until it passes its evidence bar.`,
     );
   }
 
-  return { whereMoney: `${lead} ${sleeve}`, next };
+  return { whereMoney: `${lead}${readiness.ready ? "" : strategyClause} ${sleeve}`, next };
 }

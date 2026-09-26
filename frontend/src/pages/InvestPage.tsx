@@ -161,9 +161,11 @@ export function InvestPage() {
             label="Gain / loss"
             value={pnlHistory.error ? "—" : formatMoney(wealth?.totalPnl ?? null, pool.currency)}
             hint={
-              wealth?.cumulativeReturn != null && returnSince
-                ? `${formatPct(wealth.cumulativeReturn)} since ${formatDate(returnSince)}`
-                : "No return % yet"
+              pnlHistory.error
+                ? "History unavailable"
+                : wealth?.cumulativeReturn != null && returnSince
+                  ? `${formatPct(wealth.cumulativeReturn)} since ${formatDate(returnSince)}`
+                  : "No return % yet"
             }
             tone={toneOf(wealth?.totalPnl ?? null)}
             toneHint
