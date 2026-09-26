@@ -31,6 +31,7 @@ import type {
   VerdictResponse,
 } from "@/api/types";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
+import { ShortSidePanel } from "@/components/instrument/ShortSidePanel";
 import { Sparkline } from "@/components/instrument/Sparkline";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
 import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
@@ -44,6 +45,8 @@ import { toScoreChips } from "@/lib/scoreExplanation";
 
 export interface VerdictTabProps {
   readonly instrumentId: number;
+  /** Canonical symbol — the short-volume route is symbol-keyed (#3390). */
+  readonly symbol: string;
   readonly thesis: ThesisDetail | null;
   readonly thesisErrored?: boolean;
   /** Native header price + currency, forwarded to the ThesisPane value
@@ -134,6 +137,7 @@ function EvidenceTag(): JSX.Element {
 
 export function VerdictTab({
   instrumentId,
+  symbol,
   thesis,
   thesisErrored = false,
   currentPrice = null,
@@ -186,6 +190,10 @@ export function VerdictTab({
                 : `The ranking engine does not score this instrument: ${notScoredText(notScored)}. This is a coverage fact, not a judgement on the investment.`
             }
           />
+        </Section>
+        {/* Short-sale volume does not depend on a score (#3390). */}
+        <Section title="Short side">
+          <ShortSidePanel symbol={symbol} shortInterest={null} />
         </Section>
       </div>
     );
@@ -411,7 +419,16 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 6. Score history */}
+      {/* 6. Short side (#3390) — short interest and short-sale volume,
+          each defined on its own card. */}
+      <Section title="Short side">
+        <ShortSidePanel
+          symbol={symbol}
+          shortInterest={iar === null ? null : (iar.positioning?.short_interest ?? null)}
+        />
+      </Section>
+
+      {/* 7. Score history */}
       <Section title="Score history">
         {history.loading ? (
           <SectionSkeleton rows={1} />

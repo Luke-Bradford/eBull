@@ -717,6 +717,28 @@ export interface InstrumentRiskMetrics {
   series: RiskSeries | null;
 }
 
+/** FINRA Reg SHO daily short-sale volume, consolidated file (#3390). Mirrors
+ *  RegShoDayModel / InstrumentShortVolume in app/api/instruments.py. Decimals
+ *  → string; `days` newest first; `withheld_reason` set (with `days` empty)
+ *  when two FINRA symbols resolve to this instrument (#3437). */
+export interface RegShoDay {
+  trade_date: string;
+  short_volume: string;
+  short_exempt_volume: string;
+  total_volume: string;
+  short_volume_share: string | null;
+  facilities: string;
+}
+
+export interface InstrumentShortVolume {
+  symbol: string;
+  definition: string;
+  caveats: string[];
+  latest_trade_date: string | null;
+  days: RegShoDay[];
+  withheld_reason: string | null;
+}
+
 /** Candidate-vs-current-book risk (#1636). Mirrors PortfolioRelativeRiskResponse
  *  in app/api/instruments.py. Decimals → string | null; figures are fractions,
  *  vols annualized. A current-exposure covariance estimate (today's weights over
@@ -1307,6 +1329,9 @@ export interface IarPositioningSignal {
   short_pct?: number;
   days_to_cover?: number;
   falling?: boolean;
+  // freshness gates (instrument_analytics._short_interest_from_row)
+  max_age_days?: number;
+  shares_outstanding_asof?: string;
 }
 
 export interface IarPeerFamily {

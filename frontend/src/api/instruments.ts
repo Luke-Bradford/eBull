@@ -8,6 +8,7 @@ import type {
   InstrumentIntradayCandles,
   InstrumentListResponse,
   InstrumentRiskMetrics,
+  InstrumentShortVolume,
   InstrumentSummary,
   IntradayInterval,
   PeerComparison,
@@ -495,6 +496,17 @@ export async function fetchInstrumentSegments(
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;
   }
+}
+
+/** FINRA Reg SHO daily short-sale volume, latest `limit` trade dates (#3390). */
+export function fetchInstrumentShortVolume(
+  symbol: string,
+  limit: number,
+): Promise<InstrumentShortVolume> {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  return apiFetch<InstrumentShortVolume>(
+    `/instruments/${encodeURIComponent(symbol)}/short-volume?${qs.toString()}`,
+  );
 }
 
 export function fetchInstrumentDetail(
