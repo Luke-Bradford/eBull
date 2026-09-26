@@ -752,6 +752,36 @@ export interface InstrumentShortVolume {
   withheld_reason: string | null;
 }
 
+/** Share count + dilution (#435). Mirrors ShareCountPeriodModel /
+ *  DilutionSummaryModel / InstrumentDilution in app/api/instruments.py.
+ *  Decimals → string. `net_dilution_pct_yoy` is in PERCENT units (×100, sql/259),
+ *  unlike the fraction convention elsewhere. `history` newest first. */
+export interface ShareCountPeriod {
+  period_end: string;
+  fiscal_year: number | null;
+  fiscal_period: string | null;
+  shares_outstanding: string | null;
+  shares_issued_new: string | null;
+  buyback_shares: string | null;
+}
+
+export interface DilutionSummary {
+  latest_shares: string | null;
+  latest_as_of: string | null;
+  yoy_shares: string | null;
+  net_dilution_pct_yoy: string | null;
+  ttm_shares_issued: string | null;
+  ttm_buyback_shares: string | null;
+  ttm_net_share_change: string | null;
+  dilution_posture: "dilutive" | "buyback_heavy" | "stable";
+}
+
+export interface InstrumentDilution {
+  symbol: string;
+  summary: DilutionSummary;
+  history: ShareCountPeriod[];
+}
+
 /** Deterministic fair-value band (#3390 slice 4, over #2009). Mirrors
  *  FairValueBandLeg / InstrumentFairValueBand in app/api/instruments.py.
  *  Per-share values are in `currency`; `available` only when all three exist. */

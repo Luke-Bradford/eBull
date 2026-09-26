@@ -31,6 +31,7 @@ import type {
   VerdictResponse,
 } from "@/api/types";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
+import { DilutionPanel } from "@/components/instrument/DilutionPanel";
 import { FairValueBandPanel } from "@/components/instrument/FairValueBandPanel";
 import { RiskInlinePanel } from "@/components/instrument/RiskInlinePanel";
 import { ShortSidePanel } from "@/components/instrument/ShortSidePanel";
@@ -193,12 +194,15 @@ export function VerdictTab({
             }
           />
         </Section>
-        {/* Risk, the valuation band and short-sale volume do not depend on a score (#3390). */}
+        {/* The report panels below do not depend on a score (#3390). */}
         <Section title="Risk">
           <RiskInlinePanel symbol={symbol} />
         </Section>
         <Section title="Valuation band">
           <FairValueBandPanel symbol={symbol} />
+        </Section>
+        <Section title="Share count">
+          <DilutionPanel symbol={symbol} />
         </Section>
         <Section title="Short side">
           <ShortSidePanel symbol={symbol} shortInterest={null} />
@@ -437,7 +441,12 @@ export function VerdictTab({
         <FairValueBandPanel symbol={symbol} />
       </Section>
 
-      {/* 8. Short side (#3390) — short interest and short-sale volume,
+      {/* 8. Share count & dilution (#3390) — reported counts, YoY change. */}
+      <Section title="Share count">
+        <DilutionPanel symbol={symbol} />
+      </Section>
+
+      {/* 9. Short side (#3390) — short interest and short-sale volume,
           each defined on its own card. */}
       <Section title="Short side">
         <ShortSidePanel
@@ -446,7 +455,7 @@ export function VerdictTab({
         />
       </Section>
 
-      {/* 9. Score history */}
+      {/* 10. Score history */}
       <Section title="Score history">
         {history.loading ? (
           <SectionSkeleton rows={1} />

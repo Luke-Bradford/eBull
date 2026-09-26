@@ -110,6 +110,20 @@ describe("VerdictTab", () => {
       days: [],
       withheld_reason: null,
     });
+    vi.spyOn(instrumentsApi, "fetchInstrumentDilution").mockResolvedValue({
+      symbol: "AAPL",
+      summary: {
+        latest_shares: null,
+        latest_as_of: null,
+        yoy_shares: null,
+        net_dilution_pct_yoy: null,
+        ttm_shares_issued: null,
+        ttm_buyback_shares: null,
+        ttm_net_share_change: null,
+        dilution_posture: "stable",
+      },
+      history: [],
+    });
     vi.spyOn(instrumentsApi, "fetchInstrumentFairValueBand").mockResolvedValue({
       symbol: "AAPL",
       currency: "USD",
@@ -176,6 +190,7 @@ describe("VerdictTab", () => {
     expect(screen.getByText("Short side")).toBeInTheDocument();
     expect(await screen.findByText("No risk metrics computed")).toBeInTheDocument();
     expect(await screen.findByText(/No band has been computed/)).toBeInTheDocument();
+    expect(await screen.findByText("No share count on file")).toBeInTheDocument();
     expect(await screen.findByText("No short-sale volume held")).toBeInTheDocument();
   });
 
