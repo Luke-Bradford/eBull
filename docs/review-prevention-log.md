@@ -11531,3 +11531,15 @@ neighbouring container and match it.**
   with none), and fix the rule, not the date. A rule with a start year must carry the EXCHANGE's start year.
 - Enforced in: `app/services/market_calendar.py::_NyseHolidayCalendar`,
   `tests/test_market_calendar.py::test_mlk_day_is_a_session_before_1998_and_a_closure_from_1998`.
+
+### A frozen computation passed in as a parameter is not frozen (#3385)
+
+- Failure: slice 2a gave `hunt_harness.evaluate` a `compute` callback so registration could ship before the
+  evaluator. Slice 3c-iii wrote the frozen `compute_trial`, but `evaluate` still accepted any callback and
+  stored whatever it returned under the spec's hashes and `HUNT_HARNESS_MODEL_ID`. A stub could have written
+  a durable, append-only fabricated outcome. (Codex checkpoint 2.)
+- Prevention: once the real implementation exists, remove the injection point; tests patch the module
+  attribute instead. Self-review prompt: "can a caller change the stored number without changing the identity
+  it is stored under?"
+- Enforced in: `app/services/hunt_harness.py::evaluate` (calls `compute_trial`),
+  `tests/test_hunt_compute.py::test_the_computation_and_its_loader_are_part_of_the_harness_model_id`.
