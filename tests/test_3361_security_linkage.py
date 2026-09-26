@@ -78,7 +78,8 @@ class Corpus:
 def _write_zip(path: Path, members: Mapping[str, bytes | str]) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         for name, body in members.items():
-            archive.writestr(name, body)
+            # A bare name stamps the wall clock (2 s resolution), so two builds straddling a tick hash differently.
+            archive.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), body)
     return path
 
 
