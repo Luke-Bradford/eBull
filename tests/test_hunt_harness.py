@@ -379,3 +379,16 @@ def test_compute_trial_takes_an_end_only_for_holdout(split: hh.Split, end: date 
     # Raises before any database access, so no connection is needed.
     with pytest.raises(hh.HuntHarnessError, match="end session"):
         hh.compute_trial(None, trial_spec(split=split), end=end)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("classes", "allowed"),
+    [
+        (["E"] * 3, False),
+        (["E"] * 4, True),
+        (["F", "E", "E", "E", "E"], True),
+        (["E", "E", "F", "E"], False),
+    ],
+)
+def test_abandonment_needs_the_first_failure_and_three_recurrences(classes: list[str], allowed: bool) -> None:
+    assert (hh.abandonment_refusal(classes) is None) is allowed

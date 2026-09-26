@@ -492,6 +492,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "etoro_perishable_universe",
     "etoro_perishable_snapshots",
     # #3385 slice 2a, child-to-parent.
+    "hunt_trial_retries",
     "hunt_trial_outcomes",
     "hunt_trials",
     # #3385 slice 2b-i.
