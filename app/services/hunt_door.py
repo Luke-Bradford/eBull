@@ -633,10 +633,15 @@ _SELECT_ACCESS = """
     WHERE a.access_id = %(access_id)s
 """
 
+#: ⚠ PROGRAMME-WIDE ON PURPOSE, not scoped to this hunt: the frozen M counts every
+#: ``hunt_trials`` row of EVERY hunt (spec "DSR", M), so a look recorded in any hunt after
+#: this freeze makes the frozen M an under-count, and the readout is qualified by it
+#: (contract decision 114). ``hunt_declarations`` supplies only this freeze's time.
 _SELECT_LATE_LOOKS = """
     SELECT count(*)
-    FROM hunt_trials t, hunt_declarations h
-    WHERE h.declaration_id = %(declaration_id)s AND t.purpose = 'recorded_after' AND t.registered_at > h.frozen_at
+    FROM hunt_trials
+    WHERE purpose = 'recorded_after'
+      AND registered_at > (SELECT frozen_at FROM hunt_declarations WHERE declaration_id = %(declaration_id)s)
 """
 
 _SELECT_REGISTER_VERSION = "SELECT register_version FROM hunt_declarations WHERE declaration_id = %(declaration_id)s"

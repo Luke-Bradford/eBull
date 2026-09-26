@@ -312,11 +312,13 @@ def test_the_validation_readout_waits_for_every_pin_then_gives_verdicts(
     # A fresh outcome reports the provenance it was stored with (Codex ckpt-2).
     assert isinstance(result, HuntOutcome) and result.access_id is not None
     assert result.spec_sha256 == discovered["pinned"].spec_sha256 and result.declaration_sha256 is not None
+    # A late look in ANOTHER hunt still qualifies hunt-1's readout: the frozen M counts every
+    # hunt's rows, so any look after the freeze makes it an under-count (decision 114).
     hh.record_outside_look(
         ebull_test_conn,
         note="late look after freeze",
         registered_by="test",
-        hunt_id="hunt-1",
+        hunt_id="hunt-2",
         family="x",
         split="discovery",
     )
