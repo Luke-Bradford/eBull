@@ -41,17 +41,19 @@ Synth no-op at `app/services/manifest_parsers/finra_regsho_daily.py`. Registered
 
 ## 10. Operator-visible endpoint
 
-**Not yet wired.** No `/instruments/<symbol>/regsho` route exists under `app/api/`. Operator access today: SQL against `finra_regsho_daily_observations` (latest trade date over a window via the instrument-DESC index). Endpoint scaffold tracked under operator-visibility backlog.
+`GET /instruments/{symbol}/short-volume?limit=N` (#3390, `app/api/instruments.py::get_instrument_short_volume`): the latest N trade dates of the consolidated (`CNMS_`) row with `short_volume_share = short_volume / total_volume`, plus a definition and FINRA's caveats (off-exchange facility volume only; not short interest, per FINRA Information Notice 5/10/19). An instrument with any date carrying two `CNMS_` rows (two FINRA symbols, e.g. a lowercase-suffix preferred `TpC`, resolving to one instrument) is withheld entirely with `withheld_reason`, because a same-`market` collision collapses on the PK and is invisible (#3437; dev 2026-09-26: TPC 58 visible dates, BCPC 94).
 
 ## 11. Verification queries
 
 ```sql
--- Most recent 7 trading days for GME (CNMS aggregate row).
+-- Most recent 7 trading days for GME (CNMS aggregate row). Select by the
+-- document prefix: CNMS `market` is the day's facility union ('B,Q,N', 'Q,N', ...),
+-- so `market = 'B,Q,N'` silently drops days.
 SELECT trade_date, market, short_volume, total_volume,
        short_volume / NULLIF(total_volume, 0) AS short_ratio
   FROM finra_regsho_daily_observations
  WHERE instrument_id = (SELECT instrument_id FROM instruments WHERE symbol = 'GME')
-   AND market = 'B,Q,N'
+   AND starts_with(source_document_id, 'CNMS_')
  ORDER BY trade_date DESC LIMIT 7;
 
 -- Per-facility split for a single trade date.
@@ -74,7 +76,7 @@ Not covered by the import-time gate (verified by the live-smoke runbooks under `
 
 1. **Caller-owned transaction.** Same contract as bimonthly sibling — service emits SQL only into the caller's open `with conn.transaction():`. NEVER calls `conn.commit()` / `conn.rollback()` internally.
 2. **403 ≡ not-yet-published.** Critical empirical finding from #916 live-smoke. The provider treats `(403, 404)` as the same `FinraNotFound` benign-skip semantic. Running the cron earlier in the trading day (before the EOD ~6 PM ET FINRA publication window) generates HTTP 403 responses that MUST NOT propagate as job-failures.
-3. **CNMS `market` is comma-joined.** Schema column is `TEXT`, not enum. CNMS rows carry `market='B,Q,N'` (or whatever facility union for that trade-date); per-facility rows carry single-char codes. PK includes `market` so both shapes coexist for the same `(instrument_id, trade_date)`.
+3. **CNMS `market` is comma-joined and varies.** Schema column is `TEXT`, not enum. CNMS rows carry the facility union for that symbol and trade-date (`'B,Q,N'`, `'Q,N'`, `'Q'`, ...), so select the consolidated row by `source_document_id` prefix `CNMS_`, never by `market`; per-facility rows carry single-char codes. PK includes `market` so both shapes coexist for the same `(instrument_id, trade_date)`.
 4. **DECIMAL volumes, not INTEGER.** `NUMERIC(18, 6)` — FINRA reports per-symbol weighted aggregates to 6 decimal places. A naive `BIGINT` schema would have lost precision on every row.
 5. **Shared rate budget with bimonthly.** Imports `_FINRA_RATE_LIMIT_CLOCK` / `_FINRA_RATE_LIMIT_LOCK` from `finra_short_interest` module. Combined fetch budget 1 req/s total.
 6. **FNRA prefix is often empty body.** Legacy ADF (alt display facility). Treat zero-row payload as valid published file.

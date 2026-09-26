@@ -29,7 +29,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Final, Literal, LiteralString, get_args
+from typing import Any, Final, Literal, LiteralString, get_args
 
 import httpx
 import psycopg
@@ -44,6 +44,7 @@ from app.config import settings
 from app.db import get_conn
 from app.db.snapshot import snapshot_read
 from app.providers.implementations.etoro import EtoroMarketDataProvider
+from app.providers.implementations.finra_regsho import CONSOLIDATED_PREFIX
 from app.providers.market_data import IntradayInterval
 from app.services import ownership_history, ownership_rollup
 from app.services.broker_credentials import (
@@ -2463,6 +2464,162 @@ def get_instrument_dilution(
             )
             for p in history
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# FINRA Reg SHO daily short-sale volume (#3390)
+# ---------------------------------------------------------------------------
+
+# The consolidated file combines trades in exchange-listed securities reported
+# to the TRFs and the ADF (FINRA, "Daily Short Sale Volume Files"). Its
+# ``market`` column is the facility union for that symbol and day ('B,Q,N',
+# 'Q,N', ...), so it cannot select the consolidated row; the document prefix
+# (``source_document_id = '{PREFIX}_{YYYYMMDD}'``) can.
+REGSHO_DEFINITION = (
+    "Short-sale volume as a share of the trading volume reported to FINRA's trade reporting "
+    "facilities (TRFs and ADF) on each trade date, from FINRA's consolidated daily file."
+)
+REGSHO_CAVEATS: tuple[str, ...] = (
+    "Covers only trades reported to FINRA facilities (off-exchange); trades executed on an "
+    "exchange are published by that exchange and are not included (FINRA Information Notice 5/10/19).",
+    "It is trade flow, not a position: short-sale volume 'does not — and is not intended to — "
+    "equate to' short interest (FINRA Information Notice 5/10/19).",
+    "A dealer filling a customer's buy while flat or short in the stock reports the trade as "
+    "short, so a high share is routine market making, not a bearish signal by itself.",
+)
+
+
+class RegShoDayModel(BaseModel):
+    trade_date: date
+    short_volume: Decimal
+    short_exempt_volume: Decimal
+    total_volume: Decimal
+    # short_volume / total_volume; None when FINRA reported no volume.
+    short_volume_share: Decimal | None
+    # Reporting facilities in the consolidated row ('B', 'Q', 'N' codes).
+    facilities: str
+
+
+class InstrumentShortVolume(BaseModel):
+    symbol: str
+    definition: str
+    caveats: list[str]
+    latest_trade_date: date | None
+    days: list[RegShoDayModel]
+    # Set, with ``days`` empty, when the figures cannot be attributed to this
+    # instrument alone (#3437).
+    withheld_reason: str | None
+
+
+REGSHO_IDENTITY_COLLISION = (
+    "Withheld: more than one FINRA symbol (e.g. a preferred series) resolves to this "
+    "instrument, so a day's figure may belong to a different security (#3437)."
+)
+
+
+def build_short_volume_days(
+    rows: list[dict[str, Any]],
+    *,
+    collision_in_history: bool,
+) -> tuple[list[RegShoDayModel], str | None]:
+    """Consolidated rows to days, newest first, or a withheld reason.
+
+    Two FINRA symbols that resolve to one instrument are only visible when
+    their facility unions differ (two rows on a date); when the unions match,
+    the primary key collapses them into one row that cannot be told apart
+    from a clean one. So any collision, in the window or anywhere in the
+    instrument's history, withholds every day rather than just the visible
+    ones.
+    """
+    by_date: dict[date, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_date.setdefault(row["trade_date"], []).append(row)
+    if collision_in_history or any(len(day_rows) > 1 for day_rows in by_date.values()):
+        return [], REGSHO_IDENTITY_COLLISION
+    days: list[RegShoDayModel] = []
+    for trade_date in sorted(by_date, reverse=True):
+        row = by_date[trade_date][0]
+        total = Decimal(row["total_volume"])
+        short = Decimal(row["short_volume"])
+        days.append(
+            RegShoDayModel(
+                trade_date=trade_date,
+                short_volume=short,
+                short_exempt_volume=Decimal(row["short_exempt_volume"]),
+                total_volume=total,
+                short_volume_share=(short / total) if total > 0 else None,
+                facilities=str(row["market"]),
+            )
+        )
+    return days, None
+
+
+@router.get("/{symbol}/short-volume", response_model=InstrumentShortVolume)
+def get_instrument_short_volume(
+    symbol: str,
+    limit: int = Query(default=20, ge=1, le=250),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentShortVolume:
+    """FINRA Reg SHO daily short-sale volume, consolidated file (#3390).
+
+    Returns the latest ``limit`` trade dates held. Empty ``days`` for an
+    instrument FINRA does not report (non-US listings) — the UI renders an
+    empty state, no 404 handling.
+    """
+    if not symbol.strip():
+        raise HTTPException(status_code=400, detail="symbol is required")
+    resolved = resolve_instrument_ref(conn, symbol)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id, canonical_symbol = resolved
+    params = {"iid": instrument_id, "prefix": f"{CONSOLIDATED_PREFIX}_", "limit": limit}
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT trade_date, market, short_volume, short_exempt_volume, total_volume
+            FROM finra_regsho_daily_observations
+            WHERE instrument_id = %(iid)s
+              AND trade_date IN (
+                  SELECT DISTINCT trade_date
+                  FROM finra_regsho_daily_observations
+                  WHERE instrument_id = %(iid)s
+                    AND starts_with(source_document_id, %(prefix)s)
+                  ORDER BY trade_date DESC
+                  LIMIT %(limit)s
+              )
+              AND starts_with(source_document_id, %(prefix)s)
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM finra_regsho_daily_observations
+                WHERE instrument_id = %(iid)s
+                  AND starts_with(source_document_id, %(prefix)s)
+                GROUP BY trade_date
+                HAVING count(*) > 1
+            ) AS collision
+            """,
+            params,
+        )
+        collision_row = cur.fetchone()
+
+    days, withheld_reason = build_short_volume_days(
+        rows,
+        collision_in_history=bool(collision_row and collision_row["collision"]),
+    )
+    return InstrumentShortVolume(
+        symbol=canonical_symbol,
+        definition=REGSHO_DEFINITION,
+        caveats=list(REGSHO_CAVEATS),
+        latest_trade_date=max((r["trade_date"] for r in rows), default=None),
+        days=days,
+        withheld_reason=withheld_reason,
     )
 
 
