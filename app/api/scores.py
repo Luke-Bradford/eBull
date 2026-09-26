@@ -280,6 +280,7 @@ class ScoreHistoryResponse(BaseModel):
 # `filings_status = 'analysable'`) explain absence from a run better than the
 # absence itself.
 NotRankedReason = Literal["not_tradable", "not_analysable", "not_in_latest_run", "no_rank"]
+NotScoredReason = Literal["not_tradable", "not_a_stock", "not_analysable", "no_inputs", "eligible_unscored"]
 
 
 class FamilyContribution(BaseModel):
@@ -332,6 +333,15 @@ class VerdictScore(BaseModel):
     analytics_json: dict[str, object] | None
 
 
+class NotScored(BaseModel):
+    """Why an instrument has no score row, from ``compute_rankings``' eligibility gate (#3389 d)."""
+
+    reason: NotScoredReason
+    filings_status: str | None
+    # eToro instrument type description (``etoro_instrument_types``), e.g. "ETF".
+    instrument_type: str | None
+
+
 class VerdictResponse(BaseModel):
     """Latest score row for a single instrument — the per-instrument Verdict
     payload (#1824, P3 of #1815).
@@ -352,6 +362,8 @@ class VerdictResponse(BaseModel):
 
     instrument_id: int
     score: VerdictScore | None
+    # Set only when ``score`` is null and the instrument exists (#3389 d).
+    not_scored: NotScored | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +384,29 @@ def not_ranked_reason(
     if rank is None:
         return "no_rank"
     return None
+
+
+def not_scored_reason(
+    *, is_tradable: bool, filings_status: str | None, instrument_type: str | None, has_inputs: bool
+) -> NotScoredReason:
+    """Why ``compute_rankings`` has never scored this instrument, in its gate's order (#3389 d).
+
+    The gate is ``is_tradable`` AND ``filings_status = 'analysable'`` AND at least one of
+    thesis / fundamentals snapshot / price data. A non-stock (ETF, crypto, index…) that
+    fails the filings check is reported as outside the model rather than as thin filings:
+    the model ranks companies from their SEC 10-K/10-Q history. An unknown type is not
+    claimed to be a non-stock. ``eligible_unscored`` means the instrument passes the gate
+    today and no run of the requested model has scored it (the scheduler runs only the
+    default model, so this promises no run).
+    """
+    if not is_tradable:
+        return "not_tradable"
+    if filings_status != "analysable":
+        known_non_stock = instrument_type is not None and instrument_type != "Stocks"
+        return "not_a_stock" if known_non_stock else "not_analysable"
+    if not has_inputs:
+        return "no_inputs"
+    return "eligible_unscored"
 
 
 def family_contributions(
@@ -791,6 +826,39 @@ def get_score_history(
     return ScoreHistoryResponse(instrument_id=instrument_id, items=items)
 
 
+def _load_not_scored(conn: psycopg.Connection[object], instrument_id: int) -> NotScored | None:
+    """The eligibility facts ``compute_rankings`` reads, for an unscored instrument. ``None`` if unknown id."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT i.is_tradable, c.filings_status, t.description AS instrument_type,
+                   (EXISTS (SELECT 1 FROM theses th WHERE th.instrument_id = i.instrument_id)
+                    OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)
+                    OR EXISTS (SELECT 1 FROM price_daily p WHERE p.instrument_id = i.instrument_id)) AS has_inputs
+            FROM instruments i
+            LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
+            LEFT JOIN etoro_instrument_types t ON t.instrument_type_id = i.instrument_type_id
+            WHERE i.instrument_id = %(instrument_id)s
+            """,
+            {"instrument_id": instrument_id},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    filings_status = cast(str | None, row["filings_status"])
+    instrument_type = cast(str | None, row["instrument_type"])
+    return NotScored(
+        reason=not_scored_reason(
+            is_tradable=bool(row["is_tradable"]),
+            filings_status=filings_status,
+            instrument_type=instrument_type,
+            has_inputs=bool(row["has_inputs"]),
+        ),
+        filings_status=filings_status,
+        instrument_type=instrument_type,
+    )
+
+
 @router.get("/verdict/{instrument_id}", response_model=VerdictResponse)
 def get_verdict(
     instrument_id: int,
@@ -839,7 +907,9 @@ def get_verdict(
         row = cur.fetchone()
 
     if row is None:
-        return VerdictResponse(instrument_id=instrument_id, score=None)
+        return VerdictResponse(
+            instrument_id=instrument_id, score=None, not_scored=_load_not_scored(conn, instrument_id)
+        )
 
     rank = _parse_optional_int(row, "rank")
     filings_status = row["filings_status"]

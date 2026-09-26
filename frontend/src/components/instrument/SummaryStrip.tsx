@@ -19,6 +19,7 @@
 import type {
   InstrumentSummary,
   InstrumentPositionDetail,
+  NotScored,
   ThesisDetail,
   VerdictScore,
 } from "@/api/types";
@@ -118,6 +119,8 @@ export interface SummaryStripProps {
    *  `null` when never scored. Omitted by callers without a verdict fetch. */
   verdictScore?: VerdictScore | null;
   verdictErrored?: boolean;
+  /** Why the instrument is unscored (#3389 d), when `verdictScore` is null. */
+  verdictNotScored?: NotScored | null;
 }
 
 export function SummaryStrip({
@@ -134,6 +137,7 @@ export function SummaryStrip({
   generatingThesis,
   verdictScore,
   verdictErrored = false,
+  verdictNotScored = null,
 }: SummaryStripProps): JSX.Element {
   const { identity, price } = summary;
   // Live-quote overlay (#488). When an SSE tick arrives for this
@@ -307,7 +311,7 @@ export function SummaryStrip({
 
       {/* Row 3: badges + actions */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <RankSummary score={verdictScore} errored={verdictErrored} />
+        <RankSummary score={verdictScore} errored={verdictErrored} notScored={verdictNotScored} />
         {/* Show stance badge whenever we have thesis data, even when
             the sticky error flag is set — dropping the last-known
             stance/confidence would lose useful operator context

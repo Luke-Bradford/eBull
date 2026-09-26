@@ -17,6 +17,7 @@ function makeVerdict(
 ): VerdictResponse {
   return {
     instrument_id: 1,
+    not_scored: null,
     score: {
       scored_at: "2026-06-29T09:00:00Z",
       model_version: "v1.2-balanced",
@@ -106,6 +107,7 @@ describe("VerdictTab", () => {
     vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue({
       instrument_id: 1,
       score: null,
+      not_scored: null,
     });
     render(
       <MemoryRouter>
@@ -113,6 +115,23 @@ describe("VerdictTab", () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText(/not yet scored/i)).toBeInTheDocument();
+  });
+
+  it("says an ETF is outside the ranking model, not pending (#3389 d)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue({
+      instrument_id: 1,
+      score: null,
+      not_scored: { reason: "not_a_stock", filings_status: "no_primary_sec_cik", instrument_type: "ETF" },
+    });
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={null} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Not scored")).toBeInTheDocument();
+    expect(screen.queryByText(/not yet scored/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/ETF: outside the company-ranking model/)).toBeInTheDocument();
+    expect(screen.getByText(/not a judgement on the investment/)).toBeInTheDocument();
   });
 
   it("hides a stale stored rank and says why it is not ranked (#3389 b)", async () => {
@@ -368,6 +387,7 @@ describe("VerdictTab #2003 — thesis leads the tab", () => {
     vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue({
       instrument_id: 1,
       score: null,
+      not_scored: null,
     });
     render(
       <MemoryRouter>

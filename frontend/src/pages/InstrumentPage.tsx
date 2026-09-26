@@ -720,6 +720,7 @@ function InstrumentPageBody({
         onClose={handleCloseClick}
         onGenerateThesis={handleGenerateThesis}
         verdictScore={verdictAsync.loading ? undefined : verdictAsync.data?.score}
+        verdictNotScored={verdictAsync.data?.not_scored ?? null}
         verdictErrored={verdictAsync.error !== null}
         generatingThesis={thesisBusy}
       />

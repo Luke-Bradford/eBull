@@ -6,7 +6,7 @@
  * the surface says "not ranked" with the reason. Every reason is phrased as a
  * coverage fact, never as a judgement on the investment.
  */
-import type { FamilyContribution, ScorePenaltyItem, VerdictScore } from "@/api/types";
+import type { FamilyContribution, NotScored, ScorePenaltyItem, VerdictScore } from "@/api/types";
 import { isReward } from "@/lib/scoreExplanation";
 
 export function notRankedReasonText(score: VerdictScore): string {
@@ -21,6 +21,27 @@ export function notRankedReasonText(score: VerdictScore): string {
       return "no rank assigned in the latest run";
     case null:
       return "";
+  }
+}
+
+/**
+ * Why a never-scored instrument has no score (#3389 d), phrased as a coverage
+ * fact. `null` = the backend gave no reason (unknown id): say only that no run
+ * has scored it.
+ */
+export function notScoredText(notScored: NotScored | null): string {
+  if (notScored === null) return "no ranking run has scored it";
+  switch (notScored.reason) {
+    case "not_tradable":
+      return "not tradable on eToro";
+    case "not_a_stock":
+      return `${notScored.instrument_type ?? "not a company stock"}: outside the company-ranking model, which scores firms from their SEC filings`;
+    case "not_analysable":
+      return filingsStatusText(notScored.filings_status);
+    case "no_inputs":
+      return "no price, fundamentals or thesis data yet";
+    case "eligible_unscored":
+      return "eligible for ranking; no run of this model has scored it yet";
   }
 }
 

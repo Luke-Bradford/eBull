@@ -741,13 +741,33 @@ class TestGetVerdict:
         assert score["analytics_json"]["peer_grade"]["peer_n"] == 412
 
     def test_never_scored_returns_null_score(self) -> None:
-        _with_conn([[]])
+        # Second result set: the #3389 (d) eligibility lookup finds no instrument.
+        _with_conn([[], []])
         resp = client.get("/rankings/verdict/999")
 
         assert resp.status_code == 200
         body = resp.json()
         assert body["instrument_id"] == 999
         assert body["score"] is None
+        assert body["not_scored"] is None
+
+    def test_never_scored_etf_says_why(self) -> None:
+        # #3389 (d): a held core-sleeve ETF is outside the model, not pending.
+        facts = {
+            "is_tradable": True,
+            "filings_status": "no_primary_sec_cik",
+            "instrument_type": "ETF",
+            "has_inputs": True,
+        }
+        _with_conn([[], [facts]])
+        body = client.get("/rankings/verdict/7").json()
+
+        assert body["score"] is None
+        assert body["not_scored"] == {
+            "reason": "not_a_stock",
+            "filings_status": "no_primary_sec_cik",
+            "instrument_type": "ETF",
+        }
 
     def test_scored_but_no_iar_returns_null_analytics(self) -> None:
         # Pre-#1823 row: headline present, analytics_json NULL.
@@ -780,7 +800,7 @@ class TestGetVerdict:
         assert score["completeness_tier"] is None
 
     def test_query_orders_by_scored_at_desc_limit_one(self) -> None:
-        conn = _with_conn([[]])
+        conn = _with_conn([[], []])
         client.get("/rankings/verdict/1")
 
         cur = conn.cursor.return_value
@@ -850,7 +870,7 @@ class TestGetVerdict:
         assert score["families"] == []
 
     def test_query_gates_like_the_rankings_list(self) -> None:
-        conn = _with_conn([[]])
+        conn = _with_conn([[], []])
         client.get("/rankings/verdict/1")
 
         sql: str = conn.cursor.return_value.execute.call_args_list[0][0][0].lower()
@@ -859,7 +879,7 @@ class TestGetVerdict:
         assert "c.filings_status" in sql
 
     def test_custom_model_version(self) -> None:
-        conn = _with_conn([[]])
+        conn = _with_conn([[], []])
         client.get("/rankings/verdict/1", params={"model_version": "v1-conservative"})
 
         cur = conn.cursor.return_value

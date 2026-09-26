@@ -10,23 +10,30 @@
  */
 import type { JSX } from "react";
 
-import type { VerdictScore } from "@/api/types";
+import type { NotScored, VerdictScore } from "@/api/types";
 import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
 import { RankDeltaCell } from "@/components/rankings/RankDeltaCell";
-import { largestContributions, largestDeductions, notRankedReasonText } from "@/lib/rankStatus";
+import {
+  largestContributions,
+  largestDeductions,
+  notRankedReasonText,
+  notScoredText,
+} from "@/lib/rankStatus";
 import { humanizePenaltyName } from "@/lib/scoreExplanation";
 
 export interface RankSummaryProps {
   /** `undefined` while loading; `null` when never scored. */
   readonly score: VerdictScore | null | undefined;
   readonly errored: boolean;
+  /** Why a never-scored instrument has no score (#3389 d); read only when `score` is null. */
+  readonly notScored?: NotScored | null;
 }
 
 function titleCase(family: string): string {
   return family.charAt(0).toUpperCase() + family.slice(1);
 }
 
-export function RankSummary({ score, errored }: RankSummaryProps): JSX.Element | null {
+export function RankSummary({ score, errored, notScored = null }: RankSummaryProps): JSX.Element | null {
   if (errored) {
     return (
       <span data-testid="rank-summary" className="text-xs text-slate-500">
@@ -37,8 +44,8 @@ export function RankSummary({ score, errored }: RankSummaryProps): JSX.Element |
   if (score === undefined) return null;
   if (score === null) {
     return (
-      <span data-testid="rank-summary" className="text-xs text-slate-500">
-        Not scored
+      <span data-testid="rank-summary" className="text-xs text-slate-500" title={notScoredText(notScored)}>
+        Not scored · {notScoredText(notScored)}
       </span>
     );
   }

@@ -421,6 +421,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     Occurrence("app/services/scoring.py", 1378, "price-history depth", "METADATA"),
     Occurrence("app/services/scoring.py", 1733, "price-history depth (bulk)", "METADATA"),
     Occurrence("app/services/scoring.py", 2277, "eligibility EXISTS", "METADATA"),
+    Occurrence("app/api/scores.py", 837, "not-scored eligibility EXISTS (#3389 d)", "METADATA"),
     Occurrence("app/workers/scheduler.py", 664, "eligibility EXISTS", "METADATA"),
     Occurrence("app/workers/scheduler.py", 3175, "_T3_CANDLE_SELECT last_bar", "METADATA"),
     Occurrence("app/workers/scheduler.py", 3418, "post-refresh usable count", "METADATA"),
