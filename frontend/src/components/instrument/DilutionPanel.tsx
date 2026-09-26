@@ -57,7 +57,9 @@ export function comparisonDate(
   const counts = history.filter((p) => (parseDecimal(p.shares_outstanding) ?? 0) > 0);
   const row = counts[3];
   if (row === undefined || yoyShares === null) return null;
-  return parseDecimal(row.shares_outstanding) === parseDecimal(yoyShares) ? row.period_end : null;
+  // Both are the same NUMERIC column serialised by the same model: compare the
+  // wire strings exactly rather than as floats.
+  return row.shares_outstanding === yoyShares ? row.period_end : null;
 }
 
 export function DilutionPanel({ symbol }: { readonly symbol: string }): JSX.Element {
