@@ -13,6 +13,7 @@ from app.services.trial_register import (
     TRIAL_REGISTER_CUTOFF,
     TRIAL_REGISTER_VERSION,
     DeclaredTrial,
+    InheritedFloor,
     TrialExactness,
     TrialRegister,
     declaration_backed_evidence,
@@ -27,7 +28,7 @@ def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> D
 
 class TestTheShippedDeclaration:
     def test_the_register_is_stamped_with_its_version(self) -> None:
-        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-09-26-r12"
+        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-09-26-r13"
 
     def test_every_declared_trial_carries_its_evidence(self) -> None:
         """⚠ An entry nobody can trace is indistinguishable from one invented."""
@@ -76,11 +77,13 @@ class TestTheShippedDeclaration:
         # 6 S-5..S-10 declarations + 2 MT-1 controlled pairs + 1 S-E overlay
         # (#2837, r8) + 1 S-H arm 1 (#2840, r9) + 1 ARM B stage (i) (#2834,
         # r10) + 9 #2908 exposed searches + 2 #2901 quality rows (r11) + 1 s8
-        # in-sample fan from #2840 arm 1's run (r12, #3385 slice 1). Moved
+        # in-sample fan from #2840 arm 1's run (r12, #3385 slice 1) + 88
+        # post-cutoff #2827/#3238 searches (r13, #3385 slice 3c-iv: 20 + 24 +
+        # 1 + 41 + 2). Moved
         # deliberately, not loosened: the pin exists to catch a
         # DROPPED entry, and an addition that raises M is the conservative
         # direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 289
+        assert TRIAL_REGISTER.declared_count == 377
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
     def test_the_two_mt1_controlled_pairs_are_charged_before_outcomes(self) -> None:
@@ -413,6 +416,39 @@ class TestHuntEntries:
         with pytest.raises(ValueError, match="reserved for hunt entries"):
             _trial(trial_id)
         assert trial_id.startswith(HUNT_TRIAL_PREFIX)
+
+
+class TestInheritedFloor:
+    """#3385 — `M_inh` is `declared_count` excluding every `hunt-` entry."""
+
+    def test_hunt_entries_are_excluded(self) -> None:
+        register = TrialRegister(
+            version="v",
+            trials=(
+                _trial("a"),
+                DeclaredTrial(trial_id="b", description="d", evidence="e", exactness=TrialExactness.EXACT, searches=3),
+                _log_backed(),
+                _declaration_backed(),
+            ),
+        )
+        assert register.declared_count == 1 + 3 + 3 + 4
+        assert register.inherited_floor() == InheritedFloor(register_version="v", searches=4, is_floor=False)
+
+    def test_an_inherited_floor_entry_makes_m_a_floor(self) -> None:
+        register = TrialRegister(version="v", trials=(_trial("a"), _trial("b", TrialExactness.FLOOR)))
+        assert register.inherited_floor().is_floor is True
+
+    def test_a_floored_hunt_entry_does_not_make_the_inherited_count_a_floor(self) -> None:
+        """The hunt's own FLOOR is carried by its log, not by `M_inh`."""
+        register = TrialRegister(version="v", trials=(_trial("a"), _log_backed(exactness=TrialExactness.FLOOR)))
+        assert register.inherited_floor().is_floor is False
+
+    def test_the_shipped_register(self) -> None:
+        """No hunt has registered yet, so today `M_inh` is the whole register."""
+        floor = TRIAL_REGISTER.inherited_floor()
+        assert floor.register_version == TRIAL_REGISTER_VERSION
+        assert floor.searches == TRIAL_REGISTER.declared_count
+        assert floor.is_floor is (TRIAL_REGISTER.floored_searches > 0)
 
 
 class TestReconstructionCutoff:

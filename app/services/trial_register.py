@@ -165,7 +165,12 @@ from typing import Final
 #: search, the s8 in-sample fan S-H arm 1's job wrote uncharged. Measured the
 #: same way before the bump: the SAME five groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-26-r12"
+#:
+#: r13 (2026-09-26, #3385 slice 3c-iv) reconciles #2827's post-cutoff batches and
+#: #3238's A/B, adding 88 searches. Measured the same way before the bump: the
+#: SAME five groups, 488 rows, every one `harness_validation`. It strands nothing
+#: that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-26-r13"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -397,6 +402,24 @@ def declaration_backed_evidence(*, declaration_path: str, declaration_sha256: st
 
 
 @dataclass(frozen=True)
+class InheritedFloor:
+    """#3385's ``M_inh``: the searches a hunt inherits from before it began.
+
+    ⚠ Read at each declaration's freeze and stored with it, never re-read at
+    readout: the register grows, and a verdict deflated against a count that
+    moved after its freeze would not be the verdict that was frozen.
+    """
+
+    register_version: str
+    #: ``declared_count`` excluding every ``hunt-`` entry.
+    searches: int
+    #: True when any inherited entry is ``FLOOR``: ``M`` is then only a lower
+    #: bound, so a DSR computed against it is an upper bound on significance.
+    #: This is the spec's ``m_is_floor``.
+    is_floor: bool
+
+
+@dataclass(frozen=True)
 class TrialRegister:
     """Criterion 6's ``M``, and the ``V[{SR_n}]`` estimator over it."""
 
@@ -437,6 +460,20 @@ class TrialRegister:
         direction, which is the failure this whole module is built against.
         """
         return sum(trial.searches for trial in self.trials if trial.exactness is TrialExactness.FLOOR)
+
+    def inherited_floor(self) -> InheritedFloor:
+        """``M_inh`` (#3385 spec §"Inherited floor M_inh"): every non-``hunt-`` entry.
+
+        ⚠ Hunt entries are excluded because the hunt counts its own searches
+        from ``hunt_trials`` and its pinned specs; counting their register
+        entries too would charge each hunt search twice.
+        """
+        inherited = [trial for trial in self.trials if not trial.trial_id.startswith(HUNT_TRIAL_PREFIX)]
+        return InheritedFloor(
+            register_version=self.version,
+            searches=sum(trial.searches for trial in inherited),
+            is_floor=any(trial.exactness is TrialExactness.FLOOR for trial in inherited),
+        )
 
     @property
     def trial_ids(self) -> frozenset[str]:
@@ -972,17 +1009,16 @@ TRIAL_REGISTER: Final = TrialRegister(
         #   job is its declared turnover control. Arm 2
         #   (`s12-cheapest-band-price-gated-breakout`): outcome-free censuses
         #   only — never declared or backtested. Arm 3: never built. ⚠ Arm 2's
-        #   $100 band was chosen after the addendum re-costed s4/s8's pooled
-        #   gross populations at the cheapest band — a constant shift of an
-        #   already-exposed number, so not a new search here, but arm 2's
-        #   declaration must disclose it as prior exposure.
+        #   $100 band was chosen after s4/s8's gross populations were re-costed
+        #   at the cheaper bands. Slice 1 called that a constant shift and not a
+        #   search; slice 3c-iv's Codex ckpt-2 falsified it (profit factor moves
+        #   non-uniformly, see `gross-vs-net-2827-2026-08-21` below, which now
+        #   charges those band readouts). Arm 2's declaration must still
+        #   disclose them as prior exposure.
         # - Added below: the s8 fan arm 1's job also computed and stored.
         #
-        # ⚠ NOT reconciled here (#3385 slice-1 scope is #2832/#2840): #2827's
-        # post-cutoff re-run batches — s1-s4 survivor_only x5 (2026-08-12) and
-        # s1-s10 survivorship_free x7 (2026-08-21/22) in
-        # `strategy_results_store` — and #3238's cost-basis A/B recompute. Both
-        # sit in programme rule 2's inherited count; the handoff is on #3385.
+        # #2827's post-cutoff batches and #3238's A/B were outside slice 1's
+        # scope; slice 3c-iv reconciles them in the block after this entry.
         DeclaredTrial(
             trial_id="s8-in-sample-survivorship-free-2026-08-23",
             description=(
@@ -997,6 +1033,109 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
         ),
+        # ⚠⚠ #3385 SLICE 3c-iv — EVERY POST-CUTOFF SEARCH NO ENTRY CHARGED. The
+        # population is `strategy_results_store` and `strategy_holdout_accesses`
+        # after `TRIAL_REGISTER_CUTOFF`; everything there that is not below is
+        # already charged: s5-s10's first evaluation (their entries, §4.1's fan),
+        # reads 637/638/640/641/642 (the opening look of the S-E, S-H arm 1,
+        # #2908 and #2901 entries' own searches), read 639 (S-H arm 1's declared
+        # control) and the 2026-08-23 in-sample fans (S-H arm 1, its control and
+        # the s8 entry above). Access id 425 is a sequence gap, not a row.
+        #
+        # ⚠ ONE RULE FOR RECENT WINDOWS, stated because Codex found the first
+        # draft applied two: windows collapse to one search ONLY where a
+        # declaration froze them as jointly required BEFORE the look (s5-s10's
+        # §4.1). Otherwise each stored window evaluation is a search, which is
+        # S-1..S-4's settled arithmetic (`evaluate accesses / 4`). Neither s1-s4
+        # batch below had such a declaration, so both count per window.
+        #
+        # ⚠ RE-PRICING A STORED POPULATION AT ANOTHER COST IS A SEARCH. The first
+        # draft followed slice 1 in calling it "a constant shift" and Codex
+        # ckpt-2 falsified that: the MEAN shifts by a constant, but profit factor
+        # does not, because a cost moves trades across zero
+        # (`measure_2827_gross_vs_net.py`'s own header), and PF is a decision
+        # metric. The cheaper-band readouts were then used to pick s4/s8. So
+        # every re-priced cost level that was read is a changed estimand
+        # (reconstruction clause 2). A CONTROL that reproduces an already-stored
+        # number is not.
+        DeclaredTrial(
+            trial_id="s1-s4-survivor-only-v2-cost-calendar-windows-2026-08-12",
+            description=(
+                "S-1..S-4 at their survivor_only versions re-evaluated on the hold-out under cost model "
+                "static-p75-insession-v2+split-adjusted-max for calendar 2022, 2023, 2024, 2025 and 2026-YTD: 5 "
+                "windows x 4 strategies. Pre-cutoff those windows existed only under cost v1, so each re-run "
+                "changed the estimand of a stored number; no declaration made the windows jointly required."
+            ),
+            evidence=(
+                "strategy_holdout_accesses 305-384 (80 evaluate, purpose 'complete declared recent-regime evidence "
+                "denominator', 2026-08-12 18:56-22:25Z; 80 / 4 = 20); strategy_results_store 385-464"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=20,
+        ),
+        DeclaredTrial(
+            trial_id="s1-s4-survivorship-free-pinned-windows-2026-08-21",
+            description=(
+                "S-1..S-4 at their survivorship_free / cost-v3 versions (a domain variant, so new trials), on the "
+                "hold-out windows primary-2022-plus, rolling-36m, rolling-24m, year-2022, year-2023 and year-2024: "
+                "6 windows x 4 strategies. No entry declared them before the look, so §4.1's window fan, which is "
+                "s5-s10's, does not extend to them."
+            ),
+            evidence=(
+                "strategy_holdout_accesses 385-636, the 96 evaluate rows for s1-s4 (purpose 'pinned recent-evidence "
+                "windows for the S-1..S-10 walk-forward (build-queue item 6)', 2026-08-21 13:56Z to 08-22 06:55Z; "
+                "96 / 4 = 24); strategy_results_store 485-725; scripts/run_2825_decisive_holdout_evidence.py; "
+                "issue #2827"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=24,
+        ),
+        DeclaredTrial(
+            trial_id="s1-in-sample-survivorship-free-2026-08-21",
+            description=(
+                "S-1 at its survivorship_free version, in-sample fan 1962-01-02 to 2024-09-27, stored before the "
+                "hold-out batches began. One search under the fan-collapse rule (the shape of the s8 entry above)."
+            ),
+            evidence=(
+                "strategy_results_store result_id 481-484 (s1-time-series-momentum @ "
+                "strategy-registry-v1+cd8a60d57047, namespace in_sample, created 2026-08-21 09:43Z)"
+            ),
+            exactness=TrialExactness.EXACT,
+        ),
+        DeclaredTrial(
+            trial_id="gross-vs-net-2827-2026-08-21",
+            description=(
+                "#2831's gross-vs-net measurement: all ten strategies' primary-2022-plus arms re-evaluated at zero "
+                "cost, a new estimand of published numbers, plus each gross population re-priced at the three "
+                "bands cheaper than the <$5 band every trade was then charged, with profit factor recomputed: "
+                "11 reads + 10 x 3 bands. The four robustness arms collapse per the fan rule. ⚠ 11 reads and not "
+                "10: access 466 (s9, 25s before the other ten) looks like an aborted start, but the ledger "
+                "records a look and nothing records that it saw nothing."
+            ),
+            evidence=(
+                "strategy_holdout_accesses 466-476 (11 read, 2026-08-21 21:34Z, purpose 'measure gross vs net "
+                "per-trade return...'); scripts/measure_2827_gross_vs_net.py; PR #2831; issue #2827 comment "
+                "2026-08-22T00:56Z (band table); _print_band_table over cost_model.BANDS (4 bands)"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=41,
+        ),
+        DeclaredTrial(
+            trial_id="cost-basis-ab-3238-s1-in-sample-2026-09-20",
+            description=(
+                "#3238's cost-basis A/B treatment arm: S-1 survivorship_free in-sample re-run with each trade "
+                "charged its own nominal band, on a 60-series slice and on all 17,285 series. Two populations, "
+                "two searches; the control reproduces the stored max-band number and is not counted. FLOOR: the "
+                "PR also names bounded cohort slices it does not enumerate."
+            ),
+            evidence=(
+                "scripts/ab_3238_cost_basis.py --strategy s1-time-series-momentum; PR #3240 body (60-series slice "
+                "table) and its full-population comment (--no-cohort, full_population: true); issue #2840 comment "
+                "5747000124"
+            ),
+            exactness=TrialExactness.FLOOR,
+            searches=2,
+        ),
     ),
 )
 
@@ -1007,6 +1146,7 @@ __all__ = [
     "TRIAL_REGISTER_CUTOFF",
     "TRIAL_REGISTER_VERSION",
     "DeclaredTrial",
+    "InheritedFloor",
     "TrialExactness",
     "TrialRegister",
     "declaration_backed_evidence",
