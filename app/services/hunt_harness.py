@@ -65,6 +65,7 @@ from app.services import (
     hunt_evaluator,
     hunt_inference,
     hunt_panel,
+    hunt_store,
     hunt_view,
     market_calendar,
     market_regime,
@@ -157,6 +158,7 @@ _FLOAT_TAG: Final = "__float__"
 MODEL_CODE_MODULES: Final = (
     hunt_compute,
     hunt_panel,
+    hunt_store,
     hunt_books,
     hunt_evaluator,
     hunt_inference,
@@ -710,6 +712,9 @@ def compute_trial(conn: psycopg.Connection[Any], spec: TrialSpec, *, end: date |
         constants=spec.constants,
         commission=tariff.proportional_commission_per_side,
         signal=load_signal(spec.signal_id),
+        universe_identity=spec.universe_identity.form(),
+        model_id=HUNT_HARNESS_MODEL_ID,
+        read_universe_identity=lambda: read_universe_identity(conn, spec.universe_identity.universe).form(),
     )
     return ComputedOutcome(outcome.status, outcome.statistics, outcome.active_series)
 

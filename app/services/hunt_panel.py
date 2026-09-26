@@ -4,6 +4,11 @@
 :func:`load_hunt_panel` reads every admitted series once; :func:`compute_trial` hands
 the panel to the pure ``hunt_compute.compute_panel``.
 
+#3386 slice 1 (spec ``docs/proposals/ta/2026-09-26-3386-hunt-feature-store.md`` v3): a
+DISCOVERY trial computes on parts read from ``hunt_store`` (built from this loader on a
+miss), keyed on the registered universe identity, the quarantine flags and the model id.
+Validation and holdout load live every time, behind the audited door.
+
 ⚠ Imported ONLY by ``hunt_harness``, which calls :func:`compute_trial` after a search is
 registered and committed. ``tests/test_sealed_outcome_scripts_are_gated.py`` lists this
 module as a research price reader, so a script or hunt module importing it fails that
@@ -12,20 +17,23 @@ test. Its code is part of ``HUNT_HARNESS_MODEL_ID``: every line here decides a n
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 from array import array
 from bisect import bisect_right
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, timedelta
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 import psycopg
 
-from app.services import hunt_compute, hunt_view, market_calendar
+from app.services import hunt_compute, hunt_store, hunt_view, market_calendar
 from app.services.hunt_compute import ComputeParams, HuntPanel, PanelOutcome, PanelSeries, bar_exclusion
 from app.services.hunt_evaluator import Point
+from app.services.hunt_store import PanelParts
 from app.services.indicator_series import BarSeries, Universe
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
@@ -60,6 +68,30 @@ _DIVIDEND_SQL = """
 
 _FIRST_BAR_SQL = "SELECT series_id, first_bar FROM research_price_series WHERE series_id = ANY(%(ids)s)"
 
+#: Where discovery stores live: ``var/`` is gitignored. One directory per key; old keys are
+#: kept (spec "Build": deleting them defeats reproduction) and removed by hand.
+STORE_ROOT: Path = Path(__file__).resolve().parents[2] / "var" / "hunt_store"
+
+#: The quarantine state ``load_masked_series`` applies, as exact flags (spec "Key"): every
+#: coverage row and every flagged bar ≤ ``through`` of the admitted series. No price column.
+_QUARANTINE_COVERAGE_SQL = """
+    SELECT series_id, first_bar, least(last_bar, %(through)s::date)
+    FROM research_price_quarantine_coverage
+    WHERE rule_set_version = %(quarantine_version)s
+      AND series_id = ANY(%(ids)s)
+      AND first_bar <= %(through)s::date
+    ORDER BY series_id, first_bar
+"""
+_QUARANTINE_FLAGS_SQL = """
+    SELECT series_id, bar_date, COALESCE(range_usable, TRUE), COALESCE(return_usable, TRUE)
+    FROM research_bar_quarantine
+    WHERE rule_set_version = %(quarantine_version)s
+      AND series_id = ANY(%(ids)s)
+      AND bar_date <= %(through)s::date
+      AND NOT (COALESCE(range_usable, TRUE) AND COALESCE(return_usable, TRUE))
+    ORDER BY series_id, bar_date
+"""
+
 
 def nyse_sessions(start: date, end: date) -> tuple[date, ...]:
     """NYSE sessions in [start, end] (``market_calendar``; half days are sessions)."""
@@ -80,7 +112,47 @@ def _regime_labels(conn: psycopg.Connection[Any], sessions: tuple[date, ...]) ->
     ]
 
 
+def _admitted(conn: psycopg.Connection[Any], universe: Universe) -> dict[int, Any]:
+    validated = load_validated_universe(conn)
+    selection = load_universe_selection(conn, universe=universe, validated_ids=frozenset(validated))
+    return {series.series_id: series for series in selection.admitted}
+
+
+def quarantine_identity(conn: psycopg.Connection[Any], *, universe: Universe, through: date) -> str:
+    """sha256 of the admitted series' quarantine coverage and flags ≤ ``through`` (spec "Key")."""
+    params = {
+        "ids": sorted(_admitted(conn, universe)),
+        "through": through,
+        "quarantine_version": QUARANTINE_RULE_SET_VERSION,
+    }
+    coverage = [
+        [series_id, first.isoformat(), last.isoformat()]
+        for series_id, first, last in conn.execute(_QUARANTINE_COVERAGE_SQL, params).fetchall()
+    ]
+    flags = [
+        [series_id, bar_date.isoformat(), int(range_usable), int(return_usable)]
+        for series_id, bar_date, range_usable, return_usable in conn.execute(_QUARANTINE_FLAGS_SQL, params).fetchall()
+    ]
+    body = {"rule_set_version": QUARANTINE_RULE_SET_VERSION, "coverage": coverage, "flags": flags}
+    return hashlib.sha256(hunt_store.canonical_json(body)).hexdigest()
+
+
 def load_hunt_panel(conn: psycopg.Connection[Any], *, universe: Universe, through: date) -> HuntPanel:
+    """:func:`load_panel_parts` with the regime labels attached (the live path)."""
+    return _with_regimes(conn, load_panel_parts(conn, universe=universe, through=through))
+
+
+def _with_regimes(conn: psycopg.Connection[Any], parts: PanelParts) -> HuntPanel:
+    """Regime labels are computed live on every path (spec "Parts"): the key does not cover the benchmark."""
+    return HuntPanel(
+        sessions=parts.sessions,
+        series=parts.series,
+        regime_labels=tuple(_regime_labels(conn, parts.sessions)),
+        load_counts=parts.load_counts,
+    )
+
+
+def load_panel_parts(conn: psycopg.Connection[Any], *, universe: Universe, through: date) -> PanelParts:
     """Every admitted series' bars ≤ ``through`` on both bases, keyed by NYSE session ordinal.
 
     Per series: the quarantine-masked read, its split-corrected ratio basis
@@ -90,9 +162,7 @@ def load_hunt_panel(conn: psycopg.Connection[Any], *, universe: Universe, throug
     ⚠ Residual: the calendar's ad-hoc closures are transcribed from 1994 on, so before
     that a closure can appear as a session on which no series printed.
     """
-    validated = load_validated_universe(conn)
-    selection = load_universe_selection(conn, universe=universe, validated_ids=frozenset(validated))
-    admitted = {series.series_id: series for series in selection.admitted}
+    admitted = _admitted(conn, universe)
     first_bar = dict(conn.execute(_FIRST_BAR_SQL, {"ids": sorted(admitted)}).fetchall())
     in_window = {sid: member for sid, member in admitted.items() if (first := first_bar.get(sid)) and first <= through}
     if not in_window:
@@ -200,12 +270,7 @@ def load_hunt_panel(conn: psycopg.Connection[Any], *, universe: Universe, throug
         counts["bars_loaded"] += len(ordinals)
         counts["dividends_loaded"] += len(dividends)
     counts["series_loaded"] = len(panel_series)
-    return HuntPanel(
-        sessions=sessions,
-        series=MappingProxyType(panel_series),
-        regime_labels=tuple(_regime_labels(conn, sessions)),
-        load_counts=MappingProxyType(counts),
-    )
+    return PanelParts(sessions=sessions, series=MappingProxyType(panel_series), load_counts=MappingProxyType(counts))
 
 
 def compute_trial(
@@ -225,11 +290,41 @@ def compute_trial(
     constants: Mapping[str, Any],
     commission: float,
     signal: hunt_compute.Signal,
+    universe_identity: Mapping[str, str],
+    model_id: str,
+    read_universe_identity: Callable[[], Mapping[str, str]],
 ) -> PanelOutcome:
-    """Load the split's panel and compute every cell (embargo 0 for discovery)."""
+    """Load the split's panel and compute every cell (embargo 0 for discovery).
+
+    ``universe_identity`` is the REGISTERED identity (``evaluate`` checked it equal to the
+    live one before registering); ``read_universe_identity`` re-reads the live one.
+    """
     if split_end is None:
         raise HuntPanelError("the holdout end session is frozen in its declaration (#3385 slice 2b)")
-    panel = load_hunt_panel(conn, universe=universe, through=split_end)
+    store_key = content_sha256 = quarantine = None
+    if split == "discovery":
+        quarantine = quarantine_identity(conn, universe=universe, through=split_end)
+        store_key = hunt_store.store_key(
+            through=split_end, universe_identity=universe_identity, quarantine_identity=quarantine, model_id=model_id
+        )
+
+        def verify() -> None:
+            if dict(read_universe_identity()) != dict(universe_identity):
+                raise HuntPanelError("the universe identity changed while the store was built; retry")
+            if quarantine_identity(conn, universe=universe, through=split_end) != quarantine:
+                raise HuntPanelError("the quarantine flags changed while the store was built; retry")
+
+        stored = hunt_store.load_or_build(
+            STORE_ROOT,
+            key=store_key,
+            through=split_end,
+            build=lambda: load_panel_parts(conn, universe=universe, through=split_end),
+            verify=verify,
+        )
+        content_sha256 = stored.content_sha256
+        panel = _with_regimes(conn, stored.parts)
+    else:
+        panel = load_hunt_panel(conn, universe=universe, through=split_end)
     params = ComputeParams(
         split_start=split_start,
         split_end=split_end,
@@ -243,7 +338,19 @@ def compute_trial(
         constants=constants,
         commission=commission,
     )
-    return hunt_compute.compute_panel(panel, params, signal)
+    outcome = hunt_compute.compute_panel(panel, params, signal)
+    if quarantine is not None and quarantine_identity(conn, universe=universe, through=split_end) != quarantine:
+        raise HuntPanelError("the quarantine flags changed during the computation; retry the registered trial")
+    load = {**outcome.statistics["load"], "store_key": store_key, "store_content_sha256": content_sha256}
+    return PanelOutcome(outcome.status, {**outcome.statistics, "load": load}, outcome.active_series)
 
 
-__all__ = ["HuntPanelError", "compute_trial", "load_hunt_panel", "nyse_sessions"]
+__all__ = [
+    "STORE_ROOT",
+    "HuntPanelError",
+    "compute_trial",
+    "load_hunt_panel",
+    "load_panel_parts",
+    "nyse_sessions",
+    "quarantine_identity",
+]

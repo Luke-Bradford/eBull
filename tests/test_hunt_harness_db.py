@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -573,6 +574,45 @@ def test_the_panel_loader_places_bars_splits_dividends_and_termination(
     }
 
 
+def test_the_quarantine_identity_moves_with_a_flag_on_or_before_through_only(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3386: the store key covers the exact quarantine flags ≤ through, not their count."""
+    series_id = _seed_archive(ebull_test_conn, vendor="test/3386-archive")
+    member = AdmittedSeries(series_id=series_id, name_key=-series_id, instrument_id=None, termination=None)
+    monkeypatch.setattr(hunt_panel, "load_validated_universe", lambda _conn: [])
+    monkeypatch.setattr(hunt_panel, "load_universe_selection", lambda _conn, **_kw: SimpleNamespace(admitted=(member,)))
+    through = _BARS[4][0]
+
+    def identity() -> str:
+        return hunt_panel.quarantine_identity(ebull_test_conn, universe="survivorship_free", through=through)
+
+    def flag(bar_date: date, *, return_usable: bool) -> None:
+        ebull_test_conn.execute(
+            """
+            INSERT INTO research_bar_quarantine
+                (series_id, bar_date, return_usable, range_usable, provisional, rules, rule_set_version)
+            VALUES (%s, %s, %s, TRUE, FALSE, ARRAY['test'], %s)
+            ON CONFLICT (series_id, bar_date) DO UPDATE
+               SET return_usable = EXCLUDED.return_usable, range_usable = EXCLUDED.range_usable
+            """,
+            (series_id, bar_date, return_usable, hh.QUARANTINE_RULE_SET_VERSION),
+        )
+
+    clean = identity()
+    flag(_BARS[6][0], return_usable=False)  # after through: not part of this panel
+    assert identity() == clean
+    flag(_BARS[2][0], return_usable=False)
+    flagged = identity()
+    assert flagged != clean
+    # Moving the flag keeps the count and changes the masking: the identity must move.
+    ebull_test_conn.execute(
+        "DELETE FROM research_bar_quarantine WHERE series_id = %s AND bar_date = %s", (series_id, _BARS[2][0])
+    )
+    flag(_BARS[3][0], return_usable=False)
+    assert identity() not in (clean, flagged)
+
+
 def test_an_archive_without_as_traded_prices_refuses_before_registering(
     ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]
 ) -> None:
@@ -583,7 +623,7 @@ def test_an_archive_without_as_traded_prices_refuses_before_registering(
 
 
 def test_compute_trial_reads_prices_only_after_the_search_is_committed(
-    ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     spec = _spec(bound)
     seen: list[list[tuple[Any, ...]]] = []
@@ -594,7 +634,10 @@ def test_compute_trial_reads_prices_only_after_the_search_is_committed(
         raise _PriceReadRaised
 
     monkeypatch.setattr(hh, "load_signal", lambda _signal_id: lambda _t, _view, _constants: {})
-    monkeypatch.setattr(hunt_panel, "load_hunt_panel", price_read)
+    # A discovery trial reads prices through the store's build (#3386); keep it out of the repo's var/.
+    monkeypatch.setattr(hunt_panel, "STORE_ROOT", tmp_path)
+    monkeypatch.setattr(hunt_panel, "load_panel_parts", price_read)
+    monkeypatch.setattr(hunt_panel, "quarantine_identity", lambda _conn, **_kw: "q" * 64)
     with pytest.raises(_PriceReadRaised):
         hh.evaluate(ebull_test_conn, spec, registered_by="test")
     assert seen == [[("hunt-1", "evaluate")]]

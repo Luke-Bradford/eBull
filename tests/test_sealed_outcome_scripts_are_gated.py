@@ -419,6 +419,8 @@ _RESEARCH_PRICE_READER_MODULES: Final[frozenset[str]] = frozenset(
         "app.services.price_masked_bars",
         # The hunt's own loader: only ``hunt_harness`` may import it.
         "app.services.hunt_panel",
+        # #3386: the persisted discovery panel; only ``hunt_panel`` (and ``hunt_harness``) import it.
+        "app.services.hunt_store",
     }
 )
 
