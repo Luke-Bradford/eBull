@@ -4,6 +4,7 @@ import type {
   FcfYieldSeries,
   InstrumentCandles,
   InstrumentDetail,
+  InstrumentFairValueBand,
   InstrumentFinancials,
   InstrumentIntradayCandles,
   InstrumentListResponse,
@@ -496,6 +497,15 @@ export async function fetchInstrumentSegments(
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;
   }
+}
+
+/** Deterministic fair-value band at the live method version (#3390). */
+export function fetchInstrumentFairValueBand(
+  symbol: string,
+): Promise<InstrumentFairValueBand> {
+  return apiFetch<InstrumentFairValueBand>(
+    `/instruments/${encodeURIComponent(symbol)}/fair-value-band`,
+  );
 }
 
 /** FINRA Reg SHO daily short-sale volume, latest `limit` trade dates (#3390). */

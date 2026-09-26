@@ -31,6 +31,7 @@ import type {
   VerdictResponse,
 } from "@/api/types";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
+import { FairValueBandPanel } from "@/components/instrument/FairValueBandPanel";
 import { RiskInlinePanel } from "@/components/instrument/RiskInlinePanel";
 import { ShortSidePanel } from "@/components/instrument/ShortSidePanel";
 import { Sparkline } from "@/components/instrument/Sparkline";
@@ -192,9 +193,12 @@ export function VerdictTab({
             }
           />
         </Section>
-        {/* Risk and short-sale volume do not depend on a score (#3390). */}
+        {/* Risk, the valuation band and short-sale volume do not depend on a score (#3390). */}
         <Section title="Risk">
           <RiskInlinePanel symbol={symbol} />
+        </Section>
+        <Section title="Valuation band">
+          <FairValueBandPanel symbol={symbol} />
         </Section>
         <Section title="Short side">
           <ShortSidePanel symbol={symbol} shortInterest={null} />
@@ -428,7 +432,12 @@ export function VerdictTab({
         <RiskInlinePanel symbol={symbol} />
       </Section>
 
-      {/* 7. Short side (#3390) — short interest and short-sale volume,
+      {/* 7. Valuation band (#3390) — deterministic peer band, not validated. */}
+      <Section title="Valuation band">
+        <FairValueBandPanel symbol={symbol} />
+      </Section>
+
+      {/* 8. Short side (#3390) — short interest and short-sale volume,
           each defined on its own card. */}
       <Section title="Short side">
         <ShortSidePanel
@@ -437,7 +446,7 @@ export function VerdictTab({
         />
       </Section>
 
-      {/* 8. Score history */}
+      {/* 9. Score history */}
       <Section title="Score history">
         {history.loading ? (
           <SectionSkeleton rows={1} />

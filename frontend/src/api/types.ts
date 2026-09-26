@@ -752,6 +752,44 @@ export interface InstrumentShortVolume {
   withheld_reason: string | null;
 }
 
+/** Deterministic fair-value band (#3390 slice 4, over #2009). Mirrors
+ *  FairValueBandLeg / InstrumentFairValueBand in app/api/instruments.py.
+ *  Per-share values are in `currency`; `available` only when all three exist. */
+export interface FairValueBandLeg {
+  multiple: string;
+  contributed: boolean;
+  base_value: number | null;
+  cohort_n: number | null;
+  own_points: number | null;
+  sic_level: number | null;
+  cohort_screened: boolean | null;
+  earnings_nonrep: string | null;
+  dropped_nonpositive: boolean;
+}
+
+export interface InstrumentFairValueBand {
+  symbol: string;
+  currency: string | null;
+  method_version: string;
+  label: string;
+  definition: string;
+  available: boolean;
+  reason: string;
+  quality_status: string | null;
+  bear_value: string | null;
+  base_value: string | null;
+  bull_value: string | null;
+  as_of_date: string | null;
+  ttm_end: string | null;
+  price_as_of: string | null;
+  computed_at: string | null;
+  stale: boolean;
+  stale_after_days: number;
+  target_basis: string | null;
+  cross_leg_base_ratio: number | null;
+  legs: FairValueBandLeg[];
+}
+
 /** Candidate-vs-current-book risk (#1636). Mirrors PortfolioRelativeRiskResponse
  *  in app/api/instruments.py. Decimals → string | null; figures are fractions,
  *  vols annualized. A current-exposure covariance estimate (today's weights over

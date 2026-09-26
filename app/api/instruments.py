@@ -27,7 +27,7 @@ import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal, LiteralString, get_args
 
@@ -53,6 +53,8 @@ from app.services.broker_credentials import (
 )
 from app.services.dimensional_facts import DimensionalAxis
 from app.services.dimensional_facts_store import read_segments
+from app.services.fair_value_band import METHOD_VERSION as FAIR_VALUE_BAND_METHOD_VERSION
+from app.services.fair_value_band import PRICE_STALE_DAYS as FAIR_VALUE_BAND_PRICE_STALE_DAYS
 from app.services.fcf_yield import fcf_yield_series
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates
 from app.services.intraday_candles import fetch_intraday_candles
@@ -2621,6 +2623,190 @@ def get_instrument_short_volume(
         canonical_symbol,
         rows,
         collision_in_history=bool(collision_row and collision_row["collision"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic fair-value band (#3390 slice 4, over #2009's fair_value_band_current)
+# ---------------------------------------------------------------------------
+
+FAIR_VALUE_BAND_LABEL = "Deterministic peer band — not a validated fair value."
+FAIR_VALUE_BAND_DEFINITION = (
+    "Per-share bear / base / bull implied by this company's own multiple history and a "
+    "peer cohort's multiples (P/E, P/S, P/B, EV/EBITDA), each converted at the latest "
+    "trailing-twelve-month fundamentals. It is comparables evidence, has not been "
+    "backtested, and carries no weight in the score."
+)
+
+
+class FairValueBandLeg(BaseModel):
+    multiple: str
+    # Entered the blended band. ``basis_json.selected`` is only the profile's
+    # candidate set; a leg contributes iff it stored a per-share ``base_value``
+    # (fair_value_band.compute_band: gated, synth-None and leg-dropped legs don't).
+    contributed: bool
+    base_value: float | None
+    cohort_n: int | None
+    own_points: int | None
+    # SIC digits the peer cohort matched on; 0 = no SIC-matched cohort.
+    sic_level: int | None
+    # fvb_v4 companion screen; None when the leg is not screened (pe).
+    cohort_screened: bool | None
+    # fvb_v5 earnings-representativeness gate code, when it removed the pe leg.
+    earnings_nonrep: str | None
+    # EV/EBITDA leg whose net-debt back-out turned a value <= 0 (#2021).
+    dropped_nonpositive: bool
+
+
+class InstrumentFairValueBand(BaseModel):
+    symbol: str
+    currency: str | None
+    method_version: str
+    label: str
+    definition: str
+    # True only when bear, base and bull are all present.
+    available: bool
+    # Stored reason ('ok', 'thin_cohort', 'stale_price', ...) or 'no_band'.
+    reason: str
+    quality_status: str | None
+    bear_value: Decimal | None
+    base_value: Decimal | None
+    bull_value: Decimal | None
+    as_of_date: date | None
+    ttm_end: date | None
+    price_as_of: date | None
+    computed_at: datetime | None
+    # Band older than its own price-freshness rule (PRICE_STALE_DAYS) today.
+    stale: bool
+    stale_after_days: int
+    target_basis: str | None
+    cross_leg_base_ratio: float | None
+    legs: list[FairValueBandLeg]
+
+
+def _opt_int(v: Any) -> int | None:
+    return int(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+
+def _opt_float(v: Any) -> float | None:
+    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+
+def build_fair_value_band(
+    symbol: str,
+    currency: str | None,
+    row: dict[str, Any] | None,
+    *,
+    today: date,
+) -> InstrumentFairValueBand:
+    """Stored ``fair_value_band_current`` row to the payload.
+
+    A partial bear/base/bull triple fails closed to ``available=False``, the same
+    posture as the thesis context shaper (the storage CHECK permits it).
+    """
+    common = {
+        "symbol": symbol,
+        "currency": currency,
+        "method_version": FAIR_VALUE_BAND_METHOD_VERSION,
+        "label": FAIR_VALUE_BAND_LABEL,
+        "definition": FAIR_VALUE_BAND_DEFINITION,
+        "stale_after_days": FAIR_VALUE_BAND_PRICE_STALE_DAYS,
+    }
+    if row is None:
+        return InstrumentFairValueBand(
+            **common,
+            available=False,
+            reason="no_band",
+            quality_status=None,
+            bear_value=None,
+            base_value=None,
+            bull_value=None,
+            as_of_date=None,
+            ttm_end=None,
+            price_as_of=None,
+            computed_at=None,
+            stale=False,
+            target_basis=None,
+            cross_leg_base_ratio=None,
+            legs=[],
+        )
+    basis = row["basis_json"] if isinstance(row["basis_json"], dict) else {}
+    raw_multiples = basis.get("multiples")
+    multiples: dict[str, Any] = raw_multiples if isinstance(raw_multiples, dict) else {}
+    legs = [
+        FairValueBandLeg(
+            multiple=str(name),
+            contributed=_opt_float(leg.get("base_value")) is not None,
+            base_value=_opt_float(leg.get("base_value")),
+            cohort_n=_opt_int(leg.get("cohort_n")),
+            own_points=_opt_int(leg.get("own_points")),
+            sic_level=_opt_int(leg.get("sic_level")),
+            cohort_screened=leg["cohort_screened"] if isinstance(leg.get("cohort_screened"), bool) else None,
+            earnings_nonrep=str(leg["earnings_nonrep"]) if leg.get("earnings_nonrep") else None,
+            dropped_nonpositive=leg.get("dropped_nonpositive") is True,
+        )
+        for name, leg in multiples.items()
+        if isinstance(leg, dict)
+    ]
+    available = row["bear_value"] is not None and row["base_value"] is not None and row["bull_value"] is not None
+    as_of: date = row["as_of_date"]
+    return InstrumentFairValueBand(
+        **common,
+        available=available,
+        reason=str(row["reason"]) if available or row["reason"] != "ok" else "no_band",
+        quality_status=row["quality_status"] if available else None,
+        bear_value=row["bear_value"] if available else None,
+        base_value=row["base_value"] if available else None,
+        bull_value=row["bull_value"] if available else None,
+        as_of_date=as_of,
+        ttm_end=row["ttm_end"],
+        price_as_of=row["price_as_of"],
+        computed_at=row["computed_at"],
+        stale=(today - as_of).days > FAIR_VALUE_BAND_PRICE_STALE_DAYS,
+        target_basis=str(row["target_basis"]),
+        cross_leg_base_ratio=_opt_float(basis.get("cross_leg_base_ratio")),
+        legs=legs,
+    )
+
+
+@router.get("/{symbol}/fair-value-band", response_model=InstrumentFairValueBand)
+def get_instrument_fair_value_band(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentFairValueBand:
+    """Current deterministic fair-value band at the live ``METHOD_VERSION`` (#3390).
+
+    ``fair_value_band_current`` keeps one row per (instrument, method_version),
+    so older versions' rows sit beside the live one and must never be read.
+    200 with ``available=false`` and a reason when there is no band.
+    """
+    if not symbol.strip():
+        raise HTTPException(status_code=400, detail="symbol is required")
+    resolved = resolve_instrument_ref(conn, symbol)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id, canonical_symbol = resolved
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT currency FROM instruments WHERE instrument_id = %(iid)s",
+            {"iid": instrument_id},
+        )
+        inst = cur.fetchone()
+        cur.execute(
+            """
+            SELECT bear_value, base_value, bull_value, quality_status, reason,
+                   as_of_date, ttm_end, price_as_of, computed_at, target_basis, basis_json
+            FROM fair_value_band_current
+            WHERE instrument_id = %(iid)s AND method_version = %(mv)s
+            """,
+            {"iid": instrument_id, "mv": FAIR_VALUE_BAND_METHOD_VERSION},
+        )
+        row = cur.fetchone()
+    return build_fair_value_band(
+        canonical_symbol,
+        inst["currency"] if inst else None,
+        row,
+        today=datetime.now(UTC).date(),
     )
 
 
