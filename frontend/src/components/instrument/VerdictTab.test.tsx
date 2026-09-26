@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { VerdictTab } from "@/components/instrument/VerdictTab";
 import * as verdictApi from "@/api/verdict";
 import * as historyApi from "@/api/scoreHistory";
+import * as instrumentsApi from "@/api/instruments";
 import type {
   IarAnalytics,
   ThesisDetail,
@@ -101,6 +102,14 @@ describe("VerdictTab", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockHistoryEmpty();
+    vi.spyOn(instrumentsApi, "fetchInstrumentShortVolume").mockResolvedValue({
+      symbol: "AAPL",
+      definition: "d",
+      caveats: [],
+      latest_trade_date: null,
+      days: [],
+      withheld_reason: null,
+    });
   });
 
   it("renders never-scored empty state when score is null", async () => {
@@ -111,7 +120,7 @@ describe("VerdictTab", () => {
     });
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText(/not yet scored/i)).toBeInTheDocument();
@@ -125,13 +134,16 @@ describe("VerdictTab", () => {
     });
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText("Not scored")).toBeInTheDocument();
     expect(screen.queryByText(/not yet scored/i)).not.toBeInTheDocument();
     expect(screen.getByText(/ETF: outside the company-ranking model/)).toBeInTheDocument();
     expect(screen.getByText(/not a judgement on the investment/)).toBeInTheDocument();
+    // Short-sale volume does not depend on a score (#3390).
+    expect(screen.getByText("Short side")).toBeInTheDocument();
+    expect(await screen.findByText("No short-sale volume held")).toBeInTheDocument();
   });
 
   it("hides a stale stored rank and says why it is not ranked (#3389 b)", async () => {
@@ -140,7 +152,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText(/not ranked · not tradable on eToro/)).toBeInTheDocument();
@@ -170,7 +182,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText("0.25 default")).toBeInTheDocument();
@@ -186,7 +198,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText(/boom/i)).toBeInTheDocument();
@@ -198,7 +210,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={THESIS} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={THESIS} />
       </MemoryRouter>,
     );
     // headline
@@ -228,7 +240,7 @@ describe("VerdictTab", () => {
     const fresher = { ...THESIS, created_at: "2026-07-10T12:00:00Z" };
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={fresher} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={fresher} />
       </MemoryRouter>,
     );
     expect(await screen.findByText("0.82")).toBeInTheDocument();
@@ -261,7 +273,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText("0.82")).toBeInTheDocument();
@@ -289,7 +301,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText("0.82")).toBeInTheDocument();
@@ -304,7 +316,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     // headline still renders
@@ -332,7 +344,7 @@ describe("VerdictTab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={null} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={null} />
       </MemoryRouter>,
     );
     expect(await screen.findByText("0.82")).toBeInTheDocument();
@@ -357,7 +369,7 @@ describe("VerdictTab #2003 — thesis leads the tab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={THESIS} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={THESIS} />
       </MemoryRouter>,
     );
     const memo = await screen.findByText(/bull case rests on services/i);
@@ -374,7 +386,7 @@ describe("VerdictTab #2003 — thesis leads the tab", () => {
     );
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={THESIS} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={THESIS} />
       </MemoryRouter>,
     );
     await screen.findByText("0.82");
@@ -391,7 +403,7 @@ describe("VerdictTab #2003 — thesis leads the tab", () => {
     });
     render(
       <MemoryRouter>
-        <VerdictTab instrumentId={1} thesis={THESIS} />
+        <VerdictTab instrumentId={1} symbol="AAPL" thesis={THESIS} />
       </MemoryRouter>,
     );
     const memo = await screen.findByText(/bull case rests on services/i);

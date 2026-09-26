@@ -782,6 +782,7 @@ function InstrumentPageBody({
             {activeTab === "verdict" && (
               <VerdictTab
                 instrumentId={summary.instrument_id}
+                symbol={summary.identity.symbol}
                 thesis={thesisAsync.data}
                 thesisErrored={thesisErrSticky}
                 currentPrice={summary.price?.current ?? null}
