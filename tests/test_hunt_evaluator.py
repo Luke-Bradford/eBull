@@ -292,6 +292,12 @@ def test_select_arm_includes_ties_and_honours_sign() -> None:
         ev.select_arm({1: math.nan}, sign=1, fraction=0.5)
 
 
+@pytest.mark.parametrize("fraction", [0.0, -0.1, 1.5, math.nan, math.inf])
+def test_a_fraction_outside_zero_one_is_refused(fraction: float) -> None:
+    with pytest.raises(ValueError):
+        ev.select_arm({1: 1.0, 2: 2.0}, sign=1, fraction=fraction)
+
+
 def test_the_evaluator_code_is_part_of_the_harness_model_id() -> None:
     constants = hh._model_constants()["model_code_sha256"]
     assert constants["app.services.hunt_evaluator"] == hashlib.sha256(Path(str(ev.__file__)).read_bytes()).hexdigest()

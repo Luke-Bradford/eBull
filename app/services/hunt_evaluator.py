@@ -137,6 +137,8 @@ def selection_count(fraction: float, scored: int) -> int:
     would be 8."""
     if scored < 0:
         raise ValueError(f"scored must be >= 0, got {scored}")
+    if not (math.isfinite(fraction) and 0.0 < fraction <= 1.0):
+        raise ValueError(f"fraction must be in (0, 1], got {fraction}")
     return math.ceil(Fraction(repr(fraction)) * scored)
 
 
@@ -225,7 +227,8 @@ def position_path(
             last_price = close
             pending = 0.0
         if terminal is not None and d == terminal:
-            assert terminal_fraction is not None
+            if terminal_fraction is None:  # unreachable: checked on entry; narrows the type
+                raise ValueError("a terminating series needs a terminal fraction")
             # Credit any dividend still pending (no later mark exists), then haircut the whole value.
             value *= (ref + pending) / ref
             value *= terminal_fraction
