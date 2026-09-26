@@ -11,11 +11,12 @@
  *     definition and caveats come from the API so the copy has one source.
  */
 
-import { type JSX, type ReactNode } from "react";
+import { type JSX } from "react";
 
 import { fetchInstrumentShortVolume } from "@/api/instruments";
 import type { IarPositioningSignal, InstrumentShortVolume } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { ReportCard as Card, ReportNote as Note, ReportRow as Row } from "@/components/instrument/ReportCard";
 import { Sparkline } from "@/components/instrument/Sparkline";
 import { EmptyState } from "@/components/states/EmptyState";
 import { formatDate, formatNumber, formatUnsignedPct } from "@/lib/format";
@@ -45,38 +46,6 @@ export function ShortSidePanel({
       <ShortVolumeCard symbol={symbol} />
     </div>
   );
-}
-
-function Card({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}): JSX.Element {
-  return (
-    <div className="rounded border border-slate-200 p-3 dark:border-slate-800">
-      <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-        {title}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }): JSX.Element {
-  return (
-    <div className="flex items-baseline justify-between gap-2 text-xs">
-      <span className="text-slate-500">{label}</span>
-      <span className="font-medium tabular-nums text-slate-700 dark:text-slate-300">
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function Note({ children }: { children: ReactNode }): JSX.Element {
-  return <p className="mt-1.5 text-[10px] text-slate-400">{children}</p>;
 }
 
 /** Why a short-interest read carries no figure, in the reader's own terms. */

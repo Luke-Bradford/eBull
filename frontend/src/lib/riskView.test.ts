@@ -47,6 +47,16 @@ function makeWindow(key: string): RiskWindowMetrics {
     calmar_status: null,
     trailing_status: null,
     excess_cagr_status: null,
+    sector_beta: null,
+    sector_beta_r2: null,
+    sector_beta_n_obs: null,
+    sector_beta_status: null,
+    sector_excess_cagr: null,
+    sector_excess_cagr_status: null,
+    tr_cagr: null,
+    tr_calmar: null,
+    tr_status: null,
+    tr_n_periods: null,
   };
 }
 
