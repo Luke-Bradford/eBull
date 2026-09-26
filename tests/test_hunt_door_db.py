@@ -337,3 +337,15 @@ def test_the_validation_readout_waits_for_every_pin_then_gives_verdicts(
     assert sum(cast(list[int], counts)) == len(series)
     # The readout verifies stored provenance and opens no fresh access.
     assert _count(ebull_test_conn, reads) == before
+
+
+def test_the_power_script_reproduces_the_declarations_power(
+    ebull_test_conn: psycopg.Connection[Any], discovered: dict[str, Any]
+) -> None:
+    """Slice 4: recomputed from stored discovery outcomes alone, equal to the document's."""
+    from scripts.measure_3385_power import measure
+
+    power, matches = measure(ebull_test_conn, discovered["doc"])
+    assert matches and set(power) == {discovered["pinned"].spec_sha256}
+    tampered = {**discovered["doc"], "numbers": {**discovered["doc"]["numbers"], "power": {}}}
+    assert measure(ebull_test_conn, tampered)[1] is False

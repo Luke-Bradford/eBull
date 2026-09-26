@@ -1274,6 +1274,36 @@ def _pin_spec(pin: Mapping[str, Any]) -> TrialSpec:
     return TrialSpec.from_form(pin["spec"])
 
 
+# ---------------------------------------------------------------------------
+# Power, re-executed from a declaration (slice 4)
+# ---------------------------------------------------------------------------
+
+
+def pin_power(conn: psycopg.Connection[Any], doc: Mapping[str, Any]) -> dict[str, Any]:
+    """Every pinned candidate's power statement, recomputed from STORED discovery outcomes
+    only, for the declaration's split (and frozen end, for holdout). A readout, not a
+    search: no price is read. ``scripts/measure_3385_power.py`` compares it to the
+    document; the freeze makes the same comparison inside ``declaration_numbers``.
+    """
+    split = cast(hh.Split, doc["split"])
+    end = date.fromisoformat(str(doc["end_session"])) if split == "holdout" else None
+    discovery = {
+        outcome.candidate_sha256: outcome for outcome in _discovery_outcomes(conn) if outcome.hunt_id == doc["hunt_id"]
+    }
+    power: dict[str, Any] = {}
+    for pin in doc["pins"]:
+        spec = TrialSpec.from_form(pin["spec"])
+        source = discovery.get(spec.candidate_sha256)
+        grid = hh.split_grid(split, lag=spec.lag, h=spec.h, end=end)
+        if isinstance(grid, StatRefused):
+            power[spec.spec_sha256] = {"blocked": f"target_{grid.reason}"}
+        else:
+            power[spec.spec_sha256] = power_statement(
+                None if source is None else source.active_series, target_observations=len(grid.sessions), h=spec.h
+            )
+    return dict(sorted(power.items()))
+
+
 __all__ = [
     "CORROBORATION_PARTLY_SEEN",
     "CandidateReadout",
@@ -1294,6 +1324,7 @@ __all__ = [
     "holdout_declaration_numbers",
     "holdout_pins",
     "holdout_readout",
+    "pin_power",
     "power_statement",
     "stored_screening_p",
     "tripwire",
