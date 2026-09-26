@@ -1,22 +1,25 @@
 /**
  * Rank delta visual cell.
  *
- * The backend convention (app/services/scoring.py): rank_delta is the
- * change in rank vs the most recent prior run for the same model_version.
- * A positive delta means the instrument moved DOWN the table (rank number
- * went up), which is a worsening signal; a negative delta means it moved
- * UP (improved). Color follows that meaning, not the raw sign of the
- * number.
+ * The backend convention (app/services/scoring.py::compute_rankings):
+ * rank_delta = prior_rank − current_rank, vs the most recent prior run of
+ * the same model_version. A POSITIVE delta means the instrument moved UP the
+ * table (rank number fell), which is an improvement; a negative delta means
+ * it moved down. (#3389: this cell used to read the sign the other way round;
+ * `reporting.py`'s risers = delta > 0 was right; the full-population check
+ * of stored rows is recorded on the #3389 slice (b) PR.)
  *
  * Color uses the operator-ui-conventions palette only:
- *   - emerald  improved (delta < 0)
- *   - red      worsened (delta > 0)
+ *   - emerald  improved (delta > 0)
+ *   - red      worsened (delta < 0)
  *   - slate    unchanged or unknown (delta == 0 or null)
  *
  * The arrow glyph and a screen-reader label are always present so the
  * signal does not rely on color alone.
  */
-export function RankDeltaCell({ delta }: { delta: number | null }) {
+import type { JSX } from "react";
+
+export function RankDeltaCell({ delta }: { delta: number | null }): JSX.Element {
   if (delta === null) {
     return (
       <span className="text-slate-400">
@@ -33,7 +36,7 @@ export function RankDeltaCell({ delta }: { delta: number | null }) {
       </span>
     );
   }
-  const improved = delta < 0;
+  const improved = delta > 0;
   const magnitude = Math.abs(delta);
   return (
     <span className={improved ? "text-emerald-600" : "text-red-600"}>

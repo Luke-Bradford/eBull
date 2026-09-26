@@ -33,7 +33,7 @@ from app.db import get_conn
 # Single source of truth for the default model version (#1633: v1.2-balanced). The
 # read endpoints must default to the same version the scoring pass writes, or the
 # rankings page shows stale rows of a version no longer produced.
-from app.services.scoring import _DEFAULT_MODEL_VERSION
+from app.services.scoring import _DEFAULT_MODEL_VERSION, family_weights
 from app.services.sector_classification import resolve_sector_spdr, sector_spdr_case_sql
 
 logger = logging.getLogger(__name__)
@@ -267,11 +267,35 @@ class ScoreHistoryResponse(BaseModel):
     items: list[ScoreHistoryItem]
 
 
+# Why an instrument carries no current rank (#3389). Ordered by precedence: the
+# durable exclusions (`GET /rankings` gates on `is_tradable` and
+# `filings_status = 'analysable'`) explain absence from a run better than the
+# absence itself.
+NotRankedReason = Literal["not_tradable", "not_analysable", "not_in_latest_run", "no_rank"]
+
+
+class FamilyContribution(BaseModel):
+    """One family's share of ``raw_total``: ``weight × score`` under the row's model_version."""
+
+    family: str
+    weight: float
+    score: float
+    contribution: float
+
+
 class VerdictScore(BaseModel):
     scored_at: datetime
     model_version: str
     rank: int | None
     rank_delta: int | None
+    # True iff `GET /rankings` would list this row: the latest run of its
+    # model_version, tradable, analysable, with a rank. `rank` above is the
+    # stored value and may belong to an older run; read it only when ranked.
+    ranked: bool
+    not_ranked_reason: NotRankedReason | None
+    filings_status: str | None
+    # Largest first. Empty for a model_version with no known weights.
+    contributions: list[FamilyContribution]
     total_score: float | None
     raw_total: float | None
     quality_score: float | None
@@ -312,6 +336,39 @@ class VerdictResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def not_ranked_reason(
+    *, in_latest_run: bool, is_tradable: bool, filings_status: str | None, rank: int | None
+) -> NotRankedReason | None:
+    """``None`` iff the row passes the same gate as ``GET /rankings`` (#3389)."""
+    if not is_tradable:
+        return "not_tradable"
+    if filings_status != "analysable":
+        return "not_analysable"
+    if not in_latest_run:
+        return "not_in_latest_run"
+    if rank is None:
+        return "no_rank"
+    return None
+
+
+def family_contributions(
+    weights: Mapping[str, float] | None, scores: Mapping[str, float | None]
+) -> list[FamilyContribution]:
+    """``weight × score`` per family with a stored score, largest first (#3389).
+
+    These sum to the row's ``raw_total`` (pre-penalty), so they are the score's
+    actual composition rather than a "top factors" heuristic.
+    """
+    if weights is None:
+        return []
+    items = [
+        FamilyContribution(family=family, weight=weight, score=score, contribution=weight * score)
+        for family, weight in weights.items()
+        if (score := scores.get(family)) is not None
+    ]
+    return sorted(items, key=lambda c: c.contribution, reverse=True)
 
 
 def _parse_optional_float(row: dict[str, object], key: str) -> float | None:
@@ -715,8 +772,14 @@ def get_verdict(
                s.quality_score, s.value_score, s.turnaround_score,
                s.momentum_score, s.sentiment_score, s.confidence_score,
                s.data_completeness, s.completeness_tier,
-               s.penalties_json, s.explanation, s.analytics_json
+               s.penalties_json, s.explanation, s.analytics_json,
+               i.is_tradable, c.filings_status,
+               s.scored_at = (
+                   SELECT MAX(scored_at) FROM scores WHERE model_version = %(mv)s
+               ) AS in_latest_run
         FROM scores s
+        JOIN instruments i ON i.instrument_id = s.instrument_id
+        LEFT JOIN coverage c ON c.instrument_id = s.instrument_id
         WHERE s.instrument_id = %(instrument_id)s
           AND s.model_version = %(mv)s
         ORDER BY s.scored_at DESC
@@ -731,21 +794,40 @@ def get_verdict(
     if row is None:
         return VerdictResponse(instrument_id=instrument_id, score=None)
 
+    rank = _parse_optional_int(row, "rank")
+    filings_status = row["filings_status"]
+    reason = not_ranked_reason(
+        in_latest_run=bool(row["in_latest_run"]),
+        is_tradable=bool(row["is_tradable"]),
+        filings_status=filings_status,  # type: ignore[arg-type]
+        rank=rank,
+    )
+    family_scores = {
+        family: _parse_optional_float(row, f"{family}_score")
+        for family in ("quality", "value", "turnaround", "momentum", "sentiment", "confidence")
+    }
     return VerdictResponse(
         instrument_id=instrument_id,
         score=VerdictScore(
             scored_at=row["scored_at"],  # type: ignore[arg-type]
             model_version=row["model_version"],  # type: ignore[arg-type]
-            rank=_parse_optional_int(row, "rank"),
+            rank=rank,
             rank_delta=_parse_optional_int(row, "rank_delta"),
+            ranked=reason is None,
+            not_ranked_reason=reason,
+            filings_status=filings_status,  # type: ignore[arg-type]
+            contributions=family_contributions(
+                family_weights(row["model_version"]),  # type: ignore[arg-type]
+                family_scores,
+            ),
             total_score=_parse_optional_float(row, "total_score"),
             raw_total=_parse_optional_float(row, "raw_total"),
-            quality_score=_parse_optional_float(row, "quality_score"),
-            value_score=_parse_optional_float(row, "value_score"),
-            turnaround_score=_parse_optional_float(row, "turnaround_score"),
-            momentum_score=_parse_optional_float(row, "momentum_score"),
-            sentiment_score=_parse_optional_float(row, "sentiment_score"),
-            confidence_score=_parse_optional_float(row, "confidence_score"),
+            quality_score=family_scores["quality"],
+            value_score=family_scores["value"],
+            turnaround_score=family_scores["turnaround"],
+            momentum_score=family_scores["momentum"],
+            sentiment_score=family_scores["sentiment"],
+            confidence_score=family_scores["confidence"],
             data_completeness=_parse_optional_float(row, "data_completeness"),
             completeness_tier=row["completeness_tier"],  # type: ignore[arg-type]
             penalties_json=row["penalties_json"],  # type: ignore[arg-type]

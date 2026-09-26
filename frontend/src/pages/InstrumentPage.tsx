@@ -40,7 +40,9 @@ import type {
   InstrumentSummary,
   NewsListResponse,
   ThesisDetail,
+  VerdictResponse,
 } from "@/api/types";
+import { fetchScoreVerdict } from "@/api/verdict";
 import { OfferingBlock } from "@/components/instrument/OfferingBlock";
 import { TenderBlock } from "@/components/instrument/TenderBlock";
 import { InstrumentTradesTable } from "@/components/instrument/InstrumentTradesTable";
@@ -616,6 +618,13 @@ function InstrumentPageBody({
     [instrumentId],
   );
 
+  // Rank line on the strip (#3389 (b)). VerdictTab keeps its own fetch so the
+  // tab still loads independently of the strip.
+  const verdictAsync = useAsync<VerdictResponse>(
+    () => fetchScoreVerdict(instrumentId),
+    [instrumentId],
+  );
+
   const positionAsync = useAsync<InstrumentPositionDetail | null>(
     async () => {
       try {
@@ -710,6 +719,8 @@ function InstrumentPageBody({
         onAdd={() => setAddOpen(true)}
         onClose={handleCloseClick}
         onGenerateThesis={handleGenerateThesis}
+        verdictScore={verdictAsync.loading ? undefined : verdictAsync.data?.score}
+        verdictErrored={verdictAsync.error !== null}
         generatingThesis={thesisBusy}
       />
       {thesisErr !== null ? (

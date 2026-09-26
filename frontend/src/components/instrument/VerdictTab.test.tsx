@@ -21,7 +21,11 @@ function makeVerdict(
       scored_at: "2026-06-29T09:00:00Z",
       model_version: "v1.2-balanced",
       rank: 5,
-      rank_delta: -2,
+      rank_delta: 2,
+      ranked: true,
+      not_ranked_reason: null,
+      filings_status: "analysable",
+      contributions: [],
       total_score: 0.82,
       raw_total: 0.87,
       quality_score: 0.9,
@@ -108,6 +112,19 @@ describe("VerdictTab", () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText(/not yet scored/i)).toBeInTheDocument();
+  });
+
+  it("hides a stale stored rank and says why it is not ranked (#3389 b)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({ ranked: false, not_ranked_reason: "not_tradable", rank: 5 }),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={null} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/not ranked · not tradable on eToro/)).toBeInTheDocument();
+    expect(screen.queryByText(/rank #5/)).not.toBeInTheDocument();
   });
 
   it("renders error state on fetch failure", async () => {

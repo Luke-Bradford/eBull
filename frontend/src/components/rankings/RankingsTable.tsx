@@ -34,7 +34,7 @@ interface ColumnDef {
 
 const COLUMNS: ReadonlyArray<ColumnDef> = [
   { sortKey: "rank", label: "Rank", align: "right", defaultDir: "asc" },
-  { sortKey: "rank_delta", label: "Δ", align: "right", defaultDir: "asc" },
+  { sortKey: "rank_delta", label: "Δ", align: "right", defaultDir: "desc" },
   { sortKey: "symbol", label: "Symbol", align: "left", defaultDir: "asc" },
   { sortKey: null, label: "Sector", align: "left", defaultDir: "asc" },
   { sortKey: "coverage_tier", label: "Tier", align: "right", defaultDir: "asc" },

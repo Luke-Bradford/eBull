@@ -32,10 +32,12 @@ import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { Sparkline } from "@/components/instrument/Sparkline";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
 import { HeuristicBadge } from "@/components/rankings/HeuristicBadge";
+import { RankDeltaCell } from "@/components/rankings/RankDeltaCell";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { completenessTone } from "@/lib/badgeTone";
+import { notRankedReasonText } from "@/lib/rankStatus";
 import { toScoreChips } from "@/lib/scoreExplanation";
 
 export interface VerdictTabProps {
@@ -176,21 +178,15 @@ export function VerdictTab({
             <span className="text-xs text-slate-500">total score</span>
           </div>
           <HeuristicBadge modelVersion={score.model_version} />
-          {score.rank !== null && (
+          {/* #3389 (b): a stored rank can belong to an older run, so it is
+              shown only when the row passes the `GET /rankings` gate. */}
+          {score.ranked && score.rank !== null ? (
             <span className="text-xs text-slate-500">
-              rank #{score.rank}
-              {score.rank_delta !== null && score.rank_delta !== 0 && (
-                <span
-                  className={
-                    score.rank_delta < 0
-                      ? "ml-1 text-emerald-600 dark:text-emerald-400"
-                      : "ml-1 text-red-600 dark:text-red-400"
-                  }
-                >
-                  {score.rank_delta < 0 ? "▲" : "▼"}
-                  {Math.abs(score.rank_delta)}
-                </span>
-              )}
+              rank #{score.rank} <RankDeltaCell delta={score.rank_delta} />
+            </span>
+          ) : (
+            <span className="text-xs text-slate-500">
+              not ranked · {notRankedReasonText(score)}
             </span>
           )}
           {score.completeness_tier !== null && (
