@@ -7,10 +7,13 @@ budget and closure constants, and recording a look taken outside the harness.
 
 What is NOT here yet, and how it fails meanwhile:
 
-- **The evaluator** (slice 3). ``evaluate`` takes the computation as ``compute``; slice 3b
-  supplies the frozen arm-minus-control evaluator. Its inference (slice 3a) is
-  ``hunt_inference``; its code, and the shared statistics it calls, are hashed into
-  ``HUNT_HARNESS_MODEL_ID``. Nothing in production can register a search today
+- **The computation** (slice 3). ``evaluate`` takes it as ``compute``; the frozen one is
+  :func:`compute_trial`, always (``evaluate`` takes no computation argument):
+  ``hunt_panel`` loads the prices (only this module may import it) and runs
+  ``hunt_compute.compute_panel`` over
+  ``hunt_evaluator`` and ``hunt_inference``. Their code, the shared statistics they call
+  and the reader rule sets are hashed into ``HUNT_HARNESS_MODEL_ID``. Nothing in
+  production can register a search today
   regardless: ``HUNT_BUDGETS`` is empty (a hunt with no budget refuses registration)
   and only ``real_stock_long_x1`` is priced (``HUNT_TARIFF``, re-fetched 2026-09-26).
 - **The audited door** for validation and holdout (slice 2b). Their freezes need slice 3's
@@ -31,29 +34,44 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import logging
 import math
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Literal, get_args
+from typing import Any, Final, Literal, cast, get_args
 
 import psycopg
 from psycopg.pq import TransactionStatus
 
-from app.services import deflated_sharpe, hunt_evaluator, hunt_inference, hunt_view, market_calendar, r6_monthly_trial
-from app.services.cost_model import COST_MODEL_ID
+from app.services import (
+    deflated_sharpe,
+    hunt_compute,
+    hunt_evaluator,
+    hunt_inference,
+    hunt_panel,
+    hunt_view,
+    market_calendar,
+    market_regime,
+    r6_monthly_trial,
+)
+from app.services.cost_model import COST_MODEL_ID, cost_price_basis
 from app.services.indicator_series import Universe
+from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_VERSION
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.r6_exclusion_trial import PROGRAMME_POLICIES, termination_identity
+from app.services.research_split_corrected_reader import SPLIT_CORRECTED_READER_RULE_VERSION
+from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import HOLDOUT_BOUNDARY
-from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION, load_universe_selection
+from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION, load_universe_selection, vendor_for
 
 _LOG = logging.getLogger(__name__)
 
@@ -113,7 +131,25 @@ _FLOAT_TAG: Final = "__float__"
 #: Modules whose CODE is part of the model: editing one is a new model id (spec job 3).
 #: The shared statistics the inference calls are included, so a change to them cannot
 #: return a cached outcome under an unchanged identity (Codex ckpt-2).
-MODEL_CODE_MODULES: Final = (hunt_evaluator, hunt_inference, hunt_view, deflated_sharpe, r6_monthly_trial)
+MODEL_CODE_MODULES: Final = (
+    hunt_compute,
+    hunt_panel,
+    hunt_evaluator,
+    hunt_inference,
+    hunt_view,
+    deflated_sharpe,
+    market_regime,
+    r6_monthly_trial,
+)
+#: What the panel loader reads through: each decides values the computation sees.
+MODEL_INPUT_RULE_SETS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "price_quarantine": QUARANTINE_RULE_SET_VERSION,
+        "split_corrected_reader": SPLIT_CORRECTED_READER_RULE_VERSION,
+        "series_termination": TERMINATION_RULE_VERSION,
+        "benchmark_source": BENCHMARK_SOURCE_RULE_VERSION,
+    }
+)
 
 
 def _module_code_sha256(module: Any) -> str:
@@ -123,6 +159,7 @@ def _module_code_sha256(module: Any) -> str:
 def _model_constants() -> dict[str, Any]:
     return {
         "model_code_sha256": {module.__name__: _module_code_sha256(module) for module in MODEL_CODE_MODULES},
+        "input_rule_sets": dict(MODEL_INPUT_RULE_SETS),
         "splits": {
             split: [start.isoformat(), end.isoformat() if end else None] for split, (start, end) in SPLIT_BOUNDS.items()
         },
@@ -572,6 +609,65 @@ def read_universe_identity(conn: psycopg.Connection[Any], universe: Universe) ->
     )
 
 
+_ARCHIVE_BASES_SQL = """
+    SELECT DISTINCT adjustment_basis FROM research_price_series WHERE vendor = %(vendor)s AND bar_count IS NOT NULL
+"""
+
+
+def _archive_bases_without_nominal_prices(conn: psycopg.Connection[Any], universe: Universe) -> list[str | None]:
+    """Stored bases on which ``cost_price_basis`` is not ``as_traded`` (metadata only; spec "Lanes")."""
+    rows = conn.execute(_ARCHIVE_BASES_SQL, {"vendor": vendor_for(universe)}).fetchall()
+    return sorted((row[0] for row in rows if cost_price_basis(row[0]) != "as_traded"), key=str)
+
+
+# ---------------------------------------------------------------------------
+# The computation
+# ---------------------------------------------------------------------------
+
+
+def load_signal(signal_id: str) -> hunt_compute.Signal:
+    """The ``<module>:<callable>`` signal from ``app/services/hunt_signals``."""
+    match = _SIGNAL_ID.match(signal_id)
+    if match is None:
+        raise ValueError(f"bad signal_id {signal_id!r}")
+    module = importlib.import_module(f"app.services.hunt_signals.{match.group(1)}")
+    signal = getattr(module, match.group(2))
+    if not callable(signal):
+        raise TypeError(f"{signal_id} is not callable")
+    return cast(hunt_compute.Signal, signal)
+
+
+def compute_trial(conn: psycopg.Connection[Any], spec: TrialSpec) -> ComputedOutcome:
+    """The frozen computation ``evaluate`` runs after the search is registered.
+
+    ⚠ Not a parameter of ``evaluate``: a caller-supplied computation could store any
+    statistics under this spec and model id (Codex ckpt-2). Everything that decides a
+    number lives in ``hunt_panel`` / ``hunt_compute``, which the model id hashes.
+    """
+    tariff = HUNT_TARIFF
+    if tariff is None:
+        raise HuntHarnessError("no tariff prices the lane; evaluate refuses before registering")
+    start, end = SPLIT_BOUNDS[spec.split]
+    outcome = hunt_panel.compute_trial(
+        conn,
+        split=spec.split,
+        split_start=start,
+        split_end=end,
+        embargo_sessions=EMBARGO_SESSIONS,
+        universe=spec.universe_identity.universe,
+        lag=spec.lag,
+        h=spec.h,
+        entry_point=spec.entry_point,
+        exit_point=spec.exit_point,
+        sign=spec.sign,
+        selection=spec.selection,
+        constants=spec.constants,
+        commission=tariff.proportional_commission_per_side,
+        signal=load_signal(spec.signal_id),
+    )
+    return ComputedOutcome(outcome.status, outcome.statistics, outcome.active_series)
+
+
 # ---------------------------------------------------------------------------
 # The programme lock
 # ---------------------------------------------------------------------------
@@ -659,9 +755,6 @@ class HuntOutcome:
     outcome_sha256: str
     #: True when an earlier evaluation's stored outcome was returned.
     cached: bool
-
-
-Compute = Callable[[psycopg.Connection[Any], TrialSpec], ComputedOutcome]
 
 
 def outcome_sha256_of(
@@ -777,6 +870,11 @@ def _refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec)
     """Step 2: every reason to refuse that makes no search. Cheap checks first."""
     if running_cost_model_id(spec.lane) is None:
         return HuntRefused("unpriced_lane", f"lane {spec.lane} has no priced tariff in {HUNT_COST_MODEL_PREFIX}")
+    unpriced = _archive_bases_without_nominal_prices(conn, spec.universe_identity.universe)
+    if unpriced:
+        return HuntRefused(
+            "unpriced_lane", f"archive bases {unpriced} are not as-traded, so no nominal cost band applies"
+        )
     timeline = timeline_refusal(spec)
     if timeline is not None:
         return HuntRefused("refused_timeline", timeline)
@@ -831,10 +929,8 @@ def _insert_trial(conn: psycopg.Connection[Any], params: dict[str, Any]) -> int 
     return None if row is None else int(row[0])
 
 
-def evaluate(
-    conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str, compute: Compute
-) -> HuntOutcome | HuntRefused:
-    """Register ``spec`` (committed) before ``compute`` reads a price, then store its outcome.
+def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str) -> HuntOutcome | HuntRefused:
+    """Register ``spec`` (committed) before :func:`compute_trial` reads a price, then store its outcome.
 
     Order (spec "Registration"): programme lock → refusals that make no search →
     ownership / cached outcome → reuse a registration without an outcome, else the
@@ -895,7 +991,7 @@ def evaluate(
         # ⚠ The search is durable BEFORE any price is read.
         conn.commit()
 
-        computed = compute(conn, spec)
+        computed = compute_trial(conn, spec)
         if computed.status not in ("computed", "refused"):
             raise HuntHarnessError(f"compute returned status {computed.status!r}")
         if conn.info.transaction_status != TransactionStatus.IDLE:
