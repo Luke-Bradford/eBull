@@ -75,7 +75,7 @@ describe("investNarrative", () => {
     const n = investNarrative(overview(false), core(state, null), []);
     expect(n.whereMoney).toContain(phrase);
     // Every sleeve state says what happens next, not only the ready one.
-    expect(n.next).toHaveLength(2);
+    expect(n.next.filter((line) => line.includes("index sleeve"))).toHaveLength(1);
     expect(n.whereMoney).not.toContain("Your money is in");
   });
 
