@@ -117,6 +117,12 @@ export function investNarrative(
       );
     } else if (core.state === "ready") {
       next.push("The index sleeve buys nothing until it is switched on.");
+    } else if (core.state === "cash") {
+      next.push("Nothing is bought for the index sleeve: its test chose cash.");
+    } else if (core.state === "awaiting_verdict") {
+      next.push("The index sleeve's result is reviewed next. It may name an instrument or cash.");
+    } else {
+      next.push("The index sleeve buys nothing until the reason it is unavailable is fixed (see Advanced).");
     }
   }
   const registered = overview.strategies.length;

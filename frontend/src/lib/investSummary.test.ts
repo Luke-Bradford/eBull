@@ -74,6 +74,8 @@ describe("investNarrative", () => {
   ] as const)("names the %s sleeve state without inventing a holding", (state, phrase) => {
     const n = investNarrative(overview(false), core(state, null), []);
     expect(n.whereMoney).toContain(phrase);
+    // Every sleeve state says what happens next, not only the ready one.
+    expect(n.next).toHaveLength(2);
     expect(n.whereMoney).not.toContain("Your money is in");
   });
 

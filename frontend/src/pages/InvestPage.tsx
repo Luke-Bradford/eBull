@@ -201,8 +201,8 @@ export function InvestPage() {
         <h2 id="invest-next" className="text-sm font-semibold">What happens next</h2>
         {coreSleeve.error ? <SectionError onRetry={coreSleeve.refetch} /> : null}
         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700 dark:text-slate-200">
-          {narrative.next.map((line) => (
-            <li key={line}>{line}</li>
+          {narrative.next.map((line, index) => (
+            <li key={index}>{line}</li>
           ))}
         </ul>
         <BenchmarkRefusals refusals={data.benchmark_refusals} />
