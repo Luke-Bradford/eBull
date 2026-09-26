@@ -1,9 +1,14 @@
-import { NavLink } from "react-router-dom";
+import { useState } from "react";
+import { NavLink, useLocation } from "react-router-dom";
 
-const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
-  // #3423 — the hands-off page the operator opens first.
-  { to: "/invest", label: "Invest" },
-  { to: "/", label: "Dashboard", end: true },
+type NavItem = { to: string; label: string; end?: boolean };
+
+/** #3423 — the one page the operator needs: put money in, hands off. */
+const PRIMARY_ITEM: NavItem = { to: "/", label: "Invest", end: true };
+
+/** Everything else, behind "Advanced" (operator north star, 2026-09-26). */
+const ADVANCED_ITEMS: NavItem[] = [
+  { to: "/dashboard", label: "Dashboard" },
   { to: "/portfolio", label: "Portfolio" },
   { to: "/calendar", label: "Calendar" },
   { to: "/strategies", label: "Strategies" },
@@ -17,30 +22,57 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
   { to: "/settings", label: "Settings" },
 ];
 
+function navClass({ isActive }: { isActive: boolean }): string {
+  return [
+    "rounded-md px-3 py-2 text-sm font-medium",
+    isActive
+      ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+      : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800",
+  ].join(" ");
+}
+
 export function Sidebar() {
+  const { pathname } = useLocation();
+  // Open on any page that is not Invest, so the active item is never hidden;
+  // collapsed again whenever the route RETURNS to Invest. The reset runs during
+  // render on a path change (prevention-log "Stale `useState` initializer"),
+  // not in an effect, so the collapsed state lands in the same commit.
+  const [advancedOpen, setAdvancedOpen] = useState(pathname !== "/");
+  const [seenPath, setSeenPath] = useState(pathname);
+  if (seenPath !== pathname) {
+    setSeenPath(pathname);
+    setAdvancedOpen(pathname !== "/");
+  }
+  const showAdvanced = advancedOpen || pathname !== "/";
   return (
     <aside className="flex w-56 flex-col border-r border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
       <div className="px-5 py-4 text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
         eBull
       </div>
       <nav className="flex flex-col gap-1 px-2">
-        {NAV_ITEMS.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.end}
-            className={({ isActive }) =>
-              [
-                "rounded-md px-3 py-2 text-sm font-medium",
-                isActive
-                  ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
- : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800",
-              ].join(" ")
-            }
-          >
-            {item.label}
-          </NavLink>
-        ))}
+        <NavLink to={PRIMARY_ITEM.to} end={PRIMARY_ITEM.end} className={navClass}>
+          {PRIMARY_ITEM.label}
+        </NavLink>
+        <button
+          type="button"
+          aria-expanded={showAdvanced}
+          aria-controls="sidebar-advanced"
+          disabled={pathname !== "/"}
+          onClick={() => setAdvancedOpen((open) => !open)}
+          className="mt-3 flex min-h-11 items-center justify-between rounded-md px-3 text-xs font-semibold uppercase tracking-wide text-slate-500 hover:bg-slate-100 disabled:cursor-default disabled:hover:bg-transparent dark:hover:bg-slate-800 dark:disabled:hover:bg-transparent"
+        >
+          Advanced
+          <span aria-hidden="true">{showAdvanced ? "−" : "+"}</span>
+        </button>
+        {showAdvanced ? (
+          <div id="sidebar-advanced" className="flex flex-col gap-1">
+            {ADVANCED_ITEMS.map((item) => (
+              <NavLink key={item.to} to={item.to} end={item.end} className={navClass}>
+                {item.label}
+              </NavLink>
+            ))}
+          </div>
+        ) : null}
       </nav>
       {/* Lightweight Charts attribution (#2151). The library is Apache-2.0,
           and TradingView's terms (node_modules/lightweight-charts/README.md
