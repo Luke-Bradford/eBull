@@ -3,10 +3,11 @@
 Build step 4 of `2026-09-25-pattern-hunt-programme.md`. Refs #2437, #3383, #3385. Security: none. A research
 cache and a pure view change; no broker, auth or order path, no new table.
 
-**Status: v2.** Built on the #3385 harness as merged (`2026-09-26-3385-hunt-harness.md` v5, "the harness spec",
+**Status: v3.** Built on the #3385 harness as merged (`2026-09-26-3385-hunt-harness.md` v5, "the harness spec",
 cited H). Codex ckpt-1 on v1 returned 52 findings (`2026-09-26-3386-ckpt1-v1-findings.md`, verbatim); v2 fixes the
 design-level ones inline and binds the implementation ones to a slice by number (the #3385 lesson: an unfiltered
-whole-spec round does not converge). No hunt has a budget, so no trial can yet be evaluated; on the dev DB
+whole-spec round does not converge). A scoped round on v2 checked the 52 and found 15 gaps (7 incomplete fixes, 8
+new), fixed in v3; see "Revision notes". No hunt has a budget, so no trial can yet be evaluated; on the dev DB
 `hunt_trials` holds 0 rows, so a new model id orphans nothing there (finding 52: that is the only database checked).
 
 ## Premise, measured (2026-09-26, dev DB, discovery through 2008-12-31, `survivorship_free`)
@@ -59,7 +60,8 @@ ex-date order; the arrays preserve the loader's iteration order and a test asser
 
 **Manifest** (`manifest.json`, written last): `format` = `hunt-store-v1`, `key`, `through`, `load_counts`,
 `termination_classes`, and each array file's sha256. `store_content_sha256` = sha256 of the manifest's canonical
-JSON (sorted keys, compact separators; every value a string or integer), so `load_counts` is covered (finding 9).
+JSON (sorted keys, compact separators, UTF-8; containers are objects and arrays, every leaf a string or an
+integer, anything else refused), so `load_counts` is covered (finding 9; v2 round 15).
 
 **Read (findings 14, 17–19).** Each file is read to bytes once, hashed, and decoded from those bytes with
 `allow_pickle=False`; the dtype, rank and length of every array and the CSR invariants are then validated
@@ -68,46 +70,58 @@ and class codes in their domains). Any failure — missing or malformed manifest
 missing hash entry, hash mismatch, truncated or structurally invalid array — is a **miss**. Read returns a whole
 panel's parts or nothing.
 
-**Key (findings 1–3, 12, 30).** Computed in `hunt_store` (hashed), with its own canonical JSON (all values strings
-or integers), from: `format`, `through`, the spec's `universe_identity.form()`, a **quarantine identity**, and
-`HUNT_HARNESS_MODEL_ID`, all passed in by `hunt_panel`.
-- The quarantine identity (finding 2) is new: sha256 over, per admitted series at the rule version,
-  `research_price_quarantine_coverage` (`first_bar`, `last_bar`) and the count of `research_bar_quarantine` rows
-  with `range_usable` false and with `return_usable` false. Read without prices, in `hunt_panel`.
-- The model id hashes every model module and every reader rule set; the universe identity is the metadata identity
-  `evaluate` binds before registration (H contract decision 73).
-- ⚠ The key is **metadata**, so it detects a change of rule, code, population, coverage or series shape, **not** a
-  change of a value that keeps every count and range (a price, volume, dividend amount or split-factor value).
+**Key (findings 1–3, 12, 30).** Computed in `hunt_store` (hashed), with the same canonical JSON, from: `format`,
+`through`, the **registered** `universe_identity.form()` and `HUNT_HARNESS_MODEL_ID`, both handed from
+`hunt_harness.compute_trial` to `hunt_panel.compute_trial` as arguments (v2 round 11; `evaluate` checked that
+identity equal to the live one before registering, H contract decision 73), and a **quarantine identity** that
+`hunt_panel` reads.
+- The quarantine identity (finding 2; v2 rounds 1, 10) is new: sha256 of canonical JSON of, for the admitted
+  series at the rule version, every `research_price_quarantine_coverage` row as (`series_id`, `first_bar`,
+  min(`last_bar`, `through`)) and every `research_bar_quarantine` row with `bar_date` ≤ `through` and either flag
+  false, as (`series_id`, `bar_date`, `range_usable`, `return_usable`), ordered. Exact flags, not counts; no price
+  column. Size, dev DB 2026-09-26: 936 such rows ≤ 2008-12-31 of 16,326 at the rule version (`select count(*),
+  count(*) filter (where bar_date <= '2008-12-31') from research_bar_quarantine where rule_set_version = <v> and
+  (not range_usable or not return_usable)`).
+- Recomputed on every trial, so a hit also requires today's quarantine state (v2 round 9), and recomputed after
+  the computation next to the harness's universe-identity recheck: a difference is `HuntPanelError` (no outcome,
+  retry).
+- ⚠ The key is **metadata**, so it detects a change of rule, code, population, quarantine flags, or a series'
+  counts and date range, **not** a change of a value or an interior bar date that keeps every count and range.
   v1's "never a wrong read" was wrong (finding 1). See residuals.
 
 **Build (findings 7, 22–24, 26, 51).** On a miss, under the programme lock (inside `evaluate`):
 1. remove any `var/hunt_store/.tmp-*` left by a crashed build;
 2. `load_panel_parts` live; write every array and then the manifest into `var/hunt_store/.tmp-<key>-<pid>/`;
    release the live parts;
-3. `read_universe_identity` and the quarantine identity again; on any difference remove the temp directory and
-   raise `HuntPanelError` (an infrastructure error: no outcome, retry) before anything is published;
-4. read the temp directory back with the full read check; failure is an infrastructure error;
+3. read the temp directory back with the full read check; failure is an infrastructure error;
+4. the universe identity (the harness's reader, passed in as a callable) and the quarantine identity again, after
+   the read-back (v2 round 3); on any difference remove the temp directory and raise `HuntPanelError` before
+   anything is published;
 5. if `var/hunt_store/<key>/` exists (a corrupt entry that missed), remove it; `os.replace` the temp directory into
-   place. A crash leaves either no entry (a miss next time) or a whole one.
+   place. No fsync: after a process or system crash the entry may be absent or torn, and a torn entry fails the
+   read check and is a miss, so it is rebuilt (v2 round 4). An identity change after publication leaves an entry
+   under the old key, which no later trial asks for (v2 round 3).
 Other keys' directories are **kept** (finding 10: deleting them defeats reproduction). They change only when the
 model id, identity or through date does; `scripts/` gains no cleanup, the operator removes old ones by hand.
-Peak memory on a miss is the live parts plus the written arrays (~2× the ~0.8 GB bar data); the live parts are
-released before the read-back.
+The live parts are released before the read-back. Peak memory is not estimated here; slice 1 measures it (peak
+RSS on a miss and a hit) in the A/B (v2 round 7).
 
 **Every trial computes on a panel read from the store**, hit or miss: one code path (finding 47).
 
-**Discovery only (finding 27).** `hunt_panel.compute_trial` uses the store only when `split == "discovery"` and
-`split_end` equals the discovery end (checked there, in hashed code); `hunt_harness` passes no key. Validation and
-holdout load live every time. A price file on disk is a read that needs no access row; those splits run a handful
+**Discovery only (finding 27; v2 rounds 5, 12).** `hunt_panel.compute_trial` uses the store exactly when
+`split == "discovery"`, with `through` = `split_end` (the harness's fixed discovery end). Independently,
+`save_parts` refuses parts with a session after `through`, and `load_parts` refuses a manifest whose `through` differs
+from the requested one or whose last session is after it. Validation and holdout load live every time. A price file on disk is a read that needs no access row; those splits run a handful
 of pinned specs, so the saving is not worth the door question.
 
 **Outcome record.** `statistics["load"]` gains `store_key` and `store_content_sha256`, identical on a hit and a
-miss. Whether it was a hit is logged, not stored. While the directory exists the digest identifies the exact bytes
+miss, and both `null` on validation and holdout (v2 round 14). Whether it was a hit is logged, not stored. While the directory exists the digest identifies the exact bytes
 computed on; after removal it identifies them without reproducing them.
 
 **Gated reader (finding 28).** `app.services.hunt_store` joins `_RESEARCH_PRICE_READER_MODULES` in
 `tests/test_sealed_outcome_scripts_are_gated.py`. The test then refuses it to any `scripts/` or `app/services/hunt*`
-module except `hunt_harness`, `hunt_panel` and the grandfathered list, as for the other readers. Direct
+module except `hunt_harness`, `hunt_panel`, the grandfathered `_PRE_HUNT_RESEARCH_READERS` and the test's existing
+gated scripts, exactly as for the other readers (v2 round 6). Direct
 `numpy.load` of the files is outside that import test, as notebooks and shells already are (H "Signals" residual;
 finding 29).
 
@@ -125,7 +139,8 @@ dividends as arguments:
 - `SignalView.dates`: the session dates for indices 0 … t, as a lazy read-only prefix of the panel's `sessions`
   (a new unscaled prefix class; `Prefix` scales numbers, finding 31).
 - `SeriesView.dividend_ordinals` / `SeriesView.dividend_amounts`: the series' ex-date session indices ≤ t, from
-  the dividend arrays' own ordinals (a dividend on a session with no bar is kept, finding 34), and the amounts
+  two parallel arrays `PanelSeries` builds once from its dividend mapping at construction (v2 round 13: never per
+  formation), cut by `bisect` like the bars, from the dividends' own ordinals (a dividend on a session with no bar is kept, finding 34), and the amounts
   multiplied by the same rebase factor k as the prices, so an amount sits on the as-traded basis of t.
 
 The dividends are the panel's, the same records the books credit (H contract decision on dividends; the loader's
@@ -182,13 +197,27 @@ ex-dates, not payment dates.
 counts; no trial evaluated.
 
 ## Declared residuals
-- **Value edits under unchanged metadata** (findings 1, 3, 8, 11): a price, volume, dividend amount or split-factor
-  value changed with every count and range kept is invisible to the key, so the store serves the build's values.
+- **Value edits under unchanged metadata** (findings 1, 3, 8, 11; v2 round 2): a price, volume, dividend amount,
+  split-factor value or interior bar date changed with every count and range kept is invisible to the key, so the store serves the build's values.
   Without the store the same edit changes results under an unchanged identity (H contract decision 73); with it,
   `store_content_sha256` at least records which bytes were used. Archive re-ingests are attended corpus events; the
   operator removes `var/hunt_store/` after one. An A→B→A change during a build is not detected.
+- **Quarantine state is not in the trial identity** (v2 round 8), as in H today: the registered `TrialSpec` binds
+  `universe_identity`, not the quarantine flags. The store key and the post-computation recheck bound it within one
+  computation; across a re-flag between two trials of one hunt, the trials see different masking, as they would
+  without the store.
 - The store is a file any process can read. Discovery needs no door; outcomes still need registration, and a direct
   read is outside the import test like any shell (finding 29).
 - Signals can reach the lazy prefixes' backing arrays by attribute; code review, as today (finding 43).
 - Rebase factor overflow on extreme ratios is the prices' existing arithmetic, now applied to dividends too
   (finding 41).
+
+## Revision notes
+- **v1 → v2:** the 52 ckpt-1 findings: parts without regime labels, CSR and manifest contract, the read check, the
+  build order and crash handling, kept stores, discovery-only, the gated reader, the view fields' cut and
+  representation, the point-in-time assumption, wording on the premise and residuals.
+- **v2 → v3** (scoped round, 15): exact quarantine flags ≤ `through` instead of counts; the identity recheck after the
+  read-back and after the computation; the registered identity handed to the key; torn entries are misses; the
+  store's own `through` checks; `null` store fields off discovery; the canonical JSON's leaves; dividend arrays
+  built once; the memory estimate replaced by a measurement; interior dates and the unbound quarantine state as
+  residuals.
