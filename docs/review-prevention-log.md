@@ -11476,3 +11476,18 @@ neighbouring container and match it.**
   body raise, and does the docstring promise something else?"
 - Enforced in: `app/services/r6_monthly_trial.py::check_parity`,
   `tests/test_r6_monthly_simulator.py::test_parity_refuses_a_malformed_annual_result_with_its_own_error`.
+
+### An unfiltered ckpt-1 on a whole-system spec does not converge — bind detail to slices (#3385)
+
+- Failure: the #3385 hunt-harness spec drew 99, then 130, then 150 Codex ckpt-1 findings across three
+  revisions (`docs/proposals/ta/2026-09-26-3385-ckpt1-v3-findings.md`). Each revision answered the last by
+  specifying more, and every added rule opened new edge cases: v2's fixes (late exits, NAV accounting, a split
+  correlation discount) drew most of v2's own findings. The prompt was correct ("report everything"); the loop
+  was not.
+- Prevention: when a spec's ckpt-1 count does not fall between two rounds, stop revising the whole text. Fix the
+  findings that change the CONTRACT a slice is built against, then list every remaining finding by number
+  against the slice that must resolve it, and put those numbers in that slice's ckpt-2 prompt. Close with one
+  ckpt-1 scoped to two questions: are the claimed fixes real, and is any deferred item actually contract-level?
+  Removing machinery beats adding it when a finding targets a construction choice.
+- Enforced in: `docs/proposals/ta/2026-09-26-3385-hunt-harness.md` ("Implementation obligations",
+  "Revision notes").
