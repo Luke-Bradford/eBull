@@ -148,5 +148,6 @@ It closes hunt 1 or declares its validation.
 The one discovery look ran (#3446, `hunt_trial_id` 1; `scripts.run_hunt_1_discovery --readout` reproduces it).
 Conditions: (1) BY flag **met** (m = 378); (2) active mean > 0 **met** in every base cell (+0.00152/session);
 (3) arm per-trade net **not met**: 0.325% (with dividends) / 0.311% (without) against 1.22%, label "below the
-operator bar (point estimate)". Hunt 1 is closed (`HUNT_CLOSED`); validation is not declared, and (b) stays
-unopened (the per-regime active means range 0.00111–0.00172/session, so no regime lifts the arm near the bar).
+operator bar (point estimate)". Hunt 1 is closed, "no demonstrated edge" (`HUNT_CLOSED`; register entry
+`hunt-1-discovery`, r14). Validation is not declared, and (b) stays unopened because its trigger, an (a2-i) flag,
+did not fire. The per-regime readout is arm − control per session and says nothing about per-regime per-trade net.

@@ -170,7 +170,12 @@ from typing import Final
 #: #3238's A/B, adding 88 searches. Measured the same way before the bump: the
 #: SAME five groups, 488 rows, every one `harness_validation`. It strands nothing
 #: that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-26-r13"
+#:
+#: r14 (2026-09-27, #3387) adds `hunt-1-discovery`, the one log-backed search hunt 1
+#: closed on. M_inh excludes it, so the inherited floor stays 377. Measured the same
+#: way before the bump: the SAME five groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-27-r14"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1170,6 +1175,21 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.FLOOR,
             searches=2,
+        ),
+        DeclaredTrial(
+            trial_id="hunt-1-discovery",
+            description=(
+                "Hunt 1's one discovery search, extreme_loser_reversal_illiquid_v1 (hunt_trial_id 1), closed with "
+                "no candidate declared: arm per-trade net 0.325% below the 1.22% bar (#3387)."
+            ),
+            # ``hunt_door.discovery_register_evidence(conn, "hunt-1")``, run on the dev DB at closure.
+            evidence=(
+                "hunt_trials log; query=SELECT hunt_trial_id FROM hunt_trials WHERE hunt_id = 'hunt-1' AND split = "
+                "'discovery' AND registered_at <= '2026-09-26T23:53:59.426092+00:00' ORDER BY hunt_trial_id; "
+                "closed_at=2026-09-26T23:53:59.426092+00:00; "
+                "ids_sha256=6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b; n=1"
+            ),
+            exactness=TrialExactness.EXACT,
         ),
     ),
 )

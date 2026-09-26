@@ -275,9 +275,12 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
         r13 (2026-09-26, #3385 slice 3c-iv) added five entries (88 searches) for
         #2827's post-cutoff batches and #3238's A/B; the same command returned the
         same five groups, 488 rows, all ``harness_validation``.
+
+        r14 (2026-09-27, #3387) added ``hunt-1-discovery`` (one search); the same
+        command returned the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 377
-        assert len(TRIAL_REGISTER.trials) == 41
+        assert TRIAL_REGISTER.declared_count == 378
+        assert len(TRIAL_REGISTER.trials) == 42
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1
