@@ -46,7 +46,8 @@ class Bars:
         count = len(self.ordinals)
         if any(len(column) != count for column in (self.open, self.high, self.low, self.close, self.volume)):
             raise ValueError("every bar column must have one value per ordinal")
-        if any(later <= earlier for earlier, later in zip(self.ordinals[:-1], self.ordinals[1:], strict=True)):
+        ordinals = self.ordinals
+        if any(ordinals[i + 1] <= ordinals[i] for i in range(count - 1)):
             raise ValueError("ordinals must be strictly increasing")
 
 
