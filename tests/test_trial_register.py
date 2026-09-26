@@ -148,7 +148,6 @@ class TestTheShippedDeclaration:
             "s10-relative-strength-leader",
         } <= TRIAL_REGISTER.trial_ids
 
-
     def test_the_2832_and_2840_reconciliation(self) -> None:
         """#3385 slice 1: the s8 fan #2840 arm 1's run stored is charged; the
         unrun arm 2 (s12) is not — only outcome-free censuses touched it."""
