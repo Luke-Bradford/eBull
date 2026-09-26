@@ -110,6 +110,28 @@ describe("VerdictTab", () => {
       days: [],
       withheld_reason: null,
     });
+    vi.spyOn(instrumentsApi, "fetchInstrumentFairValueBand").mockResolvedValue({
+      symbol: "AAPL",
+      currency: "USD",
+      method_version: "fvb_v5",
+      label: "Deterministic peer band — not a validated fair value.",
+      definition: "d",
+      available: false,
+      reason: "no_band",
+      quality_status: null,
+      bear_value: null,
+      base_value: null,
+      bull_value: null,
+      as_of_date: null,
+      ttm_end: null,
+      price_as_of: null,
+      computed_at: null,
+      stale: false,
+      stale_after_days: 7,
+      target_basis: null,
+      cross_leg_base_ratio: null,
+      legs: [],
+    });
     vi.spyOn(instrumentsApi, "fetchInstrumentRiskMetrics").mockResolvedValue({
       symbol: "AAPL",
       as_of_date: null,
@@ -153,6 +175,7 @@ describe("VerdictTab", () => {
     // Short-sale volume does not depend on a score (#3390).
     expect(screen.getByText("Short side")).toBeInTheDocument();
     expect(await screen.findByText("No risk metrics computed")).toBeInTheDocument();
+    expect(await screen.findByText(/No band has been computed/)).toBeInTheDocument();
     expect(await screen.findByText("No short-sale volume held")).toBeInTheDocument();
   });
 
