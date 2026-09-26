@@ -11553,3 +11553,15 @@ neighbouring container and match it.**
 - Prevention: for any message or docstring naming an ordering ("before registering", "after commit"), check
   the call site's actual position. Self-review prompt: "where in the caller's sequence does this line run?"
 - Enforced in: `app/services/hunt_harness.py::compute_trial`.
+
+### An immutable freeze must pre-check every refusal its door will apply (#3385)
+
+- Failure: slice 2b-i's validation freeze checked that each pinned candidate was BY-flagged, owned and
+  complete, but not whether a recorded outside look had already BURNED it in validation. The freeze would have
+  committed the hunt's one immutable declaration, and every later `evaluate` of that pin would have refused
+  `split_burned`: a batch that can never be opened and can never be re-declared. (Codex checkpoint 2.)
+- Prevention: when a freeze writes an append-only row that gates a later door, enumerate the door's refusals
+  and ask for each one whether the freeze can already know it. Self-review prompt: "which refusal of
+  `evaluate` could this pin hit after the freeze, and why didn't the freeze refuse first?"
+- Enforced in: `app/services/hunt_door.py::declaration_numbers` (uses `hunt_harness.burning_look`, shared with
+  `_refusal_before_registration`), `tests/test_hunt_door_db.py::test_a_burned_validation_candidate_cannot_be_pinned`.

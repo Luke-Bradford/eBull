@@ -16,9 +16,12 @@ What is NOT here yet, and how it fails meanwhile:
   production can register a search today
   regardless: ``HUNT_BUDGETS`` is empty (a hunt with no budget refuses registration)
   and only ``real_stock_long_x1`` is priced (``HUNT_TARIFF``, re-fetched 2026-09-26).
-- **The audited door** for validation and holdout (slice 2b). Their freezes need slice 3's
-  M, V[SR] and BY numbers, so the door ships after it. Until then ``evaluate`` refuses
-  both splits with ``door_unavailable`` before registering.
+- **The audited door.** Validation (slice 2b-i): ``hunt_door`` freezes a hunt's batch
+  declaration; ``evaluate`` passes ``result_ledger``'s door with a membership check
+  (a spec the frozen declaration did not pin refuses ``spec_not_in_declaration``,
+  audited through ``sql/340``, and registers nothing), commits the access row with the
+  registration before any price read, and re-verifies its provenance before storing
+  the outcome. Holdout (slice 2b-ii) still refuses ``door_unavailable``.
 
 ⚠⚠ THE LOG COMES BEFORE THE NUMBER. A discovery search is committed to ``hunt_trials``
 before ``compute`` reads a single price, so a crash, a refusal or an abandoned run is
@@ -64,11 +67,19 @@ from app.services import (
     r6_monthly_trial,
 )
 from app.services.cost_model import COST_MODEL_ID, cost_price_basis
+from app.services.hunt_inference import StatRefused
 from app.services.indicator_series import Universe
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_VERSION
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.r6_exclusion_trial import PROGRAMME_POLICIES, termination_identity
 from app.services.research_split_corrected_reader import SPLIT_CORRECTED_READER_RULE_VERSION
+from app.services.result_ledger import (
+    FrozenPreregistration,
+    HoldoutAccess,
+    PreregDeclarationRefused,
+    require_outcome_access_with_declaration,
+    verify_outcome_access_provenance,
+)
 from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import HOLDOUT_BOUNDARY
@@ -89,6 +100,8 @@ RefusalReason = Literal[
     "hunt_closed",
     "discovery_closed",
     "door_unavailable",
+    "spec_not_in_declaration",
+    "door_refused",
     "no_budget",
     "budget_exhausted",
     "candidate_owned_by_other_hunt",
@@ -123,6 +136,7 @@ HUNT_COST_MODEL_PREFIX: Final = "hunt-cost-v1"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HUNT_ID = re.compile(r"^hunt-[1-9][0-9]*$")
+HUNT_ID_PATTERN: Final = _HUNT_ID
 _FAMILY = re.compile(r"^[a-z][a-z0-9_]*$")
 #: ``<module>:<callable>`` inside ``app/services/hunt_signals``.
 _SIGNAL_ID = re.compile(r"^([a-z][a-z0-9_]*):([a-z_][a-z0-9_]*)$")
@@ -508,6 +522,19 @@ class TrialSpec:
         """The canonical form stored as ``hunt_trials.spec`` (a detached copy)."""
         return json.loads(self._form_json)
 
+    @classmethod
+    def from_form(cls, form: Mapping[str, Any]) -> TrialSpec:
+        """Rebuild a spec from its canonical form (a declaration's pin); the round trip must
+        reproduce the form exactly, so a pin cannot carry a field the spec would drop."""
+        fields_ = dict(decode_form(dict(form)))
+        universe = fields_.pop("universe_identity")
+        if not isinstance(universe, Mapping):
+            raise ValueError("universe_identity must be a mapping")
+        spec = cls(universe_identity=UniverseIdentity(**universe), **fields_)
+        if spec.form() != dict(form):
+            raise ValueError("the form does not round-trip through TrialSpec")
+        return spec
+
     @property
     def candidate_sha256(self) -> str:
         return candidate_sha256_of(self.form())
@@ -673,6 +700,151 @@ def compute_trial(conn: psycopg.Connection[Any], spec: TrialSpec) -> ComputedOut
     return ComputedOutcome(outcome.status, outcome.statistics, outcome.active_series)
 
 
+def split_sessions(split: Split, *, end: date | None = None) -> tuple[date, ...]:
+    """The split's NYSE sessions (calendar only). ``end`` is the holdout's frozen end."""
+    start, split_end = SPLIT_BOUNDS[split]
+    last = split_end if split_end is not None else end
+    if last is None:
+        raise ValueError("the holdout end session is frozen in its declaration")
+    return hunt_panel.nyse_sessions(start, last)
+
+
+def split_grid(split: Split, *, lag: int, h: int, end: date | None = None) -> hunt_evaluator.Grid | StatRefused:
+    """A split's fixed grid from the calendar alone (no price is read): what ``compute_trial``
+    builds, with the same embargo rule (0 for discovery). Ordinals index :func:`split_sessions`."""
+    sessions = split_sessions(split, end=end)
+    return hunt_evaluator.formation_grid(
+        sessions,
+        start=sessions[0],
+        end=sessions[-1],
+        lag=lag,
+        h=h,
+        embargo=0 if split == "discovery" else EMBARGO_SESSIONS,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hunt declarations (the pins a door look is checked against)
+# ---------------------------------------------------------------------------
+
+HUNT_DECLARATION_KIND: Final = "hunt-declaration-v1"
+#: A validation batch is one declaration; a holdout is ``v1`` only.
+HUNT_DECLARATION_VERSION: Final = "v1"
+
+
+def declaration_strategy_id(hunt_id: str, split: Split) -> str:
+    """The #2599 trial identity of a hunt's validation or holdout declaration."""
+    return f"{hunt_id}-{split}"
+
+
+def declaration_contract_version(doc_sha256: str) -> str:
+    """The #2599 row's ``contract_version``: its digest then covers the document's hash (``sql/428``)."""
+    return f"{HUNT_DECLARATION_KIND}:{doc_sha256}"
+
+
+@dataclass(frozen=True)
+class HuntDeclaration:
+    """A frozen hunt declaration as ``sql/428`` stores it, digest re-verified on read."""
+
+    declaration_id: int
+    hunt_id: str
+    split: Split
+    doc_path: str
+    doc: Mapping[str, Any]
+    doc_sha256: str
+
+    @property
+    def pinned_spec_sha256(self) -> frozenset[str]:
+        return frozenset(str(pin["spec_sha256"]) for pin in self.doc["pins"])
+
+
+_SELECT_HUNT_DECLARATION = """
+    SELECT declaration_id, hunt_id, split, doc_path, doc, doc_sha256
+    FROM hunt_declarations
+    WHERE declaration_id = %(declaration_id)s
+"""
+
+
+def hunt_declaration_from_row(row: tuple[Any, ...]) -> HuntDeclaration:
+    declaration_id, hunt_id, split, doc_path, doc_form, stored_sha256 = row
+    if sha256_form(doc_form) != stored_sha256:
+        raise HuntHarnessError(f"hunt declaration {declaration_id}'s document does not match its doc_sha256")
+    return HuntDeclaration(
+        declaration_id=int(declaration_id),
+        hunt_id=str(hunt_id),
+        split=cast(Split, split),
+        doc_path=str(doc_path),
+        doc=doc_form,
+        doc_sha256=str(stored_sha256),
+    )
+
+
+def load_hunt_declaration(conn: psycopg.Connection[Any], declaration_id: int) -> HuntDeclaration | None:
+    row = conn.execute(_SELECT_HUNT_DECLARATION, {"declaration_id": declaration_id}).fetchone()
+    return None if row is None else hunt_declaration_from_row(row)
+
+
+def _membership_codes(conn: psycopg.Connection[Any], frozen: FrozenPreregistration, spec: TrialSpec) -> tuple[str, ...]:
+    """Obligation 91: run by ``result_ledger``'s door under its trial lock, against the
+    declaration that door loaded."""
+    declaration = load_hunt_declaration(conn, frozen.declaration_id)
+    if declaration is None:
+        return ("hunt_declaration_missing",)
+    if frozen.declaration.contract_version != declaration_contract_version(declaration.doc_sha256):
+        return ("hunt_declaration_contract_mismatch",)
+    if spec.spec_sha256 not in declaration.pinned_spec_sha256:
+        return ("spec_not_in_declaration",)
+    return ()
+
+
+@dataclass(frozen=True)
+class _DoorPass:
+    access_id: int
+    declaration_id: int
+    declaration_sha256: str
+
+
+def _pass_door(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str) -> _DoorPass | HuntRefused:
+    """``result_ledger``'s audited door for ``spec``'s split, with the membership check.
+
+    The access row is written in the caller's transaction and commits with the
+    registration, before any price read. A refusal is recorded through ``sql/340`` by the
+    door itself and rolls back this transaction: nothing is registered.
+    """
+    access = HoldoutAccess(
+        strategy_id=declaration_strategy_id(spec.hunt_id, spec.split),
+        strategy_version=HUNT_DECLARATION_VERSION,
+        access_kind="read",
+        accessed_by=registered_by,
+        purpose=f"#3385 hunt {spec.split} evaluate of spec {spec.spec_sha256}",
+    )
+    try:
+        access_id, frozen = require_outcome_access_with_declaration(
+            cast(psycopg.Connection[tuple], conn),
+            access,
+            membership=lambda declaration: _membership_codes(conn, declaration, spec),
+        )
+    except PreregDeclarationRefused as refused:
+        conn.rollback()
+        reason: RefusalReason = (
+            "spec_not_in_declaration" if refused.refusals == ("spec_not_in_declaration",) else "door_refused"
+        )
+        return HuntRefused(reason, ", ".join(refused.refusals))
+    return _DoorPass(access_id, frozen.declaration_id, frozen.declaration_sha256)
+
+
+def _verify_door(conn: psycopg.Connection[Any], spec: TrialSpec, door: _DoorPass) -> None:
+    """#2614's re-check before an outcome is stored or returned. A failure is not a result:
+    it raises (no outcome; the registration is retried)."""
+    verify_outcome_access_provenance(
+        cast(psycopg.Connection[tuple], conn),
+        strategy_id=declaration_strategy_id(spec.hunt_id, spec.split),
+        strategy_version=HUNT_DECLARATION_VERSION,
+        declaration_id=door.declaration_id,
+        access_id=door.access_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The programme lock
 # ---------------------------------------------------------------------------
@@ -825,7 +997,8 @@ _INSERT_OUTCOME = """
     INSERT INTO hunt_trial_outcomes (
         hunt_trial_id, status, statistics, active_series, access_id, declaration_sha256, outcome_sha256
     ) VALUES (
-        %(trial)s, %(status)s, %(statistics)s::jsonb, %(active_series)s::jsonb, NULL, NULL, %(outcome)s
+        %(trial)s, %(status)s, %(statistics)s::jsonb, %(active_series)s::jsonb, %(access_id)s,
+        %(declaration_sha256)s, %(outcome)s
     )
 """
 
@@ -885,24 +1058,35 @@ def _refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec)
         return HuntRefused("refused_timeline", timeline)
     if spec.hunt_id in HUNT_CLOSED:
         return HuntRefused("hunt_closed", f"{spec.hunt_id} closed: {HUNT_CLOSED[spec.hunt_id]}")
-    if spec.split != "discovery":
+    if spec.split == "holdout":
         return HuntRefused(
-            "door_unavailable", f"the audited {spec.split} door ships in #3385 slice 2b; nothing may open it yet"
+            "door_unavailable", "the audited holdout door ships in #3385 slice 2b-ii; nothing may open it yet"
         )
     if spec.hunt_id not in HUNT_BUDGETS:
         return HuntRefused("no_budget", f"{spec.hunt_id} has no HUNT_BUDGETS entry; the #3387 PR opening it sets one")
-    burn = conn.execute(
-        _SELECT_BURN, {"split": spec.split, "candidate": spec.candidate_sha256, "hunt": spec.hunt_id}
-    ).fetchone()
+    burn = burning_look(conn, split=spec.split, candidate_sha256=spec.candidate_sha256, hunt_id=spec.hunt_id)
     if burn is not None:
-        return HuntRefused("split_burned", f"{spec.split} burned by the recorded look {burn[0]!r}")
-    frozen = conn.execute(_SELECT_VALIDATION_FROZEN, {"strategy_id": f"{spec.hunt_id}-validation"}).fetchone()
-    if frozen is not None:
-        return HuntRefused("discovery_closed", f"{spec.hunt_id}'s validation declaration has frozen")
+        return HuntRefused("split_burned", f"{spec.split} burned by the recorded look {burn!r}")
+    if spec.split == "discovery":
+        frozen = conn.execute(
+            _SELECT_VALIDATION_FROZEN, {"strategy_id": declaration_strategy_id(spec.hunt_id, "validation")}
+        ).fetchone()
+        if frozen is not None:
+            return HuntRefused("discovery_closed", f"{spec.hunt_id}'s validation declaration has frozen")
     mismatches = _identity_mismatches(conn, spec)
     if mismatches:
         return HuntRefused("identity_mismatch", "; ".join(mismatches))
     return None
+
+
+def burning_look(conn: psycopg.Connection[Any], *, split: Split, candidate_sha256: str, hunt_id: str) -> str | None:
+    """The note of the recorded look that burned ``candidate_sha256`` in ``split``, or ``None``.
+
+    Also read by the validation freeze: pinning a burned candidate would freeze an immutable
+    declaration that ``evaluate`` can never open (Codex ckpt-2).
+    """
+    row = conn.execute(_SELECT_BURN, {"split": split, "candidate": candidate_sha256, "hunt": hunt_id}).fetchone()
+    return None if row is None else str(row[0])
 
 
 def _read_outcome(conn: psycopg.Connection[Any], trial_id: int) -> HuntOutcome:
@@ -939,8 +1123,13 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
 
     Order (spec "Registration"): programme lock → refusals that make no search →
     ownership / cached outcome → reuse a registration without an outcome, else the
-    budget check and insert, COMMITTED → compute → re-check the universe identity →
+    budget check (discovery) and insert → for validation, the audited door, whose
+    membership refusal registers nothing → registration (and access row) COMMITTED →
+    compute → re-check the universe identity → re-verify the door's provenance →
     outcome committed → lock released.
+
+    A cached validation outcome is returned only after re-passing the door and its
+    provenance check: every look at a validation number is an audited access.
     """
     if not _is_text(registered_by):
         raise ValueError("registered_by must be non-empty text")
@@ -964,15 +1153,29 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
                     "candidate_owned_by_other_hunt", f"candidate {spec.candidate_sha256} is {owner}'s in {spec.split}"
                 )
             if has_outcome:
+                if spec.split != "discovery":
+                    look = _pass_door(conn, spec, registered_by=registered_by)
+                    if isinstance(look, HuntRefused):
+                        return look
+                    conn.commit()
+                    _verify_door(conn, spec, look)
                 outcome = _read_outcome(conn, trial_id)
                 conn.commit()
                 return outcome
-        else:
+        elif spec.split == "discovery":
             budget = HUNT_BUDGETS[spec.hunt_id]
             used = conn.execute(_COUNT_DISCOVERY_ROWS, {"hunt": spec.hunt_id}).fetchone()
             if used is not None and int(used[0]) >= budget:
                 conn.commit()
                 return HuntRefused("budget_exhausted", f"{spec.hunt_id} has used {used[0]} of {budget} discovery rows")
+        door: _DoorPass | None = None
+        if spec.split != "discovery":
+            # ⚠ Before the insert: a spec the declaration did not pin registers nothing.
+            passed = _pass_door(conn, spec, registered_by=registered_by)
+            if isinstance(passed, HuntRefused):
+                return passed
+            door = passed
+        if existing is None:
             inserted = _insert_trial(
                 conn,
                 {
@@ -993,7 +1196,9 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
                 raise HuntHarnessError(f"registration of {spec.candidate_sha256} conflicted under the programme lock")
             trial_id = inserted
             registered_spec_sha256 = spec.spec_sha256
-        # ⚠ The search is durable BEFORE any price is read.
+        else:
+            trial_id, registered_spec_sha256 = int(existing[0]), str(existing[3])
+        # ⚠ The search (and a door look's access row) is durable BEFORE any price is read.
         conn.commit()
 
         computed = compute_trial(conn, spec)
@@ -1004,6 +1209,8 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
         after = read_universe_identity(conn, spec.universe_identity.universe)
         if after != spec.universe_identity:
             raise HuntHarnessError("the universe identity changed during the computation; retry the registered trial")
+        if door is not None:
+            _verify_door(conn, spec, door)
 
         statistics_form = canonical_form(computed.statistics)
         series_form = None if computed.active_series is None else canonical_form(computed.active_series)
@@ -1011,8 +1218,8 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
             spec_sha256=registered_spec_sha256,
             statistics_form=statistics_form,
             active_series_form=series_form,
-            access_id=None,
-            declaration_sha256=None,
+            access_id=None if door is None else door.access_id,
+            declaration_sha256=None if door is None else door.declaration_sha256,
         )
         conn.execute(
             _INSERT_OUTCOME,
@@ -1021,6 +1228,8 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
                 "status": computed.status,
                 "statistics": dumps_form(statistics_form),
                 "active_series": None if series_form is None else dumps_form(series_form),
+                "access_id": None if door is None else door.access_id,
+                "declaration_sha256": None if door is None else door.declaration_sha256,
                 "outcome": outcome_sha256,
             },
         )

@@ -202,7 +202,7 @@ def test_a_universe_change_during_compute_is_an_infrastructure_error(
         ({"lane": "stock_cfd_long_x1"}, None, "unpriced_lane"),
         ({"h": 1, "entry_point": "close"}, None, "refused_timeline"),
         ({}, ("HUNT_CLOSED", {"hunt-1": "no demonstrated edge"}), "hunt_closed"),
-        ({"split": "validation"}, None, "door_unavailable"),
+        ({"split": "validation"}, None, "door_refused"),
         ({"split": "holdout"}, None, "door_unavailable"),
         ({}, ("HUNT_BUDGETS", {}), "no_budget"),
         ({"signal_code_sha256": "b" * 64}, None, "identity_mismatch"),

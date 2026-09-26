@@ -494,6 +494,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #3385 slice 2a, child-to-parent.
     "hunt_trial_outcomes",
     "hunt_trials",
+    # #3385 slice 2b-i.
+    "hunt_declarations",
 )
 
 # ---------------------------------------------------------------------------
