@@ -78,7 +78,7 @@ describe("RankSummary", () => {
       />,
     );
     expect(screen.getByTestId("rank-summary")).toHaveTextContent(
-      "Not ranked · no analysable SEC filings (insufficient)",
+      "Not ranked · SEC 10-K/10-Q history too thin to rank",
     );
   });
 
