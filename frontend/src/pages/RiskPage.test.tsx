@@ -119,6 +119,16 @@ function makeWindow(
     calmar_status: null,
     trailing_status: null,
     excess_cagr_status: null,
+    sector_beta: null,
+    sector_beta_r2: null,
+    sector_beta_n_obs: null,
+    sector_beta_status: null,
+    sector_excess_cagr: null,
+    sector_excess_cagr_status: null,
+    tr_cagr: null,
+    tr_calmar: null,
+    tr_status: null,
+    tr_n_periods: null,
     ...partial,
   };
 }
@@ -130,6 +140,7 @@ function makePayload(
     symbol: "AAPL",
     as_of_date: "2026-06-12",
     benchmark_symbol: "SPY",
+    sector_benchmark_symbol: null,
     metric_version: "risk_v1",
     windows: [
       makeWindow("1y", { cagr: "0.464879" }),

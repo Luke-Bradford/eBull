@@ -676,6 +676,18 @@ export interface RiskWindowMetrics {
   calmar_status: string | null;
   trailing_status: string | null;
   excess_cagr_status: string | null;
+  sector_beta: string | null;
+  sector_beta_r2: string | null;
+  sector_beta_n_obs: number | null;
+  sector_beta_status: string | null;
+  sector_excess_cagr: string | null;
+  sector_excess_cagr_status: string | null;
+  /** Total return (#1635): price return + reinvested dividends. `tr_status`
+   *  is its own axis: ok | tr_incomplete | no_dividends. */
+  tr_cagr: string | null;
+  tr_calmar: string | null;
+  tr_status: string | null;
+  tr_n_periods: number | null;
 }
 
 export interface DrawdownPoint {
@@ -712,6 +724,7 @@ export interface InstrumentRiskMetrics {
   symbol: string;
   as_of_date: string | null;
   benchmark_symbol: string | null;
+  sector_benchmark_symbol: string | null;
   metric_version: string;
   windows: RiskWindowMetrics[];
   series: RiskSeries | null;

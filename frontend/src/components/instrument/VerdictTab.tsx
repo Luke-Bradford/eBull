@@ -31,6 +31,7 @@ import type {
   VerdictResponse,
 } from "@/api/types";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
+import { RiskInlinePanel } from "@/components/instrument/RiskInlinePanel";
 import { ShortSidePanel } from "@/components/instrument/ShortSidePanel";
 import { Sparkline } from "@/components/instrument/Sparkline";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
@@ -191,7 +192,10 @@ export function VerdictTab({
             }
           />
         </Section>
-        {/* Short-sale volume does not depend on a score (#3390). */}
+        {/* Risk and short-sale volume do not depend on a score (#3390). */}
+        <Section title="Risk">
+          <RiskInlinePanel symbol={symbol} />
+        </Section>
         <Section title="Short side">
           <ShortSidePanel symbol={symbol} shortInterest={null} />
         </Section>
@@ -419,7 +423,12 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 6. Short side (#3390) — short interest and short-sale volume,
+      {/* 6. Risk (#3390) — persisted 3y window, basis and status kept. */}
+      <Section title="Risk">
+        <RiskInlinePanel symbol={symbol} />
+      </Section>
+
+      {/* 6b. Short side (#3390) — short interest and short-sale volume,
           each defined on its own card. */}
       <Section title="Short side">
         <ShortSidePanel

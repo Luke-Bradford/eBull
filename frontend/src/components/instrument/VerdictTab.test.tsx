@@ -110,6 +110,15 @@ describe("VerdictTab", () => {
       days: [],
       withheld_reason: null,
     });
+    vi.spyOn(instrumentsApi, "fetchInstrumentRiskMetrics").mockResolvedValue({
+      symbol: "AAPL",
+      as_of_date: null,
+      benchmark_symbol: null,
+      sector_benchmark_symbol: null,
+      metric_version: "risk_v1",
+      windows: [],
+      series: null,
+    });
   });
 
   it("renders never-scored empty state when score is null", async () => {
@@ -143,6 +152,7 @@ describe("VerdictTab", () => {
     expect(screen.getByText(/not a judgement on the investment/)).toBeInTheDocument();
     // Short-sale volume does not depend on a score (#3390).
     expect(screen.getByText("Short side")).toBeInTheDocument();
+    expect(await screen.findByText("No risk metrics computed")).toBeInTheDocument();
     expect(await screen.findByText("No short-sale volume held")).toBeInTheDocument();
   });
 
