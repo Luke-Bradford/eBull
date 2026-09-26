@@ -1401,7 +1401,7 @@ export type NotScoredReason =
   | "not_a_stock"
   | "not_analysable"
   | "no_inputs"
-  | "pending_run";
+  | "eligible_unscored";
 
 /** Why an instrument has no score row — the ranking engine's eligibility gate (#3389 d). */
 export interface NotScored {

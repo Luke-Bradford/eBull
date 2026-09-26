@@ -280,7 +280,7 @@ class ScoreHistoryResponse(BaseModel):
 # `filings_status = 'analysable'`) explain absence from a run better than the
 # absence itself.
 NotRankedReason = Literal["not_tradable", "not_analysable", "not_in_latest_run", "no_rank"]
-NotScoredReason = Literal["not_tradable", "not_a_stock", "not_analysable", "no_inputs", "pending_run"]
+NotScoredReason = Literal["not_tradable", "not_a_stock", "not_analysable", "no_inputs", "eligible_unscored"]
 
 
 class FamilyContribution(BaseModel):
@@ -394,16 +394,19 @@ def not_scored_reason(
     The gate is ``is_tradable`` AND ``filings_status = 'analysable'`` AND at least one of
     thesis / fundamentals snapshot / price data. A non-stock (ETF, crypto, index…) that
     fails the filings check is reported as outside the model rather than as thin filings:
-    the model ranks companies from their SEC 10-K/10-Q history. ``pending_run`` means the
-    instrument passes the gate today and no run has scored it yet.
+    the model ranks companies from their SEC 10-K/10-Q history. An unknown type is not
+    claimed to be a non-stock. ``eligible_unscored`` means the instrument passes the gate
+    today and no run of the requested model has scored it (the scheduler runs only the
+    default model, so this promises no run).
     """
     if not is_tradable:
         return "not_tradable"
     if filings_status != "analysable":
-        return "not_a_stock" if instrument_type != "Stocks" else "not_analysable"
+        known_non_stock = instrument_type is not None and instrument_type != "Stocks"
+        return "not_a_stock" if known_non_stock else "not_analysable"
     if not has_inputs:
         return "no_inputs"
-    return "pending_run"
+    return "eligible_unscored"
 
 
 def family_contributions(

@@ -163,7 +163,7 @@ export function VerdictTab({
   const score = verdict.data?.score ?? null;
   if (score === null) {
     const notScored = verdict.data?.not_scored ?? null;
-    const pending = notScored === null || notScored.reason === "pending_run";
+    const pending = notScored === null || notScored.reason === "eligible_unscored";
     // Thesis still leads even when unscored (#2003) — a generated memo
     // must not vanish behind the "Not yet scored" empty state.
     return (

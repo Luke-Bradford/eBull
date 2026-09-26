@@ -21,12 +21,12 @@ from app.services.scoring import compute_rankings
         (False, "no_primary_sec_cik", "ETF", False, "not_tradable"),
         (True, "no_primary_sec_cik", "ETF", True, "not_a_stock"),  # core-sleeve ETFs (VOO, QQQ)
         (True, None, "Crypto", True, "not_a_stock"),  # no coverage row
-        (True, "fpi", None, True, "not_a_stock"),  # unknown type is not claimed to be a stock
+        (True, "fpi", None, True, "not_analysable"),  # unknown type is not claimed to be a non-stock
         (True, "fpi", "Stocks", True, "not_analysable"),
         (True, None, "Stocks", True, "not_analysable"),
         (True, "analysable", "Stocks", False, "no_inputs"),
-        (True, "analysable", "ETF", True, "pending_run"),  # analysable ETFs ARE scored
-        (True, "analysable", "Stocks", True, "pending_run"),
+        (True, "analysable", "ETF", True, "eligible_unscored"),  # analysable ETFs ARE scored
+        (True, "analysable", "Stocks", True, "eligible_unscored"),
     ],
 )
 def test_not_scored_reason(

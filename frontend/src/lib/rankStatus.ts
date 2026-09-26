@@ -40,8 +40,8 @@ export function notScoredText(notScored: NotScored | null): string {
       return filingsStatusText(notScored.filings_status);
     case "no_inputs":
       return "no price, fundamentals or thesis data yet";
-    case "pending_run":
-      return "eligible; waiting for the next ranking run";
+    case "eligible_unscored":
+      return "eligible for ranking; no run of this model has scored it yet";
   }
 }
 
