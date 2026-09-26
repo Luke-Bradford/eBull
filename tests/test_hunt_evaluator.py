@@ -123,6 +123,22 @@ def test_the_two_overlapping_cohorts_by_hand() -> None:
     assert books.entered_formations == (0,)
 
 
+def test_the_position_tallies_count_entered_trades_only_by_hand() -> None:
+    """#3387: Σ (V(x) − 1) / #entered positions per book; never-entered positions are not trades."""
+    books = _evaluate()
+    # Arm: t = 0 {1, 4} both enter; t = 1 {2, 5} neither does.
+    arm = books.tallies["arm"]
+    assert arm.positions == 2
+    assert arm.net_sum == pytest.approx(T0[1][1] + T0[4][1] - 2.0, rel=1e-12)
+    # Control: all four enter at t = 0; at t = 1 only 1 and 4 (2 has no bar on 2, 5 has no bars left).
+    control = books.tallies["control"]
+    assert control.positions == 6
+    want = sum(v[1] - 1.0 for v in T0.values()) + (T1[1][1] - 1.0) + (T1[4][1] - 1.0)
+    assert control.net_sum == pytest.approx(want, rel=1e-12)
+    assert control.mean == pytest.approx(want / 6, rel=1e-12)
+    assert ev.PositionTally(0, 0.0).mean is None
+
+
 def test_without_dividends_drops_only_the_dividend() -> None:
     books = _evaluate(with_dividends=False)
     t0_name1 = 11 / 10.1 * (12 * 0.99) / 11
