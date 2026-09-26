@@ -53,6 +53,7 @@ from psycopg.pq import TransactionStatus
 
 from app.services import (
     deflated_sharpe,
+    hunt_books,
     hunt_compute,
     hunt_evaluator,
     hunt_inference,
@@ -134,6 +135,7 @@ _FLOAT_TAG: Final = "__float__"
 MODEL_CODE_MODULES: Final = (
     hunt_compute,
     hunt_panel,
+    hunt_books,
     hunt_evaluator,
     hunt_inference,
     hunt_view,

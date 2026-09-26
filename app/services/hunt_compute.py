@@ -39,7 +39,7 @@ from typing import Any, Final, Literal
 
 import numpy as np
 
-from app.services import hunt_evaluator, hunt_inference
+from app.services import hunt_books, hunt_evaluator, hunt_inference
 from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND, cost_band_for
 from app.services.hunt_evaluator import BookSeries, Cohort, Point, SeriesPrices
 from app.services.hunt_inference import StatRefused
@@ -412,6 +412,7 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
         )
         for name in names
     }
+    packed = hunt_books.pack_prices(prices)
     half_spreads = _half_spreads(panel, params)
 
     cells: dict[str, Any] = {}
@@ -427,18 +428,19 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
         for with_dividends in (True, False):
             for cost in COSTS:
                 key = cell_key(policy.label, with_dividends, cost)
-                books = hunt_evaluator.evaluate_books(
-                    grid,
-                    formations.cohorts,
-                    prices,
-                    lag=params.lag,
-                    h=params.h,
-                    entry_point=params.entry_point,
-                    exit_point=params.exit_point,
-                    half_spread=half_spreads(cost),
-                    terminal_fractions=fractions,
-                    with_dividends=with_dividends,
-                )
+                timeline: dict[str, Any] = {
+                    "lag": params.lag,
+                    "h": params.h,
+                    "entry_point": params.entry_point,
+                    "exit_point": params.exit_point,
+                    "half_spread": half_spreads(cost),
+                    "terminal_fractions": fractions,
+                    "with_dividends": with_dividends,
+                }
+                books = hunt_books.evaluate_books_fast(grid, formations.cohorts, packed, **timeline)
+                if books is None:
+                    # A refusal condition was met: the reference evaluator names it.
+                    books = hunt_evaluator.evaluate_books(grid, formations.cohorts, prices, **timeline)
                 if isinstance(books, StatRefused):
                     cells[key] = books.form()
                     continue
