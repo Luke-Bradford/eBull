@@ -243,3 +243,22 @@ def test_the_computation_and_its_loader_are_part_of_the_harness_model_id() -> No
     assert set(hh.MODEL_INPUT_RULE_SETS.values()) <= set(hh._model_constants()["input_rule_sets"].values())
     # And ``evaluate`` takes no computation argument: a stub cannot store an outcome under this identity.
     assert set(inspect.signature(hh.evaluate).parameters) == {"conn", "spec", "registered_by"}
+
+
+# --- #3386 slice 2: the signal receives dates and ex-dates ≤ t ------------------------------------
+
+
+def test_the_signal_sees_dates_and_ex_dates_up_to_t_only() -> None:
+    seen: dict[int, tuple[Any, ...]] = {}
+
+    def recording(t: int, view: SignalView, _constants: Mapping[str, Any]) -> Mapping[int, float]:
+        bars = view.series[1]
+        seen[t] = (view.dates[-1], len(view.dates), tuple(bars.dividend_ordinals), tuple(bars.dividend_amounts))
+        return dict.fromkeys(view.series, 1.0)
+
+    closes = [10.0] * _SESSIONS
+    hc.compute_panel(_panel(_series(1, closes, dividends={5: 0.2, 40: 0.3})), _params(), recording)
+    day = _SESSION_DATES[10]
+    assert seen[10] == ((day.year, day.month, day.day, day.weekday()), 11, (5,), pytest.approx((0.2,)))
+    assert seen[40][2] == (5, 40)  # an ex-date on t is known on t
+    assert seen[39][2] == (5,)
