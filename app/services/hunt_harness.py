@@ -334,7 +334,9 @@ class TrialSpec:
     survivor_bias_reason: str
     mechanism: str
     competing_explanation: str
-    _form: Mapping[str, Any] = field(init=False, repr=False, compare=False)
+    #: The canonical form, serialised: every accessor decodes a fresh copy, so no caller
+    #: can mutate what the hashes were computed from.
+    _form_json: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _require(isinstance(self.hunt_id, str) and bool(_HUNT_ID.match(self.hunt_id)), f"bad hunt_id {self.hunt_id!r}")
@@ -373,7 +375,7 @@ class TrialSpec:
             _require(_is_text(getattr(self, name)), f"{name} must be non-empty text")
         object.__setattr__(self, "constants", _freeze(self.constants))
         # Computing the form here validates the constants (types, finiteness, reserved key).
-        object.__setattr__(self, "_form", MappingProxyType(self._build_form()))
+        object.__setattr__(self, "_form_json", dumps_form(self._build_form()))
 
     def _build_form(self) -> dict[str, Any]:
         return canonical_form(
@@ -404,16 +406,16 @@ class TrialSpec:
         )
 
     def form(self) -> dict[str, Any]:
-        """The canonical form stored as ``hunt_trials.spec``."""
-        return dict(self._form)
+        """The canonical form stored as ``hunt_trials.spec`` (a detached copy)."""
+        return json.loads(self._form_json)
 
     @property
     def candidate_sha256(self) -> str:
-        return candidate_sha256_of(self._form)
+        return candidate_sha256_of(self.form())
 
     @property
     def spec_sha256(self) -> str:
-        return spec_sha256_of(self._form)
+        return spec_sha256_of(self.form())
 
 
 def candidate_sha256_of(form: Mapping[str, Any]) -> str:
@@ -466,14 +468,20 @@ def calendar_identity() -> str:
 
 
 #: Series metadata the archive identity covers. ⚠ Reads the dividend and split COLUMNS
-#: only to count non-trivial rows; no price column is selected.
+#: only to count non-trivial rows; no price column is selected. The live bar count and
+#: date range per series come from the same scan, so an ingest that has committed some
+#: bar batches but not yet rewritten the series row still moves the identity (Codex
+#: ckpt-2). ⚠ Residual: a rewrite that keeps every series' count and range unchanged is
+#: not detected; archive re-ingests are attended corpus events, not scheduled jobs.
 _ARCHIVE_METADATA_SQL = """
     SELECT s.series_id, s.vendor, s.vendor_symbol, s.adjustment_basis, s.first_bar, s.last_bar,
            s.bar_count, s.updated_at, s.corporate_action_stamps, s.delisting_source,
-           s.delisting_provision, coalesce(d.dividend_rows, 0), coalesce(d.split_rows, 0)
+           s.delisting_provision, coalesce(d.dividend_rows, 0), coalesce(d.split_rows, 0),
+           coalesce(d.bar_rows, 0), d.first_bar_date, d.last_bar_date
     FROM research_price_series s
     LEFT JOIN (
         SELECT series_id,
+               count(*) AS bar_rows, min(bar_date) AS first_bar_date, max(bar_date) AS last_bar_date,
                count(*) FILTER (WHERE dividend IS NOT NULL AND dividend <> 0) AS dividend_rows,
                count(*) FILTER (WHERE split_factor IS NOT NULL AND split_factor <> 1) AS split_rows
         FROM research_price_daily
@@ -622,7 +630,7 @@ def outcome_sha256_of(
 # ---------------------------------------------------------------------------
 
 _SELECT_EVALUATE_ROW = """
-    SELECT t.hunt_trial_id, t.hunt_id, o.hunt_trial_id IS NOT NULL
+    SELECT t.hunt_trial_id, t.hunt_id, o.hunt_trial_id IS NOT NULL, t.spec_sha256
     FROM hunt_trials t
     LEFT JOIN hunt_trial_outcomes o USING (hunt_trial_id)
     WHERE t.candidate_sha256 = %(candidate)s AND t.split = %(split)s AND t.purpose = 'evaluate'
@@ -674,7 +682,7 @@ _SELECT_OUTCOME = """
 """
 
 _SELECT_RECORDING = """
-    SELECT hunt_trial_id, hunt_id, split, candidate_sha256
+    SELECT hunt_trial_id, hunt_id, split, candidate_sha256, floor
     FROM hunt_trials
     WHERE purpose = 'recorded_after' AND note = %(note)s
 """
@@ -788,6 +796,9 @@ def evaluate(
         ).fetchone()
         if existing is not None:
             trial_id, owner, has_outcome = int(existing[0]), existing[1], bool(existing[2])
+            # ⚠ A retry may carry a relabelled family; the outcome binds to the REGISTERED
+            # spec, whose hash is the stored one (Codex ckpt-2).
+            registered_spec_sha256 = str(existing[3])
             if owner != spec.hunt_id:
                 conn.commit()
                 return HuntRefused(
@@ -822,6 +833,7 @@ def evaluate(
             if inserted is None:
                 raise HuntHarnessError(f"registration of {spec.candidate_sha256} conflicted under the programme lock")
             trial_id = inserted
+            registered_spec_sha256 = spec.spec_sha256
         # ⚠ The search is durable BEFORE any price is read.
         conn.commit()
 
@@ -837,7 +849,7 @@ def evaluate(
         statistics_form = canonical_form(computed.statistics)
         series_form = None if computed.active_series is None else canonical_form(computed.active_series)
         outcome_sha256 = outcome_sha256_of(
-            spec_sha256=spec.spec_sha256,
+            spec_sha256=registered_spec_sha256,
             statistics_form=statistics_form,
             active_series_form=series_form,
             access_id=None,
@@ -934,7 +946,7 @@ def record_outside_look(
         conn.commit()
     if existing is None:
         raise HuntHarnessError(f"recording {note!r} conflicted but no recording carries that note")
-    if (existing[1], existing[2], existing[3]) != (hunt, spl, candidate):
+    if (existing[1], existing[2], existing[3], existing[4]) != (hunt, spl, candidate, floor):
         raise HuntHarnessError(f"note {note!r} already records a different look (trial {existing[0]})")
     return int(existing[0])
 

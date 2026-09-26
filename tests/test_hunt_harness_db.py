@@ -132,6 +132,24 @@ def test_a_stored_outcome_is_returned_not_recomputed(
     assert len(_rows(ebull_test_conn)) == 1
 
 
+def test_a_relabelled_retry_binds_its_outcome_to_the_registered_spec(
+    ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]
+) -> None:
+    spec = _spec(bound)
+
+    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+        raise _PriceReadRaised
+
+    with pytest.raises(_PriceReadRaised):
+        hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=crash)
+    relabelled = _spec(bound, family="renamed_family")
+    assert relabelled.spec_sha256 != spec.spec_sha256
+    first = hh.evaluate(ebull_test_conn, relabelled, registered_by="test", compute=_ok)
+    cached = hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=_ok)
+    assert isinstance(first, HuntOutcome) and isinstance(cached, HuntOutcome)
+    assert cached.cached and cached.outcome_sha256 == first.outcome_sha256
+
+
 def test_a_statistical_refusal_is_an_outcome(ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]) -> None:
     def refuse(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
         return ComputedOutcome("refused", {"reasons": ["short_sample"]}, None)
@@ -260,6 +278,12 @@ def test_a_note_cannot_record_two_different_looks(
     hh.record_outside_look(ebull_test_conn, note="chart B", registered_by="test", spec=_spec(bound))
     with pytest.raises(hh.HuntHarnessError, match="different look"):
         hh.record_outside_look(ebull_test_conn, note="chart B", registered_by="test", spec=_spec(bound, lag=5))
+
+
+def test_a_note_cannot_change_its_floor_flag(ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]) -> None:
+    hh.record_outside_look(ebull_test_conn, note="chart C", registered_by="test", spec=_spec(bound))
+    with pytest.raises(hh.HuntHarnessError, match="different look"):
+        hh.record_outside_look(ebull_test_conn, note="chart C", registered_by="test", spec=_spec(bound), floor=True)
 
 
 # --- the lock -------------------------------------------------------------------------------

@@ -332,3 +332,11 @@ def test_an_unreconstructed_recording_hashes_its_note() -> None:
     base = {"hunt_id": "hunt-1", "family": "f", "split": "discovery", "spec": None, "harness_model_id": "m"}
     assert hh.verify_trial_row(**base, candidate_sha256=note_sha, spec_sha256=note_sha, note="chart 1, variant 1") == []
     assert hh.verify_trial_row(**base, candidate_sha256=_SHA, spec_sha256=note_sha, note="chart 1, variant 1") != []
+
+
+def test_form_is_a_detached_copy_so_the_hashes_cannot_be_mutated() -> None:
+    spec = trial_spec()
+    before = (spec.candidate_sha256, spec.spec_sha256)
+    spec.form()["constants"]["window"] = 999
+    spec.form()["constants"]["names"].append("c")
+    assert (spec.candidate_sha256, spec.spec_sha256) == before

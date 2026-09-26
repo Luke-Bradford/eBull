@@ -11491,3 +11491,16 @@ neighbouring container and match it.**
   Removing machinery beats adding it when a finding targets a construction choice.
 - Enforced in: `docs/proposals/ta/2026-09-26-3385-hunt-harness.md` ("Implementation obligations",
   "Revision notes").
+
+### A retry that reuses a registration must bind to the STORED identity, not the caller's (#3385)
+
+- Failure: `hunt_harness.evaluate` reuses a registered trial that has no outcome (a crash retry). The
+  candidate hash excludes the family label, the spec hash includes it, and the first draft hashed the
+  outcome with the INCOMING spec's `spec_sha256`. A retry under a relabelled family would have written an
+  append-only outcome whose hash disagreed with its registration, so every later read would fail its
+  integrity check with no way to repair the row. (Codex checkpoint 2, PR for #3385 slice 2a.)
+- Prevention: when a lookup key is coarser than the identity stored beside it, anything written against the
+  found row takes the found row's identity. Self-review prompt: "which fields of my input are NOT in the key
+  I matched on, and does anything I write depend on them?"
+- Enforced in: `app/services/hunt_harness.py::evaluate` (`registered_spec_sha256`),
+  `tests/test_hunt_harness_db.py::test_a_relabelled_retry_binds_its_outcome_to_the_registered_spec`.

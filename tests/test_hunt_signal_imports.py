@@ -18,30 +18,42 @@ from app.services import hunt_harness
 _ALLOWED: Final[frozenset[str]] = frozenset(
     {"__future__", "math", "statistics", "dataclasses", "typing", "numpy", "app.services.hunt_signals"}
 )
+#: Inside an allowed prefix but still refused: numpy's generators make a score irreproducible.
+_REFUSED: Final[frozenset[str]] = frozenset({"numpy.random"})
+
+
+def _refused(name: str) -> bool:
+    if any(name == refused or name.startswith(f"{refused}.") for refused in _REFUSED):
+        return True
+    return not any(name == allowed or name.startswith(f"{allowed}.") for allowed in _ALLOWED)
 
 
 def _import_violations(source: str) -> list[str]:
     violations: list[str] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
+            violations.extend(f"imports {alias.name}" for alias in node.names if _refused(alias.name))
         elif isinstance(node, ast.ImportFrom):
-            if node.level:
-                names = ["app.services.hunt_signals"]
-            else:
-                names = [node.module or ""]
+            if node.level > 1:
+                # ``from ..x import`` leaves the package: never admitted (Codex ckpt-2).
+                violations.append(f"imports {'.' * node.level}{node.module or ''} (outside hunt_signals)")
+                continue
+            base = "app.services.hunt_signals" if node.level else (node.module or "")
+            if node.level and node.module:
+                base = f"{base}.{node.module}"
+            if _refused(base):
+                violations.append(f"imports {base}")
+                continue
+            # ``from numpy import random`` names a refused submodule through an allowed base.
+            violations.extend(
+                f"imports {base}.{alias.name}" for alias in node.names if _refused(f"{base}.{alias.name}")
+            )
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id in {"__import__", "open", "eval", "exec"}
         ):
             violations.append(f"calls {node.func.id}()")
-            continue
-        else:
-            continue
-        for name in names:
-            if not any(name == allowed or name.startswith(f"{allowed}.") for allowed in _ALLOWED):
-                violations.append(f"imports {name}")
     return violations
 
 
@@ -65,6 +77,19 @@ def test_the_scanner_refuses_io_and_randomness() -> None:
         "imports app.services.research_split_corrected_reader",
         "imports pathlib",
         "calls open()",
+    ]
+
+
+def test_the_scanner_refuses_parent_relative_imports_and_numpy_randomness() -> None:
+    source = (
+        "from ..research_split_corrected_reader import load_ratio_basis\n"
+        "import numpy.random\nfrom numpy import random\nfrom numpy.random import default_rng\n"
+    )
+    assert _import_violations(source) == [
+        "imports ..research_split_corrected_reader (outside hunt_signals)",
+        "imports numpy.random",
+        "imports numpy.random",
+        "imports numpy.random",
     ]
 
 
