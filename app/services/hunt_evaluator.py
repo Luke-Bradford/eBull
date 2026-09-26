@@ -30,7 +30,7 @@ the last available close, never a later price (obligation 26).
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
@@ -195,6 +195,8 @@ def position_path(
 
     value = 1.0
     ref = entry * (1.0 + half_spread)
+    if not math.isfinite(ref):
+        return StatRefused("non_finite", f"the entry fill {entry} · (1 + {half_spread}) overflows")
     last_price = entry
     pending = 0.0
     frozen = False
@@ -256,11 +258,22 @@ class BookSeries:
     entered_formations: tuple[int, ...]
 
 
-def _cohort_sums(paths: Sequence[PositionPath], span: int) -> list[float]:
-    """ΣV on e − 1 … x (the leading entry is n: every position starts at 1)."""
+def _finite_sum(terms: Iterable[float]) -> float | None:
+    try:
+        total = math.fsum(terms)
+    except OverflowError, ValueError:
+        return None
+    return total if math.isfinite(total) else None
+
+
+def _cohort_sums(paths: Sequence[PositionPath], span: int) -> list[float] | None:
+    """ΣV on e − 1 … x (the leading entry is n: every position starts at 1); ``None`` on overflow."""
     sums = [float(len(paths))]
     for offset in range(span):
-        sums.append(math.fsum(path.values[offset] for path in paths))
+        total = _finite_sum(path.values[offset] for path in paths)
+        if total is None:
+            return None
+        sums.append(total)
     return sums
 
 
@@ -304,6 +317,10 @@ def evaluate_books(
                 series = prices.get(name)
                 if series is None:
                     raise ValueError(f"no prices for series {name}")
+                if series.price(e, entry_point) is None:
+                    # Never entered and never charged: no fill exists to key a band on.
+                    by_book[book].append(PositionPath(values=(1.0,) * h, entered=False))
+                    continue
                 charge = half_spread(name, e, book)
                 path = computed.get((name, charge))
                 if path is None:
@@ -324,7 +341,10 @@ def evaluate_books(
                 if book == "arm" and path.entered:
                     arm_entered = True
         for book in BOOKS:
-            sums[book][t] = _cohort_sums(by_book[book], h)
+            cohort_sums = _cohort_sums(by_book[book], h)
+            if cohort_sums is None:
+                return StatRefused("non_finite", f"the {book} cohort formed at {t} sums past the float range")
+            sums[book][t] = cohort_sums
         if arm_entered:
             entered.append(t)
 
@@ -339,7 +359,8 @@ def evaluate_books(
                     continue
                 before, now = cohort_sums[k], cohort_sums[k + 1]
                 factors.append(1.0 if before == 0.0 else now / before)
-            gross = math.fsum(factors) / h
+            total = _finite_sum(factors)
+            gross = math.nan if total is None else total / h
             if not math.isfinite(gross):
                 return StatRefused("non_finite", f"{book} gross factor {gross} at session {d}")
             if gross <= BOOK_RUIN_FACTOR:

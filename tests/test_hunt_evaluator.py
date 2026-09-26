@@ -295,3 +295,43 @@ def test_select_arm_includes_ties_and_honours_sign() -> None:
 def test_the_evaluator_code_is_part_of_the_harness_model_id() -> None:
     constants = hh._model_constants()["model_code_sha256"]
     assert constants["app.services.hunt_evaluator"] == hashlib.sha256(Path(str(ev.__file__)).read_bytes()).hexdigest()
+
+
+# --- Codex ckpt-2 findings -------------------------------------------------------------------------------------
+
+
+def _books(prices: dict[int, ev.SeriesPrices], cohort: ev.Cohort, half_spread: ev.HalfSpread = _hs) -> object:
+    return ev.evaluate_books(
+        ev.Grid(formations=(0,), first=1, last=2),
+        {0: cohort},
+        prices,
+        lag=1,
+        h=2,
+        entry_point="open",
+        exit_point="close",
+        half_spread=half_spread,
+        terminal_fractions={},
+        with_dividends=True,
+    )
+
+
+def test_a_name_that_never_enters_is_never_charged() -> None:
+    def strict(series: int, _entry: int, _book: ev.Book) -> float:
+        if series == 2:
+            raise AssertionError("no fill exists to key a band on")
+        return HS
+
+    prices = {1: _series({1: 10.0}, {1: 10.0, 2: 10.0}), 2: _series({}, {})}
+    result = _books(prices, ev.Cohort(control=frozenset({1, 2}), arm=frozenset({1})), strict)
+    assert isinstance(result, ev.BookSeries)
+
+
+def test_an_overflowing_cohort_sum_refuses() -> None:
+    prices = {n: _series({1: 1.0}, {1: 1e308, 2: 1e308}) for n in (1, 2)}
+    result = _books(prices, ev.Cohort(control=frozenset({1, 2}), arm=frozenset({1})))
+    assert isinstance(result, StatRefused) and result.reason == "non_finite"
+
+
+def test_an_overflowing_entry_fill_refuses() -> None:
+    result = _path(_series({1: 1e308}, {1: 1e308, 2: 1e308}), half_spread=0.9)
+    assert isinstance(result, StatRefused) and result.reason == "non_finite"
