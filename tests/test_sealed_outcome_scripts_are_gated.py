@@ -417,6 +417,8 @@ _RESEARCH_PRICE_READER_MODULES: Final[frozenset[str]] = frozenset(
         "app.services.research_split_corrected_reader",
         "app.services.research_price_structure_store",
         "app.services.price_masked_bars",
+        # The hunt's own loader: only ``hunt_harness`` may import it.
+        "app.services.hunt_panel",
     }
 )
 
@@ -486,7 +488,7 @@ def test_a_new_research_price_reader_goes_through_the_hunt_harness() -> None:
     offenders = [
         path.name
         for path in _hunt_scope()
-        if path.name != "hunt_harness.py"
+        if path.name not in ("hunt_harness.py", "hunt_panel.py")
         and path.name not in _PRE_HUNT_RESEARCH_READERS
         and _imports_research_price_reader(ast.parse(path.read_text()))
         and not _is_gated(path.read_text())

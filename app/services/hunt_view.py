@@ -29,20 +29,25 @@ from typing import overload
 
 @dataclass(frozen=True)
 class Bars:
-    """One series' bars on the ratio basis, keyed by strictly increasing session ordinals."""
+    """One series' bars on the ratio basis, keyed by strictly increasing session ordinals.
 
-    ordinals: tuple[int, ...]
-    open: tuple[float, ...]
-    high: tuple[float, ...]
-    low: tuple[float, ...]
-    close: tuple[float, ...]
-    volume: tuple[float, ...]
+    Any read-only sequence: the harness passes ``array.array`` columns, because a
+    discovery panel is ~16M bars and a tuple of floats costs 32 bytes a value.
+    """
+
+    ordinals: Sequence[int]
+    open: Sequence[float]
+    high: Sequence[float]
+    low: Sequence[float]
+    close: Sequence[float]
+    volume: Sequence[float]
 
     def __post_init__(self) -> None:
         count = len(self.ordinals)
         if any(len(column) != count for column in (self.open, self.high, self.low, self.close, self.volume)):
             raise ValueError("every bar column must have one value per ordinal")
-        if any(later <= earlier for earlier, later in zip(self.ordinals, self.ordinals[1:], strict=False)):
+        ordinals = self.ordinals
+        if any(ordinals[i + 1] <= ordinals[i] for i in range(count - 1)):
             raise ValueError("ordinals must be strictly increasing")
 
 
@@ -55,7 +60,7 @@ class Prefix[T: (int, float)](Sequence[T]):
 
     __slots__ = ("_end", "_factor", "_values")
 
-    def __init__(self, values: tuple[T, ...], end: int, factor: T) -> None:
+    def __init__(self, values: Sequence[T], end: int, factor: T) -> None:
         if not 0 <= end <= len(values):
             raise ValueError(f"prefix end {end} outside [0, {len(values)}]")
         self._values = values

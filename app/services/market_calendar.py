@@ -45,9 +45,10 @@ closed on a handful of ad-hoc days (9/11, Hurricane Sandy, national days of
 mourning). These are transcribed in ``_EXTRAORDINARY_CLOSURES`` from the NYSE
 historical record. The intraday chart (the sole Phase A consumer) only requests
 recent years, but the endpoint serves the full 2000-2100 range, so we include
-them for correctness. Any *future* ad-hoc closure NYSE declares must be added
-here; until then such a day fails **safe** (renders as regular hours, never a
-closed day shown as open).
+them for correctness. The #3385 research hunt reads sessions back to 1990, so
+1994's closure is transcribed too; ad-hoc closures before 1990 are not. Any
+*future* ad-hoc closure NYSE declares must be added here; until then such a
+day fails **safe** (renders as regular hours, never a closed day shown as open).
 """
 
 from __future__ import annotations
@@ -110,11 +111,24 @@ class _NyseHolidayCalendar(AbstractHolidayCalendar):
     so still appears in ``full_closures``. That is inert — the day is a weekend
     and ``us_market_status`` / ``us_market_reason`` both test the weekend first —
     and it is not a false statement about the market being shut.
+
+    ⚠ MARTIN LUTHER KING JR. DAY STARTS IN 1998, NOT 1986 (#3385). pandas'
+    ``USMartinLutherKingJr`` is the FEDERAL rule (from 1986); the NYSE first
+    closed for it on 1998-01-19 and traded through it from 1986 to 1997. The
+    corpus corroborates (not the governing rule): ``icyDenev/Intrader`` carries
+    397-2,417 bars on each of those twelve Mondays, and no later MLK Day has more
+    than 50 (per-date bar counts, 1985 → 2024-09-27).
     """
 
     rules = [
         Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),
-        USMartinLutherKingJr,
+        Holiday(
+            USMartinLutherKingJr.name,
+            month=1,
+            day=1,
+            offset=USMartinLutherKingJr.offset,
+            start_date=date(1998, 1, 1),
+        ),
         USPresidentsDay,
         GoodFriday,
         USMemorialDay,
@@ -136,6 +150,8 @@ _CACHE: dict[int, MarketYear] = {}
 # operator-facing reason; the closure SET is derived from this map so the two
 # can never drift (the reasons map is total over the closures by construction).
 _EXTRAORDINARY_CLOSURE_NAMES: dict[date, str] = {
+    # #3385: the research hunt reads sessions back to 1990. The corpus shows 0 bars that day.
+    date(1994, 4, 27): "Day of mourning — President Nixon",
     date(2001, 9, 11): "9/11 attacks",  # markets closed Sep 11-14
     date(2001, 9, 12): "9/11 attacks",
     date(2001, 9, 13): "9/11 attacks",

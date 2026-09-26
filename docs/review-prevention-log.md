@@ -11516,3 +11516,40 @@ neighbouring container and match it.**
   number and hash all of them. Self-review prompt: "which imports in this module compute part of the output?"
 - Enforced in: `app/services/hunt_harness.py::MODEL_CODE_MODULES`,
   `tests/test_hunt_inference.py::test_the_inference_code_and_its_shared_statistics_are_part_of_the_harness_model_id`.
+
+### A calendar verified on recent years is not verified on the years a backtest reads (#3385)
+
+- Failure: `market_calendar` was verified against NYSE's 2025/2026 calendars and composed from pandas'
+  FEDERAL holiday rules. The #3385 hunt grid reads it back to 1990, where `USMartinLutherKingJr` (federal
+  from 1986) closed twelve Mondays on which the NYSE traded: it first closed for MLK Day on 1998-01-19. The
+  1994-04-27 Nixon day of mourning was missing too. Found by comparing the calendar with the archive over
+  1985 → 2024-09-27: 397-2,417 `icyDenev/Intrader` bars on each 1986-1997 MLK Monday, and one calendar
+  session (1994-04-27) with 0 bars. The other 703 off-calendar bars (147 dates, each with ≤ 50) were not
+  examined; the hunt loader drops and counts them.
+- Prevention: before a session calendar defines a historical grid, diff it against the price archive over
+  the whole span the consumer reads (per-date bar counts: calendar-closed dates with many bars, open dates
+  with none), and fix the rule, not the date. A rule with a start year must carry the EXCHANGE's start year.
+- Enforced in: `app/services/market_calendar.py::_NyseHolidayCalendar`,
+  `tests/test_market_calendar.py::test_mlk_day_is_a_session_before_1998_and_a_closure_from_1998`.
+
+### A frozen computation passed in as a parameter is not frozen (#3385)
+
+- Failure: slice 2a gave `hunt_harness.evaluate` a `compute` callback so registration could ship before the
+  evaluator. Slice 3c-iii wrote the frozen `compute_trial`, but `evaluate` still accepted any callback and
+  stored whatever it returned under the spec's hashes and `HUNT_HARNESS_MODEL_ID`. A stub could have written
+  a durable, append-only fabricated outcome. (Codex checkpoint 2.)
+- Prevention: once the real implementation exists, remove the injection point; tests patch the module
+  attribute instead. Self-review prompt: "can a caller change the stored number without changing the identity
+  it is stored under?"
+- Enforced in: `app/services/hunt_harness.py::evaluate` (calls `compute_trial`),
+  `tests/test_hunt_compute.py::test_the_computation_and_its_loader_are_part_of_the_harness_model_id`.
+
+### An error message that says "before X" must be reachable before X (#3385)
+
+- Failure: `hunt_harness.compute_trial` raised "no tariff prices the lane; evaluate refuses before
+  registering", but `compute_trial` only runs AFTER the registration commits. The branch is unreachable
+  through `evaluate` (an unpriced lane refuses earlier), so the message misdescribed the ordering it sat in.
+  (Review bot, PR #3413.)
+- Prevention: for any message or docstring naming an ordering ("before registering", "after commit"), check
+  the call site's actual position. Self-review prompt: "where in the caller's sequence does this line run?"
+- Enforced in: `app/services/hunt_harness.py::compute_trial`.

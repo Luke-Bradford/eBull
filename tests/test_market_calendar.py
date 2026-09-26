@@ -88,6 +88,20 @@ def test_juneteenth_guard_pre_2022() -> None:
     assert date(2021, 6, 19) not in closures
 
 
+def test_mlk_day_is_a_session_before_1998_and_a_closure_from_1998() -> None:
+    # #3385: NYSE first closed for MLK Day on 1998-01-19; the federal rule starts in 1986.
+    for monday in (date(1986, 1, 20), date(1990, 1, 15), date(1997, 1, 20)):
+        assert us_market_status(monday) == "open"
+    for monday in (date(1998, 1, 19), date(2025, 1, 20)):
+        assert us_market_status(monday) == "closed"
+    assert us_market_reason(date(1998, 1, 19)) == "Birthday of Martin Luther King, Jr."
+
+
+def test_nixon_day_of_mourning_is_a_closure() -> None:
+    assert us_market_status(date(1994, 4, 27)) == "closed"
+    assert us_market_reason(date(1994, 4, 27)) == "Day of mourning — President Nixon"
+
+
 def test_juneteenth_present_from_2022() -> None:
     assert date(2022, 6, 20) in us_market_specials(2022).full_closures  # Jun 19 Sun → Mon 20
 

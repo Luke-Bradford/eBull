@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
 import pytest
 
 from app.services import hunt_harness as hh
+from app.services import hunt_panel
 from app.services.hunt_harness import ComputedOutcome, HuntOutcome, HuntRefused, TrialSpec
+from app.services.series_termination import TerminationClass, TerminationEvidence
+from app.services.universe_selection import AdmittedSeries, vendor_for
 from tests.test_hunt_harness import trial_spec, universe_identity
 
 _SIGNAL_SOURCE = b"def gap_score(t, view, constants):\n    return {}\n"
@@ -51,6 +55,13 @@ def _spec(bound: dict[str, Any], **overrides: Any) -> TrialSpec:
 
 def _ok(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
     return ComputedOutcome("computed", {"t": 1.25, "mean": 0.001, "cells": {"zero_recovery": "ok"}}, (0.001, -0.002))
+
+
+def _run(conn: psycopg.Connection[Any], spec: TrialSpec, compute: Any) -> HuntOutcome | HuntRefused:
+    """``evaluate`` with ``compute_trial`` stubbed: it takes no computation argument."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(hh, "compute_trial", compute)
+        return hh.evaluate(conn, spec, registered_by="test")
 
 
 def _rows(conn: psycopg.Connection[Any]) -> list[tuple[Any, ...]]:
@@ -88,7 +99,7 @@ def test_the_search_is_registered_before_compute_and_survives_a_crash(
         raise _PriceReadRaised
 
     with pytest.raises(_PriceReadRaised):
-        hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=crash)
+        _run(ebull_test_conn, spec, crash)
     assert seen == [[("hunt-1", "evaluate")]]
     assert _rows(ebull_test_conn) == [("hunt-1", "discovery", "evaluate", spec.candidate_sha256)]
     assert _outcomes(ebull_test_conn) == 0
@@ -104,12 +115,12 @@ def test_a_retry_reuses_the_registration_even_at_a_full_budget(
         raise _PriceReadRaised
 
     with pytest.raises(_PriceReadRaised):
-        hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=crash)
-    result = hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=_ok)
+        _run(ebull_test_conn, spec, crash)
+    result = _run(ebull_test_conn, spec, _ok)
     assert isinstance(result, HuntOutcome) and not result.cached
     assert len(_rows(ebull_test_conn)) == 1
     # The budget is now full for any NEW candidate.
-    other = hh.evaluate(ebull_test_conn, _spec(bound, lag=2), registered_by="test", compute=_ok)
+    other = _run(ebull_test_conn, _spec(bound, lag=2), _ok)
     assert isinstance(other, HuntRefused) and other.reason == "budget_exhausted"
     assert len(_rows(ebull_test_conn)) == 1
 
@@ -118,13 +129,13 @@ def test_a_stored_outcome_is_returned_not_recomputed(
     ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]
 ) -> None:
     spec = _spec(bound)
-    first = hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=_ok)
+    first = _run(ebull_test_conn, spec, _ok)
 
     def never(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
         raise AssertionError("a cached discovery outcome must not recompute")
 
     relabelled = _spec(bound, family="renamed_family", mechanism="new story")
-    second = hh.evaluate(ebull_test_conn, relabelled, registered_by="test", compute=never)
+    second = _run(ebull_test_conn, relabelled, never)
     assert isinstance(first, HuntOutcome) and isinstance(second, HuntOutcome)
     assert second.cached and second.hunt_trial_id == first.hunt_trial_id
     assert second.statistics == first.statistics == {"t": 1.25, "mean": 0.001, "cells": {"zero_recovery": "ok"}}
@@ -142,11 +153,11 @@ def test_a_relabelled_retry_binds_its_outcome_to_the_registered_spec(
         raise _PriceReadRaised
 
     with pytest.raises(_PriceReadRaised):
-        hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=crash)
+        _run(ebull_test_conn, spec, crash)
     relabelled = _spec(bound, family="renamed_family")
     assert relabelled.spec_sha256 != spec.spec_sha256
-    first = hh.evaluate(ebull_test_conn, relabelled, registered_by="test", compute=_ok)
-    cached = hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=_ok)
+    first = _run(ebull_test_conn, relabelled, _ok)
+    cached = _run(ebull_test_conn, spec, _ok)
     assert isinstance(first, HuntOutcome) and isinstance(cached, HuntOutcome)
     assert cached.cached and cached.outcome_sha256 == first.outcome_sha256
 
@@ -155,7 +166,7 @@ def test_a_statistical_refusal_is_an_outcome(ebull_test_conn: psycopg.Connection
     def refuse(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
         return ComputedOutcome("refused", {"reasons": ["short_sample"]}, None)
 
-    result = hh.evaluate(ebull_test_conn, _spec(bound), registered_by="test", compute=refuse)
+    result = _run(ebull_test_conn, _spec(bound), refuse)
     assert isinstance(result, HuntOutcome) and result.status == "refused" and result.active_series is None
     assert _outcomes(ebull_test_conn) == 1
 
@@ -163,8 +174,8 @@ def test_a_statistical_refusal_is_an_outcome(ebull_test_conn: psycopg.Connection
 def test_a_candidate_is_owned_by_the_hunt_that_registered_it(
     ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]
 ) -> None:
-    hh.evaluate(ebull_test_conn, _spec(bound), registered_by="test", compute=_ok)
-    result = hh.evaluate(ebull_test_conn, _spec(bound, hunt_id="hunt-2"), registered_by="test", compute=_ok)
+    _run(ebull_test_conn, _spec(bound), _ok)
+    result = _run(ebull_test_conn, _spec(bound, hunt_id="hunt-2"), _ok)
     assert isinstance(result, HuntRefused) and result.reason == "candidate_owned_by_other_hunt"
     assert len(_rows(ebull_test_conn)) == 1
 
@@ -177,7 +188,7 @@ def test_a_universe_change_during_compute_is_an_infrastructure_error(
         return _ok(conn, spec)
 
     with pytest.raises(hh.HuntHarnessError, match="universe identity changed"):
-        hh.evaluate(ebull_test_conn, _spec(bound), registered_by="test", compute=moved)
+        _run(ebull_test_conn, _spec(bound), moved)
     assert len(_rows(ebull_test_conn)) == 1
     assert _outcomes(ebull_test_conn) == 0
 
@@ -210,7 +221,7 @@ def test_a_refusal_before_registration_writes_nothing(
 ) -> None:
     if patch is not None:
         monkeypatch.setattr(hh, patch[0], patch[1])
-    result = hh.evaluate(ebull_test_conn, _spec(bound, **overrides), registered_by="test", compute=_ok)
+    result = _run(ebull_test_conn, _spec(bound, **overrides), _ok)
     assert isinstance(result, HuntRefused) and result.reason == reason, result
     assert _rows(ebull_test_conn) == []
 
@@ -219,7 +230,7 @@ def test_a_frozen_validation_declaration_closes_discovery(
     ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(hh, "_SELECT_VALIDATION_FROZEN", "SELECT 1 WHERE %(strategy_id)s = 'hunt-1-validation'")
-    result = hh.evaluate(ebull_test_conn, _spec(bound), registered_by="test", compute=_ok)
+    result = _run(ebull_test_conn, _spec(bound), _ok)
     assert isinstance(result, HuntRefused) and result.reason == "discovery_closed"
     assert _rows(ebull_test_conn) == []
 
@@ -240,10 +251,10 @@ def test_a_recorded_look_burns_its_candidate_and_is_idempotent(
     first = hh.record_outside_look(ebull_test_conn, note="notebook 2026-09-26 panel 1", registered_by="test", spec=spec)
     again = hh.record_outside_look(ebull_test_conn, note="notebook 2026-09-26 panel 1", registered_by="test", spec=spec)
     assert first == again
-    result = hh.evaluate(ebull_test_conn, spec, registered_by="test", compute=_ok)
+    result = _run(ebull_test_conn, spec, _ok)
     assert isinstance(result, HuntRefused) and result.reason == "split_burned"
     # Another candidate in the same split is untouched.
-    assert isinstance(hh.evaluate(ebull_test_conn, _spec(bound, lag=2), registered_by="test", compute=_ok), HuntOutcome)
+    assert isinstance(_run(ebull_test_conn, _spec(bound, lag=2), _ok), HuntOutcome)
 
 
 def test_an_unreconstructed_look_burns_the_whole_hunt_split(
@@ -258,9 +269,9 @@ def test_an_unreconstructed_look_burns_the_whole_hunt_split(
         split="discovery",
         floor=True,
     )
-    result = hh.evaluate(ebull_test_conn, _spec(bound, lag=3), registered_by="test", compute=_ok)
+    result = _run(ebull_test_conn, _spec(bound, lag=3), _ok)
     assert isinstance(result, HuntRefused) and result.reason == "split_burned"
-    other_hunt = hh.evaluate(ebull_test_conn, _spec(bound, hunt_id="hunt-2"), registered_by="test", compute=_ok)
+    other_hunt = _run(ebull_test_conn, _spec(bound, hunt_id="hunt-2"), _ok)
     assert isinstance(other_hunt, HuntOutcome)
 
 
@@ -269,7 +280,7 @@ def test_recorded_looks_count_in_the_budget(
 ) -> None:
     monkeypatch.setattr(hh, "HUNT_BUDGETS", {"hunt-1": 1})
     hh.record_outside_look(ebull_test_conn, note="chart A variant 1", registered_by="test", spec=_spec(bound, lag=4))
-    result = hh.evaluate(ebull_test_conn, _spec(bound), registered_by="test", compute=_ok)
+    result = _run(ebull_test_conn, _spec(bound), _ok)
     assert isinstance(result, HuntRefused) and result.reason == "budget_exhausted"
 
 
@@ -318,7 +329,7 @@ def test_the_programme_lock_is_released_after_a_crash(ebull_test_conn: psycopg.C
 
 
 def test_both_tables_are_append_only(ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]) -> None:
-    hh.evaluate(ebull_test_conn, _spec(bound), registered_by="test", compute=_ok)
+    _run(ebull_test_conn, _spec(bound), _ok)
     for statement in (
         "UPDATE hunt_trials SET note = 'x'",
         "DELETE FROM hunt_trials",
@@ -384,7 +395,7 @@ def test_the_row_checks_refuse_a_disagreeing_or_incomplete_row(
 
 
 def test_a_stored_spec_rehashes_to_its_columns(ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]) -> None:
-    hh.evaluate(ebull_test_conn, _spec(bound), registered_by="test", compute=_ok)
+    _run(ebull_test_conn, _spec(bound), _ok)
     row = ebull_test_conn.execute(
         "SELECT hunt_id, family, split, candidate_sha256, spec_sha256, spec, harness_model_id, note FROM hunt_trials"
     ).fetchone()
@@ -467,3 +478,136 @@ def test_the_outcome_trigger_binds_trial_purpose_split_and_access(ebull_test_con
     conn.execute(_RAW_OUTCOME, _outcome_params(validation_id, access_id=right_access, declaration_sha256="1" * 64))
     conn.execute(_RAW_OUTCOME, _outcome_params(evaluate_id))
     conn.commit()
+
+
+# --- slice 3c-iii: the panel loader and the frozen computation -------------------------------
+
+#: (date, open, high, low, close, volume, dividend, split_factor). 1997-01-18 is a Saturday
+#: (off-calendar); 1997-01-20 is MLK Day, a session before 1998; the 2:1 split is stamped on
+#: 1997-01-21; the last two bars are a zero range and a zero volume.
+_BARS = (
+    (date(1997, 1, 15), 20, 21, 19, 20, 100, 0, 1),
+    (date(1997, 1, 16), 20, 21, 19, 20.5, 100, 0.4, 1),
+    (date(1997, 1, 17), 21, 22, 20, 21, 100, 0, 1),
+    (date(1997, 1, 18), 21, 22, 20, 21, 100, 0.1, 1),
+    (date(1997, 1, 20), 21, 22, 20, 21.5, 100, 0, 1),
+    (date(1997, 1, 21), 10.5, 11, 10, 10.8, 100, 0, 2),
+    (date(1997, 1, 22), 10.8, 10.8, 10.8, 10.8, 100, 0.2, 1),
+    (date(1997, 1, 23), 11, 11.5, 10.5, 11, 0, 0, 1),
+)
+
+
+def _seed_archive(conn: psycopg.Connection[Any], *, vendor: str, adjustment_basis: str = "unadjusted") -> int:
+    row = conn.execute(
+        """
+        INSERT INTO research_price_series
+            (vendor, vendor_symbol, upstream_source, licence, adjustment_basis, first_bar, last_bar,
+             bar_count, corporate_action_stamps)
+        VALUES (%s, 'T3385', 'unknown', 'test-fixture', %s, %s, %s, %s, 'vendor_supplied')
+        RETURNING series_id
+        """,
+        (vendor, adjustment_basis, _BARS[0][0], _BARS[-1][0], len(_BARS)),
+    ).fetchone()
+    assert row is not None
+    series_id = int(row[0])
+    for bar_date, o, hi, lo, c, volume, dividend, factor in _BARS:
+        conn.execute(
+            """
+            INSERT INTO research_price_daily
+                (series_id, bar_date, open, high, low, close, volume, dividend, split_factor)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (series_id, bar_date, o, hi, lo, c, volume, dividend, factor),
+        )
+    conn.execute(
+        """
+        INSERT INTO research_price_quarantine_coverage
+            (series_id, rule_set_version, quarantine_as_of, first_bar, last_bar, bars_evaluated,
+             transitions_evaluated)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (series_id, hh.QUARANTINE_RULE_SET_VERSION, date(2026, 1, 1), _BARS[0][0], _BARS[-1][0], 8, 7),
+    )
+    conn.commit()
+    return series_id
+
+
+def test_the_panel_loader_places_bars_splits_dividends_and_termination(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    series_id = _seed_archive(ebull_test_conn, vendor="test/3385-archive")
+    member = AdmittedSeries(
+        series_id=series_id,
+        name_key=-series_id,
+        instrument_id=None,
+        termination=TerminationEvidence(linked=True, provision="(a)(3)", q_suffix=False),
+        last_bar=_BARS[-1][0],
+    )
+    monkeypatch.setattr(hunt_panel, "load_validated_universe", lambda _conn: [])
+    monkeypatch.setattr(hunt_panel, "load_universe_selection", lambda _conn, **_kw: SimpleNamespace(admitted=(member,)))
+    monkeypatch.setattr(hunt_panel, "_regime_labels", lambda _conn, sessions: ["unclassified"] * len(sessions))
+
+    panel = hunt_panel.load_hunt_panel(ebull_test_conn, universe="survivorship_free", through=date(1997, 1, 31))
+
+    assert panel.sessions[:7] == tuple(bar[0] for bar in _BARS if bar[0] != date(1997, 1, 18))
+    series = panel.series[series_id]
+    assert list(series.ratio.ordinals) == list(range(7))
+    # Before the 2:1 split every level halves and every share count doubles; from the split bar on, 1.
+    assert list(series.ratio.close) == pytest.approx([10.0, 10.25, 10.5, 10.75, 10.8, 10.8, 11.0])
+    assert list(series.ratio.volume) == pytest.approx([200.0, 200.0, 200.0, 200.0, 100.0, 100.0, 0.0])
+    assert list(series.traded_close) == pytest.approx([20.0, 20.5, 21.0, 21.5, 10.8, 10.8, 11.0])
+    assert list(series.exclusion) == [0, 0, 0, 0, 0, 5, 4]
+    assert dict(series.dividends) == pytest.approx({1: 0.2, 5: 0.2})
+    assert series.terminal_ordinal == 6
+    assert series.termination_class == TerminationClass.OPERATION_OF_LAW
+    assert panel.load_counts == {
+        "series_admitted": 1,
+        "series_starting_after_window": 0,
+        "series_loaded": 1,
+        "series_without_evaluated_bars": 0,
+        "bars_loaded": 7,
+        "off_calendar_bars": 1,
+        "dividends_loaded": 2,
+        "off_calendar_dividends": 1,
+        "terminating_in_window": 1,
+    }
+
+
+def test_an_archive_without_as_traded_prices_refuses_before_registering(
+    ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any]
+) -> None:
+    _seed_archive(ebull_test_conn, vendor=vendor_for("survivorship_free"), adjustment_basis="split_adjusted")
+    result = _run(ebull_test_conn, _spec(bound), _ok)
+    assert isinstance(result, HuntRefused) and result.reason == "unpriced_lane", result
+    assert _rows(ebull_test_conn) == []
+
+
+def test_compute_trial_reads_prices_only_after_the_search_is_committed(
+    ebull_test_conn: psycopg.Connection[Any], bound: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = _spec(bound)
+    seen: list[list[tuple[Any, ...]]] = []
+
+    def price_read(conn: psycopg.Connection[Any], **_kw: Any) -> None:
+        with psycopg.connect(conn.info.dsn, password=conn.info.password) as other:
+            seen.append(other.execute("SELECT hunt_id, purpose FROM hunt_trials").fetchall())
+        raise _PriceReadRaised
+
+    monkeypatch.setattr(hh, "load_signal", lambda _signal_id: lambda _t, _view, _constants: {})
+    monkeypatch.setattr(hunt_panel, "load_hunt_panel", price_read)
+    with pytest.raises(_PriceReadRaised):
+        hh.evaluate(ebull_test_conn, spec, registered_by="test")
+    assert seen == [[("hunt-1", "evaluate")]]
+    assert _rows(ebull_test_conn) == [("hunt-1", "discovery", "evaluate", spec.candidate_sha256)]
+    assert _outcomes(ebull_test_conn) == 0
+
+
+def test_a_series_starting_after_the_window_is_skipped_and_counted(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    series_id = _seed_archive(ebull_test_conn, vendor="test/3385-archive")
+    member = AdmittedSeries(series_id=series_id, name_key=-series_id, instrument_id=None, termination=None)
+    monkeypatch.setattr(hunt_panel, "load_validated_universe", lambda _conn: [])
+    monkeypatch.setattr(hunt_panel, "load_universe_selection", lambda _conn, **_kw: SimpleNamespace(admitted=(member,)))
+    with pytest.raises(hunt_panel.HuntPanelError, match="admits no series"):
+        hunt_panel.load_hunt_panel(ebull_test_conn, universe="survivorship_free", through=date(1997, 1, 10))
