@@ -33,8 +33,16 @@ function navClass({ isActive }: { isActive: boolean }): string {
 
 export function Sidebar() {
   const { pathname } = useLocation();
-  // Open on any page that is not Invest, so the active item is never hidden.
+  // Open on any page that is not Invest, so the active item is never hidden;
+  // collapsed again whenever the route RETURNS to Invest. The reset runs during
+  // render on a path change (prevention-log "Stale `useState` initializer"),
+  // not in an effect, so the collapsed state lands in the same commit.
   const [advancedOpen, setAdvancedOpen] = useState(pathname !== "/");
+  const [seenPath, setSeenPath] = useState(pathname);
+  if (seenPath !== pathname) {
+    setSeenPath(pathname);
+    setAdvancedOpen(pathname !== "/");
+  }
   const showAdvanced = advancedOpen || pathname !== "/";
   return (
     <aside className="flex w-56 flex-col border-r border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
