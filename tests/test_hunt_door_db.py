@@ -9,9 +9,10 @@ through ``sql/340`` with no registration; and the access row committed before co
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from pathlib import Path
-from typing import Any, LiteralString
+from typing import Any, LiteralString, cast
 
 import psycopg
 import pytest
@@ -135,6 +136,11 @@ def test_the_freeze_writes_the_declaration_and_its_document_together(
     assert stored is not None and frozen is not None
     assert stored.doc_sha256 == discovered["sha"]
     assert frozen.declaration.contract_version == hh.declaration_contract_version(discovered["sha"])
+    # A #2634 successor carries no document of its own: the chain resolves to the root's.
+    successor = dataclasses.replace(frozen, declaration_id=10**9, chain_declaration_ids=(declaration_id, 10**9))
+    chained = hh.load_chain_hunt_declaration(ebull_test_conn, successor)
+    ebull_test_conn.commit()
+    assert chained is not None and chained.declaration_id == declaration_id
     # Freezing closes the hunt's discovery.
     closed = _evaluate(ebull_test_conn, _spec(discovered_bound(discovered), lag=20), _discovery_outcome(20))
     assert isinstance(closed, HuntRefused) and closed.reason == "discovery_closed"
@@ -273,3 +279,61 @@ def test_a_burned_validation_candidate_cannot_be_pinned(
         ebull_test_conn, hunt_id="hunt-1", pins=[discovered["pinned"]], register=base
     )
     assert f"pin_{discovered['pinned'].spec_sha256[:12]}_split_burned" in codes
+
+
+def test_the_validation_readout_waits_for_every_pin_then_gives_verdicts(
+    ebull_test_conn: psycopg.Connection[Any], discovered: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+
+    from app.services import hunt_inference
+    from app.services.hunt_compute import cell_key
+    from app.services.r6_exclusion_trial import PROGRAMME_POLICIES
+
+    _freeze(ebull_test_conn, _register(ebull_test_conn, discovered["sha"]), monkeypatch)
+    pending = hunt_door.validation_readout(ebull_test_conn, "hunt-1")
+    assert not pending.complete and pending.closure is None and pending.candidates[0].verdict is None
+    assert pending.labels == (hunt_door.PREVIOUSLY_EXAMINED,)
+
+    series = tuple(float(v) + 0.01 for v in np.random.default_rng(7).normal(0.0, 0.01, 1500))
+    cell = hunt_inference.cell_statistics(series, h=1, entered_formations=range(1500))
+    assert isinstance(cell, hunt_inference.CellStatistics)
+    cells = {
+        cell_key(policy.label, dividends, cost): cell.form()
+        for policy in PROGRAMME_POLICIES
+        for dividends in (True, False)
+        for cost in ("base", "stress")
+    }
+    grid = hh.split_grid("validation", lag=discovered["pinned"].lag, h=discovered["pinned"].h)
+    assert not isinstance(grid, hunt_inference.StatRefused)
+    first_session = hh.split_sessions("validation")[grid.first].isoformat()
+    statistics = {"cells": cells, "grid": {"first_session": first_session}}
+    result = _evaluate(ebull_test_conn, discovered["pinned"], ComputedOutcome("computed", statistics, series))
+    # A fresh outcome reports the provenance it was stored with (Codex ckpt-2).
+    assert isinstance(result, HuntOutcome) and result.access_id is not None
+    assert result.spec_sha256 == discovered["pinned"].spec_sha256 and result.declaration_sha256 is not None
+    # A late look in ANOTHER hunt still qualifies hunt-1's readout: the frozen M counts every
+    # hunt's rows, so any look after the freeze makes it an under-count (decision 114).
+    hh.record_outside_look(
+        ebull_test_conn,
+        note="late look after freeze",
+        registered_by="test",
+        hunt_id="hunt-2",
+        family="x",
+        split="discovery",
+    )
+    reads: LiteralString = "SELECT count(*) FROM strategy_holdout_accesses WHERE strategy_id = 'hunt-1-validation'"
+    before = _count(ebull_test_conn, reads)
+    readout = hunt_door.validation_readout(ebull_test_conn, "hunt-1")
+    (candidate,) = readout.candidates
+    # t clears the bar, but the stub discovery Sharpes are widely spread, so V[SR] is large
+    # and the DSR (deflated against the FROZEN M and V) does not: underpowered, not "no edge".
+    assert readout.complete and candidate.verdict is hunt_inference.Verdict.UNDETERMINED
+    assert all(isinstance(value, float) and value < hunt_inference.DSR_BAR for value in candidate.dsr.values())
+    assert readout.closure is hunt_inference.HuntClosure.NO_DEMONSTRATED_EDGE
+    assert readout.labels == (hunt_door.PREVIOUSLY_EXAMINED, hunt_door.QUALIFIED_BY_LATE_LOOK)
+    counts = [candidate.survivor_subspans[side]["sessions"] for side in ("before", "on_or_after")]
+    assert all(isinstance(count, int) and count > 0 for count in counts)
+    assert sum(cast(list[int], counts)) == len(series)
+    # The readout verifies stored provenance and opens no fresh access.
+    assert _count(ebull_test_conn, reads) == before
