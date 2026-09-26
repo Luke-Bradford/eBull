@@ -20,7 +20,9 @@ import type {
   InstrumentSummary,
   InstrumentPositionDetail,
   ThesisDetail,
+  VerdictScore,
 } from "@/api/types";
+import { RankSummary } from "@/components/instrument/RankSummary";
 import { Term } from "@/components/Term";
 import { dayChangeVerdictTitle } from "@/lib/dayChangeVerdict";
 import { formatCloseDate } from "@/lib/format";
@@ -112,6 +114,10 @@ export interface SummaryStripProps {
   onClose: () => void;
   onGenerateThesis: () => void;
   generatingThesis: boolean;
+  /** Verdict score for the rank line (#3389 (b)): `undefined` while loading,
+   *  `null` when never scored. Omitted by callers without a verdict fetch. */
+  verdictScore?: VerdictScore | null;
+  verdictErrored?: boolean;
 }
 
 export function SummaryStrip({
@@ -126,6 +132,8 @@ export function SummaryStrip({
   onClose,
   onGenerateThesis,
   generatingThesis,
+  verdictScore,
+  verdictErrored = false,
 }: SummaryStripProps): JSX.Element {
   const { identity, price } = summary;
   // Live-quote overlay (#488). When an SSE tick arrives for this
@@ -299,6 +307,7 @@ export function SummaryStrip({
 
       {/* Row 3: badges + actions */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
+        <RankSummary score={verdictScore} errored={verdictErrored} />
         {/* Show stance badge whenever we have thesis data, even when
             the sticky error flag is set — dropping the last-known
             stance/confidence would lose useful operator context

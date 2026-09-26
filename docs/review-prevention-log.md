@@ -11598,3 +11598,14 @@ neighbouring container and match it.**
   the arm, and record why. Self-review prompt: "what is the chance this test passes if the edge is real but small?"
 - Enforced in: `docs/proposals/ta/2026-09-24-selection-programme-v2.md` ("Statistics and bar"),
   `docs/proposals/ta/2026-09-26-2902-power-first.md`.
+
+### A consumer's restatement of a producer's sign convention is a claim — check it against the arithmetic (#3389)
+
+- Failure: `RankDeltaCell` documented rank_delta as "positive means moved DOWN" and coloured it that way. It cited
+  `scoring.py`, which actually computes `prior_rank − position`, so positive means moved UP. `reporting.py` (risers
+  = delta > 0) was right. The Rankings table and the Verdict headline drew every rise red ▼ and every fall green ▲.
+  The Δ column also defaulted to ascending sort, which put the biggest fallers first under the real convention.
+- Prevention: when a UI or reader restates a stored field's sign or unit, open the producer's line that computes it,
+  and check a real row (stored delta vs `prev − cur` across two runs). Self-review prompt: "which line computes this
+  number, and does one real row agree with my reading?"
+- Enforced in: `frontend/src/components/rankings/RankDeltaCell.test.tsx`.

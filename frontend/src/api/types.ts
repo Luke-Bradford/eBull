@@ -1335,11 +1335,29 @@ export interface IarAnalytics {
   peer_grade?: IarPeerGrade;
 }
 
+/** Why an instrument carries no current rank (#3389), in the backend's precedence order. */
+export type NotRankedReason = "not_tradable" | "not_analysable" | "not_in_latest_run" | "no_rank";
+
+/** One family's share of `raw_total`: weight × score under the row's model_version. */
+export interface FamilyContribution {
+  family: string;
+  weight: number;
+  score: number;
+  contribution: number;
+}
+
 export interface VerdictScore {
   scored_at: string;
   model_version: string;
+  /** Stored rank — may belong to an older run. Read it only when `ranked`. */
   rank: number | null;
   rank_delta: number | null;
+  /** True iff `GET /rankings` would list this row (latest run, tradable, analysable, ranked). */
+  ranked: boolean;
+  not_ranked_reason: NotRankedReason | null;
+  filings_status: string | null;
+  /** Largest first; sums to `raw_total`. */
+  contributions: FamilyContribution[];
   total_score: number | null;
   raw_total: number | null;
   quality_score: number | null;

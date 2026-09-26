@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
@@ -132,6 +133,9 @@ def _make_verdict_row(
     penalties_json: list[dict[str, object]] | None = None,
     explanation: str | None = "Strong quality + value",
     analytics_json: dict[str, Any] | None = None,
+    is_tradable: bool = True,
+    filings_status: str | None = "analysable",
+    in_latest_run: bool = True,
 ) -> dict[str, Any]:
     """Build a dict matching the single-instrument verdict query shape."""
     return {
@@ -152,6 +156,9 @@ def _make_verdict_row(
         "penalties_json": penalties_json,
         "explanation": explanation,
         "analytics_json": analytics_json,
+        "is_tradable": is_tradable,
+        "filings_status": filings_status,
+        "in_latest_run": in_latest_run,
     }
 
 
@@ -779,6 +786,36 @@ class TestGetVerdict:
         lowered = sql.lower()
         assert "order by s.scored_at desc" in lowered
         assert "limit 1" in lowered
+
+    def test_ranked_row_carries_contributions_summing_to_raw_total(self) -> None:
+        # #3389 (b): contributions are weight x stored family score, largest first.
+        _with_conn([[_make_verdict_row()]])
+        score = client.get("/rankings/verdict/1").json()["score"]
+
+        assert score["ranked"] is True
+        assert score["not_ranked_reason"] is None
+        contributions = score["contributions"]
+        assert [c["family"] for c in contributions][:2] == ["quality", "value"]
+        assert sum(c["contribution"] for c in contributions) == pytest.approx(
+            0.25 * 0.90 + 0.25 * 0.75 + 0.20 * 0.60 + 0.15 * 0.85 + 0.10 * 0.70 + 0.05 * 0.50
+        )
+
+    def test_row_from_an_older_run_is_not_ranked_even_with_a_stored_rank(self) -> None:
+        _with_conn([[_make_verdict_row(rank=7, in_latest_run=False)]])
+        score = client.get("/rankings/verdict/1").json()["score"]
+
+        assert score["rank"] == 7
+        assert score["ranked"] is False
+        assert score["not_ranked_reason"] == "not_in_latest_run"
+
+    def test_query_gates_like_the_rankings_list(self) -> None:
+        conn = _with_conn([[]])
+        client.get("/rankings/verdict/1")
+
+        sql: str = conn.cursor.return_value.execute.call_args_list[0][0][0].lower()
+        assert "max(scored_at) from scores where model_version = %(mv)s" in " ".join(sql.split())
+        assert "i.is_tradable" in sql
+        assert "c.filings_status" in sql
 
     def test_custom_model_version(self) -> None:
         conn = _with_conn([[]])

@@ -268,6 +268,16 @@ _WEIGHT_MODES: dict[str, dict[str, float]] = {
     },
 }
 
+
+def family_weights(model_version: str) -> Mapping[str, float] | None:
+    """The family weights ``raw_total`` is built from, or ``None`` for an unknown version.
+
+    Read-only view for surfaces that explain a stored score (#3389): the weights
+    are the single source here, never copied into the API or frontend.
+    """
+    return _WEIGHT_MODES.get(model_version)
+
+
 # ---------------------------------------------------------------------------
 # Penalty constants  (additive deductions from total_score)
 # ---------------------------------------------------------------------------
