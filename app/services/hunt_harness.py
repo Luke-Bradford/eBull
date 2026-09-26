@@ -29,7 +29,8 @@ What is NOT here yet, and how it fails meanwhile:
 ⚠⚠ THE LOG COMES BEFORE THE NUMBER. A discovery search is committed to ``hunt_trials``
 before ``compute`` reads a single price, so a crash, a refusal or an abandoned run is
 still counted in M. A statistical refusal is an outcome; an exception is not (it
-propagates, writes no outcome, and the registration is reused on retry).
+propagates, writes no outcome, is recorded in ``hunt_trial_retries``, and the registration
+is reused on retry; :func:`abandon_trial` closes a trial whose error keeps recurring).
 
 ⚠ The programme lock is a SESSION advisory lock, non-re-entrant by a ContextVar: a nested
 acquire on one session silently double-counts (prevention log, #2964), and a nested
@@ -847,7 +848,9 @@ class _DoorPass:
     end_session: date | None
 
 
-def _pass_door(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str) -> _DoorPass | HuntRefused:
+def _pass_door(
+    conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str, purpose: str | None = None
+) -> _DoorPass | HuntRefused:
     """``result_ledger``'s audited door for ``spec``'s split, with the membership check.
 
     The access row is written in the caller's transaction and commits with the
@@ -859,7 +862,7 @@ def _pass_door(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by:
         strategy_version=HUNT_DECLARATION_VERSION,
         access_kind="read",
         accessed_by=registered_by,
-        purpose=f"#3385 hunt {spec.split} evaluate of spec {spec.spec_sha256}",
+        purpose=purpose or f"#3385 hunt {spec.split} evaluate of spec {spec.spec_sha256}",
     )
     try:
         access_id, frozen = require_outcome_access_with_declaration(
@@ -1181,6 +1184,46 @@ def read_outcome(conn: psycopg.Connection[Any], trial_id: int) -> HuntOutcome:
     )
 
 
+_INSERT_RETRY = """
+    INSERT INTO hunt_trial_retries (hunt_trial_id, error_class, error_text, recorded_by)
+    VALUES (%(trial)s, %(error_class)s, %(error_text)s, %(recorded_by)s)
+"""
+
+#: Error text is kept for the reviewer, bounded so a pathological message cannot bloat the log.
+_ERROR_TEXT_LIMIT: Final = 2000
+
+
+def error_class_of(error: BaseException) -> str:
+    return f"{type(error).__module__}.{type(error).__qualname__}"
+
+
+def _record_failure(
+    conn: psycopg.Connection[Any], trial_id: int, error: Exception, *, recorded_by: str, dsn: str, password: str | None
+) -> None:
+    """Record the failure on ``conn``; if that connection is what broke, on a fresh one to
+    the same database (Codex ckpt-2: a recurring connection failure must still reach
+    abandonment). Best effort: recording never masks the error being recorded."""
+    params = {
+        "trial": trial_id,
+        "error_class": error_class_of(error),
+        "error_text": str(error)[:_ERROR_TEXT_LIMIT],
+        "recorded_by": recorded_by,
+    }
+    try:
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+        conn.execute(_INSERT_RETRY, params)
+        conn.commit()
+        return
+    except Exception:
+        _LOG.warning("recording the failure of hunt trial %s on its own connection failed; retrying fresh", trial_id)
+    try:
+        with psycopg.connect(dsn, password=password) as fresh:
+            fresh.execute(_INSERT_RETRY, params)
+    except Exception:
+        _LOG.exception("recording the failure of hunt trial %s failed", trial_id)
+
+
 def _insert_trial(conn: psycopg.Connection[Any], params: dict[str, Any]) -> int | None:
     row = conn.execute(_INSERT_TRIAL, params).fetchone()
     return None if row is None else int(row[0])
@@ -1282,53 +1325,75 @@ def evaluate(
             trial_id, registered_spec_sha256 = int(existing[0]), str(existing[3])
         # ⚠ The search (and a door look's access row) is durable BEFORE any price is read.
         conn.commit()
+        # Captured while the connection is healthy, for recording a failure that breaks it.
+        dsn, password = conn.info.dsn, conn.info.password
 
-        computed = compute_trial(conn, spec, end=None if door is None else door.end_session)
-        if computed.status not in ("computed", "refused"):
-            raise HuntHarnessError(f"compute returned status {computed.status!r}")
-        if conn.info.transaction_status != TransactionStatus.IDLE:
-            conn.commit()
-        after = read_universe_identity(conn, spec.universe_identity.universe)
-        if after != spec.universe_identity:
-            raise HuntHarnessError("the universe identity changed during the computation; retry the registered trial")
-        if door is not None:
-            _verify_door(conn, spec, door)
+        try:
+            return _compute_and_store(
+                conn, spec, trial_id=trial_id, registered_spec_sha256=registered_spec_sha256, door=door
+            )
+        except Exception as error:
+            # An infrastructure error: no outcome, the registration is retried. Recorded so
+            # abandonment can see it recurred (obligation 131); the error still propagates.
+            _record_failure(conn, trial_id, error, recorded_by=registered_by, dsn=dsn, password=password)
+            raise
 
-        statistics_form = canonical_form(computed.statistics)
-        series_form = None if computed.active_series is None else canonical_form(computed.active_series)
-        outcome_sha256 = outcome_sha256_of(
-            spec_sha256=registered_spec_sha256,
-            statistics_form=statistics_form,
-            active_series_form=series_form,
-            access_id=None if door is None else door.access_id,
-            declaration_sha256=None if door is None else door.declaration_sha256,
-        )
-        conn.execute(
-            _INSERT_OUTCOME,
-            {
-                "trial": trial_id,
-                "status": computed.status,
-                "statistics": dumps_form(statistics_form),
-                "active_series": None if series_form is None else dumps_form(series_form),
-                "access_id": None if door is None else door.access_id,
-                "declaration_sha256": None if door is None else door.declaration_sha256,
-                "outcome": outcome_sha256,
-            },
-        )
+
+def _compute_and_store(
+    conn: psycopg.Connection[Any],
+    spec: TrialSpec,
+    *,
+    trial_id: int,
+    registered_spec_sha256: str,
+    door: _DoorPass | None,
+) -> HuntOutcome | HoldoutRecorded:
+    """``evaluate`` steps 6-7, after the registration (and any access row) committed."""
+    computed = compute_trial(conn, spec, end=None if door is None else door.end_session)
+    if computed.status not in ("computed", "refused"):
+        raise HuntHarnessError(f"compute returned status {computed.status!r}")
+    if conn.info.transaction_status != TransactionStatus.IDLE:
         conn.commit()
-        if spec.split == "holdout":
-            return HoldoutRecorded(trial_id, cached=False)
-        return HuntOutcome(
-            hunt_trial_id=trial_id,
-            status=computed.status,
-            statistics=decode_form(statistics_form),
-            active_series=None if series_form is None else tuple(decode_form(series_form)),
-            outcome_sha256=outcome_sha256,
-            cached=False,
-            spec_sha256=registered_spec_sha256,
-            access_id=None if door is None else door.access_id,
-            declaration_sha256=None if door is None else door.declaration_sha256,
-        )
+    after = read_universe_identity(conn, spec.universe_identity.universe)
+    if after != spec.universe_identity:
+        raise HuntHarnessError("the universe identity changed during the computation; retry the registered trial")
+    if door is not None:
+        _verify_door(conn, spec, door)
+
+    statistics_form = canonical_form(computed.statistics)
+    series_form = None if computed.active_series is None else canonical_form(computed.active_series)
+    outcome_sha256 = outcome_sha256_of(
+        spec_sha256=registered_spec_sha256,
+        statistics_form=statistics_form,
+        active_series_form=series_form,
+        access_id=None if door is None else door.access_id,
+        declaration_sha256=None if door is None else door.declaration_sha256,
+    )
+    conn.execute(
+        _INSERT_OUTCOME,
+        {
+            "trial": trial_id,
+            "status": computed.status,
+            "statistics": dumps_form(statistics_form),
+            "active_series": None if series_form is None else dumps_form(series_form),
+            "access_id": None if door is None else door.access_id,
+            "declaration_sha256": None if door is None else door.declaration_sha256,
+            "outcome": outcome_sha256,
+        },
+    )
+    conn.commit()
+    if spec.split == "holdout":
+        return HoldoutRecorded(trial_id, cached=False)
+    return HuntOutcome(
+        hunt_trial_id=trial_id,
+        status=computed.status,
+        statistics=decode_form(statistics_form),
+        active_series=None if series_form is None else tuple(decode_form(series_form)),
+        outcome_sha256=outcome_sha256,
+        cached=False,
+        spec_sha256=registered_spec_sha256,
+        access_id=None if door is None else door.access_id,
+        declaration_sha256=None if door is None else door.declaration_sha256,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1407,6 +1472,113 @@ def record_outside_look(
 
 
 # ---------------------------------------------------------------------------
+# Abandonment (obligation 131)
+# ---------------------------------------------------------------------------
+
+#: The first failure plus "three recorded retries" (spec "The audited door"), all with the
+#: same error class: the error RECURRED. By construction; no published rule applies.
+ABANDON_MIN_FAILURES: Final = 4
+
+_SELECT_ABANDON_TRIAL = """
+    SELECT t.purpose, t.spec, t.spec_sha256, o.hunt_trial_id IS NOT NULL
+    FROM hunt_trials t
+    LEFT JOIN hunt_trial_outcomes o USING (hunt_trial_id)
+    WHERE t.hunt_trial_id = %(trial)s
+"""
+
+_SELECT_RETRIES = """
+    SELECT retry_id, error_class FROM hunt_trial_retries WHERE hunt_trial_id = %(trial)s ORDER BY retry_id
+"""
+
+
+class AbandonmentRefused(RuntimeError):
+    """``abandon_trial`` refused; nothing was written."""
+
+
+def abandonment_refusal(error_classes: list[str]) -> str | None:
+    """Why a trial with these recorded failures (oldest first) may not be abandoned, or ``None``."""
+    if len(error_classes) < ABANDON_MIN_FAILURES:
+        return f"{len(error_classes)} recorded failures; abandonment needs {ABANDON_MIN_FAILURES}"
+    last = error_classes[-ABANDON_MIN_FAILURES:]
+    if len(set(last)) != 1:
+        return f"the last {ABANDON_MIN_FAILURES} failures are not one recurring error: {last}"
+    return None
+
+
+def abandon_trial(conn: psycopg.Connection[Any], trial_id: int, *, reason: str, abandoned_by: str) -> str:
+    """Write an ``abandoned`` outcome for a registered trial whose infrastructure error has
+    recurred (:data:`ABANDON_MIN_FAILURES` recorded failures of one class); return its
+    ``outcome_sha256``. Only ``scripts/abandon_hunt_trial.py`` calls it, from a reviewed PR.
+
+    ``abandoned`` counts as refused (``NOT_PASS_REFUSED``; BY p = 1) and completes the
+    trial, so a freeze or a readout waiting on it can proceed. A validation or holdout
+    abandonment passes the audited door like ``evaluate`` (``sql/427`` requires the access),
+    reads no price, and releases nothing.
+    """
+    if not _is_text(reason) or not _is_text(abandoned_by):
+        raise ValueError("reason and abandoned_by must be non-empty text")
+    with hunt_programme_lock(conn):
+        row = conn.execute(_SELECT_ABANDON_TRIAL, {"trial": trial_id}).fetchone()
+        if row is None:
+            raise AbandonmentRefused(f"hunt trial {trial_id} does not exist")
+        purpose, spec_form, spec_sha256, has_outcome = row
+        if purpose != "evaluate" or has_outcome:
+            raise AbandonmentRefused(f"hunt trial {trial_id} is not an evaluate registration without an outcome")
+        spec = TrialSpec.from_form(spec_form)
+        if spec.hunt_id in HUNT_CLOSED:
+            raise AbandonmentRefused(f"{spec.hunt_id} is closed")
+        retries = conn.execute(_SELECT_RETRIES, {"trial": trial_id}).fetchall()
+        refusal = abandonment_refusal([str(retry[1]) for retry in retries])
+        if refusal is not None:
+            raise AbandonmentRefused(f"hunt trial {trial_id}: {refusal}")
+        door: _DoorPass | None = None
+        if spec.split != "discovery":
+            # ⚠ The audit row names what this access is: an abandonment, no read (Codex ckpt-2).
+            passed = _pass_door(
+                conn,
+                spec,
+                registered_by=abandoned_by,
+                purpose=f"#3385 hunt {spec.split} abandonment of trial {trial_id}; no price read, nothing released",
+            )
+            if isinstance(passed, HuntRefused):
+                raise AbandonmentRefused(f"hunt trial {trial_id}: the door refused: {passed.detail}")
+            door = passed
+            conn.commit()
+            _verify_door(conn, spec, door)
+        statistics_form = canonical_form(
+            {
+                "abandoned": {
+                    "reason": reason,
+                    "by": abandoned_by,
+                    "retry_ids": [int(retry[0]) for retry in retries],
+                    "error_class": str(retries[-1][1]),
+                }
+            }
+        )
+        outcome_sha256 = outcome_sha256_of(
+            spec_sha256=str(spec_sha256),
+            statistics_form=statistics_form,
+            active_series_form=None,
+            access_id=None if door is None else door.access_id,
+            declaration_sha256=None if door is None else door.declaration_sha256,
+        )
+        conn.execute(
+            _INSERT_OUTCOME,
+            {
+                "trial": trial_id,
+                "status": "abandoned",
+                "statistics": dumps_form(statistics_form),
+                "active_series": None,
+                "access_id": None if door is None else door.access_id,
+                "declaration_sha256": None if door is None else door.declaration_sha256,
+                "outcome": outcome_sha256,
+            },
+        )
+        conn.commit()
+    return outcome_sha256
+
+
+# ---------------------------------------------------------------------------
 # Obligation 83: a stored row agrees with its own spec
 # ---------------------------------------------------------------------------
 
@@ -1454,6 +1626,7 @@ def verify_trial_row(
 
 
 __all__ = [
+    "ABANDON_MIN_FAILURES",
     "CANDIDATE_FIELDS",
     "EMBARGO_SESSIONS",
     "HORIZON_CAP_SESSIONS",
@@ -1465,6 +1638,7 @@ __all__ = [
     "LANES",
     "SPEC_FIELDS",
     "SPLIT_BOUNDS",
+    "AbandonmentRefused",
     "ComputedOutcome",
     "HoldoutRecorded",
     "HuntHarnessError",
@@ -1473,11 +1647,14 @@ __all__ = [
     "HuntTariff",
     "TrialSpec",
     "UniverseIdentity",
+    "abandon_trial",
+    "abandonment_refusal",
     "archive_last_complete_session",
     "calendar_identity",
     "canonical_form",
     "candidate_sha256_of",
     "decode_form",
+    "error_class_of",
     "evaluate",
     "hunt_programme_lock",
     "read_outcome",

@@ -3,8 +3,8 @@ and the two readouts.
 
 #3385 slices 2b-i..2b-iii, spec ``docs/proposals/ta/2026-09-26-3385-hunt-harness.md`` (v5),
 "The audited door", "DSR" (M, V[SR]), "BY", "Power" and "Trial register (#2829)";
-obligations 91 (in ``hunt_harness``), 108, 110, 122-123, 132-133 and 149. The abandonment
-script (obligation 131) is its own slice.
+obligations 91 (in ``hunt_harness``), 108, 110, 122-123, 132-133 and 149. Abandonment
+(obligation 131) is ``hunt_harness.abandon_trial``.
 
 A hunt's validation batch is ONE #2599 declaration, ``hunt-<n>-validation`` @ ``v1``. Its
 document pins every candidate's validation spec and every freeze-time number: M (with the
