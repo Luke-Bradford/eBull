@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Literal
 
-from app.services.deflated_sharpe import DeflatedSharpeResult, deflated_sharpe, trade_moments
+from app.services.deflated_sharpe import DeflatedSharpeResult, TradeMoments, deflated_sharpe, trade_moments
 from app.services.r6_monthly_trial import HacEstimate, newey_west_lag, student_t_cdf
 
 # ---------------------------------------------------------------------------
@@ -263,6 +263,16 @@ def cell_statistics(
 # ---------------------------------------------------------------------------
 
 
+def _moments(series: Sequence[float]) -> TradeMoments | None:
+    """``trade_moments``, or ``None`` when its moments are degenerate. ⚠ A near-constant finite
+    series can fail its Pearson check numerically and raise ``ValueError``, which is a
+    statistical failure here, not a bug (Codex ckpt-2)."""
+    try:
+        return trade_moments(series)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class VPopulationMember:
     """One discovery ``evaluate`` trial of the hunt with an outcome."""
@@ -281,7 +291,8 @@ class TrialSharpeVariance:
     #: mean over the population of 1/T_i: the IID variance of a per-observation Sharpe under zero edge.
     floor: float
     trial_ids: tuple[int, ...]
-    #: reason → count: ``no_series``, ``ruined``, ``non_finite``, ``zero_variance``, ``duplicate``.
+    #: reason → count: ``no_series``, ``ruined``, ``non_finite``, ``zero_variance`` (no usable
+    #: moments), ``duplicate``.
     excluded: Mapping[str, int]
 
     @property
@@ -314,7 +325,7 @@ def trial_sharpe_variance(members: Iterable[VPopulationMember]) -> TrialSharpeVa
         if series in seen:
             excluded["duplicate"] += 1
             continue
-        moments = trade_moments(series)
+        moments = _moments(series)
         if moments is None:
             excluded["zero_variance"] += 1
             continue
@@ -373,9 +384,17 @@ def hunt_dsr(
         raise ValueError(
             f"declared_trials {declared_trials} must be >= 2 and cover the {variance.measured_trials} measured trials"
         )
-    if len(active) != cell.observations:
+    # ⚠ Cells share the fixed grid, so a length check cannot catch a series from another
+    # cell; recompute and compare exactly (the estimator is deterministic; Codex ckpt-2).
+    recomputed = hac_estimate(active, cell.lag)
+    if not isinstance(recomputed, HacEstimate) or (
+        recomputed.observations,
+        recomputed.mean,
+        recomputed.variance,
+        recomputed.long_run_variance,
+    ) != (cell.observations, cell.mean, cell.variance, cell.long_run_variance):
         raise ValueError("the active series is not the one the cell statistics were computed on")
-    moments = trade_moments(active)
+    moments = _moments(active)
     if moments is None:
         return StatRefused("degenerate_variance", "the active series has no Sharpe ratio")
     effective = min(float(cell.observations), cell.observations * cell.variance / cell.long_run_variance)

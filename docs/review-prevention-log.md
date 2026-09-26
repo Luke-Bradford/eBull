@@ -11504,3 +11504,15 @@ neighbouring container and match it.**
   I matched on, and does anything I write depend on them?"
 - Enforced in: `app/services/hunt_harness.py::evaluate` (`registered_spec_sha256`),
   `tests/test_hunt_harness_db.py::test_a_relabelled_retry_binds_its_outcome_to_the_registered_spec`.
+
+### A code-hash model id must hash the shared code the module CALLS, not only the module (#3385)
+
+- Failure: #3385 slice 3a folded `hunt_inference.py`'s source hash into `HUNT_HARNESS_MODEL_ID` so an edit
+  to the inference would be a new trial identity. The p-values and DSR are actually computed by
+  `r6_monthly_trial.student_t_cdf` / `newey_west_lag` and `deflated_sharpe.deflated_sharpe` /
+  `trade_moments`; an edit to either would have left the model id unchanged and let `evaluate` return a
+  cached outcome computed under different statistics. (Codex checkpoint 2.)
+- Prevention: when identity is a code hash, list every first-party module whose functions change the stored
+  number and hash all of them. Self-review prompt: "which imports in this module compute part of the output?"
+- Enforced in: `app/services/hunt_harness.py::MODEL_CODE_MODULES`,
+  `tests/test_hunt_inference.py::test_the_inference_code_and_its_shared_statistics_are_part_of_the_harness_model_id`.

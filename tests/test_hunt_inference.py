@@ -9,8 +9,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from app.services import deflated_sharpe as deflated_sharpe_module
 from app.services import hunt_harness as hh
 from app.services import hunt_inference as hi
+from app.services import r6_monthly_trial
 from app.services.deflated_sharpe import TradeMoments, deflated_sharpe, trade_moments
 from app.services.r6_monthly_trial import HacEstimate, hac_t, newey_west_lag, student_t_cdf
 
@@ -393,6 +395,44 @@ def test_regime_readout_is_mean_and_count_per_label() -> None:
         hi.regime_readout([1.0], [])
 
 
-def test_the_inference_code_is_part_of_the_harness_model_id() -> None:
-    expected = hashlib.sha256(Path(hi.__file__).read_bytes()).hexdigest()
-    assert hh._model_constants()["model_code_sha256"] == {"app.services.hunt_inference": expected}
+def test_the_inference_code_and_its_shared_statistics_are_part_of_the_harness_model_id() -> None:
+    expected = {
+        module.__name__: hashlib.sha256(Path(str(module.__file__)).read_bytes()).hexdigest()
+        for module in (hi, deflated_sharpe_module, r6_monthly_trial)
+    }
+    assert hh._model_constants()["model_code_sha256"] == expected
+
+
+# --- Codex ckpt-2 findings -------------------------------------------------------------------------------------
+
+#: Finite, passes ``cell_statistics``, but ``trade_moments`` raises on its numerical Pearson check.
+_PEARSON_TRAP = tuple([0.001] + [0.001 * (1 + 1e-14)] * 29)
+
+
+def test_the_pearson_trap_is_real() -> None:
+    with pytest.raises(ValueError):
+        trade_moments(_PEARSON_TRAP)
+
+
+def test_a_trade_moments_failure_is_excluded_from_v_not_raised() -> None:
+    members = [*_members(10), hi.VPopulationMember(99, _PEARSON_TRAP, ruined=False)]
+    variance = hi.trial_sharpe_variance(members)
+    assert isinstance(variance, hi.TrialSharpeVariance)
+    assert variance.excluded["zero_variance"] == 1 and 99 not in variance.trial_ids
+
+
+def test_a_trade_moments_failure_refuses_the_dsr() -> None:
+    cell = hi.cell_statistics(_PEARSON_TRAP, h=1, entered_formations=range(30))
+    assert isinstance(cell, hi.CellStatistics)
+    variance = hi.trial_sharpe_variance(_members(12))
+    assert isinstance(variance, hi.TrialSharpeVariance)
+    result = hi.hunt_dsr(_PEARSON_TRAP, cell, variance=variance, declared_trials=300, trial_register_version="r12")
+    assert isinstance(result, hi.StatRefused) and result.reason == "degenerate_variance"
+
+
+def test_the_dsr_refuses_a_series_from_another_cell() -> None:
+    first, second = _noise(11, drift=0.002), _noise(21, drift=0.002)
+    variance = hi.trial_sharpe_variance(_members(12))
+    assert isinstance(variance, hi.TrialSharpeVariance)
+    with pytest.raises(ValueError):
+        hi.hunt_dsr(second, _cell(first), variance=variance, declared_trials=300, trial_register_version="r12")
