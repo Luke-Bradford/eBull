@@ -345,7 +345,12 @@ def test_the_power_script_reproduces_the_declarations_power(
     """Slice 4: recomputed from stored discovery outcomes alone, equal to the document's."""
     from scripts.measure_3385_power import measure
 
-    power, matches = measure(ebull_test_conn, discovered["doc"])
-    assert matches and set(power) == {discovered["pinned"].spec_sha256}
+    power, problems = measure(ebull_test_conn, discovered["doc"])
+    assert problems == [] and set(power) == {discovered["pinned"].spec_sha256}
     tampered = {**discovered["doc"], "numbers": {**discovered["doc"]["numbers"], "power": {}}}
-    assert measure(ebull_test_conn, tampered)[1] is False
+    assert measure(ebull_test_conn, tampered)[1] == ["numbers_power_differs_from_the_replay"]
+    # Codex ckpt-2: the replay is bound to the outcome the pin names, not merely the candidate's.
+    (pin,) = discovered["doc"]["pins"]
+    repinned = {**discovered["doc"], "pins": [{**pin, "discovery_outcome_sha256": "0" * 64}]}
+    label = discovered["pinned"].spec_sha256[:12]
+    assert measure(ebull_test_conn, repinned)[1] == [f"pin_{label}_discovery_outcome_is_not_the_pinned_one"]

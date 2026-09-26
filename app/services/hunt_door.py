@@ -1279,11 +1279,17 @@ def _pin_spec(pin: Mapping[str, Any]) -> TrialSpec:
 # ---------------------------------------------------------------------------
 
 
-def pin_power(conn: psycopg.Connection[Any], doc: Mapping[str, Any]) -> dict[str, Any]:
+def pin_power(conn: psycopg.Connection[Any], doc: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Every pinned candidate's power statement, recomputed from STORED discovery outcomes
-    only, for the declaration's split (and frozen end, for holdout). A readout, not a
-    search: no price is read. ``scripts/measure_3385_power.py`` compares it to the
-    document; the freeze makes the same comparison inside ``declaration_numbers``.
+    only, for the declaration's split (and frozen end, for holdout), plus every way a pin
+    disagrees with what it names. A readout, not a search: no price is read.
+
+    Bound to the pin (Codex ckpt-2; spec "Power": the replay runs "on the stored outcome
+    hashes pinned in the declaration"): each pin's hashes must be its spec's, and a
+    validation pin's ``discovery_hunt_trial_id`` / ``discovery_outcome_sha256`` must be the
+    stored outcome replayed, whose own hash ``read_outcome`` re-verifies. A holdout pin
+    names its validation trial instead; its discovery outcome is the candidate's one
+    ``evaluate`` row (programme-wide unique).
     """
     split = cast(hh.Split, doc["split"])
     end = date.fromisoformat(str(doc["end_session"])) if split == "holdout" else None
@@ -1291,17 +1297,28 @@ def pin_power(conn: psycopg.Connection[Any], doc: Mapping[str, Any]) -> dict[str
         outcome.candidate_sha256: outcome for outcome in _discovery_outcomes(conn) if outcome.hunt_id == doc["hunt_id"]
     }
     power: dict[str, Any] = {}
+    problems: list[str] = []
     for pin in doc["pins"]:
         spec = TrialSpec.from_form(pin["spec"])
+        label = spec.spec_sha256[:12]
+        if (pin.get("spec_sha256"), pin.get("candidate_sha256")) != (spec.spec_sha256, spec.candidate_sha256):
+            problems.append(f"pin_{label}_hashes_are_not_its_spec")
         source = discovery.get(spec.candidate_sha256)
+        active: Sequence[float] | None = None
+        if source is None:
+            problems.append(f"pin_{label}_has_no_discovery_outcome")
+        else:
+            stored = hh.read_outcome(conn, source.hunt_trial_id)
+            named = (pin.get("discovery_hunt_trial_id"), pin.get("discovery_outcome_sha256"))
+            if split == "validation" and named != (stored.hunt_trial_id, stored.outcome_sha256):
+                problems.append(f"pin_{label}_discovery_outcome_is_not_the_pinned_one")
+            active = stored.active_series
         grid = hh.split_grid(split, lag=spec.lag, h=spec.h, end=end)
         if isinstance(grid, StatRefused):
             power[spec.spec_sha256] = {"blocked": f"target_{grid.reason}"}
         else:
-            power[spec.spec_sha256] = power_statement(
-                None if source is None else source.active_series, target_observations=len(grid.sessions), h=spec.h
-            )
-    return dict(sorted(power.items()))
+            power[spec.spec_sha256] = power_statement(active, target_observations=len(grid.sessions), h=spec.h)
+    return dict(sorted(power.items())), problems
 
 
 __all__ = [
