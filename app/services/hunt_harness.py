@@ -12,7 +12,7 @@ What is NOT here yet, and how it fails meanwhile:
   ``hunt_inference``; its code, and the shared statistics it calls, are hashed into
   ``HUNT_HARNESS_MODEL_ID``. Nothing in production can register a search today
   regardless: ``HUNT_BUDGETS`` is empty (a hunt with no budget refuses registration)
-  and ``HUNT_TARIFF`` is unset (every lane is unpriced and refuses).
+  and only ``real_stock_long_x1`` is priced (``HUNT_TARIFF``, re-fetched 2026-09-26).
 - **The audited door** for validation and holdout (slice 2b). Their freezes need slice 3's
   M, V[SR] and BY numbers, so the door ships after it. Until then ``evaluate`` refuses
   both splits with ``door_unavailable`` before registering.
@@ -216,8 +216,17 @@ class HuntTariff:
     url: str
     fetched_on: date
     text_sha256: str
+    #: eToro's stock commission is set per country of residence (and exchange).
+    residence_country: str
     account_currency: str
     proportional_commission_per_side: float
+
+    def __post_init__(self) -> None:
+        if not _HEX64.match(self.text_sha256):
+            raise ValueError("text_sha256 must be a sha256 hex digest")
+        c = self.proportional_commission_per_side
+        if not (type(c) is float and math.isfinite(c) and 0.0 <= c < 1.0):
+            raise ValueError(f"proportional_commission_per_side must be a float in [0, 1), got {c!r}")
 
     def cost_model_id(self) -> str:
         form = canonical_form(
@@ -225,6 +234,7 @@ class HuntTariff:
                 "url": self.url,
                 "fetched_on": self.fetched_on.isoformat(),
                 "text_sha256": self.text_sha256,
+                "residence_country": self.residence_country,
                 "account_currency": self.account_currency,
                 "proportional_commission_per_side": self.proportional_commission_per_side,
                 "cost_model_id": COST_MODEL_ID,
@@ -233,9 +243,44 @@ class HuntTariff:
         return f"{HUNT_COST_MODEL_PREFIX}+{sha256_form(form)[:16]}"
 
 
-#: ⚠ ``None`` until slice 3 re-fetches the fees page under the etoro-api skill's protocol.
-#: While ``None`` every lane is unpriced, so nothing can register.
-HUNT_TARIFF: HuntTariff | None = None
+#: The fees page's "Stocks" section as rendered on 2026-09-26, captured in the browser with
+#: the country selector's SELECTED option written first, then the Germany row from the same
+#: fetch as a control (the selector was live, not a default). Edits to the rendered text:
+#: the selector's own heading and option list removed, and U+00A0 no-break spaces written
+#: as plain spaces. ``HUNT_TARIFF.text_sha256`` is its sha256, computed in the browser on
+#: exactly this string; a test recomputes it here and checks the selected country is the
+#: tariff's residence. The page's "0.15% of trade value" commission belongs to Stock Margin
+#: (leverage), not this lane.
+HUNT_TARIFF_EVIDENCE: Final = (
+    "Selected country: United Kingdom\n"
+    "Stocks\n\nA commission fee of $1 or $2 may apply when opening and closing a stock position, depending on "
+    "your country of residence and the stock exchange on which the asset is traded.\n\nPositions opened before "
+    "the fee implementation date in your country will not incur a fee when closing.\n\nStock commission fees in "
+    "USD\n\nStock Exchange\nAustralia, Hong Kong, Dubai, Abu Dhabi, Tokyo exchanges\tAll other exchanges\n$0\t$0"
+    "\n\nPlease note that commission fees:\n– Are calculated in USD, regardless of the base currency of the stock "
+    "being traded\n– Do not apply to CFD positions\n– Do not apply to ETFs\n– Do not apply to Copy trading or "
+    "Smart Portfolios\n– Do not apply to Recurring investment plans on opening a position (may apply on closing "
+    "position)\n\n"
+    "Control capture, same fetch:\nSelected country: Germany\n"
+    "Stock Exchange\nAustralia, Hong Kong, Dubai, Abu Dhabi, Tokyo exchanges\tAll other exchanges\t"
+    "Implementation date\n$2\t$1\t2/3/2025\n"
+)
+
+#: Re-fetched 2026-09-26 in a browser (the etoro-api skill's protocol: the portal blocks
+#: curl). For a UK-resident account a US-listed stock pays $0 commission per side, so the
+#: lane's only charge is the frozen half-spread band: proportional, and priceable. The
+#: residence is the operator's (the eToro (UK) Ltd account; the tax ledger is HMRC's); the
+#: USD account is ``cost_model.FX_EVIDENCE``'s measurement. ⚠ A $1/$2 fixed fee applies in
+#: most other countries: a change of residence or of the page is a new cost identity, and
+#: a fixed fee cannot be priced on a return series (spec "Lanes").
+HUNT_TARIFF: HuntTariff | None = HuntTariff(
+    url="https://www.etoro.com/trading/fees/",
+    fetched_on=date(2026, 9, 26),
+    text_sha256="2ca786e878ebb635386c305f06d6d1bd1928dc11710fdcf9221305ef364a218e",
+    residence_country="United Kingdom",
+    account_currency="USD",
+    proportional_commission_per_side=0.0,
+)
 
 
 def running_cost_model_id(lane: Lane) -> str | None:

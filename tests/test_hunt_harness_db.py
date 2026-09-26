@@ -31,6 +31,7 @@ def bound(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict[str, Any]:
         url="https://www.etoro.com/trading/fees/",
         fetched_on=date(2026, 9, 26),
         text_sha256="5" * 64,
+        residence_country="United Kingdom",
         account_currency="USD",
         proportional_commission_per_side=0.0,
     )
