@@ -44,6 +44,10 @@ WINDOW_YEARS: Final = (134 / 12, 13.0)  # the #2901 harness window (2013-07 .. 2
 T_BARS: Final = (3.0, 1.96)
 EDGES: Final = (0.015, 0.03)  # 1.5%/yr = declared minimum worthwhile net edge; 3% sensitivity
 MISSING: Final = (-99.99, -999.0)
+# Universes, in header order; the arm is the last (highest B/M) member of each.
+QUINTILES: Final = ("Lo 20", "Qnt 2", "Qnt 3", "Qnt 4", "Hi 20")
+TERTILES: Final = ("Lo 30", "Med 40", "Hi 30")
+SMALL_CAP_ROW: Final = ("SMALL LoBM", "ME1 BM2", "ME1 BM3", "ME1 BM4", "SMALL HiBM")
 
 
 def power(edge: float, tracking_error: float, years: float, t_bar: float) -> float:
@@ -98,6 +102,16 @@ def active_returns(
     arm: str,
     universe: tuple[str, ...],
 ) -> list[float]:
+    """Arm minus the count-weighted universe. The universe must be a unique, contiguous run of the section's
+    own header, the arm its last member, and both sections must share the header, so a wrong-but-existing
+    column refuses instead of silently re-weighting the control."""
+    for section in (returns, counts):
+        header = list(next(iter(section.values())))
+        start = header.index(universe[0]) if universe[0] in header else -1
+        if start < 0 or tuple(header[start : start + len(universe)]) != universe or arm != universe[-1]:
+            raise SystemExit(f"universe {universe} is not a contiguous header run ending at {arm!r}")
+    if all(v == int(v) for row in returns.values() for v in row.values()):
+        raise SystemExit("every return is an integer: a count section was read as returns")
     out: list[float] = []
     for month in expected_months():
         r, n = returns[month], counts[month]
@@ -121,13 +135,9 @@ def main() -> int:
     size_ret = read_section(args.size_bm, args.size_bm_sha256, "Average Equal Weighted Returns -- Monthly")
     size_n = read_section(args.size_bm, args.size_bm_sha256, "Number of Firms in Portfolios")
     proxies = {
-        "all-cap value quintile": active_returns(
-            be_me_ret, be_me_n, "Hi 20", ("Lo 20", "Qnt 2", "Qnt 3", "Qnt 4", "Hi 20")
-        ),
-        "all-cap value tertile": active_returns(be_me_ret, be_me_n, "Hi 30", ("Lo 30", "Med 40", "Hi 30")),
-        "small-cap value": active_returns(
-            size_ret, size_n, "SMALL HiBM", ("SMALL LoBM", "ME1 BM2", "ME1 BM3", "ME1 BM4", "SMALL HiBM")
-        ),
+        "all-cap value quintile": active_returns(be_me_ret, be_me_n, QUINTILES[-1], QUINTILES),
+        "all-cap value tertile": active_returns(be_me_ret, be_me_n, TERTILES[-1], TERTILES),
+        "small-cap value": active_returns(size_ret, size_n, SMALL_CAP_ROW[-1], SMALL_CAP_ROW),
     }
     months = expected_months()
     print(f"pre-window months {months[0]}..{months[-1]} n={len(months)}")

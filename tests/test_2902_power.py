@@ -14,7 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from scripts.measure_2902_power import active_returns, expected_months, power, read_section
+from scripts.measure_2902_power import (
+    QUINTILES,
+    SMALL_CAP_ROW,
+    TERTILES,
+    active_returns,
+    expected_months,
+    power,
+    read_section,
+)
 
 TITLE = "Equal Weight Returns -- Monthly"
 
@@ -30,7 +38,7 @@ def _archive(tmp_path: Path, rows: list[str]) -> tuple[Path, str]:
 
 
 def _rows(months: list[tuple[int, int]]) -> list[str]:
-    return [f"{y}{m:02d},1.0,2.0" for y, m in months]
+    return [f"{y}{m:02d},1.5,2.5" for y, m in months]
 
 
 class TestPower:
@@ -68,7 +76,7 @@ class TestReadSection:
     def test_a_non_finite_value_refuses(self, tmp_path: Path) -> None:
         months = expected_months()
         rows = _rows(months)
-        rows[5] = rows[5].replace("1.0", "nan")
+        rows[5] = rows[5].replace("1.5", "nan")
         path, digest = _archive(tmp_path, rows)
         with pytest.raises(SystemExit, match="non-finite"):
             read_section(path, digest, TITLE)
@@ -79,8 +87,51 @@ class TestReadSection:
             read_section(path, "0" * 64, TITLE)
 
 
-def test_control_is_the_count_weighted_universe() -> None:
-    returns = {m: {"A": 1.0, "B": 4.0} for m in expected_months()}
-    counts = {m: {"A": 3.0, "B": 1.0} for m in expected_months()}
-    active = active_returns(returns, counts, "B", ("A", "B"))
-    assert active[0] == pytest.approx((4.0 - (1.0 * 3 + 4.0 * 1) / 4) / 100)
+def _sections(columns: tuple[str, ...]) -> tuple[dict[tuple[int, int], dict[str, float]], ...]:
+    returns = {m: {c: 1.5 + i for i, c in enumerate(columns)} for m in expected_months()}
+    counts = {m: {c: 2.0 for c in columns} for m in expected_months()}
+    return returns, counts
+
+
+class TestActiveReturns:
+    def test_control_is_the_count_weighted_universe(self) -> None:
+        returns = {m: {"A": 1.5, "B": 4.0} for m in expected_months()}
+        counts = {m: {"A": 3.0, "B": 1.0} for m in expected_months()}
+        active = active_returns(returns, counts, "B", ("A", "B"))
+        assert active[0] == pytest.approx((4.0 - (1.5 * 3 + 4.0 * 1) / 4) / 100)
+
+    def test_small_cap_row_is_a_contiguous_run_of_the_5x5_header(self) -> None:
+        returns, counts = _sections((*SMALL_CAP_ROW, "ME2 BM1"))
+        assert len(active_returns(returns, counts, SMALL_CAP_ROW[-1], SMALL_CAP_ROW)) == len(expected_months())
+
+    @pytest.mark.parametrize(
+        "universe",
+        [
+            ("SMALL LoBM", "ME1 BM3", "ME1 BM3", "ME1 BM4", "SMALL HiBM"),  # wrong-but-existing key
+            ("SMALL LoBM", "ME1 BM2", "ME1 BM3", "ME1 BM4", "ME2 BM1"),  # crosses into the next size row
+            ("SMALL HiBM", "SMALL LoBM"),  # out of header order
+        ],
+    )
+    def test_a_non_contiguous_universe_refuses(self, universe: tuple[str, ...]) -> None:
+        returns, counts = _sections((*SMALL_CAP_ROW, "ME2 BM1"))
+        with pytest.raises(SystemExit, match="contiguous"):
+            active_returns(returns, counts, universe[-1], universe)
+
+    def test_an_arm_that_is_not_the_top_member_refuses(self) -> None:
+        returns, counts = _sections(QUINTILES)
+        with pytest.raises(SystemExit, match="contiguous"):
+            active_returns(returns, counts, "Lo 20", QUINTILES)
+
+    def test_a_count_section_read_as_returns_refuses(self) -> None:
+        _, counts = _sections(TERTILES)
+        with pytest.raises(SystemExit, match="count section"):
+            active_returns(counts, counts, TERTILES[-1], TERTILES)
+
+
+def test_universes_match_the_french_headers() -> None:
+    """Header lines copied from the pinned 202608 archives; the universes must be runs of them."""
+    be_me = "<= 0,Lo 30,Med 40,Hi 30,Lo 20,Qnt 2,Qnt 3,Qnt 4,Hi 20,Lo 10".split(",")
+    size_bm = "SMALL LoBM,ME1 BM2,ME1 BM3,ME1 BM4,SMALL HiBM,ME2 BM1".split(",")
+    for universe, header in ((QUINTILES, be_me), (TERTILES, be_me), (SMALL_CAP_ROW, size_bm)):
+        start = header.index(universe[0])
+        assert tuple(header[start : start + len(universe)]) == universe
