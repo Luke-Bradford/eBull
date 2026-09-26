@@ -1,6 +1,8 @@
 import { NavLink } from "react-router-dom";
 
 const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
+  // #3423 — the hands-off page the operator opens first.
+  { to: "/invest", label: "Invest" },
   { to: "/", label: "Dashboard", end: true },
   { to: "/portfolio", label: "Portfolio" },
   { to: "/calendar", label: "Calendar" },
