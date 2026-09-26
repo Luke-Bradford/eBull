@@ -784,10 +784,21 @@ def load_hunt_declaration(conn: psycopg.Connection[Any], declaration_id: int) ->
     return None if row is None else hunt_declaration_from_row(row)
 
 
+def load_chain_hunt_declaration(conn: psycopg.Connection[Any], frozen: FrozenPreregistration) -> HuntDeclaration | None:
+    """The document of a #2599 declaration chain. It is stored against the ROOT revision; a
+    #2634 supersession adds a successor row with identical terms (hence the same
+    ``contract_version``) and no document of its own (Codex ckpt-2)."""
+    for declaration_id in frozen.chain_declaration_ids or (frozen.declaration_id,):
+        declaration = load_hunt_declaration(conn, declaration_id)
+        if declaration is not None:
+            return declaration
+    return None
+
+
 def _membership_codes(conn: psycopg.Connection[Any], frozen: FrozenPreregistration, spec: TrialSpec) -> tuple[str, ...]:
     """Obligation 91: run by ``result_ledger``'s door under its trial lock, against the
     declaration that door loaded."""
-    declaration = load_hunt_declaration(conn, frozen.declaration_id)
+    declaration = load_chain_hunt_declaration(conn, frozen)
     if declaration is None:
         return ("hunt_declaration_missing",)
     if frozen.declaration.contract_version != declaration_contract_version(declaration.doc_sha256):
@@ -932,6 +943,10 @@ class HuntOutcome:
     outcome_sha256: str
     #: True when an earlier evaluation's stored outcome was returned.
     cached: bool
+    #: The registered spec and the door access the outcome is bound to (``None`` for discovery).
+    spec_sha256: str | None = None
+    access_id: int | None = None
+    declaration_sha256: str | None = None
 
 
 def outcome_sha256_of(
@@ -1089,7 +1104,8 @@ def burning_look(conn: psycopg.Connection[Any], *, split: Split, candidate_sha25
     return None if row is None else str(row[0])
 
 
-def _read_outcome(conn: psycopg.Connection[Any], trial_id: int) -> HuntOutcome:
+def read_outcome(conn: psycopg.Connection[Any], trial_id: int) -> HuntOutcome:
+    """A stored outcome, its hash re-verified. Read-only; opens no access."""
     row = conn.execute(_SELECT_OUTCOME, {"trial": trial_id}).fetchone()
     if row is None:
         raise HuntHarnessError(f"hunt trial {trial_id} has no outcome")
@@ -1110,6 +1126,9 @@ def _read_outcome(conn: psycopg.Connection[Any], trial_id: int) -> HuntOutcome:
         active_series=None if series_form is None else tuple(decode_form(series_form)),
         outcome_sha256=stored_sha256,
         cached=True,
+        spec_sha256=spec_sha256,
+        access_id=access_id,
+        declaration_sha256=declaration_sha256,
     )
 
 
@@ -1159,7 +1178,7 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
                         return look
                     conn.commit()
                     _verify_door(conn, spec, look)
-                outcome = _read_outcome(conn, trial_id)
+                outcome = read_outcome(conn, trial_id)
                 conn.commit()
                 return outcome
         elif spec.split == "discovery":
@@ -1241,6 +1260,9 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
             active_series=None if series_form is None else tuple(decode_form(series_form)),
             outcome_sha256=outcome_sha256,
             cached=False,
+            spec_sha256=registered_spec_sha256,
+            access_id=None if door is None else door.access_id,
+            declaration_sha256=None if door is None else door.declaration_sha256,
         )
 
 
@@ -1391,6 +1413,7 @@ __all__ = [
     "decode_form",
     "evaluate",
     "hunt_programme_lock",
+    "read_outcome",
     "read_universe_identity",
     "record_outside_look",
     "running_cost_model_id",

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -116,3 +116,68 @@ def test_register_evidence_parses_back() -> None:
     assert parsed is not None and (parsed.declaration_path, parsed.pinned_specs) == ("docs/x.json", 3)
     assert parse_log_backed_evidence(evidence) is None
     assert parse_declaration_backed_evidence("free text") is None
+
+
+# --- the validation readout's verdict (slice 2b-ii) ----------------------------------------
+
+
+def _noise(seed: int, drift: float, count: int = 500) -> tuple[float, ...]:
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    return tuple(float(value) + drift for value in rng.normal(0.0, 0.01, count))
+
+
+def _variance() -> hunt_inference.TrialSharpeVariance:
+    members = [hunt_inference.VPopulationMember(i, _noise(100 + i, 0.0), False) for i in range(12)]
+    variance = hunt_inference.trial_sharpe_variance(members)
+    assert isinstance(variance, hunt_inference.TrialSharpeVariance)
+    return variance
+
+
+def _cell_form(series: tuple[float, ...]) -> dict[str, Any]:
+    cell = hunt_inference.cell_statistics(series, h=1, entered_formations=range(len(series)))
+    assert isinstance(cell, hunt_inference.CellStatistics)
+    return hh.decode_form(hh.canonical_form(cell.form()))
+
+
+def _all_cells(base: Any, stress: Any) -> dict[str, Any]:
+    from app.services.r6_exclusion_trial import PROGRAMME_POLICIES
+
+    costs: tuple[tuple[Literal["base", "stress"], Any], ...] = (("base", base), ("stress", stress))
+    return {
+        cell_key(policy.label, dividends, cost): form
+        for policy in PROGRAMME_POLICIES
+        for dividends in (True, False)
+        for cost, form in costs
+    }
+
+
+def test_a_stored_cell_deflates_exactly_as_its_series_does() -> None:
+    series = _noise(1, 0.003)
+    form = _cell_form(series)
+    cell = hunt_inference.CellStatistics.from_form(form)
+    variance = _variance()
+    live = hunt_inference.hunt_dsr(series, cell, variance=variance, declared_trials=300, trial_register_version="r")
+    stored = hunt_inference.stored_hunt_dsr(form, variance=variance, declared_trials=300, trial_register_version="r")
+    assert isinstance(live, hunt_inference.HuntDsr) and isinstance(stored, hunt_inference.HuntDsr)
+    assert stored.result == live.result
+    assert hunt_inference.TrialSharpeVariance.from_form(hh.decode_form(hh.canonical_form(variance.form()))) == variance
+
+
+def test_a_strong_positive_outcome_passes_and_a_refused_base_cell_refuses() -> None:
+    strong = _cell_form(_noise(2, 0.01))
+    kwargs: dict[str, Any] = {"variance": _variance(), "declared_trials": 300, "trial_register_version": "r"}
+    result, dsr = hunt_door.candidate_verdict("computed", {"cells": _all_cells(strong, strong)}, **kwargs)
+    assert result.verdict is hunt_inference.Verdict.PASS and len(dsr) == 6
+    weak_stress = _cell_form(_noise(3, -0.002))
+    result, _ = hunt_door.candidate_verdict("computed", {"cells": _all_cells(strong, weak_stress)}, **kwargs)
+    assert result.verdict is hunt_inference.Verdict.PASS_CONTINGENT
+    cells = _all_cells(strong, strong)
+    cells[CANONICAL_CELL] = {"refused": "sparse_arm", "detail": "x"}
+    result, dsr = hunt_door.candidate_verdict("refused", {"cells": cells}, **kwargs)
+    assert result.verdict is hunt_inference.Verdict.NOT_PASS_REFUSED
+    assert dsr[CANONICAL_CELL.rpartition("|")[0]] == "refused: sparse_arm"
+    for status, statistics in (("abandoned", {"cells": _all_cells(strong, strong)}), ("refused", {"grid": {}})):
+        result, _ = hunt_door.candidate_verdict(status, statistics, **kwargs)
+        assert result.verdict is hunt_inference.Verdict.NOT_PASS_REFUSED

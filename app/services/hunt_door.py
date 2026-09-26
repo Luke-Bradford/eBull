@@ -33,7 +33,7 @@ import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -45,7 +45,7 @@ from app.services.hunt_compute import CANONICAL_CELL
 from app.services.hunt_harness import TrialSpec
 from app.services.hunt_inference import StatRefused, VPopulationMember
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
-from app.services.result_ledger import freeze_preregistration
+from app.services.result_ledger import freeze_preregistration, load_preregistration
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION, structural_promotion_refusals
 from app.services.trial_register import (
     TRIAL_REGISTER,
@@ -291,13 +291,7 @@ def declaration_numbers(
         codes.append(f"v_population_{variance.reason}")
         v_form: dict[str, Any] = variance.form()
     else:
-        v_form = {
-            "variance": variance.variance,
-            "measured_variance": variance.measured_variance,
-            "floor": variance.floor,
-            "trial_ids": list(variance.trial_ids),
-            "excluded": dict(sorted(variance.excluded.items())),
-        }
+        v_form = variance.form()
 
     # --- BY, programme-wide, at this readout ---
     m_by = inherited.searches + int(discovery_rows)
@@ -616,8 +610,254 @@ def freeze_validation_declaration(
     return declaration_id
 
 
+# ---------------------------------------------------------------------------
+# The validation readout (slice 2b-ii)
+# ---------------------------------------------------------------------------
+
+#: #3384 Finding 5: the validation window was examined before this programme existed.
+PREVIOUSLY_EXAMINED: Final = "previously_examined"
+#: Contract decision 114: a look recorded after the freeze qualifies the readout.
+QUALIFIED_BY_LATE_LOOK: Final = "qualified_by_late_look"
+
+_SELECT_PIN_OUTCOME = """
+    SELECT t.hunt_trial_id, o.hunt_trial_id IS NOT NULL
+    FROM hunt_trials t
+    LEFT JOIN hunt_trial_outcomes o USING (hunt_trial_id)
+    WHERE t.candidate_sha256 = %(candidate)s AND t.split = %(split)s AND t.purpose = 'evaluate'
+"""
+
+_SELECT_ACCESS = """
+    SELECT a.strategy_id, a.strategy_version, a.access_kind, a.declaration_id, a.accessed_at > d.frozen_at
+    FROM strategy_holdout_accesses a
+    JOIN strategy_preregistration_declarations d ON d.declaration_id = a.declaration_id
+    WHERE a.access_id = %(access_id)s
+"""
+
+_SELECT_LATE_LOOKS = """
+    SELECT count(*)
+    FROM hunt_trials t, hunt_declarations h
+    WHERE h.declaration_id = %(declaration_id)s AND t.purpose = 'recorded_after' AND t.registered_at > h.frozen_at
+"""
+
+_SELECT_REGISTER_VERSION = "SELECT register_version FROM hunt_declarations WHERE declaration_id = %(declaration_id)s"
+
+
+@dataclass(frozen=True)
+class CandidateReadout:
+    spec_sha256: str
+    #: ``None`` while the pinned spec has no stored outcome.
+    hunt_trial_id: int | None
+    verdict: hunt_inference.Verdict | None
+    reasons: tuple[str, ...]
+    #: Per base cell: the DSR, or the reason it was refused.
+    dsr: Mapping[str, float | str]
+    #: Descriptive, never a verdict input: the canonical active series' mean and session
+    #: count before and after ``SURVIVOR_CONDITIONING_DATE`` (spec "Survivor conditioning").
+    survivor_subspans: Mapping[str, Mapping[str, float | int | None]]
+
+
+@dataclass(frozen=True)
+class ValidationReadout:
+    hunt_id: str
+    declaration_id: int
+    #: Every pinned spec has an outcome; only then are verdicts final and a closure given.
+    complete: bool
+    candidates: tuple[CandidateReadout, ...]
+    closure: hunt_inference.HuntClosure | None
+    m: int
+    m_is_floor: bool
+    labels: tuple[str, ...]
+
+
+def _refused_form(form: Any) -> StatRefused | None:
+    if isinstance(form, Mapping) and "refused" in form:
+        return StatRefused(cast(hunt_inference.StatRefusalReason, str(form["refused"])), str(form.get("detail", "")))
+    return None
+
+
+def candidate_verdict(
+    status: str,
+    statistics: Mapping[str, Any],
+    *,
+    variance: hunt_inference.TrialSharpeVariance,
+    declared_trials: int,
+    trial_register_version: str,
+) -> tuple[hunt_inference.VerdictResult, dict[str, float | str]]:
+    """One stored validation (or holdout) outcome's verdict (spec "Verdicts"). Pure.
+
+    Base cells are deflated from their stored moments against the declaration's frozen
+    M and V[SR]; a DSR refusal refuses its base cell. An abandoned outcome, or one with no
+    cells, is ``NOT_PASS_REFUSED``.
+    """
+    if status == "abandoned":
+        return hunt_inference.VerdictResult(hunt_inference.Verdict.NOT_PASS_REFUSED, ("abandoned",)), {}
+    cells = _cells(statistics)
+    base: dict[str, hunt_inference.BaseReadout | StatRefused] = {}
+    stress: dict[str, hunt_inference.StressReadout | StatRefused] = {}
+    dsr_out: dict[str, float | str] = {}
+    for key, form in cells.items():
+        name, _, cost = str(key).rpartition("|")
+        refused = _refused_form(form)
+        if cost == "stress":
+            if refused is not None:
+                stress[name] = refused
+            else:
+                cell = hunt_inference.CellStatistics.from_form(form)
+                stress[name] = hunt_inference.StressReadout(t_stat=cell.t_stat, mean=cell.mean)
+            continue
+        if cost != "base":
+            raise hh.HuntHarnessError(f"unknown cell {key!r}")
+        if refused is not None:
+            base[name] = refused
+            dsr_out[name] = f"refused: {refused.reason}"
+            continue
+        cell = hunt_inference.CellStatistics.from_form(form)
+        dsr = hunt_inference.stored_hunt_dsr(
+            form,
+            variance=variance,
+            declared_trials=declared_trials,
+            trial_register_version=trial_register_version,
+        )
+        if isinstance(dsr, StatRefused):
+            base[name] = dsr
+            dsr_out[name] = f"refused: {dsr.reason}"
+            continue
+        dsr_out[name] = dsr.result.deflated_sharpe
+        base[name] = hunt_inference.BaseReadout(t_stat=cell.t_stat, dsr=dsr.result.deflated_sharpe, mean=cell.mean)
+    if not base:
+        grid = _refused_form(statistics.get("grid"))
+        reason = f"grid: {grid.reason}" if grid is not None else "no base cell was computed"
+        return hunt_inference.VerdictResult(hunt_inference.Verdict.NOT_PASS_REFUSED, (reason,)), dsr_out
+    return hunt_inference.decide_verdict(base, stress), dsr_out
+
+
+def survivor_subspans(
+    active: Sequence[float] | None, statistics: Mapping[str, Any], split: hh.Split
+) -> dict[str, dict[str, float | int | None]]:
+    """mean(a) and session count of the canonical series on each side of 2013-06-21.
+
+    The series sits on the fixed grid: one value per split session from the stored
+    ``grid.first_session``. Descriptive only; selecting a sub-span is a new trial.
+    """
+    grid = statistics.get("grid")
+    if active is None or not isinstance(grid, Mapping) or "first_session" not in grid:
+        return {}
+    sessions = hh.split_sessions(split)
+    first = sessions.index(date.fromisoformat(str(grid["first_session"])))
+    days = sessions[first : first + len(active)]
+    if len(days) != len(active):
+        raise hh.HuntHarnessError("the stored active series runs past the split's sessions")
+    spans: dict[str, list[float]] = {"before": [], "on_or_after": []}
+    for day, value in zip(days, active, strict=True):
+        spans["before" if day < hh.SURVIVOR_CONDITIONING_DATE else "on_or_after"].append(value)
+    return {
+        name: {"sessions": len(values), "mean": math.fsum(values) / len(values) if values else None}
+        for name, values in spans.items()
+    }
+
+
+def _check_stored_access(
+    conn: psycopg.Connection[Any], outcome_access: int | None, frozen: Any, strategy_id: str
+) -> None:
+    """Contract decision 96: a readout verifies each stored outcome's provenance and opens
+    no fresh access. Any failure is an integrity fault, never a verdict."""
+    if outcome_access is None:
+        raise hh.HuntHarnessError("a validation outcome has no access row")
+    row = conn.execute(_SELECT_ACCESS, {"access_id": outcome_access}).fetchone()
+    if row is None:
+        raise hh.HuntHarnessError(f"access {outcome_access} has no declaration")
+    access_strategy, version, kind, declaration_id, frozen_before = row
+    if (access_strategy, version, kind) != (strategy_id, hh.HUNT_DECLARATION_VERSION, "read"):
+        raise hh.HuntHarnessError(f"access {outcome_access} is {access_strategy}/{version}/{kind}")
+    if declaration_id not in frozen.chain_declaration_ids or not frozen_before:
+        raise hh.HuntHarnessError(f"access {outcome_access} was not authorised by the frozen declaration")
+
+
+def validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> ValidationReadout:
+    """The hunt's validation verdicts: the only sanctioned route to them (spec "The audited door").
+
+    Under the programme lock, in one REPEATABLE READ snapshot. It reads stored outcomes
+    only, re-verifies each one's hash and access provenance, and deflates against the M,
+    V[SR] and register version FROZEN with the declaration, never today's.
+    """
+    strategy_id = hh.declaration_strategy_id(hunt_id, "validation")
+    with hh.hunt_programme_lock(conn):
+        _repeatable_read(conn)
+        frozen = load_preregistration(cast(psycopg.Connection[tuple], conn), strategy_id, hh.HUNT_DECLARATION_VERSION)
+        if frozen is None or not frozen.digest_intact:
+            raise hh.HuntHarnessError(f"{strategy_id} has no intact frozen declaration")
+        declaration = hh.load_chain_hunt_declaration(conn, frozen)
+        if declaration is None or frozen.declaration.contract_version != hh.declaration_contract_version(
+            declaration.doc_sha256
+        ):
+            raise hh.HuntHarnessError(f"{strategy_id}'s declaration document is missing or not the frozen one")
+        numbers = declaration.doc["numbers"]
+        variance = hunt_inference.TrialSharpeVariance.from_form(hh.decode_form(numbers["v_sr"]))
+        m = int(numbers["m"])
+        register_row = conn.execute(_SELECT_REGISTER_VERSION, {"declaration_id": declaration.declaration_id}).fetchone()
+        late = conn.execute(_SELECT_LATE_LOOKS, {"declaration_id": declaration.declaration_id}).fetchone()
+        if register_row is None or late is None:
+            raise hh.HuntHarnessError(f"{strategy_id}'s declaration row vanished inside the snapshot")
+        candidates: list[CandidateReadout] = []
+        for pin in declaration.doc["pins"]:
+            spec_sha256 = str(pin["spec_sha256"])
+            row = conn.execute(
+                _SELECT_PIN_OUTCOME, {"candidate": str(pin["candidate_sha256"]), "split": "validation"}
+            ).fetchone()
+            if row is None or not row[1]:
+                candidates.append(CandidateReadout(spec_sha256, None if row is None else int(row[0]), None, (), {}, {}))
+                continue
+            outcome = hh.read_outcome(conn, int(row[0]))
+            if outcome.spec_sha256 != spec_sha256:
+                raise hh.HuntHarnessError(f"trial {row[0]}'s registered spec is not the pinned {spec_sha256}")
+            _check_stored_access(conn, outcome.access_id, frozen, strategy_id)
+            result, dsr = candidate_verdict(
+                outcome.status,
+                outcome.statistics,
+                variance=variance,
+                declared_trials=m,
+                trial_register_version=str(register_row[0]),
+            )
+            candidates.append(
+                CandidateReadout(
+                    spec_sha256,
+                    outcome.hunt_trial_id,
+                    result.verdict,
+                    result.reasons,
+                    dsr,
+                    survivor_subspans(outcome.active_series, outcome.statistics, "validation"),
+                )
+            )
+        conn.commit()
+    complete = all(candidate.verdict is not None for candidate in candidates)
+    closure = (
+        hunt_inference.validation_closure(
+            {candidate.spec_sha256: cast(hunt_inference.Verdict, candidate.verdict) for candidate in candidates}
+        )
+        if complete
+        else None
+    )
+    labels = [PREVIOUSLY_EXAMINED]
+    if int(late[0]) > 0:
+        labels.append(QUALIFIED_BY_LATE_LOOK)
+    return ValidationReadout(
+        hunt_id=hunt_id,
+        declaration_id=frozen.declaration_id,
+        complete=complete,
+        candidates=tuple(candidates),
+        closure=closure,
+        m=m,
+        m_is_floor=bool(numbers["m_is_floor"]),
+        labels=tuple(labels),
+    )
+
+
 __all__ = [
+    "CandidateReadout",
     "HuntDeclarationRefused",
+    "ValidationReadout",
+    "candidate_verdict",
+    "validation_readout",
     "build_validation_declaration",
     "declaration_numbers",
     "discovery_register_evidence",

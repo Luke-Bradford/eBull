@@ -196,9 +196,24 @@ class CellStatistics:
     p: float
     p_underflow: bool
     arm_formations: int
+    #: ``trade_moments`` of the cell's active series (per observation; raw kurtosis), stored
+    #: so a validation or holdout readout can deflate EVERY base cell: only the canonical
+    #: cell's series is stored (slice 2b-ii). ``None`` when ``trade_moments`` cannot be
+    #: computed; the cell's own statistics stand, and its DSR refuses ``degenerate_variance``.
+    sharpe: float | None
+    skewness: float | None
+    kurtosis: float | None
 
     def __post_init__(self) -> None:
-        values = (self.mean, self.variance, self.long_run_variance, self.standard_error, self.t_stat, self.p)
+        values = (
+            self.mean,
+            self.variance,
+            self.long_run_variance,
+            self.standard_error,
+            self.t_stat,
+            self.p,
+            *(value for value in (self.sharpe, self.skewness, self.kurtosis) if value is not None),
+        )
         if not _all_finite(values):
             raise ValueError(f"cell statistics must be finite, got {values}")
         if not 0.0 <= self.p <= 1.0:
@@ -216,7 +231,28 @@ class CellStatistics:
             "t_stat": self.t_stat,
             "p": P_UNDERFLOW_LABEL if self.p_underflow else self.p,
             "arm_formations": self.arm_formations,
+            "sharpe": self.sharpe,
+            "skewness": self.skewness,
+            "kurtosis": self.kurtosis,
         }
+
+    @classmethod
+    def from_form(cls, form: Mapping[str, object]) -> CellStatistics:
+        """Rebuild a stored cell; the round trip must reproduce the form exactly."""
+        underflow = form.get("p") == P_UNDERFLOW_LABEL
+        fields = {key: value for key, value in form.items() if key != "p"}
+        cell = cls(p=0.0 if underflow else form["p"], p_underflow=underflow, **fields)  # type: ignore[arg-type]
+        if cell.form() != dict(form):
+            raise ValueError("the stored cell does not round-trip through CellStatistics")
+        return cell
+
+    @property
+    def moments(self) -> TradeMoments | None:
+        if self.sharpe is None or self.skewness is None or self.kurtosis is None:
+            return None
+        return TradeMoments(
+            sharpe=self.sharpe, skewness=self.skewness, kurtosis=self.kurtosis, trade_count=self.observations
+        )
 
 
 def cell_statistics(
@@ -240,6 +276,7 @@ def cell_statistics(
     estimate = hac_estimate(active, lag)
     if isinstance(estimate, StatRefused):
         return estimate
+    moments = _moments(active)
     df = count // lag - 1
     p = one_sided_p(estimate.t_stat, df)
     underflow = p < P_UNDERFLOW
@@ -255,6 +292,9 @@ def cell_statistics(
         p=0.0 if underflow else p,
         p_underflow=underflow,
         arm_formations=arm,
+        sharpe=None if moments is None else moments.sharpe,
+        skewness=None if moments is None else moments.skewness,
+        kurtosis=None if moments is None else moments.kurtosis,
     )
 
 
@@ -298,6 +338,32 @@ class TrialSharpeVariance:
     @property
     def measured_trials(self) -> int:
         return len(self.trial_ids)
+
+    def form(self) -> dict[str, object]:
+        return {
+            "variance": self.variance,
+            "measured_variance": self.measured_variance,
+            "floor": self.floor,
+            "trial_ids": list(self.trial_ids),
+            "excluded": dict(sorted(self.excluded.items())),
+        }
+
+    @classmethod
+    def from_form(cls, form: Mapping[str, object]) -> TrialSharpeVariance:
+        trial_ids = form["trial_ids"]
+        excluded = form["excluded"]
+        if not isinstance(trial_ids, list) or not isinstance(excluded, Mapping):
+            raise ValueError("a stored V[SR] needs its trial ids and exclusion counts")
+        variance = cls(
+            variance=float(form["variance"]),  # type: ignore[arg-type]
+            measured_variance=float(form["measured_variance"]),  # type: ignore[arg-type]
+            floor=float(form["floor"]),  # type: ignore[arg-type]
+            trial_ids=tuple(int(item) for item in trial_ids),
+            excluded={str(key): int(value) for key, value in excluded.items()},
+        )
+        if variance.form() != {**form, "trial_ids": list(trial_ids)}:
+            raise ValueError("the stored V[SR] does not round-trip")
+        return variance
 
 
 def trial_sharpe_variance(members: Iterable[VPopulationMember]) -> TrialSharpeVariance | StatRefused:
@@ -397,6 +463,37 @@ def hunt_dsr(
     moments = _moments(active)
     if moments is None:
         return StatRefused("degenerate_variance", "the active series has no Sharpe ratio")
+    return _deflate(cell, moments, variance, declared_trials, trial_register_version)
+
+
+def stored_hunt_dsr(
+    cell_form: Mapping[str, object],
+    *,
+    variance: TrialSharpeVariance,
+    declared_trials: int,
+    trial_register_version: str,
+) -> HuntDsr | StatRefused:
+    """:func:`hunt_dsr` from a STORED cell: its moments were computed from the cell's own
+    active series by :func:`cell_statistics`, so no series is needed (only the canonical
+    cell's is stored)."""
+    if declared_trials < max(2, variance.measured_trials):
+        raise ValueError(
+            f"declared_trials {declared_trials} must be >= 2 and cover the {variance.measured_trials} measured trials"
+        )
+    cell = CellStatistics.from_form(cell_form)
+    moments = cell.moments
+    if moments is None:
+        return StatRefused("degenerate_variance", "the active series has no Sharpe ratio")
+    return _deflate(cell, moments, variance, declared_trials, trial_register_version)
+
+
+def _deflate(
+    cell: CellStatistics,
+    moments: TradeMoments,
+    variance: TrialSharpeVariance,
+    declared_trials: int,
+    trial_register_version: str,
+) -> HuntDsr | StatRefused:
     effective = min(float(cell.observations), cell.observations * cell.variance / cell.long_run_variance)
     if not math.isfinite(effective):
         return StatRefused("non_finite", "T_eff is not finite")

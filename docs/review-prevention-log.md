@@ -11565,3 +11565,16 @@ neighbouring container and match it.**
   `evaluate` could this pin hit after the freeze, and why didn't the freeze refuse first?"
 - Enforced in: `app/services/hunt_door.py::declaration_numbers` (uses `hunt_harness.burning_look`, shared with
   `_refusal_before_registration`), `tests/test_hunt_door_db.py::test_a_burned_validation_candidate_cannot_be_pinned`.
+
+### A row keyed to one revision of a supersedable declaration is looked up through the chain (#3385)
+
+- Failure: slice 2b-ii's validation readout and the door's membership check loaded the hunt declaration document
+  by `load_preregistration(...).declaration_id`, which is the CURRENT revision. The document is stored against
+  the root revision, and a #2634 supersession adds a successor with no document of its own. After any
+  supersession, every readout and every door look would have failed, even though the access check already
+  accepted any revision in the chain. (Codex checkpoint 2.)
+- Prevention: anything joined to `strategy_preregistration_declarations.declaration_id` resolves through
+  `FrozenPreregistration.chain_declaration_ids`, never the current id alone. Self-review prompt: "which revision
+  was this row written against, and which one does the reader hold?"
+- Enforced in: `app/services/hunt_harness.py::load_chain_hunt_declaration`,
+  `tests/test_hunt_door_db.py::test_the_freeze_writes_the_declaration_and_its_document_together`.
