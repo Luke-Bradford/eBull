@@ -28,6 +28,7 @@ import pytest
 
 from app.services.scoring import (
     _WEIGHT_MODES,
+    NO_INPUT_NOTE,
     FamilyScores,
     PenaltyRecord,
     ScoreResult,
@@ -110,7 +111,9 @@ class TestQualityScore:
         # each sub-score defaults to 0.25
         expected = 0.25
         assert score == _approx(expected)
-        assert len(notes) == 4  # all four components noted missing
+        # all four components noted missing, plus the no-input marker (#3389 c)
+        assert len(notes) == 5
+        assert notes[-1] == NO_INPUT_NOTE
 
     def test_score_clipped_to_one(self) -> None:
         # Extreme positive values should not produce score > 1.0
@@ -207,7 +210,8 @@ class TestMomentumScore:
     def test_all_missing_returns_neutral(self) -> None:
         score, notes = _momentum_score(None, None, None)
         assert score == _approx(0.5)
-        assert len(notes) == 3
+        assert notes[:3] == ["return_1m missing", "return_3m missing", "return_6m missing"]
+        assert notes[3:] == [NO_INPUT_NOTE]
 
     def test_negative_momentum_scores_low(self) -> None:
         # Very negative returns → score near 0
@@ -285,7 +289,8 @@ class TestEnhancedMomentumScore:
         """No returns + no TA = neutral 0.5."""
         score, notes = _momentum_score(None, None, None, ta_indicators=None)
         assert score == _approx(0.5)
-        assert len(notes) == 3  # 3 missing return notes
+        assert len(notes) == 4  # 3 missing return notes + the no-input marker (#3389 c)
+        assert notes[-1] == NO_INPUT_NOTE
 
     def test_rsi_overbought_penalty(self) -> None:
         """RSI > 70 should reduce momentum quality score."""

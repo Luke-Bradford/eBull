@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal
+from typing import Literal, cast, get_args
 
 import psycopg
 import psycopg.rows
@@ -33,7 +33,15 @@ from app.db import get_conn
 # Single source of truth for the default model version (#1633: v1.2-balanced). The
 # read endpoints must default to the same version the scoring pass writes, or the
 # rankings page shows stale rows of a version no longer produced.
-from app.services.scoring import _DEFAULT_MODEL_VERSION, family_weights
+from app.services.scoring import (
+    _DEFAULT_MODEL_VERSION,
+    FAMILIES,
+    FamilyUsability,
+    Maturity,
+    Purpose,
+    family_evidence,
+    family_weights,
+)
 from app.services.sector_classification import resolve_sector_spdr, sector_spdr_case_sql
 
 logger = logging.getLogger(__name__)
@@ -283,6 +291,17 @@ class FamilyContribution(BaseModel):
     contribution: float
 
 
+class FamilyEvidenceItem(BaseModel):
+    """One family's evidence status under the row's model_version (#3389 c)."""
+
+    family: str
+    maturity: Maturity
+    purpose: Purpose
+    evidence_ref: str
+    # ``None`` on rows scored before usability was recorded (sql/430): unknown, not usable.
+    usability: FamilyUsability | None
+
+
 class VerdictScore(BaseModel):
     scored_at: datetime
     model_version: str
@@ -296,6 +315,8 @@ class VerdictScore(BaseModel):
     filings_status: str | None
     # Largest first. Empty for a model_version with no known weights.
     contributions: list[FamilyContribution]
+    # One per family, in FAMILIES order. Empty for a model_version with no known registry.
+    families: list[FamilyEvidenceItem]
     total_score: float | None
     raw_total: float | None
     quality_score: float | None
@@ -369,6 +390,31 @@ def family_contributions(
         if (score := scores.get(family)) is not None
     ]
     return sorted(items, key=lambda c: c.contribution, reverse=True)
+
+
+def family_evidence_items(model_version: str, usability: Mapping[str, str] | None) -> list[FamilyEvidenceItem]:
+    """Maturity × purpose from the scoring registry, joined to the row's stored usability.
+
+    A stored usability value outside the vocabulary is dropped to ``None`` (unknown)
+    rather than passed through as if it were a known state.
+    """
+    evidence = family_evidence(model_version)
+    if evidence is None:
+        return []
+    known = get_args(FamilyUsability)
+    items = []
+    for family in FAMILIES:
+        state = (usability or {}).get(family)
+        items.append(
+            FamilyEvidenceItem(
+                family=family,
+                maturity=evidence[family].maturity,
+                purpose=evidence[family].purpose,
+                evidence_ref=evidence[family].evidence_ref,
+                usability=cast(FamilyUsability, state) if state in known else None,
+            )
+        )
+    return items
 
 
 def _parse_optional_float(row: dict[str, object], key: str) -> float | None:
@@ -773,6 +819,7 @@ def get_verdict(
                s.momentum_score, s.sentiment_score, s.confidence_score,
                s.data_completeness, s.completeness_tier,
                s.penalties_json, s.explanation, s.analytics_json,
+               s.family_usability,
                i.is_tradable, c.filings_status,
                s.scored_at = (
                    SELECT MAX(scored_at) FROM scores WHERE model_version = %(mv)s
@@ -819,6 +866,10 @@ def get_verdict(
             contributions=family_contributions(
                 family_weights(row["model_version"]),  # type: ignore[arg-type]
                 family_scores,
+            ),
+            families=family_evidence_items(
+                row["model_version"],  # type: ignore[arg-type]
+                row["family_usability"],  # type: ignore[arg-type]
             ),
             total_score=_parse_optional_float(row, "total_score"),
             raw_total=_parse_optional_float(row, "raw_total"),

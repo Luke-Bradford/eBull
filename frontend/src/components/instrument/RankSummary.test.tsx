@@ -18,6 +18,7 @@ function makeScore(overrides: Partial<VerdictScore> = {}): VerdictScore {
       { family: "value", weight: 0.25, score: 0.72, contribution: 0.18 },
       { family: "momentum", weight: 0.1, score: 0.5, contribution: 0.05 },
     ],
+    families: [],
     total_score: 0.5,
     raw_total: 0.55,
     quality_score: 0.9,
