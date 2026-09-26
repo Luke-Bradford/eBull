@@ -11543,3 +11543,13 @@ neighbouring container and match it.**
   it is stored under?"
 - Enforced in: `app/services/hunt_harness.py::evaluate` (calls `compute_trial`),
   `tests/test_hunt_compute.py::test_the_computation_and_its_loader_are_part_of_the_harness_model_id`.
+
+### An error message that says "before X" must be reachable before X (#3385)
+
+- Failure: `hunt_harness.compute_trial` raised "no tariff prices the lane; evaluate refuses before
+  registering", but `compute_trial` only runs AFTER the registration commits. The branch is unreachable
+  through `evaluate` (an unpriced lane refuses earlier), so the message misdescribed the ordering it sat in.
+  (Review bot, PR #3413.)
+- Prevention: for any message or docstring naming an ordering ("before registering", "after commit"), check
+  the call site's actual position. Self-review prompt: "where in the caller's sequence does this line run?"
+- Enforced in: `app/services/hunt_harness.py::compute_trial`.

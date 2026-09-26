@@ -148,6 +148,8 @@ MODEL_INPUT_RULE_SETS: Final[Mapping[str, str]] = MappingProxyType(
         "split_corrected_reader": SPLIT_CORRECTED_READER_RULE_VERSION,
         "series_termination": TERMINATION_RULE_VERSION,
         "benchmark_source": BENCHMARK_SOURCE_RULE_VERSION,
+        # Also the spec's ``calendar_identity``; here too because ``hunt_panel`` builds the grid from it.
+        "market_calendar": market_calendar.RULE_SET_VERSION,
     }
 )
 
@@ -646,7 +648,8 @@ def compute_trial(conn: psycopg.Connection[Any], spec: TrialSpec) -> ComputedOut
     """
     tariff = HUNT_TARIFF
     if tariff is None:
-        raise HuntHarnessError("no tariff prices the lane; evaluate refuses before registering")
+        # Unreachable through ``evaluate``: an unpriced lane refuses ``unpriced_lane`` before registering.
+        raise HuntHarnessError("no tariff prices the lane")
     start, end = SPLIT_BOUNDS[spec.split]
     outcome = hunt_panel.compute_trial(
         conn,
