@@ -47,7 +47,7 @@ from typing import Any, Final, Literal, get_args
 import psycopg
 from psycopg.pq import TransactionStatus
 
-from app.services import deflated_sharpe, hunt_inference, market_calendar, r6_monthly_trial
+from app.services import deflated_sharpe, hunt_evaluator, hunt_inference, market_calendar, r6_monthly_trial
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import Universe
 from app.services.r6_exclusion_trial import PROGRAMME_POLICIES, termination_identity
@@ -113,7 +113,7 @@ _FLOAT_TAG: Final = "__float__"
 #: Modules whose CODE is part of the model: editing one is a new model id (spec job 3).
 #: The shared statistics the inference calls are included, so a change to them cannot
 #: return a cached outcome under an unchanged identity (Codex ckpt-2).
-MODEL_CODE_MODULES: Final = (hunt_inference, deflated_sharpe, r6_monthly_trial)
+MODEL_CODE_MODULES: Final = (hunt_evaluator, hunt_inference, deflated_sharpe, r6_monthly_trial)
 
 
 def _module_code_sha256(module: Any) -> str:

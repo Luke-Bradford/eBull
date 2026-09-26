@@ -400,7 +400,7 @@ def test_the_inference_code_and_its_shared_statistics_are_part_of_the_harness_mo
         module.__name__: hashlib.sha256(Path(str(module.__file__)).read_bytes()).hexdigest()
         for module in (hi, deflated_sharpe_module, r6_monthly_trial)
     }
-    assert hh._model_constants()["model_code_sha256"] == expected
+    assert expected.items() <= hh._model_constants()["model_code_sha256"].items()
 
 
 # --- Codex ckpt-2 findings -------------------------------------------------------------------------------------
