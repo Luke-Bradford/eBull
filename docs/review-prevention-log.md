@@ -11609,3 +11609,12 @@ neighbouring container and match it.**
   and check a real row (stored delta vs `prev − cur` across two runs). Self-review prompt: "which line computes this
   number, and does one real row agree with my reading?"
 - Enforced in: `frontend/src/components/rankings/RankDeltaCell.test.tsx`.
+
+### A withheld payload must withhold every field derived from the rows it rejected (#3390)
+
+- Failure: `/instruments/{symbol}/short-volume` withheld a colliding instrument's `days` but still computed
+  `latest_trade_date` from the raw rows, so the response reported a date from the data it had just refused.
+- Prevention: when a reader sets a withheld/refused state, derive every other top-level field from the published
+  output, not from the input. Self-review prompt: "which fields in this response are still computed from the
+  rows I rejected?"
+- Enforced in: `tests/test_regsho_short_volume_days.py`.

@@ -42,12 +42,16 @@ from app.providers.implementations.finra_short_interest import (
 )
 from app.providers.resilient_client import ResilientClient
 
+# Consolidated NMS — aggregate across the TRFs and ADF (not the ORF). Its
+# Market value is the comma-joined facility union, which varies by symbol
+# and day ('B,Q,N', 'Q,N', ...), so readers select it by this prefix.
+CONSOLIDATED_PREFIX: Final = "CNMS"
+
 # Six FINRA RegSHO daily reporting facilities. Tuple is fixed-length —
 # the ScheduledJob iterates over this verbatim and tests pin the
 # membership.
 PREFIXES: Final[tuple[str, ...]] = (
-    "CNMS",  # Consolidated NMS — aggregate across facilities; Market
-    # value is comma-joined union (e.g. 'B,Q,N').
+    CONSOLIDATED_PREFIX,
     "FNQC",  # FINRA/NASDAQ TRF Chicago.
     "FNRA",  # ADF — legacy alt display facility; often empty body.
     "FNSQ",  # FINRA/NASDAQ TRF Carteret.
