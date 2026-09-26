@@ -285,8 +285,11 @@ def _parse(directory: Path, *, key: str, through: date) -> StoredParts:
                 f"series {series_id}: session indices must be increasing and in range",
             )
         terminal, code = int(table[row, 3]), int(table[row, 4])
-        _require((terminal < 0) == (code < 0), f"series {series_id}: terminal bar and class disagree")
-        _require(code < len(TERMINATION_CLASSES) and terminal < session_count, f"series {series_id}: bad terminal")
+        _require((terminal == -1) == (code == -1), f"series {series_id}: terminal bar and class disagree")
+        _require(
+            (terminal == -1 or 0 <= terminal < session_count) and (code == -1 or 0 <= code < len(TERMINATION_CLASSES)),
+            f"series {series_id}: a terminal field is outside its domain (−1 is the only sentinel)",
+        )
 
         def column(name: str, typecode: str, start: int = b0, end: int = b1) -> array[Any]:
             out = array(typecode)
@@ -320,8 +323,9 @@ def load_parts(directory: Path, *, key: str, through: date) -> StoredParts | Non
     """The stored parts, or ``None`` on ANY missing, malformed or mismatched content (a miss)."""
     try:
         return _parse(directory, key=key, through=through)
-    except (OSError, ValueError, TypeError, KeyError, IndexError) as error:
-        # json.JSONDecodeError and _Invalid are ValueErrors; PanelSeries validation raises ValueError.
+    except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, OverflowError) as error:
+        # json.JSONDecodeError and _Invalid are ValueErrors; PanelSeries validation raises ValueError;
+        # np.load raises EOFError on an empty file; date.fromordinal OverflowError on a huge ordinal (Codex ckpt-2).
         if (directory / MANIFEST).exists():
             _LOG.warning("hunt store %s is unusable (%s); rebuilding", directory.name, error)
         return None

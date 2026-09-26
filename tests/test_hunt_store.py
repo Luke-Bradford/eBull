@@ -152,6 +152,18 @@ def _bad_offset(directory: Path) -> None:
     _rewrite(directory, "series", table)
 
 
+def _rehash(directory: Path, name: str) -> None:
+    manifest = json.loads((directory / "manifest.json").read_bytes())
+    manifest["files"][name] = hunt_store._sha256((directory / f"{name}.npy").read_bytes())
+    (directory / "manifest.json").write_bytes(hunt_store.canonical_json(manifest))
+
+
+def _set_terminal(directory: Path, terminal: int, code: int) -> None:
+    table = _series_table(directory)
+    table[0, 3], table[0, 4] = terminal, code
+    _rewrite(directory, "series", table)
+
+
 def _bad_class(directory: Path) -> None:
     table = _series_table(directory)
     table[0, 3], table[0, 4] = 6, 99
@@ -174,6 +186,12 @@ def _bad_class(directory: Path) -> None:
         ),
         pytest.param(_bad_offset, id="bad-offset"),
         pytest.param(_bad_class, id="bad-class-code"),
+        pytest.param(lambda d: _set_terminal(d, -2, -2), id="bad-sentinel"),
+        pytest.param(
+            lambda d: _rewrite(d, "close", np.zeros(0)) or (d / "close.npy").write_bytes(b"") or _rehash(d, "close"),
+            id="empty-npy",
+        ),
+        pytest.param(lambda d: _rewrite(d, "sessions", np.array([10**15, 10**15 + 1])), id="huge-ordinal"),
         pytest.param(lambda d: _rewrite(d, "exclusion", np.full(28, 9, dtype=np.uint8)), id="bad-exclusion"),
         pytest.param(
             lambda d: _rewrite(d, "sessions", np.array([day.toordinal() for day in reversed(_SESSIONS)])),
