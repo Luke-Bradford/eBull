@@ -7,8 +7,9 @@ budget and closure constants, and recording a look taken outside the harness.
 
 What is NOT here yet, and how it fails meanwhile:
 
-- **The evaluator** (slice 3). ``evaluate`` takes the computation as ``compute``; slice 3
-  supplies the frozen arm-minus-control evaluator. Nothing in production can register
+- **The evaluator** (slice 3). ``evaluate`` takes the computation as ``compute``; slice 3b
+  supplies the frozen arm-minus-control evaluator. Its inference (slice 3a) is
+  ``hunt_inference``, whose code hash is part of ``HUNT_HARNESS_MODEL_ID``. Nothing in production can register
   a search today regardless: ``HUNT_BUDGETS`` is empty (a hunt with no budget refuses
   registration) and ``HUNT_TARIFF`` is unset (every lane is unpriced and refuses).
 - **The audited door** for validation and holdout (slice 2b). Their freezes need slice 3's
@@ -45,7 +46,7 @@ from typing import Any, Final, Literal, get_args
 import psycopg
 from psycopg.pq import TransactionStatus
 
-from app.services import market_calendar
+from app.services import hunt_inference, market_calendar
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import Universe
 from app.services.r6_exclusion_trial import PROGRAMME_POLICIES, termination_identity
@@ -108,8 +109,17 @@ _SIGNAL_ID = re.compile(r"^([a-z][a-z0-9_]*):([a-z_][a-z0-9_]*)$")
 _FLOAT_TAG: Final = "__float__"
 
 
+#: Modules whose CODE is part of the model: editing one is a new model id (spec job 3).
+MODEL_CODE_MODULES: Final = (hunt_inference,)
+
+
+def _module_code_sha256(module: Any) -> str:
+    return hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+
+
 def _model_constants() -> dict[str, Any]:
     return {
+        "model_code_sha256": {module.__name__: _module_code_sha256(module) for module in MODEL_CODE_MODULES},
         "splits": {
             split: [start.isoformat(), end.isoformat() if end else None] for split, (start, end) in SPLIT_BOUNDS.items()
         },
