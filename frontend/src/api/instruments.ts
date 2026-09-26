@@ -4,6 +4,7 @@ import type {
   FcfYieldSeries,
   InstrumentCandles,
   InstrumentDetail,
+  InstrumentDilution,
   InstrumentFairValueBand,
   InstrumentFinancials,
   InstrumentIntradayCandles,
@@ -497,6 +498,17 @@ export async function fetchInstrumentSegments(
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;
   }
+}
+
+/** Share count history + YoY dilution summary, newest first (#435). */
+export function fetchInstrumentDilution(
+  symbol: string,
+  limit: number,
+): Promise<InstrumentDilution> {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  return apiFetch<InstrumentDilution>(
+    `/instruments/${encodeURIComponent(symbol)}/dilution?${qs.toString()}`,
+  );
 }
 
 /** Deterministic fair-value band at the live method version (#3390). */
