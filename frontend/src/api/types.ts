@@ -1396,9 +1396,26 @@ export interface VerdictScore {
   analytics_json: IarAnalytics | null;
 }
 
+export type NotScoredReason =
+  | "not_tradable"
+  | "not_a_stock"
+  | "not_analysable"
+  | "no_inputs"
+  | "pending_run";
+
+/** Why an instrument has no score row — the ranking engine's eligibility gate (#3389 d). */
+export interface NotScored {
+  reason: NotScoredReason;
+  filings_status: string | null;
+  /** eToro instrument type description, e.g. "ETF". */
+  instrument_type: string | null;
+}
+
 export interface VerdictResponse {
   instrument_id: number;
   score: VerdictScore | null;
+  /** Set only when `score` is null and the instrument exists. */
+  not_scored: NotScored | null;
 }
 
 // ---------------------------------------------------------------------------

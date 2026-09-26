@@ -87,7 +87,19 @@ describe("RankSummary", () => {
     const { container, rerender } = render(<RankSummary score={undefined} errored={false} />);
     expect(container).toBeEmptyDOMElement();
     rerender(<RankSummary score={null} errored={false} />);
-    expect(screen.getByTestId("rank-summary")).toHaveTextContent("Not scored");
+    expect(screen.getByTestId("rank-summary")).toHaveTextContent(
+      "Not scored · no ranking run has scored it",
+    );
+    rerender(
+      <RankSummary
+        score={null}
+        errored={false}
+        notScored={{ reason: "not_analysable", filings_status: "fpi", instrument_type: "Stocks" }}
+      />,
+    );
+    expect(screen.getByTestId("rank-summary")).toHaveTextContent(
+      "Not scored · foreign private issuer (files 20-F/40-F, not 10-K/10-Q)",
+    );
     rerender(<RankSummary score={undefined} errored />);
     expect(screen.getByTestId("rank-summary")).toHaveTextContent("Rank unavailable");
   });

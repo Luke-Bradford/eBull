@@ -39,7 +39,7 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { completenessTone } from "@/lib/badgeTone";
-import { notRankedReasonText } from "@/lib/rankStatus";
+import { notRankedReasonText, notScoredText } from "@/lib/rankStatus";
 import { toScoreChips } from "@/lib/scoreExplanation";
 
 export interface VerdictTabProps {
@@ -162,6 +162,8 @@ export function VerdictTab({
 
   const score = verdict.data?.score ?? null;
   if (score === null) {
+    const notScored = verdict.data?.not_scored ?? null;
+    const pending = notScored === null || notScored.reason === "pending_run";
     // Thesis still leads even when unscored (#2003) — a generated memo
     // must not vanish behind the "Not yet scored" empty state.
     return (
@@ -173,9 +175,16 @@ export function VerdictTab({
           currency={currency}
         />
         <Section title="Verdict">
+          {/* #3389 (d): say WHY, as a coverage fact. Only an eligible
+              instrument waits for a run; the rest are never scored, and
+              "not scored" must not read as a bad investment. */}
           <EmptyState
-            title="Not yet scored"
-            description="This instrument has no scoring run yet. The verdict appears once the deterministic engine has scored it."
+            title={pending ? "Not yet scored" : "Not scored"}
+            description={
+              pending
+                ? `No verdict yet: ${notScoredText(notScored)}.`
+                : `The ranking engine does not score this instrument: ${notScoredText(notScored)}. This is a coverage fact, not a judgement on the investment.`
+            }
           />
         </Section>
       </div>
