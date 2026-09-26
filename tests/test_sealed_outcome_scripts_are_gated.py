@@ -401,3 +401,110 @@ def test_the_precutoff_openers_are_gated_rather_than_allowlisted() -> None:
         called = _called_names((_SCRIPTS / name).read_text())
         assert "require_outcome_gate" in called, name
         assert "verify_outcome_access_provenance" in called, name
+
+
+# ---------------------------------------------------------------------------
+# #3385 — the hunt harness is the only sanctioned route to research prices
+# ---------------------------------------------------------------------------
+#: Modules whose functions return research-archive bars. A new script (or an
+#: ``app/services/hunt*`` module) importing one computes numbers on research prices
+#: outside the hunt harness, so outside the trial log M is counted from.
+#: ⚠ Import provenance only: an indirect reader (a module that imports one of these
+#: and is imported in turn), raw SQL, notebooks and shells are outside this test
+#: (spec residual).
+_RESEARCH_PRICE_READER_MODULES: Final[frozenset[str]] = frozenset(
+    {
+        "app.services.research_split_corrected_reader",
+        "app.services.research_price_structure_store",
+        "app.services.price_masked_bars",
+    }
+)
+
+#: Importers that predate the hunt harness (2026-09-26). This set may only SHRINK:
+#: `test_the_pre_hunt_reader_list_only_names_live_importers` fails on a stale entry,
+#: and nothing may be added — a new reader goes through `hunt_harness` or a gate.
+_PRE_HUNT_RESEARCH_READERS: Final[frozenset[str]] = frozenset(
+    {
+        "ab_2797_s2_weekday_rebalance.py",
+        "ab_2840_barseries_row_immutability.py",
+        "ab_2840_carrier_binding.py",
+        "benchmark_2488_evidence_refresh.py",
+        "census_2840_s12_signal_supply.py",
+        "measure_2834_armb_dv_prototype.py",
+        "verify_2240_cost_model.py",
+        "verify_2240_holdout_namespace.py",
+        "verify_2240_outcome_ledger.py",
+        "verify_2240_outcome_resolver.py",
+        "verify_2240_position_builder.py",
+        "verify_2240_quarantine_sensitivity.py",
+        "verify_2240_random_entry_cohort.py",
+        "verify_2240_s1_momentum.py",
+        "verify_2240_s2_cross_sectional.py",
+        "verify_2240_s3_mean_reversion.py",
+        "verify_2240_s4_volatility_breakout.py",
+        "verify_2240_statistics.py",
+        "verify_2240_walk_forward.py",
+        "verify_2279_price_structure.py",
+        "verify_2354_nonpositive_open.py",
+        "verify_2394_backtest_run.py",
+        "verify_2394_signal_scan.py",
+        "verify_2394_signal_scan_cost.py",
+        "verify_2394_strategy_manifest.py",
+        "verify_2414_corpus_generation.py",
+        "verify_2414_revision_invariance.py",
+        "verify_2426_benchmark.py",
+        "verify_2437_level_scan.py",
+        "verify_2437_missing_market_context.py",
+        "verify_2437_s10_census.py",
+        "verify_2437_s10_turnover.py",
+        "verify_2447_strategy_monitoring.py",
+    }
+)
+
+_SERVICES = _SCRIPTS.parent / "app" / "services"
+
+
+def _imports_research_price_reader(tree: ast.Module) -> bool:
+    """Both spellings: ``from app.services.X import f`` and ``from app.services import X``."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name in _RESEARCH_PRICE_READER_MODULES for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            if node.module in _RESEARCH_PRICE_READER_MODULES:
+                return True
+            if any(f"{node.module}.{alias.name}" in _RESEARCH_PRICE_READER_MODULES for alias in node.names):
+                return True
+    return False
+
+
+def _hunt_scope() -> list[Path]:
+    return sorted(_SCRIPTS.glob("*.py")) + sorted(_SERVICES.glob("hunt*.py"))
+
+
+def test_a_new_research_price_reader_goes_through_the_hunt_harness() -> None:
+    offenders = [
+        path.name
+        for path in _hunt_scope()
+        if path.name != "hunt_harness.py"
+        and path.name not in _PRE_HUNT_RESEARCH_READERS
+        and _imports_research_price_reader(ast.parse(path.read_text()))
+        and not _is_gated(path.read_text())
+    ]
+    assert offenders == [], (
+        f"{offenders} import a research price reader outside the hunt harness (#3385). An outcome-bearing "
+        "number on research prices must be a registered hunt trial (`hunt_harness.evaluate`) or pass a "
+        "declaration gate; exploratory charts count as trials too (programme rule 2)."
+    )
+
+
+def test_the_pre_hunt_reader_list_only_names_live_importers() -> None:
+    live = {path.name for path in _SCRIPTS.glob("*.py") if _imports_research_price_reader(ast.parse(path.read_text()))}
+    assert _PRE_HUNT_RESEARCH_READERS <= live, sorted(_PRE_HUNT_RESEARCH_READERS - live)
+
+
+def test_the_reader_detector_sees_both_import_spellings() -> None:
+    assert _imports_research_price_reader(ast.parse("from app.services.price_masked_bars import load\n"))
+    assert _imports_research_price_reader(ast.parse("from app.services import research_price_structure_store\n"))
+    assert _imports_research_price_reader(ast.parse("import app.services.research_split_corrected_reader as r\n"))
+    assert not _imports_research_price_reader(ast.parse("from app.services import hunt_harness\n"))
