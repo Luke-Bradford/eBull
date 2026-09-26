@@ -18,7 +18,7 @@ import pytest
 
 from app.services import hunt_harness as hh
 from app.services import hunt_panel
-from app.services.hunt_harness import ComputedOutcome, HuntOutcome, HuntRefused, TrialSpec
+from app.services.hunt_harness import ComputedOutcome, HoldoutRecorded, HuntOutcome, HuntRefused, TrialSpec
 from app.services.series_termination import TerminationClass, TerminationEvidence
 from app.services.universe_selection import AdmittedSeries, vendor_for
 from tests.test_hunt_harness import trial_spec, universe_identity
@@ -57,7 +57,7 @@ def _ok(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> Compute
     return ComputedOutcome("computed", {"t": 1.25, "mean": 0.001, "cells": {"zero_recovery": "ok"}}, (0.001, -0.002))
 
 
-def _run(conn: psycopg.Connection[Any], spec: TrialSpec, compute: Any) -> HuntOutcome | HuntRefused:
+def _run(conn: psycopg.Connection[Any], spec: TrialSpec, compute: Any) -> HuntOutcome | HoldoutRecorded | HuntRefused:
     """``evaluate`` with ``compute_trial`` stubbed: it takes no computation argument."""
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(hh, "compute_trial", compute)
