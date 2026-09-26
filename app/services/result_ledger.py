@@ -48,7 +48,7 @@ check somebody has to remember to run.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
@@ -1623,7 +1623,11 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
 
 
 def _record_access_with_declaration(
-    conn: psycopg.Connection[tuple], access: HoldoutAccess, *, require_declaration: bool
+    conn: psycopg.Connection[tuple],
+    access: HoldoutAccess,
+    *,
+    require_declaration: bool,
+    membership: Callable[[FrozenPreregistration], tuple[str, ...]] | None = None,
 ) -> tuple[int, FrozenPreregistration | None]:
     """The one body behind both access doors. Returns ``(access_id, declaration)``.
 
@@ -1679,6 +1683,14 @@ def _record_access_with_declaration(
     frozen = _refuse_incoherent_declaration(conn, access)
     if require_declaration and frozen is None:
         _refuse_access(conn, access, ("preregistration_not_frozen",))
+    # #3385 obligation 91 — a batch declaration (a hunt's validation) authorises only
+    # the specs it pinned. The caller's check runs HERE, under the trial lock and
+    # against the declaration this call loaded, so a freeze cannot interleave and the
+    # refusal is audited like every other one.
+    if membership is not None and frozen is not None:
+        codes = membership(frozen)
+        if codes:
+            _refuse_access(conn, access, codes, frozen.declaration_id)
     row = conn.execute(
         _RECORD_ACCESS,
         {
@@ -1769,7 +1781,10 @@ def require_outcome_access(conn: psycopg.Connection[tuple], access: HoldoutAcces
 
 
 def require_outcome_access_with_declaration(
-    conn: psycopg.Connection[tuple], access: HoldoutAccess
+    conn: psycopg.Connection[tuple],
+    access: HoldoutAccess,
+    *,
+    membership: Callable[[FrozenPreregistration], tuple[str, ...]] | None = None,
 ) -> tuple[int, FrozenPreregistration]:
     """:func:`require_outcome_access`, also returning the declaration it enforced.
 
@@ -1782,8 +1797,12 @@ def require_outcome_access_with_declaration(
 
     ⚠ The return is non-optional because ``_refuse_access`` never returns: with
     ``require_declaration=True`` a ``None`` declaration has already raised.
+
+    ``membership`` (#3385) is called with the loaded declaration under the trial lock,
+    before the access row is written; any codes it returns refuse through ``sql/340``.
+    A declaration pinning a batch of specs uses it to refuse a spec it did not pin.
     """
-    access_id, frozen = _record_access_with_declaration(conn, access, require_declaration=True)
+    access_id, frozen = _record_access_with_declaration(conn, access, require_declaration=True, membership=membership)
     if frozen is None:  # pragma: no cover - _refuse_access is NoReturn on the None branch
         raise RuntimeError("require_declaration=True returned without a declaration")
     return access_id, frozen

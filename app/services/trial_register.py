@@ -390,6 +390,41 @@ def log_backed_evidence(*, query: str, closed_at: datetime, trial_ids: Sequence[
     )
 
 
+@dataclass(frozen=True)
+class LogBackedEvidence:
+    query: str
+    closed_at: datetime
+    ids_sha256: str
+    searches: int
+
+
+@dataclass(frozen=True)
+class DeclarationBackedEvidence:
+    declaration_path: str
+    declaration_sha256: str
+    pinned_specs: int
+
+
+def parse_log_backed_evidence(evidence: str) -> LogBackedEvidence | None:
+    """The fields of a ``log_backed_evidence`` string, or ``None`` when it is not one."""
+    match = _LOG_BACKED_EVIDENCE.fullmatch(evidence)
+    if match is None:
+        return None
+    try:
+        closed_at = datetime.fromisoformat(match["closed_at"])
+    except ValueError:
+        return None
+    return LogBackedEvidence(match["query"], closed_at, match["sha"], int(match["n"]))
+
+
+def parse_declaration_backed_evidence(evidence: str) -> DeclarationBackedEvidence | None:
+    """The fields of a ``declaration_backed_evidence`` string, or ``None`` when it is not one."""
+    match = _DECLARATION_BACKED_EVIDENCE.fullmatch(evidence)
+    if match is None:
+        return None
+    return DeclarationBackedEvidence(match["path"], match["sha"], int(match["n"]))
+
+
 def declaration_backed_evidence(*, declaration_path: str, declaration_sha256: str, pinned_specs: int) -> str:
     """Evidence for a validation or holdout entry: ``searches`` must be ``pinned_specs``."""
     if not re.fullmatch(_SHA256, declaration_sha256):
