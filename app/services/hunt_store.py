@@ -356,7 +356,8 @@ def load_or_build(
         return stored
     _LOG.info("hunt store miss %s; building", key[:12])
     root.mkdir(parents=True, exist_ok=True)
-    for stale in root.glob(f"{TMP_PREFIX}*"):
+    # Only this key's leftovers: a temp directory of another key may be a live build (review NITPICK).
+    for stale in root.glob(f"{TMP_PREFIX}{key}-*"):
         shutil.rmtree(stale, ignore_errors=True)
     temporary = root / f"{TMP_PREFIX}{key}-{os.getpid()}"
     try:

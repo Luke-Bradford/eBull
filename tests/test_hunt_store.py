@@ -271,14 +271,16 @@ def test_a_miss_builds_publishes_and_the_next_call_hits(tmp_path: Path) -> None:
     assert sorted(path.name for path in tmp_path.iterdir()) == [_KEY]
 
 
-def test_a_crashed_temp_directory_is_removed_and_other_keys_are_kept(tmp_path: Path) -> None:
-    (tmp_path / ".tmp-old-123").mkdir()
-    (tmp_path / ".tmp-old-123" / "close.npy").write_bytes(b"partial")
+def test_a_crashed_temp_directory_of_this_key_is_removed_and_nothing_else(tmp_path: Path) -> None:
+    crashed, foreign = tmp_path / f".tmp-{_KEY}-123", tmp_path / f".tmp-{'o' * 64}-456"
+    for directory in (crashed, foreign):
+        directory.mkdir()
+        (directory / "close.npy").write_bytes(b"partial")
     other = tmp_path / ("o" * 64)
     other.mkdir()
     _, build = _build_counter(_parts())
     hunt_store.load_or_build(tmp_path, key=_KEY, through=_THROUGH, build=build, verify=lambda: None)
-    assert sorted(path.name for path in tmp_path.iterdir()) == sorted([_KEY, "o" * 64])
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted([_KEY, "o" * 64, foreign.name])
 
 
 def test_a_corrupt_entry_is_replaced(tmp_path: Path) -> None:
