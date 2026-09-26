@@ -399,6 +399,9 @@ FamilyUsability = Literal["usable", "missing", "stale", "quarantined"]
 
 #: The families a thesis can feed. When the thesis was quarantined (#2436) and such a
 #: family had no other input, its default fill is explained by the rejection, not absence.
+#: ⚠ Simplification: the rejected row is dropped before scoring, so whether it carried
+#: per-share targets is not known here. A rejected thesis WITHOUT targets would not have fed
+#: value either, yet value with no fundamentals still reads ``quarantined`` in that case.
 THESIS_FAMILIES: frozenset[str] = frozenset({"value", "confidence"})
 Maturity = Literal["untested", "under_test", "inconclusive", "failed", "passed_backtest", "passed_forward", "retired"]
 Purpose = Literal["return_signal", "risk_avoid_signal", "eligibility_constraint", "context"]
