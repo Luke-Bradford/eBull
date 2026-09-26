@@ -43,7 +43,7 @@ from app.services import hunt_books, hunt_evaluator, hunt_inference
 from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND, cost_band_for
 from app.services.hunt_evaluator import BookSeries, Cohort, Point, SeriesPrices
 from app.services.hunt_inference import StatRefused
-from app.services.hunt_view import Bars, SignalView, rebased_view
+from app.services.hunt_view import Bars, Dividends, SessionDate, SignalView, rebased_view
 from app.services.r6_exclusion_trial import PROGRAMME_POLICIES, TerminationPolicy
 from app.services.series_termination import TerminationClass
 
@@ -119,6 +119,8 @@ class PanelSeries:
     terminal_ordinal: int | None
     termination_class: TerminationClass | None
     _index: array[int] = field(init=False, repr=False, compare=False)
+    #: ``dividends`` as the view's parallel arrays, built once here, never per formation (#3386).
+    dividend_arrays: Dividends = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         count = len(self.ratio.ordinals)
@@ -135,6 +137,12 @@ class PanelSeries:
         for position, ordinal in enumerate(self.ratio.ordinals):
             index[ordinal - first] = position
         object.__setattr__(self, "_index", index)
+        paid = sorted(self.dividends.items())
+        object.__setattr__(
+            self,
+            "dividend_arrays",
+            Dividends(array("l", [o for o, _ in paid]), array("d", [float(a) for _, a in paid])),
+        )
 
     @property
     def first(self) -> int:
@@ -268,6 +276,8 @@ def _form_cohorts(panel: HuntPanel, grid: hunt_evaluator.Grid, params: ComputePa
             spanning[ordinal] = alive
 
     reasons = (*BAR_EXCLUSIONS, NO_BAR)
+    # The view's dates, once per computation (#3386): int tuples, never date objects.
+    calendar: tuple[SessionDate, ...] = tuple((d.year, d.month, d.day, d.weekday()) for d in panel.sessions)
     counts: dict[str, list[int]] = {name: [] for name in ("eligible", "scored", "unscored", "arm", *reasons)}
     cohorts: dict[int, Cohort] = {}
     log_price_tilts: list[float] = []
@@ -276,6 +286,7 @@ def _form_cohorts(panel: HuntPanel, grid: hunt_evaluator.Grid, params: ComputePa
         excluded = dict.fromkeys(BAR_EXCLUSIONS, 0)
         eligible: dict[int, Bars] = {}
         traded_close: dict[int, float] = {}
+        paid: dict[int, Dividends] = {}
         positions: dict[int, int] = {}
         for series_id in trading[t]:
             series = panel.series[series_id]
@@ -286,8 +297,10 @@ def _form_cohorts(panel: HuntPanel, grid: hunt_evaluator.Grid, params: ComputePa
                 continue
             eligible[series_id] = series.ratio
             traded_close[series_id] = series.traded_close[position]
+            paid[series_id] = series.dividend_arrays
             positions[series_id] = position
-        scores = signal(t, rebased_view(t, eligible, traded_close), params.constants)
+        view = rebased_view(t, eligible, traded_close, sessions=calendar, dividends=paid)
+        scores = signal(t, view, params.constants)
         if not isinstance(scores, Mapping):
             raise TypeError(f"signal returned {type(scores).__name__}, not a mapping")
         outside = set(scores) - set(eligible)

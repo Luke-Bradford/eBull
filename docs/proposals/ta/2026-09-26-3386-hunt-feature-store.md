@@ -137,7 +137,10 @@ Hunt 1's families (programme doc) against the view:
 Two additions, both cut **inside** `rebased_view` (finding 32), which gains the sessions and each series'
 dividends as arguments:
 - `SignalView.dates`: the session dates for indices 0 … t, as a lazy read-only prefix of the panel's `sessions`
-  (a new unscaled prefix class; `Prefix` scales numbers, finding 31).
+  (a new unscaled prefix class; `Prefix` scales numbers, finding 31). Each date is a plain
+  `(year, month, day, weekday)` int tuple, Monday = 0, built once per computation (amended in slice 2): a
+  `datetime.date` would hand a signal `date.today()`, a clock, and `hunt_view` must itself pass the signal import
+  allowlist (`tests/test_hunt_signal_imports.py`), which admits no `datetime`.
 - `SeriesView.dividend_ordinals` / `SeriesView.dividend_amounts`: the series' ex-date session indices ≤ t, from
   two parallel arrays `PanelSeries` builds once from its dividend mapping at construction (v2 round 13: never per
   formation), cut by `bisect` like the bars, from the dividends' own ordinals (a dividend on a session with no bar is kept, finding 34), and the amounts
