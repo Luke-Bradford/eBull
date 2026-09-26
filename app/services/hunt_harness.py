@@ -1226,6 +1226,13 @@ def evaluate(
                 )
             if has_outcome:
                 if spec.split == "holdout":
+                    # The registered spec passed the door, so it is pinned. A relabelled spec
+                    # (same candidate, other ``spec_sha256``) re-passes it, which refuses and
+                    # audits it as unpinned; nothing is read either way (Codex ckpt-2).
+                    if spec.spec_sha256 != registered_spec_sha256:
+                        look = _pass_door(conn, spec, registered_by=registered_by)
+                        if isinstance(look, HuntRefused):
+                            return look
                     conn.commit()
                     return HoldoutRecorded(trial_id, cached=True)
                 if spec.split != "discovery":

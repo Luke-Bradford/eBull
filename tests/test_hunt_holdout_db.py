@@ -239,3 +239,42 @@ def test_the_holdout_freeze_refuses_a_second_holdout(
     _doc, codes = hunt_door.build_holdout_declaration(ebull_test_conn, hunt_id="hunt-1", end_session=END, register=base)
     assert "holdout_already_frozen" in codes
     assert _count(ebull_test_conn, "SELECT count(*) FROM hunt_declarations WHERE split = 'holdout'") == 1
+
+
+def test_a_relabelled_spec_cannot_ride_a_cached_holdout(
+    ebull_test_conn: psycopg.Connection[Any], validated: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex ckpt-2: same candidate, other ``spec_sha256`` is unpinned, cached or not."""
+    doc = _freeze_holdout(ebull_test_conn, validated, monkeypatch)
+    pinned = TrialSpec.from_form(doc["pins"][0]["spec"])
+    statistics, series = _statistics("holdout", pinned, mean=0.03, n=600)
+    assert isinstance(
+        _evaluate(ebull_test_conn, pinned, ComputedOutcome("computed", statistics, series)), HoldoutRecorded
+    )
+    relabelled = TrialSpec.from_form({**pinned.form(), "family": "relabelled"})
+    assert relabelled.candidate_sha256 == pinned.candidate_sha256
+    refused = _evaluate(ebull_test_conn, relabelled, ComputedOutcome("computed", statistics, series))
+    assert isinstance(refused, HuntRefused) and refused.reason == "spec_not_in_declaration"
+    assert _count(ebull_test_conn, HOLDOUT_READS) == 1
+
+
+def test_a_registered_pin_whose_retry_is_refused_does_not_wedge_the_readout(
+    ebull_test_conn: psycopg.Connection[Any], validated: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex ckpt-2: a crash after registration, then a burn, would leave the pin pending forever."""
+    doc = _freeze_holdout(ebull_test_conn, validated, monkeypatch)
+    pinned = TrialSpec.from_form(doc["pins"][0]["spec"])
+
+    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
+        raise RuntimeError("price read failed")
+
+    with pytest.MonkeyPatch.context() as patch, pytest.raises(RuntimeError):
+        patch.setattr(hh, "compute_trial", crash)
+        hh.evaluate(ebull_test_conn, pinned, registered_by="test")
+    assert hunt_door.holdout_readout(ebull_test_conn, "hunt-1").pending == (pinned.spec_sha256,)
+    hh.record_outside_look(ebull_test_conn, note="holdout chart look #2", registered_by="test", spec=pinned)
+    readout = hunt_door.holdout_readout(ebull_test_conn, "hunt-1")
+    (candidate,) = readout.candidates
+    assert readout.complete and candidate.hunt_trial_id is not None
+    assert candidate.verdict is hunt_inference.Verdict.NOT_PASS_REFUSED
+    assert candidate.reasons[0].startswith("registered, its retry refused: split_burned")

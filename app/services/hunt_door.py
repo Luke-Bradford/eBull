@@ -1199,8 +1199,9 @@ def holdout_readout(conn: psycopg.Connection[Any], hunt_id: str) -> HoldoutReado
     """The hunt's holdout verdicts, released only when every pinned spec has an outcome
     (spec "The audited door", holdout). The only sanctioned route to them.
 
-    A pin with no registration shows the refusal ``evaluate`` gives it now (e.g. a burned
-    split), as ``NOT_PASS_REFUSED``; a pin that would register is pending. Deflated against
+    A pin with no outcome shows the refusal ``evaluate`` gives it now (e.g. a burned split),
+    as ``NOT_PASS_REFUSED``, whether or not it registered; one ``evaluate`` would run is
+    pending. Deflated against
     the holdout declaration's frozen M and V[SR]; opens no fresh access.
     """
     with hh.hunt_programme_lock(conn):
@@ -1219,7 +1220,9 @@ def holdout_readout(conn: psycopg.Connection[Any], hunt_id: str) -> HoldoutReado
             trial_id, has_outcome = rows[spec_sha256]
             if has_outcome:
                 continue
-            refusal = None if trial_id is not None else hh.refusal_before_registration(conn, _pin_spec(pin))
+            # ⚠ Also for a registration without an outcome: ``evaluate`` runs this check before
+            # it looks the registration up, so a retry it refuses can never complete (Codex ckpt-2).
+            refusal = hh.refusal_before_registration(conn, _pin_spec(pin))
             if refusal is None:
                 pending.append(spec_sha256)
             else:
@@ -1231,9 +1234,10 @@ def holdout_readout(conn: psycopg.Connection[Any], hunt_id: str) -> HoldoutReado
             if pending:
                 candidates.append(CandidateReadout(spec_sha256, trial_id, None, (), {}, {}))
             elif spec_sha256 in refused:
-                reason = f"refused before registration: {refused[spec_sha256].reason}: {refused[spec_sha256].detail}"
+                stage = "refused before registration" if trial_id is None else "registered, its retry refused"
+                reason = f"{stage}: {refused[spec_sha256].reason}: {refused[spec_sha256].detail}"
                 candidates.append(
-                    CandidateReadout(spec_sha256, None, hunt_inference.Verdict.NOT_PASS_REFUSED, (reason,), {}, {})
+                    CandidateReadout(spec_sha256, trial_id, hunt_inference.Verdict.NOT_PASS_REFUSED, (reason,), {}, {})
                 )
             else:
                 candidates.append(
