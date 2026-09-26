@@ -14,9 +14,18 @@ from typing import Final
 
 from app.services import hunt_harness
 
-#: stdlib pure modules, numpy, and the package itself (the view type lands in slice 3).
+#: stdlib pure modules, numpy, the package itself, and the view type a signal is handed.
 _ALLOWED: Final[frozenset[str]] = frozenset(
-    {"__future__", "math", "statistics", "dataclasses", "typing", "numpy", "app.services.hunt_signals"}
+    {
+        "__future__",
+        "math",
+        "statistics",
+        "dataclasses",
+        "typing",
+        "numpy",
+        "app.services.hunt_signals",
+        "app.services.hunt_view",
+    }
 )
 #: Inside an allowed prefix but still refused: numpy's generators make a score irreproducible.
 _REFUSED: Final[frozenset[str]] = frozenset({"numpy.random"})
@@ -100,3 +109,13 @@ def test_the_scanner_admits_a_pure_signal() -> None:
 
 def test_the_package_path_is_the_one_the_code_hash_reads() -> None:
     assert Path(hunt_harness.__file__).resolve().parent / "hunt_signals" == hunt_harness.SIGNAL_PACKAGE_DIR
+
+
+def test_the_view_module_itself_obeys_the_allowlist() -> None:
+    """A signal may import the view, so the view must not be a route to data either."""
+    from app.services import hunt_view
+
+    source = Path(str(hunt_view.__file__)).read_text()
+    allowed_extra = {"collections.abc", "types"}
+    violations = [v for v in _import_violations(source) if v.removeprefix("imports ") not in allowed_extra]
+    assert violations == []
