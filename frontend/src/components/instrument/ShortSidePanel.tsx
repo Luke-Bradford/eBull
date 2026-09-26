@@ -21,7 +21,7 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { formatDate, formatNumber, formatUnsignedPct } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 
-// Server default is 20; the route caps at 250.
+// Trade dates requested; the route caps at 250.
 const SHORT_VOLUME_DAYS = 20;
 
 const SHORT_INTEREST_DEFINITION =
@@ -202,8 +202,9 @@ function ShortVolumeBody({ data }: { data: InstrumentShortVolume }): JSX.Element
       )}
       <Note>{data.definition}</Note>
       <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[10px] text-slate-400">
-        {data.caveats.map((c) => (
-          <li key={c}>{c}</li>
+        {/* Static, ordered server copy: position is the identity. */}
+        {data.caveats.map((c, i) => (
+          <li key={i}>{c}</li>
         ))}
       </ul>
     </>

@@ -501,7 +501,7 @@ export async function fetchInstrumentSegments(
 /** FINRA Reg SHO daily short-sale volume, latest `limit` trade dates (#3390). */
 export function fetchInstrumentShortVolume(
   symbol: string,
-  limit = 20,
+  limit: number,
 ): Promise<InstrumentShortVolume> {
   const qs = new URLSearchParams({ limit: String(limit) });
   return apiFetch<InstrumentShortVolume>(
