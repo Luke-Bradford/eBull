@@ -9,7 +9,7 @@ from typing import Any
 from app.api.instruments import (
     REGSHO_CAVEATS,
     REGSHO_IDENTITY_COLLISION,
-    build_short_volume_days,
+    build_short_volume,
 )
 from app.providers.implementations.finra_regsho import CONSOLIDATED_PREFIX, PREFIXES
 
@@ -29,7 +29,9 @@ def test_days_are_newest_first_with_share() -> None:
         _row(date(2026, 9, 24), "3047092.251603", "5048085.931547"),
         _row(date(2026, 9, 25), "3701066.408585", "6533946.477449"),
     ]
-    days, withheld = build_short_volume_days(rows, collision_in_history=False)
+    out = build_short_volume("X", rows, collision_in_history=False)
+    days, withheld = out.days, out.withheld_reason
+    assert out.latest_trade_date == date(2026, 9, 25)
     assert [d.trade_date for d in days] == [date(2026, 9, 25), date(2026, 9, 24)]
     assert days[0].short_volume_share is not None
     # GME, CNMSshvol20260925.txt: 3701066.408585 / 6533946.477449.
@@ -38,12 +40,12 @@ def test_days_are_newest_first_with_share() -> None:
 
 
 def test_zero_total_volume_gives_no_share() -> None:
-    days, _ = build_short_volume_days([_row(date(2026, 9, 25), "0", "0")], collision_in_history=False)
+    days = build_short_volume("X", [_row(date(2026, 9, 25), "0", "0")], collision_in_history=False).days
     assert days[0].short_volume_share is None
 
 
 def test_facility_union_is_passed_through_not_used_to_select() -> None:
-    days, _ = build_short_volume_days([_row(date(2026, 9, 25), "1", "4", market="Q,N")], collision_in_history=False)
+    days = build_short_volume("X", [_row(date(2026, 9, 25), "1", "4", market="Q,N")], collision_in_history=False).days
     assert days[0].facilities == "Q,N"
     assert days[0].short_volume_share == Decimal("0.25")
 
@@ -55,16 +57,19 @@ def test_two_rows_on_one_date_withhold_every_day() -> None:
         _row(date(2026, 9, 24), "11873", "44640", market="Q"),
         _row(date(2026, 9, 23), "100", "200"),
     ]
-    days, withheld = build_short_volume_days(rows, collision_in_history=False)
-    assert days == []
-    assert withheld == REGSHO_IDENTITY_COLLISION
+    out = build_short_volume("X", rows, collision_in_history=False)
+    assert out.days == []
+    assert out.withheld_reason == REGSHO_IDENTITY_COLLISION
+    # Nothing derived from the rejected rows leaks (#3390 review).
+    assert out.latest_trade_date is None
 
 
 def test_collision_outside_the_window_withholds_a_clean_looking_window() -> None:
     # Same-market collisions collapse to one row, so the window alone cannot show them.
-    days, withheld = build_short_volume_days([_row(date(2026, 9, 25), "1", "2")], collision_in_history=True)
-    assert days == []
-    assert withheld == REGSHO_IDENTITY_COLLISION
+    out = build_short_volume("X", [_row(date(2026, 9, 25), "1", "2")], collision_in_history=True)
+    assert out.days == []
+    assert out.withheld_reason == REGSHO_IDENTITY_COLLISION
+    assert out.latest_trade_date is None
 
 
 def test_consolidated_prefix_is_a_fetched_prefix() -> None:

@@ -2518,12 +2518,13 @@ REGSHO_IDENTITY_COLLISION = (
 )
 
 
-def build_short_volume_days(
+def build_short_volume(
+    symbol: str,
     rows: list[dict[str, Any]],
     *,
     collision_in_history: bool,
-) -> tuple[list[RegShoDayModel], str | None]:
-    """Consolidated rows to days, newest first, or a withheld reason.
+) -> InstrumentShortVolume:
+    """Consolidated rows to the payload: days newest first, or withheld.
 
     Two FINRA symbols that resolve to one instrument are only visible when
     their facility unions differ (two rows on a date); when the unions match,
@@ -2535,10 +2536,9 @@ def build_short_volume_days(
     by_date: dict[date, list[dict[str, Any]]] = {}
     for row in rows:
         by_date.setdefault(row["trade_date"], []).append(row)
-    if collision_in_history or any(len(day_rows) > 1 for day_rows in by_date.values()):
-        return [], REGSHO_IDENTITY_COLLISION
+    withheld = collision_in_history or any(len(day_rows) > 1 for day_rows in by_date.values())
     days: list[RegShoDayModel] = []
-    for trade_date in sorted(by_date, reverse=True):
+    for trade_date in [] if withheld else sorted(by_date, reverse=True):
         row = by_date[trade_date][0]
         total = Decimal(row["total_volume"])
         short = Decimal(row["short_volume"])
@@ -2552,7 +2552,15 @@ def build_short_volume_days(
                 facilities=str(row["market"]),
             )
         )
-    return days, None
+    return InstrumentShortVolume(
+        symbol=symbol,
+        definition=REGSHO_DEFINITION,
+        caveats=list(REGSHO_CAVEATS),
+        # From the published days only, so a withheld instrument leaks nothing.
+        latest_trade_date=days[0].trade_date if days else None,
+        days=days,
+        withheld_reason=REGSHO_IDENTITY_COLLISION if withheld else None,
+    )
 
 
 @router.get("/{symbol}/short-volume", response_model=InstrumentShortVolume)
@@ -2609,17 +2617,10 @@ def get_instrument_short_volume(
         )
         collision_row = cur.fetchone()
 
-    days, withheld_reason = build_short_volume_days(
+    return build_short_volume(
+        canonical_symbol,
         rows,
         collision_in_history=bool(collision_row and collision_row["collision"]),
-    )
-    return InstrumentShortVolume(
-        symbol=canonical_symbol,
-        definition=REGSHO_DEFINITION,
-        caveats=list(REGSHO_CAVEATS),
-        latest_trade_date=max((r["trade_date"] for r in rows), default=None),
-        days=days,
-        withheld_reason=withheld_reason,
     )
 
 
