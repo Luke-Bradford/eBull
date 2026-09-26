@@ -1,9 +1,10 @@
-"""The hunt's audited door: building and freezing a validation declaration.
+"""The hunt's audited door: building and freezing the validation and holdout declarations,
+and the two readouts.
 
-#3385 slice 2b-i, spec ``docs/proposals/ta/2026-09-26-3385-hunt-harness.md`` (v5), "The
-audited door", "DSR" (M, V[SR]), "BY", "Power" and "Trial register (#2829)"; obligations
-91 (in ``hunt_harness``), 108, 110 and 122-123. The holdout declaration, the readouts and
-the abandonment script are slice 2b-ii.
+#3385 slices 2b-i..2b-iii, spec ``docs/proposals/ta/2026-09-26-3385-hunt-harness.md`` (v5),
+"The audited door", "DSR" (M, V[SR]), "BY", "Power" and "Trial register (#2829)";
+obligations 91 (in ``hunt_harness``), 108, 110, 122-123, 132-133 and 149. The abandonment
+script (obligation 131) is its own slice.
 
 A hunt's validation batch is ONE #2599 declaration, ``hunt-<n>-validation`` @ ``v1``. Its
 document pins every candidate's validation spec and every freeze-time number: M (with the
@@ -21,6 +22,12 @@ forward-shadow floor. The flow:
    tripwire, recomputes EVERY number in one REPEATABLE READ snapshot under the programme
    lock, refuses on any difference, and only then freezes the #2599 row and stores the
    document (``sql/428``) in the same transaction.
+
+The holdout (``hunt-<n>-holdout`` @ ``v1``) follows the same three steps with
+``build_holdout_declaration`` / ``freeze_holdout_declaration``. Its pins are DERIVED, not
+chosen: every validation ``PASS``, each its validation spec with the split changed, so its
+candidate is the one validation passed. It pins the end session, recomputes M by the global
+rule, and copies validation's frozen V[SR] verbatim.
 
 ⚠ NOTHING FROZEN IS RECOMPUTED LATER. BY flags are recomputed on every readout and never
 cached on an outcome (obligation 123); a declaration pins the readout that flagged its
@@ -45,7 +52,7 @@ from app.services.hunt_compute import CANONICAL_CELL
 from app.services.hunt_harness import TrialSpec
 from app.services.hunt_inference import StatRefused, VPopulationMember
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
-from app.services.result_ledger import freeze_preregistration, load_preregistration
+from app.services.result_ledger import FrozenPreregistration, freeze_preregistration, load_preregistration
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION, structural_promotion_refusals
 from app.services.trial_register import (
     TRIAL_REGISTER,
@@ -255,6 +262,42 @@ def _pinned_keys(declarations: Iterable[Mapping[str, Any]]) -> set[tuple[str, st
     return {(str(pin["candidate_sha256"]), str(pin["spec"]["split"])) for doc in declarations for pin in doc["pins"]}
 
 
+def _programme_m(
+    conn: psycopg.Connection[Any],
+    *,
+    pins: Sequence[TrialSpec],
+    frozen: Sequence[hh.HuntDeclaration],
+    register: TrialRegister,
+) -> tuple[dict[str, Any], int]:
+    """M by the global rule (spec "DSR"): M_inh + every ``hunt_trials`` row + every pinned
+    spec, in ``pins`` or any frozen declaration, with no ``evaluate`` row yet. Also returns
+    the programme's discovery row count, BY's m less M_inh.
+
+    ⚠ No register version in the numbers: the register entry claiming a document names its
+    sha256, so the version that entry creates cannot be inside it. The freeze stores the
+    version it read in ``hunt_declarations.register_version``.
+    """
+    inherited = register.inherited_floor()
+    totals = conn.execute(_LOG_TOTALS).fetchone()
+    rows_total, any_floor_row, discovery_rows = (0, False, 0) if totals is None else totals
+    evaluated = {(str(row[0]), str(row[1])) for row in conn.execute(_EVALUATE_KEYS).fetchall()}
+    this_doc = {"pins": [{"candidate_sha256": spec.candidate_sha256, "spec": {"split": spec.split}} for spec in pins]}
+    reserved = _pinned_keys([*(declaration.doc for declaration in frozen), this_doc]) - evaluated
+    numbers = {
+        "inherited": {"searches": inherited.searches, "is_floor": inherited.is_floor},
+        "m": inherited.searches + int(rows_total) + len(reserved),
+        "m_is_floor": bool(inherited.is_floor or any_floor_row),
+        "reserved_pins": len(reserved),
+    }
+    return numbers, int(discovery_rows)
+
+
+def _shadow_supply(grid: Any, sessions: Sequence[date], h: int) -> tuple[int, int]:
+    """One pin's forward-shadow evidence supply: ⌊formations / h⌋ and the grid's span in weeks."""
+    first, last = sessions[grid.first], sessions[grid.last]
+    return len(grid.formations) // h, math.ceil((last - first).days / 7)
+
+
 def declaration_numbers(
     conn: psycopg.Connection[Any],
     *,
@@ -272,14 +315,7 @@ def declaration_numbers(
     outcomes = _discovery_outcomes(conn)
     frozen = _frozen_declarations(conn)
     by_candidate = {(outcome.hunt_id, outcome.candidate_sha256): outcome for outcome in outcomes}
-
-    # --- M = M_inh + every hunt_trials row + every pinned spec with no row yet ---
-    totals = conn.execute(_LOG_TOTALS).fetchone()
-    rows_total, any_floor_row, discovery_rows = (0, False, 0) if totals is None else totals
-    evaluated = {(str(row[0]), str(row[1])) for row in conn.execute(_EVALUATE_KEYS).fetchall()}
-    this_doc = {"pins": [{"candidate_sha256": spec.candidate_sha256, "spec": {"split": spec.split}} for spec in pins]}
-    reserved = _pinned_keys([*(declaration.doc for declaration in frozen), this_doc]) - evaluated
-    m = inherited.searches + int(rows_total) + len(reserved)
+    m_numbers, discovery_rows = _programme_m(conn, pins=pins, frozen=frozen, register=register)
 
     # --- V[SR] over this hunt's discovery evaluate trials with an outcome ---
     variance = hunt_inference.trial_sharpe_variance(
@@ -294,7 +330,7 @@ def declaration_numbers(
         v_form = variance.form()
 
     # --- BY, programme-wide, at this readout ---
-    m_by = inherited.searches + int(discovery_rows)
+    m_by = inherited.searches + discovery_rows
     p_values = {outcome.hunt_trial_id: stored_screening_p(outcome.status, outcome.statistics) for outcome in outcomes}
     by = hunt_inference.by_screen(p_values, m=max(m_by, 1))
     flagged = sorted(cast(frozenset[int], by.flagged))
@@ -333,23 +369,15 @@ def declaration_numbers(
             power[spec.spec_sha256] = power_statement(
                 discovery.active_series, target_observations=len(grid.sessions), h=spec.h
             )
-            span = hh.split_sessions("validation")
-            first, last = span[grid.first], span[grid.last]
-            shadow_dates = max(shadow_dates, len(grid.formations) // spec.h)
-            shadow_weeks = max(shadow_weeks, math.ceil((last - first).days / 7))
+            dates, weeks = _shadow_supply(grid, hh.split_sessions("validation"), spec.h)
+            shadow_dates, shadow_weeks = max(shadow_dates, dates), max(shadow_weeks, weeks)
         if "blocked" in power[spec.spec_sha256]:
             codes.append(f"pin_{label}_power_{power[spec.spec_sha256]['blocked']}")
     if not pins:
         codes.append("no_pins")
 
     numbers = {
-        # ⚠ No register version here: the register entry claiming this document names its
-        # sha256, so the version that entry creates cannot be inside it. The freeze stores the
-        # version it read in ``hunt_declarations.register_version``.
-        "inherited": {"searches": inherited.searches, "is_floor": inherited.is_floor},
-        "m": m,
-        "m_is_floor": bool(inherited.is_floor or any_floor_row),
-        "reserved_pins": len(reserved),
+        **m_numbers,
         "v_sr": v_form,
         "by": {
             "m": by.m,
@@ -414,8 +442,10 @@ def tripwire(
     doc_sha256: str,
     pinned: int,
     frozen: Sequence[hh.HuntDeclaration],
+    split: hh.Split = "validation",
 ) -> list[str]:
-    """``register_disagrees_with_log`` codes (spec "Trial register", obligation 108)."""
+    """``register_disagrees_with_log`` codes (spec "Trial register", obligation 108), for the
+    ``split`` declaration being frozen and every one already frozen."""
     codes: list[str] = []
     discovery_id = f"{hunt_id}-discovery"
     discovery = _register_entry(register, discovery_id)
@@ -438,7 +468,7 @@ def tripwire(
             floor = any(row[2] for row in counted)
             if (discovery.exactness is TrialExactness.FLOOR) != floor:
                 codes.append(f"register_disagrees_with_log:{discovery_id}_exactness")
-    entries = [(f"{hunt_id}-validation", doc_path, doc_sha256, pinned)] + [
+    entries = [(hh.declaration_strategy_id(hunt_id, split), doc_path, doc_sha256, pinned)] + [
         (hh.declaration_strategy_id(d.hunt_id, d.split), d.doc_path, d.doc_sha256, len(d.doc["pins"])) for d in frozen
     ]
     for trial_id, path, sha, count in entries:
@@ -456,12 +486,12 @@ def tripwire(
 # ---------------------------------------------------------------------------
 
 
-def _document(hunt_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+def _document(hunt_id: str, body: Mapping[str, Any], split: hh.Split = "validation") -> dict[str, Any]:
     return hh.canonical_form(
         {
             "kind": hh.HUNT_DECLARATION_KIND,
             "hunt_id": hunt_id,
-            "split": "validation",
+            "split": split,
             "harness_model_id": hh.HUNT_HARNESS_MODEL_ID,
             **body,
         }
@@ -514,9 +544,9 @@ def forward_shadow_floor(numbers: Mapping[str, Any]) -> ForwardShadowFloor:
         min_calendar_weeks=int(shadow["min_calendar_weeks"]),
         derivation=(
             "BY CONSTRUCTION, no power calculation is published for a calendar-time active series: the largest "
-            "validation evidence supply among the pinned candidates, as floor(formations / h) non-overlapping "
-            "holds and the grid's span in weeks (#2901's precedent: the floor equals the evidence behind the "
-            "pass). A forward record for a promoted candidate is a different strategy_version with its own "
+            "evidence supply of the declared split among the pinned candidates, as floor(formations / h) "
+            "non-overlapping holds and the grid's span in weeks (#2901's precedent: the floor equals the evidence "
+            "behind the pass). A forward record for a promoted candidate is a different strategy_version with its own "
             "declaration (programme step 8)."
         ),
     )
@@ -536,17 +566,7 @@ def freeze_validation_declaration(
     registration without an outcome; any recomputed number or pin that differs from the
     document (obligation 122); and every refusal ``declaration_numbers`` names.
     """
-    doc, doc_sha256 = _read_document(doc_path)
-    hunt_id = str(doc.get("hunt_id"))
-    header_codes = []
-    if doc.get("kind") != hh.HUNT_DECLARATION_KIND or doc.get("split") != "validation":
-        header_codes.append("document_not_a_validation_declaration")
-    if not hh.HUNT_ID_PATTERN.match(hunt_id):
-        header_codes.append("document_hunt_id_invalid")
-    if doc.get("harness_model_id") != hh.HUNT_HARNESS_MODEL_ID:
-        header_codes.append("document_harness_model_stale")
-    if header_codes:
-        raise HuntDeclarationRefused(hunt_id, header_codes)
+    doc, doc_sha256, hunt_id = _read_declaration_document(doc_path, "validation")
     pins = [TrialSpec.from_form(pin["spec"]) for pin in doc["pins"]]
 
     with hh.hunt_programme_lock(conn):
@@ -566,47 +586,97 @@ def freeze_validation_declaration(
         codes += _discovery_completeness(conn, hunt_id)
         body, number_codes = declaration_numbers(conn, hunt_id=hunt_id, pins=pins, register=register)
         codes += number_codes
-        recomputed = _document(hunt_id, body)
-        for key in sorted(set(recomputed) | set(doc)):
-            if recomputed.get(key) != doc.get(key):
-                codes.append(f"declaration_{key}_stale")
-        if codes:
-            conn.rollback()
-            raise HuntDeclarationRefused(hunt_id, codes)
-        declaration = PreregDeclaration(
-            strategy_id=hh.declaration_strategy_id(hunt_id, "validation"),
-            strategy_version=hh.HUNT_DECLARATION_VERSION,
-            contract_version=hh.declaration_contract_version(doc_sha256),
-            prereg_purpose="capital_candidate",
-            structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
-            declared_universe_basis=UNIVERSE_BASIS,
-            declared_carry_unmodelled=CARRY_UNMODELLED,
-            declared_fx_unmodelled=FX_UNMODELLED,
-            expected_structural_refusals=structural_promotion_refusals(
-                universe_basis=UNIVERSE_BASIS, carry_unmodelled=CARRY_UNMODELLED, fx_unmodelled=FX_UNMODELLED
-            ),
-            forward_shadow=forward_shadow_floor(body["numbers"]),
+        codes += _stale_keys(_document(hunt_id, body), doc)
+        return _write_frozen(
+            conn,
+            codes=codes,
+            hunt_id=hunt_id,
+            split="validation",
+            doc=doc,
+            doc_path=doc_path,
+            doc_sha256=doc_sha256,
+            numbers=body["numbers"],
             declared_by=declared_by,
+            register=register,
         )
-        declaration_id = freeze_preregistration(cast(psycopg.Connection[tuple], conn), declaration)
-        conn.execute(
-            """
-            INSERT INTO hunt_declarations (
-                declaration_id, hunt_id, split, doc_path, doc, doc_sha256, register_version
-            ) VALUES (
-                %(declaration_id)s, %(hunt)s, 'validation', %(path)s, %(doc)s::jsonb, %(sha)s, %(register)s
-            )
-            """,
-            {
-                "declaration_id": declaration_id,
-                "hunt": hunt_id,
-                "path": doc_path,
-                "doc": hh.dumps_form(doc),
-                "sha": doc_sha256,
-                "register": register.version,
-            },
+
+
+def _read_declaration_document(doc_path: str, split: hh.Split) -> tuple[dict[str, Any], str, str]:
+    """The committed document at ``doc_path``, its sha256 and hunt id; refuses a foreign one."""
+    doc, doc_sha256 = _read_document(doc_path)
+    hunt_id = str(doc.get("hunt_id"))
+    header_codes = []
+    if doc.get("kind") != hh.HUNT_DECLARATION_KIND or doc.get("split") != split:
+        header_codes.append(f"document_not_a_{split}_declaration")
+    if not hh.HUNT_ID_PATTERN.match(hunt_id):
+        header_codes.append("document_hunt_id_invalid")
+    if doc.get("harness_model_id") != hh.HUNT_HARNESS_MODEL_ID:
+        header_codes.append("document_harness_model_stale")
+    if header_codes:
+        raise HuntDeclarationRefused(hunt_id, header_codes)
+    return doc, doc_sha256, hunt_id
+
+
+def _stale_keys(recomputed: Mapping[str, Any], doc: Mapping[str, Any]) -> list[str]:
+    """Obligation 122: every top-level key whose recomputed value differs from the document."""
+    return [
+        f"declaration_{key}_stale" for key in sorted(set(recomputed) | set(doc)) if recomputed.get(key) != doc.get(key)
+    ]
+
+
+def _write_frozen(
+    conn: psycopg.Connection[Any],
+    *,
+    codes: Sequence[str],
+    hunt_id: str,
+    split: hh.Split,
+    doc: Mapping[str, Any],
+    doc_path: str,
+    doc_sha256: str,
+    numbers: Mapping[str, Any],
+    declared_by: str,
+    register: TrialRegister,
+) -> int:
+    """Refuse on any code; else freeze the #2599 row and store the document in ONE
+    transaction. Runs inside the caller's programme lock and snapshot."""
+    if codes:
+        conn.rollback()
+        raise HuntDeclarationRefused(hunt_id, codes)
+    declaration = PreregDeclaration(
+        strategy_id=hh.declaration_strategy_id(hunt_id, split),
+        strategy_version=hh.HUNT_DECLARATION_VERSION,
+        contract_version=hh.declaration_contract_version(doc_sha256),
+        prereg_purpose="capital_candidate",
+        structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
+        declared_universe_basis=UNIVERSE_BASIS,
+        declared_carry_unmodelled=CARRY_UNMODELLED,
+        declared_fx_unmodelled=FX_UNMODELLED,
+        expected_structural_refusals=structural_promotion_refusals(
+            universe_basis=UNIVERSE_BASIS, carry_unmodelled=CARRY_UNMODELLED, fx_unmodelled=FX_UNMODELLED
+        ),
+        forward_shadow=forward_shadow_floor(numbers),
+        declared_by=declared_by,
+    )
+    declaration_id = freeze_preregistration(cast(psycopg.Connection[tuple], conn), declaration)
+    conn.execute(
+        """
+        INSERT INTO hunt_declarations (
+            declaration_id, hunt_id, split, doc_path, doc, doc_sha256, register_version
+        ) VALUES (
+            %(declaration_id)s, %(hunt)s, %(split)s, %(path)s, %(doc)s::jsonb, %(sha)s, %(register)s
         )
-        conn.commit()
+        """,
+        {
+            "declaration_id": declaration_id,
+            "hunt": hunt_id,
+            "split": split,
+            "path": doc_path,
+            "doc": hh.dumps_form(doc),
+            "sha": doc_sha256,
+            "register": register.version,
+        },
+    )
+    conn.commit()
     return declaration_id
 
 
@@ -737,7 +807,7 @@ def candidate_verdict(
 
 
 def survivor_subspans(
-    active: Sequence[float] | None, statistics: Mapping[str, Any], split: hh.Split
+    active: Sequence[float] | None, statistics: Mapping[str, Any], split: hh.Split, *, end: date | None = None
 ) -> dict[str, dict[str, float | int | None]]:
     """mean(a) and session count of the canonical series on each side of 2013-06-21.
 
@@ -747,7 +817,7 @@ def survivor_subspans(
     grid = statistics.get("grid")
     if active is None or not isinstance(grid, Mapping) or "first_session" not in grid:
         return {}
-    sessions = hh.split_sessions(split)
+    sessions = hh.split_sessions(split, end=end)
     first = sessions.index(date.fromisoformat(str(grid["first_session"])))
     days = sessions[first : first + len(active)]
     if len(days) != len(active):
@@ -778,62 +848,106 @@ def _check_stored_access(
         raise hh.HuntHarnessError(f"access {outcome_access} was not authorised by the frozen declaration")
 
 
-def validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> ValidationReadout:
-    """The hunt's validation verdicts: the only sanctioned route to them (spec "The audited door").
+def _load_frozen(
+    conn: psycopg.Connection[Any], hunt_id: str, split: hh.Split
+) -> tuple[FrozenPreregistration, hh.HuntDeclaration] | None:
+    """The intact frozen #2599 row of ``hunt-<n>-<split>`` and its document, or ``None``
+    when it never froze. A frozen row whose digest or document does not verify raises."""
+    strategy_id = hh.declaration_strategy_id(hunt_id, split)
+    frozen = load_preregistration(cast(psycopg.Connection[tuple], conn), strategy_id, hh.HUNT_DECLARATION_VERSION)
+    if frozen is None:
+        return None
+    if not frozen.digest_intact:
+        raise hh.HuntHarnessError(f"{strategy_id}'s frozen declaration fails its digest")
+    declaration = hh.load_chain_hunt_declaration(conn, frozen)
+    if declaration is None or frozen.declaration.contract_version != hh.declaration_contract_version(
+        declaration.doc_sha256
+    ):
+        raise hh.HuntHarnessError(f"{strategy_id}'s declaration document is missing or not the frozen one")
+    return frozen, declaration
 
-    Under the programme lock, in one REPEATABLE READ snapshot. It reads stored outcomes
-    only, re-verifies each one's hash and access provenance, and deflates against the M,
-    V[SR] and register version FROZEN with the declaration, never today's.
-    """
-    strategy_id = hh.declaration_strategy_id(hunt_id, "validation")
-    with hh.hunt_programme_lock(conn):
-        _repeatable_read(conn)
-        frozen = load_preregistration(cast(psycopg.Connection[tuple], conn), strategy_id, hh.HUNT_DECLARATION_VERSION)
-        if frozen is None or not frozen.digest_intact:
-            raise hh.HuntHarnessError(f"{strategy_id} has no intact frozen declaration")
-        declaration = hh.load_chain_hunt_declaration(conn, frozen)
-        if declaration is None or frozen.declaration.contract_version != hh.declaration_contract_version(
-            declaration.doc_sha256
-        ):
-            raise hh.HuntHarnessError(f"{strategy_id}'s declaration document is missing or not the frozen one")
-        numbers = declaration.doc["numbers"]
-        variance = hunt_inference.TrialSharpeVariance.from_form(hh.decode_form(numbers["v_sr"]))
-        m = int(numbers["m"])
-        register_row = conn.execute(_SELECT_REGISTER_VERSION, {"declaration_id": declaration.declaration_id}).fetchone()
-        late = conn.execute(_SELECT_LATE_LOOKS, {"declaration_id": declaration.declaration_id}).fetchone()
-        if register_row is None or late is None:
-            raise hh.HuntHarnessError(f"{strategy_id}'s declaration row vanished inside the snapshot")
-        candidates: list[CandidateReadout] = []
-        for pin in declaration.doc["pins"]:
-            spec_sha256 = str(pin["spec_sha256"])
-            row = conn.execute(
-                _SELECT_PIN_OUTCOME, {"candidate": str(pin["candidate_sha256"]), "split": "validation"}
-            ).fetchone()
-            if row is None or not row[1]:
-                candidates.append(CandidateReadout(spec_sha256, None if row is None else int(row[0]), None, (), {}, {}))
-                continue
-            outcome = hh.read_outcome(conn, int(row[0]))
-            if outcome.spec_sha256 != spec_sha256:
-                raise hh.HuntHarnessError(f"trial {row[0]}'s registered spec is not the pinned {spec_sha256}")
-            _check_stored_access(conn, outcome.access_id, frozen, strategy_id)
-            result, dsr = candidate_verdict(
-                outcome.status,
-                outcome.statistics,
+
+def _pin_row(conn: psycopg.Connection[Any], pin: Mapping[str, Any], split: hh.Split) -> tuple[int | None, bool]:
+    """The pin's ``evaluate`` registration id (``None`` if none) and whether it has an outcome."""
+    row = conn.execute(_SELECT_PIN_OUTCOME, {"candidate": str(pin["candidate_sha256"]), "split": split}).fetchone()
+    return (None, False) if row is None else (int(row[0]), bool(row[1]))
+
+
+def _stored_candidate(
+    conn: psycopg.Connection[Any],
+    *,
+    frozen: FrozenPreregistration,
+    pin: Mapping[str, Any],
+    hunt_trial_id: int,
+    split: hh.Split,
+    end: date | None,
+    variance: hunt_inference.TrialSharpeVariance,
+    m: int,
+    register_version: str,
+) -> CandidateReadout:
+    spec_sha256 = str(pin["spec_sha256"])
+    outcome = hh.read_outcome(conn, hunt_trial_id)
+    if outcome.spec_sha256 != spec_sha256:
+        raise hh.HuntHarnessError(f"trial {hunt_trial_id}'s registered spec is not the pinned {spec_sha256}")
+    _check_stored_access(conn, outcome.access_id, frozen, frozen.declaration.strategy_id)
+    result, dsr = candidate_verdict(
+        outcome.status,
+        outcome.statistics,
+        variance=variance,
+        declared_trials=m,
+        trial_register_version=register_version,
+    )
+    return CandidateReadout(
+        spec_sha256,
+        outcome.hunt_trial_id,
+        result.verdict,
+        result.reasons,
+        dsr,
+        survivor_subspans(outcome.active_series, outcome.statistics, split, end=end),
+    )
+
+
+def _declaration_context(
+    conn: psycopg.Connection[Any], declaration: hh.HuntDeclaration
+) -> tuple[hunt_inference.TrialSharpeVariance, int, bool, str, bool]:
+    """A frozen declaration's V[SR], M, ``m_is_floor``, register version, and whether any
+    look was recorded after it froze."""
+    numbers = declaration.doc["numbers"]
+    variance = hunt_inference.TrialSharpeVariance.from_form(hh.decode_form(numbers["v_sr"]))
+    register_row = conn.execute(_SELECT_REGISTER_VERSION, {"declaration_id": declaration.declaration_id}).fetchone()
+    late = conn.execute(_SELECT_LATE_LOOKS, {"declaration_id": declaration.declaration_id}).fetchone()
+    if register_row is None or late is None:
+        raise hh.HuntHarnessError(f"declaration {declaration.declaration_id}'s row vanished inside the snapshot")
+    return variance, int(numbers["m"]), bool(numbers["m_is_floor"]), str(register_row[0]), int(late[0]) > 0
+
+
+def _validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> ValidationReadout:
+    """``validation_readout``'s body, in the caller's programme lock and snapshot (the
+    holdout freeze reads it there)."""
+    loaded = _load_frozen(conn, hunt_id, "validation")
+    if loaded is None:
+        raise hh.HuntHarnessError(f"{hh.declaration_strategy_id(hunt_id, 'validation')} has not frozen")
+    frozen, declaration = loaded
+    variance, m, m_is_floor, register_version, late = _declaration_context(conn, declaration)
+    candidates: list[CandidateReadout] = []
+    for pin in declaration.doc["pins"]:
+        trial_id, has_outcome = _pin_row(conn, pin, "validation")
+        if trial_id is None or not has_outcome:
+            candidates.append(CandidateReadout(str(pin["spec_sha256"]), trial_id, None, (), {}, {}))
+            continue
+        candidates.append(
+            _stored_candidate(
+                conn,
+                frozen=frozen,
+                pin=pin,
+                hunt_trial_id=trial_id,
+                split="validation",
+                end=None,
                 variance=variance,
-                declared_trials=m,
-                trial_register_version=str(register_row[0]),
+                m=m,
+                register_version=register_version,
             )
-            candidates.append(
-                CandidateReadout(
-                    spec_sha256,
-                    outcome.hunt_trial_id,
-                    result.verdict,
-                    result.reasons,
-                    dsr,
-                    survivor_subspans(outcome.active_series, outcome.statistics, "validation"),
-                )
-            )
-        conn.commit()
+        )
     complete = all(candidate.verdict is not None for candidate in candidates)
     closure = (
         hunt_inference.validation_closure(
@@ -842,9 +956,6 @@ def validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> Validatio
         if complete
         else None
     )
-    labels = [PREVIOUSLY_EXAMINED]
-    if int(late[0]) > 0:
-        labels.append(QUALIFIED_BY_LATE_LOOK)
     return ValidationReadout(
         hunt_id=hunt_id,
         declaration_id=frozen.declaration_id,
@@ -852,24 +963,332 @@ def validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> Validatio
         candidates=tuple(candidates),
         closure=closure,
         m=m,
-        m_is_floor=bool(numbers["m_is_floor"]),
-        labels=tuple(labels),
+        m_is_floor=m_is_floor,
+        labels=(PREVIOUSLY_EXAMINED, QUALIFIED_BY_LATE_LOOK) if late else (PREVIOUSLY_EXAMINED,),
     )
 
 
+def validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> ValidationReadout:
+    """The hunt's validation verdicts: the only sanctioned route to them (spec "The audited door").
+
+    Under the programme lock, in one REPEATABLE READ snapshot. It reads stored outcomes
+    only, re-verifies each one's hash and access provenance, and deflates against the M,
+    V[SR] and register version FROZEN with the declaration, never today's.
+    """
+    with hh.hunt_programme_lock(conn):
+        _repeatable_read(conn)
+        readout = _validation_readout(conn, hunt_id)
+        conn.commit()
+    return readout
+
+
+# ---------------------------------------------------------------------------
+# The holdout declaration (slice 2b-iii)
+# ---------------------------------------------------------------------------
+
+#: The holdout window was partly seen before this programme existed (#3384 Finding 5).
+CORROBORATION_PARTLY_SEEN: Final = "corroboration_partly_seen"
+
+
+def holdout_pins(validation: hh.HuntDeclaration, passes: Iterable[str]) -> list[TrialSpec]:
+    """Every validation ``PASS``, as its validation spec with the split changed: the same
+    candidate (its hash excludes the split), so the holdout tests what validation passed."""
+    passed = set(passes)
+    return [
+        TrialSpec.from_form({**pin["spec"], "split": "holdout"})
+        for pin in validation.doc["pins"]
+        if pin["spec_sha256"] in passed
+    ]
+
+
+def _end_session_codes(end_session: date, pins: Sequence[TrialSpec]) -> list[str]:
+    codes: list[str] = []
+    try:
+        sessions = hh.split_sessions("holdout", end=end_session)
+    except ValueError:
+        sessions = ()
+    if not sessions or sessions[-1] != end_session:
+        codes.append("end_session_not_a_holdout_session")
+    for spec in pins:
+        universe = spec.universe_identity.universe
+        bound = hh.archive_last_complete_session(universe)
+        if bound is None:
+            codes.append(f"end_session_unbounded:{universe}_declares_no_archive_capture")
+        elif end_session > bound:
+            codes.append(f"end_session_after_archive_last_complete_session:{bound.isoformat()}")
+    return list(dict.fromkeys(codes))
+
+
+def holdout_declaration_numbers(
+    conn: psycopg.Connection[Any],
+    *,
+    hunt_id: str,
+    end_session: date,
+    register: TrialRegister,
+) -> tuple[dict[str, Any], list[str]]:
+    """The holdout document's body and every refusal code (spec "The audited door", holdout).
+
+    Freezable only once every validation pin has an outcome and at least one is a
+    ``PASS`` (otherwise the hunt closes, obligation 133). V[SR] is validation's frozen one,
+    copied; M is recomputed by the global rule (obligation 132).
+
+    ⚠ Read in the caller's snapshot, under the programme lock.
+    """
+    loaded = _load_frozen(conn, hunt_id, "validation")
+    if loaded is None:
+        return {}, ["validation_not_frozen"]
+    _frozen_validation, validation = loaded
+    readout = _validation_readout(conn, hunt_id)
+    if not readout.complete:
+        return {}, ["validation_incomplete"]
+    passes = [c.spec_sha256 for c in readout.candidates if c.verdict is hunt_inference.Verdict.PASS]
+    if not passes:
+        return {}, ["no_validation_pass"]
+    pins = holdout_pins(validation, passes)
+    codes = _end_session_codes(end_session, pins)
+    frozen = _frozen_declarations(conn)
+    if any(declaration.hunt_id == hunt_id and declaration.split == "holdout" for declaration in frozen):
+        codes.append("holdout_already_frozen")
+    m_numbers, _discovery_rows = _programme_m(conn, pins=pins, frozen=frozen, register=register)
+    discovery = {
+        outcome.candidate_sha256: outcome for outcome in _discovery_outcomes(conn) if outcome.hunt_id == hunt_id
+    }
+    validation_trials = {c.spec_sha256: c.hunt_trial_id for c in readout.candidates}
+    pin_forms: list[dict[str, Any]] = []
+    power: dict[str, Any] = {}
+    shadow_dates = shadow_weeks = 0
+    for spec in pins:
+        label = spec.spec_sha256[:12]
+        if spec.harness_model_id != hh.HUNT_HARNESS_MODEL_ID:
+            codes.append(f"pin_{label}_stale_harness_model")
+        if hh.burning_look(conn, split="holdout", candidate_sha256=spec.candidate_sha256, hunt_id=hunt_id) is not None:
+            codes.append(f"pin_{label}_split_burned")
+        source = discovery.get(spec.candidate_sha256)
+        if source is None:
+            # Unreachable for a validation pin; an integrity fault, not a refusal code.
+            raise hh.HuntHarnessError(f"validation pin {label} has no discovery outcome")
+        validation_spec = next(
+            str(pin["spec_sha256"])
+            for pin in validation.doc["pins"]
+            if pin["candidate_sha256"] == spec.candidate_sha256
+        )
+        pin_forms.append(
+            {
+                "spec_sha256": spec.spec_sha256,
+                "candidate_sha256": spec.candidate_sha256,
+                "spec": hh.decode_form(spec.form()),
+                "validation_spec_sha256": validation_spec,
+                "validation_hunt_trial_id": validation_trials[validation_spec],
+            }
+        )
+        grid = (
+            hh.split_grid("holdout", lag=spec.lag, h=spec.h, end=end_session)
+            if "end_session_not_a_holdout_session" not in codes
+            else StatRefused("empty_grid", "the end session is not a holdout session")
+        )
+        if isinstance(grid, StatRefused):
+            power[spec.spec_sha256] = {"blocked": f"target_{grid.reason}"}
+        else:
+            power[spec.spec_sha256] = power_statement(
+                source.active_series, target_observations=len(grid.sessions), h=spec.h
+            )
+            dates, weeks = _shadow_supply(grid, hh.split_sessions("holdout", end=end_session), spec.h)
+            shadow_dates, shadow_weeks = max(shadow_dates, dates), max(shadow_weeks, weeks)
+        if "blocked" in power[spec.spec_sha256]:
+            codes.append(f"pin_{label}_power_{power[spec.spec_sha256]['blocked']}")
+    pin_forms.sort(key=lambda pin: pin["spec_sha256"])
+    body = {
+        "end_session": end_session.isoformat(),
+        "validation_declaration_sha256": validation.doc_sha256,
+        "pins": pin_forms,
+        "numbers": {
+            **m_numbers,
+            # Validation's FROZEN V[SR], never recomputed (spec "The audited door", holdout).
+            "v_sr": hh.decode_form(validation.doc["numbers"]["v_sr"]),
+            "power": dict(sorted(power.items())),
+            "forward_shadow": {"min_decision_dates": shadow_dates, "min_calendar_weeks": shadow_weeks},
+        },
+    }
+    return body, codes
+
+
+def build_holdout_declaration(
+    conn: psycopg.Connection[Any], *, hunt_id: str, end_session: date, register: TrialRegister = TRIAL_REGISTER
+) -> tuple[dict[str, Any], list[str]]:
+    """The holdout document and every code that would refuse its freeze. A readout: it
+    reads stored outcomes only (validation's through their provenance) and writes nothing."""
+    with hh.hunt_programme_lock(conn):
+        _repeatable_read(conn)
+        body, codes = holdout_declaration_numbers(conn, hunt_id=hunt_id, end_session=end_session, register=register)
+        conn.commit()
+    return _document(hunt_id, body, "holdout"), codes
+
+
+def freeze_holdout_declaration(
+    conn: psycopg.Connection[Any],
+    *,
+    doc_path: str,
+    declared_by: str,
+    register: TrialRegister = TRIAL_REGISTER,
+) -> int:
+    """Freeze ``hunt-<n>-holdout`` from the committed document at ``doc_path``.
+
+    Refuses, writing nothing, on everything ``freeze_validation_declaration`` refuses
+    (with the tripwire checking the holdout entry too) and every code
+    ``holdout_declaration_numbers`` names.
+    """
+    doc, doc_sha256, hunt_id = _read_declaration_document(doc_path, "holdout")
+    end_session = date.fromisoformat(str(doc.get("end_session")))
+    with hh.hunt_programme_lock(conn):
+        _repeatable_read(conn)
+        codes = ["hunt_closed"] if hunt_id in hh.HUNT_CLOSED else []
+        codes += tripwire(
+            conn,
+            hunt_id=hunt_id,
+            register=register,
+            doc_path=doc_path,
+            doc_sha256=doc_sha256,
+            pinned=len(doc["pins"]),
+            frozen=_frozen_declarations(conn),
+            split="holdout",
+        )
+        body, number_codes = holdout_declaration_numbers(
+            conn, hunt_id=hunt_id, end_session=end_session, register=register
+        )
+        codes += number_codes
+        if body:
+            codes += _stale_keys(_document(hunt_id, body, "holdout"), doc)
+        return _write_frozen(
+            conn,
+            codes=codes,
+            hunt_id=hunt_id,
+            split="holdout",
+            doc=doc,
+            doc_path=doc_path,
+            doc_sha256=doc_sha256,
+            numbers=body.get("numbers", {}),
+            declared_by=declared_by,
+            register=register,
+        )
+
+
+# ---------------------------------------------------------------------------
+# The holdout readout (slice 2b-iii)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HoldoutReadout:
+    hunt_id: str
+    declaration_id: int
+    end_session: date
+    #: Every pin has an outcome or a refusal before registration. Until then NO pin's
+    #: verdict is released (the release barrier) and ``candidates`` carry none.
+    complete: bool
+    #: The pinned specs still waiting for an outcome.
+    pending: tuple[str, ...]
+    candidates: tuple[CandidateReadout, ...]
+    #: ``HOLDOUT_REPORTED`` once complete: the hunt closes after this readout.
+    closure: hunt_inference.HuntClosure | None
+    m: int
+    m_is_floor: bool
+    labels: tuple[str, ...]
+
+
+def holdout_readout(conn: psycopg.Connection[Any], hunt_id: str) -> HoldoutReadout:
+    """The hunt's holdout verdicts, released only when every pinned spec has an outcome
+    (spec "The audited door", holdout). The only sanctioned route to them.
+
+    A pin with no registration shows the refusal ``evaluate`` gives it now (e.g. a burned
+    split), as ``NOT_PASS_REFUSED``; a pin that would register is pending. Deflated against
+    the holdout declaration's frozen M and V[SR]; opens no fresh access.
+    """
+    with hh.hunt_programme_lock(conn):
+        _repeatable_read(conn)
+        loaded = _load_frozen(conn, hunt_id, "holdout")
+        if loaded is None:
+            raise hh.HuntHarnessError(f"{hh.declaration_strategy_id(hunt_id, 'holdout')} has not frozen")
+        frozen, declaration = loaded
+        end = date.fromisoformat(str(declaration.doc["end_session"]))
+        variance, m, m_is_floor, register_version, late = _declaration_context(conn, declaration)
+        rows = {str(pin["spec_sha256"]): _pin_row(conn, pin, "holdout") for pin in declaration.doc["pins"]}
+        refused: dict[str, hh.HuntRefused] = {}
+        pending: list[str] = []
+        for pin in declaration.doc["pins"]:
+            spec_sha256 = str(pin["spec_sha256"])
+            trial_id, has_outcome = rows[spec_sha256]
+            if has_outcome:
+                continue
+            refusal = None if trial_id is not None else hh.refusal_before_registration(conn, _pin_spec(pin))
+            if refusal is None:
+                pending.append(spec_sha256)
+            else:
+                refused[spec_sha256] = refusal
+        candidates: list[CandidateReadout] = []
+        for pin in declaration.doc["pins"]:
+            spec_sha256 = str(pin["spec_sha256"])
+            trial_id, _has_outcome = rows[spec_sha256]
+            if pending:
+                candidates.append(CandidateReadout(spec_sha256, trial_id, None, (), {}, {}))
+            elif spec_sha256 in refused:
+                reason = f"refused before registration: {refused[spec_sha256].reason}: {refused[spec_sha256].detail}"
+                candidates.append(
+                    CandidateReadout(spec_sha256, None, hunt_inference.Verdict.NOT_PASS_REFUSED, (reason,), {}, {})
+                )
+            else:
+                candidates.append(
+                    _stored_candidate(
+                        conn,
+                        frozen=frozen,
+                        pin=pin,
+                        hunt_trial_id=cast(int, trial_id),
+                        split="holdout",
+                        end=end,
+                        variance=variance,
+                        m=m,
+                        register_version=register_version,
+                    )
+                )
+        conn.commit()
+    complete = not pending
+    return HoldoutReadout(
+        hunt_id=hunt_id,
+        declaration_id=frozen.declaration_id,
+        end_session=end,
+        complete=complete,
+        pending=tuple(pending),
+        candidates=tuple(candidates),
+        closure=hunt_inference.HuntClosure.HOLDOUT_REPORTED if complete else None,
+        m=m,
+        m_is_floor=m_is_floor,
+        labels=(CORROBORATION_PARTLY_SEEN, QUALIFIED_BY_LATE_LOOK) if late else (CORROBORATION_PARTLY_SEEN,),
+    )
+
+
+def _pin_spec(pin: Mapping[str, Any]) -> TrialSpec:
+    return TrialSpec.from_form(pin["spec"])
+
+
 __all__ = [
+    "CORROBORATION_PARTLY_SEEN",
     "CandidateReadout",
+    "HoldoutReadout",
     "HuntDeclarationRefused",
     "ValidationReadout",
     "candidate_verdict",
     "validation_readout",
+    "build_holdout_declaration",
     "build_validation_declaration",
     "declaration_numbers",
     "discovery_register_evidence",
     "document_bytes",
     "document_sha256",
     "forward_shadow_floor",
+    "freeze_holdout_declaration",
     "freeze_validation_declaration",
+    "holdout_declaration_numbers",
+    "holdout_pins",
+    "holdout_readout",
     "power_statement",
     "stored_screening_p",
     "tripwire",

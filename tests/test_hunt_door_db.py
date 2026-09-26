@@ -51,7 +51,7 @@ def _discovery_outcome(lag: int) -> ComputedOutcome:
 
 def _evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, outcome: ComputedOutcome) -> Any:
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(hh, "compute_trial", lambda _conn, _spec: outcome)
+        patch.setattr(hh, "compute_trial", lambda _conn, _spec, **_kw: outcome)
         return hh.evaluate(conn, spec, registered_by="test")
 
 
@@ -206,7 +206,7 @@ def test_the_tripwire_refuses_a_register_that_disagrees_with_the_log(
 def test_the_freeze_refuses_while_a_discovery_registration_lacks_an_outcome(
     ebull_test_conn: psycopg.Connection[Any], discovered: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+    def crash(_conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         raise RuntimeError("price read failed")
 
     with pytest.MonkeyPatch.context() as patch, pytest.raises(RuntimeError):
@@ -226,7 +226,7 @@ def test_a_pinned_spec_passes_the_door_and_an_unpinned_one_registers_nothing(
     _freeze(ebull_test_conn, _register(ebull_test_conn, discovered["sha"]), monkeypatch)
     seen: list[tuple[int, int]] = []
 
-    def compute(conn: psycopg.Connection[Any], _spec: TrialSpec) -> ComputedOutcome:
+    def compute(conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> ComputedOutcome:
         # Another session sees only committed rows: the registration AND the access row.
         with psycopg.connect(conn.info.dsn, password=conn.info.password) as other:
             trials = other.execute("SELECT count(*) FROM hunt_trials WHERE split = 'validation'").fetchone()

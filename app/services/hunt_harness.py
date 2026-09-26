@@ -21,7 +21,10 @@ What is NOT here yet, and how it fails meanwhile:
   (a spec the frozen declaration did not pin refuses ``spec_not_in_declaration``,
   audited through ``sql/340``, and registers nothing), commits the access row with the
   registration before any price read, and re-verifies its provenance before storing
-  the outcome. Holdout (slice 2b-ii) still refuses ``door_unavailable``.
+  the outcome. Holdout (slice 2b-iii) goes through the same door against the frozen
+  ``hunt-<n>-holdout`` declaration, computes to the end session it pins, and returns
+  NO number: ``evaluate`` answers :class:`HoldoutRecorded` (the release barrier), fresh
+  or cached, and ``hunt_door.holdout_readout`` is the only sanctioned route to a verdict.
 
 ⚠⚠ THE LOG COMES BEFORE THE NUMBER. A discovery search is committed to ``hunt_trials``
 before ``compute`` reads a single price, so a crash, a refusal or an abandoned run is
@@ -83,7 +86,12 @@ from app.services.result_ledger import (
 from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import HOLDOUT_BOUNDARY
-from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION, load_universe_selection, vendor_for
+from app.services.universe_selection import (
+    INTRADER_CAPTURE_DATE,
+    UNIVERSE_SELECTION_RULE_VERSION,
+    load_universe_selection,
+    vendor_for,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -99,7 +107,6 @@ RefusalReason = Literal[
     "split_burned",
     "hunt_closed",
     "discovery_closed",
-    "door_unavailable",
     "spec_not_in_declaration",
     "door_refused",
     "no_budget",
@@ -668,8 +675,11 @@ def load_signal(signal_id: str) -> hunt_compute.Signal:
     return cast(hunt_compute.Signal, signal)
 
 
-def compute_trial(conn: psycopg.Connection[Any], spec: TrialSpec) -> ComputedOutcome:
+def compute_trial(conn: psycopg.Connection[Any], spec: TrialSpec, *, end: date | None = None) -> ComputedOutcome:
     """The frozen computation ``evaluate`` runs after the search is registered.
+
+    ``end`` is the holdout's end session, frozen in its declaration and passed ONLY for
+    holdout (spec contract decision 79); the other splits' ends are fixed.
 
     ⚠ Not a parameter of ``evaluate``: a caller-supplied computation could store any
     statistics under this spec and model id (Codex ckpt-2). Everything that decides a
@@ -679,7 +689,10 @@ def compute_trial(conn: psycopg.Connection[Any], spec: TrialSpec) -> ComputedOut
     if tariff is None:
         # Unreachable through ``evaluate``: an unpriced lane refuses ``unpriced_lane`` before registering.
         raise HuntHarnessError("no tariff prices the lane")
-    start, end = SPLIT_BOUNDS[spec.split]
+    start, fixed_end = SPLIT_BOUNDS[spec.split]
+    if (fixed_end is None) != (end is not None):
+        raise HuntHarnessError(f"{spec.split} takes {'its frozen' if fixed_end is None else 'no'} end session")
+    end = fixed_end if fixed_end is not None else end
     outcome = hunt_panel.compute_trial(
         conn,
         split=spec.split,
@@ -707,6 +720,23 @@ def split_sessions(split: Split, *, end: date | None = None) -> tuple[date, ...]
     if last is None:
         raise ValueError("the holdout end session is frozen in its declaration")
     return hunt_panel.nyse_sessions(start, last)
+
+
+def archive_last_complete_session(universe: Universe) -> date | None:
+    """The latest session a holdout end may take (spec "The audited door": the end session
+    is ≤ the archive's last complete session, else refused). ``None`` when the universe's
+    archive declares no capture date, which refuses the holdout.
+
+    ``survivorship_free``: the Intrader capture date, which ``load_universe_selection``
+    ASSERTS equals ``max(last_bar)`` on every load. That session is complete, not a
+    mid-session scrape — measured 2026-09-26 over the 9,946 series whose last bar is the
+    capture date, median volume per session: 2024-09-25 77,549 / 2024-09-26 87,540 /
+    2024-09-27 81,561 (``SELECT bar_date, count(*), percentile_cont(0.5) WITHIN GROUP
+    (ORDER BY volume) FROM research_price_daily d JOIN research_price_series s USING
+    (series_id) WHERE s.vendor = 'icyDenev/Intrader' AND s.last_bar = DATE '2024-09-27'
+    AND bar_date >= DATE '2024-09-25' GROUP BY 1``). ``survivor_only`` declares no capture.
+    """
+    return INTRADER_CAPTURE_DATE if universe == "survivorship_free" else None
 
 
 def split_grid(split: Split, *, lag: int, h: int, end: date | None = None) -> hunt_evaluator.Grid | StatRefused:
@@ -813,6 +843,8 @@ class _DoorPass:
     access_id: int
     declaration_id: int
     declaration_sha256: str
+    #: The holdout declaration's frozen end session; ``None`` for validation.
+    end_session: date | None
 
 
 def _pass_door(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str) -> _DoorPass | HuntRefused:
@@ -841,7 +873,14 @@ def _pass_door(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by:
             "spec_not_in_declaration" if refused.refusals == ("spec_not_in_declaration",) else "door_refused"
         )
         return HuntRefused(reason, ", ".join(refused.refusals))
-    return _DoorPass(access_id, frozen.declaration_id, frozen.declaration_sha256)
+    end_session = None
+    if spec.split == "holdout":
+        declaration = load_chain_hunt_declaration(conn, frozen)
+        if declaration is None:
+            # The membership check under the door's lock already required it.
+            raise HuntHarnessError(f"{spec.hunt_id}'s holdout declaration vanished after the door")
+        end_session = date.fromisoformat(str(declaration.doc["end_session"]))
+    return _DoorPass(access_id, frozen.declaration_id, frozen.declaration_sha256, end_session)
 
 
 def _verify_door(conn: psycopg.Connection[Any], spec: TrialSpec, door: _DoorPass) -> None:
@@ -932,6 +971,16 @@ class ComputedOutcome:
     status: Literal["computed", "refused"]
     statistics: Mapping[str, Any]
     active_series: tuple[float, ...] | None
+
+
+@dataclass(frozen=True)
+class HoldoutRecorded:
+    """A holdout ``evaluate``'s whole answer: the outcome is stored, and NO number, status
+    or refusal reason comes back, fresh or cached (the release barrier; spec "The audited
+    door"). ``hunt_door.holdout_readout`` releases the verdicts once every pin has one."""
+
+    hunt_trial_id: int
+    cached: bool
 
 
 @dataclass(frozen=True)
@@ -1059,8 +1108,12 @@ def _identity_mismatches(conn: psycopg.Connection[Any], spec: TrialSpec) -> list
     return mismatches
 
 
-def _refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec) -> HuntRefused | None:
-    """Step 2: every reason to refuse that makes no search. Cheap checks first."""
+def refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec) -> HuntRefused | None:
+    """Step 2: every reason to refuse that makes no search. Cheap checks first.
+
+    Also read by ``hunt_door.holdout_readout``: a pinned holdout spec with no registration
+    shows the refusal ``evaluate`` would give it (spec "The audited door").
+    """
     if running_cost_model_id(spec.lane) is None:
         return HuntRefused("unpriced_lane", f"lane {spec.lane} has no priced tariff in {HUNT_COST_MODEL_PREFIX}")
     unpriced = _archive_bases_without_nominal_prices(conn, spec.universe_identity.universe)
@@ -1073,10 +1126,6 @@ def _refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec)
         return HuntRefused("refused_timeline", timeline)
     if spec.hunt_id in HUNT_CLOSED:
         return HuntRefused("hunt_closed", f"{spec.hunt_id} closed: {HUNT_CLOSED[spec.hunt_id]}")
-    if spec.split == "holdout":
-        return HuntRefused(
-            "door_unavailable", "the audited holdout door ships in #3385 slice 2b-ii; nothing may open it yet"
-        )
     if spec.hunt_id not in HUNT_BUDGETS:
         return HuntRefused("no_budget", f"{spec.hunt_id} has no HUNT_BUDGETS entry; the #3387 PR opening it sets one")
     burn = burning_look(conn, split=spec.split, candidate_sha256=spec.candidate_sha256, hunt_id=spec.hunt_id)
@@ -1137,7 +1186,9 @@ def _insert_trial(conn: psycopg.Connection[Any], params: dict[str, Any]) -> int 
     return None if row is None else int(row[0])
 
 
-def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str) -> HuntOutcome | HuntRefused:
+def evaluate(
+    conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str
+) -> HuntOutcome | HoldoutRecorded | HuntRefused:
     """Register ``spec`` (committed) before :func:`compute_trial` reads a price, then store its outcome.
 
     Order (spec "Registration"): programme lock → refusals that make no search →
@@ -1148,12 +1199,14 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
     outcome committed → lock released.
 
     A cached validation outcome is returned only after re-passing the door and its
-    provenance check: every look at a validation number is an audited access.
+    provenance check: every look at a validation number is an audited access. Holdout
+    returns :class:`HoldoutRecorded` and no number, fresh or cached; a cached holdout
+    opens no access, because nothing is read.
     """
     if not _is_text(registered_by):
         raise ValueError("registered_by must be non-empty text")
     with hunt_programme_lock(conn):
-        refusal = _refusal_before_registration(conn, spec)
+        refusal = refusal_before_registration(conn, spec)
         if refusal is not None:
             conn.commit()
             return refusal
@@ -1172,6 +1225,9 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
                     "candidate_owned_by_other_hunt", f"candidate {spec.candidate_sha256} is {owner}'s in {spec.split}"
                 )
             if has_outcome:
+                if spec.split == "holdout":
+                    conn.commit()
+                    return HoldoutRecorded(trial_id, cached=True)
                 if spec.split != "discovery":
                     look = _pass_door(conn, spec, registered_by=registered_by)
                     if isinstance(look, HuntRefused):
@@ -1220,7 +1276,7 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
         # ⚠ The search (and a door look's access row) is durable BEFORE any price is read.
         conn.commit()
 
-        computed = compute_trial(conn, spec)
+        computed = compute_trial(conn, spec, end=None if door is None else door.end_session)
         if computed.status not in ("computed", "refused"):
             raise HuntHarnessError(f"compute returned status {computed.status!r}")
         if conn.info.transaction_status != TransactionStatus.IDLE:
@@ -1253,6 +1309,8 @@ def evaluate(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: s
             },
         )
         conn.commit()
+        if spec.split == "holdout":
+            return HoldoutRecorded(trial_id, cached=False)
         return HuntOutcome(
             hunt_trial_id=trial_id,
             status=computed.status,
@@ -1401,12 +1459,14 @@ __all__ = [
     "SPEC_FIELDS",
     "SPLIT_BOUNDS",
     "ComputedOutcome",
+    "HoldoutRecorded",
     "HuntHarnessError",
     "HuntOutcome",
     "HuntRefused",
     "HuntTariff",
     "TrialSpec",
     "UniverseIdentity",
+    "archive_last_complete_session",
     "calendar_identity",
     "canonical_form",
     "candidate_sha256_of",
@@ -1416,6 +1476,7 @@ __all__ = [
     "read_outcome",
     "read_universe_identity",
     "record_outside_look",
+    "refusal_before_registration",
     "running_cost_model_id",
     "signal_code_sha256",
     "spec_sha256_of",
