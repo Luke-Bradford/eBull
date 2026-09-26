@@ -99,7 +99,10 @@ counterfactual**, run with spread/carry stress arms that widen in exactly the st
    exploration.**
 4. **Feature store**: identity = raw manifests + mappings + calendars + adjustment/termination rules + costs +
    split membership + seeds. PyArrow declared as a direct dependency if used directly (today it is transitive).
-5. **Hunt 1**: families 1–3 on held price/dividend data, within its declared trial budget.
+5. **Hunt 1**: families 1–3 on held price/dividend data, within its declared trial budget. **Closed 2026-09-26 with
+   no searches** (`2026-09-26-3387-hunt-1-precheck.md`): every published edge sits below, or within known haircuts
+   of, the harness's stress-cell bar of (1.450 − base band) × 252/h. Every later family spec runs that pre-check
+   table before any construction work.
 6. **Ingests**: FTD → Cboe → FRED/ALFRED/COT → MIDAS → Wikipedia, each gated by the admissibility probe.
 7. **Hunts 2–4**: families 4–6 and 8; family 7 at ≥ 12 months of recording.
 8. Survivor → construction frozen **before** its confirmation (sizing, turnover band, hedge rule) → forward
