@@ -848,7 +848,9 @@ class _DoorPass:
     end_session: date | None
 
 
-def _pass_door(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str) -> _DoorPass | HuntRefused:
+def _pass_door(
+    conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str, purpose: str | None = None
+) -> _DoorPass | HuntRefused:
     """``result_ledger``'s audited door for ``spec``'s split, with the membership check.
 
     The access row is written in the caller's transaction and commits with the
@@ -860,7 +862,7 @@ def _pass_door(conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by:
         strategy_version=HUNT_DECLARATION_VERSION,
         access_kind="read",
         accessed_by=registered_by,
-        purpose=f"#3385 hunt {spec.split} evaluate of spec {spec.spec_sha256}",
+        purpose=purpose or f"#3385 hunt {spec.split} evaluate of spec {spec.spec_sha256}",
     )
     try:
         access_id, frozen = require_outcome_access_with_declaration(
@@ -1195,22 +1197,29 @@ def error_class_of(error: BaseException) -> str:
     return f"{type(error).__module__}.{type(error).__qualname__}"
 
 
-def _record_failure(conn: psycopg.Connection[Any], trial_id: int, error: Exception, *, recorded_by: str) -> None:
-    """Best effort: a failure to record never masks the error being recorded (a dead
-    connection cannot write, and the propagating error is the one that matters)."""
+def _record_failure(
+    conn: psycopg.Connection[Any], trial_id: int, error: Exception, *, recorded_by: str, dsn: str, password: str | None
+) -> None:
+    """Record the failure on ``conn``; if that connection is what broke, on a fresh one to
+    the same database (Codex ckpt-2: a recurring connection failure must still reach
+    abandonment). Best effort: recording never masks the error being recorded."""
+    params = {
+        "trial": trial_id,
+        "error_class": error_class_of(error),
+        "error_text": str(error)[:_ERROR_TEXT_LIMIT],
+        "recorded_by": recorded_by,
+    }
     try:
         if conn.info.transaction_status != TransactionStatus.IDLE:
             conn.rollback()
-        conn.execute(
-            _INSERT_RETRY,
-            {
-                "trial": trial_id,
-                "error_class": error_class_of(error),
-                "error_text": str(error)[:_ERROR_TEXT_LIMIT],
-                "recorded_by": recorded_by,
-            },
-        )
+        conn.execute(_INSERT_RETRY, params)
         conn.commit()
+        return
+    except Exception:
+        _LOG.warning("recording the failure of hunt trial %s on its own connection failed; retrying fresh", trial_id)
+    try:
+        with psycopg.connect(dsn, password=password) as fresh:
+            fresh.execute(_INSERT_RETRY, params)
     except Exception:
         _LOG.exception("recording the failure of hunt trial %s failed", trial_id)
 
@@ -1316,6 +1325,8 @@ def evaluate(
             trial_id, registered_spec_sha256 = int(existing[0]), str(existing[3])
         # ⚠ The search (and a door look's access row) is durable BEFORE any price is read.
         conn.commit()
+        # Captured while the connection is healthy, for recording a failure that breaks it.
+        dsn, password = conn.info.dsn, conn.info.password
 
         try:
             return _compute_and_store(
@@ -1324,7 +1335,7 @@ def evaluate(
         except Exception as error:
             # An infrastructure error: no outcome, the registration is retried. Recorded so
             # abandonment can see it recurred (obligation 131); the error still propagates.
-            _record_failure(conn, trial_id, error, recorded_by=registered_by)
+            _record_failure(conn, trial_id, error, recorded_by=registered_by, dsn=dsn, password=password)
             raise
 
 
@@ -1522,7 +1533,13 @@ def abandon_trial(conn: psycopg.Connection[Any], trial_id: int, *, reason: str, 
             raise AbandonmentRefused(f"hunt trial {trial_id}: {refusal}")
         door: _DoorPass | None = None
         if spec.split != "discovery":
-            passed = _pass_door(conn, spec, registered_by=abandoned_by)
+            # ⚠ The audit row names what this access is: an abandonment, no read (Codex ckpt-2).
+            passed = _pass_door(
+                conn,
+                spec,
+                registered_by=abandoned_by,
+                purpose=f"#3385 hunt {spec.split} abandonment of trial {trial_id}; no price read, nothing released",
+            )
             if isinstance(passed, HuntRefused):
                 raise AbandonmentRefused(f"hunt trial {trial_id}: the door refused: {passed.detail}")
             door = passed

@@ -95,8 +95,29 @@ def test_a_validation_abandonment_passes_the_door_and_reads_not_pass_refused(
     before = _count(ebull_test_conn, reads)
     hh.abandon_trial(ebull_test_conn, trial, reason="unreadable (#test)", abandoned_by="test")
     assert _count(ebull_test_conn, reads) == before + 1
+    purpose = ebull_test_conn.execute(
+        "SELECT purpose FROM strategy_holdout_accesses ORDER BY access_id DESC LIMIT 1"
+    ).fetchone()
+    ebull_test_conn.commit()
+    assert purpose is not None and "abandonment of trial" in purpose[0]
     readout = hunt_door.validation_readout(ebull_test_conn, "hunt-1")
     (candidate,) = readout.candidates
     assert readout.complete and candidate.verdict is hunt_inference.Verdict.NOT_PASS_REFUSED
     assert candidate.reasons == ("abandoned",)
     assert readout.closure is hunt_inference.HuntClosure.NO_DEMONSTRATED_EDGE
+
+
+def test_a_failure_that_breaks_the_connection_is_still_recorded(
+    ebull_test_conn: psycopg.Connection[Any],
+    bound: dict[str, Any],  # noqa: F811 - the imported fixture, requested by name
+) -> None:
+    """Codex ckpt-2: a recurring connection failure must still reach abandonment."""
+
+    def drop(conn: psycopg.Connection[Any], _spec: TrialSpec, **_kw: Any) -> Any:
+        conn.close()
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    info = ebull_test_conn.info
+    with psycopg.connect(info.dsn, password=info.password) as own, pytest.raises(psycopg.OperationalError):
+        _run(own, _spec(bound), drop)
+    assert _count(ebull_test_conn, "SELECT count(*) FROM hunt_trial_retries") == 1
