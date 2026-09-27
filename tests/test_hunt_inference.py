@@ -13,7 +13,7 @@ from app.services import deflated_sharpe as deflated_sharpe_module
 from app.services import hunt_harness as hh
 from app.services import hunt_inference as hi
 from app.services import r6_monthly_trial
-from app.services.deflated_sharpe import TradeMoments, deflated_sharpe, trade_moments
+from app.services.deflated_sharpe import DeflatedSharpeResult, TradeMoments, deflated_sharpe, trade_moments
 from app.services.r6_monthly_trial import HacEstimate, hac_t, newey_west_lag, student_t_cdf
 
 
@@ -221,13 +221,75 @@ def test_clones_cannot_collapse_v_below_the_floor() -> None:
     ]
     variance = hi.trial_sharpe_variance(clones)
     assert isinstance(variance, hi.TrialSharpeVariance)
-    assert variance.measured_variance < 1e-12
+    assert variance.measured_variance is not None and variance.measured_variance < 1e-12
     assert variance.variance == pytest.approx(1 / 300)
 
 
-def test_fewer_than_ten_distinct_trials_refuses() -> None:
-    result = hi.trial_sharpe_variance(_members(9))
-    assert isinstance(result, hi.StatRefused) and result.reason == "trial_population_too_small"
+def test_no_eligible_trial_refuses() -> None:
+    # #3448: only an empty eligible population refuses; exclusions do not count towards it.
+    unusable = [hi.VPopulationMember(1, None, ruined=False), hi.VPopulationMember(2, _noise(2), ruined=True)]
+    for members in ([], unusable):
+        result = hi.trial_sharpe_variance(members)
+        assert isinstance(result, hi.StatRefused) and result.reason == "trial_population_too_small"
+
+
+def test_small_population_keeps_the_measured_variance_floored() -> None:
+    members = _members(9)
+    variance = hi.trial_sharpe_variance(members)
+    assert isinstance(variance, hi.TrialSharpeVariance)
+    assert variance.population == "small_population"
+    assert variance.measured_variance is not None
+    assert variance.variance == max(variance.measured_variance, variance.floor)
+    full = hi.trial_sharpe_variance(_members(10))
+    assert isinstance(full, hi.TrialSharpeVariance) and full.population == "full"
+
+
+def test_one_trial_is_floor_only_after_dedup_and_exclusions() -> None:
+    base = _members(1)
+    members = [*base, hi.VPopulationMember(7, base[0].active_series, False), hi.VPopulationMember(8, None, False)]
+    variance = hi.trial_sharpe_variance(members)
+    assert isinstance(variance, hi.TrialSharpeVariance)
+    assert (variance.population, variance.measured_variance, variance.trial_ids) == ("floor_only", None, (1,))
+    assert variance.variance == variance.floor == pytest.approx(1 / 300)
+    assert variance.excluded["duplicate"] == 1 and variance.excluded["no_series"] == 1
+
+
+@pytest.mark.parametrize("count", [1, 5, 12])
+def test_v_forms_round_trip_and_a_full_form_carries_no_population_key(count: int) -> None:
+    variance = hi.trial_sharpe_variance(_members(count))
+    assert isinstance(variance, hi.TrialSharpeVariance)
+    form = variance.form()
+    assert ("population" in form) is (count < hi.MIN_V_POPULATION)
+    assert hi.TrialSharpeVariance.from_form(form) == variance
+
+
+def test_a_floor_only_population_still_deflates_at_n_hat_m() -> None:
+    # The shared DSR refuses one measured trial unless told V is the zero-edge floor.
+    active = _noise(11, drift=0.002)
+    cell = _cell(active)
+    variance = hi.trial_sharpe_variance(_members(1))
+    assert isinstance(variance, hi.TrialSharpeVariance)
+    dsr = hi.hunt_dsr(active, cell, variance=variance, declared_trials=379, trial_register_version="r14")
+    assert isinstance(dsr, hi.HuntDsr)
+    assert dsr.result.independent_trials == 379
+    moments = trade_moments(active)
+    assert moments is not None
+
+    def shared(*, null_floor_variance: bool) -> DeflatedSharpeResult | None:
+        return deflated_sharpe(
+            moments,
+            effective_sample_size=dsr.effective_sample_size,
+            trial_sharpe_variance=variance.floor,
+            declared_trials=379,
+            average_correlation=0.0,
+            measured_trials=1,
+            trial_register_version="r14",
+            null_floor_variance=null_floor_variance,
+        )
+
+    assert shared(null_floor_variance=False) is None
+    direct = shared(null_floor_variance=True)
+    assert direct is not None and dsr.result.deflated_sharpe == pytest.approx(direct.deflated_sharpe)
 
 
 # --- DSR -------------------------------------------------------------------------------------------------------
