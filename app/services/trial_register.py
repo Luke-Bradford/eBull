@@ -175,7 +175,12 @@ from typing import Final
 #: closed on. M_inh excludes it, so the inherited floor stays 377. Measured the same
 #: way before the bump: the SAME five groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-27-r14"
+#:
+#: r15 (2026-09-28, #3448) adds `hunt-2-discovery`, the one log-backed search hunt 2
+#: closed on. M_inh excludes it, so the inherited floor stays 377. Measured the same
+#: way before the bump: the SAME five groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r15"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1188,6 +1193,22 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "'discovery' AND registered_at <= '2026-09-26T23:53:59.426092+00:00' ORDER BY hunt_trial_id; "
                 "closed_at=2026-09-26T23:53:59.426092+00:00; "
                 "ids_sha256=6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b; n=1"
+            ),
+            exactness=TrialExactness.EXACT,
+        ),
+        DeclaredTrial(
+            trial_id="hunt-2-discovery",
+            description=(
+                "Hunt 2's one discovery search, extreme_loser_reversal_illiquid_next_open_v1 (hunt_trial_id 2), "
+                "closed with no candidate declared: excess over SPY -26.8%/yr in the binding stress cell against "
+                "the 8%/yr bar, and underpowered at the bar (#3448)."
+            ),
+            # ``hunt_door.discovery_register_evidence(conn, "hunt-2")``, run on the dev DB at closure.
+            evidence=(
+                "hunt_trials log; query=SELECT hunt_trial_id FROM hunt_trials WHERE hunt_id = 'hunt-2' AND split = "
+                "'discovery' AND registered_at <= '2026-09-27T23:20:01.085678+00:00' ORDER BY hunt_trial_id; "
+                "closed_at=2026-09-27T23:20:01.085678+00:00; "
+                "ids_sha256=d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35; n=1"
             ),
             exactness=TrialExactness.EXACT,
         ),

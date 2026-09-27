@@ -292,3 +292,39 @@ A miss is the likelier outcome. The run is cheap, and SC2 orders it.
     rather than silently shortening the window.
 - **Then** the one discovery look. It closes hunt 2 (register entry `hunt-2-discovery`, `HUNT_CLOSED`), or it writes
   the validation declaration.
+
+## Outcome (2026-09-28)
+The one discovery look ran after #3451 (`76d876eb`): `hunt_trial_id` 2, outcome_sha256 `151c3c6a…`.
+`scripts.run_hunt_2_discovery --readout` reproduces it. Every termination policy gives the same figures.
+
+| condition | result |
+| --- | --- |
+| 1. BY flag (m = 379) | **met**, p underflows to 0 |
+| 2. active mean > 0, every base cell | **met**: +0.00164/session with dividends, +0.00168 without |
+| 3. `excess_ann` ≥ 0.08, every base and stress cell | **not met**. Base passes, stress fails (see below) |
+| 4. excess-series MDE₈₀ ≤ 0.08 | **not met**: MDE₈₀ is **0.210** (MDE₅₀ 0.164) |
+
+Condition 3, in detail:
+- base cells: +0.175 with dividends, +0.169 without;
+- binding stress cells: **−0.268** with dividends, **−0.274** without.
+
+Descriptive, canonical cell (the tracker covers 1993-02-01 → 2008-12-31, 4,011 sessions; 779 earlier sessions
+excluded):
+
+| | per trade | annualised |
+| --- | ---: | ---: |
+| arm, base | +0.433% | 0.257 |
+| arm, stress | −0.450% | −0.186 |
+| control | −0.331% | −0.148 |
+| SPY | | 0.0818 |
+
+Next-open entry lifted base per-trade net from hunt 1's 0.325% to 0.433%, about +0.11 points, against the ≈ 0.87
+the stress arm needed. Every cohort position entered (both utilisation shares are 1.0).
+
+**Hunt 2 is closed: "no demonstrated edge".**
+- Conditions (3) and (4) keep their labels: "below the corrected bar (point estimate)" and "underpowered at the
+  bar".
+- Recorded in `HUNT_CLOSED` and in register entry `hunt-2-discovery` (r15).
+- Validation is not declared, so the `hunt_gate` block is not built.
+- Costs are the kill criterion, as SC2 anticipated. At the base charge this construction clears the bar by
+  9.5 points over SPY. At the stress charge it loses 27 points.
