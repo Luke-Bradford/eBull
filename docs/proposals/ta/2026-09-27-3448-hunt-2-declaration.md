@@ -283,5 +283,12 @@ A miss is the likelier outcome. The run is cheap, and SC2 orders it.
   `HUNT_HARNESS_MODEL_ID` moves. Hunt 1's stored outcome keeps its own model id and hash. The BY and V readers read
   only `cells` and the active series, so the added key leaves them unchanged; a test pins that hunt 1's outcome
   still reads and counts.
+- **Sequencing (implementation, #3448 slice 2a):**
+  - The tracker readout, budget and runner land first.
+  - The `hunt_gate` block is built only if discovery flags.
+  - Until it is built, `hunt_door.HUNTS_AWAITING_GATE` refuses hunt 2's validation freeze
+    (`hunt_gate_not_implemented`), so the generic PASS cannot promote without the gate.
+  - The tracker's first bar is pinned (`hunt_panel.TRACKER_FIRST_BAR` = 1993-01-29). A lost leading row raises
+    rather than silently shortening the window.
 - **Then** the one discovery look. It closes hunt 2 (register entry `hunt-2-discovery`, `HUNT_CLOSED`), or it writes
   the validation declaration.

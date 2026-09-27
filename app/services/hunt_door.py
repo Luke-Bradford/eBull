@@ -86,6 +86,12 @@ UNIVERSE_BASIS: Final = "survivorship_free"
 CARRY_UNMODELLED: Final = False
 FX_UNMODELLED: Final = False
 
+#: Hunts whose spec freezes an economic gate into the validation declaration that this module
+#: does not build yet. Their validation (and so holdout) freeze refuses ``hunt_gate_not_implemented``
+#: until it does: fail closed rather than promote on the generic PASS alone (#3448 spec, "The gate
+#: is frozen into the declaration"; built only if hunt 2's discovery flags).
+HUNTS_AWAITING_GATE: Final = frozenset({"hunt-2"})
+
 #: The canonical text of a discovery entry's closing query; the tripwire requires it verbatim.
 DISCOVERY_LOG_QUERY: Final = (
     "SELECT hunt_trial_id FROM hunt_trials WHERE hunt_id = '{hunt}' AND split = 'discovery' "
@@ -533,8 +539,13 @@ def build_validation_declaration(
         _repeatable_read(conn)
         body, codes = declaration_numbers(conn, hunt_id=hunt_id, pins=pins, register=register)
         codes += _discovery_completeness(conn, hunt_id)
+        codes += _gate_codes(hunt_id)
         conn.commit()
     return _document(hunt_id, body), codes
+
+
+def _gate_codes(hunt_id: str) -> list[str]:
+    return ["hunt_gate_not_implemented"] if hunt_id in HUNTS_AWAITING_GATE else []
 
 
 def document_bytes(doc: Any) -> bytes:
@@ -596,6 +607,7 @@ def freeze_validation_declaration(
         frozen = _frozen_declarations(conn)
         # Closure is read under the programme lock (spec "Budget and closure").
         codes = ["hunt_closed"] if hunt_id in hh.HUNT_CLOSED else []
+        codes += _gate_codes(hunt_id)
         codes += tripwire(
             conn,
             hunt_id=hunt_id,

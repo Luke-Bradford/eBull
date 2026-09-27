@@ -265,7 +265,8 @@ HUNT_HARNESS_MODEL_ID: Final = f"hunt-harness-v1+{sha256_form(canonical_form(_mo
 #: Discovery rows per hunt, both purposes. Set once by the #3387 PR that opens the hunt;
 #: raising it is a new hunt. A hunt with no entry refuses registration.
 #: hunt-1 = 1: the one frozen trial of spec ``2026-09-26-3387-hunt-1-route-a-spec.md`` (#3387).
-HUNT_BUDGETS: Final[Mapping[str, int]] = MappingProxyType({"hunt-1": 1})
+#: hunt-2 = 1: the one frozen trial of spec ``2026-09-27-3448-hunt-2-declaration.md`` (#3448).
+HUNT_BUDGETS: Final[Mapping[str, int]] = MappingProxyType({"hunt-1": 1, "hunt-2": 1})
 #: hunt → terminal readout. Adding a hunt here IS the closing event.
 HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType(
     {

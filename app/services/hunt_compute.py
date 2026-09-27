@@ -25,6 +25,14 @@ stress charges ARM positions max(base band, ``UNKNOWN_NOMINAL_PRICE_BAND``). The
 cell is base, with dividends, ``zero_recovery``: its active series is stored, and the
 outcome is ``refused`` exactly when its statistics refused.
 
+``tracker`` (#3448, spec ``2026-09-27-3448-hunt-2-declaration.md``, "The bar"): per cell,
+252 × the per-session means of the arm book, the control book and SPY's total return over
+the grid sessions with a tracker return, and ``excess_ann`` = arm − tracker. Sessions up to
+SPY's first bar are excluded and counted; any later missing or invalid tracker bar refuses
+the whole block. Also the canonical cell's excess series (condition 4's power input), the
+identity of the tracker rows used, and two descriptive utilisation shares. No statistic
+reads it; the hunt-2 discovery gate does.
+
 ``per_trade`` (#3387, descriptive): per cell whose books computed, each book's entered
 positions and trade-weighted mean position net return Σ (V_i(x) − 1) / #positions
 (``hunt_evaluator.PositionTally``). A cell whose books refused has no entry. No statistic,
@@ -33,6 +41,8 @@ flag or verdict here reads it; the hunt-1 discovery gate does (spec "Discovery f
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import platform
 from array import array
@@ -40,6 +50,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 import numpy as np
@@ -67,6 +78,10 @@ BAR_EXCLUSIONS: Final[tuple[str, ...]] = (
 NO_BAR: Final = "no_bar"
 
 CANONICAL_POLICY: Final = "zero_recovery"
+#: #3448 "The bar": arithmetic annualisation, the harness's unit (``hunt_door.SESSIONS_PER_YEAR``).
+TRACKER_SESSIONS_PER_YEAR: Final = 252
+#: The tracker the loader reads (``hunt_panel``): ``spy_chain_v1``'s pre-seam segment, total return.
+TRACKER_SOURCE: Final = "spy_chain_v1:fallback_segment:total_return"
 COST_REGIME: Final = "tariff-2026-counterfactual"
 #: The descriptive volatility tilt's window (spec "Descriptive tilts").
 TILT_VOLATILITY_SESSIONS: Final = 63
@@ -195,6 +210,9 @@ class HuntPanel:
     regime_labels: Sequence[str]
     #: What the loader dropped or could not place, by reason (recorded on the outcome).
     load_counts: Mapping[str, int]
+    #: The tracker's bars by date, (close, dividend); NaN marks a NULL. Empty refuses the
+    #: tracker readout (#3448).
+    tracker: Mapping[date, tuple[float, float]] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if len(self.regime_labels) != len(self.sessions):
@@ -400,6 +418,109 @@ def _describe(values: list[float]) -> dict[str, Any]:
     return {"mean": math.fsum(values) / len(values) if values else None, "formations": len(values)}
 
 
+def _tracker_returns(
+    panel: HuntPanel, grid: hunt_evaluator.Grid
+) -> tuple[list[int], list[float], dict[str, Any]] | str:
+    """Positions in ``grid.sessions`` with a tracker return, those returns, and the block's
+    header; or the refusal reason. A session up to the tracker's first bar has no return."""
+    if not panel.tracker:
+        return "no_tracker"
+    first_bar = min(panel.tracker)
+    sessions = panel.sessions
+    positions: list[int] = []
+    returns: list[float] = []
+    before_inception = 0
+    for position, d in enumerate(grid.sessions):
+        if sessions[d] <= first_bar:
+            before_inception += 1
+            continue
+        if d == 0:
+            return f"tracker_gap:{sessions[d].isoformat()}"
+        current, previous = panel.tracker.get(sessions[d]), panel.tracker.get(sessions[d - 1])
+        if current is None or previous is None:
+            return f"tracker_gap:{sessions[d].isoformat()}"
+        (close, dividend), previous_close = current, previous[0]
+        if not (_finite_positive(close) and _finite_positive(previous_close) and math.isfinite(dividend)):
+            return f"tracker_invalid:{sessions[d].isoformat()}"
+        if dividend < 0.0:
+            return f"tracker_invalid:{sessions[d].isoformat()}"
+        positions.append(position)
+        returns.append((close + dividend) / previous_close - 1.0)
+    if not positions:
+        return "no_tracker_return"
+    first, last = grid.sessions[positions[0]], grid.sessions[positions[-1]]
+    rows = [
+        [sessions[d].isoformat(), repr(panel.tracker[sessions[d]][0]), repr(panel.tracker[sessions[d]][1])]
+        for d in range(first - 1, last + 1)
+    ]
+    header = {
+        "identity_sha256": hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        "first_row": rows[0][0],
+        "first_return": sessions[first].isoformat(),
+        "last_return": sessions[last].isoformat(),
+        "sessions_used": len(positions),
+        "sessions_before_inception": before_inception,
+    }
+    return positions, returns, header
+
+
+def _annualised_mean(values: Sequence[float]) -> float | None:
+    mean = _finite_sum(values)
+    if mean is None:
+        return None
+    mean *= TRACKER_SESSIONS_PER_YEAR / len(values)
+    return mean if math.isfinite(mean) else None
+
+
+def _finite_sum(values: Sequence[float]) -> float | None:
+    try:
+        total = math.fsum(values)
+    except OverflowError, ValueError:
+        return None
+    return total if math.isfinite(total) else None
+
+
+def _tracker_block(
+    panel: HuntPanel,
+    grid: hunt_evaluator.Grid,
+    books: Mapping[str, BookSeries],
+    cohorts: Mapping[int, Cohort],
+) -> dict[str, Any]:
+    """The #3448 tracker readout over every cell whose books computed."""
+    readout = _tracker_returns(panel, grid)
+    if isinstance(readout, str):
+        return {"refused": readout}
+    positions, returns, header = readout
+    tracker_ann = _annualised_mean(returns)
+    cells: dict[str, Any] = {}
+    for key, cell_books in books.items():
+        arm_ann = _annualised_mean([cell_books.arm[i] for i in positions])
+        control_ann = _annualised_mean([cell_books.control[i] for i in positions])
+        if arm_ann is None or control_ann is None or tracker_ann is None:
+            cells[key] = {"refused": "non_finite"}
+            continue
+        cells[key] = {
+            "arm_ann": arm_ann,
+            "control_ann": control_ann,
+            "tracker_ann": tracker_ann,
+            "excess_ann": arm_ann - tracker_ann,
+        }
+    block: dict[str, Any] = {"source": TRACKER_SOURCE, **header, "cells": cells}
+    canonical = books.get(CANONICAL_CELL)
+    if canonical is not None:
+        block["canonical_excess_series"] = [canonical.arm[i] - r for i, r in zip(positions, returns, strict=True)]
+        cohort_positions = sum(len(cohort.arm) for cohort in cohorts.values())
+        block["utilisation"] = {
+            "entered_formation_share": len(canonical.entered_formations) / len(grid.formations)
+            if grid.formations
+            else None,
+            "entered_position_share": canonical.tallies["arm"].positions / cohort_positions
+            if cohort_positions
+            else None,
+        }
+    return block
+
+
 def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> PanelOutcome:
     """Every cell's statistics, the canonical active series and the descriptive readouts."""
     grid = hunt_evaluator.formation_grid(
@@ -435,6 +556,7 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
 
     cells: dict[str, Any] = {}
     per_trade: dict[str, Any] = {}
+    computed_books: dict[str, BookSeries] = {}
     canonical_books: BookSeries | None = None
     canonical_refused = True
     policy: TerminationPolicy
@@ -463,6 +585,7 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
                 if isinstance(books, StatRefused):
                     cells[key] = books.form()
                     continue
+                computed_books[key] = books
                 per_trade[key] = {
                     book: {"positions": tally.positions, "mean": tally.mean} for book, tally in books.tallies.items()
                 }
@@ -489,6 +612,7 @@ def compute_panel(panel: HuntPanel, params: ComputeParams, signal: Signal) -> Pa
         "per_formation": per_formation,
         "cells": cells,
         "per_trade": per_trade,
+        "tracker": _tracker_block(panel, grid, computed_books, formations.cohorts),
         "tilts": {
             "log_price": _describe(formations.log_price_tilts),
             "volatility_63": _describe(formations.volatility_tilts),

@@ -262,3 +262,70 @@ def test_the_signal_sees_dates_and_ex_dates_up_to_t_only() -> None:
     assert seen[10] == ((day.year, day.month, day.day, day.weekday()), 11, (5,), pytest.approx((0.2,)))
     assert seen[40][2] == (5, 40)  # an ex-date on t is known on t
     assert seen[39][2] == (5,)
+
+
+# --- the tracker readout (#3448) ------------------------------------------------------------------
+
+
+def _tracker(
+    first: int = 5, *, gap: int | None = None, bad_dividend: int | None = None
+) -> dict[date, tuple[float, float]]:
+    bars = {}
+    for i in range(first, _SESSIONS):
+        if i == gap:
+            continue
+        dividend = math.nan if i == bad_dividend else (0.5 if i == 20 else 0.0)
+        bars[_SESSION_DATES[i]] = (100.0 * 1.001**i, dividend)
+    return bars
+
+
+def _tracked_outcome(tracker: Mapping[date, tuple[float, float]]) -> hc.PanelOutcome:
+    low_closes = [51.0 + (i % 2) for i in range(_SESSIONS)]
+    panel = _panel(_series(1, low_closes, opens=[50.0] * _SESSIONS), _series(2, [150.0] * _SESSIONS))
+    panel = hc.HuntPanel(
+        sessions=panel.sessions,
+        series=panel.series,
+        regime_labels=panel.regime_labels,
+        load_counts=panel.load_counts,
+        tracker=tracker,
+    )
+    return hc.compute_panel(panel, _params(), _by_close)
+
+
+def test_the_tracker_readout_is_the_annualised_arm_less_spy_total_return() -> None:
+    outcome = _tracked_outcome(_tracker())
+    block = outcome.statistics["tracker"]
+    # The grid holds sessions 1..129; 1..5 are on or before the first bar (5), so 6..129 are used.
+    assert (block["sessions_before_inception"], block["sessions_used"]) == (5, 124)
+    assert (block["first_row"], block["first_return"]) == (_SESSION_DATES[5].isoformat(), _SESSION_DATES[6].isoformat())
+    band_150, band_50 = 0.00322 / 2, 0.00509 / 2
+    arm = 150.0 * (1 - band_150) / (150.0 * (1 + band_150)) - 1
+    control = [(arm + (51.0 + (d % 2)) * (1 - band_50) / (50.0 * (1 + band_50)) - 1) / 2 for d in range(6, _SESSIONS)]
+    tracker = [
+        (100.0 * 1.001**d + (0.5 if d == 20 else 0.0)) / (100.0 * 1.001 ** (d - 1)) - 1 for d in range(6, _SESSIONS)
+    ]
+    cell = block["cells"][hc.CANONICAL_CELL]
+    assert cell["arm_ann"] == pytest.approx(252 * arm, rel=1e-12)
+    assert cell["control_ann"] == pytest.approx(252 * math.fsum(control) / 124, rel=1e-12)
+    assert cell["tracker_ann"] == pytest.approx(252 * math.fsum(tracker) / 124, rel=1e-12)
+    assert cell["excess_ann"] == pytest.approx(cell["arm_ann"] - cell["tracker_ann"], rel=1e-12)
+    assert block["canonical_excess_series"] == pytest.approx([arm - r for r in tracker], rel=1e-12)
+    assert len(block["cells"]) == len(outcome.statistics["per_trade"])
+    assert block["utilisation"] == {"entered_formation_share": 1.0, "entered_position_share": 1.0}
+    canonical_form(outcome.statistics)  # storable as-is
+
+
+@pytest.mark.parametrize(
+    ("tracker", "reason"),
+    [
+        ({}, "no_tracker"),
+        (_tracker(gap=50), f"tracker_gap:{_SESSION_DATES[50].isoformat()}"),
+        (_tracker(bad_dividend=30), f"tracker_invalid:{_SESSION_DATES[30].isoformat()}"),
+    ],
+)
+def test_a_missing_or_invalid_tracker_bar_refuses_the_block(
+    tracker: Mapping[date, tuple[float, float]], reason: str
+) -> None:
+    outcome = _tracked_outcome(tracker)
+    assert outcome.statistics["tracker"] == {"refused": reason}
+    assert outcome.status == "computed"  # the readout is descriptive; the cells are untouched
