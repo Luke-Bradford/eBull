@@ -75,3 +75,28 @@ def test_the_spec_is_the_frozen_trial() -> None:
     assert spec.signal_code_sha256 == hh.signal_code_sha256("extreme_move_illiquid:score")
     assert hh.timeline_refusal(spec) is None
     assert hh.HUNT_BUDGETS[spec.hunt_id] == 1
+
+
+#: The stored hunt-1 discovery outcome (hunt_trial_id 1, outcome_sha256 43895acf…), base cells only, as
+#: ``--readout`` printed it on 2026-09-27. Every termination policy gave the same figures.
+STORED_BASE = {
+    True: {"active": 0.0015215045741797377, "arm": 0.0032513068802462923},
+    False: {"active": 0.0015602159960924546, "arm": 0.00310990198993311},
+}
+
+
+def test_the_hunt_1_closure_matches_its_stored_readout() -> None:
+    """Harness spec "Budget and closure": the closure's listed verdict against the stored outcome."""
+    cells: dict[str, Any] = {}
+    per_trade: dict[str, Any] = {}
+    for policy in ("zero_recovery", "classified_best", "classified_worst"):
+        for dividends, figures in STORED_BASE.items():
+            key = cell_key(policy, dividends, "base")
+            cells[key] = {"mean": figures["active"]}
+            per_trade[key] = {"arm": {"positions": 146758, "mean": figures["arm"]}}
+    flag = run.discovery_flag("computed", {"cells": cells, "per_trade": per_trade}, by_flagged=True)
+    assert flag["declare_validation"] is False
+    assert [name for name, c in flag["conditions"].items() if not c["met"]] == ["operator_bar"]
+    closure = hh.HUNT_CLOSED["hunt-1"]
+    assert closure.startswith("no demonstrated edge")
+    assert run.CONDITION_LABELS["operator_bar"] in closure
