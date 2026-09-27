@@ -35,7 +35,12 @@ from app.services.hunt_compute import ComputeParams, HuntPanel, PanelOutcome, Pa
 from app.services.hunt_evaluator import Point
 from app.services.hunt_store import PanelParts
 from app.services.indicator_series import BarSeries, Universe
-from app.services.market_regime_provider import MarketRegimeProvider
+from app.services.market_regime_provider import (
+    CHAIN_FALLBACK,
+    CHAIN_FALLBACK_BASIS,
+    CHAIN_SEAM,
+    MarketRegimeProvider,
+)
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.research_price_structure_store import load_masked_series
 from app.services.research_split_adjustment import corrected_price, split_scales
@@ -112,6 +117,40 @@ def _regime_labels(conn: psycopg.Connection[Any], sessions: tuple[date, ...]) ->
     ]
 
 
+#: #3448: the tracker is ``spy_chain_v1``'s fallback segment, strictly before the seam. A
+#: session at or after the seam has no tracker bar, so a readout reaching it refuses
+#: (``tracker_gap``); discovery and validation both end before it.
+_TRACKER_SERIES_SQL = """
+    SELECT series_id FROM research_price_series
+    WHERE vendor = %(vendor)s AND vendor_symbol = %(symbol)s AND adjustment_basis = %(basis)s
+"""
+_TRACKER_BARS_SQL = """
+    SELECT bar_date, close, dividend FROM research_price_daily
+    WHERE series_id = %(series_id)s AND bar_date < %(seam)s AND bar_date <= %(through)s
+    ORDER BY bar_date
+"""
+
+
+#: The tracker's first bar (SPY's first session), measured 2026-09-27 and pinned: inferring it
+#: from the rows present would let a lost leading row silently shorten the gated window.
+TRACKER_FIRST_BAR = date(1993, 1, 29)
+
+
+def _tracker(conn: psycopg.Connection[Any], through: date) -> Mapping[date, tuple[float, float]]:
+    """The tracker's (close, dividend) by date; a NULL is NaN, which the readout refuses."""
+    vendor, symbol = CHAIN_FALLBACK
+    rows = conn.execute(
+        _TRACKER_SERIES_SQL, {"vendor": vendor, "symbol": symbol, "basis": CHAIN_FALLBACK_BASIS}
+    ).fetchall()
+    if len(rows) != 1:
+        raise HuntPanelError(f"the tracker {vendor}/{symbol} resolves to {len(rows)} series, not 1")
+    bars = conn.execute(_TRACKER_BARS_SQL, {"series_id": rows[0][0], "seam": CHAIN_SEAM, "through": through})
+    tracker = {day: (_as_float(close), _as_float(dividend)) for day, close, dividend in bars}
+    if through >= TRACKER_FIRST_BAR and min(tracker, default=None) != TRACKER_FIRST_BAR:
+        raise HuntPanelError(f"the tracker's first bar is {min(tracker, default=None)}, not {TRACKER_FIRST_BAR}")
+    return MappingProxyType(tracker)
+
+
 def _admitted(conn: psycopg.Connection[Any], universe: Universe) -> dict[int, Any]:
     validated = load_validated_universe(conn)
     selection = load_universe_selection(conn, universe=universe, validated_ids=frozenset(validated))
@@ -143,12 +182,14 @@ def load_hunt_panel(conn: psycopg.Connection[Any], *, universe: Universe, throug
 
 
 def _with_regimes(conn: psycopg.Connection[Any], parts: PanelParts) -> HuntPanel:
-    """Regime labels are computed live on every path (spec "Parts"): the key does not cover the benchmark."""
+    """Regime labels and the tracker are read live on every path (spec "Parts"): the key does
+    not cover the benchmark."""
     return HuntPanel(
         sessions=parts.sessions,
         series=parts.series,
         regime_labels=tuple(_regime_labels(conn, parts.sessions)),
         load_counts=parts.load_counts,
+        tracker=_tracker(conn, parts.sessions[-1]),
     )
 
 

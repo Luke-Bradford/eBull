@@ -342,6 +342,7 @@ def _route(
         lambda _conn, **_kw: events.append("live-panel") or hunt_panel._with_regimes(None, _parts()),  # type: ignore[arg-type]
     )
     monkeypatch.setattr(hunt_panel, "_regime_labels", lambda _conn, sessions: ["unclassified"] * len(sessions))
+    monkeypatch.setattr(hunt_panel, "_tracker", lambda _conn, _through: {})  # #3448: no SPY in this fixture
 
     def compute(panel: Any, _params: Any, _signal: Any) -> hunt_compute.PanelOutcome:
         _assert_equal(PanelParts(panel.sessions, panel.series, panel.load_counts), _parts())

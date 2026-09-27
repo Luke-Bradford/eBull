@@ -549,6 +549,7 @@ def test_the_panel_loader_places_bars_splits_dividends_and_termination(
     monkeypatch.setattr(hunt_panel, "load_validated_universe", lambda _conn: [])
     monkeypatch.setattr(hunt_panel, "load_universe_selection", lambda _conn, **_kw: SimpleNamespace(admitted=(member,)))
     monkeypatch.setattr(hunt_panel, "_regime_labels", lambda _conn, sessions: ["unclassified"] * len(sessions))
+    monkeypatch.setattr(hunt_panel, "_tracker", lambda _conn, _through: {})  # #3448: no SPY in this fixture
 
     panel = hunt_panel.load_hunt_panel(ebull_test_conn, universe="survivorship_free", through=date(1997, 1, 31))
 
