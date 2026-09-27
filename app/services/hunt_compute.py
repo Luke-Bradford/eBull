@@ -60,6 +60,7 @@ from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND, cost_band_for
 from app.services.hunt_evaluator import BookSeries, Cohort, Point, SeriesPrices
 from app.services.hunt_inference import StatRefused
 from app.services.hunt_view import Bars, Dividends, SessionDate, SignalView, rebased_view
+from app.services.market_regime_provider import CHAIN_FALLBACK, CHAIN_FALLBACK_BASIS, CHAIN_SEAM
 from app.services.r6_exclusion_trial import PROGRAMME_POLICIES, TerminationPolicy
 from app.services.series_termination import TerminationClass
 
@@ -81,7 +82,8 @@ CANONICAL_POLICY: Final = "zero_recovery"
 #: #3448 "The bar": arithmetic annualisation, the harness's unit (``hunt_door.SESSIONS_PER_YEAR``).
 TRACKER_SESSIONS_PER_YEAR: Final = 252
 #: The tracker the loader reads (``hunt_panel``): ``spy_chain_v1``'s pre-seam segment, total return.
-TRACKER_SOURCE: Final = "spy_chain_v1:fallback_segment:total_return"
+#: Derived from the constants the loader's query uses, so the label cannot drift from them.
+TRACKER_SOURCE: Final = f"{'/'.join(CHAIN_FALLBACK)}:{CHAIN_FALLBACK_BASIS}:before:{CHAIN_SEAM}:total_return"
 COST_REGIME: Final = "tariff-2026-counterfactual"
 #: The descriptive volatility tilt's window (spec "Descriptive tilts").
 TILT_VOLATILITY_SESSIONS: Final = 63
