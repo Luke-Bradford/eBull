@@ -132,6 +132,9 @@ _NORMAL: Final = statistics.NormalDist(0.0, 1.0)
 #: trial Sharpes, it is no distribution: ``SR_0`` would collapse to zero and the
 #: DSR would silently become an undeflated PSR — the exact correction criterion
 #: 6 exists to apply, reported as if it had been applied.
+#: ⚠ The one exception is ``null_floor_variance`` (#3448): a caller that supplies the
+#: zero-edge sampling variance 1/T (strictly positive, so ``SR_0`` cannot collapse)
+#: instead of a measured one may pass a single measured trial.
 MIN_MEASURED_TRIALS: Final = 2
 
 
@@ -391,8 +394,13 @@ def deflated_sharpe(
     average_correlation: float,
     measured_trials: int,
     trial_register_version: str,
+    null_floor_variance: bool = False,
 ) -> DeflatedSharpeResult | None:
     """Equation (2). Pure; reads no database.
+
+    ``null_floor_variance``: ``trial_sharpe_variance`` is the zero-edge sampling
+    variance of a Sharpe estimate, not a cross-trial measurement, so refusal 1 needs
+    only one measured trial (#3448; the hunt's one-trial V[SR]).
 
     ⚠⚠ ``effective_sample_size`` IS ``T``, AND THAT IS THE WHOLE STAGE. §5.2:
     criterion 6's Deflated Sharpe consumes criterion 3's effective sample size.
@@ -443,7 +451,7 @@ def deflated_sharpe(
     trial count *"fails; it does not default"* — and a DSR that could not be
     computed defaults to nothing either.
     """
-    if measured_trials < MIN_MEASURED_TRIALS:
+    if measured_trials < (1 if null_floor_variance else MIN_MEASURED_TRIALS):
         return None
     if effective_sample_size <= 1.0 or not math.isfinite(effective_sample_size):
         return None

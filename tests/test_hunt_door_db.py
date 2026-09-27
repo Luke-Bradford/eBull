@@ -354,3 +354,35 @@ def test_the_power_script_reproduces_the_declarations_power(
     repinned = {**discovered["doc"], "pins": [{**pin, "discovery_outcome_sha256": "0" * 64}]}
     label = discovered["pinned"].spec_sha256[:12]
     assert measure(ebull_test_conn, repinned)[1] == [f"pin_{label}_discovery_outcome_is_not_the_pinned_one"]
+
+
+# --- a one-trial hunt (#3448) -----------------------------------------------------------------
+
+
+def test_a_one_trial_hunt_freezes_on_a_floor_only_v(
+    ebull_test_conn: psycopg.Connection[Any],
+    bound: dict[str, Any],  # noqa: F811 - the imported fixture, requested by name
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Before #3448 V[SR] refused below 10 trials, so a budget-1 hunt could never freeze validation.
+    monkeypatch.setattr(hh, "HUNT_BUDGETS", {"hunt-1": 1})
+    monkeypatch.setattr(hunt_door, "REPO_ROOT", tmp_path)
+    result = _evaluate(ebull_test_conn, _spec(bound, lag=WINNER_LAG), _discovery_outcome(WINNER_LAG))
+    assert isinstance(result, HuntOutcome), result
+    pinned = _spec(bound, lag=WINNER_LAG, split="validation")
+    base = TrialRegister(version="test-r1", trials=(INHERITED,))
+    doc, codes = hunt_door.build_validation_declaration(ebull_test_conn, hunt_id="hunt-1", pins=[pinned], register=base)
+    assert codes == []
+    v_sr = hh.decode_form(doc["numbers"]["v_sr"])
+    assert (v_sr["population"], v_sr["measured_variance"], v_sr["trial_ids"]) == (
+        "floor_only",
+        None,
+        [result.hunt_trial_id],
+    )
+    (tmp_path / "hunts").mkdir()
+    sha = hunt_door.write_declaration(tmp_path / DOC_PATH, doc)
+    declaration_id = _freeze(ebull_test_conn, _register(ebull_test_conn, sha), monkeypatch)
+    stored = hh.load_hunt_declaration(ebull_test_conn, declaration_id)
+    ebull_test_conn.commit()
+    assert stored is not None and stored.doc_sha256 == sha

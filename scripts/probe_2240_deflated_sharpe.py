@@ -188,7 +188,7 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "a single measured trial admitted, so V[SR_n] is a variance over one point",
         DSR,
         DSR_TESTS,
-        [("    if measured_trials < MIN_MEASURED_TRIALS:", "    if False:")],
+        [("    if measured_trials < (1 if null_floor_variance else MIN_MEASURED_TRIALS):", "    if False:")],
         "test_one_measured_trial_has_no_sharpe_variance",
     ),
     (

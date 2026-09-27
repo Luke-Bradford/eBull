@@ -27,7 +27,7 @@ import statistics
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Literal
+from typing import Final, Literal, cast, get_args
 
 from app.services.deflated_sharpe import DeflatedSharpeResult, TradeMoments, deflated_sharpe, trade_moments
 from app.services.r6_monthly_trial import HacEstimate, newey_west_lag, student_t_cdf
@@ -45,7 +45,9 @@ P_UNDERFLOW: Final = 1e-12
 P_UNDERFLOW_LABEL: Final = f"< {P_UNDERFLOW:g}"
 #: T_eff at or below this refuses ``short_effective_sample``.
 MIN_EFFECTIVE_SAMPLE: Final = 30.0
-#: Fewer distinct finite trial Sharpes refuses ``trial_population_too_small``.
+#: At least this many distinct finite trial Sharpes is a ``full`` V[SR] population; fewer is
+#: ``small_population`` (2-9) or ``floor_only`` (1), and none refuses ``trial_population_too_small``
+#: (#3448: a hunt budgeted under 10 could otherwise never freeze validation).
 MIN_V_POPULATION: Final = 10
 #: BY's FDR level for the discovery screen.
 BY_Q: Final = 0.05
@@ -324,28 +326,39 @@ class VPopulationMember:
     ruined: bool
 
 
+VPopulation = Literal["full", "small_population", "floor_only"]
+
+
 @dataclass(frozen=True)
 class TrialSharpeVariance:
     variance: float
-    measured_variance: float
+    #: ``None`` exactly when ``population`` is ``floor_only``: one Sharpe has no sample variance.
+    measured_variance: float | None
     #: mean over the population of 1/T_i: the IID variance of a per-observation Sharpe under zero edge.
     floor: float
     trial_ids: tuple[int, ...]
     #: reason → count: ``no_series``, ``ruined``, ``non_finite``, ``zero_variance`` (no usable
     #: moments), ``duplicate``.
     excluded: Mapping[str, int]
+    population: VPopulation = "full"
+
+    def __post_init__(self) -> None:
+        if (self.measured_variance is None) != (self.population == "floor_only"):
+            raise ValueError("measured_variance is None exactly for a floor_only population")
 
     @property
     def measured_trials(self) -> int:
         return len(self.trial_ids)
 
     def form(self) -> dict[str, object]:
+        # ``population`` is written only when not ``full``, so a pre-#3448 stored form round-trips.
         return {
             "variance": self.variance,
             "measured_variance": self.measured_variance,
             "floor": self.floor,
             "trial_ids": list(self.trial_ids),
             "excluded": dict(sorted(self.excluded.items())),
+            **({} if self.population == "full" else {"population": self.population}),
         }
 
     @classmethod
@@ -354,12 +367,17 @@ class TrialSharpeVariance:
         excluded = form["excluded"]
         if not isinstance(trial_ids, list) or not isinstance(excluded, Mapping):
             raise ValueError("a stored V[SR] needs its trial ids and exclusion counts")
+        population = form.get("population", "full")
+        if population not in get_args(VPopulation):
+            raise ValueError(f"bad V[SR] population {population!r}")
+        measured = form["measured_variance"]
         variance = cls(
             variance=float(form["variance"]),  # type: ignore[arg-type]
-            measured_variance=float(form["measured_variance"]),  # type: ignore[arg-type]
+            measured_variance=None if measured is None else float(measured),  # type: ignore[arg-type]
             floor=float(form["floor"]),  # type: ignore[arg-type]
             trial_ids=tuple(int(item) for item in trial_ids),
             excluded={str(key): int(value) for key, value in excluded.items()},
+            population=cast(VPopulation, population),
         )
         if variance.form() != {**form, "trial_ids": list(trial_ids)}:
             raise ValueError("the stored V[SR] does not round-trip")
@@ -371,6 +389,11 @@ def trial_sharpe_variance(members: Iterable[VPopulationMember]) -> TrialSharpeVa
 
     Identical series count once (the lowest trial id is kept); a missing, ruined,
     non-finite or zero-variance series is excluded and counted (spec "DSR").
+
+    #3448 (spec ``2026-09-27-3448-hunt-2-declaration.md``, "Harness change required"):
+    ≥ ``MIN_V_POPULATION`` eligible Sharpes is ``full``; 2-9 is ``small_population``,
+    same formula; exactly 1 is ``floor_only``, V = the floor (the zero-edge sampling
+    variance, a construction); 0 refuses.
     """
     excluded = {"no_series": 0, "ruined": 0, "non_finite": 0, "zero_variance": 0, "duplicate": 0}
     seen: set[tuple[float, ...]] = set()
@@ -402,12 +425,21 @@ def trial_sharpe_variance(members: Iterable[VPopulationMember]) -> TrialSharpeVa
         ids.append(member.hunt_trial_id)
         sharpes.append(moments.sharpe)
         lengths.append(len(series))
-    if len(sharpes) < MIN_V_POPULATION:
-        return StatRefused(
-            "trial_population_too_small", f"{len(sharpes)} distinct finite trial Sharpes < {MIN_V_POPULATION}"
+    if not sharpes:
+        return StatRefused("trial_population_too_small", "no distinct finite trial Sharpe")
+    floor = statistics.fmean(1.0 / length for length in lengths)
+    if len(sharpes) == 1:
+        if not math.isfinite(floor):
+            return StatRefused("non_finite", "the trial Sharpe variance floor is not finite")
+        return TrialSharpeVariance(
+            variance=floor,
+            measured_variance=None,
+            floor=floor,
+            trial_ids=tuple(ids),
+            excluded=dict(excluded),
+            population="floor_only",
         )
     measured = statistics.variance(sharpes)
-    floor = statistics.fmean(1.0 / length for length in lengths)
     if not (math.isfinite(measured) and math.isfinite(floor)):
         return StatRefused("non_finite", "the trial Sharpe variance is not finite")
     return TrialSharpeVariance(
@@ -416,6 +448,7 @@ def trial_sharpe_variance(members: Iterable[VPopulationMember]) -> TrialSharpeVa
         floor=floor,
         trial_ids=tuple(ids),
         excluded=dict(excluded),
+        population="full" if len(sharpes) >= MIN_V_POPULATION else "small_population",
     )
 
 
@@ -507,6 +540,7 @@ def _deflate(
         average_correlation=0.0,
         measured_trials=variance.measured_trials,
         trial_register_version=trial_register_version,
+        null_floor_variance=variance.population == "floor_only",
     )
     if result is None:
         return StatRefused("dsr_not_computed", "the shared deflated_sharpe returned None")
@@ -726,6 +760,7 @@ __all__ = [
     "StatRefused",
     "StressReadout",
     "TrialSharpeVariance",
+    "VPopulation",
     "VPopulationMember",
     "Verdict",
     "VerdictResult",
