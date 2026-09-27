@@ -276,6 +276,13 @@ HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType(
             "no demonstrated edge: discovery closed with no candidate declared (hunt_trial_id 1: BY flag met, "
             "arm beats control, below the operator bar (point estimate), arm per-trade net 0.325% vs 1.22%; #3387)"
         ),
+        # #3448 discovery readout 2026-09-28 (hunt_trial_id 2). Pinned against the stored figures in
+        # tests/test_run_hunt_2_discovery.py; ``--readout`` re-derives them from the store.
+        "hunt-2": (
+            "no demonstrated edge: discovery closed with no candidate declared (hunt_trial_id 2: BY flag met, "
+            "arm beats control, below the corrected bar (point estimate): excess over SPY +17.5%/yr at base but "
+            "-26.8%/yr in the binding stress cell; underpowered at the bar, excess-series MDE80 0.210 vs 0.08; #3448)"
+        ),
     }
 )
 

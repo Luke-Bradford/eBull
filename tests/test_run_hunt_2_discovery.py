@@ -87,7 +87,6 @@ def test_the_spec_is_the_frozen_trial() -> None:
     assert spec.signal_code_sha256 == hh.signal_code_sha256("extreme_move_illiquid:score")
     assert hh.timeline_refusal(spec) is None
     assert hh.HUNT_BUDGETS[spec.hunt_id] == 1
-    assert "hunt-2" not in hh.HUNT_CLOSED
 
 
 def test_power_reads_the_validation_calendar_only() -> None:
@@ -116,3 +115,33 @@ def test_hunt_2_validation_refuses_until_its_gate_is_built() -> None:
 
     assert hunt_door._gate_codes("hunt-2") == ["hunt_gate_not_implemented"]
     assert hunt_door._gate_codes("hunt-1") == []
+
+
+#: The stored hunt-2 discovery outcome (hunt_trial_id 2, outcome_sha256 151c3c6a…) as ``--readout``
+#: printed it on 2026-09-28. Every termination policy gave the same figures.
+STORED = {
+    True: {"active": 0.001639929104219274, "base": 0.17501138765841934, "stress": -0.26771160177412046},
+    False: {"active": 0.0016786932457142304, "base": 0.16889681785845023, "stress": -0.27382568952701897},
+}
+STORED_POWER = {"min_detectable_annual_mean_80": "0.209986"}
+
+
+def test_the_hunt_2_closure_matches_its_stored_readout() -> None:
+    """Harness spec "Budget and closure": the closure's listed verdict against the stored outcome."""
+    cells: dict[str, Any] = {}
+    per_trade: dict[str, Any] = {}
+    tracker: dict[str, Any] = {}
+    for policy in ("zero_recovery", "classified_best", "classified_worst"):
+        for dividends, figures in STORED.items():
+            for cost in ("base", "stress"):
+                key = cell_key(policy, dividends, cost)
+                cells[key] = {"mean": figures["active"]}
+                per_trade[key] = {"arm": {"positions": 146758}}
+                tracker[key] = {"excess_ann": figures[cost]}
+    statistics = {"cells": cells, "per_trade": per_trade, "tracker": {"cells": tracker}}
+    flag = run.discovery_flag("computed", statistics, by_flagged=True, power=STORED_POWER)
+    assert flag["declare_validation"] is False
+    assert [name for name, c in flag["conditions"].items() if not c["met"]] == ["corrected_bar", "power_at_bar"]
+    closure = hh.HUNT_CLOSED["hunt-2"]
+    assert closure.startswith("no demonstrated edge")
+    assert run.CONDITION_LABELS["corrected_bar"] in closure and run.CONDITION_LABELS["power_at_bar"] in closure
