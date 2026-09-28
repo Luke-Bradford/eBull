@@ -15,7 +15,7 @@ from app.services.ai_trial_executor import execute_trial_signal
 from app.services.ai_trial_pair_lifecycle import pair_unit_state, record_pair_lifecycle
 from tests.test_ai_trial_deadline_db import _opened_arm_leg
 from tests.test_ai_trial_executor_db import _broker, _control_instrument
-from tests.test_ai_trial_intent_db import NOW
+from tests.test_ai_trial_intent_db import NOW, _published_pair
 
 Conn = psycopg.Connection[Any]
 
@@ -85,3 +85,23 @@ def test_a_refused_leg_breaks_the_pair_with_its_refusal_code(
         ("arm", "filled", None),
         (None, "broken", [refused.reason_code]),
     ]
+
+
+def test_a_pair_with_every_leg_terminal_and_its_verdict_settled_is_no_longer_read(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _, signals = _published_pair(conn)
+    late = NOW + timedelta(days=1)
+    for leg in ("arm", "control"):
+        broker = _broker(_control_instrument(conn, signals[leg]))
+        assert execute_trial_signal(conn, broker=broker, signal_id=signals[leg], now=late).verdict == "rejected"
+
+    assert record_pair_lifecycle(conn, now=late) == 1
+    assert [event for _, event, _ in _events(conn)] == ["broken"]
+
+    def _read(*_: object) -> int:
+        raise AssertionError("a finished pair was read again")
+
+    monkeypatch.setattr("app.services.ai_trial_pair_lifecycle._record_pair", _read)
+    assert record_pair_lifecycle(conn, now=late) == 0

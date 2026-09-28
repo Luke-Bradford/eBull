@@ -48,8 +48,9 @@ TRIAL_CENSOR_SESSIONS: Final = 10
 #: §9 "Unresolved legs": still unresolved 10 sessions after the target session → ``unresolved``.
 TRIAL_UNRESOLVED_SESSIONS: Final = 10
 
-#: Trade statuses reached only after the broker submission was attempted.
-_SUBMITTED_STATUSES: Final = frozenset({"submitted", "open", "closing", "closed", "reconcile_required"})
+#: Trade statuses reached only after the broker submission was attempted. A trial trade is
+#: ``failed`` only by a broker rejection, which comes after the call.
+_SUBMITTED_STATUSES: Final = frozenset({"submitted", "open", "closing", "closed", "reconcile_required", "failed"})
 _REASON: Final = re.compile(r"[a-z][a-z0-9_]*")
 
 
@@ -229,8 +230,11 @@ def record_pair_lifecycle(conn: psycopg.Connection[Any], *, now: datetime | None
     """Append every owed event for every pair not yet finished; returns the events written.
 
     One transaction per pair, holding the pair row, so a concurrent pass waits and then sees
-    the events already written. A pair with both legs ``closed`` is finished: both legs filled,
-    so its ``broken`` verdict (if any) was decided no later than the pass that closed them.
+    the events already written. A pair is finished, and no longer read, once its ``broken``
+    verdict is settled and every leg is terminal: ``closed``, refused at funding, or a broker
+    rejection whose ``submitted`` is recorded. An ``unresolved`` leg is never terminal, since
+    it may still fill. Both legs ``closed`` settles the verdict: both filled, so it was decided
+    no later than the pass that closed them.
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise TrialPairLifecycleError("the pair lifecycle writer requires an idle connection")
@@ -240,8 +244,32 @@ def record_pair_lifecycle(conn: psycopg.Connection[Any], *, now: datetime | None
         for row in conn.execute(
             """
             SELECT p.pair_id FROM ai_trial_pairs p
-            WHERE (SELECT count(*) FROM ai_trial_pair_events e
-                   WHERE e.pair_id = p.pair_id AND e.event = 'closed') < 2
+            CROSS JOIN LATERAL (
+                SELECT count(*) FILTER (WHERE terminal) AS terminal_legs,
+                       count(*) FILTER (WHERE closed) AS closed_legs,
+                       bool_or(broken) AS broken
+                FROM (
+                    SELECT
+                        EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                                WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'closed') AS closed,
+                        EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                                WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'closed')
+                        OR EXISTS (
+                            SELECT 1 FROM ai_trial_leg_links l
+                            JOIN strategy_funding_decisions fd ON fd.signal_id = l.signal_id
+                            LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
+                            WHERE l.pair_id = p.pair_id AND l.leg = legs.leg
+                              AND (fd.verdict = 'rejected'
+                                   OR (t.status = 'failed' AND EXISTS (
+                                       SELECT 1 FROM ai_trial_pair_events e
+                                       WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'submitted')))
+                        ) AS terminal,
+                        EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                                WHERE e.pair_id = p.pair_id AND e.event = 'broken') AS broken
+                    FROM (VALUES ('arm'), ('control')) AS legs (leg)
+                ) leg_state
+            ) pair_state
+            WHERE NOT (pair_state.terminal_legs = 2 AND (pair_state.broken OR pair_state.closed_legs = 2))
             ORDER BY p.pair_id
             """
         ).fetchall()

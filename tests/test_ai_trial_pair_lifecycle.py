@@ -36,11 +36,12 @@ def test_the_clocks_run_to_15_utc_ten_sessions_on() -> None:
 @pytest.mark.parametrize(
     ("facts", "last", "owed"),
     [
-        # Not yet executed, refused, planned (the broker call may be in flight) or broker-refused.
+        # Not yet executed, refused, or planned (the broker call may be in flight).
         (LegFacts(), None, []),
         (LegFacts(funding_verdict="rejected", refusal_code="trial_cost_cap"), None, []),
         (LegFacts(funding_verdict="allocated", trade_status="planned"), None, []),
-        (LegFacts(funding_verdict="allocated", trade_status="failed"), None, []),
+        # Rejected by the broker: the call was made.
+        (LegFacts(funding_verdict="allocated", trade_status="failed"), None, ["submitted"]),
         # Accepted by the broker, not yet filled.
         (LegFacts(funding_verdict="allocated", trade_status="submitted", broker_order_ref="1"), None, ["submitted"]),
         # Submission outcome unknown.
