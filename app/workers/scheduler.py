@@ -583,6 +583,10 @@ JOB_ETORO_INVESTOR_SNAPSHOT = "etoro_investor_snapshot"
 # #3381 slice 3 — the forward-only daily record of rates, eligibility (incl. x1
 # short availability) and what-if open costs. eToro serves no history for any of them.
 JOB_ETORO_PERISHABLES_SNAPSHOT = "etoro_perishables_snapshot"
+# #3471 — the AI-discretionary-v1 demo trial: the after-close decision run (claim, pack, one
+# tool-less model call, one-transaction publish) and the in-session execution of its legs.
+JOB_AI_TRIAL_DECISION_RUN = "ai_trial_decision_run"
+JOB_AI_TRIAL_EXECUTE = "ai_trial_execute"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -2704,6 +2708,44 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.every_n_minutes(interval=5),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_AI_TRIAL_DECISION_RUN,
+        display_name="AI trial decision run (#3471)",
+        source="ai_trial",
+        description=(
+            "Daily 23:30 UTC — the AI-discretionary-v1 demo trial's decision for the next NYSE session: "
+            "one claimed run, a point-in-time pack, one tool-less claude -p call, a validated response and "
+            "the random control drawn, all published in one transaction. Refused runs are recorded. Does "
+            "nothing without a frozen declaration, and never runs while the regular session is open."
+        ),
+        # Daily, not Mon-Fri: a weekend fire targets the same session as Friday's run and the
+        # unique claim refuses it as a duplicate before any model call (spec §3).
+        cadence=Cadence.daily(hour=23, minute=30),
+        # A post-close boot catch-up is the same decision a little later; one on the target
+        # session's own date is skipped by the service (it would read that session's bars).
+        catch_up_on_boot=True,
+        # The body bounds its own lateness (the target-date guard) and is idempotent (one
+        # claim per session), so a fire delayed by a host pause is still worth running.
+        misfire_grace_seconds=4 * 60 * 60,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_AI_TRIAL_EXECUTE,
+        display_name="AI trial leg execution (#3471)",
+        source="ai_trial",
+        description=(
+            "Daily 15:00 UTC (in session in both EDT and EST) — submits each published AI-trial leg "
+            "for today's session to demo through the trial executor's gates, arm before control; a leg "
+            "whose session has passed is refused as decision_expired. Demo only; skips outside the "
+            "regular session."
+        ),
+        cadence=Cadence.daily(hour=15, minute=0),
+        catch_up_on_boot=True,
+        # Same argument: the body refuses outside the session and before 15:00 UTC, and the
+        # executor is idempotent per signal, so a late fire can only execute in-window legs.
+        misfire_grace_seconds=4 * 60 * 60,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -6765,6 +6807,7 @@ def fred_reference_refresh() -> None:
 def strategy_paper_cycle() -> None:
     """Run the bounded demo strategy lifecycle; never select live credentials."""
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.ai_trial_pair_lifecycle import record_pair_lifecycle
     from app.services.strategy_paper_runtime import run_strategy_paper_cycle
 
     if settings.etoro_env != "demo":
@@ -6784,12 +6827,69 @@ def strategy_paper_cycle() -> None:
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
             with connect_job() as conn:
                 result = run_strategy_paper_cycle(conn, broker=broker)
+                # #3471: the trial's pair events derive from the state this cycle just
+                # reconciled and managed, so they are recorded on the same cycle (spec O11).
+                # The cycle can end inside its ranking read; the writer needs an idle
+                # connection, and the context exit would commit the same work anyway.
+                conn.commit()
+                pair_events = record_pair_lifecycle(conn)
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
         tracker.note = (
             f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
             f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
+            f"trial_pair_events={pair_events} "
             f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
         )
+
+
+def ai_trial_decision_run() -> None:
+    """The AI trial's after-close decision run (#3471 spec §3 steps 0-5).
+
+    Informational broker reads only (the account-risk snapshot and intraday candles); the model
+    call is the tool-less subprocess in ``ai_trial_invocation``. Nothing here submits an order.
+    """
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.ai_trial_jobs import run_decision_job
+
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_AI_TRIAL_DECISION_RUN, "the AI trial is demo-only")
+        return
+    creds = _load_etoro_credentials(JOB_AI_TRIAL_DECISION_RUN)
+    if creds is None:
+        _record_prereq_skip(JOB_AI_TRIAL_DECISION_RUN, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_AI_TRIAL_DECISION_RUN) as tracker:
+        with (
+            EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker,
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
+            connect_job() as conn,
+        ):
+            result = run_decision_job(conn, broker=broker, get_intraday_candles=market.get_intraday_candles)
+        tracker.row_count = 0 if result.outcome is None else len(result.outcome.pair_ids)
+        tracker.note = result.note
+        logger.info("ai_trial_decision_run: %s", result.note)
+
+
+def ai_trial_execute() -> None:
+    """Submit today's published AI-trial legs to demo (#3471 spec §3 step 6, §8)."""
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.ai_trial_jobs import run_trial_execution
+
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_AI_TRIAL_EXECUTE, "the AI trial is demo-only")
+        return
+    creds = _load_etoro_credentials(JOB_AI_TRIAL_EXECUTE)
+    if creds is None:
+        _record_prereq_skip(JOB_AI_TRIAL_EXECUTE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_AI_TRIAL_EXECUTE) as tracker:
+        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker, connect_job() as conn:
+            result = run_trial_execution(conn, broker=broker, refresh_halts=_refresh_strategy_halt_feed)
+        tracker.row_count = result.legs
+        tracker.note = result.note
+        logger.info("ai_trial_execute: %s", result.note)
 
 
 def recommendation_order_reconcile() -> None:

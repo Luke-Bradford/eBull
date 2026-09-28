@@ -120,6 +120,10 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # invoker on the same lane, so the dual registration passes the
         # source-registry conflict check.
         "openfigi",
+        # #3471 — the AI trial's decision (23:30) and execute (15:00) jobs: both fire
+        # inside other holders' windows (etoro's candle sweep, the paper cycle).
+        # See app/jobs/sources.py::Lane.
+        "ai_trial",
         # #1527 — daily/hourly continuation of #1526. monitor_positions,
         # cusip_extid_sweep, ownership_observations_sync each fire on a
         # 5-min-aligned slot and lost the ``job_source:db`` race to
