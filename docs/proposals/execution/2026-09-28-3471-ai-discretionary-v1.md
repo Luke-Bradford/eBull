@@ -444,6 +444,15 @@ This is a pure calculation over explicit inputs. It must not call `_observe_loca
 
 State can still change between 23:30 and execution. Execution-time refusals remain possible, and they are broken pairs.
 
+**Implemented in slice 2c-i** (`app/services/ai_trial_start_gate.py`). Not yet scheduled.
+- **Shared arithmetic.** `_risk_and_amount`'s capacity arithmetic is extracted as the pure `strategy_paper_executor._capacities`. The paper path, the executor and the preview all size with it, so the three cannot drift.
+- **Pure half.** `start_gate_reason` checks one pair jointly.
+  - Shared terms must hold 2 × $125: pool remaining, available cash net of pending, portfolio exposure, active risk, cash reserve and concurrency (+2).
+  - Per-leg terms must hold $125 each: max ticket, deployment remaining at the fixed-mode base, instrument exposure at zero existing exposure, loss at the 25% preview stop, and leg slots.
+  - Refusals read `trial_capacity_unavailable:<term>`.
+- **DB half.** `preview_trial_capacity` is read-only: it needs an idle connection and runs in one transaction of its own. A refusing shared-capital observation comes back as a named refusal, not an exception (Codex ckpt-2). It reuses the executor's pending-risk and mandate-observation SQL, and reads the high-water mark without advancing it.
+- **Measured on the fixture.** The fixture pool is $2,000 balanced (0.75% per-position loss). There it refuses as `loss_at_stop`: $2,000 × 0.75 / 25 = $60, below $125. At $10,000 growth it admits the pair.
+
 ⚠⚠ **PREREQUISITE: the live sandbox cannot admit the trial today (measured 2026-09-28).**
 
 The engine's only paper pool, event 4, reads:
