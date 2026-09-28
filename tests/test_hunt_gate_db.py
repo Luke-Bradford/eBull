@@ -142,3 +142,14 @@ def test_a_validation_row_closes_its_lineage_for_every_other_spec(
     # The row's own candidate is not a new look: it falls through to the burn check.
     own = _evaluate(ebull_test_conn, pinned, ComputedOutcome("computed", {}, SERIES))
     assert isinstance(own, HuntRefused) and own.reason == "split_burned"
+
+
+def test_a_closed_lineage_refuses_without_any_validation_row(
+    ebull_test_conn: psycopg.Connection[Any], gated: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = _spec(gated["bound"], lag=4)
+    monkeypatch.setattr(hh, "LAST_LOOK_LINEAGES", {spec.family: frozenset({spec.signal_code_sha256})})
+    monkeypatch.setattr(hh, "CLOSED_LINEAGES", {spec.family: "closed on its record"})
+    refused = _evaluate(ebull_test_conn, spec, ComputedOutcome("computed", {}, SERIES))
+    assert isinstance(refused, HuntRefused) and refused.reason == "lineage_closed"
+    assert _count(ebull_test_conn, "SELECT count(*) FROM hunt_trials") == 0

@@ -288,6 +288,14 @@ HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType(
             "arm beats control, below the corrected bar (point estimate): excess over SPY +17.5%/yr at base but "
             "-26.8%/yr in the binding stress cell; underpowered at the bar, excess-series MDE80 0.210 vs 0.08; #3448)"
         ),
+        # #3454 validation readout 2026-09-28 (hunt_trial_id 3, declaration 13). The immutable
+        # record is docs/hunts/hunt-3-validation-readout.json; tests/test_hunt_gate.py pins this
+        # verdict against it. Later reads of hunt 3's verdict read the record, not the code.
+        "hunt-3": (
+            "no demonstrated edge: the one validation look (hunt_trial_id 3) failed promotion: verdict "
+            "UNDETERMINED (arm vs control t 0.16-0.40), excess over SPY -33.1% to -39.0%/yr in every base cell "
+            "against the 0.08 bar, canonical excess NW t -6.94; M_val -0.470, so the capital route closes; #3454"
+        ),
     }
 )
 
@@ -330,6 +338,14 @@ HUNT_INHERITED_DISCOVERY: Final[Mapping[str, InheritedDiscovery]] = MappingProxy
 #: extreme_move_illiquid: hunts 1-3's signal module ``extreme_move_illiquid:score``.
 LAST_LOOK_LINEAGES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {"extreme_move_illiquid": frozenset({"4bb3e87efbc38fcf80f2d665537a2d17a4b6f33f59e70720ffcd5beb640dd172"})}
+)
+
+
+#: lineage → its terminal readout: the reviewed record of a state ``lineage_closed`` already
+#: enforces from the database (#3454 spec, "Lineage closure"). Refused here too, so the closure
+#: does not depend on the validation row surviving.
+CLOSED_LINEAGES: Final[Mapping[str, str]] = MappingProxyType(
+    {"extreme_move_illiquid": f"hunt 3's validation look was the lineage's last: {HUNT_CLOSED['hunt-3']}"}
 )
 
 
@@ -1246,6 +1262,8 @@ def refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec) 
     terminal = terminal_refusal(conn, hunt_id=spec.hunt_id, lineage=lineage)
     if terminal is not None:
         return HuntRefused("hunt_terminal", terminal)
+    if lineage is not None and lineage in CLOSED_LINEAGES:
+        return HuntRefused("lineage_closed", f"lineage {lineage} closed: {CLOSED_LINEAGES[lineage]}")
     if lineage is not None:
         look = conn.execute(
             _SELECT_LINEAGE_LOOK,
@@ -1797,6 +1815,7 @@ __all__ = [
     "CANDIDATE_FIELDS",
     "EMBARGO_SESSIONS",
     "HORIZON_CAP_SESSIONS",
+    "CLOSED_LINEAGES",
     "HUNT_BUDGETS",
     "HUNT_CLOSED",
     "HUNT_HARNESS_MODEL_ID",
