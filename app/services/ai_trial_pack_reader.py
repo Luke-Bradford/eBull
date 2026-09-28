@@ -203,7 +203,13 @@ def _decimal(value: object) -> Decimal | None:
 
 
 def _market_cap(conn: Conn, instrument_id: int, valuation_cap: object) -> Decimal | None:
-    """``market_cap_live`` with the #1664 overlay, exactly as the scorer applies it."""
+    """``market_cap_live`` with the #1664 overlay, exactly as the scorer applies it.
+
+    Cost per call: one savepoint plus ``resolve_market_cap_basis``'s own queries, mirroring the
+    scorer's per-instrument overlay loop. It runs once per name the small-cap walk reaches that
+    has a valuation row — the walk stops at the 20th admitted name or at the end of the
+    eligible list, so the count is the walk length, not ``SMALL_CAP_N``. Measured on the dev
+    DB (2026-09-28): the whole pack assembles in ~1.5 s."""
     try:
         with conn.transaction():
             resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id)

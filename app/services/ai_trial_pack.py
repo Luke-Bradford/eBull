@@ -134,7 +134,8 @@ def select_shortlist(
     name from the small-cap slice only.
 
     ``market_cap``, when given, resolves a candidate's cap lazily in rank order and is called
-    only until the small-cap slice is full — the #1664 overlay costs a query per name.
+    only until the small-cap slice is full or the ranked list ends — the #1664 overlay costs a
+    savepoint and several queries per name.
     Without it, ``candidate.market_cap_usd`` is used."""
     eligible = [c for c in candidates if is_eligible(c, as_of=as_of)]
     ids = [c.instrument_id for c in eligible]
