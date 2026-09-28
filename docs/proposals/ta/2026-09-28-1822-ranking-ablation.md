@@ -1,9 +1,10 @@
-# #1822 — v1.5 ranking family ablation: spec (v6)
+# #1822 — v1.5 ranking family ablation: spec (v7)
 
 Refs #1822, #1815, #2437 (supervisor refill 2026-09-28 05:15Z, item 2),
 `docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md` §3. v2 answers Codex ckpt-1 v1 (61
 findings), v3 answers round 2 (50),
-v4 answers round 3, v5 settles "Prices", v6 settles slice 1b; see "Revision notes".
+v4 answers round 3, v5 settles "Prices", v6 settles slice 1b, v7 records slice 1b's build corrections; see
+"Revision notes".
 
 **Ask (supervisor):** ablate each v1.5 family against the matched control, on the hunt harness (#3385) and the PIT
 bundles. Report each family's incremental contribution with its SE, and close no family on power alone. Weights
@@ -128,8 +129,8 @@ and reports each run's scored count. Model versions never mix; v1.6 starts a new
 - **entry session e** = the first session whose open is strictly after the known time; entry at the open of e.
   "t = e − 1" is an index label only: nothing assumes the run was available during t;
 - when several runs share one entry session, the one with the latest known time is used (ties: the latest
-  `scored_at`) and the others are counted as superseded. Across all v1.5 runs this happens on one New York date
-  (2026-07-23);
+  `scored_at`) and the others are counted as superseded. `--census` lists them. At readout date 2026-09-28 it
+  found 7, six of them weekend runs sharing Monday's entry with a later run (v1–v6 said one date; that was wrong);
 - exit at the close of x = e + h − 1, with h = 21 sessions. If x has no valid bar, the exit is at the last
   available close before x (the harness rule, never a later price).
 
@@ -152,8 +153,9 @@ unless the termination source says so (the harness rule).
 
 **Termination source (v6).** The harness reads `series_termination.TerminationEvidence`: a Form 25 link, its
 provision, and the Q suffix.
-- **Linked:** a `sec_form25_register` row whose `issuer_cik` is in the instrument's `instrument_cik_history` and
-  whose `filed_date` is in [first formation, c_k]. The rule is uniform. It yields no link in the window, because the
+- **Linked:** a `sec_form25_register` row with `provision_class = 'equity_delisting'` whose `issuer_cik` is in the
+  instrument's `instrument_cik_history` and whose `filed_date` is in [first formation, c_k]; the latest filed wins.
+  (v7: a `debt_lifecycle` Form 25 delists a bond, not the stock.) The rule is uniform. It yields no link in the window, because the
   register is a harvest whose latest `filed_date` is 2024-12-31 (`select max(filed_date) from
   sec_form25_register`).
 - **Q suffix:** `q_suffix =
@@ -289,7 +291,9 @@ changes one assumption against the canonical, and they are never combined.
 beside the canonical for all six families. None is a decision.
 
 **Grid (nested by construction).** Readout k has cutoff c_k, frozen in its vintage record. c_k is the latest
-session at least `price_quarantine.PROVISIONAL_WINDOW_DAYS` calendar days before the readout date.
+session **more than** `price_quarantine.PROVISIONAL_WINDOW_DAYS` calendar days before the readout date. (v7: v6 said
+"at least", but `evaluate_bars` marks `price_date >= as_of − 5 days` provisional, so a session exactly 5 days back
+is provisional and would break the next bullet.)
 - It is calendar-only, so it never moves backward between readouts.
 - No bar at or before it is provisional under the verdicts the readout computes.
 - A bar loaded late shows up as a revision in a later readout (below). The cutoff does not wait for it.
@@ -485,6 +489,8 @@ the 34-run window cannot feed and which exceeds the harness's 63-session cap for
   - Route F is registered in the #2829 register, and the reason `hunt_trials` does not fit is stated (#25, #26).
   - "No history at all" is corrected (#27). The overlapping-cohort choice is declared deliberate (#28). The MDE
     classifies nothing (#29).
+- **v7 (slice 1b build, no ckpt-1: three corrections found by building; the first two are pinned by tests).** c_k is strictly
+  outside the provisional window; a Form 25 link is an equity delisting; the superseded-run figure is the census's.
 - **v6 (slice 1b settlements, measured 2026-09-28; ckpt-1, 10 findings).**
   - Witness: the commit boundary is cited, with both tracked callers, and an ambiguous cover is excluded (#9, #10).
   - Termination: a uniform Form 25 link rule over `instrument_cik_history`, which yields none because the register
