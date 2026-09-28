@@ -242,6 +242,8 @@ class _LazyRegime:
             try:
                 self._provider = self._loader(conn)
             except BenchmarkUnavailableError as exc:
+                # Logged here, once per pass, not once per deferred pair.
+                logger.warning("ai_trial: benchmark unavailable; regime labels deferred this pass", exc_info=True)
                 self._error = exc
                 raise
         return self._provider
@@ -254,7 +256,6 @@ def _record_label(conn: psycopg.Connection[Any], pair_id: int, arm_filled_at: da
     try:
         label = entry_regime_label(regime.get(conn), entry_session)
     except BenchmarkUnavailableError:
-        logger.warning("ai_trial pair %d: benchmark unavailable; regime label deferred", pair_id, exc_info=True)
         return
     if label is None:
         logger.info("ai_trial pair %d: no benchmark bar before %s yet; regime label deferred", pair_id, entry_session)
