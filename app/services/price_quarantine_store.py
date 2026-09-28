@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 # is_tradable/coverage — an instrument that stops being tradable keeps its
 # history, and a verdict-less series reads as UNKNOWN downstream (fail-closed),
 # which would silently remove it from every backtest rather than mark it.
+# ⚠ #1822's reader runs this exact constant through its query registry so its in-process
+# verdicts use the SAME ``params_for`` class the stored ones do.
 _SCOPE_SQL = """
 SELECT p.instrument_id, e.asset_class
 FROM (SELECT DISTINCT instrument_id FROM price_daily) p
@@ -112,20 +114,6 @@ class QuarantineCensus:
     stale_version_instruments: int = 0
     """Instruments whose stored coverage row predates the current rule set — their
     verdicts are NOT current and the read path treats them as unknown."""
-
-
-def asset_classes(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_ids: list[int],
-) -> dict[int, str | None]:
-    """The asset class this module evaluates each instrument under (its scope query).
-
-    A reader that computes verdicts in-process (#1822) must pick the SAME
-    ``params_for`` class the stored verdicts use, so it reads it here rather than
-    re-deriving the join. Instruments with no bars are absent.
-    """
-    rows = conn.execute(_SCOPE_SQL, {"instrument_ids": instrument_ids}).fetchall()
-    return {int(instrument_id): asset_class for instrument_id, asset_class in rows}
 
 
 def _series_batches(
