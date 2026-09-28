@@ -245,3 +245,13 @@ def test_the_lineage_hash_is_hunt_2s_signal_module() -> None:
 )
 def test_only_substantive_refusals_close_a_gated_hunt(code: str, substantive: bool) -> None:
     assert hunt_door._substantive(code) is substantive
+
+
+def test_every_pins_lineage_is_read_not_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #3458: a later pin's lineage is not dropped."""
+    from tests.test_hunt_harness import trial_spec
+
+    monkeypatch.setattr(hh, "LAST_LOOK_LINEAGES", {"b_family": frozenset({"b" * 64}), "c_family": frozenset()})
+    pins = [trial_spec(family="a_family"), trial_spec(family="c_family"), trial_spec(family="b_family", lag=2)]
+    assert hunt_door._pin_lineages(pins) == ["b_family", "c_family"]
+    assert hunt_door._pin_lineages([trial_spec(family="a_family")]) == [None]

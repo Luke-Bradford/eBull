@@ -518,8 +518,22 @@ def _substantive(code: str) -> bool:
     )
 
 
-def _lineage_of_pins(pins: Sequence[TrialSpec]) -> str | None:
-    return next((lin for spec in pins if (lin := hh.lineage_of(spec.family, spec.signal_code_sha256))), None)
+def _pin_lineages(pins: Sequence[TrialSpec]) -> list[str | None]:
+    """Every distinct ``LAST_LOOK_LINEAGES`` lineage among ``pins`` (all of them, not the first:
+    review #3458); ``[None]`` when none belongs to one, so the hunt's own rows still count."""
+    found = {lineage for spec in pins if (lineage := hh.lineage_of(spec.family, spec.signal_code_sha256))}
+    return [*sorted(found)] if found else [None]
+
+
+def _terminal(conn: psycopg.Connection[Any], hunt_id: str, lineages: Sequence[str | None]) -> str | None:
+    return next(
+        (reason for lin in lineages if (reason := hh.terminal_refusal(conn, hunt_id=hunt_id, lineage=lin))), None
+    )
+
+
+def _write_terminal(conn: psycopg.Connection[Any], hunt_id: str, lineages: Sequence[str | None], reason: str) -> None:
+    for lineage in lineages:
+        hh.write_terminal(conn, hunt_id=hunt_id, lineage=lineage, reason=reason)
 
 
 def _discovery_completeness(conn: psycopg.Connection[Any], hunt_id: str) -> list[str]:
@@ -711,8 +725,8 @@ def freeze_validation_declaration(
         frozen = _frozen_declarations(conn)
         # Closure is read under the programme lock (spec "Budget and closure").
         codes = ["hunt_closed"] if hunt_id in hh.HUNT_CLOSED else []
-        lineage = _lineage_of_pins(pins)
-        terminal = hh.terminal_refusal(conn, hunt_id=hunt_id, lineage=lineage)
+        lineages = _pin_lineages(pins)
+        terminal = _terminal(conn, hunt_id, lineages)
         if terminal is not None:
             codes.append("hunt_terminal")
         codes += _gate_codes(hunt_id)
@@ -740,12 +754,7 @@ def freeze_validation_declaration(
             substantive = [code for code in codes if _substantive(code)]
             if substantive and terminal is None:
                 conn.rollback()
-                hh.write_terminal(
-                    conn,
-                    hunt_id=hunt_id,
-                    lineage=lineage,
-                    reason=f"validation freeze refused: {'; '.join(substantive)}",
-                )
+                _write_terminal(conn, hunt_id, lineages, f"validation freeze refused: {'; '.join(substantive)}")
         else:
             codes += _stale_keys(recomputed, doc)
         return _write_frozen(
@@ -1090,15 +1099,13 @@ def _validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> Validati
         raise hh.HuntHarnessError(f"{hh.declaration_strategy_id(hunt_id, 'validation')} has not frozen")
     frozen, declaration = loaded
     if hunt_id in hunt_gate.GATED_HUNTS:
-        lineage = _lineage_of_pins([TrialSpec.from_form(pin["spec"]) for pin in declaration.doc["pins"]])
+        lineages = _pin_lineages([TrialSpec.from_form(pin["spec"]) for pin in declaration.doc["pins"]])
         # A terminal row is final: restoring the pinned files cannot re-open a readout (Codex ckpt-2).
-        if hh.terminal_refusal(conn, hunt_id=hunt_id, lineage=lineage) is not None:
+        if _terminal(conn, hunt_id, lineages) is not None:
             raise HuntDeclarationRefused(hunt_id, ["hunt_terminal"])
         gate_codes = hunt_gate.look_codes(declaration.doc, harness_model_id=hh.HUNT_HARNESS_MODEL_ID)
         if gate_codes:
-            hh.write_terminal(
-                conn, hunt_id=hunt_id, lineage=lineage, reason=f"validation readout refused: {', '.join(gate_codes)}"
-            )
+            _write_terminal(conn, hunt_id, lineages, f"validation readout refused: {', '.join(gate_codes)}")
             raise HuntDeclarationRefused(hunt_id, gate_codes)
     variance, m, m_is_floor, register_version, late = _declaration_context(conn, declaration)
     candidates: list[CandidateReadout] = []
