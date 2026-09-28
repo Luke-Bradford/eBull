@@ -533,3 +533,42 @@ def test_look_record_names_the_calendar_cutoff(monkeypatch: pytest.MonkeyPatch, 
     script.run_readout(None, _FACT_DAY, looks_path=looks)  # type: ignore[arg-type]
     (record,) = [json.loads(line) for line in looks.read_text().splitlines()]
     assert record["cutoff_c_k"] == "2026-09-22"
+
+
+class _MainConn(_Conn):
+    isolation_level: object = None
+    read_only = False
+
+    def __enter__(self) -> _MainConn:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("argv", "target", "result", "expected"),
+    [
+        (["--terms"], "generate_terms", {"outcome": "refused", "reason": "no_witnessed_run"}, 1),
+        (["--terms"], "generate_terms", {"outcome": "written"}, 0),
+        (["--census"], "census", {"refused": "no witnessed run"}, 1),
+        (["--census"], "census", {"grid": {"refused": "empty_grid"}}, 1),
+        (["--census"], "census", {"grid": {}}, 0),
+        (["--readout"], "run_readout", {"outcome": "refused", "reason": "not_frozen"}, 1),
+        (["--readout"], "run_readout", {"outcome": "read"}, 0),
+    ],
+)
+def test_main_exit_code_reflects_the_outcome(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], target: str, result: dict[str, Any], expected: int
+) -> None:
+    monkeypatch.setattr(script.psycopg, "connect", lambda _url: _MainConn())
+    monkeypatch.setattr(script, target, lambda _conn, _day: result)
+    assert script.main(argv) == expected
+
+
+@pytest.mark.parametrize(("code", "expected"), [(1, 1), (0, 0)])
+def test_main_freeze_exit_code_is_the_freeze_code(monkeypatch: pytest.MonkeyPatch, code: int, expected: int) -> None:
+    monkeypatch.setattr(script.psycopg, "connect", lambda _url: _MainConn())
+    monkeypatch.setattr(script, "freeze", lambda _conn, *, dry_run: (code, {"outcome": "x"}))
+    assert script.main(["--freeze"]) == expected
+    assert script.main(["--freeze", "--dry-run"]) == expected

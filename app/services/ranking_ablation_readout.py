@@ -273,9 +273,7 @@ def readout(inputs: Inputs, *, frozen_at: datetime) -> dict[str, Any]:
     """Every evaluation over both populations, in the inventory's order."""
     return {
         population: {
-            evaluation: evaluate(
-                inputs, evaluation, prospective_after=frozen_at if population == "prospective" else None
-            )
+            evaluation: evaluate(inputs, evaluation, prospective_after=_boundary(population, frozen_at))
             for evaluation in EVALUATIONS
         }
         for population in POPULATIONS

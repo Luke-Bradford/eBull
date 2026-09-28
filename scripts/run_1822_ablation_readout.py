@@ -507,7 +507,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.dry_run and not args.freeze:
         parser.error("--dry-run applies to --freeze only")
-    code = 0
     with psycopg.connect(settings.database_url) as conn:
         if args.freeze and not args.dry_run:
             code, result = freeze(conn, dry_run=False)
@@ -517,8 +516,11 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if args.census:
                     result = census(conn, args.readout_date)
+                    refused = "refused" in result or "refused" in result.get("grid", {})
+                    code = 1 if refused else 0
                 elif args.terms:
                     result = generate_terms(conn, args.readout_date)
+                    code = 0 if result["outcome"] == "written" else 1
                 elif args.freeze:
                     code, result = freeze(conn, dry_run=True)
                 else:
