@@ -49,6 +49,7 @@ from app.services.ai_trial_pack import (
     Disclosure,
     Shortlist,
     ShortlistCandidate,
+    ShortlistName,
     build_bar_series,
     canonical_sha256,
     indicators,
@@ -56,6 +57,7 @@ from app.services.ai_trial_pack import (
     select_disclosures,
     select_shortlist,
 )
+from app.services.indicator_series import BarSeries
 from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.price_masked_bars import MASKED_REASON, load_masked_bars
 from app.services.scoring import _DEFAULT_MODEL_VERSION, _apply_market_cap_basis
@@ -524,35 +526,74 @@ def assemble_pack(
         if isinstance(intraday, str):
             incomplete[name.symbol] = intraday
             continue
-        ind = {k: _finite_or_none(v) for k, v in indicators(series).items()}
-        rank = ranking[name.instrument_id]
-        crowd_row = crowd.get(name.instrument_id, {})
         names.append(
-            {
-                "symbol": name.symbol,
-                "instrument_id": name.instrument_id,
-                "slice": name.slice,
-                "bars": [_bar_json(d, r) for d, r in zip(series.dates, series.rows, strict=True)][-PROMPT_BARS:],
-                "indicators": ind,
-                "intraday": {
-                    "interval": INTRADAY_INTERVAL,
-                    "fetched_at": fetched_at,
-                    "returned_count": len(raw),
-                    "bars": [
-                        {"t": b.timestamp, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
-                        for b in intraday
-                    ],
-                },
-                "crowd": {k: crowd_row.get(k) for k in ("buy_holding_pct", "sell_holding_pct", "traders_change_7d")},
-                "filings": [_disclosure_json(d) for d in disclosures[name.instrument_id]["filings"]],
-                "news": [_disclosure_json(d) for d in disclosures[name.instrument_id]["news"]],
-                "ranking": rank,
-            }
+            pack_name_entry(
+                name,
+                series=series,
+                intraday=intraday,
+                returned_count=len(raw),
+                fetched_at=fetched_at,
+                crowd_row=crowd.get(name.instrument_id, {}),
+                filings=disclosures[name.instrument_id]["filings"],
+                news=disclosures[name.instrument_id]["news"],
+                ranking=ranking[name.instrument_id],
+            )
         )
         complete[name.symbol] = name.instrument_id
 
-    pack: dict[str, Any] = {
-        "as_of": as_of,
+    pack = pack_document(step1, shortlist=shortlist, incomplete=incomplete, account=account, names=names)
+    return Pack(pack, canonical_sha256(pack), complete, incomplete)
+
+
+def pack_name_entry(
+    name: ShortlistName,
+    *,
+    series: BarSeries,
+    intraday: Sequence[IntradayBar],
+    returned_count: int,
+    fetched_at: datetime,
+    crowd_row: Mapping[str, Any],
+    filings: Sequence[Disclosure],
+    news: Sequence[Disclosure],
+    ranking: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One pack-complete name's pack entry (§3.2). Shared with the synthetic CLI so its fixture
+    pack cannot drift from the real shape."""
+    return {
+        "symbol": name.symbol,
+        "instrument_id": name.instrument_id,
+        "slice": name.slice,
+        "bars": [_bar_json(d, r) for d, r in zip(series.dates, series.rows, strict=True)][-PROMPT_BARS:],
+        "indicators": {k: _finite_or_none(v) for k, v in indicators(series).items()},
+        "intraday": {
+            "interval": INTRADAY_INTERVAL,
+            "fetched_at": fetched_at,
+            "returned_count": returned_count,
+            "bars": [
+                {"t": b.timestamp, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume} for b in intraday
+            ],
+        },
+        "crowd": {k: crowd_row.get(k) for k in ("buy_holding_pct", "sell_holding_pct", "traders_change_7d")},
+        "filings": [_disclosure_json(d) for d in filings],
+        "news": [_disclosure_json(d) for d in news],
+        "ranking": dict(ranking),
+    }
+
+
+def pack_document(
+    step1: Step1,
+    *,
+    shortlist: Shortlist,
+    incomplete: Mapping[str, str],
+    account: AccountContext,
+    names: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The whole pack (§3.2) around the per-name entries."""
+    if step1.scores_run is None:
+        raise ValueError("a pack needs the step-1 scores run")
+    run = step1.scores_run
+    return {
+        "as_of": step1.as_of,
         "session_date": step1.session_date,
         "last_session": step1.last_session,
         "scores_run": {"model_version": run.model_version, "scored_at": run.scored_at},
@@ -563,15 +604,14 @@ def assemble_pack(
             {"symbol": n.symbol, "instrument_id": n.instrument_id, "slice": n.slice, "market_cap_usd": n.market_cap_usd}
             for n in shortlist.names
         ],
-        "incomplete": incomplete,
+        "incomplete": dict(incomplete),
         "account": {
             "open_positions": [dict(p) for p in account.open_positions],
             "free_slots": account.free_slots,
             "max_new_entries": account.max_new_entries,
         },
-        "names": names,
+        "names": list(names),
     }
-    return Pack(pack, canonical_sha256(pack), complete, incomplete)
 
 
 def _disclosure_json(d: Disclosure) -> dict[str, Any]:
