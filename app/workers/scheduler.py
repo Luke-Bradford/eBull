@@ -6807,7 +6807,6 @@ def fred_reference_refresh() -> None:
 def strategy_paper_cycle() -> None:
     """Run the bounded demo strategy lifecycle; never select live credentials."""
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
-    from app.services.ai_trial_pair_lifecycle import record_pair_lifecycle
     from app.services.strategy_paper_runtime import run_strategy_paper_cycle
 
     if settings.etoro_env != "demo":
@@ -6827,19 +6826,36 @@ def strategy_paper_cycle() -> None:
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
             with connect_job() as conn:
                 result = run_strategy_paper_cycle(conn, broker=broker)
-                # #3471: the trial's pair events derive from the state this cycle just
-                # reconciled and managed, so they are recorded on the same cycle (spec O11).
-                # The cycle can end inside its ranking read; the writer needs an idle
-                # connection, and the context exit would commit the same work anyway.
-                conn.commit()
-                pair_events = record_pair_lifecycle(conn)
+                pair_events = _record_trial_pair_lifecycle(conn)
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
         tracker.note = (
             f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
             f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
-            f"trial_pair_events={pair_events} "
+            f"trial_pair_events={'error' if pair_events is None else pair_events} "
             f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
         )
+        if pair_events is None:
+            tracker.progress = JobProgress(errors={"trial_pair_lifecycle": 1})
+
+
+def _record_trial_pair_lifecycle(conn: psycopg.Connection[Any]) -> int | None:
+    """#3471: record the AI trial's pair events after a paper cycle; ``None`` if it failed.
+
+    The events derive from the state the cycle just reconciled and managed (spec O11). A
+    secondary step: the cycle's own work is committed first and survives a failure here, which
+    is logged and returned as ``None`` so the run is degraded on the errors axis rather than
+    failed (hiding the cycle's counts) or recorded clean (hiding the failure). The cycle can end
+    inside its ranking read, and the writer needs an idle connection.
+    """
+    from app.services.ai_trial_pair_lifecycle import record_pair_lifecycle
+
+    conn.commit()
+    try:
+        return record_pair_lifecycle(conn)
+    except Exception:
+        logger.exception("strategy_paper_cycle: AI-trial pair lifecycle failed; the cycle's work is committed")
+        conn.rollback()
+        return None
 
 
 def ai_trial_decision_run() -> None:
@@ -6868,6 +6884,8 @@ def ai_trial_decision_run() -> None:
             result = run_decision_job(conn, broker=broker, get_intraday_candles=market.get_intraday_candles)
         tracker.row_count = 0 if result.outcome is None else len(result.outcome.pair_ids)
         tracker.note = result.note
+        if result.orphans_killed is None:
+            tracker.progress = JobProgress(errors={"orphan_sweep": 1})
         logger.info("ai_trial_decision_run: %s", result.note)
 
 
@@ -6889,6 +6907,12 @@ def ai_trial_execute() -> None:
             result = run_trial_execution(conn, broker=broker, refresh_halts=_refresh_strategy_halt_feed)
         tracker.row_count = result.legs
         tracker.note = result.note
+        if result.errors:
+            tracker.progress = JobProgress(
+                candidates_seen=result.legs + result.errors,
+                outcomes=dict(result.verdicts),
+                errors={"leg_raised": result.errors},
+            )
         logger.info("ai_trial_execute: %s", result.note)
 
 

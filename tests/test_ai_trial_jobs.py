@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from psycopg.pq import TransactionStatus
 
 from app.jobs.runtime import _INVOKERS
 from app.providers.broker import BrokerAccountRiskSnapshot, BrokerProvider
@@ -259,6 +260,26 @@ def test_a_late_catch_up_still_runs_before_the_target_date(monkeypatch: pytest.M
     assert _decision(monkeypatch, now=now)[0].status == "decided"
 
 
+def test_a_failed_orphan_sweep_is_surfaced_and_never_blocks_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_trial_jobs, "load_declaration", lambda _conn: object())
+
+    def sweep() -> int:
+        raise subprocess.CalledProcessError(1, ["ps"])
+
+    result = run_decision_job(
+        cast(Any, _Conn()),
+        broker=cast(BrokerProvider, _Broker()),
+        get_intraday_candles=lambda *_a: [],
+        now=AFTER_CLOSE,
+        resolve=lambda: ENV,
+        verify=lambda _env: None,
+        sweep=sweep,
+        decide=lambda *_a, **_k: RunOutcome("decided", 1, date(2026, 9, 30)),
+    )
+    assert (result.status, result.orphans_killed) == ("decided", None)
+    assert result.note.endswith("orphans_killed=unknown")
+
+
 def test_an_unavailable_risk_snapshot_reaches_the_run_as_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """The run records it as `trial_capacity_unavailable:account_risk_unavailable`."""
     result, seen = _decision(monkeypatch, now=AFTER_CLOSE, broker=_Broker(fail=True))
@@ -327,6 +348,54 @@ def test_a_cli_changed_under_the_worker_fails_closed(current: RunEnvironment, ok
     else:
         with pytest.raises(TrialJobError, match="changed since deploy"):
             ai_trial_jobs.verify_run_environment(ENV, resolve=lambda _env: current)
+
+
+class _TxConn:
+    def __init__(self) -> None:
+        self.rollbacks = 0
+        self.info = type("Info", (), {"transaction_status": TransactionStatus.INERROR})()
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def test_one_leg_raising_does_not_skip_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2948: an unmodelled failure on the FIRST leg; the others still execute."""
+    executed: list[int] = []
+
+    def execute(_conn: Any, *, broker: Any, signal_id: int, now: datetime) -> Any:
+        if signal_id == 1:
+            raise RuntimeError("unmodelled transport error")
+        executed.append(signal_id)
+        return type("R", (), {"verdict": "submitted"})()
+
+    monkeypatch.setattr(ai_trial_jobs, "due_trial_legs", lambda _conn, *, today: [1, 2, 3])
+    monkeypatch.setattr(ai_trial_jobs, "execute_trial_signal", execute)
+    conn = _TxConn()
+    result = run_trial_execution(
+        cast(Any, conn), broker=cast(BrokerProvider, None), refresh_halts=lambda: None, clock=lambda: IN_SESSION
+    )
+    assert executed == [2, 3] and conn.rollbacks == 1
+    assert (result.legs, result.errors, result.note) == (2, 1, "legs=2 submitted=2 errors=1")
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_the_paper_cycle_lifecycle_step_is_contained(monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
+    from app.services import ai_trial_pair_lifecycle
+    from app.workers import scheduler
+
+    def record(_conn: Any) -> int:
+        if fails:
+            raise RuntimeError("boom")
+        return 3
+
+    monkeypatch.setattr(ai_trial_pair_lifecycle, "record_pair_lifecycle", record)
+    conn = _TxConn()
+    assert scheduler._record_trial_pair_lifecycle(cast(Any, conn)) == (None if fails else 3)
+    assert conn.rollbacks == (1 if fails else 0)
 
 
 def test_the_deployed_environment_is_resolved_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:

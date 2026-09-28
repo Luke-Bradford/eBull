@@ -44,6 +44,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Final
 
 import psycopg
+from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerProvider
 from app.providers.market_data import IntradayBar
@@ -202,7 +203,8 @@ class DecisionJobResult:
     #: else the run's own status.
     status: str
     outcome: RunOutcome | None = None
-    orphans_killed: int = 0
+    #: ``None`` when the sweep itself failed; the run still went ahead.
+    orphans_killed: int | None = 0
 
     @property
     def note(self) -> str:
@@ -215,7 +217,7 @@ class DecisionJobResult:
             if self.outcome.refusal_reason is not None:
                 parts.append(f"reason={self.outcome.refusal_reason}")
             parts.append(f"pairs={len(self.outcome.pair_ids)}")
-        parts.append(f"orphans_killed={self.orphans_killed}")
+        parts.append(f"orphans_killed={'unknown' if self.orphans_killed is None else self.orphans_killed}")
         return " ".join(parts)
 
 
@@ -241,7 +243,14 @@ def run_decision_job(
 
     env = resolve()
     verify(env)
-    orphans = sweep()
+    # A diagnostics step, not a correctness one: a leftover process cannot publish (the lease
+    # refuses a late worker), so a failed sweep is surfaced, never allowed to block the run.
+    orphans: int | None
+    try:
+        orphans = sweep()
+    except Exception:
+        logger.exception("ai_trial decision job: orphan sweep failed")
+        orphans = None
     try:
         risk = broker.get_account_risk_snapshot()
     except Exception:
@@ -284,6 +293,8 @@ class ExecutionJobResult:
     #: ``False`` outside the regular session or before ``TRIAL_ENTRY_TIME_UTC``.
     session_open: bool
     verdicts: Mapping[str, int] = field(default_factory=dict)
+    #: Legs whose executor call raised; each was logged and the batch continued.
+    errors: int = 0
 
     @property
     def legs(self) -> int:
@@ -294,7 +305,8 @@ class ExecutionJobResult:
         if not self.session_open:
             return "session_closed"
         breakdown = " ".join(f"{k}={v}" for k, v in sorted(self.verdicts.items()))
-        return f"legs={self.legs} {breakdown}".rstrip() if self.verdicts else "legs=0"
+        errors = f" errors={self.errors}" if self.errors else ""
+        return f"legs={self.legs} {breakdown}".rstrip() + errors
 
 
 def run_trial_execution(
@@ -310,15 +322,26 @@ def run_trial_execution(
     signal_ids = due_trial_legs(conn, today=observed.astimezone(_NY).date())
     conn.commit()
     verdicts: Counter[str] = Counter()
+    errors = 0
     if signal_ids:
         refresh_halts()
     for signal_id in signal_ids:
         # A fresh instant per leg: the executor refuses an account snapshot stamped more than 5 s
         # after `now`, so one instant for the batch would make a later leg's fresh snapshot a
         # final `account_risk_stale` (Codex ckpt-2).
-        result = execute_trial_signal(conn, broker=broker, signal_id=signal_id, now=clock())
+        # One leg's unmodelled failure must not skip the rest (#2948): contain it, leave the
+        # connection usable, and surface it on the result. The leg has no funding decision,
+        # so the next in-session fire retries it or refuses it `decision_expired`.
+        try:
+            result = execute_trial_signal(conn, broker=broker, signal_id=signal_id, now=clock())
+        except Exception:
+            logger.exception("ai_trial execute: signal %s raised; continuing with the batch", signal_id)
+            if conn.info.transaction_status != TransactionStatus.IDLE:
+                conn.rollback()
+            errors += 1
+            continue
         verdicts[result.verdict] += 1
-    return ExecutionJobResult(session_open=True, verdicts=dict(verdicts))
+    return ExecutionJobResult(session_open=True, verdicts=dict(verdicts), errors=errors)
 
 
 # ---------------------------------------------------------------------------
@@ -356,11 +379,11 @@ __all__ = [
     "TrialJobError",
     "configure_trial_position_managers",
     "deployed_run_environment",
-    "verify_run_environment",
     "due_trial_legs",
     "orphan_model_pids",
     "resolve_run_environment",
     "run_decision_job",
     "run_trial_execution",
     "sweep_orphan_model_processes",
+    "verify_run_environment",
 ]
