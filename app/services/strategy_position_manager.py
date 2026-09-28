@@ -12,7 +12,7 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -29,6 +29,7 @@ from app.providers.broker import (
     BrokerPositionMutationUncertain,
     BrokerProvider,
 )
+from app.services.ai_trial_deadline import deadline_exit_due
 from app.services.broker_closed_release import (
     evaluate_whole_close,
     load_whole_close_evidence,
@@ -109,6 +110,11 @@ class _OwnedPosition:
     structure_atr_multiple: Decimal | None
     quote_bid: Decimal | None
     quoted_at: datetime | None
+    # #3471 §8: a demo-trial leg carries a per-trade exit deadline.  ``is_demo_trial`` is
+    # derived from the trial's trade LINK, never from the deadline being non-NULL, for the
+    # same reason ``is_core`` is: absence must not decide which exit rules apply.
+    is_demo_trial: bool
+    exit_deadline_session: date | None
 
 
 @contextmanager
@@ -328,7 +334,9 @@ _LOAD_OWNED_SQL = f"""
                    variant.break_atr_multiple,
                    variant.chandelier_atr_multiple,
                    variant.structure_atr_multiple,
-                   q.bid AS quote_bid, q.quoted_at
+                   q.bid AS quote_bid, q.quoted_at,
+                   t.exit_deadline_session,
+                   trial_link.strategy_trade_id IS NOT NULL AS is_demo_trial
             FROM strategy_position_ownership own
             JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
             LEFT JOIN strategy_funding_decisions funding
@@ -344,6 +352,7 @@ _LOAD_OWNED_SQL = f"""
             LEFT JOIN strategy_ratchet_variants variant
               ON variant.ratchet_variant_id=manager.ratchet_variant_id
             LEFT JOIN quotes q ON q.instrument_id=t.instrument_id
+            LEFT JOIN ai_trial_trade_links trial_link ON trial_link.strategy_trade_id=t.strategy_trade_id
             WHERE own.strategy_trade_id=%s AND own.broker_position_id=%s AND own.status='active'
               AND t.status IN ('open','closing','reconcile_required')
               AND (
@@ -407,6 +416,8 @@ def _load_owned(conn: psycopg.Connection[Any], *, strategy_trade_id: int, broker
         ),
         quote_bid=Decimal(str(row["quote_bid"])) if row["quote_bid"] is not None else None,
         quoted_at=cast(datetime | None, row["quoted_at"]),
+        is_demo_trial=bool(row["is_demo_trial"]),
+        exit_deadline_session=cast(date | None, row["exit_deadline_session"]),
     )
 
 
@@ -1037,7 +1048,9 @@ def _submit_close(
     *,
     broker: BrokerProvider,
     owned: _OwnedPosition,
-    trigger_code: Literal["timeout", "strategy_exit", "emergency_risk", "operator_close", "core_rebalance"],
+    trigger_code: Literal[
+        "timeout", "exit_deadline", "strategy_exit", "emergency_risk", "operator_close", "core_rebalance"
+    ],
     core_rebalance_intent_id: int | None = None,
 ) -> PositionManagerResult:
     request_id = uuid4()
@@ -1422,12 +1435,33 @@ def manage_owned_position(
         # silently start being closed for being old.  A core holding has no
         # horizon by construction -- that is what makes it core.
         age_seconds = None if owned.is_core else owned.max_position_age_seconds
+        # #3471 §8 "Per-trade deadline": a demo-trial leg exits at the first cycle at or after
+        # 15:00 UTC on its deadline session, and every later cycle retries until it is closed
+        # (a halted name closes when it is tradable again: `broker_close_not_allowed` below).
+        # The age-out still applies, so the effective exit is min(deadline, age).
+        if owned.is_demo_trial and owned.exit_deadline_session is None:
+            with conn.transaction():
+                conn.execute(
+                    "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "
+                    "WHERE strategy_trade_id=%s",
+                    (strategy_trade_id,),
+                )
+            return PositionManagerResult(
+                strategy_trade_id, broker_position_id, "reconcile_required", "trial_exit_deadline_missing"
+            )
+        deadline_due = (
+            owned.is_demo_trial
+            and owned.exit_deadline_session is not None
+            and deadline_exit_due(owned.exit_deadline_session, observed_at)
+        )
         timed_out = (
             age_seconds is not None
             and position.open_date_time is not None
             and position.open_date_time <= observed_at - timedelta(seconds=age_seconds)
         )
-        if age_seconds is not None and position.open_date_time is None:
+        # A due deadline does not depend on the broker's open time, so its absence (which only
+        # the age-out needs) must not hold a due trial exit in reconciliation (Codex ckpt-2).
+        if age_seconds is not None and position.open_date_time is None and not deadline_due:
             with conn.transaction():
                 conn.execute(
                     "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "
@@ -1440,7 +1474,7 @@ def manage_owned_position(
                 "reconcile_required",
                 "position_open_time_missing",
             )
-        if close_reason is not None or timed_out:
+        if close_reason is not None or timed_out or deadline_due:
             eligibility = _eligibility_for_owned(broker, owned)
             if not eligibility.allow_close_position:
                 return PositionManagerResult(
@@ -1450,7 +1484,7 @@ def manage_owned_position(
                 conn,
                 broker=broker,
                 owned=owned,
-                trigger_code=close_reason or "timeout",
+                trigger_code=close_reason or ("timeout" if timed_out else "exit_deadline"),
                 core_rebalance_intent_id=core_rebalance_intent_id,
             )
 

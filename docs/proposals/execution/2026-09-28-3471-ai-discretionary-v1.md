@@ -399,6 +399,12 @@ Slice 2 tests:
 - Each leg's deadline counts from its **own** fill session.
 - The exit fires at the first position cycle at or after 15:00 UTC on the deadline session. `market_calendar` skips holidays.
 - A halted name at its deadline closes when it becomes tradable again.
+- **Implemented in slice 2c-ii** (`sql/435`, `app/services/ai_trial_deadline.py`).
+  - The reconciliation that opens the leg stamps the deadline in the same UPDATE, from the entry order's stored `execution_time`. The fill session is its New York civil date, rolled forward to the next session when that date is closed.
+  - ⚠ Deviation: the trigger requires the deadline once a trial trade is `open`, `closing` or `closed`, not from insert, because the fill session does not exist while the trade is `planned`/`submitted`. "Trial trade" means `ai_trial_trade_links` names it; that link is now refused unless the trade is still `planned`. The deadline is immutable, and a non-trial trade cannot carry one.
+  - The manager closes under the new trigger code `exit_deadline` (`timeout` wins when both are due). A trial leg loaded without a deadline goes `reconcile_required` (`trial_exit_deadline_missing`).
+  - Still owed (2c-iii, with O10): a submitted protection edit that never lands resumes `pending` on every cycle and returns before any exit is evaluated, so it would hold a due deadline close indefinitely (Codex ckpt-2 P1; the same holds for the age-out today). O10's repair-or-close must let a due deadline supersede that edit.
+  - Still owed: the `censored` pair event (10 sessions after the deadline) needs the pair-lifecycle writer, since `ai_trial_pair_events` refuses `censored` before `filled`; it moves to 2c-iii. The 40-session `max_position_age` is set when the trial deployments are configured (slice 2c-iv / 3).
 
 **Lifecycle exceptions.** These map to the manager's existing states:
 - A failed close keeps the pair `open`, and it is reported as censored.
