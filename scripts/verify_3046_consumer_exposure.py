@@ -425,6 +425,17 @@ INVENTORY: tuple[Occurrence, ...] = (
     Occurrence("app/workers/scheduler.py", 664, "eligibility EXISTS", "METADATA"),
     Occurrence("app/workers/scheduler.py", 3175, "_T3_CANDLE_SELECT last_bar", "METADATA"),
     Occurrence("app/workers/scheduler.py", 3418, "post-refresh usable count", "METADATA"),
+    Occurrence(
+        "app/services/ranking_ablation_reader.py",
+        258,
+        "_SERIES_SQL read start",
+        "METADATA",
+        note=(
+            "max(price_date) before the first formation. The bar read is the JOIN below it, which "
+            "this FROM-regex does not see; every bar it reads gets bar AND transition verdicts "
+            "computed in-process by evaluate_series (#1822 spec 'Reader'), T3 handled by declaration"
+        ),
+    ),
     # --- the masked loader, which carries bar verdicts and no transition ----
     Occurrence(
         "app/services/price_masked_bars.py",
