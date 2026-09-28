@@ -65,7 +65,7 @@ export function RankSummary({ score, errored, notScored = null }: RankSummaryPro
       )}
       <HeuristicBadge modelVersion={score.model_version} compact />
       {contributions.length > 0 && (
-        <span className="text-slate-500" title="Largest weight × score contributions to the pre-penalty total">
+        <span className="text-slate-500" title="Largest weight × score contributions to the pre-penalty total, excluding default fills (families with no input)">
           largest:{" "}
           {contributions
             .map((c) => `${titleCase(c.family)} +${c.contribution.toFixed(2)}`)

@@ -65,9 +65,16 @@ function filingsStatusText(status: string | null): string {
   }
 }
 
-/** The largest `n` family contributions (already sorted by the backend). */
+/** The largest `n` family contributions (already sorted by the backend), skipping
+ *  default fills: a family that observed no input (`missing` / `quarantined`)
+ *  contributes weight × default, which must not read as a verdict (#3389 c). */
 export function largestContributions(score: VerdictScore, n = 2): FamilyContribution[] {
-  return score.contributions.slice(0, n);
+  const defaultFill = new Set(
+    score.families
+      .filter((f) => f.usability === "missing" || f.usability === "quarantined")
+      .map((f) => f.family),
+  );
+  return score.contributions.filter((c) => !defaultFill.has(c.family)).slice(0, n);
 }
 
 /** Fired penalties with a deduction, largest first, at most `n`. */
