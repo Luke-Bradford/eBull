@@ -279,7 +279,7 @@ def _text(raw: bytes, budget: int) -> str:
     """Decoded output within ``budget`` UTF-8 bytes. NUL is not storable in ``text``; a
     replacement character can take more bytes than the byte it replaces, so the budget is
     enforced AFTER decoding, never assumed from the raw length."""
-    text = raw.decode("utf-8", errors="replace").replace("\x00", "�")
+    text = raw.decode("utf-8", errors="replace").replace("\x00", "\ufffd")
     encoded = text.encode("utf-8")
     if len(encoded) <= budget:
         return text
