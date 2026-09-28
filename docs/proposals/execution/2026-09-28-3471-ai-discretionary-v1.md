@@ -328,6 +328,7 @@ v3 adds a third purpose, **`demo_trial`**, for the two trial strategy ids. It wo
 - **Every other chokepoint** requires `capital_candidate`, so `demo_trial` fails it with no code change.
 - **Why this key:** the identity is **per strategy**. A second, "standard" deployment inserted for the same strategy id is still `demo_trial`.
 - **No evidence path:** the trial writes **nothing** to `strategy_results_store` or promotion tables. The readout lives only in `ai_trial_*`.
+- **Implemented in slice 2a.** The two ids live in `strategy_manifest.DEMO_TRIAL_STRATEGY_IDS`, **not** in `STRATEGY_MANIFEST`. They have no signal function or runner, and every backtest and evidence path iterates the manifest. `registered_strategy_purpose` reads that set after the manifest, and a collision between the two is refused at import. A `demo_trial` paper deployment is admitted only while the strategy has no promotion stage. The "trial loader refuses a non-trial signal" test belongs to slice 2b, which builds that loader.
 
 Slice 2 tests:
 - an **enumeration test** that calls every live-authority and advancing-promotion entry point listed above for a `demo_trial` id and asserts refusal, and asserts that the one paper branch is accepted;

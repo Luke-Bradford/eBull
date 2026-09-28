@@ -195,6 +195,18 @@ StrategyPurpose = Literal["harness_validation", "capital_candidate"]
 STRATEGY_CLASSES: frozenset[str] = frozenset(get_args(StrategyClass))
 STRATEGY_PURPOSES: frozenset[str] = frozenset(get_args(StrategyPurpose))
 
+#: #3471 spec §8. The AI-discretionary-v1 trial's two legs carry a THIRD purpose, ``demo_trial``.
+#: They are deliberately NOT manifest entries: they have no signal function or runner, and every
+#: backtest and evidence path iterates ``STRATEGY_MANIFEST``. ``registered_strategy_purpose`` reads
+#: this set after the manifest, so every capital and promotion chokepoint — all of which already
+#: consult it and require ``capital_candidate`` — refuses them with no change of its own. The
+#: control plane's two narrow branches (``promote_strategy`` refuses every advancing stage;
+#: ``configure_deployment`` admits a paper deployment only) are the whole of what they may do.
+DemoTrialPurpose = Literal["demo_trial"]
+DEMO_TRIAL_STRATEGY_IDS: Final[frozenset[str]] = frozenset({"ai-discretionary-v1", "ai-discretionary-v1-control"})
+#: The purpose any registered strategy id resolves to: a manifest purpose, or ``demo_trial``.
+RegisteredPurpose = StrategyPurpose | DemoTrialPurpose
+
 
 class IdentityFactory(Protocol):
     """``s*_identity``. Both arguments are required — criterion 11 puts the
@@ -1286,6 +1298,12 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
     }
 )
 
+# A demo-trial id that were also a manifest entry would resolve to the manifest's purpose and
+# silently lose the demo_trial restriction's meaning; refuse the collision at import.
+_DEMO_TRIAL_COLLISIONS = DEMO_TRIAL_STRATEGY_IDS & STRATEGY_MANIFEST.keys()
+if _DEMO_TRIAL_COLLISIONS:
+    raise RuntimeError(f"demo-trial ids collide with the manifest: {sorted(_DEMO_TRIAL_COLLISIONS)}")
+
 
 #: The strategies whose VERDICTS depend on the price-basis carrier (#2840 §8b).
 #:
@@ -1318,6 +1336,7 @@ RATIO_BASIS_CONSUMERS: Final[frozenset[str]] = frozenset({S2_STRATEGY_ID})
 __all__ = [
     "PRICE_BASIS_CONSUMERS",
     "RATIO_BASIS_CONSUMERS",
+    "DEMO_TRIAL_STRATEGY_IDS",
     "STRATEGY_CLASSES",
     "STRATEGY_MANIFEST",
     "CrossSectionalLeg",
@@ -1328,6 +1347,7 @@ __all__ = [
     "IdentityFactory",
     "MemberStager",
     "PerSeriesSignals",
+    "RegisteredPurpose",
     "StrategyClass",
     "StrategyEntry",
     "StrategyPurpose",

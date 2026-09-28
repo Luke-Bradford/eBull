@@ -25,7 +25,7 @@ from app.services.strategy_base_currency import (
     normalise_deployment_currency,
 )
 from app.services.strategy_capital_sandbox import sandbox_bound
-from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
+from app.services.strategy_manifest import DEMO_TRIAL_STRATEGY_IDS, STRATEGY_MANIFEST, RegisteredPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
 from app.services.strategy_promotion_evidence_store import load_promotion_evidences
 from app.services.strategy_result import holdout_count_promotion_refusals, structural_promotion_refusals
@@ -88,6 +88,8 @@ _NEXT_STAGE: dict[Stage | None, frozenset[Stage]] = {
 
 _RESULT_EVIDENCE_STAGES = frozenset({"historical_validated", "forward_observation"})
 _EXTERNAL_EVIDENCE_STAGES = frozenset({"historical_validated", "forward_observation", "paper_enabled", "live_enabled"})
+#: Every stage that moves a strategy FORWARD. ``paused`` and ``retired`` are the risk-reducing rest.
+_ADVANCING_STAGES = frozenset({"research_candidate"}) | _EXTERNAL_EVIDENCE_STAGES
 
 
 class StrategyControlError(ValueError):
@@ -98,9 +100,12 @@ class StrategyOwnershipError(StrategyControlError):
     """The exact broker position is not actively owned by this trade."""
 
 
-def registered_strategy_purpose(strategy_id: str) -> StrategyPurpose | None:
+def registered_strategy_purpose(strategy_id: str) -> RegisteredPurpose | None:
+    """The manifest entry's purpose, ``demo_trial`` for the #3471 trial legs, else ``None``."""
     entry = STRATEGY_MANIFEST.get(strategy_id)
-    return None if entry is None else entry.purpose
+    if entry is not None:
+        return entry.purpose
+    return "demo_trial" if strategy_id in DEMO_TRIAL_STRATEGY_IDS else None
 
 
 @dataclass(frozen=True)
@@ -588,6 +593,11 @@ def promote_strategy(
     manifest_entry = STRATEGY_MANIFEST.get(strategy_id)
     if to_stage in _EXTERNAL_EVIDENCE_STAGES and manifest_entry is not None and manifest_entry.retired_reason:
         raise StrategyControlError(f"{strategy_id} is retired and cannot advance: {manifest_entry.retired_reason}")
+    # #3471 §8: a demo-trial leg runs on a paper deployment with NO promotion stage, so every
+    # advancing stage is refused — including `research_candidate`, the one outside the evidence
+    # set. Nothing it does may become promotion evidence.
+    if to_stage in _ADVANCING_STAGES and purpose == "demo_trial":
+        raise StrategyControlError("demo-trial strategies run without promotion and cannot advance")
     if to_stage in _EXTERNAL_EVIDENCE_STAGES and purpose == "harness_validation":
         raise StrategyControlError("harness-validation strategies are permanent controls and cannot be promoted")
     if to_stage in _EXTERNAL_EVIDENCE_STAGES and purpose != "capital_candidate":
@@ -830,13 +840,18 @@ def configure_deployment(
     purpose = registered_strategy_purpose(strategy_id)
     if purpose == "harness_validation" and not risk_reducing and (enabled or capital_limit > 0):
         raise StrategyControlError("harness-validation strategies cannot receive capital authority")
-    if purpose != "capital_candidate" and not risk_reducing and (enabled or capital_limit > 0):
+    # #3471 §8: a demo-trial leg may hold a PAPER deployment with a capital limit and no promotion
+    # stage — the one narrow branch — and never live authority.
+    if purpose == "demo_trial" and mode != "paper" and not risk_reducing and (enabled or capital_limit > 0):
+        raise StrategyControlError("demo-trial strategies cannot receive live capital authority")
+    if purpose not in ("capital_candidate", "demo_trial") and not risk_reducing and (enabled or capital_limit > 0):
         raise StrategyControlError("unregistered strategies cannot receive capital authority")
+    demo_trial_paper = purpose == "demo_trial" and mode == "paper" and stage is None
     eligible: dict[Mode, frozenset[Stage]] = {
         "paper": frozenset({"paper_enabled", "live_enabled"}),
         "live": frozenset({"live_enabled"}),
     }
-    if enabled and stage not in eligible[mode] and not risk_reducing:
+    if enabled and stage not in eligible[mode] and not risk_reducing and not demo_trial_paper:
         raise StrategyControlError(f"{mode} deployment cannot be enabled at stage {stage!r}")
     if existing is None:
         revision = 1

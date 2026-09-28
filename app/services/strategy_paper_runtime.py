@@ -25,7 +25,7 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
-from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_manifest import DEMO_TRIAL_STRATEGY_IDS, STRATEGY_MANIFEST
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
 from app.services.strategy_opportunity_ranker import (
     RankableOpportunity,
@@ -311,8 +311,15 @@ def refresh_strategy_health(
             LEFT JOIN strategy_scan_watermark w
               ON w.strategy_id=d.strategy_id AND w.strategy_version=d.strategy_version
             WHERE d.mode='paper' AND d.enabled
+              -- #3471 §8: a demo-trial leg has no scan-watermark producer; its freshness
+              -- bound is the decision's own target session, checked by its loader. Counted
+              -- here, its absent watermark would hold scan_freshness active for everyone.
+              AND NOT (d.strategy_id = ANY(%(demo_trial_ids)s::text[]))
             """,
-            {"cutoff": observed_at - timedelta(seconds=int(policy["scan_age"]))},
+            {
+                "cutoff": observed_at - timedelta(seconds=int(policy["scan_age"])),
+                "demo_trial_ids": sorted(DEMO_TRIAL_STRATEGY_IDS),
+            },
         )
         scan = cur.fetchone()
         assert scan is not None

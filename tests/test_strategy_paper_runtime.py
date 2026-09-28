@@ -625,3 +625,24 @@ def test_health_refresh_persists_account_and_deployment_max_drawdown(
         now=observed + timedelta(minutes=2),
     )
     assert report.facts.max_observed_drawdown_pct == deployment[2]
+
+
+def test_demo_trial_paper_deployment_does_not_trip_scan_freshness(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3471 §8: a demo-trial leg has no scan-watermark producer, so its enabled paper
+    deployment must not hold the global scan_freshness block active."""
+    conn = ebull_test_conn
+    _seed(conn)
+    conn.execute(
+        """
+        INSERT INTO strategy_deployments (
+            strategy_id,strategy_version,mode,capital_limit,currency,enabled,updated_by,reason
+        ) VALUES ('ai-discretionary-v1','v1','paper',1000,'USD',TRUE,'test','#3471')
+        """
+    )
+    conn.commit()
+    refresh_strategy_health(conn, broker=_broker(), now=_NOW)
+    assert conn.execute("SELECT active FROM strategy_execution_blocks WHERE source='scan_freshness'").fetchone() == (
+        False,
+    )
