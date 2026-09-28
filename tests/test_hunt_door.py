@@ -217,9 +217,11 @@ def test_the_harness_model_id_is_the_one_hunt_2s_discovery_row_carries() -> None
     assert hh.HUNT_HARNESS_MODEL_ID == "hunt-harness-v1+58244f6f49e168f2"
 
 
-def test_hunt_3_registers_no_discovery_row_and_waits_for_its_gate() -> None:
+def test_hunt_3_registers_no_discovery_row_and_carries_its_gate() -> None:
+    from app.services import hunt_gate
+
     assert hh.HUNT_BUDGETS["hunt-3"] == 0
-    assert "hunt-3" in hunt_door.HUNTS_AWAITING_GATE
+    assert "hunt-3" in hunt_gate.GATED_HUNTS and "hunt-3" not in hunt_door.HUNTS_AWAITING_GATE
     assert hh.HUNT_INHERITED_DISCOVERY["hunt-3"].source_hunt_id == "hunt-2"
     assert "hunt-2" in hh.HUNT_CLOSED
 

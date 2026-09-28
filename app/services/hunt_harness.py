@@ -62,6 +62,7 @@ from app.services import (
     hunt_books,
     hunt_compute,
     hunt_evaluator,
+    hunt_gate,
     hunt_inference,
     hunt_panel,
     hunt_store,
@@ -113,6 +114,8 @@ RefusalReason = Literal[
     "no_budget",
     "budget_exhausted",
     "candidate_owned_by_other_hunt",
+    "hunt_terminal",
+    "lineage_closed",
 ]
 
 SPLITS: Final[tuple[Split, ...]] = get_args(Split)
@@ -317,6 +320,25 @@ HUNT_INHERITED_DISCOVERY: Final[Mapping[str, InheritedDiscovery]] = MappingProxy
         ),
     }
 )
+
+#: family → the signal code sha256s of a lineage whose FIRST validation-split row is its LAST
+#: historical look (#3454, spec "Lineage closure (terminal invariant)"). Once any
+#: validation-split ``hunt_trials`` row exists for the lineage, ``evaluate`` refuses
+#: ``lineage_closed`` for every other spec with that family or signal hash, under any hunt,
+#: entry point, lag, h, floor or cost variant. Keyed on DATABASE state, so a crashed or
+#: abandoned look closes it too. Reviewed-PR changes only; never in any hash.
+#: extreme_move_illiquid: hunts 1-3's signal module ``extreme_move_illiquid:score``.
+LAST_LOOK_LINEAGES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {"extreme_move_illiquid": frozenset({"4bb3e87efbc38fcf80f2d665537a2d17a4b6f33f59e70720ffcd5beb640dd172"})}
+)
+
+
+def lineage_of(family: str, signal_code_sha256: str | None) -> str | None:
+    """The ``LAST_LOOK_LINEAGES`` lineage a spec belongs to by family OR signal hash."""
+    for lineage, hashes in LAST_LOOK_LINEAGES.items():
+        if family == lineage or signal_code_sha256 in hashes:
+            return lineage
+    return None
 
 
 @dataclass(frozen=True)
@@ -890,6 +912,9 @@ def _membership_codes(conn: psycopg.Connection[Any], frozen: FrozenPreregistrati
         return ("hunt_declaration_contract_mismatch",)
     if spec.spec_sha256 not in declaration.pinned_spec_sha256:
         return ("spec_not_in_declaration",)
+    if declaration.hunt_id in hunt_gate.GATED_HUNTS and declaration.split == "validation":
+        # #3454: the frozen gate binds from the freeze through the readout.
+        return tuple(hunt_gate.look_codes(declaration.doc, harness_model_id=HUNT_HARNESS_MODEL_ID))
     return ()
 
 
@@ -926,6 +951,14 @@ def _pass_door(
         )
     except PreregDeclarationRefused as refused:
         conn.rollback()
+        gate = [code for code in refused.refusals if code.startswith(hunt_gate.SUBSTANTIVE_PREFIX)]
+        if gate:
+            write_terminal(
+                conn,
+                hunt_id=spec.hunt_id,
+                lineage=lineage_of(spec.family, spec.signal_code_sha256),
+                reason=f"{spec.split} look refused: {', '.join(gate)}",
+            )
         reason: RefusalReason = (
             "spec_not_in_declaration" if refused.refusals == ("spec_not_in_declaration",) else "door_refused"
         )
@@ -1102,6 +1135,30 @@ _SELECT_VALIDATION_FROZEN = """
 
 _COUNT_DISCOVERY_ROWS = "SELECT count(*) FROM hunt_trials WHERE hunt_id = %(hunt)s AND split = 'discovery'"
 
+_SELECT_TERMINAL = """
+    SELECT hunt_id, reason
+    FROM hunt_terminal
+    WHERE hunt_id = %(hunt)s OR (%(lineage)s::text IS NOT NULL AND lineage = %(lineage)s::text)
+    ORDER BY hunt_terminal_id
+    LIMIT 1
+"""
+
+_INSERT_TERMINAL = """
+    INSERT INTO hunt_terminal (hunt_id, lineage, reason) VALUES (%(hunt)s, %(lineage)s, %(reason)s)
+"""
+
+#: Any validation-split row of the lineage, of either purpose, other than THIS candidate's own
+#: validation row (a retry or cached read of the one look is the same look, not a new one).
+_SELECT_LINEAGE_LOOK = """
+    SELECT hunt_trial_id, hunt_id
+    FROM hunt_trials
+    WHERE split = 'validation'
+      AND (family = %(lineage)s OR spec ->> 'signal_code_sha256' = ANY(%(hashes)s))
+      AND NOT (%(split)s = 'validation' AND candidate_sha256 IS NOT DISTINCT FROM %(candidate)s)
+    ORDER BY hunt_trial_id
+    LIMIT 1
+"""
+
 _INSERT_TRIAL = """
     INSERT INTO hunt_trials (
         hunt_id, family, split, candidate_sha256, spec_sha256, spec, harness_model_id,
@@ -1185,6 +1242,24 @@ def refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec) 
         return HuntRefused("hunt_closed", f"{spec.hunt_id} closed: {HUNT_CLOSED[spec.hunt_id]}")
     if spec.hunt_id not in HUNT_BUDGETS:
         return HuntRefused("no_budget", f"{spec.hunt_id} has no HUNT_BUDGETS entry; the #3387 PR opening it sets one")
+    lineage = lineage_of(spec.family, spec.signal_code_sha256)
+    terminal = terminal_refusal(conn, hunt_id=spec.hunt_id, lineage=lineage)
+    if terminal is not None:
+        return HuntRefused("hunt_terminal", terminal)
+    if lineage is not None:
+        look = conn.execute(
+            _SELECT_LINEAGE_LOOK,
+            {
+                "lineage": lineage,
+                "hashes": sorted(LAST_LOOK_LINEAGES[lineage]),
+                "split": spec.split,
+                "candidate": spec.candidate_sha256,
+            },
+        ).fetchone()
+        if look is not None:
+            return HuntRefused(
+                "lineage_closed", f"lineage {lineage} closed by validation row {look[0]} ({look[1]}); #3454"
+            )
     burn = burning_look(conn, split=spec.split, candidate_sha256=spec.candidate_sha256, hunt_id=spec.hunt_id)
     if burn is not None:
         return HuntRefused("split_burned", f"{spec.split} burned by the recorded look {burn!r}")
@@ -1198,6 +1273,27 @@ def refusal_before_registration(conn: psycopg.Connection[Any], spec: TrialSpec) 
     if mismatches:
         return HuntRefused("identity_mismatch", "; ".join(mismatches))
     return None
+
+
+def terminal_refusal(conn: psycopg.Connection[Any], *, hunt_id: str, lineage: str | None) -> str | None:
+    """The terminal row closing ``hunt_id``, or its lineage, as ``"<hunt>: <reason>"``; else ``None``."""
+    row = conn.execute(_SELECT_TERMINAL, {"hunt": hunt_id, "lineage": lineage}).fetchone()
+    return None if row is None else f"{row[0]}: {row[1]}"
+
+
+def write_terminal(conn: psycopg.Connection[Any], *, hunt_id: str, lineage: str | None, reason: str) -> None:
+    """Persist a gated hunt's substantive refusal AS IT HAPPENS (#3454 "Lineage closure").
+
+    Called under the programme lock after the refused transaction rolled back; commits its own
+    row, so the refusal survives whatever the caller raises next.
+    """
+    if not _PROGRAMME_LOCK_HELD.get():
+        raise HuntHarnessError("a terminal row is written only under the hunt programme lock")
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
+    conn.execute(_INSERT_TERMINAL, {"hunt": hunt_id, "lineage": lineage, "reason": reason})
+    conn.commit()
+    _LOG.warning("hunt %s is terminal (lineage %s): %s", hunt_id, lineage, reason)
 
 
 def burning_look(conn: psycopg.Connection[Any], *, split: Split, candidate_sha256: str, hunt_id: str) -> str | None:
@@ -1283,6 +1379,15 @@ def _insert_trial(conn: psycopg.Connection[Any], params: dict[str, Any]) -> int 
     return None if row is None else int(row[0])
 
 
+def _stale_gated_look(spec: TrialSpec, refusal: HuntRefused) -> bool:
+    return (
+        refusal.reason == "identity_mismatch"
+        and spec.hunt_id in hunt_gate.GATED_HUNTS
+        and spec.split == "validation"
+        and spec.harness_model_id != HUNT_HARNESS_MODEL_ID
+    )
+
+
 def evaluate(
     conn: psycopg.Connection[Any], spec: TrialSpec, *, registered_by: str
 ) -> HuntOutcome | HoldoutRecorded | HuntRefused:
@@ -1305,6 +1410,14 @@ def evaluate(
     with hunt_programme_lock(conn):
         refusal = refusal_before_registration(conn, spec)
         if refusal is not None:
+            if _stale_gated_look(spec, refusal):
+                # #3454: a model move closes a gated hunt "undetermined"; it is not re-run.
+                write_terminal(
+                    conn,
+                    hunt_id=spec.hunt_id,
+                    lineage=lineage_of(spec.family, spec.signal_code_sha256),
+                    reason=f"{spec.split} look refused: stale harness model: {refusal.detail}",
+                )
             conn.commit()
             return refusal
 
@@ -1688,6 +1801,7 @@ __all__ = [
     "HUNT_CLOSED",
     "HUNT_HARNESS_MODEL_ID",
     "HUNT_INHERITED_DISCOVERY",
+    "LAST_LOOK_LINEAGES",
     "HUNT_PROGRAMME_LOCK",
     "HUNT_TARIFF",
     "LANES",
@@ -1713,6 +1827,7 @@ __all__ = [
     "error_class_of",
     "evaluate",
     "hunt_programme_lock",
+    "lineage_of",
     "read_outcome",
     "read_universe_identity",
     "record_outside_look",
@@ -1720,6 +1835,8 @@ __all__ = [
     "running_cost_model_id",
     "signal_code_sha256",
     "spec_sha256_of",
+    "terminal_refusal",
     "timeline_refusal",
     "verify_trial_row",
+    "write_terminal",
 ]

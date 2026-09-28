@@ -497,6 +497,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "hunt_trials",
     # #3385 slice 2b-i.
     "hunt_declarations",
+    # #3454 slice B.
+    "hunt_terminal",
 )
 
 # ---------------------------------------------------------------------------
