@@ -1,10 +1,10 @@
-# #1822 — v1.5 ranking family ablation: spec (v7)
+# #1822 — v1.5 ranking family ablation: spec (v8)
 
 Refs #1822, #1815, #2437 (supervisor refill 2026-09-28 05:15Z, item 2),
 `docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md` §3. v2 answers Codex ckpt-1 v1 (61
 findings), v3 answers round 2 (50),
-v4 answers round 3, v5 settles "Prices", v6 settles slice 1b, v7 records slice 1b's build corrections; see
-"Revision notes".
+v4 answers round 3, v5 settles "Prices", v6 settles slice 1b, v7 records slice 1b's build corrections, v8 fixes the
+declaration's terms; see "Revision notes".
 
 **Ask (supervisor):** ablate each v1.5 family against the matched control, on the hunt harness (#3385) and the PIT
 bundles. Report each family's incremental contribution with its SE, and close no family on power alone. Weights
@@ -357,10 +357,138 @@ rebalancing is uncosted in both books (the harness residual), so net Δ is not f
 Six families, two cost bases: every t is **marginal**. No multiplicity correction is applied because no inference
 is drawn; the readout says this in its header.
 
-**Declaration.** Slice 1 freezes a `freeze_preregistration` row before any forward return is read. It carries the
-population query, the timeline rules and the completion witness, h, fraction, tie rule, termination policies, lane
-filter, cost model id, price reader and archive identity, calendar identity, and the code sha of the module and
-script. Everything else is residual.
+**Declaration (v8).** Slice 1b-ii freezes one `freeze_preregistration` row before any forward return is read.
+`sql/333`'s row has fixed columns, so the construction lives in a **terms sidecar** that the row pins by digest.
+
+- **Terms sidecar.** It is canonical JSON: `sort_keys`, `separators=(",", ":")`, `ensure_ascii`, and one trailing
+  newline. It is stored per digest at `docs/proposals/ta/1822-route-f/terms-<sha256>.json`, and it is never
+  overwritten. It has two sections.
+  - **Semantic terms**, regenerated from the code:
+    - the SQL constants route F executes;
+    - H, FRACTION, LAG, the tie rule (`select_arm`: every tie at the cut), FAMILY_ORDER and the weights by value;
+    - the lane (`Stocks`, USD), the four cells and the three `PROGRAMME_POLICIES` (canonical `zero_recovery`);
+    - the rule identities: `COST_MODEL_ID`, `HUNT_HARNESS_MODEL_ID`, `STRUCTURAL_REFUSAL_POLICY_VERSION`, and the
+      quarantine, calendar and termination `RULE_SET_VERSION`s. The last three embed their module's code hash;
+    - `ranking_ablation.CONSTRUCTION_REVISION`, an integer bumped with any change to selection, aggregation or
+      statistics code. It is a declared revision, not auto-detected; the commit provenance below is the backstop;
+    - the evaluation inventory, as explicit lists: the 8 books, the 6 evaluations and the 2 populations. `searches`
+      is their product, and the readout iterates these lists from the sidecar.
+  - **Frozen facts**, computed once at PR time from the dev DB and never recomputed. They are generated only
+    together with new semantic terms, and a sidecar whose semantic terms equal an existing one is refused, so the
+    semantic terms always select one sidecar:
+    - the forward-shadow floor values, with their derivation text;
+    - the grid facts they come from, and the date those facts were read.
+- **Code provenance: recorded, not proven.** `--freeze` and each readout record `git rev-parse HEAD`, and they refuse
+  a dirty tree (`git status --porcelain`, where ignored files do not count).
+  - `--freeze` prints one JSON record: the commit, the `declaration_id`, `frozen_at`, and an outcome of `frozen` or
+    `already_frozen_identical`, which tells a retry from the original. The readout-1 PR commits it as
+    `1822-route-f/freeze-<declaration_id>.json`.
+  - This *identifies* the code. It does not prove which bytes ran: a stale `.pyc`, an edit racing the run, or an
+    environment change can defeat it. It is an accident control, like `unattended_guard`, and the readout says so.
+  - The spec's "Grid" identity already takes the same stance ("detects a change; it does not replay one").
+  - Semantic changes are what the gate refuses. Any rule-set change also moves its `RULE_SET_VERSION`.
+- **Identity.** It uses the full digest.
+  - `strategy_id = "ranking-ablation-1822-route-f"`;
+  - `strategy_version = "v1.5-balanced+<sha256>"`, at most 78 characters against `sql/333`'s limit of 200;
+  - `contract_version = "1822-route-f-terms-<sha256>"`;
+  - `trial_id = "ranking-ablation-1822-route-f-<sha256>"`.
+
+  Changed semantic terms or frozen facts give a new sidecar, identity, root and register entry. The earlier ones
+  stay. It is never a second root on one identity (`sql/337`), and never a re-pointed entry (`freeze_preregistration`'s
+  #2829 message).
+- **Row.**
+  - `structural_refusal_policy_version = STRUCTURAL_REFUSAL_POLICY_VERSION`;
+  - `declared_by = "scripts/run_1822_ablation_readout.py --freeze (#1822)"`;
+  - `prereg_purpose = "falsification_only"`: of `PreregPurpose`'s two values, the one that cannot promote;
+  - `declared_universe_basis = "survivor_only"`. This is the conservative label (#2288: *"an unlabelled result is
+    treated as survivor_only"*). Membership is the rows each run wrote, but the lane filter and the Q-suffix symbol
+    are read at readout time, so survivorship-free is not claimed. A `falsification_only` declaration over
+    survivor-only stamps is coherent (`declaration_refusals`' docstring).
+  - `declared_carry_unmodelled = False` and `declared_fx_unmodelled = False`, as #2901 declares for the same lane:
+    *"Long x1 US equities in a USD lane: no overnight financing exists, and USD in / held / out has no conversion
+    event"*. A bespoke contract owns its stamps.
+  - `expected_structural_refusals = structural_promotion_refusals(...)` =
+    `("universe_basis_not_survivorship_free",)`.
+  - **Floor.** It is fixed by construction, following the #2901 / #2840 precedent (*"the floor equals the evidence
+    supply"*), because no power calculation exists for a descriptive readout.
+    - `min_independent_decision_dates` = the number of distinct entry sessions on the grid (at the fact date) that
+      have a mapped witnessed run. It comes from the calendar and `job_runs`; no price is read.
+    - `min_calendar_weeks` = ⌈(G_k − first entry session) days / 7⌉.
+    - If either is < 1, generation refuses `floor_not_positive` and nothing is frozen.
+    - The derivation says the floor is the evidence supply **at the fact date**, not readout 1's grid (which may have
+      more runs), and that it gates nothing.
+- **Trial register (#2829).** There is one entry per sidecar: `DeclaredTrial(trial_id, …, declared_for=(strategy_id,
+  strategy_version), exactness=EXACT, searches=96)`. Its evidence is `declaration_backed_evidence(declaration_path=…,
+  declaration_sha256=…, pinned_specs=96)`, the register's format for a group pinned by one frozen declaration.
+  - **96 = 8 books × 6 evaluations × 2 populations.**
+    - The books are `arm_full`, the six `arm_{−f}` and the control.
+    - The evaluations are the 4 cells, plus the 2 non-canonical termination policies re-evaluating the canonical
+      cell.
+    - The populations are the pooled series and the prospective subseries.
+  - Every evaluated book and population is charged. The fragility precedents (S-E, S-H, ARM B) exempted their cells
+    because a joint pass bar left no cell selectable, and route F has no pass bar. #3238 charges each population.
+    #3238's control was exempt because it reproduced a stored number, and this control is new.
+  - Readouts under identical terms add none. The source rule is the DSR's own: N is the number of configurations
+    tried (Bailey & López de Prado 2014, *J. Portfolio Mgmt* 40(5)), and re-evaluating one configuration over more
+    sessions is not a new one. #2831's charged extra read was a look whose configuration could not be established.
+    An identical-terms readout's configuration is established by the gate. If the register ever adopts a
+    per-look charge, the start log gives the count.
+  - Looks are **listed**, best-effort. Before its first return is read, a readout appends a start record to
+    `var/1822-route-f/looks.jsonl`, holding a uuid, the identity, the commit, the cutoff and the start time, and
+    fsyncs it.
+    - The readout holds an exclusive `flock` on that file for its whole run, so readouts serialise.
+    - Each committed vintage record lists every start record whose uuid appears in no earlier vintage, aborted
+      ones included.
+    - Claim level: this lists looks made from this checkout only. The loop runs from one worktree. A final
+      aborted run appears in the next vintage, or in none if there is no next one, and the readout says so.
+  - It bumps `TRIAL_REGISTER_VERSION`, with the strand measurement the register's header prescribes. It is not a
+    `hunt-` entry, so it counts in M_inh (`TRIAL_REGISTER.inherited_floor()`, printed before and after in the PR).
+    Raising M is conservative.
+  - Route F reports no DSR and no M.
+- **Tests (slice 1b-ii).**
+  - Exactly one committed sidecar matches the regenerated semantic terms, which makes the selection rule for
+    `--freeze` and `--readout` unambiguous.
+  - Every sidecar under `1822-route-f/` has exactly one register entry, with the matching `trial_id` and
+    `declared_for`, `searches == 96`, `EXACT`, and evidence equal to `declaration_backed_evidence(…, 96)`. No sidecar
+    named by an entry is missing.
+  - For the **selected** sidecar only, `build_declaration(sidecar)` passes `declaration_refusals`. Historical
+    sidecars are checked for integrity (entry mapping) but not coherence, since a policy bump correctly retires them.
+  - Each register entry's `searches` equals the product of its sidecar's inventory lists.
+  - Gate before returns: with the gate stubbed to refuse, `--readout` never calls the price reader.
+  - The access boundary (below).
+- **Freeze.**
+  1. From `main` with a clean tree, `--freeze --dry-run` prints the full `digest_payload`.
+  2. `--freeze` selects the sidecar, rebuilds the declaration from it, and freezes.
+  3. On `UniqueViolation` it rolls back, reloads, and returns `already_frozen_identical` when the stored digest
+     equals the rebuilt one; anything else is refused.
+  - The prospective boundary is the row's `frozen_at`: a run is prospective when its `known_at > frozen_at`, both
+    timestamptz.
+- **Readout gate.** `--readout` refuses unless every one of these holds:
+  - the tree is clean;
+  - the regenerated semantic terms select exactly one sidecar;
+  - `load_preregistration` returns the row;
+  - the stored `declaration_sha256` equals `build_declaration(sidecar).sha256`, which is equality with the full
+    intended payload, not just integrity;
+  - `declaration_refusals` is empty.
+
+  **Input** revisions after the freeze (a score, bar or termination correction) keep the declaration and are
+  reported through the "Grid" input identity. **Implementation** corrections are semantic-term changes, and so a new
+  declaration.
+- **Sealed-outcome boundary.** The withheld side is only reachable through `backtest_run` with an
+  `evidence_window_id` and `holdout_requested` (the gate test's docstring). `price_daily` is the live app table and
+  holds no sealed window. Two tests pin the boundary:
+  - Route F's modules, and the computation modules they import from `app.services`, import at top level only (an
+    AST check: no `import` inside a function body). A subprocess then imports the script and asserts that
+    `app.services.backtest_run` is absent from `sys.modules`. Residual: a lazy import in a module outside that set.
+  - Every query route F issues goes through one `_execute` helper, which raises unless the SQL is a registered
+    constant. The runtime path therefore cannot run an unaudited query. The ledger's freeze/load SQL is the
+    exception: it runs inside `result_ledger`, and its table is in the allowlist.
+  - Every relation named in a FROM or JOIN of the registered constants is in an allowlist. The constants are the
+    reader's, the script's, `price_quarantine_store._SCOPE_SQL`, and the ledger's declaration SQL. The allowlist is
+    `scores`, `job_runs`, `instruments`, `etoro_instrument_types`, `exchanges`, `price_daily`,
+    `instrument_cik_history`, the Form 25 view, `instrument_dividend_summary`, `dividend_events`, the premise tables
+    and `strategy_preregistration_declarations`. It excludes `strategy_results_store` and
+    `strategy_holdout_accesses`.
 
 ⚠ **Retrospective, then prospective.** The window 2026-07-23 → cutoff already exists. Nobody has computed this
 ablation over it, but the prices are not unseen. Readout 1 is labelled **retrospective**. Every later readout
@@ -370,7 +498,7 @@ the pooled series.
 **Repeated readouts.** Readouts come on the first weekday of each month, with c_k as defined under "Grid", each
 recomputed in full on the frozen construction. With the nested grid they append, and input corrections are surfaced as above. None is a significance
 decision, so no sequential correction applies. A rerun at the same cutoff over the same input identity must reproduce byte-identical statistics;
-a correction is a new declaration.
+an implementation correction is a new declaration (an input revision is reported, per "Declaration").
 
 **Prospective subseries.** It uses only cohorts formed from runs known after the declaration's freeze time, on
 their own grid. Retrospective cohorts are never sliced into it.
@@ -489,6 +617,28 @@ the 34-run window cannot feed and which exceeds the harness's 63-session cap for
   - Route F is registered in the #2829 register, and the reason `hunt_trials` does not fit is stated (#25, #26).
   - "No history at all" is corrected (#27). The overlapping-cohort choice is declared deliberate (#28). The MDE
     classifies nothing (#29).
+- **v8 (the declaration's concrete terms, for slice 1b-ii; ckpt-1, three rounds: 24, 12 and 18 findings).**
+  - A terms sidecar (canonical JSON, one path per digest) carries the construction, and the full digest is the
+    identity and the trial id.
+  - Round 3 showed that proving which bytes executed is unbounded, so code identity became recorded provenance
+    with the claim level stated (r3 #1–#4, #17). The semantic terms are what the gate compares.
+  - The floor is the evidence supply at the fact date, frozen in the sidecar, and refuses at < 1 (r2 #5, #6; r3 #5,
+    #6).
+  - The universe basis is `survivor_only`, which is conservative and coherent under `falsification_only` (r2 #3).
+  - searches = 96: every book × evaluation × population, because no joint pass bar protects the cells (r1 #6–#10;
+    r3 #13). Readouts under identical terms add none, per the DSR's N (r2 #10; r3 #12, which corrected the #2831
+    reading).
+  - Looks are listed through a git-ignored, fsynced start log (r3 #14, #15). The tests tie each sidecar to its entry
+    and to the searches count (r3 #7–#10). The readout compares the full declaration payload (r3 #11). Input and
+    implementation corrections are separated (r3 #16). The access boundary is an import closure plus a SQL
+    allowlist (r3 #17, #18).
+  - The remaining round-1 items are covered: the row fields, the stamps citations, rollback before the reload, and
+    the dry-run.
+  - **Round 4** (12 findings): frozen facts never change alone, so selection is unique (#1). There is a declared
+    `CONSTRUCTION_REVISION` (#2). The inventory is an explicit list, and searches is its product (#3). The per-look
+    note (#4). Keyword-only evidence (#5). A freeze record (#6). A best-effort look log under `flock`, deduplicated
+    by uuid (#7, #8). Coherence is tested on the selected sidecar only (#9). A gate-before-returns test (#10). The
+    AST scope is widened, with the residual named (#11). A runtime `_execute` allowlist (#12).
 - **v7 (slice 1b build, no ckpt-1: three corrections found by building; the first two are pinned by tests).** c_k is strictly
   outside the provisional window; a Form 25 link is an equity delisting; the superseded-run figure is the census's.
 - **v6 (slice 1b settlements, measured 2026-09-28; ckpt-1, 10 findings).**
