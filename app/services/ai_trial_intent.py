@@ -86,7 +86,7 @@ PAPER_GATE_MAP: Final[dict[str, str]] = {
     # session is the freshness bound.
     "scan_watermark_missing": "replaced:decision_expired",
     "scan_stale": "replaced:decision_expired",
-    # §8: forecast barriers -> the validated decision's stop/target, still bounded by the
+    # §8: forecast barriers -> the leg's own stop/target (spec v5), still bounded by the
     # policy stop_loss_pct under the trial's own code.
     "opportunity_forecast_stop_exceeds_policy": "replaced:decision_stop_exceeds_policy",
     "opportunity_forecast_target_barrier_missing": "replaced:decision_stop_exceeds_policy",
@@ -141,7 +141,8 @@ class TrialIntent:
     mandate_max_concurrent_positions: int
     policy_revision: int
     max_ticket_amount: Decimal
-    #: The validated decision's stop / target (§8 table), percentage points.
+    #: This leg's stop / target (§8 table, spec v5), percentage points: the decision's for the
+    #: arm, the pair's ATR-derived levels for the control.
     stop_loss_pct: Decimal
     take_profit_pct: Decimal
     max_quote_age_seconds: int
@@ -198,6 +199,7 @@ _TRIAL_INTENT_SQL = f"""
            pair.control_instrument_id, pair.stop_pct AS pair_stop_pct,
            pair.target_pct AS pair_target_pct, pair.horizon_days AS pair_horizon_days,
            pair.size_tier AS pair_size_tier,
+           pair.control_stop_pct, pair.control_target_pct,
            decision.decision_id, decision.verdict AS decision_verdict,
            decision.instrument_id AS decision_instrument_id,
            decision.stop_pct, decision.target_pct, decision.horizon_days, decision.size_tier,
@@ -278,6 +280,14 @@ def _positive_finite(value: object) -> bool:
     return value is not None and Decimal(str(value)).is_finite() and Decimal(str(value)) > 0
 
 
+def _leg_levels(row: dict[str, Any]) -> tuple[object, object]:
+    """§8 table (spec v5): the arm leg exits at the decision's stop/target, the control leg at
+    the pair's levels derived from its OWN ATR (§7) — never the arm's percentages."""
+    if row["leg"] == "control":
+        return row["control_stop_pct"], row["control_target_pct"]
+    return row["stop_pct"], row["target_pct"]
+
+
 def _identity_agrees(row: dict[str, Any]) -> bool:
     """Signal, decision, instrument, leg, strategy id/version all agree. ``sql/432``'s link
     trigger checked this at link time; it is re-read here because this is the query that
@@ -346,6 +356,7 @@ def load_trial_intent(
     if session_reason is not None:
         return None, session_reason, True
 
+    leg_stop, leg_target = _leg_levels(row)
     # The paper loader's non-evidence gates, same codes, same order (PAPER_GATE_MAP).
     checks = (
         (bool(row["is_tradable"]), "instrument_not_tradable"),
@@ -377,12 +388,12 @@ def load_trial_intent(
         # sql/432's CHECK admits only these tiers; refused here rather than a KeyError below
         # should that vocabulary ever widen without this map.
         (row["size_tier"] in TRIAL_TICKET_USD, "decision_size_tier_unknown"),
-        # §8 table: the decision's stop is still bounded by the policy stop_loss_pct.
+        # §8 table: each leg's own stop is still bounded by the policy stop_loss_pct.
         (
-            _positive_finite(row["stop_pct"])
-            and _positive_finite(row["target_pct"])
+            _positive_finite(leg_stop)
+            and _positive_finite(leg_target)
             and _positive_finite(row["policy_stop_loss_pct"])
-            and Decimal(str(row["stop_pct"])) <= Decimal(str(row["policy_stop_loss_pct"])),
+            and Decimal(str(leg_stop)) <= Decimal(str(row["policy_stop_loss_pct"])),
             "decision_stop_exceeds_policy",
         ),
         (not bool(row["execution_blocked"]), "execution_block_active"),
@@ -425,8 +436,8 @@ def load_trial_intent(
             mandate_max_concurrent_positions=int(row["mandate_max_concurrent_positions"]),
             policy_revision=int(row["policy_revision"]),
             max_ticket_amount=Decimal(str(row["max_ticket_amount"])),
-            stop_loss_pct=Decimal(str(row["stop_pct"])),
-            take_profit_pct=Decimal(str(row["target_pct"])),
+            stop_loss_pct=Decimal(str(leg_stop)),
+            take_profit_pct=Decimal(str(leg_target)),
             max_quote_age_seconds=int(row["max_quote_age_seconds"]),
             max_halt_feed_age_seconds=int(row["max_halt_feed_age_seconds"]),
             max_cost_age_seconds=int(row["max_cost_age_seconds"]),
