@@ -34,12 +34,9 @@ from typing import Any, Final, Literal
 
 from app.providers.market_data import IntradayBar
 from app.services.ai_trial_decision import (
-    ControlPoolExhausted,
-    control_pool,
     decision_json_schema,
-    derive_control_levels,
-    draw_control,
     pack_atr_measurements,
+    plan_pairs,
     validate_response,
 )
 from app.services.ai_trial_invocation import TRIAL_MODEL_ID, InvocationResult, build_env, invoke_model
@@ -297,14 +294,23 @@ def run_synthetic(
     summary["whole_refusal"] = validation.whole_refusal
     summary["no_trade_reason"] = validation.no_trade_reason
     decisions: list[dict[str, Any]] = []
-    drawn: set[int] = set()
-    pair_seq = 0
-    for verdict in validation.verdicts:
+    # §7 v5: the pool is built per decision from its own multiples (the run publisher's step 5).
+    planned = plan_pairs(
+        validation.verdicts,
+        shortlist_instrument_ids=sorted(pack.complete.values()),
+        atr_by_instrument=atr,
+        control_held_instrument_ids=_CONTROL_HELD,
+        declaration_sha256_hex=SYNTHETIC_DECLARATION_SHA256,
+        session_date=_SESSION_DATE,
+        first_pair_seq=0,
+    )
+    for plan in planned:
+        verdict = plan.verdict
         row: dict[str, Any] = {
             "response_position": verdict.response_position,
             "symbol": verdict.decision.symbol,
             "instrument_id": verdict.instrument_id,
-            "reason_code": verdict.reason_code,
+            "reason_code": plan.reason_code,
             "decision": verdict.decision.model_dump(),
             "r_multiple": str(verdict.metrics.r_multiple),
             "stop_atr_multiple": None
@@ -312,41 +318,17 @@ def run_synthetic(
             else str(verdict.metrics.stop_atr_multiple),
             "atr14_pct": None if verdict.metrics.atr is None else str(verdict.metrics.atr.atr14_pct),
         }
-        if verdict.accepted:
-            # §7 v5: the pool is built per decision from its own multiples.
-            levels = {iid: derive_control_levels(verdict.metrics, m) for iid, m in atr.items()}
-            pool = control_pool(
-                sorted(pack.complete.values()),
-                control_held_instrument_ids=_CONTROL_HELD,
-                drawn_this_run=frozenset(drawn),
-                placeable_instrument_ids=frozenset(iid for iid, lv in levels.items() if lv is not None),
-            )
-            try:
-                draw = draw_control(
-                    declaration_sha256_hex=SYNTHETIC_DECLARATION_SHA256,
-                    session_date=_SESSION_DATE,
-                    pair_seq=pair_seq,
-                    pool=pool,
-                )
-            except ControlPoolExhausted:
-                # Spec §7: an exhausted pool refuses the ARM decision too, so every accepted arm
-                # entry has a control. The validator accepted it; pairing is what refuses it.
-                row["reason_code"] = "control_pool_exhausted"
-            else:
-                drawn.add(draw.instrument_id)
-                control = levels[draw.instrument_id]
-                if control is None:  # the pool admits placeable names only; never strip this under -O
-                    raise RuntimeError(f"drawn control {draw.instrument_id} has no placeable levels")
-                row["pair"] = {
-                    "pair_seq": pair_seq,
-                    "seed_material": draw.seed_material,
-                    "pool": list(draw.pool),
-                    "index": draw.index,
-                    "control_instrument_id": draw.instrument_id,
-                    "control_stop_pct": str(control.stop_pct),
-                    "control_target_pct": str(control.target_pct),
-                }
-                pair_seq += 1
+        if plan.pair is not None:
+            draw, control = plan.pair.draw, plan.pair.control
+            row["pair"] = {
+                "pair_seq": plan.pair.pair_seq,
+                "seed_material": draw.seed_material,
+                "pool": list(draw.pool),
+                "index": draw.index,
+                "control_instrument_id": draw.instrument_id,
+                "control_stop_pct": str(control.stop_pct),
+                "control_target_pct": str(control.target_pct),
+            }
         decisions.append(row)
     summary["decisions"] = decisions
     return SyntheticOutcome(summary, result)
