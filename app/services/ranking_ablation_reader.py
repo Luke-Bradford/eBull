@@ -148,21 +148,18 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
         # A run whose every row is excluded still exists: it can supersede an earlier run
         # at the same entry session, and its formation is then idle (spec "Timeline").
         run = runs.setdefault(scored_at, {})
-        reason = lane_exclusion(type_description, currency)
-        parsed: ScoreRow | str | None = None
-        if reason is None:
-            families: dict[str, Any] = dict(
+        parsed: ScoreRow | str = lane_exclusion(type_description, currency) or parse_score_row(
+            iid,
+            rank=rank,
+            family_scores=dict(
                 zip(FAMILY_ORDER, (quality, value, turnaround, momentum, sentiment, confidence), strict=True)
-            )
-            parsed = parse_score_row(
-                iid, rank=rank, family_scores=families, raw_total=raw_total, penalties_json=penalties_json
-            )
-            if isinstance(parsed, str):
-                reason = parsed
-        if reason is not None or not isinstance(parsed, ScoreRow):
-            key = reason or "unparsed"
-            excluded_rows[key] += 1
-            excluded_names.setdefault(key, set()).add(iid)
+            ),
+            raw_total=raw_total,
+            penalties_json=penalties_json,
+        )
+        if isinstance(parsed, str):
+            excluded_rows[parsed] += 1
+            excluded_names.setdefault(parsed, set()).add(iid)
             continue
         text = explanation or ""
         run[iid] = StoredRow(
