@@ -17,6 +17,7 @@ import pytest
 from app.providers.market_data import IntradayBar
 from app.services import ai_trial_pack_reader as r
 from app.services.ai_trial_pack import canonical_sha256
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 
 Conn = psycopg.Connection[Any]
@@ -24,7 +25,7 @@ Conn = psycopg.Connection[Any]
 AS_OF = datetime(2026, 10, 2, 23, 30, tzinfo=UTC)  # Friday; the session closed 20:00Z
 PINNED_RUN = datetime(2026, 10, 1, 22, 0, tzinfo=UTC)
 LATER_RUN = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)  # after AS_OF: must not be read
-AAA, BBB, CCC, DDD, EEE = 1, 2, 3, 4, 5
+AAA, BBB, CCC, DDD, EEE, FFF, GGG = 1, 2, 3, 4, 5, 6, 7
 
 
 def _sessions(last: date, n: int) -> list[date]:
@@ -45,6 +46,8 @@ def _seed(conn: Conn) -> None:
         (CCC, "CCC", True),  # intraday fetch raises → intraday_fetch_failed
         (DDD, "DDD", True),  # spread 2% → not eligible, not shortlisted
         (EEE, "EEE", False),  # not tradable
+        (FFF, "FFF", True),  # a quarantined close in its window → quarantined_bar
+        (GGG, "GGG", True),  # never evaluated by the quarantine → the masked loader returns no bars
     ):
         conn.execute(
             "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable, exchange) "
@@ -63,11 +66,24 @@ def _seed(conn: Conn) -> None:
                 (iid, _DEFAULT_MODEL_VERSION, scored_at, iid, score),
             )
         last = date(2026, 10, 1) if iid == BBB else date(2026, 10, 2)
-        for k, day in enumerate(_sessions(last, 80)):
+        days = _sessions(last, 80)
+        for k, day in enumerate(days):
             conn.execute(
                 "INSERT INTO price_daily (instrument_id, price_date, open, high, low, close, volume) "
                 "VALUES (%s, %s, %s, %s, %s, %s, 1000)",
                 (iid, day, 20 + k / 10, 21 + k / 10, 19 + k / 10, 20.5 + k / 10),
+            )
+        if iid != GGG:
+            conn.execute(
+                "INSERT INTO price_quarantine_coverage (instrument_id, rule_set_version, first_bar, last_bar, "
+                "bars_evaluated, transitions_evaluated) VALUES (%s, %s, %s, %s, 80, 79)",
+                (iid, QUARANTINE_RULE_SET_VERSION, days[0], days[-1]),
+            )
+        if iid == FFF:
+            conn.execute(
+                "INSERT INTO price_bar_quarantine (instrument_id, price_date, return_usable, range_usable, "
+                "provisional, rules, rule_set_version) VALUES (%s, %s, FALSE, TRUE, FALSE, '{B2}', %s)",
+                (iid, days[-5], QUARANTINE_RULE_SET_VERSION),
             )
     for started, status in (
         (datetime(2026, 10, 2, 21, 52, tzinfo=UTC), "complete"),
@@ -143,10 +159,15 @@ def test_pack_is_point_in_time_and_drops_incomplete_names(ebull_test_conn: Conn)
     got = r.assemble_pack(ebull_test_conn, step1=step1, account=account, fetch_intraday=_fetch, clock=lambda: fetched)
 
     assert got.complete == {"AAA": AAA}
-    assert got.incomplete == {"BBB": "stale_last_bar", "CCC": "intraday_fetch_failed"}
+    assert got.incomplete == {
+        "BBB": "stale_last_bar",
+        "CCC": "intraday_fetch_failed",
+        "FFF": "quarantined_bar",
+        "GGG": "too_few_bars",
+    }
     assert got.sha256 == canonical_sha256(got.pack)
     pack = got.pack
-    assert pack["eligible_count"] == 3  # DDD's spread and EEE's tradability exclude them
+    assert pack["eligible_count"] == 5  # DDD's spread and EEE's tradability exclude them
     assert pack["crowd_snapshot_id"] is not None and pack["scores_run"]["scored_at"] == PINNED_RUN
     (name,) = pack["names"]
     assert len(name["bars"]) == 60 and name["bars"][-1]["d"] == date(2026, 10, 2)

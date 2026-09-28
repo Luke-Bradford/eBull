@@ -665,6 +665,8 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
     - intraday = one `FourHours` request of 400 bars (~3 months of reach); a response that fills the request and still starts inside the 30-day window is `intraday_truncated`, and fewer kept bars than NYSE sessions in the window is `intraday_too_few_bars`;
     - `filing_events` has no title column, so a filing title is built from the structured submission fields: `"{form} filed {filing_date}[ (items …)][ (period {report_date})]"`;
     - `instrument_valuation` has no as-of; the cap only decides the small-cap slice and is recorded per small-cap name.
+    - bars come through the house quarantine-masked reader `price_masked_bars.load_masked_bars` (the #3046 consumer-exposure class): an unevaluated instrument returns no bars (`too_few_bars`), and a quarantined field in the last 260 bars makes the name `quarantined_bar`;
+    - a symbol shared by two candidates drops every copy, since §6 maps the model's symbol back to one instrument.
 - **O1 amended in slice 1b-iii:** a NULL `price_daily.volume` is "not provided" (market-data skill, #21), not a non-finite value. The bar stands; `volume_ratio20` / `vwap20_proxy` are `null` when their window holds a NULL volume. Refusing such bars dropped 9 of the 20 small-cap names on the dev DB (`as_of` 2026-09-25 23:30Z; reproduce with `read_shortlist` + `build_bar_series` at that `as_of`).
 - **O3, determinism (r2-73, 77, 90).**
   - Disclosure selection is newest first, ties broken by source id, exact-title dedupe, amendments kept as their own rows.

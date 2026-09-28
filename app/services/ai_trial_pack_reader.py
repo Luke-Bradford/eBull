@@ -9,7 +9,8 @@ an injected callable, so the job (slice 2) owns provider construction and creden
 
 Knowledge time (O2), per source:
 
-- ``price_daily``: bars dated ≤ the last completed NYSE session at ``as_of``.
+- ``price_daily``: bars dated ≤ the last completed NYSE session at ``as_of``, read through the
+  quarantine-masked loader (``price_masked_bars``).
 - ``quotes``: one current row per instrument; ``quoted_at ≤ as_of`` is ``is_eligible``'s check.
 - ``scores``: the latest ``_DEFAULT_MODEL_VERSION`` run with ``scored_at ≤ as_of``. ``scores`` has
   no run id; every row of one run shares ``scored_at``, so ``(model_version, scored_at)`` IS the
@@ -42,6 +43,7 @@ from psycopg.rows import dict_row
 
 from app.providers.market_data import IntradayBar
 from app.services.ai_trial_pack import (
+    INDICATOR_BARS,
     PROMPT_BARS,
     Disclosure,
     Shortlist,
@@ -54,6 +56,7 @@ from app.services.ai_trial_pack import (
     select_shortlist,
 )
 from app.services.market_calendar import latest_completed_us_session, us_market_status
+from app.services.price_masked_bars import MASKED_REASON, load_masked_bars
 from app.services.scoring import _DEFAULT_MODEL_VERSION, _apply_market_cap_basis
 from app.services.xbrl_derived_stats import MarketCapResolution, resolve_market_cap_basis
 
@@ -283,27 +286,23 @@ def read_shortlist(conn: Conn, *, step1: Step1) -> Shortlist:
 # ---------------------------------------------------------------------------
 # §3.2 per-name reads
 # ---------------------------------------------------------------------------
-def read_bars(conn: Conn, instrument_ids: Sequence[int], *, last_session: date, limit: int) -> dict[int, list[dict]]:
-    """The last ``limit`` ``price_daily`` bars dated ≤ ``last_session``, ascending per name."""
-    out: dict[int, list[dict]] = {i: [] for i in instrument_ids}
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            SELECT ids.instrument_id, b.price_date, b.open, b.high, b.low, b.close, b.volume
-              FROM unnest(%(ids)s::bigint[]) AS ids(instrument_id)
-              JOIN LATERAL (
-                    SELECT price_date, open, high, low, close, volume
-                      FROM price_daily p
-                     WHERE p.instrument_id = ids.instrument_id AND p.price_date <= %(d)s
-                     ORDER BY p.price_date DESC
-                     LIMIT %(limit)s
-              ) b ON TRUE
-             ORDER BY ids.instrument_id, b.price_date
-            """,
-            {"ids": list(instrument_ids), "d": last_session, "limit": limit},
-        )
-        for r in cur.fetchall():
-            out[int(r.pop("instrument_id"))].append(r)
+def read_bars(
+    conn: Conn, instrument_ids: Sequence[int], *, last_session: date
+) -> dict[int, tuple[list[date], list[Mapping[str, Any]]]]:
+    """The last ``INDICATOR_BARS`` bars dated ≤ ``last_session`` per name, ascending, through the
+    house fail-closed reader ``price_masked_bars.load_masked_bars``.
+
+    Its masking is the quarantine's: an unevaluated instrument returns no bars, and a
+    quarantined field comes back ``None`` (``assemble_pack`` turns that into
+    ``quarantined_bar``). A raw ``price_daily`` read here would feed quarantined bars into
+    the indicators — it is the #3046 consumer-exposure class."""
+    out: dict[int, tuple[list[date], list[Mapping[str, Any]]]] = {}
+    for instrument_id in instrument_ids:
+        series = load_masked_bars(conn, instrument_id).series
+        n = sum(1 for d in series.dates if d <= last_session)
+        dates = list(series.dates[:n])
+        rows: list[Mapping[str, Any]] = [dict(r) for r in series.rows[:n]]
+        out[instrument_id] = (dates[-INDICATOR_BARS:], rows[-INDICATOR_BARS:])
     return out
 
 
@@ -487,7 +486,7 @@ def assemble_pack(
     as_of, run = step1.as_of, step1.scores_run
     shortlist = read_shortlist(conn, step1=step1)
     ids = [n.instrument_id for n in shortlist.names]
-    bars = read_bars(conn, ids, last_session=step1.last_session, limit=260)
+    bars = read_bars(conn, ids, last_session=step1.last_session)
     crowd = read_crowd(conn, ids, snapshot_id=step1.crowd_snapshot_id)
     disclosures = read_disclosures(conn, ids, as_of=as_of)
     ranking = read_ranking(conn, ids, run=run)
@@ -497,8 +496,11 @@ def assemble_pack(
     complete: dict[str, int] = {}
     incomplete: dict[str, str] = {}
     for name in shortlist.names:
-        rows = bars[name.instrument_id]
-        series = build_bar_series([r["price_date"] for r in rows], rows, last_session=step1.last_session)
+        dates, rows = bars[name.instrument_id]
+        if any(row[k] is None for row in rows for k in ("open", "high", "low", "close")):
+            incomplete[name.symbol] = MASKED_REASON
+            continue
+        series = build_bar_series(dates, rows, last_session=step1.last_session)
         if isinstance(series, str):
             incomplete[name.symbol] = series
             continue
@@ -523,9 +525,7 @@ def assemble_pack(
                 "symbol": name.symbol,
                 "instrument_id": name.instrument_id,
                 "slice": name.slice,
-                "bars": [_bar_json(d, r) for d, r in zip(series.dates, rows[-len(series) :], strict=True)][
-                    -PROMPT_BARS:
-                ],
+                "bars": [_bar_json(d, r) for d, r in zip(series.dates, series.rows, strict=True)][-PROMPT_BARS:],
                 "indicators": ind,
                 "intraday": {
                     "interval": INTRADAY_INTERVAL,
