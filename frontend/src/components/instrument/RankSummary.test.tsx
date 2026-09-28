@@ -55,6 +55,27 @@ describe("RankSummary", () => {
     expect(line).not.toHaveTextContent("Strong Calmar");
   });
 
+  it("skips default-fill families when naming the largest contributions", () => {
+    const family = (name: string, usability: "usable" | "missing" | "quarantined") => ({
+      family: name,
+      maturity: "untested" as const,
+      purpose: "return_signal" as const,
+      evidence_ref: "",
+      usability,
+    });
+    render(
+      <RankSummary
+        score={makeScore({
+          families: [family("quality", "usable"), family("value", "missing"), family("momentum", "usable")],
+        })}
+        errored={false}
+      />,
+    );
+    const line = screen.getByTestId("rank-summary");
+    expect(line).toHaveTextContent("largest: Quality +0.23 · Momentum +0.05");
+    expect(line).not.toHaveTextContent("Value");
+  });
+
   it("never shows a stale stored rank as current", () => {
     render(
       <RankSummary
