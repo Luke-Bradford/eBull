@@ -907,18 +907,10 @@ _MANDATE_OBSERVATION_SQL = """
 """
 
 
-def _observe_local_mandate_risk(
-    conn: psycopg.Connection[Any],
-    *,
-    intent: _SizingIntent,
-    risk: BrokerAccountRiskSnapshot,
-    now: datetime,
-    shared_pool_bound: Decimal,
-) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | str:
-    """Read local allocation risk and advance the high-water mark atomically."""
-    with conn.transaction():
-        pending_row = conn.execute(
-            """
+# Allocated strategy entries whose order the broker snapshot may not show yet: every
+# unresolved entry order, in total and for one instrument (the ``%s``). Read by the paper
+# sizing observation and by the #3471 step-0 preview.
+_PENDING_RISK_SQL = """
             SELECT COALESCE(SUM(d.amount), 0),
                    COALESCE(SUM(d.amount) FILTER (WHERE t.instrument_id=%s), 0)
             FROM strategy_funding_decisions d
@@ -929,9 +921,20 @@ def _observe_local_mandate_risk(
             LEFT JOIN strategy_order_reconciliation_state r ON r.order_id=o.order_id
             WHERE d.verdict='allocated' AND t.status NOT IN ('closed', 'failed')
               AND (r.state IS NULL OR r.state NOT IN ('resolved', 'rejected'))
-            """,
-            (intent.instrument_id,),
-        ).fetchone()
+"""
+
+
+def _observe_local_mandate_risk(
+    conn: psycopg.Connection[Any],
+    *,
+    intent: _SizingIntent,
+    risk: BrokerAccountRiskSnapshot,
+    now: datetime,
+    shared_pool_bound: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | str:
+    """Read local allocation risk and advance the high-water mark atomically."""
+    with conn.transaction():
+        pending_row = conn.execute(_PENDING_RISK_SQL, (intent.instrument_id,)).fetchone()
         if pending_row is None:  # pragma: no cover - aggregate SELECT always returns one row
             raise StrategyPaperExecutionError("pending strategy risk observation was unavailable")
         pending_total = Decimal(str(pending_row[0]))
@@ -975,6 +978,118 @@ def _observe_local_mandate_risk(
             (high_water, risk.equity, drawdown, risk.observed_at),
         )
     return deployment_base, pool_base, pending_total, pending_instrument, drawdown
+
+
+@dataclass(frozen=True)
+class _Capacities:
+    """Every capacity an entry is sized under; each is an upper bound on its amount.
+
+    ``pool_remaining``, ``cash``, ``portfolio``, ``active_risk`` and ``cash_reserve`` are
+    SHARED across entries; ``deployment_remaining`` is per deployment; ``instrument`` per
+    instrument; ``loss_at_stop`` per position. The #3471 step-0 preview relies on that split
+    to admit a pair jointly.
+    """
+
+    deployment_remaining: Decimal
+    pool_remaining: Decimal
+    cash: Decimal
+    portfolio: Decimal
+    instrument: Decimal
+    active_risk: Decimal
+    cash_reserve: Decimal
+    loss_at_stop: Decimal
+
+    def bounds(self) -> tuple[Decimal, ...]:
+        return (
+            self.deployment_remaining,
+            self.pool_remaining,
+            self.cash,
+            self.portfolio,
+            self.instrument,
+            self.active_risk,
+            self.cash_reserve,
+            self.loss_at_stop,
+        )
+
+
+def _capacities(
+    *,
+    pool_base: Decimal,
+    committed: Decimal,
+    deployment_base: Decimal,
+    deployment_reserved: Decimal,
+    equity: Decimal,
+    total_invested: Decimal,
+    available_cash: Decimal,
+    pending_total: Decimal,
+    pending_instrument: Decimal,
+    current_instrument: Decimal,
+    max_portfolio_exposure_pct: Decimal,
+    max_instrument_exposure_pct: Decimal,
+    mandate_cash_reserve_pct: Decimal,
+    mandate_active_risk_budget_pct: Decimal,
+    mandate_max_loss_per_position_pct: Decimal,
+    stop_loss_pct: Decimal,
+) -> _Capacities | str:
+    """The capacity arithmetic of ``_risk_and_amount`` over explicit inputs: pure, no I/O.
+
+    Returns the named refusal for a limit already exhausted, else every capacity term.
+    """
+    deployment_remaining = max(Decimal("0"), deployment_base - deployment_reserved)
+    # `pool_base` IS the shared bound resolved from exact-owned alpha and core
+    # realised P&L by `resolve_engine_capital_usage`.
+    pool_headroom = headroom_from_bound(bound=pool_base, committed=committed)
+    pool_remaining = pool_headroom.remaining
+    # ⚠ NAMED, and named BEFORE the nine other capacity terms fold into `min(...)`
+    # below (#2844). Reaching the assignment used to surface as
+    # `risk_capacity_exhausted` -- the shared outcome of ten unrelated limits -- so
+    # the operator could not tell "I have hit the boundary I set" from "this
+    # instrument is too concentrated". The settled decision names this refusal
+    # specifically, and a boundary refusal indistinguishable from nine others is not
+    # the visible safety net the operator asked for.
+    #
+    # ⚠ The per-DEPLOYMENT limit deliberately keeps the generic code. It is an
+    # allocation *inside* the sandbox, not the sandbox, and giving it this name would
+    # report a breach of the operator's assignment when one strategy's slice is full.
+    if pool_remaining.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return SANDBOX_EXCEEDED
+    portfolio_capacity = max(
+        Decimal("0"),
+        equity * max_portfolio_exposure_pct / Decimal("100") - total_invested - pending_total,
+    )
+    instrument_capacity = max(
+        Decimal("0"),
+        equity * max_instrument_exposure_pct / Decimal("100") - current_instrument - pending_instrument,
+    )
+    cash_reserve_capacity = max(
+        Decimal("0"),
+        pool_base * (Decimal("100") - mandate_cash_reserve_pct) / Decimal("100") - committed,
+    )
+    if cash_reserve_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return "portfolio_cash_reserve_limit"
+    active_risk_capacity = max(
+        Decimal("0"),
+        pool_base * mandate_active_risk_budget_pct / Decimal("100") - committed,
+    )
+    if active_risk_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return "portfolio_active_risk_limit"
+    if stop_loss_pct <= 0:
+        return "execution_policy_invalid"
+    # Both inputs are percentage points, so their /100 factors cancel when
+    # solving amount * stop_pct/100 <= pool_base * loss_limit_pct/100.
+    loss_at_stop_capacity = pool_base * mandate_max_loss_per_position_pct / stop_loss_pct
+    if loss_at_stop_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return "portfolio_position_loss_limit"
+    return _Capacities(
+        deployment_remaining=deployment_remaining,
+        pool_remaining=pool_remaining,
+        cash=max(Decimal("0"), available_cash - pending_total),
+        portfolio=portfolio_capacity,
+        instrument=instrument_capacity,
+        active_risk=active_risk_capacity,
+        cash_reserve=cash_reserve_capacity,
+        loss_at_stop=loss_at_stop_capacity,
+    )
 
 
 def _paper_requested_ticket(intent: _Intent, deployment_base: Decimal) -> Decimal | str:
@@ -1068,66 +1183,30 @@ def _risk_and_amount(
         return "account_drawdown_limit"
     if drawdown >= intent.mandate_max_drawdown_pct:
         return "portfolio_drawdown_limit"
-    deployment_remaining = max(Decimal("0"), deployment_base - intent.reserved)
-    # `pool_base` IS the shared bound resolved from exact-owned alpha and core
-    # realised P&L by `resolve_engine_capital_usage` above.
-    pool_headroom = headroom_from_bound(bound=pool_base, committed=usage.committed)
-    pool_remaining = pool_headroom.remaining
-    # ⚠ NAMED, and named BEFORE the nine other capacity terms fold into `min(...)`
-    # below (#2844). Reaching the assignment used to surface as
-    # `risk_capacity_exhausted` -- the shared outcome of ten unrelated limits -- so
-    # the operator could not tell "I have hit the boundary I set" from "this
-    # instrument is too concentrated". The settled decision names this refusal
-    # specifically, and a boundary refusal indistinguishable from nine others is not
-    # the visible safety net the operator asked for.
-    #
-    # ⚠ The per-DEPLOYMENT limit deliberately keeps the generic code. It is an
-    # allocation *inside* the sandbox, not the sandbox, and giving it this name would
-    # report a breach of the operator's assignment when one strategy's slice is full.
-    if pool_remaining.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
-        return SANDBOX_EXCEEDED
-    portfolio_capacity = max(
-        Decimal("0"),
-        risk.equity * intent.max_portfolio_exposure_pct / Decimal("100") - risk.total_invested - pending_total,
+    capacities = _capacities(
+        pool_base=pool_base,
+        committed=usage.committed,
+        deployment_base=deployment_base,
+        deployment_reserved=intent.reserved,
+        equity=risk.equity,
+        total_invested=risk.total_invested,
+        available_cash=risk.available_cash,
+        pending_total=pending_total,
+        pending_instrument=pending_instrument,
+        current_instrument=current_instrument,
+        max_portfolio_exposure_pct=intent.max_portfolio_exposure_pct,
+        max_instrument_exposure_pct=intent.max_instrument_exposure_pct,
+        mandate_cash_reserve_pct=intent.mandate_cash_reserve_pct,
+        mandate_active_risk_budget_pct=intent.mandate_active_risk_budget_pct,
+        mandate_max_loss_per_position_pct=intent.mandate_max_loss_per_position_pct,
+        stop_loss_pct=intent.stop_loss_pct,
     )
-    instrument_capacity = max(
-        Decimal("0"),
-        risk.equity * intent.max_instrument_exposure_pct / Decimal("100") - current_instrument - pending_instrument,
-    )
-    cash_reserve_capacity = max(
-        Decimal("0"),
-        pool_base * (Decimal("100") - intent.mandate_cash_reserve_pct) / Decimal("100") - usage.committed,
-    )
-    if cash_reserve_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
-        return "portfolio_cash_reserve_limit"
-    active_risk_capacity = max(
-        Decimal("0"),
-        pool_base * intent.mandate_active_risk_budget_pct / Decimal("100") - usage.committed,
-    )
-    if active_risk_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
-        return "portfolio_active_risk_limit"
-    if intent.stop_loss_pct <= 0:
-        return "execution_policy_invalid"
-    # Both inputs are percentage points, so their /100 factors cancel when
-    # solving amount * stop_pct/100 <= pool_base * loss_limit_pct/100.
-    loss_at_stop_capacity = pool_base * intent.mandate_max_loss_per_position_pct / intent.stop_loss_pct
-    if loss_at_stop_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
-        return "portfolio_position_loss_limit"
+    if isinstance(capacities, str):
+        return capacities
     ticket = requested_ticket(deployment_base)
     if isinstance(ticket, str):
         return ticket
-    amount = min(
-        ticket,
-        intent.max_ticket_amount,
-        deployment_remaining,
-        pool_remaining,
-        max(Decimal("0"), risk.available_cash - pending_total),
-        portfolio_capacity,
-        instrument_capacity,
-        active_risk_capacity,
-        cash_reserve_capacity,
-        loss_at_stop_capacity,
-    ).quantize(_CENT, rounding=ROUND_DOWN)
+    amount = min(ticket, intent.max_ticket_amount, *capacities.bounds()).quantize(_CENT, rounding=ROUND_DOWN)
     if amount <= 0:
         return "risk_capacity_exhausted"
     return amount, current_instrument, drawdown
