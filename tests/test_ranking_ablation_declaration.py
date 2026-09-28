@@ -668,7 +668,10 @@ def test_a_later_vintage_reports_revised_sessions_and_the_input_that_moved(
     assert unchanged["revisions"]["changed_inputs"] == [] and unchanged["revisions"]["revised_sessions"] == {}
     # A price correction on name 9 mid-window: the input identity and the reported Δ both move.
     read = base.series[9]
-    bumped = [replace(bar, close=bar.close * Decimal("1.5")) if i == 30 else bar for i, bar in enumerate(read.bars)]
+    bumped = [
+        replace(bar, close=bar.close * Decimal("1.5")) if i == 30 and bar.close is not None else bar
+        for i, bar in enumerate(read.bars)
+    ]
     corrected = replace(
         base, series={**base.series, 9: reader.read_series(bumped, "us_equity", as_of=date(2026, 12, 31))}
     )
