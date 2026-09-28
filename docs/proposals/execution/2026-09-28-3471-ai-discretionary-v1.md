@@ -266,7 +266,7 @@ An expired decision is refused as `decision_expired`. This replaces the paper pa
 **Implemented in slice 2b-i** (`app/services/ai_trial_intent.py::load_trial_intent`).
 - "`ai_trial_executions`" is `sql/432`'s **`ai_trial_leg_links`**. It already links signal → pair → decision, and its insert trigger checks leg, strategy id/version, instrument and fill session. No new table was needed.
 - "Digest-intact" means `canonical_sha256(doc)` equals `doc_sha256`, and the #2599 `contract_version` names that sha. The slice 3 writer must hash with `ai_trial_intent.declaration_digest`.
-- Refusal codes added: `strategy_not_demo_trial`, `trial_link_missing`, `trial_decision_not_accepted`, `trial_identity_mismatch`, `trial_declaration_not_intact`, `trial_not_active`, `decision_not_yet_due`, `decision_stop_exceeds_policy`, `trial_currency_not_usd`.
+- Refusal codes added: `strategy_not_demo_trial`, `trial_link_missing`, `trial_decision_not_accepted`, `trial_identity_mismatch`, `trial_declaration_not_intact`, `trial_not_active`, `decision_not_yet_due`, `decision_stop_exceeds_policy`, `decision_size_tier_unknown`, `trial_currency_not_usd`.
 - `PAPER_GATE_MAP` classifies every `_load_intent` code as kept, replaced or dropped. A test parses both loaders and fails on an unclassified code.
 
 **Safety gates kept.** Every non-evidence gate `_load_intent` and `_risk_and_amount` apply, each mapped explicitly and tested:

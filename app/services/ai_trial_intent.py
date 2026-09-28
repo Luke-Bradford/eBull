@@ -374,6 +374,9 @@ def load_trial_intent(
         # quietly reinterpret them in another currency.
         (row["currency"] == TRIAL_CURRENCY, "trial_currency_not_usd"),
         (row["policy_revision"] is not None, "execution_policy_missing"),
+        # sql/432's CHECK admits only these tiers; refused here rather than a KeyError below
+        # should that vocabulary ever widen without this map.
+        (row["size_tier"] in TRIAL_TICKET_USD, "decision_size_tier_unknown"),
         # §8 table: the decision's stop is still bounded by the policy stop_loss_pct.
         (
             _positive_finite(row["stop_pct"])
