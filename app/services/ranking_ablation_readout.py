@@ -225,6 +225,8 @@ def evaluate(inputs: Inputs, evaluation: str, *, prospective_after: datetime | N
     out: dict[str, Any] = {
         "first_formation": first_formation,
         "g_k": inputs.sessions[grid.last],
+        #: The reported sessions, so a later vintage can compare an already reported session.
+        "grid_sessions": [inputs.sessions[d] for d in grid.sessions],
         "T": observations,
         "L": lag,
         "L_ge_T": lag >= observations,
@@ -259,6 +261,7 @@ def evaluate(inputs: Inputs, evaluation: str, *, prospective_after: datetime | N
             for t in built.control
         ]
         families[family] = {
+            "delta": list(delta),
             "canonical_lag": _statistics(delta, lag),
             "double_lag": _statistics(delta, 2 * lag),
             "arm_positions": ablated.tallies["arm"].positions,

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -452,7 +453,16 @@ def load_inputs(conn: psycopg.Connection[Any], readout_date: date) -> readout_mo
 def scoring_commits(since: date, until: date) -> list[str]:
     """Every commit touching ``scoring.py`` in the window, as dated markers; the readout does not split on them."""
     return subprocess.run(
-        ["git", "log", f"--since={since}", f"--until={until}", "--format=%cs %h %s", "--", "app/services/scoring.py"],
+        # Whole calendar days: a date-only bound resolves to the current time of day.
+        [
+            "git",
+            "log",
+            f"--since={since} 00:00:00",
+            f"--until={until} 23:59:59",
+            "--format=%cs %h %s",
+            "--",
+            "app/services/scoring.py",
+        ],
         cwd=terms.REPO_ROOT,
         capture_output=True,
         text=True,
@@ -471,6 +481,60 @@ def unlisted_looks(looks_path: Path, trial_id: str, vintage_dir: Path) -> list[d
     return [record for record in records if record["trial_id"] == trial_id and record["uuid"] not in listed]
 
 
+def latest_vintage(vintage_dir: Path, trial_id: str) -> dict[str, Any] | None:
+    """The most recent earlier vintage of this trial (by readout date, then look start)."""
+    vintages = [json.loads(path.read_text()) for path in sorted(vintage_dir.glob("vintage-*.json"))]
+    ours = [v for v in vintages if v.get("look", {}).get("trial_id") == trial_id]
+    return max(ours, key=lambda v: (v["readout_date"], v["look"]["started_at"]), default=None)
+
+
+def revisions(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+    """What changed for already reported sessions (spec "Grid"): input components, and Δ per session.
+
+    Δ_f(d) is compared on every session both vintages report; any difference is a revision,
+    never silent. The identity names which input moved; it does not replay the change.
+    """
+    if previous is None:
+        return {"previous": None}
+    previous_identity = json.loads(json.dumps(previous["vintage"], default=_json_default))
+    current_identity = json.loads(json.dumps(current["vintage"], default=_json_default))
+    changed_inputs = sorted(key for key in current_identity if previous_identity.get(key) != current_identity[key])
+    sessions: dict[str, dict[str, list[str]]] = {}
+    now = json.loads(json.dumps(current["results"], default=_json_default))
+    for population, evaluations in previous["results"].items():
+        for evaluation, before in evaluations.items():
+            after = now.get(population, {}).get(evaluation, {})
+            for family, before_family in before.get("families", {}).items():
+                after_family = after.get("families", {}).get(family, {})
+                old = dict(zip(before.get("grid_sessions", []), before_family.get("delta", []), strict=True))
+                new = dict(zip(after.get("grid_sessions", []), after_family.get("delta", []), strict=True))
+                moved = sorted(day for day in old.keys() & new.keys() if old[day] != new[day])
+                missing = sorted(old.keys() - new.keys())
+                if moved or missing:
+                    sessions.setdefault(f"{population}/{evaluation}", {})[family] = moved + missing
+    return {
+        "previous": {"readout_date": previous["readout_date"], "look": previous["look"]["uuid"]},
+        "changed_inputs": changed_inputs,
+        "revised_sessions": sessions,
+    }
+
+
+def publish_vintage(vintage_dir: Path, name: str, record: dict[str, Any]) -> Path:
+    """Write, fsync, then link into place: a vintage is complete or absent, and never overwritten."""
+    vintage_dir.mkdir(parents=True, exist_ok=True)
+    path = vintage_dir / name
+    temporary = vintage_dir / f".{name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, default=_json_default, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)  # FileExistsError rather than overwrite
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
 def vintage_identity(inputs: readout_mod.Inputs) -> dict[str, Any]:
     """Every result-driving input (spec "Grid"): it detects a change, it does not replay one."""
     return {
@@ -487,10 +551,9 @@ def vintage_identity(inputs: readout_mod.Inputs) -> dict[str, Any]:
         "yield_snapshot": {iid: y for iid, y in sorted(inputs.yields.items())},
         "regime_benchmark": inputs.regimes
         if isinstance(inputs.regimes, str)
-        else {
-            "classified_days": sum(1 for v in inputs.regimes.values() if v is not None),
-            "last": max(inputs.regimes, default=None),
-        },
+        else hashlib.sha256(
+            json.dumps(sorted((day.isoformat(), label) for day, label in inputs.regimes.items())).encode()
+        ).hexdigest(),
     }
 
 
@@ -547,10 +610,8 @@ def run_readout(
             "scoring_py_commits": scoring_commits(pooled_start, inputs.cutoff),
             "results": results,
         }
-        path = vintage_dir / f"vintage-{readout_date}-{look['uuid'][:8]}.json"
-        vintage_dir.mkdir(parents=True, exist_ok=True)
-        with path.open("x", encoding="utf-8") as handle:  # never overwritten
-            handle.write(json.dumps(record, default=_json_default, indent=2, sort_keys=True) + "\n")
+        record["revisions"] = revisions(latest_vintage(vintage_dir, ident.trial_id), record)
+        path = publish_vintage(vintage_dir, f"vintage-{readout_date}-{look['uuid'][:8]}.json", record)
         return {**record, "vintage_path": str(path)}
 
 

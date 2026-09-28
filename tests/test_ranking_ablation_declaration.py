@@ -648,3 +648,39 @@ def test_readout_writes_a_vintage_listing_only_unlisted_looks(monkeypatch: pytes
     stored = json.loads(Path(first["vintage_path"]).read_text())
     assert stored["results"]["pooled"]["canonical"]["families"]["quality"]["canonical_lag"]
     assert stored["scoring_py_commits"] == ["2026-08-12 ac21f90d thesis quarantine"]
+
+
+def test_a_later_vintage_reports_revised_sessions_and_the_input_that_moved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    looks, vintages = tmp_path / "looks.jsonl", tmp_path / "v"
+    sidecar = terms.write_sidecar(terms.semantic_terms(), _facts(), tmp_path / "sc")
+    monkeypatch.setattr(script, "git_state", lambda: ("c" * 40, False))
+    monkeypatch.setattr(
+        script, "readout_gate", lambda _conn, *, dirty: script.Gate(sidecar, 7, datetime(2027, 1, 1, tzinfo=UTC))
+    )
+    monkeypatch.setattr(script, "scoring_commits", lambda _s, _u: [])
+    base = _inputs()
+    monkeypatch.setattr(script, "load_inputs", lambda _conn, _day: base)
+    first = script.run_readout(None, _FACT_DAY, looks_path=looks, vintage_dir=vintages)  # type: ignore[arg-type]
+    assert first["revisions"] == {"previous": None}
+    unchanged = script.run_readout(None, _FACT_DAY, looks_path=looks, vintage_dir=vintages)  # type: ignore[arg-type]
+    assert unchanged["revisions"]["changed_inputs"] == [] and unchanged["revisions"]["revised_sessions"] == {}
+    # A price correction on name 9 mid-window: the input identity and the reported Δ both move.
+    read = base.series[9]
+    bumped = [replace(bar, close=bar.close * Decimal("1.5")) if i == 30 else bar for i, bar in enumerate(read.bars)]
+    corrected = replace(
+        base, series={**base.series, 9: reader.read_series(bumped, "us_equity", as_of=date(2026, 12, 31))}
+    )
+    monkeypatch.setattr(script, "load_inputs", lambda _conn, _day: corrected)
+    revised = script.run_readout(None, _FACT_DAY, looks_path=looks, vintage_dir=vintages)  # type: ignore[arg-type]
+    assert revised["revisions"]["changed_inputs"] == ["price_input_sha256"]
+    assert revised["revisions"]["revised_sessions"]
+
+
+def test_publish_vintage_never_overwrites_and_leaves_no_temporary(tmp_path: Path) -> None:
+    path = script.publish_vintage(tmp_path, "vintage-x.json", {"a": 1})
+    with pytest.raises(FileExistsError):
+        script.publish_vintage(tmp_path, "vintage-x.json", {"a": 2})
+    assert json.loads(path.read_text()) == {"a": 1}
+    assert [p.name for p in tmp_path.iterdir()] == ["vintage-x.json"]
