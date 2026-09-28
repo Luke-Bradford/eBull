@@ -233,6 +233,14 @@ class MarketRegimeProvider:
         return cls._classify(dates, [float(row[1]) for row in rows], label=repr(symbol))
 
     @classmethod
+    def from_closes(cls, dates: Sequence[date], close_values: Sequence[float], *, label: str) -> MarketRegimeProvider:
+        """Classify a benchmark series a caller has already read (#1822 route F reads it through its registry).
+
+        The same one path as ``load`` and ``load_research``; the caller owns the read and its checks.
+        """
+        return cls._classify(dates, close_values, label=label)
+
+    @classmethod
     def _classify(cls, dates: Sequence[date], close_values: Sequence[float], *, label: str) -> MarketRegimeProvider:
         """The one classification path, shared by both constructors.
 

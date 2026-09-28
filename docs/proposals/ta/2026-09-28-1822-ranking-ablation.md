@@ -1,4 +1,4 @@
-# #1822 — v1.5 ranking family ablation: spec (v8)
+# #1822 — v1.5 ranking family ablation: spec (v9)
 
 Refs #1822, #1815, #2437 (supervisor refill 2026-09-28 05:15Z, item 2),
 `docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md` §3. v2 answers Codex ckpt-1 v1 (61
@@ -570,6 +570,22 @@ Changing or proposing a weight. Mixing model versions. Summing Δ across familie
 the 34-run window cannot feed and which exceeds the harness's 63-session cap for route H.
 
 ## Revision notes
+
+- **v9 (slice 1b-ii-b, as built).** These construction details were unstated, and the code fixes them. All are
+  descriptive, and all are semantic terms of sidecar `ee86663b…`:
+  - **Realised turnover per book** is the mean, over consecutive active formations, of 1 − |A(t) ∩ A(prev)| / |A(t)|.
+  - **Regime label** of reported session d is the benchmark's `classify_regimes` label on session d − 1, so the
+    label uses bars before d only. The per-label split (sessions, mean Δ ×252) is reported only when the grid spans
+    more than one non-null label. It carries no SE. At the fact date the window is one label (`bull_quiet`), so
+    readout 1 reports no split.
+  - **Carried V** counts, per book, the entered position-sessions from e through min(x, terminal bar) that have no
+    valid close.
+  - **Funnel** per formation with a run: ranked, then excluded by reason, then lane-and-valid, then `t3_excluded`,
+    then bars present, then each `bar_exclusion` reason under the cell's rule, then the control.
+  - **Vintage.** `--readout` writes `1822-route-f/vintage-<readout date>-<look uuid8>.json` and never overwrites
+    one.
+  - **Split.** Slice 1b-ii shipped as 1b-ii-a (#3468: the machinery) and 1b-ii-b (the descriptives, the sidecar,
+    and register r18).
 - **v2 (Codex ckpt-1 v1, 61 findings).**
   - Fixed: the renormalisation claim was false (#11), so the ablation is now a construction, with clip, P and R
     reproduced (#12, #13).

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -51,6 +52,14 @@ from app.services.series_termination import TerminationClass
 
 #: The look log (spec "Trial register"): a start record per readout, appended before any return is read.
 LOOKS_PATH: Final = terms.REPO_ROOT / "var" / "1822-route-f" / "looks.jsonl"
+#: Printed in every vintage: what the numbers are and are not (spec "Statistics", "Declaration").
+READOUT_HEADER: Final = (
+    "Descriptive readout, no inference: six families x two cost bases, every t is marginal and no multiplicity "
+    "correction is applied. Net only; between-slot rebalancing is uncosted in both books. Price-only (no "
+    "dividends). Retrospective before the freeze, prospective after. The recorded commit identifies the code; "
+    "it does not prove which bytes ran. Looks are listed from this checkout only; a final aborted run appears "
+    "in the next vintage, or in none."
+)
 #: Confidence's neutral value (spec "Premise check"). A thesis can also score exactly this, so
 #: the share of rows AT it is reported beside, never instead of, the writer's branch record.
 _NEUTRAL_CONFIDENCE = 0.5
@@ -436,7 +445,99 @@ def load_inputs(conn: psycopg.Connection[Any], readout_date: date) -> readout_mo
         cutoff=timeline.cutoff,
         series=series,
         termination=termination,
+        yields=reader.load_yields(conn, names),
+        regimes=reader.load_regimes(conn),
     )
+
+
+def scoring_commits(since: date, until: date) -> list[str]:
+    """Every commit touching ``scoring.py`` in the window, as dated markers; the readout does not split on them."""
+    return subprocess.run(
+        # Whole calendar days: a date-only bound resolves to the current time of day.
+        [
+            "git",
+            "log",
+            f"--since={since} 00:00:00",
+            f"--until={until} 23:59:59",
+            "--format=%cs %h %s",
+            "--",
+            "app/services/scoring.py",
+        ],
+        cwd=terms.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+
+def unlisted_looks(looks_path: Path, trial_id: str, vintage_dir: Path) -> list[dict[str, Any]]:
+    """Start records for ``trial_id`` whose uuid no earlier vintage lists, aborted ones included."""
+    listed = {
+        look["uuid"]
+        for path in sorted(vintage_dir.glob("vintage-*.json"))
+        for look in json.loads(path.read_text()).get("looks", [])
+    }
+    records = [json.loads(line) for line in looks_path.read_text().splitlines() if line.strip()]
+    return [record for record in records if record["trial_id"] == trial_id and record["uuid"] not in listed]
+
+
+def latest_vintage(vintage_dir: Path, trial_id: str) -> dict[str, Any] | None:
+    """The most recent earlier vintage of this trial (by readout date, then look start)."""
+    vintages = [json.loads(path.read_text()) for path in sorted(vintage_dir.glob("vintage-*.json"))]
+    ours = [v for v in vintages if v.get("look", {}).get("trial_id") == trial_id]
+    return max(ours, key=lambda v: (v["readout_date"], v["look"]["started_at"]), default=None)
+
+
+def revisions(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+    """What changed for already reported sessions (spec "Grid"): input components, and Δ per session.
+
+    Δ_f(d) is compared on every session both vintages report; any difference is a revision,
+    never silent. The identity names which input moved; it does not replay the change.
+    """
+    if previous is None:
+        return {"previous": None}
+    previous_identity = json.loads(json.dumps(previous["vintage"], default=_json_default))
+    current_identity = json.loads(json.dumps(current["vintage"], default=_json_default))
+    changed_inputs = sorted(key for key in current_identity if previous_identity.get(key) != current_identity[key])
+    sessions: dict[str, dict[str, list[str]]] = {}
+    now = json.loads(json.dumps(current["results"], default=_json_default))
+    for population, evaluations in previous["results"].items():
+        for evaluation, before in evaluations.items():
+            after = now.get(population, {}).get(evaluation, {})
+            for family, before_family in before.get("families", {}).items():
+                after_family = after.get("families", {}).get(family, {})
+                old = dict(zip(before.get("grid_sessions", []), before_family.get("delta", []), strict=True))
+                new = dict(zip(after.get("grid_sessions", []), after_family.get("delta", []), strict=True))
+                moved = sorted(day for day in old.keys() & new.keys() if old[day] != new[day])
+                missing = sorted(old.keys() - new.keys())
+                if moved or missing:
+                    sessions.setdefault(f"{population}/{evaluation}", {})[family] = moved + missing
+    return {
+        "previous": {"readout_date": previous["readout_date"], "look": previous["look"]["uuid"]},
+        "changed_inputs": changed_inputs,
+        "revised_sessions": sessions,
+    }
+
+
+def publish_vintage(vintage_dir: Path, name: str, record: dict[str, Any]) -> Path:
+    """Write, fsync, then link into place: a vintage is complete or absent, and never overwritten."""
+    vintage_dir.mkdir(parents=True, exist_ok=True)
+    path = vintage_dir / name
+    temporary = vintage_dir / f".{name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, default=_json_default, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)  # FileExistsError rather than overwrite
+    finally:
+        temporary.unlink(missing_ok=True)
+    directory = os.open(vintage_dir, os.O_RDONLY)
+    try:
+        os.fsync(directory)  # make the new directory entry durable, not just the file's bytes
+    finally:
+        os.close(directory)
+    return path
 
 
 def vintage_identity(inputs: readout_mod.Inputs) -> dict[str, Any]:
@@ -446,10 +547,18 @@ def vintage_identity(inputs: readout_mod.Inputs) -> dict[str, Any]:
         "quarantine_rule_set_version": QUARANTINE_RULE_SET_VERSION,
         "population_rows_sha256": inputs.population.rows_sha256,
         "excluded_rows": inputs.population.excluded_rows,
-        "entries": {entry: [run.scored_at, run.known_at] for entry, run in sorted(inputs.run_map.entries.items())},
+        "entries": {
+            entry.isoformat(): [run.scored_at, run.known_at] for entry, run in sorted(inputs.run_map.entries.items())
+        },
         "superseded_runs": [run.scored_at for run in inputs.run_map.superseded],
         "beyond_calendar_runs": [run.scored_at for run in inputs.run_map.beyond_calendar],
         "termination_classes": {iid: str(c) for iid, c in sorted(inputs.termination.items())},
+        "yield_snapshot": {iid: y for iid, y in sorted(inputs.yields.items())},
+        "regime_benchmark": inputs.regimes
+        if isinstance(inputs.regimes, str)
+        else hashlib.sha256(
+            json.dumps(sorted((day.isoformat(), label) for day, label in inputs.regimes.items())).encode()
+        ).hexdigest(),
     }
 
 
@@ -459,7 +568,13 @@ def _append_look(handle: Any, record: dict[str, Any]) -> None:
     os.fsync(handle.fileno())
 
 
-def run_readout(conn: psycopg.Connection[Any], readout_date: date, *, looks_path: Path = LOOKS_PATH) -> dict[str, Any]:
+def run_readout(
+    conn: psycopg.Connection[Any],
+    readout_date: date,
+    *,
+    looks_path: Path = LOOKS_PATH,
+    vintage_dir: Path = terms.SIDECAR_DIR,
+) -> dict[str, Any]:
     """Gate, then log the look, then read prices. A refused gate reads no price."""
     commit, dirty = git_state()
     gate = readout_gate(conn, dirty=dirty)
@@ -483,16 +598,26 @@ def run_readout(conn: psycopg.Connection[Any], readout_date: date, *, looks_path
         inputs = load_inputs(conn, readout_date)
         if isinstance(inputs, str):
             return {"outcome": "refused", "reason": inputs, "look": look}
-        return {
+        results = readout_mod.readout(inputs, frozen_at=gate.frozen_at)
+        pooled_start = results["pooled"]["canonical"].get("first_formation", inputs.cutoff)
+        record = {
             "outcome": "read",
             "look": look,
             "declaration_id": gate.declaration_id,
             "frozen_at": gate.frozen_at,
             "sidecar": gate.sidecar.path,
+            "commit": commit,
+            "readout_date": readout_date,
             "cutoff_c_k": inputs.cutoff,
+            "header": READOUT_HEADER,
             "vintage": vintage_identity(inputs),
-            "results": readout_mod.readout(inputs, frozen_at=gate.frozen_at),
+            "looks": unlisted_looks(looks_path, ident.trial_id, vintage_dir),
+            "scoring_py_commits": scoring_commits(pooled_start, inputs.cutoff),
+            "results": results,
         }
+        record["revisions"] = revisions(latest_vintage(vintage_dir, ident.trial_id), record)
+        path = publish_vintage(vintage_dir, f"vintage-{readout_date}-{look['uuid'][:8]}.json", record)
+        return {**record, "vintage_path": str(path)}
 
 
 def main(argv: list[str] | None = None) -> int:

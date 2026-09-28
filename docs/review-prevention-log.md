@@ -11629,3 +11629,15 @@ neighbouring container and match it.**
   and table-test `main(argv)` per mode with the work stubbed to refuse and to succeed. Self-review prompt: "for each
   mode, which line maps a refusal to a non-zero exit?"
 - Enforced in: `tests/test_ranking_ablation_declaration.py::test_main_exit_code_reflects_the_outcome`.
+
+### A ratio or a `d − 1` lookup guards its degenerate case locally, even when upstream makes it unreachable (#1822)
+
+- Failure: the route F readout's turnover divided by |A(t)| with no empty-book guard. Its regime label read
+  `sessions[d − 1]`, which on ordinal 0 wraps to the calendar's last day. In both cases a caller today makes the
+  degenerate input unreachable: the control is non-empty, and the grid starts at ordinal ≥ 1. The guard lived only
+  in the caller, though, so a reuse would fail loudly (ZeroDivisionError) or silently (a wrapped index reads a
+  valid-looking label).
+- Prevention: in the function that divides or offsets, skip or `None` the degenerate case itself, and unit-test
+  that function on it directly. Python's negative indexing makes an `index − 1` lookup the silent kind. Self-review
+  prompt: "what does this line do on an empty set, or on index 0?"
+- Enforced in: `tests/test_ranking_ablation_declaration.py::test_turnover_skips_an_empty_book_and_regimes_never_wrap`.

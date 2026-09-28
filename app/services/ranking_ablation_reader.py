@@ -40,12 +40,13 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Final, Literal
 
 import psycopg
 
+from app.services.market_regime_provider import BENCHMARK_SYMBOL, BenchmarkUnavailableError, MarketRegimeProvider
 from app.services.price_quarantine import PROVISIONAL_WINDOW_DAYS, Bar, SeriesVerdicts, evaluate_series
 from app.services.price_quarantine_store import _SCOPE_SQL as QUARANTINE_SCOPE_SQL
 from app.services.ranking_ablation import FAMILY_ORDER, MODEL_VERSION, Run, ScoreRow, parse_score_row
@@ -107,6 +108,8 @@ class Population:
     excluded_names: Mapping[str, int]
     #: The symbol current at the read, for every population instrument.
     symbols: Mapping[int, str]
+    #: scored_at → reason → rows of that run excluded for it (the per-formation funnel).
+    excluded_by_run: Mapping[datetime, Mapping[str, int]] = field(default_factory=dict)
     #: sha256 over every row read, excluded ones included (the vintage identity's score half):
     #: a changed score, penalty, lane field or symbol moves it even when no count does.
     rows_sha256: str = ""
@@ -130,6 +133,7 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
     runs: dict[datetime, dict[int, StoredRow]] = {}
     excluded_rows: Counter[str] = Counter()
     excluded_names: dict[str, set[int]] = {}
+    excluded_by_run: dict[datetime, Counter[str]] = {}
     symbols: dict[int, str] = {}
     digest = hashlib.sha256()
     rows = list(rows)
@@ -169,6 +173,7 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
         )
         if isinstance(parsed, str):
             excluded_rows[parsed] += 1
+            excluded_by_run.setdefault(scored_at, Counter())[parsed] += 1
             excluded_names.setdefault(parsed, set()).add(iid)
             continue
         text = explanation or ""
@@ -184,6 +189,7 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
         excluded_rows=dict(excluded_rows),
         excluded_names={reason: len(names) for reason, names in excluded_names.items()},
         symbols=symbols,
+        excluded_by_run={run: dict(reasons) for run, reasons in excluded_by_run.items()},
         rows_sha256=digest.hexdigest(),
     )
 
@@ -399,6 +405,48 @@ def termination_classes(
 
 
 # ---------------------------------------------------------------------------
+# Descriptive inputs: dividend yield and the regime benchmark
+# ---------------------------------------------------------------------------
+
+#: The yield tilt's input ("Prices" 3), read at readout time, not point-in-time.
+_YIELD_SQL: Final = """
+SELECT instrument_id, ttm_yield_pct FROM instrument_dividend_summary
+WHERE instrument_id = ANY(%(instrument_ids)s::bigint[])
+ORDER BY instrument_id
+"""
+#: ``MarketRegimeProvider.load``'s benchmark read, registered here so it runs through :func:`execute`.
+_REGIME_BENCHMARK_SQL: Final = """
+SELECT p.price_date, p.close
+FROM price_daily p
+JOIN instruments i ON i.instrument_id = p.instrument_id
+WHERE i.symbol = %(symbol)s AND p.close IS NOT NULL
+ORDER BY p.price_date
+"""
+
+
+def load_yields(conn: psycopg.Connection[Any], instrument_ids: Sequence[int]) -> dict[int, float | None]:
+    """instrument → ``ttm_yield_pct``; NULL stays None, a name without a summary row is absent."""
+    rows = execute(conn, "dividend_yield", {"instrument_ids": sorted(set(instrument_ids))})
+    return {int(iid): _as_float(value) for iid, value in rows}
+
+
+def load_regimes(conn: psycopg.Connection[Any]) -> dict[date, str | None] | str:
+    """The benchmark's causal regime per date (``market_regime.classify_regimes``), or a refusal."""
+    rows = execute(conn, "regime_benchmark", {"symbol": BENCHMARK_SYMBOL})
+    dates = [row[0] for row in rows]
+    if not rows:
+        return "benchmark_unavailable"
+    if len(set(dates)) != len(dates):
+        return "benchmark_ambiguous"  # ``MarketRegimeProvider.load``'s duplicate-date refusal
+    try:
+        # The provider's one classification path, shared so the labels cannot drift from it.
+        provider = MarketRegimeProvider.from_closes(dates, [float(row[1]) for row in rows], label=BENCHMARK_SYMBOL)
+    except BenchmarkUnavailableError:
+        return "benchmark_unclassifiable"
+    return {day: None if value is None else str(value) for day, value in provider.classification_items()}
+
+
+# ---------------------------------------------------------------------------
 # Census, dividends and the declaration's freeze time
 # ---------------------------------------------------------------------------
 
@@ -437,6 +485,8 @@ ROUTE_F_SQL: Final[Mapping[str, str]] = {
     "form25": _FORM25_SQL,
     **_PREMISE_SQL,
     "dividend_events": _DIVIDEND_SQL,
+    "dividend_yield": _YIELD_SQL,
+    "regime_benchmark": _REGIME_BENCHMARK_SQL,
     "frozen_at": _FROZEN_AT_SQL,
 }
 
@@ -471,6 +521,8 @@ __all__ = [
     "cutoff_session",
     "input_sha256",
     "lane_exclusion",
+    "load_regimes",
+    "load_yields",
     "load_form25_links",
     "load_job_windows",
     "load_population",
