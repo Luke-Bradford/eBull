@@ -422,6 +422,7 @@ def test_pair_events_follow_the_leg_lifecycle(ebull_test_conn: Conn) -> None:
     # `broken` is pair-level, once, with reasons — and does not stop a late leg's events (O11).
     broken = "INSERT INTO ai_trial_pair_events (pair_id, event, reasons) VALUES (%s, 'broken', %s)"
     _refused(ebull_test_conn, broken, (pair_id, []), "ai_trial_pair_events_reasons_iff_broken")
+    _refused(ebull_test_conn, broken, (pair_id, ["late_fill,unresolved"]), "is not a reason code")
     ebull_test_conn.execute(broken, (pair_id, ["late_fill"]))
     ebull_test_conn.commit()
     _refused(ebull_test_conn, broken, (pair_id, ["unresolved"]), "already broken")

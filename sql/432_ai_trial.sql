@@ -408,7 +408,8 @@ BEGIN
         RAISE EXCEPTION 'pair declaration % is not its run''s (%)', NEW.declaration_id, r.declaration_id;
     END IF;
 
-    SELECT count(*) INTO next_seq FROM ai_trial_pairs WHERE declaration_id = NEW.declaration_id;
+    -- Dense by this check, so max + 1 is the count, and reads the unique index's last entry.
+    SELECT coalesce(max(pair_seq) + 1, 0) INTO next_seq FROM ai_trial_pairs WHERE declaration_id = NEW.declaration_id;
     IF NEW.pair_seq <> next_seq THEN
         RAISE EXCEPTION 'pair_seq % is not the next in sequence (%)', NEW.pair_seq, next_seq;
     END IF;
@@ -592,8 +593,7 @@ CREATE TABLE IF NOT EXISTS ai_trial_pair_events (
     CONSTRAINT ai_trial_pair_events_leg_iff_not_broken CHECK ((event = 'broken') = (leg IS NULL)),
     CONSTRAINT ai_trial_pair_events_reasons_iff_broken CHECK (
         (event = 'broken') = (reasons IS NOT NULL)
-        AND (reasons IS NULL OR (cardinality(reasons) >= 1 AND array_position(reasons, NULL) IS NULL
-                                 AND array_to_string(reasons, ',') ~ '^[a-z][a-z0-9_]*(,[a-z][a-z0-9_]*)*$'))
+        AND (reasons IS NULL OR (cardinality(reasons) >= 1 AND array_position(reasons, NULL) IS NULL))
     )
 );
 
@@ -606,9 +606,16 @@ CREATE OR REPLACE FUNCTION ai_trial_pair_events_order()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     last_event TEXT;
+    reason     TEXT;
 BEGIN
     PERFORM 1 FROM ai_trial_pairs WHERE pair_id = NEW.pair_id FOR NO KEY UPDATE;
     IF NEW.event = 'broken' THEN
+        -- Per element: a regex over the joined array cannot tell {'a,b'} from {'a','b'}.
+        FOREACH reason IN ARRAY NEW.reasons LOOP
+            IF reason !~ '^[a-z][a-z0-9_]*$' THEN
+                RAISE EXCEPTION 'broken reason % is not a reason code', reason;
+            END IF;
+        END LOOP;
         IF EXISTS (SELECT 1 FROM ai_trial_pair_events WHERE pair_id = NEW.pair_id AND event = 'broken') THEN
             RAISE EXCEPTION 'pair % is already broken', NEW.pair_id;
         END IF;
