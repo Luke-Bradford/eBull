@@ -532,6 +532,11 @@ def publish_vintage(vintage_dir: Path, name: str, record: dict[str, Any]) -> Pat
         os.link(temporary, path)  # FileExistsError rather than overwrite
     finally:
         temporary.unlink(missing_ok=True)
+    directory = os.open(vintage_dir, os.O_RDONLY)
+    try:
+        os.fsync(directory)  # make the new directory entry durable, not just the file's bytes
+    finally:
+        os.close(directory)
     return path
 
 

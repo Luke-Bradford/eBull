@@ -308,6 +308,18 @@ def _mean(values: Sequence[float]) -> float | None:
     return math.fsum(values) / len(values) if values else None
 
 
+def _turnover(by_t: Mapping[int, frozenset[int]]) -> float | None:
+    """Mean over consecutive formations of 1 − |A(t) ∩ A(prev)| / |A(t)|; an empty book is skipped."""
+    ordered = sorted(by_t)
+    return _mean(
+        [
+            1.0 - len(by_t[now] & by_t[before]) / len(by_t[now])
+            for before, now in zip(ordered, ordered[1:], strict=False)
+            if by_t[now]
+        ]
+    )
+
+
 def describe(
     inputs: Inputs,
     grid: Grid,
@@ -373,10 +385,7 @@ def describe(
     turnover: dict[str, float | None] = {}
     carried: dict[str, int] = {}
     for book, by_t in arms.items():
-        ordered = sorted(by_t)
-        turnover[book] = _mean(
-            [1.0 - len(by_t[now] & by_t[before]) / len(by_t[now]) for before, now in zip(ordered, ordered[1:])]
-        )
+        turnover[book] = _turnover(by_t)
         carried[book] = sum(
             1
             for t, members in by_t.items()
@@ -476,7 +485,8 @@ def _session_regimes(inputs: Inputs, grid: Grid) -> tuple[dict[str, Any], dict[i
     if isinstance(inputs.regimes, str):
         return {"refused": inputs.regimes}, {}
     regimes = inputs.regimes
-    of = {d: regimes.get(inputs.sessions[d - 1]) for d in grid.sessions}
+    # Ordinal 0 has no prior session; never let d − 1 wrap to the calendar's last day.
+    of = {d: regimes.get(inputs.sessions[d - 1]) if d >= 1 else None for d in grid.sessions}
     return {"counts": dict(Counter(str(label) for label in of.values()))}, of
 
 

@@ -687,3 +687,12 @@ def test_publish_vintage_never_overwrites_and_leaves_no_temporary(tmp_path: Path
         script.publish_vintage(tmp_path, "vintage-x.json", {"a": 2})
     assert json.loads(path.read_text()) == {"a": 1}
     assert [p.name for p in tmp_path.iterdir()] == ["vintage-x.json"]
+
+
+def test_turnover_skips_an_empty_book_and_regimes_never_wrap() -> None:
+    assert readout._turnover({0: frozenset({1}), 1: frozenset()}) is None
+    assert readout._turnover({0: frozenset({1, 2}), 1: frozenset({2, 3}), 2: frozenset()}) == 0.5
+    inputs = _inputs()
+    last_only = replace(inputs, regimes={inputs.sessions[-1]: "bull_quiet"})
+    _, of = readout._session_regimes(last_only, readout.Grid(formations=(), first=0, last=1))
+    assert of[0] is None  # d = 0 never borrows the calendar's last session
