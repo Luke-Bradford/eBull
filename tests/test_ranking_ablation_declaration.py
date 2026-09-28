@@ -483,3 +483,53 @@ def test_terminating_series_ends_at_its_last_bar() -> None:
     assert readout.series_prices(read, index, terminal_class=TerminationClass.Q_SUFFIX_OTC).terminal_ordinal == 4
     assert readout.series_prices(read, index, terminal_class=TerminationClass.UNKNOWN).terminal_ordinal is None
     assert readout.series_prices(read, index, terminal_class=None).terminal_ordinal is None
+
+
+def test_population_digest_moves_on_a_score_change_no_count_sees() -> None:
+    row = (
+        datetime(2026, 8, 3, tzinfo=UTC),
+        1,
+        1,
+        0.5,
+        0.4,
+        0.3,
+        0.2,
+        0.1,
+        0.5,
+        0.35,
+        0.35,
+        [],
+        "Stocks",
+        "USD",
+        "A",
+        "",
+    )
+    changed = (*row[:3], 0.6, *row[4:])
+    one, other = reader.build_population([row]), reader.build_population([changed])
+    assert one.excluded_rows == other.excluded_rows
+    assert one.rows_sha256 != other.rows_sha256
+
+
+def test_gate_refuses_a_stored_row_that_no_longer_matches_its_digest(
+    monkeypatch: pytest.MonkeyPatch, selected: terms.Sidecar
+) -> None:
+    declaration = terms.build_declaration(selected)
+    tampered = replace(declaration, declared_by="someone else")
+    stored = result_ledger.FrozenPreregistration(
+        declaration_id=11, declaration=tampered, declaration_sha256=declaration.sha256, chain_declaration_ids=(11,)
+    )
+    monkeypatch.setattr(script, "load_preregistration", lambda *_a: stored)
+    assert script.readout_gate(None, dirty=False) == "stored_row_does_not_match_its_digest"  # type: ignore[arg-type]
+
+
+def test_look_record_names_the_calendar_cutoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    looks = tmp_path / "looks.jsonl"
+    sidecar = terms.write_sidecar(terms.semantic_terms(), _facts(), tmp_path / "sc")
+    monkeypatch.setattr(script, "git_state", lambda: ("c" * 40, False))
+    monkeypatch.setattr(
+        script, "readout_gate", lambda _conn, *, dirty: script.Gate(sidecar, 7, datetime(2026, 9, 29, tzinfo=UTC))
+    )
+    monkeypatch.setattr(script, "load_inputs", lambda _conn, _day: "no_witnessed_run")
+    script.run_readout(None, _FACT_DAY, looks_path=looks)  # type: ignore[arg-type]
+    (record,) = [json.loads(line) for line in looks.read_text().splitlines()]
+    assert record["cutoff_c_k"] == "2026-09-22"

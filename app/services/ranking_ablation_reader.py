@@ -107,6 +107,9 @@ class Population:
     excluded_names: Mapping[str, int]
     #: The symbol current at the read, for every population instrument.
     symbols: Mapping[int, str]
+    #: sha256 over every row read, excluded ones included (the vintage identity's score half):
+    #: a changed score, penalty, lane field or symbol moves it even when no count does.
+    rows_sha256: str = ""
 
 
 def lane_exclusion(type_description: str | None, currency: str | None) -> str | None:
@@ -128,6 +131,10 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
     excluded_rows: Counter[str] = Counter()
     excluded_names: dict[str, set[int]] = {}
     symbols: dict[int, str] = {}
+    digest = hashlib.sha256()
+    rows = list(rows)
+    for fields in rows:
+        digest.update(json.dumps([None if f is None else str(f) for f in fields]).encode())
     for (
         scored_at,
         instrument_id,
@@ -177,6 +184,7 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
         excluded_rows=dict(excluded_rows),
         excluded_names={reason: len(names) for reason, names in excluded_names.items()},
         symbols=symbols,
+        rows_sha256=digest.hexdigest(),
     )
 
 

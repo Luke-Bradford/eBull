@@ -408,6 +408,8 @@ def readout_gate(conn: psycopg.Connection[Any], *, dirty: bool) -> Gate | str:
         return "not_frozen"
     if stored.declaration_sha256 != declaration.sha256:
         return "stored_declaration_differs"
+    if stored.declaration.sha256 != stored.declaration_sha256:
+        return "stored_row_does_not_match_its_digest"
     if declaration_refusals(declaration):
         return "declaration_refused"
     ((frozen_at,),) = reader.execute(conn, "frozen_at", {"declaration_id": stored.declaration_id})
@@ -437,6 +439,20 @@ def load_inputs(conn: psycopg.Connection[Any], readout_date: date) -> readout_mo
     )
 
 
+def vintage_identity(inputs: readout_mod.Inputs) -> dict[str, Any]:
+    """Every result-driving input (spec "Grid"): it detects a change, it does not replay one."""
+    return {
+        "price_input_sha256": reader.input_sha256(inputs.series),
+        "quarantine_rule_set_version": QUARANTINE_RULE_SET_VERSION,
+        "population_rows_sha256": inputs.population.rows_sha256,
+        "excluded_rows": inputs.population.excluded_rows,
+        "entries": {entry: [run.scored_at, run.known_at] for entry, run in sorted(inputs.run_map.entries.items())},
+        "superseded_runs": [run.scored_at for run in inputs.run_map.superseded],
+        "beyond_calendar_runs": [run.scored_at for run in inputs.run_map.beyond_calendar],
+        "termination_classes": {iid: str(c) for iid, c in sorted(inputs.termination.items())},
+    }
+
+
 def _append_look(handle: Any, record: dict[str, Any]) -> None:
     handle.write(json.dumps(record, default=_json_default, sort_keys=True) + "\n")
     handle.flush()
@@ -450,6 +466,8 @@ def run_readout(conn: psycopg.Connection[Any], readout_date: date, *, looks_path
     if isinstance(gate, str):
         return {"outcome": "refused", "reason": gate}
     ident = terms.identity(gate.sidecar.sha256)
+    # Calendar-only (spec "Grid"), so the look names its target before any price is read.
+    cutoff = reader.cutoff_session(readout_date, ra.nyse_sessions(readout_date - timedelta(days=31), readout_date))
     looks_path.parent.mkdir(parents=True, exist_ok=True)
     with looks_path.open("a", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)  # readouts serialise; released on close
@@ -458,6 +476,7 @@ def run_readout(conn: psycopg.Connection[Any], readout_date: date, *, looks_path
             "trial_id": ident.trial_id,
             "commit": commit,
             "readout_date": readout_date,
+            "cutoff_c_k": cutoff,
             "started_at": datetime.now(UTC),
         }
         _append_look(handle, look)
@@ -471,12 +490,7 @@ def run_readout(conn: psycopg.Connection[Any], readout_date: date, *, looks_path
             "frozen_at": gate.frozen_at,
             "sidecar": gate.sidecar.path,
             "cutoff_c_k": inputs.cutoff,
-            "vintage": {
-                "price_input_sha256": reader.input_sha256(inputs.series),
-                "quarantine_rule_set_version": QUARANTINE_RULE_SET_VERSION,
-                "excluded_rows": inputs.population.excluded_rows,
-                "superseded_runs": [run.scored_at for run in inputs.run_map.superseded],
-            },
+            "vintage": vintage_identity(inputs),
             "results": readout_mod.readout(inputs, frozen_at=gate.frozen_at),
         }
 
