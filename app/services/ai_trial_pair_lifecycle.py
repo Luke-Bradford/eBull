@@ -22,22 +22,36 @@ ownership releases — so the writer is idempotent and can run on any cadence. I
   so it is still managed to its exits and reported (O11).
 - **O11.** ``pair_unit_state`` is the readout's inclusion rule: a pair with a leg whose latest
   event is ``uncertain`` is ``blocked`` (excluded until reconciliation resolves it).
+- **Regime label (§9, slice 2c-iv-a).** Once the arm leg has ``filled``, one
+  ``ai_trial_pair_labels`` row: the house market regime (``market_regime`` over the SPY benchmark,
+  ``market_regime_provider`` — the classifier ``strategy_result_regime_cohorts`` uses) at the
+  close of the NYSE session BEFORE the arm's fill session. That is the regime known at the fill;
+  the fill session's own close is not. No benchmark bar for that session yet → no label this
+  pass, and the pair stays unfinished until one is written; a bar still in warm-up →
+  ``unclassified`` (the cohort table's vocabulary).
 
 Not scheduled here: the jobs slice (2c-iv) runs ``record_pair_lifecycle`` each position cycle.
 """
 
 from __future__ import annotations
 
+import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, Literal
 
 import psycopg
 from psycopg.pq import TransactionStatus
 
 from app.services.ai_trial_deadline import TRIAL_EXIT_TIME_UTC, exit_deadline_session, fill_session
+from app.services.market_calendar import us_market_status
+from app.services.market_regime import REGIME_RULE_VERSION
+from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_RULE_SET_VERSION
+from app.services.market_regime_provider import BenchmarkUnavailableError, MarketRegimeProvider
+
+logger = logging.getLogger(__name__)
 
 LegEvent = Literal["submitted", "uncertain", "filled", "censored", "closed"]
 PairUnitState = Literal["broken", "blocked", "unit", "open"]
@@ -50,6 +64,14 @@ TRIAL_UNRESOLVED_SESSIONS: Final = 10
 
 #: Trade statuses reached only after the broker submission was attempted. A trial trade is
 #: ``failed`` only by a broker rejection, which comes after the call.
+#: The label's classifier identity: the regime rule and the benchmark-source rule, the pair
+#: ``strategy_registry.INPUT_RULE_SETS`` carries for every regime-gated strategy.
+LABEL_CLASSIFIER_VERSION: Final = f"{REGIME_RULE_VERSION};{BENCHMARK_RULE_SET_VERSION}"
+#: A benchmark bar that exists but is still in the classifier's warm-up.
+UNCLASSIFIED: Final = "unclassified"
+
+RegimeLoader = Callable[[psycopg.Connection[Any]], MarketRegimeProvider]
+
 _SUBMITTED_STATUSES: Final = frozenset({"submitted", "open", "closing", "closed", "reconcile_required", "failed"})
 _REASON: Final = re.compile(r"[a-z][a-z0-9_]*")
 
@@ -185,7 +207,68 @@ _LEG_FACTS_SQL: Final = """
 _EVENT_SQL: Final = "INSERT INTO ai_trial_pair_events (pair_id, leg, event) VALUES (%s, %s, %s)"
 
 
-def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime) -> int:
+def previous_session(day: date) -> date:
+    """The last NYSE session strictly before ``day``."""
+    prior = day - timedelta(days=1)
+    while us_market_status(prior) == "closed":
+        prior -= timedelta(days=1)
+    return prior
+
+
+def entry_regime_label(provider: MarketRegimeProvider, entry_session: date) -> str | None:
+    """The §9 label for an arm that filled in ``entry_session``; ``None`` while the benchmark
+    has no bar for the session before it (the label waits, it is never guessed from an older
+    bar)."""
+    series = provider.for_dates((previous_session(entry_session),))
+    if series.not_evaluable_indices:
+        return None
+    regime = series.values[0]
+    return UNCLASSIFIED if regime is None else regime.value
+
+
+class _LazyRegime:
+    """Loads the benchmark once per pass, and only if a label is owed."""
+
+    def __init__(self, loader: RegimeLoader) -> None:
+        self._loader = loader
+        self._provider: MarketRegimeProvider | None = None
+        self._error: BenchmarkUnavailableError | None = None
+
+    def get(self, conn: psycopg.Connection[Any]) -> MarketRegimeProvider:
+        # A failed load is cached too: every later pair in the pass defers without re-reading.
+        if self._error is not None:
+            raise self._error
+        if self._provider is None:
+            try:
+                self._provider = self._loader(conn)
+            except BenchmarkUnavailableError as exc:
+                self._error = exc
+                raise
+        return self._provider
+
+
+def _record_label(conn: psycopg.Connection[Any], pair_id: int, arm_filled_at: datetime, regime: _LazyRegime) -> None:
+    if conn.execute("SELECT 1 FROM ai_trial_pair_labels WHERE pair_id = %s", (pair_id,)).fetchone():
+        return
+    entry_session = fill_session(arm_filled_at)
+    try:
+        label = entry_regime_label(regime.get(conn), entry_session)
+    except BenchmarkUnavailableError:
+        logger.warning("ai_trial pair %d: benchmark unavailable; regime label deferred", pair_id, exc_info=True)
+        return
+    if label is None:
+        logger.info("ai_trial pair %d: no benchmark bar before %s yet; regime label deferred", pair_id, entry_session)
+        return
+    conn.execute(
+        """
+        INSERT INTO ai_trial_pair_labels (pair_id, entry_session, regime_label, classifier_version)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (pair_id, entry_session, label, LABEL_CLASSIFIER_VERSION),
+    )
+
+
+def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime, regime: _LazyRegime) -> int:
     target = conn.execute(
         """
         SELECT r.session_date
@@ -207,6 +290,7 @@ def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime) -> 
         facts[row[0]] = LegFacts(*row[1:])
 
     written = 0
+    arm_filled = any(leg == "arm" and event == "filled" for leg, event in history)
     for leg in LEGS:
         last: LegEvent | None = None
         for event_leg, event in history:
@@ -215,6 +299,10 @@ def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime) -> 
         for event in next_leg_events(facts[leg], last, now):
             conn.execute(_EVENT_SQL, (pair_id, leg, event))
             written += 1
+            arm_filled = arm_filled or (leg == "arm" and event == "filled")
+    arm_filled_at = facts["arm"].filled_at
+    if arm_filled and arm_filled_at is not None:
+        _record_label(conn, pair_id, arm_filled_at, regime)
     if not any(event == "broken" for _, event in history):
         reasons = broken_reasons([leg_outcome(facts[leg], target[0], now) for leg in LEGS])
         if reasons is not None:
@@ -226,15 +314,22 @@ def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime) -> 
     return written
 
 
-def record_pair_lifecycle(conn: psycopg.Connection[Any], *, now: datetime | None = None) -> int:
-    """Append every owed event for every pair not yet finished; returns the events written.
+def record_pair_lifecycle(
+    conn: psycopg.Connection[Any],
+    *,
+    now: datetime | None = None,
+    regime_loader: RegimeLoader = MarketRegimeProvider.load,
+) -> int:
+    """Append every owed event (and regime label) for every pair not yet finished; returns the
+    events written. A label is not an event and is not counted.
 
     One transaction per pair, holding the pair row, so a concurrent pass waits and then sees
     the events already written. A pair is finished, and no longer read, once its ``broken``
     verdict is settled and every leg is terminal: ``closed``, refused at funding, or a broker
     rejection whose ``submitted`` is recorded. An ``unresolved`` leg is never terminal, since
     it may still fill. Both legs ``closed`` settles the verdict: both filled, so it was decided
-    no later than the pass that closed them.
+    no later than the pass that closed them. A pair whose arm filled is never finished before
+    its label is written.
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise TrialPairLifecycleError("the pair lifecycle writer requires an idle connection")
@@ -269,6 +364,11 @@ def record_pair_lifecycle(conn: psycopg.Connection[Any], *, now: datetime | None
                 AND (pair_state.closed_legs = 2
                      OR EXISTS (SELECT 1 FROM ai_trial_pair_events e
                                 WHERE e.pair_id = p.pair_id AND e.event = 'broken'))
+                AND NOT (
+                    EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                            WHERE e.pair_id = p.pair_id AND e.leg = 'arm' AND e.event = 'filled')
+                    AND NOT EXISTS (SELECT 1 FROM ai_trial_pair_labels lb WHERE lb.pair_id = p.pair_id)
+                )
             )
             ORDER BY p.pair_id
             """
@@ -276,22 +376,27 @@ def record_pair_lifecycle(conn: psycopg.Connection[Any], *, now: datetime | None
     ]
     conn.commit()
     written = 0
+    regime = _LazyRegime(regime_loader)
     for pair_id in pair_ids:
         with conn.transaction():
-            written += _record_pair(conn, pair_id, observed)
+            written += _record_pair(conn, pair_id, observed, regime)
     return written
 
 
 __all__ = [
+    "LABEL_CLASSIFIER_VERSION",
     "LEGS",
     "TRIAL_CENSOR_SESSIONS",
     "TRIAL_UNRESOLVED_SESSIONS",
+    "UNCLASSIFIED",
     "LegFacts",
     "TrialPairLifecycleError",
     "broken_reasons",
     "clock_instant",
+    "entry_regime_label",
     "leg_outcome",
     "next_leg_events",
     "pair_unit_state",
+    "previous_session",
     "record_pair_lifecycle",
 ]
