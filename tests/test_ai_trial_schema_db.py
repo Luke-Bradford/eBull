@@ -391,10 +391,15 @@ def test_leg_and_trade_links_bind_the_leg_identity(ebull_test_conn: Conn) -> Non
     control_trade = trade(control_signal, "ai-discretionary-v1-control")
     ebull_test_conn.commit()
 
-    trade_link = "INSERT INTO ai_trial_trade_links (pair_id, leg, strategy_trade_id) VALUES (%s, %s, %s)"
-    _refused(ebull_test_conn, trade_link, (pair_id, "arm", control_trade), "not the arm leg's")
-    ebull_test_conn.execute(trade_link, (pair_id, "arm", arm_trade))
-    ebull_test_conn.execute(trade_link, (pair_id, "control", control_trade))
+    trade_link = (
+        "INSERT INTO ai_trial_trade_links (pair_id, leg, strategy_trade_id, requested_amount) VALUES (%s, %s, %s, %s)"
+    )
+    _refused(ebull_test_conn, trade_link, (pair_id, "arm", control_trade, 125), "not the arm leg's")
+    # sql/434 (§8 "Sizing"): capacity may reduce the funded amount, nothing may raise it above
+    # the requested ticket.
+    _refused(ebull_test_conn, trade_link, (pair_id, "arm", arm_trade, 124), "above or without the requested")
+    ebull_test_conn.execute(trade_link, (pair_id, "arm", arm_trade, 125))
+    ebull_test_conn.execute(trade_link, (pair_id, "control", control_trade, 250))
     ebull_test_conn.commit()
 
 

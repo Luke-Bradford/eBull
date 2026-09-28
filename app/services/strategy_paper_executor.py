@@ -9,12 +9,13 @@ to account/instrument risk but can never acquire strategy ownership here.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -169,6 +170,71 @@ class _Intent:
     halt_feed_at: datetime
     gross_expectancy_ci_low_pct: Decimal
     reserved: Decimal
+
+
+class _SizingIntent(Protocol):
+    """The non-evidence fields every entry path's sizing, eligibility and cost gates read.
+
+    ``_Intent`` and the #3471 ``ai_trial_intent.TrialIntent`` both satisfy it; the evidence
+    fields (forecast, ranking, expectancy, scan) stay on ``_Intent`` alone.
+    """
+
+    @property
+    def signal_id(self) -> int: ...
+    @property
+    def strategy_id(self) -> str: ...
+    @property
+    def strategy_version(self) -> str: ...
+    @property
+    def instrument_id(self) -> int: ...
+    @property
+    def deployment_id(self) -> int: ...
+    @property
+    def currency(self) -> str: ...
+    @property
+    def deployment_limit(self) -> Decimal: ...
+    @property
+    def capital_mode(self) -> Literal["fixed", "compound"]: ...
+    @property
+    def mandate_max_drawdown_pct(self) -> Decimal: ...
+    @property
+    def mandate_max_loss_per_position_pct(self) -> Decimal: ...
+    @property
+    def mandate_max_daily_loss_pct(self) -> Decimal: ...
+    @property
+    def mandate_active_risk_budget_pct(self) -> Decimal: ...
+    @property
+    def mandate_cash_reserve_pct(self) -> Decimal: ...
+    @property
+    def mandate_max_concurrent_positions(self) -> int: ...
+    @property
+    def policy_revision(self) -> int: ...
+    @property
+    def max_ticket_amount(self) -> Decimal: ...
+    @property
+    def stop_loss_pct(self) -> Decimal: ...
+    @property
+    def take_profit_pct(self) -> Decimal: ...
+    @property
+    def max_quote_age_seconds(self) -> int: ...
+    @property
+    def max_cost_age_seconds(self) -> int: ...
+    @property
+    def max_instrument_exposure_pct(self) -> Decimal: ...
+    @property
+    def max_portfolio_exposure_pct(self) -> Decimal: ...
+    @property
+    def max_drawdown_pct(self) -> Decimal: ...
+    @property
+    def cost_stress_multiplier(self) -> Decimal: ...
+    @property
+    def quote_at(self) -> datetime: ...
+    @property
+    def ask(self) -> Decimal: ...
+    @property
+    def halt_feed_at(self) -> datetime: ...
+    @property
+    def reserved(self) -> Decimal: ...
 
 
 def _age_ok(observed_at: datetime, *, now: datetime, max_seconds: int) -> bool:
@@ -556,10 +622,13 @@ def _persist_rejection(
     signal_id: int,
     reason_code: str,
     now: datetime,
-    intent: _Intent | None = None,
+    intent: _SizingIntent | None = None,
     risk: BrokerAccountRiskSnapshot | None = None,
     halt_identity_evaluated: bool = False,
 ) -> PaperExecutionResult:
+    # Evidence columns come from the paper intent only; a #3471 trial intent has none and
+    # writes NULL rather than a fabricated forecast, ranking or expectancy.
+    evidence = intent if isinstance(intent, _Intent) else None
     existing = _existing_result(conn, signal_id)
     conn.commit()
     if existing is not None:
@@ -580,12 +649,12 @@ def _persist_rejection(
                 signal_id,
                 intent.deployment_id if intent else None,
                 intent.policy_revision if intent else None,
-                intent.forecast_id if intent else None,
-                intent.ranking_member_id if intent else None,
+                evidence.forecast_id if evidence else None,
+                evidence.ranking_member_id if evidence else None,
                 reason_code,
                 now,
                 intent.quote_at if intent else None,
-                intent.scan_at if intent else None,
+                evidence.scan_at if evidence else None,
                 intent.halt_feed_at if intent else None,
                 HALT_IDENTITY_RULE_VERSION if intent is not None or halt_identity_evaluated else None,
                 risk.available_cash if risk else None,
@@ -597,13 +666,13 @@ def _persist_rejection(
                 )
                 if risk and intent
                 else None,
-                intent.gross_expectancy_ci_low_pct if intent else None,
+                evidence.gross_expectancy_ci_low_pct if evidence else None,
             ),
         )
     return PaperExecutionResult(signal_id, "rejected", reason_code)
 
 
-def _eligibility_reason(response: BrokerEligibilityResponse, intent: _Intent, amount: Decimal) -> str | None:
+def _eligibility_reason(response: BrokerEligibilityResponse, intent: _SizingIntent, amount: Decimal) -> str | None:
     # EQUALITY against the deployment's currency, not membership of the supported set.
     # The two coincide while only USD is supported, but membership is the shape that
     # breaks on widening: with {"USD","GBP"} a response quoted in GBP would satisfy a
@@ -706,6 +775,25 @@ def _costs(
     amount: Decimal,
     now: datetime,
 ) -> _CostAssessment | str:
+    priced = _stressed_cost(response, intent=intent, now=now)
+    if isinstance(priced, str):
+        return priced
+    stressed, basis = priced
+    net = intent.gross_expectancy_ci_low_pct - (stressed / amount * Decimal("100"))
+    return _CostAssessment(stressed=stressed, net=net, basis=basis)
+
+
+def _stressed_cost(
+    response: BrokerWhatIfCostResponse,
+    *,
+    intent: _SizingIntent,
+    now: datetime,
+) -> tuple[Decimal, str] | str:
+    """The broker what-if cost, summed and stressed, with its basis; or the refusal code.
+
+    Shared by the paper net-expectancy gate and the #3471 trial cost cap, so both price a
+    preflight under one freshness, currency, unit and recurring-cost rule.
+    """
     if response.instrument_id != intent.instrument_id or not _age_ok(
         response.last_updated, now=now, max_seconds=intent.max_cost_age_seconds
     ):
@@ -740,9 +828,18 @@ def _costs(
         # and an off-spec one into a single total assumes they mean the same thing,
         # which is exactly what has not been established for a response that uses both.
         return "cost_unit_undocumented"
-    stressed = total * intent.cost_stress_multiplier
-    net = intent.gross_expectancy_ci_low_pct - (stressed / amount * Decimal("100"))
-    return _CostAssessment(stressed=stressed, net=net, basis=bases.pop())
+    return total * intent.cost_stress_multiplier, bases.pop()
+
+
+def _protective_rates(intent: _SizingIntent) -> tuple[Decimal, Decimal]:
+    """Stop and take-profit rates from the pre-submission ask, rounded DOWN to 6dp."""
+    stop_rate = (intent.ask * (Decimal("1") - intent.stop_loss_pct / Decimal("100"))).quantize(
+        Decimal("0.000001"), rounding=ROUND_DOWN
+    )
+    take_rate = (intent.ask * (Decimal("1") + intent.take_profit_pct / Decimal("100"))).quantize(
+        Decimal("0.000001"), rounding=ROUND_DOWN
+    )
+    return stop_rate, take_rate
 
 
 # The two PORTFOLIO-MANDATE observations that are sourced from OUR tables rather
@@ -813,7 +910,7 @@ _MANDATE_OBSERVATION_SQL = """
 def _observe_local_mandate_risk(
     conn: psycopg.Connection[Any],
     *,
-    intent: _Intent,
+    intent: _SizingIntent,
     risk: BrokerAccountRiskSnapshot,
     now: datetime,
     shared_pool_bound: Decimal,
@@ -880,13 +977,30 @@ def _observe_local_mandate_risk(
     return deployment_base, pool_base, pending_total, pending_instrument, drawdown
 
 
+def _paper_requested_ticket(intent: _Intent, deployment_base: Decimal) -> Decimal | str:
+    """The paper policy's ticket: fixed, or a fraction of the effective deployment base."""
+    if intent.ticket_sizing_mode == "fixed":
+        if intent.fixed_ticket_amount is None:
+            return "execution_policy_invalid"
+        return intent.fixed_ticket_amount
+    if intent.ticket_fraction is None:
+        return "execution_policy_invalid"
+    return deployment_base * intent.ticket_fraction
+
+
 def _risk_and_amount(
     conn: psycopg.Connection[Any],
     *,
-    intent: _Intent,
+    intent: _SizingIntent,
     risk: BrokerAccountRiskSnapshot,
     now: datetime,
+    requested_ticket: Callable[[Decimal], Decimal | str],
 ) -> tuple[Decimal, Decimal, Decimal] | str:
+    """Size one entry: the requested ticket, reduced by every capacity, never raised.
+
+    ``requested_ticket`` maps the effective deployment base to the path's own ticket (the
+    paper policy's, or the #3471 trial's ``size_tier`` amount), or to a refusal code.
+    """
     if not _age_ok(risk.observed_at, now=now, max_seconds=intent.max_quote_age_seconds):
         return "account_risk_stale"
     current_instrument = next(
@@ -999,16 +1113,11 @@ def _risk_and_amount(
     loss_at_stop_capacity = pool_base * intent.mandate_max_loss_per_position_pct / intent.stop_loss_pct
     if loss_at_stop_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
         return "portfolio_position_loss_limit"
-    if intent.ticket_sizing_mode == "fixed":
-        if intent.fixed_ticket_amount is None:
-            return "execution_policy_invalid"
-        requested_ticket = intent.fixed_ticket_amount
-    else:
-        if intent.ticket_fraction is None:
-            return "execution_policy_invalid"
-        requested_ticket = deployment_base * intent.ticket_fraction
+    ticket = requested_ticket(deployment_base)
+    if isinstance(ticket, str):
+        return ticket
     amount = min(
-        requested_ticket,
+        ticket,
         intent.max_ticket_amount,
         deployment_remaining,
         pool_remaining,
@@ -1026,7 +1135,7 @@ def _risk_and_amount(
 
 def _effective_deployment_base(
     conn: psycopg.Connection[Any],
-    intent: _Intent,
+    intent: _SizingIntent,
 ) -> Decimal | str:
     """Resolve the capped or compounding deployment base from realised P&L."""
     realised_by_strategy = load_paper_realised_pnl(conn)
@@ -1154,6 +1263,45 @@ def _resume_uncertain_submission_locked(
     )
 
 
+def _trading_enabled_refusal(conn: psycopg.Connection[Any]) -> str | None:
+    """The runtime switch and kill switch, read in their own committed transaction."""
+    try:
+        runtime = get_runtime_config(conn)
+        kill_row = conn.execute("SELECT is_active FROM kill_switch WHERE id = true").fetchone()
+        conn.commit()
+    except RuntimeConfigCorrupt:
+        return "runtime_config_corrupt"
+    if not runtime.enable_auto_trading:
+        return "auto_trading_disabled"
+    if kill_row is None or bool(kill_row[0]):
+        return "kill_switch_active_or_missing"
+    return None
+
+
+def _reconciliation_overdue(conn: psycopg.Connection[Any], signal_id: int) -> bool:
+    """Refresh the reconciliation SLO block under the signal's paper policy; True when active.
+
+    This updates one bounded current-state block. It never calls the broker.
+    """
+    provisional = conn.execute(
+        """
+        SELECT p.max_reconciliation_age_seconds
+        FROM strategy_signals s
+        JOIN strategy_deployments d ON d.strategy_id=s.strategy_id AND d.strategy_version=s.strategy_version
+          AND d.mode='paper'
+        JOIN strategy_execution_policies p ON p.deployment_id=d.deployment_id
+        WHERE s.signal_id=%s
+        """,
+        (signal_id,),
+    ).fetchone()
+    conn.commit()
+    if provisional is None:
+        return False
+    health = enforce_reconciliation_slo(conn, max_unresolved_seconds=int(provisional[0]))
+    conn.commit()
+    return health.active_block
+
+
 def _execute_fired_paper_signal_locked(
     conn: psycopg.Connection[Any],
     *,
@@ -1185,39 +1333,13 @@ def _execute_fired_paper_signal_locked(
             return refreshed or existing
         reason_code = "harness_validation_only" if purpose == "harness_validation" else "strategy_not_capital_candidate"
         return _persist_rejection(conn, signal_id=signal_id, reason_code=reason_code, now=evaluated_at)
-    try:
-        runtime = get_runtime_config(conn)
-        kill_row = conn.execute("SELECT is_active FROM kill_switch WHERE id = true").fetchone()
-        conn.commit()
-    except RuntimeConfigCorrupt:
-        return _persist_rejection(conn, signal_id=signal_id, reason_code="runtime_config_corrupt", now=evaluated_at)
-    if not runtime.enable_auto_trading:
-        return _persist_rejection(conn, signal_id=signal_id, reason_code="auto_trading_disabled", now=evaluated_at)
-    if kill_row is None or bool(kill_row[0]):
-        return _persist_rejection(
-            conn, signal_id=signal_id, reason_code="kill_switch_active_or_missing", now=evaluated_at
-        )
+    trading_refusal = _trading_enabled_refusal(conn)
+    if trading_refusal is not None:
+        return _persist_rejection(conn, signal_id=signal_id, reason_code=trading_refusal, now=evaluated_at)
     if existing is not None:
         return _resume_uncertain_submission(conn, broker=broker, existing=existing)
-
-    # This updates one bounded current-state block. It never calls the broker.
-    provisional = conn.execute(
-        """
-        SELECT p.max_reconciliation_age_seconds
-        FROM strategy_signals s
-        JOIN strategy_deployments d ON d.strategy_id=s.strategy_id AND d.strategy_version=s.strategy_version
-          AND d.mode='paper'
-        JOIN strategy_execution_policies p ON p.deployment_id=d.deployment_id
-        WHERE s.signal_id=%s
-        """,
-        (signal_id,),
-    ).fetchone()
-    conn.commit()
-    if provisional is not None:
-        health = enforce_reconciliation_slo(conn, max_unresolved_seconds=int(provisional[0]))
-        conn.commit()
-        if health.active_block:
-            return _persist_rejection(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=evaluated_at)
+    if _reconciliation_overdue(conn, signal_id):
+        return _persist_rejection(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=evaluated_at)
 
     intent, reason, halt_identity_evaluated = _load_intent(
         conn,
@@ -1241,7 +1363,13 @@ def _execute_fired_paper_signal_locked(
         return _persist_rejection(
             conn, signal_id=signal_id, reason_code="account_risk_unavailable", now=evaluated_at, intent=intent
         )
-    sized = _risk_and_amount(conn, intent=intent, risk=risk, now=evaluated_at)
+    sized = _risk_and_amount(
+        conn,
+        intent=intent,
+        risk=risk,
+        now=evaluated_at,
+        requested_ticket=lambda base: _paper_requested_ticket(intent, base),
+    )
     if isinstance(sized, str):
         return _persist_rejection(
             conn, signal_id=signal_id, reason_code=sized, now=evaluated_at, intent=intent, risk=risk
@@ -1287,12 +1415,7 @@ def _execute_fired_paper_signal_locked(
             intent=intent,
             risk=risk,
         )
-    stop_rate = (intent.ask * (Decimal("1") - intent.stop_loss_pct / Decimal("100"))).quantize(
-        Decimal("0.000001"), rounding=ROUND_DOWN
-    )
-    take_rate = (intent.ask * (Decimal("1") + intent.take_profit_pct / Decimal("100"))).quantize(
-        Decimal("0.000001"), rounding=ROUND_DOWN
-    )
+    stop_rate, take_rate = _protective_rates(intent)
 
     # Re-load under locks through the control-plane allocator. Any concurrent
     # reservation that consumes the cap makes this transaction fail closed.
@@ -1366,6 +1489,37 @@ def _execute_fired_paper_signal_locked(
                 take_rate,
             ),
         )
+    return _submit_recorded_order(
+        conn,
+        broker=broker,
+        signal_id=signal_id,
+        trade_id=trade_id,
+        order_id=order_id,
+        request_id=request_id,
+        instrument_id=intent.instrument_id,
+        amount=amount,
+        stop_rate=stop_rate,
+        take_rate=take_rate,
+    )
+
+
+def _submit_recorded_order(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    signal_id: int,
+    trade_id: int,
+    order_id: int,
+    request_id: UUID,
+    instrument_id: int,
+    amount: Decimal,
+    stop_rate: Decimal,
+    take_rate: Decimal,
+) -> PaperExecutionResult:
+    """The sole demo broker write for an already-durable entry authority, and its outcome.
+
+    Shared by the paper path and the #3471 trial path: the order, its reconciliation row and
+    its request id are committed before this is called."""
     # ⚠ #2964 item 2. The order and its reconciliation row are already
     # committed (the durable-before-I/O design), so the scheduled backlog can
     # be polling this exact order while the broker call is in flight. Hold its
@@ -1378,7 +1532,7 @@ def _execute_fired_paper_signal_locked(
         try:
             submission = broker.place_demo_strategy_order(
                 BrokerStrategyOrder(
-                    instrument_id=intent.instrument_id,
+                    instrument_id=instrument_id,
                     amount=amount,
                     settlement_type="real",
                     stop_loss_rate=stop_rate,
