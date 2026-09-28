@@ -373,6 +373,10 @@ def refuse_run(conn: Conn, claim: Claim, reason: str, values: Mapping[str, Any])
         conn.commit()
         return RunOutcome(row[0], claim.run_id, claim.session_date, row[1])
     recorded = "stale_claim" if row[2] else reason
+    if recorded != reason:
+        # sql/432 allows only `stale_claim` after the lease, so the column cannot keep the
+        # reason the run actually reached; the log does.
+        logger.warning("ai_trial run %s lease expired; refusal %s recorded as stale_claim", claim.run_id, reason)
     _update_run(conn, claim.run_id, "refused", {**values, "refusal_reason": recorded})
     conn.commit()
     logger.info("ai_trial run %s (session %s) refused: %s", claim.run_id, claim.session_date, recorded)
@@ -590,7 +594,11 @@ def run_trial_decision(
         )
     except Exception:
         logger.exception("ai_trial run %s failed; recording it refused", claim.run_id)
-        refuse_run(conn, claim, "run_failed", reached)
+        try:
+            refuse_run(conn, claim, "run_failed", reached)
+        except Exception:
+            # Never let the bookkeeping failure replace the failure that caused it.
+            logger.exception("ai_trial run %s: recording the failure also failed", claim.run_id)
         raise
 
 
@@ -626,6 +634,10 @@ def _decide(
         return refuse_run(conn, claim, step1.refusal, reached)
 
     # Step 2.
+    # Read once, before the model call, and used unchanged by step 4 and step 5: the validator
+    # and the pool judge the book the model was SHOWN. Nothing opens a trial trade between the
+    # claim and the publish (the executor runs on the target session's signals); a close only
+    # frees a slot, and the executor re-counts slots under the allocator lock anyway.
     books = read_leg_books(conn, declaration.declaration_id)
     entries = max_new_entries(books)
     account = AccountContext(
