@@ -68,6 +68,11 @@ H: Final = 21
 FRACTION: Final = 0.2
 LAG: Final = 1
 ANNUALISATION: Final = 252
+#: Declared, not detected (spec v8 "Declaration"): bump with ANY change to selection,
+#: aggregation or statistics code here or in the readout. It is a semantic term of the
+#: frozen declaration, so a bump is a new declaration. The commit recorded at freeze and
+#: readout is the backstop for a change nobody declared.
+CONSTRUCTION_REVISION: Final = 1
 #: (z_.975 + z_.80): the normal-approximation planning multiplier (Cohen 1988 ch. 1).
 MDE_MULTIPLIER: Final = NormalDist().inv_cdf(0.975) + NormalDist().inv_cdf(0.80)
 
@@ -414,6 +419,7 @@ def delta_statistics(delta: Sequence[float], *, lag: int) -> DeltaStatistics | S
 
 __all__ = [
     "ANNUALISATION",
+    "CONSTRUCTION_REVISION",
     "FAMILY_ORDER",
     "FRACTION",
     "H",

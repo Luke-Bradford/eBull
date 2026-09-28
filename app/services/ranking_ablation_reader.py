@@ -29,6 +29,9 @@ What is read, each rule the spec's:
   ``instrument_cik_history``, common-equity delistings only, filed in [first formation, c_k]; the
   Q suffix from the current symbol. A series stopping before c_k terminates only when
   :func:`series_termination.classify_termination` is not ``UNKNOWN``.
+
+Every query goes through :func:`execute`, which runs only a name in :data:`ROUTE_F_SQL`
+(spec v8 "Sealed-outcome boundary").
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ from typing import Any, Final, Literal
 import psycopg
 
 from app.services.price_quarantine import PROVISIONAL_WINDOW_DAYS, Bar, SeriesVerdicts, evaluate_series
-from app.services.price_quarantine_store import asset_classes
+from app.services.price_quarantine_store import _SCOPE_SQL as QUARANTINE_SCOPE_SQL
 from app.services.ranking_ablation import FAMILY_ORDER, MODEL_VERSION, Run, ScoreRow, parse_score_row
 from app.services.research_corpus_ingest import vendor_symbol_has_bankruptcy_suffix
 from app.services.series_termination import TerminationClass, TerminationEvidence, classify_termination
@@ -104,6 +107,9 @@ class Population:
     excluded_names: Mapping[str, int]
     #: The symbol current at the read, for every population instrument.
     symbols: Mapping[int, str]
+    #: sha256 over every row read, excluded ones included (the vintage identity's score half):
+    #: a changed score, penalty, lane field or symbol moves it even when no count does.
+    rows_sha256: str = ""
 
 
 def lane_exclusion(type_description: str | None, currency: str | None) -> str | None:
@@ -125,6 +131,10 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
     excluded_rows: Counter[str] = Counter()
     excluded_names: dict[str, set[int]] = {}
     symbols: dict[int, str] = {}
+    digest = hashlib.sha256()
+    rows = list(rows)
+    for fields in rows:
+        digest.update(json.dumps([None if f is None else str(f) for f in fields]).encode())
     for (
         scored_at,
         instrument_id,
@@ -174,11 +184,12 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
         excluded_rows=dict(excluded_rows),
         excluded_names={reason: len(names) for reason, names in excluded_names.items()},
         symbols=symbols,
+        rows_sha256=digest.hexdigest(),
     )
 
 
 def load_population(conn: psycopg.Connection[Any]) -> Population:
-    return build_population(conn.execute(_POPULATION_SQL, {"model_version": MODEL_VERSION}).fetchall())
+    return build_population(execute(conn, "population", {"model_version": MODEL_VERSION}))
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +240,7 @@ def witness_runs(scored_ats: Iterable[datetime], windows: Sequence[JobWindow]) -
 
 
 def load_job_windows(conn: psycopg.Connection[Any]) -> tuple[JobWindow, ...]:
-    rows = conn.execute(_WITNESS_SQL, {"job_name": WITNESS_JOB, "status": WITNESS_STATUS}).fetchall()
+    rows = execute(conn, "witness", {"job_name": WITNESS_JOB, "status": WITNESS_STATUS})
     return tuple(JobWindow(started_at=row[0], finished_at=row[1]) for row in rows)
 
 
@@ -308,11 +319,12 @@ def load_series(
 ) -> dict[int, ReadSeries]:
     """Every requested instrument with at least one bar in the read range; the rest are absent."""
     ids = sorted(set(instrument_ids))
-    classes = asset_classes(conn, ids)
+    # ``price_quarantine_store.asset_classes``' query, run through the registry.
+    classes = {int(iid): asset_class for iid, asset_class in execute(conn, "asset_class", {"instrument_ids": ids})}
     grouped: dict[int, list[Bar]] = {}
-    for iid, price_date, open_, high, low, close, volume in conn.execute(
-        _SERIES_SQL, {"instrument_ids": ids, "first_formation": first_formation, "cutoff": cutoff}
-    ).fetchall():
+    for iid, price_date, open_, high, low, close, volume in execute(
+        conn, "series", {"instrument_ids": ids, "first_formation": first_formation, "cutoff": cutoff}
+    ):
         grouped.setdefault(int(iid), []).append(
             Bar(price_date=price_date, open=open_, high=high, low=low, close=close, volume=volume)
         )
@@ -352,14 +364,15 @@ def load_form25_links(
 ) -> dict[int, str | None]:
     """instrument → the provision of its latest linked common-equity Form 25 in the window."""
     links: dict[int, str | None] = {}
-    for iid, provision in conn.execute(
-        _FORM25_SQL,
+    for iid, provision in execute(
+        conn,
+        "form25",
         {
             "instrument_ids": sorted(set(instrument_ids)),
             "first_formation": first_formation,
             "cutoff": cutoff,
         },
-    ).fetchall():
+    ):
         links[int(iid)] = provision  # ordered by filed_date: the latest wins
     return links
 
@@ -385,8 +398,66 @@ def termination_classes(
     }
 
 
+# ---------------------------------------------------------------------------
+# Census, dividends and the declaration's freeze time
+# ---------------------------------------------------------------------------
+
+#: The spec's "Premise check" figures, reprinted by ``--census``.
+_PREMISE_SQL: Final = {
+    "premise.financial_facts_min_filed_date": "SELECT min(filed_date) FROM financial_facts_raw",
+    "premise.financial_facts_instruments_filed_before_2009": (
+        "SELECT count(DISTINCT instrument_id) FROM financial_facts_raw WHERE filed_date < DATE '2009-01-01'"
+    ),
+    "premise.theses_min_created_at": "SELECT min(created_at) FROM theses",
+    "premise.theses_instruments": "SELECT count(DISTINCT instrument_id) FROM theses",
+    "premise.news_events_min_event_time": "SELECT min(event_time) FROM news_events",
+}
+_DIVIDEND_SQL: Final = """
+SELECT count(*), count(DISTINCT instrument_id) FROM dividend_events
+WHERE ex_date BETWEEN %(start)s AND %(end)s AND instrument_id = ANY(%(ids)s::bigint[])
+"""
+#: ``load_preregistration`` does not return ``frozen_at``; the prospective boundary needs it.
+_FROZEN_AT_SQL: Final = """
+SELECT frozen_at FROM strategy_preregistration_declarations WHERE declaration_id = %(declaration_id)s
+"""
+
+# ---------------------------------------------------------------------------
+# The registry (spec "Sealed-outcome boundary")
+# ---------------------------------------------------------------------------
+
+#: Every query route F issues, by name. :func:`execute` runs nothing else, so the runtime path
+#: cannot reach a relation the boundary test has not audited. The ledger's freeze/load SQL is
+#: the one exception: it runs inside ``result_ledger``. The declaration's semantic terms carry
+#: this mapping, so changing a query is a new declaration.
+ROUTE_F_SQL: Final[Mapping[str, str]] = {
+    "population": _POPULATION_SQL,
+    "witness": _WITNESS_SQL,
+    "asset_class": QUARANTINE_SCOPE_SQL,
+    "series": _SERIES_SQL,
+    "form25": _FORM25_SQL,
+    **_PREMISE_SQL,
+    "dividend_events": _DIVIDEND_SQL,
+    "frozen_at": _FROZEN_AT_SQL,
+}
+
+
+class UnregisteredQuery(KeyError):
+    """A route F query name outside :data:`ROUTE_F_SQL`."""
+
+
+def execute(conn: psycopg.Connection[Any], name: str, params: Mapping[str, Any] | None = None) -> list[tuple[Any, ...]]:
+    """Run the registered query ``name`` and return every row; refuse any other."""
+    sql = ROUTE_F_SQL.get(name)
+    if sql is None:
+        raise UnregisteredQuery(name)
+    return conn.execute(sql, params).fetchall()  # type: ignore[arg-type]  # registered constant, not LiteralString-typed
+
+
 __all__ = [
     "CONFIDENCE_NO_THESIS_MARKER",
+    "ROUTE_F_SQL",
+    "UnregisteredQuery",
+    "execute",
     "LANE_CURRENCY",
     "VALUE_FALLBACK_MARKER",
     "WITNESS_JOB",

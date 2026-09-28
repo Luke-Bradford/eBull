@@ -11618,3 +11618,14 @@ neighbouring container and match it.**
   output, not from the input. Self-review prompt: "which fields in this response are still computed from the
   rows I rejected?"
 - Enforced in: `tests/test_regsho_short_volume_days.py`.
+
+### A multi-mode CLI's exit code must come from each mode's own outcome (#1822)
+
+- Failure: `scripts/run_1822_ablation_readout.py` added `--terms`, `--freeze` and `--readout` to a script that had
+  only `--census`. `--readout` and `--freeze` derived the exit code from their outcome, but `--terms` and `--census`
+  kept the old hardcoded 0, so a refused sidecar generation (`no_witnessed_run`) exited 0. A wrapper gating on it
+  would read a refusal as success.
+- Prevention: when a mode is added to a CLI, derive every mode's exit code from its own `outcome` or refusal key,
+  and table-test `main(argv)` per mode with the work stubbed to refuse and to succeed. Self-review prompt: "for each
+  mode, which line maps a refusal to a non-zero exit?"
+- Enforced in: `tests/test_ranking_ablation_declaration.py::test_main_exit_code_reflects_the_outcome`.
