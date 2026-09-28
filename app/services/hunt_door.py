@@ -90,7 +90,7 @@ FX_UNMODELLED: Final = False
 #: does not build yet. Their validation (and so holdout) freeze refuses ``hunt_gate_not_implemented``
 #: until it does: fail closed rather than promote on the generic PASS alone (#3448 spec, "The gate
 #: is frozen into the declaration"; built only if hunt 2's discovery flags).
-HUNTS_AWAITING_GATE: Final = frozenset({"hunt-2"})
+HUNTS_AWAITING_GATE: Final = frozenset({"hunt-2", "hunt-3"})
 
 #: The canonical text of a discovery entry's closing query; the tripwire requires it verbatim.
 DISCOVERY_LOG_QUERY: Final = (
@@ -157,7 +157,7 @@ def power_statement(discovery_active: Sequence[float] | None, *, target_observat
 
 _DISCOVERY_OUTCOMES = """
     SELECT t.hunt_trial_id, t.hunt_id, t.candidate_sha256, o.status, o.statistics, o.active_series,
-           o.outcome_sha256
+           o.outcome_sha256, t.harness_model_id
     FROM hunt_trials t
     JOIN hunt_trial_outcomes o USING (hunt_trial_id)
     WHERE t.split = 'discovery' AND t.purpose = 'evaluate'
@@ -196,6 +196,7 @@ class _DiscoveryOutcome:
     statistics: Mapping[str, Any]
     active_series: tuple[float, ...] | None
     outcome_sha256: str
+    harness_model_id: str
 
 
 def _discovery_outcomes(conn: psycopg.Connection[Any]) -> list[_DiscoveryOutcome]:
@@ -208,9 +209,53 @@ def _discovery_outcomes(conn: psycopg.Connection[Any]) -> list[_DiscoveryOutcome
             statistics=hh.decode_form(row[4]),
             active_series=None if row[5] is None else tuple(hh.decode_form(row[5])),
             outcome_sha256=str(row[6]),
+            harness_model_id=str(row[7]),
         )
         for row in conn.execute(_DISCOVERY_OUTCOMES).fetchall()
     ]
+
+
+def hunt_discovery_population(
+    outcomes: Sequence[_DiscoveryOutcome], *, hunt_id: str, own_discovery_rows: int
+) -> tuple[list[_DiscoveryOutcome], list[str]]:
+    """``hunt_id``'s discovery population: its own evaluate outcomes, plus the closed hunt's
+    outcome it inherits (``HUNT_INHERITED_DISCOVERY``, #3454), and the contract's refusals.
+
+    Pure. ``own_discovery_rows`` counts every discovery row the hunt registered, recordings
+    included: an inheriting hunt must have none, or two discovery sources would compete.
+    BY is programme-wide and never reads this; it already counts the inherited row once.
+    """
+    own = [outcome for outcome in outcomes if outcome.hunt_id == hunt_id]
+    source = hh.HUNT_INHERITED_DISCOVERY.get(hunt_id)
+    if source is None:
+        return own, []
+    reasons: list[str] = []
+    if own_discovery_rows:
+        reasons.append("own_discovery_rows")
+    if source.source_hunt_id not in hh.HUNT_CLOSED:
+        reasons.append("source_not_closed")
+    inherited = next((outcome for outcome in outcomes if outcome.hunt_trial_id == source.hunt_trial_id), None)
+    if inherited is None:
+        reasons.append("source_row_missing")
+    else:
+        if inherited.hunt_id != source.source_hunt_id:
+            reasons.append("source_hunt")
+        if inherited.status != "computed":
+            reasons.append("source_not_computed")
+        if inherited.outcome_sha256 != source.outcome_sha256:
+            reasons.append("outcome_sha256")
+        if inherited.harness_model_id != hh.HUNT_HARNESS_MODEL_ID:
+            reasons.append("stale_harness_model")
+    if reasons or inherited is None:
+        return own, [f"inherited_discovery_invalid:{reason}" for reason in reasons]
+    return [*own, inherited], []
+
+
+def _hunt_discovery(
+    conn: psycopg.Connection[Any], outcomes: Sequence[_DiscoveryOutcome], hunt_id: str
+) -> tuple[list[_DiscoveryOutcome], list[str]]:
+    own_rows = len(conn.execute(_HUNT_DISCOVERY_ROWS, {"hunt": hunt_id}).fetchall())
+    return hunt_discovery_population(outcomes, hunt_id=hunt_id, own_discovery_rows=own_rows)
 
 
 def _frozen_declarations(conn: psycopg.Connection[Any]) -> list[hh.HuntDeclaration]:
@@ -344,14 +389,15 @@ def declaration_numbers(
     inherited = register.inherited_floor()
     outcomes = _discovery_outcomes(conn)
     frozen = _frozen_declarations(conn)
-    by_candidate = {(outcome.hunt_id, outcome.candidate_sha256): outcome for outcome in outcomes}
+    population, inheritance_codes = _hunt_discovery(conn, outcomes, hunt_id)
+    codes += inheritance_codes
+    by_candidate = {outcome.candidate_sha256: outcome for outcome in population}
     m_numbers, discovery_rows = _programme_m(conn, pins=pins, frozen=frozen, register=register)
 
-    # --- V[SR] over this hunt's discovery evaluate trials with an outcome ---
+    # --- V[SR] over this hunt's discovery evaluate trials with an outcome (inherited included) ---
     variance = hunt_inference.trial_sharpe_variance(
         VPopulationMember(outcome.hunt_trial_id, outcome.active_series, _ruined(outcome.statistics))
-        for outcome in outcomes
-        if outcome.hunt_id == hunt_id
+        for outcome in population
     )
     if isinstance(variance, StatRefused):
         codes.append(f"v_population_{variance.reason}")
@@ -383,7 +429,7 @@ def declaration_numbers(
             codes.append(f"pin_{label}_pinned_by_other_hunt")
         if hh.burning_look(conn, split=spec.split, candidate_sha256=spec.candidate_sha256, hunt_id=hunt_id) is not None:
             codes.append(f"pin_{label}_split_burned")
-        discovery = by_candidate.get((hunt_id, spec.candidate_sha256))
+        discovery = by_candidate.get(spec.candidate_sha256)
         if discovery is None:
             codes.append(f"pin_{label}_no_discovery_outcome")
             continue
@@ -479,7 +525,10 @@ def tripwire(
     discovery = _register_entry(register, discovery_id)
     rows = conn.execute(_HUNT_DISCOVERY_ROWS, {"hunt": hunt_id}).fetchall()
     if discovery is None:
-        codes.append(f"register_disagrees_with_log:{discovery_id}_missing")
+        # An inheriting hunt registers no discovery row, so it has no discovery entry (#3454);
+        # its inherited row is the source hunt's entry. Any row of its own restores the check.
+        if hunt_id not in hh.HUNT_INHERITED_DISCOVERY or rows:
+            codes.append(f"register_disagrees_with_log:{discovery_id}_missing")
     else:
         evidence = parse_log_backed_evidence(discovery.evidence)
         if evidence is None:
@@ -1084,9 +1133,9 @@ def holdout_declaration_numbers(
     if any(declaration.hunt_id == hunt_id and declaration.split == "holdout" for declaration in frozen):
         codes.append("holdout_already_frozen")
     m_numbers, _discovery_rows = _programme_m(conn, pins=pins, frozen=frozen, register=register)
-    discovery = {
-        outcome.candidate_sha256: outcome for outcome in _discovery_outcomes(conn) if outcome.hunt_id == hunt_id
-    }
+    population, inheritance_codes = _hunt_discovery(conn, _discovery_outcomes(conn), hunt_id)
+    codes += inheritance_codes
+    discovery = {outcome.candidate_sha256: outcome for outcome in population}
     validation_trials = {c.spec_sha256: c.hunt_trial_id for c in readout.candidates}
     pin_forms: list[dict[str, Any]] = []
     power: dict[str, Any] = {}
@@ -1327,11 +1376,9 @@ def pin_power(conn: psycopg.Connection[Any], doc: Mapping[str, Any]) -> tuple[di
     """
     split = cast(hh.Split, doc["split"])
     end = date.fromisoformat(str(doc["end_session"])) if split == "holdout" else None
-    discovery = {
-        outcome.candidate_sha256: outcome for outcome in _discovery_outcomes(conn) if outcome.hunt_id == doc["hunt_id"]
-    }
+    population, problems = _hunt_discovery(conn, _discovery_outcomes(conn), str(doc["hunt_id"]))
+    discovery = {outcome.candidate_sha256: outcome for outcome in population}
     power: dict[str, Any] = {}
-    problems: list[str] = []
     for pin in doc["pins"]:
         spec = TrialSpec.from_form(pin["spec"])
         label = spec.spec_sha256[:12]

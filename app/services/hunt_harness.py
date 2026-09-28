@@ -266,7 +266,9 @@ HUNT_HARNESS_MODEL_ID: Final = f"hunt-harness-v1+{sha256_form(canonical_form(_mo
 #: raising it is a new hunt. A hunt with no entry refuses registration.
 #: hunt-1 = 1: the one frozen trial of spec ``2026-09-26-3387-hunt-1-route-a-spec.md`` (#3387).
 #: hunt-2 = 1: the one frozen trial of spec ``2026-09-27-3448-hunt-2-declaration.md`` (#3448).
-HUNT_BUDGETS: Final[Mapping[str, int]] = MappingProxyType({"hunt-1": 1, "hunt-2": 1})
+#: hunt-3 = 0: it registers no discovery row; it inherits hunt 2's (``HUNT_INHERITED_DISCOVERY``,
+#: spec ``2026-09-28-3454-hunt-3-spec.md``, #3454).
+HUNT_BUDGETS: Final[Mapping[str, int]] = MappingProxyType({"hunt-1": 1, "hunt-2": 1, "hunt-3": 0})
 #: hunt → terminal readout. Adding a hunt here IS the closing event.
 HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -282,6 +284,36 @@ HUNT_CLOSED: Final[Mapping[str, str]] = MappingProxyType(
             "no demonstrated edge: discovery closed with no candidate declared (hunt_trial_id 2: BY flag met, "
             "arm beats control, below the corrected bar (point estimate): excess over SPY +17.5%/yr at base but "
             "-26.8%/yr in the binding stress cell; underpowered at the bar, excess-series MDE80 0.210 vs 0.08; #3448)"
+        ),
+    }
+)
+
+
+@dataclass(frozen=True)
+class InheritedDiscovery:
+    """A CLOSED hunt's discovery outcome that a successor hunt takes as its own (#3454).
+
+    The successor re-registers the identical candidate, which cannot hold a second
+    discovery evaluate row (``sql/427``: one per candidate and split), so the door reads
+    this row as the successor's discovery population (pin, V[SR], holdout pins). BY is
+    programme-wide and counts the row once, as it already does. ``hunt_door`` enforces
+    the contract; a mismatch refuses ``inherited_discovery_invalid:<reason>``.
+    """
+
+    source_hunt_id: str
+    hunt_trial_id: int
+    outcome_sha256: str
+
+
+#: successor hunt → the discovery outcome it inherits. Reviewed-PR changes only.
+#: hunt-3: hunt 2's one discovery row, re-registered with two post-look gate changes disclosed
+#: (spec ``2026-09-28-3454-hunt-3-spec.md``, "Hunt 3's identity: inherit, do not recompute").
+HUNT_INHERITED_DISCOVERY: Final[Mapping[str, InheritedDiscovery]] = MappingProxyType(
+    {
+        "hunt-3": InheritedDiscovery(
+            source_hunt_id="hunt-2",
+            hunt_trial_id=2,
+            outcome_sha256="151c3c6a603c442dd44b9dbd8d7d344a501319fd8a79be19c144b96966648f7d",
         ),
     }
 )
@@ -1655,6 +1687,7 @@ __all__ = [
     "HUNT_BUDGETS",
     "HUNT_CLOSED",
     "HUNT_HARNESS_MODEL_ID",
+    "HUNT_INHERITED_DISCOVERY",
     "HUNT_PROGRAMME_LOCK",
     "HUNT_TARIFF",
     "LANES",
@@ -1667,6 +1700,7 @@ __all__ = [
     "HuntOutcome",
     "HuntRefused",
     "HuntTariff",
+    "InheritedDiscovery",
     "TrialSpec",
     "UniverseIdentity",
     "abandon_trial",

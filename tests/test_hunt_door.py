@@ -181,3 +181,82 @@ def test_a_strong_positive_outcome_passes_and_a_refused_base_cell_refuses() -> N
     for status, statistics in (("abandoned", {"cells": _all_cells(strong, strong)}), ("refused", {"grid": {}})):
         result, _ = hunt_door.candidate_verdict(status, statistics, **kwargs)
         assert result.verdict is hunt_inference.Verdict.NOT_PASS_REFUSED
+
+
+# ---------------------------------------------------------------------------
+# #3454: hunt 3 inherits hunt 2's discovery outcome
+# ---------------------------------------------------------------------------
+
+_HUNT_2_OUTCOME = hh.HUNT_INHERITED_DISCOVERY["hunt-3"].outcome_sha256
+
+
+def _outcome(
+    trial_id: int = 2,
+    *,
+    hunt_id: str = "hunt-2",
+    status: str = "computed",
+    outcome_sha256: str = _HUNT_2_OUTCOME,
+    harness_model_id: str = hh.HUNT_HARNESS_MODEL_ID,
+) -> Any:
+    return hunt_door._DiscoveryOutcome(
+        hunt_trial_id=trial_id,
+        hunt_id=hunt_id,
+        candidate_sha256="c" * 64,
+        status=status,
+        statistics={},
+        active_series=None,
+        outcome_sha256=outcome_sha256,
+        harness_model_id=harness_model_id,
+    )
+
+
+def test_the_harness_model_id_is_the_one_hunt_2s_discovery_row_carries() -> None:
+    # ⚠ Hunt 3 inherits hunt_trial_id 2, stamped with this id (dev DB, 2026-09-28). A move
+    # makes the inheritance refuse ``stale_harness_model``, and hunt 3 then closes
+    # "undetermined" rather than re-running (#3454 spec, "The harness model must not move").
+    assert hh.HUNT_HARNESS_MODEL_ID == "hunt-harness-v1+58244f6f49e168f2"
+
+
+def test_hunt_3_registers_no_discovery_row_and_waits_for_its_gate() -> None:
+    assert hh.HUNT_BUDGETS["hunt-3"] == 0
+    assert "hunt-3" in hunt_door.HUNTS_AWAITING_GATE
+    assert hh.HUNT_INHERITED_DISCOVERY["hunt-3"].source_hunt_id == "hunt-2"
+    assert "hunt-2" in hh.HUNT_CLOSED
+
+
+def test_a_hunt_without_an_inheritance_reads_only_its_own_outcomes() -> None:
+    own = _outcome(1, hunt_id="hunt-1", outcome_sha256="a" * 64)
+    population, codes = hunt_door.hunt_discovery_population([own, _outcome()], hunt_id="hunt-1", own_discovery_rows=1)
+    assert (population, codes) == ([own], [])
+
+
+def test_hunt_3_inherits_hunt_2s_outcome_when_the_contract_holds() -> None:
+    inherited = _outcome()
+    population, codes = hunt_door.hunt_discovery_population(
+        [_outcome(1, hunt_id="hunt-1", outcome_sha256="a" * 64), inherited], hunt_id="hunt-3", own_discovery_rows=0
+    )
+    assert (population, codes) == ([inherited], [])
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "own_rows", "reason"),
+    [
+        ([_outcome()], 1, "own_discovery_rows"),
+        ([], 0, "source_row_missing"),
+        ([_outcome(hunt_id="hunt-1")], 0, "source_hunt"),
+        ([_outcome(status="abandoned")], 0, "source_not_computed"),
+        ([_outcome(outcome_sha256="f" * 64)], 0, "outcome_sha256"),
+        ([_outcome(harness_model_id="hunt-harness-v1+0000000000000000")], 0, "stale_harness_model"),
+    ],
+)
+def test_a_broken_inheritance_refuses_and_inherits_nothing(outcomes: list[Any], own_rows: int, reason: str) -> None:
+    population, codes = hunt_door.hunt_discovery_population(outcomes, hunt_id="hunt-3", own_discovery_rows=own_rows)
+    assert population == []
+    assert f"inherited_discovery_invalid:{reason}" in codes
+
+
+def test_an_inheritance_from_an_open_hunt_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hh, "HUNT_CLOSED", {})
+    population, codes = hunt_door.hunt_discovery_population([_outcome()], hunt_id="hunt-3", own_discovery_rows=0)
+    assert population == []
+    assert codes == ["inherited_discovery_invalid:source_not_closed"]
