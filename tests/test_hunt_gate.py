@@ -8,7 +8,9 @@ input is "undetermined", a miss is "no demonstrated edge").
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -255,3 +257,19 @@ def test_every_pins_lineage_is_read_not_the_first(monkeypatch: pytest.MonkeyPatc
     pins = [trial_spec(family="a_family"), trial_spec(family="c_family"), trial_spec(family="b_family", lag=2)]
     assert hunt_door._pin_lineages(pins) == ["b_family", "c_family"]
     assert hunt_door._pin_lineages([trial_spec(family="a_family")]) == [None]
+
+
+def test_hunt_3_closed_on_its_immutable_readout_record() -> None:
+    """The closure text matches the record the one look wrote (#3454 "At validation, one look")."""
+    record = json.loads((Path(__file__).resolve().parents[1] / "docs/hunts/hunt-3-validation-readout.json").read_text())
+    record = hh.decode_form(record)
+    assert (record["hunt_id"], record["hunt_trial_id"], record["complete"]) == ("hunt-3", 3, True)
+    assert record["outcome_sha256"] == "921b3a61cbd615dec98a715f9a2348287152a9ac5e06d4f9d8681ecfe85ce40b"
+    assert (record["promote"], record["closure"], record["verdict"]) == (False, "no demonstrated edge", "UNDETERMINED")
+    assert record["unavailable"] == []
+    assert max(record["base_excess_ann"].values()) == pytest.approx(-0.3315, abs=5e-4)
+    assert min(record["base_excess_ann"].values()) == pytest.approx(-0.3903, abs=5e-4)
+    assert record["excess_t"]["t_stat"] == pytest.approx(-6.94, abs=5e-3)
+    assert record["m_val"] == pytest.approx(-0.470, abs=5e-4)
+    assert "hunt_trial_id 3" in hh.HUNT_CLOSED["hunt-3"] and "-6.94" in hh.HUNT_CLOSED["hunt-3"]
+    assert set(hh.CLOSED_LINEAGES) == set(hh.LAST_LOOK_LINEAGES) == {"extreme_move_illiquid"}

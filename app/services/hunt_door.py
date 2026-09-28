@@ -1098,6 +1098,10 @@ def _validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> Validati
     if loaded is None:
         raise hh.HuntHarnessError(f"{hh.declaration_strategy_id(hunt_id, 'validation')} has not frozen")
     frozen, declaration = loaded
+    if hunt_id in hunt_gate.GATED_HUNTS and hunt_id in hh.HUNT_CLOSED:
+        # Closed on its immutable readout record; the closure edit itself moves the pinned
+        # files, so re-checking them now would misreport a closed hunt as terminal (#3454).
+        raise HuntDeclarationRefused(hunt_id, ["hunt_closed"])
     if hunt_id in hunt_gate.GATED_HUNTS:
         lineages = _pin_lineages([TrialSpec.from_form(pin["spec"]) for pin in declaration.doc["pins"]])
         # A terminal row is final: restoring the pinned files cannot re-open a readout (Codex ckpt-2).
