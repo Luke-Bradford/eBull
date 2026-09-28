@@ -1,9 +1,9 @@
-# #1822 — v1.5 ranking family ablation: spec (v4)
+# #1822 — v1.5 ranking family ablation: spec (v5)
 
 Refs #1822, #1815, #2437 (supervisor refill 2026-09-28 05:15Z, item 2),
 `docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md` §3. v2 answers Codex ckpt-1 v1 (61
 findings), v3 answers round 2 (50),
-v4 answers round 3; see "Revision notes".
+v4 answers round 3, v5 settles "Prices"; see "Revision notes".
 
 **Ask (supervisor):** ablate each v1.5 family against the matched control, on the hunt harness (#3385) and the PIT
 bundles. Report each family's incremental contribution with its SE, and close no family on power alone. Weights
@@ -75,6 +75,8 @@ prerequisites and is not conditioned on route F's numbers (see "Route H").
 | freeze before look | frozen declaration row | #2829 / #2599, `result_ledger.freeze_preregistration` |
 | rank key | `total_score` descending | `scoring.compute_rankings` (`scoring.py:2464`) |
 | ablation of family f | **(construction)** below | none published for a heuristic composite |
+| bar / transition validity | `price_quarantine` B1–B4, T1–T3, computed in-process | S7 verdict on #2247, `price_quarantine.py` docstring |
+| cost band on a non-as-traded basis | `cost_price_basis` → `UNKNOWN_NOMINAL_PRICE_BAND` | #3238, `cost_model.py:460-559` |
 
 **Ablation (construction).** Both keys are rebuilt symmetrically from the stored family scores, with the same
 precision:
@@ -130,14 +132,14 @@ visible. Sessions with no run leave that slot idle (return 0 in every book), as 
 
 **Books** (`hunt_evaluator.evaluate_books`, unchanged):
 - control C(t) = every lane-eligible population name whose bar on t (the last session before entry) is valid
-  under the harness's bar rule. That bar is complete before the entry open;
+  under the control bar rule in "Prices". That bar is complete before the entry open;
 - both keys are restricted to C(t) **before** selection, so A(t) ⊆ C(t);
 - `arm_full` = `select_arm(total_score|C, sign=+1, fraction=0.2)`;
 - `arm_{−f}` = `select_arm(key_{−f}|C, …, 0.2)` for each of the six families.
 
 `select_arm` includes every tie at the cut. A book can therefore exceed ⌈0.2·N⌉ and differ from a rank cut; sizes
-are reported. The books use equal weight, dividends reinvested, the `real_stock_long_x1` tariff, and
-`cost_model.cost_band_for` at the as-traded entry price. Termination follows `r6_exclusion_trial.PROGRAMME_POLICIES`;
+are reported. The books use equal weight, price only ("Prices" 3), the `real_stock_long_x1` tariff, and
+`cost_model.cost_band_for` on the basis fixed in "Prices" 2. Termination follows `r6_exclusion_trial.PROGRAMME_POLICIES`;
 `zero_recovery` is canonical and the others are reported beside it. A name whose feed stops is not terminated
 unless the termination source says so (the harness rule).
 
@@ -145,25 +147,145 @@ unless the termination source says so (the harness rule).
 and excluded from the population, so from both keys **and** the control (slice 1 measures how many). Rows with a
 non-finite `raw_total` or unparseable `penalties_json` are excluded the same way.
 
-**Prices.** Slice 1's first task is a **go/no-go**: name the split-safe, dividend-aware eToro daily reader (or
-the research reader, if it covers the window) and prove it on the window's split and dividend events. If neither
-exists, the slice stops and reports. It does not build a reader silently.
+**Prices (v5).** This section settles the slice-1 go/no-go and its four residuals (#1822 comment, 2026-09-28). The
+figures were measured on the window 2026-07-20 → 2026-09-25 over the ranked names; `--census` reprints them. Of the
+3,924 names ever ranked by v1.5, 3,881 have `price_daily` bars in the window.
 
-**Grid (nested by construction).** Readout k has cutoff c_k = min(the prior session, the last session with a
-complete load in the selected price reader), frozen in its vintage record. Its reporting grid runs from the first
+⚠ Eligibility and prices are reconstructed from the store as it stands at the readout, not as they were available
+at each formation. This is part of the "retrospective" label.
+
+**Reader.** The reader is `price_daily`. The readout **computes** the bar and transition verdicts itself, with
+`price_quarantine.evaluate_series`, over each series as read. The read runs ascending from the last bar before the
+first formation through c_k, and `as_of` is the readout date. Dates are unique by `price_daily`'s key. Every read,
+prices and metadata alike, happens in one REPEATABLE READ transaction. Verdicts are computed before masking. Each series uses the
+asset class that `price_quarantine_store` uses (its scope query, `price_quarantine_store.py:49`).
+- Masking then follows `research_price_structure_store.load_masked_series`: the close on `return_usable`, high and
+  low on `range_usable`, and the open on its value.
+- Verdicts are never read from `price_bar_quarantine`, so a stored verdict can never be stale against the prices.
+  The function is pure and its rule-set version is declared. The vintage identity covers the rows read, each
+  series' asset class and `as_of`, so it detects a change; it does not replay one.
+- The research archive cannot serve the full window: no archive series for a ranked name reaches 2026-09-20.
+
+**Basis.** The canonical **treats** `price_daily` returns as split-safe. This is a methodological choice: the
+harness makes the same one with its own split correction. It rests on two measurements.
+- **The provider back-adjusts re-denominations.** #2840 found that 0 of 142 filing-registered re-denominations left
+  a cliff (`scripts/probe_2840_confirmed_split_adjustment.py`). That evidence covers registered events only. An event
+  newer than an issuer's latest periodic report is untested.
+- **The store follows the provider through the #2066 heal.** `market_data.detect_adjustment_event` flags an overlap
+  ratio ≥ 1.2 and triggers a full re-fetch. Three failures are not detected here: a sub-1.2 re-base, a failed heal,
+  and a heal with no overlap.
+
+The `t3_excluded` sensitivity covers a failure that leaves a step T3 flags. **A step T3 does not flag is an
+unmitigated residual**: one under 5×, one already explained by T1 or T2, or one admitted back by a turnover spike.
+The series is also **treated as price-only**: in the 7 instruments measured, eToro candles carried no dividend
+adjustment (`etoro-api.md`, "eToro prices vs the public tape"; #2240).
+
+1. **Jumps.** The go/no-go comment's 1.8 / 0.55 screen is not a rule. The repo's rule is `price_quarantine` (S7
+   verdict on #2247).
+   - T1 (an unusable endpoint) and T2 (a hole) stay with the evaluator. A session without a valid close carries V,
+     and the next valid close marks from the last reference (the harness convention).
+   - T3 is a magnitude trigger with no turnover spike. Magnitude is a trigger, not a verdict.
+   - In the window, over the stored verdicts, there are 10 T3 transitions. Every one is `unclassifiable`, because
+     both bars have NULL volume, so T3 there is magnitude alone. There are also 7 T2 holes, 1 trigger admitted back
+     (`spike`) and 1 provisional trigger. `--census` recounts all of these from the computed verdicts, including T1
+     and the overlaps between rules.
+   - **Canonical:** a T3 transition is a return.
+   - **`t3_excluded` sensitivity.** A T3 verdict is dated by its later bar. Every name with a computed T3 verdict
+     dated in [the first formation's session t, c_k] leaves the population at every formation, and so leaves both
+     keys and the control.
+     - It uses information from after formation, so it is labelled a **look-ahead sensitivity**.
+     - It is recomputed in full at each readout, and does not nest.
+     - It measures how far Δ_f depends on those names, not the effect of admitting T3 itself.
+   - The readout also lists, per book, the entered positions still held at the close before a T3 transition and
+     at its later bar, with each ratio.
+   - The #2840 classification route is not used. Its register is built from periodic-report restatements, so it
+     cannot reach the recent events at issue.
+2. **Cost bands.** `cost_model.cost_price_basis` (#3238) is total and fail-closed: only a stored basis that
+   positively says as-traded may select a band. `price_daily` is back-adjusted.
+   - **Canonical:** `cost_band_for(p, price_basis="split_adjusted")`, which is `UNKNOWN_NOMINAL_PRICE_BAND` (the
+     highest measured p75 band), in every book. p is the entry fill's stored price. A position never entered is
+     never charged (the evaluator). The band is selected once per
+     position and reused at exit, as the harness's `HalfSpread` does.
+   - `cost_model.py:460` calls this band an **adverse sensitivity, not the historical quote**, and that is the label
+     it carries here. A flat band does not bound Δ in either direction.
+   - **Sensitivity:** `as_traded` on the stored level. Its error is directional per event: a later reverse split
+     lifts the stored level into a cheaper band, and a later forward split lowers it into a dearer one.
+   - **Gross is dropped.** `hunt_evaluator.position_path` refuses a zero half-spread, and changing the evaluator
+     changes `HUNT_HARNESS_MODEL_ID`. Net is reported at both bases. Entries per formation per book are reported
+     descriptively; they do not decompose Δ.
+3. **Dividends.** None of our stores covers the window's ex-dates:
+   - `dividend_events` holds 4 ex-dates in 3 of 3,881 names. That is insufficient coverage, and no statement is
+     made about its point-in-time provenance. It holds 0 ex-dates for AAPL, MSFT, JPM, HD, KO, XOM and GME over
+     2026-06-01 → 2026-09-30;
+   - the research archive has 0 dividend rows since 2026-01-01;
+   - `dividend_history` is keyed by fiscal period and carries no ex-date.
+
+   Route F is therefore **price-only**, and the with-dividends cell is not computed. The omission changes each
+   book's path, since the evaluator compounds credited dividends and applies terminal haircuts. The sign of its
+   effect on Δ_f is not known.
+
+   The readout gives one **descriptive diagnostic**, the yield tilt. Per family and formation, it takes the mean
+   `instrument_dividend_summary.ttm_yield_pct` over each book's entered positions, then the difference between the
+   two books.
+   - NULL or non-finite yields are counted and left out.
+   - A formation where either book has no yield is skipped and counted. With none left, the diagnostic is refused.
+   - The yield is read at readout time, not point-in-time, and the snapshot is stored in the vintage sidecar.
+   - It neither signs nor bounds the omission's effect on Δ.
+4. **The mismatched name is CTNT (1052266).** On all 90 compared bars, each of open, high, low and close live
+   equals the stored value × **150.000**. The mismatch was observed on 2026-09-28; the store's last bar is
+   2026-09-25. Neither the provider's re-base date nor the economic effective date is established here.
+   - A uniform scale leaves every return unchanged, and so canonical cost and membership are unchanged too, because
+     the verdicts are computed from ratios. Only the `as_traded` sensitivity reads the level.
+   - CTNT is not excluded. The #2066 heal is meant to rewrite the series on the first refresh that overlaps the new basis. This is the
+mechanism; the rewrite has not been verified. The
+     vintage identity records the rewrite, and the readout reports it as a revision.
+
+**Control bar rule.** This supersedes "the harness's bar rule" under Books. It is the harness's eligibility rule
+(`2026-09-26-3385-hunt-harness.md`, "Eligibility"), applied **per formation** to the masked bar on t, with one change:
+the volume clause passes when volume is NULL **or** finite and > 0.
+- Stored volume is NULL on every window bar of **995** of 3,881 names (48,202 bars), and on some bars of 19 more.
+  No window bar stores volume 0. A live fetch also returns `volume = None` for PLAG and YYAI (2 checked).
+- A NULL volume records the absence of a figure, not evidence that nothing traded. It is also not evidence of
+  liquidity; canonical cost treats every name alike.
+- H > L is kept. 908 bars fail it, 855 of them in series with NULL volume.
+- The readout reports the exclusion funnel per formation: ranked, lane, bars present, then each bar-rule reason.
+  The harness counts it the same way.
+
+Sensitivity: the harness rule verbatim, applied per formation. At a formation where a name's bar on t has NULL
+volume, that name leaves the population, both keys and the control.
+
+**Cells.** There are four: canonical, `t3_excluded`, `as_traded` cost, and the verbatim bar rule. Each sensitivity
+changes one assumption against the canonical, and they are never combined.
+- An empty control at a formation is an idle slot.
+- A grid with no admitted cohort is refused as `empty_grid`. All three are frozen in the declaration and reported
+beside the canonical for all six families. None is a decision.
+
+**Grid (nested by construction).** Readout k has cutoff c_k, frozen in its vintage record. c_k is the latest
+session at least `price_quarantine.PROVISIONAL_WINDOW_DAYS` calendar days before the readout date.
+- It is calendar-only, so it never moves backward between readouts.
+- No bar at or before it is provisional under the verdicts the readout computes.
+- A bar loaded late shows up as a revision in a later readout (below). The cutoff does not wait for it.
+
+Its reporting grid runs from the first
 entry session to G_k = c_k − (h − 1) sessions:
 - only cohorts with entry e ≤ G_k are admitted, so each exits by c_k;
 - every admitted cohort is evaluated over its whole path through its exit, but only daily returns through G_k are
   reported;
-- ruin and refusals are judged on the reported grid only.
+- `ruined` is judged on the reported grid only. An evaluator refusal (`StatRefused`) anywhere on an admitted
+  cohort's path is fail-closed, because the evaluator cannot return part of a path:
+  - in `arm_full` or the control, it refuses all six families in that cell;
+  - in `arm_{−f}`, it refuses f only.
+
+  Cells never affect each other.
 
 A later readout appends sessions. An earlier session's return changes only if an **input** changed (a price,
 dividend, score or termination correction). Each readout's vintage record stores the input identity: a sha256
-over the ordered rows of every series it read. A later readout that finds a differing identity for an already
+over the ordered rows of every series it read, the quarantine rule-set version, and the exclusion list with its
+reasons. A later readout that finds a differing identity for an already
 reported session reports the revision and its cause, never silently. The record is a JSON sidecar next to the
 readout doc, and slice 1's script writes it along with the declaration. Idle slots at start-up and in sparse-run
-gaps return 0. The readout reports the deployed share (active slots / h) per session, so the annualised figures
-are read against actual exposure.
+gaps return 0. The readout reports the deployed share per session: active slots / h, and the entered share
+of each active cohort. The annualised figures are read against that exposure.
 
 **Held names.** These follow the harness evaluator's rules unchanged (`hunt_evaluator.py` docstring):
 - a session without a bar carries V forward;
@@ -178,7 +300,7 @@ rebalancing is uncosted in both books (the harness residual), so net Δ is not f
 - Δ_f(d) = r_{arm_full}(d) − r_{arm_{−f}}(d), paired on the same sessions (the control cancels);
 - the mean of Δ_f and its HAC SE, computed **on the paired daily series**; both are ×252 annualised (an
   arithmetic annualised spread, not a compounded wealth gap); t (unannualised); T; the NW lag used; and the count
-  of sessions where Δ ≠ 0. All reported **gross and net**;
+  of sessions where Δ ≠ 0. All reported **net**, in each of the four cells of "Prices" (gross is dropped there);
 - MDE_f = (z_{.975} + z_{.80}) · SE_annual, reported beside Δ and Δ / SE. It is a planning figure, showing what
   this window could resolve, and it classifies nothing;
 - a sensitivity SE at twice the NW lag. The window is short and holdings persist, so the rule-of-thumb lag may be
@@ -186,10 +308,11 @@ rebalancing is uncosted in both books (the harness residual), so net Δ is not f
 - `hac_t` refusals (constant series, too few observations, invalid variance) are reported as refusals, and no t or
   MDE is fabricated. A book ruined **on the reported grid** (`evaluate_books`' own flag) stops the family's
   statistics: the readout reports "ruined" and computes no SE, t or MDE for that family;
-- descriptive: `arm_full − control`, both book sizes per formation, the symmetric membership difference
+- descriptive: `arm_full − control`, both book sizes and never-entered positions per formation, held
+  position-sessions marked without a valid close (carried V) per book, the symmetric membership difference
   |arm_full △ arm_{−f}|, and realised turnover per book.
 
-Six families, gross and net: every t is **marginal**. No multiplicity correction is applied because no inference
+Six families, two cost bases: every t is **marginal**. No multiplicity correction is applied because no inference
 is drawn; the readout says this in its header.
 
 **Declaration.** Slice 1 freezes a `freeze_preregistration` row before any forward return is read. It carries the
@@ -204,7 +327,7 @@ the pooled series.
 
 **Repeated readouts.** Readouts come on the first weekday of each month, with c_k as defined under "Grid", each
 recomputed in full on the frozen construction. With the nested grid they append, and input corrections are surfaced as above. None is a significance
-decision, so no sequential correction applies. A rerun at the same cutoff must reproduce byte-identical statistics;
+decision, so no sequential correction applies. A rerun at the same cutoff over the same input identity must reproduce byte-identical statistics;
 a correction is a new declaration.
 
 **Prospective subseries.** It uses only cohorts formed from runs known after the declaration's freeze time, on
@@ -248,13 +371,27 @@ Its prerequisites:
 
 ## Slices
 
-1. **Go/no-go and build.** The price-reader go/no-go (above), then `app/services/ranking_ablation.py`: pure key
+1. **Build.** The reader fixed in "Prices", then `app/services/ranking_ablation.py`: pure key
    construction, domain restriction, timeline mapping, and the Δ series via `evaluate_books`, `hac_t` and the MDE.
    Also `scripts/run_1822_ablation_readout.py` (read-only; `--census` prints the premise table; writes only the
    declaration) and the frozen declaration. Tests: adding w_f·s_f back to the **pre-clip** ablated total and then clipping reproduces `key_full`;
    Δ ≡ 0 → refusal, not t; `key_{−f}` with name-specific P − R differs from a renormalised key (pins the "no
    renormalisation" choice); clipped keys and ties at the cut; the timeline around an in-session run, a weekend run,
    a holiday and two runs per entry session; exclusion applied to both keys; `ruined` propagation.
+   "Prices" tests:
+   - verdicts computed in-process equal `evaluate_series` on the same bars, and no stored verdict is read;
+   - `t3_excluded` removes a T3 name at every formation, from both keys and the control; T1/T2/admitted/provisional
+     do not trigger it;
+   - canonical cost is exactly `UNKNOWN_NOMINAL_PRICE_BAND`, selected at entry and reused at exit;
+   - a uniform ×k rescale of one series leaves canonical returns (to 1e-12), costs and membership unchanged. In a
+     fixture whose rescale crosses a band threshold it moves only the `as_traded` band (the CTNT case);
+   - volume NULL passes; 0, negative, NaN and ∞ fail. The verbatim arm drops a NULL-volume name at that formation
+     only;
+   - c_k is calendar-only and monotone in the readout date. At the `PROVISIONAL_WINDOW_DAYS` boundary,
+     `evaluate_series` marks no bar ≤ c_k provisional;
+   - a `StatRefused` after G_k in `arm_{−f}` refuses f only, and in `arm_full` it refuses all six; `ruined` after
+     G_k refuses nothing;
+   - `t3_excluded` dates a T3 by its later bar and leaves an empty formation idle.
 2. **Readout 1 (retrospective):** `docs/proposals/ta/2026-09-28-1822-ablation-readout-1.md`.
 3. **Route H**, per its own spec.
 
@@ -310,3 +447,33 @@ the 34-run window cannot feed and which exceeds the harness's 63-session cap for
   - Route F is registered in the #2829 register, and the reason `hunt_trials` does not fit is stated (#25, #26).
   - "No history at all" is corrected (#27). The overlapping-cohort choice is declared deliberate (#28). The MDE
     classifies nothing (#29).
+- **v5 (the go/no-go and its four residuals, measured 2026-09-28; ckpt-1 rounds 4, 5 and 6).**
+  - Reader: `price_daily`. Bar and transition verdicts are **computed in-process** with `evaluate_series`, not read
+    from stored tables. This removes the stale-verdict, coverage, rule-version and interior-completeness class
+    (r4 #5, #8, #9, #44; r5 #4, #5, #23, #26, #27).
+  - Basis: split-safety is stated as a methodological choice, and its residuals are named (a sub-1.2 re-base, a
+    failed heal, no overlap, a sub-5× unadjusted step) (r4 #1–#7; r5 #1–#3).
+  - Jumps: T1 and T2 stay with the evaluator. For T3, the canonical treats it as a return. The `contained`
+    segment arm (r4 v5 draft) is **withdrawn**: it removed the whole remaining path, used d's close for an open exit
+    on d, clashed with termination and did not match the `Segment` model (r5 #6, #7, #18–#22). It is replaced by
+    `t3_excluded`, a labelled look-ahead exclusion. The #2840 route is not used (r4 #11–#21).
+  - Cost: the maximum band, labelled adverse and not a bound. Selected at entry and reused. Gross dropped; entry
+    counts are descriptive, not a decomposition (r4 #22–#27; r5 #28).
+  - Dividends: coverage is "insufficient", with provenance not claimed. The yield bound becomes a tilt diagnostic,
+    with defined skips and refusal and a stored snapshot (r4 #28–#35; r5 #8–#11, #29).
+  - CTNT: all four OHLC fields ×150.000 on 90 of 90 bars. No date is claimed. Membership is unchanged because the
+    verdicts come from ratios (r4 #36–#38; r5 #12, #17, #30, #31).
+  - Volume: finite > 0 or NULL, applied per formation in both arms, with a per-formation funnel. 3,924 versus
+    3,881 is reconciled (r4 #39–#46; r5 #13).
+  - Grid: c_k is calendar-only and monotone; late loads become revisions (r4 #49; r5 #15, #24, #25). An evaluator
+    refusal anywhere refuses the family; `ruined` is judged on the grid (r4 #50; r5 #16). Deployed share counts
+    entered positions (r4 #48; r5 #14). Sensitivities are one at a time (r4 #51). Tests rewritten (r4 #52).
+  - Round 6 (24 findings): reader bounds, ordering and one snapshot (#8–#10); identity detects, does not replay
+    (#7, #11); the T3 residual widened to "not flagged" (#6); `t3_excluded` dating, nesting and meaning (#12–#14);
+    empty cases and the cell list (#15, #24); a carried-mark diagnostic (#5, #16); tests pinned (#17, #20, #21);
+    reruns keyed by cutoff and identity (#18); refusal propagation (#19); heal wording (#22); never-entered cost
+    (#23). Not changed: #1 (as r5 #2 below); #4, since per-family composition is the quantity the ablation itself
+    measures.
+  - Not changed: r4 #4 and r5 #2. Treating T3 as a return is the harness's choice, and it is labelled as a
+    choice. `t3_excluded` shows what rests on it. r4 #10 is covered by the retrospective label. r5 #9: the
+    dividend claim is stated as measured on 7 instruments; no population claim is made.
