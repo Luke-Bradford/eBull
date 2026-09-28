@@ -261,8 +261,11 @@ def test_every_pins_lineage_is_read_not_the_first(monkeypatch: pytest.MonkeyPatc
 
 def test_hunt_3_closed_on_its_immutable_readout_record() -> None:
     """The closure text matches the record the one look wrote (#3454 "At validation, one look")."""
-    record = json.loads((Path(__file__).resolve().parents[1] / "docs/hunts/hunt-3-validation-readout.json").read_text())
-    record = hh.decode_form(record)
+    from scripts.run_hunt_3_validation import RECORD_PATH, RECORD_SHA256
+
+    raw = json.loads((Path(__file__).resolve().parents[1] / RECORD_PATH).read_text())
+    assert hunt_door.document_sha256(raw) == RECORD_SHA256
+    record = hh.decode_form(raw)
     assert (record["hunt_id"], record["hunt_trial_id"], record["complete"]) == ("hunt-3", 3, True)
     assert record["outcome_sha256"] == "921b3a61cbd615dec98a715f9a2348287152a9ac5e06d4f9d8681ecfe85ce40b"
     assert (record["promote"], record["closure"], record["verdict"]) == (False, "no demonstrated edge", "UNDETERMINED")

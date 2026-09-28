@@ -39,6 +39,9 @@ DOC_PATH: Final = "docs/hunts/hunt-3-validation.json"
 #: The immutable readout record. Written once; the closure PR commits it.
 RECORD_PATH: Final = "docs/hunts/hunt-3-validation-readout.json"
 RECORD_KIND: Final = "hunt-3-validation-readout-v1"
+#: The record's canonical sha256, pinned once written (2026-09-28): after the closure, a read of
+#: hunt 3's verdict is a read of THIS record, verified, never a recomputation (spec "Hunt 3's identity").
+RECORD_SHA256: Final = "d68955490e15ac8fb8ee82d0381ad23e05539eeb1eb12a679e06d3e8f7e430d9"
 
 _SOURCE_SPEC: Final = "SELECT hunt_id, split, purpose, spec FROM hunt_trials WHERE hunt_trial_id = %(trial)s"
 
@@ -93,6 +96,23 @@ def record(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     }
 
 
+def closed_record(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    """The committed record, verified: canonical bytes, the pinned sha256, and the stored outcome
+    and frozen declaration it names. Any mismatch raises; it is never recomputed."""
+    raw = (hunt_door.REPO_ROOT / RECORD_PATH).read_bytes()
+    doc = json.loads(raw)
+    if hunt_door.document_bytes(doc) != raw or hunt_door.document_sha256(doc) != RECORD_SHA256:
+        raise SystemExit(f"{RECORD_PATH} is not the pinned record {RECORD_SHA256}")
+    outcome = hh.read_outcome(conn, int(doc["hunt_trial_id"]))
+    declaration = hh.load_hunt_declaration(conn, int(doc["declaration_id"]))
+    conn.commit()
+    if outcome.outcome_sha256 != doc["outcome_sha256"] or declaration is None:
+        raise SystemExit("the record's outcome or declaration is not the stored one")
+    if declaration.doc_sha256 != doc["declaration_sha256"]:
+        raise SystemExit("the record's declaration is not the frozen one")
+    return hh.decode_form(doc)
+
+
 def _write_once(path: str, canonical_doc: Mapping[str, Any]) -> str:
     """Write an ALREADY canonical document once; an existing file is never overwritten."""
     target = hunt_door.REPO_ROOT / path
@@ -115,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
     if (args.freeze or args.look) and not args.by:
         parser.error("--freeze and --look need --by")
     with psycopg.connect(settings.database_url) as conn:
+        if args.readout and HUNT_ID in hh.HUNT_CLOSED:
+            if args.record:
+                parser.error("hunt-3 is closed: its record is written")
+            print(json.dumps(closed_record(conn), indent=2, default=str))
+            return 0
         if args.readout:
             result = record(conn)
             print(json.dumps(result, indent=2, default=str))
