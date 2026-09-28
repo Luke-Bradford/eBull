@@ -355,8 +355,11 @@ class _TxConn:
         self.rollbacks = 0
         self.info = type("Info", (), {"transaction_status": TransactionStatus.INERROR})()
 
+    commit_fails = False
+
     def commit(self) -> None:
-        pass
+        if self.commit_fails:
+            raise RuntimeError("commit failed")
 
     def rollback(self) -> None:
         self.rollbacks += 1
@@ -382,8 +385,10 @@ def test_one_leg_raising_does_not_skip_the_rest(monkeypatch: pytest.MonkeyPatch)
     assert (result.legs, result.errors, result.note) == (2, 1, "legs=2 submitted=2 errors=1")
 
 
-@pytest.mark.parametrize("fails", [False, True])
-def test_the_paper_cycle_lifecycle_step_is_contained(monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
+@pytest.mark.parametrize(("fails", "commit_fails"), [(False, False), (True, False), (False, True)])
+def test_the_paper_cycle_lifecycle_step_is_contained(
+    monkeypatch: pytest.MonkeyPatch, fails: bool, commit_fails: bool
+) -> None:
     from app.services import ai_trial_pair_lifecycle
     from app.workers import scheduler
 
@@ -394,8 +399,10 @@ def test_the_paper_cycle_lifecycle_step_is_contained(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(ai_trial_pair_lifecycle, "record_pair_lifecycle", record)
     conn = _TxConn()
-    assert scheduler._record_trial_pair_lifecycle(cast(Any, conn)) == (None if fails else 3)
-    assert conn.rollbacks == (1 if fails else 0)
+    conn.commit_fails = commit_fails
+    failed = fails or commit_fails
+    assert scheduler._record_trial_pair_lifecycle(cast(Any, conn)) == (None if failed else 3)
+    assert conn.rollbacks == (1 if failed else 0)
 
 
 def test_the_deployed_environment_is_resolved_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:

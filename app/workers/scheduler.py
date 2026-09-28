@@ -6849,8 +6849,8 @@ def _record_trial_pair_lifecycle(conn: psycopg.Connection[Any]) -> int | None:
     """
     from app.services.ai_trial_pair_lifecycle import record_pair_lifecycle
 
-    conn.commit()
     try:
+        conn.commit()
         return record_pair_lifecycle(conn)
     except Exception:
         logger.exception("strategy_paper_cycle: AI-trial pair lifecycle failed; the cycle's work is committed")

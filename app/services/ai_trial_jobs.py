@@ -242,6 +242,9 @@ def run_decision_job(
         return DecisionJobResult("declaration_missing")
 
     env = resolve()
+    # Fail closed BEFORE the claim, whatever raises (a changed CLI, a failed re-resolve): the
+    # job run records the failure, no model is called, and the session stays claimable, so a
+    # run after the worker restarts can still decide it (up to the target-date guard).
     verify(env)
     # A diagnostics step, not a correctness one: a leftover process cannot publish (the lease
     # refuses a late worker), so a failed sweep is surfaced, never allowed to block the run.
