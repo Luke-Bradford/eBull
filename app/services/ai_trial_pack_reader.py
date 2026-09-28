@@ -43,6 +43,7 @@ from psycopg.rows import dict_row
 
 from app.providers.market_data import IntradayBar
 from app.services.ai_trial_pack import (
+    DISCLOSURE_WINDOW,
     INDICATOR_BARS,
     PROMPT_BARS,
     Disclosure,
@@ -342,7 +343,7 @@ def read_disclosures(
 ) -> dict[int, dict[str, tuple[Disclosure, ...]]]:
     """Per name: at most 5 filings and 5 headlines via ``select_disclosures`` (one source per
     call). The SQL bounds knowledge time and the window; the pure selector re-applies both."""
-    window_start = as_of - INTRADAY_WINDOW
+    window_start = as_of - DISCLOSURE_WINDOW
     filings: dict[int, list[Disclosure]] = {i: [] for i in instrument_ids}
     news: dict[int, list[Disclosure]] = {i: [] for i in instrument_ids}
     params = {"ids": list(instrument_ids), "as_of": as_of, "start": window_start, "forms": list(FILING_FORMS)}
