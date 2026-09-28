@@ -404,7 +404,7 @@ Slice 2 tests:
   - ⚠ Deviation: the trigger requires the deadline once a trial trade is `open`, `closing` or `closed`, not from insert, because the fill session does not exist while the trade is `planned`/`submitted`. "Trial trade" means `ai_trial_trade_links` names it; that link is now refused unless the trade is still `planned`. The deadline is immutable, and a non-trial trade cannot carry one.
   - The manager closes under the new trigger code `exit_deadline` (`timeout` wins when both are due). A trial leg loaded without a deadline goes `reconcile_required` (`trial_exit_deadline_missing`).
   - A submitted protection edit that never lands resumes `pending` on every cycle and returns before any exit is evaluated (Codex ckpt-2 P1 on #3484). **Fixed in 2c-iii-a for trial legs only**: the edit gives way to a due deadline, or to O10's close once it has been pending a whole cycle. The age-out on other arms keeps this exposure, and that is unchanged.
-  - Still owed: the `censored` pair event (10 sessions after the deadline) needs the pair-lifecycle writer, since `ai_trial_pair_events` refuses `censored` before `filled`; it moves to 2c-iii. The 40-session `max_position_age` is set when the trial deployments are configured (slice 2c-iv / 3).
+  - The `censored` pair event is written by the pair-lifecycle writer (slice 2c-iii-b, see O11). The 40-session `max_position_age` is set when the trial deployments are configured (slice 2c-iv / 3).
 
 **Lifecycle exceptions.** These map to the manager's existing states:
 - A failed close keeps the pair `open`, and it is reported as censored.
@@ -794,6 +794,12 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
       - the refusal is recorded in the repair streak as `trial_protection_close_refused`, which has a budget of 1. The position is therefore `unrepairable` on `/system/status` straight away. That is the operator alert, on the existing `strategy_exit_protection` channel.
     - An earlier close whose outcome is uncertain (`reconcile_required`, not yet witnessed) blocks a new close (`trial_close_outstanding`). An uncertain close is not a refusal, so it does not halt the trial.
 - **O11, uncertain submissions (r2-119).** A leg in `uncertain` state blocks the pair. It is resolved by reconciliation. A leg that fills after its session → the pair is `broken:late_fill`, and the filled leg is still managed to its exits and reported.
+  - **Implemented in slice 2c-iii-b** (`app/services/ai_trial_pair_lifecycle.py`, no migration). `record_pair_lifecycle` derives every `ai_trial_pair_events` row from state other writers own, so it is idempotent and runs on any cadence (the jobs slice schedules it each position cycle).
+    - Leg events: `submitted` once the trade has left `planned`; `uncertain` while it is `reconcile_required` with no broker order id and no fill; `filled` once the entry order has a stored execution; `censored` if the leg is still open at 15:00 UTC ten sessions after its own `exit_deadline_session`; `closed` with the trade. A closed leg is judged by its close time (the latest ownership release), so a late pass still records a late close as censored.
+    - An event is an observation: an uncertainty that resolved between two passes is not written. The readout values fills and closes from the source tables, never from the event's `at`.
+    - `broken` is written once, when both legs are determined and either is not a fill in the target session. Reasons: `late_fill` (or `early_fill`), the leg's funding `reason_code`, `broker_rejected`, or `unresolved` (still unfilled at 15:00 UTC ten sessions after the target session). Leg attribution is recoverable by joining the leg links. A leg filled after the pair broke keeps its events.
+    - `pair_unit_state` is the readout inclusion rule: `broken`, `blocked` (a leg's latest event is `uncertain`), `unit` (both filled, each closed or censored) or `open`.
+    - Still owed: the `ai_trial_pair_labels` row at the arm's fill needs the regime classifier, and moves to the jobs slice (2c-iv).
 - **O12, exits outside the mechanical set (r2-118).**
   - Manual, forced, delisting and policy-age exits are labelled per leg.
   - The primary analysis includes them at their recorded close.
