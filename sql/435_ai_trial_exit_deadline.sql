@@ -80,21 +80,22 @@ CREATE TRIGGER trg_ai_trial_trade_links_planned
 BEFORE INSERT ON ai_trial_trade_links
 FOR EACH ROW EXECUTE FUNCTION ai_trial_trade_links_planned();
 
--- The manager's deadline close. Built from the LIVE constraint, read from the dev cluster
--- 2026-09-28 with `pg_get_constraintdef` (= sql/411's). A mismatch refuses (fail-closed).
+-- The manager's deadline close. The drift check compares the SET of quoted codes in the live
+-- constraint with sql/411's list, read from the dev cluster 2026-09-28 with
+-- `pg_get_constraintdef`, so a server version that renders the definition differently does not
+-- trip it (review bot + Codex ckpt-3) while a code added or dropped elsewhere still refuses.
 DO $$
 DECLARE
-    live TEXT;
+    live  TEXT;
+    codes TEXT[];
 BEGIN
     SELECT pg_get_constraintdef(oid) INTO live
     FROM pg_constraint
     WHERE conrelid = 'strategy_position_operations'::regclass
       AND conname = 'strategy_position_operations_trigger_code_check';
-    IF live IS DISTINCT FROM
-        'CHECK ((trigger_code = ANY (ARRAY[''entry_exit_gap''::text, ''causal_resistance_break''::text, '
-        '''timeout''::text, ''strategy_exit''::text, ''emergency_risk''::text, ''operator_close''::text, '
-        '''core_rebalance''::text])))'
-    THEN
+    SELECT array_agg(m[1] ORDER BY m[1]) INTO codes FROM regexp_matches(live, '''([a-z_]+)''', 'g') AS m;
+    IF codes IS DISTINCT FROM ARRAY['causal_resistance_break', 'core_rebalance', 'emergency_risk',
+                                    'entry_exit_gap', 'operator_close', 'strategy_exit', 'timeout'] THEN
         RAISE EXCEPTION 'strategy_position_operations_trigger_code_check drifted: %', live;
     END IF;
 END $$;
