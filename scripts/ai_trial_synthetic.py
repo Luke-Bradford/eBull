@@ -30,7 +30,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from app.providers.market_data import IntradayBar
 from app.services.ai_trial_decision import (
@@ -66,7 +66,7 @@ _SESSION_DATE: Final = date(2026, 9, 28)
 _BAR_COUNT: Final = 260
 
 #: (symbol, instrument_id, slice, base price, daily drift, swing) — shapes, not market data.
-_NAMES: Final = (
+_NAMES: Final[tuple[tuple[str, int, Literal["top", "small_cap"], float, float, float], ...]] = (
     ("SYN_ALFA", 900001, "top", 42.0, 0.0012, 0.020),
     ("SYN_BRVO", 900002, "top", 118.0, -0.0006, 0.015),
     ("SYN_CHRL", 900003, "top", 7.5, 0.0003, 0.045),
@@ -143,7 +143,7 @@ def synthetic_pack() -> Pack:
     scores_run = ScoresRun("synthetic", _AS_OF - timedelta(hours=6))
     step1 = Step1(_AS_OF, _LAST_SESSION, _SESSION_DATE, scores_run, 1, None)
     shortlist_names = tuple(
-        ShortlistName(iid, sym, 80.0 - k, slc, Decimal("900000000") if slc == "small_cap" else None)  # type: ignore[arg-type]
+        ShortlistName(iid, sym, 80.0 - k, slc, Decimal("900000000") if slc == "small_cap" else None)
         for k, (sym, iid, slc, *_rest) in enumerate(_NAMES)
     )
     names: list[dict[str, Any]] = []
@@ -317,6 +317,8 @@ def run_synthetic(
                     pool=pool,
                 )
             except ControlPoolExhausted:
+                # Spec §7: an exhausted pool refuses the ARM decision too, so every accepted arm
+                # entry has a control. The validator accepted it; pairing is what refuses it.
                 row["reason_code"] = "control_pool_exhausted"
             else:
                 drawn.add(draw.instrument_id)
