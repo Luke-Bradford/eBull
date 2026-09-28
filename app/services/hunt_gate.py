@@ -248,6 +248,8 @@ def freeze_codes(recomputed: Mapping[str, Any], frozen: Any) -> list[str]:
     """The freeze's comparison of the document's block with its recomputation, per key."""
     if not isinstance(frozen, Mapping):
         # A document built without the block: rebuild it (procedural, nothing was looked at).
+        # Deliberately NOT ``hunt_gate_missing``: that prefix is substantive, and after the
+        # freeze :func:`look_codes` returns it for the same absence (review nitpick, #3458).
         return ["gate_missing"]
     codes: list[str] = []
     for key in sorted(set(recomputed) | set(frozen)):
@@ -262,6 +264,7 @@ def look_codes(doc: Mapping[str, Any], *, harness_model_id: str, repo_root: Path
     its decision pins must match the code, and its harness model must be the running one."""
     block = doc.get("hunt_gate")
     if not isinstance(block, Mapping):
+        # Substantive here; the freeze's ``gate_missing`` for the same absence is procedural.
         return [f"{SUBSTANTIVE_PREFIX}missing"]
     if set(block) != BLOCK_KEYS or block.get("version") != HUNT_GATE_VERSION:
         return [f"{SUBSTANTIVE_PREFIX}malformed"]
