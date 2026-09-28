@@ -225,10 +225,16 @@ def test_timeline_refusals(lag: int, h: int, entry: str, exit_: str, refused: bo
 # --- constants ------------------------------------------------------------------------------
 
 
-def test_every_budget_is_a_positive_integer() -> None:
+def test_every_budget_is_a_positive_integer_except_an_inheriting_hunts_zero() -> None:
+    # #3454: a hunt that inherits a closed hunt's discovery outcome registers no discovery row,
+    # so its budget is 0 — and only such a hunt may have one.
     for hunt, budget in hh.HUNT_BUDGETS.items():
         assert hh._HUNT_ID.match(hunt), hunt
-        assert isinstance(budget, int) and not isinstance(budget, bool) and budget > 0, (hunt, budget)
+        assert isinstance(budget, int) and not isinstance(budget, bool), (hunt, budget)
+        if hunt in hh.HUNT_INHERITED_DISCOVERY:
+            assert budget == 0, (hunt, budget)
+        else:
+            assert budget > 0, (hunt, budget)
 
 
 def test_closed_hunts_are_hunt_ids_with_a_readout() -> None:
@@ -273,9 +279,10 @@ def test_a_tariff_rejects_a_malformed_record() -> None:
         _tariff(proportional_commission_per_side=1)
 
 
-def test_hunts_1_and_2_have_one_look_each() -> None:
-    """#3387 route-A spec and #3448 spec, "Budget and delivery": one discovery row each, no variants."""
-    assert dict(hh.HUNT_BUDGETS) == {"hunt-1": 1, "hunt-2": 1}
+def test_hunts_1_and_2_have_one_look_each_and_hunt_3_none() -> None:
+    """#3387 route-A spec and #3448 spec, "Budget and delivery": one discovery row each, no variants.
+    #3454: hunt 3 inherits hunt 2's row and registers none."""
+    assert dict(hh.HUNT_BUDGETS) == {"hunt-1": 1, "hunt-2": 1, "hunt-3": 0}
 
 
 def _tariff(**overrides: Any) -> hh.HuntTariff:
