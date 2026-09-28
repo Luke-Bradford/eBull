@@ -440,7 +440,7 @@ def load_regimes(conn: psycopg.Connection[Any]) -> dict[date, str | None] | str:
         return "benchmark_ambiguous"  # ``MarketRegimeProvider.load``'s duplicate-date refusal
     try:
         # The provider's one classification path, shared so the labels cannot drift from it.
-        provider = MarketRegimeProvider._classify(dates, [float(row[1]) for row in rows], label=BENCHMARK_SYMBOL)
+        provider = MarketRegimeProvider.from_closes(dates, [float(row[1]) for row in rows], label=BENCHMARK_SYMBOL)
     except BenchmarkUnavailableError:
         return "benchmark_unclassifiable"
     return {day: None if value is None else str(value) for day, value in provider.classification_items()}
