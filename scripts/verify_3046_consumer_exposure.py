@@ -416,6 +416,13 @@ INVENTORY: tuple[Occurrence, ...] = (
     Occurrence("app/services/fair_value_band.py", 888, "as-of close", "SINGLE_BAR"),
     Occurrence("app/services/fair_value_band.py", 1407, "_TARGET_PRICE_SQL", "SINGLE_BAR"),
     # --- metadata / freshness ----------------------------------------------
+    Occurrence(
+        "app/services/ai_trial_pack_reader.py",
+        177,
+        "step-1 price_daily session gate",
+        "METADATA",
+        note="#3471: max(price_date) only; the pack's bars come through price_masked_bars",
+    ),
     Occurrence("app/services/portfolio_eod.py", 337, "_resolve_snapshot_date", "METADATA"),
     Occurrence("app/services/fair_value_band.py", 853, "corpus frontier", "METADATA"),
     Occurrence("app/services/strategy_scan_freshness.py", 119, "frontier", "METADATA"),
