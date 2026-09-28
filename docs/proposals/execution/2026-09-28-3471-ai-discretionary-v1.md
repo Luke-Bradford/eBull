@@ -653,7 +653,8 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
   - `low > min(open, close)` or `high < max(open, close)`;
   - negative volume.
 
-  Scores and caps must be finite and positive. RSI needs 15 closes, and ATR's first true range uses high − low. A zero denominator gives `null`. An intraday response with fewer bars than the session count implies over 30 days is incomplete.
+  Scores and caps must be finite and positive. RSI needs 15 closes. A zero denominator gives `null`.
+  - **Amended in slice 1b-ii (reuse rule):** v4 wrote "ATR's first true range uses high − low", which is a bar-0 seed. The implementation reuses `indicator_series.atr_series`, whose first true range is at bar 1 because it needs the prior close. The weight of the seed in the latest ATR is ≤ (13/14)^46 ≈ 3% at the 60-bar minimum and < 1e-8 at 260 bars. The declaration freezes the house function by name. An intraday response with fewer bars than the session count implies over 30 days is incomplete.
 - **O2, knowledge time (r2-69, 70, 71, 76).**
   - Filings are keyed on our **ingestion** timestamp ≤ `as_of`, not `filed_at` alone.
   - Intraday bars are fetched after `as_of`, and the fetch time is recorded. The freeze covers the fetch rule, not the bytes.
