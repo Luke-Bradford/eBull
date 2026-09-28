@@ -245,16 +245,13 @@ def record_pair_lifecycle(conn: psycopg.Connection[Any], *, now: datetime | None
             """
             SELECT p.pair_id FROM ai_trial_pairs p
             CROSS JOIN LATERAL (
-                SELECT count(*) FILTER (WHERE terminal) AS terminal_legs,
-                       count(*) FILTER (WHERE closed) AS closed_legs,
-                       bool_or(broken) AS broken
+                SELECT count(*) FILTER (WHERE closed OR refused) AS terminal_legs,
+                       count(*) FILTER (WHERE closed) AS closed_legs
                 FROM (
                     SELECT
                         EXISTS (SELECT 1 FROM ai_trial_pair_events e
                                 WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'closed') AS closed,
-                        EXISTS (SELECT 1 FROM ai_trial_pair_events e
-                                WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'closed')
-                        OR EXISTS (
+                        EXISTS (
                             SELECT 1 FROM ai_trial_leg_links l
                             JOIN strategy_funding_decisions fd ON fd.signal_id = l.signal_id
                             LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
@@ -263,13 +260,16 @@ def record_pair_lifecycle(conn: psycopg.Connection[Any], *, now: datetime | None
                                    OR (t.status = 'failed' AND EXISTS (
                                        SELECT 1 FROM ai_trial_pair_events e
                                        WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'submitted')))
-                        ) AS terminal,
-                        EXISTS (SELECT 1 FROM ai_trial_pair_events e
-                                WHERE e.pair_id = p.pair_id AND e.event = 'broken') AS broken
+                        ) AS refused
                     FROM (VALUES ('arm'), ('control')) AS legs (leg)
                 ) leg_state
             ) pair_state
-            WHERE NOT (pair_state.terminal_legs = 2 AND (pair_state.broken OR pair_state.closed_legs = 2))
+            WHERE NOT (
+                pair_state.terminal_legs = 2
+                AND (pair_state.closed_legs = 2
+                     OR EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                                WHERE e.pair_id = p.pair_id AND e.event = 'broken'))
+            )
             ORDER BY p.pair_id
             """
         ).fetchall()
