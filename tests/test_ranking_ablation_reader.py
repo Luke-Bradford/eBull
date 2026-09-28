@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from app.services import ranking_ablation_reader as reader
+from app.services import scoring
 from app.services.price_quarantine import PROVISIONAL_WINDOW_DAYS, Bar, evaluate_series
 from app.services.series_termination import TerminationClass
 from app.workers.scheduler import JOB_MORNING_CANDIDATE_REVIEW
@@ -38,6 +40,7 @@ def _row(
     currency: str | None = "USD",
     rank: int | None = 1,
     penalties: object = (),
+    explanation: str | None = None,
 ) -> tuple[object, ...]:
     return (
         scored_at,
@@ -55,6 +58,7 @@ def _row(
         type_description,
         currency,
         f"S{iid}",
+        explanation,
     )
 
 
@@ -99,6 +103,38 @@ def test_population_counts_each_exclusion_by_row_and_name() -> None:
     assert population.excluded_names["non_stock"] == 1
     # Every read symbol is kept, excluded or not (the Q-suffix snapshot needs it).
     assert population.symbols[2] == "S2"
+
+
+def test_a_run_whose_rows_are_all_excluded_is_kept_empty() -> None:
+    # It can still supersede an earlier run at the same entry session (its formation is idle).
+    first, second = _at(13), _at(14)
+    population = reader.build_population([_row(first, 1), _row(second, 2, type_description="ETF")])
+    assert population.runs[second] == {}
+    assert set(population.runs[first]) == {1}
+
+
+def test_branch_usage_is_the_writers_record_not_the_score_value() -> None:
+    at = _at(13)
+    population = reader.build_population(
+        [
+            _row(
+                at, 1, explanation="value: fundamentals fallback (no thesis); confidence: no thesis; defaulting to 0.5"
+            ),
+            _row(at, 2, explanation="quality: debt missing"),  # confidence 0.5 in _row, but from a thesis
+            _row(at, 3),
+        ]
+    )
+    rows = population.runs[at]
+    assert (rows[1].value_from_thesis, rows[1].confidence_from_thesis) == (False, False)
+    assert (rows[2].value_from_thesis, rows[2].confidence_from_thesis) == (True, True)
+    assert rows[2].row.families["confidence"] == 0.5
+    assert (rows[3].value_from_thesis, rows[3].confidence_from_thesis) == (True, True)
+
+
+def test_branch_markers_are_the_scoring_writers_strings() -> None:
+    source = inspect.getsource(scoring)
+    assert f'"{reader.VALUE_FALLBACK_MARKER} (no thesis)"' in source
+    assert f'"{reader.CONFIDENCE_NO_THESIS_MARKER}; defaulting to 0.5"' in source
 
 
 # --- Witness --------------------------------------------------------------

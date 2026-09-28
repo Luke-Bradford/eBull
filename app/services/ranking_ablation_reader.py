@@ -26,7 +26,7 @@ What is read, each rule the spec's:
   marks ``price_date >= as_of − 5 days`` provisional, so a session exactly 5 days back IS
   provisional. The spec's own test ("no bar ≤ c_k provisional") decides it: strictly more.
 - **Termination** (Route F "Termination source"). Form 25 link through
-  ``instrument_cik_history``, equity delistings only, filed in [first formation, c_k]; the
+  ``instrument_cik_history``, common-equity delistings only, filed in [first formation, c_k]; the
   Q suffix from the current symbol. A series stopping before c_k terminates only when
   :func:`series_termination.classify_termination` is not ``UNKNOWN``.
 """
@@ -55,8 +55,10 @@ LANE_CURRENCY: Final = "USD"
 #: Not imported: a service must not import the scheduler. A test pins the two equal.
 WITNESS_JOB: Final = "morning_candidate_review"
 WITNESS_STATUS: Final = "success"
-#: ``sec_form25_register.provision_class`` of a security delisting (the other is ``debt_lifecycle``).
-EQUITY_DELISTING: Final = "equity_delisting"
+#: The branch markers ``scoring.compute_score`` writes into ``explanation`` (``_value_score``'s
+#: fallback note, and the confidence default). Both predate v1.5; a test pins them to the writer.
+VALUE_FALLBACK_MARKER: Final = "fundamentals fallback"
+CONFIDENCE_NO_THESIS_MARKER: Final = "confidence: no thesis"
 
 WitnessRefusal = Literal["no_witness", "ambiguous_witness"]
 
@@ -70,7 +72,7 @@ SELECT s.scored_at, s.instrument_id, s.rank,
        s.quality_score, s.value_score, s.turnaround_score,
        s.momentum_score, s.sentiment_score, s.confidence_score,
        s.raw_total, s.total_score, s.penalties_json,
-       t.description, i.currency, i.symbol
+       t.description, i.currency, i.symbol, s.explanation
 FROM scores s
 JOIN instruments i ON i.instrument_id = s.instrument_id
 LEFT JOIN etoro_instrument_types t ON t.instrument_type_id = i.instrument_type_id
@@ -86,11 +88,15 @@ class StoredRow:
     row: ScoreRow
     raw_total: float
     total_score: float | None
+    #: The branch the writer recorded: value on its thesis path, confidence from a thesis.
+    value_from_thesis: bool
+    confidence_from_thesis: bool
 
 
 @dataclass(frozen=True)
 class Population:
-    #: scored_at → instrument → row, lane-eligible and valid only.
+    #: scored_at → instrument → row, lane-eligible and valid only. Every run read is a key,
+    #: including one whose rows were all excluded.
     runs: Mapping[datetime, Mapping[int, StoredRow]]
     #: reason → rows excluded for it (lane reasons first; a lane-excluded row is not parsed).
     excluded_rows: Mapping[str, int]
@@ -135,9 +141,13 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
         type_description,
         currency,
         symbol,
+        explanation,
     ) in rows:
         iid = int(instrument_id)
         symbols[iid] = symbol
+        # A run whose every row is excluded still exists: it can supersede an earlier run
+        # at the same entry session, and its formation is then idle (spec "Timeline").
+        run = runs.setdefault(scored_at, {})
         reason = lane_exclusion(type_description, currency)
         parsed: ScoreRow | str | None = None
         if reason is None:
@@ -154,8 +164,13 @@ def build_population(rows: Iterable[Sequence[Any]]) -> Population:
             excluded_rows[key] += 1
             excluded_names.setdefault(key, set()).add(iid)
             continue
-        runs.setdefault(scored_at, {})[iid] = StoredRow(
-            row=parsed, raw_total=float(raw_total), total_score=_as_float(total_score)
+        text = explanation or ""
+        run[iid] = StoredRow(
+            row=parsed,
+            raw_total=float(raw_total),
+            total_score=_as_float(total_score),
+            value_from_thesis=VALUE_FALLBACK_MARKER not in text,
+            confidence_from_thesis=CONFIDENCE_NO_THESIS_MARKER not in text,
         )
     return Population(
         runs=runs,
@@ -323,12 +338,13 @@ def input_sha256(series: Mapping[int, ReadSeries]) -> str:
 # Termination
 # ---------------------------------------------------------------------------
 
+#: ``sec_form25_common_equity_delistings`` (sql/252): an equity delisting of COMMON equity. A
+#: warrant, unit, preferred or note delisting by the same issuer does not end the stock.
 _FORM25_SQL: Final = """
 SELECT h.instrument_id, r.rule_provision
 FROM instrument_cik_history h
-JOIN sec_form25_register r ON r.issuer_cik = h.cik
+JOIN sec_form25_common_equity_delistings r ON r.issuer_cik = h.cik
 WHERE h.instrument_id = ANY(%(instrument_ids)s::bigint[])
-  AND r.provision_class = %(provision_class)s
   AND r.filed_date BETWEEN %(first_formation)s AND %(cutoff)s
 ORDER BY h.instrument_id, r.filed_date, r.accession_number
 """
@@ -337,13 +353,12 @@ ORDER BY h.instrument_id, r.filed_date, r.accession_number
 def load_form25_links(
     conn: psycopg.Connection[Any], instrument_ids: Sequence[int], *, first_formation: date, cutoff: date
 ) -> dict[int, str | None]:
-    """instrument → the provision of its latest linked equity Form 25 in the window."""
+    """instrument → the provision of its latest linked common-equity Form 25 in the window."""
     links: dict[int, str | None] = {}
     for iid, provision in conn.execute(
         _FORM25_SQL,
         {
             "instrument_ids": sorted(set(instrument_ids)),
-            "provision_class": EQUITY_DELISTING,
             "first_formation": first_formation,
             "cutoff": cutoff,
         },
@@ -374,8 +389,9 @@ def termination_classes(
 
 
 __all__ = [
-    "EQUITY_DELISTING",
+    "CONFIDENCE_NO_THESIS_MARKER",
     "LANE_CURRENCY",
+    "VALUE_FALLBACK_MARKER",
     "WITNESS_JOB",
     "WITNESS_STATUS",
     "JobWindow",

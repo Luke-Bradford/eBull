@@ -37,7 +37,8 @@ def _seed(conn: psycopg.Connection[tuple]) -> None:
         conn.execute(
             "INSERT INTO scores (instrument_id, model_version, scored_at, rank, quality_score, value_score, "
             "turnaround_score, momentum_score, sentiment_score, confidence_score, raw_total, total_score, "
-            "penalties_json) VALUES (%s, %s, %s, 1, 0.5, 0.4, 0.3, 0.2, 0.1, 0.5, 0.35, 0.35, '[]'::jsonb)",
+            "penalties_json, explanation) VALUES (%s, %s, %s, 1, 0.5, 0.4, 0.3, 0.2, 0.1, 0.5, 0.35, 0.35, "
+            "'[]'::jsonb, 'confidence: no thesis; defaulting to 0.5')",
             (iid, MODEL_VERSION, scored),
         )
     conn.execute(
@@ -81,6 +82,12 @@ def _seed(conn: psycopg.Connection[tuple]) -> None:
             "security_class, rule_provision) VALUES (%s, '25-NSE', %s, %s, %s, 'common_equity', %s)",
             (accession, filed, cik, provision_class, provision),
         )
+    # A warrant's equity delisting by the stock's issuer does not end the stock.
+    conn.execute(
+        "INSERT INTO sec_form25_register (accession_number, form, filed_date, issuer_cik, provision_class, "
+        "security_class, rule_provision) VALUES ('a-5', '25-NSE', '2026-08-04', '0000000001', "
+        "'equity_delisting', 'warrant', '(b)')"
+    )
     conn.commit()
 
 
@@ -93,6 +100,8 @@ def test_reader_queries(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # 
     assert set(population.runs[scored_at]) == {1, 3}
     assert population.excluded_rows == {"non_stock": 1}  # the v1.1 row is not in the population
     assert population.symbols[3] == "BTAIQ"
+    assert not population.runs[scored_at][1].confidence_from_thesis
+    assert population.runs[scored_at][1].value_from_thesis
 
     windows = reader.load_job_windows(conn)
     assert [w.finished_at for w in windows] == [datetime(2026, 8, 3, 13, 1, tzinfo=UTC)]
@@ -107,4 +116,4 @@ def test_reader_queries(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # 
     assert [bar.price_date for bar in series[3].bars] == [date(2026, 8, 4)]
 
     links = reader.load_form25_links(conn, [1, 3], first_formation=date(2026, 8, 3), cutoff=date(2026, 8, 5))
-    assert links == {3: "(b)"}  # equity delistings in the window only; the latest filed wins
+    assert links == {3: "(b)"}  # common-equity delistings in the window only; the latest filed wins

@@ -45,7 +45,8 @@ _DIVIDEND_SQL = """
 SELECT count(*), count(DISTINCT instrument_id) FROM dividend_events
 WHERE ex_date BETWEEN %(start)s AND %(end)s AND instrument_id = ANY(%(ids)s::bigint[])
 """
-#: Confidence's neutral value when no thesis exists (spec "Premise check", "0.5 on 89.9%").
+#: Confidence's neutral value (spec "Premise check"). A thesis can also score exactly this, so
+#: the share of rows AT it is reported beside, never instead of, the writer's branch record.
 _NEUTRAL_CONFIDENCE = 0.5
 
 
@@ -54,12 +55,14 @@ def _json_default(value: object) -> str:
 
 
 def _reconciliation(population: reader.Population) -> dict[str, Any]:
-    """raw_total vs Σ w·s, total_score vs clip(raw_total − P + R), over every valid row."""
+    """raw_total vs Σ w·s, total_score vs clip(raw_total − P + R), and branch usage, over every valid row."""
     weights = ra.weights()
     raw_gap = 0.0
     total_gap = 0.0
     clipped = 0
     neutral_confidence = 0
+    value_thesis = 0
+    confidence_thesis = 0
     rows = 0
     for run in population.runs.values():
         for stored in run.values():
@@ -73,12 +76,16 @@ def _reconciliation(population: reader.Population) -> dict[str, Any]:
                 total_gap = max(total_gap, abs(stored.total_score - ra.rebuilt_key(stored.row, weights)))
             if stored.row.families["confidence"] == _NEUTRAL_CONFIDENCE:
                 neutral_confidence += 1
+            value_thesis += stored.value_from_thesis
+            confidence_thesis += stored.confidence_from_thesis
     return {
         "rows": rows,
         "max_abs_raw_total_minus_weighted_sum": raw_gap,
         "max_abs_total_score_minus_key_full": total_gap,
         "clipped_rows": clipped,
-        "confidence_neutral_share": neutral_confidence / rows if rows else None,
+        "confidence_at_neutral_share": neutral_confidence / rows if rows else None,
+        "branch_rows_value_thesis_path": value_thesis,
+        "branch_rows_confidence_from_thesis": confidence_thesis,
     }
 
 
@@ -114,6 +121,9 @@ def census(conn: psycopg.Connection[Any], readout_date: date) -> dict[str, Any]:
         "beyond_calendar": [r.scored_at for r in run_map.beyond_calendar],
     }
 
+    if not run_map.entries:
+        out["refused"] = "no witnessed run enters before the readout date"
+        return out
     index = {day: ordinal for ordinal, day in enumerate(sessions)}
     first_entry = min(run_map.entries)
     first_formation = sessions[index[first_entry] - ra.LAG]
