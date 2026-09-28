@@ -345,7 +345,7 @@ LAST_LOOK_LINEAGES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
 #: enforces from the database (#3454 spec, "Lineage closure"). Refused here too, so the closure
 #: does not depend on the validation row surviving.
 CLOSED_LINEAGES: Final[Mapping[str, str]] = MappingProxyType(
-    {"extreme_move_illiquid": "hunt 3's validation look (hunt_trial_id 3) was the lineage's last; #3454"}
+    {"extreme_move_illiquid": f"hunt 3's validation look was the lineage's last: {HUNT_CLOSED['hunt-3']}"}
 )
 
 
