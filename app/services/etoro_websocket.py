@@ -81,6 +81,9 @@ _AUTH_FAILURE_BACKOFF_S: tuple[float, ...] = (5.0, 30.0, 120.0, 600.0, 600.0)
 # isn't hammered. 3 seconds is short enough that the operator sees
 # fresh state inside a "feel alive" window without churn.
 _RECONCILE_DEBOUNCE_S = 3.0
+# Bound on how long ``stop()`` waits for a worker thread (reconcile, or an
+# in-flight private-event write) before proceeding to pool teardown.
+_SHUTDOWN_DRAIN_S = 30.0
 # REST live-rate poll cadence. eToro's WS is bursty; this poll
 # guarantees a freshness floor so the chart's in-progress bar updates
 # at least every _RATE_POLL_INTERVAL_S regardless of WS push state.
@@ -1123,7 +1126,7 @@ class EtoroWebSocketSubscriber:
         # The listener is gone; its shielded private-event writes may not be.
         pending_writes = list(self._private_writes)
         if pending_writes:
-            done, still_running = await asyncio.wait(pending_writes, timeout=30.0)
+            done, still_running = await asyncio.wait(pending_writes, timeout=_SHUTDOWN_DRAIN_S)
             for write in done:
                 if not write.cancelled() and write.exception() is not None:
                     logger.error(
@@ -1132,8 +1135,9 @@ class EtoroWebSocketSubscriber:
                     )
             if still_running:
                 logger.warning(
-                    "EtoroWebSocketSubscriber: %d private event write(s) still running after 30s shutdown wait",
+                    "EtoroWebSocketSubscriber: %d private event write(s) still running after %.0fs shutdown wait",
                     len(still_running),
+                    _SHUTDOWN_DRAIN_S,
                 )
         if self._rest_poll_task is not None:
             self._rest_poll_task.cancel()
@@ -1162,11 +1166,12 @@ class EtoroWebSocketSubscriber:
             # Bounded wait — sync_portfolio is fast, but if a thread
             # is somehow stuck we'd rather log + proceed than hang
             # shutdown forever.
-            done = await asyncio.to_thread(self._reconcile_idle.wait, 30.0)
+            done = await asyncio.to_thread(self._reconcile_idle.wait, _SHUTDOWN_DRAIN_S)
             if not done:
                 logger.warning(
                     "EtoroWebSocketSubscriber: reconcile thread still "
-                    "running after 30s shutdown wait — proceeding anyway"
+                    "running after %.0fs shutdown wait — proceeding anyway",
+                    _SHUTDOWN_DRAIN_S,
                 )
         logger.info("EtoroWebSocketSubscriber: stopped")
 
