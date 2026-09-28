@@ -81,6 +81,24 @@ def test_shortlist_ties_break_by_instrument_id_and_a_null_cap_only_leaves_the_sm
         p.select_shortlist([_cand(1), _cand(1)], as_of=AS_OF)
 
 
+def test_lazy_market_cap_is_resolved_in_rank_order_only_until_the_small_cap_slice_is_full() -> None:
+    large = [_cand(i, 100.0 - i, market_cap_usd=None) for i in range(1, 31)]
+    rest = [_cand(100 + i, 10.0 - i / 100, market_cap_usd=None) for i in range(40)]
+    caps = {100 + i: (Decimal("5e9") if i % 2 else Decimal("1e9")) for i in range(40)}
+    asked: list[int] = []
+
+    def resolve(c: p.ShortlistCandidate) -> Decimal | None:
+        asked.append(c.instrument_id)
+        return caps.get(c.instrument_id)
+
+    got = p.select_shortlist(large + rest, as_of=AS_OF, market_cap=resolve)
+    small = got.names[30:]
+    assert [n.instrument_id for n in small] == [100 + i for i in range(0, 40, 2)]
+    assert {n.market_cap_usd for n in small} == {Decimal("1e9")}
+    assert all(n.market_cap_usd is None for n in got.names[:30])  # the top slice never asks
+    assert asked == [100 + i for i in range(39)]  # stops once the 20th small cap is admitted
+
+
 def _bars(n: int, *, last: date = date(2026, 10, 2)) -> tuple[list[date], list[dict[str, Any]]]:
     dates = [last - timedelta(days=n - 1 - i) for i in range(n)]
     rows = [
@@ -104,7 +122,7 @@ LAST = date(2026, 10, 2)
     [
         (lambda d, r: (d[1:], r[1:]), None),  # exactly 60 bars is complete
         (lambda d, r: (d, _with(r, 5, close=math.nan)), "non_finite_ohlcv"),
-        (lambda d, r: (d, _with(r, 5, volume=None)), "non_finite_ohlcv"),
+        (lambda d, r: (d, _with(r, 5, volume=None)), None),  # NULL volume = not provided, bar stands
         (lambda d, r: (d, _with(r, 5, volume=-1)), "negative_volume"),
         (lambda d, r: (d, _with(r, 5, low=10.6)), "bar_range_inconsistent"),  # low above open 10.5
         (lambda d, r: (d, _with(r, 5, high=10.3)), "bar_range_inconsistent"),  # high below max(open, close)
@@ -189,3 +207,21 @@ def test_canonical_json() -> None:
     for bad in (math.nan, math.inf, Decimal("NaN"), datetime(2026, 10, 2), object()):
         with pytest.raises(p.NonCanonicalValue):
             p.canonical_json({"x": bad})
+
+
+def test_a_null_volume_keeps_the_name_and_nulls_only_the_volume_indicators() -> None:
+    dates, rows = _bars(120)
+    old_null = p.build_bar_series(dates, _with(rows, 10, volume=None), last_session=LAST)
+    assert isinstance(old_null, BarSeries)
+    clean = p.build_bar_series(dates, rows, last_session=LAST)
+    assert isinstance(clean, BarSeries)
+    full = p.indicators(clean)
+    assert p.indicators(old_null) == full  # outside both 20-bar windows: nothing changes
+
+    recent_null = p.build_bar_series(dates, _with(rows, 110, volume=None), last_session=LAST)
+    assert isinstance(recent_null, BarSeries)
+    got = p.indicators(recent_null)
+    assert got["volume_ratio20"] is None and got["vwap20_proxy"] is None
+    assert {k: got[k] for k in ("sma20", "sma50", "rsi14", "atr14")} == {
+        k: full[k] for k in ("sma20", "sma50", "rsi14", "atr14")
+    }

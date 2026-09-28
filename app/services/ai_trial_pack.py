@@ -23,7 +23,7 @@ import hashlib
 import json
 import math
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -88,6 +88,8 @@ class ShortlistName:
     symbol: str
     total_score: float
     slice: Literal["top", "small_cap"]
+    #: The cap that admitted a small-cap name; ``None`` on the top slice, where it decides nothing.
+    market_cap_usd: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -121,26 +123,35 @@ def is_eligible(candidate: ShortlistCandidate, *, as_of: datetime) -> bool:
     return _finite_positive(candidate.total_score)
 
 
-def select_shortlist(candidates: Iterable[ShortlistCandidate], *, as_of: datetime) -> Shortlist:
+def select_shortlist(
+    candidates: Iterable[ShortlistCandidate],
+    *,
+    as_of: datetime,
+    market_cap: Callable[[ShortlistCandidate], Decimal | None] | None = None,
+) -> Shortlist:
     """Top 30 by ``total_score``, plus the top 20 of the REMAINING names with a market cap
     under $2B. Ties break by ``instrument_id`` ascending. A NULL or non-finite cap excludes a
-    name from the small-cap slice only."""
+    name from the small-cap slice only.
+
+    ``market_cap``, when given, resolves a candidate's cap lazily in rank order and is called
+    only until the small-cap slice is full — the #1664 overlay costs a query per name.
+    Without it, ``candidate.market_cap_usd`` is used."""
     eligible = [c for c in candidates if is_eligible(c, as_of=as_of)]
     ids = [c.instrument_id for c in eligible]
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate instrument_id among shortlist candidates")
     # `total_score` is not None here: `is_eligible` required it finite and positive.
     ranked = sorted(eligible, key=lambda c: (-(c.total_score or 0.0), c.instrument_id))
-    top = ranked[:TOP_N]
-    rest = [
-        c
-        for c in ranked[TOP_N:]
-        if _finite_positive(c.market_cap_usd) and (c.market_cap_usd or Decimal(0)) < SMALL_CAP_MAX_USD
-    ]
-    names = tuple(ShortlistName(c.instrument_id, c.symbol, c.total_score or 0.0, "top") for c in top) + tuple(
-        ShortlistName(c.instrument_id, c.symbol, c.total_score or 0.0, "small_cap") for c in rest[:SMALL_CAP_N]
-    )
-    return Shortlist(names, len(eligible))
+    names = [ShortlistName(c.instrument_id, c.symbol, c.total_score or 0.0, "top") for c in ranked[:TOP_N]]
+    small = 0
+    for c in ranked[TOP_N:]:
+        if small == SMALL_CAP_N:
+            break
+        cap = market_cap(c) if market_cap is not None else c.market_cap_usd
+        if _finite_positive(cap) and (cap or Decimal(0)) < SMALL_CAP_MAX_USD:
+            names.append(ShortlistName(c.instrument_id, c.symbol, c.total_score or 0.0, "small_cap", cap))
+            small += 1
+    return Shortlist(tuple(names), len(eligible))
 
 
 # ---------------------------------------------------------------------------
@@ -174,13 +185,18 @@ def build_bar_series(
     if dates[-1] != last_session:
         return "stale_last_bar"
     for row in rows:
-        values = [row.get(k) for k in ("open", "high", "low", "close", "volume")]
+        values = [row.get(k) for k in ("open", "high", "low", "close")]
+        # A NULL volume is "not provided" (market-data skill, #21), not a broken bar: the prices
+        # stand and only the volume indicators go null (`indicators`). Refusing the bar instead
+        # dropped a large share of the small-cap slice on the dev DB (#3471 slice 1b-iii PR).
+        if row.get("volume") is not None:
+            values.append(row["volume"])
         if not all(_finite_number(v) for v in values):
             return "non_finite_ohlcv"
         o, h, low, c = (Decimal(str(row[k])) for k in ("open", "high", "low", "close"))
         if low > min(o, c) or h < max(o, c):
             return "bar_range_inconsistent"
-        if row["volume"] < 0:
+        if row["volume"] is not None and row["volume"] < 0:
             return "negative_volume"
     return BarSeries(
         tuple(dates),
@@ -190,7 +206,7 @@ def build_bar_series(
                 high=Decimal(str(r["high"])),
                 low=Decimal(str(r["low"])),
                 close=Decimal(str(r["close"])),
-                volume=int(r["volume"]),
+                volume=int(r["volume"]) if r["volume"] is not None else None,
             )
             for r in rows
         ),
@@ -211,18 +227,24 @@ def indicators(series: BarSeries) -> dict[str, float | None]:
     out["rsi14"] = _last(rsi_series(series, universe="survivor_only", period=WILDER_PERIOD).values)
     out["atr14"] = _last(atr_series(series, universe="survivor_only", period=WILDER_PERIOD).values)
 
-    volumes = [float(row["volume"] or 0) for row in series.rows]
-    prior = volumes[-VOLUME_RATIO_WINDOW - 1 : -1]
-    prior_mean = sum(prior) / len(prior) if len(prior) == VOLUME_RATIO_WINDOW else 0.0
-    out["volume_ratio20"] = volumes[-1] / prior_mean if prior_mean > 0 else None
+    # A volume indicator whose window holds a NULL (not provided) volume is null, never a
+    # zero-filled figure.
+    volumes = [float(row["volume"]) if row["volume"] is not None else None for row in series.rows]
+    latest, prior = volumes[-1], volumes[-VOLUME_RATIO_WINDOW - 1 : -1]
+    ratio: float | None = None
+    if latest is not None and len(prior) == VOLUME_RATIO_WINDOW and None not in prior:
+        prior_mean = sum(v for v in prior if v is not None) / VOLUME_RATIO_WINDOW
+        ratio = latest / prior_mean if prior_mean > 0 else None
+    out["volume_ratio20"] = ratio
 
     # "VWAP20": a daily-bar PROXY (§3.2), labelled as such in the prompt.
     window = list(zip(series.float_highs, series.float_lows, series.float_closes, volumes, strict=True))[-VWAP_WINDOW:]
-    volume_sum = sum(v for *_, v in window)
-    weighted = sum(
-        (h + low + c) / 3 * v for h, low, c, v in window if h is not None and low is not None and c is not None
-    )
-    out["vwap20_proxy"] = weighted / volume_sum if volume_sum > 0 else None
+    vwap: float | None = None
+    if all(h is not None and low is not None and c is not None and v is not None for h, low, c, v in window):
+        volume_sum = sum(v or 0.0 for *_, v in window)
+        weighted = sum(((h or 0.0) + (low or 0.0) + (c or 0.0)) / 3 * (v or 0.0) for h, low, c, v in window)
+        vwap = weighted / volume_sum if volume_sum > 0 else None
+    out["vwap20_proxy"] = vwap
     return out
 
 
