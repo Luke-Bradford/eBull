@@ -362,13 +362,18 @@ jobs:
           # triage work this bot needs to do (catching hallucinated/
           # already-rebutted/out-of-diff findings before posting).
           #
+          # Model: Sonnet 5.5 (2026-09-28), same $2/$10 list price as Sonnet 5.
+          # Its API default effort is "high", so "medium" stays explicit. It
+          # rejects a non-default temperature/top_p/top_k with a 400; this
+          # payload sets none and uses no tools.
+          #
           # max_tokens must leave headroom for thinking + text: adaptive
           # thinking shares the max_tokens budget, and on a large diff
           # (PR #1973, 279k input tokens) it consumed all 5000 tokens as
           # thinking, emitting NO text block at all (#1976). 16000 is a
           # cap, not a spend — billing is on actual output tokens only.
           payload = {
-              "model": "claude-sonnet-5",
+              "model": "claude-sonnet-5-5",
               "max_tokens": 16000,
               "thinking": {"type": "adaptive"},
               "output_config": {"effort": "medium"},
