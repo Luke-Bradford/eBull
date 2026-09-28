@@ -1163,7 +1163,14 @@ def decide_funding(
             "paper": frozenset({"paper_enabled", "live_enabled"}),
             "live": frozenset({"live_enabled"}),
         }
-        if stage not in eligible[mode]:
+        # #3471 §8: a `demo_trial` strategy never holds a promotion stage (`promote_strategy`
+        # refuses every advancing one), so its paper deployment is funded at stage None —
+        # the same narrow branch `configure_deployment` admits. Paper only; a live
+        # allocation still needs `live_enabled`, which `demo_trial` cannot reach.
+        demo_trial_paper = (
+            mode == "paper" and stage is None and registered_strategy_purpose(str(signal[0])) == "demo_trial"
+        )
+        if stage not in eligible[mode] and not demo_trial_paper:
             raise StrategyControlError(f"{mode} funding cannot be allocated at strategy stage {stage!r}")
 
         # The deployment lock serialises the reservation read with concurrent

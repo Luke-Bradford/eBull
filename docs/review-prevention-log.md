@@ -11641,3 +11641,18 @@ neighbouring container and match it.**
   that function on it directly. Python's negative indexing makes an `index − 1` lookup the silent kind. Self-review
   prompt: "what does this line do on an empty set, or on index 0?"
 - Enforced in: `tests/test_ranking_ablation_declaration.py::test_turnover_skips_an_empty_book_and_regimes_never_wrap`.
+
+### A NOT NULL column added without a DEFAULT cites why EVERY environment is empty, not a dev count (#3471)
+
+- Failure: `sql/434` added `ai_trial_trade_links.requested_amount NUMERIC NOT NULL` with no `DEFAULT`. Its header
+  justified that with "the dev DB held 0 rows". A dev count is a population-of-one: it does not say another
+  environment is empty. The review bot flagged it (#3482). Here the table was empty everywhere by construction,
+  because no writer existed at `origin/main` (`git grep -n ai_trial_trade_links origin/main -- app scripts`
+  returned nothing). The header just did not say so.
+- Prevention: for `ADD COLUMN … NOT NULL` with no `DEFAULT`, the migration header names the STRUCTURAL reason the
+  table is empty everywhere, e.g. "no writer before this PR", together with the command that proves it. If no such
+  reason exists, backfill explicitly. Do not invent a `DEFAULT`: a fabricated value in an audit column is worse
+  than a loud failure.
+  ⚠ Fix the header BEFORE the first push. The pre-push smoke applies the migration to the dev DB, so any later
+  edit trips the checksum guard.
+- Enforced in: this prevention log.

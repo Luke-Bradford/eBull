@@ -50,6 +50,10 @@ DECLARATION_CONTRACT_PREFIX: Final = "ai-trial-declaration-v1:"
 #: The inherited capacity arithmetic may reduce it; nothing may raise it.
 TRIAL_TICKET_USD: Final[dict[str, Decimal]] = {"full": Decimal("250"), "half": Decimal("125")}
 TRIAL_CURRENCY: Final = "USD"
+#: §8 trial caps: "capital mode — fixed; realised losses are not replenished". Applied to the
+#: leg's deployment base whatever the shared pool's mode, so profit never expands a leg; the
+#: pool's own mode still governs the shared #2844 bound.
+TRIAL_CAPITAL_MODE: Final = "fixed"
 
 Leg = Literal["arm", "control"]
 
@@ -426,7 +430,7 @@ def load_trial_intent(
             currency=str(row["currency"]),
             deployment_limit=Decimal(str(row["capital_limit"])),
             pool_limit=Decimal(str(row["pool_limit"])),
-            capital_mode=cast(Literal["fixed", "compound"], row["capital_mode"]),
+            capital_mode=TRIAL_CAPITAL_MODE,
             pool_reserved=Decimal(str(row["pool_reserved"])),
             mandate_max_drawdown_pct=Decimal(str(row["mandate_max_drawdown_pct"])),
             mandate_max_loss_per_position_pct=Decimal(str(row["mandate_max_loss_per_position_pct"])),
@@ -469,6 +473,7 @@ def load_trial_intent(
 __all__ = [
     "DECLARATION_CONTRACT_PREFIX",
     "PAPER_GATE_MAP",
+    "TRIAL_CAPITAL_MODE",
     "TRIAL_CURRENCY",
     "TRIAL_TICKET_USD",
     "TrialIntent",

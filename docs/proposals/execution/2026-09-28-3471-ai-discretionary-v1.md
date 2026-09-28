@@ -423,6 +423,18 @@ Slice 2 tests:
 - Below the open minimum, the leg is refused, which makes a broken pair.
 - The primary metric is per-trade %, which does not depend on size. Capital-weighted figures use actual amounts.
 
+**Implemented in slice 2b-ii** (`app/services/ai_trial_executor.py::execute_trial_signal`, not yet scheduled).
+- It runs under the paper allocator lock and reuses `_risk_and_amount` (via a `_SizingIntent` Protocol plus a `requested_ticket` callback), `_eligibility_reason`, the what-if pricing core `_stressed_cost`, the durable-before-I/O order write, and `_submit_recorded_order` / `_resume_uncertain_submission`.
+- Refusal codes added: `trial_cost_cap` (stressed cost × 100 > 1.0 × amount; exactly 1.0% passes), `protective_levels_invalid`, `trial_leg_slots_full` (≥ 4 allocated, non-closed trades on the leg's deployment, counted under the lock).
+- Requested versus actual is recorded as `ai_trial_trade_links.requested_amount` (`sql/434`), whose trigger refuses a funded amount above it. The preflight row carries no forecast, ranking, scan or expectancy value.
+- Inside the authority transaction, two facts are re-read under row locks, because a concurrent writer can move them during the broker round trips (Codex ckpt-2):
+  - the trial state, under `FOR SHARE` on the declaration row, which the state-event writer locks `FOR NO KEY UPDATE` → `trial_not_active`;
+  - O9 parity: both legs' execution policies, minus bookkeeping columns, must be identical, held `FOR SHARE` → `trial_policy_parity`.
+- `TrialIntent.capital_mode` is always `fixed` (`TRIAL_CAPITAL_MODE`), whatever the shared pool's mode. The pool's mode still governs the #2844 bound.
+- A non-trial signal **raises** rather than being persisted as refused, because a funding decision is one per signal and a refusal written here would pre-empt the owning path.
+- ⚠ **One chokepoint §8 did not list:** `decide_funding` requires stage `paper_enabled` for a paper allocation, which a `demo_trial` strategy can never reach. It gained the same narrow branch as `configure_deployment`: paper, stage None, purpose `demo_trial`.
+- Still owed (2c or later): WS `private` event persistence, the pair lifecycle, `exit_deadline_session`, protection repair (O10), the uncertain-leg pair block (O11), the step-0 gate and the jobs.
+
 **Start gate (step 0; a best-effort preview, not a guarantee).** Before any model call, the job refuses the run (`trial_capacity_unavailable:<reason>`) if the capacity arithmetic could not admit **one half-ticket pair**:
 - **Inputs:** the current pool, mandate, engine capital authority and latest account-risk snapshot.
 - **Preview terms:** a 25% stop (adverse for loss-at-stop capacity) and zero existing instrument exposure (favourable). This is a preview, not a worst case.
