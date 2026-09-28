@@ -20,6 +20,7 @@ fetch via ``monkeypatch`` so they run without network.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import date, timedelta
 from typing import Any
 
 import psycopg
@@ -80,12 +81,18 @@ def _seed_share_count(
     *,
     iid: int,
     shares: int,
-    period_end: str = "2026-03-31",
+    period_end: str | None = None,
     accession: str = "0000000000-26-000001",
 ) -> None:
     """Seed an ``EntityCommonStockSharesOutstanding`` fact so that
     ``instrument_share_count_latest`` (the view) returns ``shares``
-    for the instrument."""
+    for the instrument.
+
+    ``period_end`` defaults to 30 days before today, inside the check's
+    180-day staleness window, so the drift tests see no freshness finding
+    whatever day they run. A fixed date here expired on 2026-09-27."""
+    if period_end is None:
+        period_end = (date.today() - timedelta(days=30)).isoformat()
     conn.execute(
         """
         INSERT INTO financial_facts_raw (
