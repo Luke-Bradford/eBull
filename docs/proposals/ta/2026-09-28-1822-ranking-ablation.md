@@ -1,9 +1,9 @@
-# #1822 — v1.5 ranking family ablation: spec (v5)
+# #1822 — v1.5 ranking family ablation: spec (v6)
 
 Refs #1822, #1815, #2437 (supervisor refill 2026-09-28 05:15Z, item 2),
 `docs/proposals/ta/2026-09-25-evidence-ranking-and-instrument-report.md` §3. v2 answers Codex ckpt-1 v1 (61
 findings), v3 answers round 2 (50),
-v4 answers round 3, v5 settles "Prices"; see "Revision notes".
+v4 answers round 3, v5 settles "Prices", v6 settles slice 1b; see "Revision notes".
 
 **Ask (supervisor):** ablate each v1.5 family against the matched control, on the hunt harness (#3385) and the PIT
 bundles. Report each family's incremental contribution with its SE, and close no family on power alone. Weights
@@ -116,8 +116,15 @@ and reports each run's scored count. Model versions never mix; v1.6 starts a new
   [`started_at`, `finished_at`] covers its `scored_at`. `compute_rankings` has one caller
   (`app/workers/scheduler.py:5438`, inside that job). 33 of 34 v1.5 runs have this witness, the latest finishing
   60 s after `scored_at`. A run with no witness is excluded and counted. Scores carry no run id, so the witness is
-  containment plus the single writer. Slice 1 cites the transaction that commits the rows before the job's
-  `finished_at` is stamped, or the rule fails and slice 1 stops;
+  containment plus the single writer. **The commit boundary holds (v6).**
+  - `compute_rankings` writes inside `with connect_job() as conn:` (`scheduler.py:5436-5437`), and `connect_job`
+    returns a plain `psycopg.connect(...)` (`job_connection.py:75`).
+  - On a clean exit, psycopg's `Connection.__exit__` calls `commit()` (installed `psycopg/connection.py:171-172`).
+  - Both callers of `compute_morning_recommendations` run it inside `_tracked_job("morning_candidate_review")`: the
+    scheduled job (`scheduler.py:5352-5353`) and the sync-orchestrator adapter (`adapters.py:403-404`). That tracker
+    records `finished_at` only after its `yield` returns (`scheduler.py:3141-3149`).
+  - So the rows commit before `finished_at`.
+  - A `scored_at` covered by more than one successful run is ambiguous; it is excluded and counted.
 - **entry session e** = the first session whose open is strictly after the known time; entry at the open of e.
   "t = e − 1" is an index label only: nothing assumes the run was available during t;
 - when several runs share one entry session, the one with the latest known time is used (ties: the latest
@@ -143,8 +150,29 @@ are reported. The books use equal weight, price only ("Prices" 3), the `real_sto
 `zero_recovery` is canonical and the others are reported beside it. A name whose feed stops is not terminated
 unless the termination source says so (the harness rule).
 
+**Termination source (v6).** The harness reads `series_termination.TerminationEvidence`: a Form 25 link, its
+provision, and the Q suffix.
+- **Linked:** a `sec_form25_register` row whose `issuer_cik` is in the instrument's `instrument_cik_history` and
+  whose `filed_date` is in [first formation, c_k]. The rule is uniform. It yields no link in the window, because the
+  register is a harvest whose latest `filed_date` is 2024-12-31 (`select max(filed_date) from
+  sec_form25_register`).
+- **Q suffix:** `q_suffix =
+vendor_symbol_has_bankruptcy_suffix(instruments.symbol)`, the helper (`research_corpus_ingest.py:362`) `universe_selection` already uses.
+  The symbol is the one current at the readout. Its snapshot goes into the vintage identity, and the
+  classification is retrospective, like the rest of route F.
+- A series is **terminating** when its last stored bar is before c_k and `classify_termination` is not `UNKNOWN`.
+  Its `terminal_ordinal` is that bar, and each `PROGRAMME_POLICIES` fraction applies to it. Recognising a
+  termination from bars missing after the fact, and valuing it at the last bar, is the harness's ex-post valuation
+  convention, not an executable exit.
+  - A suspension that later resumes shows up as new bars, and the next readout reports it as a revision.
+- Every other stopped series is **not terminated**. It carries V and exits at the last available close (the
+  evaluator's rule). No claim is made that this close matches any takeout consideration.
+- Measured: the last stored bar falls between 2026-07-20 and 2026-09-17 for 37 ranked names. None has a register
+  Form 25, and 2 carry a Q suffix under the helper (NOTVQ, QVCAQ). The census recounts all of them.
+
 ⚠ **Lane eligibility.** Every population name is priced as a real-stock long. Non-stock or non-USD rows are counted
-and excluded from the population, so from both keys **and** the control (slice 1 measures how many). Rows with a
+and excluded from the population. Stock means `instruments.instrument_type_id = 5` ("Stocks" in
+`etoro_instrument_types`); the 30 ranked ETFs (type 6) are excluded. That removes them so from both keys **and** the control (slice 1 measures how many). Rows with a
 non-finite `raw_total` or unparseable `penalties_json` are excluded the same way.
 
 **Prices (v5).** This section settles the slice-1 go/no-go and its four residuals (#1822 comment, 2026-09-28). The
@@ -303,9 +331,19 @@ rebalancing is uncosted in both books (the harness residual), so net Δ is not f
   of sessions where Δ ≠ 0. All reported **net**, in each of the four cells of "Prices" (gross is dropped there);
 - MDE_f = (z_{.975} + z_{.80}) · SE_annual, reported beside Δ and Δ / SE. It is a planning figure, showing what
   this window could resolve, and it classifies nothing;
-- a sensitivity SE at twice the NW lag. The window is short and holdings persist, so the rule-of-thumb lag may be
-  too small, and the readout shows how much that changes the SE;
-- `hac_t` refusals (constant series, too few observations, invalid variance) are reported as refusals, and no t or
+- **the lag (v6 correction).** The harness's lag is its *construction* L = max(2h, ⌊4(T/100)^{2/9}⌋)
+  (`2026-09-26-3385-hunt-harness.md`, "Lag (construction)"; `hunt_inference.hunt_lag`). The 2h floor covers the
+  overlap of h cohorts. v1–v5 cited only its initial-lag row, which is too small for 21-session overlapping holds.
+  - Canonical: `hac_estimate(Δ_f, L)` with L = `hunt_lag(T, h)`. Sensitivity: `hac_estimate(Δ_f, 2L)`.
+  - L is kept in the Bartlett weights even when L ≥ T, as the code does, and autocovariances at shifts ≥ T are 0.
+    The readout flags L ≥ T and 2L ≥ T separately;
+- two of the harness's `cell_statistics` floors are **reported, not applied**, because the readout is descriptive:
+  - T / L against `SHORT_SAMPLE_LAGS`;
+  - `sparse_arm_count` of the `arm_full` book's entered formations on the admitted grid, against
+    `MIN_ARM_FORMATIONS`.
+
+  The census gives readout 1's values. A window of about two months cannot come near either floor;
+- `hac_estimate` refusals (constant series, too few observations, invalid variance) are reported as refusals, and no t or
   MDE is fabricated. A book ruined **on the reported grid** (`evaluate_books`' own flag) stops the family's
   statistics: the readout reports "ruined" and computes no SE, t or MDE for that family;
 - descriptive: `arm_full − control`, both book sizes and never-entered positions per formation, held
@@ -447,6 +485,15 @@ the 34-run window cannot feed and which exceeds the harness's 63-session cap for
   - Route F is registered in the #2829 register, and the reason `hunt_trials` does not fit is stated (#25, #26).
   - "No history at all" is corrected (#27). The overlapping-cohort choice is declared deliberate (#28). The MDE
     classifies nothing (#29).
+- **v6 (slice 1b settlements, measured 2026-09-28; ckpt-1, 10 findings).**
+  - Witness: the commit boundary is cited, with both tracked callers, and an ambiguous cover is excluded (#9, #10).
+  - Termination: a uniform Form 25 link rule over `instrument_cik_history`, which yields none because the register
+    ends 2024-12-31 (#5). The Q suffix uses the current symbol, as a retrospective snapshot (#6). A series
+    terminates only if it stops before c_k with a non-`UNKNOWN` class. This is the harness's ex-post convention, and
+    a resumption becomes a revision (#7, #8).
+  - Lane: stock is type 5; the 30 ETFs are excluded.
+  - Lag: corrected to the harness construction, max(2h, NW), with 2L as the sensitivity, via `hac_estimate`, L kept
+    at L ≥ T (#1, #3). The short-sample and `sparse_arm` floors are reported, not applied (#2, #4).
 - **v5 (the go/no-go and its four residuals, measured 2026-09-28; ckpt-1 rounds 4, 5 and 6).**
   - Reader: `price_daily`. Bar and transition verdicts are **computed in-process** with `evaluate_series`, not read
     from stored tables. This removes the stale-verdict, coverage, rule-version and interior-completeness class
