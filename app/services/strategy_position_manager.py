@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -30,6 +30,7 @@ from app.providers.broker import (
     BrokerProvider,
 )
 from app.services.ai_trial_deadline import deadline_exit_due
+from app.services.ai_trial_protection import halt_trial_for_unprotected_leg
 from app.services.broker_closed_release import (
     evaluate_whole_close,
     load_whole_close_evidence,
@@ -1049,7 +1050,13 @@ def _submit_close(
     broker: BrokerProvider,
     owned: _OwnedPosition,
     trigger_code: Literal[
-        "timeout", "exit_deadline", "strategy_exit", "emergency_risk", "operator_close", "core_rebalance"
+        "timeout",
+        "exit_deadline",
+        "protection_failed",
+        "strategy_exit",
+        "emergency_risk",
+        "operator_close",
+        "core_rebalance",
     ],
     core_rebalance_intent_id: int | None = None,
 ) -> PositionManagerResult:
@@ -1354,6 +1361,103 @@ def _repair_fixed_exit(
     )
 
 
+#: #3471 O10: "a position without an SL or TP is repaired within one 5-minute cycle". The
+#: paper cycle runs every 5 minutes (`Cadence.every_n_minutes(interval=5)`), and an edit
+#: accepted in one cycle is first re-observed in the next. The grace is one cycle LESS A HALF
+#: CYCLE, as `RECONCILIATION_RETRY_BASE_SECONDS` is: the edit is stamped `submitted_at` a
+#: few seconds into its cycle, so a full five minutes would not have elapsed at the next
+#: cycle's `observed_at` and the failure would slip a whole extra cycle (Codex ckpt-2).
+TRIAL_REPAIR_GRACE: Final = timedelta(minutes=5) - timedelta(seconds=150)
+
+#: The reason a trial leg's refused protection close is recorded under in the repair streak.
+#: `strategy_exit_protection.REFUSAL_BUDGET_BY_REASON` gives it a budget of 1, so the
+#: position alerts on `/system/status` at once: O10's operator alert.
+TRIAL_PROTECTION_CLOSE_REFUSED: Final = "trial_protection_close_refused"
+
+
+def _trial_supersede_trigger(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    owned: _OwnedPosition,
+    resumed: PositionManagerResult,
+    observed_at: datetime,
+) -> Literal["exit_deadline", "protection_failed"] | None:
+    """Whether a demo-trial leg's accepted-but-never-landed edit gives way to a close.
+
+    ``_resume_operation`` leaves such an edit ``submitted`` forever, and the unresolved-operation
+    index then blocks every other operation on the position, including every exit (Codex
+    checkpoint 2 on #3484). For a trial leg ANY such edit yields to a due deadline. It yields to
+    O10's protection close only when it is a ``fixed_exit_repair`` past the grace AND the
+    position is still observed short of its levels: a pending ratchet, or a repair overtaken by
+    a manually tightened stop, is not an unprotected position (Codex checkpoint 2). Every other
+    arm is unchanged.
+    """
+    if not owned.is_demo_trial or (resumed.state, resumed.reason_code) != ("pending", "broker_edit_pending"):
+        return None
+    if owned.exit_deadline_session is not None and deadline_exit_due(owned.exit_deadline_session, observed_at):
+        return "exit_deadline"
+    row = conn.execute(
+        "SELECT operation_type, submitted_at FROM strategy_position_operations WHERE position_operation_id=%s",
+        (resumed.position_operation_id,),
+    ).fetchone()
+    conn.commit()
+    if row is None or row[0] != "fixed_exit_repair" or row[1] is None or row[1] > observed_at - TRIAL_REPAIR_GRACE:
+        return None
+    position = _exact_broker_position(broker, owned)
+    if position is None or not _exit_intent(owned=owned, position=position).has_gap:
+        return None
+    return "protection_failed"
+
+
+def _trial_close(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    owned: _OwnedPosition,
+    trigger_code: Literal["exit_deadline", "protection_failed"],
+    observed_at: datetime,
+) -> PositionManagerResult:
+    """Close a demo-trial leg. O10: when the close for a failed protection is refused too, the
+    trial halts (``halted_operator``) and the position alerts; an unprotected position is a
+    refusal surface."""
+    # An earlier close whose outcome the broker never confirmed may still execute, so a second
+    # request is not sent over it (Codex ckpt-2); the #2979 witness settles it. Same predicate
+    # as the core executor's `core_operation_outstanding`.
+    outstanding = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM strategy_position_operations
+            WHERE ownership_id=%s AND operation_type='close' AND status='reconcile_required'
+              AND broker_close_witnessed_at IS NULL
+        )
+        """,
+        (owned.ownership_id,),
+    ).fetchone()
+    conn.commit()
+    if outstanding is not None and outstanding[0]:
+        return PositionManagerResult(
+            owned.strategy_trade_id, owned.broker_position_id, "reconcile_required", "trial_close_outstanding"
+        )
+    eligibility = _eligibility_for_owned(broker, owned)
+    if eligibility.allow_close_position:
+        result = _submit_close(conn, broker=broker, owned=owned, trigger_code=trigger_code)
+    else:
+        result = PositionManagerResult(
+            owned.strategy_trade_id, owned.broker_position_id, "rejected", "broker_close_not_allowed"
+        )
+    if trigger_code == "protection_failed" and result.state == "rejected":
+        record_repair_visit(
+            conn,
+            ownership_id=owned.ownership_id,
+            state="rejected",
+            reason_code=TRIAL_PROTECTION_CLOSE_REFUSED,
+            observed_at=observed_at,
+        )
+        halt_trial_for_unprotected_leg(conn, strategy_trade_id=owned.strategy_trade_id, reason=result.reason_code)
+    return result
+
+
 def manage_owned_position(
     conn: psycopg.Connection[Any],
     *,
@@ -1412,7 +1516,22 @@ def manage_owned_position(
         # abort every later position in the cycle.
         resumed = _resume_operation(conn, broker=broker, owned=owned, observed_at=observed_at)
         if resumed is not None:
-            return resumed
+            supersede = _trial_supersede_trigger(
+                conn, broker=broker, owned=owned, resumed=resumed, observed_at=observed_at
+            )
+            if supersede is None:
+                return resumed
+            assert resumed.position_operation_id is not None
+            # `reconcile_required`, never `rejected`: the broker accepted this edit and may yet
+            # apply it, and an applied edit must never be recorded as rejected (#3284).
+            with conn.transaction():
+                _terminal(
+                    conn,
+                    operation_id=resumed.position_operation_id,
+                    status="reconcile_required",
+                    error_code="superseded_by_trial_close",
+                )
+            return _trial_close(conn, broker=broker, owned=owned, trigger_code=supersede, observed_at=observed_at)
         position = _exact_broker_position(broker, owned)
         if position is None:
             release_reason = _release_whole_broker_close(conn, owned=owned, observed_at=observed_at)
@@ -1474,7 +1593,9 @@ def manage_owned_position(
                 "reconcile_required",
                 "position_open_time_missing",
             )
-        if close_reason is not None or timed_out or deadline_due:
+        if close_reason is None and not timed_out and deadline_due:
+            return _trial_close(conn, broker=broker, owned=owned, trigger_code="exit_deadline", observed_at=observed_at)
+        if close_reason is not None or timed_out:
             eligibility = _eligibility_for_owned(broker, owned)
             if not eligibility.allow_close_position:
                 return PositionManagerResult(
@@ -1484,7 +1605,7 @@ def manage_owned_position(
                 conn,
                 broker=broker,
                 owned=owned,
-                trigger_code=close_reason or ("timeout" if timed_out else "exit_deadline"),
+                trigger_code=close_reason or "timeout",
                 core_rebalance_intent_id=core_rebalance_intent_id,
             )
 
@@ -1541,6 +1662,12 @@ def manage_owned_position(
                 reason_code=result.reason_code,
                 observed_at=observed_at,
             )
+            # #3471 O10: a trial leg whose repair did not happen is closed, not left to retry.
+            # `reconcile_required` counts: an unconfirmed edit is not a repair.
+            if owned.is_demo_trial and result.state in ("rejected", "reconcile_required"):
+                return _trial_close(
+                    conn, broker=broker, owned=owned, trigger_code="protection_failed", observed_at=observed_at
+                )
             return result
 
         # The position is observed carrying both levels: the episode, if there was one,

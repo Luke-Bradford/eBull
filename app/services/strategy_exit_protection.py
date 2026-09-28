@@ -141,6 +141,9 @@ REFUSAL_BUDGET_BY_REASON: dict[str, int] = {
     # `arms[0].allow_edit_stop_loss is not True` — a capability verdict about the
     # instrument, re-read from the same eligibility payload on every visit.
     "broker_fixed_exit_edit_not_allowed": 1,
+    # #3471 O10: a demo-trial leg whose repair failed AND whose protection close was refused.
+    # The trial is halted, so no retry will run: nothing short of an operator changes it.
+    "trial_protection_close_refused": 1,
 }
 
 
