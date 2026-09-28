@@ -11666,3 +11666,13 @@ neighbouring container and match it.**
   version bump for every consumer, so put the helper elsewhere unless the rule itself changed.
   (`git grep -ln "read_bytes()).hexdigest" -- app/services` lists them.)
 - Enforced in: the pre-push fast tier (`tests/test_hunt_door.py`, `tests/test_ranking_ablation_declaration.py`).
+
+### A forced terminal code must not erase the reason it overrides (#3471)
+
+- Failure: `ai_trial_run.refuse_run` records `stale_claim` whenever the lease has expired, because `sql/432` allows
+  only that code after the lease. A run that reached a real refusal (`model_timeout`, `policy_drift`) past its lease
+  therefore lost that reason, with no column holding it. The review bot flagged it (#3490).
+- Prevention: when a state machine forces a code over the one the writer computed, log the overridden reason at
+  WARNING with the row id, or store it in its own column. Self-review prompt: "which reason does this row claim, and
+  is it the one that happened?"
+- Enforced in: `ai_trial_run.refuse_run` (the WARNING log line).

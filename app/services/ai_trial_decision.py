@@ -391,3 +391,70 @@ def draw_control(
     seed_material = f"{declaration_sha256_hex}|{session_date.isoformat()}|{pair_seq}"
     digest = hashlib.sha256(seed_material.encode("utf-8")).digest()
     return ControlDraw(seed_material, pool, int.from_bytes(digest, "big") % len(pool))
+
+
+@dataclass(frozen=True)
+class PairPlan:
+    pair_seq: int
+    draw: ControlDraw
+    control: ControlLevels
+
+
+@dataclass(frozen=True)
+class PlannedDecision:
+    """One decision row as it will be stored: the validator's verdict, the pairing outcome."""
+
+    verdict: DecisionVerdict
+    #: ``verdict.reason_code``, or ``control_pool_exhausted`` for an accepted decision that
+    #: could not be paired (§7: every accepted arm entry has a control).
+    reason_code: DecisionRefusal | Literal["control_pool_exhausted"] | None
+    pair: PairPlan | None
+
+
+def plan_pairs(
+    verdicts: Sequence[DecisionVerdict],
+    *,
+    shortlist_instrument_ids: Sequence[int],
+    atr_by_instrument: Mapping[int, AtrMeasurement | None],
+    control_held_instrument_ids: frozenset[int],
+    declaration_sha256_hex: str,
+    session_date: date,
+    first_pair_seq: int,
+) -> tuple[PlannedDecision, ...]:
+    """§3 step 5 over one run's verdicts, in ascending ``response_position``.
+
+    Each accepted decision gets a pool built from ITS OWN multiples (§7 v5), then the draw. An
+    empty pool refuses the arm decision ``control_pool_exhausted`` and consumes no ``pair_seq``;
+    the next pool excludes only the controls of pairs actually created.
+    """
+    planned: list[PlannedDecision] = []
+    drawn: set[int] = set()
+    pair_seq = first_pair_seq
+    for verdict in sorted(verdicts, key=lambda v: v.response_position):
+        if not verdict.accepted:
+            planned.append(PlannedDecision(verdict, verdict.reason_code, None))
+            continue
+        levels = {iid: derive_control_levels(verdict.metrics, atr) for iid, atr in atr_by_instrument.items()}
+        pool = control_pool(
+            shortlist_instrument_ids,
+            control_held_instrument_ids=control_held_instrument_ids,
+            drawn_this_run=frozenset(drawn),
+            placeable_instrument_ids=frozenset(iid for iid, lv in levels.items() if lv is not None),
+        )
+        try:
+            draw = draw_control(
+                declaration_sha256_hex=declaration_sha256_hex,
+                session_date=session_date,
+                pair_seq=pair_seq,
+                pool=pool,
+            )
+        except ControlPoolExhausted:
+            planned.append(PlannedDecision(verdict, "control_pool_exhausted", None))
+            continue
+        control = levels[draw.instrument_id]
+        if control is None:  # the pool admits placeable names only; never strip this under -O
+            raise RuntimeError(f"drawn control {draw.instrument_id} has no placeable levels")
+        drawn.add(draw.instrument_id)
+        planned.append(PlannedDecision(verdict, None, PairPlan(pair_seq, draw, control)))
+        pair_seq += 1
+    return tuple(planned)

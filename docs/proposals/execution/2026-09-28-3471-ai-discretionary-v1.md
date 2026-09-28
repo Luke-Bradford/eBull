@@ -526,6 +526,12 @@ Neither admits a $125 half ticket.
   - the git SHA of the code at freeze;
   - `AI_TRIAL_POLICY_HASH`, a hash over the frozen constants module.
 - **Runtime checks.** Each run recomputes `AI_TRIAL_POLICY_HASH` and refuses on mismatch (`policy_drift`). Each run also records the git SHA and the CLI version.
+  - **Implemented in slice 2c-iv-b** (`app/services/ai_trial_policy.py`, `app/services/ai_trial_run.py`).
+    - `AI_TRIAL_POLICY_HASH` is the sha256 over the source bytes of every module that defines a §3–§8 constant: `ai_trial_pack`, `ai_trial_pack_reader`, `ai_trial_decision` (which now also holds the step-5 `plan_pairs`), `ai_trial_prompt`, `ai_trial_invocation`, `ai_trial_intent` and `ai_trial_start_gate`. Execution plumbing (executor, deadline, protection, pair lifecycle, position manager, the publisher) is not hashed by bytes, so a fix there mints no new version. The frozen terms those modules define (per-leg slots, cost cap, exit time, censor and unresolved clocks, label classifier version, repair grace) and the scorer's default model version are hashed by value (`FROZEN_CONSTANTS`, Codex ckpt-2).
+    - **The slice 3 declaration document must carry `policy_hash`.** A document without it refuses every run as `policy_drift`.
+    - The run order is: no declaration → `declaration_missing` (no row); sweep expired claims to `refused`/`stale_claim`; claim on the database clock; then `trial_declaration_not_intact` / `policy_drift` / `trial_not_active`; step 0; step 1; step 2; one model call; step 4, where a whole-response refusal refuses the run; then step 5 and the `decided` publish in one transaction under the declaration row lock, which serialises `pair_seq`.
+    - Each trial signal is a fired `entry` with `signal_bar_date` = the last completed session, `fill_bar_date` = the target session and `universe` = `survivor_only`. Its `fill_price` is the leg name's last pack close, the decision-time reference; the executor still prices from its own ask.
+    - A publish refused because the lease ran out is recorded as `stale_claim`. Any other failure after the claim is recorded as `refused` (`run_failed` / `publish_failed`), carrying the provenance the run had reached, and re-raised.
 - **Trial register.** The trial charges the register once.
 - **Ordering.** Freezing happens **before any real-shortlist model call**. Pre-freeze model calls use a synthetic pack with fictitious symbols only.
 
