@@ -153,7 +153,7 @@ def test_indicators_reuse_the_house_wilder_functions_and_null_on_zero_denominato
 
 def _disc(source_id: int, title: str, days_ago: float, *, known_lag: timedelta = timedelta(0)) -> p.Disclosure:
     event_at = AS_OF - timedelta(days=days_ago)
-    return p.Disclosure(source_id, title, event_at, event_at + known_lag)
+    return p.Disclosure("filing", source_id, title, event_at, event_at + known_lag)
 
 
 def test_disclosures_are_point_in_time_newest_first_deduped_and_capped() -> None:
@@ -172,6 +172,10 @@ def test_disclosures_are_point_in_time_newest_first_deduped_and_capped() -> None
     assert [d.source_id for d in got] == [3, 4, 5, 7, 8]
     assert got[3].title == "Ctl char line tab"
     assert got[4].title == "x" * 200
+
+    news = p.Disclosure("news", 10, "Headline", AS_OF, AS_OF)
+    with pytest.raises(ValueError, match="one source per call"):
+        p.select_disclosures([*items, news], as_of=AS_OF)
 
 
 def test_canonical_json() -> None:

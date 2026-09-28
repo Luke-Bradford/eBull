@@ -234,6 +234,7 @@ class Disclosure:
     """A filing or news title. ``known_at`` is OUR ingestion time — the O2 knowledge key —
     and ``event_at`` the filing / publication time."""
 
+    source: Literal["filing", "news"]
     source_id: int
     title: str
     event_at: datetime
@@ -249,7 +250,11 @@ def clean_title(title: str) -> str:
 def select_disclosures(items: Iterable[Disclosure], *, as_of: datetime) -> tuple[Disclosure, ...]:
     """At most 5, known by ``as_of`` and dated within the 30 days before it; newest first, ties
     by source id, exact (cleaned) title de-duplicated keeping the first. Amendments are their
-    own rows and are kept (O3). Call once per source (filings, news)."""
+    own rows and are kept (O3). The cap is PER SOURCE (§3.2: 5 filings and 5 headlines), so
+    one call takes one source and a mixed input is refused."""
+    items = list(items)
+    if len({d.source for d in items}) > 1:
+        raise ValueError("select_disclosures takes one source per call; the cap of 5 is per source")
     known = [d for d in items if d.known_at <= as_of and as_of - DISCLOSURE_WINDOW <= d.event_at <= as_of]
     known.sort(key=lambda d: (-d.event_at.timestamp(), d.source_id))
     out: list[Disclosure] = []
@@ -259,7 +264,7 @@ def select_disclosures(items: Iterable[Disclosure], *, as_of: datetime) -> tuple
         if not title or title in seen:
             continue
         seen.add(title)
-        out.append(Disclosure(d.source_id, title, d.event_at, d.known_at))
+        out.append(Disclosure(d.source, d.source_id, title, d.event_at, d.known_at))
         if len(out) == DISCLOSURE_LIMIT:
             break
     return tuple(out)
