@@ -76,6 +76,25 @@ describe("RankSummary", () => {
     expect(line).not.toHaveTextContent("Value");
   });
 
+  it("omits the largest line when every family is a default fill", () => {
+    const family = (name: string, usability: "missing" | "quarantined") => ({
+      family: name,
+      maturity: "untested" as const,
+      purpose: "return_signal" as const,
+      evidence_ref: "",
+      usability,
+    });
+    render(
+      <RankSummary
+        score={makeScore({
+          families: [family("quality", "quarantined"), family("value", "missing"), family("momentum", "missing")],
+        })}
+        errored={false}
+      />,
+    );
+    expect(screen.getByTestId("rank-summary")).not.toHaveTextContent("largest");
+  });
+
   it("never shows a stale stored rank as current", () => {
     render(
       <RankSummary
