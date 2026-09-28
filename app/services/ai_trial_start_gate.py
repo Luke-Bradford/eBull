@@ -47,6 +47,7 @@ from app.services.strategy_paper_executor import (
     _MANDATE_OBSERVATION_SQL,
     _NY,
     _PENDING_RISK_SQL,
+    StrategyPaperExecutionError,
     _capacities,
 )
 
@@ -258,7 +259,8 @@ def _preview(
     high_water_row = conn.execute(
         "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id = true"
     ).fetchone()
-    assert pending is not None and mandate_row is not None  # aggregate SELECTs always return a row
+    if pending is None or mandate_row is None:  # pragma: no cover - aggregate SELECTs always return a row
+        raise StrategyPaperExecutionError("pending or mandate observation was unavailable")
     high_water = max(Decimal(str(high_water_row[0])) if high_water_row else risk.equity, risk.equity)
     drawdown = (high_water - risk.equity) / high_water * Decimal("100") if high_water > 0 else Decimal("100")
 
