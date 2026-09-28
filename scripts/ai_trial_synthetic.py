@@ -335,7 +335,8 @@ def run_synthetic(
             else:
                 drawn.add(draw.instrument_id)
                 control = levels[draw.instrument_id]
-                assert control is not None  # the pool admits placeable names only
+                if control is None:  # the pool admits placeable names only; never strip this under -O
+                    raise RuntimeError(f"drawn control {draw.instrument_id} has no placeable levels")
                 row["pair"] = {
                     "pair_seq": pair_seq,
                     "seed_material": draw.seed_material,
