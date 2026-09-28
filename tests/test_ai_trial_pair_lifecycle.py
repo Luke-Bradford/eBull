@@ -8,13 +8,19 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from app.services.ai_trial_pair_lifecycle import (
+    UNCLASSIFIED,
     LegFacts,
+    _LazyRegime,
     broken_reasons,
     clock_instant,
+    entry_regime_label,
     leg_outcome,
     next_leg_events,
     pair_unit_state,
+    previous_session,
 )
+from app.services.market_regime import Regime
+from app.services.market_regime_provider import BenchmarkUnavailableError, MarketRegimeProvider
 
 TARGET = date(2026, 10, 5)  # a Monday
 IN_SESSION = datetime(2026, 10, 5, 15, 0, tzinfo=UTC)
@@ -139,3 +145,48 @@ def test_broken_reasons(outcomes: list[str | None], reasons: list[str] | None) -
 )
 def test_pair_unit_state(events: list[tuple[str | None, str]], state: str) -> None:
     assert pair_unit_state(events) == state
+
+
+# --- §9 regime label (slice 2c-iv-a) ---
+
+
+@pytest.mark.parametrize(
+    ("day", "expected"),
+    [
+        (date(2026, 9, 29), date(2026, 9, 28)),  # Tuesday → Monday
+        (date(2026, 9, 28), date(2026, 9, 25)),  # Monday → Friday
+        (date(2025, 12, 26), date(2025, 12, 24)),  # Christmas closed; Dec 24 is a half day, still a session
+    ],
+)
+def test_previous_session_skips_weekends_and_holidays(day: date, expected: date) -> None:
+    assert previous_session(day) == expected
+
+
+def test_entry_label_is_the_regime_at_the_prior_session_close() -> None:
+    provider = MarketRegimeProvider(
+        regime_by_date={date(2026, 9, 25): Regime.BEAR_VOLATILE, date(2026, 9, 28): Regime.BULL_QUIET}
+    )
+    # Filled Monday: Friday's close is what was known; Monday's own close is not.
+    assert entry_regime_label(provider, date(2026, 9, 28)) == "bear_volatile"
+
+
+def test_entry_label_waits_for_a_missing_bar_and_names_warm_up() -> None:
+    provider = MarketRegimeProvider(regime_by_date={date(2026, 9, 24): Regime.BULL_QUIET, date(2026, 9, 28): None})
+    # No bar for Friday: never fall back to Thursday's.
+    assert entry_regime_label(provider, date(2026, 9, 28)) is None
+    # A bar that exists but is still in warm-up is labelled, not deferred.
+    assert entry_regime_label(provider, date(2026, 9, 29)) == UNCLASSIFIED
+
+
+def test_a_failed_benchmark_load_is_not_repeated_within_a_pass() -> None:
+    calls: list[int] = []
+
+    def unavailable(_: object) -> MarketRegimeProvider:
+        calls.append(1)
+        raise BenchmarkUnavailableError("no SPY")
+
+    regime = _LazyRegime(unavailable)
+    for _ in range(3):
+        with pytest.raises(BenchmarkUnavailableError):
+            regime.get(None)  # type: ignore[arg-type]
+    assert calls == [1]

@@ -799,7 +799,11 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
     - An event is an observation: an uncertainty that resolved between two passes is not written. The readout values fills and closes from the source tables, never from the event's `at`.
     - `broken` is written once, when both legs are determined and either is not a fill in the target session. Reasons: `late_fill` (or `early_fill`), the leg's funding `reason_code`, `broker_rejected`, or `unresolved` (still unfilled at 15:00 UTC ten sessions after the target session). Leg attribution is recoverable by joining the leg links. A leg filled after the pair broke keeps its events.
     - `pair_unit_state` is the readout inclusion rule: `broken`, `blocked` (a leg's latest event is `uncertain`), `unit` (both filled, each closed or censored) or `open`.
-    - Still owed: the `ai_trial_pair_labels` row at the arm's fill needs the regime classifier, and moves to the jobs slice (2c-iv).
+    - **Implemented in slice 2c-iv-a:** the `ai_trial_pair_labels` row, written by the lifecycle writer once the arm has `filled`.
+      - `entry_session` = `fill_session` of the arm's first execution.
+      - The label is the house market regime (`market_regime` over the SPY benchmark via `market_regime_provider`, the classifier `strategy_result_regime_cohorts` uses) at the close of the NYSE session **before** `entry_session`. That is what was known at the fill; the entry session's own close is not.
+      - `classifier_version` = `REGIME_RULE_VERSION;benchmark RULE_SET_VERSION`.
+      - When the benchmark has no bar for that session, the label is deferred and never taken from an older bar; the pair stays unfinished until it is written. A bar still in warm-up is labelled `unclassified`.
 - **O12, exits outside the mechanical set (r2-118).**
   - Manual, forced, delisting and policy-age exits are labelled per leg.
   - The primary analysis includes them at their recorded close.
