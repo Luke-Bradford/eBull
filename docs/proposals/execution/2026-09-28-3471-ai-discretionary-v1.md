@@ -200,7 +200,7 @@ The argv and the environment construction are pinned by a unit test.
 **Terms.**
 - **Entry.** A market order in the target session. The protective levels are absolute rates computed from the executor's **pre-submission ask**, using the rule the existing paper path already uses (§8). Both legs follow the same rule.
 - **Horizon.** NYSE sessions counted from the fill session, which is session 0.
-- **No model exits.** There are none in v1. Exits are SL, TP or the horizon only, identical for both legs.
+- **No model exits.** There are none in v1. Exits are SL, TP or the horizon only. The two legs' exits match **in ATR multiples** (§7 shared terms), not in percentage terms.
 - **Bounds.** The §5 bounds are by construction. The stop cap is a **stop distance**, not a maximum loss: gaps and slippage can exceed it.
 
 ## 6. Validation (refuse, never repair)
@@ -219,15 +219,46 @@ The argv and the environment construction are pinned by a unit test.
 | 1 | `not_in_shortlist` | the symbol is not in the pack-complete shortlist |
 | 2 | `duplicate_symbol` | the symbol appears more than once; every copy is refused |
 | 3 | `already_held` | the arm already holds the name |
-| 4 | `target_not_above_stop` | `target_pct` ≤ `stop_pct` |
-| 5 | `thesis_too_long` | the thesis runs past 3 sentences |
+| 4 | `stop_outside_atr_band` | the ATR measurement is invalid, or `stop_atr_multiple` is outside [1, 4] |
+| 5 | `reward_risk_below_min` | `r_multiple` < 1.5 |
+| 6 | `thesis_too_long` | the thesis runs past 3 sentences |
+
+`target_not_above_stop` stays in the `sql/432` vocabulary but leaves the precedence (v5). A `target_pct ≤ stop_pct` decision now refuses at order 4 or order 5, whichever fails first. Keeping the old code ahead of both would mask the supervisor's codes.
+
+**ATR band (supervisor rule, #3471, 2026-09-28 15:45Z; binding).** The §5 bounds alone are not sufficient: a 2% stop on a name whose ATR is 5% is a noise stop, and a 25% stop on a 1%-ATR name is no stop.
+- **Source of the constants.** The supervisor rule sets 1, 4 and 1.5. The percentage conversion (× 100) and the 4-decimal quantum below are fixed by construction.
+- **Measurement.** Both inputs are the pack's own figures for that name, taken from the ONE quarantine-masked bar series the pack was built from:
+  - `atr14` is the latest value of `ai_trial_pack.indicators`' `atr14` (the house Wilder `atr_series`, in price units);
+  - `close` is the close of that same series' latest bar, so the adjustment basis and the endpoint are the ones the ATR saw.
+  - **Valid** means `atr14` and `close` are finite and > 0 **and** the quantized `atr14_pct` is > 0. A tiny ATR can quantize to 0, and `stop_atr_multiple` would then be undefined. (The pack's canonical JSON already refuses non-finite values, O3.) The 60-bar minimum does NOT guarantee validity: a flat price history gives `atr14 = 0`.
+- **Arithmetic: exact rationals, never binary floats.** The float round trip `(s / a) × a` can land one ulp below `s`, which would drop the arm's own name from its control pool at a boundary. So:
+  - Python computes on `fractions.Fraction(Decimal(repr(x)))` of each stored float, which is exact.
+  - `q(x)` means quantize to 4 decimal places, half up: `floor(x × 10⁴ + ½) / 10⁴`, over positive values.
+  - Division is never re-done in Postgres. Its `numeric` quotient keeps finitely many digits, and a rational quotient can lie arbitrarily close to a rounding tie, so no finite-digit division decides the rounding in general.
+  - Instead, the database verifies each stored `x = q(n / d)` with exact `numeric` multiplication. It requires `x = round(x, 4)` (on the 4-decimal grid) **and** `(x − 0.00005) × d ≤ n < (x + 0.00005) × d` for `d > 0`. Together those admit exactly one `x`. Products (`q(m × a)`) are recomputed exactly and compared with `round(·, 4)`.
+  - **Operand serialization (measured, Postgres 17).** The new columns are unconstrained `numeric`, so there is no scale coercion before the trigger sees a value. Python binds `Decimal(repr(x))`, never a float. SQL reads a stored `DOUBLE PRECISION` (`stop_pct`, `target_pct`) as `x::text::numeric`, never `x::numeric`: the direct cast rounds to 15 significant digits (`2.7100000000000004::float8::numeric` = `2.71`), while the text cast gives the shortest round-trip form that Python's `repr` gives (`2.7100000000000004`).
+- **Recorded figures.** These are computed for every decision row, **independently of which check fails first**, so an early refusal still carries them:
+  - `r_multiple = q(target_pct / stop_pct)`, always, because the §5 schema guarantees `stop_pct` > 0;
+  - `atr14`, `close` (the raw pair), `atr14_pct = q(100 × atr14 / close)` and `stop_atr_multiple = q(stop_pct / atr14_pct)`, when the symbol maps to a shortlist name and the measurement is valid. Otherwise they are `NULL`: the symbol is unmapped or the measurement is invalid. Which one applies is recoverable from the stored pack, and the reason code need not say, because an earlier refusal such as `duplicate_symbol` wins the precedence.
+- **Checks.** The comparisons run on the recorded (quantized) values, and both ends are inclusive:
+  - `1 ≤ stop_atr_multiple ≤ 4`;
+  - `r_multiple ≥ 1.5`.
+  - An invalid measurement on a mapped name refuses at order 4.
+- **Never clamp or repair.** A decision outside either bound is refused with its code and logged like every other §6 refusal. The §5 schema bounds keep their v4 whole-response semantics. This amendment does not change them.
+- The bounds and the quantum are frozen in the declaration (§9) with every other §3–§8 constant.
+- **Compliance is judged at decision time** on the percentage levels. The executable rates are §8's unchanged rule: from the pre-submission ask, rounded down at 6 decimals. That rounding is not re-checked against the band.
 
 Every decision row, refused ones included, carries `response_position`, its 0-based index in the model's array. Pairs are identified by `pair_seq` (§7).
 
 ## 7. Controls (frozen before trade 1)
 
 **(a) Random-entry control (matched pair).** For each accepted arm decision *k*:
-- **Pool.** The pack-complete shortlist, excluding names the **control leg** holds and names already drawn this run (without replacement). The pool does not exclude the arm's picks: a control draw equal to the arm's pick is a legitimate random outcome, and it gives *d* = 0 in expectation. The rule is symmetric with the arm, which excludes only its own holdings.
+- **Pool (per decision).** Built for EACH accepted arm decision from that decision's own terms, never once per run. The accepted decisions are processed in ascending `response_position`. The pool is the pack-complete shortlist, minus:
+  - names the **control leg** holds;
+  - controls already drawn by this run's earlier pairs (without replacement);
+  - **(v5) names whose derived control levels are not placeable.** That covers an invalid ATR measurement (§6), and derived levels that fail the §5 bounds (stop 2–25, target 2–100), the ATR band or the reward/risk floor, each evaluated on the stored quantized values.
+
+  The pool does not exclude the arm's picks: a control draw equal to the arm's pick is a legitimate random outcome. The feasibility filter is applied BEFORE the draw, and never as a redraw. An exhausted pool refuses the arm decision (`control_pool_exhausted`) and reserves nothing. The next decision's pool excludes only the controls of pairs that were actually created.
 - **Draw.** `idx = int.from_bytes(sha256(m).digest(), "big") mod len(pool)`.
   - The seed material is `m = UTF-8("{declaration_sha256_hex}|{session_date ISO-8601}|{pair_seq}")`, where `pair_seq` is the trial-global 0-based sequence number of the accepted pair.
   - The pool is ordered by `instrument_id` ascending.
@@ -235,7 +266,18 @@ Every decision row, refused ones included, carries `response_position`, its 0-ba
   - Modulo bias is below `len(pool)/2^256`, which is negligible but not zero.
   - Treating sha256 output as uniform is an explicit pseudorandomness assumption.
 - **Exhaustion.** An empty pool → `control_pool_exhausted`, and the arm decision is refused as well, so every accepted arm entry has a control.
-- **Shared terms.** Session, `stop_pct`, `target_pct`, `horizon_days` and `size_tier` are copied from the arm decision.
+- **Shared terms.** Session, `horizon_days` and `size_tier` are copied from the arm decision. The exits match **in ATR multiples** (supervisor rule, 2026-09-28 15:45Z). The control's levels are derived, and never chosen:
+  - `control_stop_pct = q(stop_atr_multiple × control_atr14_pct)`;
+  - `control_target_pct = q(r_multiple × control_stop_pct)`.
+
+  Both use the arm row's recorded multiples and the control name's own §6 measurement. The exits therefore match **to the 4-decimal quantum**, not exactly. The control's own quantized multiple can differ from the arm's in the last digit (arm `3.9999`, control ATR% `0.5001` → stop `2.0003`, multiple `3.9998`). Feasibility is judged on the control's own recorded values.
+  - **The arm's own name gets no special case.** It goes through the same derivation and feasibility. Its derived levels can differ from the arm's by more than the 4th decimal (stop 25 / target 100 at ATR% `23.0298` → `25.0012` / `100.0048`). At a boundary the name can be infeasible (stop 2 at ATR% `1.0341` → derived stop `1.9999` < 2) and leave the pool. That is a selection effect, not a *d* residual, and the readout reports it with exhaustion.
+- **What the control is (v5).** The control is a random pick from the arm-conditioned feasible set: the pack-complete names whose ATR admits the arm's multiples. It is not a random pick from the whole shortlist. Consequences for the readout, which must report them:
+  - the model's chosen multiples shape the benchmark's composition as well as its exits;
+  - exhaustion conditions *d* on control availability, so the readout reports exhausted decisions and the pool size per pair;
+  - equal tickets on names with different ATRs carry different percentage stops and dollar risk, so *d* measures performance under this allocation rule, not equal-risk selection skill;
+  - equal ATR multiples do not equalise exit probabilities (gaps, tails, durations), and levels set from the ask rather than the pack close shift the realised ATR multiple by `ask / close`.
+  The supervisor chose ATR-matched exits over identical percentage exits, and these are its costs.
 - **Pair numbering.** `pair_seq` is assigned only **after** the draw succeeds, so an exhausted-pool refusal consumes no number.
 - **Submission order.** It alternates by `pair_seq` parity (even: arm first), and `pair_seq` is global across runs, so neither leg is **assigned** first systematically. Balance among retained units can drift after exclusions, and the readout reports it. A pair whose symbols are identical can still differ, through latency and sizing. That residual is part of *d*.
 - **Broken pairs.** If either leg is refused or rejected at execution, the pair is recorded `broken` with both reason codes. There is no redraw and no substitute. Broken pairs are excluded from *d* but reported, with a count by reason.
@@ -296,7 +338,7 @@ An expired decision is refused as `decision_expired`. This replaces the paper pa
 
 | paper-path field | `demo_trial` source |
 | --- | --- |
-| forecast stop/target barriers | the validated decision's `stop_pct` / `target_pct`; still bounded by the policy `stop_loss_pct` (the paper path's `opportunity_forecast_stop_exceeds_policy` check keeps its meaning) |
+| forecast stop/target barriers | the arm leg: the validated decision's `stop_pct` / `target_pct`. The control leg: the pair's derived `control_stop_pct` / `control_target_pct` (§7, v5). Each leg's own stop is still bounded by the policy `stop_loss_pct` (`decision_stop_exceeds_policy`; the paper path's `opportunity_forecast_stop_exceeds_policy` keeps its meaning) |
 | `forecast_id` / `ranking_member_id` | none. The trial uses its **own intent type**, with no forecast or ranking fields. `ai_trial_decision_id` never populates a forecast or ranking column or FK. |
 | scan watermark | the decision's target `session_date` (see Loader authorisation) |
 | ranking-to-current-pool binding | the step-0 gate and execution both read the **current** pool event, so a mandate change applies to already-queued decisions |
@@ -589,6 +631,10 @@ Every table is append-only by trigger, except for the one named transition on `a
   - the decision fields;
   - `instrument_id`;
   - `verdict`, `reason_code`;
+  - (v5, `sql/433`) `r_multiple` (NOT NULL on new rows), and `atr14`, `close`, `atr14_pct`, `stop_atr_multiple` (nullable, per §6).
+    - A trigger verifies each from its inputs with the §6 multiplication bracket. It never divides.
+    - An accepted row requires all of them, with `1 ≤ stop_atr_multiple ≤ 4` and `r_multiple ≥ 1.5`.
+    - The columns are added nullable, because `ALTER TABLE` validates existing rows. The dev DB holds no decision or pair rows (measured before the migration), and no declaration is frozen, so there is nothing to backfill and there are no mixed-version readers;
   - unique on `(run_id, response_position)`.
 - **`ai_trial_pairs`:**
   - one row per accepted pair;
@@ -596,7 +642,13 @@ Every table is append-only by trigger, except for the one named transition on `a
   - FK to the arm decision, unique;
   - the control `instrument_id`;
   - the draw material (seed material, pool, idx);
-  - the copied terms.
+  - the copied terms;
+  - (v5, `sql/433`) the control's `control_atr14`, `control_close`, `control_atr14_pct`, `control_stop_pct` and `control_target_pct`.
+    - The insert trigger **refuses, never overwrites**, unless:
+      - `control_atr14_pct` is the §6 quantization of `100 × control_atr14 / control_close`, checked with the multiplication bracket;
+      - both levels are their §7 derivation from the arm row's recorded multiples. They are products, so they are recomputed exactly and then rounded;
+      - the levels satisfy the §5 bounds, the ATR band and the reward/risk floor.
+    - Whether the raw `atr14` / `close` pairs are the stored pack's figures, and whether the pool excluded every infeasible name, is checkable offline from the stored pack, as the pool's holdings exclusion already is (a PL/pgSQL walk of the pack JSON is not attempted).
 - **`ai_trial_leg_links`:**
   - append-only `(pair_seq, leg, signal_id)`, unique on `(pair_seq, leg)` and on `signal_id`;
   - trade links are a separate append-only row `(pair_seq, leg, strategy_trade_id)`, also unique, so each link is written once when it becomes known.
@@ -820,3 +872,27 @@ Partial resolutions:
 **Acknowledged, not resolved:**
 - r3-22: same-symbol residual.
 - r3-32, r3-33: simulated population and dependence differ from the trial's.
+
+## Ckpt-1 on the v5 ATR amendment (supervisor rule, 2026-09-28 15:45Z): disposition
+
+Codex returned 40 findings in round 1 and 10 in round 2. Every numeric counterexample was reproduced with exact `Fraction` arithmetic before its text was adopted.
+
+**Accepted and fixed:**
+- **Float round-trip failures (r1-13…17, 22, 23).** The arithmetic now uses exact rationals with the `q` quantum. The trigger refuses and never overwrites. Control compliance is verified, not assumed.
+- **Precedence masking (r1-1, 2; r2-8).** `target_not_above_stop` leaves the precedence.
+- **Recording independent of first failure, and NULL semantics (r1-4…7; r2-9).**
+- **Invalid ATR and close, including a quantized-to-zero ATR (r1-8…12; r2-1).**
+- **Per-decision pools and processing order (r1-25…27).**
+- **The false symmetry claim and the comparability consequences (r1-28…37).**
+- **Decision-time compliance versus executable rounding (r1-38).**
+- **Migration and existing rows (r1-24).** Measured: 0 rows in every `ai_trial_*` table on dev.
+- **Cross-runtime operands (r1-17, 18; r2-2, 3).** The multiplication bracket has a grid check, and doubles are read via `::text::numeric` (measured).
+- **Same-name wording (r2-4…7).** The examples are reproduced exactly.
+- **The false tie-distance claim (r2-10).** It was withdrawn and replaced by the no-division rule.
+
+**Kept by decision:**
+- **r1-3.** §5 schema bounds keep v4's whole-response semantics, which were settled before this amendment.
+- **r1-21.** Pack provenance of the raw `atr14` / `close` stays offline-checkable, the same stance `sql/432` takes for the pool.
+- **r1-39.** The §5 bounds are reused as the control's feasibility bounds by construction: the control must be placeable under the same schema that binds the arm.
+
+No round 3 was run. Round 2 found only defects inside the round-1 fixes, all resolved above, and the implementation slice gets ckpt-2 on the code.
