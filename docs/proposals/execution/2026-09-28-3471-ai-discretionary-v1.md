@@ -403,7 +403,7 @@ Slice 2 tests:
   - The reconciliation that opens the leg stamps the deadline in the same UPDATE, from the entry order's stored `execution_time`. The fill session is its New York civil date, rolled forward to the next session when that date is closed.
   - ⚠ Deviation: the trigger requires the deadline once a trial trade is `open`, `closing` or `closed`, not from insert, because the fill session does not exist while the trade is `planned`/`submitted`. "Trial trade" means `ai_trial_trade_links` names it; that link is now refused unless the trade is still `planned`. The deadline is immutable, and a non-trial trade cannot carry one.
   - The manager closes under the new trigger code `exit_deadline` (`timeout` wins when both are due). A trial leg loaded without a deadline goes `reconcile_required` (`trial_exit_deadline_missing`).
-  - Still owed (2c-iii, with O10): a submitted protection edit that never lands resumes `pending` on every cycle and returns before any exit is evaluated, so it would hold a due deadline close indefinitely (Codex ckpt-2 P1; the same holds for the age-out today). O10's repair-or-close must let a due deadline supersede that edit.
+  - A submitted protection edit that never lands resumes `pending` on every cycle and returns before any exit is evaluated (Codex ckpt-2 P1 on #3484). **Fixed in 2c-iii-a for trial legs only**: the edit gives way to a due deadline, or to O10's close once it has been pending a whole cycle. The age-out on other arms keeps this exposure, and that is unchanged.
   - Still owed: the `censored` pair event (10 sessions after the deadline) needs the pair-lifecycle writer, since `ai_trial_pair_events` refuses `censored` before `filled`; it moves to 2c-iii. The 40-session `max_position_age` is set when the trial deployments are configured (slice 2c-iv / 3).
 
 **Lifecycle exceptions.** These map to the manager's existing states:
@@ -781,6 +781,18 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
   - Per-leg free slots are enforced at allocation, under the allocator lock, and include pending and uncertain positions.
 - **O9, effective-term parity (r2-114).** Both trial deployments share one execution policy revision. The copied terms are stored, and a parity check refuses a pair whose effective policy differs.
 - **O10, protection (r2-117).** A position without an SL or TP is repaired within one 5-minute cycle. If repair fails, the position is closed. If both fail, the trial goes to `halted_operator` and an operator alert is raised: an unprotected position is a refusal surface.
+  - **Implemented in slice 2c-iii-a** (`strategy_position_manager._trial_supersede_trigger` / `_trial_close`, `app/services/ai_trial_protection.py`, `sql/436`). It applies to demo-trial legs only.
+    - "Repair fails" means one of two things.
+      - The repair arm returns `rejected` or `reconcile_required`; an unconfirmed edit is not a repair.
+      - An accepted `fixed_exit_repair` is still not in effect at a later visit that is at least `TRIAL_REPAIR_GRACE` after it was submitted, **and** the position is still observed short of its levels.
+    - `TRIAL_REPAIR_GRACE` is one 5-minute cycle less a half cycle (150 s), the reconciliation retry's convention. With a full five minutes, the next cycle's `observed_at` would fall seconds short and slip a whole extra cycle.
+    - A pending ratchet, or a repair overtaken by a manually tightened stop, is not a protection failure. Only a due deadline supersedes those.
+    - The superseded edit is terminalised `reconcile_required` / `superseded_by_trial_close`, never `rejected`, because the broker may yet apply it.
+    - The close is recorded under trigger code `protection_failed`. Deadline closes of trial legs go through the same `_trial_close`.
+    - If the close is refused (not allowed, or rejected by the broker):
+      - the trial moves `active → halted_operator` (actor `engine`) exactly once, and an ERROR is logged;
+      - the refusal is recorded in the repair streak as `trial_protection_close_refused`, which has a budget of 1. The position is therefore `unrepairable` on `/system/status` straight away. That is the operator alert, on the existing `strategy_exit_protection` channel.
+    - An earlier close whose outcome is uncertain (`reconcile_required`, not yet witnessed) blocks a new close (`trial_close_outstanding`). An uncertain close is not a refusal, so it does not halt the trial.
 - **O11, uncertain submissions (r2-119).** A leg in `uncertain` state blocks the pair. It is resolved by reconciliation. A leg that fills after its session → the pair is `broken:late_fill`, and the filled leg is still managed to its exits and reported.
 - **O12, exits outside the mechanical set (r2-118).**
   - Manual, forced, delisting and policy-age exits are labelled per leg.
