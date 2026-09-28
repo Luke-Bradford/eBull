@@ -46,8 +46,8 @@ from typing import Any, Final, cast
 
 import psycopg
 
+from app.services import hunt_gate, hunt_inference
 from app.services import hunt_harness as hh
-from app.services import hunt_inference
 from app.services.hunt_compute import CANONICAL_CELL
 from app.services.hunt_harness import TrialSpec
 from app.services.hunt_inference import StatRefused, VPopulationMember
@@ -87,10 +87,11 @@ CARRY_UNMODELLED: Final = False
 FX_UNMODELLED: Final = False
 
 #: Hunts whose spec freezes an economic gate into the validation declaration that this module
-#: does not build yet. Their validation (and so holdout) freeze refuses ``hunt_gate_not_implemented``
-#: until it does: fail closed rather than promote on the generic PASS alone (#3448 spec, "The gate
-#: is frozen into the declaration"; built only if hunt 2's discovery flags).
-HUNTS_AWAITING_GATE: Final = frozenset({"hunt-2", "hunt-3"})
+#: does not build. Their validation (and so holdout) freeze refuses ``hunt_gate_not_implemented``:
+#: fail closed rather than promote on the generic PASS alone (#3448 spec, "The gate is frozen
+#: into the declaration"; hunt 2 closed at discovery, so its gate was never built). Hunt 3's is
+#: ``hunt_gate`` (#3454), enforced per declaration for ``hunt_gate.GATED_HUNTS``.
+HUNTS_AWAITING_GATE: Final = frozenset({"hunt-2"})
 
 #: The canonical text of a discovery entry's closing query; the tripwire requires it verbatim.
 DISCOVERY_LOG_QUERY: Final = (
@@ -449,6 +450,10 @@ def declaration_numbers(
             codes.append(f"pin_{label}_power_{power[spec.spec_sha256]['blocked']}")
     if not pins:
         codes.append("no_pins")
+    gate: dict[str, Any] | None = None
+    if hunt_id in hunt_gate.GATED_HUNTS:
+        gate, gate_codes = _gate_block(pins, by_candidate, by)
+        codes += gate_codes
 
     numbers = {
         **m_numbers,
@@ -464,7 +469,57 @@ def declaration_numbers(
         "forward_shadow": {"min_decision_dates": shadow_dates, "min_calendar_weeks": shadow_weeks},
     }
     pin_forms.sort(key=lambda pin: pin["spec_sha256"])
-    return {"pins": pin_forms, "numbers": numbers}, codes
+    body: dict[str, Any] = {"pins": pin_forms, "numbers": numbers}
+    if gate is not None:
+        body["hunt_gate"] = gate
+    return body, codes
+
+
+def _gate_block(
+    pins: Sequence[TrialSpec], by_candidate: Mapping[str, _DiscoveryOutcome], by: hunt_inference.ByReadout
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """#3454 "Flag → validation declaration": the ``hunt_gate`` block on the pin's discovery
+    outcome (for hunt 3, the inherited one). A gated hunt pins exactly one candidate."""
+    if len(pins) != 1:
+        return None, ["gate_needs_one_pin"]
+    (spec,) = pins
+    discovery = by_candidate.get(spec.candidate_sha256)
+    grid = hh.split_grid("validation", lag=spec.lag, h=spec.h)
+    if discovery is None or isinstance(grid, StatRefused):
+        # Already refused as ``pin_*_no_discovery_outcome`` / ``pin_*_power_target_*``.
+        return None, []
+    tracker = discovery.statistics.get("tracker")
+    series = tracker.get("canonical_excess_series") if isinstance(tracker, Mapping) else None
+    source = hh.HUNT_INHERITED_DISCOVERY.get(spec.hunt_id)
+    inheritance: dict[str, Any] = {
+        "discovery_hunt_trial_id": discovery.hunt_trial_id,
+        "discovery_outcome_sha256": discovery.outcome_sha256,
+        "harness_model_id": hh.HUNT_HARNESS_MODEL_ID,
+    }
+    if source is not None:
+        inheritance["source_hunt_id"] = source.source_hunt_id
+    return hunt_gate.gate_block(
+        discovery.statistics,
+        by_flagged=discovery.status != "abandoned" and discovery.hunt_trial_id in by.flagged,
+        excess_power=power_statement(series, target_observations=len(grid.sessions), h=spec.h),
+        significance_lag=hunt_inference.hunt_lag(len(grid.sessions), spec.h),
+        inheritance=inheritance,
+        pins=hunt_gate.decision_pins(),
+    )
+
+
+def _substantive(code: str) -> bool:
+    """#3454 "Flag drift": a refusal that closes a gated hunt. Everything else is procedural
+    (fixed, then retried on the snapshot current at the retry)."""
+    return (
+        code.startswith(hunt_gate.SUBSTANTIVE_PREFIX)
+        or code.startswith("inherited_discovery_invalid:")
+        or code.endswith("_stale_harness_model")
+    )
+
+
+def _lineage_of_pins(pins: Sequence[TrialSpec]) -> str | None:
+    return next((lin for spec in pins if (lin := hh.lineage_of(spec.family, spec.signal_code_sha256))), None)
 
 
 def _discovery_completeness(conn: psycopg.Connection[Any], hunt_id: str) -> list[str]:
@@ -656,6 +711,10 @@ def freeze_validation_declaration(
         frozen = _frozen_declarations(conn)
         # Closure is read under the programme lock (spec "Budget and closure").
         codes = ["hunt_closed"] if hunt_id in hh.HUNT_CLOSED else []
+        lineage = _lineage_of_pins(pins)
+        terminal = hh.terminal_refusal(conn, hunt_id=hunt_id, lineage=lineage)
+        if terminal is not None:
+            codes.append("hunt_terminal")
         codes += _gate_codes(hunt_id)
         codes += tripwire(
             conn,
@@ -669,7 +728,26 @@ def freeze_validation_declaration(
         codes += _discovery_completeness(conn, hunt_id)
         body, number_codes = declaration_numbers(conn, hunt_id=hunt_id, pins=pins, register=register)
         codes += number_codes
-        codes += _stale_keys(_document(hunt_id, body), doc)
+        recomputed = _document(hunt_id, body)
+        if hunt_id in hunt_gate.GATED_HUNTS:
+            # Per key, so a stale gate VALUE (substantive) is told apart from stale decision
+            # pins (procedural before the freeze: nothing has been looked at yet).
+            if "hunt_gate" in recomputed:
+                codes += hunt_gate.freeze_codes(recomputed["hunt_gate"], doc.get("hunt_gate"))
+            recomputed = {key: value for key, value in recomputed.items() if key != "hunt_gate"}
+            doc_rest = {key: value for key, value in doc.items() if key != "hunt_gate"}
+            codes += _stale_keys(recomputed, doc_rest)
+            substantive = [code for code in codes if _substantive(code)]
+            if substantive and terminal is None:
+                conn.rollback()
+                hh.write_terminal(
+                    conn,
+                    hunt_id=hunt_id,
+                    lineage=lineage,
+                    reason=f"validation freeze refused: {'; '.join(substantive)}",
+                )
+        else:
+            codes += _stale_keys(recomputed, doc)
         return _write_frozen(
             conn,
             codes=codes,
@@ -1011,6 +1089,16 @@ def _validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> Validati
     if loaded is None:
         raise hh.HuntHarnessError(f"{hh.declaration_strategy_id(hunt_id, 'validation')} has not frozen")
     frozen, declaration = loaded
+    if hunt_id in hunt_gate.GATED_HUNTS:
+        gate_codes = hunt_gate.look_codes(declaration.doc, harness_model_id=hh.HUNT_HARNESS_MODEL_ID)
+        if gate_codes:
+            hh.write_terminal(
+                conn,
+                hunt_id=hunt_id,
+                lineage=_lineage_of_pins([TrialSpec.from_form(pin["spec"]) for pin in declaration.doc["pins"]]),
+                reason=f"validation readout refused: {', '.join(gate_codes)}",
+            )
+            raise HuntDeclarationRefused(hunt_id, gate_codes)
     variance, m, m_is_floor, register_version, late = _declaration_context(conn, declaration)
     candidates: list[CandidateReadout] = []
     for pin in declaration.doc["pins"]:
@@ -1117,6 +1205,9 @@ def holdout_declaration_numbers(
 
     ⚠ Read in the caller's snapshot, under the programme lock.
     """
+    if hunt_id in hunt_gate.GATED_HUNTS:
+        # #3454 "Lineage closure": a gated hunt's validation look is its lineage's last.
+        return {}, ["lineage_closed"]
     loaded = _load_frozen(conn, hunt_id, "validation")
     if loaded is None:
         return {}, ["validation_not_frozen"]
