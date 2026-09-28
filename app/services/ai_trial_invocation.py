@@ -25,6 +25,7 @@ Nothing here retries. One call per run; a failed call is a refused run (spec §3
 from __future__ import annotations
 
 import json
+import logging
 import os
 import selectors
 import signal
@@ -38,12 +39,16 @@ from typing import Any, Final, Literal
 
 from app.services.ai_trial_decision import StrictJSONError, strict_json_loads
 
+logger = logging.getLogger(__name__)
+
 TRIAL_MODEL_ID: Final = "claude-opus-5-5"
 EXPECTED_INIT_TOOLS: Final = ("StructuredOutput",)
 EXPECTED_PERMISSION_MODE: Final = "default"
 MODEL_TIMEOUT_SECONDS: Final = 600.0
 #: Combined stdout + stderr cap (O4).
 OUTPUT_CAP_BYTES: Final = 2 * 1024 * 1024
+#: How long to wait for the kernel to reap a SIGKILLed child before giving up on it.
+REAP_TIMEOUT_SECONDS: Final = 10.0
 
 #: Measured 2026-09-28 with ``env -i``: PATH + HOME alone gives "Not logged in"; these five
 #: authenticate. Nothing else crosses — in particular no DB URL and no broker variable.
@@ -226,7 +231,12 @@ def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError, PermissionError:
             pass
-    proc.wait()
+    try:
+        proc.wait(timeout=REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # SIGKILL cannot interrupt uninterruptible sleep. Never block the job on it: the run is
+        # already refused, and the orphan is left to the job runner's next-run sweep (slice 2).
+        logger.error("ai-trial model pid %s not reaped %ss after SIGKILL", proc.pid, REAP_TIMEOUT_SECONDS)
 
 
 def invoke_model(
@@ -325,6 +335,8 @@ def invoke_model(
                 # Any unexpected exception above still reaps the tree before propagating.
                 _kill_tree(proc)
             writer.join(timeout=1.0)
+            if writer.is_alive():
+                logger.warning("ai-trial stdin writer for pid %s still blocked after the call ended", proc.pid)
 
     exit_code = proc.returncode
     refusal: InvocationRefusal | None = check.refusal
