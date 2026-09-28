@@ -9,6 +9,7 @@ import pytest
 
 from app.providers.market_data import IntradayBar
 from app.services import ai_trial_pack_reader as r
+from app.services.ai_trial_pack import ShortlistCandidate
 
 AS_OF = datetime(2026, 10, 2, 23, 30, tzinfo=UTC)
 
@@ -79,3 +80,11 @@ def test_select_intraday_keeps_completed_bars_inside_the_window() -> None:
 )
 def test_select_intraday_refusals(bars: list[IntradayBar], requested: int, sessions: int, reason: str) -> None:
     assert r.select_intraday(bars, as_of=AS_OF, requested=requested, sessions_in_window=sessions) == reason
+
+
+def test_a_shared_symbol_drops_every_copy() -> None:
+    def cand(i: int, symbol: str) -> ShortlistCandidate:
+        return ShortlistCandidate(i, symbol, Decimal("10"), Decimal("10.01"), AS_OF, 1.0, None)
+
+    kept = r.drop_symbol_collisions([cand(1, "AAA"), cand(2, "BBB"), cand(3, "AAA")])
+    assert [c.instrument_id for c in kept] == [2]

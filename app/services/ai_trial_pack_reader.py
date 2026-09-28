@@ -210,6 +210,21 @@ def _market_cap(conn: Conn, instrument_id: int, valuation_cap: object) -> Decima
     return _decimal(overlaid["market_cap_live"]) if overlaid is not None else None
 
 
+def drop_symbol_collisions(candidates: Sequence[ShortlistCandidate]) -> list[ShortlistCandidate]:
+    """Every candidate whose symbol another candidate shares, removed — both copies.
+
+    ``instruments.symbol`` is not unique (sql/043), and the model answers with a symbol that
+    §6 maps back to an instrument id. Picking one listing would be a guess; dropping the
+    symbol fails closed. (None exist among tradable ``us_equity`` names on 2026-09-28.)"""
+    counts: dict[str, int] = {}
+    for c in candidates:
+        counts[c.symbol] = counts.get(c.symbol, 0) + 1
+    dropped = sorted(s for s, n in counts.items() if n > 1)
+    if dropped:
+        logger.warning("ai_trial shortlist: dropping colliding symbols %s", dropped)
+    return [c for c in candidates if counts[c.symbol] == 1]
+
+
 def read_shortlist(conn: Conn, *, step1: Step1) -> Shortlist:
     """The §3.1 shortlist at ``as_of``: tradable ``us_equity`` names scored in the recorded run.
 
@@ -247,6 +262,7 @@ def read_shortlist(conn: Conn, *, step1: Step1) -> Shortlist:
             )
             for r in cur.fetchall()
         ]
+        candidates = drop_symbol_collisions(candidates)
         eligible_ids = [c.instrument_id for c in candidates if is_eligible(c, as_of=step1.as_of)]
         cur.execute(
             "SELECT instrument_id, market_cap_live FROM instrument_valuation "
@@ -507,7 +523,6 @@ def assemble_pack(
                 "symbol": name.symbol,
                 "instrument_id": name.instrument_id,
                 "slice": name.slice,
-                "market_cap_usd": name.market_cap_usd,
                 "bars": [_bar_json(d, r) for d, r in zip(series.dates, rows[-len(series) :], strict=True)][
                     -PROMPT_BARS:
                 ],
@@ -537,7 +552,9 @@ def assemble_pack(
         "crowd_snapshot_id": step1.crowd_snapshot_id,
         "eligible_count": shortlist.eligible_count,
         "shortlist": [
-            {"symbol": n.symbol, "instrument_id": n.instrument_id, "slice": n.slice} for n in shortlist.names
+            # The cap that admitted a small-cap name, kept here so an INCOMPLETE one stays auditable.
+            {"symbol": n.symbol, "instrument_id": n.instrument_id, "slice": n.slice, "market_cap_usd": n.market_cap_usd}
+            for n in shortlist.names
         ],
         "incomplete": incomplete,
         "account": {
