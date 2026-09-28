@@ -119,7 +119,11 @@ def _stuck_edit(conn: Conn, broker: Any, at: datetime) -> None:
 
     broker.edit_demo_strategy_position.side_effect = _edit
     assert _manage(conn, broker, at)[0] == "submitted"
-    conn.execute("UPDATE strategy_position_operations SET submitted_at = %s", (at,))
+    conn.execute(
+        "UPDATE strategy_position_operations SET submitted_at = %s "
+        "WHERE operation_type = 'fixed_exit_repair' AND status = 'submitted'",
+        (at,),
+    )
     conn.commit()
 
 

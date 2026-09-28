@@ -1521,7 +1521,8 @@ def manage_owned_position(
             )
             if supersede is None:
                 return resumed
-            assert resumed.position_operation_id is not None
+            if resumed.position_operation_id is None:
+                raise StrategyPositionManagerError("a pending resumed edit must name its operation")
             # `reconcile_required`, never `rejected`: the broker accepted this edit and may yet
             # apply it, and an applied edit must never be recorded as rejected (#3284).
             with conn.transaction():
