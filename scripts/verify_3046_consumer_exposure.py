@@ -271,6 +271,14 @@ INVENTORY: tuple[Occurrence, ...] = (
         "loads the SPY series only; its exposure is the benchmark section of the report",
     ),
     Occurrence(
+        "app/services/ranking_ablation_reader.py",
+        420,
+        "_REGIME_BENCHMARK_SQL (#1822 regime labels)",
+        "WINDOWED",
+        ("benchmark_propagation",),
+        "MarketRegimeProvider.load's SPY read, registered in route F's query registry; same exposure",
+    ),
+    Occurrence(
         "app/services/research_comparator_snapshot.py", 318, "comparator bars", "WINDOWED", ("comparator_series",)
     ),
     Occurrence(

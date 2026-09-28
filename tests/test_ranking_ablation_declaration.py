@@ -154,7 +154,7 @@ def test_register_mapping_is_one_entry_per_sidecar(sidecar_dir: Path) -> None:
     entry = terms.expected_register_entry(sidecar)
     assert entry.searches == 96
     assert entry.evidence.endswith("pinned_specs=96")
-    base = TRIAL_REGISTER.trials
+    base = tuple(trial for trial in TRIAL_REGISTER.trials if not trial.trial_id.startswith(terms.STRATEGY_ID))
     ok = TrialRegister(version="t", trials=(*base, entry))
     assert terms.register_refusals([sidecar], ok) == ()
     assert terms.register_refusals([sidecar], TrialRegister(version="t", trials=base)) == (
@@ -168,10 +168,14 @@ def test_register_mapping_is_one_entry_per_sidecar(sidecar_dir: Path) -> None:
 def test_committed_sidecars_and_register_agree() -> None:
     """Integrity of every committed sidecar, and its entry. Coherence is checked for the selected one only."""
     sidecars = terms.load_sidecars()
+    assert sidecars, "no committed terms sidecar"
     assert terms.register_refusals(sidecars, TRIAL_REGISTER) == ()
     selected = terms.select_sidecar(terms.semantic_terms(), sidecars)
-    if not isinstance(selected, str):
-        assert declaration_refusals(terms.build_declaration(selected)) == ()
+    # Exactly one committed sidecar declares today's terms: the selection rule for --freeze/--readout.
+    assert isinstance(selected, terms.Sidecar), selected
+    assert declaration_refusals(terms.build_declaration(selected)) == ()
+    declaration = terms.build_declaration(selected)
+    assert TRIAL_REGISTER.trial_for_declaration(declaration.strategy_id, declaration.strategy_version) is not None
 
 
 # --- Query registry and the sealed-outcome boundary -------------------------
@@ -572,3 +576,75 @@ def test_main_freeze_exit_code_is_the_freeze_code(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(script, "freeze", lambda _conn, *, dry_run: (code, {"outcome": "x"}))
     assert script.main(["--freeze"]) == expected
     assert script.main(["--freeze", "--dry-run"]) == expected
+
+
+# --- Descriptives (slice 1b-ii-b) --------------------------------------------
+
+
+def test_descriptives_report_funnel_sizes_deployment_and_turnover() -> None:
+    inputs = _inputs()
+    described = readout.evaluate(inputs, "canonical", prospective_after=None)["descriptive"]
+    first = described["funnel"][0]
+    assert (first["ranked"], first["lane_and_valid"], first["bars_present"], first["control"]) == (10, 10, 10, 10)
+    assert first["bar_rule"] == {}
+    assert [row["size"] for row in described["book_sizes"]["control"]] == [10] * 10
+    assert described["book_sizes"]["arm_full"][0]["never_entered"] == 0
+    # Identical scores every run: the arm never changes.
+    assert described["turnover_mean"]["arm_full"] == 0.0
+    assert described["carried_v_position_sessions"]["control"] == 0
+    shares = [row["deployed_share"] for row in described["deployed_share"]]
+    assert shares[0] == 1 / ra.H and max(shares) == 10 / ra.H
+
+
+def test_funnel_names_the_verbatim_volume_reason() -> None:
+    described = readout.evaluate(_inputs(volume=None), "verbatim_bar_rule", prospective_after=None)
+    assert described["refused"] == "empty_grid"
+    canonical = readout.evaluate(_inputs(volume=None), "canonical", prospective_after=None)["descriptive"]
+    assert canonical["funnel"][0]["bar_rule"] == {}
+
+
+def test_yield_tilt_is_refused_without_yields_and_signed_with_them() -> None:
+    inputs = _inputs()
+    assert (
+        readout.evaluate(inputs, "canonical", prospective_after=None)["descriptive"]["yield_tilt"]["quality"]["refused"]
+        == "no_formation_with_yields"
+    )
+    with_yields = replace(inputs, yields={iid: float(iid) for iid in range(10)})
+    tilt = readout.evaluate(with_yields, "canonical", prospective_after=None)["descriptive"]["yield_tilt"]
+    # Dropping quality selects the high-momentum (low-id, low-yield) names instead.
+    assert tilt["quality"]["mean_tilt_pct"] > 0
+    assert tilt["value"]["mean_tilt_pct"] == 0.0
+
+
+def test_regime_split_appears_only_across_two_labels() -> None:
+    inputs = _inputs()
+    one = replace(inputs, regimes=dict.fromkeys(inputs.sessions, "bull_quiet"))
+    result = readout.evaluate(one, "canonical", prospective_after=None)
+    assert result["families"]["quality"]["regime_split"] is None
+    half = len(inputs.sessions) // 2
+    two = replace(
+        inputs, regimes={d: ("bull_quiet" if i < 40 else "bear_volatile") for i, d in enumerate(inputs.sessions)}
+    )
+    split = readout.evaluate(two, "canonical", prospective_after=None)["families"]["quality"]["regime_split"]
+    assert set(split) == {"bear_volatile", "bull_quiet"} and half > 0
+    refused = readout.evaluate(replace(inputs, regimes="benchmark_ambiguous"), "canonical", prospective_after=None)
+    assert refused["regime_labels"] == {"refused": "benchmark_ambiguous"}
+
+
+def test_readout_writes_a_vintage_listing_only_unlisted_looks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    looks, vintages = tmp_path / "looks.jsonl", tmp_path / "v"
+    sidecar = terms.write_sidecar(terms.semantic_terms(), _facts(), tmp_path / "sc")
+    monkeypatch.setattr(script, "git_state", lambda: ("c" * 40, False))
+    monkeypatch.setattr(
+        script, "readout_gate", lambda _conn, *, dirty: script.Gate(sidecar, 7, datetime(2027, 1, 1, tzinfo=UTC))
+    )
+    monkeypatch.setattr(script, "load_inputs", lambda _conn, _day: _inputs())
+    monkeypatch.setattr(script, "scoring_commits", lambda _s, _u: ["2026-08-12 ac21f90d thesis quarantine"])
+    first = script.run_readout(None, _FACT_DAY, looks_path=looks, vintage_dir=vintages)  # type: ignore[arg-type]
+    second = script.run_readout(None, _FACT_DAY, looks_path=looks, vintage_dir=vintages)  # type: ignore[arg-type]
+    assert [look["uuid"] for look in first["looks"]] == [first["look"]["uuid"]]
+    assert [look["uuid"] for look in second["looks"]] == [second["look"]["uuid"]]
+    assert len(list(vintages.glob("vintage-*.json"))) == 2
+    stored = json.loads(Path(first["vintage_path"]).read_text())
+    assert stored["results"]["pooled"]["canonical"]["families"]["quality"]["canonical_lag"]
+    assert stored["scoring_py_commits"] == ["2026-08-12 ac21f90d thesis quarantine"]

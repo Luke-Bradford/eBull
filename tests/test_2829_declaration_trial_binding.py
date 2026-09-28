@@ -288,9 +288,13 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
 
         r17 (2026-09-28, #3454) added ``hunt-3-validation`` (one pinned spec); the same
         command returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r18 (2026-09-28, #1822) added route F's declaration-backed entry (96 pinned
+        evaluations); the same command returned the same five groups, 488 rows, all
+        ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 381
-        assert len(TRIAL_REGISTER.trials) == 45
+        assert TRIAL_REGISTER.declared_count == 477
+        assert len(TRIAL_REGISTER.trials) == 46
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

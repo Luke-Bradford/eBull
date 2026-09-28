@@ -190,7 +190,13 @@ from typing import Final
 #: 3's one-pin validation batch (`docs/hunts/hunt-3-validation.json`). M_inh excludes it,
 #: so the inherited floor stays 378. Measured the same way before the bump: the SAME five
 #: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r17"
+#:
+#: r18 (2026-09-28, #1822) adds `ranking-ablation-1822-route-f-<sha256>`, route F's
+#: declaration-backed entry: 96 evaluations (8 books x 6 evaluations x 2 populations) pinned by
+#: one terms sidecar. Not a `hunt-` entry, so it counts in M_inh: 378 -> 474. Raising M is the
+#: conservative direction. Measured the same way before the bump: the SAME five groups, 488
+#: rows, every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r18"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1256,6 +1262,26 @@ TRIAL_REGISTER: Final = TrialRegister(
             exactness=TrialExactness.EXACT,
             searches=1,
             declared_for=("hunt-3-validation", "v1"),
+        ),
+        DeclaredTrial(
+            # ``ranking_ablation_terms.expected_register_entry``; a test pins the two equal.
+            trial_id="ranking-ablation-1822-route-f-ee86663bbe6ee9c2400200c20332972898ba11358aca243da70f3a1605fa70c6",
+            description=(
+                "#1822 route F: the v1.5 family ablation over stored scores under terms sidecar "
+                "ee86663bbe6e…, 96 evaluations (books x evaluations x populations)."
+            ),
+            # ``scripts/run_1822_ablation_readout.py --terms --readout-date 2026-09-28`` on the dev DB.
+            evidence=declaration_backed_evidence(
+                declaration_path="docs/proposals/ta/1822-route-f/terms-ee86663bbe6ee9c2400200c20332972898ba11358aca243da70f3a1605fa70c6.json",
+                declaration_sha256="ee86663bbe6ee9c2400200c20332972898ba11358aca243da70f3a1605fa70c6",
+                pinned_specs=96,
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=96,
+            declared_for=(
+                "ranking-ablation-1822-route-f",
+                "v1.5-balanced+ee86663bbe6ee9c2400200c20332972898ba11358aca243da70f3a1605fa70c6",
+            ),
         ),
     ),
 )

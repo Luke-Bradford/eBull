@@ -281,9 +281,22 @@ def bar_valid(
     ⚠ The canonical passes a placeholder volume of 1 for a NULL so that ONLY the volume
     clause is bypassed; every other clause and its order stay :func:`bar_exclusion`'s.
     """
+    return bar_reason(open_, high, low, close, volume, verbatim=verbatim) == 0
+
+
+def bar_reason(
+    open_: Decimal | float | None,
+    high: Decimal | float | None,
+    low: Decimal | float | None,
+    close: Decimal | float | None,
+    volume: Decimal | float | None,
+    *,
+    verbatim: bool = False,
+) -> int:
+    """:func:`bar_exclusion`'s code under the control bar rule (0 = valid): the funnel's reason."""
     reported = _as_float(volume)
     checked = 1.0 if volume is None and not verbatim else reported
-    return bar_exclusion(_as_float(open_), _as_float(high), _as_float(low), _as_float(close), checked) == 0
+    return bar_exclusion(_as_float(open_), _as_float(high), _as_float(low), _as_float(close), checked)
 
 
 def t3_excluded(verdicts: Mapping[int, Sequence[TransitionVerdict]], *, start: date, end: date) -> frozenset[int]:
@@ -432,6 +445,7 @@ __all__ = [
     "RunMap",
     "ScoreRow",
     "ablation_books",
+    "bar_reason",
     "bar_valid",
     "delta_statistics",
     "entry_session",

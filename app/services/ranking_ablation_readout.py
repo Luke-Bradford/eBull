@@ -22,8 +22,9 @@ them into per-cell statistics and reads nothing itself.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -31,7 +32,7 @@ from typing import Any, Final
 from app.services import ranking_ablation as ra
 from app.services import ranking_ablation_reader as reader
 from app.services.cost_model import cost_band_for
-from app.services.hunt_evaluator import Book, HalfSpread, SeriesPrices, select_arm
+from app.services.hunt_evaluator import Book, Grid, HalfSpread, SeriesPrices, select_arm
 from app.services.hunt_harness import HUNT_TARIFF
 from app.services.hunt_inference import MIN_ARM_FORMATIONS, SHORT_SAMPLE_LAGS, StatRefused, hunt_lag, sparse_arm_count
 from app.services.r6_exclusion_trial import PROGRAMME_POLICIES, TerminationPolicy
@@ -67,6 +68,10 @@ class Inputs:
     cutoff: date
     series: Mapping[int, reader.ReadSeries]
     termination: Mapping[int, TerminationClass]
+    #: ``ttm_yield_pct`` at readout time (the yield-tilt diagnostic); absent = no summary row.
+    yields: Mapping[int, float | None] = field(default_factory=dict)
+    #: The benchmark's causal regime per date, or the reason it could not be classified.
+    regimes: Mapping[date, str | None] | str = field(default_factory=dict)
 
 
 def series_prices(
@@ -262,7 +267,227 @@ def evaluate(inputs: Inputs, evaluation: str, *, prospective_after: datetime | N
             "symmetric_difference_max": max(symmetric, default=None),
         }
     out["families"] = families
+    out["descriptive"] = describe(inputs, grid, built, prices, runs=runs, cell=spec.cell, t3_names=t3_names)
+    out["regime_labels"], regime_of = _session_regimes(inputs, grid)
+    for family, delta_out in families.items():
+        ablated = books.ablated[family]
+        if not isinstance(ablated, StatRefused):
+            delta_out["regime_split"] = _regime_split(ra.paired_delta(full, ablated), regime_of)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Descriptives: reported beside the statistics, never deciding anything
+# ---------------------------------------------------------------------------
+
+#: ``hunt_compute.bar_exclusion``'s codes, in its rule order.
+BAR_REASONS: Final = {
+    1: "non_positive_ohlc",
+    2: "low_above_body",
+    3: "high_below_body",
+    4: "volume",
+    5: "high_not_above_low",
+}
+
+
+def _book_arms(built: Formations) -> dict[str, dict[int, frozenset[int]]]:
+    """book → formation → members, for ``arm_full``, every ``arm_-f`` and the control."""
+    arms: dict[str, dict[int, frozenset[int]]] = {
+        "arm_full": {t: _arm(built.keys[t][None], control) for t, control in built.control.items()}
+    }
+    for family in ra.FAMILY_ORDER:
+        arms[f"arm_-{family}"] = {t: _arm(built.keys[t][family], control) for t, control in built.control.items()}
+    arms["control"] = dict(built.control)
+    return arms
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    return math.fsum(values) / len(values) if values else None
+
+
+def describe(
+    inputs: Inputs,
+    grid: Grid,
+    built: Formations,
+    prices: Mapping[int, SeriesPrices],
+    *,
+    runs: Mapping[date, ra.Run],
+    cell: str,
+    t3_names: frozenset[int],
+) -> dict[str, Any]:
+    """The spec's descriptive items for one evaluation (Route F "Statistics", "Prices", "Grid")."""
+    sessions = inputs.sessions
+    index = {day: ordinal for ordinal, day in enumerate(sessions)}
+    by_day = {iid: {bar.price_date: bar for bar in read.masked} for iid, read in inputs.series.items()}
+    arms = _book_arms(built)
+
+    def entered(name: int, t: int) -> bool:
+        return prices[name].price(t + ra.LAG, "open") is not None
+
+    def hold_end(name: int, t: int) -> int:
+        x = t + ra.LAG + ra.H - 1
+        terminal = prices[name].terminal_ordinal
+        return x if terminal is None else min(x, terminal)
+
+    # The funnel: every grid formation with a run, active or idle.
+    funnel = []
+    for t in grid.formations:
+        run = runs.get(sessions[t + ra.LAG])
+        if run is None:
+            continue
+        rows = inputs.population.runs[run.scored_at]
+        excluded = inputs.population.excluded_by_run.get(run.scored_at, {})
+        t3 = [iid for iid in rows if cell == "t3_excluded" and iid in t3_names]
+        present = [iid for iid in rows if iid not in t3 and sessions[t] in by_day.get(iid, {})]
+        reasons: Counter[str] = Counter()
+        for iid in present:
+            bar = by_day[iid][sessions[t]]
+            code = ra.bar_reason(
+                bar.open, bar.high, bar.low, bar.close, bar.volume, verbatim=cell == "verbatim_bar_rule"
+            )
+            if code:
+                reasons[BAR_REASONS[code]] += 1
+        funnel.append(
+            {
+                "formation": sessions[t],
+                "ranked": len(rows) + sum(excluded.values()),
+                "excluded": dict(excluded),
+                "lane_and_valid": len(rows),
+                "t3_excluded": len(t3),
+                "bars_present": len(present),
+                "bar_rule": dict(reasons),
+                "control": len(built.control.get(t, ())),
+            }
+        )
+
+    sizes = {
+        book: [
+            {"formation": sessions[t], "size": len(members), "never_entered": sum(not entered(i, t) for i in members)}
+            for t, members in sorted(by_t.items())
+        ]
+        for book, by_t in arms.items()
+    }
+    turnover: dict[str, float | None] = {}
+    carried: dict[str, int] = {}
+    for book, by_t in arms.items():
+        ordered = sorted(by_t)
+        turnover[book] = _mean(
+            [1.0 - len(by_t[now] & by_t[before]) / len(by_t[now]) for before, now in zip(ordered, ordered[1:])]
+        )
+        carried[book] = sum(
+            1
+            for t, members in by_t.items()
+            for name in members
+            if entered(name, t)
+            for s in range(t + ra.LAG, hold_end(name, t) + 1)
+            if prices[name].price(s, "close") is None
+        )
+    deployed = [
+        {
+            "session": sessions[d],
+            "deployed_share": sum(1 for k in range(ra.H) if d - ra.LAG - k in built.control) / ra.H,
+        }
+        for d in grid.sessions
+    ]
+
+    # Entered positions held across a computed T3 transition ("Prices" 1).
+    t3_held = []
+    for name, read in sorted(inputs.series.items()):
+        for transition in read.verdicts.transitions:
+            if "T3" not in transition.rules:
+                continue
+            before, after = index.get(transition.prior_date), index.get(transition.price_date)
+            if before is None or after is None:
+                continue
+            for book, by_t in arms.items():
+                for t, members in sorted(by_t.items()):
+                    if name in members and entered(name, t) and t + ra.LAG <= before and after <= hold_end(name, t):
+                        t3_held.append(
+                            {
+                                "book": book,
+                                "formation": sessions[t],
+                                "instrument_id": name,
+                                "prior_date": transition.prior_date,
+                                "price_date": transition.price_date,
+                                "ratio": None if transition.observed_ratio is None else str(transition.observed_ratio),
+                            }
+                        )
+
+    return {
+        "funnel": funnel,
+        "book_sizes": sizes,
+        "turnover_mean": turnover,
+        "carried_v_position_sessions": carried,
+        "deployed_share": deployed,
+        "t3_held": t3_held,
+        "yield_tilt": _yield_tilt(inputs.yields, arms, entered),
+    }
+
+
+def _yield_tilt(
+    yields: Mapping[int, float | None],
+    arms: Mapping[str, Mapping[int, frozenset[int]]],
+    entered: Any,
+) -> dict[str, Any]:
+    """Per family: mean over formations of (mean yield of arm_full's entered names − arm_-f's).
+
+    Read at readout time, not point-in-time; it neither signs nor bounds the omitted
+    dividends' effect on Δ ("Prices" 3).
+    """
+
+    def usable(value: float | None) -> bool:
+        return value is not None and math.isfinite(value)
+
+    out: dict[str, Any] = {}
+    for family in ra.FAMILY_ORDER:
+        tilts: list[float] = []
+        skipped = 0
+        missing: set[int] = set()
+        for t, full in arms["arm_full"].items():
+            means = []
+            for members in (full, arms[f"arm_-{family}"][t]):
+                held = [name for name in members if entered(name, t)]
+                missing.update(name for name in held if not usable(yields.get(name)))
+                means.append(
+                    _mean([value for name in held if (value := yields.get(name)) is not None and usable(value)])
+                )
+            if means[0] is None or means[1] is None:
+                skipped += 1
+            else:
+                tilts.append(means[0] - means[1])
+        out[family] = (
+            {"refused": "no_formation_with_yields", "formations_skipped": skipped, "names_without_yield": len(missing)}
+            if not tilts
+            else {
+                "mean_tilt_pct": _mean(tilts),
+                "formations": len(tilts),
+                "formations_skipped": skipped,
+                "names_without_yield": len(missing),
+            }
+        )
+    return out
+
+
+def _session_regimes(inputs: Inputs, grid: Grid) -> tuple[dict[str, Any], dict[int, str | None]]:
+    """Session d's label is the benchmark's regime on d − 1 (bars ≤ t only), or None."""
+    if isinstance(inputs.regimes, str):
+        return {"refused": inputs.regimes}, {}
+    regimes = inputs.regimes
+    of = {d: regimes.get(inputs.sessions[d - 1]) for d in grid.sessions}
+    return {"counts": dict(Counter(str(label) for label in of.values()))}, of
+
+
+def _regime_split(delta: Sequence[float], regime_of: Mapping[int, str | None]) -> dict[str, Any] | None:
+    """Per-label mean Δ (×252), only when the grid spans more than one label; no SE, no inference."""
+    labels = sorted({label for label in regime_of.values() if label is not None})
+    if len(labels) <= 1:
+        return None
+    ordered = list(regime_of.values())
+    split: dict[str, Any] = {}
+    for label in labels:
+        values = [d for d, value in zip(delta, ordered, strict=True) if value == label]
+        split[label] = {"sessions": len(values), "mean_annual": math.fsum(values) / len(values) * ra.ANNUALISATION}
+    return split
 
 
 def _boundary(population: str, frozen_at: datetime) -> datetime | None:
@@ -281,9 +506,11 @@ def readout(inputs: Inputs, *, frozen_at: datetime) -> dict[str, Any]:
 
 
 __all__ = [
+    "BAR_REASONS",
     "Evaluation",
     "Formations",
     "Inputs",
+    "describe",
     "evaluate",
     "formations",
     "parse_evaluation",

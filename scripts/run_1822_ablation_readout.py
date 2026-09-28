@@ -51,6 +51,14 @@ from app.services.series_termination import TerminationClass
 
 #: The look log (spec "Trial register"): a start record per readout, appended before any return is read.
 LOOKS_PATH: Final = terms.REPO_ROOT / "var" / "1822-route-f" / "looks.jsonl"
+#: Printed in every vintage: what the numbers are and are not (spec "Statistics", "Declaration").
+READOUT_HEADER: Final = (
+    "Descriptive readout, no inference: six families x two cost bases, every t is marginal and no multiplicity "
+    "correction is applied. Net only; between-slot rebalancing is uncosted in both books. Price-only (no "
+    "dividends). Retrospective before the freeze, prospective after. The recorded commit identifies the code; "
+    "it does not prove which bytes ran. Looks are listed from this checkout only; a final aborted run appears "
+    "in the next vintage, or in none."
+)
 #: Confidence's neutral value (spec "Premise check"). A thesis can also score exactly this, so
 #: the share of rows AT it is reported beside, never instead of, the writer's branch record.
 _NEUTRAL_CONFIDENCE = 0.5
@@ -436,7 +444,31 @@ def load_inputs(conn: psycopg.Connection[Any], readout_date: date) -> readout_mo
         cutoff=timeline.cutoff,
         series=series,
         termination=termination,
+        yields=reader.load_yields(conn, names),
+        regimes=reader.load_regimes(conn),
     )
+
+
+def scoring_commits(since: date, until: date) -> list[str]:
+    """Every commit touching ``scoring.py`` in the window, as dated markers; the readout does not split on them."""
+    return subprocess.run(
+        ["git", "log", f"--since={since}", f"--until={until}", "--format=%cs %h %s", "--", "app/services/scoring.py"],
+        cwd=terms.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+
+def unlisted_looks(looks_path: Path, trial_id: str, vintage_dir: Path) -> list[dict[str, Any]]:
+    """Start records for ``trial_id`` whose uuid no earlier vintage lists, aborted ones included."""
+    listed = {
+        look["uuid"]
+        for path in sorted(vintage_dir.glob("vintage-*.json"))
+        for look in json.loads(path.read_text()).get("looks", [])
+    }
+    records = [json.loads(line) for line in looks_path.read_text().splitlines() if line.strip()]
+    return [record for record in records if record["trial_id"] == trial_id and record["uuid"] not in listed]
 
 
 def vintage_identity(inputs: readout_mod.Inputs) -> dict[str, Any]:
@@ -446,10 +478,19 @@ def vintage_identity(inputs: readout_mod.Inputs) -> dict[str, Any]:
         "quarantine_rule_set_version": QUARANTINE_RULE_SET_VERSION,
         "population_rows_sha256": inputs.population.rows_sha256,
         "excluded_rows": inputs.population.excluded_rows,
-        "entries": {entry: [run.scored_at, run.known_at] for entry, run in sorted(inputs.run_map.entries.items())},
+        "entries": {
+            entry.isoformat(): [run.scored_at, run.known_at] for entry, run in sorted(inputs.run_map.entries.items())
+        },
         "superseded_runs": [run.scored_at for run in inputs.run_map.superseded],
         "beyond_calendar_runs": [run.scored_at for run in inputs.run_map.beyond_calendar],
         "termination_classes": {iid: str(c) for iid, c in sorted(inputs.termination.items())},
+        "yield_snapshot": {iid: y for iid, y in sorted(inputs.yields.items())},
+        "regime_benchmark": inputs.regimes
+        if isinstance(inputs.regimes, str)
+        else {
+            "classified_days": sum(1 for v in inputs.regimes.values() if v is not None),
+            "last": max(inputs.regimes, default=None),
+        },
     }
 
 
@@ -459,7 +500,13 @@ def _append_look(handle: Any, record: dict[str, Any]) -> None:
     os.fsync(handle.fileno())
 
 
-def run_readout(conn: psycopg.Connection[Any], readout_date: date, *, looks_path: Path = LOOKS_PATH) -> dict[str, Any]:
+def run_readout(
+    conn: psycopg.Connection[Any],
+    readout_date: date,
+    *,
+    looks_path: Path = LOOKS_PATH,
+    vintage_dir: Path = terms.SIDECAR_DIR,
+) -> dict[str, Any]:
     """Gate, then log the look, then read prices. A refused gate reads no price."""
     commit, dirty = git_state()
     gate = readout_gate(conn, dirty=dirty)
@@ -483,16 +530,28 @@ def run_readout(conn: psycopg.Connection[Any], readout_date: date, *, looks_path
         inputs = load_inputs(conn, readout_date)
         if isinstance(inputs, str):
             return {"outcome": "refused", "reason": inputs, "look": look}
-        return {
+        results = readout_mod.readout(inputs, frozen_at=gate.frozen_at)
+        pooled_start = results["pooled"]["canonical"].get("first_formation", inputs.cutoff)
+        record = {
             "outcome": "read",
             "look": look,
             "declaration_id": gate.declaration_id,
             "frozen_at": gate.frozen_at,
             "sidecar": gate.sidecar.path,
+            "commit": commit,
+            "readout_date": readout_date,
             "cutoff_c_k": inputs.cutoff,
+            "header": READOUT_HEADER,
             "vintage": vintage_identity(inputs),
-            "results": readout_mod.readout(inputs, frozen_at=gate.frozen_at),
+            "looks": unlisted_looks(looks_path, ident.trial_id, vintage_dir),
+            "scoring_py_commits": scoring_commits(pooled_start, inputs.cutoff),
+            "results": results,
         }
+        path = vintage_dir / f"vintage-{readout_date}-{look['uuid'][:8]}.json"
+        vintage_dir.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as handle:  # never overwritten
+            handle.write(json.dumps(record, default=_json_default, indent=2, sort_keys=True) + "\n")
+        return {**record, "vintage_path": str(path)}
 
 
 def main(argv: list[str] | None = None) -> int:
