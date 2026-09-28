@@ -46,6 +46,7 @@ from app.services.etoro_websocket import (
     parse_rate_deltas,
     parse_rate_message,
     parse_rate_messages,
+    private_messages,
     upsert_quote,
 )
 
@@ -1437,6 +1438,139 @@ class TestListenResilience:
         assert [u.instrument_id for u in upsert_calls] == [1001]
         assert 2002 not in sub._rate_state._state
         assert set(sub._rate_state._state) <= set(sub._topic_refs)
+
+    async def test_private_push_is_recorded_before_reconcile(self) -> None:
+        """#3471: every private push is persisted at receipt, BEFORE the
+        reconcile it triggers; a private-topic message of an unlisted type
+        is recorded but triggers no reconcile."""
+        order: list[str] = []
+        recorded: list[list[tuple[int, dict[str, object]]]] = []
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+
+        def fake_record(messages: list[tuple[int, dict[str, object]]], received_at: datetime) -> None:
+            assert received_at.tzinfo is not None
+            order.append("record")
+            recorded.append(messages)
+
+        sub._sync_record_private = fake_record  # type: ignore[method-assign]
+        sub._schedule_reconcile = lambda: order.append("reconcile")  # type: ignore[method-assign]
+
+        unknown = json.dumps({"messages": [{"topic": "private", "type": "Trading.Something.New", "content": "{}"}]})
+        order_update = json.dumps(
+            {"messages": [{"topic": "private", "type": "Trading.OrderForOpen.Update", "content": "{}"}]}
+        )
+        await sub._listen(_ListFakeWs([unknown, order_update]))  # type: ignore[arg-type]
+
+        assert order == ["record", "record", "reconcile"]
+        assert [[m["type"] for _, m in msgs] for msgs in recorded] == [
+            ["Trading.Something.New"],
+            ["Trading.OrderForOpen.Update"],
+        ]
+
+    async def test_failed_private_record_still_reconciles_and_upserts(self) -> None:
+        upserts: list[QuoteUpdate] = []
+        reconciles: list[int] = []
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+
+        def failing_record(messages: list[tuple[int, dict[str, object]]], received_at: datetime) -> None:
+            raise psycopg.OperationalError("pool exhausted")
+
+        sub._sync_record_private = failing_record  # type: ignore[method-assign]
+        sub._schedule_reconcile = lambda: reconciles.append(1)  # type: ignore[method-assign]
+        sub._sync_upsert = upserts.append  # type: ignore[method-assign]
+        sub._topic_refs[1001] = 1
+
+        private = json.dumps({"type": "Trading.PositionUpdate", "data": {}})
+        rate = _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="100", Ask="101")
+        await sub._listen(_ListFakeWs([private, rate]))  # type: ignore[arg-type]
+
+        assert reconciles == [1]
+        assert [u.instrument_id for u in upserts] == [1001]
+
+    async def test_stop_drains_an_in_flight_private_write(self) -> None:
+        """Codex ckpt-2: cancelling the listener must not abandon an accepted
+        push — ``stop()`` waits for the write before the pool can close."""
+        release = threading.Event()
+        written: list[bool] = []
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+
+        def slow_record(messages: list[tuple[int, dict[str, object]]], received_at: datetime) -> None:
+            release.wait(5.0)
+            written.append(True)
+
+        sub._sync_record_private = slow_record  # type: ignore[method-assign]
+        sub._schedule_reconcile = lambda: None  # type: ignore[method-assign]
+
+        class _HangAfter(_ListFakeWs):
+            async def __anext__(self) -> str:
+                if not self._frames:
+                    await asyncio.Event().wait()
+                return self._frames.pop(0)
+
+        frame = json.dumps({"messages": [{"topic": "private", "type": "Trading.Position.Closed", "content": "{}"}]})
+        sub._task = asyncio.create_task(sub._listen(_HangAfter([frame])))  # type: ignore[arg-type]
+        while not sub._private_writes:
+            await asyncio.sleep(0.01)
+        threading.Timer(0.2, release.set).start()
+        await sub.stop()
+        assert written == [True]
+        assert not sub._private_writes
+
+
+class _ListFakeWs:
+    def __init__(self, frames: list[str]) -> None:
+        self._frames = frames
+
+    def __aiter__(self) -> _ListFakeWs:
+        return self
+
+    async def __anext__(self) -> str:
+        if not self._frames:
+            raise StopAsyncIteration
+        return self._frames.pop(0)
+
+
+class TestPrivateMessages:
+    def test_selects_private_topic_and_trigger_types_with_frame_index(self) -> None:
+        raw = json.dumps(
+            {
+                "messages": [
+                    {"topic": "instrument:1001", "type": "Trading.Instrument.Rate", "content": "{}"},
+                    {"topic": "private", "type": "Trading.Something.New", "content": "{}"},
+                    {"type": "Trading.Position.Closed", "content": "{}"},
+                    {"topic": "instrument:1002", "type": "Trading.Instrument.Rate", "content": "{}"},
+                ]
+            }
+        )
+        assert [i for i, _ in private_messages(raw)] == [1, 2]
+
+    def test_rate_only_and_malformed_frames_yield_nothing(self) -> None:
+        assert private_messages(_rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1", Ask="2")) == []
+        assert private_messages("not json") == []
 
 
 # ---------------------------------------------------------------------------

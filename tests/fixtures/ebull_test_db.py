@@ -499,6 +499,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "hunt_declarations",
     # #3454 slice B.
     "hunt_terminal",
+    # #3471 slice 2c-iii-c: no FK anywhere.
+    "broker_private_events",
 )
 
 # ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
@@ -56,6 +56,7 @@ from uuid import UUID
 import psycopg
 import psycopg_pool
 import websockets
+from psycopg.types.json import Jsonb
 from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed
 
@@ -538,11 +539,75 @@ def is_private_event(raw: str) -> bool:
     ``{"messages": [...]}`` envelope (the eToro v1 shape) as well
     as the top-level inner-message shape used by older fixtures.
     """
-    for msg in _iter_inner_messages(raw):
+    return any(_is_reconcile_trigger(msg) for msg in _iter_inner_messages(raw))
+
+
+def _is_reconcile_trigger(msg: dict[str, object]) -> bool:
+    msg_type = msg.get("type")
+    return isinstance(msg_type, str) and any(msg_type.startswith(p) for p in _PRIVATE_EVENT_PREFIXES)
+
+
+def private_messages(raw: str) -> list[tuple[int, dict[str, object]]]:
+    """``(message_index, inner message)`` for every private-channel push
+    in ``raw`` — the rows :func:`record_private_events` persists (#3471).
+
+    Wider than :func:`is_private_event`: a message counts if it arrived
+    on the ``private`` topic OR carries a reconcile-trigger type, so a
+    private event type we have not listed is still recorded. The index
+    is the message's position in the frame, rate ticks included.
+    """
+    return [
+        (i, msg)
+        for i, msg in enumerate(_iter_inner_messages(raw))
+        if msg.get("topic") == _PRIVATE_TOPIC or _is_reconcile_trigger(msg)
+    ]
+
+
+def record_private_events(
+    conn: psycopg.Connection[Any],
+    messages: list[tuple[int, dict[str, object]]],
+    *,
+    received_at: datetime,
+    environment: str,
+    frame_id: UUID,
+) -> None:
+    """Append ``messages`` (one frame's) to ``broker_private_events``,
+    as served. ``content`` is the parsed ``content`` string, or NULL
+    when it is absent or not JSON (sql/437)."""
+    rows = []
+    for index, msg in messages:
+        # ``parsed`` is None only when there is nothing to parse; a valid
+        # JSON ``null`` becomes ``Jsonb(None)``, i.e. JSONB null, not SQL NULL.
+        content_raw = msg.get("content")
+        parsed: Jsonb | None = None
+        if isinstance(content_raw, str):
+            try:
+                parsed = Jsonb(json.loads(content_raw))
+            except json.JSONDecodeError:
+                parsed = None
+        topic = msg.get("topic")
         msg_type = msg.get("type")
-        if isinstance(msg_type, str) and any(msg_type.startswith(p) for p in _PRIVATE_EVENT_PREFIXES):
-            return True
-    return False
+        rows.append(
+            (
+                received_at,
+                environment,
+                frame_id,
+                index,
+                topic if isinstance(topic, str) else None,
+                msg_type if isinstance(msg_type, str) else None,
+                Jsonb(msg),
+                parsed,
+            )
+        )
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO broker_private_events
+                (received_at, environment, frame_id, message_index, topic, message_type, message, content)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            rows,
+        )
 
 
 def parse_rate_message(raw: str) -> QuoteUpdate | None:
@@ -915,6 +980,12 @@ class EtoroWebSocketSubscriber:
         # immediately before every death.
         self._pending_acks: dict[str, tuple[str, int, float]] = {}
 
+        # In-flight private-event writes (#3471). Shielded from the
+        # listener's cancellation and drained by ``stop()`` before the
+        # lifespan closes the pool, so an accepted broker push is not
+        # lost to shutdown.
+        self._private_writes: set[asyncio.Task[None]] = set()
+
     def _default_watched_ids(self) -> list[int]:
         with self._pool.connection() as conn:
             return fetch_watched_instrument_ids(conn)
@@ -1020,6 +1091,11 @@ class EtoroWebSocketSubscriber:
             upsert_quote(conn, update)
             conn.commit()
 
+    def _sync_record_private(self, messages: list[tuple[int, dict[str, object]]], received_at: datetime) -> None:
+        with self._pool.connection() as conn:
+            record_private_events(conn, messages, received_at=received_at, environment=self._env, frame_id=uuid.uuid4())
+            conn.commit()
+
     async def start(self) -> None:
         if self._task is not None:
             return
@@ -1044,6 +1120,21 @@ class EtoroWebSocketSubscriber:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+        # The listener is gone; its shielded private-event writes may not be.
+        pending_writes = list(self._private_writes)
+        if pending_writes:
+            done, still_running = await asyncio.wait(pending_writes, timeout=30.0)
+            for write in done:
+                if not write.cancelled() and write.exception() is not None:
+                    logger.error(
+                        "EtoroWebSocketSubscriber: private event record failed during shutdown",
+                        exc_info=write.exception(),
+                    )
+            if still_running:
+                logger.warning(
+                    "EtoroWebSocketSubscriber: %d private event write(s) still running after 30s shutdown wait",
+                    len(still_running),
+                )
         if self._rest_poll_task is not None:
             self._rest_poll_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1536,8 +1627,25 @@ class EtoroWebSocketSubscriber:
             # rejected on the first key check for a rate frame.
             self._resolve_acks(raw)
 
-            if is_private_event(raw):
-                self._schedule_reconcile()
+            # #3471: persist every private push raw, BEFORE the reconcile
+            # it triggers, stamped at receipt. A failed write is logged at
+            # ERROR and does not stop the reconcile or the rate path.
+            private = private_messages(raw)
+            if private:
+                received_at = datetime.now(UTC)
+                write = asyncio.create_task(asyncio.to_thread(self._sync_record_private, private, received_at))
+                self._private_writes.add(write)
+                write.add_done_callback(self._private_writes.discard)
+                try:
+                    await asyncio.shield(write)
+                except Exception:
+                    logger.error(
+                        "EtoroWebSocketSubscriber: private event record failed (%d messages)",
+                        len(private),
+                        exc_info=True,
+                    )
+                if any(_is_reconcile_trigger(msg) for _, msg in private):
+                    self._schedule_reconcile()
             # #2252: parse to sparse deltas and merge onto per-instrument
             # state. Requiring a complete Bid+Ask payload — as this loop
             # did — discarded 58.1% of price-CHANGING pushes and left
