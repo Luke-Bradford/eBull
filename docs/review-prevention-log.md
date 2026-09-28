@@ -11656,3 +11656,13 @@ neighbouring container and match it.**
   ⚠ Fix the header BEFORE the first push. The pre-push smoke applies the migration to the dev DB, so any later
   edit trips the checksum guard.
 - Enforced in: this prevention log.
+
+### A module that versions itself by its own bytes is not a place to park a shared helper (#3471)
+
+- Failure: slice 2c-ii moved a 4-line `next_us_session` into `market_calendar.py` to share it. That module's
+  `RULE_SET_VERSION` is the SHA of its own file bytes, so the move re-keyed every frozen hash that embeds it: the
+  hunt harness model id and the ranking-ablation sidecars both failed at pre-push.
+- Prevention: before editing a module, `grep -n "read_bytes()).hexdigest" <file>`. If it self-hashes, an edit is a
+  version bump for every consumer, so put the helper elsewhere unless the rule itself changed.
+  (`git grep -ln "read_bytes()).hexdigest" -- app/services` lists them.)
+- Enforced in: the pre-push fast tier (`tests/test_hunt_door.py`, `tests/test_ranking_ablation_declaration.py`).

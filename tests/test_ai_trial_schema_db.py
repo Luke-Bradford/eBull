@@ -370,8 +370,9 @@ def test_leg_and_trade_links_bind_the_leg_identity(ebull_test_conn: Conn) -> Non
         ).fetchone()
         assert funding is not None
         row = ebull_test_conn.execute(
+            # `planned`: sql/435 links a trade to a trial leg only at allocation, as the executor does.
             "INSERT INTO strategy_trades (funding_decision_id, instrument_id, status) "
-            "VALUES (%s, %s, 'submitted') RETURNING strategy_trade_id",
+            "VALUES (%s, %s, 'planned') RETURNING strategy_trade_id",
             (funding[0], arm_instrument),
         ).fetchone()
         assert row is not None

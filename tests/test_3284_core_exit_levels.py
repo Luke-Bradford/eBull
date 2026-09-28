@@ -145,6 +145,8 @@ def _owned(*, is_core: bool) -> _OwnedPosition:
         structure_atr_multiple=None,
         quote_bid=Decimal("773.81"),
         quoted_at=None,
+        is_demo_trial=False,
+        exit_deadline_session=None,
     )
 
 

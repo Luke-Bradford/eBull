@@ -57,6 +57,7 @@ from app.providers.broker import (
     BrokerPositionExecution,
     BrokerProvider,
 )
+from app.services.ai_trial_deadline import trial_exit_deadline
 from app.services.strategy_control_plane import StrategyControlError, StrategyOwnershipError
 from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
 
@@ -719,9 +720,19 @@ def _apply_detail(
     )
     if purpose == "entry":
         trade_status = "open" if state == "resolved" else ("failed" if state == "rejected" else "submitted")
+        # #3471 §8: a trial leg's exit deadline is stamped in the SAME update that opens it, from
+        # the fill just recorded above; `sql/435` refuses an open trial trade without one.
+        deadline = None
+        if trade_status == "open":
+            try:
+                deadline = trial_exit_deadline(conn, strategy_trade_id=int(strategy_trade_id), entry_order_id=order_id)
+            except ValueError as exc:
+                raise StrategyReconciliationError(str(exc)) from exc
         conn.execute(
-            "UPDATE strategy_trades SET status = %s, updated_at = now() WHERE strategy_trade_id = %s",
-            (trade_status, strategy_trade_id),
+            "UPDATE strategy_trades SET status = %s, "
+            "exit_deadline_session = COALESCE(exit_deadline_session, %s), updated_at = now() "
+            "WHERE strategy_trade_id = %s",
+            (trade_status, deadline, strategy_trade_id),
         )
     return ReconciliationResult(
         order_id,
