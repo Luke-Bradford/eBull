@@ -104,6 +104,7 @@ PROMPT_TEMPLATE_SHA256: Final = _sha256(USER_PROMPT_TEMPLATE)
 
 def encode_pack(pack: Mapping[str, Any]) -> str:
     """The pack's canonical JSON with no ``<`` or ``>`` in it; ``json.loads`` gives the pack back."""
+    # Order-independent: neither escape contains the other's target character.
     return canonical_json(pack).replace("<", "\\u003c").replace(">", "\\u003e")
 
 
