@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS ai_trial_declarations (
     frozen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT ai_trial_declarations_columns_match_doc
-        CHECK (doc ->> 'strategy_id' = strategy_id AND doc ->> 'strategy_version' = strategy_version),
+        CHECK ((doc ->> 'strategy_id') IS NOT DISTINCT FROM strategy_id
+               AND (doc ->> 'strategy_version') IS NOT DISTINCT FROM strategy_version),
     -- O14: each strategy version is its own register entry and its own declaration.
     CONSTRAINT ai_trial_declarations_one_per_version UNIQUE (strategy_id, strategy_version)
 );
@@ -137,8 +138,8 @@ BEGIN
         IF NEW.to_state <> 'active' THEN
             RAISE EXCEPTION 'illegal transition % -> %', current_state, NEW.to_state;
         END IF;
-        IF NEW.actor = 'engine' THEN
-            RAISE EXCEPTION 'resuming from % is a supervisor action, not an engine one', current_state;
+        IF NEW.actor <> 'supervisor' THEN
+            RAISE EXCEPTION 'resuming from % is a supervisor action, not a % one', current_state, NEW.actor;
         END IF;
     ELSE
         RAISE EXCEPTION '% is terminal', current_state;
@@ -204,9 +205,11 @@ CREATE TABLE IF NOT EXISTS ai_trial_runs (
     -- O4: stdout and stderr share one 2 MB cap.
     CONSTRAINT ai_trial_runs_output_capped
         CHECK (coalesce(octet_length(stdout), 0) + coalesce(octet_length(stderr), 0) <= 2097152),
+    -- ⚠ Every CHECK here is written so a NULL cannot make it UNKNOWN (which Postgres accepts).
     CONSTRAINT ai_trial_runs_prompt_sha_matches
-        CHECK (rendered_prompt IS NULL
-               OR rendered_prompt_sha256 = encode(sha256(convert_to(rendered_prompt, 'UTF8')), 'hex')),
+        CHECK (rendered_prompt IS NULL AND rendered_prompt_sha256 IS NULL
+               OR rendered_prompt_sha256 IS NOT DISTINCT FROM
+                  encode(sha256(convert_to(rendered_prompt, 'UTF8')), 'hex')),
     CONSTRAINT ai_trial_runs_claimed_is_bare
         CHECK (status <> 'claimed' OR (decided_at IS NULL AND refusal_reason IS NULL
                                        AND pack IS NULL AND structured_output IS NULL)),
@@ -218,12 +221,12 @@ CREATE TABLE IF NOT EXISTS ai_trial_runs (
             refusal_reason IS NULL AND decided_at IS NOT NULL
             AND scores_model_version IS NOT NULL AND scores_scored_at IS NOT NULL
             AND pack IS NOT NULL AND pack_sha256 IS NOT NULL
-            AND rendered_prompt IS NOT NULL
+            AND rendered_prompt IS NOT NULL AND rendered_prompt_sha256 IS NOT NULL
             AND system_prompt_sha256 IS NOT NULL AND prompt_template_sha256 IS NOT NULL
             AND model_id IS NOT NULL AND argv_sha256 IS NOT NULL
             AND executable_path IS NOT NULL AND cli_version IS NOT NULL
             AND git_sha IS NOT NULL AND policy_hash IS NOT NULL
-            AND init_event IS NOT NULL AND exit_code = 0
+            AND init_event IS NOT NULL AND exit_code IS NOT DISTINCT FROM 0
             AND structured_output IS NOT NULL
         ))
 );
@@ -356,7 +359,8 @@ CREATE TABLE IF NOT EXISTS ai_trial_pairs (
     control_instrument_id BIGINT NOT NULL REFERENCES instruments (instrument_id) ON DELETE RESTRICT,
     seed_material         TEXT NOT NULL,
     -- Ordered by instrument_id ascending (§7).
-    pool                  BIGINT[] NOT NULL CHECK (cardinality(pool) >= 1),
+    pool                  BIGINT[] NOT NULL
+                          CHECK (cardinality(pool) >= 1 AND array_position(pool, NULL) IS NULL),
     draw_idx              INTEGER NOT NULL CHECK (draw_idx >= 0),
     -- Copied from the arm decision (§7 shared terms).
     stop_pct              DOUBLE PRECISION NOT NULL,
@@ -434,7 +438,7 @@ BEGIN
         RAISE EXCEPTION 'seed material % is not the §7 material for this pair', NEW.seed_material;
     END IF;
     IF NEW.draw_idx <> ai_trial_draw_index(NEW.seed_material, cardinality(NEW.pool))
-       OR NEW.control_instrument_id <> NEW.pool[NEW.draw_idx + 1] THEN
+       OR NEW.control_instrument_id IS DISTINCT FROM NEW.pool[NEW.draw_idx + 1] THEN
         RAISE EXCEPTION 'control % is not the draw''s output', NEW.control_instrument_id;
     END IF;
     RETURN NEW;
@@ -503,21 +507,31 @@ CREATE TABLE IF NOT EXISTS ai_trial_trade_links (
 CREATE OR REPLACE FUNCTION ai_trial_leg_links_verify()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-    want_strategy   TEXT;
-    got_strategy    TEXT;
-    got_instrument  BIGINT;
+    want_strategy TEXT;
+    want_version  TEXT;
+    want_session  DATE;
+    sig           strategy_signals%ROWTYPE;
 BEGIN
-    SELECT dcl.strategy_id || CASE NEW.leg WHEN 'control' THEN '-control' ELSE '' END
-      INTO want_strategy
-    FROM ai_trial_pairs p JOIN ai_trial_declarations dcl ON dcl.declaration_id = p.declaration_id
+    SELECT dcl.strategy_id || CASE NEW.leg WHEN 'control' THEN '-control' ELSE '' END,
+           dcl.strategy_version, r.session_date
+      INTO want_strategy, want_version, want_session
+    FROM ai_trial_pairs p
+    JOIN ai_trial_declarations dcl ON dcl.declaration_id = p.declaration_id
+    JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id
+    JOIN ai_trial_runs r ON r.run_id = d.run_id
     WHERE p.pair_id = NEW.pair_id;
-    SELECT strategy_id, instrument_id INTO got_strategy, got_instrument
-    FROM strategy_signals WHERE signal_id = NEW.signal_id;
-    IF got_strategy IS DISTINCT FROM want_strategy THEN
-        RAISE EXCEPTION 'signal % is strategy %, not the % leg''s %', NEW.signal_id, got_strategy, NEW.leg, want_strategy;
+    SELECT * INTO sig FROM strategy_signals WHERE signal_id = NEW.signal_id;
+    IF sig.strategy_id IS DISTINCT FROM want_strategy OR sig.strategy_version IS DISTINCT FROM want_version THEN
+        RAISE EXCEPTION 'signal % is %/%, not the % leg''s %/%',
+            NEW.signal_id, sig.strategy_id, sig.strategy_version, NEW.leg, want_strategy, want_version;
     END IF;
-    IF got_instrument IS DISTINCT FROM ai_trial_leg_instrument(NEW.pair_id, NEW.leg) THEN
-        RAISE EXCEPTION 'signal % instrument % is not the % leg''s', NEW.signal_id, got_instrument, NEW.leg;
+    IF sig.instrument_id IS DISTINCT FROM ai_trial_leg_instrument(NEW.pair_id, NEW.leg) THEN
+        RAISE EXCEPTION 'signal % instrument % is not the % leg''s', NEW.signal_id, sig.instrument_id, NEW.leg;
+    END IF;
+    -- A fired entry that fills in the pair's target session (§3 session identity).
+    IF sig.signal_kind IS DISTINCT FROM 'entry' OR sig.verdict IS DISTINCT FROM 'fired'
+       OR sig.fill_bar_date IS DISTINCT FROM want_session THEN
+        RAISE EXCEPTION 'signal % is not a fired entry filling in session %', NEW.signal_id, want_session;
     END IF;
     RETURN NEW;
 END $$;
@@ -527,14 +541,21 @@ CREATE TRIGGER trg_ai_trial_leg_links_verify
 BEFORE INSERT ON ai_trial_leg_links
 FOR EACH ROW EXECUTE FUNCTION ai_trial_leg_links_verify();
 
+-- The trade must be the one funded from THIS leg's signal: an instrument match alone cannot
+-- tell the legs apart when the control draws the arm's own name.
 CREATE OR REPLACE FUNCTION ai_trial_trade_links_verify()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-    got_instrument BIGINT;
+    trade_signal BIGINT;
+    leg_signal   BIGINT;
 BEGIN
-    SELECT instrument_id INTO got_instrument FROM strategy_trades WHERE strategy_trade_id = NEW.strategy_trade_id;
-    IF got_instrument IS DISTINCT FROM ai_trial_leg_instrument(NEW.pair_id, NEW.leg) THEN
-        RAISE EXCEPTION 'trade % instrument % is not the % leg''s', NEW.strategy_trade_id, got_instrument, NEW.leg;
+    SELECT fd.signal_id INTO trade_signal
+    FROM strategy_trades t JOIN strategy_funding_decisions fd ON fd.funding_decision_id = t.funding_decision_id
+    WHERE t.strategy_trade_id = NEW.strategy_trade_id;
+    SELECT signal_id INTO leg_signal FROM ai_trial_leg_links WHERE pair_id = NEW.pair_id AND leg = NEW.leg;
+    IF trade_signal IS DISTINCT FROM leg_signal THEN
+        RAISE EXCEPTION 'trade % was funded from signal %, not the % leg''s %',
+            NEW.strategy_trade_id, trade_signal, NEW.leg, leg_signal;
     END IF;
     RETURN NEW;
 END $$;

@@ -78,17 +78,21 @@ _DECIDED = """
         pack = '{}', pack_sha256 = %(sha)s, rendered_prompt = 'p', rendered_prompt_sha256 = %(psha)s,
         system_prompt_sha256 = %(sha)s, prompt_template_sha256 = %(sha)s, model_id = 'claude-opus-5-5',
         argv_sha256 = %(sha)s, executable_path = '/usr/local/bin/claude', cli_version = '2.1.280',
-        git_sha = %(git)s, policy_hash = %(sha)s, init_event = '{}', exit_code = 0,
+        git_sha = %(git)s, policy_hash = %(sha)s, init_event = '{}', exit_code = %(exit)s,
         structured_output = '{}'
     WHERE run_id = %(run_id)s
 """
 
 
-def _decide(conn: Conn, run_id: int) -> None:
-    conn.execute(
-        _DECIDED,
-        {"sha": DOC_SHA, "psha": hashlib.sha256(b"p").hexdigest(), "git": "a" * 40, "run_id": run_id},
-    )
+def _decide(conn: Conn, run_id: int, **overrides: object) -> None:
+    params: dict[str, object] = {
+        "sha": DOC_SHA,
+        "psha": hashlib.sha256(b"p").hexdigest(),
+        "git": "a" * 40,
+        "exit": 0,
+        "run_id": run_id,
+    }
+    conn.execute(_DECIDED, params | overrides)
 
 
 def _decision(conn: Conn, run_id: int, position: int, instrument_id: int | None, reason: str | None = None) -> int:
@@ -288,44 +292,115 @@ def test_an_accepted_decision_without_a_pair_cannot_commit(ebull_test_conn: Conn
     assert row == ("claimed",)  # the whole publication rolled back
 
 
-def _published_pair(conn: Conn) -> tuple[int, int]:
+def _published_pair(conn: Conn, pool: tuple[int, ...] = INSTRUMENTS[1:]) -> tuple[int, int]:
     declaration_id = _seed(conn)
     run_id = _claim(conn, declaration_id)
     _decide(conn, run_id)
     decision_id = _decision(conn, run_id, 0, INSTRUMENTS[0])
-    pair_id = _pair(conn, declaration_id, decision_id, 0, INSTRUMENTS[1:])
+    pair_id = _pair(conn, declaration_id, decision_id, 0, pool)
     conn.commit()
     return declaration_id, pair_id
 
 
-def test_leg_links_bind_the_leg_strategy_and_instrument(ebull_test_conn: Conn) -> None:
-    _, pair_id = _published_pair(ebull_test_conn)
-    signal_sql = """
-        INSERT INTO strategy_signals (
-            strategy_id, strategy_version, instrument_id, signal_bar_date, signal_kind, verdict,
-            fill_bar_date, fill_price, universe, input_rule_set_versions
-        ) VALUES (%s, 'v1', %s, '2026-10-02', 'entry', 'fired', '2026-10-05', 100, 'survivor_only',
-                  '{"indicator_series": "rules-v1"}')
-        RETURNING signal_id
-    """
+def test_leg_and_trade_links_bind_the_leg_identity(ebull_test_conn: Conn) -> None:
+    # The control draws the arm's own name (a one-name pool), so only identity, not the
+    # instrument, tells the legs apart.
+    arm_instrument = INSTRUMENTS[0]
+    _, pair_id = _published_pair(ebull_test_conn, pool=(arm_instrument,))
 
-    def signal(strategy_id: str, instrument_id: int) -> int:
-        row = ebull_test_conn.execute(signal_sql, (strategy_id, instrument_id)).fetchone()
+    def signal(strategy_id: str, *, version: str = "v1", fill: str = "2026-10-05") -> int:
+        row = ebull_test_conn.execute(
+            """
+            INSERT INTO strategy_signals (
+                strategy_id, strategy_version, instrument_id, signal_bar_date, signal_kind, verdict,
+                fill_bar_date, fill_price, universe, input_rule_set_versions
+            ) VALUES (%s, %s, %s, '2026-10-02', 'entry', 'fired', %s, 100, 'survivor_only',
+                      '{"indicator_series": "rules-v1"}')
+            RETURNING signal_id
+            """,
+            (strategy_id, version, arm_instrument, fill),
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def trade(signal_id: int, strategy_id: str) -> int:
+        deployment = ebull_test_conn.execute(
+            "INSERT INTO strategy_deployments (strategy_id, strategy_version, mode, capital_limit, enabled, "
+            "updated_by, reason) VALUES (%s, 'v1', 'paper', 1000, FALSE, 'test', '#3471 test') RETURNING deployment_id",
+            (strategy_id,),
+        ).fetchone()
+        assert deployment is not None
+        funding = ebull_test_conn.execute(
+            "INSERT INTO strategy_funding_decisions (signal_id, deployment_id, verdict, amount, reason_code) "
+            "VALUES (%s, %s, 'allocated', 125, 'test') RETURNING funding_decision_id",
+            (signal_id, deployment[0]),
+        ).fetchone()
+        assert funding is not None
+        row = ebull_test_conn.execute(
+            "INSERT INTO strategy_trades (funding_decision_id, instrument_id, status) "
+            "VALUES (%s, %s, 'submitted') RETURNING strategy_trade_id",
+            (funding[0], arm_instrument),
+        ).fetchone()
         assert row is not None
         return int(row[0])
 
     link = "INSERT INTO ai_trial_leg_links (pair_id, leg, signal_id) VALUES (%s, %s, %s)"
+    _refused(ebull_test_conn, link, (pair_id, "arm", signal("ai-discretionary-v1-control")), "not the arm leg's")
+    _refused(ebull_test_conn, link, (pair_id, "arm", signal("ai-discretionary-v1", version="v2")), "not the arm leg's")
+    _refused(
+        ebull_test_conn, link, (pair_id, "arm", signal("ai-discretionary-v1", fill="2026-10-06")), "not a fired entry"
+    )
+    arm_signal = signal("ai-discretionary-v1")
+    control_signal = signal("ai-discretionary-v1-control")
+    ebull_test_conn.execute(link, (pair_id, "arm", arm_signal))
+    ebull_test_conn.execute(link, (pair_id, "control", control_signal))
+    arm_trade = trade(arm_signal, "ai-discretionary-v1")
+    control_trade = trade(control_signal, "ai-discretionary-v1-control")
+    ebull_test_conn.commit()
+
+    trade_link = "INSERT INTO ai_trial_trade_links (pair_id, leg, strategy_trade_id) VALUES (%s, %s, %s)"
+    _refused(ebull_test_conn, trade_link, (pair_id, "arm", control_trade), "not the arm leg's")
+    ebull_test_conn.execute(trade_link, (pair_id, "arm", arm_trade))
+    ebull_test_conn.execute(trade_link, (pair_id, "control", control_trade))
+    ebull_test_conn.commit()
+
+
+def test_a_null_cannot_satisfy_a_check_by_being_unknown(ebull_test_conn: Conn) -> None:
+    # Postgres accepts a CHECK that evaluates to UNKNOWN, and PL/pgSQL skips an IF that does.
+    declaration_id = _seed(ebull_test_conn)
     _refused(
         ebull_test_conn,
-        link,
-        (pair_id, "arm", signal("ai-discretionary-v1-control", INSTRUMENTS[0])),
-        "not the arm leg's",
+        "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
+        "VALUES (%s, NULL, 'active', 'r', 'supervisor'), (%s, 'active', 'halted_operator', 'r', 'engine'), "
+        "(%s, 'halted_operator', 'active', 'r', 'operator')",
+        (declaration_id, declaration_id, declaration_id),
+        "supervisor action, not a operator one",
     )
     _refused(
-        ebull_test_conn, link, (pair_id, "arm", signal("ai-discretionary-v1", INSTRUMENTS[1])), "is not the arm leg's"
+        ebull_test_conn,
+        "INSERT INTO ai_trial_declarations (declaration_id, strategy_id, strategy_version, doc_path, doc, doc_sha256) "
+        "VALUES (%s, 'ai-discretionary-v1', 'v1', 'x', '{}', %s)",
+        (declaration_id, DOC_SHA),
+        "ai_trial_declarations_columns_match_doc",
     )
-    ebull_test_conn.execute(link, (pair_id, "arm", signal("ai-discretionary-v1", INSTRUMENTS[0])))
-    ebull_test_conn.commit()
+    run_id = _claim(ebull_test_conn, declaration_id)
+    with pytest.raises(psycopg.errors.CheckViolation, match="ai_trial_runs_decided_is_complete"):
+        _decide(ebull_test_conn, run_id, exit=None)
+    ebull_test_conn.rollback()
+    # A refused run need not be complete, but a prompt it stores still carries its digest.
+    _refused(
+        ebull_test_conn,
+        "UPDATE ai_trial_runs SET status = 'refused', refusal_reason = 'model_timeout', rendered_prompt = 'p' "
+        "WHERE run_id = %s",
+        (run_id,),
+        "ai_trial_runs_prompt_sha_matches",
+    )
+
+    _decide(ebull_test_conn, run_id)
+    decision_id = _decision(ebull_test_conn, run_id, 0, INSTRUMENTS[0])
+    with pytest.raises(psycopg.Error, match="is not the draw's output|ai_trial_pairs_pool_check"):
+        _pair_raw(ebull_test_conn, declaration_id, decision_id, 0, f"{DOC_SHA}|{SESSION}|0", (None,), 0, INSTRUMENTS[1])  # type: ignore[arg-type]
+    ebull_test_conn.rollback()
 
 
 def test_pair_events_follow_the_leg_lifecycle(ebull_test_conn: Conn) -> None:
