@@ -28,7 +28,7 @@ def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> D
 
 class TestTheShippedDeclaration:
     def test_the_register_is_stamped_with_its_version(self) -> None:
-        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-09-28-r16"
+        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-09-28-r17"
 
     def test_every_declared_trial_carries_its_evidence(self) -> None:
         """⚠ An entry nobody can trace is indistinguishable from one invented."""
@@ -81,11 +81,12 @@ class TestTheShippedDeclaration:
         # post-cutoff #2827/#3238 searches (r13, #3385 slice 3c-iv: 20 + 24 +
         # 1 + 41 + 2) + 1 hunt-1-discovery (r14, #3387) + 1 hunt-2-discovery (r15,
         # #3448), both outside M_inh, + 1 reregistration-3454-hunt-2-construction
-        # (r16, #3454), inside M_inh. Moved
+        # (r16, #3454), inside M_inh, + 1 hunt-3-validation (r17, #3454), outside
+        # M_inh. Moved
         # deliberately, not loosened: the pin exists to catch a
         # DROPPED entry, and an addition that raises M is the conservative
         # direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 380
+        assert TRIAL_REGISTER.declared_count == 381
         assert TRIAL_REGISTER.inherited_floor().searches == 378
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
@@ -447,10 +448,11 @@ class TestInheritedFloor:
         assert register.inherited_floor().is_floor is False
 
     def test_the_shipped_register(self) -> None:
-        """`M_inh` is the whole register less its hunt entries (`hunt-1-discovery`, `hunt-2-discovery`)."""
+        """`M_inh` is the whole register less its hunt entries (`hunt-1-discovery`, `hunt-2-discovery`,
+        `hunt-3-validation`)."""
         floor = TRIAL_REGISTER.inherited_floor()
         hunt_searches = sum(t.searches for t in TRIAL_REGISTER.trials if t.trial_id.startswith("hunt-"))
-        assert hunt_searches == 2
+        assert hunt_searches == 3
         assert floor.register_version == TRIAL_REGISTER_VERSION
         assert floor.searches == TRIAL_REGISTER.declared_count - hunt_searches
         assert floor.is_floor is (TRIAL_REGISTER.floored_searches > 0)

@@ -285,9 +285,12 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
         r16 (2026-09-28, #3454) added ``reregistration-3454-hunt-2-construction``
         (one search); the same command returned the same five groups, 488 rows, all
         ``harness_validation``.
+
+        r17 (2026-09-28, #3454) added ``hunt-3-validation`` (one pinned spec); the same
+        command returned the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 380
-        assert len(TRIAL_REGISTER.trials) == 44
+        assert TRIAL_REGISTER.declared_count == 381
+        assert len(TRIAL_REGISTER.trials) == 45
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

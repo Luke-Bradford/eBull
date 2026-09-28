@@ -185,7 +185,12 @@ from typing import Final
 #: re-registration of hunt 2's construction, which has no `hunt_trials` row of its own.
 #: It counts in M_inh, which moves 377 → 378. An addition that raises M is the
 #: conservative direction.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r16"
+#:
+#: r17 (2026-09-28, #3454) adds `hunt-3-validation`, the declaration-backed entry for hunt
+#: 3's one-pin validation batch (`docs/hunts/hunt-3-validation.json`). M_inh excludes it,
+#: so the inherited floor stays 378. Measured the same way before the bump: the SAME five
+#: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r17"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1234,6 +1239,23 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "hunt_harness.HUNT_INHERITED_DISCOVERY['hunt-3']"
             ),
             exactness=TrialExactness.EXACT,
+        ),
+        DeclaredTrial(
+            trial_id="hunt-3-validation",
+            description=(
+                "Hunt 3's validation batch: one pin, hunt 2's construction relabelled to hunt-3 (spec_sha256 "
+                "a76417b5…), with the hunt_gate block (bar 0.08 in every base cell, stress reported, canonical "
+                "excess NW t > 3) frozen in the document (#3454)."
+            ),
+            # ``scripts/run_hunt_3_validation.py --write`` on the dev DB, from main at c69d10e4.
+            evidence=declaration_backed_evidence(
+                declaration_path="docs/hunts/hunt-3-validation.json",
+                declaration_sha256="dc73289bdf7ccf227037868423770b7dc1c8fdeaff16fb7cf363fc76e7245074",
+                pinned_specs=1,
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=1,
+            declared_for=("hunt-3-validation", "v1"),
         ),
     ),
 )
