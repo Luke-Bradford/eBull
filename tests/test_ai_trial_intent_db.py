@@ -14,7 +14,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.ai_trial_decision import draw_control
+from app.services.ai_trial_decision import decision_metrics, derive_control_levels, draw_control, measure_atr
 from app.services.ai_trial_intent import DECLARATION_CONTRACT_PREFIX, declaration_digest, load_trial_intent
 from app.services.strategy_control_plane import (
     configure_deployment,
@@ -28,6 +28,10 @@ SESSION = date(2026, 10, 5)  # a Monday
 NOW = datetime(2026, 10, 5, 15, 0, tzinfo=UTC)  # 11:00 New York
 ARM_INSTRUMENT = 347101
 POOL = (347102, 347103, 347104)
+# §6/§7 v5: the arm name's ATR is 4% (stop 8 = 2 ATRs, R 2); every control name's is 2%, so the
+# control leg's derived levels are 4 / 8, not the arm's 8 / 16.
+ARM_ATR = measure_atr(4.0, 100.0)
+CONTROL_ATR = measure_atr(2.0, 100.0)
 
 
 def _seed_instruments(conn: Conn) -> None:
@@ -182,27 +186,54 @@ def _published_pair(
         """,
         {"sha": sha, "git": "b" * 40, "run_id": run[0]},
     )
+    metrics = decision_metrics(8.0, 16.0, ARM_ATR)
+    assert ARM_ATR is not None and CONTROL_ATR is not None
     decision = conn.execute(
         """
         INSERT INTO ai_trial_decisions (
             run_id, response_position, action, symbol, stop_pct, target_pct, horizon_days,
-            size_tier, confidence, thesis, instrument_id, verdict
-        ) VALUES (%s, 0, 'enter_long', 'AIT347101', 8.0, 16.0, 10, 'half', 3, 'Thesis.', %s, 'accepted')
+            size_tier, confidence, thesis, instrument_id, verdict,
+            atr14, close, atr14_pct, stop_atr_multiple, r_multiple
+        ) VALUES (%s, 0, 'enter_long', 'AIT347101', 8.0, 16.0, 10, 'half', 3, 'Thesis.', %s, 'accepted',
+                  %s, %s, %s, %s, %s)
         RETURNING decision_id
         """,
-        (run[0], ARM_INSTRUMENT),
+        (
+            run[0],
+            ARM_INSTRUMENT,
+            ARM_ATR.atr14,
+            ARM_ATR.close,
+            ARM_ATR.atr14_pct,
+            metrics.stop_atr_multiple,
+            metrics.r_multiple,
+        ),
     ).fetchone()
     assert decision is not None
     draw = draw_control(declaration_sha256_hex=doc_sha, session_date=SESSION, pair_seq=0, pool=POOL)
+    levels = derive_control_levels(metrics, CONTROL_ATR)
+    assert levels is not None
     pair = conn.execute(
         """
         INSERT INTO ai_trial_pairs (
             declaration_id, pair_seq, arm_decision_id, control_instrument_id, seed_material, pool,
-            draw_idx, stop_pct, target_pct, horizon_days, size_tier
-        ) VALUES (%s, 0, %s, %s, %s, %s, %s, 8.0, 16.0, 10, 'half')
+            draw_idx, stop_pct, target_pct, horizon_days, size_tier,
+            control_atr14, control_close, control_atr14_pct, control_stop_pct, control_target_pct
+        ) VALUES (%s, 0, %s, %s, %s, %s, %s, 8.0, 16.0, 10, 'half', %s, %s, %s, %s, %s)
         RETURNING pair_id
         """,
-        (declaration_id, decision[0], draw.instrument_id, draw.seed_material, list(POOL), draw.index),
+        (
+            declaration_id,
+            decision[0],
+            draw.instrument_id,
+            draw.seed_material,
+            list(POOL),
+            draw.index,
+            CONTROL_ATR.atr14,
+            CONTROL_ATR.close,
+            CONTROL_ATR.atr14_pct,
+            levels.stop_pct,
+            levels.target_pct,
+        ),
     ).fetchone()
     assert pair is not None
     conn.commit()
@@ -233,8 +264,10 @@ def test_both_legs_load_with_the_decision_terms_and_no_evidence(ebull_test_conn:
         assert intent.leg == leg
         assert intent.strategy_id == "ai-discretionary-v1" + ("-control" if leg == "control" else "")
         assert intent.declaration_id == declaration_id and intent.session_date == SESSION
-        # §8 table: the decision's stop/target replace the forecast barriers, for BOTH legs.
-        assert (intent.stop_loss_pct, intent.take_profit_pct) == (Decimal("8.0"), Decimal("16.0"))
+        # §8 table (v5): the arm exits at the decision's levels, the control at its own
+        # ATR-derived levels (2 ATRs of a 2% name, R 2).
+        expected = (Decimal("8.0"), Decimal("16.0")) if leg == "arm" else (Decimal("4.0000"), Decimal("8.0000"))
+        assert (intent.stop_loss_pct, intent.take_profit_pct) == expected
         assert (intent.size_tier, intent.requested_amount, intent.horizon_days) == ("half", Decimal("125"), 10)
         assert intent.ask == Decimal("100")
     conn.commit()
@@ -289,6 +322,8 @@ def test_a_tampered_declaration_and_an_over_policy_stop_refuse(ebull_test_conn: 
     # canonical re-hash sees that the document is not the one the sha names.
     _, tampered = _published_pair(conn, "v2", tamper=True)
     assert _reason(conn, tampered["arm"]) == "trial_declaration_not_intact"
-    # The decision's 8% stop against a 5% policy stop (§8 table: the bound keeps its meaning).
+    # The policy stop bounds EACH leg's own stop: the arm's 8% fails a 5% policy stop, the
+    # control's derived 4% passes it.
     _, strict = _published_pair(conn, "v3", policy_stop="5")
-    assert _reason(conn, strict["control"]) == "decision_stop_exceeds_policy"
+    assert _reason(conn, strict["arm"]) == "decision_stop_exceeds_policy"
+    assert _reason(conn, strict["control"]) is None

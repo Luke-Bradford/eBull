@@ -14,11 +14,14 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.services.ai_trial_decision import draw_control
+from app.services.ai_trial_decision import decision_metrics, derive_control_levels, draw_control, measure_atr
 
 DOC_SHA = hashlib.sha256(b"ai-trial test declaration").hexdigest()
 SESSION = date(2026, 10, 5)
 INSTRUMENTS = (11, 12, 13, 14, 15)
+# Every name's §6 v5 measurement: ATR 4% (atr14 4, close 100). The fixture decision (stop 8,
+# target 16) is then 2 ATRs and R 2, and every control derives the same 8 / 16 levels.
+ATR = measure_atr(4.0, 100.0)
 
 Conn = psycopg.Connection[Any]
 
@@ -96,15 +99,29 @@ def _decide(conn: Conn, run_id: int, **overrides: object) -> None:
 
 
 def _decision(conn: Conn, run_id: int, position: int, instrument_id: int | None, reason: str | None = None) -> int:
+    metrics = decision_metrics(8.0, 16.0, None if instrument_id is None else ATR)
+    atr = metrics.atr
     row = conn.execute(
         """
         INSERT INTO ai_trial_decisions (
             run_id, response_position, action, symbol, stop_pct, target_pct, horizon_days,
-            size_tier, confidence, thesis, instrument_id, verdict, reason_code
-        ) VALUES (%s, %s, 'enter_long', 'AIT', 8.0, 16.0, 10, 'half', 3, 'Thesis.', %s, %s, %s)
+            size_tier, confidence, thesis, instrument_id, verdict, reason_code,
+            atr14, close, atr14_pct, stop_atr_multiple, r_multiple
+        ) VALUES (%s, %s, 'enter_long', 'AIT', 8.0, 16.0, 10, 'half', 3, 'Thesis.', %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING decision_id
         """,
-        (run_id, position, instrument_id, "accepted" if reason is None else "refused", reason),
+        (
+            run_id,
+            position,
+            instrument_id,
+            "accepted" if reason is None else "refused",
+            reason,
+            None if atr is None else atr.atr14,
+            None if atr is None else atr.close,
+            None if atr is None else atr.atr14_pct,
+            metrics.stop_atr_multiple,
+            metrics.r_multiple,
+        ),
     ).fetchone()
     assert row is not None
     return int(row[0])
@@ -127,15 +144,31 @@ def _pair_raw(
     idx: int,
     control: int,
 ) -> int:
+    levels = derive_control_levels(decision_metrics(8.0, 16.0, ATR), ATR)
+    assert ATR is not None and levels is not None
     row = conn.execute(
         """
         INSERT INTO ai_trial_pairs (
             declaration_id, pair_seq, arm_decision_id, control_instrument_id, seed_material, pool,
-            draw_idx, stop_pct, target_pct, horizon_days, size_tier
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, 8.0, 16.0, 10, 'half')
+            draw_idx, stop_pct, target_pct, horizon_days, size_tier,
+            control_atr14, control_close, control_atr14_pct, control_stop_pct, control_target_pct
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, 8.0, 16.0, 10, 'half', %s, %s, %s, %s, %s)
         RETURNING pair_id
         """,
-        (declaration_id, pair_seq, decision_id, control, seed, list(pool), idx),
+        (
+            declaration_id,
+            pair_seq,
+            decision_id,
+            control,
+            seed,
+            list(pool),
+            idx,
+            ATR.atr14,
+            ATR.close,
+            ATR.atr14_pct,
+            levels.stop_pct,
+            levels.target_pct,
+        ),
     ).fetchone()
     assert row is not None
     return int(row[0])
@@ -429,3 +462,96 @@ def test_pair_events_follow_the_leg_lifecycle(ebull_test_conn: Conn) -> None:
     ebull_test_conn.execute(leg_event, (pair_id, "control", "submitted"))
     ebull_test_conn.execute(leg_event, (pair_id, "control", "filled"))
     ebull_test_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# sql/433 — §6/§7 v5: the recorded ATR figures and the control's derived levels
+# ---------------------------------------------------------------------------
+_RAW_DECISION = """
+    INSERT INTO ai_trial_decisions (
+        run_id, response_position, action, symbol, stop_pct, target_pct, horizon_days, size_tier,
+        confidence, thesis, instrument_id, verdict, reason_code,
+        atr14, close, atr14_pct, stop_atr_multiple, r_multiple
+    ) VALUES (%(run)s, %(pos)s, 'enter_long', 'AIT', %(stop)s, %(target)s, 10, 'half', 3, 'Thesis.', %(iid)s,
+              %(verdict)s, %(reason)s, %(atr14)s, %(close)s, %(atr_pct)s, %(mult)s, %(r)s)
+"""
+
+
+def test_decision_figures_are_verified_without_dividing(ebull_test_conn: Conn) -> None:
+    from decimal import Decimal
+
+    conn = ebull_test_conn
+    declaration_id = _seed(conn)
+    run_id = _claim(conn, declaration_id)
+    good = {
+        "run": run_id, "pos": 0, "stop": 8.0, "target": 16.0, "iid": INSTRUMENTS[0], "verdict": "refused",
+        "reason": "thesis_too_long", "atr14": Decimal("4"), "close": Decimal("100"),
+        "atr_pct": Decimal("4.0000"), "mult": Decimal("2.0000"), "r": Decimal("2.0000"),
+    }  # fmt: skip
+
+    def refused(match: str, **overrides: object) -> None:
+        _decide(conn, run_id)
+        with pytest.raises(psycopg.Error, match=match):
+            conn.execute(_RAW_DECISION, good | overrides)
+        conn.rollback()
+
+    refused("r_multiple", r=Decimal("2.0001"))
+    refused("r_multiple", r=Decimal("2.00001"))  # inside the bracket but off the 4-decimal grid
+    refused("r_multiple", r=None)
+    refused("all present or all NULL", mult=None)
+    refused("unmapped symbol", iid=None, reason="not_in_shortlist")
+    refused("atr14_pct", atr_pct=Decimal("4.0001"))
+    refused("stop_atr_multiple", mult=Decimal("1.9999"))
+    # An accepted row must sit inside the band: stop 2, ATR 4% is half an ATR.
+    refused("accepted decision needs", stop=2.0, target=16.0, mult=Decimal("0.5000"), r=Decimal("8.0000"),
+            verdict="accepted", reason=None)  # fmt: skip
+    # The double is read by its shortest round-trip form: 2.7100000000000004 is not 2.71.
+    # The double is read by its shortest round-trip form. Exactly, 2.0001 / 2.0000000000000004 is
+    # just under the 1.00005 tie (q = 1.0000); a 15-digit `::numeric` cast would give 1.0001.
+    trap = {"stop": 2.0000000000000004, "target": 2.0001, "mult": Decimal("0.5000")}
+    refused("r_multiple", **trap, r=Decimal("1.0001"))
+
+    _decide(conn, run_id)
+    conn.execute(_RAW_DECISION, good)
+    conn.execute(_RAW_DECISION, good | trap | {"pos": 2, "r": Decimal("1.0000")})
+    conn.execute(_RAW_DECISION, good | {"pos": 1, "iid": None, "reason": "not_in_shortlist", "atr14": None,
+                                        "close": None, "atr_pct": None, "mult": None})  # fmt: skip
+    conn.commit()
+
+
+def test_the_control_levels_must_be_derived_and_placeable(ebull_test_conn: Conn) -> None:
+    from decimal import Decimal
+
+    conn = ebull_test_conn
+    declaration_id = _seed(conn)
+    run_id = _claim(conn, declaration_id)
+    pool = INSTRUMENTS[1:]
+    draw = draw_control(declaration_sha256_hex=DOC_SHA, session_date=SESSION, pair_seq=0, pool=pool)
+    sql = """
+        INSERT INTO ai_trial_pairs (
+            declaration_id, pair_seq, arm_decision_id, control_instrument_id, seed_material, pool,
+            draw_idx, stop_pct, target_pct, horizon_days, size_tier,
+            control_atr14, control_close, control_atr14_pct, control_stop_pct, control_target_pct
+        ) VALUES (%s, 0, %s, %s, %s, %s, %s, 8.0, 16.0, 10, 'half', %s, %s, %s, %s, %s)
+    """
+
+    def attempt(atr14: str, atr_pct: str, stop: str, target: str) -> None:
+        _decide(conn, run_id)
+        decision_id = _decision(conn, run_id, 0, INSTRUMENTS[0])
+        conn.execute(
+            sql,
+            (declaration_id, decision_id, draw.instrument_id, draw.seed_material, list(pool), draw.index,
+             Decimal(atr14), Decimal("100"), Decimal(atr_pct), Decimal(stop), Decimal(target)),
+        )  # fmt: skip
+
+    for args, match in (
+        (("4", "4.0000", "8.0001", "16.0002"), "not derived"),  # not the arm's multiples x the control ATR
+        (("4", "4.0001", "8.0002", "16.0004"), "atr14_pct"),  # ATR% is not q(100 * atr14 / close)
+        (("0.9", "0.9000", "1.8000", "3.6000"), "not placeable"),  # derived stop under the 2% bound
+    ):
+        with pytest.raises(psycopg.Error, match=match):
+            attempt(*args)
+        conn.rollback()
+    # ATR 3%: 2 ATRs = 6%, R 2 = 12%. Derived, in the band, above the floor.
+    attempt("3", "3.0000", "6.0000", "12.0000")
+    conn.commit()

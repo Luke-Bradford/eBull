@@ -37,7 +37,9 @@ from app.services.ai_trial_decision import (
     ControlPoolExhausted,
     control_pool,
     decision_json_schema,
+    derive_control_levels,
     draw_control,
+    pack_atr_measurements,
     validate_response,
 )
 from app.services.ai_trial_invocation import TRIAL_MODEL_ID, InvocationResult, build_env, invoke_model
@@ -284,9 +286,11 @@ def run_synthetic(
         return SyntheticOutcome(summary, result)
 
     arm_held = frozenset(int(p["instrument_id"]) for p in pack.pack["account"]["open_positions"])
+    atr = pack_atr_measurements(pack.pack["names"])
     validation = validate_response(
         result.structured_output,
         shortlist=pack.complete,
+        atr_by_instrument=atr,
         arm_held_instrument_ids=arm_held,
         max_new_entries=pack.pack["account"]["max_new_entries"],
     )
@@ -302,12 +306,20 @@ def run_synthetic(
             "instrument_id": verdict.instrument_id,
             "reason_code": verdict.reason_code,
             "decision": verdict.decision.model_dump(),
+            "r_multiple": str(verdict.metrics.r_multiple),
+            "stop_atr_multiple": None
+            if verdict.metrics.stop_atr_multiple is None
+            else str(verdict.metrics.stop_atr_multiple),
+            "atr14_pct": None if verdict.metrics.atr is None else str(verdict.metrics.atr.atr14_pct),
         }
         if verdict.accepted:
+            # §7 v5: the pool is built per decision from its own multiples.
+            levels = {iid: derive_control_levels(verdict.metrics, m) for iid, m in atr.items()}
             pool = control_pool(
                 sorted(pack.complete.values()),
                 control_held_instrument_ids=_CONTROL_HELD,
                 drawn_this_run=frozenset(drawn),
+                placeable_instrument_ids=frozenset(iid for iid, lv in levels.items() if lv is not None),
             )
             try:
                 draw = draw_control(
@@ -322,12 +334,16 @@ def run_synthetic(
                 row["reason_code"] = "control_pool_exhausted"
             else:
                 drawn.add(draw.instrument_id)
+                control = levels[draw.instrument_id]
+                assert control is not None  # the pool admits placeable names only
                 row["pair"] = {
                     "pair_seq": pair_seq,
                     "seed_material": draw.seed_material,
                     "pool": list(draw.pool),
                     "index": draw.index,
                     "control_instrument_id": draw.instrument_id,
+                    "control_stop_pct": str(control.stop_pct),
+                    "control_target_pct": str(control.target_pct),
                 }
                 pair_seq += 1
         decisions.append(row)
