@@ -180,7 +180,12 @@ from typing import Final
 #: closed on. M_inh excludes it, so the inherited floor stays 377. Measured the same
 #: way before the bump: the SAME five groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r15"
+#:
+#: r16 (2026-09-28, #3454) adds `reregistration-3454-hunt-2-construction`: hunt 3's
+#: re-registration of hunt 2's construction, which has no `hunt_trials` row of its own.
+#: It counts in M_inh, which moves 377 → 378. An addition that raises M is the
+#: conservative direction.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r16"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1209,6 +1214,24 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "'discovery' AND registered_at <= '2026-09-27T23:20:01.085678+00:00' ORDER BY hunt_trial_id; "
                 "closed_at=2026-09-27T23:20:01.085678+00:00; "
                 "ids_sha256=d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35; n=1"
+            ),
+            exactness=TrialExactness.EXACT,
+        ),
+        DeclaredTrial(
+            # ⚠ Not ``hunt-``: that prefix is reserved for log- and declaration-backed hunt
+            # entries, which M_inh excludes. This search has no ``hunt_trials`` row (hunt 3
+            # inherits hunt 2's), so it must count through M_inh.
+            trial_id="reregistration-3454-hunt-2-construction",
+            description=(
+                "Hunt 3 re-registers hunt 2's construction, extreme_loser_reversal_illiquid_next_open_v1, after "
+                "hunt 2's discovery look, with two gates changed because of that result's shape: stress cells "
+                "reported, not gated; excess-series power moved from a pre-look gate to a post-look t > 3 test. "
+                "It inherits hunt_trial_id 2 as its discovery evidence (#3454)."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-09-28-3454-hunt-3-spec.md (merged #3456), sections 'The disclosure "
+                "registered with hunt 3' and 'Hunt 3's identity: inherit, do not recompute'; "
+                "hunt_harness.HUNT_INHERITED_DISCOVERY['hunt-3']"
             ),
             exactness=TrialExactness.EXACT,
         ),
