@@ -1090,13 +1090,14 @@ def _validation_readout(conn: psycopg.Connection[Any], hunt_id: str) -> Validati
         raise hh.HuntHarnessError(f"{hh.declaration_strategy_id(hunt_id, 'validation')} has not frozen")
     frozen, declaration = loaded
     if hunt_id in hunt_gate.GATED_HUNTS:
+        lineage = _lineage_of_pins([TrialSpec.from_form(pin["spec"]) for pin in declaration.doc["pins"]])
+        # A terminal row is final: restoring the pinned files cannot re-open a readout (Codex ckpt-2).
+        if hh.terminal_refusal(conn, hunt_id=hunt_id, lineage=lineage) is not None:
+            raise HuntDeclarationRefused(hunt_id, ["hunt_terminal"])
         gate_codes = hunt_gate.look_codes(declaration.doc, harness_model_id=hh.HUNT_HARNESS_MODEL_ID)
         if gate_codes:
             hh.write_terminal(
-                conn,
-                hunt_id=hunt_id,
-                lineage=_lineage_of_pins([TrialSpec.from_form(pin["spec"]) for pin in declaration.doc["pins"]]),
-                reason=f"validation readout refused: {', '.join(gate_codes)}",
+                conn, hunt_id=hunt_id, lineage=lineage, reason=f"validation readout refused: {', '.join(gate_codes)}"
             )
             raise HuntDeclarationRefused(hunt_id, gate_codes)
     variance, m, m_is_floor, register_version, late = _declaration_context(conn, declaration)

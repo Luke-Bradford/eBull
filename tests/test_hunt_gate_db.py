@@ -82,30 +82,48 @@ def test_a_substantive_freeze_refusal_is_terminal(
     ebull_test_conn.rollback()
 
 
-def test_a_stale_decision_pin_after_the_freeze_refuses_the_look_and_the_readout_terminally(
+def _frozen_then_moved(
+    conn: psycopg.Connection[Any], gated: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> tuple[TrialSpec, dict[str, str]]:
+    pinned, sha, codes = _discover_and_write(conn, gated)
+    assert codes == []
+    _freeze(conn, _register(conn, sha), monkeypatch)
+    return pinned, {**hunt_gate.decision_pins(), "app/services/hunt_door.py": "0" * 64}
+
+
+def test_a_stale_decision_pin_after_the_freeze_refuses_the_look_terminally(
     ebull_test_conn: psycopg.Connection[Any], gated: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pinned, sha, codes = _discover_and_write(ebull_test_conn, gated)
-    assert codes == []
-    _freeze(ebull_test_conn, _register(ebull_test_conn, sha), monkeypatch)
-    real = hunt_gate.decision_pins()
-    moved = {**real, "app/services/hunt_door.py": "0" * 64}
+    pinned, moved = _frozen_then_moved(ebull_test_conn, gated, monkeypatch)
     with monkeypatch.context() as patch:
         patch.setattr(hunt_gate, "decision_pins", lambda _root=None: moved)
         look = _evaluate(ebull_test_conn, pinned, ComputedOutcome("computed", gate_statistics(), SERIES))
-        assert isinstance(look, HuntRefused) and look.reason == "door_refused"
-        assert "hunt_gate_pin_stale:app/services/hunt_door.py" in look.detail
-        # The refused look registered nothing; the terminal row is its only trace.
-        assert _count(ebull_test_conn, "SELECT count(*) FROM hunt_trials WHERE split = 'validation'") == 0
-        with pytest.raises(hunt_door.HuntDeclarationRefused):
-            hunt_door.validation_readout(ebull_test_conn, "hunt-1")
-    rows = _terminal(ebull_test_conn)
-    assert [row[0] for row in rows] == ["hunt-1", "hunt-1"]
-    assert rows[0][2].startswith("validation look refused: hunt_gate_pin_stale")
-    assert rows[1][2].startswith("validation readout refused: hunt_gate_pin_stale")
-    # With the code restored, the hunt stays closed.
+    assert isinstance(look, HuntRefused) and look.reason == "door_refused"
+    assert "hunt_gate_pin_stale:app/services/hunt_door.py" in look.detail
+    # The refused look registered nothing; the terminal row is its only trace.
+    assert _count(ebull_test_conn, "SELECT count(*) FROM hunt_trials WHERE split = 'validation'") == 0
+    ((_hunt, _lineage, reason),) = _terminal(ebull_test_conn)
+    assert reason.startswith("validation look refused: hunt_gate_pin_stale")
+    # With the code restored, the hunt stays closed: no look, and no readout (Codex ckpt-2).
     retry = _evaluate(ebull_test_conn, pinned, ComputedOutcome("computed", gate_statistics(), SERIES))
     assert isinstance(retry, HuntRefused) and retry.reason == "hunt_terminal"
+    with pytest.raises(hunt_door.HuntDeclarationRefused) as readout:
+        hunt_door.validation_readout(ebull_test_conn, "hunt-1")
+    assert readout.value.codes == ("hunt_terminal",)
+    assert len(_terminal(ebull_test_conn)) == 1
+
+
+def test_a_stale_decision_pin_refuses_the_readout_terminally(
+    ebull_test_conn: psycopg.Connection[Any], gated: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pinned, moved = _frozen_then_moved(ebull_test_conn, gated, monkeypatch)
+    with monkeypatch.context() as patch:
+        patch.setattr(hunt_gate, "decision_pins", lambda _root=None: moved)
+        with pytest.raises(hunt_door.HuntDeclarationRefused) as refused:
+            hunt_door.validation_readout(ebull_test_conn, "hunt-1")
+    assert refused.value.codes == ("hunt_gate_pin_stale:app/services/hunt_door.py",)
+    ((_hunt, _lineage, reason),) = _terminal(ebull_test_conn)
+    assert reason.startswith("validation readout refused: hunt_gate_pin_stale")
 
 
 def test_a_validation_row_closes_its_lineage_for_every_other_spec(

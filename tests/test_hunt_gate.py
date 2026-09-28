@@ -127,13 +127,39 @@ def test_the_look_refuses_a_missing_malformed_or_stale_block() -> None:
     assert hunt_gate.look_codes({"hunt_gate": block}, harness_model_id="hunt-harness-v1+0") == ["hunt_gate_model_stale"]
 
 
-def test_the_register_pin_covers_code_and_not_entries(monkeypatch: pytest.MonkeyPatch) -> None:
-    before = hunt_gate.code_only_sha256(trial_register)
-    monkeypatch.setattr(trial_register, "TRIAL_REGISTER_VERSION", "trial-register-r99")
-    monkeypatch.setattr(trial_register, "TRIAL_REGISTER", trial_register.TrialRegister(version="r99", trials=()))
-    assert hunt_gate.code_only_sha256(trial_register) == before
-    monkeypatch.setattr(trial_register, "ordered_ids_sha256", lambda _ids: "")
-    assert hunt_gate.code_only_sha256(trial_register) != before
+_REGISTER_SOURCE = '''"""The register."""
+HUNT_TRIAL_PREFIX: Final = "hunt-"
+TRIAL_REGISTER_VERSION: Final = "r16"
+
+
+def floor(trials):
+    return [t for t in trials if not t.startswith(HUNT_TRIAL_PREFIX)]
+
+
+TRIAL_REGISTER: Final = ("hunt-3-validation", "reregistration-3454")
+'''
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "pinned"),
+    [
+        ('"r16"', '"r17"', False),
+        ('"reregistration-3454")', '"reregistration-3454", "hunt-3-validation-doc")', False),
+        ('"""The register."""', '"""The register, re-worded."""', False),
+        ("return [t", "# a comment\n    return [t", False),
+        ('HUNT_TRIAL_PREFIX: Final = "hunt-"', 'HUNT_TRIAL_PREFIX: Final = "h-"', True),
+        ("not t.startswith", "t.startswith", True),
+    ],
+)
+def test_the_register_pin_covers_code_and_constants_but_not_entries(old: str, new: str, pinned: bool) -> None:
+    before = hunt_gate.code_only_sha256_of_source(_REGISTER_SOURCE)
+    assert _REGISTER_SOURCE.count(old) == 1
+    after = hunt_gate.code_only_sha256_of_source(_REGISTER_SOURCE.replace(old, new))
+    assert (after != before) is pinned
+
+
+def test_the_live_register_pin_is_computed_from_its_source() -> None:
+    assert hunt_gate.code_only_sha256(trial_register) == hunt_gate.decision_pins()[hunt_gate.CODE_ONLY_PIN]
 
 
 def test_every_decision_module_is_pinned_and_present() -> None:

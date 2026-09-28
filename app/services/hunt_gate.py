@@ -17,11 +17,10 @@ Pure except :func:`decision_pins`, which reads the pinned files. Imports nothing
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
-import json
 import math
-import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
@@ -80,6 +79,10 @@ PINNED_FILES: Final = (
 #: Pinned as CODE only: its register entries name the declaration's hash, so a whole-file
 #: pin would be circular. The entries reach the declaration through M, which the freeze recomputes.
 CODE_ONLY_PIN: Final = "app/services/trial_register.py#code"
+#: The register DATA the code-only pin leaves out: the entries and the version naming them.
+#: Every other statement (functions, classes, patterns AND plain constants the code reads,
+#: e.g. ``HUNT_TRIAL_PREFIX``) is pinned (Codex ckpt-2).
+REGISTER_DATA_NAMES: Final = frozenset({"TRIAL_REGISTER", "TRIAL_REGISTER_VERSION"})
 
 _TRACKER_IDENTITY_KEYS: Final = (
     "source",
@@ -112,16 +115,22 @@ BLOCK_KEYS: Final = frozenset(
 SUBSTANTIVE_PREFIX: Final = "hunt_gate_"
 
 
+def _assigns_register_data(node: ast.stmt) -> bool:
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+    return any(isinstance(target, ast.Name) and target.id in REGISTER_DATA_NAMES for target in targets)
+
+
+def code_only_sha256_of_source(source: str) -> str:
+    """sha256 over the parsed module less its docstring and its ``REGISTER_DATA_NAMES``
+    assignments. Comments and formatting do not enter (``ast.dump``); every other statement does."""
+    body = [node for node in ast.parse(source).body if not _assigns_register_data(node)]
+    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+        body = body[1:]
+    return hashlib.sha256(ast.dump(ast.Module(body=body, type_ignores=[])).encode("utf-8")).hexdigest()
+
+
 def code_only_sha256(module: ModuleType) -> str:
-    """sha256 over the source of ``module``'s own functions and classes and its compiled
-    patterns, keyed by name. Data (register entries, version strings) is excluded."""
-    parts: dict[str, str] = {}
-    for name, value in sorted(vars(module).items()):
-        if isinstance(value, re.Pattern):
-            parts[name] = f"{value.pattern}\x00{value.flags}"
-        elif (inspect.isfunction(value) or inspect.isclass(value)) and value.__module__ == module.__name__:
-            parts[name] = inspect.getsource(value)
-    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8")).hexdigest()
+    return code_only_sha256_of_source(inspect.getsource(module))
 
 
 def decision_pins(repo_root: Path = REPO_ROOT) -> dict[str, str]:
@@ -360,6 +369,7 @@ __all__ = [
     "T_THRESHOLD",
     "cell_excess",
     "code_only_sha256",
+    "code_only_sha256_of_source",
     "decision_pins",
     "freeze_codes",
     "gate_block",
