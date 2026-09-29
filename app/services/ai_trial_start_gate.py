@@ -64,6 +64,8 @@ class PreviewShared:
     within_bound: bool
     pool_base: Decimal
     committed: Decimal
+    # Non-core committed only: the active-risk budget's charge (#3471 §8, 2026-09-29).
+    active_committed: Decimal
     equity: Decimal
     total_invested: Decimal
     available_cash: Decimal
@@ -131,6 +133,7 @@ def start_gate_reason(
         capacities = _capacities(
             pool_base=shared.pool_base,
             committed=shared.committed,
+            active_committed=shared.active_committed,
             deployment_base=leg.deployment_base,
             deployment_reserved=leg.deployment_reserved,
             equity=shared.equity,
@@ -299,6 +302,7 @@ def _preview(
         within_bound=usage.headroom.within_bound,
         pool_base=usage.headroom.bound,
         committed=usage.committed,
+        active_committed=authority.alpha_committed,
         equity=risk.equity,
         total_invested=risk.total_invested,
         available_cash=risk.available_cash,

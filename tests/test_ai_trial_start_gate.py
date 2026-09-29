@@ -17,12 +17,15 @@ from app.services.ai_trial_start_gate import (
     PreviewShared,
     start_gate_reason,
 )
+from app.services.strategy_capital_sandbox import SANDBOX_EXCEEDED
+from app.services.strategy_paper_executor import _Capacities, _capacities
 
 # A growth-profile pot of $10,000 on a $100,000 account: comfortably admits one pair.
 SHARED = PreviewShared(
     within_bound=True,
     pool_base=Decimal("10000"),
     committed=Decimal("0"),
+    active_committed=Decimal("0"),
     equity=Decimal("100000"),
     total_invested=Decimal("0"),
     available_cash=Decimal("5000"),
@@ -68,25 +71,87 @@ def test_the_measured_2026_09_28_pot_refuses() -> None:
         mandate_max_concurrent_positions=4,
     )
     assert start_gate_reason(cautious, (LEG, LEG)) == "trial_capacity_unavailable:loss_at_stop"
-    # And core consuming the active-risk budget refuses by name before any sizing (§8 question).
-    assert (
-        start_gate_reason(replace(cautious, committed=Decimal("250")), (LEG, LEG))
-        == "trial_capacity_unavailable:portfolio_active_risk_limit"
+
+
+# §8 answer (supervisor 2026-09-29): the active-risk budget charges NON-core committed only;
+# the sandbox still charges everything. Growth pot P = $40,000, active budget 30% = $12,000.
+GROWTH_40K = replace(SHARED, pool_base=Decimal("40000"), available_cash=Decimal("20000"))
+
+
+@pytest.mark.parametrize(
+    ("within_bound", "committed", "active_committed", "expected"),
+    [
+        # (a) core at its 50% target no longer blocks a non-core entry.
+        (True, Decimal("20200"), Decimal("0"), None),
+        # (b) the #2844 total-exposure refusal still fires when core + alpha > capital,
+        # although alpha alone ($10,000) sits inside the active budget.
+        (False, Decimal("40000.01"), Decimal("10000"), "sandbox_exceeded"),
+        # (c) non-core alone over the budget still refuses, with no core at all.
+        (True, Decimal("12000"), Decimal("12000"), "portfolio_active_risk_limit"),
+    ],
+)
+def test_active_risk_budget_charges_non_core_only(
+    within_bound: bool, committed: Decimal, active_committed: Decimal, expected: str | None
+) -> None:
+    shared = replace(GROWTH_40K, within_bound=within_bound, committed=committed, active_committed=active_committed)
+    reason = start_gate_reason(shared, (LEG, LEG))
+    assert reason == (None if expected is None else "trial_capacity_unavailable:" + expected)
+
+
+@pytest.mark.parametrize(
+    ("committed", "active_committed", "expected_active_risk"),
+    [
+        # (a) core at target: the active budget is untouched, $12,000.
+        (Decimal("20200"), Decimal("0"), Decimal("12000")),
+        # (b) core + alpha over the pot: the sandbox refuses by name.
+        (Decimal("40000.01"), Decimal("10000"), SANDBOX_EXCEEDED),
+        # (c) non-core alone at the budget: refused although the pot has room.
+        (Decimal("12000"), Decimal("12000"), "portfolio_active_risk_limit"),
+    ],
+)
+def test_executor_capacities_charge_active_risk_to_non_core_only(
+    committed: Decimal, active_committed: Decimal, expected_active_risk: Decimal | str
+) -> None:
+    # The same `_capacities` the paper executor's `_risk_and_amount` sizes through.
+    result = _capacities(
+        pool_base=Decimal("40000"),
+        committed=committed,
+        active_committed=active_committed,
+        deployment_base=Decimal("1000"),
+        deployment_reserved=Decimal("0"),
+        equity=Decimal("100000"),
+        total_invested=committed,
+        available_cash=Decimal("20000"),
+        pending_total=Decimal("0"),
+        pending_instrument=Decimal("0"),
+        current_instrument=Decimal("0"),
+        max_portfolio_exposure_pct=Decimal("80"),
+        max_instrument_exposure_pct=Decimal("30"),
+        mandate_cash_reserve_pct=Decimal("10"),
+        mandate_active_risk_budget_pct=Decimal("30"),
+        mandate_max_loss_per_position_pct=Decimal("1"),
+        stop_loss_pct=Decimal("25"),
     )
+    if isinstance(expected_active_risk, str):
+        assert result == expected_active_risk
+    else:
+        assert isinstance(result, _Capacities)
+        assert result.active_risk == expected_active_risk
 
 
 @pytest.mark.parametrize(
     ("committed", "expected"),
     [
-        # Active-risk room = 3000 - committed; the pair needs 2 x 125 jointly.
+        # Active-risk room = 3000 - non-core committed; the pair needs 2 x 125 jointly.
         (Decimal("2750"), None),
         (Decimal("2750.01"), "trial_capacity_unavailable:active_risk"),
     ],
 )
 def test_shared_terms_hold_both_legs_jointly(committed: Decimal, expected: str | None) -> None:
-    assert start_gate_reason(replace(SHARED, committed=committed), (LEG, LEG)) == expected
+    shared = replace(SHARED, committed=committed, active_committed=committed)
+    assert start_gate_reason(shared, (LEG, LEG)) == expected
     # One leg alone would fit in the same room.
-    assert start_gate_reason(replace(SHARED, committed=committed), (LEG,)) is None
+    assert start_gate_reason(shared, (LEG,)) is None
 
 
 @pytest.mark.parametrize(

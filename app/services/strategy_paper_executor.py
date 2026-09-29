@@ -1017,6 +1017,7 @@ def _capacities(
     *,
     pool_base: Decimal,
     committed: Decimal,
+    active_committed: Decimal,
     deployment_base: Decimal,
     deployment_reserved: Decimal,
     equity: Decimal,
@@ -1035,6 +1036,9 @@ def _capacities(
     """The capacity arithmetic of ``_risk_and_amount`` over explicit inputs: pure, no I/O.
 
     Returns the named refusal for a limit already exhausted, else every capacity term.
+
+    ``committed`` is everything the shared pot holds (core + pending core + alpha);
+    ``active_committed`` is the NON-core share only, and feeds the active-risk budget alone.
     """
     deployment_remaining = max(Decimal("0"), deployment_base - deployment_reserved)
     # `pool_base` IS the shared bound resolved from exact-owned alpha and core
@@ -1068,9 +1072,13 @@ def _capacities(
     )
     if cash_reserve_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
         return "portfolio_cash_reserve_limit"
+    # ⚠ NON-core committed only (#3471 §8, supervisor 2026-09-29). Core is bounded by its
+    # own mandate target and by the sandbox above, which still counts everything. Charging
+    # a 50%-target passive sleeve to a <=30% active budget made every non-core entry
+    # inadmissible by construction once core sat near target.
     active_risk_capacity = max(
         Decimal("0"),
-        pool_base * mandate_active_risk_budget_pct / Decimal("100") - committed,
+        pool_base * mandate_active_risk_budget_pct / Decimal("100") - active_committed,
     )
     if active_risk_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
         return "portfolio_active_risk_limit"
@@ -1187,6 +1195,7 @@ def _risk_and_amount(
     capacities = _capacities(
         pool_base=pool_base,
         committed=usage.committed,
+        active_committed=usage.authority.alpha_committed,
         deployment_base=deployment_base,
         deployment_reserved=intent.reserved,
         equity=risk.equity,
