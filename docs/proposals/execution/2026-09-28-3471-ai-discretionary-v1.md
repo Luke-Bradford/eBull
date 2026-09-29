@@ -538,7 +538,7 @@ Neither admits a $125 half ticket.
 - **Freeze (slice 3d, amended 2026-09-29; Codex ckpt-1 dispositions appended below; implemented in `app/services/ai_trial_freeze.py` + `scripts/ai_trial_freeze.py`).** Fixed by construction; nothing here is chosen at freeze time.
   - **Document** = `ai_trial_freeze.build_declaration(...)`, a pure function of the code and the freeze-time provenance, so review of the PR that ships it IS review of the terms. Keys:
     - `kind` = `ai-trial-declaration-v1`, `strategy_id`, `strategy_version`, `control_strategy_id`;
-    - `policy_hash` = a FRESH `policy_hash()` at freeze. The freeze refuses `policy_hash_stale` unless it equals the import-time `AI_TRIAL_POLICY_HASH`, which catches a module edited after import. `policy_modules` holds each hashed module's sha256, and `frozen_constants` holds name → `repr(value)`. Both come from one `ai_trial_policy.policy_manifest()`, which `policy_hash` itself consumes, and the builder asserts that re-hashing the manifest gives the document's `policy_hash`. So the three describe one snapshot, and the all-string values make the JSONB round trip lossless;
+    - `policy_hash` = a FRESH `policy_hash()` at freeze. The freeze refuses `policy_hash_stale` unless it equals the import-time `AI_TRIAL_POLICY_HASH`, which catches a module edited after import. `policy_modules` holds each hashed module's sha256, and `frozen_constants` holds name → `repr(value)`. Both come from one `ai_trial_policy.policy_manifest()`, which `policy_hash` itself consumes. The document's `policy_hash` IS that manifest's digest, so the three describe one snapshot by construction, and the all-string values make the JSONB round trip lossless;
     - `model_id`, `system_prompt_sha256`, `prompt_template_sha256`, `decision_schema_sha256` (canonical sha of `decision_json_schema()`);
     - `draw_rule` = `ai_trial_decision.draw_control` (its bytes are in `policy_modules`) and `house_functions_by_name` = `indicator_series.atr_series` and `market_calendar` (frozen by NAME only, as `ai_trial_policy`'s docstring states, so an edit there mints no version);
     - `prereg` = every #2599 term below (purpose, stamps, structural-refusal policy version, expected refusals, forward floor), so the digest binds them as well as the #2599 row;
@@ -572,10 +572,11 @@ Neither admits a $125 half ticket.
     1. the #2599 row, read back and asserted field by field equal to `doc.prereg`;
     2. the `ai_trial_declarations` row;
     3. `configure_trial_position_managers`, which also sets `ratchet_variant_id = NULL`. That is intended: the trial's exits are stop, target, deadline and censor (§8) with no ratchet. The resulting manager rows are re-read and asserted.
-    4. the genesis event `<none> → active`, actor `supervisor`, reason `declaration frozen at <code_git_sha>; wake: <--wake-evidence>`.
+    4. the genesis event `<none> → active`, actor `supervisor`, reason `declaration frozen at <code_git_sha> by <--declared-by>; wake: <--wake-evidence>`.
   - **CLI** `scripts/ai_trial_freeze.py`:
     - **The dry run runs the SAME code path and rolls back,** so it reports every refusal the state at that moment would produce: #2599 coherence, register mapping, existing root. It is advisory, because locks are released on rollback; `--apply` re-runs every check. On an existing declaration it prints `already_frozen` and whether the stored `doc_sha256` equals the recomputed one; that is the lost-commit retry check.
     - `--apply --declared-by <who> --wake-evidence <url of the supervisor's §8 answer>` freezes and commits.
+    - Unreadable git provenance is the refusal `git_unavailable:<error>`. A rolled-back failure prints `freeze FAILED, nothing written` and exits 1.
     - ⚠ The genesis actor label and `--declared-by` are procedural, not authenticated; the database checks neither.
   - ⚠ **`--apply` starts the trial.**
     - Both jobs read `active` at their next fire; a manual job trigger reads it immediately. The model call and orders stay behind every downstream gate: step 0, the loader and the executor.

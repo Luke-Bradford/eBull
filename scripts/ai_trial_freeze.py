@@ -24,7 +24,7 @@ from pathlib import Path
 import psycopg
 
 from app.config import settings
-from app.services.ai_trial_freeze import FreezeReport, freeze_trial, read_provenance
+from app.services.ai_trial_freeze import FreezeReport, TrialFreezeError, freeze_trial, read_provenance
 
 
 def render(report: FreezeReport) -> str:
@@ -59,15 +59,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     provenance = read_provenance(fetch=not args.no_fetch)
-    with psycopg.connect(settings.database_url) as conn:
-        report = freeze_trial(
-            conn,
-            provenance=provenance,
-            apply=args.apply,
-            declared_by=args.declared_by,
-            wake_evidence=args.wake_evidence,
-            expect_config_sha256=args.expect_config_sha256,
-        )
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            report = freeze_trial(
+                conn,
+                provenance=provenance,
+                apply=args.apply,
+                declared_by=args.declared_by,
+                wake_evidence=args.wake_evidence,
+                expect_config_sha256=args.expect_config_sha256,
+            )
+    except (TrialFreezeError, psycopg.Error) as exc:
+        # Rolled back: nothing was frozen. Printed as a failure, never a bare traceback.
+        print(f"freeze FAILED, nothing written: {type(exc).__name__}: {exc}")
+        return 1
     print(render(report))
     if args.json is not None:
         args.json.write_text(json.dumps(report.__dict__, sort_keys=True, indent=2, default=str))

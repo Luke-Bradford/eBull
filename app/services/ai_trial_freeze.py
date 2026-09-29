@@ -197,15 +197,28 @@ def read_provenance(repo_root: Path = REPO_ROOT, *, fetch: bool = True) -> Prove
     ``origin/main``: merged = reviewed, latest = no stale ancestor)."""
 
     def git(*args: str) -> str:
-        return subprocess.run(["git", *args], cwd=repo_root, check=True, capture_output=True, text=True).stdout.strip()
+        return subprocess.run(
+            ["git", *args], cwd=repo_root, check=True, capture_output=True, text=True, timeout=120
+        ).stdout.strip()
 
-    if fetch:
-        git("fetch", "--quiet", "origin", "main")
-    head = git("rev-parse", "HEAD")
+    try:
+        if fetch:
+            git("fetch", "--quiet", "origin", "main")
+        head = git("rev-parse", "HEAD")
+        dirty = bool(git("status", "--porcelain"))
+        origin_main = git("rev-parse", "origin/main")
+    except (OSError, subprocess.SubprocessError) as exc:
+        # Unreadable provenance is a refusal, never a freeze with a guessed sha.
+        return Provenance(
+            code_git_sha="unknown",
+            spec_sha256=hashlib.sha256((repo_root / SPEC_PATH).read_bytes()).hexdigest(),
+            python_version=sys.version.split()[0],
+            refusals=(f"git_unavailable:{type(exc).__name__}",),
+        )
     refusals = []
-    if git("status", "--porcelain"):
+    if dirty:
         refusals.append("worktree_dirty")
-    if head != git("rev-parse", "origin/main"):
+    if head != origin_main:
         refusals.append("code_not_origin_main")
     return Provenance(
         code_git_sha=head,
@@ -319,7 +332,8 @@ def _write(
         f"SELECT {', '.join(_PREREG_COLUMNS)} FROM strategy_preregistration_declarations WHERE declaration_id = %s",
         (declaration_id,),
     ).fetchone()
-    assert stored is not None
+    if stored is None:
+        raise TrialFreezeError(f"#2599 row {declaration_id} not readable after the freeze")
     read_back = dict(zip(_PREREG_COLUMNS, stored, strict=True))
     read_back["expected_structural_refusals"] = list(read_back["expected_structural_refusals"])
     if read_back != doc["prereg"]:
@@ -351,7 +365,7 @@ def _write(
     conn.execute(
         "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
         "VALUES (%s, NULL, 'active', %s, 'supervisor')",
-        (declaration_id, f"declaration frozen at {doc['code_git_sha']}; wake: {wake_evidence}"),
+        (declaration_id, f"declaration frozen at {doc['code_git_sha']} by {declared_by}; wake: {wake_evidence}"),
     )
     return declaration_id
 
