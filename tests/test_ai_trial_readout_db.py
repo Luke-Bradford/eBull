@@ -102,22 +102,23 @@ def test_exposure_facts_are_read_as_known_at_the_decision(
     conn = ebull_test_conn
     _opened_arm_leg(conn, monkeypatch)
     row = conn.execute(
-        "SELECT p.declaration_id, p.pair_seq, r.session_date, d.atr14_pct, p.control_instrument_id "
+        "SELECT p.declaration_id, p.pair_seq, r.as_of, d.atr14_pct, p.control_instrument_id "
         "FROM ai_trial_pairs p JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id "
         "JOIN ai_trial_runs r ON r.run_id = d.run_id"
     ).fetchone()
     assert row is not None
-    declaration_id, pair_seq, session, arm_atr, control_id = row
-    # The house 1y beta: the observation dated before the entry session counts, the one ON it does not.
-    for as_of_date, beta in ((session - timedelta(days=3), "1.25"), (session, "9.0")):
+    declaration_id, pair_seq, run_as_of, arm_atr, control_id = row
+    # The house 1y beta as known at the run's cutoff: a later recompute of the SAME date is invisible.
+    for computed_at, beta in ((run_as_of - timedelta(hours=1), "1.25"), (run_as_of + timedelta(hours=1), "9.0")):
         conn.execute(
             "INSERT INTO instrument_risk_metrics_observations (instrument_id, as_of_date, metric_version, "
-            "window_key, beta) VALUES (%s, %s, %s, '1y', %s)",
-            (ARM_INSTRUMENT, as_of_date, RISK_METRICS_VERSION, Decimal(beta)),
+            "window_key, computed_at, beta) VALUES (%s, %s, %s, '1y', %s, %s)",
+            (ARM_INSTRUMENT, run_as_of.date() - timedelta(days=3), RISK_METRICS_VERSION, computed_at, Decimal(beta)),
         )
     conn.commit()
 
-    facts = load_exposure_facts(conn, int(declaration_id))
+    facts = load_exposure_facts(conn, int(declaration_id), [int(pair_seq)])
+    assert load_exposure_facts(conn, int(declaration_id), []) == {}
     conn.commit()
     arm = facts[int(pair_seq)]["arm"]
     assert (arm.beta_1y, arm.atr14_pct) == (Decimal("1.25"), arm_atr)

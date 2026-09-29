@@ -73,8 +73,8 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
 
 - **Exposure (§9, "size, sector and beta are not matched").** Per leg over the cohort units, every
   fact as known at the decision (``load_exposure_facts``): the cap the run's pack recorded (median),
-  the recorded §6 ATR14 % (mean), the house 1-year OLS beta against SPY dated before the entry
-  session (mean), and the provider stocks-industry id effective at the run's cutoff (counts). A
+  the recorded §6 ATR14 % (mean), the house 1-year OLS beta against SPY computed by the run's
+  cutoff (mean), and the provider stocks-industry id effective at the run's cutoff (counts). A
   missing fact is counted per fact, never estimated. Due readout only, like the SPY references.
 """
 
@@ -1090,20 +1090,23 @@ _EXPOSURE_SQL: Final = """
     FROM ai_trial_pairs p
     JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id
     JOIN ai_trial_runs r ON r.run_id = d.run_id
-    WHERE p.declaration_id = %s
+    WHERE p.declaration_id = %s AND p.pair_seq = ANY(%s)
 """
 
-#: The house 1-year daily OLS beta against SPY (``risk_metrics.ols_beta``), latest observation
-#: dated before the entry session.
+#: The house 1-year daily OLS beta against SPY (``risk_metrics.ols_beta``): the latest observation
+#: COMPUTED by the run's knowledge cutoff. The observations table is append-only and keyed by
+#: ``computed_at`` (``sql/198``), so a later recompute of an earlier date is never visible here.
 _BETA_SQL: Final = """
     SELECT beta FROM instrument_risk_metrics_observations
-    WHERE instrument_id = %s AND window_key = '1y' AND metric_version = %s AND as_of_date < %s
-    ORDER BY as_of_date DESC LIMIT 1
+    WHERE instrument_id = %s AND window_key = '1y' AND metric_version = %s AND computed_at <= %s
+    ORDER BY as_of_date DESC, computed_at DESC LIMIT 1
 """
 
 
-def load_exposure_facts(conn: psycopg.Connection[Any], declaration_id: int) -> dict[int, dict[str, ExposureFacts]]:
-    """Each pair's two legs' exposure as known at the decision, by ``pair_seq``.
+def load_exposure_facts(
+    conn: psycopg.Connection[Any], declaration_id: int, pair_seqs: Sequence[int]
+) -> dict[int, dict[str, ExposureFacts]]:
+    """The two legs' exposure of each listed pair as known at the decision, by ``pair_seq``.
 
     - size: the ``market_cap_usd`` the run's own pack recorded on the shortlist (the #1664-overlaid
       cap that admitted the name; ``None`` where the pack resolved none);
@@ -1114,7 +1117,7 @@ def load_exposure_facts(conn: psycopg.Connection[Any], declaration_id: int) -> d
     """
     facts: dict[int, dict[str, ExposureFacts]] = {}
     with conn.cursor(row_factory=dict_row) as cur:
-        rows = cur.execute(_EXPOSURE_SQL, (declaration_id,)).fetchall()
+        rows = cur.execute(_EXPOSURE_SQL, (declaration_id, list(pair_seqs))).fetchall()
     for row in rows:
         caps = {
             int(entry["instrument_id"]): _decimal(entry.get("market_cap_usd"))
@@ -1128,7 +1131,7 @@ def load_exposure_facts(conn: psycopg.Connection[Any], declaration_id: int) -> d
         ):
             if instrument_id is None:
                 continue
-            beta = conn.execute(_BETA_SQL, (int(instrument_id), RISK_METRICS_VERSION, row["session_date"])).fetchone()
+            beta = conn.execute(_BETA_SQL, (int(instrument_id), RISK_METRICS_VERSION, row["as_of"])).fetchone()
             classification = load_market_classification(
                 conn, instrument_id=int(instrument_id), decision_at=row["as_of"]
             )
@@ -1146,9 +1149,19 @@ class ReadoutUnavailable(RuntimeError):
     pass
 
 
-def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_of: datetime | None = None) -> Readout:
+def compute_readout(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_version: str,
+    as_of: datetime | None = None,
+    descriptives: bool = True,
+) -> Readout:
     """The readout for the arm's declaration of ``strategy_version`` (O14: each version is its
-    own declaration, so the version is never inferred). Read-only."""
+    own declaration, so the version is never inferred). Read-only.
+
+    ``descriptives=False`` skips the benchmark and exposure reads (SPY references and exposure
+    print empty). ``ai_trial_halts`` passes it: it runs this every 5-minute cycle for the harm looks
+    alone and fails CLOSED on any error, so a descriptive read must not be able to halt a trial."""
     # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constants), and
     # ai_trial_halts imports this module for the harm looks.
     from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD
@@ -1164,11 +1177,12 @@ def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_
     declaration_id = int(declaration[0])
     pairs, first_fill = load_pairs(conn, declaration_id)
     as_of = as_of or datetime.now(UTC)
-    # Descriptive inputs of the due readout only: ``ai_trial_halts`` runs this every 5-minute cycle
-    # and fails CLOSED on any error, so a benchmark read must not be able to halt a live trial.
-    due = first_fill is not None and cohort(pairs, first_fill, fill_session(as_of)).status == "due"
-    spy_closes, spy_quote = load_spy_reference(conn, first_fill) if due and first_fill else ({}, (None, None))
-    exposure_facts = load_exposure_facts(conn, declaration_id) if due else {}
+    # Descriptive inputs of the due readout only, over its cohort units only.
+    state = cohort(pairs, first_fill, fill_session(as_of))
+    load = descriptives and first_fill is not None and state.status == "due" and state.last_session is not None
+    spy_closes, spy_quote = load_spy_reference(conn, first_fill) if load and first_fill else ({}, (None, None))
+    unit_seqs = [p.pair_seq for p in pairs if p.valued and state.last_session and p.session_date <= state.last_session]
+    exposure_facts = load_exposure_facts(conn, declaration_id, unit_seqs) if load else {}
     run_census = {
         f"{status}:{reason}" if reason else status: int(count)
         for status, reason, count in conn.execute(

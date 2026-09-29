@@ -107,7 +107,9 @@ def test_a_check_that_cannot_run_fails_closed_to_a_resumable_halt(
     looks = [HarmLook(1, 10, 8, 0.001, 0.025, True, flows_final=True)]
     calls: list[str] = []
 
-    def readout(_conn: Conn, *, strategy_version: str, as_of: Any) -> SimpleNamespace:
+    def readout(_conn: Conn, *, strategy_version: str, as_of: Any, descriptives: bool) -> SimpleNamespace:
+        # The 5-minute halt check reads no descriptives (benchmark, exposure): only the harm looks.
+        assert descriptives is False
         calls.append(strategy_version)
         # The halt is written first, then this declaration's own check raises: its savepoint
         # takes the halt with it, and the pass reports it failed instead of raising.
