@@ -1116,6 +1116,8 @@ def load_exposure_facts(
       prospective classification history (``strategy_decision_context.load_market_classification``).
     """
     facts: dict[int, dict[str, ExposureFacts]] = {}
+    if not pair_seqs:
+        return facts
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(_EXPOSURE_SQL, (declaration_id, list(pair_seqs))).fetchall()
     for row in rows:
@@ -1179,10 +1181,15 @@ def compute_readout(
     as_of = as_of or datetime.now(UTC)
     # Descriptive inputs of the due readout only, over its cohort units only.
     state = cohort(pairs, first_fill, fill_session(as_of))
-    load = descriptives and first_fill is not None and state.status == "due" and state.last_session is not None
-    spy_closes, spy_quote = load_spy_reference(conn, first_fill) if load and first_fill else ({}, (None, None))
-    unit_seqs = [p.pair_seq for p in pairs if p.valued and state.last_session and p.session_date <= state.last_session]
-    exposure_facts = load_exposure_facts(conn, declaration_id, unit_seqs) if load else {}
+    load = descriptives and state.status == "due"
+    spy_closes: dict[date, Decimal | None] = {}
+    spy_quote: tuple[Decimal | None, Decimal | None] = (None, None)
+    exposure_facts: dict[int, dict[str, ExposureFacts]] = {}
+    if load and first_fill is not None and state.last_session is not None:
+        last = state.last_session
+        spy_closes, spy_quote = load_spy_reference(conn, first_fill)
+        units = [pair.pair_seq for pair in pairs if pair.valued and pair.session_date <= last]
+        exposure_facts = load_exposure_facts(conn, declaration_id, units)
     run_census = {
         f"{status}:{reason}" if reason else status: int(count)
         for status, reason, count in conn.execute(
