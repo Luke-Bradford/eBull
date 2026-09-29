@@ -71,7 +71,7 @@ import psycopg
 
 from app.services.ai_trial_decision import HORIZON_SESSIONS, DecisionMetrics, derive_control_levels, measure_atr
 from app.services.ai_trial_pack import INDICATOR_BARS, MIN_BARS, MIN_BID, WILDER_PERIOD
-from app.services.ai_trial_stats import flip_set, sign_flip_p_batch
+from app.services.ai_trial_stats import EXACT_MAX_CLUSTERS, flip_set, sign_flip_p_batch
 from app.services.indicator_series import BarSeries, atr_series
 from app.services.market_calendar import us_market_status
 from app.services.outcome_resolver import ExitLevels, resolve_outcome
@@ -83,6 +83,7 @@ WINDOW_END: Final = date(2026, 6, 30)
 MIN_CLOSE: Final = MIN_BID
 PAIRS_PER_SESSION: Final = 2
 CLUSTER_COUNTS: Final = (15, 20, 30)
+MC_CLUSTER_COUNTS: Final = tuple(k for k in CLUSTER_COUNTS if k > EXACT_MAX_CLUSTERS)
 #: Supervisor rule 2026-09-28 15:30Z (#2437): stop = k × ATR14 with k in [1.5, 3]; target 2R default.
 STOP_ATR_MULTIPLES: Final = (Decimal("1.5"), Decimal("3"))
 REWARD_RISK: Final = Decimal("2")
@@ -307,8 +308,9 @@ def rejection_rates(
 
 
 def flip_set_sensitivity(a: Mapping[float, Mapping[int, float]], b: Mapping[float, Mapping[int, float]]) -> float:
-    """Largest |rate_a − rate_b| over every (δ, K): 0 where K ≤ 16 (exact flips agree)."""
-    return max(abs(a[s][k] - b[s][k]) for s in a for k in a[s])
+    """Largest |rate_a − rate_b| over the (δ, K) cells ``b`` covers — the Monte-Carlo K only, since
+    exact enumeration (K ≤ ``EXACT_MAX_CLUSTERS``) is identical under any seed."""
+    return max((abs(a[s][k] - b[s][k]) for s in b for k in b[s]), default=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +393,7 @@ def run(panel: Sequence[PanelInstrument], frontier: date, *, replicates: int, se
         # Monte-Carlo error moves the whole column together. Reported, not assumed away.
         rates_alt = rejection_rates(
             base,
-            cluster_counts=CLUSTER_COUNTS,
+            cluster_counts=MC_CLUSTER_COUNTS,
             shifts_pct=SHIFTS_PCT,
             alpha=ALPHA,
             seed=seed + ALT_FLIP_SEED,

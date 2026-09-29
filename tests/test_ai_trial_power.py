@@ -275,8 +275,9 @@ def test_draw_pairs_arm_minus_control_and_replaces_thin_sessions() -> None:
 
 def test_flip_set_sensitivity_is_the_largest_rate_gap() -> None:
     a = {0.0: {15: 0.05, 20: 0.06}, 1.0: {15: 0.2, 20: 0.3}}
-    b = {0.0: {15: 0.05, 20: 0.05}, 1.0: {15: 0.2, 20: 0.33}}
+    b = {0.0: {20: 0.05}, 1.0: {20: 0.33}}  # Monte-Carlo K only
     assert flip_set_sensitivity(a, b) == pytest.approx(0.03)
+    assert flip_set_sensitivity(a, {}) == 0.0
 
 
 def test_rejection_rates_respond_to_the_planted_shift() -> None:
