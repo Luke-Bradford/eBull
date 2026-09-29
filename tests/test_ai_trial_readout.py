@@ -417,6 +417,11 @@ def test_turnover_is_opened_over_mean_committed_per_twenty_sessions() -> None:
     assert result.mean_committed_usd == pytest.approx(400 / 3)
     assert result.per_20_sessions == pytest.approx(200 / (400 / 3) * 20 / 3)
     assert turnover([]).per_20_sessions is None
+    # An unvalued leg's dates still bound the window (Codex ckpt-2): 4 sessions, committed
+    # 100, 200, 100, 0 → mean 100.
+    later = _sessions(4)
+    wider = turnover([*legs[:2], _spanned(None, later[0], later[3], opened=None)])
+    assert (wider.sessions, wider.mean_committed_usd, wider.missing) == (4, pytest.approx(100.0), 1)
 
 
 def test_the_due_readout_carries_spy_references_and_turnover() -> None:

@@ -11,8 +11,9 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from app.services import ai_trial_readout
 from app.services.ai_trial_pair_lifecycle import previous_session, record_pair_lifecycle
-from app.services.ai_trial_readout import load_pairs
+from app.services.ai_trial_readout import compute_readout, load_pairs
 from app.services.market_regime import Regime
 from app.services.market_regime_provider import MarketRegimeProvider
 from tests.test_ai_trial_deadline_db import _POSITION_ID, _opened_arm_leg
@@ -80,3 +81,15 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
     assert pair.pool_size is not None and pair.pool_size >= 1
     # Filled at 100 against the preflight's stored 100 ask (sql/438); the control never filled.
     assert pair.fill_gaps == {"arm": 0.0}
+
+    # The SPY reference is a due-readout input only: the 5-minute halt cycle runs this readout and
+    # fails closed on any error, so a benchmark read must not reach it before the cohort is due.
+    def _boom(*_: object) -> None:
+        raise AssertionError("SPY loaded before the readout is due")
+
+    monkeypatch.setattr(ai_trial_readout, "load_spy_reference", _boom)
+    version = conn.execute("SELECT strategy_version FROM ai_trial_declarations").fetchone()
+    assert version is not None
+    readout = compute_readout(conn, strategy_version=str(version[0]), as_of=closed_at)
+    conn.commit()
+    assert (readout.cohort.status, readout.spy_capital) == ("not_due", None)

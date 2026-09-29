@@ -554,20 +554,20 @@ class Turnover:
 
 def turnover(legs: Sequence[LegValue]) -> Turnover:
     """§9: Σ open amounts ÷ mean capital committed, scaled to ``TURNOVER_SESSIONS`` sessions. A leg
-    commits its open amount on every session from its fill to its exit, both included."""
-    spans = [
+    commits its open amount on every session from its fill to its exit, both included. The window
+    runs over every leg's known sessions, a leg without an open amount included: it still held
+    capital across them, so dropping its dates would shorten the window and overstate turnover."""
+    dated = [
         (leg.entry_session, leg.exit_session, leg.open_amount)
         for leg in legs
-        if leg.entry_session is not None
-        and leg.exit_session is not None
-        and leg.open_amount is not None
-        and leg.entry_session <= leg.exit_session
+        if leg.entry_session is not None and leg.exit_session is not None and leg.entry_session <= leg.exit_session
     ]
+    spans = [(entry, exit_, amount) for entry, exit_, amount in dated if amount is not None]
     missing = len(legs) - len(spans)
     if not spans:
         return Turnover(0, 0.0, 0, None, None, missing)
-    sessions = [min(entry for entry, _, _ in spans)]
-    last = max(exit_ for _, exit_, _ in spans)
+    sessions = [min(entry for entry, _, _ in dated)]
+    last = max(exit_ for _, exit_, _ in dated)
     while sessions[-1] < last:
         sessions.append(exit_deadline_session(sessions[-1], 1))
     committed = [sum(amount for entry, exit_, amount in spans if entry <= s <= exit_) for s in sessions]
@@ -1038,7 +1038,11 @@ def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_
         raise ReadoutUnavailable(f"no frozen {strategy_version} declaration: the trial has not started (slice 3d)")
     declaration_id = int(declaration[0])
     pairs, first_fill = load_pairs(conn, declaration_id)
-    spy_closes, spy_quote = load_spy_reference(conn, first_fill) if first_fill else ({}, (None, None))
+    as_of = as_of or datetime.now(UTC)
+    # Descriptive inputs of the due readout only: ``ai_trial_halts`` runs this every 5-minute cycle
+    # and fails CLOSED on any error, so a benchmark read must not be able to halt a live trial.
+    due = first_fill is not None and cohort(pairs, first_fill, fill_session(as_of)).status == "due"
+    spy_closes, spy_quote = load_spy_reference(conn, first_fill) if due and first_fill else ({}, (None, None))
     run_census = {
         f"{status}:{reason}" if reason else status: int(count)
         for status, reason, count in conn.execute(
@@ -1073,7 +1077,7 @@ def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_
         run_census=run_census,
         decision_census=decision_census,
         run_costs=costs,
-        as_of=as_of or datetime.now(UTC),
+        as_of=as_of,
         leg_capital_usd=TRIAL_LEG_CAPITAL_USD,
         spy_closes=spy_closes,
         spy_quote=spy_quote,
