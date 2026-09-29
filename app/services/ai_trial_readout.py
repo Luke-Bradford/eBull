@@ -236,8 +236,10 @@ def partial_close(rows: Sequence[CloseRow], close_trigger: str | None, close_req
     """A closed leg one of whose slices was closed before its final exit. An engine close closes
     the position once, so any slice executed before its operation was requested is a partial. A
     broker close is recognised by its slices' own O12 labels disagreeing with the leg's (a slice
-    between stop and target beside a final stop or target slice). ⚠ A manual partial filled at or
-    through the leg's own stop or target price is indistinguishable from it, and is not caught."""
+    between stop and target beside a final stop or target slice). ⚠ Two residuals are not caught,
+    because the close rows carry no initiator: a manual partial filled at or through the leg's own
+    stop or target price, and a manual partial executed at or after an engine close's request (an
+    engine close of several owned executions legitimately yields several slices then)."""
     if close_trigger is not None:
         # No request time (unreachable: ``created_at`` is NOT NULL) cannot show the slices came
         # after the close, so the leg is kept out of the library outcomes rather than valued in.
@@ -821,7 +823,8 @@ def _weighted(pairs: Sequence[tuple[int, float | None]]) -> float | None:
 
 
 def _library_exit(value: LegValue) -> str:
-    """The library's name for the leg's exit, or ``other:<label>``; a partial close is always other."""
+    """The library's name for the leg's exit, or ``other:<label>``; a leg ``partial_close``
+    recognised is always other (its residuals are in that function's docstring)."""
     if value.partial_close:
         return "other:partial_close"
     return LIBRARY_EXITS.get(value.exit_label, f"other:{value.exit_label}")
