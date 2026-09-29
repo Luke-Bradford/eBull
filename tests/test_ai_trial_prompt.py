@@ -10,6 +10,8 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+import pytest
+
 from app.services.ai_trial_decision import STOP_PCT_MAX, TARGET_PCT_MAX, THESIS_MAX_SENTENCES
 from app.services.ai_trial_levels import SETUP_TYPES, SUPPORT_LEVEL_IDS, TARGET_LEVEL_IDS
 from app.services.ai_trial_pack import canonical_json
@@ -24,6 +26,7 @@ from app.services.ai_trial_prompt import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_SHA256,
     USER_PROMPT_TEMPLATE,
+    _num,
     encode_pack,
     render_user_prompt,
 )
@@ -94,6 +97,7 @@ def test_the_excursion_table_is_the_checked_in_exit_base_rates_output() -> None:
             re.M,
         )
     }
+    assert found, "no 'horizon Nd … MAE(ATR) … MFE(ATR)' line parsed: the .out format changed"
     assert found == {h: list(v) for h, v in EXCURSION_ATR.items()}
 
 
@@ -107,3 +111,14 @@ def test_the_library_statements_hold_for_the_bound_library() -> None:
     signs = [[Fraction(r["halves"][h]["mean_net_r"]) < 0 for h in ("train", "holdout")] for r in doc["rows"]]
     assert all(any(row) for row in signs)  # negative in at least one half, every row
     assert not any(all(Fraction(r["halves"][h]["mean_net_r"]) > 0 for h in ("train", "holdout")) for r in doc["rows"])
+
+
+def test_rule_constants_render_exactly() -> None:
+    assert [_num(Fraction(1, 4)), _num(Fraction(3, 2)), _num(Fraction(4)), _num(Fraction(10))] == [
+        "0.25",
+        "1.5",
+        "4",
+        "10",
+    ]
+    with pytest.raises(ValueError):
+        _num(Fraction(1, 3))

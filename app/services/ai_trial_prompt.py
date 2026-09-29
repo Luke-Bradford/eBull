@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Final
 
@@ -40,6 +41,26 @@ from app.services.ai_trial_decision import (
     TARGET_PCT_MIN,
     THESIS_MAX_CHARS,
     THESIS_MAX_SENTENCES,
+)
+from app.services.ai_trial_levels import (
+    DONCHIAN_LONG,
+    DONCHIAN_SHORT,
+    FLAG_MAX_RETRACE,
+    FLAG_PEAK_FIRST,
+    FLAG_PEAK_LAST,
+    FLAG_POLE_BARS,
+    FLAG_POLE_MIN_ATR,
+    FRACTAL_N,
+    PULLBACK_PRIOR_FIRST,
+    PULLBACK_PRIOR_LAST,
+    PULLBACK_SLOPE_LAG,
+    PULLBACK_TOUCH_ABOVE_ATR,
+    PULLBACK_TOUCH_BARS,
+    PULLBACK_TOUCH_BELOW_ATR,
+    RANGE_MAX_WIDTH_ATR,
+    RANGE_MIN_TOUCHES,
+    RANGE_MIN_WIDTH_ATR,
+    RANGE_TOUCH_ATR,
 )
 from app.services.ai_trial_pack import PROMPT_BARS, canonical_json
 from app.services.ai_trial_plan import HORIZON_STOP_FLOOR_ATR, PLAN_R_MIN, STOP_OFFSET_ATR
@@ -63,7 +84,14 @@ LIBRARY_COST_PCT: Final = "0.30"
 
 
 def _num(value: float | Fraction) -> str:
-    return f"{float(value):g}"
+    """A rule constant as the prompt states it. A ``Fraction`` renders exactly, or raises: a
+    rounded rule in the prompt would state a different rule from the one the guard applies."""
+    if isinstance(value, Fraction):
+        number = Decimal(value.numerator) / Decimal(value.denominator)
+        if Fraction(number) != value:
+            raise ValueError(f"{value} has no exact decimal form")
+        return f"{number.normalize():f}"
+    return f"{value:g}"
 
 
 _FLOORS: Final = ", ".join(f"{h} sessions {_num(HORIZON_STOP_FLOOR_ATR[h])}" for h in HORIZON_SESSIONS)
@@ -116,24 +144,30 @@ target {_num(TARGET_PCT_MIN)} to {_num(TARGET_PCT_MAX)} percent above it.
 
 Setups, evaluated on the name's daily bars at its last bar t ("setups" reports each as detected or \
 not, and inputs_missing when it could not be evaluated)
-- breakout_donchian20: close(t) is above the highest high of the 20 bars before t.
-- pullback_rising_sma20 and pullback_rising_sma50: the SMA is above its value 5 bars earlier; every \
-close from t-10 to t-4 was above the SMA; in one of the last 4 bars the low came within 1 atr14 \
-below to 0.5 atr14 above the SMA; and close(t) is above the SMA.
-- range_support_bounce: the 20-bar range before t is 1.5 to 4 atr14 wide; its low and its high \
-were each tested (within 0.5 atr14) on at least 2 non-adjacent bars; the low was tested on t or \
-t-1; close(t) is at or above the range low and above the previous close.
-- trend_continuation_flag: the highest high of bars t-15 to t-3 ends a pole at least 3 atr14 tall \
-from the lowest low of the 10 bars before it; since that high there is no new high, and the \
-pullback holds at least half the pole.
+- breakout_donchian20: close(t) is above the highest high of the {DONCHIAN_SHORT} bars before t.
+- pullback_rising_sma20 and pullback_rising_sma50: the SMA is above its value \
+{PULLBACK_SLOPE_LAG} bars earlier; every close from t-{PULLBACK_PRIOR_FIRST} to \
+t-{PULLBACK_PRIOR_LAST} was above the SMA; in one of the last {PULLBACK_TOUCH_BARS + 1} bars the \
+low came within {_num(PULLBACK_TOUCH_BELOW_ATR)} atr14 below to {_num(PULLBACK_TOUCH_ABOVE_ATR)} \
+atr14 above the SMA; and close(t) is above the SMA.
+- range_support_bounce: the {DONCHIAN_SHORT}-bar range before t is {_num(RANGE_MIN_WIDTH_ATR)} to \
+{_num(RANGE_MAX_WIDTH_ATR)} atr14 wide; its low and its high were each tested (within \
+{_num(RANGE_TOUCH_ATR)} atr14) on at least {RANGE_MIN_TOUCHES} non-adjacent bars; the low was \
+tested on t or t-1; close(t) is at or above the range low and above the previous close.
+- trend_continuation_flag: the highest high of bars t-{FLAG_PEAK_FIRST} to t-{FLAG_PEAK_LAST} ends \
+a pole at least {_num(FLAG_POLE_MIN_ATR)} atr14 tall from the lowest low of the {FLAG_POLE_BARS} \
+bars before it; since that high there is no new high, and the pullback retraces at most \
+{_num(FLAG_MAX_RETRACE)} of the pole.
 
 Levels ("levels" gives each id's price, its atr_distance from the last close in atr14 units, and \
 origin_bar; a null level is unavailable; a level's age in bars is indicator_bars - 1 - origin_bar)
-- Invalidation ids (support): swing_low_1, swing_low_2, swing_low_3 (confirmed 5-bar swing lows, \
-most recent first); donchian20_low and donchian55_low (lowest low of the 20 or 55 bars before t); \
+- Invalidation ids (support): swing_low_1, swing_low_2, swing_low_3 (confirmed \
+{2 * FRACTAL_N + 1}-bar swing lows, most recent first); donchian20_low and donchian55_low (lowest \
+low of the {DONCHIAN_SHORT} or {DONCHIAN_LONG} bars before t); \
 sma20, sma50, sma200; vwap20_proxy (a daily-bar proxy, not an intraday VWAP).
 - Target ids (resistance or projection): swing_high_1, swing_high_2, swing_high_3; \
-donchian20_high and donchian55_high; range20_projection (the 20-bar high plus the 20-bar range); \
+donchian20_high and donchian55_high; range20_projection (the {DONCHIAN_SHORT}-bar high plus the \
+{DONCHIAN_SHORT}-bar range); \
 mm_up (a measured move: the latest swing low, high and higher low, with the first leg's height \
 added to the higher low).
 
