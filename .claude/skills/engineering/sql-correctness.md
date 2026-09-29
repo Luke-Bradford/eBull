@@ -26,6 +26,15 @@ VALUES (
 
 This is atomic. COALESCE handles NULL from MAX on an empty table — always trace the first-row case.
 
+## SELECT-list scalar subquery — prove the join key is unique
+
+A `(SELECT x FROM ... ) AS col` in a select list raises `more than one row returned by a subquery`
+at run time if its join can match twice, and that kills the whole query, not one row. For every
+one you add, name the PRIMARY KEY or UNIQUE constraint that bounds it to one row (cite the
+migration), or give it a deterministic `ORDER BY ... LIMIT 1`. Example (#3496):
+`strategy_trades.funding_decision_id` is UNIQUE and `strategy_entry_preflights.signal_id` is the
+PK, so the funding → preflight lookup is single-row by construction.
+
 ## INSERT ... SELECT zero-rows trap
 
 `INSERT INTO t SELECT ... FROM t WHERE condition` inserts zero rows silently when WHERE matches nothing. No error is raised. Always trace what happens on the very first row for a given key.

@@ -69,6 +69,7 @@ from decimal import Decimal
 from typing import Any, Final, Literal
 
 import psycopg
+from psycopg.rows import dict_row
 
 from app.services.ai_trial_deadline import TRIAL_EXIT_TIME_UTC, exit_deadline_session, fill_session
 from app.services.ai_trial_pair_lifecycle import (
@@ -743,9 +744,10 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
         (pair_ids,),
     ).fetchall():
         events[int(pair_id)].append((leg, event, reasons))
-    legs = {(int(row[0]), row[1]): row for row in conn.execute(_LEGS_SQL, (declaration_id,)).fetchall()}
-    close_rows = load_close_rows(conn, [int(row[2]) for row in legs.values()])
-    fills = [row[6] for row in legs.values() if row[6] is not None]
+    with conn.cursor(row_factory=dict_row) as cur:
+        legs = {(int(row["pair_id"]), row["leg"]): row for row in cur.execute(_LEGS_SQL, (declaration_id,)).fetchall()}
+    close_rows = load_close_rows(conn, [int(row["strategy_trade_id"]) for row in legs.values()])
+    fills = [row["filled_at"] for row in legs.values() if row["filled_at"] is not None]
     first_fill = min((fill_session(filled) for filled in fills), default=None)
 
     records: list[PairRecord] = []
@@ -761,30 +763,30 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
             leg_events = [event for event_leg, event, _ in history if event_leg == leg]
             live += "filled" in leg_events and not {"closed", "censored"} & set(leg_events)
             row = legs.get((int(pair_id), leg))
-            if row is not None and row[6] is not None:
-                fill_gaps[leg] = fill_gap_pct(_decimal(row[11]), _decimal(row[8]))
+            if row is not None and row["filled_at"] is not None:
+                fill_gaps[leg] = fill_gap_pct(_decimal(row["quote_ask"]), _decimal(row["average_price"]))
             # Any leg that exited is valued, a broken pair's included (O11: it is still reported);
             # only a ``unit`` enters the statistics.
-            if row is None or row[6] is None or not {"closed", "censored"} & set(leg_events):
+            if row is None or row["filled_at"] is None or not {"closed", "censored"} & set(leg_events):
                 values[leg] = None
                 continue
-            (_, _, trade_id, instrument_id, deadline, currency, _, units, avg_price, released_at, trigger, _) = row
+            trade_id = int(row["strategy_trade_id"])
             if "censored" in leg_events:
-                censor_session = exit_deadline_session(deadline, TRIAL_CENSOR_SESSIONS)
+                censor_session = exit_deadline_session(row["exit_deadline_session"], TRIAL_CENSOR_SESSIONS)
                 mark = _censor_mark(
                     conn,
-                    instrument_id=int(instrument_id),
-                    usd=currency == "USD",
+                    instrument_id=int(row["instrument_id"]),
+                    usd=row["currency"] == "USD",
                     censor_session=censor_session,
-                    average_price=_decimal(avg_price),
-                    closes=close_rows.get(int(trade_id), []),
+                    average_price=_decimal(row["average_price"]),
+                    closes=close_rows.get(trade_id, []),
                 )
-                values[leg] = value_censored_leg(mark, _decimal(units))
+                values[leg] = value_censored_leg(mark, _decimal(row["units"]))
                 resolved.append(censor_session)
             else:
-                values[leg] = value_closed_leg(close_rows.get(int(trade_id), []), trigger)
-                if released_at is not None:
-                    resolved.append(fill_session(released_at))
+                values[leg] = value_closed_leg(close_rows.get(trade_id, []), row["close_trigger"])
+                if row["released_at"] is not None:
+                    resolved.append(fill_session(row["released_at"]))
         records.append(
             PairRecord(
                 pair_seq=int(pair_seq),
