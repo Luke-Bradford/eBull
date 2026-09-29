@@ -53,6 +53,13 @@ def test_ties_count_as_greater_or_equal() -> None:
     assert sign_flip_p(sums, flip_set(4, seed=0)) == pytest.approx(_brute_force_p(sums))
 
 
+def test_the_tie_tolerance_is_scale_invariant() -> None:
+    # A real inequality at a tiny scale must not be absorbed as a tie (Codex ckpt-3 on #3492).
+    fs = flip_set(1, seed=0)
+    assert sign_flip_p([1e-13], fs) == 0.5
+    assert sign_flip_p([1e-13, 2e-13, 3e-13], flip_set(3, seed=0)) == sign_flip_p([1.0, 2.0, 3.0], flip_set(3, seed=0))
+
+
 def test_less_alternative_is_the_mirror_of_greater() -> None:
     sums = [1.0, 2.0, 3.0]
     fs = flip_set(3, seed=0)

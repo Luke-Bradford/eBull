@@ -89,7 +89,7 @@ def sign_flip_p_batch(
         raise ValueError("cluster sums must be finite")
     orient = 1.0 if alternative == "greater" else -1.0
     t_obs = orient * sums.sum(axis=1)  # (R,)
-    floor = t_obs - _TIE_RTOL * np.maximum(np.abs(sums).sum(axis=1), 1.0)
+    floor = t_obs - _TIE_RTOL * np.abs(sums).sum(axis=1)  # purely relative: scale-invariant
     hits = np.empty(sums.shape[0], dtype=np.float64)
     step = max(1, _BLOCK_ELEMENTS // signs.shape[0])
     for lo in range(0, sums.shape[0], step):
