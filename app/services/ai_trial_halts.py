@@ -127,8 +127,11 @@ def leg_losses(trades: Sequence[LegTrade]) -> list[LegLoss]:
 
 
 def loss_breach(losses: Sequence[LegLoss], *, limit_usd: Decimal = TRIAL_LOSS_LIMIT_USD) -> LegLoss | None:
-    """§9: the first leg whose loss reached the limit (≥, the spec's own comparison)."""
-    return next((leg for leg in losses if leg.loss_usd >= limit_usd), None)
+    """§9: a leg whose loss reached the limit (≥, the spec's own comparison). A PROVEN breach (no
+    unmeasured trade) wins over an unproven one on the other leg, so the terminal halt is never
+    downgraded by leg order (review round 7)."""
+    breaches = [leg for leg in losses if leg.loss_usd >= limit_usd]
+    return next((leg for leg in breaches if leg.unmeasured == 0), breaches[0] if breaches else None)
 
 
 _TRADES_SQL: Final = """

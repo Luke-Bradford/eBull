@@ -128,3 +128,7 @@ def test_the_breach_is_reached_at_the_limit_on_either_leg() -> None:
     assert loss_breach(at) == at[1]
     # An unmeasured trade never pushes a leg over: it contributes nothing.
     assert loss_breach([LegLoss("arm", Decimal("-150"), 3)]) is None
+    # A proven breach wins over an unproven one ahead of it in leg order.
+    both = [LegLoss("arm", Decimal("-300"), 1), LegLoss("control", Decimal("-200"), 0)]
+    assert loss_breach(both) == both[1]
+    assert loss_breach(both[:1]) == both[0]
