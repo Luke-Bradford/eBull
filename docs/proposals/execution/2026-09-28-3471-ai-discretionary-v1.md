@@ -1096,6 +1096,11 @@ The supervisor's text folds "too close" and "R < 2" into `no_valid_plan`. v6 kee
 
 It also refuses when **bid ≤ `invalidation_price`**, since the named level itself no longer holds (r2-17/19), and when a price-series break or split for the name is dated after the pack's `as_of` (r2-20). Precedence: these checks run immediately after the executor's quote-freshness check and before sizing (r2-21).
 
+Implemented in slice v6-3b (`ai_trial_intent.load_trial_intent`), with these details:
+- **Dated after `as_of`** means after the New York date of the run's `as_of`. It covers any `price_series_break` row, resolved or not (an explained break is still a new scale), and any active `price_adjustments` row.
+- **An unusable bid refuses as `quote_bid_invalid`** (non-positive or non-finite; `quotes.bid` is NOT NULL). Without a usable bid there is no way to show the level still holds.
+- ⚠ **The break and adjustment tables are not a complete split registry** (`sql/246` header; Codex ckpt-2 on v6-3b). Most provider-adjusted splits leave no row in either, and the repo has no corporate-action table. The quote checks bound the gap by arithmetic: with close *C*, a forward split of ratio *r* puts the ask near *C*/*r*, which is ≤ the stop whenever *r* ≥ 1/(1 − stop%). A reverse split puts it near *r*·*C*, which is ≥ the target whenever *r* ≥ 1 + target%. **What remains is a forward split whose ratio sits inside the plan's own stop band** (for example 5:4 against a stop wider than 20%), plus any intraday move that offsets it. That residual is labelled, not closed.
+
 **What this does not do (labelled).**
 - It checks the quote at submission only, not the path since the pack (r2-18).
 - Otherwise §8's rule applies unchanged: the percentages go onto the ask. So exits are displaced by ask / close. In r2-16's example (close 100, ask 108) the stop lands near 103.14, not 96 − ¼ ATR. That is **approximate**, as in v5: quantization and 6-decimal rounding also apply.
