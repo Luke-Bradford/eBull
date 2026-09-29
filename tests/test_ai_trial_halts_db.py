@@ -92,3 +92,37 @@ def test_a_harm_look_that_halts_writes_halted_harm(ebull_test_conn: Conn, monkey
     assert check.halted == "halted_harm"
     assert _states(conn)[-1][:2] == ("halted_harm", "engine")
     assert _states(conn)[-1][2] == "harm_look:k=2:units=20:clusters=9:p=0.004<0.0125"
+
+
+def test_a_failing_declaration_neither_skips_nor_undoes_another(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _opened_arm_leg(conn, monkeypatch)
+    row = conn.execute("SELECT declaration_id FROM ai_trial_declarations").fetchone()
+    conn.commit()
+    assert row is not None
+    looks = [HarmLook(1, 10, 8, 0.001, 0.025, True, flows_final=True)]
+    calls: list[str] = []
+
+    def readout(_conn: Conn, *, strategy_version: str, as_of: Any) -> SimpleNamespace:
+        calls.append(strategy_version)
+        # The halt is written first, then this declaration's own check raises: its savepoint
+        # takes the halt with it, and the pass reports it failed instead of raising.
+        _conn.execute(
+            "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
+            "VALUES (%s, 'active', 'halted_operator', 'probe', 'engine')",
+            (int(row[0]),),
+        )
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.ai_trial_halts.compute_readout", readout)
+    (check,) = _enforce(conn)
+    assert (check.failed, check.halted) == (True, None)
+    assert [state for state, _, _ in _states(conn)] == ["active"]
+    # A clean pass afterwards still halts.
+    monkeypatch.setattr(
+        "app.services.ai_trial_halts.compute_readout", lambda *_, **__: SimpleNamespace(harm_looks=looks)
+    )
+    assert [check.halted for check in _enforce(conn)] == ["halted_harm"]
+    assert calls == ["v1"]

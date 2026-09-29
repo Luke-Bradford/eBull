@@ -6866,9 +6866,10 @@ def _record_trial_pair_lifecycle(conn: psycopg.Connection[Any]) -> int | None:
 
 
 def _enforce_trial_halts(conn: psycopg.Connection[Any]) -> str | None:
-    """#3471 §9: the loss halt and the harm stop, after the pair events they read; ``None`` if the
-    check failed (degraded on the errors axis, as the lifecycle step above). Returns
-    ``checked=<n> halted=<states> unmeasured=<n>`` for the cycle's note."""
+    """#3471 §9: the loss halt and the harm stop, after the pair events they read; ``None`` if any
+    check failed (degraded on the errors axis, as the lifecycle step above; a declaration that
+    raised is logged by ``enforce_trial_halts`` and the others' halts are still committed).
+    Returns ``checked=<n> halted=<states> unmeasured=<n>`` for the cycle's note."""
     from app.services.ai_trial_halts import enforce_trial_halts
 
     try:
@@ -6878,6 +6879,8 @@ def _enforce_trial_halts(conn: psycopg.Connection[Any]) -> str | None:
     except Exception:
         logger.exception("strategy_paper_cycle: AI-trial halt check failed")
         conn.rollback()
+        return None
+    if any(check.failed for check in checks):
         return None
     halted = ",".join(f"{check.declaration_id}:{check.halted}" for check in checks if check.halted) or "none"
     return f"checked={len(checks)} halted={halted} unmeasured={sum(check.unmeasured for check in checks)}"

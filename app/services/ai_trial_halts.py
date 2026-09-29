@@ -84,7 +84,8 @@ def trade_pnl_usd(trade: LegTrade) -> Decimal | None:
         realised += row.realized_pnl_usd
         closed_units += row.units
     if trade.status == "closed":
-        # A slice not yet ingested leaves the realised figure partial (Codex ckpt-2).
+        # Unmeasured until its slices cover the opened units: a slice not yet ingested leaves
+        # the realised figure partial (Codex ckpt-2).
         return realised if closed_units >= trade.opened_units else None
     remaining = trade.opened_units - closed_units
     if remaining <= 0:
@@ -161,6 +162,8 @@ class HaltCheck:
     #: The state this pass wrote, if any.
     halted: EngineHalt | None
     unmeasured: int
+    #: The check raised; its savepoint was rolled back and the other declarations still ran.
+    failed: bool = False
 
 
 _ACTIVE_DECLARATIONS_SQL: Final = """
@@ -173,39 +176,50 @@ _ACTIVE_DECLARATIONS_SQL: Final = """
 """
 
 
+def _check_declaration(conn: Conn, declaration_id: int, strategy_version: str, now: datetime | None) -> HaltCheck:
+    losses = leg_losses(load_leg_trades(conn, declaration_id))
+    unmeasured = sum(leg.unmeasured for leg in losses)
+    halted: EngineHalt | None = None
+    reason = ""
+    breach = loss_breach(losses)
+    if breach is not None:
+        reason = (
+            f"loss_halt:leg={breach.leg}:loss_usd={breach.loss_usd:.2f}"
+            f":limit_usd={TRIAL_LOSS_LIMIT_USD:.2f}:unmeasured={breach.unmeasured}"
+        )
+        if halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_loss", reason=reason):
+            halted = "halted_loss"
+    else:
+        readout = compute_readout(conn, strategy_version=strategy_version, as_of=now)
+        look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
+        if look is not None:
+            reason = (
+                f"harm_look:k={look.k}:units={look.units}:clusters={look.clusters}"
+                f":p={look.p_less:.6g}<{look.threshold:.6g}"
+            )
+            if halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_harm", reason=reason):
+                halted = "halted_harm"
+    if halted is not None:
+        logger.error("ai trial %s %s (%s)", declaration_id, halted, reason)
+    return HaltCheck(declaration_id, halted, unmeasured)
+
+
 def enforce_trial_halts(conn: Conn, *, now: datetime | None = None) -> list[HaltCheck]:
-    """Check both halts on every active trial and write the first that fires. The caller commits."""
+    """Check both halts on every active trial and write the first that fires. The caller commits.
+
+    Each declaration runs in its own savepoint: one that raises is rolled back alone and reported
+    ``failed``, so it can neither skip a later declaration nor undo a halt an earlier one wrote."""
     # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constant).
     from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
 
     checks: list[HaltCheck] = []
     for declaration_id, strategy_version in conn.execute(_ACTIVE_DECLARATIONS_SQL, (TRIAL_ARM_STRATEGY_ID,)).fetchall():
-        declaration_id = int(declaration_id)
-        losses = leg_losses(load_leg_trades(conn, declaration_id))
-        unmeasured = sum(leg.unmeasured for leg in losses)
-        halted: EngineHalt | None = None
-        reason = ""
-        breach = loss_breach(losses)
-        if breach is not None:
-            reason = (
-                f"loss_halt:leg={breach.leg}:loss_usd={breach.loss_usd:.2f}"
-                f":limit_usd={TRIAL_LOSS_LIMIT_USD:.2f}:unmeasured={breach.unmeasured}"
-            )
-            if halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_loss", reason=reason):
-                halted = "halted_loss"
-        else:
-            readout = compute_readout(conn, strategy_version=str(strategy_version), as_of=now)
-            look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
-            if look is not None:
-                reason = (
-                    f"harm_look:k={look.k}:units={look.units}:clusters={look.clusters}"
-                    f":p={look.p_less:.6g}<{look.threshold:.6g}"
-                )
-                if halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_harm", reason=reason):
-                    halted = "halted_harm"
-        if halted is not None:
-            logger.error("ai trial %s %s (%s)", declaration_id, halted, reason)
-        checks.append(HaltCheck(declaration_id, halted, unmeasured))
+        try:
+            with conn.transaction():
+                checks.append(_check_declaration(conn, int(declaration_id), str(strategy_version), now))
+        except Exception:
+            logger.exception("ai trial %s: halt check failed", declaration_id)
+            checks.append(HaltCheck(int(declaration_id), None, 0, failed=True))
     return checks
 
 

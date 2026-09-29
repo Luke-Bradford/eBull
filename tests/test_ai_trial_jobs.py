@@ -405,21 +405,25 @@ def test_the_paper_cycle_lifecycle_step_is_contained(
     assert conn.rollbacks == (1 if failed else 0)
 
 
-@pytest.mark.parametrize("fails", [False, True])
-def test_the_paper_cycle_halt_step_is_contained(monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
+@pytest.mark.parametrize("outcome", ["ok", "raises", "one_failed"])
+def test_the_paper_cycle_halt_step_is_contained(monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
     from app.services import ai_trial_halts
     from app.workers import scheduler
 
     def enforce(_conn: Any) -> list[ai_trial_halts.HaltCheck]:
-        if fails:
+        if outcome == "raises":
             raise RuntimeError("boom")
-        return [ai_trial_halts.HaltCheck(7, "halted_loss", 1), ai_trial_halts.HaltCheck(8, None, 2)]
+        checks = [ai_trial_halts.HaltCheck(7, "halted_loss", 1), ai_trial_halts.HaltCheck(8, None, 2)]
+        if outcome == "one_failed":
+            checks.append(ai_trial_halts.HaltCheck(9, None, 0, failed=True))
+        return checks
 
     monkeypatch.setattr(ai_trial_halts, "enforce_trial_halts", enforce)
     conn = _TxConn()
     note = scheduler._enforce_trial_halts(cast(Any, conn))
-    assert note == (None if fails else "checked=2 halted=7:halted_loss unmeasured=3")
-    assert conn.rollbacks == (1 if fails else 0)
+    assert note == ("checked=2 halted=7:halted_loss unmeasured=3" if outcome == "ok" else None)
+    # A declaration that failed inside its savepoint does not roll back the others' halts.
+    assert conn.rollbacks == (1 if outcome == "raises" else 0)
 
 
 def test_the_deployed_environment_is_resolved_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
