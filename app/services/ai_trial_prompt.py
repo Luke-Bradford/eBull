@@ -84,14 +84,16 @@ LIBRARY_COST_PCT: Final = "0.30"
 
 
 def _num(value: float | Fraction) -> str:
-    """A rule constant as the prompt states it. A ``Fraction`` renders exactly, or raises: a
-    rounded rule in the prompt would state a different rule from the one the guard applies."""
+    """A rule constant as the prompt states it, exactly: a float by its shortest round-trip form,
+    a ``Fraction`` by its terminating decimal or a raise. A rounded rule in the prompt would state
+    a different rule from the one the guard applies."""
     if isinstance(value, Fraction):
         number = Decimal(value.numerator) / Decimal(value.denominator)
         if Fraction(number) != value:
             raise ValueError(f"{value} has no exact decimal form")
-        return f"{number.normalize():f}"
-    return f"{value:g}"
+    else:
+        number = Decimal(repr(value))
+    return f"{number.normalize():f}"
 
 
 _FLOORS: Final = ", ".join(f"{h} sessions {_num(HORIZON_STOP_FLOOR_ATR[h])}" for h in HORIZON_SESSIONS)

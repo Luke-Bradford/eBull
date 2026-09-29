@@ -11716,5 +11716,7 @@ neighbouring container and match it.**
   model reading one rule while the server applies another, with no failing test. The review bot flagged it (#3508).
 - Prevention: every number in a frozen prompt's rule text is either interpolated from the constant the code
   applies, or pinned to its source by a test (the excursion table and the library caveat). A `Fraction` renders
-  exactly or raises, never rounded. Self-review: grep the prompt f-string for bare digits.
+  exactly or raises, never rounded. A DERIVED expression in the text (`TOUCH_BARS + 1`, `2 * FRACTAL_N + 1`) is
+  written only after reading the detector's own range bounds and comparison operators, and the PR cites those lines
+  (#3508 round 2). Self-review: grep the prompt f-string for bare digits.
 - Enforced in: `ai_trial_prompt.SYSTEM_PROMPT`, `ai_trial_prompt._num` and `tests/test_ai_trial_prompt.py`.
