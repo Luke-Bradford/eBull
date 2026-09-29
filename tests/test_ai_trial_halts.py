@@ -71,7 +71,7 @@ def test_the_limit_is_twenty_percent_of_the_fixed_leg_capital() -> None:
         (_trade(closes=(_slice("-5", "1"),)), Decimal("-15")),
         # Every unit closed by slices while the trade is not yet `closed`: realised only.
         (_trade(bid=None, closes=(_slice("-5", "1"), _slice("-7", "1"))), Decimal("-12")),
-        # Closed: realised only, whatever the quote says.
+        # Closed, its slices covering every opened unit: realised only, whatever the quote says.
         (_trade(status="closed", closes=(_slice("-5", "2"),)), Decimal("-5")),
         # Never filled: nothing at risk.
         (_trade(units=None, bid=None), Decimal(0)),
@@ -89,8 +89,10 @@ def test_trade_pnl(trade: LegTrade, expected: Decimal) -> None:
         _trade(usd=False),
         _trade(closes=(_slice(None, "1"),)),
         _trade(closes=(_slice("-5", None),)),
-        # History ingest lags the close: a closed trade with no slice is not a zero.
+        # History ingest lags the close: a closed trade with no slice, or with slices not yet
+        # covering its opened units, is not measured.
         _trade(status="closed"),
+        _trade(status="closed", closes=(_slice("-5", "1"),)),
     ],
 )
 def test_an_unmeasurable_trade_is_none_never_zero(trade: LegTrade) -> None:

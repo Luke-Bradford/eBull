@@ -78,13 +78,16 @@ def test_a_harm_look_that_halts_writes_halted_harm(ebull_test_conn: Conn, monkey
     conn = ebull_test_conn
     _opened_arm_leg(conn, monkeypatch)
     looks = [
-        HarmLook(1, 10, 8, 0.2, 0.025, False),
-        HarmLook(2, 20, 9, 0.004, 0.0125, True),
+        HarmLook(1, 10, 8, 0.2, 0.025, False, flows_final=True),
+        # Would halt, but a unit's flow window is still open: provisional, not acted on.
+        HarmLook(2, 20, 9, 0.001, 0.0125, True, flows_final=False),
     ]
     monkeypatch.setattr(
         "app.services.ai_trial_halts.compute_readout", lambda *_, **__: SimpleNamespace(harm_looks=looks)
     )
 
+    assert [check.halted for check in _enforce(conn)] == [None]
+    looks[1] = HarmLook(2, 20, 9, 0.004, 0.0125, True, flows_final=True)
     (check,) = _enforce(conn)
     assert check.halted == "halted_harm"
     assert _states(conn)[-1][:2] == ("halted_harm", "engine")

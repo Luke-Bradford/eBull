@@ -19,11 +19,15 @@ positions run to their exits.
     a bid is a price the position could have exited at when it was quoted, so a loss it shows
     was real at that instant, and the rule is "reaches".
   - A filled trade whose P&L cannot be measured (no bid, a non-USD instrument, a slice without
-    P&L or units, or a closed trade whose close slice has not been ingested yet) is counted
+    P&L or units, or a closed trade whose slices do not yet cover its opened units — history
+    ingest lags the close) is counted
     ``unmeasured`` and contributes nothing. It never halts: ``halted_loss`` is terminal, and an
     absent number is not a loss. The count is on the paper cycle's note.
-- **Harm stop.** ``compute_readout(...).harm_looks`` (§9 "Harm stop"); the first look with
-  ``halts`` writes ``halted_harm``, naming the look in the reason.
+- **Harm stop.** ``compute_readout(...).harm_looks`` (§9 "Harm stop"); the first look that
+  ``halts`` and is ``flows_final`` writes ``halted_harm``, naming the look in the reason. A leg is
+  valued from its first close slice, and a later slice inside the 5-session flow window can move
+  its *d*; a terminal halt must not rest on a provisional p (Codex ckpt-2), so it waits for the
+  window, as the cohort readout does.
 """
 
 from __future__ import annotations
@@ -80,7 +84,8 @@ def trade_pnl_usd(trade: LegTrade) -> Decimal | None:
         realised += row.realized_pnl_usd
         closed_units += row.units
     if trade.status == "closed":
-        return realised if trade.closes else None
+        # A slice not yet ingested leaves the realised figure partial (Codex ckpt-2).
+        return realised if closed_units >= trade.opened_units else None
     remaining = trade.opened_units - closed_units
     if remaining <= 0:
         return realised
@@ -190,7 +195,7 @@ def enforce_trial_halts(conn: Conn, *, now: datetime | None = None) -> list[Halt
                 halted = "halted_loss"
         else:
             readout = compute_readout(conn, strategy_version=str(strategy_version), as_of=now)
-            look = next((look for look in readout.harm_looks if look.halts), None)
+            look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
             if look is not None:
                 reason = (
                     f"harm_look:k={look.k}:units={look.units}:clusters={look.clusters}"

@@ -291,6 +291,9 @@ class HarmLook:
     halts: bool
     #: ``too_few_clusters`` when the look was due but below ``HARM_MIN_CLUSTERS``.
     skipped: str | None = None
+    #: Every unit in the look has passed its ``FLOW_WINDOW_SESSIONS`` window, so no later close
+    #: slice can move its *d*. The terminal halt acts only on a final look (``ai_trial_halts``).
+    flows_final: bool = False
 
 
 def settled_unvalued(pair: PairRecord, today: date) -> bool:
@@ -325,11 +328,16 @@ def harm_looks(pairs: Sequence[PairRecord], *, seed: int, today: date) -> list[H
         subset = ordered[: k * HARM_LOOK_EVERY]
         sums = cluster_sums(subset)
         threshold = HARM_ALPHA * 2.0**-k
+        final = all(
+            pair.resolved_session is not None
+            and today > exit_deadline_session(pair.resolved_session, FLOW_WINDOW_SESSIONS)
+            for pair in subset
+        )
         if len(sums) < HARM_MIN_CLUSTERS:
-            looks.append(HarmLook(k, len(subset), len(sums), None, threshold, False, "too_few_clusters"))
+            looks.append(HarmLook(k, len(subset), len(sums), None, threshold, False, "too_few_clusters", final))
             continue
         p = sign_flip_p(sums, flip_set(len(sums), seed=seed), alternative="less")
-        looks.append(HarmLook(k, len(subset), len(sums), p, threshold, p < threshold))
+        looks.append(HarmLook(k, len(subset), len(sums), p, threshold, p < threshold, None, final))
     return looks
 
 

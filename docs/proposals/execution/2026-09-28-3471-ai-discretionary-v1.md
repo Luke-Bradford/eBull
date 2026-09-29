@@ -643,11 +643,11 @@ Neither admits a $125 half ticket.
   - Harm looks are computed and printed here; `ai_trial_halts` acts on them (below).
 - **Halts implemented** (`app/services/ai_trial_halts.py`, run after every 5-minute paper cycle, no migration). Each writes `active → halted_*` once, actor `engine`, through the same transition helper as O10. Choices fixed by construction:
   - **Order:** the loss halt is checked first (safety), then the harm stop.
-  - **Harm stop:** the first `harm_looks` entry with `halts` writes `halted_harm`; the reason names k, units, clusters, p and the threshold.
+  - **Harm stop:** the first `harm_looks` entry that `halts` **and** is `flows_final` writes `halted_harm`; the reason names k, units, clusters, p and the threshold. `flows_final` = every unit in the look is past its 5-session flow window. A leg is valued from its first close slice, and a later slice inside the window can move *d*, so a terminal halt waits for the window, as the cohort readout does (Codex ckpt-2).
   - **Leg capital** = `TRIAL_MAX_CONCURRENT_PER_LEG` × the full ticket = $1,000, so the limit is $200. `TRIAL_LOSS_HALT_PCT` joins `FROZEN_CONSTANTS`.
   - **Realised** = Σ `realized_pnl_usd` over every close slice of every leg trade in the declaration (the readout's reach, partial-close siblings included). No flow window: a late restatement is still money lost.
   - **Unrealised** = (opened units − Σ closed slice units) × (`quotes.bid` − entry average price). `quotes` is the position manager's own mark. Its age is not gated, because the rule is "reaches" and a quoted bid was an exit price at its instant.
-  - **Unmeasurable trades** (no bid, non-USD, a slice without P&L or units, a closed trade whose slice is not ingested yet) contribute nothing and are counted `unmeasured` on the cycle note. They never halt: `halted_loss` is terminal, and a missing number is not a loss.
+  - **Unmeasurable trades** (no bid, non-USD, a slice without P&L or units, a closed trade whose slices do not yet cover its opened units) contribute nothing and are counted `unmeasured` on the cycle note. They never halt: `halted_loss` is terminal, and a missing number is not a loss.
   - **Not yet computed:** SPY references (O13), exposure, turnover, and the fill-versus-ask gap. The executor does not persist the ask it priced a leg from, so that gap has no stored input until it does.
 
 ## 10. Contamination rule

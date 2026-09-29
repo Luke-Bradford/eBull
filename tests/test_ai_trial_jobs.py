@@ -405,6 +405,23 @@ def test_the_paper_cycle_lifecycle_step_is_contained(
     assert conn.rollbacks == (1 if failed else 0)
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_the_paper_cycle_halt_step_is_contained(monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
+    from app.services import ai_trial_halts
+    from app.workers import scheduler
+
+    def enforce(_conn: Any) -> list[ai_trial_halts.HaltCheck]:
+        if fails:
+            raise RuntimeError("boom")
+        return [ai_trial_halts.HaltCheck(7, "halted_loss", 1), ai_trial_halts.HaltCheck(8, None, 2)]
+
+    monkeypatch.setattr(ai_trial_halts, "enforce_trial_halts", enforce)
+    conn = _TxConn()
+    note = scheduler._enforce_trial_halts(cast(Any, conn))
+    assert note == (None if fails else "checked=2 halted=7:halted_loss unmeasured=3")
+    assert conn.rollbacks == (1 if fails else 0)
+
+
 def test_the_deployed_environment_is_resolved_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[object] = []
     monkeypatch.setattr(ai_trial_jobs, "_environment", None)

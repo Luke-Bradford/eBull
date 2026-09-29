@@ -48,7 +48,8 @@ def render(readout: Readout) -> str:
     for look in readout.harm_looks:
         lines.append(
             f"harm look {look.k}: units {look.units}, clusters {look.clusters}, p(<0) {look.p_less}, "
-            f"threshold {look.threshold:.6f}, halts {look.halts}" + (f" ({look.skipped})" if look.skipped else "")
+            f"threshold {look.threshold:.6f}, halts {look.halts}, flows final {look.flows_final}"
+            + (f" ({look.skipped})" if look.skipped else "")
         )
     if readout.primary is None:
         lines.append("primary: not computed — the cohort readout is not due")
