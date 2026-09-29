@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -16,6 +17,7 @@ from scripts.ai_trial_power import (
     Census,
     Leg,
     PanelInstrument,
+    atr_at,
     draw_pair_differences,
     in_universe,
     nyse_sessions,
@@ -99,16 +101,28 @@ def test_shape_and_finiteness_are_refused() -> None:
 
 D = Decimal
 START = date(2025, 3, 3)  # a Monday
-SESSIONS = nyse_sessions(START, START + timedelta(days=40))
+SESSIONS = nyse_sessions(START, START + timedelta(days=600))
 FRONTIER = date(2026, 9, 25)
 
 
-def _inst(bars: list[tuple[str, str, str, str]], *, atr: float | None = 1.0) -> PanelInstrument:
-    """Bars as (open, high, low, close) on consecutive NYSE sessions; bar 0 is the signal bar."""
+def _series(bars: list[tuple[str | None, ...]]) -> BarSeries:
     dates = tuple(SESSIONS[: len(bars)])
-    rows = tuple({"open": D(o), "high": D(h), "low": D(lo), "close": D(c), "volume": 1000} for o, h, lo, c in bars)
-    series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
-    return PanelInstrument(1, series, {d: i for i, d in enumerate(dates)}, [atr] * len(bars))
+    rows = tuple(
+        {"open": o and D(o), "high": h and D(h), "low": lo and D(lo), "close": c and D(c), "volume": 1000}
+        for o, h, lo, c in bars
+    )
+    return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+
+
+def _inst(
+    bars: list[tuple[str, str, str, str]], *, atr: float | None = 1.0, breaks: tuple[date, ...] = ()
+) -> PanelInstrument:
+    """Bars as (open, high, low, close) on consecutive NYSE sessions; bar 0 is the signal bar. The
+    ATR is pinned through the cache so the bracket arithmetic is exact."""
+    series = _series(list(bars))
+    inst = PanelInstrument(1, series, {d: i for i, d in enumerate(series.dates)}, breaks)
+    inst.atr_cache.update(dict.fromkeys(range(len(bars)), atr))
+    return inst
 
 
 # ATR 1.0 on a close of 100 → ATR14% = 1; k = 5 → stop 5%, R = 2 → target 10% (entry 100: SL 95, TP 110).
@@ -146,6 +160,13 @@ def test_series_ending_before_the_frontier_is_a_delisting_at_its_last_close() ->
     assert (leg.outcome, leg.return_pct) == ("delisted", pytest.approx(-3.0))
 
 
+def test_unresolved_break_inside_the_hold_is_refused_not_booked_across_the_scale_change() -> None:
+    # A 1:10 reverse split on bar 3 would read as a +900% target touch without the segment bound.
+    bars = [FLAT, FLAT, FLAT, ("1000", "1010", "990", "1000"), FLAT]
+    leg = _leg(bars, breaks=(SESSIONS[3],))
+    assert (leg.return_pct, leg.refusal) == (None, "series_break")
+
+
 def test_series_ending_at_the_frontier_is_refused_not_booked() -> None:
     leg = _leg([FLAT, FLAT, FLAT], frontier=SESSIONS[2])
     assert (leg.return_pct, leg.refusal) == (None, "corpus_edge")
@@ -164,6 +185,26 @@ def test_missing_atr_and_missing_fill_session_are_refused() -> None:
         "next_bar_not_next_session"
     )
     assert simulate_leg(inst, SESSIONS[4], SESSIONS[5], CELL, frontier=FRONTIER).refusal == "no_next_bar"
+
+
+def test_atr_window_lets_an_old_masked_bar_age_out() -> None:
+    clean = ("100", "101", "99", "100")
+    bars: list[tuple[str | None, ...]] = [clean] * 400
+    bars[5] = ("100", None, None, "100")  # a quarantined wick early in the history
+    inst = PanelInstrument(1, _series(bars), {}, ())
+    assert atr_at(inst, 100) is None  # masked bar still inside the trailing window
+    assert atr_at(inst, 399) == pytest.approx(2.0)  # aged out: the pack sees a clean window
+
+
+def test_atr_needs_min_bars_inside_the_signal_segment() -> None:
+    bars: list[tuple[str | None, ...]] = [("100", "101", "99", "100")] * 200
+    series = _series(bars)
+    inst = PanelInstrument(1, series, {}, (series.dates[150],))
+    assert math.isnan(atr_at(inst, 170) or 0.0)  # 21 bars since the break < MIN_BARS
+    assert atr_at(inst, 149) == pytest.approx(2.0)
+    fresh = PanelInstrument(1, series, {}, ())
+    assert math.isnan(atr_at(fresh, 30) or 0.0)
+    assert _leg([FLAT] * 5, atr=math.nan).refusal == "too_few_bars"
 
 
 def test_universe_floor_reads_the_signal_close() -> None:

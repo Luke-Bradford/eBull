@@ -13,14 +13,19 @@ Spec: ``docs/proposals/execution/2026-09-28-3471-ai-discretionary-v1.md`` §9 "P
 - **Pairs:** ``PAIRS_PER_SESSION`` per sampled session; both legs are uniform random draws from the
   same session's universe (no two legs share an instrument within a session).
 - **Levels:** each leg's own, as the §7 v5 control derives them: stop = k × its ATR14% at the signal
-  session (``indicator_series.atr_series``, the pack's function), target = R × stop, a leg outside
-  the §5 bounds is ineligible and redrawn. The grid is the supervisor's 2026-09-28 15:30Z rule:
-  k ∈ [1.5, 3] (both ends), R = 2 (the default), crossed with the §5 horizons.
+  session, target = R × stop, a leg outside the §5 bounds is ineligible and redrawn. The ATR is the
+  pack's: ``indicator_series.atr_series`` over the trailing ``INDICATOR_BARS`` bars (at least
+  ``MIN_BARS``) inside the signal bar's own price segment, so an old masked bar ages out of the
+  window exactly as it does in the live pack instead of poisoning every later session. The grid is
+  the supervisor's 2026-09-28 15:30Z rule: k ∈ [1.5, 3] (both ends), R = 2 (the default), crossed
+  with the §5 horizons.
 - **Execution:** entry at the next session's open; ``outcome_resolver.resolve_outcome`` resolves the
   bracket (a gap through a level fills at the open). Two spec §9 rules differ from that resolver and
   are applied on top of it: an ``ambiguous`` bar takes the stop first, and a horizon exit is at the
   last window bar's CLOSE (the resolver books the next open). A series that ends inside the window
-  before the corpus frontier is a delisting and exits at its last close.
+  before the corpus frontier is a delisting and exits at its last close. An unresolved
+  ``price_series_break`` inside the hold ends the segment (``price_segments.segment_end_index``),
+  so the leg is refused rather than booked across a scale change.
 - **Statistic:** d = arm − control per-trade gross %, with the planted shift δ added to the arm;
   one-sided cluster sign-flip p (``ai_trial_stats``); the rejection rate is the share of replicates
   with p ≤ α.
@@ -62,11 +67,12 @@ from app.services.ai_trial_decision import (
     TARGET_PCT_MAX,
     TARGET_PCT_MIN,
 )
-from app.services.ai_trial_pack import MIN_BID, WILDER_PERIOD
+from app.services.ai_trial_pack import INDICATOR_BARS, MIN_BARS, MIN_BID, WILDER_PERIOD
 from app.services.ai_trial_stats import flip_set, sign_flip_p_batch
 from app.services.indicator_series import BarSeries, atr_series
 from app.services.market_calendar import us_market_status
 from app.services.outcome_resolver import ExitLevels, resolve_outcome
+from app.services.price_segments import segment_end_index, segment_for_index
 
 WINDOW_START: Final = date(2024, 1, 2)
 WINDOW_END: Final = date(2026, 6, 30)
@@ -80,17 +86,20 @@ REWARD_RISK: Final = 2.0
 #: Planted shifts in d, per-trade percentage points.
 SHIFTS_PCT: Final = (0.0, 1.0, 2.0, 3.0, 5.0)
 ALPHA: Final = 0.05
-#: Bars kept before the window for the ATR warm-up (Wilder seed weight after 250 bars < 1e-7).
-WARMUP_START: Final = date(2023, 1, 3)
+#: Load start: at least ``INDICATOR_BARS`` NYSE sessions before ``WINDOW_START``, so the first signal
+#: session sees the pack's full ATR window.
+WARMUP_START: Final = date(2022, 12, 1)
 
 LegOutcome = Literal["tp_hit", "sl_hit", "expired", "ambiguous_stop", "delisted"]
 LegRefusal = Literal[
     "no_next_bar",
     "next_bar_not_next_session",
     "no_fill_open",
+    "too_few_bars",
     "atr_invalid",
     "levels_outside_bounds",
     "masked_bar",
+    "series_break",
     "corpus_edge",
     "no_exit_close",
 ]
@@ -115,7 +124,10 @@ class PanelInstrument:
     instrument_id: int
     series: BarSeries
     index: Mapping[date, int]
-    atr14: Sequence[float | None]
+    #: Unresolved ``price_series_break`` dates (first bar at the new scale), ascending.
+    breaks: tuple[date, ...] = ()
+    #: Memoised ``atr_at`` by bar index — shared across grid cells.
+    atr_cache: dict[int, float | None] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)
@@ -125,9 +137,23 @@ class Leg:
     refusal: LegRefusal | None = None
 
 
-def panel_instrument(instrument_id: int, series: BarSeries) -> PanelInstrument:
-    atr = atr_series(series, universe="survivor_only", period=WILDER_PERIOD).values
-    return PanelInstrument(instrument_id, series, {d: i for i, d in enumerate(series.dates)}, atr)
+def panel_instrument(instrument_id: int, series: BarSeries, breaks: Sequence[date] = ()) -> PanelInstrument:
+    return PanelInstrument(instrument_id, series, {d: i for i, d in enumerate(series.dates)}, tuple(breaks))
+
+
+def atr_at(inst: PanelInstrument, i: int) -> float | None:
+    """The pack's ATR14 at bar ``i``: Wilder over the trailing ``INDICATOR_BARS`` bars of ``i``'s own
+    price segment. ``nan`` when that segment holds fewer than ``MIN_BARS`` bars up to ``i`` (the
+    pack's ``too_few_bars``); ``None`` when the window's last value is unevaluable."""
+    if i not in inst.atr_cache:
+        segment, local = segment_for_index(inst.series, index=i, unresolved_breaks=inst.breaks)
+        lo = max(0, local + 1 - INDICATOR_BARS)
+        if local + 1 - lo < MIN_BARS:
+            inst.atr_cache[i] = math.nan
+        else:
+            window = BarSeries(dates=segment.dates[lo : local + 1], rows=segment.rows[lo : local + 1])
+            inst.atr_cache[i] = atr_series(window, universe="survivor_only", period=WILDER_PERIOD).values[-1]
+    return inst.atr_cache[i]
 
 
 def in_universe(inst: PanelInstrument, session: date) -> bool:
@@ -151,7 +177,9 @@ def simulate_leg(inst: PanelInstrument, session: date, next_session: date, cell:
     entry = rows[f].get("open")
     if entry is None:
         return Leg(None, refusal="no_fill_open")
-    atr, close = inst.atr14[i], rows[i].get("close")
+    atr, close = atr_at(inst, i), rows[i].get("close")
+    if atr is not None and math.isnan(atr):
+        return Leg(None, refusal="too_few_bars")
     if atr is None or close is None or not math.isfinite(atr) or atr <= 0:
         return Leg(None, refusal="atr_invalid")
     stop_pct = cell.stop_atr_multiple * 100.0 * atr / float(close)
@@ -166,7 +194,7 @@ def simulate_leg(inst: PanelInstrument, session: date, next_session: date, cell:
         entry_price=entry,
         levels=ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=cell.horizon),
         masked_bar_reasons={},
-        segment_end_index=None,
+        segment_end_index=segment_end_index(inst.series, fill_index=f, unresolved_breaks=inst.breaks),
     )
 
     def booked(price: Decimal | None, kind: LegOutcome) -> Leg:
@@ -184,6 +212,8 @@ def simulate_leg(inst: PanelInstrument, session: date, next_session: date, cell:
         if dates[-1] >= frontier:
             return Leg(None, refusal="corpus_edge")
         return booked(rows[-1].get("close"), "delisted")
+    if outcome.reason == "series_break":
+        return Leg(None, refusal="series_break")
     return Leg(None, refusal="masked_bar")
 
 
@@ -280,9 +310,11 @@ _UNIVERSE_SQL = """
 
 def load_panel(conn: psycopg.Connection[Any]) -> tuple[list[PanelInstrument], date]:
     from app.services.price_masked_bars import load_bar_spans, load_masked_bars
+    from app.services.price_segments import load_unresolved_breaks
 
     ids = [int(r[0]) for r in conn.execute(_UNIVERSE_SQL).fetchall()]
     spans = load_bar_spans(conn, ids)
+    breaks = load_unresolved_breaks(conn, list(spans))
     frontier = max(s.last_bar for s in spans.values())
     panel: list[PanelInstrument] = []
     for iid in sorted(i for i, s in spans.items() if s.last_bar >= WINDOW_START):
@@ -291,7 +323,7 @@ def load_panel(conn: psycopg.Connection[Any]) -> tuple[list[PanelInstrument], da
         if not keep:
             continue
         trimmed = BarSeries(dates=tuple(series.dates[n] for n in keep), rows=tuple(series.rows[n] for n in keep))
-        panel.append(panel_instrument(iid, trimmed))
+        panel.append(panel_instrument(iid, trimmed, breaks.get(iid, ())))
     return panel, frontier
 
 
