@@ -213,7 +213,9 @@ def _fail_closed(conn: Conn, declaration_id: int, exc: Exception) -> HaltCheck:
             declaration_id=declaration_id,
             to_state="halted_operator",
             # The message too (bounded), so a persistent cause is triageable from the event alone.
-            reason=f"halt_check_failed:{type(exc).__name__}:{str(exc)[:200]}",
+            # Bound as a parameter; `reason` is unbounded TEXT (sql/432), and a NUL, which a
+            # text parameter refuses, is dropped so the halt cannot fail on its own reason.
+            reason=f"halt_check_failed:{type(exc).__name__}:{str(exc).replace(chr(0), '')[:200]}",
         )
     except Exception:
         logger.exception("ai trial %s: the fail-closed halt could not be written either", declaration_id)

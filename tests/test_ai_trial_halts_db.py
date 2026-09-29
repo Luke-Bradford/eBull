@@ -114,7 +114,7 @@ def test_a_check_that_cannot_run_fails_closed_to_a_resumable_halt(
             "VALUES (%s, 'active', 'halted_operator', 'probe', 'engine')",
             (int(row[0]),),
         )
-        raise RuntimeError("boom")
+        raise RuntimeError("bo\x00om")
 
     monkeypatch.setattr("app.services.ai_trial_halts.compute_readout", readout)
     (check,) = _enforce(conn)
