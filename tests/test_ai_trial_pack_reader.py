@@ -126,3 +126,20 @@ def test_latest_segment_break_on_the_last_bar_leaves_one_bar() -> None:
 def test_latest_segment_with_no_bar_by_the_session_is_empty() -> None:
     series = _daily(5, start=date(2026, 2, 1))
     assert r.latest_segment(series, last_session=date(2026, 1, 1), unresolved_breaks=[]).dates == ()
+
+
+def test_read_bars_refuses_when_the_break_map_moves_during_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    series = _daily(80)
+    maps = iter([{}, {7: (series.dates[40],)}])  # a break detected between the two reads
+    monkeypatch.setattr(r, "load_unresolved_breaks", lambda conn, ids: next(maps))
+    monkeypatch.setattr(r, "load_masked_bars", lambda conn, iid: type("M", (), {"series": series})())
+    with pytest.raises(r.PackReadRace):
+        r.read_bars(object(), [7], last_session=series.dates[-1])  # type: ignore[arg-type]
+
+
+def test_read_bars_cuts_each_name_at_its_own_break(monkeypatch: pytest.MonkeyPatch) -> None:
+    series = _daily(80)
+    monkeypatch.setattr(r, "load_unresolved_breaks", lambda conn, ids: {7: (series.dates[40],)})
+    monkeypatch.setattr(r, "load_masked_bars", lambda conn, iid: type("M", (), {"series": series})())
+    out = r.read_bars(object(), [7, 8], last_session=series.dates[-1])  # type: ignore[arg-type]
+    assert out[7][0] == list(series.dates[40:]) and out[8][0] == list(series.dates)

@@ -327,7 +327,12 @@ def read_bars(
     Its masking is the quarantine's: an unevaluated instrument returns no bars, and a
     quarantined field comes back ``None`` (``assemble_pack`` turns that into
     ``quarantined_bar``). A raw ``price_daily`` read here would feed quarantined bars into
-    the indicators — it is the #3046 consumer-exposure class."""
+    the indicators — it is the #3046 consumer-exposure class.
+
+    ⚠ The break map and the bars are separate reads (Codex ckpt-2), so a break detected or
+    resolved between them would pair one generation's bars with another's breaks. The map is
+    re-read after the bars and a change RAISES ``PackReadRace``: the publisher records the run
+    as ``refused``/``run_failed`` instead of publishing a pack that may span a scale change."""
     breaks = load_unresolved_breaks(conn, instrument_ids)
     out: dict[int, tuple[list[date], list[Mapping[str, Any]]]] = {}
     for instrument_id in instrument_ids:
@@ -339,7 +344,13 @@ def read_bars(
         dates = list(segment.dates)
         rows: list[Mapping[str, Any]] = [dict(r) for r in segment.rows]
         out[instrument_id] = (dates[-INDICATOR_BARS:], rows[-INDICATOR_BARS:])
+    if load_unresolved_breaks(conn, instrument_ids) != breaks:
+        raise PackReadRace("unresolved price_series_break rows changed while the pack bars were read")
     return out
+
+
+class PackReadRace(RuntimeError):
+    """The break map moved during ``read_bars``; the bars cannot be trusted to one segment."""
 
 
 def read_crowd(conn: Conn, instrument_ids: Sequence[int], *, snapshot_id: int) -> dict[int, dict[str, Decimal | None]]:
