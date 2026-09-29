@@ -1610,7 +1610,8 @@ def load_exposure_facts(
 _PLAN_SQL: Final = """
     SELECT p.pair_seq, d.setup_type, d.horizon_days, d.response_position,
            d.base_rate_train_mean_net_r, d.base_rate_holdout_mean_net_r,
-           cardinality(p.pool) AS pool_size, p.control_instrument_id = d.instrument_id AS self_draw,
+           cardinality(p.pool) AS pool_size,
+           coalesce(p.control_instrument_id = d.instrument_id, false) AS self_draw,
            d.stop_atr_multiple AS arm_stop_atr, d.r_multiple AS arm_r, d.stop_pct AS arm_stop_pct,
            d.target_pct AS arm_target_pct, d.close AS arm_close,
            p.control_stop_atr_multiple AS control_stop_atr, p.control_r_multiple AS control_r,
@@ -1641,7 +1642,8 @@ _PLAN_SQL: Final = """
 """
 
 #: Each leg's executor outcome: its funding decision (the refusal code, or the funded amount) and
-#: the ask its entry preflight priced from.
+#: the ask its entry preflight priced from.  One row per leg: ``strategy_funding_decisions.signal_id`` is UNIQUE
+#: (``sql/281``) and ``strategy_entry_preflights.signal_id`` its PRIMARY KEY (``sql/287``).
 _LEG_FUNDING_SQL: Final = """
     SELECT p.pair_seq, ll.leg,
            CASE WHEN fd.verdict = 'rejected' THEN fd.reason_code END AS refusal,
