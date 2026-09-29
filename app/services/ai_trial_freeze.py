@@ -44,7 +44,7 @@ from app.services.ai_trial_prompt import PROMPT_TEMPLATE_SHA256, SYSTEM_PROMPT_S
 from app.services.ai_trial_readout import COHORT_SESSIONS, MIN_CLUSTERS
 from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID, TRIAL_STRATEGY_VERSION
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
-from app.services.result_ledger import PreregDeclarationRefused, freeze_preregistration
+from app.services.result_ledger import PreregDeclarationRefused, _lock_trial, freeze_preregistration
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION, structural_promotion_refusals
 from app.services.trial_register import DeclaredTrial, TrialExactness
 
@@ -392,6 +392,11 @@ def freeze_trial(
     declaration_id: int | None = None
     try:
         with conn.transaction():
+            # The #2599 per-trial mutex FIRST (``freeze_preregistration`` re-takes it; advisory
+            # locks are re-entrant in a session). Without it two concurrent freezes both take the
+            # deployments FOR SHARE, and the winner's FOR UPDATE upgrade in
+            # ``configure_trial_position_managers`` deadlocks against the loser (Codex ckpt-2).
+            _lock_trial(conn, TRIAL_ARM_STRATEGY_ID, TRIAL_STRATEGY_VERSION)
             exists, existing_sha = _existing_doc_sha256(conn)
             if exists:
                 refusals.append("already_frozen")
