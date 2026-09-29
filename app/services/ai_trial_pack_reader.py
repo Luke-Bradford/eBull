@@ -25,16 +25,25 @@ Knowledge time (O2), per source:
 
 ⚠ ``instrument_valuation`` is a live view with no as-of. The market cap only decides the
 §3.1 small-cap slice, and the pack records the figure it used next to each name.
+
+v6 §16.2 (slice v6-2): each name carries its structure ``levels`` and ``setups``. The §16.5
+library rows are carried ONCE at pack level (``setup_library``), bound by sha256. Verbatim per
+name they would repeat up to 6 rows for every name in the prompt.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from fractions import Fraction
+from pathlib import Path
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo
 
@@ -42,6 +51,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.providers.market_data import IntradayBar
+from app.services.ai_trial_decision import AtrMeasurement, exact, measure_atr
+from app.services.ai_trial_levels import LEVEL_IDS, SETUP_TYPES, Level, compute_levels, detect_setups
 from app.services.ai_trial_pack import (
     DISCLOSURE_WINDOW,
     INDICATOR_BARS,
@@ -57,6 +68,7 @@ from app.services.ai_trial_pack import (
     select_disclosures,
     select_shortlist,
 )
+from app.services.ai_trial_plan import qs
 from app.services.indicator_series import BarSeries
 from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.price_masked_bars import MASKED_REASON, load_masked_bars
@@ -72,6 +84,11 @@ _NY: Final = ZoneInfo("America/New_York")
 
 #: §3 step 1 — frozen gate term.
 SCORES_MAX_AGE: Final = timedelta(days=3)
+
+#: §16.5 setup base-rate library, bound by the sha256 of its bytes (O-v6-4, §16.11). The value is
+#: this module's text, so the policy hash binds it; any other file refuses the pack.
+SETUP_LIBRARY_PATH: Final = Path(__file__).resolve().parents[2] / "docs/proposals/execution/3471-setup-base-rates.json"
+SETUP_LIBRARY_SHA256: Final = "45ffca5f703254ca7ab32250b873b1bdee75a7b2dec0d3894b4a30d1da5073bc"
 
 #: §3.2 intraday — frozen terms. 400 FourHours bars reach ~3 months (1000 reach ~8,
 #: ``etoro-api.md`` "WE HAVE INTRADAY HISTORY"), so a 30-day window fits in one request with
@@ -487,6 +504,72 @@ def select_intraday(
 
 
 # ---------------------------------------------------------------------------
+# §16.2 structure levels, setups and the §16.5 library
+# ---------------------------------------------------------------------------
+class SetupLibraryMismatch(RuntimeError):
+    """The library file is missing or is not the one ``SETUP_LIBRARY_SHA256`` binds (§16.11
+    ``library_sha_mismatch``): the run refuses before any model call."""
+
+
+def load_setup_library(
+    path: Path = SETUP_LIBRARY_PATH, *, expected_sha256: str = SETUP_LIBRARY_SHA256
+) -> dict[str, Any]:
+    """The pack's ``setup_library``: the file's sha256, its caveat line and its rows verbatim."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise SetupLibraryMismatch(f"setup library unreadable: {exc}") from exc
+    sha = hashlib.sha256(raw).hexdigest()
+    if sha != expected_sha256:
+        raise SetupLibraryMismatch(f"setup library sha256 {sha} != bound {expected_sha256}")
+    doc = json.loads(raw)
+    return {"sha256": sha, "caveat": doc["caveat"], "rows": doc["rows"]}
+
+
+def exact_decimal(value: Fraction) -> Decimal | None:
+    """``value`` as the Decimal that denotes it exactly, or ``None`` when it has no finite
+    decimal expansion within 100 digits. Every §16.1 level is built from stored decimals by sums,
+    differences and ``Decimal(repr(float))``, so ``None`` should not arise; it is refused
+    (the level becomes ``null``), never rounded."""
+    with localcontext() as ctx:
+        ctx.prec = 100
+        result = Decimal(value.numerator) / Decimal(value.denominator)
+    return result if Fraction(result) == value else None
+
+
+def _level_json(level: Level | None, atr: AtrMeasurement | None) -> dict[str, Any] | None:
+    """§16.2 ``levels[id]``: ``null`` when the level is absent, its price is not a finite
+    value > 0, or the §6 ATR measurement is invalid."""
+    if level is None or atr is None or level.price <= 0:
+        return None
+    price = exact_decimal(level.price)
+    if price is None:
+        return None
+    return {
+        "price": price,
+        "atr_distance": qs((level.price - exact(atr.close)) / exact(atr.atr14)),
+        "origin_bar": level.origin_bar,
+    }
+
+
+def structure_entry(series: BarSeries, pack_indicators: Mapping[str, float | None]) -> dict[str, Any]:
+    """One name's §16.2 ``levels`` (every id present) and ``setups`` (every setup type), from
+    the same series and indicators the pack stores, so the validator can re-derive both.
+    ``origin_bar`` indexes the name's indicator series, whose last bar is ``indicator_bars − 1``."""
+    levels = compute_levels(series, indicators=pack_indicators)
+    setups = detect_setups(series, levels=levels)
+    atr = measure_atr(pack_indicators.get("atr14"), series.rows[-1]["close"])
+    return {
+        "indicator_bars": len(series),
+        "levels": {level_id: _level_json(levels[level_id], atr) for level_id in LEVEL_IDS},
+        "setups": {
+            setup: {"detected": setups[setup].detected, "inputs_missing": setups[setup].inputs_missing}
+            for setup in SETUP_TYPES
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # §3.2 assembly
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -530,6 +613,8 @@ def assemble_pack(
     recorded in the pack; nothing is replenished."""
     if step1.refusal is not None or step1.scores_run is None or step1.crowd_snapshot_id is None:
         raise ValueError(f"step 1 refused ({step1.refusal}); no pack")
+    # Before any read or fetch: a wrong library refuses the whole run (§16.11).
+    setup_library = load_setup_library()
     as_of, run = step1.as_of, step1.scores_run
     shortlist = read_shortlist(conn, step1=step1)
     ids = [n.instrument_id for n in shortlist.names]
@@ -579,7 +664,9 @@ def assemble_pack(
         )
         complete[name.symbol] = name.instrument_id
 
-    pack = pack_document(step1, shortlist=shortlist, incomplete=incomplete, account=account, names=names)
+    pack = pack_document(
+        step1, shortlist=shortlist, incomplete=incomplete, account=account, names=names, setup_library=setup_library
+    )
     return Pack(pack, canonical_sha256(pack), complete, incomplete)
 
 
@@ -597,12 +684,14 @@ def pack_name_entry(
 ) -> dict[str, Any]:
     """One pack-complete name's pack entry (§3.2). Shared with the synthetic CLI so its fixture
     pack cannot drift from the real shape."""
+    pack_indicators = {k: _finite_or_none(v) for k, v in indicators(series).items()}
     return {
         "symbol": name.symbol,
         "instrument_id": name.instrument_id,
         "slice": name.slice,
         "bars": [_bar_json(d, r) for d, r in zip(series.dates, series.rows, strict=True)][-PROMPT_BARS:],
-        "indicators": {k: _finite_or_none(v) for k, v in indicators(series).items()},
+        "indicators": pack_indicators,
+        **structure_entry(series, pack_indicators),
         "intraday": {
             "interval": INTRADAY_INTERVAL,
             "fetched_at": fetched_at,
@@ -625,8 +714,9 @@ def pack_document(
     incomplete: Mapping[str, str],
     account: AccountContext,
     names: Sequence[Mapping[str, Any]],
+    setup_library: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """The whole pack (§3.2) around the per-name entries."""
+    """The whole pack (§3.2) around the per-name entries, with the §16.5 library once."""
     if step1.scores_run is None:
         raise ValueError("a pack needs the step-1 scores run")
     run = step1.scores_run
@@ -649,6 +739,8 @@ def pack_document(
             "max_new_entries": account.max_new_entries,
         },
         "names": list(names),
+        # A deep copy: the rows are nested lists, and the pack must not alias the loaded library.
+        "setup_library": copy.deepcopy(dict(setup_library)),
     }
 
 

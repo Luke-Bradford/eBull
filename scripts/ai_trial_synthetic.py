@@ -46,6 +46,7 @@ from app.services.ai_trial_pack_reader import (
     Pack,
     ScoresRun,
     Step1,
+    load_setup_library,
     pack_document,
     pack_name_entry,
 )
@@ -209,6 +210,7 @@ def synthetic_pack() -> Pack:
         incomplete={},
         account=account,
         names=names,
+        setup_library=load_setup_library(),
     )
     return Pack(pack, canonical_sha256(pack), complete, {})
 
