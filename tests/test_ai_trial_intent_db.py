@@ -7,6 +7,7 @@ refused in turn. The gate-map half is ``test_ai_trial_intent.py``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
@@ -162,10 +163,15 @@ def _signal(conn: Conn, strategy_id: str, version: str, instrument_id: int) -> i
 
 
 def _published_pair(
-    conn: Conn, version: str = "v1", *, tamper: bool = False, policy_stop: str = "25"
+    conn: Conn,
+    version: str = "v1",
+    *,
+    tamper: bool = False,
+    policy_stop: str = "25",
+    pack: Mapping[str, Any] | None = None,
 ) -> tuple[int, dict[str, int]]:
     """A decided run with one accepted decision and its pair, both legs linked; returns the
-    declaration id and each leg's signal id."""
+    declaration id and each leg's signal id. ``pack`` is stored verbatim (default ``{}``)."""
     _seed_instruments(conn)
     declaration_id, doc_sha = _declare(conn, version, tamper=tamper)
     arm, control = "ai-discretionary-v1", "ai-discretionary-v1-control"
@@ -184,7 +190,7 @@ def _published_pair(
         """
         UPDATE ai_trial_runs SET
             status = 'decided', scores_model_version = 'v1.5', scores_scored_at = now(),
-            pack = '{}', pack_sha256 = %(sha)s, rendered_prompt = 'p',
+            pack = %(pack)s, pack_sha256 = %(sha)s, rendered_prompt = 'p',
             rendered_prompt_sha256 = encode(sha256('p'::bytea), 'hex'),
             system_prompt_sha256 = %(sha)s, prompt_template_sha256 = %(sha)s, model_id = 'claude-opus-5-5',
             argv_sha256 = %(sha)s, executable_path = '/usr/local/bin/claude', cli_version = '2.1.280',
@@ -192,7 +198,7 @@ def _published_pair(
             structured_output = '{}'
         WHERE run_id = %(run_id)s
         """,
-        {"sha": sha, "git": "b" * 40, "run_id": run[0]},
+        {"sha": sha, "git": "b" * 40, "run_id": run[0], "pack": Jsonb(dict(pack or {}))},
     )
     assert ARM_ATR is not None and CONTROL_ATR is not None
     arm_plan = plan_figures(ARM_ATR, *ARM_LEVELS)

@@ -11720,3 +11720,14 @@ neighbouring container and match it.**
   written only after reading the detector's own range bounds and comparison operators, and the PR cites those lines
   (#3508 round 2). Self-review: grep the prompt f-string for bare digits.
 - Enforced in: `ai_trial_prompt.SYSTEM_PROMPT`, `ai_trial_prompt._num` and `tests/test_ai_trial_prompt.py`.
+
+### A `x is not None and …` guard decides a classification, so its None branch needs a test (#3471)
+
+- Failure: the v6-4b readout's `partial_close` read `close_requested_at is not None and …`. When the request time
+  is missing, that guard classified the leg as "no partial close", which admits it into the library outcomes. That is
+  the permissive side, and no test pinned the branch (review bot, #3509 round 2).
+- Prevention: when a None guard sits inside a predicate that decides which population a record joins, choose the
+  None branch deliberately. An unknown input should keep the record OUT of a measured population. Pin that branch
+  with a test, even when the schema makes it unreachable.
+- Enforced in: `ai_trial_readout.partial_close` and
+  `tests/test_ai_trial_readout_plans.py::test_a_partial_close_before_the_final_exit_is_recognised`.
