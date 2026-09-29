@@ -97,6 +97,7 @@ A spread taken at 23:30 is an after-hours spread, so it is only a coarse filter.
   - the prompt shows the last 60;
   - indicators use all 260.
   - A name with fewer than 60 bars is **incomplete**. With fewer than 200 bars, SMA200 is `null`, and that is allowed.
+  - **Amended in slice 3b: the bars never span an unresolved `price_series_break`.** They are cut to the price segment of the last bar (`ai_trial_pack_reader.latest_segment`, using `price_segments`), because an unre-based scale change would show the model a jump that never traded and would inflate ATR14, and with it the §6 band and the §7 control levels. A name whose latest segment is shorter than 60 bars is incomplete (`too_few_bars`). On 2026-09-29, 27 tradable, scored US equities had an unresolved break dated on or after 2025-09-01.
 - **Indicators,** computed in code with conventions frozen in the declaration:
   - SMA 20/50/200;
   - RSI(14) and ATR(14), Wilder-smoothed, seeded with the simple mean of the first 14;
