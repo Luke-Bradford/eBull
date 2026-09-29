@@ -73,6 +73,12 @@ def test_orders_8_to_12(
     assert derive_plan(atr, invalidation, target, horizon_days=horizon).refusal == refusal
 
 
+def test_a_hand_built_invalid_measurement_refuses_instead_of_dividing_by_zero() -> None:
+    zero = AtrMeasurement(Decimal(0), Decimal(100), Decimal(0))
+    assert derive_plan(zero, _lvl("96"), _lvl("110"), horizon_days=10).refusal == "level_unavailable"
+    assert plan_figures(zero, _lvl("96"), _lvl("110")).stop_atr_multiple is None
+
+
 def test_reward_risk_also_binds_the_quantized_percentages_execution_uses() -> None:
     # risk 2.99995 → stop_pct q=3.0000; reward 5.9999 → R on prices is exactly 2, but the
     # executed ratio 5.9999 / 3.0000 is below 2 (r2-14).

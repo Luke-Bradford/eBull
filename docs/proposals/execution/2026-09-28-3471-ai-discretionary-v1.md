@@ -1149,7 +1149,7 @@ It is **not** isolated name-selection skill:
   - median close ≥ $3 over the trailing 252 bars;
   - median dollar volume ≥ $1M over the trailing 252 bars.
   - The thresholds are exit_map's; applying them point-in-time is by construction.
-- **Levels and setups:** the exact §16.1 and §16.2 functions from `app/`, called on bars ≤ *t*: the pack's own input, `build_bar_series` over the 260 bars ending at *t*, read through the pack's quarantine masking (`load_masked_bars`). The script imports them and never reimplements them, so no fast path needs a parity test. A window the pack would refuse is not evaluated. ATR14 is Wilder.
+- **Levels and setups:** the exact §16.1 and §16.2 functions from `app/`, called on bars ≤ *t*: the pack's own input, `build_bar_series` over the 260 bars ending at *t*, read through the pack's quarantine masking (`load_masked_bars`). The script imports them and never reimplements them, so no fast path needs a parity test. A window the pack would refuse is not evaluated. `last_session` is the name's own bar *t* by construction: the library only evaluates bars the name has, so the pack's staleness refusal (the name's last bar ≠ the global last session) cannot arise. The one gap is a stored bar dated on a non-NYSE session, which the library evaluates and the pack would never see. ATR14 is Wilder.
 - **Entry:** close(*t*). The walk runs over bars *t*+1 … *t*+h, so the entry bar's own range is never used.
   - **Order of operations (r2-37, 46):**
     1. detect;

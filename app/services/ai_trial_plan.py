@@ -79,10 +79,15 @@ class PlanVerdict:
         return self.refusal is None
 
 
+def _valid(atr: AtrMeasurement | None) -> bool:
+    """§6 validity, re-checked here so a hand-built measurement cannot divide by zero."""
+    return atr is not None and atr.atr14 > 0 and atr.close > 0 and atr.atr14_pct > 0
+
+
 def plan_figures(atr: AtrMeasurement | None, invalidation: Level | None, target: Level | None) -> PlanFigures:
     """§16.3 derivation, computed whatever check later fails (§6: figures are recorded
-    independently of the refusal)."""
-    if atr is None:
+    independently of the refusal). An invalid measurement gives all-``None`` figures."""
+    if atr is None or not _valid(atr):
         return PlanFigures(None, None, None, None, None)
     atr14, close = exact(atr.atr14), exact(atr.close)
     stop_price = None if invalidation is None else invalidation.price - STOP_OFFSET_ATR * atr14
@@ -105,6 +110,7 @@ def derive_plan(
     figures = plan_figures(atr, invalidation, target)
     if (
         atr is None
+        or not _valid(atr)
         or invalidation is None
         or target is None
         or figures.stop_price is None
@@ -113,14 +119,16 @@ def derive_plan(
         or target.price <= exact(atr.close)
     ):
         return PlanVerdict(figures, "level_unavailable")
-    # Order 8 passed: every figure is defined and risk, reward > 0.
+    # Order 8 passed, so risk and reward are > 0 and every figure is defined; an explicit
+    # check rather than an ``assert`` (stripped under ``python -O``) keeps that fail-closed.
     stop_atr, stop_pct, target_pct, r_multiple = (
         figures.stop_atr_multiple,
         figures.stop_pct,
         figures.target_pct,
         figures.r_multiple,
     )
-    assert stop_atr is not None and stop_pct is not None and target_pct is not None and r_multiple is not None
+    if stop_atr is None or stop_pct is None or target_pct is None or r_multiple is None:
+        return PlanVerdict(figures, "level_unavailable")
     if Fraction(stop_atr) < floor:
         return PlanVerdict(figures, "stop_below_horizon_floor")
     if Fraction(stop_atr) > STOP_ATR_MULTIPLE_MAX:
