@@ -210,7 +210,7 @@ def _decide(
     )
     if breach is not None and breach.unmeasured == 0:
         return "halted_loss", f"loss_halt:{detail}"
-    readout = compute_readout(conn, strategy_version=strategy_version, as_of=now)
+    readout = compute_readout(conn, strategy_version=strategy_version, as_of=now, descriptives=False)
     look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
     if look is not None:
         return "halted_harm", (

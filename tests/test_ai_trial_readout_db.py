@@ -13,9 +13,10 @@ from psycopg.types.json import Jsonb
 
 from app.services import ai_trial_readout
 from app.services.ai_trial_pair_lifecycle import previous_session, record_pair_lifecycle
-from app.services.ai_trial_readout import compute_readout, load_pairs
+from app.services.ai_trial_readout import compute_readout, load_exposure_facts, load_pairs
 from app.services.market_regime import Regime
 from app.services.market_regime_provider import MarketRegimeProvider
+from app.services.risk_metrics import RISK_METRICS_VERSION
 from tests.test_ai_trial_deadline_db import _POSITION_ID, _opened_arm_leg
 from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW
 
@@ -93,3 +94,34 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
     readout = compute_readout(conn, strategy_version=str(version[0]), as_of=closed_at)
     conn.commit()
     assert (readout.cohort.status, readout.spy_capital) == ("not_due", None)
+
+
+def test_exposure_facts_are_read_as_known_at_the_decision(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _opened_arm_leg(conn, monkeypatch)
+    row = conn.execute(
+        "SELECT p.declaration_id, p.pair_seq, r.as_of, d.atr14_pct, p.control_instrument_id "
+        "FROM ai_trial_pairs p JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id "
+        "JOIN ai_trial_runs r ON r.run_id = d.run_id"
+    ).fetchone()
+    assert row is not None
+    declaration_id, pair_seq, run_as_of, arm_atr, control_id = row
+    # The house 1y beta as known at the run's cutoff: a later recompute of the SAME date is invisible.
+    for computed_at, beta in ((run_as_of - timedelta(hours=1), "1.25"), (run_as_of + timedelta(hours=1), "9.0")):
+        conn.execute(
+            "INSERT INTO instrument_risk_metrics_observations (instrument_id, as_of_date, metric_version, "
+            "window_key, computed_at, beta) VALUES (%s, %s, %s, '1y', %s, %s)",
+            (ARM_INSTRUMENT, run_as_of.date() - timedelta(days=3), RISK_METRICS_VERSION, computed_at, Decimal(beta)),
+        )
+    conn.commit()
+
+    facts = load_exposure_facts(conn, int(declaration_id), [int(pair_seq)])
+    assert load_exposure_facts(conn, int(declaration_id), []) == {}
+    conn.commit()
+    arm = facts[int(pair_seq)]["arm"]
+    assert (arm.beta_1y, arm.atr14_pct) == (Decimal("1.25"), arm_atr)
+    control = facts[int(pair_seq)]["control"]
+    assert control.beta_1y is None
+    assert set(facts[int(pair_seq)]) == {"arm", "control"} and control_id is not None

@@ -71,7 +71,11 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
   to its exit, both included, and the sessions run from the first fill to the last exit. An
   unvalued leg (no open amount) is counted ``missing``.
 
-Not computed here (named, so its absence is visible): arm-versus-control exposure.
+- **Exposure (§9, "size, sector and beta are not matched").** Per leg over the cohort units, every
+  fact as known at the decision (``load_exposure_facts``): the cap the run's pack recorded (median),
+  the recorded §6 ATR14 % (mean), the house 1-year OLS beta against SPY computed by the run's
+  cutoff (mean), and the provider stocks-industry id effective at the run's cutoff (counts). A
+  missing fact is counted per fact, never estimated. Due readout only, like the SPY references.
 """
 
 from __future__ import annotations
@@ -82,6 +86,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from statistics import median
 from typing import Any, Final, Literal
 
 import psycopg
@@ -103,6 +108,8 @@ from app.services.ai_trial_stats import flip_set, sign_flip_p
 from app.services.block_bootstrap import BootstrapResult, block_bootstrap_expectancy, cluster_by_date
 from app.services.market_regime_provider import BENCHMARK_SYMBOL
 from app.services.price_masked_bars import load_masked_bars
+from app.services.risk_metrics import RISK_METRICS_VERSION
+from app.services.strategy_decision_context import load_market_classification
 
 #: §9 "Cohort": NYSE sessions 1–40, session 1 = the first fill session.
 COHORT_SESSIONS: Final = 40
@@ -582,6 +589,48 @@ def turnover(legs: Sequence[LegValue]) -> Turnover:
 
 
 @dataclass(frozen=True)
+class ExposureFacts:
+    """One leg's exposure as known at its decision (§9 descriptive); every field point-in-time."""
+
+    market_cap_usd: Decimal | None
+    atr14_pct: Decimal | None
+    beta_1y: Decimal | None
+    industry_id: int | None
+
+
+@dataclass(frozen=True)
+class LegExposure:
+    legs: int
+    median_market_cap_usd: float | None
+    mean_atr14_pct: float | None
+    mean_beta_1y: float | None
+    #: Provider stocks-industry id (not GICS) → legs; ``unclassified`` when none was effective.
+    industries: dict[str, int]
+    #: Legs without each fact, never estimated.
+    missing: dict[str, int]
+
+
+def leg_exposure(facts: Sequence[ExposureFacts | None]) -> LegExposure:
+    """§9 "arm-versus-control exposure (size, sector, beta, volatility)", one leg's side."""
+    caps = [float(f.market_cap_usd) for f in facts if f is not None and f.market_cap_usd is not None]
+    atrs = [float(f.atr14_pct) for f in facts if f is not None and f.atr14_pct is not None]
+    betas = [float(f.beta_1y) for f in facts if f is not None and f.beta_1y is not None]
+    industries = Counter("unclassified" if f is None or f.industry_id is None else str(f.industry_id) for f in facts)
+    return LegExposure(
+        legs=len(facts),
+        median_market_cap_usd=median(caps) if caps else None,
+        mean_atr14_pct=sum(atrs) / len(atrs) if atrs else None,
+        mean_beta_1y=sum(betas) / len(betas) if betas else None,
+        industries=dict(sorted(industries.items())),
+        missing={
+            "market_cap": len(facts) - len(caps),
+            "atr14_pct": len(facts) - len(atrs),
+            "beta_1y": len(facts) - len(betas),
+        },
+    )
+
+
+@dataclass(frozen=True)
 class GroupRow:
     group: str
     units: int
@@ -687,6 +736,8 @@ class Readout:
     spy_capital: SpyCapital | None = None
     #: Per leg, over every filled cohort leg (broken pairs' included: they used the capital).
     turnover: dict[str, Turnover] = field(default_factory=dict)
+    #: Per leg, over the cohort units (the population *d* is computed on).
+    exposure: dict[str, LegExposure] = field(default_factory=dict)
 
 
 def build_readout(
@@ -703,6 +754,7 @@ def build_readout(
     leg_capital_usd: Decimal,
     spy_closes: Mapping[date, Decimal | None] | None = None,
     spy_quote: tuple[Decimal | None, Decimal | None] = (None, None),
+    exposure_facts: Mapping[int, Mapping[str, ExposureFacts]] | None = None,
 ) -> Readout:
     seed = readout_seed(declaration_sha256)
     # The session ``as_of`` belongs to (New York date, or the next session on a closed day), the
@@ -784,6 +836,10 @@ def build_readout(
             cohort_arm, closes, spy_quote, capital_usd=leg_capital_usd, start=first_fill, end=state.due_session
         ),
         turnover={"arm": turnover(cohort_arm), "control": turnover(cohort_control)},
+        exposure={
+            leg: leg_exposure([(exposure_facts or {}).get(unit.pair_seq, {}).get(leg) for unit in units])
+            for leg in LEGS
+        },
     )
 
 
@@ -1027,13 +1083,88 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
     return records, first_fill
 
 
+_EXPOSURE_SQL: Final = """
+    SELECT p.pair_seq, r.as_of, r.session_date, r.pack -> 'shortlist' AS shortlist,
+           d.instrument_id AS arm_id, d.atr14_pct AS arm_atr,
+           p.control_instrument_id AS control_id, p.control_atr14_pct AS control_atr
+    FROM ai_trial_pairs p
+    JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id
+    JOIN ai_trial_runs r ON r.run_id = d.run_id
+    WHERE p.declaration_id = %s AND p.pair_seq = ANY(%s)
+"""
+
+#: The house 1-year daily OLS beta against SPY (``risk_metrics.ols_beta``): the latest observation
+#: COMPUTED by the run's knowledge cutoff. The observations table is append-only and keyed by
+#: ``computed_at`` (``sql/198``), so a later recompute of an earlier date is never visible here.
+_BETA_SQL: Final = """
+    SELECT beta FROM instrument_risk_metrics_observations
+    WHERE instrument_id = %s AND window_key = '1y' AND metric_version = %s AND computed_at <= %s
+    ORDER BY as_of_date DESC, computed_at DESC LIMIT 1
+"""
+
+
+def load_exposure_facts(
+    conn: psycopg.Connection[Any], declaration_id: int, pair_seqs: Sequence[int]
+) -> dict[int, dict[str, ExposureFacts]]:
+    """The two legs' exposure of each listed pair as known at the decision, by ``pair_seq``.
+
+    - size: the ``market_cap_usd`` the run's own pack recorded on the shortlist (the #1664-overlaid
+      cap that admitted the name; ``None`` where the pack resolved none);
+    - volatility: the §6 ATR14 % recorded on the decision (arm) and the pair (control);
+    - beta: ``_BETA_SQL``;
+    - sector: the provider stocks-industry id effective at the run's knowledge cutoff, from the
+      prospective classification history (``strategy_decision_context.load_market_classification``).
+    """
+    facts: dict[int, dict[str, ExposureFacts]] = {}
+    if not pair_seqs:
+        return facts
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(_EXPOSURE_SQL, (declaration_id, list(pair_seqs))).fetchall()
+    for row in rows:
+        caps = {
+            int(entry["instrument_id"]): _decimal(entry.get("market_cap_usd"))
+            for entry in row["shortlist"] or []
+            if isinstance(entry, dict) and entry.get("instrument_id") is not None
+        }
+        legs: dict[str, ExposureFacts] = {}
+        for leg, instrument_id, atr in (
+            ("arm", row["arm_id"], row["arm_atr"]),
+            ("control", row["control_id"], row["control_atr"]),
+        ):
+            if instrument_id is None:
+                continue
+            beta = conn.execute(_BETA_SQL, (int(instrument_id), RISK_METRICS_VERSION, row["as_of"])).fetchone()
+            classification = load_market_classification(
+                conn, instrument_id=int(instrument_id), decision_at=row["as_of"]
+            )
+            legs[leg] = ExposureFacts(
+                market_cap_usd=caps.get(int(instrument_id)),
+                atr14_pct=_decimal(atr),
+                beta_1y=_decimal(beta[0]) if beta else None,
+                industry_id=classification.provider_industry_id if classification else None,
+            )
+        facts[int(row["pair_seq"])] = legs
+    return facts
+
+
 class ReadoutUnavailable(RuntimeError):
     pass
 
 
-def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_of: datetime | None = None) -> Readout:
+def compute_readout(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_version: str,
+    as_of: datetime | None = None,
+    descriptives: bool = True,
+) -> Readout:
     """The readout for the arm's declaration of ``strategy_version`` (O14: each version is its
-    own declaration, so the version is never inferred). Read-only."""
+    own declaration, so the version is never inferred). Read-only.
+
+    ``descriptives=False`` skips the benchmark and exposure reads (a due readout then reports every
+    SPY close and exposure fact as missing). ``ai_trial_halts`` passes it: it runs this every
+    5-minute cycle for the harm looks alone and fails CLOSED on any error, so a descriptive read
+    must not be able to halt a trial."""
     # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constants), and
     # ai_trial_halts imports this module for the harm looks.
     from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD
@@ -1049,10 +1180,17 @@ def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_
     declaration_id = int(declaration[0])
     pairs, first_fill = load_pairs(conn, declaration_id)
     as_of = as_of or datetime.now(UTC)
-    # Descriptive inputs of the due readout only: ``ai_trial_halts`` runs this every 5-minute cycle
-    # and fails CLOSED on any error, so a benchmark read must not be able to halt a live trial.
-    due = first_fill is not None and cohort(pairs, first_fill, fill_session(as_of)).status == "due"
-    spy_closes, spy_quote = load_spy_reference(conn, first_fill) if due and first_fill else ({}, (None, None))
+    # Descriptive inputs of the due readout only, over its cohort units only.
+    state = cohort(pairs, first_fill, fill_session(as_of))
+    load = descriptives and state.status == "due"
+    spy_closes: dict[date, Decimal | None] = {}
+    spy_quote: tuple[Decimal | None, Decimal | None] = (None, None)
+    exposure_facts: dict[int, dict[str, ExposureFacts]] = {}
+    if load and first_fill is not None and state.last_session is not None:
+        last = state.last_session
+        spy_closes, spy_quote = load_spy_reference(conn, first_fill)
+        units = [pair.pair_seq for pair in pairs if pair.valued and pair.session_date <= last]
+        exposure_facts = load_exposure_facts(conn, declaration_id, units)
     run_census = {
         f"{status}:{reason}" if reason else status: int(count)
         for status, reason, count in conn.execute(
@@ -1091,4 +1229,5 @@ def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_
         leg_capital_usd=TRIAL_LEG_CAPITAL_USD,
         spy_closes=spy_closes,
         spy_quote=spy_quote,
+        exposure_facts=exposure_facts,
     )
