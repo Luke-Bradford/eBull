@@ -33,8 +33,8 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.services.ai_trial_deadline import TRIAL_MAX_POSITION_AGE_SECONDS
-from app.services.ai_trial_decision import decision_json_schema
 from app.services.ai_trial_executor import _POLICY_BOOKKEEPING, trial_policy_parity_refusal
+from app.services.ai_trial_guard import decision_json_schema
 from app.services.ai_trial_intent import DECLARATION_CONTRACT_PREFIX, declaration_digest
 from app.services.ai_trial_invocation import TRIAL_MODEL_ID
 from app.services.ai_trial_jobs import configure_trial_position_managers

@@ -1247,8 +1247,8 @@ The prompt sha changes before the freeze. The handoff records it.
   - `invalidation_price`, `target_price`, `stop_price` (numeric, nullable per §16.3).
   - `stop_pct` and `target_pct` stay, now server-derived. On **refused** rows they, and the recorded quotients, may be NULL or non-positive. The v4/v5 CHECKs that required them positive and in bounds now bind **accepted** rows only (r2-13).
   - `origin_bar` metadata lives in the stored pack.
-- **`ai_trial_pairs` gains** the control's three prices.
-- **The refusal vocabulary gains** `no_valid_plan`, `setup_not_detected`, `setup_base_rate_missing`, `level_unavailable`, `stop_below_horizon_floor`, `plan_outside_bounds` and `plan_invalidated`.
+- **`ai_trial_pairs` gains** the control's three prices, and (slice v6-3a) its two recorded quotients `control_stop_atr_multiple` and `control_r_multiple`, so the trigger judges the floor, ceiling and R on the same quantized values the guard judged. Without them the DB would have to divide, or judge exact values that can disagree with the quantized ones at a boundary.
+- **The decision refusal vocabulary gains** `no_valid_plan`, `setup_not_detected`, `setup_base_rate_missing`, `level_unavailable`, `stop_below_horizon_floor` and `plan_outside_bounds` (`sql/439`). `plan_invalidated` is an executor refusal and lands with slice v6-3b's executor check, not on `ai_trial_decisions`.
 - **The §6 triggers are replaced** for `stop_atr_multiple` and `r_multiple` (new definitions), and extended to the new columns.
 
 ### 16.9 Slices and obligations

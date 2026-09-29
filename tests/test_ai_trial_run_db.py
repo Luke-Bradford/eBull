@@ -19,9 +19,16 @@ from psycopg.types.json import Jsonb
 from app.providers.broker import BrokerAccountRiskSnapshot
 from app.services import ai_trial_run
 from app.services.ai_trial_decision import pack_atr_measurements
+from app.services.ai_trial_guard import PlanRecord, control_plan, pack_structures, price_decimal, validate_response
 from app.services.ai_trial_intent import DECLARATION_CONTRACT_PREFIX, declaration_digest
 from app.services.ai_trial_invocation import InvocationResult
-from app.services.ai_trial_pack_reader import ScoresRun, Step1, next_us_session
+from app.services.ai_trial_pack_reader import (
+    ScoresRun,
+    SetupLibraryMismatch,
+    Step1,
+    load_setup_library,
+    next_us_session,
+)
 from app.services.ai_trial_policy import AI_TRIAL_POLICY_HASH
 from app.services.ai_trial_run import Claim, RunEnvironment, run_trial_decision
 from app.services.market_calendar import latest_completed_us_session
@@ -36,24 +43,22 @@ ATR = pack_atr_measurements(PACK.pack["names"])
 ARM_SYMBOL = "SYN_ALFA"
 
 
-def _arm_levels() -> tuple[float, float]:
-    """Stop at 2 ATRs of the arm name, target at 2R: inside the §6 band and the §5 bounds."""
-    atr = ATR[PACK.complete[ARM_SYMBOL]]
-    assert atr is not None
-    stop = round(float(2 * atr.atr14_pct), 2)
-    assert 2 <= stop <= 12.5
-    return stop, 2 * stop
-
-
 def _decisions() -> dict[str, Any]:
-    stop, target = _arm_levels()
-    common = {"action": "enter_long", "horizon_days": 10, "size_tier": "half", "confidence": 3, "thesis": "Trend."}
+    """ALFA's detected pullback with a feasible sma50 / range20_projection plan at 5 sessions (the
+    synthetic pack is built so), and an unmapped symbol."""
+    common = {
+        "action": "enter_long",
+        "setup_type": "pullback_rising_sma20",
+        "invalidation_level_id": "sma50",
+        "target_level_id": "range20_projection",
+        "horizon_days": 5,
+        "size_tier": "half",
+        "confidence": 3,
+        "thesis": "Trend.",
+    }
     return {
         "no_trade_reason": None,
-        "decisions": [
-            {**common, "symbol": ARM_SYMBOL, "stop_pct": stop, "target_pct": target},
-            {**common, "symbol": "NOPE", "stop_pct": stop, "target_pct": target},
-        ],
+        "decisions": [{**common, "symbol": ARM_SYMBOL}, {**common, "symbol": "NOPE"}],
     }
 
 
@@ -180,12 +185,96 @@ def test_a_run_publishes_decisions_pairs_signals_and_links_in_one_transaction(
         ("control", "ai-discretionary-v1-control", pair[2], outcome.session_date, control_atr.close),
     ]
 
+    _assert_rows_re_derive_from_the_stored_pack(conn, int(outcome.run_id or 0))
+
     # One claim per session: a second fire writes nothing and never calls the model.
     def never(**_: object) -> InvocationResult:
         raise AssertionError("a duplicate claim must not call the model")
 
     conn.commit()
     assert _run(conn, never).status == "duplicate"
+
+
+_PLAN_COLUMNS = (
+    "atr14, close, invalidation_price, target_price, stop_price, stop_atr_multiple, "
+    "stop_pct::text::numeric, target_pct::text::numeric, r_multiple"
+)
+
+
+def _assert_rows_re_derive_from_the_stored_pack(conn: Conn, run_id: int) -> None:
+    """O-v6-1: every recorded figure — both legs' — re-derives from the STORED pack alone."""
+    row = conn.execute("SELECT pack, structured_output FROM ai_trial_runs WHERE run_id = %s", (run_id,)).fetchone()
+    assert row is not None
+    stored_pack, output = row
+    structures = pack_structures(stored_pack["names"])
+    validation = validate_response(
+        output,
+        shortlist={n["symbol"]: int(n["instrument_id"]) for n in stored_pack["names"]},
+        structures=structures,
+        library_rows=load_setup_library()["rows"],
+        arm_held_instrument_ids=frozenset(),
+        max_new_entries=2,
+    )
+
+    def expected(plan: PlanRecord) -> tuple[object, ...]:
+        f = plan.figures
+        return (
+            None if plan.atr is None else plan.atr.atr14,
+            None if plan.atr is None else plan.atr.close,
+            price_decimal(plan.invalidation_price),
+            price_decimal(plan.target_price),
+            price_decimal(f.stop_price),
+            f.stop_atr_multiple,
+            f.stop_pct,
+            f.target_pct,
+            f.r_multiple,
+        )
+
+    for verdict in validation.verdicts:
+        stored = conn.execute(
+            f"SELECT {_PLAN_COLUMNS}, base_rate_train_mean_net_r, base_rate_holdout_mean_net_r "
+            "FROM ai_trial_decisions WHERE run_id = %s AND response_position = %s",
+            (run_id, verdict.response_position),
+        ).fetchone()
+        baseline = None if verdict.baseline is None else vars(verdict.baseline)
+        assert stored is not None and stored[:9] == expected(verdict.plan)
+        assert stored[9:] == ((None, None) if baseline is None else tuple(baseline.values()))
+    pair = conn.execute(
+        "SELECT p.control_instrument_id, d.response_position, p.control_atr14, p.control_close, "
+        "p.control_invalidation_price, p.control_target_price, p.control_stop_price, p.control_stop_atr_multiple, "
+        "p.control_stop_pct, p.control_target_pct, p.control_r_multiple "
+        "FROM ai_trial_pairs p JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id WHERE d.run_id = %s",
+        (run_id,),
+    ).fetchone()
+    assert pair is not None
+    control = control_plan(validation.verdicts[pair[1]], structures[int(pair[0])])
+    assert control is not None and tuple(pair[2:]) == expected(control)
+
+
+@pytest.mark.parametrize("stage", ["pack", "validation"])
+def test_a_library_mismatch_refuses_the_whole_run(
+    ebull_test_conn: Conn, stubbed: dict[str, Any], monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    """§16.11: a missing or re-written library refuses ``library_sha_mismatch`` — before the model
+    call at pack build, or before any decision row at validation (O-v6-6)."""
+    conn = ebull_test_conn
+    _seed(conn)
+
+    def mismatch(*_: object, **__: object) -> Any:
+        raise SetupLibraryMismatch("setup library sha256 0… != bound 45ff…")
+
+    calls: list[object] = []
+    invoke = _invoke(_decisions())
+
+    def counted(**kwargs: object) -> InvocationResult:
+        calls.append(kwargs)
+        return invoke(**kwargs)
+
+    monkeypatch.setattr(ai_trial_run, "assemble_pack" if stage == "pack" else "load_setup_library", mismatch)
+    outcome = _run(conn, counted)
+    assert (outcome.status, outcome.refusal_reason) == ("refused", "library_sha_mismatch")
+    assert len(calls) == (0 if stage == "pack" else 1)
+    assert conn.execute("SELECT count(*) FROM ai_trial_decisions").fetchone() == (0,)
 
 
 @pytest.mark.parametrize(

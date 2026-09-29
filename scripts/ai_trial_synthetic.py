@@ -3,7 +3,7 @@
 Spec: ``docs/proposals/execution/2026-09-28-3471-ai-discretionary-v1.md`` §9 ("Ordering") and
 §12 slice 1. Before the declaration freezes, the model may only ever see a synthetic pack:
 
-    fixture pack → frozen prompts → ``invoke_model`` → ``validate_response`` → ``draw_control``
+    fixture pack → frozen prompts → ``invoke_model`` → ``validate_response`` → ``plan_pairs``
 
 ⚠ Every symbol is ``SYN_``-prefixed (no US ticker carries an underscore) and ``assert_fictitious``
 refuses a pack holding any other symbol BEFORE the model is called, so this CLI cannot become a
@@ -33,9 +33,10 @@ from decimal import Decimal
 from typing import Any, Final, Literal
 
 from app.providers.market_data import IntradayBar
-from app.services.ai_trial_decision import (
+from app.services.ai_trial_guard import (
+    PlanRecord,
     decision_json_schema,
-    pack_atr_measurements,
+    pack_structures,
     plan_pairs,
     validate_response,
 )
@@ -65,14 +66,17 @@ _LAST_SESSION: Final = date(2026, 9, 25)
 _SESSION_DATE: Final = date(2026, 9, 28)
 _BAR_COUNT: Final = 260
 
-#: (symbol, instrument_id, slice, base price, daily drift, swing) — shapes, not market data.
-_NAMES: Final[tuple[tuple[str, int, Literal["top", "small_cap"], float, float, float], ...]] = (
-    ("SYN_ALFA", 900001, "top", 42.0, 0.0012, 0.020),
-    ("SYN_BRVO", 900002, "top", 118.0, -0.0006, 0.015),
-    ("SYN_CHRL", 900003, "top", 7.5, 0.0003, 0.045),
-    ("SYN_DLTA", 900004, "small_cap", 23.0, 0.0020, 0.030),
-    ("SYN_ECHO", 900005, "small_cap", 61.0, -0.0015, 0.025),
-    ("SYN_FXTR", 900006, "top", 15.0, 0.0008, 0.010),
+#: (symbol, instrument_id, slice, base price, daily drift, swing, wave phase) — shapes, not market
+#: data. The phases put ALFA, DLTA and FXTR in a detected ``pullback_rising_sma20`` whose
+#: ``sma50`` / ``range20_projection`` plan is feasible at 5 sessions (§16.3), so a v6 decision
+#: can be accepted and paired; BRVO and ECHO detect no setup, so the §16.4 filter is exercised.
+_NAMES: Final[tuple[tuple[str, int, Literal["top", "small_cap"], float, float, float, int], ...]] = (
+    ("SYN_ALFA", 900001, "top", 42.0, 0.0012, 0.020, 5),
+    ("SYN_BRVO", 900002, "top", 118.0, -0.0006, 0.015, 0),
+    ("SYN_CHRL", 900003, "top", 7.5, 0.0003, 0.045, 6),
+    ("SYN_DLTA", 900004, "small_cap", 23.0, 0.0020, 0.030, 5),
+    ("SYN_ECHO", 900005, "small_cap", 61.0, -0.0015, 0.025, 0),
+    ("SYN_FXTR", 900006, "top", 15.0, 0.0008, 0.010, 6),
 )
 #: The arm holds FXTR (in the pack's account) and the control leg holds ECHO, so both
 #: exclusions are exercised.
@@ -101,12 +105,12 @@ def _weekdays_ending(last: date, count: int) -> list[date]:
     return out[::-1]
 
 
-def _bars(base: float, drift: float, swing: float) -> tuple[list[date], list[dict[str, Any]]]:
+def _bars(base: float, drift: float, swing: float, offset: int) -> tuple[list[date], list[dict[str, Any]]]:
     """Deterministic trend + a triangle-wave swing; no RNG so the pack sha is stable."""
     dates = _weekdays_ending(_LAST_SESSION, _BAR_COUNT)
     rows: list[dict[str, Any]] = []
     for i in range(_BAR_COUNT):
-        phase = (i % 20) / 20
+        phase = ((i + offset) % 20) / 20
         wave = swing * (4 * abs(phase - 0.5) - 1)
         close = base * (1 + drift) ** i * (1 + wave)
         open_ = close * (1 - swing / 4)
@@ -148,8 +152,8 @@ def synthetic_pack() -> Pack:
     )
     names: list[dict[str, Any]] = []
     complete: dict[str, int] = {}
-    for k, (name, (_, _, _, base, drift, swing)) in enumerate(zip(shortlist_names, _NAMES, strict=True)):
-        dates, rows = _bars(base, drift, swing)
+    for k, (name, (_, _, _, base, drift, swing, offset)) in enumerate(zip(shortlist_names, _NAMES, strict=True)):
+        dates, rows = _bars(base, drift, swing, offset)
         series = build_bar_series(dates, rows, last_session=_LAST_SESSION)
         if isinstance(series, str):
             raise AssertionError(f"synthetic bars for {name.symbol} are incomplete: {series}")
@@ -285,22 +289,23 @@ def run_synthetic(
         return SyntheticOutcome(summary, result)
 
     arm_held = frozenset(int(p["instrument_id"]) for p in pack.pack["account"]["open_positions"])
-    atr = pack_atr_measurements(pack.pack["names"])
+    structures = pack_structures(pack.pack["names"])
     validation = validate_response(
         result.structured_output,
         shortlist=pack.complete,
-        atr_by_instrument=atr,
+        structures=structures,
+        library_rows=load_setup_library()["rows"],
         arm_held_instrument_ids=arm_held,
         max_new_entries=pack.pack["account"]["max_new_entries"],
     )
     summary["whole_refusal"] = validation.whole_refusal
     summary["no_trade_reason"] = validation.no_trade_reason
     decisions: list[dict[str, Any]] = []
-    # §7 v5: the pool is built per decision from its own multiples (the run publisher's step 5).
+    # §16.4: the pool is built per decision from its own setup and level ids (the publisher's step 5).
     planned = plan_pairs(
         validation.verdicts,
         shortlist_instrument_ids=sorted(pack.complete.values()),
-        atr_by_instrument=atr,
+        structures=structures,
         control_held_instrument_ids=_CONTROL_HELD,
         declaration_sha256_hex=SYNTHETIC_DECLARATION_SHA256,
         session_date=_SESSION_DATE,
@@ -314,11 +319,8 @@ def run_synthetic(
             "instrument_id": verdict.instrument_id,
             "reason_code": plan.reason_code,
             "decision": verdict.decision.model_dump(),
-            "r_multiple": str(verdict.metrics.r_multiple),
-            "stop_atr_multiple": None
-            if verdict.metrics.stop_atr_multiple is None
-            else str(verdict.metrics.stop_atr_multiple),
-            "atr14_pct": None if verdict.metrics.atr is None else str(verdict.metrics.atr.atr14_pct),
+            **_plan_summary(verdict.plan),
+            "baseline": None if verdict.baseline is None else vars(verdict.baseline),
         }
         if plan.pair is not None:
             draw, control = plan.pair.draw, plan.pair.control
@@ -328,12 +330,26 @@ def run_synthetic(
                 "pool": list(draw.pool),
                 "index": draw.index,
                 "control_instrument_id": draw.instrument_id,
-                "control_stop_pct": str(control.stop_pct),
-                "control_target_pct": str(control.target_pct),
+                "control": _plan_summary(control),
             }
         decisions.append(row)
     summary["decisions"] = decisions
     return SyntheticOutcome(summary, result)
+
+
+def _plan_summary(plan: PlanRecord) -> dict[str, str | None]:
+    figures = plan.figures
+    values = {
+        "atr14_pct": None if plan.atr is None else plan.atr.atr14_pct,
+        "invalidation_price": plan.invalidation_price,
+        "target_price": plan.target_price,
+        "stop_price": figures.stop_price,
+        "stop_atr_multiple": figures.stop_atr_multiple,
+        "stop_pct": figures.stop_pct,
+        "target_pct": figures.target_pct,
+        "r_multiple": figures.r_multiple,
+    }
+    return {k: None if v is None else str(v) for k, v in values.items()}
 
 
 def _resolve_executable(value: str | None) -> str:

@@ -42,15 +42,17 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import BrokerAccountRiskSnapshot
-from app.services.ai_trial_decision import (
+from app.services.ai_trial_executor import TRIAL_MAX_CONCURRENT_PER_LEG
+from app.services.ai_trial_guard import (
+    LIBRARY_SHA_MISMATCH,
     PlannedDecision,
     ValidationResult,
     decision_json_schema,
-    pack_atr_measurements,
+    pack_structures,
     plan_pairs,
+    price_decimal,
     validate_response,
 )
-from app.services.ai_trial_executor import TRIAL_MAX_CONCURRENT_PER_LEG
 from app.services.ai_trial_intent import DECLARATION_CONTRACT_PREFIX, declaration_digest
 from app.services.ai_trial_invocation import TRIAL_MODEL_ID, InvocationResult, build_argv, invoke_model
 from app.services.ai_trial_pack import NonCanonicalValue, canonical_json, canonical_sha256
@@ -58,8 +60,10 @@ from app.services.ai_trial_pack_reader import (
     AccountContext,
     IntradayFetch,
     Pack,
+    SetupLibraryMismatch,
     Step1,
     assemble_pack,
+    load_setup_library,
     next_us_session,
     read_step1,
 )
@@ -388,13 +392,18 @@ def refuse_run(conn: Conn, claim: Claim, reason: str, values: Mapping[str, Any])
 # ---------------------------------------------------------------------------
 _DECISION_INSERT: Final = """
     INSERT INTO ai_trial_decisions (
-        run_id, response_position, action, symbol, stop_pct, target_pct, horizon_days, size_tier,
-        confidence, thesis, instrument_id, verdict, reason_code,
-        atr14, close, atr14_pct, stop_atr_multiple, r_multiple
+        run_id, response_position, action, symbol, setup_type, invalidation_level_id, target_level_id,
+        stop_pct, target_pct, horizon_days, size_tier, confidence, thesis, instrument_id, verdict,
+        reason_code, atr14, close, atr14_pct, stop_atr_multiple, r_multiple,
+        invalidation_price, target_price, stop_price,
+        base_rate_train_mean_net_r, base_rate_holdout_mean_net_r
     ) VALUES (
-        %(run_id)s, %(response_position)s, %(action)s, %(symbol)s, %(stop_pct)s, %(target_pct)s,
+        %(run_id)s, %(response_position)s, %(action)s, %(symbol)s, %(setup_type)s,
+        %(invalidation_level_id)s, %(target_level_id)s, %(stop_pct)s, %(target_pct)s,
         %(horizon_days)s, %(size_tier)s, %(confidence)s, %(thesis)s, %(instrument_id)s, %(verdict)s,
-        %(reason_code)s, %(atr14)s, %(close)s, %(atr14_pct)s, %(stop_atr_multiple)s, %(r_multiple)s
+        %(reason_code)s, %(atr14)s, %(close)s, %(atr14_pct)s, %(stop_atr_multiple)s, %(r_multiple)s,
+        %(invalidation_price)s, %(target_price)s, %(stop_price)s,
+        %(base_rate_train_mean_net_r)s, %(base_rate_holdout_mean_net_r)s
     )
     RETURNING decision_id
 """
@@ -403,12 +412,16 @@ _PAIR_INSERT: Final = """
     INSERT INTO ai_trial_pairs (
         declaration_id, pair_seq, arm_decision_id, control_instrument_id, seed_material, pool,
         draw_idx, stop_pct, target_pct, horizon_days, size_tier,
-        control_atr14, control_close, control_atr14_pct, control_stop_pct, control_target_pct
+        control_atr14, control_close, control_atr14_pct, control_stop_pct, control_target_pct,
+        control_invalidation_price, control_target_price, control_stop_price,
+        control_stop_atr_multiple, control_r_multiple
     ) VALUES (
         %(declaration_id)s, %(pair_seq)s, %(arm_decision_id)s, %(control_instrument_id)s,
         %(seed_material)s, %(pool)s, %(draw_idx)s, %(stop_pct)s, %(target_pct)s, %(horizon_days)s,
         %(size_tier)s, %(control_atr14)s, %(control_close)s, %(control_atr14_pct)s,
-        %(control_stop_pct)s, %(control_target_pct)s
+        %(control_stop_pct)s, %(control_target_pct)s,
+        %(control_invalidation_price)s, %(control_target_price)s, %(control_stop_price)s,
+        %(control_stop_atr_multiple)s, %(control_r_multiple)s
     )
     RETURNING pair_id
 """
@@ -423,16 +436,20 @@ _SIGNAL_INSERT: Final = """
 
 
 def _decision_row(run_id: int, plan: PlannedDecision) -> dict[str, Any]:
+    """The §16.8 row: the model's choice, and every figure the server derived from the pack."""
     v = plan.verdict
     d = v.decision
-    atr = v.metrics.atr
+    atr, figures = v.plan.atr, v.plan.figures
     return {
         "run_id": run_id,
         "response_position": v.response_position,
         "action": d.action,
         "symbol": d.symbol,
-        "stop_pct": d.stop_pct,
-        "target_pct": d.target_pct,
+        "setup_type": d.setup_type,
+        "invalidation_level_id": d.invalidation_level_id,
+        "target_level_id": d.target_level_id,
+        "stop_pct": figures.stop_pct,
+        "target_pct": figures.target_pct,
         "horizon_days": d.horizon_days,
         "size_tier": d.size_tier,
         "confidence": d.confidence,
@@ -443,8 +460,13 @@ def _decision_row(run_id: int, plan: PlannedDecision) -> dict[str, Any]:
         "atr14": None if atr is None else atr.atr14,
         "close": None if atr is None else atr.close,
         "atr14_pct": None if atr is None else atr.atr14_pct,
-        "stop_atr_multiple": v.metrics.stop_atr_multiple,
-        "r_multiple": v.metrics.r_multiple,
+        "stop_atr_multiple": figures.stop_atr_multiple,
+        "r_multiple": figures.r_multiple,
+        "invalidation_price": price_decimal(v.plan.invalidation_price),
+        "target_price": price_decimal(v.plan.target_price),
+        "stop_price": price_decimal(figures.stop_price),
+        "base_rate_train_mean_net_r": None if v.baseline is None else v.baseline.train_mean_net_r,
+        "base_rate_holdout_mean_net_r": None if v.baseline is None else v.baseline.holdout_mean_net_r,
     }
 
 
@@ -480,7 +502,7 @@ def publish_run(
     """Step 5 and the ``decided`` publish, in ONE transaction (§11). Returns the pair ids."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise ValueError("the run publish requires an idle connection")
-    atr = pack_atr_measurements(pack.pack["names"])
+    structures = pack_structures(pack.pack["names"])
     with conn.transaction():
         # Serialises pair_seq across publishers; the state-event writer takes the same lock.
         conn.execute(
@@ -495,7 +517,7 @@ def publish_run(
         planned = plan_pairs(
             validation.verdicts,
             shortlist_instrument_ids=sorted(pack.complete.values()),
-            atr_by_instrument=atr,
+            structures=structures,
             control_held_instrument_ids=control_held_instrument_ids,
             declaration_sha256_hex=declaration.doc_sha256,
             session_date=claim.session_date,
@@ -509,7 +531,9 @@ def publish_run(
             if plan.pair is None:
                 continue
             v, pair = plan.verdict, plan.pair
-            control = pair.control
+            control, arm = pair.control, plan.verdict.plan
+            if control.atr is None or arm.atr is None or v.instrument_id is None:  # never under -O
+                raise RuntimeError(f"accepted decision {v.response_position} has an incomplete plan")
             inserted = conn.execute(
                 _PAIR_INSERT,
                 {
@@ -520,21 +544,26 @@ def publish_run(
                     "seed_material": pair.draw.seed_material,
                     "pool": list(pair.draw.pool),
                     "draw_idx": pair.draw.index,
-                    "stop_pct": v.decision.stop_pct,
-                    "target_pct": v.decision.target_pct,
+                    "stop_pct": arm.figures.stop_pct,
+                    "target_pct": arm.figures.target_pct,
                     "horizon_days": v.decision.horizon_days,
                     "size_tier": v.decision.size_tier,
                     "control_atr14": control.atr.atr14,
                     "control_close": control.atr.close,
                     "control_atr14_pct": control.atr.atr14_pct,
-                    "control_stop_pct": control.stop_pct,
-                    "control_target_pct": control.target_pct,
+                    "control_stop_pct": control.figures.stop_pct,
+                    "control_target_pct": control.figures.target_pct,
+                    "control_invalidation_price": price_decimal(control.invalidation_price),
+                    "control_target_price": price_decimal(control.target_price),
+                    "control_stop_price": price_decimal(control.figures.stop_price),
+                    "control_stop_atr_multiple": control.figures.stop_atr_multiple,
+                    "control_r_multiple": control.figures.r_multiple,
                 },
             ).fetchone()
-            assert inserted is not None and v.instrument_id is not None and v.metrics.atr is not None
+            assert inserted is not None
             pair_id = int(inserted[0])
             legs: tuple[tuple[Leg, str, int, object], ...] = (
-                ("arm", TRIAL_ARM_STRATEGY_ID, v.instrument_id, v.metrics.atr.close),
+                ("arm", TRIAL_ARM_STRATEGY_ID, v.instrument_id, arm.atr.close),
                 ("control", TRIAL_ARM_STRATEGY_ID + "-control", pair.draw.instrument_id, control.atr.close),
             )
             for leg, strategy_id, instrument_id, reference_close in legs:
@@ -648,7 +677,12 @@ def _decide(
         free_slots=books["arm"].free_slots,
         max_new_entries=entries,
     )
-    pack = assemble_pack(conn, step1=step1, account=account, fetch_intraday=fetch)
+    try:
+        pack = assemble_pack(conn, step1=step1, account=account, fetch_intraday=fetch)
+    except SetupLibraryMismatch:
+        # §16.11: a missing or re-written library refuses the whole run before the model call.
+        logger.warning("ai_trial run %s: setup library mismatch at pack build", claim.run_id, exc_info=True)
+        return refuse_run(conn, claim, LIBRARY_SHA_MISMATCH, reached)
     conn.commit()
     reached.update(_provenance(env, step1=step1, pack=pack))
 
@@ -667,11 +701,18 @@ def _decide(
     if result.refusal_reason is not None:
         return refuse_run(conn, claim, result.refusal_reason, values)
 
-    # Step 4: a whole-response refusal refuses the run; there are no decisions (§6).
+    # Step 4: a whole-response refusal refuses the run; there are no decisions (§6). The library
+    # is RE-READ against its bound sha, never taken from the pack's copy (§16.11).
+    try:
+        library = load_setup_library()
+    except SetupLibraryMismatch:
+        logger.warning("ai_trial run %s: setup library mismatch at validation", claim.run_id, exc_info=True)
+        return refuse_run(conn, claim, LIBRARY_SHA_MISMATCH, values)
     validation = validate_response(
         result.structured_output,
         shortlist=pack.complete,
-        atr_by_instrument=pack_atr_measurements(pack.pack["names"]),
+        structures=pack_structures(pack.pack["names"]),
+        library_rows=library["rows"],
         arm_held_instrument_ids=books["arm"].held_instrument_ids,
         max_new_entries=entries,
     )

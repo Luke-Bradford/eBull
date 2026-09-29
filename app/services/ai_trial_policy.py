@@ -6,8 +6,10 @@ refused ``policy_drift``. Hashing the files covers both at once, because every f
 defined in one of them:
 
 * ``ai_trial_pack`` / ``ai_trial_pack_reader`` — shortlist, pack, indicators, knowledge time;
-* ``ai_trial_decision`` — the §5 schema, the §6 validator and the §7 draw;
-* ``ai_trial_levels`` — the v6 §16.1 structure levels and setup detectors;
+* ``ai_trial_decision`` — the §5 bounds, the §6 measurement and the §7 draw;
+* ``ai_trial_guard`` — the v6 §16.3 schema and guard and the §16.4 control pre-filter;
+* ``ai_trial_levels`` / ``ai_trial_plan`` — the v6 §16.1 structure levels, setup detectors and
+  the §16.3 plan derivation;
 * ``ai_trial_prompt`` / ``ai_trial_invocation`` — the frozen prompts, the model id, the argv,
   the env and the §4 limits;
 * ``ai_trial_intent`` — the loader and the §8 tickets;
@@ -67,6 +69,7 @@ _SERVICES: Final = Path(__file__).resolve().parent
 #: Sorted; the digest is over ``name\\0sha256(bytes)\\n`` lines, so a rename is a change too.
 POLICY_MODULES: Final = (
     "ai_trial_decision.py",
+    "ai_trial_guard.py",
     "ai_trial_intent.py",
     "ai_trial_invocation.py",
     "ai_trial_levels.py",

@@ -19,9 +19,10 @@ Spec: ``docs/proposals/execution/2026-09-28-3471-ai-discretionary-v1.md`` §9 "P
   window exactly as it does in the live pack instead of poisoning every later session. The grid is
   the supervisor's 2026-09-28 15:30Z rule: k ∈ [1.5, 3] (both ends), R = 2 (the default), crossed
   with the §5 horizons.
-- **Levels are quantized exactly as the trial's control:** ``ai_trial_decision.measure_atr`` then
-  ``derive_control_levels`` (so the §5 bounds, the ATR band and the R floor all apply on the 4-dp
-  values).
+- **Levels are quantized exactly as the v5 trial control was:** ``ai_trial_decision.measure_atr``
+  then ``v5_levels`` (so the §5 bounds, the v5 ATR band and the v5 R floor all apply on the 4-dp
+  values). ⚠ v6 (§16.0) replaced that control rule with structure plans; ``v5_levels`` lives here
+  only until slice v6-4 re-specifies this grid under O-v6-5.
 - **Execution:** entry at the next session's open; the fill session is session 0 and the deadline is
   session h (``ai_trial_deadline``), so the hold spans h + 1 bars. ``outcome_resolver.resolve_outcome``
   resolves the bracket over the series cut at the deadline (a gap through a level fills at the open).
@@ -62,6 +63,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -69,7 +71,18 @@ import numpy as np
 import numpy.typing as npt
 import psycopg
 
-from app.services.ai_trial_decision import HORIZON_SESSIONS, DecisionMetrics, derive_control_levels, measure_atr
+from app.services.ai_trial_decision import (
+    HORIZON_SESSIONS,
+    STOP_ATR_MULTIPLE_MAX,
+    STOP_PCT_MAX,
+    STOP_PCT_MIN,
+    TARGET_PCT_MAX,
+    TARGET_PCT_MIN,
+    AtrMeasurement,
+    exact,
+    measure_atr,
+    quantize,
+)
 from app.services.ai_trial_pack import INDICATOR_BARS, MIN_BARS, MIN_BID, WILDER_PERIOD
 from app.services.ai_trial_stats import EXACT_MAX_CLUSTERS, flip_set, sign_flip_p_batch
 from app.services.indicator_series import BarSeries, atr_series
@@ -87,6 +100,9 @@ MC_CLUSTER_COUNTS: Final = tuple(k for k in CLUSTER_COUNTS if k > EXACT_MAX_CLUS
 #: Supervisor rule 2026-09-28 15:30Z (#2437): stop = k × ATR14 with k in [1.5, 3]; target 2R default.
 STOP_ATR_MULTIPLES: Final = (Decimal("1.5"), Decimal("3"))
 REWARD_RISK: Final = Decimal("2")
+#: The v5 §6 band floor and R floor (supervisor 2026-09-28 15:45Z), superseded in the trial by §16.
+V5_STOP_ATR_MULTIPLE_MIN: Final = Fraction(1)
+V5_R_MULTIPLE_MIN: Final = Fraction(3, 2)
 #: Planted shifts in d, per-trade percentage points.
 SHIFTS_PCT: Final = (0.0, 1.0, 2.0, 3.0, 5.0)
 ALPHA: Final = 0.05
@@ -143,6 +159,29 @@ class Leg:
     refusal: LegRefusal | None = None
 
 
+@dataclass(frozen=True)
+class V5Levels:
+    stop_pct: Decimal
+    target_pct: Decimal
+
+
+def v5_levels(stop_atr_multiple: Decimal, reward_risk: Decimal, atr: AtrMeasurement | None) -> V5Levels | None:
+    """The v5 §7 control rule: ``stop = q(k × atr14_pct)``, ``target = q(R × stop)``; ``None``
+    when not placeable (an invalid measurement, the §5 bounds, the ATR band or the R floor)."""
+    if atr is None:
+        return None
+    stop = quantize(Fraction(stop_atr_multiple) * Fraction(atr.atr14_pct))
+    target = quantize(Fraction(reward_risk) * Fraction(stop))
+    atr_pct, s, t = Fraction(atr.atr14_pct), Fraction(stop), Fraction(target)
+    placeable = (
+        exact(STOP_PCT_MIN) <= s <= exact(STOP_PCT_MAX)
+        and exact(TARGET_PCT_MIN) <= t <= exact(TARGET_PCT_MAX)
+        and V5_STOP_ATR_MULTIPLE_MIN * atr_pct <= s <= STOP_ATR_MULTIPLE_MAX * atr_pct
+        and t >= V5_R_MULTIPLE_MIN * s
+    )
+    return V5Levels(stop, target) if placeable else None
+
+
 def panel_instrument(instrument_id: int, series: BarSeries, breaks: Sequence[date] = ()) -> PanelInstrument:
     return PanelInstrument(instrument_id, series, {d: i for i, d in enumerate(series.dates)}, tuple(breaks))
 
@@ -186,10 +225,7 @@ def simulate_leg(inst: PanelInstrument, session: date, next_session: date, cell:
     atr, close = atr_at(inst, i), rows[i].get("close")
     if atr is not None and math.isnan(atr):
         return Leg(None, refusal="too_few_bars")
-    levels = derive_control_levels(
-        DecisionMetrics(cell.reward_risk, None, cell.stop_atr_multiple),
-        measure_atr(atr, close),
-    )
+    levels = v5_levels(cell.stop_atr_multiple, cell.reward_risk, measure_atr(atr, close))
     if levels is None:
         return Leg(None, refusal="atr_invalid" if measure_atr(atr, close) is None else "levels_outside_bounds")
     stop = entry * (1 - levels.stop_pct / 100)
