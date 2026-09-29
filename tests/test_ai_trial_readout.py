@@ -13,6 +13,7 @@ from app.services.ai_trial_deadline import exit_deadline_session
 from app.services.ai_trial_policy import FROZEN_CONSTANTS
 from app.services.ai_trial_readout import (
     COHORT_SESSIONS,
+    FLOW_WINDOW_SESSIONS,
     INSUFFICIENT,
     READING,
     READOUT_WAIT_SESSIONS,
@@ -34,6 +35,7 @@ from app.services.ai_trial_readout import (
 
 SESSION_1 = date(2026, 10, 1)  # a Thursday NYSE session
 CLOSE_AT = datetime(2026, 10, 8, 18, 0, tzinfo=UTC)
+LATER = date(2027, 6, 1)
 
 
 def _row(
@@ -193,10 +195,11 @@ def test_the_primary_is_the_exact_sign_flip_p_at_ten_clusters() -> None:
 def test_harm_looks_wait_for_eight_clusters_and_halt_on_a_one_sided_p() -> None:
     sessions = _sessions(10)
     few = [_pair(i, sessions[i % 5], -1.0) for i in range(10)]
-    assert [(look.k, look.skipped, look.halts) for look in harm_looks(few, seed=1)] == [(1, "too_few_clusters", False)]
+    looks = harm_looks(few, seed=1, today=LATER)
+    assert [(look.k, look.skipped, look.halts) for look in looks] == [(1, "too_few_clusters", False)]
 
     harmful = [_pair(i, sessions[i], -1.0) for i in range(10)]
-    (look,) = harm_looks(harmful, seed=1)
+    (look,) = harm_looks(harmful, seed=1, today=LATER)
     assert (look.k, look.units, look.clusters) == (1, 10, 10)
     assert look.p_less == pytest.approx(1 / 1024)
     assert look.threshold == pytest.approx(0.025)
@@ -206,10 +209,21 @@ def test_harm_looks_wait_for_eight_clusters_and_halt_on_a_one_sided_p() -> None:
 def test_a_pair_ahead_in_entry_order_that_is_not_a_unit_holds_the_look() -> None:
     sessions = _sessions(12)
     pairs = [_pair(0, sessions[0], 0.0, state="blocked")] + [_pair(i, sessions[i], -1.0) for i in range(1, 12)]
-    assert harm_looks(pairs, seed=1) == []
+    assert harm_looks(pairs, seed=1, today=LATER) == []
     # A broken pair is census only and does not hold anything.
     pairs[0] = _pair(0, sessions[0], 0.0, state="broken")
-    assert [look.k for look in harm_looks(pairs, seed=1)] == [1]
+    assert [look.k for look in harm_looks(pairs, seed=1, today=LATER)] == [1]
+
+
+def test_an_unvalued_unit_holds_the_looks_only_until_its_flow_window_closes() -> None:
+    sessions = _sessions(12)
+    unvalued = replace(_pair(0, sessions[0], 0.0), control=LegValue(None, None, None, "deadline", "close_flow_missing"))
+    assert unvalued.resolved_session is not None
+    pairs = [unvalued] + [_pair(i, sessions[i], -1.0) for i in range(1, 12)]
+    window_end = exit_deadline_session(unvalued.resolved_session, FLOW_WINDOW_SESSIONS)
+    assert harm_looks(pairs, seed=1, today=window_end) == []
+    (look,) = harm_looks(pairs, seed=1, today=exit_deadline_session(window_end, 1))
+    assert (look.units, look.clusters) == (10, 10)
 
 
 def test_profit_factor_reports_counts_without_losses() -> None:
@@ -231,9 +245,12 @@ def test_cohort_timing() -> None:
     assert "not yet resolved" in cohort([blocked], SESSION_1, after).detail
     unit = _pair(1, last, 1.0)  # resolves 5 sessions after the last cohort session
     due = exit_deadline_session(exit_deadline_session(last, 5), READOUT_WAIT_SESSIONS)
-    assert cohort([unit], SESSION_1, due - timedelta(days=1)).status == "not_due"
-    state = cohort([unit], SESSION_1, due)
+    # The due session must have finished: a row recorded late on it still counts.
+    assert cohort([unit], SESSION_1, due).status == "not_due"
+    state = cohort([unit], SESSION_1, exit_deadline_session(due, 1))
     assert (state.status, state.due_session) == ("due", due)
+    # A unit whose regime label the lifecycle writer deferred keeps the cohort pending.
+    assert "not yet resolved: [1]" in cohort([replace(unit, regime_label=None)], SESSION_1, LATER).detail
 
 
 def test_a_broken_pair_with_a_live_leg_holds_the_readout_until_it_exits() -> None:

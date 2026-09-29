@@ -36,7 +36,8 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
   last cohort pair resolves, and no primary number is computed before that. Later pairs are
   exploratory.
 - **Harm looks.** Every ``HARM_LOOK_EVERY``-th unit in entry (``pair_seq``) order, once the
-  first 10·k non-broken pairs are all units; none before ``HARM_MIN_CLUSTERS`` clusters; look k
+  first 10·k pairs are all valued units (broken and settled-unvalued pairs are outside the
+  order); none before ``HARM_MIN_CLUSTERS`` clusters; look k
   halts if the one-sided (``less``) p < ``HARM_ALPHA`` · 2^−k. Computed here, over every pair
   (monitoring continues through exploration); nothing in this module writes a state event.
 - **Seed.** The Monte-Carlo flips (above 16 clusters) are drawn from
@@ -68,11 +69,9 @@ from app.services.ai_trial_pair_lifecycle import (
     TRIAL_CENSOR_SESSIONS,
     PairUnitState,
     pair_unit_state,
-    previous_session,
 )
 from app.services.ai_trial_stats import flip_set, sign_flip_p
 from app.services.block_bootstrap import BootstrapResult, block_bootstrap_expectancy, cluster_by_date
-from app.services.market_calendar import us_market_status
 
 #: §9 "Cohort": NYSE sessions 1–40, session 1 = the first fill session.
 COHORT_SESSIONS: Final = 40
@@ -292,10 +291,26 @@ class HarmLook:
     skipped: str | None = None
 
 
-def harm_looks(pairs: Sequence[PairRecord], *, seed: int) -> list[HarmLook]:
-    """Every look due so far. A look k is due once the first 10·k non-broken pairs in entry
-    order are all valued units; a blocked, open or unvalued pair ahead of it holds it back."""
-    ordered = sorted((pair for pair in pairs if pair.state != "broken"), key=lambda pair: pair.pair_seq)
+def settled_unvalued(pair: PairRecord, today: date) -> bool:
+    """A unit that cannot be valued and never will be: its flow window closed with a leg still
+    unvalued, so no later row can count (a late row is a restatement)."""
+    return (
+        pair.state == "unit"
+        and not pair.valued
+        and pair.resolved_session is not None
+        and today > exit_deadline_session(pair.resolved_session, FLOW_WINDOW_SESSIONS)
+    )
+
+
+def harm_looks(pairs: Sequence[PairRecord], *, seed: int, today: date) -> list[HarmLook]:
+    """Every look due so far, as of the session ``today``. A look k is due once the first 10·k
+    pairs in entry order are all valued units. Broken and settled-unvalued pairs are outside the
+    sequence (census only); a blocked, open or still-valuable pair ahead holds it back, since it
+    may yet enter."""
+    ordered = sorted(
+        (pair for pair in pairs if pair.state != "broken" and not settled_unvalued(pair, today)),
+        key=lambda pair: pair.pair_seq,
+    )
     ready = 0
     for pair in ordered:
         if not pair.valued:
@@ -389,15 +404,24 @@ def cohort(pairs: Sequence[PairRecord], first_fill: date | None, today: date) ->
     members = [pair for pair in pairs if pair.session_date <= last]
     if today <= last:
         return Cohort(first_fill, last, None, "not_due", f"enrollment runs to {last}")
-    # A broken pair is resolved only once its filled leg (if any) has exited too.
-    pending = [pair.pair_seq for pair in members if pair.state not in ("broken", "unit") or pair.live_legs]
+    # A broken pair is resolved only once its filled leg (if any) has exited too; a unit only once
+    # its §9 regime label is written (the lifecycle writer defers it, never guesses it).
+    pending = [
+        pair.pair_seq
+        for pair in members
+        if pair.state not in ("broken", "unit")
+        or pair.live_legs
+        or (pair.state == "unit" and pair.regime_label is None)
+    ]
     if pending:
         return Cohort(first_fill, last, None, "not_due", f"cohort pairs not yet resolved: {pending}")
     resolved = [pair.resolved_session for pair in members if pair.resolved_session is not None]
     anchor = max([last, *resolved])
     due = exit_deadline_session(anchor, READOUT_WAIT_SESSIONS)
-    if today < due:
-        return Cohort(first_fill, last, due, "not_due", f"cash-flow window closes; due {due}")
+    # ``today`` is the session ``as_of`` belongs to; the due session must have FINISHED, since a
+    # row recorded late on it still counts.
+    if today <= due:
+        return Cohort(first_fill, last, due, "not_due", f"cash-flow window closes with session {due}")
     return Cohort(first_fill, last, due, "due", f"due since {due}")
 
 
@@ -457,9 +481,9 @@ def build_readout(
     as_of: datetime,
 ) -> Readout:
     seed = readout_seed(declaration_sha256)
-    today = as_of.astimezone(UTC).date()
-    if us_market_status(today) == "closed":
-        today = previous_session(today)
+    # The session ``as_of`` belongs to (New York date, or the next session on a closed day), the
+    # same mapping that decides which session a close row was recorded in.
+    today = fill_session(as_of)
     legs = [leg for pair in pairs for leg in (pair.arm, pair.control) if leg is not None]
     state = cohort(pairs, first_fill, today)
     readout = Readout(
@@ -483,7 +507,7 @@ def build_readout(
         decision_census=dict(decision_census),
         model_cost_usd_total=sum(run_costs),
         model_cost_usd_per_run=sum(run_costs) / len(run_costs) if run_costs else None,
-        harm_looks=harm_looks(pairs, seed=seed),
+        harm_looks=harm_looks(pairs, seed=seed, today=today),
         restated_rows=sum(leg.restated_rows for leg in legs),
         fee_rows=sum(leg.fee_rows for leg in legs),
         pool_sizes={pair.pair_seq: pair.pool_size for pair in pairs},
