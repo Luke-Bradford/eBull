@@ -151,6 +151,10 @@ def test_a_measured_breach_with_an_unmeasured_trade_halts_resumably(
         "app.services.ai_trial_halts.trade_pnl_usd", lambda trade: None if trade is not measured else Decimal(-250)
     )
     monkeypatch.setattr("app.services.ai_trial_halts.load_leg_trades", lambda *_: [measured, replace(measured)])
+    looks = [HarmLook(1, 10, 8, 0.2, 0.025, False, flows_final=True)]
+    monkeypatch.setattr(
+        "app.services.ai_trial_halts.compute_readout", lambda *_, **__: SimpleNamespace(harm_looks=looks)
+    )
 
     (check,) = _enforce(conn)
     # −250 measured, but the unmeasured trade could offset it: the terminal state is not proven.
@@ -160,6 +164,15 @@ def test_a_measured_breach_with_an_unmeasured_trade_halts_resumably(
         "engine",
         "loss_halt_unproven:leg=arm:loss_usd=250.00:limit_usd=200.00:unmeasured=1",
     )
+
+    # Resumed while the breach is still unproven: a final harm look now outranks it (terminal).
+    conn.execute(
+        "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
+        "SELECT declaration_id, 'halted_operator', 'active', 'resume', 'supervisor' FROM ai_trial_declarations"
+    )
+    conn.commit()
+    looks[0] = HarmLook(1, 10, 8, 0.001, 0.025, True, flows_final=True)
+    assert [check.halted for check in _enforce(conn)] == ["halted_harm"]
 
 
 class _Unprintable(RuntimeError):

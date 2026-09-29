@@ -26,7 +26,8 @@ positions run to their exits.
     and an absent number is not a loss. The count is on the paper cycle's note. A leg whose
     MEASURED loss reaches the limit while it has unmeasured trades moves the trial to the
     resumable ``halted_operator`` (``loss_halt_unproven``) instead: the terminal condition is not
-    proven, and entries still stop.
+    proven, and entries still stop. It ranks below both terminal halts, so a final harm look is
+    still written as ``halted_harm``.
 - **A check that cannot run** moves the trial to the resumable ``halted_operator`` (fail closed).
 - **Harm stop.** ``compute_readout(...).harm_looks`` (§9 "Harm stop"); the first look that
   ``halts`` and is ``flows_final`` writes ``halted_harm``, naming the look in the reason. A leg is
@@ -195,36 +196,43 @@ _ACTIVE_DECLARATIONS_SQL: Final = """
 """
 
 
+def _decide(
+    conn: Conn, losses: Sequence[LegLoss], strategy_version: str, now: datetime | None
+) -> tuple[EngineHalt, str] | None:
+    """The strongest halt due: a proven loss breach, then a final harm look (both terminal), then
+    an unproven loss breach (resumable). A terminal halt is never masked by the resumable one."""
+    breach = loss_breach(losses)
+    detail = (
+        ""
+        if breach is None
+        else f"leg={breach.leg}:loss_usd={breach.loss_usd:.2f}:limit_usd={TRIAL_LOSS_LIMIT_USD:.2f}"
+        f":unmeasured={breach.unmeasured}"
+    )
+    if breach is not None and breach.unmeasured == 0:
+        return "halted_loss", f"loss_halt:{detail}"
+    readout = compute_readout(conn, strategy_version=strategy_version, as_of=now)
+    look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
+    if look is not None:
+        return "halted_harm", (
+            f"harm_look:k={look.k}:units={look.units}:clusters={look.clusters}:p={look.p_less:.6g}<{look.threshold:.6g}"
+        )
+    if breach is not None:
+        # The measured trades breach, but an unmeasured one could offset them, so the TERMINAL
+        # condition is not proven: stop entries resumably instead (Codex ckpt-3).
+        return "halted_operator", f"loss_halt_unproven:{detail}"
+    return None
+
+
 def _check_declaration(conn: Conn, declaration_id: int, strategy_version: str, now: datetime | None) -> HaltCheck:
     losses = leg_losses(load_leg_trades(conn, declaration_id))
     unmeasured = sum(leg.unmeasured for leg in losses)
     halted: EngineHalt | None = None
-    reason = ""
-    breach = loss_breach(losses)
-    if breach is not None:
-        reason = (
-            f"loss_halt:leg={breach.leg}:loss_usd={breach.loss_usd:.2f}"
-            f":limit_usd={TRIAL_LOSS_LIMIT_USD:.2f}:unmeasured={breach.unmeasured}"
-        )
-        # The measured trades breach, but an unmeasured one could offset them, so the TERMINAL
-        # condition is not proven: stop entries resumably instead (Codex ckpt-3).
-        target: EngineHalt = "halted_loss" if breach.unmeasured == 0 else "halted_operator"
-        if target == "halted_operator":
-            reason = "loss_halt_unproven:" + reason.removeprefix("loss_halt:")
+    decision = _decide(conn, losses, strategy_version, now)
+    if decision is not None:
+        target, reason = decision
         if halt_active_trial(conn, declaration_id=declaration_id, to_state=target, reason=reason):
             halted = target
-    else:
-        readout = compute_readout(conn, strategy_version=strategy_version, as_of=now)
-        look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
-        if look is not None:
-            reason = (
-                f"harm_look:k={look.k}:units={look.units}:clusters={look.clusters}"
-                f":p={look.p_less:.6g}<{look.threshold:.6g}"
-            )
-            if halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_harm", reason=reason):
-                halted = "halted_harm"
-    if halted is not None:
-        logger.error("ai trial %s %s (%s)", declaration_id, halted, reason)
+            logger.error("ai trial %s %s (%s)", declaration_id, halted, reason)
     return HaltCheck(declaration_id, halted, unmeasured)
 
 
