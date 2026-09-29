@@ -924,7 +924,7 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
 
 ## 16. v6 amendment: structure-based trade plans (supervisor, 2026-09-29)
 
-Status: v6.2. Codex ckpt-1 on v6 ran two rounds: round 1 returned 85 findings, round 2 returned 58. Both dispositions are at the end of this section.
+Status: v6.3. Codex ckpt-1 on v6 ran two rounds: round 1 returned 85 findings, round 2 returned 58. Both dispositions are at the end of this section. **v6.3.1 (§16.11, supervisor 2026-09-29 13:05Z) retires order 7 as a refusal: the library row becomes the stated baseline.**
 
 Source: the supervisor's comments on #3471 of 2026-09-29. Both are binding before the freeze.
 - **~10:15Z:** exit base rates, the horizon stop floor, and the base rates in the prompt and the readout.
@@ -996,7 +996,7 @@ That leaves an alternating sequence.
 | stop ceiling | 4 ATR | supervisor 2026-09-28 15:45Z (v5); by construction |
 | R floor | 2.0 | supervisor 10:40Z (up from 1.5); by construction |
 | percentage bounds on the derived levels | stop 2–25%, target 2–100% | the v4 §5 bounds, kept as a guard (§16.3). They also force a positive stop price. |
-| library gate | mean net R ≥ 0 in **both** halves (§16.5), with n ≥ 100 plans across ≥ 30 names per half | the supervisor's sign rule; the halves and the minimums are by construction |
+| library baseline minimums (order 6) | n ≥ 100 plans across ≥ 30 names per half (§16.5). The v6.2 sign rule (mean net R ≥ 0 in both halves) is **retired in v6.3** (§16.11). | by construction |
 | thesis cap | 3 sentences | v4 §6, by construction. It is **not** a semantic check (r1-28). |
 
 ### 16.2 Pack additions, per name
@@ -1070,7 +1070,7 @@ Each is `NULL` when an input is `NULL` or its denominator is ≤ 0. Every record
 | 4 | `no_valid_plan` | `setup_type = none` |
 | 5 | `setup_not_detected` | `setups[setup_type].detected` is false |
 | 6 | `setup_base_rate_missing` | there is no library row for (setup, horizon), or it is below the §16.1 minimums |
-| 7 | `setup_negative_base_rate` | either half's mean net R < 0 |
+| 7 | *(retired in v6.3, §16.11)* | never refuses; the library row is recorded on the decision as its baseline. The number is kept so orders 8–13 keep their codes. |
 | 8 | `level_unavailable` | the ATR measurement is invalid; or either chosen level is `null`; or `stop_price` ≤ 0; or `invalidation_price` ≥ close; or `target_price` ≤ close |
 | 9 | `stop_below_horizon_floor` | `stop_atr_multiple` < the horizon floor |
 | 10 | `stop_outside_atr_band` | `stop_atr_multiple` > 4 |
@@ -1106,7 +1106,7 @@ It also refuses when **bid ≤ `invalidation_price`**, since the named level its
 - `setups[arm.setup_type].detected`; and
 - the arm's **own** `invalidation_level_id` and `target_level_id`, applied to that name, pass orders 8–12.
 
-Orders 6 and 7 depend only on (setup, horizon), so they are identical for both legs.
+Order 6 depends only on (setup, horizon), so it is identical for both legs. (Order 7 no longer refuses, §16.11.)
 
 **Draw and shared terms.**
 - The draw is §7's.
@@ -1186,9 +1186,9 @@ It is **not** isolated name-selection skill:
   - mean net % and mean net R.
 - **Halves:** the training half is 2023-01-01 to 2025-06-30. The holdout half is 2025-07-01 to 2026-09-25.
   - Membership is by entry date, and the exit bar must fall inside the same half (purge, r2-24/25).
-  - A row passes the gate only when **both** halves pass (§16.1). That is a stability check, not validation (r1-51).
+  - Both halves are reported. v6.2 gated on both halves' sign; v6.3 retires that gate (§16.11). The two halves are a stability description, not validation (r1-51).
 - **Row contract (r2-43..45).** One row per (setup, horizon), carrying `halves: {train, holdout}` with every statistic.
-  - `mean_net_r` is serialized exactly, as the reduced fraction `p/q` of the mean of per-trade net R values quantized half-even to 1e-12. (A general rational mean has no finite decimal expansion, so an "exact decimal string" does not exist.) The gate compares that exact value, never the rounded `mean_net_r_display`.
+  - `mean_net_r` is serialized exactly, as the reduced fraction `p/q` of the mean of per-trade net R values quantized half-even to 1e-12. (A general rational mean has no finite decimal expansion, so an "exact decimal string" does not exist.) v6.2's gate compared that exact value; v6.3 records it on the decision row as the baseline (§16.11). The rounded `mean_net_r_display` is for reading only.
   - A missing half, a missing statistic or a non-finite value classifies the row as `setup_base_rate_missing`.
 - **Freeze:**
   - The JSON (`docs/proposals/execution/3471-setup-base-rates.json`) is frozen by sha256 in the declaration, together with the script's own sha and the source-data sha (r1-85, r2-32).
@@ -1207,7 +1207,7 @@ It is **not** isolated name-selection skill:
 - the §16.1 setup and level definitions;
 - the role restriction;
 - the supervisor's 10:15Z MAE/MFE table in ATR multiples;
-- the §16.3 guards and the base-rate gate, stated as rules;
+- the §16.3 guards, stated as rules, and the library baseline as stated in §16.11;
 - the instruction that the thesis name why the invalidation level invalidates the idea (r2-55);
 - the library's fixed caveat line: "in-sample, run-vintage, dependent entries; not a validated edge". The same line is carried in every pack's `setup_base_rates` and printed by the readout (r2-48).
 
@@ -1217,7 +1217,7 @@ The prompt sha changes before the freeze. The handoff records it.
 
 - **Exit mix:** per arm, the realised % stop, % target and % time, beside the exit base rates (10:15Z (c)).
 - **Library comparison.** Per (setup, horizon) cell, the **holdout** half's target-hit rate against the realised rate (r2-51).
-  - It is labelled selection-conditioned: the gate chose these rows on the same outcomes (r2-49).
+  - v6.2 labelled it selection-conditioned because the gate chose rows on the same outcomes (r2-49). Under v6.3 no gate chooses rows on outcomes: every row with order 6's minimums is eligible. The model still sees the rows, so its own choice of setup and horizon is not outcome-blind (v63-21).
   - It is not like-for-like: level ids, geometry, firing selection, universe and timing all differ (r2-50).
   - Denominator: executed legs of completed pairs whose exit was a stop, target or time exit. Anything else is counted separately (r2-52).
 - **Pair geometry:**
@@ -1240,7 +1240,7 @@ The prompt sha changes before the freeze. The handoff records it.
   - `stop_pct` and `target_pct` stay, now server-derived. On **refused** rows they, and the recorded quotients, may be NULL or non-positive. The v4/v5 CHECKs that required them positive and in bounds now bind **accepted** rows only (r2-13).
   - `origin_bar` metadata lives in the stored pack.
 - **`ai_trial_pairs` gains** the control's three prices.
-- **The refusal vocabulary gains** `no_valid_plan`, `setup_not_detected`, `setup_base_rate_missing`, `setup_negative_base_rate`, `level_unavailable`, `stop_below_horizon_floor`, `plan_outside_bounds` and `plan_invalidated`.
+- **The refusal vocabulary gains** `no_valid_plan`, `setup_not_detected`, `setup_base_rate_missing`, `level_unavailable`, `stop_below_horizon_floor`, `plan_outside_bounds` and `plan_invalidated`.
 - **The §6 triggers are replaced** for `stop_atr_multiple` and `r_multiple` (new definitions), and extended to the new columns.
 
 ### 16.9 Slices and obligations
@@ -1342,6 +1342,148 @@ The prompt sha changes before the freeze. The handoff records it.
 - **Provenance.**
   - r1-81 to r1-84: the constants table.
   - r1-85: the freeze bindings.
+
+### 16.11 v6.3 amendment: the conditional hypothesis (supervisor, 2026-09-29 13:05Z)
+
+Status: v6.3.1. Codex ckpt-1: round 1 returned 61 findings (v63-1..61), and round 2 returned 29 (r2-v63-1..29). Both dispositions are at the end of this section.
+
+Source: the supervisor's answer to 5889431928 on #3471. Binding before the freeze.
+
+**Measured negative, recorded.** The §16.5 library (`docs/proposals/execution/3471-setup-base-rates.json`, sha256 `45ffca5f…73bc`; script `db4fd398…`; source data `4f603ecd…`):
+- every one of the 15 (setup, horizon) rows has mean net R < 0 in at least one half;
+- across both halves, the per-half means lie in −0.122 … +0.055, over 9,803 … 47,743 plans per half;
+- the sampling unit is the **first feasible firing of each run** under the library's plan rule (§16.5), not every firing.
+- Reproduce: `python3 -c "import json; d=json.load(open('docs/proposals/execution/3471-setup-base-rates.json')); [print(r['setup_type'], r['horizon_days'], *(r['halves'][h]['mean_net_r_display'] for h in ('train','holdout'))) for r in d['rows']]"`.
+
+**Reading (descriptive, in-sample, dependent entries; no inference).** No row shows a positive mean net R in both halves. In this sample, under the library's plan rule, no textbook setup showed a net-R edge that was positive in both halves after its 0.30% cost. This agrees with #2831, where the daily-bar TA family failed at zero cost. It does **not** establish:
+- that any setup's true expectancy is ≤ 0;
+- that any row's pooled mean is negative;
+- anything about percentage or dollar P&L, because R divides by varying stop distances (v63-17..19, r2-v63-2, 3).
+
+**Hypothesis.** H1: among the setup-detected names whose own levels admit a feasible plan under the model's level ids, the model's pick beats a §7 draw from the §16.4 pool, net, with session, setup, ids, horizon and tier copied from the arm.
+- The §7 draw is uniform up to its stated sha256-modulo residual (r2-v63-6).
+- The observed population is further conditioned on both legs executing and on §9's stopping rules (r2-v63-7). The primary statistic and every verdict rule are §9's, unchanged.
+- The library base rate is **not** a hurdle for *d*. A cohort where both legs lose but *d* > 0 is read by §9's rules like any other cohort. Being negative in absolute terms neither blocks nor supports a verdict (v63-24). ⚠ The absolute-loss halt can still end the trial before the cohort minimum while *d* > 0. That is §9's safety rule, unchanged (r2-v63-5).
+- *d* grades the model's choice **given** that it traded. It does not grade abstention, timing or the value of the shared plan, all of which the control copies (v63-23).
+- A positive *d* does not attribute the effect to filings, news or any other named input. Without an ablation, plan interaction, geometry and comparator composition remain alternative explanations (v63-22).
+- H1 is a demo-tier decision aid (§9), not capital-tier evidence.
+
+**Why order 7 is retired.** Order 7 asked whether the setup **alone**, taken on its first feasible firings, is profitable. For its own sample the library already answers that: no row passes in both halves (r2-v63-4).
+
+As a per-decision refusal it rejects all 15 rows, so the trial could never measure H1. It is the same defect class as the 09-26 per-trade bar and the 09-27 binding stress: a gate that empties the trial before it measures what it exists to measure.
+
+No evidence bar moves. Unchanged:
+- the §9 harm stop and loss halts;
+- the §16.3 plan guards (orders 4–6 and 8–13);
+- the readout thresholds.
+
+**Separability (the ckpt-1 framing question).** Codex's verdict: separable **as an estimand**, but not as an exchangeability result (v63 framing, v63-1..14). The honest statement follows.
+1. **Why the unconditional negative is not in *d*.** The library measures the level of a setup's returns. *d* is the difference between two legs that share the session, the setup, the level ids and the horizon.
+   - If the legs' returns were additive in a shared session-and-setup component, that component would cancel in *d*. They are not exactly additive (r2-v63-8).
+   - What remains in *d* is how the arm's name differs from a random pool member. That **includes** everything §16.4 already lists as not isolated: pivot age, stop ATR, R, percentage risk and dollar risk all differ between the legs, so a shared setup-level drift need not cancel exactly (v63-7).
+2. **What is not claimed.** "No selection skill" does **not** give E[*d*] = 0, and does not make the §9 sign-flip null exact (v63-1, 11). E[*d*] = 0 would need the arm's name to be equal in conditional expected executed net return to a uniform pool draw, after all of:
+   - plan choice after seeing the name (v63-2);
+   - holdings exclusions, which can remove the arm from its own pool (v63-3, 9);
+   - earlier pairs' depletion of later pools (v63-4);
+   - survival of both legs to execution, `plan_invalidated` included (v63-5, 6);
+   - the sha256-modulo draw's residual non-uniformity, which §7 already states (v63-10).
+
+   Singleton-self pools carry no selection contrast, and the readout reports them (§16.7, v63-8). §9 already calls its null approximate; v6.3 neither adds to that nor removes anything from it.
+3. **Loss halts.** The §9 absolute-loss halt fires on either leg's own capital.
+   - The legs' breach probabilities differ, because dollar risk, hold length and variance differ (v63-13).
+   - Stopping on a loss changes which pairs the cohort retains (v63-12).
+   - This is unchanged from v6.2 and stays frozen as a safety rule. O-v6-5 (below) makes the power simulation carry it.
+4. **Harm stop.** Its formula does not read the base rate and is unchanged. Its operating characteristics under the v6 admission rules are not known (v63-14).
+
+**Pack.** §16.2's `setup_base_rates` is unchanged. Each detected setup carries its library rows verbatim: both halves, every statistic, the caveat line, and the library file's sha256. All 15 rows meet order 6's minimums.
+
+**Decision row.**
+- `ai_trial_decisions` gains `base_rate_train_mean_net_r` and `base_rate_holdout_mean_net_r` (text). They hold the library row's `mean_net_r` strings for (`setup_type`, `horizon_days`), verbatim.
+- **Both are set, or both are NULL:**
+  - set exactly when order 6 passed, whether the decision is then accepted or refused at orders 8–13;
+  - NULL when the decision was refused at orders 1–6 (v63-35, 39).
+- A DB CHECK enforces:
+  - the pairing;
+  - a canonical-fraction shape on each: `^-?[1-9][0-9]*/[1-9][0-9]*$` or `0/1`;
+  - both non-NULL on accepted rows (v63-36, 38).
+
+  Reduction, stage and value provenance are checked in the validator, not the DB.
+- The validator checks:
+  - **stage:** both strings are set exactly when order 6 passed, and both are NULL otherwise (r2-v63-10, 13);
+  - **shape:** each is a reduced fraction (gcd 1) with a positive denominator (r2-v63-11);
+  - **provenance:** each equals the row the **declaration-bound library file** holds for (setup, horizon). The validator re-reads that file, checks its sha256 against the declaration, and compares rows. It does not trust the pack's copy or its claimed sha (v63-37, r2-v63-12, O-v6-4).
+- **Refusal on mismatch.** If the library file is missing, or its sha differs from the declaration, the whole run refuses `library_sha_mismatch` at pack build, before the model call. It is a whole-response refusal in step 4's sense (r2-v63-14).
+- `ai_trial_decisions` rows are immutable once written, as every §11 row already is.
+- The control shares the arm's (setup, horizon), and therefore its row, so `ai_trial_pairs` gains nothing.
+- **Compatibility.** Order 7 was never implemented. No code path, row or declaration carries `setup_negative_base_rate`, so no compatibility rule is needed (v63-41).
+
+**Prompt (§16.6 addition).** The prompt states the baseline as a fact, not as a rule:
+- for every setup and horizon, the library's mean net R after a 0.30% cost is negative in at least one of two historical halves, and no row is positive in both (the `setup_base_rates` rows);
+- a detected setup is therefore not by itself a reason to trade;
+- an entry must rest on information in the pack that the base rate does not use (filings, disclosures, crowd, ranking, news), and the thesis must name it;
+- `no_trade_reason` is the expected answer when no such information exists.
+
+⚠ Naming the information is **prompt text only**. It is not a semantic check, as with the thesis rules r1-28 and r2-55.
+
+**Readout (§16.7 addition).**
+- **(a) Primary:** *d* against the random control, §9's statistic, unchanged. It is not labelled "skill": §16.4's non-isolation list applies (r2-v63-9).
+- **(b) Calibration:** per (setup, horizon) cell, **each leg separately**, its realised mean net R beside the library's train and holdout mean net R.
+  - **Leg population:** §16.7's library-comparison denominator, applied leg by leg: executed legs of cohort pairs in §9's primary population whose exit was a stop, target or time exit.
+    - Broken pairs, legs with any other close reason (a partial manual close included) and unvalued legs are counted, not valued (r2-v63-16, 17).
+    - Arm and control legs are filtered independently, so the two samples and their pooled weights can differ. The gap can therefore reflect composition (v63-27, 28, r2-v63-20).
+  - **Realised net R** = the leg's §9 net return % ÷ the `stop_pct` the executor applied. That is the server-derived `stop_pct` (from the decision for the arm, from the pair for the control), not a percentage recomputed from the fill (v63-26).
+    - A missing or non-finite numerator, or a missing, non-finite or non-positive denominator, leaves the leg unvalued and counted (v63-30, r2-v63-18).
+    - **Baselines** come from the stored decision rows, which are declaration-bound, never from a re-read of the current library (r2-v63-15).
+  - **Pooled figure:** weighted by each forward cell's valued-leg count. The library side of the pooled figure uses the same weights. An empty cell prints `null` with its counts, and the pooled figure is `null` when every cell is empty (v63-29, 30, r2-v63-19).
+  - **Where it runs:** in the due cohort readout only, under `descriptives=True`. `ai_trial_halts` never reads it, so the fail-closed halt path cannot reach it (v63-32, 34).
+  - **Not *d*:**
+    - the calibration's arm-minus-control gap in mean R is not the primary *d*, and unequal stop denominators can even reverse its sign (v63-25);
+    - the control-minus-library gap mixes universe, firing selection, plan geometry, timing and cost, so it cannot identify which difference moved it (v63-31).
+  - **Descriptive only:** small cells, no test. §16.7's not-like-for-like list applies, and the library's 0.30% tariff is not the realised cost. v63-33's netProfit and fee point belongs to §9's cash-flow definition and is not changed here.
+
+**Obligations.**
+- **O-v6-5 (amended).** The power-simulation paragraph that O-v6-5 already sends to its own ckpt-1 must also:
+  - apply the §9 absolute-loss halt to each simulated leg's running P&L;
+  - report, separately, the fraction of paths whose entries stopped (a loss halt) before enrollment reached the cohort minimum (r2-v63-24);
+  - reproduce the trial's conditioning: setup detection and plan feasibility on the sampled names, as O-v6-5 already requires (r2-v63-23).
+
+  How to do that (path granularity, dollar sizing, halted paths in the rejection rate, harm-stop interaction) is that paragraph's to specify. The simulation's pairs are real paths from the corpus, so any drift the setups carry is in the data, not assumed from the library (v63-42..51).
+- **O-v6-6.** Guard tests (v63-39):
+  - a row negative in both halves, passing orders 1–6 and 8–13, is **accepted** with both baselines recorded;
+  - a mixed-sign row is likewise **accepted**;
+  - a refusal at orders 8–13 keeps both baselines;
+  - a refusal at orders 1–5, or at order 6, stores both NULL. The order-6 cases are a missing row, an undersized row, a missing half, a missing statistic and a non-finite value (r2-v63-25);
+  - a library-sha mismatch refuses the run `library_sha_mismatch`.
+- The retired sign rule enters no frozen constant. The library sha stays bound (O-v6-4).
+
+**Ckpt-1 disposition (v6.3). Round 1: 61 findings. Round 2: 29 findings, each fixed in the text where its id is cited above. r2-v63-26/27 are addressed by the two deferral bullets and the v63-53..61 list.**
+- **Framing:** accepted. The separability paragraph is rewritten to claim the estimand, not exchangeability.
+- **Fixed in the text:**
+  - v63-1..14: separability items 1–4 and the hypothesis. Round 2 tightened them (r2-v63-5..9).
+  - v63-15: the prompt misstated the library as "at or below zero", but +0.055 exists. Fixed.
+  - v63-16: first feasible firing of a run.
+  - v63-17..20: the reading paragraph. "Both legs carry the negative drift" is removed.
+  - v63-21: the §16.7 retired-gate note. v6.3 does not claim the model's choice is outcome-blind: the model sees the library rows.
+  - v63-22..24: the hypothesis bullets.
+  - v63-25..34: readout (b).
+  - v63-35..39 and v63-41: the decision row and O-v6-6.
+  - v63-40: the §16.5 "the gate compares" line.
+  - v63-42..51: **deferred, not fixed** (r2-v63-22). O-v6-5 no longer prescribes library-row draws. The simulation mechanics (sizing, chronology, intra-path marks, halted-path denominators, harm-stop interaction) go to O-v6-5's own ckpt-1, which must answer each.
+  - v63-33: **deferred** to §9's cash-flow definition, where it is pre-existing (r2-v63-21).
+- **Pre-existing in §9 (v63-52..61).** None was introduced by v6.3, and this amendment changes none of them. They are recorded here and on the PR.
+  - **v63-52, the Monte Carlo floor.** For *k* ≥ 13 the harm threshold is at most 0.05 · 2^−13 ≈ 6.1e-6, below the floor 1/(1+99,999) = 1e-5. So the Monte Carlo harm test cannot fire from look 13 onwards (r2-v63-28).
+    - Inside the declared cohort that floor cannot bind: 40 sessions × at most 2 pairs is at most 80 units, so at most 8 looks, and the threshold at *k* = 8 is ≈ 1.95e-4.
+    - The harm stop itself can still bind inside the cohort. The floor limits only post-cohort exploration (r2-v63-29).
+  - **v63-53..61, as raised:**
+    - identity double-counting in the Monte Carlo p;
+    - whether a skipped look consumes *k*;
+    - look membership when excluded pairs re-enter;
+    - legal transitions versus "a terminal halt is never masked";
+    - unmeasured trades while the measured loss is below the limit;
+    - stale bids aggregated from different instants;
+    - readiness before the 40th enrollment session;
+    - no terminal deadline for a trial that never trades;
+    - the arm capital-return formula's missing ÷ C.
 
 ## Ckpt-1 (v1) disposition
 
