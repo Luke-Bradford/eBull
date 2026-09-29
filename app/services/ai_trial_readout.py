@@ -19,12 +19,14 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
   is COUNTED (``fee_rows``), not subtracted — subtracting could double-charge. The schema carries
   no dividend or financing field, so neither is in the net (a real-stock long carries no
   financing; a dividend inside a ≤ 10-session hold is the stated gap).
-- **Net per-trade % (censored leg).** §9: valued at its last available close minus half the
-  recorded spread, and flagged. "Last available" at the censoring instant (15:00 UTC on the censor
-  session) is the close of the last bar dated before that session, through the house quarantine
-  mask; the spread is the latest ``etoro_rate_observations`` bid/ask observed by that instant. A
-  masked close, no recorded spread, a non-USD price or any ``price_series_break`` inside the hold
-  leaves the leg unvalued.
+- **Net per-trade % (censored leg).** §9: valued at its last available price minus half the
+  recorded spread, and flagged. Both come from ONE record: the latest ``etoro_rate_observations``
+  row observed by the censoring instant (15:00 UTC on the censor session). Its mid less half its
+  spread is its bid, so the mark is that bid. The table is append-only, so a rerun cannot see a
+  price revised after the instant — ``price_daily`` has no ingest time and could (Codex ckpt-2).
+  It is also as-traded, like the entry price, so a split inside the hold cannot mis-scale it. No
+  valid quote, a non-USD price or a close slice before the instant (a partial close: marking every
+  opened unit would double-count it) leaves the leg unvalued.
 - **Exit labels (O12).** An applied engine close carries its ``trigger_code``: ``exit_deadline``
   is the mechanical ``deadline``, anything else is its own non-mechanical label. A broker-side
   close is ``stop`` at or through the recorded stop, ``target`` at or through the target, else
@@ -39,6 +41,9 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
   (monitoring continues through exploration); nothing in this module writes a state event.
 - **Seed.** The Monte-Carlo flips (above 16 clusters) are drawn from
   ``sha256(declaration sha | "readout")`` — declared by construction, as the §7 draw's seed is.
+
+- **Cohort resolution.** A broken pair whose filled leg has not yet exited still holds the readout
+  (``live_legs``); its exit session enters the due-date anchor.
 
 Not computed here (named, so their absence is visible): SPY references (O13), arm-versus-control
 exposure, turnover and the fill-versus-ask gap — the executor does not persist the ask it priced a
@@ -66,8 +71,8 @@ from app.services.ai_trial_pair_lifecycle import (
     previous_session,
 )
 from app.services.ai_trial_stats import flip_set, sign_flip_p
+from app.services.block_bootstrap import BootstrapResult, block_bootstrap_expectancy, cluster_by_date
 from app.services.market_calendar import us_market_status
-from app.services.price_masked_bars import load_masked_bars
 
 #: §9 "Cohort": NYSE sessions 1–40, session 1 = the first fill session.
 COHORT_SESSIONS: Final = 40
@@ -121,14 +126,17 @@ class CloseRow:
 
 @dataclass(frozen=True)
 class CensorMark:
-    """The inputs of a censored leg's mark; any ``None`` leaves the leg unvalued."""
+    """The inputs of a censored leg's mark; any ``None`` leaves the leg unvalued.
+
+    ``bid`` / ``ask`` are the latest ``etoro_rate_observations`` row observed by the censoring
+    instant: an append-only record, so a rerun can never see a later price."""
 
     average_price: Decimal | None
-    close: Decimal | None
     bid: Decimal | None
     ask: Decimal | None
     usd: bool
-    break_in_hold: bool
+    #: A broker close slice executed before the censoring instant (a partial close).
+    partial_close: bool
 
 
 @dataclass(frozen=True)
@@ -180,27 +188,25 @@ def value_closed_leg(rows: Sequence[CloseRow], close_trigger: str | None) -> Leg
 
 
 def value_censored_leg(mark: CensorMark, units: Decimal | None) -> LegValue:
-    """§9: last available close minus half the recorded spread, flagged ``censored``."""
+    """§9: the last available price minus half the recorded spread, flagged ``censored``.
+
+    The recorded quote's mid less half its spread is its bid, so the mark IS the recorded bid —
+    the price a long exits at."""
     reason: str | None = None
     if not mark.usd:
         reason = "non_usd_price"
-    elif mark.break_in_hold:
-        reason = "price_break_in_hold"
+    elif mark.partial_close:
+        # Marking every opened unit would double-count the slice already closed.
+        reason = "partial_close_before_censor"
     elif mark.average_price is None or mark.average_price <= 0 or units is None or units <= 0:
         reason = "entry_missing"
-    elif mark.close is None:
-        reason = "mark_close_missing"
     elif mark.bid is None or mark.ask is None or not 0 < mark.bid <= mark.ask:
-        reason = "spread_missing"
+        reason = "quote_missing"
     if reason is not None:
         return LegValue(None, None, None, "censored", reason)
-    assert mark.close is not None and mark.bid is not None and mark.ask is not None
-    assert mark.average_price is not None and units is not None
-    # Half the spread as a fraction of the mid: (ask − bid) / 2 ÷ (ask + bid) / 2.
-    half_spread = (mark.ask - mark.bid) / (mark.ask + mark.bid)
-    marked = mark.close * (1 - half_spread)
+    assert mark.bid is not None and mark.average_price is not None and units is not None
     opened = units * mark.average_price
-    pnl = units * (marked - mark.average_price)
+    pnl = units * (mark.bid - mark.average_price)
     return LegValue(float(100 * pnl / opened), float(opened), float(pnl), "censored")
 
 
@@ -220,8 +226,13 @@ class PairRecord:
     control: LegValue | None
     regime_label: str | None
     confidence: int | None
-    #: Session the pair resolved in (the later leg's close or censor session); None while open.
+    #: Session of the latest leg exit (close or censor), over the legs that exited.
     resolved_session: date | None
+    #: Legs filled and not yet closed or censored. A broken pair holds one when a leg filled and
+    #: the other was refused; it holds the cohort readout until it exits.
+    live_legs: int = 0
+    #: §7: the control pool's size (exhaustion conditions *d* on control availability).
+    pool_size: int | None = None
 
     @property
     def valued(self) -> bool:
@@ -378,10 +389,11 @@ def cohort(pairs: Sequence[PairRecord], first_fill: date | None, today: date) ->
     members = [pair for pair in pairs if pair.session_date <= last]
     if today <= last:
         return Cohort(first_fill, last, None, "not_due", f"enrollment runs to {last}")
-    pending = [pair.pair_seq for pair in members if pair.state not in ("broken", "unit")]
+    # A broken pair is resolved only once its filled leg (if any) has exited too.
+    pending = [pair.pair_seq for pair in members if pair.state not in ("broken", "unit") or pair.live_legs]
     if pending:
         return Cohort(first_fill, last, None, "not_due", f"cohort pairs not yet resolved: {pending}")
-    resolved = [pair.resolved_session for pair in members if pair.state == "unit" and pair.resolved_session]
+    resolved = [pair.resolved_session for pair in members if pair.resolved_session is not None]
     anchor = max([last, *resolved])
     due = exit_deadline_session(anchor, READOUT_WAIT_SESSIONS)
     if today < due:
@@ -411,11 +423,17 @@ class Readout:
     harm_looks: list[HarmLook]
     restated_rows: int
     fee_rows: int
+    #: §7: every pair's control-pool size, by ``pair_seq``.
+    pool_sizes: dict[int, int | None]
     #: Computed only once the cohort readout is due; ``None`` before.
     primary: Primary | None = None
     #: O12: the primary over units whose legs both exited mechanically.
     mechanical_only: Primary | None = None
     arm: LegSummary | None = None
+    #: §9 "Absolute return": the house C3 date-clustered bootstrap of the arm's mean per-trade net.
+    #: ⚠ Labelled: it ignores cross-session dependence beyond its blocks, so its coverage is not
+    #: reliable, and no profitability claim is made from it.
+    arm_interval: BootstrapResult | None = None
     control: LegSummary | None = None
     capital_weighted_d_pct: float | None = None
     per_regime: list[GroupRow] = field(default_factory=list)
@@ -468,6 +486,7 @@ def build_readout(
         harm_looks=harm_looks(pairs, seed=seed),
         restated_rows=sum(leg.restated_rows for leg in legs),
         fee_rows=sum(leg.fee_rows for leg in legs),
+        pool_sizes={pair.pair_seq: pair.pool_size for pair in pairs},
     )
     if state.status != "due" or state.last_session is None:
         return readout
@@ -486,6 +505,13 @@ def build_readout(
         primary=primary(units, seed=seed),
         mechanical_only=primary([unit for unit in units if unit.mechanical], seed=seed),
         arm=arm,
+        arm_interval=block_bootstrap_expectancy(
+            cluster_by_date(
+                [unit.arm.net_pct for unit in units if unit.arm and unit.arm.net_pct is not None],
+                [unit.session_date for unit in units],
+            ),
+            seed=seed,
+        ),
         control=control,
         capital_weighted_d_pct=weighted,
         per_regime=by_group(units, "regime_label"),
@@ -507,7 +533,7 @@ def build_readout(
 # --------------------------------------------------------------------------------------------
 
 _PAIRS_SQL: Final = """
-    SELECT p.pair_id, p.pair_seq, r.session_date, d.confidence, lb.regime_label
+    SELECT p.pair_id, p.pair_seq, r.session_date, d.confidence, lb.regime_label, cardinality(p.pool)
     FROM ai_trial_pairs p
     JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id
     JOIN ai_trial_runs r ON r.run_id = d.run_id
@@ -570,18 +596,11 @@ def _censor_mark(
     *,
     instrument_id: int,
     usd: bool,
-    filled: date,
     censor_session: date,
     average_price: Decimal | None,
+    closes: Sequence[CloseRow],
 ) -> CensorMark:
     instant = datetime.combine(censor_session, TRIAL_EXIT_TIME_UTC, tzinfo=UTC)
-    series = load_masked_bars(conn, instrument_id).series
-    close: Decimal | None = None
-    for bar_date, bar in zip(reversed(series.dates), reversed(series.rows), strict=True):
-        if bar_date < censor_session:
-            # A masked close is None: the leg is unvalued, never marked from an older bar.
-            close = _decimal(bar["close"])
-            break
     quote = conn.execute(
         """
         SELECT bid, ask FROM etoro_rate_observations
@@ -590,17 +609,12 @@ def _censor_mark(
         """,
         (instrument_id, instant),
     ).fetchone()
-    breaks = conn.execute(
-        "SELECT 1 FROM price_series_break WHERE instrument_id = %s AND break_date > %s AND break_date < %s LIMIT 1",
-        (instrument_id, filled, censor_session),
-    ).fetchone()
     return CensorMark(
         average_price=average_price,
-        close=close,
         bid=_decimal(quote[0]) if quote else None,
         ask=_decimal(quote[1]) if quote else None,
         usd=usd,
-        break_in_hold=breaks is not None,
+        partial_close=any(row.executed_at < instant for row in closes),
     )
 
 
@@ -634,30 +648,32 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
     first_fill = min((fill_session(filled) for filled in fills), default=None)
 
     records: list[PairRecord] = []
-    for pair_id, pair_seq, session_date, confidence, regime_label in pair_rows:
+    for pair_id, pair_seq, session_date, confidence, regime_label, pool_size in pair_rows:
         history = events[int(pair_id)]
         state = pair_unit_state([(leg, event) for leg, event, _ in history])
         broken = tuple(reason for _, event, reasons in history if event == "broken" for reason in reasons or ())
         values: dict[str, LegValue | None] = {}
         resolved: list[date] = []
+        live = 0
         for leg in LEGS:
             leg_events = [event for event_leg, event, _ in history if event_leg == leg]
+            live += "filled" in leg_events and not {"closed", "censored"} & set(leg_events)
             row = legs.get((int(pair_id), leg))
             # Any leg that exited is valued, a broken pair's included (O11: it is still reported);
             # only a ``unit`` enters the statistics.
             if row is None or row[6] is None or not {"closed", "censored"} & set(leg_events):
                 values[leg] = None
                 continue
-            (_, _, trade_id, instrument_id, deadline, currency, filled_at, units, avg_price, released_at, trigger) = row
+            (_, _, trade_id, instrument_id, deadline, currency, _, units, avg_price, released_at, trigger) = row
             if "censored" in leg_events:
                 censor_session = exit_deadline_session(deadline, TRIAL_CENSOR_SESSIONS)
                 mark = _censor_mark(
                     conn,
                     instrument_id=int(instrument_id),
                     usd=currency == "USD",
-                    filled=fill_session(filled_at),
                     censor_session=censor_session,
                     average_price=_decimal(avg_price),
+                    closes=close_rows.get(int(trade_id), []),
                 )
                 values[leg] = value_censored_leg(mark, _decimal(units))
                 resolved.append(censor_session)
@@ -675,7 +691,9 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
                 control=values.get("control"),
                 regime_label=regime_label,
                 confidence=None if confidence is None else int(confidence),
-                resolved_session=max(resolved) if state == "unit" and len(resolved) == len(LEGS) else None,
+                resolved_session=max(resolved, default=None),
+                live_legs=live,
+                pool_size=None if pool_size is None else int(pool_size),
             )
         )
     return records, first_fill

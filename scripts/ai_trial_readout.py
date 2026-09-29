@@ -42,6 +42,7 @@ def render(readout: Readout) -> str:
         f"runs: {readout.run_census}  decisions: {readout.decision_census}",
         f"model cost: ${readout.model_cost_usd_total:.2f} total, per run {readout.model_cost_usd_per_run}",
         f"restated close rows: {readout.restated_rows}  close rows with a nonzero fee: {readout.fee_rows}",
+        f"control-pool size by pair_seq: {readout.pool_sizes}",
     ]
     for look in readout.harm_looks:
         lines.append(
@@ -57,6 +58,8 @@ def render(readout: Readout) -> str:
         f"  verdict: {p.verdict}",
         f"O12 mechanical-exits only: {readout.mechanical_only}",
         f"arm: {readout.arm}",
+        f"arm mean net interval (house C3 block bootstrap; coverage NOT reliable, no profitability claim): "
+        f"{readout.arm_interval}",
         f"control: {readout.control}",
         f"capital-weighted d: {readout.capital_weighted_d_pct} pp",
         f"per regime: {readout.per_regime}",

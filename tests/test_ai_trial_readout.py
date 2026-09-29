@@ -3,6 +3,7 @@ timing and the assembled readout."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -132,35 +133,32 @@ def test_a_broker_close_without_recorded_levels_is_not_mechanical() -> None:
     assert exit_label([], None) == "broker_other"
 
 
-def test_a_censored_leg_is_marked_at_its_close_less_half_the_spread() -> None:
-    mark = CensorMark(Decimal("100"), Decimal("110"), Decimal("99"), Decimal("101"), usd=True, break_in_hold=False)
-    value = value_censored_leg(mark, Decimal("2"))
-    # half spread = (101 − 99) / (101 + 99) = 1%; mark = 110 × 0.99 = 108.9
-    assert value.net_pct == pytest.approx(8.9)
-    assert (value.open_amount, value.pnl_usd, value.exit_label) == (200.0, pytest.approx(17.8), "censored")
-
-
 def _mark(**overrides: object) -> CensorMark:
     fields: dict[str, object] = {
         "average_price": Decimal(100),
-        "close": Decimal(110),
-        "bid": Decimal(99),
-        "ask": Decimal(101),
+        "bid": Decimal("108.9"),
+        "ask": Decimal("111.1"),
         "usd": True,
-        "break_in_hold": False,
+        "partial_close": False,
     }
     return CensorMark(**{**fields, **overrides})  # type: ignore[arg-type]
+
+
+def test_a_censored_leg_is_marked_at_the_recorded_bid() -> None:
+    # The recorded mid (110) less half its spread (1.1) is the bid, 108.9.
+    value = value_censored_leg(_mark(), Decimal("2"))
+    assert value.net_pct == pytest.approx(8.9)
+    assert (value.open_amount, value.pnl_usd, value.exit_label) == (200.0, pytest.approx(17.8), "censored")
 
 
 @pytest.mark.parametrize(
     ("mark", "reason"),
     [
         (_mark(usd=False), "non_usd_price"),
-        (_mark(break_in_hold=True), "price_break_in_hold"),
+        (_mark(partial_close=True), "partial_close_before_censor"),
         (_mark(average_price=None), "entry_missing"),
-        (_mark(close=None), "mark_close_missing"),
-        (_mark(bid=None), "spread_missing"),
-        (_mark(bid=Decimal(102)), "spread_missing"),  # crossed quote
+        (_mark(bid=None), "quote_missing"),
+        (_mark(bid=Decimal(112)), "quote_missing"),  # crossed quote
     ],
 )
 def test_a_censored_leg_without_a_clean_mark_is_unvalued(mark: CensorMark, reason: str) -> None:
@@ -238,6 +236,18 @@ def test_cohort_timing() -> None:
     assert (state.status, state.due_session) == ("due", due)
 
 
+def test_a_broken_pair_with_a_live_leg_holds_the_readout_until_it_exits() -> None:
+    last = exit_deadline_session(SESSION_1, COHORT_SESSIONS - 1)
+    later = exit_deadline_session(last, 30)
+    live = replace(_pair(1, SESSION_1, 0.0, state="broken"), live_legs=1)
+    assert "not yet resolved: [1]" in cohort([live], SESSION_1, later).detail
+    # Once the filled leg exits, its exit session anchors the wait.
+    exited_at = exit_deadline_session(last, 12)
+    exited = replace(live, live_legs=0, resolved_session=exited_at)
+    state = cohort([exited], SESSION_1, later)
+    assert (state.status, state.due_session) == ("due", exit_deadline_session(exited_at, READOUT_WAIT_SESSIONS))
+
+
 def _build(pairs: list[PairRecord], as_of: datetime) -> Readout:
     return build_readout(
         declaration_id=7,
@@ -253,8 +263,10 @@ def _build(pairs: list[PairRecord], as_of: datetime) -> Readout:
 
 
 def test_the_readout_computes_no_primary_before_it_is_due() -> None:
-    readout = _build([_pair(1, SESSION_1, 1.0)], datetime(2026, 10, 2, 22, tzinfo=UTC))
+    readout = _build([replace(_pair(1, SESSION_1, 1.0), pool_size=12)], datetime(2026, 10, 2, 22, tzinfo=UTC))
     assert readout.primary is None
+    assert readout.arm_interval is None
+    assert readout.pool_sizes == {1: 12}
     assert readout.model_cost_usd_per_run == 1.0
 
 
@@ -270,6 +282,10 @@ def test_the_due_readout_splits_cohort_from_exploratory_and_tabulates() -> None:
     assert readout.primary.units == 31
     assert readout.mechanical_only.units == 30
     assert readout.exploratory_units == 1
+    assert readout.arm_interval is not None
+    assert readout.arm_interval.cluster_count == 10
+    interval = readout.arm_interval
+    assert interval.ci_low_pct <= interval.point_estimate_pct <= interval.ci_high_pct
     assert readout.order_parity == {"arm_first": 16, "control_first": 15}
     assert readout.exit_labels["arm"] == {"deadline": 30, "operator_close": 1}
     assert [row.group for row in readout.per_confidence] == ["1", "2", "3"]

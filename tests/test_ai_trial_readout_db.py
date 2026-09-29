@@ -69,3 +69,6 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
     assert pair.arm.net_pct == pytest.approx(16.0)
     assert (pair.arm.open_amount, pair.arm.exit_label, pair.arm.unvalued_reason) == (125.0, "target", None)
     assert pair.arm.pnl_usd == pytest.approx(float(Decimal(20)))
+    # The exited arm is no longer live, its exit session anchors the pair, and §7's pool is reported.
+    assert (pair.live_legs, pair.resolved_session) == (0, closed_at.date())
+    assert pair.pool_size is not None and pair.pool_size >= 1
