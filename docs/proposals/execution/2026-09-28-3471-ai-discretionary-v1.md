@@ -1,6 +1,6 @@
 # AI-discretionary-v1: a forward-only demo trial of an LLM daily decision job (#3471)
 
-Status: spec v4.
+Status: spec v4, **amended to v6.1 by §16** (supervisor, 2026-09-29). §16 supersedes the parts of §5–§7 it names.
 - **Codex ckpt-1, round 1 (v1):** 109 findings; the disposition is at the end.
 - **Round 2 (v2):** 145 findings.
 - **Round 3 (v3, framing only):** 39 findings, dispositioned at the end.
@@ -921,6 +921,427 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
   - A sensitivity analysis excludes pairs that carry them.
 - **O13, readout arithmetic (r2-137 to 143).** The §9 formulas apply. SPY per pair uses close-to-close with no spread. SPY capital-level uses one round-trip spread from the recorded quote. The capital base is the arm's C, and the terminal date is the cohort readout's.
 - **O14, register (r2-136).** Every strategy version (prompt or model change) is its own register entry. A restarted run of the same version is the same entry.
+
+## 16. v6 amendment: structure-based trade plans (supervisor, 2026-09-29)
+
+Status: v6.2. Codex ckpt-1 on v6 ran two rounds: round 1 returned 85 findings, round 2 returned 58. Both dispositions are at the end of this section.
+
+Source: the supervisor's comments on #3471 of 2026-09-29. Both are binding before the freeze.
+- **~10:15Z:** exit base rates, the horizon stop floor, and the base rates in the prompt and the readout.
+- **~10:40Z:** each trade gets its own structure-based plan.
+
+The §8 active-risk formula shipped separately in #3500. The declaration has not been frozen, so v1 is still the version and nothing is minted.
+
+### 16.0 What v6 supersedes
+
+**The model no longer chooses a stop % or a target %.** It chooses a setup and two level ids. The server derives the percentages from those levels (§16.3), and the control re-applies the same ids to its own name (§16.4).
+
+**Obsolete, replaced by §16:**
+
+| section | what is replaced |
+| --- | --- |
+| §1 | The estimand's "Both legs share the same session, stop %, target % and horizon", and the "selection-conditioned exit terms" paragraph. Replaced by §16.4. |
+| §5 | The JSON schema and the Terms line "The two legs' exits match **in ATR multiples**". |
+| §6 | Orders 4–5; the `target_not_above_stop` paragraph; the ATR-band **checks**; and the band block's definitions of `stop_atr_multiple` and `r_multiple`. **Retained and binding on v6** (r2-1): the band block's measurement (`atr14`, `close`, validity), `q`, the exact-rational arithmetic, operand serialization, and the multiplication-bracket verification, plus "compliance is judged at decision time". |
+| §7 | In (a): the "(v5) names whose derived control levels are not placeable" bullet, the "Shared terms" derivation, "The arm's own name gets no special case", and "What the control is (v5)". |
+| §9 | The ATR-grid bullet of the power simulation. Slice v6-4 updates it to the §16.3 rule. |
+
+**Everything else in §3–§15 stands:**
+- §7's draw, `pair_seq`, submission order and broken-pair rules;
+- §8's execution rule: percentages applied to the pre-submission ask, rounded down at 6 decimals.
+
+### 16.1 Source rule, and every constant's provenance
+
+**Levels.** Every window is over **stored bars** of the §3.2 series: one quarantine-masked price segment, completed sessions only, ending at the last completed NYSE session that step 1 already requires. *t* is the index of that last bar.
+
+| level id | definition | provenance |
+| --- | --- | --- |
+| `swing_low_k`, `swing_high_k` (k = 1..3, 1 = most recent) | **Strict** 5-bar fractal: `price_structure.detect_swings(bars, 2, universe=…)`. `_pivot_at` rejects any neighbour ≥ the centre high (≤ for lows). A pivot at *i* is usable only when *i* + 2 ≤ *t*. The pivots come from **normalised pivots** (below). | B. Williams, *Trading Chaos* (1995). The strict variant is **our selection**: Williams' 2nd edition also admits extended equal-high formations (ckpt-1 r1-73). Keeping 3 per side is **by construction**. |
+| `donchian20_low`, `donchian20_high`, `donchian55_low`, `donchian55_high` | min(low) and max(high) over bars `[t−N, t−1]`, which excludes bar *t* | The Turtle 20-day and 55-day breakout references: C. Faith, *The Original Turtle Trading Rules* (2003). |
+| `sma20`, `sma50`, `sma200`, `vwap20_proxy` | as in §3.2 | house implementations, frozen by name in §9 |
+| `range20_projection` | `donchian20_high + (donchian20_high − donchian20_low)` | The rectangle measuring rule, pattern height projected from the breakout: Edwards & Magee, *Technical Analysis of Stock Trends*. Applying it to a 20-bar Donchian range instead of a drawn rectangle is **by construction**. |
+| `mm_up` | `C + (B − A)` over the **latest** three normalised pivots, which must be low-high-low with A < C < B. There is no backward search: if the latest triple does not qualify, the level is `null`. It is also `null` when any **raw bar low** after C is ≤ C (C must hold), or when any raw bar high after B is ≥ `mm_up` (the target is already hit). | Bulkowski, *Encyclopedia of Chart Patterns*, 2nd ed. (2005), "Measured Move Up": equal legs either side of a correction. The **detector is ours** and is not Bulkowski's identification rules. ckpt-1 read ch. 33, pp. 510–521, as reporting 45% (bull) and 56% (bear) target attainment for completed patterns. I have not re-verified that reading. It is not a stop-competing probability over 5, 10 or 20 sessions. Edwards & Magee's flag rule projects from the breakout, not from C, so it is **not** the same anchor. |
+
+**Normalised pivots (by construction).**
+1. Merge the confirmed highs and lows, ordered by index.
+2. Drop any bar that is both a high pivot and a low pivot, because its intrabar order is unknown.
+3. Collapse each run of same-kind pivots to its extreme. Ties go to the later bar.
+
+That leaves an alternating sequence.
+
+**Unknown pivot state.** If `_pivot_at` returns `None` for any bar of the series, every pivot-derived level (`swing_*`, `mm_up`) is `null` (r2-6).
+
+**Missing data in a window.** A window containing a missing extreme makes its level `null` (r2-7). The `universe` argument is `"survivor_only"`, as the pack's own indicator calls pass it (`ai_trial_pack.indicators`) (r2-9).
+
+**Arithmetic.** Every level construction and every detector comparison runs on exact rationals of `Decimal(repr(x))`. A float is never compared (r2-10).
+
+**VWAP.** A session VWAP needs stored intraday bars, which is the `price_intraday` build gap. Published anchored-VWAP anchors exist (earnings, major highs and lows: B. Shannon), but choosing one is a design decision that v6 does not take. v6 carries `vwap20_proxy` only, labelled as a proxy.
+
+**Setups.** Detectors are pure functions of the same series, evaluated at *t*. Every comparison uses **contemporaneous** values: the SMA and ATR at bar *j* when bar *j* is tested. An input the detector needs but cannot compute gives `detected = false`, with `inputs_missing = true` recorded beside it.
+
+| `setup_type` | detected when | provenance |
+| --- | --- | --- |
+| `breakout_donchian20` | close(t) > `donchian20_high` | The Turtle System 1 entry. **Adaptations:** the trigger is a daily close, not one tick beyond the prior high intraday, and System 1's "skip after a winning breakout" filter is omitted. Both are ours (ckpt-1 r1-74). |
+| `pullback_rising_sma20`, `pullback_rising_sma50` (one enum value per period *p*) | SMA*p*(t) > SMA*p*(t−5); **and** close(k) > SMA*p*(k) for every k in [t−10, t−4] (prior trend above); **and** some j in [t−3, t] has SMA*p*(j) − 1×ATR(j) ≤ low(j) ≤ SMA*p*(j) + 0.5×ATR(j) (bounded touch); **and** close(t) > SMA*p*(t). | The practitioner reference is Connors & Raschke, *Street Smarts* (1995), ch. 10, "Holy Grail": ADX(14) above 30 **and rising**, a pullback that touches the 20-EMA, a buy stop above the previous bar's high, and an ADX reset for the next signal. **v6 adapts it; every window and multiple here is ours.** It uses SMA because that is what the pack carries. It has no ADX filter, because ADX is not in the pack. It has no buy-stop trigger, because entry is the §8 market order. |
+| `range_support_bounce` | 1.5×ATR(t) ≤ `donchian20_high − donchian20_low` ≤ 4×ATR(t); **and** ≥ 2 non-adjacent bars in [t−20, t−1] with low ≤ `donchian20_low` + 0.5×ATR, and ≥ 2 with high ≥ `donchian20_high` − 0.5×ATR (both boundaries tested); **and** for some j ∈ {t−1, t}, low(j) ≤ `donchian20_low` + 0.5×ATR(j); **and** close(t) ≥ `donchian20_low`; **and** close(t) > close(t−1). | **No published formulation. Entirely by construction.** |
+| `trend_continuation_flag` | *h* = the index of the highest high in [t−15, t−3], latest on ties; H = high(h). L = the lowest low in [h−10, h−1], which excludes *h*. Pole: H − L ≥ 3×ATR(h). Flag over (h, t]: max high < H (no new high), and min low ≥ H − 0.5×(H − L) (≤ 50% retrace). This gives 3–15 flag bars by construction. | Edwards & Magee and Bulkowski describe the morphology: a sharp pole, then a short, parallel-sided counter-trend consolidation; Bulkowski gives up to 3 weeks. **The detector is ours** and does not enforce parallel boundaries. |
+| `none` | the model names no setup | always refused, `no_valid_plan` |
+
+**Every other v6 constant.**
+
+| constant | value | provenance |
+| --- | --- | --- |
+| stop offset beyond the invalidation level | 0.25 × ATR14 | supervisor 10:40Z; by construction |
+| stop floor, in ATR by horizon | 5d 1.0, 10d 1.5, 20d 2.0 | supervisor 10:15Z: MAE p50 of random entries rounded up to 0.5, defined by `scripts/ai_trial_exit_base_rates.py`. It is a noise **heuristic**, not a calibrated stop probability (r1-53). |
+| stop ceiling | 4 ATR | supervisor 2026-09-28 15:45Z (v5); by construction |
+| R floor | 2.0 | supervisor 10:40Z (up from 1.5); by construction |
+| percentage bounds on the derived levels | stop 2–25%, target 2–100% | the v4 §5 bounds, kept as a guard (§16.3). They also force a positive stop price. |
+| library gate | mean net R ≥ 0 in **both** halves (§16.5), with n ≥ 100 plans across ≥ 30 names per half | the supervisor's sign rule; the halves and the minimums are by construction |
+| thesis cap | 3 sentences | v4 §6, by construction. It is **not** a semantic check (r1-28). |
+
+### 16.2 Pack additions, per name
+
+**`levels`.** An object keyed by **every** §16.1 id, so each id is always present. The value is `null`, or `{price, atr_distance}`:
+- `price` is a finite value > 0. Anything else is stored as `null`.
+- `atr_distance = qs((price − close) / atr14)`.
+- `origin_bar` is the bar index the level is anchored to: the pivot bar for swing levels, and the extreme bar for Donchian levels (latest on ties). It is `null` for moving averages, the VWAP proxy and projections. This is what the readout's level age uses (r2-53).
+- `qs(x) = sign(x) × q(|x|)`, that is §6's `q` rounding half away from zero.
+- A level is `null` whenever the §6 ATR measurement is invalid.
+
+**`setups`.** An object keyed by every enum value except `none`. Each value is `{detected, inputs_missing}`.
+
+**`setup_base_rates`.** The §16.5 rows for each detected setup, one per horizon.
+
+**Information boundary (corrected, r2-22/23).** The pack excludes the declaration sha, `pair_seq` and the draw seed. That hides the draw **index** but not the pool: every name's levels and setups are in the pack, so the model can in principle infer the feasible set, and for a singleton pool it knows the control. The readout reports singleton and self-draw pools (§16.7).
+
+### 16.3 Schema and guard
+
+**Schema (replaces §5; frozen; implemented verbatim in slice v6-3):**
+
+```json
+{
+  "type": "object", "additionalProperties": false,
+  "required": ["decisions", "no_trade_reason"],
+  "properties": {
+    "no_trade_reason": {"type": ["string", "null"], "maxLength": 600},
+    "decisions": {
+      "type": "array", "maxItems": 2,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["action", "symbol", "setup_type", "invalidation_level_id", "target_level_id",
+                     "horizon_days", "size_tier", "confidence", "thesis"],
+        "properties": {
+          "action": {"const": "enter_long"},
+          "symbol": {"type": "string", "maxLength": 16},
+          "setup_type": {"enum": ["breakout_donchian20", "pullback_rising_sma20", "pullback_rising_sma50",
+                                  "range_support_bounce", "trend_continuation_flag", "none"]},
+          "invalidation_level_id": {"enum": ["swing_low_1", "swing_low_2", "swing_low_3", "donchian20_low",
+                                             "donchian55_low", "sma20", "sma50", "sma200", "vwap20_proxy"]},
+          "target_level_id": {"enum": ["swing_high_1", "swing_high_2", "swing_high_3", "donchian20_high",
+                                       "donchian55_high", "range20_projection", "mm_up"]},
+          "horizon_days": {"enum": [5, 10, 20]},
+          "size_tier": {"enum": ["half", "full"]},
+          "confidence": {"type": "integer", "minimum": 1, "maximum": 5},
+          "thesis": {"type": "string", "minLength": 1, "maxLength": 600}
+        }
+      }
+    }
+  }
+}
+```
+
+**Level roles are restricted by the enums.** An invalidation level must be a support-kind id, and a target must be a resistance or projection id.
+
+**The model never types a price.** The thesis must name why the invalidation level invalidates the idea. That requirement is prompt text only; no check enforces it.
+
+**Derivation.** Every value is an exact rational, as in §6: Python binds `Decimal(repr(x))` and never a float. `close` and `atr14` come from the §6 measurement. The two prices are the chosen ids' `levels[...].price`.
+- `stop_price = invalidation_price − ¼ × atr14`, exact and not quantized.
+- `stop_atr_multiple = q((close − stop_price) / atr14)`. This replaces §6's `stop_pct / atr14_pct` definition.
+- `stop_pct = q(100 × (close − stop_price) / close)`.
+- `target_pct = q(100 × (target_price − close) / close)`.
+- `r_multiple = q((target_price − close) / (close − stop_price))`. It is computed on prices, so percentage quantization cannot move it.
+
+Each is `NULL` when an input is `NULL` or its denominator is ≤ 0. Every recorded quotient uses `qs`, since refused rows can be negative (r2-11). The SQL verification of a negative x applies the §6 bracket to |x| and |n| (r2-12). The recorded figures are computed whatever check fails first, as §6 already requires.
+
+**Per-decision precedence** (orders 1–3 are unchanged):
+
+| order | code | refused when |
+| --- | --- | --- |
+| 4 | `no_valid_plan` | `setup_type = none` |
+| 5 | `setup_not_detected` | `setups[setup_type].detected` is false |
+| 6 | `setup_base_rate_missing` | there is no library row for (setup, horizon), or it is below the §16.1 minimums |
+| 7 | `setup_negative_base_rate` | either half's mean net R < 0 |
+| 8 | `level_unavailable` | the ATR measurement is invalid; or either chosen level is `null`; or `stop_price` ≤ 0; or `invalidation_price` ≥ close; or `target_price` ≤ close |
+| 9 | `stop_below_horizon_floor` | `stop_atr_multiple` < the horizon floor |
+| 10 | `stop_outside_atr_band` | `stop_atr_multiple` > 4 |
+| 11 | `reward_risk_below_min` | `r_multiple` < 2.0, **or** the exact ratio `target_pct / stop_pct` of the quantized percentages that execution uses is < 2.0 (r2-14) |
+| 12 | `plan_outside_bounds` | `stop_pct` outside [2, 25], or `target_pct` outside [2, 100] |
+| 13 | `thesis_too_long` | as in §6 |
+
+The supervisor's text folds "too close" and "R < 2" into `no_valid_plan`. v6 keeps specific codes because they are the audit trail, and the supervisor named `stop_below_horizon_floor` itself.
+
+**Never clamp or repair.**
+
+**Execution (added to the §8 executor; applies to both legs).** Just before submission, the executor refuses `plan_invalidated` when:
+- ask ≤ `stop_price`; or
+- ask ≥ `target_price`.
+
+It also refuses when **bid ≤ `invalidation_price`**, since the named level itself no longer holds (r2-17/19), and when a price-series break or split for the name is dated after the pack's `as_of` (r2-20). Precedence: these checks run immediately after the executor's quote-freshness check and before sizing (r2-21).
+
+**What this does not do (labelled).**
+- It checks the quote at submission only, not the path since the pack (r2-18).
+- Otherwise §8's rule applies unchanged: the percentages go onto the ask. So exits are displaced by ask / close. In r2-16's example (close 100, ask 108) the stop lands near 103.14, not 96 − ¼ ATR. That is **approximate**, as in v5: quantization and 6-decimal rounding also apply.
+- The ATR floor and ceiling are judged at decision time; the executed distance scales by ask / close (r2-15).
+
+**Persistence and provenance.**
+- The new price columns are unconstrained `numeric`, bound from `Decimal(repr(x))`.
+- The DB trigger re-checks the whole derivation by exact multiplication:
+  - `stop_price` against the offset;
+  - each quantized quotient via §6's bracket rule, with `qs` for signed values.
+- Level provenance (the price equals the stored pack's `levels[id].price` for that name) is checked in the validator against the stored pack. A test re-derives every recorded figure from the stored pack alone (O-v6-1).
+
+### 16.4 Control (replaces the §7 shared-terms derivation)
+
+**Pool (per accepted arm decision).** Start from the §7 pool: the pack-complete shortlist, minus the control leg's holdings, minus this run's earlier draws. Then keep only names where both:
+- `setups[arm.setup_type].detected`; and
+- the arm's **own** `invalidation_level_id` and `target_level_id`, applied to that name, pass orders 8–12.
+
+Orders 6 and 7 depend only on (setup, horizon), so they are identical for both legs.
+
+**Draw and shared terms.**
+- The draw is §7's.
+- Session, horizon and `size_tier` are copied from the arm.
+- The control's levels come from its own prices for the arm's ids, by the §16.3 derivation.
+
+The supervisor's "draw again within the pool" is implemented as this pre-filter. **Qualification:** that matches unbounded uniform rejection sampling over a pool that is fixed for the draw. The pool is fixed, because it is built once per decision before the draw. The sha256-modulo uniformity assumption from §7 still applies.
+
+**Self-membership invariant.** The arm's name passes its own structural filter by construction: it is the same derivation and the same guard. So it leaves the pool only through the control leg's holdings or an earlier draw. A test pins this (O-v6-2). §7's rounding-based self-exclusion note is obsolete.
+
+**What *d* measures (replaces §1's shared-exit estimand).** *d* is the paired net difference between two legs:
+- **the arm:** the model's name, under the model's setup, level ids, horizon and tier;
+- **the control:** a uniform draw from the names on which the same setup is detected and the same level ids give a feasible plan.
+
+It is **conditional**:
+- on feasibility, on control availability, and on both legs executing;
+- on the model's response order, since earlier pairs consume controls (§7);
+- on inventory path.
+
+It is **not** isolated name-selection skill:
+- The model picks its setup and ids after seeing its own name. *d* therefore includes the interaction between the name and the plan, and the composition of the benchmark.
+- The same ids do **not** equalise geometry: pivot age, stop ATR, R, target distance and percentage risk all vary.
+- The same tier does not equalise dollar risk.
+- v6 gives up v5's matched ATR multiples in exchange for matched structure. That was the supervisor's choice, and these are its costs.
+- The legs still exclude different holdings (unchanged from v4).
+
+§16.7 lists what the readout reports about these.
+
+### 16.5 Base-rate scripts (slice v6-1; the library is pre-trial TRAINING, not validation)
+
+**`scripts/ai_trial_exit_base_rates.py`.** This is the supervisor's `exit_map`, committed as the exact definition of the §16.1 floors.
+- Changes are lint-only.
+- Its output is checked in beside it.
+- Its whole-window universe filter uses later observations. That is labelled in the script header; it is the floors' method as measured.
+
+**`scripts/ai_trial_setup_base_rates.py`.** The library, defined as follows.
+- **Data:** stored `price_daily` bars and break state as of the script run. **The library is not point-in-time with respect to revisions, adjustments, quarantine or listing coverage.** It is run-vintage data, labelled as such (r1-60, r2-29..31). Each name's series is split at the run's unresolved `price_series_break` rows. The script records a sha256 of the ordered `(instrument_id, price_date, open, high, low, close, volume)` stream it read, so the source data is bound, not only its counts (r2-32).
+- **Point-in-time universe at each entry *t*:**
+  - ≥ 260 prior bars;
+  - median close ≥ $3 over the trailing 252 bars;
+  - median dollar volume ≥ $1M over the trailing 252 bars.
+  - The thresholds are exit_map's; applying them point-in-time is by construction.
+- **Levels and setups:** the exact §16.1 and §16.2 functions from `app/`, called on bars ≤ *t*. The script imports them and never reimplements them. ATR14 is Wilder.
+- **Entry:** close(*t*). The walk runs over bars *t*+1 … *t*+h, so the entry bar's own range is never used.
+  - **Order of operations (r2-37, 46):**
+    1. detect;
+    2. point-in-time universe;
+    3. plan feasibility;
+    4. completeness: *t* + h ≤ the series' last bar **and** *t* + h ≤ the half's end date (purged, r2-24..28);
+    5. dedupe.
+  - **Counters:** `firings` counts step 1, restricted to step 2. `no_valid_plan` counts step 3 failures. `truncated` counts step 4 failures caused by the **series** ending before the half's end. `plans` = n.
+  - Planning, completeness and dedupe are **per horizon** (r2-35).
+  - ⚠ The trial enters at the ask at 15:00 on the next session (§8). That timing mismatch is labelled.
+- **Plan (the library's deterministic rule).**
+  - Invalidation: the highest-priced support-kind id below close that passes orders 8–12 together with some target.
+  - Target: then the lowest-priced resistance or projection id above close with R ≥ 2.0.
+  - Price ties break by the enum order.
+  - A firing with no feasible pair counts as `no_valid_plan`.
+  - **Entries per run:** within each run of consecutive firings of a setup on one name, only the **first firing that passes steps 2–4** is taken (r1-68). A run resets at a half boundary, at a segment boundary, and on any session where the setup is not detected or the name is outside the universe (r2-36).
+  - **Stop and target prices** use §16.3's derivation, including quantization, with entry = close. That is the executor's rule with ask = close (r2-38/39).
+- **Exits:**
+  - If open ≤ stop, exit at the open (gap-through). If open ≥ target, exit at the open (gap-up, r2-40).
+  - Else if low ≤ stop, exit at the stop.
+  - Else if high ≥ target, exit at the target.
+  - A same-bar touch of both counts as the stop.
+  - Otherwise exit at close(*t*+h).
+  - A bar with missing OHLC inside the walk excludes the trade, counted as `truncated`. Horizons count **stored bars** (r2-41/42).
+- **Cost:** net = gross − 0.30% of the entry, round trip. That is the supervisor's tariff figure, with the spread excluded (r1-65).
+- **R per trade:**
+  - `R = (exit − entry) / (entry − stop)`;
+  - `net R = (exit − entry − 0.003 × entry) / (entry − stop)`;
+  - the reported value is the mean of the per-trade ratios.
+- **Output per (setup, horizon, half):**
+  - firings, `no_valid_plan` count, plans (= n), `n_names`, the excluded-truncated count;
+  - % stop, % target and % time over plans;
+  - average win (net > 0) and average loss (net ≤ 0), in net %; an empty subset gives `null` (r2-47);
+  - mean net % and mean net R.
+- **Halves:** the training half is 2023-01-01 to 2025-06-30. The holdout half is 2025-07-01 to 2026-09-25.
+  - Membership is by entry date, and the exit bar must fall inside the same half (purge, r2-24/25).
+  - A row passes the gate only when **both** halves pass (§16.1). That is a stability check, not validation (r1-51).
+- **Row contract (r2-43..45).** One row per (setup, horizon), carrying `halves: {train, holdout}` with every statistic.
+  - `mean_net_r` is serialized as an exact decimal string of the rational mean. The gate compares that exact value, never a rounded display.
+  - A missing half, a missing statistic or a non-finite value classifies the row as `setup_base_rate_missing`.
+- **Freeze:**
+  - The JSON (`docs/proposals/execution/3471-setup-base-rates.json`) is frozen by sha256 in the declaration, together with the script's own sha and the source-data sha (r1-85, r2-32).
+  - `scripts/ai_trial_exit_base_rates.py` and its output are frozen the same way (r2-33).
+  - The §16.1 floors are the frozen constants. A test asserts that rounding the checked-in MAE p50s up to 0.5 reproduces them (r2-34).
+  - The detector and level modules join `ai_trial_policy`'s hashed `policy_modules`.
+- **Scope, stated in the output header:**
+  - The rows are in-sample and descriptive, over a regime with a 2023–26 bull drift.
+  - Overlapping paths and multiple setups per name make the entries dependent, so no inference is claimed (r1-69).
+  - The library's plan rule differs from the arm's own choices (r1-54).
+  - Its universe is not the shortlist (r1-58).
+
+### 16.6 Prompt
+
+`SYSTEM_PROMPT` gains:
+- the §16.1 setup and level definitions;
+- the role restriction;
+- the supervisor's 10:15Z MAE/MFE table in ATR multiples;
+- the §16.3 guards and the base-rate gate, stated as rules;
+- the instruction that the thesis name why the invalidation level invalidates the idea (r2-55);
+- the library's fixed caveat line: "in-sample, run-vintage, dependent entries; not a validated edge". The same line is carried in every pack's `setup_base_rates` and printed by the readout (r2-48).
+
+The prompt sha changes before the freeze. The handoff records it.
+
+### 16.7 Readout additions
+
+- **Exit mix:** per arm, the realised % stop, % target and % time, beside the exit base rates (10:15Z (c)).
+- **Library comparison.** Per (setup, horizon) cell, the **holdout** half's target-hit rate against the realised rate (r2-51).
+  - It is labelled selection-conditioned: the gate chose these rows on the same outcomes (r2-49).
+  - It is not like-for-like: level ids, geometry, firing selection, universe and timing all differ (r2-50).
+  - Denominator: executed legs of completed pairs whose exit was a stop, target or time exit. Anything else is counted separately (r2-52).
+- **Pair geometry:**
+  - stop ATR and R;
+  - stop % and target %;
+  - the age of each chosen level in bars;
+  - ask / close displacement;
+  - the pool size;
+  - self-draw frequency and singleton-self pools;
+  - exhaustion per setup;
+  - `plan_invalidated` counts per leg;
+  - each leg's dollar risk at the stop (stop % × amount);
+  - *d* split by response position (r2-54, r1-72).
+
+### 16.8 Schema (slice v6-3 migration)
+
+- **`ai_trial_decisions` gains:**
+  - `setup_type`, `invalidation_level_id`, `target_level_id`;
+  - `invalidation_price`, `target_price`, `stop_price` (numeric, nullable per §16.3).
+  - `stop_pct` and `target_pct` stay, now server-derived. On **refused** rows they, and the recorded quotients, may be NULL or non-positive. The v4/v5 CHECKs that required them positive and in bounds now bind **accepted** rows only (r2-13).
+  - `origin_bar` metadata lives in the stored pack.
+- **`ai_trial_pairs` gains** the control's three prices.
+- **The refusal vocabulary gains** `no_valid_plan`, `setup_not_detected`, `setup_base_rate_missing`, `setup_negative_base_rate`, `level_unavailable`, `stop_below_horizon_floor`, `plan_outside_bounds` and `plan_invalidated`.
+- **The §6 triggers are replaced** for `stop_atr_multiple` and `r_multiple` (new definitions), and extended to the new columns.
+
+### 16.9 Slices and obligations
+
+1. **v6-1:** the pure level builder and setup detectors (table-tested, including look-ahead tests: truncating the series after *t* must not change any output), plus the two §16.5 scripts and their checked-in outputs.
+2. **v6-2:** the pack additions (§16.2).
+3. **v6-3:** the schema, the guard, `plan_invalidated`, the control pre-filter, and the migration (§16.3, §16.4, §16.8).
+4. **v6-4:** the prompt, the readout, and the §9 power-grid update.
+
+**Obligations:**
+- **O-v6-1:** re-derive every recorded figure from the stored pack.
+- **O-v6-2:** the self-membership invariant.
+- **O-v6-3:** the look-ahead truncation test for every level and detector.
+- **O-v6-4:** the library JSON's sha equals the declaration's.
+- **O-v6-5 (r2-56):** slice v6-4 specifies the power simulation's comparator: plans from the library rule, on random setup-detected names, through the same pool, gate and exhaustion. It does so in a short spec paragraph that gets its own ckpt-1 before code.
+
+**Supervisor wake:** all four slices merged, the jobs respawned, and the pool command posted. The command has been posted on #3471.
+
+### 16.10 Ckpt-1 dispositions (v6)
+
+**Round 2 (v6.1 → v6.2).**
+- **Framing verdict:** the pre-filter keeps the control comparable, and two-half pre-trial training is not forward leakage.
+- **Fixed in text:**
+  - r2-1 and r2-2: the §16.0 table.
+  - r2-3 to r2-10: §16.1.
+  - r2-11 and r2-12: `qs` and the negative bracket.
+  - r2-13: CHECKs bind accepted rows only.
+  - r2-14: the executable-R check.
+  - r2-15 to r2-21: the execution checks, plus the labelled limits.
+  - r2-22 and r2-23: the boundary claim corrected.
+  - r2-24 to r2-47: the §16.5 method.
+  - r2-48 to r2-55: the prompt and readout text.
+  - r2-57: r1-72 disposition added.
+  - r2-58: justification corrected.
+- **Carried:** r2-56 → O-v6-5.
+
+**Round 1 (v6 → v6.1).** r1-72: pair geometry in §16.7.
+
+
+- **Estimand and comparability.**
+  - r1-1, 2, 4, 5, 13, 15 and 16: stated in §16.4's *d* paragraph and reported in §16.7.
+  - r1-3: unchanged from v4, noted.
+  - r1-9: invariant, O-v6-2.
+  - r1-10: reported.
+  - r1-11: the claim is removed.
+  - r1-12: qualified.
+  - r1-14: the information boundary (§16.2).
+- **Execution.**
+  - r1-6 and r1-8: `plan_invalidated`.
+  - r1-7: "approximately".
+- **Supersession.**
+  - r1-17: the §16.0 table.
+  - r1-18 to r1-20: order 12 plus `stop_price` ≤ 0 at order 8.
+- **Arithmetic.**
+  - r1-21: redefined on prices.
+  - r1-22: `qs`.
+  - r1-23 and r1-24: NULL rules, with ATR invalidity at order 8.
+  - r1-25: numeric columns.
+  - r1-26: validator provenance plus O-v6-1.
+- **Schema.**
+  - r1-27: frozen JSON.
+  - r1-28: labelled advisory.
+  - r1-29: role enums.
+  - r1-30: the keyed-object rule.
+- **Pivots and windows.**
+  - r1-31: `_pivot_at` checked (strict, `other >= centre`).
+  - r1-32: `universe` keyword; bars ≤ *t*.
+  - r1-33 to r1-35: completed sessions only, and confirmation *i* + 2 ≤ *t*.
+  - r1-36: `[t−N, t−1]`.
+  - r1-37: windows count stored bars within one segment.
+  - r1-38: `inputs_missing`.
+  - r1-39 and r1-40: normalisation plus the `mm_up` staleness rules.
+  - r1-41: `range20_projection` added. It is a published projection for the case where no support or resistance id lies above close within the R range. Breakouts can still have older overhead resistance (r2-58).
+- **Detectors.**
+  - r1-42 and r1-43: prior-above, bounded touch, contemporaneous values.
+  - r1-44 and r1-45: bounded range, touches of both boundaries, close ≥ support.
+  - r1-46 to r1-49: *h* ∈ [t−15, t−3], the tie rule, the pole window excludes *h*, ATR at *h*, and "no new high".
+  - r1-48: parallel boundaries are not enforced, and that is labelled.
+- **Library.**
+  - r1-50 and r1-51: labelled TRAINING, with the two-half stability gate.
+  - r1-52: the script is the definition.
+  - r1-53: labelled a heuristic.
+  - r1-54, r1-58, r1-69 and r1-71: labelled.
+  - r1-55 and r1-56: minimums, and split codes.
+  - r1-57: point-in-time universe.
+  - r1-59: excluded and counted.
+  - r1-60: stored as of the run.
+  - r1-61 and r1-62: close entry with a forward walk; the timing mismatch is labelled.
+  - r1-63: complete horizons only.
+  - r1-64: the gap-through rule.
+  - r1-65: labelled.
+  - r1-66 and r1-67: defined.
+  - r1-68: the first feasible firing.
+  - r1-70: enum-order ties.
+- **Citations.**
+  - r1-73 to r1-79: corrected in §16.1.
+  - r1-76: the ~51% figure was the skill's head-and-shoulders count, misapplied to the measured move. It is removed, and ckpt-1's ch. 33 figures are carried as reported, not verified.
+  - r1-80: rephrased.
+- **Provenance.**
+  - r1-81 to r1-84: the constants table.
+  - r1-85: the freeze bindings.
 
 ## Ckpt-1 (v1) disposition
 
