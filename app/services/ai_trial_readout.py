@@ -54,8 +54,24 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
   execution, not the arm-versus-control outcome. A filled leg with no stored ask is counted
   ``ask_missing``, never estimated.
 
-Not computed here (named, so their absence is visible): SPY references (O13), arm-versus-control
-exposure and turnover.
+- **SPY references (§7b, O13).** Descriptive, labelled unmeasured approximations of executable
+  returns; computed only in the due readout. SPY is the house benchmark's exact symbol, its closes
+  read through the quarantine-masked reader (a masked or missing close leaves the figure ``None``).
+  - *Per pair:* 100 × (close[arm exit session] ÷ close[arm fill session] − 1), no spread. The fill
+    session's own close is the proxy for the 15:00 UTC entry, the nearer close in time; the exit
+    session is the last close slice's (broker execution time, not the release) or the censor
+    session. Reported with the mean arm-minus-SPY over the same units.
+  - *Capital level:* buy-and-hold on the arm's capital (``ai_trial_halts.TRIAL_LEG_CAPITAL_USD``,
+    the §8 fixed-mode cap) from the first fill session's close to the cohort readout's due
+    session's close, less one round-trip spread, 100 × (ask − bid) ÷ mid, of SPY's latest
+    ``etoro_rate_observations`` row by 15:00 UTC on the first fill session. Beside it, the arm on
+    the same capital: 100 × Σ P&L of every valued cohort arm leg (broken pairs' included) ÷ it.
+- **Turnover (§9).** Per leg, over every exited cohort leg: Σ open amounts ÷ mean capital
+  committed × 20 ÷ sessions, where a leg commits its open amount on each NYSE session from its fill
+  to its exit, both included, and the sessions run from the first fill to the last exit. An
+  unvalued leg (no open amount) is counted ``missing``.
+
+Not computed here (named, so its absence is visible): arm-versus-control exposure.
 """
 
 from __future__ import annotations
@@ -71,7 +87,12 @@ from typing import Any, Final, Literal
 import psycopg
 from psycopg.rows import dict_row
 
-from app.services.ai_trial_deadline import TRIAL_EXIT_TIME_UTC, exit_deadline_session, fill_session
+from app.services.ai_trial_deadline import (
+    TRIAL_ENTRY_TIME_UTC,
+    TRIAL_EXIT_TIME_UTC,
+    exit_deadline_session,
+    fill_session,
+)
 from app.services.ai_trial_pair_lifecycle import (
     LEGS,
     TRIAL_CENSOR_SESSIONS,
@@ -80,6 +101,8 @@ from app.services.ai_trial_pair_lifecycle import (
 )
 from app.services.ai_trial_stats import flip_set, sign_flip_p
 from app.services.block_bootstrap import BootstrapResult, block_bootstrap_expectancy, cluster_by_date
+from app.services.market_regime_provider import BENCHMARK_SYMBOL
+from app.services.price_masked_bars import load_masked_bars
 
 #: §9 "Cohort": NYSE sessions 1–40, session 1 = the first fill session.
 COHORT_SESSIONS: Final = 40
@@ -158,6 +181,10 @@ class LegValue:
     unvalued_reason: str | None = None
     restated_rows: int = 0
     fee_rows: int = 0
+    #: The leg's fill session and exit session (its last close slice's session, or its censor
+    #: session); set by the loader, read by the SPY reference and turnover.
+    entry_session: date | None = None
+    exit_session: date | None = None
 
 
 def exit_label(rows: Sequence[CloseRow], close_trigger: str | None) -> str:
@@ -416,6 +443,144 @@ def fill_gap(gaps: Iterable[float | None]) -> FillGap:
     )
 
 
+#: §9 turnover: Σ actual open amounts ÷ mean capital committed, per this many sessions.
+TURNOVER_SESSIONS: Final = 20
+
+
+def close_return_pct(closes: Mapping[date, Decimal | None], start: date, end: date) -> float | None:
+    """100 × (close[end] ÷ close[start] − 1); ``None`` when either close is missing, masked or
+    non-positive."""
+    first, last = closes.get(start), closes.get(end)
+    if first is None or last is None or first <= 0 or last <= 0:
+        return None
+    return float(100 * (last / first - 1))
+
+
+def round_trip_spread_pct(bid: Decimal | None, ask: Decimal | None) -> float | None:
+    """One round trip crosses the spread once (buy at the ask, sell at the bid): 100 × (ask − bid)
+    ÷ mid of one recorded quote."""
+    if bid is None or ask is None or not 0 < bid <= ask:
+        return None
+    return float(100 * (ask - bid) / ((ask + bid) / 2))
+
+
+@dataclass(frozen=True)
+class SpyPairs:
+    #: Units whose arm leg has a SPY reference.
+    units: int
+    mean_spy_pct: float | None
+    #: Mean of (arm net % − SPY %) over those units.
+    mean_arm_minus_spy_pct: float | None
+    #: Units without one: no arm net or no arm sessions, or a SPY close missing or masked.
+    missing: int
+
+
+def spy_pairs(units: Sequence[PairRecord], closes: Mapping[date, Decimal | None]) -> SpyPairs:
+    """O13 per pair: SPY close to close over the arm leg's own sessions, no spread."""
+    refs: list[tuple[float, float]] = []
+    for unit in units:
+        arm = unit.arm
+        if arm is None or arm.net_pct is None or arm.entry_session is None or arm.exit_session is None:
+            continue
+        ref = close_return_pct(closes, arm.entry_session, arm.exit_session)
+        if ref is not None:
+            refs.append((ref, arm.net_pct - ref))
+    return SpyPairs(
+        len(refs),
+        sum(ref for ref, _ in refs) / len(refs) if refs else None,
+        sum(excess for _, excess in refs) / len(refs) if refs else None,
+        len(units) - len(refs),
+    )
+
+
+@dataclass(frozen=True)
+class SpyCapital:
+    capital_usd: float
+    start_session: date
+    end_session: date
+    #: SPY buy-and-hold, stored close to stored close, before the spread.
+    gross_pct: float | None
+    spread_pct: float | None
+    net_pct: float | None
+    net_usd: float | None
+    #: The arm on the same capital: 100 × Σ valued arm-leg P&L ÷ capital.
+    arm_pct: float
+    arm_legs: int
+    #: Filled cohort arm legs that could not be valued, outside ``arm_pct``.
+    arm_unvalued: int
+
+
+def spy_capital(
+    arm_legs: Sequence[LegValue],
+    closes: Mapping[date, Decimal | None],
+    quote: tuple[Decimal | None, Decimal | None],
+    *,
+    capital_usd: Decimal,
+    start: date,
+    end: date,
+) -> SpyCapital:
+    """O13 capital level: SPY bought and held on the arm's capital from the first fill session to
+    the cohort readout's due session, less one round-trip spread from the recorded quote."""
+    gross = close_return_pct(closes, start, end)
+    spread = round_trip_spread_pct(*quote)
+    net = gross - spread if gross is not None and spread is not None else None
+    valued = [leg for leg in arm_legs if leg.pnl_usd is not None]
+    capital = float(capital_usd)
+    return SpyCapital(
+        capital_usd=capital,
+        start_session=start,
+        end_session=end,
+        gross_pct=gross,
+        spread_pct=spread,
+        net_pct=net,
+        net_usd=capital * net / 100 if net is not None else None,
+        arm_pct=100 * sum(leg.pnl_usd or 0.0 for leg in valued) / capital,
+        arm_legs=len(valued),
+        arm_unvalued=len(arm_legs) - len(valued),
+    )
+
+
+@dataclass(frozen=True)
+class Turnover:
+    legs: int
+    opened_usd: float
+    #: NYSE sessions from the first fill to the last exit, inclusive.
+    sessions: int
+    mean_committed_usd: float | None
+    per_20_sessions: float | None
+    #: Exited legs outside the sums: no open amount (unvalued), or no valid session span (a session
+    #: unknown, or entry after exit).
+    missing: int
+
+
+def turnover(legs: Sequence[LegValue]) -> Turnover:
+    """§9: Σ open amounts ÷ mean capital committed, scaled to ``TURNOVER_SESSIONS`` sessions. A leg
+    commits its open amount on every session from its fill to its exit, both included. The window
+    runs over every leg's known sessions, a leg without an open amount included: it still held
+    capital across them, so dropping its dates would shorten the window and overstate the printed
+    mean capital committed. The ratio itself is window-invariant (= opened × 20 ÷ Σ committed)."""
+    dated = [
+        (leg.entry_session, leg.exit_session, leg.open_amount)
+        for leg in legs
+        if leg.entry_session is not None and leg.exit_session is not None and leg.entry_session <= leg.exit_session
+    ]
+    spans = [(entry, exit_, amount) for entry, exit_, amount in dated if amount is not None]
+    missing = len(legs) - len(spans)
+    if not dated:
+        return Turnover(0, 0.0, 0, None, None, missing)
+    sessions = [min(entry for entry, _, _ in dated)]
+    last = max(exit_ for _, exit_, _ in dated)
+    while sessions[-1] < last:
+        sessions.append(exit_deadline_session(sessions[-1], 1))
+    if not spans:
+        return Turnover(0, 0.0, len(sessions), None, None, missing)
+    committed = [sum(amount for entry, exit_, amount in spans if entry <= s <= exit_) for s in sessions]
+    mean = sum(committed) / len(sessions)
+    opened = sum(amount for _, _, amount in spans)
+    per_20 = opened / mean * TURNOVER_SESSIONS / len(sessions) if mean > 0 else None
+    return Turnover(len(spans), opened, len(sessions), mean, per_20, missing)
+
+
 @dataclass(frozen=True)
 class GroupRow:
     group: str
@@ -517,6 +682,11 @@ class Readout:
     #: Retained units by ``pair_seq`` parity (§7 submission order): even = arm first.
     order_parity: dict[str, int] = field(default_factory=dict)
     exploratory_units: int = 0
+    #: O13 (descriptive, unmeasured approximations of executable returns).
+    spy_per_pair: SpyPairs | None = None
+    spy_capital: SpyCapital | None = None
+    #: Per leg, over every filled cohort leg (broken pairs' included: they used the capital).
+    turnover: dict[str, Turnover] = field(default_factory=dict)
 
 
 def build_readout(
@@ -530,6 +700,9 @@ def build_readout(
     decision_census: Mapping[str, int],
     run_costs: Sequence[float],
     as_of: datetime,
+    leg_capital_usd: Decimal,
+    spy_closes: Mapping[date, Decimal | None] | None = None,
+    spy_quote: tuple[Decimal | None, Decimal | None] = (None, None),
 ) -> Readout:
     seed = readout_seed(declaration_sha256)
     # The session ``as_of`` belongs to (New York date, or the next session on a closed day), the
@@ -564,9 +737,14 @@ def build_readout(
         pool_sizes={pair.pair_seq: pair.pool_size for pair in pairs},
         fill_vs_ask={leg: fill_gap(pair.fill_gaps[leg] for pair in pairs if leg in pair.fill_gaps) for leg in LEGS},
     )
-    if state.status != "due" or state.last_session is None:
+    if state.status != "due" or state.last_session is None or state.due_session is None or first_fill is None:
         return readout
     last = state.last_session
+    closes = spy_closes or {}
+    # Every exited cohort leg, a broken pair's included: it spent the leg's capital.
+    cohort_pairs = [pair for pair in pairs if pair.session_date <= last]
+    cohort_arm = [pair.arm for pair in cohort_pairs if pair.arm is not None]
+    cohort_control = [pair.control for pair in cohort_pairs if pair.control is not None]
     units = [pair for pair in pairs if pair.valued and pair.session_date <= last]
     arm_legs = [pair.arm for pair in units if pair.arm is not None]
     control_legs = [pair.control for pair in units if pair.control is not None]
@@ -601,6 +779,11 @@ def build_readout(
             "control_first": sum(1 for unit in units if unit.pair_seq % 2 == 1),
         },
         exploratory_units=sum(1 for pair in pairs if pair.valued and pair.session_date > last),
+        spy_per_pair=spy_pairs(units, closes),
+        spy_capital=spy_capital(
+            cohort_arm, closes, spy_quote, capital_usd=leg_capital_usd, start=first_fill, end=state.due_session
+        ),
+        turnover={"arm": turnover(cohort_arm), "control": turnover(cohort_control)},
     )
 
 
@@ -697,6 +880,21 @@ def _censor_mark(
     closes: Sequence[CloseRow],
 ) -> CensorMark:
     instant = datetime.combine(censor_session, TRIAL_EXIT_TIME_UTC, tzinfo=UTC)
+    bid, ask = _recorded_quote(conn, instrument_id, instant)
+    return CensorMark(
+        average_price=average_price,
+        bid=bid,
+        ask=ask,
+        usd=usd,
+        partial_close=any(row.executed_at < instant for row in closes),
+    )
+
+
+def _recorded_quote(
+    conn: psycopg.Connection[Any], instrument_id: int, instant: datetime
+) -> tuple[Decimal | None, Decimal | None]:
+    """(bid, ask) of the latest ``etoro_rate_observations`` row observed by ``instant``: an
+    append-only record, so a rerun can never see a later price."""
     quote = conn.execute(
         """
         SELECT bid, ask FROM etoro_rate_observations
@@ -705,13 +903,24 @@ def _censor_mark(
         """,
         (instrument_id, instant),
     ).fetchone()
-    return CensorMark(
-        average_price=average_price,
-        bid=_decimal(quote[0]) if quote else None,
-        ask=_decimal(quote[1]) if quote else None,
-        usd=usd,
-        partial_close=any(row.executed_at < instant for row in closes),
-    )
+    return (_decimal(quote[0]), _decimal(quote[1])) if quote else (None, None)
+
+
+def load_spy_reference(
+    conn: psycopg.Connection[Any], first_fill: date
+) -> tuple[dict[date, Decimal | None], tuple[Decimal | None, Decimal | None]]:
+    """SPY's stored closes and its recorded quote at the trial's entry time on the first fill
+    session, both empty when the benchmark symbol does not resolve to exactly one instrument.
+
+    Closes come through the quarantine-masked reader (a masked close is ``None``), pinned by the
+    house benchmark's exact symbol (``market_regime_provider.BENCHMARK_SYMBOL``)."""
+    rows = conn.execute("SELECT instrument_id FROM instruments WHERE symbol = %s", (BENCHMARK_SYMBOL,)).fetchall()
+    if len(rows) != 1:
+        return {}, (None, None)
+    spy = int(rows[0][0])
+    series = load_masked_bars(conn, spy).series
+    closes: dict[date, Decimal | None] = {day: bar["close"] for day, bar in zip(series.dates, series.rows, strict=True)}
+    return closes, _recorded_quote(conn, spy, datetime.combine(first_fill, TRIAL_ENTRY_TIME_UTC, tzinfo=UTC))
 
 
 def load_close_rows(conn: psycopg.Connection[Any], trade_ids: Sequence[int]) -> dict[int, list[CloseRow]]:
@@ -771,22 +980,34 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
                 values[leg] = None
                 continue
             trade_id = int(row["strategy_trade_id"])
+            slices = close_rows.get(trade_id, [])
+            exit_session: date | None
             if "censored" in leg_events:
-                censor_session = exit_deadline_session(row["exit_deadline_session"], TRIAL_CENSOR_SESSIONS)
+                exit_session = exit_deadline_session(row["exit_deadline_session"], TRIAL_CENSOR_SESSIONS)
                 mark = _censor_mark(
                     conn,
                     instrument_id=int(row["instrument_id"]),
                     usd=row["currency"] == "USD",
-                    censor_session=censor_session,
+                    censor_session=exit_session,
                     average_price=_decimal(row["average_price"]),
-                    closes=close_rows.get(trade_id, []),
+                    closes=slices,
                 )
-                values[leg] = value_censored_leg(mark, _decimal(row["units"]))
-                resolved.append(censor_session)
+                value = value_censored_leg(mark, _decimal(row["units"]))
+                resolved.append(exit_session)
             else:
-                values[leg] = value_closed_leg(close_rows.get(trade_id, []), row["close_trigger"])
+                value = value_closed_leg(slices, row["close_trigger"])
                 if row["released_at"] is not None:
                     resolved.append(fill_session(row["released_at"]))
+                # The broker's execution time, not the release: a close detected a session late
+                # still exited on its own session. With no slice (an unvalued leg) the release is
+                # the only exit evidence, and its dates still bound the turnover window.
+                if slices:
+                    exit_session = fill_session(max(s.executed_at for s in slices))
+                elif row["released_at"] is not None:
+                    exit_session = fill_session(row["released_at"])
+                else:
+                    exit_session = None
+            values[leg] = replace(value, entry_session=fill_session(row["filled_at"]), exit_session=exit_session)
         records.append(
             PairRecord(
                 pair_seq=int(pair_seq),
@@ -813,7 +1034,9 @@ class ReadoutUnavailable(RuntimeError):
 def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_of: datetime | None = None) -> Readout:
     """The readout for the arm's declaration of ``strategy_version`` (O14: each version is its
     own declaration, so the version is never inferred). Read-only."""
-    # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constants).
+    # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constants), and
+    # ai_trial_halts imports this module for the harm looks.
+    from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD
     from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
 
     declaration = conn.execute(
@@ -825,6 +1048,11 @@ def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_
         raise ReadoutUnavailable(f"no frozen {strategy_version} declaration: the trial has not started (slice 3d)")
     declaration_id = int(declaration[0])
     pairs, first_fill = load_pairs(conn, declaration_id)
+    as_of = as_of or datetime.now(UTC)
+    # Descriptive inputs of the due readout only: ``ai_trial_halts`` runs this every 5-minute cycle
+    # and fails CLOSED on any error, so a benchmark read must not be able to halt a live trial.
+    due = first_fill is not None and cohort(pairs, first_fill, fill_session(as_of)).status == "due"
+    spy_closes, spy_quote = load_spy_reference(conn, first_fill) if due and first_fill else ({}, (None, None))
     run_census = {
         f"{status}:{reason}" if reason else status: int(count)
         for status, reason, count in conn.execute(
@@ -859,5 +1087,8 @@ def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_
         run_census=run_census,
         decision_census=decision_census,
         run_costs=costs,
-        as_of=as_of or datetime.now(UTC),
+        as_of=as_of,
+        leg_capital_usd=TRIAL_LEG_CAPITAL_USD,
+        spy_closes=spy_closes,
+        spy_quote=spy_quote,
     )

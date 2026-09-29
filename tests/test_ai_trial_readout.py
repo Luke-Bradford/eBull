@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -23,6 +24,7 @@ from app.services.ai_trial_readout import (
     PairRecord,
     Readout,
     build_readout,
+    close_return_pct,
     cohort,
     exit_label,
     fill_gap_pct,
@@ -30,6 +32,10 @@ from app.services.ai_trial_readout import (
     primary,
     profit_factor,
     readout_seed,
+    round_trip_spread_pct,
+    spy_capital,
+    spy_pairs,
+    turnover,
     value_censored_leg,
     value_closed_leg,
 )
@@ -271,7 +277,7 @@ def test_a_broken_pair_with_a_live_leg_holds_the_readout_until_it_exits() -> Non
     assert (state.status, state.due_session) == ("due", exit_deadline_session(exited_at, READOUT_WAIT_SESSIONS))
 
 
-def _build(pairs: list[PairRecord], as_of: datetime) -> Readout:
+def _build(pairs: list[PairRecord], as_of: datetime, **spy: Any) -> Readout:
     return build_readout(
         declaration_id=7,
         strategy_version="v1",
@@ -282,6 +288,8 @@ def _build(pairs: list[PairRecord], as_of: datetime) -> Readout:
         decision_census={"accepted": 3},
         run_costs=[0.5, 1.5],
         as_of=as_of,
+        leg_capital_usd=Decimal("1000"),
+        **spy,
     )
 
 
@@ -338,3 +346,109 @@ def test_the_seed_is_declared_by_construction_and_the_stopping_rules_are_hashed_
     assert readout_seed("ab" * 32) == readout_seed("ab" * 32) != readout_seed("cd" * 32)
     assert FROZEN_CONSTANTS["ai_trial_readout.MECHANICAL_EXITS"] == ("censored", "deadline", "stop", "target")
     assert FROZEN_CONSTANTS["ai_trial_readout.MIN_UNITS"] == 30
+
+
+# -- SPY references and turnover (O13) ---------------------------------------------------------
+
+
+def _spanned(net: float | None, entry: date, exit_: date, *, opened: float | None = 100.0) -> LegValue:
+    pnl = None if net is None or opened is None else net * opened / 100
+    return LegValue(net, opened, pnl, "deadline", entry_session=entry, exit_session=exit_)
+
+
+def test_close_return_and_round_trip_spread() -> None:
+    s = _sessions(3)
+    closes = {s[0]: Decimal("400"), s[1]: Decimal("404"), s[2]: None}
+    assert close_return_pct(closes, s[0], s[1]) == pytest.approx(1.0)
+    # A masked (None), missing or non-positive close is no reference, never a zero.
+    assert close_return_pct(closes, s[0], s[2]) is None
+    assert close_return_pct(closes, s[0], LATER) is None
+    assert close_return_pct({s[0]: Decimal("0"), s[1]: Decimal("1")}, s[0], s[1]) is None
+    assert round_trip_spread_pct(Decimal("99.9"), Decimal("100.1")) == pytest.approx(0.2)
+    assert [round_trip_spread_pct(None, Decimal("1")), round_trip_spread_pct(Decimal("2"), Decimal("1"))] == [
+        None,
+        None,
+    ]
+
+
+def test_spy_per_pair_spans_the_arm_legs_own_sessions() -> None:
+    s = _sessions(6)
+    closes: dict[date, Decimal | None] = {s[0]: Decimal("100"), s[2]: Decimal("102"), s[3]: Decimal("99")}
+    units = [
+        replace(_pair(1, s[0], 0.0), arm=_spanned(5.0, s[0], s[2])),  # SPY +2 → excess +3
+        replace(_pair(2, s[0], 0.0), arm=_spanned(-1.0, s[0], s[3])),  # SPY −1 → excess 0
+        replace(_pair(3, s[0], 0.0), arm=_spanned(4.0, s[0], s[5])),  # no close on s[5]
+        _pair(4, s[0], 1.0),  # the loader set no sessions
+    ]
+    refs = spy_pairs(units, closes)
+    assert (refs.units, refs.missing) == (2, 2)
+    assert refs.mean_spy_pct == pytest.approx(0.5)
+    assert refs.mean_arm_minus_spy_pct == pytest.approx(1.5)
+
+
+def test_spy_capital_level_charges_one_round_trip_and_sets_the_arm_beside_it() -> None:
+    s = _sessions(3)
+    closes: dict[date, Decimal | None] = {s[0]: Decimal("500"), s[2]: Decimal("510")}
+    legs = [
+        _spanned(10.0, s[0], s[1], opened=250.0),
+        _spanned(-4.0, s[1], s[2], opened=250.0),
+        _spanned(None, s[0], s[1]),
+    ]
+    ref = spy_capital(
+        legs, closes, (Decimal("499.5"), Decimal("500.5")), capital_usd=Decimal("1000"), start=s[0], end=s[2]
+    )
+    assert ref.gross_pct == pytest.approx(2.0)
+    assert ref.spread_pct == pytest.approx(0.2)
+    assert ref.net_pct == pytest.approx(1.8)
+    assert ref.net_usd == pytest.approx(18.0)
+    # (25 − 10) ÷ 1000; the unvalued leg is counted, never estimated.
+    assert (ref.arm_pct, ref.arm_legs, ref.arm_unvalued) == (pytest.approx(1.5), 2, 1)
+    # No recorded quote: the gross stands, the net is not invented.
+    bare = spy_capital(legs, closes, (None, None), capital_usd=Decimal("1000"), start=s[0], end=s[2])
+    assert (bare.gross_pct, bare.spread_pct, bare.net_pct, bare.net_usd) == (pytest.approx(2.0), None, None, None)
+
+
+def test_turnover_is_opened_over_mean_committed_per_twenty_sessions() -> None:
+    s = _sessions(3)
+    legs = [_spanned(1.0, s[0], s[1]), _spanned(1.0, s[1], s[2]), _spanned(None, s[0], s[2], opened=None)]
+    result = turnover(legs)
+    # Committed by session: 100, 200, 100 → mean 133.33; opened 200 over 3 sessions.
+    assert (result.legs, result.opened_usd, result.sessions, result.missing) == (2, 200.0, 3, 1)
+    assert result.mean_committed_usd == pytest.approx(400 / 3)
+    assert result.per_20_sessions == pytest.approx(200 / (400 / 3) * 20 / 3)
+    assert turnover([]).per_20_sessions is None
+    # Only unvalued legs: no ratio, but the window they span is still reported (review bot).
+    unvalued = turnover([legs[2]])
+    assert (unvalued.legs, unvalued.sessions, unvalued.per_20_sessions, unvalued.missing) == (0, 3, None, 1)
+    # An unvalued leg's dates still bound the window (Codex ckpt-2): 4 sessions, committed
+    # 100, 200, 100, 0 → mean 100.
+    later = _sessions(4)
+    wider = turnover([*legs[:2], _spanned(None, later[0], later[3], opened=None)])
+    assert (wider.sessions, wider.mean_committed_usd, wider.missing) == (4, pytest.approx(100.0), 1)
+
+
+def test_the_due_readout_carries_spy_references_and_turnover() -> None:
+    sessions = _sessions(COHORT_SESSIONS + 1)
+    closes: dict[date, Decimal | None] = {day: Decimal(400 + i) for i, day in enumerate(sessions)}
+    units = [
+        replace(
+            _pair(i, sessions[i], 1.0),
+            arm=_spanned(2.0, sessions[i], sessions[i + 1]),
+            control=_spanned(1.0, sessions[i], sessions[i + 1]),
+        )
+        for i in range(30)
+    ]
+    as_of = datetime.combine(exit_deadline_session(sessions[COHORT_SESSIONS], 15), datetime.min.time(), tzinfo=UTC)
+    before = _build(units, datetime(2026, 10, 2, 22, tzinfo=UTC), spy_closes=closes)
+    assert (before.spy_per_pair, before.spy_capital, before.turnover) == (None, None, {})
+    readout = _build(units, as_of + timedelta(hours=22), spy_closes=closes, spy_quote=(Decimal("1"), Decimal("1")))
+    assert readout.spy_per_pair is not None and readout.spy_per_pair.units == 30
+    assert readout.spy_capital is not None
+    assert (readout.spy_capital.start_session, readout.spy_capital.end_session) == (
+        SESSION_1,
+        readout.cohort.due_session,
+    )
+    # The due session lies past the stubbed closes, so the capital-level gross is honestly None.
+    assert readout.spy_capital.gross_pct is None
+    assert readout.spy_capital.arm_pct == pytest.approx(100 * 30 * 2.0 / 1000)
+    assert set(readout.turnover) == {"arm", "control"} and readout.turnover["arm"].legs == 30
