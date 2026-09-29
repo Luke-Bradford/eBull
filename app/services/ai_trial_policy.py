@@ -30,6 +30,7 @@ whole sha256: a declaration pins it, so a truncation would only weaken the pin.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -102,17 +103,40 @@ FROZEN_CONSTANTS: Final[dict[str, object]] = {
 }
 
 
+@dataclass(frozen=True)
+class PolicyManifest:
+    """What ``policy_hash`` hashes, read once: each module's sha256 and each constant's ``repr``.
+    The #3471 declaration stores both, so the document and its hash describe one snapshot."""
+
+    module_sha256: dict[str, str]
+    constant_repr: dict[str, str]
+
+    def digest(self) -> str:
+        digest = hashlib.sha256()
+        for name in sorted(self.module_sha256):
+            digest.update(f"{name}\0{self.module_sha256[name]}\n".encode())
+        for name in sorted(self.constant_repr):
+            digest.update(f"{name}\0{self.constant_repr[name]}\n".encode())
+        return digest.hexdigest()
+
+
+def policy_manifest(
+    root: Path = _SERVICES,
+    modules: tuple[str, ...] = POLICY_MODULES,
+    constants: dict[str, object] = FROZEN_CONSTANTS,
+) -> PolicyManifest:
+    return PolicyManifest(
+        {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in modules},
+        {name: repr(value) for name, value in constants.items()},
+    )
+
+
 def policy_hash(
     root: Path = _SERVICES,
     modules: tuple[str, ...] = POLICY_MODULES,
     constants: dict[str, object] = FROZEN_CONSTANTS,
 ) -> str:
-    digest = hashlib.sha256()
-    for name in sorted(modules):
-        digest.update(f"{name}\0{hashlib.sha256((root / name).read_bytes()).hexdigest()}\n".encode())
-    for name in sorted(constants):
-        digest.update(f"{name}\0{constants[name]!r}\n".encode())
-    return digest.hexdigest()
+    return policy_manifest(root, modules, constants).digest()
 
 
 AI_TRIAL_POLICY_HASH: Final = policy_hash()

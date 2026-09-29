@@ -292,9 +292,12 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
         r18 (2026-09-28, #1822) added route F's declaration-backed entry (96 pinned
         evaluations); the same command returned the same five groups, 488 rows, all
         ``harness_validation``.
+
+        r19 (2026-09-29, #3471) added ``ai-discretionary-v1`` (one search); the same
+        command returned the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 477
-        assert len(TRIAL_REGISTER.trials) == 46
+        assert TRIAL_REGISTER.declared_count == 478
+        assert len(TRIAL_REGISTER.trials) == 47
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

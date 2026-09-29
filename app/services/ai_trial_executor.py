@@ -260,27 +260,34 @@ def _authority_refusal(conn: psycopg.Connection[Any], declaration_id: int) -> st
     * O9 policy parity: both legs' deployments carry the same effective execution policy. The
       rows are held ``FOR SHARE`` so neither can change before this transaction commits.
     """
-    conn.execute(
-        "SELECT 1 FROM ai_trial_declarations WHERE declaration_id = %s FOR SHARE", (declaration_id,)
+    declaration = conn.execute(
+        "SELECT strategy_id, strategy_version FROM ai_trial_declarations WHERE declaration_id = %s FOR SHARE",
+        (declaration_id,),
     ).fetchone()
     state = conn.execute(
         "SELECT to_state FROM ai_trial_state_events WHERE declaration_id = %s ORDER BY event_id DESC LIMIT 1",
         (declaration_id,),
     ).fetchone()
-    if state is None or state[0] != "active":
+    if declaration is None or state is None or state[0] != "active":
         return "trial_not_active"
+    return trial_policy_parity_refusal(conn, strategy_id=str(declaration[0]), strategy_version=str(declaration[1]))
+
+
+def trial_policy_parity_refusal(
+    conn: psycopg.Connection[Any], *, strategy_id: str, strategy_version: str
+) -> str | None:
+    """O9: both legs' paper deployments carry the same effective execution policy, or
+    ``trial_policy_parity``. Keyed on the ARM's id and version, so the #3471 freeze can run it
+    before a declaration exists. The policy rows are held ``FOR SHARE`` to the caller's commit."""
     policies = conn.execute(
         """
         SELECT d.strategy_id, (to_jsonb(p) - %s::text[])::text
-        FROM ai_trial_declarations dcl
-        JOIN strategy_deployments d
-          ON d.strategy_id IN (dcl.strategy_id, dcl.strategy_id || '-control')
-         AND d.strategy_version = dcl.strategy_version AND d.mode = 'paper'
+        FROM strategy_deployments d
         JOIN strategy_execution_policies p ON p.deployment_id = d.deployment_id
-        WHERE dcl.declaration_id = %s
+        WHERE d.strategy_id IN (%s, %s || '-control') AND d.strategy_version = %s AND d.mode = 'paper'
         FOR SHARE OF p
         """,
-        (_POLICY_BOOKKEEPING, declaration_id),
+        (_POLICY_BOOKKEEPING, strategy_id, strategy_id, strategy_version),
     ).fetchall()
     if len({row[0] for row in policies}) != 2 or len({row[1] for row in policies}) != 1:
         return "trial_policy_parity"
@@ -401,4 +408,5 @@ __all__ = [
     "execute_trial_signal",
     "protective_levels_reason",
     "trial_cost_cap_reason",
+    "trial_policy_parity_refusal",
 ]

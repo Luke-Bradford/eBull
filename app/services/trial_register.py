@@ -196,7 +196,13 @@ from typing import Final
 #: one terms sidecar. Not a `hunt-` entry, so it counts in M_inh: 378 -> 474. Raising M is the
 #: conservative direction. Measured the same way before the bump: the SAME five groups, 488
 #: rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-28-r18"
+#:
+#: r19 (2026-09-29, #3471 slice 3d) adds `ai-discretionary-v1`, the AI-discretionary trial's
+#: one search, declared for its `falsification_only` #2599 row before the freeze (spec §9
+#: "Freeze"). The random control leg is not a search. Not a `hunt-` entry, so it counts in
+#: M_inh: 474 -> 475. Measured the same way before the bump: the SAME five groups, 488 rows,
+#: every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-29-r19"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1282,6 +1288,19 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "ranking-ablation-1822-route-f",
                 "v1.5-balanced+ee86663bbe6ee9c2400200c20332972898ba11358aca243da70f3a1605fa70c6",
             ),
+        ),
+        # ``ai_trial_freeze.EXPECTED_REGISTER_ENTRY``; a test pins the two equal.
+        DeclaredTrial(
+            trial_id="ai-discretionary-v1",
+            description=(
+                "#3471 AI-discretionary-v1: the model's daily long picks against a random-draw control leg "
+                "on demo, one declared hypothesis (the arm-minus-control pair unit d, §9)."
+            ),
+            evidence="docs/proposals/execution/2026-09-28-3471-ai-discretionary-v1.md §9 'Declaration' and "
+            "'Freeze'; frozen by scripts/ai_trial_freeze.py (#3471)",
+            exactness=TrialExactness.EXACT,
+            searches=1,
+            declared_for=("ai-discretionary-v1", "v1"),
         ),
     ),
 )
