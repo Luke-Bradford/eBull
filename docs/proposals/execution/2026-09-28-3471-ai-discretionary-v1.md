@@ -535,6 +535,59 @@ Neither admits a $125 half ticket.
     - A publish refused because the lease ran out is recorded as `stale_claim`. Any other failure after the claim is recorded as `refused` (`run_failed` / `publish_failed`), carrying the provenance the run had reached, and re-raised.
 - **Trial register.** The trial charges the register once.
 - **Ordering.** Freezing happens **before any real-shortlist model call**. Pre-freeze model calls use a synthetic pack with fictitious symbols only.
+- **Freeze (slice 3d, amended 2026-09-29; Codex ckpt-1 dispositions appended below; implemented in `app/services/ai_trial_freeze.py` + `scripts/ai_trial_freeze.py`).** Fixed by construction; nothing here is chosen at freeze time.
+  - **Document** = `ai_trial_freeze.build_declaration(...)`, a pure function of the code and the freeze-time provenance, so review of the PR that ships it IS review of the terms. Keys:
+    - `kind` = `ai-trial-declaration-v1`, `strategy_id`, `strategy_version`, `control_strategy_id`;
+    - `policy_hash` = a FRESH `policy_hash()` at freeze. The freeze refuses `policy_hash_stale` unless it equals the import-time `AI_TRIAL_POLICY_HASH`, which catches a module edited after import. `policy_modules` holds each hashed module's sha256, and `frozen_constants` holds name → `repr(value)`. Both come from one `ai_trial_policy.policy_manifest()`, which `policy_hash` itself consumes, and the builder asserts that re-hashing the manifest gives the document's `policy_hash`. So the three describe one snapshot, and the all-string values make the JSONB round trip lossless;
+    - `model_id`, `system_prompt_sha256`, `prompt_template_sha256`, `decision_schema_sha256` (canonical sha of `decision_json_schema()`);
+    - `draw_rule` = `ai_trial_decision.draw_control` (its bytes are in `policy_modules`) and `house_functions_by_name` = `indicator_series.atr_series` and `market_calendar` (frozen by NAME only, as `ai_trial_policy`'s docstring states, so an edit there mints no version);
+    - `prereg` = every #2599 term below (purpose, stamps, structural-refusal policy version, expected refusals, forward floor), so the digest binds them as well as the #2599 row;
+    - `spec_path` and `spec_sha256` (this file's bytes), `code_git_sha` and `python_version`.
+  - **Provenance refusals:**
+    - `worktree_dirty`, when `git status --porcelain` is non-empty;
+    - `code_not_origin_main`, unless `code_git_sha` EQUALS `origin/main` right after `git fetch origin main`. Merged means reviewed, and latest means no stale ancestor. It is also the code the jobs daemon serves after its reload.
+    - Residual, stated rather than hidden: files outside `POLICY_MODULES` can change between the check and the commit. Every run records its own `git_sha` (§9 runtime checks), so drift is visible afterwards.
+  - `doc_sha256` = `declaration_digest(doc)`; `doc_path` = `generated:ai_trial_freeze.build_declaration@<code_git_sha>`. There is no committed document file.
+  - **Runtime enforcement stays as built:** `policy_hash` plus the digest. The document's other keys are provenance. Only the builder writes them, and the digest makes them immutable; they are not re-validated per run.
+  - **#2599 row** (`freeze_preregistration`), following the `ranking_ablation_terms` precedent for a long ×1 USD lane:
+    - `contract_version` = `ai-trial-declaration-v1:<doc_sha256>`;
+    - `prereg_purpose` = **`falsification_only`** (§9 "What this trial's statistics are": nothing here is capital-tier evidence);
+    - `structural_refusal_policy_version` = `STRUCTURAL_REFUSAL_POLICY_VERSION`;
+    - `declared_universe_basis` = `survivor_only` (the trial's signals carry `universe = survivor_only`);
+    - `declared_carry_unmodelled` = False and `declared_fx_unmodelled` = False. The structure makes the trial long ×1 real stock in USD only: `BrokerStrategyOrder(settlement_type='real')`, `leverage=1` on the what-if, and `load_trial_intent`'s `trial_currency_not_usd`;
+    - `expected_structural_refusals` = `structural_promotion_refusals(...)` over those stamps.
+  - **Forward-shadow floor, BY CONSTRUCTION** (precedent `hunt_door.forward_shadow_floor`). A `falsification_only` declaration cannot promote, and no power calculation fixes a promotion floor for a demo-tier decision aid.
+    - `min_independent_decision_dates` = `MIN_CLUSTERS` = 10, §9 "Too little data"; a cluster is a decision session.
+    - `min_calendar_weeks` = ⌈`COHORT_SESSIONS` ÷ 5⌉ = 8. This is a lower bound on the cohort's calendar span, because holidays only lengthen it.
+    - `derivation` states exactly this.
+  - **Trial register.** One NEW `DeclaredTrial` `ai-discretionary-v1`: `searches=1`, `EXACT`, `declared_for=("ai-discretionary-v1", "v1")`, with `TRIAL_REGISTER_VERSION` bumped. `ai_trial_freeze.EXPECTED_REGISTER_ENTRY` pins the shape, and a test asserts the register holds it (the `ranking_ablation_terms` precedent). The control leg is a random draw, not a search, and gets no entry.
+  - **Preconditions, all inside the freeze transaction; a failure raises, the transaction rolls back and nothing is written:**
+    - no `strategy_preregistration_declarations` row and no `ai_trial_declarations` row for (arm id, version);
+    - both legs' `paper` deployments exist (`strategy_deployments_unique` makes each at most one row), locked `FOR SHARE`, enabled, `capital_limit > 0`, currency `USD`, with **equal `capital_limit`** (capacity reduction must not size one leg differently);
+    - O9 parity: identical execution policy under the executor's comparison. The comparison is extracted from `_authority_refusal` into `trial_policy_parity_refusal(conn, strategy_id, strategy_version)`, which keys on the arm id and version, needs no declaration, and is reused by the executor. Policy rows are locked `FOR SHARE`.
+    - **Config binding:** `config_sha256` = the canonical sha of both legs' deployment and policy rows, excluding bookkeeping. The dry run prints it, and `--apply --expect-config-sha256 <sha>` refuses `config_changed` on any difference. The values the supervisor reviewed are therefore the values frozen.
+    - A concurrent freeze loses on the unique root. A `UniqueViolation` on the #2599 root index or on `ai_trial_declarations_one_per_version` → rollback → refusal `already_frozen`. Any other violation propagates.
+  - **The freeze does not create deployments or choose any capital, profile or policy number.** Those are §8 pool decisions, pending the supervisor's answer, set through the existing `configure_deployment` / `configure_execution_policy` audit paths. The freeze verifies structure only. The dry run PRINTS both legs' deployment and policy values, so the supervisor checks them against the approved §8 answer before `--apply`.
+  - **One transaction, in order:**
+    1. the #2599 row, read back and asserted field by field equal to `doc.prereg`;
+    2. the `ai_trial_declarations` row;
+    3. `configure_trial_position_managers`, which also sets `ratchet_variant_id = NULL`. That is intended: the trial's exits are stop, target, deadline and censor (§8) with no ratchet. The resulting manager rows are re-read and asserted.
+    4. the genesis event `<none> → active`, actor `supervisor`, reason `declaration frozen at <code_git_sha>; wake: <--wake-evidence>`.
+  - **CLI** `scripts/ai_trial_freeze.py`:
+    - **The dry run runs the SAME code path and rolls back,** so it reports every refusal the state at that moment would produce: #2599 coherence, register mapping, existing root. It is advisory, because locks are released on rollback; `--apply` re-runs every check. On an existing declaration it prints `already_frozen` and whether the stored `doc_sha256` equals the recomputed one; that is the lost-commit retry check.
+    - `--apply --declared-by <who> --wake-evidence <url of the supervisor's §8 answer>` freezes and commits.
+    - ⚠ The genesis actor label and `--declared-by` are procedural, not authenticated; the database checks neither.
+  - ⚠ **`--apply` starts the trial.**
+    - Both jobs read `active` at their next fire; a manual job trigger reads it immediately. The model call and orders stay behind every downstream gate: step 0, the loader and the executor.
+    - It is a go-live action, run by the supervisor once the §8 wake condition holds, never by the loop.
+  - **Prospective ordering.** `ai_trial_runs.declaration_id` is a NOT NULL FK, so no real-shortlist run can precede the declaration. Pre-freeze model calls exist only in the synthetic CLI (§12).
+  - **ckpt-1 dispositions (2 rounds; 35 findings).** Every other finding is fixed in the text above. Accepted residuals, each stated so it is not mistaken for a guarantee:
+    - Runs compare the import-time `AI_TRIAL_POLICY_HASH` (slice 2c-iv-b). The jobs child is respawned on `app/**` mtime, so the import-time value tracks the code on disk. This design predates 3d and is not changed here.
+    - A constant defined outside `POLICY_MODULES` and edited after the CLI's import would not move the fresh hash. The CLI is a fresh process, so the window is its own runtime.
+    - No code writer of `ai_trial_declarations` exists besides the freeze. A hand SQL insert bypasses every code gate, as it does on every table.
+    - A clean porcelain status and `HEAD == origin/main` do not prove the loaded modules came from this checkout (ignored files, alternate import paths), and they do not pin dependency versions. `python_version` is recorded; the lockfile at `code_git_sha` pins dependencies.
+    - Prospective ordering is proven for STORED runs only (the FK). The synthetic-only rule for pre-freeze model calls is §12's, enforced by review.
+    - The register test pins the entry's shape. It cannot prove the entry was never re-pointed; history and review carry that, as the `trial_register` docstring says.
 
 **What this trial's statistics are, and are not (v4).**
 - **Nothing produced here is capital-tier evidence.** Round 3 of ckpt-1 established that the arm label is not randomised: only the control is. The model also chooses the shared exit terms, and pairs are dependent across sessions (overlapping holds, common shocks, inventory paths). So no test below has guaranteed error rates.
