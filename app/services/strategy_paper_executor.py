@@ -640,10 +640,10 @@ def _persist_rejection(
             INSERT INTO strategy_entry_preflights (
                 signal_id, deployment_id, policy_revision, forecast_id, ranking_member_id,
                 verdict, reason_code,
-                evaluated_at, quote_at, scan_at, halt_feed_at, halt_identity_rule_version,
+                evaluated_at, quote_at, quote_ask, scan_at, halt_feed_at, halt_identity_rule_version,
                 broker_available_cash, account_equity, account_invested,
                 instrument_invested, gross_expectancy_ci_low_pct
-            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 signal_id,
@@ -654,6 +654,7 @@ def _persist_rejection(
                 reason_code,
                 now,
                 intent.quote_at if intent else None,
+                intent.ask if intent else None,
                 evidence.scan_at if evidence else None,
                 intent.halt_feed_at if intent else None,
                 HALT_IDENTITY_RULE_VERSION if intent is not None or halt_identity_evaluated else None,
@@ -1527,7 +1528,7 @@ def _execute_fired_paper_signal_locked(
             INSERT INTO strategy_entry_preflights (
                 signal_id, deployment_id, policy_revision, forecast_id, ranking_member_id,
                 verdict, reason_code,
-                evaluated_at, quote_at, scan_at, halt_feed_at, halt_identity_rule_version,
+                evaluated_at, quote_at, quote_ask, scan_at, halt_feed_at, halt_identity_rule_version,
                 eligibility_checked_at, costs_at, broker_available_cash,
                 account_equity, account_invested, instrument_invested,
                 account_drawdown_pct, allocated_amount,
@@ -1535,7 +1536,7 @@ def _execute_fired_paper_signal_locked(
                 net_expectancy_pct, stop_loss_rate, take_profit_rate
             ) VALUES (
                 %s, %s, %s, %s, %s, 'allocated', 'all_paper_entry_gates_passed',
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
@@ -1546,6 +1547,7 @@ def _execute_fired_paper_signal_locked(
                 intent.ranking_member_id,
                 evaluated_at,
                 intent.quote_at,
+                intent.ask,
                 intent.scan_at,
                 intent.halt_feed_at,
                 HALT_IDENTITY_RULE_VERSION,

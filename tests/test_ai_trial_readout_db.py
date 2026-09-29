@@ -76,3 +76,5 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
     # The exited arm is no longer live, its exit session anchors the pair, and §7's pool is reported.
     assert (pair.live_legs, pair.resolved_session) == (0, closed_at.date())
     assert pair.pool_size is not None and pair.pool_size >= 1
+    # Filled at 100 against the preflight's stored 100 ask (sql/438); the control never filled.
+    assert pair.fill_gaps == {"arm": 0.0}

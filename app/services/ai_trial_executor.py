@@ -336,13 +336,13 @@ def _commit_authority(
         """
         INSERT INTO strategy_entry_preflights (
             signal_id, deployment_id, policy_revision, verdict, reason_code,
-            evaluated_at, quote_at, halt_feed_at, halt_identity_rule_version,
+            evaluated_at, quote_at, quote_ask, halt_feed_at, halt_identity_rule_version,
             eligibility_checked_at, costs_at, broker_available_cash,
             account_equity, account_invested, instrument_invested,
             account_drawdown_pct, allocated_amount, stressed_cost_amount, cost_basis,
             stop_loss_rate, take_profit_rate
         ) VALUES (
-            %s, %s, %s, 'allocated', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, 'allocated', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         """,
         (
@@ -352,6 +352,7 @@ def _commit_authority(
             TRIAL_ALLOCATED_REASON,
             evaluated_at,
             intent.quote_at,
+            intent.ask,
             intent.halt_feed_at,
             HALT_IDENTITY_RULE_VERSION,
             evaluated_at,

@@ -25,6 +25,7 @@ from app.services.ai_trial_readout import (
     build_readout,
     cohort,
     exit_label,
+    fill_gap_pct,
     harm_looks,
     primary,
     profit_factor,
@@ -290,6 +291,26 @@ def test_the_readout_computes_no_primary_before_it_is_due() -> None:
     assert readout.arm_interval is None
     assert readout.pool_sizes == {1: 12}
     assert readout.model_cost_usd_per_run == 1.0
+
+
+def test_fill_versus_ask_is_measured_on_every_filled_leg_and_never_estimated() -> None:
+    assert fill_gap_pct(Decimal("100"), Decimal("100.5")) == pytest.approx(0.5)
+    assert fill_gap_pct(Decimal("100"), Decimal("99")) == pytest.approx(-1.0)
+    # A missing or non-positive price is a missing gap, not a zero.
+    assert [fill_gap_pct(None, Decimal("1")), fill_gap_pct(Decimal("0"), Decimal("1"))] == [None, None]
+    assert fill_gap_pct(Decimal("1"), None) is None
+    pairs = [
+        replace(_pair(1, SESSION_1, 1.0), fill_gaps={"arm": 0.5, "control": -1.0}),
+        # A broken pair whose arm filled with no stored ask (pre-sql/438), control never filled.
+        replace(_pair(2, SESSION_1, 0.0, state="broken"), fill_gaps={"arm": None}),
+        replace(_pair(3, SESSION_1, 0.0, state="broken"), fill_gaps={"arm": 1.5}),
+    ]
+    # Printed before the cohort is due: it describes execution, not the outcome.
+    readout = _build(pairs, datetime(2026, 10, 2, 22, tzinfo=UTC))
+    assert readout.primary is None
+    arm, control = readout.fill_vs_ask["arm"], readout.fill_vs_ask["control"]
+    assert (arm.legs, arm.mean_pct, arm.max_pct, arm.ask_missing) == (2, pytest.approx(1.0), 1.5, 1)
+    assert (control.legs, control.mean_pct, control.max_pct, control.ask_missing) == (1, -1.0, -1.0, 0)
 
 
 def test_the_due_readout_splits_cohort_from_exploratory_and_tabulates() -> None:

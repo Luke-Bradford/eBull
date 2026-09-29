@@ -650,7 +650,11 @@ Neither admits a $125 half ticket.
   - **Unrealised** = (opened units − Σ closed slice units) × (`quotes.bid` − entry average price). `quotes` is the position manager's own mark. Its age is not gated, because the rule is "reaches" and a quoted bid was an exit price at its instant.
   - **Unmeasurable trades** contribute nothing and are counted `unmeasured` on the cycle note. They are: no bid, a bid quoted before the fill, no entry price, a non-USD instrument, a slice without P&L or units, or a closed trade whose slices do not yet cover its opened units. They never prove a breach, because `halted_loss` is terminal and a missing number is not a loss.
   - **Unproven breach:** when a leg's **measured** loss reaches the limit while it has unmeasured trades, the trial moves to the resumable `halted_operator` (reason `loss_halt_unproven:…`). The terminal condition is not proven, and entries still stop (Codex ckpt-3).
-  - **Not yet computed:** SPY references (O13), exposure, turnover, and the fill-versus-ask gap. The executor does not persist the ask it priced a leg from, so that gap has no stored input until it does.
+  - **Not yet computed:** SPY references (O13), exposure and turnover.
+- **Fill-versus-ask gap implemented** (`sql/438`, `ai_trial_readout.fill_gap_pct`). Choices fixed by construction:
+  - **Stored input:** `strategy_entry_preflights.quote_ask`, the `quotes.ask` the preflight priced from, written wherever `quote_at` is (paper allocated and rejected rows, trial allocated rows). No backfill: `quotes` is overwritten on refresh, so a past ask is not recoverable.
+  - **Gap** = 100 × (entry average fill − `quote_ask`) ÷ `quote_ask`, per filled leg; positive = filled above the ask. Both prices are in the instrument's own currency, so no FX.
+  - **Population:** every filled leg of the declaration, printed on every readout (count, mean, max, `ask_missing`). It describes execution, not the arm-versus-control outcome, so it does not wait for the cohort.
 
 ## 10. Contamination rule
 

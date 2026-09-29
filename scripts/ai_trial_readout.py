@@ -44,6 +44,7 @@ def render(readout: Readout) -> str:
         f"model cost: ${readout.model_cost_usd_total:.2f} total, per run {readout.model_cost_usd_per_run}",
         f"restated close rows: {readout.restated_rows}  close rows with a nonzero fee: {readout.fee_rows}",
         f"control-pool size by pair_seq: {readout.pool_sizes}",
+        f"fill vs ask (%, + = filled above the priced ask): {readout.fill_vs_ask}",
     ]
     for look in readout.harm_looks:
         lines.append(
@@ -68,7 +69,7 @@ def render(readout: Readout) -> str:
         f"per confidence (not a calibration): {readout.per_confidence}",
         f"exit labels: {readout.exit_labels}  order parity: {readout.order_parity}",
         f"exploratory units (after the cohort): {readout.exploratory_units}",
-        "Not computed: SPY references, exposure, turnover, fill-versus-ask gap (see ai_trial_readout).",
+        "Not computed: SPY references, exposure, turnover (see ai_trial_readout).",
         "Dividends are not in the closed-trade history, so not in the net.",
     ]
     return "\n".join(lines)
