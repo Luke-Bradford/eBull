@@ -46,9 +46,16 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
 - **Cohort resolution.** A broken pair whose filled leg has not yet exited still holds the readout
   (``live_legs``); its exit session enters the due-date anchor.
 
+- **Fill-versus-ask gap** (§8 "Protective levels", §9 descriptive). Per filled leg, 100 × (entry
+  average fill − the ask the preflight priced from) ÷ that ask; positive = filled above the ask.
+  The ask is ``strategy_entry_preflights.quote_ask`` (``sql/438``) and the fill is the entry
+  executions' unit-weighted average, both in the instrument's own currency, so the ratio needs no
+  FX. Summarised over every filled leg, whether or not it exited or the cohort is due: it measures
+  execution, not the arm-versus-control outcome. A filled leg with no stored ask is counted
+  ``ask_missing``, never estimated.
+
 Not computed here (named, so their absence is visible): SPY references (O13), arm-versus-control
-exposure, turnover and the fill-versus-ask gap — the executor does not persist the ask it priced a
-leg from, so that gap has no stored input.
+exposure and turnover.
 """
 
 from __future__ import annotations
@@ -62,6 +69,7 @@ from decimal import Decimal
 from typing import Any, Final, Literal
 
 import psycopg
+from psycopg.rows import dict_row
 
 from app.services.ai_trial_deadline import TRIAL_EXIT_TIME_UTC, exit_deadline_session, fill_session
 from app.services.ai_trial_pair_lifecycle import (
@@ -234,6 +242,8 @@ class PairRecord:
     live_legs: int = 0
     #: §7: the control pool's size (exhaustion conditions *d* on control availability).
     pool_size: int | None = None
+    #: Fill-versus-ask gap % per FILLED leg (``fill_gap_pct``); ``None`` = filled, no stored ask.
+    fill_gaps: Mapping[str, float | None] = field(default_factory=dict)
 
     @property
     def valued(self) -> bool:
@@ -379,6 +389,33 @@ def leg_summary(legs: Sequence[LegValue]) -> LegSummary:
     )
 
 
+def fill_gap_pct(ask: Decimal | None, average_fill: Decimal | None) -> float | None:
+    """100 × (fill − ask) ÷ ask, or ``None`` when either price is missing or non-positive."""
+    if ask is None or average_fill is None or ask <= 0 or average_fill <= 0:
+        return None
+    return float(100 * (average_fill - ask) / ask)
+
+
+@dataclass(frozen=True)
+class FillGap:
+    #: Filled legs with a stored ask.
+    legs: int
+    mean_pct: float | None
+    max_pct: float | None
+    ask_missing: int
+
+
+def fill_gap(gaps: Iterable[float | None]) -> FillGap:
+    items = list(gaps)
+    known = [gap for gap in items if gap is not None]
+    return FillGap(
+        len(known),
+        sum(known) / len(known) if known else None,
+        max(known, default=None),
+        len(items) - len(known),
+    )
+
+
 @dataclass(frozen=True)
 class GroupRow:
     group: str
@@ -461,6 +498,8 @@ class Readout:
     fee_rows: int
     #: §7: every pair's control-pool size, by ``pair_seq``.
     pool_sizes: dict[int, int | None]
+    #: Per leg, over every filled leg of the declaration (see the module docstring).
+    fill_vs_ask: dict[str, FillGap] = field(default_factory=dict)
     #: Computed only once the cohort readout is due; ``None`` before.
     primary: Primary | None = None
     #: O12: the primary over units whose legs both exited mechanically.
@@ -523,6 +562,7 @@ def build_readout(
         restated_rows=sum(leg.restated_rows for leg in legs),
         fee_rows=sum(leg.fee_rows for leg in legs),
         pool_sizes={pair.pair_seq: pair.pool_size for pair in pairs},
+        fill_vs_ask={leg: fill_gap(pair.fill_gaps[leg] for pair in pairs if leg in pair.fill_gaps) for leg in LEGS},
     )
     if state.status != "due" or state.last_session is None:
         return readout
@@ -589,7 +629,10 @@ _LEGS_SQL: Final = """
             JOIN strategy_position_operations op ON op.ownership_id = ow.ownership_id
             WHERE ow.strategy_trade_id = t.strategy_trade_id
               AND op.operation_type = 'close' AND op.status = 'applied'
-            ORDER BY op.position_operation_id DESC LIMIT 1) AS close_trigger
+            ORDER BY op.position_operation_id DESC LIMIT 1) AS close_trigger,
+           (SELECT pf.quote_ask FROM strategy_funding_decisions fd
+            JOIN strategy_entry_preflights pf ON pf.signal_id = fd.signal_id
+            WHERE fd.funding_decision_id = t.funding_decision_id) AS quote_ask
     FROM ai_trial_trade_links tl
     JOIN ai_trial_pairs p ON p.pair_id = tl.pair_id
     JOIN strategy_trades t ON t.strategy_trade_id = tl.strategy_trade_id
@@ -701,9 +744,10 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
         (pair_ids,),
     ).fetchall():
         events[int(pair_id)].append((leg, event, reasons))
-    legs = {(int(row[0]), row[1]): row for row in conn.execute(_LEGS_SQL, (declaration_id,)).fetchall()}
-    close_rows = load_close_rows(conn, [int(row[2]) for row in legs.values()])
-    fills = [row[6] for row in legs.values() if row[6] is not None]
+    with conn.cursor(row_factory=dict_row) as cur:
+        legs = {(int(row["pair_id"]), row["leg"]): row for row in cur.execute(_LEGS_SQL, (declaration_id,)).fetchall()}
+    close_rows = load_close_rows(conn, [int(row["strategy_trade_id"]) for row in legs.values()])
+    fills = [row["filled_at"] for row in legs.values() if row["filled_at"] is not None]
     first_fill = min((fill_session(filled) for filled in fills), default=None)
 
     records: list[PairRecord] = []
@@ -712,34 +756,37 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
         state = pair_unit_state([(leg, event) for leg, event, _ in history])
         broken = tuple(reason for _, event, reasons in history if event == "broken" for reason in reasons or ())
         values: dict[str, LegValue | None] = {}
+        fill_gaps: dict[str, float | None] = {}
         resolved: list[date] = []
         live = 0
         for leg in LEGS:
             leg_events = [event for event_leg, event, _ in history if event_leg == leg]
             live += "filled" in leg_events and not {"closed", "censored"} & set(leg_events)
             row = legs.get((int(pair_id), leg))
+            if row is not None and row["filled_at"] is not None:
+                fill_gaps[leg] = fill_gap_pct(_decimal(row["quote_ask"]), _decimal(row["average_price"]))
             # Any leg that exited is valued, a broken pair's included (O11: it is still reported);
             # only a ``unit`` enters the statistics.
-            if row is None or row[6] is None or not {"closed", "censored"} & set(leg_events):
+            if row is None or row["filled_at"] is None or not {"closed", "censored"} & set(leg_events):
                 values[leg] = None
                 continue
-            (_, _, trade_id, instrument_id, deadline, currency, _, units, avg_price, released_at, trigger) = row
+            trade_id = int(row["strategy_trade_id"])
             if "censored" in leg_events:
-                censor_session = exit_deadline_session(deadline, TRIAL_CENSOR_SESSIONS)
+                censor_session = exit_deadline_session(row["exit_deadline_session"], TRIAL_CENSOR_SESSIONS)
                 mark = _censor_mark(
                     conn,
-                    instrument_id=int(instrument_id),
-                    usd=currency == "USD",
+                    instrument_id=int(row["instrument_id"]),
+                    usd=row["currency"] == "USD",
                     censor_session=censor_session,
-                    average_price=_decimal(avg_price),
-                    closes=close_rows.get(int(trade_id), []),
+                    average_price=_decimal(row["average_price"]),
+                    closes=close_rows.get(trade_id, []),
                 )
-                values[leg] = value_censored_leg(mark, _decimal(units))
+                values[leg] = value_censored_leg(mark, _decimal(row["units"]))
                 resolved.append(censor_session)
             else:
-                values[leg] = value_closed_leg(close_rows.get(int(trade_id), []), trigger)
-                if released_at is not None:
-                    resolved.append(fill_session(released_at))
+                values[leg] = value_closed_leg(close_rows.get(trade_id, []), row["close_trigger"])
+                if row["released_at"] is not None:
+                    resolved.append(fill_session(row["released_at"]))
         records.append(
             PairRecord(
                 pair_seq=int(pair_seq),
@@ -753,6 +800,7 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
                 resolved_session=max(resolved, default=None),
                 live_legs=live,
                 pool_size=None if pool_size is None else int(pool_size),
+                fill_gaps=fill_gaps,
             )
         )
     return records, first_fill

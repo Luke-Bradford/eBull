@@ -1051,9 +1051,9 @@ def test_forecast_barriers_drive_loss_sizing_and_submitted_tp_sl(
     assert order.stop_loss_rate == Decimal("98.000000")
     assert order.take_profit_rate == Decimal("104.000000")
     assert conn.execute(
-        "SELECT stop_loss_rate,take_profit_rate FROM strategy_entry_preflights WHERE signal_id=%s",
+        "SELECT stop_loss_rate,take_profit_rate,quote_ask FROM strategy_entry_preflights WHERE signal_id=%s",
         (signal_id,),
-    ).fetchone() == (Decimal("98.000000"), Decimal("104.000000"))
+    ).fetchone() == (Decimal("98.000000"), Decimal("104.000000"), Decimal("100.000000"))
 
 
 @pytest.mark.parametrize(

@@ -146,7 +146,7 @@ def test_the_arm_leg_submits_its_ticket_with_its_own_levels_and_no_evidence(
     assert broker.place_demo_strategy_order.call_args.kwargs["request_id"] == _REQUEST_ID
     preflight = conn.execute(
         "SELECT verdict, reason_code, allocated_amount, forecast_id, ranking_member_id, scan_at, "
-        "gross_expectancy_ci_low_pct, net_expectancy_pct, stressed_cost_amount, cost_basis "
+        "gross_expectancy_ci_low_pct, net_expectancy_pct, stressed_cost_amount, cost_basis, quote_ask "
         "FROM strategy_entry_preflights WHERE signal_id=%s",
         (signals["arm"],),
     ).fetchone()
@@ -161,6 +161,7 @@ def test_the_arm_leg_submits_its_ticket_with_its_own_levels_and_no_evidence(
         None,
         Decimal("1.000000"),  # 0.5 spread x the policy's 2x stress
         COST_BASIS_BROKER_PREFLIGHT_VALUE,
+        Decimal("100.000000"),  # the ask the 92/116 levels were derived from (sql/438)
     )
     link = conn.execute(
         "SELECT l.leg, l.requested_amount, fd.amount FROM ai_trial_trade_links l "
@@ -223,10 +224,10 @@ def test_cost_cap_slot_cap_and_kill_switch_refuse_before_any_broker_write(
     assert (refused.verdict, refused.reason_code) == ("rejected", "trial_cost_cap")
     expensive.place_demo_strategy_order.assert_not_called()
     assert conn.execute(
-        "SELECT verdict, reason_code, forecast_id, gross_expectancy_ci_low_pct FROM strategy_entry_preflights "
-        "WHERE signal_id = %s",
+        "SELECT verdict, reason_code, forecast_id, gross_expectancy_ci_low_pct, quote_ask "
+        "FROM strategy_entry_preflights WHERE signal_id = %s",
         (signals["arm"],),
-    ).fetchone() == ("rejected", "trial_cost_cap", None, None)
+    ).fetchone() == ("rejected", "trial_cost_cap", None, None, Decimal("100.000000"))
     conn.commit()
 
     control_instrument = _control_instrument(conn, signals["control"])
