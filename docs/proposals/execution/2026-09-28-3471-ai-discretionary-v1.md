@@ -629,6 +629,14 @@ Neither admits a $125 half ticket.
   - The cash flows are: −open amount, +close proceeds, and −fees, −financing, +dividends as signed in the broker's closed-trade history.
   - Spread is embedded in fills and is not charged again.
   - Only flows posted within 5 sessions of the close count. Later adjustments appear as a restatement line.
+- **Implemented in slice 3c** (`app/services/ai_trial_readout.py`, `scripts/ai_trial_readout.py`, no migration). Choices fixed by construction:
+  - **Closed-leg net** = 100 × Σ `realized_pnl_usd` ÷ Σ `investment_usd` over the leg's `trade_events` close rows (reached through `strategy_position_ownership`). eToro's trade-history schema documents `netProfit` and `fees` separately and does not say whether one includes the other; every stored close row has `fees = 0` and `netProfit = (close − open) × units`. So `netProfit` is the net, and a nonzero fee is counted and printed, never subtracted. The history carries no dividend or financing field, so dividends are a stated gap. A row "posted" = `recorded_at`, and the window is 5 sessions after the close's session.
+  - **Censored mark** = the close of the last bar dated before the censor session (quarantine-masked; what was known at 15:00 UTC on it) × (1 − (ask − bid) ÷ (ask + bid)), taking the latest `etoro_rate_observations` quote by that instant. A masked close, no quote, a non-USD price or any `price_series_break` inside the hold leaves the leg unvalued. An unvalued leg is counted in a census and never repaired.
+  - **O12 labels:** an applied engine close has its `trigger_code`, and `exit_deadline` maps to `deadline`. A broker close at or through the recorded stop is `stop`, at or through the target is `target`, and otherwise `broker_other`. Mechanical = stop, target, deadline and censored.
+  - **Monte-Carlo seed** = the first 64 bits of sha256(declaration sha | "readout").
+  - **Frozen by value:** the §9 stopping and cohort constants, plus the flip constants, join `FROZEN_CONSTANTS`.
+  - **Harm looks are computed and printed, not acted on.** Nothing writes `halted_harm` yet, and the loss halt is not built either. Both are go-live prerequisites.
+  - **Not yet computed:** SPY references (O13), exposure, turnover, and the fill-versus-ask gap. The executor does not persist the ask it priced a leg from, so that gap has no stored input until it does.
 
 ## 10. Contamination rule
 
