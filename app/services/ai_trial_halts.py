@@ -23,6 +23,7 @@ positions run to their exits.
     ingest lags the close) is counted
     ``unmeasured`` and contributes nothing. It never halts: ``halted_loss`` is terminal, and an
     absent number is not a loss. The count is on the paper cycle's note.
+- **A check that cannot run** moves the trial to the resumable ``halted_operator`` (fail closed).
 - **Harm stop.** ``compute_readout(...).harm_looks`` (§9 "Harm stop"); the first look that
   ``halts`` and is ``flows_final`` writes ``halted_harm``, naming the look in the reason. A leg is
   valued from its first close slice, and a later slice inside the 5-session flow window can move
@@ -162,7 +163,8 @@ class HaltCheck:
     #: The state this pass wrote, if any.
     halted: EngineHalt | None
     unmeasured: int
-    #: The check raised; its savepoint was rolled back and the other declarations still ran.
+    #: The check raised; its savepoint was rolled back, the trial was moved to the resumable
+    #: ``halted_operator`` (``halted`` says whether that write landed) and the others still ran.
     failed: bool = False
 
 
@@ -204,11 +206,29 @@ def _check_declaration(conn: Conn, declaration_id: int, strategy_version: str, n
     return HaltCheck(declaration_id, halted, unmeasured)
 
 
+def _fail_closed(conn: Conn, declaration_id: int, exc: Exception) -> HaltCheck:
+    try:
+        written = halt_active_trial(
+            conn,
+            declaration_id=declaration_id,
+            to_state="halted_operator",
+            reason=f"halt_check_failed:{type(exc).__name__}",
+        )
+    except Exception:
+        logger.exception("ai trial %s: the fail-closed halt could not be written either", declaration_id)
+        written = False
+    return HaltCheck(declaration_id, "halted_operator" if written else None, 0, failed=True)
+
+
 def enforce_trial_halts(conn: Conn, *, now: datetime | None = None) -> list[HaltCheck]:
     """Check both halts on every active trial and write the first that fires. The caller commits.
 
     Each declaration runs in its own savepoint: one that raises is rolled back alone and reported
-    ``failed``, so it can neither skip a later declaration nor undo a halt an earlier one wrote."""
+    ``failed``, so it can neither skip a later declaration nor undo a halt an earlier one wrote.
+
+    ⚠ A check that cannot run fails CLOSED: the trial moves to ``halted_operator``, the same
+    resumable refusal surface O10 uses for an unprotected leg. A loss or harm halt that cannot be
+    evaluated must not let entries continue behind a note on the job (review round 2)."""
     # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constant).
     from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
 
@@ -217,9 +237,9 @@ def enforce_trial_halts(conn: Conn, *, now: datetime | None = None) -> list[Halt
         try:
             with conn.transaction():
                 checks.append(_check_declaration(conn, int(declaration_id), str(strategy_version), now))
-        except Exception:
-            logger.exception("ai trial %s: halt check failed", declaration_id)
-            checks.append(HaltCheck(int(declaration_id), None, 0, failed=True))
+        except Exception as exc:
+            logger.exception("ai trial %s: halt check failed; halting it for the supervisor", declaration_id)
+            checks.append(_fail_closed(conn, int(declaration_id), exc))
     return checks
 
 

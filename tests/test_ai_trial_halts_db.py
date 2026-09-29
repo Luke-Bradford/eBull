@@ -94,7 +94,7 @@ def test_a_harm_look_that_halts_writes_halted_harm(ebull_test_conn: Conn, monkey
     assert _states(conn)[-1][2] == "harm_look:k=2:units=20:clusters=9:p=0.004<0.0125"
 
 
-def test_a_failing_declaration_neither_skips_nor_undoes_another(
+def test_a_check_that_cannot_run_fails_closed_to_a_resumable_halt(
     ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     conn = ebull_test_conn
@@ -118,11 +118,21 @@ def test_a_failing_declaration_neither_skips_nor_undoes_another(
 
     monkeypatch.setattr("app.services.ai_trial_halts.compute_readout", readout)
     (check,) = _enforce(conn)
-    assert (check.failed, check.halted) == (True, None)
-    assert [state for state, _, _ in _states(conn)] == ["active"]
-    # A clean pass afterwards still halts.
+    assert (check.failed, check.halted) == (True, "halted_operator")
+    # The probe's write went with the savepoint; the fail-closed halt is the only event.
+    assert [(state, actor, reason) for state, actor, reason in _states(conn)][1:] == [
+        ("halted_operator", "engine", "halt_check_failed:RuntimeError")
+    ]
+    assert calls == ["v1"]
+
+    # The supervisor resumes; a clean pass then halts on the harm look.
+    conn.execute(
+        "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
+        "VALUES (%s, 'halted_operator', 'active', 'resume', 'supervisor')",
+        (int(row[0]),),
+    )
+    conn.commit()
     monkeypatch.setattr(
         "app.services.ai_trial_halts.compute_readout", lambda *_, **__: SimpleNamespace(harm_looks=looks)
     )
     assert [check.halted for check in _enforce(conn)] == ["halted_harm"]
-    assert calls == ["v1"]
