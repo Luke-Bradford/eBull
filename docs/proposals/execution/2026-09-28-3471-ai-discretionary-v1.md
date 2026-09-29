@@ -1149,7 +1149,7 @@ It is **not** isolated name-selection skill:
   - median close ≥ $3 over the trailing 252 bars;
   - median dollar volume ≥ $1M over the trailing 252 bars.
   - The thresholds are exit_map's; applying them point-in-time is by construction.
-- **Levels and setups:** the exact §16.1 and §16.2 functions from `app/`, called on bars ≤ *t*. The script imports them and never reimplements them. ATR14 is Wilder.
+- **Levels and setups:** the exact §16.1 and §16.2 functions from `app/`, called on bars ≤ *t*: the pack's own input, `build_bar_series` over the 260 bars ending at *t*, read through the pack's quarantine masking (`load_masked_bars`). The script imports them and never reimplements them, so no fast path needs a parity test. A window the pack would refuse is not evaluated. `last_session` is the name's own bar *t* by construction: the library only evaluates bars the name has, so the pack's staleness refusal (the name's last bar ≠ the global last session) cannot arise. The one gap is a stored bar dated on a non-NYSE session, which the library evaluates and the pack would never see. ATR14 is Wilder.
 - **Entry:** close(*t*). The walk runs over bars *t*+1 … *t*+h, so the entry bar's own range is never used.
   - **Order of operations (r2-37, 46):**
     1. detect;
@@ -1157,7 +1157,7 @@ It is **not** isolated name-selection skill:
     3. plan feasibility;
     4. completeness: *t* + h ≤ the series' last bar **and** *t* + h ≤ the half's end date (purged, r2-24..28);
     5. dedupe.
-  - **Counters:** `firings` counts step 1, restricted to step 2. `no_valid_plan` counts step 3 failures. `truncated` counts step 4 failures caused by the **series** ending before the half's end. `plans` = n.
+  - **Counters:** `firings` counts step 1, restricted to step 2. `no_valid_plan` counts step 3 failures. `truncated` counts step 4 failures caused by the **series** ending before the half's end, plus walks through a missing OHLC. `purged` counts step 4 failures at the half's end. `deduped` counts step 5 drops. `plans` = n.
   - Planning, completeness and dedupe are **per horizon** (r2-35).
   - ⚠ The trial enters at the ask at 15:00 on the next session (§8). That timing mismatch is labelled.
 - **Plan (the library's deterministic rule).**
@@ -1188,7 +1188,7 @@ It is **not** isolated name-selection skill:
   - Membership is by entry date, and the exit bar must fall inside the same half (purge, r2-24/25).
   - A row passes the gate only when **both** halves pass (§16.1). That is a stability check, not validation (r1-51).
 - **Row contract (r2-43..45).** One row per (setup, horizon), carrying `halves: {train, holdout}` with every statistic.
-  - `mean_net_r` is serialized as an exact decimal string of the rational mean. The gate compares that exact value, never a rounded display.
+  - `mean_net_r` is serialized exactly, as the reduced fraction `p/q` of the mean of per-trade net R values quantized half-even to 1e-12. (A general rational mean has no finite decimal expansion, so an "exact decimal string" does not exist.) The gate compares that exact value, never the rounded `mean_net_r_display`.
   - A missing half, a missing statistic or a non-finite value classifies the row as `setup_base_rate_missing`.
 - **Freeze:**
   - The JSON (`docs/proposals/execution/3471-setup-base-rates.json`) is frozen by sha256 in the declaration, together with the script's own sha and the source-data sha (r1-85, r2-32).

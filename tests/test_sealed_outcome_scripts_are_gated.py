@@ -474,6 +474,11 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # no signal, nothing selectable, never calls the model. A hunt trial would spend the hunt's M on
     # a power calculation, and the trial's own #2599 declaration is frozen AFTER this table.
     "ai_trial_power.py": "#3471 §9/§10 planning table (random-vs-random dispersion)",
+    # #3471 spec §16.5: the setup base-rate library is the declaration's own pre-trial TRAINING
+    # input, frozen by sha in the #2599 declaration. It selects nothing — its only use is the
+    # §16.3 order-7 REFUSAL of a setup whose mean net R is negative in either half — and its
+    # method was fixed by the spec (ckpt-1 r1/r2) before it was run.
+    "ai_trial_setup_base_rates.py": "#3471 §16.5 setup base-rate library (declaration input; refusal gate only)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"

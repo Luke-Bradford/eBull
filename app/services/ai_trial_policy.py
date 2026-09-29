@@ -72,6 +72,7 @@ POLICY_MODULES: Final = (
     "ai_trial_levels.py",
     "ai_trial_pack.py",
     "ai_trial_pack_reader.py",
+    "ai_trial_plan.py",
     "ai_trial_prompt.py",
     "ai_trial_start_gate.py",
 )
