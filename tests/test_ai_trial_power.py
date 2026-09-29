@@ -127,7 +127,7 @@ def _inst(
 
 # ATR 3.0 on a close of 100 → ATR14% = 3; k = 1.5 → stop 4.5%, R = 2 → target 9%
 # (entry 100: SL 95.5, TP 109). Horizon 3: fill = bar 1 (session 0), deadline = bar 4.
-CELL = Cell(stop_atr_multiple=1.5, reward_risk=2.0, horizon=3)
+CELL = Cell(stop_atr_multiple=D("1.5"), reward_risk=D("2"), horizon=3)
 FLAT = ("100", "101", "99", "100")
 
 

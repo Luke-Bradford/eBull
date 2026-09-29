@@ -29,9 +29,9 @@ Spec: ``docs/proposals/execution/2026-09-28-3471-ai-discretionary-v1.md`` §9 "P
   takes the stop first, and the horizon exit is the deadline bar's CLOSE (the resolver books the
   next open, which is why the series is cut — no bar after the deadline can decide a leg). A
   series that ends inside the hold before the corpus frontier is a delisting and exits at its last
-  close. An unresolved
-  ``price_series_break`` inside the hold ends the segment (``price_segments.segment_end_index``),
-  so the leg is refused rather than booked across a scale change.
+  close. An unresolved ``price_series_break`` inside the hold ends the segment
+  (``price_segments.segment_end_index``), so the leg is refused rather than booked across a scale
+  change.
 - **Statistic:** d = arm − control per-trade gross %, with the planted shift δ added to the arm;
   one-sided cluster sign-flip p (``ai_trial_stats``); the rejection rate is the share of replicates
   with p ≤ α.
@@ -84,8 +84,8 @@ MIN_CLOSE: Final = MIN_BID
 PAIRS_PER_SESSION: Final = 2
 CLUSTER_COUNTS: Final = (15, 20, 30)
 #: Supervisor rule 2026-09-28 15:30Z (#2437): stop = k × ATR14 with k in [1.5, 3]; target 2R default.
-STOP_ATR_MULTIPLES: Final = (1.5, 3.0)
-REWARD_RISK: Final = 2.0
+STOP_ATR_MULTIPLES: Final = (Decimal("1.5"), Decimal("3"))
+REWARD_RISK: Final = Decimal("2")
 #: Planted shifts in d, per-trade percentage points.
 SHIFTS_PCT: Final = (0.0, 1.0, 2.0, 3.0, 5.0)
 ALPHA: Final = 0.05
@@ -110,8 +110,8 @@ LegRefusal = Literal[
 
 @dataclass(frozen=True)
 class Cell:
-    stop_atr_multiple: float
-    reward_risk: float
+    stop_atr_multiple: Decimal
+    reward_risk: Decimal
     horizon: int
 
     @property
@@ -184,7 +184,7 @@ def simulate_leg(inst: PanelInstrument, session: date, next_session: date, cell:
     if atr is not None and math.isnan(atr):
         return Leg(None, refusal="too_few_bars")
     levels = derive_control_levels(
-        DecisionMetrics(Decimal(repr(cell.reward_risk)), None, Decimal(repr(cell.stop_atr_multiple))),
+        DecisionMetrics(cell.reward_risk, None, cell.stop_atr_multiple),
         measure_atr(atr, close),
     )
     if levels is None:
