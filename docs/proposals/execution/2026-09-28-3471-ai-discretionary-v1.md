@@ -1012,6 +1012,14 @@ That leaves an alternating sequence.
 
 **`setup_base_rates`.** The §16.5 rows for each detected setup, one per horizon.
 
+**Amended in slice v6-2 (`ai_trial_pack_reader.structure_entry` / `load_setup_library`).**
+- **The library travels once, at pack level.** It is `setup_library = {sha256, caveat, rows}`, with all 15 rows verbatim. It is not repeated per name as `setup_base_rates`:
+  - verbatim per name it would add up to 6 rows × every name to the prompt;
+  - the whole library is 13.7 kB of canonical JSON.
+  A name's rows are the pack-level rows for its detected setups.
+- **The file is bound by sha256.** It is bound by `SETUP_LIBRARY_SHA256`, which is in the policy-hashed `ai_trial_pack_reader`. A missing or different file raises `SetupLibraryMismatch` before any read or fetch, so the run refuses before the model call. Slice v6-3 maps that to the `library_sha_mismatch` code (§16.11).
+- **Each name also carries `indicator_bars`,** the length of its indicator series. `origin_bar` indexes that series, so a level's age is `indicator_bars − 1 − origin_bar`.
+
 **Information boundary (corrected, r2-22/23).** The pack excludes the declaration sha, `pair_seq` and the draw seed. That hides the draw **index** but not the pool: every name's levels and setups are in the pack, so the model can in principle infer the feasible set, and for a singleton pool it knows the control. The readout reports singleton and self-draw pools (§16.7).
 
 ### 16.3 Schema and guard
