@@ -11731,3 +11731,16 @@ neighbouring container and match it.**
   with a test, even when the schema makes it unreachable.
 - Enforced in: `ai_trial_readout.partial_close` and
   `tests/test_ai_trial_readout_plans.py::test_a_partial_close_before_the_final_exit_is_recognised`.
+
+### A "never will be" exclusion must check every way the record can still change (#3471)
+
+- Failure: `ai_trial_readout.settled_unvalued` excluded a unit from the harm looks once its flow window closed
+  with a leg unvalued. It did not check `live_legs`, so a unit whose first leg closed early and whose other leg
+  was still open dropped out of the look sequence and later re-entered at its entry position. That moved every later
+  look's membership after the fact, on the path that writes a terminal halt. Found while specifying the v6-4c
+  power simulation, which reuses `harm_looks`.
+- Prevention: a predicate that declares a record permanently out of a sequence ("settled", "final", "never")
+  lists every input that can still move it, open legs included, and a test pins the open-leg case. The same review
+  anchors a flow-window clock on the LATER of every exit signal (release and execution), never on one of them.
+- Enforced in: `ai_trial_readout.settled_unvalued`, the loader's `resolved_session`, and
+  `tests/test_ai_trial_readout.py::test_a_unit_with_a_leg_still_open_holds_the_looks_whatever_its_first_exit_age`.

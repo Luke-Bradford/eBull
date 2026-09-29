@@ -1,30 +1,43 @@
-"""#3471 slice 3a — §9 sign-flip p and the planning-table leg simulator (pure; no DB, no model)."""
+"""#3471 §9 sign-flip p and the v6 planning-table path simulator (slice v6-4c; pure; no DB, no model)."""
 
 from __future__ import annotations
 
 import itertools
-import math
 from datetime import date, timedelta
 from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 import pytest
 
+from app.services.ai_trial_decision import measure_atr
+from app.services.ai_trial_levels import LEVEL_IDS, Level
 from app.services.ai_trial_stats import EXACT_MAX_CLUSTERS, flip_set, sign_flip_p, sign_flip_p_batch
-from app.services.indicator_series import BarSeries
 from scripts.ai_trial_power import (
-    Cell,
-    Census,
-    Leg,
-    PanelInstrument,
-    atr_at,
-    draw_pair_differences,
-    flip_set_sensitivity,
-    in_universe,
+    LEGS,
+    PATH_SESSIONS,
+    SHIFTS_PCT,
+    Decision,
+    Diagnostics,
+    LegName,
+    LegPlan,
+    Name,
+    PathContext,
+    Trade,
+    assert_order_6,
+    build_panel,
+    decide,
+    leg_loss,
+    make_name,
     nyse_sessions,
-    rejection_rates,
-    simulate_leg,
+    open_leg,
+    render,
+    simulate_path,
+    summarise,
+    valid_bar,
+    walk,
 )
+from scripts.ai_trial_setup_base_rates import Evaluation
 
 # ---------------------------------------------------------------------------
 # ai_trial_stats
@@ -107,181 +120,237 @@ def test_shape_and_finiteness_are_refused() -> None:
 
 
 # ---------------------------------------------------------------------------
-# simulate_leg
+# v6 grid: bars, walk, fill, loss
 # ---------------------------------------------------------------------------
 
 D = Decimal
+Row = tuple[str, str, str, str] | None
 START = date(2025, 3, 3)  # a Monday
-SESSIONS = nyse_sessions(START, START + timedelta(days=600))
-FRONTIER = date(2026, 9, 25)
+CAL = nyse_sessions(START, START + timedelta(days=700))
+FLAT: Row = ("100", "101", "99", "100")
 
 
-def _series(bars: list[tuple[str | None, ...]]) -> BarSeries:
-    dates = tuple(SESSIONS[: len(bars)])
-    rows = tuple(
-        {"open": o and D(o), "high": h and D(h), "low": lo and D(lo), "close": c and D(c), "volume": 1000}
-        for o, h, lo, c in bars
+def _name(rows: list[Row], *, iid: int = 1, positions: list[int] | None = None, **kw: object) -> Name:
+    bars = [(None, None, None, None, None) if r is None else (*(D(x) for x in r), 1000) for r in rows]
+    return make_name(iid, list(range(len(rows))) if positions is None else positions, bars, **kw)  # type: ignore[arg-type]
+
+
+STOP, TARGET = D("95"), D("110")
+
+
+def test_a_bar_is_valid_only_when_finite_positive_and_consistent() -> None:
+    assert valid_bar((D(100), D(101), D(99), D(100), None))
+    assert not valid_bar((D(100), D(101), D(101), D(100), 1))  # low above the open
+    assert not valid_bar((D(100), D(99), D(98), D(100), 1))  # high below the close
+    assert not valid_bar((D(100), D(101), D(0), D(100), 1))
+    assert not valid_bar((D(100), D("NaN"), D(99), D(100), 1))
+
+
+def test_the_fill_bar_is_intrabar_only_and_a_touch_of_both_takes_the_stop() -> None:
+    target = walk(_name([("100", "111", "99", "105"), FLAT, FLAT, FLAT]), 0, 3, STOP, TARGET, CAL)
+    assert (target.label, target.price, target.session) == ("target", TARGET, CAL[0])
+    both = walk(_name([FLAT, ("100", "112", "94", "100"), FLAT, FLAT]), 0, 3, STOP, TARGET, CAL)
+    assert (both.label, both.price) == ("stop", STOP)
+
+
+def test_a_later_gap_through_a_level_fills_at_the_open() -> None:
+    down = walk(_name([FLAT, ("90", "91", "88", "90"), FLAT, FLAT]), 0, 3, STOP, TARGET, CAL)
+    assert (down.label, down.price, down.session) == ("stop", D(90), CAL[1])
+    up = walk(_name([FLAT, ("115", "116", "114", "115"), FLAT, FLAT]), 0, 3, STOP, TARGET, CAL)
+    assert (up.label, up.price) == ("target", D(115))
+
+
+def test_the_deadline_counts_nyse_sessions_and_no_later_bar_matters() -> None:
+    rows: list[Row] = [FLAT, FLAT, FLAT, ("100", "103", "99", "102"), ("50", "50", "50", "50")]
+    exit_ = walk(_name(rows), 0, 3, STOP, TARGET, CAL)
+    assert (exit_.label, exit_.price, exit_.session) == ("deadline", D(102), CAL[3])
+    # A coverage hole inside the hold does not lengthen it: the deadline is still CAL[3].
+    holed = walk(_name([FLAT, FLAT, ("100", "104", "99", "103")], positions=[0, 1, 3]), 0, 3, STOP, TARGET, CAL)
+    assert (holed.price, holed.session) == (D(103), CAL[3])
+    # An invalid bar is an absent session: its low of 80 is never read.
+    bad = walk(_name([FLAT, ("100", "101", "101", "80"), FLAT, FLAT]), 0, 3, STOP, TARGET, CAL)
+    assert (bad.label, bad.price) == ("deadline", D(100))
+
+
+def test_a_missing_deadline_bar_exits_at_the_next_executable_open() -> None:
+    exit_ = walk(_name([FLAT, FLAT, FLAT, ("98", "99", "97", "98")], positions=[0, 1, 2, 5]), 0, 3, STOP, TARGET, CAL)
+    assert (exit_.label, exit_.price, exit_.session) == ("deadline", D(98), CAL[5])
+
+
+def test_no_executable_bar_before_the_censor_session_censors_at_the_latest_close() -> None:
+    ended = walk(_name([FLAT, ("100", "101", "96", "97")]), 0, 3, STOP, TARGET, CAL)
+    assert (ended.label, ended.price, ended.session) == ("censored", D(97), CAL[13])
+    # An unresolved break ends the segment: bars at the new scale are never read.
+    split = walk(_name([FLAT, ("100", "101", "96", "97"), FLAT, FLAT], unresolved_breaks=[2]), 0, 3, STOP, TARGET, CAL)
+    assert (split.label, split.price) == ("censored", D(97))
+
+
+PLAN = LegPlan(1, Fraction(96), Fraction(110), Fraction(955, 10), D("4.5"), D("10"))
+
+
+def _open(name: Name, *, slots: int = 0, plan: LegPlan = PLAN) -> Trade | str:
+    return open_leg(name, CAL[0], CAL[1], plan, 5, calendar=CAL, fill_position=1, slots_held=slots)
+
+
+def test_open_leg_refusals_in_order() -> None:
+    assert _open(_name([FLAT], positions=[0])) == "no_fill"
+    assert _open(_name([FLAT, None])) == "no_fill"
+    assert _open(_name([FLAT] * 8, breaks=(CAL[1],))) == "plan_invalidated"
+    for open_ in ("95.5", "96", "110"):
+        assert _open(_name([FLAT, (open_, "111", "95", open_)] + [FLAT] * 6)) == "plan_invalidated"
+    # Capacity is judged after the plan: an invalidated plan is named first.
+    assert _open(_name([FLAT, ("96", "97", "95", "96")] + [FLAT] * 6), slots=4) == "plan_invalidated"
+    assert _open(_name([FLAT] * 8), slots=4) == "capacity"
+
+
+def test_open_leg_places_the_executor_rates_on_the_open_and_nets_the_tariff() -> None:
+    trade = _open(_name([FLAT, ("100", "101", "99", "100")] + [FLAT] * 6))
+    assert isinstance(trade, Trade)
+    assert (trade.entry, trade.exit.label, trade.exit.session) == (D(100), "deadline", CAL[6])
+    assert trade.net_pct == pytest.approx(-0.3)
+    stopped = _open(_name([FLAT, FLAT, ("100", "101", "95", "96")] + [FLAT] * 5))
+    assert isinstance(stopped, Trade) and stopped.exit.price == D("95.5")
+
+
+def _trade(fill: int, exit_: int, price: str, lows: dict[int, str], *, label: str = "deadline") -> Trade:
+    from scripts.ai_trial_power import Exit
+
+    entry = D(100)
+    return Trade(
+        1,
+        CAL[fill],
+        entry,
+        Exit(D(price), CAL[exit_], label, tuple((CAL[k], D(v)) for k, v in sorted(lows.items()))),  # type: ignore[arg-type]
+        float(100 * (D(price) - entry) / entry) - 0.3,
     )
-    return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
 
 
-def _inst(
-    bars: list[tuple[str, str, str, str]], *, atr: float | None = 3.0, breaks: tuple[date, ...] = ()
-) -> PanelInstrument:
-    """Bars as (open, high, low, close) on consecutive NYSE sessions; bar 0 is the signal bar. The
-    ATR is pinned through the cache so the bracket arithmetic is exact."""
-    series = _series(list(bars))
-    inst = PanelInstrument(1, series, {d: i for i, d in enumerate(series.dates)}, breaks)
-    inst.atr_cache.update(dict.fromkeys(range(len(bars)), atr))
-    return inst
-
-
-# ATR 3.0 on a close of 100 → ATR14% = 3; k = 1.5 → stop 4.5%, R = 2 → target 9%
-# (entry 100: SL 95.5, TP 109). Horizon 3: fill = bar 1 (session 0), deadline = bar 4.
-CELL = Cell(stop_atr_multiple=D("1.5"), reward_risk=D("2"), horizon=3)
-FLAT = ("100", "101", "99", "100")
-
-
-def _leg(bars: list[tuple[str, str, str, str]], *, cell: Cell = CELL, frontier: date = FRONTIER, **kw: object) -> Leg:
-    return simulate_leg(_inst(bars, **kw), SESSIONS[0], SESSIONS[1], cell, frontier=frontier)  # type: ignore[arg-type]
-
-
-def test_target_touch_fills_at_the_target() -> None:
-    leg = _leg([FLAT, ("100", "111", "99", "105"), FLAT, FLAT, FLAT])
-    assert (leg.outcome, leg.return_pct) == ("tp_hit", pytest.approx(9.0))
-
-
-def test_gap_through_the_stop_fills_at_the_open() -> None:
-    leg = _leg([FLAT, FLAT, ("90", "91", "88", "90"), FLAT, FLAT])
-    assert (leg.outcome, leg.return_pct) == ("sl_hit", pytest.approx(-10.0))
-
-
-def test_ambiguous_bar_takes_the_stop_first() -> None:
-    leg = _leg([FLAT, FLAT, ("100", "112", "94", "100"), FLAT, FLAT])
-    assert (leg.outcome, leg.return_pct) == ("ambiguous_stop", pytest.approx(-4.5))
-
-
-def test_horizon_exit_is_the_deadline_close_and_no_later_bar_matters() -> None:
-    deadline = ("100", "101", "99", "103")
-    # A bar after the deadline that gaps through the stop, and one that is missing entirely.
-    assert _leg([FLAT, FLAT, FLAT, FLAT, deadline, ("80", "81", "79", "80")]).return_pct == pytest.approx(3.0)
-    leg = _leg([FLAT, FLAT, FLAT, FLAT, deadline])
-    assert (leg.outcome, leg.return_pct) == ("expired", pytest.approx(3.0))
-
-
-def test_a_touch_on_the_deadline_session_counts() -> None:
-    leg = _leg([FLAT, FLAT, FLAT, FLAT, ("100", "110", "99", "104")])
-    assert (leg.outcome, leg.return_pct) == ("tp_hit", pytest.approx(9.0))
-
-
-def test_series_ending_before_the_frontier_is_a_delisting_at_its_last_close() -> None:
-    leg = _leg([FLAT, FLAT, FLAT, ("100", "101", "96", "97")])
-    assert (leg.outcome, leg.return_pct) == ("delisted", pytest.approx(-3.0))
-
-
-def test_unresolved_break_inside_the_hold_is_refused_not_booked_across_the_scale_change() -> None:
-    # A 1:10 reverse split on bar 3 would read as a +900% target touch without the segment bound.
-    bars = [FLAT, FLAT, FLAT, ("1000", "1010", "990", "1000"), FLAT]
-    leg = _leg(bars, breaks=(SESSIONS[3],))
-    assert (leg.return_pct, leg.refusal) == (None, "series_break")
-
-
-def test_series_ending_at_the_frontier_is_refused_not_booked() -> None:
-    leg = _leg([FLAT, FLAT, FLAT, FLAT], frontier=SESSIONS[3])
-    assert (leg.return_pct, leg.refusal) == (None, "corpus_edge")
-
-
-def test_levels_outside_the_section_5_bounds_are_ineligible() -> None:
-    assert _leg([FLAT] * 5, atr=0.5).refusal == "levels_outside_bounds"  # stop 0.75% < 2%
-    assert _leg([FLAT] * 5, atr=20.0).refusal == "levels_outside_bounds"  # stop 30% > 25%
-
-
-def test_levels_are_judged_on_the_quantized_control_derivation() -> None:
-    # ATR14% = q(100 × 1.333333 / 100) = 1.3333; k = 1.5 → stop q(1.99995) = 2.0000, which the
-    # §5 floor admits. On raw floats the stop is 1.9999995% and would be refused.
-    leg = _leg([FLAT] * 5, atr=1.333333)
-    assert leg.refusal is None and leg.outcome == "expired"
-
-
-def test_missing_atr_and_missing_fill_session_are_refused() -> None:
-    assert _leg([FLAT] * 5, atr=None).refusal == "atr_invalid"
-    inst = _inst([FLAT] * 5)
-    # The next session passed in is not the instrument's next bar (a provider coverage hole).
-    assert simulate_leg(inst, SESSIONS[0], SESSIONS[2], CELL, frontier=FRONTIER).refusal == (
-        "next_bar_not_next_session"
-    )
-    assert simulate_leg(inst, SESSIONS[4], SESSIONS[5], CELL, frontier=FRONTIER).refusal == "no_next_bar"
-
-
-def test_atr_window_lets_an_old_masked_bar_age_out() -> None:
-    clean = ("100", "101", "99", "100")
-    bars: list[tuple[str | None, ...]] = [clean] * 400
-    bars[5] = ("100", None, None, "100")  # a quarantined wick early in the history
-    inst = PanelInstrument(1, _series(bars), {}, ())
-    assert atr_at(inst, 100) is None  # masked bar still inside the trailing window
-    assert atr_at(inst, 399) == pytest.approx(2.0)  # aged out: the pack sees a clean window
-
-
-def test_atr_needs_min_bars_inside_the_signal_segment() -> None:
-    bars: list[tuple[str | None, ...]] = [("100", "101", "99", "100")] * 200
-    series = _series(bars)
-    inst = PanelInstrument(1, series, {}, (series.dates[150],))
-    assert math.isnan(atr_at(inst, 170) or 0.0)  # 21 bars since the break < MIN_BARS
-    assert atr_at(inst, 149) == pytest.approx(2.0)
-    fresh = PanelInstrument(1, series, {}, ())
-    assert math.isnan(atr_at(fresh, 30) or 0.0)
-    assert _leg([FLAT] * 5, atr=math.nan).refusal == "too_few_bars"
-
-
-def test_universe_floor_reads_the_signal_close() -> None:
-    inst = _inst([("3", "3.1", "2.9", "2.99"), ("3", "3.1", "2.9", "3.00")])
-    assert not in_universe(inst, SESSIONS[0])
-    assert in_universe(inst, SESSIONS[1])
-    assert not in_universe(inst, SESSIONS[9])
-
-
-def test_nyse_sessions_skip_weekends_and_holidays() -> None:
-    week = nyse_sessions(date(2025, 12, 22), date(2025, 12, 28))
-    assert week == [date(2025, 12, 22), date(2025, 12, 23), date(2025, 12, 24), date(2025, 12, 26)]
+def test_leg_loss_is_realised_plus_the_session_low_bound() -> None:
+    open_trade = _trade(0, 5, "100", {0: "97"})
+    assert leg_loss([open_trade], CAL[0]) == pytest.approx(250 * 0.03)
+    # No bar read on CAL[1]: the latest earlier low since the fill.
+    assert leg_loss([open_trade], CAL[1]) == pytest.approx(250 * 0.03)
+    # Exiting this session: min(low, exit) plus the tariff; no intraday gain offsets it.
+    stopped = _trade(0, 1, "95", {0: "99", 1: "94"}, label="stop")
+    assert leg_loss([stopped], CAL[1]) == pytest.approx(250 * (0.06 + 0.003))
+    # After its exit it is realised.
+    assert leg_loss([stopped], CAL[2]) == pytest.approx(250 * 0.053)
+    # No low read at all: marked at the entry.
+    assert leg_loss([_trade(0, 5, "100", {})], CAL[0]) == 0.0
 
 
 # ---------------------------------------------------------------------------
-# draw + rejection rates
+# v6 grid: decisions and whole paths (a fixed feasible structure on every name)
 # ---------------------------------------------------------------------------
 
 
-def test_draw_pairs_arm_minus_control_and_replaces_thin_sessions() -> None:
-    sessions = [date(2025, 3, 3), date(2025, 3, 4), date(2025, 3, 5)]
-    # Session 1 has only refused legs → thin; the others return the instrument's position as a %.
-    universes = [[0, 1, 2, 3], [0, 1, 2, 3], [4, 5, 6, 7]]
+def _evaluation(setups: tuple[str, ...] = ("breakout_donchian20",)) -> Evaluation:
+    # close 100, ATR 2: invalidation 96 → stop 95.5 (2.25 ATR, 4.5%); target 110 (10%, R 2.22).
+    levels: dict[str, Level | None] = dict.fromkeys(LEVEL_IDS, None)
+    levels["swing_low_1"] = Level(Fraction(96), 5)
+    levels["donchian20_high"] = Level(Fraction(110), 5)
+    return Evaluation(frozenset(setups), levels, measure_atr(D(2), D(100)))
 
-    def leg_for(j: int, n: int) -> Leg:
-        return Leg(None, refusal="next_bar_not_next_session") if j == 1 else Leg(float(n), outcome="expired")
 
-    census = Census()
-    out = draw_pair_differences(
-        np.random.default_rng(0), sessions, universes, leg_for, replicates=4, clusters=2, census=census
-    )
-    assert out.shape == (4, 2, 2)
-    assert census.thin_sessions == {sessions[1]}
-    # Four distinct legs per session, so the pair differences are bounded by the session's spread.
-    assert np.all(np.abs(out) <= 3.0) and np.all(out != 0.0)
+def _context(rows: list[Row] | None = None, *, n: int = 6, evaluation: Evaluation | None = None) -> PathContext:
+    bars: list[Row] = [FLAT] * len(CAL) if rows is None else rows
+    names = {iid: _name(bars, iid=iid) for iid in range(1, n + 1)}
+    position = {d: p for p, d in enumerate(CAL)}
+    ev = _evaluation() if evaluation is None else evaluation
 
-    with pytest.raises(RuntimeError, match="eligible legs"):
-        draw_pair_differences(
-            np.random.default_rng(0), sessions, universes, leg_for, replicates=1, clusters=3, census=Census()
+    def evaluate(iid: int, session: date) -> Evaluation | None:
+        return ev if names[iid].index_of(position[session]) is not None and evaluation is not False else None
+
+    return PathContext(names, CAL, position, tuple(names), s0=1, seed=7, replicate=0, evaluate=evaluate)
+
+
+def test_decide_excludes_arm_and_control_holdings_and_is_reproducible() -> None:
+    ctx = _context(n=3)
+    holdings: dict[LegName, frozenset[int]] = {"arm": frozenset({1}), "control": frozenset({2})}
+
+    def run() -> tuple[list[Decision], Diagnostics]:
+        diagnostics = Diagnostics()
+        out = decide(
+            ctx,
+            horizon=5,
+            session=CAL[0],
+            fill=CAL[1],
+            holdings=holdings,
+            next_pair_seq=0,
+            hex_="a" * 64,
+            diagnostics=diagnostics,  # type: ignore[arg-type]
         )
+        return out, diagnostics
+
+    decisions, diagnostics = run()
+    assert {d.arm.instrument_id for d in decisions} <= {2, 3}
+    assert all(d.control.instrument_id in {1, 3} for d in decisions)
+    assert [d.pair_seq for d in decisions] == list(range(len(decisions)))
+    assert diagnostics.arm_decisions == 2
+    # Two draws from a 2-name pool with no replacement: both pairs are created.
+    assert len(decisions) + diagnostics.control_pool_exhausted == 2
+    assert [(d.arm.instrument_id, d.control.instrument_id) for d in decisions] == [
+        (d.arm.instrument_id, d.control.instrument_id) for d in run()[0]
+    ]
 
 
-def test_flip_set_sensitivity_is_the_largest_rate_gap() -> None:
-    a = {0.0: {15: 0.05, 20: 0.06}, 1.0: {15: 0.2, 20: 0.3}}
-    b = {0.0: {20: 0.05}, 1.0: {20: 0.33}}  # Monte-Carlo K only
-    assert flip_set_sensitivity(a, b) == pytest.approx(0.03)
-    assert flip_set_sensitivity(a, {}) == 0.0
+def test_a_flat_path_enrolls_hits_capacity_and_reads_d_zero() -> None:
+    result = simulate_path(_context(), horizon=5, shift=0.0)
+    diag = result.diagnostics
+    assert not result.halted_loss and not result.no_start
+    assert set(diag.refused_legs) <= {"capacity"} and diag.refused_legs["capacity"] > 0
+    assert result.units == diag.pairs - diag.broken_pairs
+    assert result.sum_d == pytest.approx(0.0)
+    assert result.outcome in ("insufficient", "not_reject")
 
 
-def test_rejection_rates_respond_to_the_planted_shift() -> None:
-    base = np.random.default_rng(2).normal(scale=10.0, size=(200, 20, 2))
-    rates = rejection_rates(base, cluster_counts=(10, 20), shifts_pct=(0.0, 20.0), alpha=0.05, seed=1, flips=999)
-    assert rates[0.0][10] < 0.15 and rates[0.0][20] < 0.15
-    assert rates[20.0][20] > 0.95
+def test_a_crash_halts_entries_on_the_loss_bound_and_positions_run_out() -> None:
+    crash: Row = ("40", "41", "39", "40")
+    rows: list[Row] = [FLAT] * 10 + [crash] * (len(CAL) - 10)
+    result = simulate_path(_context(rows), horizon=20, shift=0.0)
+    assert result.halted_loss and result.pairs_at_loss_halt is not None
+    # No pair enters after the halt, so the cohort is exactly the pairs filled by then.
+    assert result.units == result.pairs_at_loss_halt
+    assert result.outcome == "insufficient"
+
+
+def test_a_harmful_planted_shift_trips_the_harm_stop() -> None:
+    assert simulate_path(_context(), horizon=5, shift=-5.0).outcome == "halted_harm"
+
+
+def test_a_path_with_nothing_evaluable_never_starts() -> None:
+    result = simulate_path(_context(evaluation=False), horizon=5, shift=0.0)  # type: ignore[arg-type]
+    assert (result.no_start, result.units, result.outcome) == (True, 0, "insufficient")
+
+
+def test_summary_and_render_cover_every_cell_with_every_path_in_the_denominator() -> None:
+    ctx = _context()
+    results = [simulate_path(ctx, horizon=h, shift=s) for h in (5, 10, 20) for s in SHIFTS_PCT]
+    cells = summarise(results)
+    assert set(cells) == {"5", "10", "20"}
+    assert all(cells[h]["by_shift"]["0.0"]["outcomes"]["insufficient"]["n"] == 1 for h in cells)
+    assert "### horizon 5" in render(
+        {"window": ["a", "b"], "frontier": "f", "instruments": 6, "replicates": 1, "seed": 7, "cells": cells}
+    )
+    assert LEGS == ("arm", "control")
+
+
+def test_order_6_passes_for_every_setup_and_horizon_in_the_frozen_library() -> None:
+    assert_order_6()
+
+
+def test_build_panel_needs_room_for_a_whole_path() -> None:
+    panel = build_panel({}, CAL)
+    assert panel.starts and max(panel.starts) + PATH_SESSIONS < len(CAL)
+    with pytest.raises(RuntimeError, match="no start session"):
+        build_panel({}, CAL[:PATH_SESSIONS])
+
+
+def test_a_weekend_dated_break_still_cuts_at_the_next_retained_bar() -> None:
+    from scripts.ai_trial_power import segment_cuts
+
+    kept = [date(2025, 3, 6), date(2025, 3, 7), date(2025, 3, 10), date(2025, 3, 11)]
+    # Saturday 2025-03-08: the NYSE cut dropped that bar, the scale change still starts on the 10th.
+    assert segment_cuts(kept, [date(2025, 3, 8)]) == [2]
+    # Before the first or after the last retained bar: nothing to split.
+    assert segment_cuts(kept, [date(2025, 1, 2), date(2025, 4, 1)]) == []

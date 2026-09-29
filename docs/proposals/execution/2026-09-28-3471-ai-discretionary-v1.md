@@ -663,6 +663,106 @@ Neither admits a $125 half ticket.
   - **The grid is ATR-relative, per the supervisor's 2026-09-28 rule** (posted on #2437 after v4): k ∈ {1.5, 3}, R = 2, over the §5 horizons. Each leg's levels come from `ai_trial_decision.measure_atr` and `derive_control_levels`, exactly as a trial control leg's, so the §5 bounds, ATR band and R floor judge the quantized values; an unplaceable leg is redrawn. The ATR is the pack's: Wilder over the trailing 260 bars (at least 60) of the signal bar's own price segment. A full-history ATR would be poisoned for good by one old masked bar (Codex ckpt-2).
   - **Bracket resolution reuses `outcome_resolver.resolve_outcome`** over the series cut at the deadline. The fill session is session 0 and the deadline is session h (`ai_trial_deadline`), so a leg holds h + 1 bars and no later bar can decide it. The two rules above apply on top: an ambiguous bar takes the stop, and the horizon exit is the deadline bar's close. An unresolved `price_series_break` inside the hold refuses the leg.
   - The test is one-sided at α = 0.05, with δ planted on the arm leg. Its size at δ = 0 is printed, so a miscalibrated run is visible.
+- **v6 grid (slice v6-4c, O-v6-5; answers v63-42..51 and r2-v63-22..24; ckpt-1 rounds p1–p42, q1–q18, s1–s11).** Supersedes the ATR-grid bullet above, the random-vs-random pair, the thin-session redraw, the next-open gross execution model, the fixed-cluster output and the caveat list. Kept: the NYSE-session cut, the window, the back-adjusted-close limitation and "never calls the model". Everything below is by construction. No library row is drawn from, so no library drift is assumed (v63-42, 47): pairs are real corpus paths.
+  - **Data.** Every `us_equity` name with a bar on or after the window start, through `load_masked_bars` (quarantine masking kept), cut to NYSE sessions from 2022-06-01 and split into segments at unresolved `price_series_break` rows. 2022-06-01 is about 390 sessions before the window. Every window the sim reads is ≤ 261 bars ending at or after s₀'s signal session, so the cut changes a result only for a name missing more than ~130 sessions (p5). A non-finite or negative volume is read as missing (q17). Prices are held as float64 and read back as `Decimal(repr(x))`; the load asserts that round trip is exact for every stored price.
+    - A bar is **valid** when open, high, low and close are all finite and > 0, low ≤ min(open, close) and high ≥ max(open, close) (p23). An invalid bar is treated as an absent session.
+    - **Frontier** = the latest stored bar date over the universe.
+    - Every resolved or unresolved break date is loaded for the §16.3 break check.
+  - **Replicate = one forward trial path.** There are `--replicates` of them (default 400) under `--seed` (default 3471).
+    - Every random choice uses its own `numpy.random.default_rng`, keyed by an integer tuple, and its calls are consumed in the order written here (p14, p15). Candidate lists are ordered by `instrument_id`.
+      - key `(seed, r)`: first s₀, uniform over the window's NYSE sessions with s₀ + 100 sessions ≤ the frontier (no such session → the script raises, q18); then the shortlist.
+      - key `(seed, r, h, session ordinal, position)`: first the arm's name, then its setup. The session ordinal counts NYSE sessions from s₀'s signal session, which is 0.
+      - The control draw is `draw_control` under declaration hex = sha256(`"{seed}|{r}|{h}"`), with `pair_seq` counting from 0 per path and advancing only when a pair is created (as `plan_pairs` does) (p14).
+    - So δ never changes a draw, and a path under two δ diverges only where a halt changes its entries.
+    - The primary and harm-look seed is `ai_trial_readout.readout_seed` of that hex (q14).
+  - **Enrollment (p2).** Decisions start at s₀'s signal session. **Enrollment session 1** = the first session on which any leg fills, as in §9, and enrollment covers its 40 sessions. Decisions are taken only for fills on enrollment sessions, so the last is at the 39th session's close; nothing enters after enrollment (s1). A path with no fill by s₀ + 20 stops there, is `insufficient`, and is counted as `no_start`. The 100-session cap covers the 20-session start allowance, 40 enrollment sessions, a 20-session hold, the 10-session censor clock and the 6-session readout wait (p3).
+  - **Shortlist.** min(50, |U|) distinct names (`TOP_N + SMALL_CAP_N`), drawn uniformly once per replicate from U. U is the universe at s₀'s signal session: names with a valid bar on that session that pass §16.5's `in_universe` inside their segment (≥ 260 prior bars, median close ≥ $3, median dollar volume ≥ $1M over 252 bars). The shortlist is fixed for the replicate, and the thresholds are not re-applied later (p10).
+  - **Evaluable** at signal session *t*: the member has a valid bar dated *t* (the pack's staleness refusal, p8), ≥ 260 bars in its segment up to *t*, and `evaluate_at` (§16.5: the pack's `build_bar_series`, `indicators`, `compute_levels`, `detect_setups`, `measure_atr`) returns a state. Everything is judged at *t*, never at the fill session (p7).
+  - **Arm (O-v6-5's comparator).** Two decision positions per signal session, the §16.3 `maxItems` (p12). That is a throughput ceiling, since abstention is not modelled.
+    - Position *k* draws one name uniformly from the evaluable members that are all of:
+      - not held by the arm leg after that session's exits (`already_held`);
+      - not already chosen at this session;
+      - showing ≥ 1 detected setup;
+      - carrying a feasible `library_plan` at the cell's horizon.
+    - The setup is then uniform over that name's detected setups, taken in `SETUP_TYPES` order. The level ids are the library plan's.
+    - Order 6 passes for every (setup, horizon): all 15 frozen library rows meet its minimums (§16.11 "Pack"), and the code asserts it with `library_baseline` (p11).
+    - An empty candidate set, or an exhausted control pool, uses up the position; nothing is redrawn.
+    - This reproduces the trial's conditioning, setup detection and plan feasibility (r2-v63-23). The arm carries no selection skill, only δ.
+  - **Control.** `ai_trial_guard.control_pool` over the shortlist's evaluable members, minus the control leg's holdings after that session's exits and this session's earlier draws. Feasible means the arm's setup is detected and `derive_plan` on the arm's ids passes orders 8–12. The name then comes from `draw_control`. An empty pool is `control_pool_exhausted`: no pair, counted per accepted arm decision.
+  - **Order of a session *s*** (p13, q2):
+    1. fills for the decisions taken at *s* − 1, pairs in ascending `pair_seq`, each leg against its own capacity;
+    2. that session's bar decides exits;
+    3. the loss check;
+    4. the harm check;
+    5. decisions at the close, for a fill at *s* + 1.
+    A trade whose exit session is *s* holds its slot at *s*'s fill, and is not held at *s*'s close.
+  - **Execution at the fill bar's open,** standing in for the 15:00 ask and bid (no spread). Per leg, the first failure below is the one named (p22):
+    1. `no_fill`: no stored bar on the fill session, or its open is non-finite or ≤ 0. Only the open is judged, so the fill needs no other field of that bar; an otherwise invalid fill bar fills and joins the walk as an absent session (q1).
+    2. `plan_invalidated`: a break dated in (*t*, fill] (§16.3; active `price_adjustments` are not modelled, p24); or open ≤ `stop_price`, open ≥ `target_price` or open ≤ `invalidation_price`.
+    3. `capacity`: the leg already holds `TRIAL_MAX_CONCURRENT_PER_LEG` slots.
+    - A pair with a refused leg is broken (O11). Its filled leg holds a slot, counts toward the loss halt, and holds the readout (§9).
+    - Exits are `protective_rates(open, stop_pct, target_pct)`.
+  - **Walk (p16–p21, q3–q5, q12, s2).** The deadline is `exit_deadline_session(fill, h)`, counted in NYSE sessions. The walk reads the leg's own segment's valid bars dated from the fill session through the deadline, and stops at the exit.
+    - On the fill bar, only the intrabar rule applies: low ≤ stop exits at the stop; high ≥ target exits at the target; if both, the stop.
+    - On a later bar, a gap through a level fills at the open; then the intrabar rule applies.
+    - An absent session inside the hold is skipped. Its move reaches the next valid bar's open.
+    - Otherwise the exit is the deadline bar's close.
+    - When the deadline session has no valid bar in the leg's segment (a hole, a delisting, a break), the engine's deadline close executes at the next executable price: the open of the first valid segment bar after the deadline, up to the censor session `exit_deadline_session(deadline, TRIAL_CENSOR_SESSIONS)`. That bar is the exit session.
+    - **Censored (§9's clock)** when there is no such bar: the leg is valued at the latest valid close in its segment dated on or before the censor session, with no spread. Its exit session is the censor session, its exit label `censored`.
+    - So every filled leg is valued, and no leg is left unvalued in the sim.
+  - **Net and dollars** (v63-45, p25):
+    - Net % = 100 × (exit − entry) ÷ entry − 0.30, the library tariff.
+    - δ (pp) is added to the arm's net % for *d* only. Dollars and the loss halt never see it (p26, p29), so the halt path is the same for every δ and only the harm stop can differ.
+    - Each leg is a `full` ticket (`TRIAL_TICKET_USD`), fractional and unrounded. Realised $ = ticket × net % ÷ 100, with net % unshifted.
+  - **Loss halt** (v63-46, p27–p29, q9–q11, s3–s5). Per leg at session *s*, over the leg's own segment's bars only:
+    - loss(*s*) = −(realised $ of trades that exited before *s*) + Σ over trades alive at any point in *s* of loss*ᵢ*.
+    - For a trade exiting in *s*, loss*ᵢ* = ticket × [(entry − min(low*ₛ*, exit)) ÷ entry + 0.003].
+    - For a trade not exiting in *s*, loss*ᵢ* = ticket × (entry − low*ₛ*) ÷ entry.
+    - A trade with no valid bar on *s* uses its latest earlier low since its fill, or entry when it has none (s5). That session is not bounded, which is stated.
+    - On sessions with valid bars, this bounds from above the largest loss any instant of *s* can show under the daily-bar model. The 5-minute prices are not in the corpus.
+    - A leg whose loss(*s*) reaches `TRIAL_LOSS_HALT_PCT` of `TRIAL_LEG_CAPITAL_USD` halts the trial: no fills from *s* + 1. Open trades run to their exits and stay in the cohort.
+    - A crossing of the bound is not a proven breach, because the lows need not coincide (s4). So the `halted_loss` share is an upper bound under the daily-bar model, and it is labelled that way. `ai_trial_halts`' unmeasured and unproven branches have no sim counterpart.
+  - **Harm stop** (v63-50, p30–p32, q6–q8). Each session *s* runs `ai_trial_readout.harm_looks(records, seed=seed, today=s)` over records built from what is known at *s* only:
+    - `pair_seq` is the entry order, and `session_date` is the fill session;
+    - `state` is `unit` when both legs filled, `broken` otherwise;
+    - a leg that exited by *s* carries its `LegValue`, and a leg still open carries `None`;
+    - `live_legs` counts the filled legs still open;
+    - `resolved_session` is the latest exit up to *s*.
+    The first look that `halts` and is `flows_final` halts entries from *s* + 1. The first halt of either kind is terminal: loss is checked before harm at one session, and nothing fires after a halt.
+    - ⚠ **Live defects fixed in this slice.**
+      - `settled_unvalued` did not check `live_legs`. A unit whose first leg exited more than 5 sessions earlier, while the other leg was still open, left the look sequence, and it re-entered at its position once that leg exited. That shifted look membership, and a terminal halt could act on the wrong subset. It now requires `live_legs == 0`.
+      - The loader's `resolved_session` counted a closed leg only through `released_at`. It now also counts the leg's slice-based exit session (s11), so the anchor is the later of the two and a closed leg without a release still anchors `flows_final`.
+  - **Readout (p31, p33, q13).** Let *E* be the 40th enrollment session, kept after a halt, as the live cohort anchor does (`no_start`: s₀ + 20).
+    - The readout session *D* = `exit_deadline_session(max(E, latest exit of any filled cohort leg), READOUT_WAIT_SESSIONS + 1)`, so every final look is evaluated.
+    - Harm checks run through *D*.
+    - At *D*, `ai_trial_readout.primary(units, seed=seed)` runs, so the cohort minimum applies (v63-48). **Units** = the cohort pairs whose legs both filled; every one is valued (q15).
+  - **Outcome per replicate.** Exclusive, and every path is in the denominator (v63-49):
+    1. `halted_harm`;
+    2. else `insufficient` (< 30 units **or** < 10 clusters, p36; `no_start` included);
+    3. else `reject` (p ≤ α);
+    4. else `not_reject`.
+    Reported beside those, not exclusive:
+    - `halted_loss`;
+    - `halted_loss_below_minimum`: a loss halt fired **and** the final cohort is `insufficient`, counted after the positions open at the halt have run out (r2-v63-24's eventual-count reading);
+    - `pairs_at_loss_halt`: pairs with both legs filled by the halt session (p35).
+  - **Cells.** Horizon ∈ {5, 10, 20}, with every decision in a cell using it, crossed with δ ∈ {0, 1, 2, 3, 5} pp on per-trade net % (v63-43). Replicates are coupled across δ and h by the keyed draws above.
+  - **Printed per cell,** each with its denominator; an empty denominator prints `n/a (0)`, never 0 (p38–p40, q16).
+    - Over all paths, zero-unit paths included: the outcome shares per δ, with the Monte-Carlo SE √(p(1 − p) ÷ n); units and clusters (mean, p10, p50, p90).
+    - Denominators (s8). An **arm decision** is a position that drew a name; it has no further guard refusal, since its plan is feasible by construction. A **pair** is an arm decision whose control draw succeeded.
+    - Per arm decision: `control_pool_exhausted`, and the setup mix.
+    - Per pair: broken pairs, counted per refused leg by that leg's reason, so a pair with two refused legs counts twice and the shares can sum above 100% (s7); pool size; self-draw share; singleton-self pools.
+    - At δ = 0: the `reject` share, labelled the rejection rate under a no-skill arm and shown beside mean(*d*) pooled over every unit of every replicate, with that unit count (s9). It is the test's size only if E[*d*] = 0 there, and the arm's own library plan against the control's transferred ids need not give that (p37).
+  - **Caveats (replace the list above):**
+    - This is a noise model: the arm is a random library-plan pick.
+    - The population is not the ranked shortlist, and neither its turnover nor its spread filter is modelled.
+    - The throughput ceiling overstates units if the model abstains.
+    - Open-as-ask ignores the spread and the 15:00 fill.
+    - The 0.30% tariff is not the realised cost. No dividends, fees or financing are modelled. Corporate actions enter only as the back-adjusted series carries them, and that also moves the $3 and liquidity thresholds (p41, p42).
+    - A censored leg's latest close is the §9 mark with no spread, and a delisting is valued at the last close the corpus has (p20).
+    - The loss halt is a daily-bar bound, with no bound on a session that has no valid bar.
+    - `halted_mandate`, `halted_operator`, the §9 unresolved-leg clock, active adjustments and broker refusals other than those named are not modelled.
+    - The weekend-bar cut differs from the pack, as stated above.
+    - A share is the probability of that outcome under this simulation model, not a calibrated probability of the live trial's verdict (s10).
 
 **Readout.**
 - **Primary:** mean(*d*), the sign-flip p, the unit and cluster counts, and the verdict wording above.
@@ -1280,7 +1380,7 @@ Implemented in slice v6-4b (`ai_trial_readout.plan_readout`, with §16.11(b)). I
 - **O-v6-2:** the self-membership invariant.
 - **O-v6-3:** the look-ahead truncation test for every level and detector.
 - **O-v6-4:** the library JSON's sha equals the declaration's.
-- **O-v6-5 (r2-56):** slice v6-4 specifies the power simulation's comparator: plans from the library rule, on random setup-detected names, through the same pool, gate and exhaustion. It does so in a short spec paragraph that gets its own ckpt-1 before code.
+- **O-v6-5 (r2-56):** slice v6-4 specifies the power simulation's comparator: plans from the library rule, on random setup-detected names, through the same pool, gate and exhaustion. It does so in a short spec paragraph that gets its own ckpt-1 before code. **Specified in §9 "v6 grid" (slice v6-4c).**
 
 **Supervisor wake:** all four slices merged, the jobs respawned, and the pool command posted. The command has been posted on #3471.
 

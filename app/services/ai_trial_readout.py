@@ -382,10 +382,13 @@ class HarmLook:
 
 def settled_unvalued(pair: PairRecord, today: date) -> bool:
     """A unit that cannot be valued and never will be: its flow window closed with a leg still
-    unvalued, so no later row can count (a late row is a restatement)."""
+    unvalued, so no later row can count (a late row is a restatement). A leg still open can still
+    be valued, so a unit with ``live_legs`` is never settled: dropping it would let it re-enter the
+    look sequence later at its entry position and shift every later look's membership."""
     return (
         pair.state == "unit"
         and not pair.valued
+        and pair.live_legs == 0
         and pair.resolved_session is not None
         and today > exit_deadline_session(pair.resolved_session, FLOW_WINDOW_SESSIONS)
     )
@@ -1529,6 +1532,10 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
                     exit_session = fill_session(row["released_at"])
                 else:
                     exit_session = None
+                # The flow-window anchor is the later of the release and the execution, so a
+                # closed leg with no release yet still anchors ``flows_final`` and the due date.
+                if exit_session is not None:
+                    resolved.append(exit_session)
             values[leg] = replace(value, entry_session=fill_session(row["filled_at"]), exit_session=exit_session)
         records.append(
             PairRecord(

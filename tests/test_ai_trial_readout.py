@@ -240,6 +240,16 @@ def test_an_unvalued_unit_holds_the_looks_only_until_its_flow_window_closes() ->
     assert (look.units, look.clusters) == (10, 10)
 
 
+def test_a_unit_with_a_leg_still_open_holds_the_looks_whatever_its_first_exit_age() -> None:
+    # Arm exited long ago, control still open: the unit can still be valued, so it is never
+    # settled. Dropping it would let look 1 run on pairs 1–10, and re-admitting it once the
+    # control exits would move pair 10 out of look 1's membership after the fact.
+    sessions = _sessions(12)
+    open_control = replace(_pair(0, sessions[0], 0.0), control=None, live_legs=1)
+    pairs = [open_control] + [_pair(i, sessions[i], -1.0) for i in range(1, 12)]
+    assert harm_looks(pairs, seed=1, today=LATER) == []
+
+
 def test_profit_factor_reports_counts_without_losses() -> None:
     assert profit_factor([2.0, -1.0, 3.0, -4.0]).value == pytest.approx(1.0)
     no_losses = profit_factor([1.0, 2.0])
