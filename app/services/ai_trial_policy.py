@@ -44,6 +44,18 @@ from app.services.ai_trial_pair_lifecycle import (
     TRIAL_CENSOR_SESSIONS,
     TRIAL_UNRESOLVED_SESSIONS,
 )
+from app.services.ai_trial_readout import (
+    COHORT_SESSIONS,
+    FLOW_WINDOW_SESSIONS,
+    HARM_ALPHA,
+    HARM_LOOK_EVERY,
+    HARM_MIN_CLUSTERS,
+    MECHANICAL_EXITS,
+    MIN_CLUSTERS,
+    MIN_UNITS,
+    READOUT_WAIT_SESSIONS,
+)
+from app.services.ai_trial_stats import EXACT_MAX_CLUSTERS, MONTE_CARLO_FLIPS
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.strategy_position_manager import TRIAL_REPAIR_GRACE
 
@@ -61,7 +73,8 @@ POLICY_MODULES: Final = (
 )
 
 
-#: §3–§8 / O10 / O11 terms defined outside ``POLICY_MODULES``, hashed by ``repr``.
+#: §3–§8 / O10 / O11 terms and the §9 stopping rules defined outside ``POLICY_MODULES``, hashed by
+#: ``repr`` (a set as a sorted tuple: a frozenset's repr order follows the per-process string hash).
 FROZEN_CONSTANTS: Final[dict[str, object]] = {
     "ai_trial_deadline.TRIAL_ENTRY_TIME_UTC": TRIAL_ENTRY_TIME_UTC,
     "ai_trial_deadline.TRIAL_EXIT_TIME_UTC": TRIAL_EXIT_TIME_UTC,
@@ -71,6 +84,17 @@ FROZEN_CONSTANTS: Final[dict[str, object]] = {
     "ai_trial_pair_lifecycle.LABEL_CLASSIFIER_VERSION": LABEL_CLASSIFIER_VERSION,
     "ai_trial_pair_lifecycle.TRIAL_CENSOR_SESSIONS": TRIAL_CENSOR_SESSIONS,
     "ai_trial_pair_lifecycle.TRIAL_UNRESOLVED_SESSIONS": TRIAL_UNRESOLVED_SESSIONS,
+    "ai_trial_readout.COHORT_SESSIONS": COHORT_SESSIONS,
+    "ai_trial_readout.FLOW_WINDOW_SESSIONS": FLOW_WINDOW_SESSIONS,
+    "ai_trial_readout.HARM_ALPHA": HARM_ALPHA,
+    "ai_trial_readout.HARM_LOOK_EVERY": HARM_LOOK_EVERY,
+    "ai_trial_readout.HARM_MIN_CLUSTERS": HARM_MIN_CLUSTERS,
+    "ai_trial_readout.MECHANICAL_EXITS": tuple(sorted(MECHANICAL_EXITS)),
+    "ai_trial_readout.MIN_CLUSTERS": MIN_CLUSTERS,
+    "ai_trial_readout.MIN_UNITS": MIN_UNITS,
+    "ai_trial_readout.READOUT_WAIT_SESSIONS": READOUT_WAIT_SESSIONS,
+    "ai_trial_stats.EXACT_MAX_CLUSTERS": EXACT_MAX_CLUSTERS,
+    "ai_trial_stats.MONTE_CARLO_FLIPS": MONTE_CARLO_FLIPS,
     "scoring._DEFAULT_MODEL_VERSION": _DEFAULT_MODEL_VERSION,
     "strategy_position_manager.TRIAL_REPAIR_GRACE": TRIAL_REPAIR_GRACE,
 }
