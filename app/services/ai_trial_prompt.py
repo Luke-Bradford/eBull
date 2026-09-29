@@ -93,6 +93,8 @@ def _num(value: float | Fraction) -> str:
             raise ValueError(f"{value} has no exact decimal form")
     else:
         number = Decimal(repr(value))
+        if not number.is_finite():
+            raise ValueError(f"{value} is not a finite rule constant")
     return f"{number.normalize():f}"
 
 

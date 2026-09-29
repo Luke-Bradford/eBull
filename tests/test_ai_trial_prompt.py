@@ -123,3 +123,6 @@ def test_rule_constants_render_exactly() -> None:
     with pytest.raises(ValueError):
         _num(Fraction(1, 3))
     assert [_num(2.0), _num(25.0), _num(100.0), _num(0.1234567)] == ["2", "25", "100", "0.1234567"]
+    for bad in (float("inf"), float("nan")):
+        with pytest.raises(ValueError):
+            _num(bad)
