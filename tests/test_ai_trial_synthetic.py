@@ -23,12 +23,13 @@ def _decision(symbol: str, **kw: Any) -> dict[str, Any]:
     return {
         "action": "enter_long",
         "symbol": symbol,
-        "stop_pct": 5.0,
-        "target_pct": 12.0,
-        "horizon_days": 10,
+        "setup_type": "pullback_rising_sma20",
+        "invalidation_level_id": "sma50",
+        "target_level_id": "range20_projection",
+        "horizon_days": 5,
         "size_tier": "half",
         "confidence": 3,
-        "thesis": "Trend intact. Stop under the swing low.",
+        "thesis": "Trend intact. The 8-K beat is not in the base rate.",
         **kw,
     }
 
@@ -93,6 +94,10 @@ def test_validates_and_pairs_the_accepted_decision() -> None:
     assert 900005 not in pair["pool"]  # the control leg's holding
     assert 900006 in pair["pool"]  # the ARM's holding is not excluded from the control pool
     assert pair["control_instrument_id"] == pair["pool"][pair["index"]]
+    # §16.4: BRVO detects no setup, so it is filtered out; the arm's own name stays in (O-v6-2).
+    assert 900002 not in pair["pool"] and 900001 in pair["pool"]
+    assert accepted["baseline"] is not None and accepted["stop_pct"] is not None
+    assert pair["control"]["stop_price"] is not None
 
 
 def test_injected_symbol_is_refused_not_in_shortlist() -> None:
