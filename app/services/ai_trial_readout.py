@@ -471,7 +471,7 @@ class SpyPairs:
     mean_spy_pct: float | None
     #: Mean of (arm net % − SPY %) over those units.
     mean_arm_minus_spy_pct: float | None
-    #: Units without one: a leg session unknown, or a SPY close missing or masked.
+    #: Units without one: no arm net or no arm sessions, or a SPY close missing or masked.
     missing: int
 
 
@@ -564,12 +564,14 @@ def turnover(legs: Sequence[LegValue]) -> Turnover:
     ]
     spans = [(entry, exit_, amount) for entry, exit_, amount in dated if amount is not None]
     missing = len(legs) - len(spans)
-    if not spans:
+    if not dated:
         return Turnover(0, 0.0, 0, None, None, missing)
     sessions = [min(entry for entry, _, _ in dated)]
     last = max(exit_ for _, exit_, _ in dated)
     while sessions[-1] < last:
         sessions.append(exit_deadline_session(sessions[-1], 1))
+    if not spans:
+        return Turnover(0, 0.0, len(sessions), None, None, missing)
     committed = [sum(amount for entry, exit_, amount in spans if entry <= s <= exit_) for s in sessions]
     mean = sum(committed) / len(sessions)
     opened = sum(amount for _, _, amount in spans)
@@ -995,8 +997,14 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
                 if row["released_at"] is not None:
                     resolved.append(fill_session(row["released_at"]))
                 # The broker's execution time, not the release: a close detected a session late
-                # still exited on its own session.
-                exit_session = fill_session(max(s.executed_at for s in slices)) if slices else None
+                # still exited on its own session. With no slice (an unvalued leg) the release is
+                # the only exit evidence, and its dates still bound the turnover window.
+                if slices:
+                    exit_session = fill_session(max(s.executed_at for s in slices))
+                elif row["released_at"] is not None:
+                    exit_session = fill_session(row["released_at"])
+                else:
+                    exit_session = None
             values[leg] = replace(value, entry_session=fill_session(row["filled_at"]), exit_session=exit_session)
         records.append(
             PairRecord(
