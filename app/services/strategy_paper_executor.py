@@ -832,15 +832,21 @@ def _stressed_cost(
     return total * intent.cost_stress_multiplier, bases.pop()
 
 
-def _protective_rates(intent: _SizingIntent) -> tuple[Decimal, Decimal]:
-    """Stop and take-profit rates from the pre-submission ask, rounded DOWN to 6dp."""
-    stop_rate = (intent.ask * (Decimal("1") - intent.stop_loss_pct / Decimal("100"))).quantize(
+def protective_rates(ask: Decimal, stop_loss_pct: Decimal, take_profit_pct: Decimal) -> tuple[Decimal, Decimal]:
+    """Stop and take-profit rates from the pre-submission ask, rounded DOWN to 6dp. Public so
+    the #3471 setup base-rate library (``scripts/ai_trial_setup_base_rates.py``) places its
+    exits by the executor's own rule rather than a copy of it."""
+    stop_rate = (ask * (Decimal("1") - stop_loss_pct / Decimal("100"))).quantize(
         Decimal("0.000001"), rounding=ROUND_DOWN
     )
-    take_rate = (intent.ask * (Decimal("1") + intent.take_profit_pct / Decimal("100"))).quantize(
+    take_rate = (ask * (Decimal("1") + take_profit_pct / Decimal("100"))).quantize(
         Decimal("0.000001"), rounding=ROUND_DOWN
     )
     return stop_rate, take_rate
+
+
+def _protective_rates(intent: _SizingIntent) -> tuple[Decimal, Decimal]:
+    return protective_rates(intent.ask, intent.stop_loss_pct, intent.take_profit_pct)
 
 
 # The two PORTFOLIO-MANDATE observations that are sourced from OUR tables rather
