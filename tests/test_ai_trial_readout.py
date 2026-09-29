@@ -20,6 +20,7 @@ from app.services.ai_trial_readout import (
     READOUT_WAIT_SESSIONS,
     CensorMark,
     CloseRow,
+    ExposureFacts,
     LegValue,
     PairRecord,
     Readout,
@@ -29,6 +30,7 @@ from app.services.ai_trial_readout import (
     exit_label,
     fill_gap_pct,
     harm_looks,
+    leg_exposure,
     primary,
     profit_factor,
     readout_seed,
@@ -452,3 +454,40 @@ def test_the_due_readout_carries_spy_references_and_turnover() -> None:
     assert readout.spy_capital.gross_pct is None
     assert readout.spy_capital.arm_pct == pytest.approx(100 * 30 * 2.0 / 1000)
     assert set(readout.turnover) == {"arm", "control"} and readout.turnover["arm"].legs == 30
+
+
+# -- exposure -----------------------------------------------------------------------------------
+
+
+def _facts(cap: str | None, atr: str | None, beta: str | None, industry: int | None) -> ExposureFacts:
+    return ExposureFacts(
+        market_cap_usd=None if cap is None else Decimal(cap),
+        atr14_pct=None if atr is None else Decimal(atr),
+        beta_1y=None if beta is None else Decimal(beta),
+        industry_id=industry,
+    )
+
+
+def test_leg_exposure_summarises_and_counts_each_missing_fact() -> None:
+    exposure = leg_exposure(
+        [_facts("1e9", "3", "1.2", 7), _facts("3e9", None, "0.8", 7), _facts(None, "5", None, None), None]
+    )
+    assert exposure.legs == 4
+    assert exposure.median_market_cap_usd == pytest.approx(2e9)
+    assert exposure.mean_atr14_pct == pytest.approx(4.0)
+    assert exposure.mean_beta_1y == pytest.approx(1.0)
+    assert exposure.industries == {"7": 2, "unclassified": 2}
+    assert exposure.missing == {"market_cap": 2, "atr14_pct": 2, "beta_1y": 2}
+    assert leg_exposure([]).median_market_cap_usd is None
+
+
+def test_the_due_readout_reports_exposure_per_leg_over_the_units() -> None:
+    sessions = _sessions(COHORT_SESSIONS + 1)
+    units = [_pair(i, sessions[i % 10], 1.0) for i in range(30)]
+    facts = {i: {"arm": _facts("5e8", "4", "1.5", 3), "control": _facts("2e9", "2", "0.9", 4)} for i in range(29)}
+    as_of = datetime.combine(exit_deadline_session(sessions[COHORT_SESSIONS], 15), datetime.min.time(), tzinfo=UTC)
+    readout = _build(units, as_of + timedelta(hours=22), exposure_facts=facts)
+    arm, control = readout.exposure["arm"], readout.exposure["control"]
+    assert (arm.legs, arm.mean_beta_1y, arm.industries) == (30, pytest.approx(1.5), {"3": 29, "unclassified": 1})
+    assert (control.median_market_cap_usd, control.missing["beta_1y"]) == (pytest.approx(2e9), 1)
+    assert _build(units, datetime(2026, 10, 2, 22, tzinfo=UTC), exposure_facts=facts).exposure == {}

@@ -73,7 +73,7 @@ def render(readout: Readout) -> str:
         f"  per pair (arm's own sessions, no spread): {readout.spy_per_pair}",
         f"  capital level (buy-and-hold on the arm's capital, one round-trip spread): {readout.spy_capital}",
         f"turnover (Σ opened ÷ mean committed, per 20 sessions): {readout.turnover}",
-        "Not computed: exposure (see ai_trial_readout).",
+        f"exposure at the decision (not matched between legs, §9): {readout.exposure}",
         "Dividends are not in the closed-trade history, so not in the net.",
     ]
     return "\n".join(lines)
