@@ -556,7 +556,8 @@ def turnover(legs: Sequence[LegValue]) -> Turnover:
     """§9: Σ open amounts ÷ mean capital committed, scaled to ``TURNOVER_SESSIONS`` sessions. A leg
     commits its open amount on every session from its fill to its exit, both included. The window
     runs over every leg's known sessions, a leg without an open amount included: it still held
-    capital across them, so dropping its dates would shorten the window and overstate turnover."""
+    capital across them, so dropping its dates would shorten the window and overstate the printed
+    mean capital committed. The ratio itself is window-invariant (= opened × 20 ÷ Σ committed)."""
     dated = [
         (leg.entry_session, leg.exit_session, leg.open_amount)
         for leg in legs
