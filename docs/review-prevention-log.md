@@ -11698,3 +11698,13 @@ neighbouring container and match it.**
 - Prevention: when a decision's strength depends on a per-candidate property, collect every candidate and choose by
   that property before acting. `next(...)` over a filter is a leg-order tie-break, not a rule.
 - Enforced in: `ai_trial_halts.loss_breach` and `tests/test_ai_trial_halts.py`.
+
+### A fail-closed guard over bad data needs its own refusal code, not the nearest business code (#3471)
+
+- Failure: v6-3b's execution check folded "the leg's plan prices are missing" into `plan_invalidated`. The refusal
+  was fail-closed and correct, but the audit trail then reported corrupt plan data as a market move invalidating
+  the plan, and the two cannot be told apart afterwards. The review bot flagged it (#3507).
+- Prevention: when a guard refuses because an INPUT is unusable, give it a code that names the input
+  (`plan_prices_missing`, `quote_bid_invalid`), separate from the code for the condition the check exists to
+  detect. Self-review prompt: "if this refusal fires, would a reader of the code alone know what happened?"
+- Enforced in: `ai_trial_intent.load_trial_intent` and `tests/test_ai_trial_intent_db.py`.

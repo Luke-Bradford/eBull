@@ -409,6 +409,15 @@ def test_a_plan_the_quote_or_a_scale_change_has_invalidated_refuses_each_leg(ebu
     conn.commit()
     assert _reason(conn, control) == "plan_invalidated"
 
+    # A leg without its plan prices is bad data, refused under its own code (the triggers that
+    # forbid it are bypassed here to reach the guard).
+    conn.execute("ALTER TABLE ai_trial_pairs DISABLE TRIGGER USER")
+    conn.execute("UPDATE ai_trial_pairs SET control_stop_price = NULL")
+    conn.execute("ALTER TABLE ai_trial_pairs ENABLE TRIGGER USER")
+    conn.execute("DELETE FROM price_adjustments WHERE instrument_id = %s", (control_instrument[0],))
+    conn.commit()
+    assert _reason(conn, control) == "plan_prices_missing"
+
 
 def test_a_tampered_declaration_and_an_over_policy_stop_refuse(ebull_test_conn: Conn) -> None:
     conn = ebull_test_conn

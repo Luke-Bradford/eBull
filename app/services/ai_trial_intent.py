@@ -455,7 +455,11 @@ def load_trial_intent(
     if not _positive_finite(row["bid"]):
         return None, "quote_bid_invalid", True
     prices = _leg_plan_prices(row)
-    if not all(_positive_finite(p) for p in prices) or plan_invalidated(
+    # Bad plan data is not an invalidated plan: its own code, so the audit trail tells them apart.
+    # (`sql/439` requires these prices on every published row, so this is a defect guard.)
+    if not all(_positive_finite(p) for p in prices):
+        return None, "plan_prices_missing", True
+    if plan_invalidated(
         ask=Decimal(str(row["ask"])),
         bid=Decimal(str(row["bid"])),
         invalidation=Decimal(str(prices[0])),
