@@ -121,7 +121,7 @@ def test_a_check_that_cannot_run_fails_closed_to_a_resumable_halt(
     assert (check.failed, check.halted) == (True, "halted_operator")
     # The probe's write went with the savepoint; the fail-closed halt is the only event.
     assert [(state, actor, reason) for state, actor, reason in _states(conn)][1:] == [
-        ("halted_operator", "engine", "halt_check_failed:RuntimeError")
+        ("halted_operator", "engine", "halt_check_failed:RuntimeError:boom")
     ]
     assert calls == ["v1"]
 

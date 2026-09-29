@@ -212,7 +212,8 @@ def _fail_closed(conn: Conn, declaration_id: int, exc: Exception) -> HaltCheck:
             conn,
             declaration_id=declaration_id,
             to_state="halted_operator",
-            reason=f"halt_check_failed:{type(exc).__name__}",
+            # The message too (bounded), so a persistent cause is triageable from the event alone.
+            reason=f"halt_check_failed:{type(exc).__name__}:{str(exc)[:200]}",
         )
     except Exception:
         logger.exception("ai trial %s: the fail-closed halt could not be written either", declaration_id)
