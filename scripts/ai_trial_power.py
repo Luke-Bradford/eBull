@@ -427,7 +427,7 @@ def render(report: Mapping[str, Any]) -> str:
         lines += [
             "",
             f"### {cell['cell']} — sd(d) {cell['d_sd_pct']:.2f} pp, mean(d) {cell['d_mean_pct']:+.3f} pp, "
-            f"flip-set sensitivity {cell['flip_set_sensitivity']:.3f}",
+            f"flip-set sensitivity (Monte-Carlo K only; exact K is seed-free) {cell['flip_set_sensitivity']:.3f}",
             f"distinct legs {cell['leg_outcomes']} · refused {cell['leg_refusals']} · "
             f"thin sessions {len(cell['thin_sessions'])}",
             head,
