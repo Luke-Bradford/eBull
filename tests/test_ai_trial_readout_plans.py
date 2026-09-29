@@ -265,6 +265,8 @@ def test_a_partial_close_before_the_final_exit_is_recognised() -> None:
     # Engine close: a slice executed before the close was requested is a partial.
     assert partial_close([_slice(10, "103"), _slice(31, "104")], "exit_deadline", requested)
     assert not partial_close([_slice(31, "104"), _slice(31, "104")], "exit_deadline", requested)
+    # An engine close with no request time cannot show its slices followed it: kept out.
+    assert partial_close([_slice(31, "104")], "exit_deadline", None)
     # Broker close: a slice between stop and target beside a final stop slice.
     assert partial_close([_slice(10, "103"), _slice(40, "94")], None, None)
     assert not partial_close([_slice(40, "94"), _slice(41, "93")], None, None)

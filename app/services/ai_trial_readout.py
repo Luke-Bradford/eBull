@@ -239,7 +239,9 @@ def partial_close(rows: Sequence[CloseRow], close_trigger: str | None, close_req
     between stop and target beside a final stop or target slice). ⚠ A manual partial filled at or
     through the leg's own stop or target price is indistinguishable from it, and is not caught."""
     if close_trigger is not None:
-        return close_requested_at is not None and any(row.executed_at < close_requested_at for row in rows)
+        # No request time (unreachable: ``created_at`` is NOT NULL) cannot show the slices came
+        # after the close, so the leg is kept out of the library outcomes rather than valued in.
+        return close_requested_at is None or any(row.executed_at < close_requested_at for row in rows)
     final = exit_label(rows, None)
     return any(exit_label([row], None) != final for row in rows)
 
@@ -1060,10 +1062,10 @@ def plan_readout(cohort_pairs: Sequence[PairRecord], units: Sequence[PairRecord]
     plans = facts.pairs
     completed = [pair for pair in cohort_pairs if pair.state == "unit"]
     cohort_plans = [plans[pair.pair_seq] for pair in cohort_pairs if pair.pair_seq in plans]
-    positions: dict[str, list[float]] = {}
+    positions: dict[int | None, list[float]] = {}
     for unit in units:
         plan = plans.get(unit.pair_seq)
-        positions.setdefault("unlabelled" if plan is None else str(plan.response_position), []).append(unit.d)
+        positions.setdefault(None if plan is None else plan.response_position, []).append(unit.d)
     return PlanReadout(
         library_sha256=facts.library_sha256,
         library_caveat=facts.library_caveat,
@@ -1088,7 +1090,11 @@ def plan_readout(cohort_pairs: Sequence[PairRecord], units: Sequence[PairRecord]
             for leg in LEGS
         },
         exhausted_by_setup=dict(sorted(facts.exhausted.items())),
-        d_by_response_position=[GroupRow(k, len(ds), sum(ds) / len(ds)) for k, ds in sorted(positions.items())],
+        # Numeric order (not lexicographic), with any unplanned unit last.
+        d_by_response_position=[
+            GroupRow("unlabelled" if k is None else str(k), len(ds), sum(ds) / len(ds))
+            for k, ds in sorted(positions.items(), key=lambda item: (item[0] is None, item[0] or 0))
+        ],
     )
 
 
