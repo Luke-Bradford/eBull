@@ -6827,15 +6827,22 @@ def strategy_paper_cycle() -> None:
             with connect_job() as conn:
                 result = run_strategy_paper_cycle(conn, broker=broker)
                 pair_events = _record_trial_pair_lifecycle(conn)
+                trial_halts = _enforce_trial_halts(conn)
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
         tracker.note = (
             f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
             f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
             f"trial_pair_events={'error' if pair_events is None else pair_events} "
+            f"trial_halts={'error' if trial_halts is None else trial_halts} "
             f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
         )
-        if pair_events is None:
-            tracker.progress = JobProgress(errors={"trial_pair_lifecycle": 1})
+        errors = {
+            name: 1
+            for name, failed in (("trial_pair_lifecycle", pair_events is None), ("trial_halts", trial_halts is None))
+            if failed
+        }
+        if errors:
+            tracker.progress = JobProgress(errors=errors)
 
 
 def _record_trial_pair_lifecycle(conn: psycopg.Connection[Any]) -> int | None:
@@ -6856,6 +6863,27 @@ def _record_trial_pair_lifecycle(conn: psycopg.Connection[Any]) -> int | None:
         logger.exception("strategy_paper_cycle: AI-trial pair lifecycle failed; the cycle's work is committed")
         conn.rollback()
         return None
+
+
+def _enforce_trial_halts(conn: psycopg.Connection[Any]) -> str | None:
+    """#3471 §9: the loss halt and the harm stop, after the pair events they read; ``None`` if any
+    check failed (degraded on the errors axis, as the lifecycle step above; a declaration that
+    raised is logged by ``enforce_trial_halts`` and the others' halts are still committed).
+    Returns ``checked=<n> halted=<states> unmeasured=<n>`` for the cycle's note."""
+    from app.services.ai_trial_halts import enforce_trial_halts
+
+    try:
+        conn.commit()
+        checks = enforce_trial_halts(conn)
+        conn.commit()
+    except Exception:
+        logger.exception("strategy_paper_cycle: AI-trial halt check failed")
+        conn.rollback()
+        return None
+    if any(check.failed for check in checks):
+        return None
+    halted = ",".join(f"{check.declaration_id}:{check.halted}" for check in checks if check.halted) or "none"
+    return f"checked={len(checks)} halted={halted} unmeasured={sum(check.unmeasured for check in checks)}"
 
 
 def ai_trial_decision_run() -> None:

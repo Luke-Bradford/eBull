@@ -11689,3 +11689,12 @@ neighbouring container and match it.**
   WARNING with the row id, or store it in its own column. Self-review prompt: "which reason does this row claim, and
   is it the one that happened?"
 - Enforced in: `ai_trial_run.refuse_run` (the WARNING log line).
+
+### A terminal decision must pick the strongest PROVEN candidate, not the first (#3471)
+
+- Failure: the AI trial's loss halt took the first leg over the limit. When that leg's breach was unproven (it had
+  unmeasured trades, so it earns only the resumable `halted_operator`), a proven breach on the other leg was
+  downgraded from the terminal `halted_loss` by leg order alone. The review bot flagged it (#3495).
+- Prevention: when a decision's strength depends on a per-candidate property, collect every candidate and choose by
+  that property before acting. `next(...)` over a filter is a leg-order tie-break, not a rule.
+- Enforced in: `ai_trial_halts.loss_breach` and `tests/test_ai_trial_halts.py`.

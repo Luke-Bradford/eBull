@@ -203,7 +203,11 @@ def test_harm_looks_wait_for_eight_clusters_and_halt_on_a_one_sided_p() -> None:
     assert (look.k, look.units, look.clusters) == (1, 10, 10)
     assert look.p_less == pytest.approx(1 / 1024)
     assert look.threshold == pytest.approx(0.025)
-    assert look.halts
+    assert look.halts and look.flows_final
+    # The same look inside the last unit's flow window is provisional.
+    last_window = exit_deadline_session(harmful[-1].resolved_session or LATER, FLOW_WINDOW_SESSIONS)
+    (early,) = harm_looks(harmful, seed=1, today=last_window)
+    assert early.halts and not early.flows_final
 
 
 def test_an_open_pair_ahead_in_entry_order_holds_the_look() -> None:
