@@ -115,7 +115,7 @@ def _series(bars: list[tuple[str | None, ...]]) -> BarSeries:
 
 
 def _inst(
-    bars: list[tuple[str, str, str, str]], *, atr: float | None = 1.0, breaks: tuple[date, ...] = ()
+    bars: list[tuple[str, str, str, str]], *, atr: float | None = 3.0, breaks: tuple[date, ...] = ()
 ) -> PanelInstrument:
     """Bars as (open, high, low, close) on consecutive NYSE sessions; bar 0 is the signal bar. The
     ATR is pinned through the cache so the bracket arithmetic is exact."""
@@ -125,8 +125,9 @@ def _inst(
     return inst
 
 
-# ATR 1.0 on a close of 100 → ATR14% = 1; k = 5 → stop 5%, R = 2 → target 10% (entry 100: SL 95, TP 110).
-CELL = Cell(stop_atr_multiple=5.0, reward_risk=2.0, horizon=3)
+# ATR 3.0 on a close of 100 → ATR14% = 3; k = 1.5 → stop 4.5%, R = 2 → target 9%
+# (entry 100: SL 95.5, TP 109). Horizon 3: fill = bar 1 (session 0), deadline = bar 4.
+CELL = Cell(stop_atr_multiple=1.5, reward_risk=2.0, horizon=3)
 FLAT = ("100", "101", "99", "100")
 
 
@@ -136,7 +137,7 @@ def _leg(bars: list[tuple[str, str, str, str]], *, cell: Cell = CELL, frontier: 
 
 def test_target_touch_fills_at_the_target() -> None:
     leg = _leg([FLAT, ("100", "111", "99", "105"), FLAT, FLAT, FLAT])
-    assert (leg.outcome, leg.return_pct) == ("tp_hit", pytest.approx(10.0))
+    assert (leg.outcome, leg.return_pct) == ("tp_hit", pytest.approx(9.0))
 
 
 def test_gap_through_the_stop_fills_at_the_open() -> None:
@@ -146,17 +147,24 @@ def test_gap_through_the_stop_fills_at_the_open() -> None:
 
 def test_ambiguous_bar_takes_the_stop_first() -> None:
     leg = _leg([FLAT, FLAT, ("100", "112", "94", "100"), FLAT, FLAT])
-    assert (leg.outcome, leg.return_pct) == ("ambiguous_stop", pytest.approx(-5.0))
+    assert (leg.outcome, leg.return_pct) == ("ambiguous_stop", pytest.approx(-4.5))
 
 
-def test_horizon_exit_is_the_last_window_close_not_the_next_open() -> None:
-    bars = [FLAT, FLAT, FLAT, ("100", "101", "99", "103"), ("108", "109", "107", "108")]
-    leg = _leg(bars)
+def test_horizon_exit_is_the_deadline_close_and_no_later_bar_matters() -> None:
+    deadline = ("100", "101", "99", "103")
+    # A bar after the deadline that gaps through the stop, and one that is missing entirely.
+    assert _leg([FLAT, FLAT, FLAT, FLAT, deadline, ("80", "81", "79", "80")]).return_pct == pytest.approx(3.0)
+    leg = _leg([FLAT, FLAT, FLAT, FLAT, deadline])
     assert (leg.outcome, leg.return_pct) == ("expired", pytest.approx(3.0))
 
 
+def test_a_touch_on_the_deadline_session_counts() -> None:
+    leg = _leg([FLAT, FLAT, FLAT, FLAT, ("100", "110", "99", "104")])
+    assert (leg.outcome, leg.return_pct) == ("tp_hit", pytest.approx(9.0))
+
+
 def test_series_ending_before_the_frontier_is_a_delisting_at_its_last_close() -> None:
-    leg = _leg([FLAT, FLAT, ("100", "101", "96", "97")])
+    leg = _leg([FLAT, FLAT, FLAT, ("100", "101", "96", "97")])
     assert (leg.outcome, leg.return_pct) == ("delisted", pytest.approx(-3.0))
 
 
@@ -168,13 +176,20 @@ def test_unresolved_break_inside_the_hold_is_refused_not_booked_across_the_scale
 
 
 def test_series_ending_at_the_frontier_is_refused_not_booked() -> None:
-    leg = _leg([FLAT, FLAT, FLAT], frontier=SESSIONS[2])
+    leg = _leg([FLAT, FLAT, FLAT, FLAT], frontier=SESSIONS[3])
     assert (leg.return_pct, leg.refusal) == (None, "corpus_edge")
 
 
 def test_levels_outside_the_section_5_bounds_are_ineligible() -> None:
-    assert _leg([FLAT] * 5, cell=Cell(1.0, 2.0, 3)).refusal == "levels_outside_bounds"  # stop 1% < 2%
-    assert _leg([FLAT] * 5, cell=Cell(30.0, 2.0, 3)).refusal == "levels_outside_bounds"  # stop 30% > 25%
+    assert _leg([FLAT] * 5, atr=0.5).refusal == "levels_outside_bounds"  # stop 0.75% < 2%
+    assert _leg([FLAT] * 5, atr=20.0).refusal == "levels_outside_bounds"  # stop 30% > 25%
+
+
+def test_levels_are_judged_on_the_quantized_control_derivation() -> None:
+    # ATR14% = q(100 × 1.333333 / 100) = 1.3333; k = 1.5 → stop q(1.99995) = 2.0000, which the
+    # §5 floor admits. On raw floats the stop is 1.9999995% and would be refused.
+    leg = _leg([FLAT] * 5, atr=1.333333)
+    assert leg.refusal is None and leg.outcome == "expired"
 
 
 def test_missing_atr_and_missing_fill_session_are_refused() -> None:

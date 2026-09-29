@@ -19,11 +19,17 @@ Spec: ``docs/proposals/execution/2026-09-28-3471-ai-discretionary-v1.md`` §9 "P
   window exactly as it does in the live pack instead of poisoning every later session. The grid is
   the supervisor's 2026-09-28 15:30Z rule: k ∈ [1.5, 3] (both ends), R = 2 (the default), crossed
   with the §5 horizons.
-- **Execution:** entry at the next session's open; ``outcome_resolver.resolve_outcome`` resolves the
-  bracket (a gap through a level fills at the open). Two spec §9 rules differ from that resolver and
-  are applied on top of it: an ``ambiguous`` bar takes the stop first, and a horizon exit is at the
-  last window bar's CLOSE (the resolver books the next open). A series that ends inside the window
-  before the corpus frontier is a delisting and exits at its last close. An unresolved
+- **Levels are quantized exactly as the trial's control:** ``ai_trial_decision.measure_atr`` then
+  ``derive_control_levels`` (so the §5 bounds, the ATR band and the R floor all apply on the 4-dp
+  values).
+- **Execution:** entry at the next session's open; the fill session is session 0 and the deadline is
+  session h (``ai_trial_deadline``), so the hold spans h + 1 bars. ``outcome_resolver.resolve_outcome``
+  resolves the bracket over the series cut at the deadline (a gap through a level fills at the open).
+  Two spec §9 rules differ from that resolver and are applied on top of it: an ``ambiguous`` bar
+  takes the stop first, and the horizon exit is the deadline bar's CLOSE (the resolver books the
+  next open, which is why the series is cut — no bar after the deadline can decide a leg). A
+  series that ends inside the hold before the corpus frontier is a delisting and exits at its last
+  close. An unresolved
   ``price_series_break`` inside the hold ends the segment (``price_segments.segment_end_index``),
   so the leg is refused rather than booked across a scale change.
 - **Statistic:** d = arm − control per-trade gross %, with the planted shift δ added to the arm;
@@ -60,13 +66,7 @@ import numpy as np
 import numpy.typing as npt
 import psycopg
 
-from app.services.ai_trial_decision import (
-    HORIZON_SESSIONS,
-    STOP_PCT_MAX,
-    STOP_PCT_MIN,
-    TARGET_PCT_MAX,
-    TARGET_PCT_MIN,
-)
+from app.services.ai_trial_decision import HORIZON_SESSIONS, DecisionMetrics, derive_control_levels, measure_atr
 from app.services.ai_trial_pack import INDICATOR_BARS, MIN_BARS, MIN_BID, WILDER_PERIOD
 from app.services.ai_trial_stats import flip_set, sign_flip_p_batch
 from app.services.indicator_series import BarSeries, atr_series
@@ -180,19 +180,23 @@ def simulate_leg(inst: PanelInstrument, session: date, next_session: date, cell:
     atr, close = atr_at(inst, i), rows[i].get("close")
     if atr is not None and math.isnan(atr):
         return Leg(None, refusal="too_few_bars")
-    if atr is None or close is None or not math.isfinite(atr) or atr <= 0:
-        return Leg(None, refusal="atr_invalid")
-    stop_pct = cell.stop_atr_multiple * 100.0 * atr / float(close)
-    target_pct = cell.reward_risk * stop_pct
-    if not (STOP_PCT_MIN <= stop_pct <= STOP_PCT_MAX and TARGET_PCT_MIN <= target_pct <= TARGET_PCT_MAX):
-        return Leg(None, refusal="levels_outside_bounds")
-    stop = entry * (1 - Decimal(repr(stop_pct)) / 100)
-    target = entry * (1 + Decimal(repr(target_pct)) / 100)
+    levels = derive_control_levels(
+        DecisionMetrics(Decimal(repr(cell.reward_risk)), None, Decimal(repr(cell.stop_atr_multiple))),
+        measure_atr(atr, close),
+    )
+    if levels is None:
+        return Leg(None, refusal="atr_invalid" if measure_atr(atr, close) is None else "levels_outside_bounds")
+    stop = entry * (1 - levels.stop_pct / 100)
+    target = entry * (1 + levels.target_pct / 100)
+    # The fill session is session 0 and the deadline is session h (``ai_trial_deadline``), so the
+    # hold spans bars f..f+h. The series is cut at the deadline: the exit is that bar's close, and
+    # no later bar may decide the leg (the resolver's own expiry reads the NEXT open).
+    deadline = f + cell.horizon
     outcome = resolve_outcome(
-        series=inst.series,
+        series=BarSeries(dates=dates[: deadline + 1], rows=rows[: deadline + 1]),
         fill_index=f,
         entry_price=entry,
-        levels=ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=cell.horizon),
+        levels=ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=cell.horizon + 1),
         masked_bar_reasons={},
         segment_end_index=segment_end_index(inst.series, fill_index=f, unresolved_breaks=inst.breaks),
     )
@@ -206,9 +210,10 @@ def simulate_leg(inst: PanelInstrument, session: date, next_session: date, cell:
         return booked(outcome.exit_price, outcome.outcome)
     if outcome.outcome == "ambiguous":
         return booked(stop, "ambiguous_stop")
-    if outcome.outcome == "expired":
-        return booked(rows[f + cell.horizon - 1].get("close"), "expired")
     if outcome.reason == "window_truncated":
+        # Reached only after every bar of the (cut) window was read without a touch.
+        if len(rows) > deadline:
+            return booked(rows[deadline].get("close"), "expired")
         if dates[-1] >= frontier:
             return Leg(None, refusal="corpus_edge")
         return booked(rows[-1].get("close"), "delisted")
