@@ -26,6 +26,17 @@ _NY: Final = ZoneInfo("America/New_York")
 
 #: §8: "the exit fires at the first position cycle at or after 15:00 UTC on the deadline session".
 TRIAL_EXIT_TIME_UTC: Final = time(15, 0)
+#: §3 step 6: the execute job's time, in session in both EDT and EST. A boot catch-up never
+#: submits before it — an earlier entry would change the frozen entry timing.
+TRIAL_ENTRY_TIME_UTC: Final = time(15, 0)
+
+#: §8 / r2-53: the trial deployments' ``max_position_age`` is 40 sessions, above the 20-session
+#: horizon maximum, so the declared horizon binds. The position manager ages in seconds, so the
+#: sessions convert at their SHORTEST calendar span — 5 sessions to 7 days, no holidays — and the
+#: age can never outlast 40 sessions. ``tests/test_ai_trial_jobs.py`` proves it still sits beyond
+#: every 20-session deadline plus the 10-session censor clock.
+TRIAL_MAX_POSITION_AGE_SESSIONS: Final = 40
+TRIAL_MAX_POSITION_AGE_SECONDS: Final = TRIAL_MAX_POSITION_AGE_SESSIONS * 7 // 5 * 86_400
 
 
 def _next_session(after: date) -> date:

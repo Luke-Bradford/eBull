@@ -716,6 +716,11 @@ Each slice PR gets Codex ckpt-2 and must discharge its §15 obligations.
    - state events;
    - the two jobs.
    - **The jobs refuse to run without a frozen declaration.** Scheduling them before slice 3 is harmless, because every run refuses as `declaration_missing`.
+   - **Implemented in slice 2c-iv-c** (`app/services/ai_trial_jobs.py`, lane `ai_trial`, no migration):
+     - `ai_trial_decision_run` daily at 23:30 UTC and `ai_trial_execute` daily at 15:00 UTC. Without a declaration the decision job returns before any broker call, process sweep or subprocess.
+     - Each executor refusal is persisted and final, so the decision job skips on its target session's own New York date (a boot catch-up would read that session's pre-market or partial bars); after the close or on a non-session date it runs, and the execute job skips outside it (it would write `market_session_closed` against a leg that could still fill) and before 15:00 UTC (`TRIAL_ENTRY_TIME_UTC`, hashed by value: a boot catch-up must not move the entry time). It refreshes the halt feed immediately before the legs, as the paper cycle does, so a missed feed fire cannot become a final `halt_feed_stale`. The execute job takes only legs with no funding decision whose target session is today or earlier, in the §7 submission order (`pair_seq` parity), each with its own clock instant; a past one is refused `decision_expired` by the executor.
+     - `record_pair_lifecycle` runs at the end of every `strategy_paper_cycle`.
+     - `TRIAL_MAX_POSITION_AGE_SECONDS` (`ai_trial_deadline`, hashed by value) converts 40 sessions at their shortest calendar span (5 sessions = 7 days, so 56 days). `configure_trial_position_managers` applies it to both legs' paper deployments; slice 3 calls it when it configures them.
 3. **Slice 3.** `ai_trial_power.py`, the declaration freeze PR, and the readout script.
 4. **Go live.** It needs the §8 supervisor decision and the capacity it unlocks. The **engine** places the first pair on schedule. The loop never places, closes or simulates a trade, and it may only observe.
 
@@ -770,6 +775,7 @@ These are binding on the slice PRs. The `r2-N` numbers refer to Codex round 2 on
   - The binary is resolved once at deploy time, and its absolute path is recorded.
   - It runs in its own session (`start_new_session=True`).
   - The run kills the process group on timeout, overflow or violation, reaps it, and sweeps orphans at the next run.
+    - **Implemented in slice 2c-iv-c:** the run environment is resolved once per jobs-worker process, at the entrypoint's boot (the daemon respawns the worker on every `app/**` change). The decision job SIGKILLs every process re-parented to pid 1 whose command carries the frozen argv's flags after the executable (the model and the no-tools / no-MCP set), so an orphan launched through an earlier deployment's binary path is still swept. `ps` renders the empty `--tools` value as two spaces (measured, CLI 2.1.280). A live run's child is parented to the worker, so it never matches.
   - Exactly one `init` event, before any other event, is required. Any `tool_use` event other than `StructuredOutput` refuses the run.
   - stdout and stderr share a combined 2 MB cap, read incrementally.
   - `num_turns` and the structured-output attempts are recorded. More than one assistant structured output refuses the run.

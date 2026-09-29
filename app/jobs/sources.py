@@ -108,6 +108,7 @@ Lane = Literal[
     "cboe",
     "reference_data",
     "openfigi",
+    "ai_trial",
 ]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
 jobs serialise under one ``JobLock``; cross-source jobs run in parallel.
@@ -499,6 +500,16 @@ The final lane is bootstrap-only:
   bootstrap S13 ``cusip_resolver_post_bulk_sweep`` stage
   (#1233 PR-1b). SD-1 cross-reference: ``docs/settled-decisions.md``.
   Resolver: ``app/services/openfigi_resolver.py``.
+
+* ``ai_trial`` — ``ai_trial_decision_run`` (#3471, daily 23:30 UTC) and
+  ``ai_trial_execute`` (daily 15:00 UTC). Its own lane because both fire
+  inside other holders' windows: ``etoro`` is held by the 3-4 h candle sweep
+  across 23:30, and ``strategy_execution`` by the 5-minute paper cycle. The two
+  jobs share it and never overlap in time. Broker safety is not the lane's: the
+  executor serialises with the paper path under the allocator advisory lock,
+  and the intraday fetch paces on the process-wide eToro read clock. Their
+  EXECUTION permit is the paper-lifecycle reservation
+  (``runtime.execution_lane_for``), not the single general one.
 """
 
 

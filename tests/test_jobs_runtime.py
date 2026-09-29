@@ -2500,7 +2500,18 @@ class TestMisfireVisibilityAndGrace:
         # 1-second default would discard a fire that landed during the :23 sweep for
         # no reason at all. Ceiling derived in
         # ``test_the_core_quote_grace_cannot_reach_the_next_fire``.
-        assert opted_in == {"portfolio_eod_snapshot", "quotes_refresh", "core_candidate_quote_refresh"}
+        #
+        # #3471 added the two AI-trial jobs: each body bounds its own lateness (the decision
+        # run refuses on its target session's date; execution refuses outside the session and
+        # before 15:00 UTC) and is idempotent (one claim per session, one funding decision per
+        # signal), so a delayed fire can only do in-window work.
+        assert opted_in == {
+            "portfolio_eod_snapshot",
+            "quotes_refresh",
+            "core_candidate_quote_refresh",
+            "ai_trial_decision_run",
+            "ai_trial_execute",
+        }
 
     def test_grace_cannot_reach_the_next_frontier_advance(self) -> None:
         """The EOD grace must expire before the sweep that moves its anchor.
@@ -2739,6 +2750,8 @@ class TestReservedLaneSchedulerExecutors:
         same shape as ``NON_GATED_SCHEDULED`` and the misfire-grace allow list.
         """
         from app.workers.scheduler import (
+            JOB_AI_TRIAL_DECISION_RUN,
+            JOB_AI_TRIAL_EXECUTE,
             JOB_CORE_CANDIDATE_QUOTE_REFRESH,
             JOB_QUOTES_REFRESH,
             JOB_STRATEGY_HALT_FEED_REFRESH,
@@ -2747,7 +2760,9 @@ class TestReservedLaneSchedulerExecutors:
         )
 
         expected = {
-            runtime.EXECUTION_LANE_PAPER: {JOB_STRATEGY_PAPER_CYCLE},
+            # #3471 — the AI trial's jobs are paper-lifecycle work; on the single general
+            # permit the nightly model call would park every other non-SEC job.
+            runtime.EXECUTION_LANE_PAPER: {JOB_STRATEGY_PAPER_CYCLE, JOB_AI_TRIAL_DECISION_RUN, JOB_AI_TRIAL_EXECUTE},
             runtime.EXECUTION_LANE_QUOTE: {
                 JOB_QUOTES_REFRESH,
                 JOB_CORE_CANDIDATE_QUOTE_REFRESH,

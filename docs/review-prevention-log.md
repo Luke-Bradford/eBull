@@ -11667,6 +11667,19 @@ neighbouring container and match it.**
   (`git grep -ln "read_bytes()).hexdigest" -- app/services` lists them.)
 - Enforced in: the pre-push fast tier (`tests/test_hunt_door.py`, `tests/test_ranking_ablation_declaration.py`).
 
+### A secondary step appended to a job must neither fail it nor pass silently (#3471)
+
+- Failure: slice 2c-iv-c appended the AI trial's pair-lifecycle writer to `strategy_paper_cycle`. The first
+  version let it raise inside the job, so a lifecycle failure would have marked the whole cycle failed after the
+  cycle's own reconcile, manage and entry work had committed, and hidden the counts. The review bot flagged it
+  (#3491). The opposite fix, catching and logging only, records a clean `success` for a run that did not do its
+  work.
+- Prevention: commit the primary work first, contain the secondary step, and surface its failure on
+  `JobProgress.errors` so the run is degraded, not failed and not clean. The same applies to a diagnostics
+  pre-step that does not decide correctness (the trial's orphan sweep). A per-item broker batch follows the #2948
+  entry above.
+- Enforced in: `scheduler._record_trial_pair_lifecycle` and `tests/test_ai_trial_jobs.py`.
+
 ### A forced terminal code must not erase the reason it overrides (#3471)
 
 - Failure: `ai_trial_run.refuse_run` records `stale_claim` whenever the lease has expired, because `sql/432` allows

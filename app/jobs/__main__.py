@@ -1190,6 +1190,16 @@ def serve(stop_event: threading.Event | None = None) -> int:
         except Exception:
             logger.exception("jobs entrypoint: queue stale-row recovery failed; continuing")
 
+        # #3471 O4 — pin the AI trial's run environment (claude binary, CLI version, git sha)
+        # at deploy time, before any job can run. Best-effort: a failure here leaves the
+        # decision job to resolve it on first use, and to fail loudly if it still cannot.
+        try:
+            from app.services.ai_trial_jobs import deployed_run_environment
+
+            deployed_run_environment()
+        except Exception:
+            logger.exception("jobs entrypoint: AI trial run environment unresolved at boot; continuing")
+
         # Step 7 — boot-drain pending rows BEFORE scheduler.start().
         try:
             drained = _drain_pending_at_boot(

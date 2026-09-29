@@ -33,7 +33,11 @@ import hashlib
 from pathlib import Path
 from typing import Final
 
-from app.services.ai_trial_deadline import TRIAL_EXIT_TIME_UTC
+from app.services.ai_trial_deadline import (
+    TRIAL_ENTRY_TIME_UTC,
+    TRIAL_EXIT_TIME_UTC,
+    TRIAL_MAX_POSITION_AGE_SECONDS,
+)
 from app.services.ai_trial_executor import TRIAL_COST_CAP_PCT, TRIAL_MAX_CONCURRENT_PER_LEG
 from app.services.ai_trial_pair_lifecycle import (
     LABEL_CLASSIFIER_VERSION,
@@ -59,7 +63,9 @@ POLICY_MODULES: Final = (
 
 #: §3–§8 / O10 / O11 terms defined outside ``POLICY_MODULES``, hashed by ``repr``.
 FROZEN_CONSTANTS: Final[dict[str, object]] = {
+    "ai_trial_deadline.TRIAL_ENTRY_TIME_UTC": TRIAL_ENTRY_TIME_UTC,
     "ai_trial_deadline.TRIAL_EXIT_TIME_UTC": TRIAL_EXIT_TIME_UTC,
+    "ai_trial_deadline.TRIAL_MAX_POSITION_AGE_SECONDS": TRIAL_MAX_POSITION_AGE_SECONDS,
     "ai_trial_executor.TRIAL_COST_CAP_PCT": TRIAL_COST_CAP_PCT,
     "ai_trial_executor.TRIAL_MAX_CONCURRENT_PER_LEG": TRIAL_MAX_CONCURRENT_PER_LEG,
     "ai_trial_pair_lifecycle.LABEL_CLASSIFIER_VERSION": LABEL_CLASSIFIER_VERSION,
