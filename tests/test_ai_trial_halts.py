@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -44,15 +44,19 @@ def _trade(
     units: str | None = "2",
     bid: str | None = "90",
     closes: tuple[CloseRow, ...] = (),
+    average_price: str | None = "100",
+    bid_at: datetime | None = AT + timedelta(hours=1),
 ) -> LegTrade:
     return LegTrade(
         leg=leg,
         status=status,
         usd=usd,
         opened_units=None if units is None else Decimal(units),
-        average_price=None if units is None else Decimal("100"),
+        average_price=None if units is None or average_price is None else Decimal(average_price),
         bid=None if bid is None else Decimal(bid),
         closes=closes,
+        filled_at=AT,
+        bid_at=bid_at,
     )
 
 
@@ -86,6 +90,11 @@ def test_trade_pnl(trade: LegTrade, expected: Decimal) -> None:
     [
         _trade(bid=None),
         _trade(bid="0"),
+        # A bid quoted before the fill is not a price the position ever had.
+        _trade(bid_at=AT - timedelta(seconds=1)),
+        _trade(bid_at=None),
+        # Filled, but no entry price: known exposure, unknown P&L.
+        _trade(average_price=None),
         _trade(usd=False),
         _trade(closes=(_slice(None, "1"),)),
         _trade(closes=(_slice("-5", None),)),

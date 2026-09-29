@@ -648,7 +648,8 @@ Neither admits a $125 half ticket.
   - **Leg capital** = `TRIAL_MAX_CONCURRENT_PER_LEG` × the full ticket = $1,000, so the limit is $200. `TRIAL_LOSS_HALT_PCT` joins `FROZEN_CONSTANTS`.
   - **Realised** = Σ `realized_pnl_usd` over every close slice of every leg trade in the declaration (the readout's reach, partial-close siblings included). No flow window: a late restatement is still money lost.
   - **Unrealised** = (opened units − Σ closed slice units) × (`quotes.bid` − entry average price). `quotes` is the position manager's own mark. Its age is not gated, because the rule is "reaches" and a quoted bid was an exit price at its instant.
-  - **Unmeasurable trades** (no bid, non-USD, a slice without P&L or units, a closed trade whose slices do not yet cover its opened units) contribute nothing and are counted `unmeasured` on the cycle note. They never halt: `halted_loss` is terminal, and a missing number is not a loss.
+  - **Unmeasurable trades** contribute nothing and are counted `unmeasured` on the cycle note. They are: no bid, a bid quoted before the fill, no entry price, a non-USD instrument, a slice without P&L or units, or a closed trade whose slices do not yet cover its opened units. They never prove a breach, because `halted_loss` is terminal and a missing number is not a loss.
+  - **Unproven breach:** when a leg's **measured** loss reaches the limit while it has unmeasured trades, the trial moves to the resumable `halted_operator` (reason `loss_halt_unproven:…`). The terminal condition is not proven, and entries still stop (Codex ckpt-3).
   - **Not yet computed:** SPY references (O13), exposure, turnover, and the fill-versus-ask gap. The executor does not persist the ask it priced a leg from, so that gap has no stored input until it does.
 
 ## 10. Contamination rule

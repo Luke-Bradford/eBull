@@ -18,11 +18,15 @@ positions run to their exits.
     entry average price). ``quotes`` is the position manager's own mark. Its age is not gated:
     a bid is a price the position could have exited at when it was quoted, so a loss it shows
     was real at that instant, and the rule is "reaches".
-  - A filled trade whose P&L cannot be measured (no bid, a non-USD instrument, a slice without
+  - A filled trade whose P&L cannot be measured (no bid, a bid quoted before the fill, no entry
+    price, a non-USD instrument, a slice without
     P&L or units, or a closed trade whose slices do not yet cover its opened units — history
     ingest lags the close) is counted
-    ``unmeasured`` and contributes nothing. It never halts: ``halted_loss`` is terminal, and an
-    absent number is not a loss. The count is on the paper cycle's note.
+    ``unmeasured`` and contributes nothing. It never proves a breach: ``halted_loss`` is terminal,
+    and an absent number is not a loss. The count is on the paper cycle's note. A leg whose
+    MEASURED loss reaches the limit while it has unmeasured trades moves the trial to the
+    resumable ``halted_operator`` (``loss_halt_unproven``) instead: the terminal condition is not
+    proven, and entries still stop.
 - **A check that cannot run** moves the trial to the resumable ``halted_operator`` (fail closed).
 - **Harm stop.** ``compute_readout(...).harm_looks`` (§9 "Harm stop"); the first look that
   ``halts`` and is ``flows_final`` writes ``halted_harm``, naming the look in the reason. A leg is
@@ -69,13 +73,17 @@ class LegTrade:
     average_price: Decimal | None
     bid: Decimal | None
     closes: tuple[CloseRow, ...]
+    #: The entry's first execution and the quote's own time: a bid quoted before the fill is
+    #: not a price the position ever had (Codex ckpt-3).
+    filled_at: datetime | None = None
+    bid_at: datetime | None = None
 
 
 def trade_pnl_usd(trade: LegTrade) -> Decimal | None:
     """Realised + unrealised USD P&L; ``None`` = unmeasured. An unfilled trade is 0."""
-    if trade.opened_units is None or trade.opened_units <= 0 or trade.average_price is None:
+    if trade.opened_units is None or trade.opened_units <= 0:
         return Decimal(0)
-    if not trade.usd:
+    if not trade.usd or trade.average_price is None:
         return None
     realised = Decimal(0)
     closed_units = Decimal(0)
@@ -92,6 +100,8 @@ def trade_pnl_usd(trade: LegTrade) -> Decimal | None:
     if remaining <= 0:
         return realised
     if trade.bid is None or not trade.bid > 0:
+        return None
+    if trade.bid_at is None or trade.filled_at is None or trade.bid_at < trade.filled_at:
         return None
     return realised + remaining * (trade.bid - trade.average_price)
 
@@ -122,7 +132,8 @@ def loss_breach(losses: Sequence[LegLoss], *, limit_usd: Decimal = TRIAL_LOSS_LI
 
 
 _TRADES_SQL: Final = """
-    SELECT tl.leg, t.strategy_trade_id, t.status, i.currency = 'USD', entry.units, entry.average_price, q.bid
+    SELECT tl.leg, t.strategy_trade_id, t.status, i.currency = 'USD', entry.units, entry.average_price, q.bid,
+           entry.filled_at, q.quoted_at
     FROM ai_trial_trade_links tl
     JOIN ai_trial_pairs p ON p.pair_id = tl.pair_id
     JOIN strategy_trades t ON t.strategy_trade_id = tl.strategy_trade_id
@@ -130,7 +141,8 @@ _TRADES_SQL: Final = """
     LEFT JOIN quotes q ON q.instrument_id = t.instrument_id
     LEFT JOIN LATERAL (
         SELECT sum(e.opening_units) AS units,
-               sum(e.opening_units * e.average_price) / NULLIF(sum(e.opening_units), 0) AS average_price
+               sum(e.opening_units * e.average_price) / NULLIF(sum(e.opening_units), 0) AS average_price,
+               min(e.execution_time) AS filled_at
         FROM strategy_trade_orders sto
         JOIN strategy_order_position_executions e ON e.order_id = sto.order_id
         WHERE sto.strategy_trade_id = t.strategy_trade_id AND sto.purpose = 'entry'
@@ -152,8 +164,10 @@ def load_leg_trades(conn: Conn, declaration_id: int) -> list[LegTrade]:
             average_price=None if average_price is None else Decimal(average_price),
             bid=None if bid is None else Decimal(bid),
             closes=tuple(closes.get(int(trade_id), ())),
+            filled_at=filled_at,
+            bid_at=bid_at,
         )
-        for leg, trade_id, status, usd, units, average_price, bid in rows
+        for leg, trade_id, status, usd, units, average_price, bid, filled_at, bid_at in rows
     ]
 
 
@@ -189,8 +203,13 @@ def _check_declaration(conn: Conn, declaration_id: int, strategy_version: str, n
             f"loss_halt:leg={breach.leg}:loss_usd={breach.loss_usd:.2f}"
             f":limit_usd={TRIAL_LOSS_LIMIT_USD:.2f}:unmeasured={breach.unmeasured}"
         )
-        if halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_loss", reason=reason):
-            halted = "halted_loss"
+        # The measured trades breach, but an unmeasured one could offset them, so the TERMINAL
+        # condition is not proven: stop entries resumably instead (Codex ckpt-3).
+        target: EngineHalt = "halted_loss" if breach.unmeasured == 0 else "halted_operator"
+        if target == "halted_operator":
+            reason = "loss_halt_unproven:" + reason.removeprefix("loss_halt:")
+        if halt_active_trial(conn, declaration_id=declaration_id, to_state=target, reason=reason):
+            halted = target
     else:
         readout = compute_readout(conn, strategy_version=strategy_version, as_of=now)
         look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
@@ -209,11 +228,11 @@ def _check_declaration(conn: Conn, declaration_id: int, strategy_version: str, n
 def _fail_closed(conn: Conn, declaration_id: int, exc: Exception) -> HaltCheck:
     kind = f"halt_check_failed:{type(exc).__name__}"
     # The message too (bounded), so a persistent cause is triageable from the event alone. It is
-    # arbitrary text, so if it cannot be written (a NUL, a lone surrogate) the class-only reason
-    # is: the halt must not fail on its own reason.
-    reasons = (f"{kind}:{str(exc)[:200]}", kind)
-    for reason in reasons:
+    # arbitrary text, so if it cannot be rendered (a raising ``__str__``) or written (a NUL, a
+    # lone surrogate) the class-only reason is: the halt must not fail on its own reason.
+    for detailed in (True, False):
         try:
+            reason = f"{kind}:{str(exc)[:200]}" if detailed else kind
             written = halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_operator", reason=reason)
         except Exception:
             logger.exception("ai trial %s: the fail-closed halt could not be written (%r)", declaration_id, kind)

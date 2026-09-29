@@ -3,7 +3,9 @@ remainder at the manager's quote; the harm stop writes the look that fired. Both
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,7 +13,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from app.services.ai_trial_halts import HaltCheck, enforce_trial_halts
+from app.services.ai_trial_halts import HaltCheck, LegTrade, enforce_trial_halts
 from app.services.ai_trial_readout import HarmLook
 from tests.test_ai_trial_deadline_db import _POSITION_ID, _opened_arm_leg
 from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW
@@ -137,3 +139,42 @@ def test_a_check_that_cannot_run_fails_closed_to_a_resumable_halt(
         "app.services.ai_trial_halts.compute_readout", lambda *_, **__: SimpleNamespace(harm_looks=looks)
     )
     assert [check.halted for check in _enforce(conn)] == ["halted_harm"]
+
+
+def test_a_measured_breach_with_an_unmeasured_trade_halts_resumably(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _opened_arm_leg(conn, monkeypatch)
+    measured = LegTrade("arm", "closed", True, Decimal(1), Decimal(100), None, ())
+    monkeypatch.setattr(
+        "app.services.ai_trial_halts.trade_pnl_usd", lambda trade: None if trade is not measured else Decimal(-250)
+    )
+    monkeypatch.setattr("app.services.ai_trial_halts.load_leg_trades", lambda *_: [measured, replace(measured)])
+
+    (check,) = _enforce(conn)
+    # −250 measured, but the unmeasured trade could offset it: the terminal state is not proven.
+    assert (check.halted, check.unmeasured) == ("halted_operator", 1)
+    assert _states(conn)[-1] == (
+        "halted_operator",
+        "engine",
+        "loss_halt_unproven:leg=arm:loss_usd=250.00:limit_usd=200.00:unmeasured=1",
+    )
+
+
+class _Unprintable(RuntimeError):
+    def __str__(self) -> str:
+        raise ValueError("cannot render")
+
+
+def test_an_unrenderable_error_still_fails_closed(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = ebull_test_conn
+    _opened_arm_leg(conn, monkeypatch)
+
+    def readout(*_: Any, **__: Any) -> SimpleNamespace:
+        raise _Unprintable
+
+    monkeypatch.setattr("app.services.ai_trial_halts.compute_readout", readout)
+    (check,) = _enforce(conn)
+    assert (check.failed, check.halted) == (True, "halted_operator")
+    assert _states(conn)[-1] == ("halted_operator", "engine", "halt_check_failed:_Unprintable")
