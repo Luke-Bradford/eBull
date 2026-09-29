@@ -12,6 +12,7 @@ import inspect
 import textwrap
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -23,6 +24,7 @@ from app.services.ai_trial_intent import (
     _session_reason,
     declaration_digest,
     load_trial_intent,
+    plan_invalidated,
 )
 from app.services.ai_trial_pack import canonical_sha256
 from app.services.strategy_paper_executor import _load_intent
@@ -135,3 +137,30 @@ def test_the_declaration_digest_is_the_canonical_json_hash() -> None:
 )
 def test_the_target_session_is_the_new_york_date(now: datetime, expected: str | None) -> None:
     assert _session_reason(date(2026, 10, 5), now=now) == expected
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask", "scale_changed", "invalidated"),
+    [
+        ("99", "100", False, False),
+        ("99", "92", False, True),  # ask at the stop
+        ("99", "91.99", False, True),  # ask through the stop
+        ("99", "116", False, True),  # ask at the target
+        ("93", "100", False, True),  # bid at the invalidation level
+        ("93.0001", "115.9999", False, False),
+        ("99", "100", True, True),  # a scale change after the pack, whatever the quote
+    ],
+)
+def test_plan_invalidated(bid: str, ask: str, scale_changed: bool, invalidated: bool) -> None:
+    """§16.3 "Execution": invalidation 93, stop 92, target 116."""
+    assert (
+        plan_invalidated(
+            ask=Decimal(ask),
+            bid=Decimal(bid),
+            invalidation=Decimal("93"),
+            stop=Decimal("92"),
+            target=Decimal("116"),
+            scale_changed=scale_changed,
+        )
+        is invalidated
+    )

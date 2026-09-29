@@ -293,8 +293,8 @@ def test_both_legs_load_with_the_decision_terms_and_no_evidence(ebull_test_conn:
         assert intent.leg == leg
         assert intent.strategy_id == "ai-discretionary-v1" + ("-control" if leg == "control" else "")
         assert intent.declaration_id == declaration_id and intent.session_date == SESSION
-        # §8 table (v5): the arm exits at the decision's levels, the control at its own
-        # ATR-derived levels (2 ATRs of a 2% name, R 2).
+        # §8 table (v6 §16.4): the arm exits at the decision's levels, the control at its own
+        # plan's (the same ids on its own levels: 2 ATRs of a 2% name, R 2).
         expected = (Decimal("8.0"), Decimal("16.0")) if leg == "arm" else (Decimal("4.0000"), Decimal("8.0000"))
         assert (intent.stop_loss_pct, intent.take_profit_pct) == expected
         assert (intent.size_tier, intent.requested_amount, intent.horizon_days) == ("half", Decimal("125"), 10)
@@ -343,6 +343,71 @@ def test_authorisation_and_kept_gates_refuse(ebull_test_conn: Conn) -> None:
     conn.commit()
     assert _reason(conn, arm) == "trial_not_active"
     assert _reason(conn, signals["control"]) == "trial_not_active"
+
+
+def test_a_plan_the_quote_or_a_scale_change_has_invalidated_refuses_each_leg(ebull_test_conn: Conn) -> None:
+    """§16.3 "Execution" (v6-3b): each leg against ITS OWN plan — arm 93 / 92 / 116 (invalidation,
+    stop, target), control 96.5 / 96 / 108 — checked right after quote freshness."""
+    conn = ebull_test_conn
+    _, signals = _published_pair(conn)
+    arm, control = signals["arm"], signals["control"]
+    control_instrument = conn.execute(
+        "SELECT instrument_id FROM strategy_signals WHERE signal_id = %s", (control,)
+    ).fetchone()
+    assert control_instrument is not None
+
+    def quote(instrument: int, bid: object, ask: object) -> None:
+        conn.execute("UPDATE quotes SET bid = %s, ask = %s WHERE instrument_id = %s", (bid, ask, instrument))
+        conn.commit()
+
+    assert _reason(conn, arm) is None and _reason(conn, control) is None
+    for bid, ask, reason in (
+        (91, 92, "plan_invalidated"),  # ask at the stop
+        (115, 116, "plan_invalidated"),  # ask at the target
+        (93, 100, "plan_invalidated"),  # bid at the invalidation level
+        (0, 100, "quote_bid_invalid"),  # an unusable bid cannot show the level holds
+        (93.01, 115.99, None),
+    ):
+        quote(ARM_INSTRUMENT, bid, ask)
+        assert _reason(conn, arm) == reason
+    # The control's own plan: a bid of 96 breaks its 96.5 level, and would not break the arm's 93.
+    quote(control_instrument[0], 96, 100)
+    assert _reason(conn, control) == "plan_invalidated"
+    quote(control_instrument[0], 99, 100)
+    # Freshness still comes first (r2-21).
+    quote(ARM_INSTRUMENT, 93, 100)
+    assert _reason(conn, arm, NOW + timedelta(seconds=120)) == "quote_stale"
+    quote(ARM_INSTRUMENT, 99, 100)
+
+    # r2-20: a break or an active adjustment dated after the pack's as_of — the run's NY date,
+    # read back from the stored run (it is the DB clock at seeding, not a fixed date).
+    cutoff_row = conn.execute("SELECT (as_of AT TIME ZONE 'America/New_York')::date FROM ai_trial_runs").fetchone()
+    assert cutoff_row is not None
+    cutoff: date = cutoff_row[0]
+    conn.execute(
+        "INSERT INTO price_series_break (instrument_id, break_date, observed_ratio, direction, rule_version) "
+        "VALUES (%s, %s, 0.5, 'down', 'test')",
+        (ARM_INSTRUMENT, cutoff + timedelta(days=1)),
+    )
+    conn.commit()
+    assert _reason(conn, arm) == "plan_invalidated"
+    assert _reason(conn, control) is None
+    conn.execute("DELETE FROM price_series_break WHERE instrument_id = %s", (ARM_INSTRUMENT,))
+    conn.execute(
+        "INSERT INTO price_series_break (instrument_id, break_date, observed_ratio, direction, rule_version) "
+        "VALUES (%s, %s, 0.5, 'down', 'test')",
+        (ARM_INSTRUMENT, cutoff),
+    )
+    conn.commit()
+    assert _reason(conn, arm) is None  # ON the as_of date is not after it (strict)
+    conn.execute(
+        "INSERT INTO price_adjustments (instrument_id, effective_date, factor, kind, source, source_priority, "
+        "confidence, detector_version, observed_at, created_by) "
+        "VALUES (%s, %s, 0.5, 'split', 'operator', 1, 'confirmed', 'test', now(), 'test')",
+        (control_instrument[0], cutoff + timedelta(days=1)),
+    )
+    conn.commit()
+    assert _reason(conn, control) == "plan_invalidated"
 
 
 def test_a_tampered_declaration_and_an_over_policy_stop_refuse(ebull_test_conn: Conn) -> None:

@@ -204,9 +204,12 @@ _TRIAL_INTENT_SQL = f"""
            pair.target_pct AS pair_target_pct, pair.horizon_days AS pair_horizon_days,
            pair.size_tier AS pair_size_tier,
            pair.control_stop_pct, pair.control_target_pct,
+           pair.control_invalidation_price, pair.control_stop_price, pair.control_target_price,
            decision.decision_id, decision.verdict AS decision_verdict,
            decision.instrument_id AS decision_instrument_id,
            decision.stop_pct, decision.target_pct, decision.horizon_days, decision.size_tier,
+           decision.invalidation_price, decision.stop_price AS decision_stop_price,
+           decision.target_price AS decision_target_price,
            run.run_id, run.status AS run_status, run.session_date,
            run.declaration_id AS run_declaration_id,
            decl.strategy_id AS declared_strategy_id, decl.strategy_version AS declared_version,
@@ -225,7 +228,7 @@ _TRIAL_INTENT_SQL = f"""
            p.max_quote_age_seconds, p.max_halt_feed_age_seconds, p.max_cost_age_seconds,
            p.max_reconciliation_age_seconds, p.max_instrument_exposure_pct,
            p.max_portfolio_exposure_pct, p.max_drawdown_pct, p.cost_stress_multiplier,
-           q.quoted_at, q.ask, q.spread_flag,
+           q.quoted_at, q.ask, q.bid, q.spread_flag,
            h.fetched_at AS halt_feed_at,
            EXISTS (
                SELECT 1 FROM strategy_market_halts mh
@@ -233,6 +236,21 @@ _TRIAL_INTENT_SQL = f"""
                  AND mh.symbol = {INSTRUMENT_HALT_SYMBOL_SQL} AND mh.resumed_at IS NULL
            ) AS is_halted,
            EXISTS (SELECT 1 FROM strategy_execution_blocks b WHERE b.active) AS execution_blocked,
+           -- §16.3 r2-20: a scale change for the leg's name dated after the pack's as_of (NY date)
+           -- makes the pack's levels a different unit from the live quote. Resolved breaks count:
+           -- an explained break is still a new scale.
+           (
+               EXISTS (
+                   SELECT 1 FROM price_series_break psb
+                   WHERE psb.instrument_id = s.instrument_id
+                     AND psb.break_date > (run.as_of AT TIME ZONE 'America/New_York')::date
+               )
+               OR EXISTS (
+                   SELECT 1 FROM price_adjustments pa
+                   WHERE pa.instrument_id = s.instrument_id AND pa.superseded_by IS NULL
+                     AND pa.effective_date > (run.as_of AT TIME ZONE 'America/New_York')::date
+               )
+           ) AS scale_changed_after_pack,
            (
                SELECT COALESCE(SUM(fd.amount), 0)
                FROM strategy_funding_decisions fd
@@ -285,11 +303,29 @@ def _positive_finite(value: object) -> bool:
 
 
 def _leg_levels(row: dict[str, Any]) -> tuple[object, object]:
-    """§8 table (spec v5): the arm leg exits at the decision's stop/target, the control leg at
-    the pair's levels derived from its OWN ATR (§7) — never the arm's percentages."""
+    """§8 table (spec v6 §16.4): the arm leg exits at the decision's stop/target, the control leg
+    at its OWN plan's — the arm's level ids applied to its own levels — never the arm's percentages."""
     if row["leg"] == "control":
         return row["control_stop_pct"], row["control_target_pct"]
     return row["stop_pct"], row["target_pct"]
+
+
+def _leg_plan_prices(row: dict[str, Any]) -> tuple[object, object, object]:
+    """§16.3: the leg's own invalidation, stop and target prices — the decision's for the arm,
+    the pair's control plan for the control."""
+    if row["leg"] == "control":
+        return row["control_invalidation_price"], row["control_stop_price"], row["control_target_price"]
+    return row["invalidation_price"], row["decision_stop_price"], row["decision_target_price"]
+
+
+def plan_invalidated(
+    *, ask: Decimal, bid: Decimal, invalidation: Decimal, stop: Decimal, target: Decimal, scale_changed: bool
+) -> bool:
+    """§16.3 "Execution", both legs, at submission: the quote has already crossed the plan (ask ≤
+    stop or ask ≥ target), the named level no longer holds (bid ≤ invalidation), or the name's
+    price scale changed after the pack. ⚠ The quote at submission only, not the path since the
+    pack (r2-18)."""
+    return scale_changed or ask <= stop or ask >= target or bid <= invalidation
 
 
 def _identity_agrees(row: dict[str, Any]) -> bool:
@@ -414,6 +450,20 @@ def load_trial_intent(
     halt_feed_at = cast(datetime, row["halt_feed_at"])
     if not _age_ok(quote_at, now=now, max_seconds=int(row["max_quote_age_seconds"])):
         return None, "quote_stale", True
+    # §16.3 r2-21: immediately after quote freshness, before sizing. A missing or unusable bid
+    # cannot show the level still holds, so it refuses rather than skipping the check.
+    if not _positive_finite(row["bid"]):
+        return None, "quote_bid_invalid", True
+    prices = _leg_plan_prices(row)
+    if not all(_positive_finite(p) for p in prices) or plan_invalidated(
+        ask=Decimal(str(row["ask"])),
+        bid=Decimal(str(row["bid"])),
+        invalidation=Decimal(str(prices[0])),
+        stop=Decimal(str(prices[1])),
+        target=Decimal(str(prices[2])),
+        scale_changed=bool(row["scale_changed_after_pack"]),
+    ):
+        return None, "plan_invalidated", True
     if not _age_ok(halt_feed_at, now=now, max_seconds=int(row["max_halt_feed_age_seconds"])):
         return None, "halt_feed_stale", True
     if not _session_is_open(now):
@@ -479,4 +529,5 @@ __all__ = [
     "TrialIntent",
     "declaration_digest",
     "load_trial_intent",
+    "plan_invalidated",
 ]
