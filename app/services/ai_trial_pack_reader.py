@@ -296,6 +296,10 @@ def read_shortlist(conn: Conn, *, step1: Step1) -> Shortlist:
 # ---------------------------------------------------------------------------
 # §3.2 per-name reads
 # ---------------------------------------------------------------------------
+class PackReadRace(RuntimeError):
+    """The break map moved during ``read_bars``; the bars cannot be trusted to one segment."""
+
+
 def latest_segment(series: BarSeries, *, last_session: date, unresolved_breaks: Sequence[date]) -> BarSeries:
     """The bars dated ≤ ``last_session`` that share the LAST such bar's price segment, ascending.
 
@@ -347,10 +351,6 @@ def read_bars(
     if load_unresolved_breaks(conn, instrument_ids) != breaks:
         raise PackReadRace("unresolved price_series_break rows changed while the pack bars were read")
     return out
-
-
-class PackReadRace(RuntimeError):
-    """The break map moved during ``read_bars``; the bars cannot be trusted to one segment."""
 
 
 def read_crowd(conn: Conn, instrument_ids: Sequence[int], *, snapshot_id: int) -> dict[int, dict[str, Decimal | None]]:
