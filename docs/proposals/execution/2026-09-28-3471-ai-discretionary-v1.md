@@ -602,6 +602,12 @@ Neither admits a $125 half ticket.
   - it ignores inventory evolution, refusals, broken pairs, halts and the cohort minimum;
   - the rejection rate is not the probability of any verdict.
 - The script never calls the model (§10).
+- **Implemented in slice 3a** (`scripts/ai_trial_power.py`; the sign-flip p lives in `app/services/ai_trial_stats.py`, which the readout reuses). Reproduce with `PYTHONPATH=. uv run python -m scripts.ai_trial_power --json <out>`. Four amendments, each forced by the data or by a later rule:
+  - **The $3 floor reads the stored close.** `price_daily` is provider back-adjusted and has no as-traded column. The universe is `exchanges.asset_class = 'us_equity'` (the shortlist's own filter) without the tradability flag, so delisted names stay.
+  - **Sessions are NYSE sessions** (`market_calendar.us_market_status`), and each series is cut to them at load, because the stored corpus carries weekend and holiday bars. The corpus also has provider coverage holes on some sessions; a leg whose fill session is a hole is refused and counted (`next_bar_not_next_session`), and a session with too few fillable legs is redrawn and listed.
+  - **The grid is ATR-relative, per the supervisor's 2026-09-28 rule** (posted on #2437 after v4): stop = k × each leg's own ATR14% with k ∈ {1.5, 3}, target = 2R, over the §5 horizons. A leg whose derived levels fall outside the §5 bounds is ineligible and redrawn, as a trial control leg would be.
+  - **Bracket resolution reuses `outcome_resolver.resolve_outcome`**, with the two rules above applied on top: an ambiguous bar takes the stop, and a horizon exit is at the close.
+  - The test is one-sided at α = 0.05, with δ planted on the arm leg. Its size at δ = 0 is printed, so a miscalibrated run is visible.
 
 **Readout.**
 - **Primary:** mean(*d*), the sign-flip p, the unit and cluster counts, and the verdict wording above.
