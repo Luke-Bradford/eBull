@@ -465,6 +465,17 @@ _PRE_HUNT_RESEARCH_READERS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Readers that compute NO outcome-bearing number on a hypothesis, each with the governing rule.
+#: ⚠ Not a back door: an entry must cite the spec section that authorises it and state why a hunt
+#: trial would be the wrong accounting. Anything that ranks, selects or scores a signal does not
+#: qualify, however small.
+_NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
+    # #3471 spec §9 "Planning table" + §10: random-vs-random pair dispersion with PLANTED shifts —
+    # no signal, nothing selectable, never calls the model. A hunt trial would spend the hunt's M on
+    # a power calculation, and the trial's own #2599 declaration is frozen AFTER this table.
+    "ai_trial_power.py": "#3471 §9/§10 planning table (random-vs-random dispersion)",
+}
+
 _SERVICES = _SCRIPTS.parent / "app" / "services"
 
 
@@ -492,6 +503,7 @@ def test_a_new_research_price_reader_goes_through_the_hunt_harness() -> None:
         for path in _hunt_scope()
         if path.name not in ("hunt_harness.py", "hunt_panel.py")
         and path.name not in _PRE_HUNT_RESEARCH_READERS
+        and path.name not in _NON_TRIAL_RESEARCH_READERS
         and _imports_research_price_reader(ast.parse(path.read_text()))
         and not _is_gated(path.read_text())
     ]
@@ -505,6 +517,7 @@ def test_a_new_research_price_reader_goes_through_the_hunt_harness() -> None:
 def test_the_pre_hunt_reader_list_only_names_live_importers() -> None:
     live = {path.name for path in _SCRIPTS.glob("*.py") if _imports_research_price_reader(ast.parse(path.read_text()))}
     assert _PRE_HUNT_RESEARCH_READERS <= live, sorted(_PRE_HUNT_RESEARCH_READERS - live)
+    assert set(_NON_TRIAL_RESEARCH_READERS) <= live, sorted(set(_NON_TRIAL_RESEARCH_READERS) - live)
 
 
 def test_the_reader_detector_sees_both_import_spellings() -> None:
