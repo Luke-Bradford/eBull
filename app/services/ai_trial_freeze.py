@@ -208,10 +208,11 @@ def read_provenance(repo_root: Path = REPO_ROOT, *, fetch: bool = True) -> Prove
         dirty = bool(git("status", "--porcelain"))
         origin_main = git("rev-parse", "origin/main")
     except (OSError, subprocess.SubprocessError) as exc:
-        # Unreadable provenance is a refusal, never a freeze with a guessed sha.
+        # Unreadable provenance is a refusal, never a freeze with a guessed sha. Nothing else is
+        # read here: an error path must not repeat a fallible operation.
         return Provenance(
             code_git_sha="unknown",
-            spec_sha256=hashlib.sha256((repo_root / SPEC_PATH).read_bytes()).hexdigest(),
+            spec_sha256="unknown",
             python_version=sys.version.split()[0],
             refusals=(f"git_unavailable:{type(exc).__name__}",),
         )

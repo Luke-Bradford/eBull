@@ -58,8 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, default=None, help="also write the report as JSON")
     args = parser.parse_args(argv)
 
-    provenance = read_provenance(fetch=not args.no_fetch)
     try:
+        provenance = read_provenance(fetch=not args.no_fetch)
         with psycopg.connect(settings.database_url) as conn:
             report = freeze_trial(
                 conn,
@@ -69,13 +69,18 @@ def main(argv: list[str] | None = None) -> int:
                 wake_evidence=args.wake_evidence,
                 expect_config_sha256=args.expect_config_sha256,
             )
-    except (TrialFreezeError, psycopg.Error) as exc:
+    except (TrialFreezeError, psycopg.Error, OSError) as exc:
         # Rolled back: nothing was frozen. Printed as a failure, never a bare traceback.
         print(f"freeze FAILED, nothing written: {type(exc).__name__}: {exc}")
         return 1
     print(render(report))
     if args.json is not None:
-        args.json.write_text(json.dumps(report.__dict__, sort_keys=True, indent=2, default=str))
+        try:
+            args.json.write_text(json.dumps(report.__dict__, sort_keys=True, indent=2, default=str))
+        except OSError as exc:
+            # The freeze outcome above stands; only the copy failed.
+            print(f"--json not written: {type(exc).__name__}: {exc}")
+            return 1
     return 0 if not report.refusals else 1
 
 
