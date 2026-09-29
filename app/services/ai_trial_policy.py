@@ -7,6 +7,7 @@ defined in one of them:
 
 * ``ai_trial_pack`` / ``ai_trial_pack_reader`` — shortlist, pack, indicators, knowledge time;
 * ``ai_trial_decision`` — the §5 schema, the §6 validator and the §7 draw;
+* ``ai_trial_levels`` — the v6 §16.1 structure levels and setup detectors;
 * ``ai_trial_prompt`` / ``ai_trial_invocation`` — the frozen prompts, the model id, the argv,
   the env and the §4 limits;
 * ``ai_trial_intent`` — the loader and the §8 tickets;
@@ -68,6 +69,7 @@ POLICY_MODULES: Final = (
     "ai_trial_decision.py",
     "ai_trial_intent.py",
     "ai_trial_invocation.py",
+    "ai_trial_levels.py",
     "ai_trial_pack.py",
     "ai_trial_pack_reader.py",
     "ai_trial_prompt.py",
