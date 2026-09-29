@@ -39,6 +39,7 @@ from app.services.ai_trial_deadline import (
     TRIAL_MAX_POSITION_AGE_SECONDS,
 )
 from app.services.ai_trial_executor import TRIAL_COST_CAP_PCT, TRIAL_MAX_CONCURRENT_PER_LEG
+from app.services.ai_trial_halts import TRIAL_LOSS_HALT_PCT
 from app.services.ai_trial_pair_lifecycle import (
     LABEL_CLASSIFIER_VERSION,
     TRIAL_CENSOR_SESSIONS,
@@ -81,6 +82,7 @@ FROZEN_CONSTANTS: Final[dict[str, object]] = {
     "ai_trial_deadline.TRIAL_MAX_POSITION_AGE_SECONDS": TRIAL_MAX_POSITION_AGE_SECONDS,
     "ai_trial_executor.TRIAL_COST_CAP_PCT": TRIAL_COST_CAP_PCT,
     "ai_trial_executor.TRIAL_MAX_CONCURRENT_PER_LEG": TRIAL_MAX_CONCURRENT_PER_LEG,
+    "ai_trial_halts.TRIAL_LOSS_HALT_PCT": TRIAL_LOSS_HALT_PCT,
     "ai_trial_pair_lifecycle.LABEL_CLASSIFIER_VERSION": LABEL_CLASSIFIER_VERSION,
     "ai_trial_pair_lifecycle.TRIAL_CENSOR_SESSIONS": TRIAL_CENSOR_SESSIONS,
     "ai_trial_pair_lifecycle.TRIAL_UNRESOLVED_SESSIONS": TRIAL_UNRESOLVED_SESSIONS,

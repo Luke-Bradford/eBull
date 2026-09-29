@@ -39,7 +39,7 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
   first 10·k pairs are all valued units (broken and settled-unvalued pairs are outside the
   order); none before ``HARM_MIN_CLUSTERS`` clusters; look k
   halts if the one-sided (``less``) p < ``HARM_ALPHA`` · 2^−k. Computed here, over every pair
-  (monitoring continues through exploration); nothing in this module writes a state event.
+  (monitoring continues through exploration); ``ai_trial_halts`` acts on them.
 - **Seed.** The Monte-Carlo flips (above 16 clusters) are drawn from
   ``sha256(declaration sha | "readout")`` — declared by construction, as the §7 draw's seed is.
 
@@ -121,6 +121,8 @@ class CloseRow:
     price: Decimal | None
     stop_rate: Decimal | None
     take_rate: Decimal | None
+    #: Units the slice closed (the §9 loss halt nets them off the opened units).
+    units: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -603,7 +605,7 @@ _LEGS_SQL: Final = """
 _CLOSE_ROWS_SQL: Final = """
     SELECT t.strategy_trade_id, ev.executed_at, ev.recorded_at, ev.realized_pnl_usd,
            ev.investment_usd, ev.fees_usd, ev.price,
-           ev.raw_payload ->> 'stopLossRate', ev.raw_payload ->> 'takeProfitRate'
+           ev.raw_payload ->> 'stopLossRate', ev.raw_payload ->> 'takeProfitRate', ev.units
     FROM strategy_trades t
     JOIN trade_events ev ON ev.event_kind = 'close' AND (
         ev.position_id IN (SELECT ow.broker_position_id FROM strategy_position_ownership ow
@@ -661,6 +663,26 @@ def _censor_mark(
     )
 
 
+def load_close_rows(conn: psycopg.Connection[Any], trade_ids: Sequence[int]) -> dict[int, list[CloseRow]]:
+    """Every broker close slice of each trade, by ``strategy_trade_id`` (see ``_CLOSE_ROWS_SQL``)."""
+    close_rows: dict[int, list[CloseRow]] = {}
+    for row in conn.execute(_CLOSE_ROWS_SQL, (list(trade_ids),)).fetchall():
+        close_rows.setdefault(int(row[0]), []).append(
+            CloseRow(
+                row[1],
+                row[2],
+                _decimal(row[3]),
+                _decimal(row[4]),
+                _decimal(row[5]),
+                _decimal(row[6]),
+                _decimal(row[7]),
+                _decimal(row[8]),
+                _decimal(row[9]),
+            )
+        )
+    return close_rows
+
+
 def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list[PairRecord], date | None]:
     """Every pair of the declaration with its legs valued, plus the trial's first fill session."""
     pair_rows = conn.execute(_PAIRS_SQL, (declaration_id,)).fetchall()
@@ -672,21 +694,7 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
     ).fetchall():
         events[int(pair_id)].append((leg, event, reasons))
     legs = {(int(row[0]), row[1]): row for row in conn.execute(_LEGS_SQL, (declaration_id,)).fetchall()}
-    close_rows: dict[int, list[CloseRow]] = {}
-    trade_ids = [int(row[2]) for row in legs.values()]
-    for row in conn.execute(_CLOSE_ROWS_SQL, (trade_ids,)).fetchall():
-        close_rows.setdefault(int(row[0]), []).append(
-            CloseRow(
-                row[1],
-                row[2],
-                _decimal(row[3]),
-                _decimal(row[4]),
-                _decimal(row[5]),
-                _decimal(row[6]),
-                _decimal(row[7]),
-                _decimal(row[8]),
-            )
-        )
+    close_rows = load_close_rows(conn, [int(row[2]) for row in legs.values()])
     fills = [row[6] for row in legs.values() if row[6] is not None]
     first_fill = min((fill_session(filled) for filled in fills), default=None)
 

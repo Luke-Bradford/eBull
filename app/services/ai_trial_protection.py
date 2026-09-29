@@ -15,26 +15,20 @@ refuses `trial_not_active`) and an ERROR log line naming the trade.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 
 logger = logging.getLogger(__name__)
 
 
-def halt_trial_for_unprotected_leg(conn: psycopg.Connection[Any], *, strategy_trade_id: int, reason: str) -> bool:
-    """Move the leg's trial ``active -> halted_operator``. Returns False when the trial is
-    already not active (a halt is never stacked on a halt, and a resume is a supervisor action).
-    """
+EngineHalt = Literal["halted_harm", "halted_loss", "halted_operator"]
+
+
+def halt_active_trial(conn: psycopg.Connection[Any], *, declaration_id: int, to_state: EngineHalt, reason: str) -> bool:
+    """Move the trial ``active -> to_state`` as the engine. Returns False when the trial is not
+    active (a halt is never stacked on a halt, and a resume is a supervisor action)."""
     with conn.transaction():
-        row = conn.execute(
-            "SELECT p.declaration_id FROM ai_trial_trade_links l JOIN ai_trial_pairs p ON p.pair_id = l.pair_id "
-            "WHERE l.strategy_trade_id = %s",
-            (strategy_trade_id,),
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"strategy trade {strategy_trade_id} is not a trial leg")
-        declaration_id = int(row[0])
         # The state-event trigger takes the same lock; taking it first makes the read below the
         # current state rather than a stale one, so a concurrent halt is not a raised error.
         conn.execute(
@@ -48,9 +42,32 @@ def halt_trial_for_unprotected_leg(conn: psycopg.Connection[Any], *, strategy_tr
             return False
         conn.execute(
             "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
-            "VALUES (%s, 'active', 'halted_operator', %s, 'engine')",
-            (declaration_id, f"o10_unprotected_leg:trade={strategy_trade_id}:{reason}"),
+            "VALUES (%s, 'active', %s, %s, 'engine')",
+            (declaration_id, to_state, reason),
         )
+    return True
+
+
+def halt_trial_for_unprotected_leg(conn: psycopg.Connection[Any], *, strategy_trade_id: int, reason: str) -> bool:
+    """Move the leg's trial ``active -> halted_operator``. Returns False when the trial is
+    already not active.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT p.declaration_id FROM ai_trial_trade_links l JOIN ai_trial_pairs p ON p.pair_id = l.pair_id "
+            "WHERE l.strategy_trade_id = %s",
+            (strategy_trade_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"strategy trade {strategy_trade_id} is not a trial leg")
+        declaration_id = int(row[0])
+        if not halt_active_trial(
+            conn,
+            declaration_id=declaration_id,
+            to_state="halted_operator",
+            reason=f"o10_unprotected_leg:trade={strategy_trade_id}:{reason}",
+        ):
+            return False
     logger.error(
         "ai trial %s halted: leg trade %s is unprotected and its close was refused (%s)",
         declaration_id,
@@ -60,4 +77,4 @@ def halt_trial_for_unprotected_leg(conn: psycopg.Connection[Any], *, strategy_tr
     return True
 
 
-__all__ = ["halt_trial_for_unprotected_leg"]
+__all__ = ["EngineHalt", "halt_active_trial", "halt_trial_for_unprotected_leg"]
