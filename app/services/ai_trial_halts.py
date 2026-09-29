@@ -207,20 +207,19 @@ def _check_declaration(conn: Conn, declaration_id: int, strategy_version: str, n
 
 
 def _fail_closed(conn: Conn, declaration_id: int, exc: Exception) -> HaltCheck:
-    try:
-        written = halt_active_trial(
-            conn,
-            declaration_id=declaration_id,
-            to_state="halted_operator",
-            # The message too (bounded), so a persistent cause is triageable from the event alone.
-            # Bound as a parameter; `reason` is unbounded TEXT (sql/432), and a NUL, which a
-            # text parameter refuses, is dropped so the halt cannot fail on its own reason.
-            reason=f"halt_check_failed:{type(exc).__name__}:{str(exc).replace(chr(0), '')[:200]}",
-        )
-    except Exception:
-        logger.exception("ai trial %s: the fail-closed halt could not be written either", declaration_id)
-        written = False
-    return HaltCheck(declaration_id, "halted_operator" if written else None, 0, failed=True)
+    kind = f"halt_check_failed:{type(exc).__name__}"
+    # The message too (bounded), so a persistent cause is triageable from the event alone. It is
+    # arbitrary text, so if it cannot be written (a NUL, a lone surrogate) the class-only reason
+    # is: the halt must not fail on its own reason.
+    reasons = (f"{kind}:{str(exc)[:200]}", kind)
+    for reason in reasons:
+        try:
+            written = halt_active_trial(conn, declaration_id=declaration_id, to_state="halted_operator", reason=reason)
+        except Exception:
+            logger.exception("ai trial %s: the fail-closed halt could not be written (%r)", declaration_id, kind)
+            continue
+        return HaltCheck(declaration_id, "halted_operator" if written else None, 0, failed=True)
+    return HaltCheck(declaration_id, None, 0, failed=True)
 
 
 def enforce_trial_halts(conn: Conn, *, now: datetime | None = None) -> list[HaltCheck]:
