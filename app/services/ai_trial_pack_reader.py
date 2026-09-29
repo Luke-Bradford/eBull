@@ -33,6 +33,7 @@ name they would repeat up to 6 rows for every name in the prompt.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -738,7 +739,8 @@ def pack_document(
             "max_new_entries": account.max_new_entries,
         },
         "names": list(names),
-        "setup_library": dict(setup_library),
+        # A deep copy: the rows are nested lists, and the pack must not alias the loaded library.
+        "setup_library": copy.deepcopy(dict(setup_library)),
     }
 
 
