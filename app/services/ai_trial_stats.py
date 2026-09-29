@@ -27,9 +27,11 @@ MONTE_CARLO_FLIPS: Final = 99_999
 
 Alternative = Literal["greater", "less"]
 
-#: Relative tolerance for "T_b ≥ T_obs". A flip that reproduces T_obs up to float summation order
-#: is a tie, and ties count as ≥ (§9) — without the tolerance a reordered sum could drop one.
-_TIE_RTOL: Final = 1e-12
+#: Unit roundoff. "T_b ≥ T_obs" is tested to within the float summation-error bound: a flip that
+#: reproduces T_obs up to summation order is a tie, and ties count as ≥ (§9). The bound is
+#: 2 · (K + 1) · u · Σ|S| (Higham's γ_n for each of the two K-term sums), so a real difference larger
+#: than float noise is never absorbed — scale-invariant, and tight when large sums cancel.
+_UNIT_ROUNDOFF: Final = float(np.finfo(np.float64).eps) / 2
 #: Upper bound on the (flips × rows) T_b block held at once, in elements (~64 MB of float64).
 _BLOCK_ELEMENTS: Final = 8_000_000
 
@@ -89,7 +91,7 @@ def sign_flip_p_batch(
         raise ValueError("cluster sums must be finite")
     orient = 1.0 if alternative == "greater" else -1.0
     t_obs = orient * sums.sum(axis=1)  # (R,)
-    floor = t_obs - _TIE_RTOL * np.abs(sums).sum(axis=1)  # purely relative: scale-invariant
+    floor = t_obs - 2 * (sums.shape[1] + 1) * _UNIT_ROUNDOFF * np.abs(sums).sum(axis=1)
     hits = np.empty(sums.shape[0], dtype=np.float64)
     step = max(1, _BLOCK_ELEMENTS // signs.shape[0])
     for lo in range(0, sums.shape[0], step):

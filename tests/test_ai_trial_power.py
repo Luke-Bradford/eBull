@@ -19,6 +19,7 @@ from scripts.ai_trial_power import (
     PanelInstrument,
     atr_at,
     draw_pair_differences,
+    flip_set_sensitivity,
     in_universe,
     nyse_sessions,
     rejection_rates,
@@ -58,6 +59,9 @@ def test_the_tie_tolerance_is_scale_invariant() -> None:
     fs = flip_set(1, seed=0)
     assert sign_flip_p([1e-13], fs) == 0.5
     assert sign_flip_p([1e-13, 2e-13, 3e-13], flip_set(3, seed=0)) == sign_flip_p([1.0, 2.0, 3.0], flip_set(3, seed=0))
+    # Large sums that cancel: T_obs = 0.5 and the flipped −0.5 is a real inequality, not a tie
+    # (Codex ckpt-3 counterexample on #3492 — a 1e-12 relative tolerance gave 0.75).
+    assert sign_flip_p([1e12, -1e12 + 0.5], flip_set(2, seed=0)) == 0.5
 
 
 def test_less_alternative_is_the_mirror_of_greater() -> None:
@@ -267,6 +271,12 @@ def test_draw_pairs_arm_minus_control_and_replaces_thin_sessions() -> None:
         draw_pair_differences(
             np.random.default_rng(0), sessions, universes, leg_for, replicates=1, clusters=3, census=Census()
         )
+
+
+def test_flip_set_sensitivity_is_the_largest_rate_gap() -> None:
+    a = {0.0: {15: 0.05, 20: 0.06}, 1.0: {15: 0.2, 20: 0.3}}
+    b = {0.0: {15: 0.05, 20: 0.05}, 1.0: {15: 0.2, 20: 0.33}}
+    assert flip_set_sensitivity(a, b) == pytest.approx(0.03)
 
 
 def test_rejection_rates_respond_to_the_planted_shift() -> None:

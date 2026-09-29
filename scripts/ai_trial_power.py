@@ -89,6 +89,8 @@ REWARD_RISK: Final = Decimal("2")
 #: Planted shifts in d, per-trade percentage points.
 SHIFTS_PCT: Final = (0.0, 1.0, 2.0, 3.0, 5.0)
 ALPHA: Final = 0.05
+#: Seed offset for the second, independent Monte-Carlo flip set (``flip_set_sensitivity``).
+ALT_FLIP_SEED: Final = 1_000_003
 #: Load start: at least ``INDICATOR_BARS`` NYSE sessions before ``WINDOW_START``, so the first signal
 #: session sees the pack's full ATR window.
 WARMUP_START: Final = date(2022, 12, 1)
@@ -304,6 +306,11 @@ def rejection_rates(
     return out
 
 
+def flip_set_sensitivity(a: Mapping[float, Mapping[int, float]], b: Mapping[float, Mapping[int, float]]) -> float:
+    """Largest |rate_a − rate_b| over every (δ, K): 0 where K ≤ 16 (exact flips agree)."""
+    return max(abs(a[s][k] - b[s][k]) for s in a for k in a[s])
+
+
 # ---------------------------------------------------------------------------
 # DB load (read-only) and CLI
 # ---------------------------------------------------------------------------
@@ -377,6 +384,19 @@ def run(panel: Sequence[PanelInstrument], frontier: date, *, replicates: int, se
         base = draw_pair_differences(
             rng, sessions, universes, leg_for, replicates=replicates, clusters=max(CLUSTER_COUNTS), census=census
         )
+        rates = rejection_rates(
+            base, cluster_counts=CLUSTER_COUNTS, shifts_pct=SHIFTS_PCT, alpha=ALPHA, seed=seed, flips=flips
+        )
+        # The same draws under an independent flip set: every replicate shares one flip set, so its
+        # Monte-Carlo error moves the whole column together. Reported, not assumed away.
+        rates_alt = rejection_rates(
+            base,
+            cluster_counts=CLUSTER_COUNTS,
+            shifts_pct=SHIFTS_PCT,
+            alpha=ALPHA,
+            seed=seed + ALT_FLIP_SEED,
+            flips=flips,
+        )
         report["cells"].append(
             {
                 "cell": cell.label,
@@ -385,12 +405,8 @@ def run(panel: Sequence[PanelInstrument], frontier: date, *, replicates: int, se
                 "leg_outcomes": dict(census.outcomes),
                 "leg_refusals": dict(census.refusals),
                 "thin_sessions": sorted(d.isoformat() for d in census.thin_sessions),
-                "rejection": {
-                    str(s): {str(k): r for k, r in by_k.items()}
-                    for s, by_k in rejection_rates(
-                        base, cluster_counts=CLUSTER_COUNTS, shifts_pct=SHIFTS_PCT, alpha=ALPHA, seed=seed, flips=flips
-                    ).items()
-                },
+                "rejection": {str(s): {str(k): r for k, r in by_k.items()} for s, by_k in rates.items()},
+                "flip_set_sensitivity": flip_set_sensitivity(rates, rates_alt),
             }
         )
     return report
@@ -408,7 +424,8 @@ def render(report: Mapping[str, Any]) -> str:
     for cell in report["cells"]:
         lines += [
             "",
-            f"### {cell['cell']} — sd(d) {cell['d_sd_pct']:.2f} pp, mean(d) {cell['d_mean_pct']:+.3f} pp",
+            f"### {cell['cell']} — sd(d) {cell['d_sd_pct']:.2f} pp, mean(d) {cell['d_mean_pct']:+.3f} pp, "
+            f"flip-set sensitivity {cell['flip_set_sensitivity']:.3f}",
             f"distinct legs {cell['leg_outcomes']} · refused {cell['leg_refusals']} · "
             f"thin sessions {len(cell['thin_sessions'])}",
             head,
