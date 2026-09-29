@@ -76,16 +76,37 @@ statistic", "Cohort", "Harm stop", "Readout"; O12 (exit labels); O13 (arithmetic
   the recorded §6 ATR14 % (mean), the house 1-year OLS beta against SPY computed by the run's
   cutoff (mean), and the provider stocks-industry id effective at the run's cutoff (counts). A
   missing fact is counted per fact, never estimated. Due readout only, like the SPY references.
+
+- **v6 structure plans (§16.7, §16.11(b)).** Due readout with descriptives only (``load_plan_facts``;
+  ``ai_trial_halts`` never reaches it). Every input as recorded: plan figures from the decision and
+  pair rows, level ages from the run's stored pack, executor outcomes from the funding decisions,
+  the library's holdout rows from the stored packs and the §16.11 baselines from the decision rows.
+  - *Exit mix / library comparison:* per leg and per (setup, horizon), the realised % stop, target
+    and time (``LIBRARY_EXITS``) over the executed legs of completed cohort pairs, beside the
+    library's holdout half; any other exit, a partial close included (``partial_close``), is
+    counted outside the denominator. ⚠ Beside the
+    library's setup-conditioned rates, not ``ai_trial_exit_base_rates``' random-entry grid: that
+    grid is keyed by fixed stop and R multiples, which a structure plan's continuous geometry
+    does not select.
+  - *Calibration:* per leg, realised net R = §9 net % ÷ the applied ``stop_pct``, over the cohort
+    pairs whose leg exited by stop, target or time; broken pairs, other exits and unvalued legs are
+    counted. Pooled by each cell's valued-leg count, the library side with the same weights. Not
+    *d*, and no test.
+  - *Geometry:* per leg over the cohort units — stop ATR, R, stop %, target %, level ages, ask ÷
+    close, dollar risk at the stop — plus pool sizes, self-draws, singleton-self pools,
+    ``plan_invalidated`` per leg, pool exhaustion per setup and *d* by response position.
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from fractions import Fraction
 from statistics import median
 from typing import Any, Final, Literal
 
@@ -192,6 +213,9 @@ class LegValue:
     #: session); set by the loader, read by the SPY reference and turnover.
     entry_session: date | None = None
     exit_session: date | None = None
+    #: A close slice preceded the leg's final exit (a partial manual close; ``partial_close``).
+    #: §9 values the whole leg regardless; §16.7/§16.11(b) count it as an other exit.
+    partial_close: bool = False
 
 
 def exit_label(rows: Sequence[CloseRow], close_trigger: str | None) -> str:
@@ -206,6 +230,18 @@ def exit_label(rows: Sequence[CloseRow], close_trigger: str | None) -> str:
     if last.take_rate is not None and last.take_rate > 0 and last.price >= last.take_rate:
         return "target"
     return "broker_other"
+
+
+def partial_close(rows: Sequence[CloseRow], close_trigger: str | None, close_requested_at: datetime | None) -> bool:
+    """A closed leg one of whose slices was closed before its final exit. An engine close closes
+    the position once, so any slice executed before its operation was requested is a partial. A
+    broker close is recognised by its slices' own O12 labels disagreeing with the leg's (a slice
+    between stop and target beside a final stop or target slice). ⚠ A manual partial filled at or
+    through the leg's own stop or target price is indistinguishable from it, and is not caught."""
+    if close_trigger is not None:
+        return close_requested_at is not None and any(row.executed_at < close_requested_at for row in rows)
+    final = exit_label(rows, None)
+    return any(exit_label([row], None) != final for row in rows)
 
 
 def value_closed_leg(rows: Sequence[CloseRow], close_trigger: str | None) -> LegValue:
@@ -646,6 +682,417 @@ def by_group(units: Sequence[PairRecord], key: str) -> list[GroupRow]:
 
 
 # --------------------------------------------------------------------------------------------
+# v6 structure plans: §16.7 and §16.11(b) (pure)
+# --------------------------------------------------------------------------------------------
+
+#: §16.7: the trial's exits that the §16.5 library also has, under the library's names. The
+#: library's time exit is close(t+h), the trial's is ``deadline``. ``censored`` is §9's clock (the
+#: deadline close did not execute in time), so it is counted with the other exits, not as time.
+LIBRARY_EXITS: Final = {"stop": "stop", "target": "target", "deadline": "time"}
+
+Cell = tuple[str, int]
+
+
+@dataclass(frozen=True)
+class LegPlan:
+    """One leg's recorded §16.3 plan and its execution facts (§16.7)."""
+
+    stop_atr_multiple: Decimal | None
+    r_multiple: Decimal | None
+    #: The server-derived stop % the executor applied (§16.11(b)'s denominator).
+    stop_pct: Decimal | None
+    target_pct: Decimal | None
+    #: The §6 close the plan was derived from.
+    close: Decimal | None
+    #: The ask the entry preflight priced from; ``None`` when the leg never reached it.
+    ask: Decimal | None
+    #: The funded amount (``strategy_funding_decisions.amount``); ``None`` unless allocated.
+    amount: Decimal | None
+    #: Bars from each chosen level's anchor to the name's last pack bar; ``None`` when the level
+    #: has no anchor (moving averages, the VWAP proxy, projections) or is absent.
+    invalidation_age: int | None
+    target_age: int | None
+    #: The executor's refusal code for this leg, ``None`` when allocated or not yet decided.
+    refusal: str | None
+
+
+@dataclass(frozen=True)
+class PairPlan:
+    setup_type: str | None
+    horizon_days: int
+    response_position: int
+    #: The decision's §16.11 baselines, the library's ``mean_net_r`` fractions verbatim.
+    base_rate_train: str | None
+    base_rate_holdout: str | None
+    pool_size: int
+    #: The draw returned the arm's own name.
+    self_draw: bool
+    legs: Mapping[str, LegPlan]
+
+    @property
+    def cell(self) -> Cell:
+        return (self.setup_type or "unlabelled", self.horizon_days)
+
+
+@dataclass(frozen=True)
+class PlanFacts:
+    """The loader's v6 inputs over the cohort (``load_plan_facts``)."""
+
+    #: By ``pair_seq``, every cohort pair.
+    pairs: Mapping[int, PairPlan]
+    #: Cohort arm decisions refused ``control_pool_exhausted``, by setup.
+    exhausted: Mapping[str, int]
+    #: The library's holdout half per (setup, horizon), from the declaration's stored packs;
+    #: empty when the packs disagree on the library (``library_sha256`` is then ``None``).
+    library_holdout: Mapping[Cell, Mapping[str, Any]]
+    library_sha256: str | None
+    library_caveat: str | None
+
+
+def fraction_value(raw: str | None) -> float | None:
+    """A library ``p/q`` string as a float for display; ``None`` when absent or malformed."""
+    if raw is None:
+        return None
+    try:
+        return float(Fraction(raw))
+    except ValueError, ZeroDivisionError:
+        return None
+
+
+def _library_pct(row: Mapping[str, Any] | None, key: str) -> float | None:
+    raw = None if row is None else row.get(key)
+    try:
+        value = float(raw) if isinstance(raw, str | int | float) and not isinstance(raw, bool) else None
+    except ValueError:
+        return None
+    return value if value is not None and math.isfinite(value) else None
+
+
+@dataclass(frozen=True)
+class ExitCell:
+    setup_type: str
+    horizon_days: int
+    #: Legs whose exit was a stop, target or time exit: the denominator of every rate here.
+    legs: int
+    stop: int
+    target: int
+    time: int
+    #: Legs with any other exit, by label, outside the denominator (§16.7, r2-52).
+    other: dict[str, int]
+    pct_stop: float | None
+    pct_target: float | None
+    pct_time: float | None
+    #: The library's holdout half for this cell (§16.7, r2-51).
+    library_pct_stop: float | None
+    library_pct_target: float | None
+    library_pct_time: float | None
+
+
+@dataclass(frozen=True)
+class ExitMix:
+    """One leg's exit mix over every cell, beside the library's holdout mix weighted by the leg's
+    own per-cell denominators."""
+
+    legs: int
+    pct_stop: float | None
+    pct_target: float | None
+    pct_time: float | None
+    library_pct_stop: float | None
+    library_pct_target: float | None
+    library_pct_time: float | None
+    other: dict[str, int]
+    cells: list[ExitCell]
+
+
+def _pct(part: int, whole: int) -> float | None:
+    return 100 * part / whole if whole else None
+
+
+def _weighted(pairs: Sequence[tuple[int, float | None]]) -> float | None:
+    """Σ w·x ÷ Σ w over positive weights; ``None`` when there is no weight, or when a weighted
+    cell lacks its value (a partial average would silently change the weights)."""
+    weighted = [(w, x) for w, x in pairs if w > 0]
+    if not weighted or any(x is None for _, x in weighted):
+        return None
+    total = sum(w for w, _ in weighted)
+    return sum(w * x for w, x in weighted if x is not None) / total
+
+
+def _library_exit(value: LegValue) -> str:
+    """The library's name for the leg's exit, or ``other:<label>``; a partial close is always other."""
+    if value.partial_close:
+        return "other:partial_close"
+    return LIBRARY_EXITS.get(value.exit_label, f"other:{value.exit_label}")
+
+
+def exit_mix(
+    completed: Sequence[PairRecord],
+    plans: Mapping[int, PairPlan],
+    library: Mapping[Cell, Mapping[str, Any]],
+    leg: str,
+) -> ExitMix:
+    """§16.7 exit mix and library comparison for one leg, over the executed legs of the completed
+    (``unit``) cohort pairs."""
+    counts: dict[Cell, Counter[str]] = {}
+    for pair in completed:
+        value = pair.arm if leg == "arm" else pair.control
+        plan = plans.get(pair.pair_seq)
+        if value is None or plan is None:
+            continue
+        counts.setdefault(plan.cell, Counter())[_library_exit(value)] += 1
+    cells: list[ExitCell] = []
+    for (setup, horizon), counter in sorted(counts.items()):
+        row = library.get((setup, horizon))
+        n = counter["stop"] + counter["target"] + counter["time"]
+        cells.append(
+            ExitCell(
+                setup_type=setup,
+                horizon_days=horizon,
+                legs=n,
+                stop=counter["stop"],
+                target=counter["target"],
+                time=counter["time"],
+                other={k.removeprefix("other:"): v for k, v in sorted(counter.items()) if k.startswith("other:")},
+                pct_stop=_pct(counter["stop"], n),
+                pct_target=_pct(counter["target"], n),
+                pct_time=_pct(counter["time"], n),
+                library_pct_stop=_library_pct(row, "pct_stop"),
+                library_pct_target=_library_pct(row, "pct_target"),
+                library_pct_time=_library_pct(row, "pct_time"),
+            )
+        )
+    n = sum(cell.legs for cell in cells)
+    other: Counter[str] = Counter()
+    for cell in cells:
+        other.update(cell.other)
+    return ExitMix(
+        legs=n,
+        pct_stop=_pct(sum(cell.stop for cell in cells), n),
+        pct_target=_pct(sum(cell.target for cell in cells), n),
+        pct_time=_pct(sum(cell.time for cell in cells), n),
+        library_pct_stop=_weighted([(cell.legs, cell.library_pct_stop) for cell in cells]),
+        library_pct_target=_weighted([(cell.legs, cell.library_pct_target) for cell in cells]),
+        library_pct_time=_weighted([(cell.legs, cell.library_pct_time) for cell in cells]),
+        other=dict(sorted(other.items())),
+        cells=cells,
+    )
+
+
+def realised_net_r(value: LegValue | None, stop_pct: Decimal | None) -> tuple[float | None, str | None]:
+    """§16.11(b): the leg's §9 net % ÷ the stop % the executor applied, or the reason it is
+    counted rather than valued."""
+    if value is None or value.net_pct is None or not math.isfinite(value.net_pct):
+        return None, "unvalued"
+    if stop_pct is None or not stop_pct.is_finite() or stop_pct <= 0:
+        return None, "stop_pct_missing"
+    return value.net_pct / float(stop_pct), None
+
+
+@dataclass(frozen=True)
+class CalibrationCell:
+    setup_type: str
+    horizon_days: int
+    #: Valued legs; the cell's weight in the pooled figures.
+    legs: int
+    mean_net_r: float | None
+    library_train_mean_net_r: float | None
+    library_holdout_mean_net_r: float | None
+    #: Legs counted, not valued, by reason.
+    counted: dict[str, int]
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """§16.11(b) for one leg. Descriptive only: not *d*, and no test."""
+
+    legs: int
+    mean_net_r: float | None
+    library_train_mean_net_r: float | None
+    library_holdout_mean_net_r: float | None
+    counted: dict[str, int]
+    cells: list[CalibrationCell]
+
+
+def calibration(cohort_pairs: Sequence[PairRecord], plans: Mapping[int, PairPlan], leg: str) -> Calibration:
+    """§16.11(b) over one leg of the cohort pairs: realised mean net R per (setup, horizon) cell
+    beside the baselines the decision rows recorded, pooled by each cell's valued-leg count."""
+    values: dict[Cell, list[float]] = {}
+    counted: dict[Cell, Counter[str]] = {}
+    baselines: dict[Cell, tuple[str | None, str | None]] = {}
+    for pair in cohort_pairs:
+        plan = plans.get(pair.pair_seq)
+        if plan is None:
+            continue
+        cell = plan.cell
+        values.setdefault(cell, [])
+        counted.setdefault(cell, Counter())
+        baselines.setdefault(cell, (plan.base_rate_train, plan.base_rate_holdout))
+        value = pair.arm if leg == "arm" else pair.control
+        if pair.state != "unit":
+            counted[cell][f"pair_{pair.state}"] += 1
+            continue
+        label = None if value is None else _library_exit(value)
+        if label is not None and label.startswith("other:"):
+            counted[cell]["exit:" + label.removeprefix("other:")] += 1
+            continue
+        r, reason = realised_net_r(value, plan.legs[leg].stop_pct if leg in plan.legs else None)
+        if r is None:
+            counted[cell][reason or "unvalued"] += 1
+        else:
+            values[cell].append(r)
+    cells = [
+        CalibrationCell(
+            setup_type=cell[0],
+            horizon_days=cell[1],
+            legs=len(values[cell]),
+            mean_net_r=sum(values[cell]) / len(values[cell]) if values[cell] else None,
+            library_train_mean_net_r=fraction_value(baselines[cell][0]),
+            library_holdout_mean_net_r=fraction_value(baselines[cell][1]),
+            counted=dict(sorted(counted[cell].items())),
+        )
+        for cell in sorted(values)
+    ]
+    total: Counter[str] = Counter()
+    for cell in cells:
+        total.update(cell.counted)
+    return Calibration(
+        legs=sum(cell.legs for cell in cells),
+        mean_net_r=_weighted([(cell.legs, cell.mean_net_r) for cell in cells]),
+        library_train_mean_net_r=_weighted([(cell.legs, cell.library_train_mean_net_r) for cell in cells]),
+        library_holdout_mean_net_r=_weighted([(cell.legs, cell.library_holdout_mean_net_r) for cell in cells]),
+        counted=dict(sorted(total.items())),
+        cells=cells,
+    )
+
+
+@dataclass(frozen=True)
+class Dist:
+    n: int
+    mean: float | None
+    median: float | None
+    min: float | None
+    max: float | None
+    #: Members without the figure, never estimated.
+    missing: int
+
+
+def dist(values: Sequence[float | None]) -> Dist:
+    known = [value for value in values if value is not None]
+    return Dist(
+        n=len(known),
+        mean=sum(known) / len(known) if known else None,
+        median=median(known) if known else None,
+        min=min(known, default=None),
+        max=max(known, default=None),
+        missing=len(values) - len(known),
+    )
+
+
+def _float(value: Decimal | None) -> float | None:
+    return float(value) if value is not None and value.is_finite() else None
+
+
+@dataclass(frozen=True)
+class LegGeometry:
+    stop_atr_multiple: Dist
+    r_multiple: Dist
+    stop_pct: Dist
+    target_pct: Dist
+    invalidation_age_bars: Dist
+    target_age_bars: Dist
+    #: The priced ask ÷ the plan's close: how far execution displaced the exits (§16.3).
+    ask_over_close: Dist
+    #: Stop % × funded amount: the dollars lost at the stop, before slippage.
+    dollar_risk_usd: Dist
+
+
+def leg_geometry(plans: Sequence[LegPlan]) -> LegGeometry:
+    def ask_over_close(plan: LegPlan) -> float | None:
+        if plan.ask is None or plan.close is None or plan.ask <= 0 or plan.close <= 0:
+            return None
+        return float(plan.ask / plan.close)
+
+    def dollar_risk(plan: LegPlan) -> float | None:
+        if plan.stop_pct is None or plan.amount is None or not plan.stop_pct.is_finite():
+            return None
+        return float(plan.stop_pct * plan.amount / 100)
+
+    return LegGeometry(
+        stop_atr_multiple=dist([_float(plan.stop_atr_multiple) for plan in plans]),
+        r_multiple=dist([_float(plan.r_multiple) for plan in plans]),
+        stop_pct=dist([_float(plan.stop_pct) for plan in plans]),
+        target_pct=dist([_float(plan.target_pct) for plan in plans]),
+        invalidation_age_bars=dist([plan.invalidation_age for plan in plans]),
+        target_age_bars=dist([plan.target_age for plan in plans]),
+        ask_over_close=dist([ask_over_close(plan) for plan in plans]),
+        dollar_risk_usd=dist([dollar_risk(plan) for plan in plans]),
+    )
+
+
+@dataclass(frozen=True)
+class PlanReadout:
+    """§16.7 and §16.11(b). Descriptive: small cells, no test, not like-for-like with the library
+    (level ids, geometry, firing selection, universe, timing and cost all differ)."""
+
+    library_sha256: str | None
+    library_caveat: str | None
+    #: Per leg, over the executed legs of the completed cohort pairs.
+    exit_mix: dict[str, ExitMix]
+    #: Per leg, over the cohort pairs (§16.11(b)).
+    calibration: dict[str, Calibration]
+    #: Per leg, over the cohort units (the population *d* is computed on).
+    geometry: dict[str, LegGeometry]
+    #: Over every cohort pair.
+    pairs: int
+    pool_size: Dist
+    self_draws: int
+    #: Pools of one whose only member is the arm's own name: no selection contrast (v63-8).
+    singleton_self_pools: int
+    #: Cohort pairs whose leg the executor refused ``plan_invalidated``, per leg.
+    plan_invalidated: dict[str, int]
+    #: Cohort arm decisions refused ``control_pool_exhausted``, per setup.
+    exhausted_by_setup: dict[str, int]
+    #: *d* over the cohort units by the arm decision's position in the model's response.
+    d_by_response_position: list[GroupRow]
+
+
+def plan_readout(cohort_pairs: Sequence[PairRecord], units: Sequence[PairRecord], facts: PlanFacts) -> PlanReadout:
+    plans = facts.pairs
+    completed = [pair for pair in cohort_pairs if pair.state == "unit"]
+    cohort_plans = [plans[pair.pair_seq] for pair in cohort_pairs if pair.pair_seq in plans]
+    positions: dict[str, list[float]] = {}
+    for unit in units:
+        plan = plans.get(unit.pair_seq)
+        positions.setdefault("unlabelled" if plan is None else str(plan.response_position), []).append(unit.d)
+    return PlanReadout(
+        library_sha256=facts.library_sha256,
+        library_caveat=facts.library_caveat,
+        exit_mix={leg: exit_mix(completed, plans, facts.library_holdout, leg) for leg in LEGS},
+        calibration={leg: calibration(cohort_pairs, plans, leg) for leg in LEGS},
+        geometry={
+            leg: leg_geometry(
+                [
+                    plans[unit.pair_seq].legs[leg]
+                    for unit in units
+                    if unit.pair_seq in plans and leg in plans[unit.pair_seq].legs
+                ]
+            )
+            for leg in LEGS
+        },
+        pairs=len(cohort_plans),
+        pool_size=dist([plan.pool_size for plan in cohort_plans]),
+        self_draws=sum(plan.self_draw for plan in cohort_plans),
+        singleton_self_pools=sum(plan.self_draw and plan.pool_size == 1 for plan in cohort_plans),
+        plan_invalidated={
+            leg: sum(1 for plan in cohort_plans if leg in plan.legs and plan.legs[leg].refusal == "plan_invalidated")
+            for leg in LEGS
+        },
+        exhausted_by_setup=dict(sorted(facts.exhausted.items())),
+        d_by_response_position=[GroupRow(k, len(ds), sum(ds) / len(ds)) for k, ds in sorted(positions.items())],
+    )
+
+
+# --------------------------------------------------------------------------------------------
 # Cohort (pure)
 # --------------------------------------------------------------------------------------------
 
@@ -738,6 +1185,8 @@ class Readout:
     turnover: dict[str, Turnover] = field(default_factory=dict)
     #: Per leg, over the cohort units (the population *d* is computed on).
     exposure: dict[str, LegExposure] = field(default_factory=dict)
+    #: v6 §16.7 / §16.11(b); computed only in the due readout with descriptives.
+    plans: PlanReadout | None = None
 
 
 def build_readout(
@@ -755,6 +1204,7 @@ def build_readout(
     spy_closes: Mapping[date, Decimal | None] | None = None,
     spy_quote: tuple[Decimal | None, Decimal | None] = (None, None),
     exposure_facts: Mapping[int, Mapping[str, ExposureFacts]] | None = None,
+    plan_facts: PlanFacts | None = None,
 ) -> Readout:
     seed = readout_seed(declaration_sha256)
     # The session ``as_of`` belongs to (New York date, or the next session on a closed day), the
@@ -840,6 +1290,7 @@ def build_readout(
             leg: leg_exposure([(exposure_facts or {}).get(unit.pair_seq, {}).get(leg) for unit in units])
             for leg in LEGS
         },
+        plans=None if plan_facts is None else plan_readout(cohort_pairs, units, plan_facts),
     )
 
 
@@ -863,12 +1314,7 @@ _LEGS_SQL: Final = """
            entry.filled_at, entry.units, entry.average_price,
            (SELECT max(ow.released_at) FROM strategy_position_ownership ow
             WHERE ow.strategy_trade_id = t.strategy_trade_id) AS released_at,
-           (SELECT op.trigger_code
-            FROM strategy_position_ownership ow
-            JOIN strategy_position_operations op ON op.ownership_id = ow.ownership_id
-            WHERE ow.strategy_trade_id = t.strategy_trade_id
-              AND op.operation_type = 'close' AND op.status = 'applied'
-            ORDER BY op.position_operation_id DESC LIMIT 1) AS close_trigger,
+           close_op.trigger_code AS close_trigger, close_op.created_at AS close_requested_at,
            (SELECT pf.quote_ask FROM strategy_funding_decisions fd
             JOIN strategy_entry_preflights pf ON pf.signal_id = fd.signal_id
             WHERE fd.funding_decision_id = t.funding_decision_id) AS quote_ask
@@ -876,6 +1322,14 @@ _LEGS_SQL: Final = """
     JOIN ai_trial_pairs p ON p.pair_id = tl.pair_id
     JOIN strategy_trades t ON t.strategy_trade_id = tl.strategy_trade_id
     JOIN instruments i ON i.instrument_id = t.instrument_id
+    LEFT JOIN LATERAL (
+        SELECT op.trigger_code, op.created_at
+        FROM strategy_position_ownership ow
+        JOIN strategy_position_operations op ON op.ownership_id = ow.ownership_id
+        WHERE ow.strategy_trade_id = t.strategy_trade_id
+          AND op.operation_type = 'close' AND op.status = 'applied'
+        ORDER BY op.position_operation_id DESC LIMIT 1
+    ) close_op ON TRUE
     LEFT JOIN LATERAL (
         SELECT min(e.execution_time) AS filled_at,
                sum(e.opening_units) AS units,
@@ -1051,7 +1505,10 @@ def load_pairs(conn: psycopg.Connection[Any], declaration_id: int) -> tuple[list
                 value = value_censored_leg(mark, _decimal(row["units"]))
                 resolved.append(exit_session)
             else:
-                value = value_closed_leg(slices, row["close_trigger"])
+                value = replace(
+                    value_closed_leg(slices, row["close_trigger"]),
+                    partial_close=partial_close(slices, row["close_trigger"], row["close_requested_at"]),
+                )
                 if row["released_at"] is not None:
                     resolved.append(fill_session(row["released_at"]))
                 # The broker's execution time, not the release: a close detected a session late
@@ -1147,6 +1604,141 @@ def load_exposure_facts(
     return facts
 
 
+#: Each leg's chosen levels in its run's stored pack: ``origin_bar`` indexes the name's indicator
+#: series, whose last bar is ``indicator_bars − 1`` (``ai_trial_pack_reader.structure_entry``).
+#: The control's ids are the arm's (§16.4).
+_PLAN_SQL: Final = """
+    SELECT p.pair_seq, d.setup_type, d.horizon_days, d.response_position,
+           d.base_rate_train_mean_net_r, d.base_rate_holdout_mean_net_r,
+           cardinality(p.pool) AS pool_size, p.control_instrument_id = d.instrument_id AS self_draw,
+           d.stop_atr_multiple AS arm_stop_atr, d.r_multiple AS arm_r, d.stop_pct AS arm_stop_pct,
+           d.target_pct AS arm_target_pct, d.close AS arm_close,
+           p.control_stop_atr_multiple AS control_stop_atr, p.control_r_multiple AS control_r,
+           p.control_stop_pct AS control_stop_pct, p.control_target_pct AS control_target_pct,
+           p.control_close AS control_close,
+           arm_lv.bars AS arm_bars, arm_lv.inv AS arm_inv, arm_lv.tgt AS arm_tgt,
+           control_lv.bars AS control_bars, control_lv.inv AS control_inv, control_lv.tgt AS control_tgt
+    FROM ai_trial_pairs p
+    JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id
+    JOIN ai_trial_runs r ON r.run_id = d.run_id
+    LEFT JOIN LATERAL (
+        SELECT n ->> 'indicator_bars' AS bars,
+               n -> 'levels' -> d.invalidation_level_id ->> 'origin_bar' AS inv,
+               n -> 'levels' -> d.target_level_id ->> 'origin_bar' AS tgt
+        FROM jsonb_array_elements(r.pack -> 'names') n
+        WHERE n ->> 'instrument_id' = d.instrument_id::text
+        LIMIT 1
+    ) arm_lv ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT n ->> 'indicator_bars' AS bars,
+               n -> 'levels' -> d.invalidation_level_id ->> 'origin_bar' AS inv,
+               n -> 'levels' -> d.target_level_id ->> 'origin_bar' AS tgt
+        FROM jsonb_array_elements(r.pack -> 'names') n
+        WHERE n ->> 'instrument_id' = p.control_instrument_id::text
+        LIMIT 1
+    ) control_lv ON TRUE
+    WHERE p.declaration_id = %s AND r.session_date <= %s
+"""
+
+#: Each leg's executor outcome: its funding decision (the refusal code, or the funded amount) and
+#: the ask its entry preflight priced from.
+_LEG_FUNDING_SQL: Final = """
+    SELECT p.pair_seq, ll.leg,
+           CASE WHEN fd.verdict = 'rejected' THEN fd.reason_code END AS refusal,
+           CASE WHEN fd.verdict = 'allocated' THEN fd.amount END AS amount,
+           (SELECT pf.quote_ask FROM strategy_entry_preflights pf WHERE pf.signal_id = ll.signal_id) AS ask
+    FROM ai_trial_leg_links ll
+    JOIN ai_trial_pairs p ON p.pair_id = ll.pair_id
+    LEFT JOIN strategy_funding_decisions fd ON fd.signal_id = ll.signal_id
+    WHERE p.declaration_id = %s
+"""
+
+
+def _age(bars: Any, origin: Any) -> int | None:
+    try:
+        age = int(bars) - 1 - int(origin)
+    except TypeError, ValueError:
+        return None
+    return age if age >= 0 else None
+
+
+def load_plan_facts(conn: psycopg.Connection[Any], declaration_id: int, last_session: date) -> PlanFacts:
+    """The v6 inputs of the pairs entered on or before ``last_session`` (the cohort), every one as
+    recorded: the plan from the decision and pair rows, the level ages from the run's stored pack,
+    the executor outcome from the funding decision, and the library's holdout rows from the stored
+    packs (declaration-bound at pack build, §16.11), never the current file."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(_PLAN_SQL, (declaration_id, last_session)).fetchall()
+        funding = {
+            (int(row["pair_seq"]), str(row["leg"])): row
+            for row in cur.execute(_LEG_FUNDING_SQL, (declaration_id,)).fetchall()
+        }
+    pairs: dict[int, PairPlan] = {}
+    for row in rows:
+        pair_seq = int(row["pair_seq"])
+        legs: dict[str, LegPlan] = {}
+        for leg in LEGS:
+            outcome = funding.get((pair_seq, leg))
+            legs[leg] = LegPlan(
+                stop_atr_multiple=_decimal(row[f"{leg}_stop_atr"]),
+                r_multiple=_decimal(row[f"{leg}_r"]),
+                stop_pct=_decimal(row[f"{leg}_stop_pct"]),
+                target_pct=_decimal(row[f"{leg}_target_pct"]),
+                close=_decimal(row[f"{leg}_close"]),
+                ask=None if outcome is None else _decimal(outcome["ask"]),
+                amount=None if outcome is None else _decimal(outcome["amount"]),
+                invalidation_age=_age(row[f"{leg}_bars"], row[f"{leg}_inv"]),
+                target_age=_age(row[f"{leg}_bars"], row[f"{leg}_tgt"]),
+                refusal=None if outcome is None else outcome["refusal"],
+            )
+        pairs[pair_seq] = PairPlan(
+            setup_type=row["setup_type"],
+            horizon_days=int(row["horizon_days"]),
+            response_position=int(row["response_position"]),
+            base_rate_train=row["base_rate_train_mean_net_r"],
+            base_rate_holdout=row["base_rate_holdout_mean_net_r"],
+            pool_size=int(row["pool_size"]),
+            self_draw=bool(row["self_draw"]),
+            legs=legs,
+        )
+    exhausted = {
+        str(setup or "unlabelled"): int(count)
+        for setup, count in conn.execute(
+            """
+            SELECT d.setup_type, count(*) FROM ai_trial_decisions d
+            JOIN ai_trial_runs r ON r.run_id = d.run_id
+            WHERE r.declaration_id = %s AND r.session_date <= %s AND d.reason_code = 'control_pool_exhausted'
+            GROUP BY 1
+            """,
+            (declaration_id, last_session),
+        ).fetchall()
+    }
+    libraries = conn.execute(
+        """
+        SELECT DISTINCT r.pack -> 'setup_library' ->> 'sha256', r.pack -> 'setup_library' ->> 'caveat',
+               r.pack -> 'setup_library' -> 'rows'
+        FROM ai_trial_runs r
+        WHERE r.declaration_id = %s AND r.session_date <= %s AND r.pack -> 'setup_library' IS NOT NULL
+        """,
+        (declaration_id, last_session),
+    ).fetchall()
+    holdout: dict[Cell, Mapping[str, Any]] = {}
+    sha: str | None = None
+    caveat: str | None = None
+    # One library per declaration by construction (``library_sha_mismatch``); should two ever
+    # appear, no comparison is printed rather than one picked.
+    if len(libraries) == 1:
+        sha, caveat, library_rows = libraries[0]
+        for entry in library_rows or []:
+            if not isinstance(entry, dict):
+                continue
+            half = (entry.get("halves") or {}).get("holdout")
+            horizon = entry.get("horizon_days")
+            if isinstance(half, dict) and isinstance(horizon, int):
+                holdout[(str(entry.get("setup_type")), horizon)] = half
+    return PlanFacts(pairs, exhausted, holdout, sha, caveat)
+
+
 class ReadoutUnavailable(RuntimeError):
     pass
 
@@ -1161,7 +1753,7 @@ def compute_readout(
     """The readout for the arm's declaration of ``strategy_version`` (O14: each version is its
     own declaration, so the version is never inferred). Read-only.
 
-    ``descriptives=False`` skips the benchmark and exposure reads (a due readout then reports every
+    ``descriptives=False`` skips the benchmark, exposure and v6 plan reads (a due readout then reports every
     SPY close and exposure fact as missing). ``ai_trial_halts`` passes it: it runs this every
     5-minute cycle for the harm looks alone and fails CLOSED on any error, so a descriptive read
     must not be able to halt a trial."""
@@ -1186,11 +1778,13 @@ def compute_readout(
     spy_closes: dict[date, Decimal | None] = {}
     spy_quote: tuple[Decimal | None, Decimal | None] = (None, None)
     exposure_facts: dict[int, dict[str, ExposureFacts]] = {}
+    plan_facts: PlanFacts | None = None
     if load and first_fill is not None and state.last_session is not None:
         last = state.last_session
         spy_closes, spy_quote = load_spy_reference(conn, first_fill)
         units = [pair.pair_seq for pair in pairs if pair.valued and pair.session_date <= last]
         exposure_facts = load_exposure_facts(conn, declaration_id, units)
+        plan_facts = load_plan_facts(conn, declaration_id, last)
     run_census = {
         f"{status}:{reason}" if reason else status: int(count)
         for status, reason, count in conn.execute(
@@ -1230,4 +1824,5 @@ def compute_readout(
         spy_closes=spy_closes,
         spy_quote=spy_quote,
         exposure_facts=exposure_facts,
+        plan_facts=plan_facts,
     )

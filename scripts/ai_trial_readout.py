@@ -24,6 +24,7 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.services.ai_trial_pair_lifecycle import LEGS
 from app.services.ai_trial_readout import Readout, ReadoutUnavailable, compute_readout
 from app.services.ai_trial_run import TRIAL_STRATEGY_VERSION
 
@@ -75,6 +76,40 @@ def render(readout: Readout) -> str:
         f"turnover (Σ opened ÷ mean committed, per 20 sessions): {readout.turnover}",
         f"exposure at the decision (not matched between legs, §9): {readout.exposure}",
         "Dividends are not in the closed-trade history, so not in the net.",
+    ]
+    plans = readout.plans
+    if plans is None:
+        return "\n".join(lines)
+    lines += [
+        "v6 structure plans (§16.7, §16.11(b)) — descriptive, small cells, no test, not like-for-like "
+        "with the library:",
+        f"  library {plans.library_sha256}: {plans.library_caveat}",
+    ]
+    for leg in LEGS:
+        mix, cal = plans.exit_mix[leg], plans.calibration[leg]
+        lines += [
+            f"  {leg} exit mix over {mix.legs} legs: stop {mix.pct_stop} / target {mix.pct_target} / time "
+            f"{mix.pct_time} %; library holdout (same weights) {mix.library_pct_stop} / "
+            f"{mix.library_pct_target} / {mix.library_pct_time} %; other exits {mix.other}",
+            *(
+                f"    {c.setup_type} {c.horizon_days}d: {c.legs} legs, target hit {c.pct_target} % vs library "
+                f"holdout {c.library_pct_target} %; other {c.other}"
+                for c in mix.cells
+            ),
+            f"  {leg} calibration (not d): mean net R {cal.mean_net_r} over {cal.legs} legs vs library train "
+            f"{cal.library_train_mean_net_r} / holdout {cal.library_holdout_mean_net_r}; counted {cal.counted}",
+            *(
+                f"    {c.setup_type} {c.horizon_days}d: {c.legs} legs, mean net R {c.mean_net_r} vs "
+                f"{c.library_train_mean_net_r} / {c.library_holdout_mean_net_r}; counted {c.counted}"
+                for c in cal.cells
+            ),
+            f"  {leg} geometry (cohort units): {plans.geometry[leg]}",
+        ]
+    lines += [
+        f"  pairs {plans.pairs}, pool size {plans.pool_size}, self-draws {plans.self_draws}, "
+        f"singleton-self pools {plans.singleton_self_pools}",
+        f"  plan_invalidated per leg {plans.plan_invalidated}; pool exhausted per setup {plans.exhausted_by_setup}",
+        f"  d by response position: {plans.d_by_response_position}",
     ]
     return "\n".join(lines)
 

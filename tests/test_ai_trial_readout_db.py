@@ -13,12 +13,12 @@ from psycopg.types.json import Jsonb
 
 from app.services import ai_trial_readout
 from app.services.ai_trial_pair_lifecycle import previous_session, record_pair_lifecycle
-from app.services.ai_trial_readout import compute_readout, load_exposure_facts, load_pairs
+from app.services.ai_trial_readout import compute_readout, load_exposure_facts, load_pairs, load_plan_facts
 from app.services.market_regime import Regime
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.risk_metrics import RISK_METRICS_VERSION
 from tests.test_ai_trial_deadline_db import _POSITION_ID, _opened_arm_leg
-from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW
+from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW, POOL, SESSION
 
 Conn = psycopg.Connection[Any]
 
@@ -125,3 +125,63 @@ def test_exposure_facts_are_read_as_known_at_the_decision(
     control = facts[int(pair_seq)]["control"]
     assert control.beta_1y is None
     assert set(facts[int(pair_seq)]) == {"arm", "control"} and control_id is not None
+
+
+def test_plan_facts_are_read_as_recorded(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = ebull_test_conn
+    # Each name's levels as the run's stored pack carries them. sma50 has no anchor in a real pack;
+    # one is given here only so the loader's origin_bar path is exercised.
+    names = [
+        {
+            "instrument_id": instrument_id,
+            "indicator_bars": 260,
+            "levels": {"sma50": {"price": "90", "origin_bar": 250}, "range20_projection": None},
+        }
+        for instrument_id in (ARM_INSTRUMENT, *POOL)
+    ]
+    library = {
+        "sha256": "c" * 64,
+        "caveat": "in-sample",
+        "rows": [
+            {"setup_type": "pullback_rising_sma20", "horizon_days": 10, "halves": {"holdout": {"pct_target": "12.5"}}}
+        ],
+    }
+    _opened_arm_leg(conn, monkeypatch, pack={"names": names, "setup_library": library})
+    row = conn.execute(
+        "SELECT p.declaration_id, d.stop_pct, d.close, p.control_stop_pct, p.control_stop_atr_multiple, "
+        "d.base_rate_holdout_mean_net_r, ll.signal_id "
+        "FROM ai_trial_pairs p JOIN ai_trial_decisions d ON d.decision_id = p.arm_decision_id "
+        "JOIN ai_trial_leg_links ll ON ll.pair_id = p.pair_id AND ll.leg = 'control'"
+    ).fetchone()
+    assert row is not None
+    declaration_id, arm_stop, arm_close, control_stop, control_atr, holdout, control_signal = row
+    # The control leg's executor refused it at submission.
+    conn.execute(
+        "INSERT INTO strategy_funding_decisions (signal_id, verdict, reason_code) "
+        "VALUES (%s, 'rejected', 'plan_invalidated')",
+        (control_signal,),
+    )
+    conn.commit()
+
+    facts = load_plan_facts(conn, int(declaration_id), SESSION)
+    assert load_plan_facts(conn, int(declaration_id), SESSION - timedelta(days=1)).pairs == {}
+    conn.commit()
+    (plan,) = facts.pairs.values()
+    assert (plan.setup_type, plan.horizon_days, plan.response_position) == ("pullback_rising_sma20", 10, 0)
+    assert plan.base_rate_holdout == holdout and plan.pool_size == len(POOL) and not plan.self_draw
+    arm, control = plan.legs["arm"], plan.legs["control"]
+    assert (arm.stop_pct, arm.close, arm.refusal) == (Decimal(str(arm_stop)), arm_close, None)
+    # Allocated: the funded amount and the ask the preflight priced from (100, sql/438).
+    assert arm.amount is not None and arm.amount > 0 and arm.ask == Decimal("100")
+    # 260 bars, anchored at bar 250: 9 bars old; the projection has no anchor.
+    assert (arm.invalidation_age, arm.target_age) == (9, None)
+    assert (control.stop_pct, control.stop_atr_multiple) == (control_stop, control_atr)
+    assert (control.refusal, control.amount, control.ask, control.invalidation_age) == (
+        "plan_invalidated",
+        None,
+        None,
+        9,
+    )
+    assert facts.library_sha256 == "c" * 64 and facts.library_caveat == "in-sample"
+    assert facts.library_holdout == {("pullback_rising_sma20", 10): {"pct_target": "12.5"}}
+    assert facts.exhausted == {}

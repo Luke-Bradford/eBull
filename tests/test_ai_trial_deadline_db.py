@@ -4,6 +4,7 @@ reconciliation that opens a trial leg, enforced by the position manager, guarded
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -50,8 +51,10 @@ def _position(*, open_at: datetime) -> BrokerPosition:
     )
 
 
-def _opened_arm_leg(conn: Conn, monkeypatch: pytest.MonkeyPatch, *, filled_at: datetime = NOW) -> tuple[int, Any]:
-    _, signals = _published_pair(conn)
+def _opened_arm_leg(
+    conn: Conn, monkeypatch: pytest.MonkeyPatch, *, filled_at: datetime = NOW, pack: Mapping[str, Any] | None = None
+) -> tuple[int, Any]:
+    _, signals = _published_pair(conn, pack=pack)
     _enable_trading(conn)
     broker = _broker(ARM_INSTRUMENT)
     monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)

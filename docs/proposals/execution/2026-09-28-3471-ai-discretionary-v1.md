@@ -1245,6 +1245,18 @@ The prompt sha changes before the freeze. The handoff records it.
   - each leg's dollar risk at the stop (stop % × amount);
   - *d* split by response position (r2-54, r1-72).
 
+Implemented in slice v6-4b (`ai_trial_readout.plan_readout`, with §16.11(b)). It runs in the due cohort readout under `descriptives=True` only. Details:
+- **Time exit** means the trial's `deadline`. `censored` is §9's clock, not the library's close(*t*+h), so it is counted with the other exits.
+- **A partial close** (a slice closed before the leg's final exit) is counted as an other exit (§16.11(b)). For an engine close, that means a slice executed before the close operation was requested. For a broker close, it means a slice whose own stop/target label differs from the leg's. ⚠ A manual partial filled at or through the leg's own stop or target price is indistinguishable from a mechanical slice, and is not caught. §9's O12 labels are unchanged.
+- **The exit mix is set beside the library's holdout half**, weighted by the leg's own per-cell denominators. It is not set beside the random-entry grid of `ai_trial_exit_base_rates`, because that grid is keyed by fixed stop and R multiples, which a structure plan's continuous geometry does not select. Choosing a grid row would be an invented mapping.
+- **The library rows come from the declaration's stored packs**, never the current file. If two distinct libraries appear, no comparison is printed.
+- **Populations:**
+  - exit mix: the executed legs of completed (`unit`) cohort pairs;
+  - geometry: the cohort units, the population *d* is computed on;
+  - pool, self-draw, `plan_invalidated` and exhaustion counts: every cohort pair or cohort arm decision.
+- **Level age** is `indicator_bars − 1 − origin_bar` from the leg's name in the run's stored pack. It is `null` for an anchorless level.
+- **Dollar risk** is `stop_pct` × the funded amount, before slippage.
+
 ### 16.8 Schema (slice v6-3 migration)
 
 - **`ai_trial_decisions` gains:**
