@@ -548,7 +548,8 @@ class Turnover:
     sessions: int
     mean_committed_usd: float | None
     per_20_sessions: float | None
-    #: Filled legs without an open amount or a session span (unvalued), outside the sums.
+    #: Exited legs outside the sums: no open amount (unvalued), or no valid session span (a session
+    #: unknown, or entry after exit).
     missing: int
 
 
