@@ -70,17 +70,21 @@ def main(argv: list[str] | None = None) -> int:
                 expect_config_sha256=args.expect_config_sha256,
             )
     except (TrialFreezeError, psycopg.Error, OSError) as exc:
-        # Rolled back: nothing was frozen. Printed as a failure, never a bare traceback.
-        print(f"freeze FAILED, nothing written: {type(exc).__name__}: {exc}")
+        # Printed as a failure, never a bare traceback. An error before the commit rolled
+        # everything back; one after it (connection close) cannot be told apart here, so the
+        # operator is pointed at the check that can: a dry run reports `already_frozen`.
+        print(
+            f"freeze FAILED: {type(exc).__name__}: {exc}\n"
+            "Before retrying, run the dry run: `already_frozen` means the freeze DID commit."
+        )
         return 1
     print(render(report))
     if args.json is not None:
         try:
             args.json.write_text(json.dumps(report.__dict__, sort_keys=True, indent=2, default=str))
         except OSError as exc:
-            # The freeze outcome above stands; only the copy failed.
-            print(f"--json not written: {type(exc).__name__}: {exc}")
-            return 1
+            # The freeze outcome above stands and decides the exit status; only the copy failed.
+            print(f"--json not written (the outcome above stands): {type(exc).__name__}: {exc}")
     return 0 if not report.refusals else 1
 
 
