@@ -1162,8 +1162,9 @@ def compute_readout(
     own declaration, so the version is never inferred). Read-only.
 
     ``descriptives=False`` skips the benchmark and exposure reads (a due readout then reports every
-    SPY close and exposure fact as missing). ``ai_trial_halts`` passes it: it runs this every 5-minute cycle for the harm looks
-    alone and fails CLOSED on any error, so a descriptive read must not be able to halt a trial."""
+    SPY close and exposure fact as missing). ``ai_trial_halts`` passes it: it runs this every
+    5-minute cycle for the harm looks alone and fails CLOSED on any error, so a descriptive read
+    must not be able to halt a trial."""
     # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constants), and
     # ai_trial_halts imports this module for the harm looks.
     from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD
