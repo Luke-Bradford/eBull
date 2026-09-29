@@ -11708,3 +11708,15 @@ neighbouring container and match it.**
   (`plan_prices_missing`, `quote_bid_invalid`), separate from the code for the condition the check exists to
   detect. Self-review prompt: "if this refusal fires, would a reader of the code alone know what happened?"
 - Enforced in: `ai_trial_intent.load_trial_intent` and `tests/test_ai_trial_intent_db.py`.
+
+### A frozen prompt states rules from the rule module, never as literals (#3471)
+
+- Failure: the v6-4a prompt described the setup detectors with hand-typed thresholds ("1.5 to 4 atr14", "t-10 to
+  t-4", "at least 3 atr14") while the guard's own constants were imported. A later constant change would leave the
+  model reading one rule while the server applies another, with no failing test. The review bot flagged it (#3508).
+- Prevention: every number in a frozen prompt's rule text is either interpolated from the constant the code
+  applies, or pinned to its source by a test (the excursion table and the library caveat). A `Fraction` renders
+  exactly or raises, never rounded. A DERIVED expression in the text (`TOUCH_BARS + 1`, `2 * FRACTAL_N + 1`) is
+  written only after reading the detector's own range bounds and comparison operators, and the PR cites those lines
+  (#3508 round 2). Self-review: grep the prompt f-string for bare digits.
+- Enforced in: `ai_trial_prompt.SYSTEM_PROMPT`, `ai_trial_prompt._num` and `tests/test_ai_trial_prompt.py`.
