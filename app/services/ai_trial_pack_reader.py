@@ -60,6 +60,7 @@ from app.services.ai_trial_pack import (
 from app.services.indicator_series import BarSeries
 from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.price_masked_bars import MASKED_REASON, load_masked_bars
+from app.services.price_segments import load_unresolved_breaks, segment_for_index
 from app.services.scoring import _DEFAULT_MODEL_VERSION, _apply_market_cap_basis
 from app.services.xbrl_derived_stats import MarketCapResolution, resolve_market_cap_basis
 
@@ -295,23 +296,60 @@ def read_shortlist(conn: Conn, *, step1: Step1) -> Shortlist:
 # ---------------------------------------------------------------------------
 # §3.2 per-name reads
 # ---------------------------------------------------------------------------
+class PackReadRace(RuntimeError):
+    """The break map moved during ``read_bars``; the bars cannot be trusted to one segment."""
+
+
+def latest_segment(series: BarSeries, *, last_session: date, unresolved_breaks: Sequence[date]) -> BarSeries:
+    """The bars dated ≤ ``last_session`` that share the LAST such bar's price segment, ascending.
+
+    ⚠ An unresolved ``price_series_break`` is a scale change the corpus has not re-based
+    (``price_segments``: "indicators and positions must not span the boundary"). A pack spanning
+    one shows the model a 5–11× jump that never traded and feeds it into ATR14, and so into the
+    §6 ATR band and the §7 control levels. Cutting to the latest segment can leave fewer than
+    ``MIN_BARS`` bars; ``assemble_pack`` then refuses the name as ``too_few_bars``, which is the
+    honest outcome for a name whose comparable history is that short. Breaks after
+    ``last_session`` cannot reach the pack and are ignored.
+    """
+    n = sum(1 for d in series.dates if d <= last_session)
+    if n == 0:
+        return BarSeries(dates=(), rows=())
+    head = BarSeries(dates=series.dates[:n], rows=series.rows[:n])
+    segment, _ = segment_for_index(
+        head, index=n - 1, unresolved_breaks=[b for b in unresolved_breaks if b <= last_session]
+    )
+    return segment
+
+
 def read_bars(
     conn: Conn, instrument_ids: Sequence[int], *, last_session: date
 ) -> dict[int, tuple[list[date], list[Mapping[str, Any]]]]:
     """The last ``INDICATOR_BARS`` bars dated ≤ ``last_session`` per name, ascending, through the
-    house fail-closed reader ``price_masked_bars.load_masked_bars``.
+    house fail-closed reader ``price_masked_bars.load_masked_bars``, cut to the latest price
+    segment (``latest_segment``; #3471 slice 3b).
 
     Its masking is the quarantine's: an unevaluated instrument returns no bars, and a
     quarantined field comes back ``None`` (``assemble_pack`` turns that into
     ``quarantined_bar``). A raw ``price_daily`` read here would feed quarantined bars into
-    the indicators — it is the #3046 consumer-exposure class."""
+    the indicators — it is the #3046 consumer-exposure class.
+
+    ⚠ The break map and the bars are separate reads (Codex ckpt-2), so a break detected or
+    resolved between them would pair one generation's bars with another's breaks. The map is
+    re-read after the bars and a change RAISES ``PackReadRace``: the publisher records the run
+    as ``refused``/``run_failed`` instead of publishing a pack that may span a scale change."""
+    breaks = load_unresolved_breaks(conn, instrument_ids)
     out: dict[int, tuple[list[date], list[Mapping[str, Any]]]] = {}
     for instrument_id in instrument_ids:
-        series = load_masked_bars(conn, instrument_id).series
-        n = sum(1 for d in series.dates if d <= last_session)
-        dates = list(series.dates[:n])
-        rows: list[Mapping[str, Any]] = [dict(r) for r in series.rows[:n]]
+        segment = latest_segment(
+            load_masked_bars(conn, instrument_id).series,
+            last_session=last_session,
+            unresolved_breaks=breaks.get(instrument_id, ()),
+        )
+        dates = list(segment.dates)
+        rows: list[Mapping[str, Any]] = [dict(r) for r in segment.rows]
         out[instrument_id] = (dates[-INDICATOR_BARS:], rows[-INDICATOR_BARS:])
+    if load_unresolved_breaks(conn, instrument_ids) != breaks:
+        raise PackReadRace("unresolved price_series_break rows changed while the pack bars were read")
     return out
 
 

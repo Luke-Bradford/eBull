@@ -236,6 +236,26 @@ def test_a_failure_after_the_pack_is_recorded_run_failed_with_what_it_reached(
     assert row is not None and row[:3] == ("refused", "run_failed", PACK.sha256) and row[3] is not None
 
 
+def test_a_pack_read_race_is_recorded_run_failed_before_any_pack(
+    ebull_test_conn: Conn, stubbed: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3471 slice 3b: ``read_bars`` raises ``PackReadRace`` when the break map moves mid-read; the
+    publisher's handler records the run refused, and no pack is published."""
+    from app.services import ai_trial_pack_reader, ai_trial_run
+
+    conn = ebull_test_conn
+    _seed(conn)
+
+    def racing(_conn: object, **_kw: object) -> object:
+        raise ai_trial_pack_reader.PackReadRace("break map moved")
+
+    monkeypatch.setattr(ai_trial_run, "assemble_pack", racing)
+    with pytest.raises(ai_trial_pack_reader.PackReadRace):
+        _run(conn, _invoke({"decisions": []}))
+    row = conn.execute("SELECT status, refusal_reason, pack_sha256 FROM ai_trial_runs").fetchone()
+    assert row == ("refused", "run_failed", None)
+
+
 def test_an_expired_lease_is_swept_and_a_late_publish_is_a_stale_claim(
     ebull_test_conn: Conn, stubbed: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
