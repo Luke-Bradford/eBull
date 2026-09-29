@@ -206,13 +206,14 @@ def test_harm_looks_wait_for_eight_clusters_and_halt_on_a_one_sided_p() -> None:
     assert look.halts
 
 
-def test_a_pair_ahead_in_entry_order_that_is_not_a_unit_holds_the_look() -> None:
+def test_an_open_pair_ahead_in_entry_order_holds_the_look() -> None:
     sessions = _sessions(12)
-    pairs = [_pair(0, sessions[0], 0.0, state="blocked")] + [_pair(i, sessions[i], -1.0) for i in range(1, 12)]
+    pairs = [_pair(0, sessions[0], 0.0, state="open")] + [_pair(i, sessions[i], -1.0) for i in range(1, 12)]
     assert harm_looks(pairs, seed=1, today=LATER) == []
-    # A broken pair is census only and does not hold anything.
-    pairs[0] = _pair(0, sessions[0], 0.0, state="broken")
-    assert [look.k for look in harm_looks(pairs, seed=1, today=LATER)] == [1]
+    # Broken pairs are census only; a blocked one is excluded until it resolves (§9).
+    for state in ("broken", "blocked"):
+        pairs[0] = _pair(0, sessions[0], 0.0, state=state)
+        assert [look.k for look in harm_looks(pairs, seed=1, today=LATER)] == [1]
 
 
 def test_an_unvalued_unit_holds_the_looks_only_until_its_flow_window_closes() -> None:

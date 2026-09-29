@@ -8,7 +8,7 @@ looks only — no primary number is computed early.
 
 Usage::
 
-    PYTHONPATH=. uv run python -m scripts.ai_trial_readout [--json out.json]
+    PYTHONPATH=. uv run python -m scripts.ai_trial_readout [--version v1] [--json out.json]
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import psycopg
 
 from app.config import settings
 from app.services.ai_trial_readout import Readout, ReadoutUnavailable, compute_readout
+from app.services.ai_trial_run import TRIAL_STRATEGY_VERSION
 
 
 def _jsonable(value: Any) -> Any:
@@ -74,11 +75,12 @@ def render(readout: Readout) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="#3471 §9 readout of the AI-discretionary-v1 demo trial")
+    parser.add_argument("--version", default=TRIAL_STRATEGY_VERSION, help="the declared strategy version")
     parser.add_argument("--json", type=Path, help="also write the readout as JSON here")
     args = parser.parse_args(argv)
     with psycopg.connect(settings.database_url) as conn:
         try:
-            readout = compute_readout(conn)
+            readout = compute_readout(conn, strategy_version=args.version)
         except ReadoutUnavailable as exc:
             print(f"no readout: {exc}")
             return 0

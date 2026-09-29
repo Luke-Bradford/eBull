@@ -27,23 +27,26 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
     conn = ebull_test_conn
     trade_id, _ = _opened_arm_leg(conn, monkeypatch)
     closed_at = NOW + timedelta(days=3)
-    # The broker closed the position at its 116 target: +20 on 125 opened (1.25 units at 100).
-    conn.execute(
-        """
-        INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units,
-                                  price, executed_at, fees_usd, realized_pnl_usd, investment_usd, source,
-                                  raw_payload, recorded_at)
-        VALUES (%s, %s, %s, 'close', 'sell', 1.25, 116, %s, 0, 20, 125, 'etoro_history', %s, %s)
-        """,
-        (
-            _POSITION_ID,
-            ARM_INSTRUMENT,
-            ARM_INSTRUMENT,
-            closed_at,
-            Jsonb({"stopLossRate": 92, "takeProfitRate": 116}),
-            closed_at + timedelta(minutes=5),
-        ),
-    )
+    # The broker closed the position at its 116 target: +20 on 125 opened (1.25 units at 100), in
+    # two slices. eToro books a partial slice under a NEW position id sharing the entry orderId.
+    for position_id, order_id in ((_POSITION_ID, None), (_POSITION_ID + 1, 3471001)):
+        conn.execute(
+            """
+            INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units,
+                                      price, executed_at, fees_usd, realized_pnl_usd, investment_usd, order_id,
+                                      source, raw_payload, recorded_at)
+            VALUES (%s, %s, %s, 'close', 'sell', 0.625, 116, %s, 0, 10, 62.5, %s, 'etoro_history', %s, %s)
+            """,
+            (
+                position_id,
+                ARM_INSTRUMENT,
+                ARM_INSTRUMENT,
+                closed_at + timedelta(seconds=position_id - _POSITION_ID),
+                order_id,
+                Jsonb({"stopLossRate": 92, "takeProfitRate": 116}),
+                closed_at + timedelta(minutes=5),
+            ),
+        )
     conn.execute(
         "UPDATE strategy_position_ownership SET status = 'released', released_at = %s, "
         "release_reason = 'broker_whole_close' WHERE strategy_trade_id = %s",
@@ -69,6 +72,7 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
     assert pair.arm.net_pct == pytest.approx(16.0)
     assert (pair.arm.open_amount, pair.arm.exit_label, pair.arm.unvalued_reason) == (125.0, "target", None)
     assert pair.arm.pnl_usd == pytest.approx(float(Decimal(20)))
+    # Both slices counted: the owned position's and the unowned partial-close sibling's.
     # The exited arm is no longer live, its exit session anchors the pair, and §7's pool is reported.
     assert (pair.live_legs, pair.resolved_session) == (0, closed_at.date())
     assert pair.pool_size is not None and pair.pool_size >= 1

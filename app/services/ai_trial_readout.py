@@ -305,10 +305,12 @@ def settled_unvalued(pair: PairRecord, today: date) -> bool:
 def harm_looks(pairs: Sequence[PairRecord], *, seed: int, today: date) -> list[HarmLook]:
     """Every look due so far, as of the session ``today``. A look k is due once the first 10·k
     pairs in entry order are all valued units. Broken and settled-unvalued pairs are outside the
-    sequence (census only); a blocked, open or still-valuable pair ahead holds it back, since it
-    may yet enter."""
+    sequence (census only), and so is a blocked pair until it resolves; an open or still-valuable
+    pair ahead holds it back, since it may yet enter."""
+    # §9 "Unresolved legs": a blocked pair is excluded until it resolves, then re-enters at its
+    # entry position.
     ordered = sorted(
-        (pair for pair in pairs if pair.state != "broken" and not settled_unvalued(pair, today)),
+        (pair for pair in pairs if pair.state not in ("broken", "blocked") and not settled_unvalued(pair, today)),
         key=lambda pair: pair.pair_seq,
     )
     ready = 0
@@ -594,13 +596,30 @@ _LEGS_SQL: Final = """
     WHERE p.declaration_id = %s
 """
 
+#: A leg's close slices: rows under a position the trade owns, plus eToro's partial-close slices —
+#: booked under a NEW position id that shares the entry order's ``orderId`` and that nobody owns
+#: (``broker_closed_release``, attended 2026-09-23). One entry order can also yield several OWNED
+#: executions (sql/282); those are positions of their own and are reached through ownership.
 _CLOSE_ROWS_SQL: Final = """
-    SELECT ow.strategy_trade_id, ev.executed_at, ev.recorded_at, ev.realized_pnl_usd,
+    SELECT t.strategy_trade_id, ev.executed_at, ev.recorded_at, ev.realized_pnl_usd,
            ev.investment_usd, ev.fees_usd, ev.price,
            ev.raw_payload ->> 'stopLossRate', ev.raw_payload ->> 'takeProfitRate'
-    FROM strategy_position_ownership ow
-    JOIN trade_events ev ON ev.position_id = ow.broker_position_id AND ev.event_kind = 'close'
-    WHERE ow.strategy_trade_id = ANY(%s)
+    FROM strategy_trades t
+    JOIN trade_events ev ON ev.event_kind = 'close' AND (
+        ev.position_id IN (SELECT ow.broker_position_id FROM strategy_position_ownership ow
+                           WHERE ow.strategy_trade_id = t.strategy_trade_id)
+        OR (
+            NOT EXISTS (SELECT 1 FROM strategy_position_ownership other
+                        WHERE other.broker_position_id = ev.position_id)
+            AND EXISTS (
+                SELECT 1 FROM strategy_trade_orders sto
+                JOIN orders o ON o.order_id = sto.order_id
+                WHERE sto.strategy_trade_id = t.strategy_trade_id AND sto.purpose = 'entry'
+                  AND (ev.order_id::text = o.broker_order_ref OR ev.raw_payload ->> 'orderId' = o.broker_order_ref)
+            )
+        )
+    )
+    WHERE t.strategy_trade_id = ANY(%s)
     ORDER BY ev.executed_at
 """
 
@@ -727,14 +746,19 @@ class ReadoutUnavailable(RuntimeError):
     pass
 
 
-def compute_readout(conn: psycopg.Connection[Any], *, as_of: datetime | None = None) -> Readout:
-    """The readout for the (single) frozen declaration. Read-only."""
+def compute_readout(conn: psycopg.Connection[Any], *, strategy_version: str, as_of: datetime | None = None) -> Readout:
+    """The readout for the arm's declaration of ``strategy_version`` (O14: each version is its
+    own declaration, so the version is never inferred). Read-only."""
+    # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constants).
+    from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
+
     declaration = conn.execute(
         "SELECT declaration_id, strategy_version, doc_sha256 FROM ai_trial_declarations "
-        "ORDER BY declaration_id DESC LIMIT 1"
+        "WHERE strategy_id = %s AND strategy_version = %s",
+        (TRIAL_ARM_STRATEGY_ID, strategy_version),
     ).fetchone()
     if declaration is None:
-        raise ReadoutUnavailable("no frozen declaration: the trial has not started (slice 3d)")
+        raise ReadoutUnavailable(f"no frozen {strategy_version} declaration: the trial has not started (slice 3d)")
     declaration_id = int(declaration[0])
     pairs, first_fill = load_pairs(conn, declaration_id)
     run_census = {
