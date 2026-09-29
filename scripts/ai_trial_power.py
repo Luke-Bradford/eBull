@@ -39,8 +39,11 @@ Spec: ``docs/proposals/execution/2026-09-28-3471-ai-discretionary-v1.md`` §9 "P
 ⚠ Stated caveats (§9): gross dispersion only (costs vary by name and hold); the population is not
 the ranked shortlist; inventory, refusals, broken pairs, halts and the cohort minimum are ignored;
 the rejection rate is not the probability of any verdict; a horizon that spans a coverage hole runs one
-session longer, and legs on a hole session come only from names the provider has bars for. The script
-never calls the model (§10).
+session longer, and legs on a hole session come only from names the provider has bars for. The ATR
+here is cut to NYSE sessions and to the signal bar's price segment, while the live pack
+(``ai_trial_pack_reader.read_bars``) takes the last 260 stored rows unsegmented, so the two differ for
+a name with weekend bars or an unresolved break in its window. The script never calls the model
+(§10).
 
 Usage::
 
