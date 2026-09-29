@@ -34,7 +34,11 @@ of the live trial's verdict.
 Usage (background mode, output to a file, never piped)::
 
     PYTHONPATH=. uv run python -m scripts.ai_trial_power [--replicates 400] [--seed 3471] \
-        [--workers 8] [--json out.json] > /tmp/ai_trial_power.log 2>&1
+        [--workers 8] [--json out.json] [--max-concurrent 4] [--cohort-sessions 40] \
+        > /tmp/ai_trial_power.log 2>&1
+
+``--max-concurrent`` / ``--cohort-sessions`` size a CANDIDATE for the §8 concurrency/cohort answer
+(``Terms``); the defaults are the frozen values and the header says which was run.
 """
 
 from __future__ import annotations
@@ -67,7 +71,7 @@ from app.services.ai_trial_deadline import exit_deadline_session
 from app.services.ai_trial_decision import HORIZON_SESSIONS, ControlPoolExhausted, draw_control, exact
 from app.services.ai_trial_executor import TRIAL_MAX_CONCURRENT_PER_LEG
 from app.services.ai_trial_guard import control_pool, library_baseline
-from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD, TRIAL_LOSS_HALT_PCT
+from app.services.ai_trial_halts import TRIAL_LOSS_HALT_PCT
 from app.services.ai_trial_intent import TRIAL_TICKET_USD
 from app.services.ai_trial_levels import SETUP_TYPES
 from app.services.ai_trial_pack import INDICATOR_BARS, SMALL_CAP_N, TOP_N
@@ -75,6 +79,7 @@ from app.services.ai_trial_pack_reader import load_setup_library
 from app.services.ai_trial_pair_lifecycle import TRIAL_CENSOR_SESSIONS
 from app.services.ai_trial_plan import LibraryPlan, derive_plan, library_plan
 from app.services.ai_trial_readout import (
+    COHORT_SESSIONS,
     FLOW_WINDOW_SESSIONS,
     HARM_LOOK_EVERY,
     INSUFFICIENT,
@@ -104,16 +109,11 @@ WINDOW_END: Final = date(2026, 6, 30)
 HISTORY_START: Final = date(2022, 6, 1)
 SHORTLIST_SIZE: Final = TOP_N + SMALL_CAP_N
 DECISIONS_PER_SESSION: Final = 2
-ENROLLMENT_SESSIONS: Final = 40
 #: Fill sessions s₀ … s₀ + START_ALLOWANCE may open enrollment; a path with no fill by then is ``no_start``.
 START_ALLOWANCE: Final = 20
-#: s₀ + PATH_SESSIONS ≤ the frontier: the start allowance, 40 enrollment sessions, a 20-session hold,
-#: the 10-session censor clock and the 6-session readout wait (96), rounded up.
-PATH_SESSIONS: Final = 100
 SHIFTS_PCT: Final = (0.0, 1.0, 2.0, 3.0, 5.0)
 ALPHA: Final = 0.05
 TICKET_USD: Final = float(TRIAL_TICKET_USD["full"])
-LOSS_LIMIT_USD: Final = float(TRIAL_LOSS_HALT_PCT / 100 * TRIAL_LEG_CAPITAL_USD)
 TARIFF: Final = float(COST_ROUND_TRIP)
 TARIFF_PCT: Final = 100 * TARIFF
 #: Clusters below the cohort minimum make ``primary`` return ``INSUFFICIENT`` (§9).
@@ -122,6 +122,38 @@ LEGS: Final[tuple[LegName, ...]] = ("arm", "control")
 Outcome = Literal["halted_harm", "insufficient", "reject", "not_reject"]
 OUTCOMES: Final[tuple[Outcome, ...]] = ("halted_harm", "insufficient", "reject", "not_reject")
 ExitLabel = Literal["stop", "target", "deadline", "censored"]
+
+
+@dataclass(frozen=True)
+class Terms:
+    """The two frozen §8/§9 trial terms the grid may vary, for the §8 concurrency/cohort answer.
+
+    The defaults ARE the frozen values; ``--max-concurrent`` / ``--cohort-sessions`` only size a
+    candidate, they change nothing the trial reads. Leg capital follows concurrency exactly as
+    ``ai_trial_halts.TRIAL_LEG_CAPITAL_USD`` does (slots × full ticket), so the §9 loss halt scales too.
+    """
+
+    max_concurrent: int = TRIAL_MAX_CONCURRENT_PER_LEG
+    cohort_sessions: int = COHORT_SESSIONS
+
+    @property
+    def leg_capital_usd(self) -> Decimal:
+        return self.max_concurrent * TRIAL_TICKET_USD["full"]
+
+    @property
+    def loss_limit_usd(self) -> float:
+        return float(TRIAL_LOSS_HALT_PCT / 100 * self.leg_capital_usd)
+
+    @property
+    def path_sessions(self) -> int:
+        """s₀ + path_sessions ≤ the frontier: the start allowance, the cohort, the longest hold, the censor
+        clock and the readout wait (+1), rounded up to 10."""
+        need = START_ALLOWANCE + self.cohort_sessions + max(HORIZON_SESSIONS) + TRIAL_CENSOR_SESSIONS
+        return math.ceil((need + READOUT_WAIT_SESSIONS + 1) / 10) * 10
+
+
+FROZEN_TERMS: Final = Terms()
+PATH_SESSIONS: Final = FROZEN_TERMS.path_sessions
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +341,7 @@ def open_leg(
     calendar: Sequence[date],
     fill_position: int,
     slots_held: int,
+    max_concurrent: int = TRIAL_MAX_CONCURRENT_PER_LEG,
 ) -> Trade | LegRefusal:
     """Per leg, the first failure named: ``no_fill`` → ``plan_invalidated`` → ``capacity``."""
     i = name.index_of(fill_position)
@@ -324,7 +357,7 @@ def open_leg(
         or o <= plan.invalidation_price
     ):
         return "plan_invalidated"
-    if slots_held >= TRIAL_MAX_CONCURRENT_PER_LEG:
+    if slots_held >= max_concurrent:
         return "capacity"
     stop, target = protective_rates(entry, plan.stop_pct, plan.target_pct)
     exit_ = walk(name, i, horizon, stop, target, calendar)
@@ -550,7 +583,7 @@ def _harm_key(records: Sequence[PairRecord], today: date) -> tuple[tuple[int, bo
     )
 
 
-def simulate_path(ctx: PathContext, *, horizon: int, shift: float) -> PathResult:
+def simulate_path(ctx: PathContext, *, horizon: int, shift: float, terms: Terms = FROZEN_TERMS) -> PathResult:
     """One forward trial path for one cell (§9 v6 "Order of a session")."""
     cal = ctx.calendar
     hex_ = declaration_hex(ctx.seed, ctx.replicate, horizon)
@@ -583,6 +616,7 @@ def simulate_path(ctx: PathContext, *, horizon: int, shift: float) -> PathResult
                     calendar=cal,
                     fill_position=p,
                     slots_held=held,
+                    max_concurrent=terms.max_concurrent,
                 )
                 if isinstance(result, Trade):
                     pair.trades[leg] = result
@@ -600,12 +634,12 @@ def simulate_path(ctx: PathContext, *, horizon: int, shift: float) -> PathResult
                 first_fill = p
         pending = []
         enrollment_end = (
-            first_fill + ENROLLMENT_SESSIONS - 1
+            first_fill + terms.cohort_sessions - 1
             if first_fill is not None
             else (last_fill_allowed if p >= last_fill_allowed else None)
         )
         # 3. loss, 4. harm — the first halt of either kind is terminal.
-        if halted is None and any(leg_loss(trades[leg], session) >= LOSS_LIMIT_USD for leg in LEGS):
+        if halted is None and any(leg_loss(trades[leg], session) >= terms.loss_limit_usd for leg in LEGS):
             halted = "loss"
             pairs_at_loss_halt = sum(1 for pair in pairs if len(pair.trades) == 2)
         records = pair_records(pairs, session, shift)
@@ -682,13 +716,13 @@ class Panel:
     starts: tuple[int, ...]
 
 
-def build_panel(names: Mapping[int, Name], calendar: Sequence[date]) -> Panel:
+def build_panel(names: Mapping[int, Name], calendar: Sequence[date], *, path_sessions: int = PATH_SESSIONS) -> Panel:
     """``calendar`` = the NYSE sessions from ``HISTORY_START`` to the frontier, which every name's
     ``positions`` index."""
     starts = tuple(
         p
         for p, d in enumerate(calendar)
-        if WINDOW_START <= d <= WINDOW_END and p >= 1 and p + PATH_SESSIONS < len(calendar)
+        if WINDOW_START <= d <= WINDOW_END and p >= 1 and p + path_sessions < len(calendar)
     )
     if not starts:
         raise RuntimeError("no start session leaves room for a full path before the frontier")
@@ -728,18 +762,18 @@ def replicate_context(panel: Panel, *, seed: int, replicate: int) -> PathContext
     )
 
 
-def run_replicate(panel: Panel, *, seed: int, replicate: int) -> list[PathResult]:
+def run_replicate(panel: Panel, *, seed: int, replicate: int, terms: Terms = FROZEN_TERMS) -> list[PathResult]:
     ctx = replicate_context(panel, seed=seed, replicate=replicate)
-    return [simulate_path(ctx, horizon=h, shift=s) for h in HORIZON_SESSIONS for s in SHIFTS_PCT]
+    return [simulate_path(ctx, horizon=h, shift=s, terms=terms) for h in HORIZON_SESSIONS for s in SHIFTS_PCT]
 
 
 _PANEL: Panel | None = None
 
 
-def _worker(args: tuple[int, int]) -> list[PathResult]:
+def _worker(args: tuple[int, int, Terms]) -> list[PathResult]:
     assert _PANEL is not None
-    seed, replicate = args
-    return run_replicate(_PANEL, seed=seed, replicate=replicate)
+    seed, replicate, terms = args
+    return run_replicate(_PANEL, seed=seed, replicate=replicate, terms=terms)
 
 
 def assert_order_6() -> None:
@@ -834,6 +868,9 @@ def render(report: Mapping[str, Any]) -> str:
         f"#3471 §9 planning table, v6 grid — start window {report['window'][0]}..{report['window'][1]}, "
         f"frontier {report['frontier']}, {report['instruments']} instruments, {report['replicates']} replicates, "
         f"seed {report['seed']}, one-sided α = {ALPHA}",
+        f"terms: max_concurrent/leg {report['terms']['max_concurrent']}, cohort {report['terms']['cohort_sessions']} "
+        f"sessions, leg capital ${report['terms']['leg_capital_usd']}"
+        + (" (FROZEN)" if report["terms"]["frozen"] else " (CANDIDATE — not the frozen declaration)"),
         "Shares are over EVERY path (zero-unit and halted paths included), ± Monte-Carlo SE. A share is the",
         "probability of that outcome under this simulation model, not of the live trial's verdict.",
         "halted_loss is a daily-bar UPPER BOUND. At δ = 0 `reject` is the rejection rate under a no-skill arm;",
@@ -962,7 +999,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=3471)
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--max-concurrent", type=int, default=FROZEN_TERMS.max_concurrent)
+    parser.add_argument("--cohort-sessions", type=int, default=FROZEN_TERMS.cohort_sessions)
     args = parser.parse_args(argv)
+    if args.max_concurrent < 1 or args.cohort_sessions < 1:
+        parser.error("--max-concurrent and --cohort-sessions must be >= 1")
+    terms = Terms(max_concurrent=args.max_concurrent, cohort_sessions=args.cohort_sessions)
 
     from app.config import settings
 
@@ -972,11 +1014,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     with psycopg.connect(settings.database_url) as conn:
         conn.read_only = True
         names, calendar = load_names(conn)
-    _PANEL = build_panel(names, calendar)
+    _PANEL = build_panel(names, calendar, path_sessions=terms.path_sessions)
     frontier = calendar[-1]
     print(f"loaded {len(names)} names, frontier {frontier}, {time.monotonic() - started:.0f}s", flush=True)
     results: list[PathResult] = []
-    jobs = [(args.seed, r) for r in range(args.replicates)]
+    jobs = [(args.seed, r, terms) for r in range(args.replicates)]
     with ProcessPoolExecutor(max_workers=args.workers, mp_context=get_context("fork")) as pool:
         for done, batch in enumerate(pool.map(_worker, jobs, chunksize=1), start=1):
             results.extend(batch)
@@ -988,6 +1030,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "instruments": len(names),
         "replicates": args.replicates,
         "seed": args.seed,
+        "terms": {
+            "max_concurrent": terms.max_concurrent,
+            "cohort_sessions": terms.cohort_sessions,
+            "leg_capital_usd": str(terms.leg_capital_usd),
+            "frozen": terms == FROZEN_TERMS,
+        },
         "cells": summarise(results),
         "elapsed_s": round(time.monotonic() - started, 1),
     }

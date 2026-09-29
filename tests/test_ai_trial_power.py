@@ -11,9 +11,11 @@ import numpy as np
 import pytest
 
 from app.services.ai_trial_decision import measure_atr
+from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD
 from app.services.ai_trial_levels import LEVEL_IDS, Level
 from app.services.ai_trial_stats import EXACT_MAX_CLUSTERS, flip_set, sign_flip_p, sign_flip_p_batch
 from scripts.ai_trial_power import (
+    FROZEN_TERMS,
     LEGS,
     PATH_SESSIONS,
     SHIFTS_PCT,
@@ -23,6 +25,7 @@ from scripts.ai_trial_power import (
     LegPlan,
     Name,
     PathContext,
+    Terms,
     Trade,
     assert_order_6,
     build_panel,
@@ -203,6 +206,29 @@ def test_open_leg_refusals_in_order() -> None:
     assert _open(_name([FLAT] * 8), slots=4) == "capacity"
 
 
+def test_a_candidate_concurrency_moves_only_the_capacity_refusal() -> None:
+    assert _open(_name([FLAT] * 8), slots=4) == "capacity"
+    trade = open_leg(
+        _name([FLAT] * 8), CAL[0], CAL[1], PLAN, 5, calendar=CAL, fill_position=1, slots_held=4, max_concurrent=8
+    )
+    assert isinstance(trade, Trade)
+
+
+def test_the_default_terms_are_the_frozen_trial_terms() -> None:
+    # The grid's defaults must stay the declaration's: leg capital as ai_trial_halts derives it, and the
+    # pre-parameterisation path length (20 start + 40 cohort + 20 hold + 10 censor + 6 wait → 100).
+    assert FROZEN_TERMS == Terms()
+    assert FROZEN_TERMS.leg_capital_usd == TRIAL_LEG_CAPITAL_USD
+    assert FROZEN_TERMS.loss_limit_usd == pytest.approx(200.0)
+    assert PATH_SESSIONS == 100
+    wider = Terms(max_concurrent=8, cohort_sessions=80)
+    assert (wider.leg_capital_usd, wider.loss_limit_usd, wider.path_sessions) == (
+        Decimal(2000),
+        pytest.approx(400.0),
+        140,
+    )
+
+
 def test_open_leg_places_the_executor_rates_on_the_open_and_nets_the_tariff() -> None:
     trade = _open(_name([FLAT, ("100", "101", "99", "100")] + [FLAT] * 6))
     assert isinstance(trade, Trade)
@@ -304,6 +330,12 @@ def test_a_flat_path_enrolls_hits_capacity_and_reads_d_zero() -> None:
     assert result.outcome in ("insufficient", "not_reject")
 
 
+def test_a_wider_concurrency_refuses_fewer_legs_for_capacity() -> None:
+    frozen = simulate_path(_context(), horizon=5, shift=0.0).diagnostics.refused_legs["capacity"]
+    wider = simulate_path(_context(), horizon=5, shift=0.0, terms=Terms(max_concurrent=8))
+    assert wider.diagnostics.refused_legs["capacity"] < frozen
+
+
 def test_a_crash_halts_entries_on_the_loss_bound_and_positions_run_out() -> None:
     crash: Row = ("40", "41", "39", "40")
     rows: list[Row] = [FLAT] * 10 + [crash] * (len(CAL) - 10)
@@ -330,7 +362,15 @@ def test_summary_and_render_cover_every_cell_with_every_path_in_the_denominator(
     assert set(cells) == {"5", "10", "20"}
     assert all(cells[h]["by_shift"]["0.0"]["outcomes"]["insufficient"]["n"] == 1 for h in cells)
     assert "### horizon 5" in render(
-        {"window": ["a", "b"], "frontier": "f", "instruments": 6, "replicates": 1, "seed": 7, "cells": cells}
+        {
+            "window": ["a", "b"],
+            "frontier": "f",
+            "instruments": 6,
+            "replicates": 1,
+            "seed": 7,
+            "terms": {"max_concurrent": 4, "cohort_sessions": 40, "leg_capital_usd": "1000", "frozen": True},
+            "cells": cells,
+        }
     )
     assert LEGS == ("arm", "control")
 
