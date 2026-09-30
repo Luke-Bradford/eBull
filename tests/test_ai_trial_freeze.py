@@ -63,8 +63,8 @@ def test_the_prereg_terms_are_fixed_by_construction() -> None:
     assert terms["prereg_purpose"] == "falsification_only"
     assert terms["declared_universe_basis"] == "survivor_only"
     assert (terms["declared_carry_unmodelled"], terms["declared_fx_unmodelled"]) == (False, False)
-    # §9 "Too little data" (10 clusters) and the 40-session cohort's calendar floor.
-    assert (terms["min_forward_decision_dates"], terms["min_forward_calendar_weeks"]) == (10, 8)
+    # §9 "Too little data" (10 clusters) and the 60-session cohort's calendar floor.
+    assert (terms["min_forward_decision_dates"], terms["min_forward_calendar_weeks"]) == (10, 12)
     assert terms["expected_structural_refusals"] == list(
         structural_promotion_refusals(universe_basis="survivor_only", carry_unmodelled=False, fx_unmodelled=False)
     )

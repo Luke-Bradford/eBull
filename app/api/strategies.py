@@ -688,6 +688,9 @@ class StrategyPaperPoolView(BaseModel):
     capital_mode: Literal["fixed", "compound"]
     #: #2843. Who may approve a stage promotion under this authority.
     approval_mode: Literal["manual", "autonomous"]
+    #: #3471 §8. Demo-only; ``None`` = the mandate's own ``max_concurrent_positions``.
+    max_concurrent_positions_override: int | None = None
+    effective_max_concurrent_positions: int | None = None
     effective_capital: Decimal | None
     currency: Literal["USD"] = "USD"
     reserved_capital: Decimal
@@ -966,7 +969,16 @@ class StrategyPaperPoolUpdateRequest(BaseModel):
     #: every edit that is not about approval; making it a reset would let an
     #: unrelated capital-limit change silently revoke autonomy and report success.
     approval_mode: Literal["manual", "autonomous"] | None = None
+    #: #3471 §8. OMITTED carries the current value forward, same reason as ``approval_mode``;
+    #: an explicit ``null`` clears it. Demo-only, enforced by ``configure_paper_pool``.
+    max_concurrent_positions_override: int | None = Field(default=None, gt=0)
     reason: str = Field(min_length=1, max_length=1000)
+
+    def resolve_concurrency_override(self, current: int | None) -> int | None:
+        """Omitted -> ``current``; present (a value or ``null``) -> as sent."""
+        if "max_concurrent_positions_override" in self.model_fields_set:
+            return self.max_concurrent_positions_override
+        return current
 
     @model_validator(mode="after")
     def enabled_requires_capital(self) -> StrategyPaperPoolUpdateRequest:
@@ -2888,6 +2900,8 @@ def get_strategy_overview(
             capital_limit=paper_pool.capital_limit,
             capital_mode=paper_pool.capital_mode,
             approval_mode=paper_pool.approval_mode,
+            max_concurrent_positions_override=paper_pool.max_concurrent_positions_override,
+            effective_max_concurrent_positions=paper_pool.effective_max_concurrent_positions,
             effective_capital=effective_pool_capital,
             reserved_capital=reserved_total,
             invested_capital=invested_total,
@@ -3833,17 +3847,20 @@ def update_strategy_paper_pool(
             # request field -- is what both the change test and the INSERT see. The
             # rule is a named function so it has a test surface; see its docstring.
             approval_mode = resolve_approval_mode(body.approval_mode, current_pool.approval_mode)
+            concurrency_override = body.resolve_concurrency_override(current_pool.max_concurrent_positions_override)
             pool_changed = (
                 current_pool.enabled != body.enabled
                 or current_pool.capital_limit != body.capital_limit
                 or current_pool.capital_mode != body.capital_mode
                 or current_pool.mandate.risk_profile != body.risk_profile
                 or current_pool.approval_mode != approval_mode
+                or current_pool.max_concurrent_positions_override != concurrency_override
             )
             automation_changed = runtime.enable_auto_trading != body.enabled
             if not pool_changed and not automation_changed:
                 raise StrategyControlError(
-                    "automation change must alter enabled state, capital limit, capital mode, mandate, or approval mode"
+                    "automation change must alter enabled state, capital limit, capital mode, mandate, "
+                    "approval mode, or concurrency override"
                 )
             if pool_changed:
                 configure_paper_pool(
@@ -3853,6 +3870,7 @@ def update_strategy_paper_pool(
                     capital_mode=body.capital_mode,
                     risk_profile=body.risk_profile,
                     approval_mode=approval_mode,
+                    max_concurrent_positions_override=concurrency_override,
                     changed_by=session.username,
                     reason=body.reason,
                 )

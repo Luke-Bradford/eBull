@@ -12,11 +12,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, LiteralString, cast
 
 import psycopg
 import psycopg.rows
 
+from app.config import settings
 from app.services.result_ledger import holdout_access_counts, stored_result_promotion_refusals_for
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY,
@@ -238,6 +239,36 @@ class PaperPool:
     #: #2843.  Defaults to the safe value so a ``PaperPool`` constructed in a test or
     #: an unconfigured install can never read as autonomous.
     approval_mode: ApprovalMode = "manual"
+    #: #3471 §8.  Demo-only replacement for ``mandate.max_concurrent_positions``; kept off
+    #: ``PortfolioMandate`` because the mandate is the immutable profile resolution.
+    max_concurrent_positions_override: int | None = None
+
+    @property
+    def effective_max_concurrent_positions(self) -> int | None:
+        """What the executor compares open lifecycles against (``EFFECTIVE_MAX_CONCURRENT_SQL``)."""
+        if self.max_concurrent_positions_override is not None and _OVERRIDE_COUNTS:
+            return self.max_concurrent_positions_override
+        return self.mandate.max_concurrent_positions
+
+
+def effective_max_concurrent_sql(environment: str) -> LiteralString:
+    """The pool's effective concurrency cap as a SQL expression over ``strategy_paper_pool_events``.
+
+    The override counts in ``demo`` only.  Anywhere else a STANDING override (set in demo, then
+    the environment changed) is ignored at read time and the profile cap binds, so the fence
+    does not rest on set-time checks alone (review WARNING + Codex ckpt-3 on PR #3512).
+    """
+    if environment == "demo":
+        return "COALESCE(max_concurrent_positions_override, max_concurrent_positions)"
+    return "max_concurrent_positions"
+
+
+#: The one spelling for every SQL reader (sql/440).  A reader that selects the bare profile
+#: column ignores the override, which is the pair-breaking defect the override exists to
+#: prevent.  ``etoro_env`` is process configuration, fixed at import like ``settings`` itself.
+EFFECTIVE_MAX_CONCURRENT_SQL: Final = effective_max_concurrent_sql(settings.etoro_env)
+#: The same import-time decision for the Python reader, so the API view and the SQL agree.
+_OVERRIDE_COUNTS: Final = settings.etoro_env == "demo"
 
 
 def paper_automation_enabled(conn: psycopg.Connection[Any]) -> bool:
@@ -263,6 +294,20 @@ def paper_automation_enabled(conn: psycopg.Connection[Any]) -> bool:
     return False if row is None else bool(row[0])
 
 
+def paper_pool_concurrency_override(conn: psycopg.Connection[Any]) -> int | None:
+    """The latest pool revision's concurrency override, read alone (``paper_automation_enabled``'s
+    reasoning: the live-enable guard must not fail on a mandate column it never reads)."""
+    row = conn.execute(
+        """
+        SELECT max_concurrent_positions_override
+        FROM strategy_paper_pool_events
+        ORDER BY strategy_paper_pool_event_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])
+
+
 def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
     row = conn.execute(
         """
@@ -270,7 +315,7 @@ def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
                mandate_policy_version,risk_profile,target_volatility_pct,
                max_portfolio_drawdown_pct,max_loss_per_position_pct,max_daily_loss_pct,
                active_risk_budget_pct,cash_reserve_pct,max_concurrent_positions,
-               shorts_allowed,leverage_allowed,approval_mode
+               shorts_allowed,leverage_allowed,approval_mode,max_concurrent_positions_override
         FROM strategy_paper_pool_events
         ORDER BY strategy_paper_pool_event_id DESC
         LIMIT 1
@@ -299,6 +344,7 @@ def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
         cast(CapitalMode, row[4]),
         mandate,
         cast(ApprovalMode, row[16]),
+        None if row[17] is None else int(row[17]),
     )
 
 
@@ -310,6 +356,7 @@ def configure_paper_pool(
     capital_mode: CapitalMode = "fixed",
     risk_profile: RiskProfile,
     approval_mode: ApprovalMode,
+    max_concurrent_positions_override: int | None,
     changed_by: str,
     reason: str,
 ) -> PaperPool:
@@ -322,6 +369,11 @@ def configure_paper_pool(
     forces each caller to resolve the value, and the type checker finds every one.
     The API's own resolution is "omitted means unchanged", not "omitted means
     manual"; see ``update_strategy_paper_pool``.
+
+    ``max_concurrent_positions_override`` is required for the same reason (#3471 §8): an
+    unrelated edit that dropped it would narrow the cap under an active trial and break its
+    pairs.  A non-null value is demo-only (``_refuse_non_demo_override``); the INSERT is its
+    audit record.
     """
     _require_text(changed_by, "changed_by")
     _require_text(reason, "reason")
@@ -338,19 +390,34 @@ def configure_paper_pool(
         # sql/365's CHECK is the backstop, not the mechanism: `PaperPool` is
         # publicly constructible and this function is reachable without the API.
         raise StrategyControlError("autonomous approval requires a configured portfolio risk mandate")
+    if max_concurrent_positions_override is not None:
+        if isinstance(max_concurrent_positions_override, bool) or max_concurrent_positions_override <= 0:
+            raise StrategyControlError("max_concurrent_positions_override must be a positive integer")
+        if not mandate.configured:
+            raise StrategyControlError("a concurrency override requires a configured portfolio risk mandate")
     # Conflict with the executor's session lock so a pause/lower cannot race an
     # already-sized order between its authority read and demo broker submit.
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
     current = load_paper_pool(conn)
+    if max_concurrent_positions_override is not None and (
+        enabled or max_concurrent_positions_override != current.max_concurrent_positions_override
+    ):
+        # Exempt only carrying an UNCHANGED override on a DISABLED pool, where it authorises
+        # nothing: disabling is risk reduction and is never blocked. Setting, changing, or
+        # carrying it on an enabled pool is checked. Under the lock: `patch_config` takes the
+        # same one to refuse the inverse order.
+        _refuse_non_demo_override(conn)
     if (
         current.enabled == enabled
         and current.capital_limit == capital_limit
         and current.capital_mode == capital_mode
         and current.mandate == mandate
         and current.approval_mode == approval_mode
+        and current.max_concurrent_positions_override == max_concurrent_positions_override
     ):
         raise StrategyControlError(
-            "paper pool change must alter enabled state, capital limit, capital mode, mandate, or approval mode"
+            "paper pool change must alter enabled state, capital limit, capital mode, mandate, approval mode, "
+            "or concurrency override"
         )
     if current.event_id is not None and (
         capital_limit != current.capital_limit or capital_mode != current.capital_mode
@@ -397,15 +464,15 @@ def configure_paper_pool(
             mandate_policy_version,risk_profile,target_volatility_pct,
             max_portfolio_drawdown_pct,max_loss_per_position_pct,max_daily_loss_pct,
             active_risk_budget_pct,cash_reserve_pct,max_concurrent_positions,
-            shorts_allowed,leverage_allowed,approval_mode
+            shorts_allowed,leverage_allowed,approval_mode,max_concurrent_positions_override
         )
-        VALUES (%s,%s,'USD',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,'USD',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING strategy_paper_pool_event_id
         """,
         # ⚠ THREE positional lists that must stay aligned: the column list above,
         # the placeholder count, and this tuple.  #2623 shipped a value into the
         # wrong column by appending at a different ordinal in one of them.
-        # `approval_mode` is appended LAST in all three.
+        # `approval_mode` then `max_concurrent_positions_override` are appended LAST in all three.
         (
             enabled,
             capital_limit,
@@ -424,10 +491,32 @@ def configure_paper_pool(
             mandate.shorts_allowed,
             mandate.leverage_allowed,
             approval_mode,
+            max_concurrent_positions_override,
         ),
     ).fetchone()
     assert row is not None
-    return PaperPool(int(row[0]), enabled, capital_limit, "USD", capital_mode, mandate, approval_mode)
+    return PaperPool(
+        int(row[0]),
+        enabled,
+        capital_limit,
+        "USD",
+        capital_mode,
+        mandate,
+        approval_mode,
+        max_concurrent_positions_override,
+    )
+
+
+def _refuse_non_demo_override(conn: psycopg.Connection[Any]) -> None:
+    """The demo half of the override's chokepoint (#3471 §8); ``app.api.config.patch_config``
+    holds the other half, refusing live enable while an override stands. Both read under
+    ``PAPER_ALLOCATOR_ADVISORY_LOCK`` in their callers' transactions."""
+    from app.services.runtime_config import get_runtime_config
+
+    if settings.etoro_env != "demo":
+        raise StrategyControlError("a concurrency override is demo-only")
+    if get_runtime_config(conn).enable_live_trading:
+        raise StrategyControlError("a concurrency override cannot be set while system-wide live trading is enabled")
 
 
 @dataclass(frozen=True)

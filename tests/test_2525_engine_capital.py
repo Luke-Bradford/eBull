@@ -180,6 +180,7 @@ def test_database_authority_begins_at_the_first_assigned_pool_event(
         capital_mode="fixed",
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="assign the engine pot",
     )
@@ -236,6 +237,7 @@ def test_a_pending_allocation_before_the_assigned_pot_refuses_instead_of_disappe
         capital_mode="fixed",
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="assign the engine pot",
     )
@@ -256,6 +258,7 @@ def test_a_trade_backed_by_a_non_actionable_core_intent_refuses_instead_of_disap
         capital_mode="fixed",
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="assign the engine pot",
     )

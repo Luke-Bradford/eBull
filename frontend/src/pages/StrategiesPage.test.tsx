@@ -157,6 +157,8 @@ const OVERVIEW: StrategyOverviewResponse = {
     capital_limit: "1000.000000",
     capital_mode: "fixed",
     approval_mode: "manual",
+    max_concurrent_positions_override: null,
+    effective_max_concurrent_positions: 8,
     effective_capital: "1000.000000",
     currency: "USD",
     reserved_capital: "0.000000",
@@ -1006,6 +1008,20 @@ describe("StrategiesPage", () => {
     await waitFor(() => expect(update).toHaveBeenCalledWith(expect.objectContaining({
       risk_profile: "growth",
     })));
+  });
+
+  it("shows the enforced concurrency cap when the demo pool carries an override", async () => {
+    // #3471 §8: the executor enforces the override, so the profile's own cap is labelled as such.
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      paper_pool: {
+        ...OVERVIEW.paper_pool,
+        max_concurrent_positions_override: 30,
+        effective_max_concurrent_positions: 30,
+      },
+    });
+    renderStrategies("setup");
+    expect(await screen.findByText("30 (demo override; profile 8)")).toBeInTheDocument();
   });
 
   it("does not present automation as enabled while the system-wide guard is off", async () => {

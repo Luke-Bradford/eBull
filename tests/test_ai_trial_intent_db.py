@@ -72,6 +72,7 @@ def _seed_instruments(conn: Conn) -> None:
             capital_limit=Decimal("2000"),
             risk_profile="balanced",
             approval_mode="manual",
+            max_concurrent_positions_override=None,
             changed_by="test",
             reason="#3471 trial loader fixture",
         )

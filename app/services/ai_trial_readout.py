@@ -132,8 +132,8 @@ from app.services.price_masked_bars import load_masked_bars
 from app.services.risk_metrics import RISK_METRICS_VERSION
 from app.services.strategy_decision_context import load_market_classification
 
-#: §9 "Cohort": NYSE sessions 1–40, session 1 = the first fill session.
-COHORT_SESSIONS: Final = 40
+#: §9 "Cohort": NYSE sessions 1–60, session 1 = the first fill session (§8 answer, 2026-09-30).
+COHORT_SESSIONS: Final = 60
 #: §9 "When the readout runs": every cohort pair resolved, plus 5 sessions.
 READOUT_WAIT_SESSIONS: Final = 5
 #: §9 "Too little data".

@@ -417,12 +417,12 @@ Slice 2 tests:
 | term | value |
 | --- | --- |
 | legs | arm and control |
-| `max_concurrent` per leg | 4 |
+| `max_concurrent` per leg | 12 (§16.12; was 4) |
 | full ticket | $250 |
 | half ticket | $125 |
 | new entries per run | ≤ min(2, arm free slots, control free slots) |
 | capital mode | fixed; realised losses are not replenished |
-| absolute-loss halt | **either** leg's realised + unrealised loss ≥ 20% of that leg's capital ($200) → `halted_loss`, a trial-specific rule independent of the shared mandate |
+| absolute-loss halt | **either** leg's realised + unrealised loss ≥ 20% of that leg's capital ($600 on $3,000, §16.12) → `halted_loss`, a trial-specific rule independent of the shared mandate |
 
 **Sizing.**
 - The requested amount is the `size_tier`'s ticket.
@@ -558,7 +558,7 @@ Neither admits a $125 half ticket.
     - `expected_structural_refusals` = `structural_promotion_refusals(...)` over those stamps.
   - **Forward-shadow floor, BY CONSTRUCTION** (precedent `hunt_door.forward_shadow_floor`). A `falsification_only` declaration cannot promote, and no power calculation fixes a promotion floor for a demo-tier decision aid.
     - `min_independent_decision_dates` = `MIN_CLUSTERS` = 10, §9 "Too little data"; a cluster is a decision session.
-    - `min_calendar_weeks` = ⌈`COHORT_SESSIONS` ÷ 5⌉ = 8. This is a lower bound on the cohort's calendar span, because holidays only lengthen it.
+    - `min_calendar_weeks` = ⌈`COHORT_SESSIONS` ÷ 5⌉ = 12 (60 sessions, §16.12). This is a lower bound on the cohort's calendar span, because holidays only lengthen it.
     - `derivation` states exactly this.
   - **Trial register.** One NEW `DeclaredTrial` `ai-discretionary-v1`: `searches=1`, `EXACT`, `declared_for=("ai-discretionary-v1", "v1")`, with `TRIAL_REGISTER_VERSION` bumped. `ai_trial_freeze.EXPECTED_REGISTER_ENTRY` pins the shape, and a test asserts the register holds it (the `ranking_ablation_terms` precedent). The control leg is a random draw, not a search, and gets no entry.
   - **Preconditions, all inside the freeze transaction; a failure raises, the transaction rolls back and nothing is written:**
@@ -606,12 +606,12 @@ Neither admits a $125 half ticket.
 - **Monte Carlo.** Above 16 clusters it takes B = 99,999 flips from a declared seed, and p = (1 + #{T_b ≥ T_obs}) / (1 + B). The identity transformation is counted, and ties count as ≥.
 - **The null is approximate.** Under "the model's pick behaves like a random pick", *d* is roughly symmetric about 0. Exchangeability fails in at least three ways, all stated:
   - the model chooses the exit terms;
-  - pools differ by up to **8** names (the symmetric difference of two 4-name holding sets), and more in relative terms after pack drops;
+  - pools differ by up to **24** names (the symmetric difference of two 12-name holding sets, §16.12), and more in relative terms after pack drops;
   - clusters are dependent.
 - **Reading.** A small p reads *"the model's picks, under its own terms, did better than random picks from this shortlist on demo, beyond what sign-symmetric noise usually produces"*. It is not a proof of edge.
 
 **Cohort (fixed; no extension).**
-- **Enrollment** is the NYSE sessions numbered 1–40, where session 1 is the first fill session and is counted.
+- **Enrollment** is the NYSE sessions numbered 1–60 (§16.12; was 1–40), where session 1 is the first fill session and is counted.
 - **Closing a leg.** Each leg closes at its exit. Otherwise it is **censored 10 sessions after its own deadline**; that is the **only** censoring clock. A censored leg is valued at its last available close, minus half the recorded spread, and flagged.
 - **When the readout runs.** At the first session when every cohort pair is closed or censored, plus **5 sessions**, so the §9 cash-flow window is final before any number is computed.
 - **Too little data.** If the cohort then holds < 30 units or < 10 clusters, the verdict is **"insufficient evidence"**.
@@ -1609,6 +1609,17 @@ No evidence bar moves. Unchanged:
     - readiness before the 40th enrollment session;
     - no terminal deadline for a trial that never trades;
     - the arm capital-return formula's missing ÷ C.
+
+### 16.12 §8 concurrency and cohort answer (supervisor, 2026-09-30 07:35Z)
+
+- **Terms.** `TRIAL_MAX_CONCURRENT_PER_LEG` = 12, `COHORT_SESSIONS` = 60. Leg capital = 12 × $250 = $3,000, loss halt $600 (both derived in `ai_trial_halts`). `AI_TRIAL_POLICY_HASH` moves with them (hashed by value).
+- **Why.** 12 × 60 is the only cell of the §9 power grid (`scripts/ai_trial_power.py --max-concurrent 12 --cohort-sessions 60`) that clears the cohort minimum at every horizon. Cutting horizons to fit the profile cap was rejected.
+- **The pool cap.** Both legs and every open core lifecycle count against the pool's `max_concurrent_positions` (`_MANDATE_OBSERVATION_SQL`), and `growth` caps that at 12. So the demo pool carries `max_concurrent_positions_override` (sql/440). No profile constant changes.
+  - Effective cap = `COALESCE(override, max_concurrent_positions)`, spelled once as `EFFECTIVE_MAX_CONCURRENT_SQL`. The paper executor, the trial intent loader and the step-0 preview all read it.
+  - Demo-only, at both set time and read time. At set time, `configure_paper_pool` refuses to set, change, or carry an override on an enabled pool outside `etoro_env = demo` or while live trading is on. Carrying an unchanged one on a disabled pool is exempt, because disabling is never blocked. `patch_config` refuses live enable while an override stands. Both read under `PAPER_ALLOCATOR_ADVISORY_LOCK`. At read time, the effective-cap fragment ignores the override outside demo. The pool event row is the audit record.
+  - Value = `TRIAL_POOL_MAX_CONCURRENT` = 2 × 12 + 6 = 30. The 6 covers the 2 core lifecycles open on 2026-09-30 plus 4 spare, so a core lifecycle opened mid-trial cannot push the cap into the legs. The step-0 preview refuses `trial_pool_concurrency_below_design` below it, because a lower cap admits the first pair and breaks a later one. It also refuses `trial_pool_non_trial_over_headroom` when open non-trial lifecycles (open lifecycles minus the legs' open trades) exceed the 6, since the cap then no longer holds both legs' slots (Codex ckpt-2).
+- **Harm-floor re-check (v63-52).** At most 2 pairs per session × 60 sessions = 120 units, so at most 12 looks. The threshold at *k* = 12 is 0.05 · 2^−12 ≈ 1.22e-5, still above the 1e-5 Monte Carlo floor. The floor still cannot bind inside the cohort.
+- **Singleton-self pairs** (52–69% in the grid) are accepted for v1 as measured. The readout already counts them (`PlanReadout.singleton_self_pools`). *d* on contrast-only pairs, as a secondary line, is a later readout slice; it does not gate the start.
 
 ## Ckpt-1 (v1) disposition
 

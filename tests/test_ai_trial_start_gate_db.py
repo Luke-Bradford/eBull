@@ -11,7 +11,7 @@ from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerAccountRiskSnapshot
 from app.services import ai_trial_start_gate
-from app.services.ai_trial_start_gate import preview_trial_capacity
+from app.services.ai_trial_start_gate import TRIAL_POOL_MAX_CONCURRENT, preview_trial_capacity
 from app.services.strategy_control_plane import configure_paper_pool
 from app.services.strategy_engine_capital import EngineCapitalObservationError
 from tests.test_ai_trial_intent_db import NOW, _published_pair
@@ -33,22 +33,27 @@ RISK = BrokerAccountRiskSnapshot(
 def test_the_preview_reads_both_legs_and_writes_nothing(ebull_test_conn: Conn) -> None:
     conn = ebull_test_conn
     declaration_id, _ = _published_pair(conn)
-    # The fixture pool: $2,000 balanced (0.75% per-position loss). At the 25% preview stop the
-    # worst-stop capacity is $60, below the $125 half ticket.
-    assert (
-        preview_trial_capacity(conn, declaration_id=declaration_id, risk=RISK, now=NOW)
-        == "trial_capacity_unavailable:loss_at_stop"
-    )
-    configure_paper_pool(
-        conn,
-        enabled=True,
-        capital_limit=Decimal("10000"),
-        risk_profile="growth",
-        approval_mode="manual",
-        changed_by="test",
-        reason="#3471 step-0 preview",
-    )
-    conn.commit()
+    # The fixture pool: $2,000 balanced, concurrency cap 8 < TRIAL_POOL_MAX_CONCURRENT.
+    below_design = "trial_capacity_unavailable:trial_pool_concurrency_below_design"
+    assert preview_trial_capacity(conn, declaration_id=declaration_id, risk=RISK, now=NOW) == below_design
+
+    def growth(override: int | None) -> None:
+        configure_paper_pool(
+            conn,
+            enabled=True,
+            capital_limit=Decimal("10000"),
+            risk_profile="growth",
+            approval_mode="manual",
+            max_concurrent_positions_override=override,
+            changed_by="test",
+            reason="#3471 step-0 preview",
+        )
+        conn.commit()
+
+    # `growth` alone caps at 12; the demo pool's override (sql/440) is what the preview reads.
+    growth(None)
+    assert preview_trial_capacity(conn, declaration_id=declaration_id, risk=RISK, now=NOW) == below_design
+    growth(TRIAL_POOL_MAX_CONCURRENT)
     assert preview_trial_capacity(conn, declaration_id=declaration_id, risk=RISK, now=NOW) is None
     # Read-only: the account high-water state `_observe_local_mandate_risk` advances is untouched.
     assert conn.execute("SELECT count(*) FROM strategy_paper_account_risk_state").fetchone() == (0,)

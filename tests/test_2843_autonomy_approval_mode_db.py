@@ -162,6 +162,7 @@ def _configure(conn: psycopg.Connection[Any], *, approval_mode: str, enabled: bo
         capital_mode="fixed",
         risk_profile="balanced",
         approval_mode=approval_mode,  # type: ignore[arg-type]
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="autonomy flag test",
     )
@@ -211,6 +212,7 @@ def test_autonomous_is_refused_without_a_configured_mandate(ebull_test_conn: psy
             capital_mode="fixed",
             risk_profile="unconfigured",
             approval_mode="autonomous",
+            max_concurrent_positions_override=None,
             changed_by="operator",
             reason="should refuse",
         )
@@ -406,6 +408,7 @@ def test_downgrading_the_mandate_cannot_leave_a_carried_forward_autonomous(
             capital_mode="fixed",
             risk_profile="unconfigured",
             approval_mode=carried,
+            max_concurrent_positions_override=None,
             changed_by="operator",
             reason="downgrade the mandate while autonomy is on",
         )

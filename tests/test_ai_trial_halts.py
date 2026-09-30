@@ -61,8 +61,8 @@ def _trade(
 
 
 def test_the_limit_is_twenty_percent_of_the_fixed_leg_capital() -> None:
-    # §8: 4 concurrent × the $250 full ticket; §9 names the $200 limit itself.
-    assert (TRIAL_LEG_CAPITAL_USD, TRIAL_LOSS_LIMIT_USD) == (Decimal(1000), Decimal(200))
+    # §8 answer (2026-09-30): 12 concurrent × the $250 full ticket, halt $600.
+    assert (TRIAL_LEG_CAPITAL_USD, TRIAL_LOSS_LIMIT_USD) == (Decimal(3000), Decimal(600))
     assert FROZEN_CONSTANTS["ai_trial_halts.TRIAL_LOSS_HALT_PCT"] == Decimal("20")
 
 
@@ -122,13 +122,13 @@ def test_leg_losses_sum_per_leg_and_count_the_unmeasured() -> None:
 
 
 def test_the_breach_is_reached_at_the_limit_on_either_leg() -> None:
-    below = [LegLoss("arm", Decimal("-199.99"), 0), LegLoss("control", Decimal("500"), 0)]
+    below = [LegLoss("arm", Decimal("-599.99"), 0), LegLoss("control", Decimal("500"), 0)]
     assert loss_breach(below) is None
-    at = [LegLoss("arm", Decimal("10"), 0), LegLoss("control", Decimal("-200"), 0)]
+    at = [LegLoss("arm", Decimal("10"), 0), LegLoss("control", Decimal("-600"), 0)]
     assert loss_breach(at) == at[1]
     # An unmeasured trade never pushes a leg over: it contributes nothing.
-    assert loss_breach([LegLoss("arm", Decimal("-150"), 3)]) is None
+    assert loss_breach([LegLoss("arm", Decimal("-450"), 3)]) is None
     # A proven breach wins over an unproven one ahead of it in leg order.
-    both = [LegLoss("arm", Decimal("-300"), 1), LegLoss("control", Decimal("-200"), 0)]
+    both = [LegLoss("arm", Decimal("-900"), 1), LegLoss("control", Decimal("-600"), 0)]
     assert loss_breach(both) == both[1]
     assert loss_breach(both[:1]) == both[0]
