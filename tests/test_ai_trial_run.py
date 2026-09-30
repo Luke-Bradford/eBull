@@ -34,18 +34,27 @@ def _declaration(doc: object, *, state: str | None = "active", sha: str | None =
 
 def test_declaration_refusal_order() -> None:
     doc = {"strategy_id": "ai-discretionary-v1", "strategy_version": "v1", "policy_hash": AI_TRIAL_POLICY_HASH}
-    assert declaration_refusal(_declaration(doc)) is None
+    assert declaration_refusal(_declaration(doc), policy_hash=AI_TRIAL_POLICY_HASH) is None
     # Digest-intact first: a stored sha that is not the document's.
-    assert declaration_refusal(_declaration(doc, sha="d" * 64)) == "trial_declaration_not_intact"
+    assert (
+        declaration_refusal(_declaration(doc, sha="d" * 64), policy_hash=AI_TRIAL_POLICY_HASH)
+        == "trial_declaration_not_intact"
+    )
     wrong_contract = Declaration(1, doc, declaration_digest(doc), "ai-trial-declaration-v1:" + "e" * 64, "active")
-    assert declaration_refusal(wrong_contract) == "trial_declaration_not_intact"
+    assert declaration_refusal(wrong_contract, policy_hash=AI_TRIAL_POLICY_HASH) == "trial_declaration_not_intact"
     # O6: a document with no policy hash, or another one, is drift.
-    assert declaration_refusal(_declaration({**doc, "policy_hash": "f" * 64})) == "policy_drift"
+    assert (
+        declaration_refusal(_declaration({**doc, "policy_hash": "f" * 64}), policy_hash=AI_TRIAL_POLICY_HASH)
+        == "policy_drift"
+    )
     no_hash = {k: v for k, v in doc.items() if k != "policy_hash"}
-    assert declaration_refusal(_declaration(no_hash)) == "policy_drift"
+    assert declaration_refusal(_declaration(no_hash), policy_hash=AI_TRIAL_POLICY_HASH) == "policy_drift"
     # No state event at all is not active (fail closed), nor is a halt.
-    assert declaration_refusal(_declaration(doc, state=None)) == "trial_not_active"
-    assert declaration_refusal(_declaration(doc, state="halted_operator")) == "trial_not_active"
+    assert declaration_refusal(_declaration(doc, state=None), policy_hash=AI_TRIAL_POLICY_HASH) == "trial_not_active"
+    assert (
+        declaration_refusal(_declaration(doc, state="halted_operator"), policy_hash=AI_TRIAL_POLICY_HASH)
+        == "trial_not_active"
+    )
 
 
 def _book(n: int) -> LegBook:

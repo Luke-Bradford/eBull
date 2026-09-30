@@ -33,6 +33,7 @@ from app.services.ai_trial_pack_reader import INTRADAY_INTERVAL, INTRADAY_REQUES
 from app.services.ai_trial_pair_lifecycle import TRIAL_CENSOR_SESSIONS, clock_instant
 from app.services.ai_trial_policy import FROZEN_CONSTANTS
 from app.services.ai_trial_run import RunEnvironment, RunOutcome
+from app.services.ai_trial_version import V1, TrialVersion
 from app.services.market_calendar import us_market_status
 from app.workers.scheduler import JOB_AI_TRIAL_DECISION_RUN, JOB_AI_TRIAL_EXECUTE, SCHEDULED_JOBS
 
@@ -188,7 +189,12 @@ def _decision(
     monkeypatch: pytest.MonkeyPatch, *, now: datetime, declared: bool = True, broker: _Broker | None = None
 ) -> tuple[DecisionJobResult, dict[str, Any]]:
     seen: dict[str, Any] = {"resolved": 0, "swept": [], "fetched": []}
-    monkeypatch.setattr(ai_trial_jobs, "load_declaration", lambda _conn: object() if declared else None)
+
+    def load(_conn: Any, *, version: TrialVersion) -> object | None:
+        seen["loaded_version"] = version
+        return object() if declared else None
+
+    monkeypatch.setattr(ai_trial_jobs, "load_declaration", load)
 
     def resolve() -> RunEnvironment:
         seen["resolved"] += 1
@@ -198,8 +204,8 @@ def _decision(
         seen["swept"].append(True)
         return 2
 
-    def decide(conn: Any, *, env: RunEnvironment, risk: Any, fetch_intraday: Any) -> RunOutcome:
-        seen["env"], seen["risk"] = env, risk
+    def decide(conn: Any, *, env: RunEnvironment, risk: Any, fetch_intraday: Any, version: TrialVersion) -> RunOutcome:
+        seen["env"], seen["risk"], seen["version"] = env, risk, version
         fetch_intraday(7)
         return RunOutcome("decided", 11, date(2026, 9, 30), None, (5,))
 
@@ -225,6 +231,8 @@ def test_the_decision_job_runs_after_the_close(monkeypatch: pytest.MonkeyPatch) 
     result, seen = _decision(monkeypatch, now=AFTER_CLOSE)
     assert (result.status, result.orphans_killed) == ("decided", 2)
     assert seen["swept"] == [True] and seen["env"] is ENV and seen["verified"] is ENV and seen["risk"] == "snapshot"
+    # v1 by default: the declaration and the run are both v1's (fund-v1 spec §7).
+    assert seen["loaded_version"] is V1 and seen["version"] is V1
     assert seen["fetched"] == [(7, INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT)]
     assert result.note == "status=decided session=2026-09-30 run_id=11 pairs=1 orphans_killed=2"
 
@@ -261,7 +269,7 @@ def test_a_late_catch_up_still_runs_before_the_target_date(monkeypatch: pytest.M
 
 
 def test_a_failed_orphan_sweep_is_surfaced_and_never_blocks_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ai_trial_jobs, "load_declaration", lambda _conn: object())
+    monkeypatch.setattr(ai_trial_jobs, "load_declaration", lambda _conn, **_kw: object())
 
     def sweep() -> int:
         raise subprocess.CalledProcessError(1, ["ps"])

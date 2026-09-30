@@ -26,7 +26,7 @@ import psycopg
 from app.config import settings
 from app.services.ai_trial_pair_lifecycle import LEGS
 from app.services.ai_trial_readout import Readout, ReadoutUnavailable, compute_readout
-from app.services.ai_trial_run import TRIAL_STRATEGY_VERSION
+from app.services.ai_trial_version import V1, trial_version
 
 
 def _jsonable(value: Any) -> Any:
@@ -35,9 +35,9 @@ def _jsonable(value: Any) -> Any:
     raise TypeError(f"not JSON-serialisable: {type(value).__name__}")
 
 
-def render(readout: Readout) -> str:
+def render(readout: Readout, *, arm_strategy_id: str = V1.arm_strategy_id) -> str:
     lines = [
-        f"AI-discretionary-v1 readout — declaration {readout.declaration_id} ({readout.strategy_version}), "
+        f"{arm_strategy_id} readout — declaration {readout.declaration_id} ({readout.strategy_version}), "
         f"as of {readout.as_of.isoformat()}",
         f"cohort: {readout.cohort.status} — {readout.cohort.detail}",
         f"pairs: {readout.pair_states}  broken: {readout.broken_reasons}  unvalued legs: {readout.unvalued_reasons}",
@@ -117,16 +117,22 @@ def render(readout: Readout) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="#3471 §9 readout of the AI-discretionary-v1 demo trial")
-    parser.add_argument("--version", default=TRIAL_STRATEGY_VERSION, help="the declared strategy version")
+    parser.add_argument("--arm", default=V1.arm_strategy_id, help="the arm's strategy id")
+    parser.add_argument("--version", default=V1.strategy_version, help="the declared strategy version")
     parser.add_argument("--json", type=Path, help="also write the readout as JSON here")
     args = parser.parse_args(argv)
     with psycopg.connect(settings.database_url) as conn:
         try:
-            readout = compute_readout(conn, strategy_version=args.version)
+            version = trial_version(args.arm, args.version)
+        except LookupError as exc:
+            print(f"no readout: {exc}")
+            return 0
+        try:
+            readout = compute_readout(conn, version=version)
         except ReadoutUnavailable as exc:
             print(f"no readout: {exc}")
             return 0
-    print(render(readout))
+    print(render(readout, arm_strategy_id=args.arm))
     if args.json:
         args.json.write_text(json.dumps(dataclasses.asdict(readout), default=_jsonable, indent=2))
     return 0

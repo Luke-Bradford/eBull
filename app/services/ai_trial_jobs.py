@@ -52,14 +52,8 @@ from app.services.ai_trial_deadline import TRIAL_ENTRY_TIME_UTC, TRIAL_MAX_POSIT
 from app.services.ai_trial_executor import execute_trial_signal
 from app.services.ai_trial_invocation import TRIAL_MODEL_ID, build_argv, build_env
 from app.services.ai_trial_pack_reader import INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT, next_us_session
-from app.services.ai_trial_run import (
-    TRIAL_ARM_STRATEGY_ID,
-    TRIAL_STRATEGY_VERSION,
-    RunEnvironment,
-    RunOutcome,
-    load_declaration,
-    run_trial_decision,
-)
+from app.services.ai_trial_run import RunEnvironment, RunOutcome, load_declaration, run_trial_decision
+from app.services.ai_trial_version import V1, TrialVersion
 from app.services.market_calendar import latest_completed_us_session
 from app.services.strategy_paper_executor import _NY, _session_is_open
 from app.services.strategy_position_manager import configure_position_manager
@@ -231,12 +225,13 @@ def run_decision_job(
     verify: Callable[[RunEnvironment], None] = verify_run_environment,
     sweep: Callable[[], int] = sweep_orphan_model_processes,
     decide: Callable[..., RunOutcome] = run_trial_decision,
+    version: TrialVersion = V1,
 ) -> DecisionJobResult:
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     # The claim's own target-session rule (`ai_trial_run.claim_run`, §3).
     if next_us_session(latest_completed_us_session(observed)) == observed.astimezone(_NY).date():
         return DecisionJobResult("target_session_date")
-    declaration = load_declaration(conn)
+    declaration = load_declaration(conn, version=version)
     conn.commit()
     if declaration is None:
         return DecisionJobResult("declaration_missing")
@@ -264,7 +259,7 @@ def run_decision_job(
     def fetch_intraday(instrument_id: int) -> Sequence[IntradayBar]:
         return get_intraday_candles(instrument_id, INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT)
 
-    outcome = decide(conn, env=env, risk=risk, fetch_intraday=fetch_intraday)
+    outcome = decide(conn, env=env, risk=risk, fetch_intraday=fetch_intraday, version=version)
     return DecisionJobResult(outcome.status, outcome, orphans)
 
 
@@ -350,7 +345,7 @@ def run_trial_execution(
 # ---------------------------------------------------------------------------
 # Position-age backstop (slice 3 calls this when it configures the deployments)
 # ---------------------------------------------------------------------------
-def configure_trial_position_managers(conn: Conn, *, updated_by: str) -> dict[str, int]:
+def configure_trial_position_managers(conn: Conn, *, updated_by: str, version: TrialVersion = V1) -> dict[str, int]:
     """Set ``max_position_age_seconds`` to the 40-session backstop on both legs' paper deployments
     (§8, r2-53). Refuses unless both exist. Returns each leg's policy revision; the caller commits."""
     rows = conn.execute(
@@ -358,7 +353,7 @@ def configure_trial_position_managers(conn: Conn, *, updated_by: str) -> dict[st
         SELECT strategy_id, deployment_id FROM strategy_deployments
         WHERE strategy_id = ANY(%s) AND strategy_version = %s AND mode = 'paper'
         """,
-        ([TRIAL_ARM_STRATEGY_ID, TRIAL_ARM_STRATEGY_ID + "-control"], TRIAL_STRATEGY_VERSION),
+        (list(version.leg_strategy_ids), version.strategy_version),
     ).fetchall()
     deployments = {str(r[0]): int(r[1]) for r in rows}
     if len(deployments) != 2:

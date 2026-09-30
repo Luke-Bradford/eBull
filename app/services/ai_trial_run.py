@@ -62,20 +62,13 @@ from app.services.ai_trial_pack_reader import (
     Pack,
     SetupLibraryMismatch,
     Step1,
-    assemble_pack,
     load_setup_library,
     next_us_session,
     read_step1,
 )
-from app.services.ai_trial_policy import AI_TRIAL_POLICY_HASH
-from app.services.ai_trial_prompt import (
-    PROMPT_TEMPLATE_SHA256,
-    SYSTEM_PROMPT,
-    SYSTEM_PROMPT_SHA256,
-    RenderedPrompt,
-    render_user_prompt,
-)
+from app.services.ai_trial_prompt import PROMPT_TEMPLATE_SHA256, RenderedPrompt, render_user_prompt
 from app.services.ai_trial_start_gate import REFUSAL_PREFIX, preview_trial_capacity
+from app.services.ai_trial_version import TRIAL_VERSIONS, V1, PackRefusal, TrialVersion
 from app.services.market_calendar import latest_completed_us_session
 from app.services.strategy_manifest import DEMO_TRIAL_STRATEGY_IDS
 
@@ -83,11 +76,13 @@ logger = logging.getLogger(__name__)
 
 Conn = psycopg.Connection[Any]
 
-#: §8 "two legs, two identities": the arm's id; the control's is this plus ``-control``.
-TRIAL_ARM_STRATEGY_ID: Final = "ai-discretionary-v1"
-TRIAL_STRATEGY_VERSION: Final = "v1"
-if {TRIAL_ARM_STRATEGY_ID, TRIAL_ARM_STRATEGY_ID + "-control"} != DEMO_TRIAL_STRATEGY_IDS:
-    raise RuntimeError("the trial leg ids must be strategy_manifest.DEMO_TRIAL_STRATEGY_IDS")
+#: v1's identity (§8 "two legs, two identities"), kept for v1-only callers; everything that
+#: serves a version takes its ``TrialVersion`` (fund-v1 spec §7).
+TRIAL_ARM_STRATEGY_ID: Final = V1.arm_strategy_id
+TRIAL_STRATEGY_VERSION: Final = V1.strategy_version
+# Every capital path keys on purpose ``demo_trial``: a leg outside the set is refused by all of them.
+if not {leg for version in TRIAL_VERSIONS for leg in version.leg_strategy_ids} <= DEMO_TRIAL_STRATEGY_IDS:
+    raise RuntimeError("every trial leg id must be in strategy_manifest.DEMO_TRIAL_STRATEGY_IDS")
 
 #: A live, tradable shortlist is survivor-only by construction (#2288 labelling contract).
 SIGNAL_UNIVERSE: Final = "survivor_only"
@@ -155,17 +150,18 @@ _DECLARATION_SQL: Final = """
 """
 
 
-def load_declaration(conn: Conn, *, strategy_version: str = TRIAL_STRATEGY_VERSION) -> Declaration | None:
-    row = conn.execute(_DECLARATION_SQL, (TRIAL_ARM_STRATEGY_ID, strategy_version)).fetchone()
+def load_declaration(conn: Conn, *, version: TrialVersion = V1) -> Declaration | None:
+    row = conn.execute(_DECLARATION_SQL, (version.arm_strategy_id, version.strategy_version)).fetchone()
     if row is None:
         return None
     return Declaration(int(row[0]), row[1], str(row[2]), row[3], row[4])
 
 
-def declaration_refusal(declaration: Declaration, *, policy_hash: str = AI_TRIAL_POLICY_HASH) -> str | None:
+def declaration_refusal(declaration: Declaration, *, policy_hash: str) -> str | None:
     """§9 runtime checks, before any read that costs: the stored document is digest-intact and
-    named by its #2599 contract (the loader's rule), its ``policy_hash`` is this code's
-    (``policy_drift``, O6), and the trial is ``active``."""
+    named by its #2599 contract (the loader's rule), its ``policy_hash`` is the version's
+    (``policy_drift``, O6; required, so no caller can check one version against another's hash),
+    and the trial is ``active``."""
     try:
         digest = declaration_digest(declaration.doc)
     except NonCanonicalValue:
@@ -298,6 +294,7 @@ def _stored_output(result: InvocationResult) -> tuple[str, str]:
 
 def _provenance(
     env: RunEnvironment,
+    version: TrialVersion,
     *,
     step1: Step1 | None = None,
     pack: Pack | None = None,
@@ -307,12 +304,12 @@ def _provenance(
     """The run's columns for whatever the run reached (§11: a refused run carries what it
     reached; a decided one carries all of it)."""
     values: dict[str, Any] = {
-        "policy_hash": AI_TRIAL_POLICY_HASH,
+        "policy_hash": version.policy_hash,
         "git_sha": env.git_sha,
         "cli_version": env.cli_version,
         "executable_path": env.executable,
         "model_id": TRIAL_MODEL_ID,
-        "system_prompt_sha256": SYSTEM_PROMPT_SHA256,
+        "system_prompt_sha256": version.system_prompt_sha256,
         "prompt_template_sha256": PROMPT_TEMPLATE_SHA256,
     }
     if step1 is not None and step1.scores_run is not None:
@@ -334,7 +331,7 @@ def _provenance(
                     build_argv(
                         env.executable,
                         model_id=TRIAL_MODEL_ID,
-                        system_prompt=SYSTEM_PROMPT,
+                        system_prompt=version.system_prompt,
                         json_schema=decision_json_schema(),
                     )
                 ),
@@ -470,18 +467,20 @@ def _decision_row(run_id: int, plan: PlannedDecision) -> dict[str, Any]:
     }
 
 
-def _insert_signal(conn: Conn, *, strategy_id: str, instrument_id: int, step1: Step1, fill_price: object) -> int:
+def _insert_signal(
+    conn: Conn, *, version: TrialVersion, strategy_id: str, instrument_id: int, step1: Step1, fill_price: object
+) -> int:
     row = conn.execute(
         _SIGNAL_INSERT,
         (
             strategy_id,
-            TRIAL_STRATEGY_VERSION,
+            version.strategy_version,
             instrument_id,
             step1.last_session,
             step1.session_date,
             fill_price,
             SIGNAL_UNIVERSE,
-            Jsonb({"ai_trial_policy": AI_TRIAL_POLICY_HASH}),
+            Jsonb({"ai_trial_policy": version.policy_hash}),
         ),
     ).fetchone()
     assert row is not None
@@ -491,6 +490,7 @@ def _insert_signal(conn: Conn, *, strategy_id: str, instrument_id: int, step1: S
 def publish_run(
     conn: Conn,
     *,
+    version: TrialVersion = V1,
     claim: Claim,
     declaration: Declaration,
     step1: Step1,
@@ -563,12 +563,17 @@ def publish_run(
             assert inserted is not None
             pair_id = int(inserted[0])
             legs: tuple[tuple[Leg, str, int, object], ...] = (
-                ("arm", TRIAL_ARM_STRATEGY_ID, v.instrument_id, arm.atr.close),
-                ("control", TRIAL_ARM_STRATEGY_ID + "-control", pair.draw.instrument_id, control.atr.close),
+                ("arm", version.arm_strategy_id, v.instrument_id, arm.atr.close),
+                ("control", version.control_strategy_id, pair.draw.instrument_id, control.atr.close),
             )
             for leg, strategy_id, instrument_id, reference_close in legs:
                 signal_id = _insert_signal(
-                    conn, strategy_id=strategy_id, instrument_id=instrument_id, step1=step1, fill_price=reference_close
+                    conn,
+                    version=version,
+                    strategy_id=strategy_id,
+                    instrument_id=instrument_id,
+                    step1=step1,
+                    fill_price=reference_close,
                 )
                 conn.execute(
                     "INSERT INTO ai_trial_leg_links (pair_id, leg, signal_id) VALUES (%s, %s, %s)",
@@ -588,7 +593,7 @@ def run_trial_decision(
     risk: BrokerAccountRiskSnapshot | None,
     fetch_intraday: IntradayFetch,
     invoke: Callable[..., InvocationResult] = invoke_model,
-    strategy_version: str = TRIAL_STRATEGY_VERSION,
+    version: TrialVersion = V1,
 ) -> RunOutcome:
     """One decision run for the current target session (§3 steps 0-5).
 
@@ -597,10 +602,10 @@ def run_trial_decision(
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise ValueError("the trial run requires an idle connection")
-    declaration = load_declaration(conn, strategy_version=strategy_version)
+    declaration = load_declaration(conn, version=version)
     conn.commit()
     if declaration is None:
-        logger.info("ai_trial run: no frozen declaration for %s/%s", TRIAL_ARM_STRATEGY_ID, strategy_version)
+        logger.info("ai_trial run: no frozen declaration for %s/%s", version.arm_strategy_id, version.strategy_version)
         return RunOutcome("declaration_missing")
     sweep_stale_claims(conn, declaration.declaration_id)
     claim = claim_run(conn, declaration.declaration_id)
@@ -609,10 +614,11 @@ def run_trial_decision(
 
     # What the run has reached so far; `_decide` extends it at each stage, so a failure is
     # recorded with the scores run, pack and prompt it had already built (Codex ckpt-2).
-    reached = _provenance(env)
+    reached = _provenance(env, version)
     try:
         return _decide(
             conn,
+            version=version,
             claim=claim,
             declaration=declaration,
             env=env,
@@ -634,6 +640,7 @@ def run_trial_decision(
 def _decide(
     conn: Conn,
     *,
+    version: TrialVersion,
     claim: Claim,
     declaration: Declaration,
     env: RunEnvironment,
@@ -642,7 +649,7 @@ def _decide(
     invoke: Callable[..., InvocationResult],
     reached: dict[str, Any],
 ) -> RunOutcome:
-    reason = declaration_refusal(declaration)
+    reason = declaration_refusal(declaration, policy_hash=version.policy_hash)
     if reason is not None:
         return refuse_run(conn, claim, reason, reached)
 
@@ -656,7 +663,7 @@ def _decide(
     # Step 1.
     step1 = read_step1(conn, as_of=claim.as_of)
     conn.commit()
-    reached.update(_provenance(env, step1=step1))
+    reached.update(_provenance(env, version, step1=step1))
     if step1.session_date != claim.session_date:  # one session concept everywhere (§3)
         raise RuntimeError(f"step 1 targets {step1.session_date}, the claim {claim.session_date}")
     if step1.refusal is not None:
@@ -678,25 +685,27 @@ def _decide(
         max_new_entries=entries,
     )
     try:
-        pack = assemble_pack(conn, step1=step1, account=account, fetch_intraday=fetch)
+        pack = version.build_pack(conn, step1=step1, account=account, fetch_intraday=fetch)
     except SetupLibraryMismatch:
         # §16.11: a missing or re-written library refuses the whole run before the model call.
         logger.warning("ai_trial run %s: setup library mismatch at pack build", claim.run_id, exc_info=True)
         return refuse_run(conn, claim, LIBRARY_SHA_MISMATCH, reached)
+    except PackRefusal as refusal:  # never raised by v1's builder (fund-v1 spec §5)
+        return refuse_run(conn, claim, refusal.reason, reached)
     conn.commit()
-    reached.update(_provenance(env, step1=step1, pack=pack))
+    reached.update(_provenance(env, version, step1=step1, pack=pack))
 
     # Step 3: one call, never retried for the session.
     prompt = render_user_prompt(pack.pack)
-    reached.update(_provenance(env, step1=step1, pack=pack, prompt=prompt))
+    reached.update(_provenance(env, version, step1=step1, pack=pack, prompt=prompt))
     result = invoke(
         executable=env.executable,
         prompt=prompt.text,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=version.system_prompt,
         json_schema=decision_json_schema(),
         source_env=env.source_env,
     )
-    values = _provenance(env, step1=step1, pack=pack, prompt=prompt, result=result)
+    values = _provenance(env, version, step1=step1, pack=pack, prompt=prompt, result=result)
     reached.update(values)
     if result.refusal_reason is not None:
         return refuse_run(conn, claim, result.refusal_reason, values)
@@ -723,6 +732,7 @@ def _decide(
     try:
         pair_ids = publish_run(
             conn,
+            version=version,
             claim=claim,
             declaration=declaration,
             step1=step1,

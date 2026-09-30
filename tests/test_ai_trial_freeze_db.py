@@ -14,6 +14,7 @@ import psycopg
 from app.services.ai_trial_deadline import TRIAL_MAX_POSITION_AGE_SECONDS
 from app.services.ai_trial_freeze import Provenance, freeze_trial
 from app.services.ai_trial_intent import declaration_digest
+from app.services.ai_trial_policy import AI_TRIAL_POLICY_HASH
 from app.services.ai_trial_run import declaration_refusal, load_declaration
 from app.services.strategy_control_plane import configure_deployment
 from tests.test_ai_trial_intent_db import _deploy, _seed_instruments
@@ -84,7 +85,7 @@ def test_apply_starts_the_trial_and_the_runtime_accepts_the_frozen_document(ebul
     assert declaration is not None and declaration.declaration_id == applied.declaration_id
     # The publisher's own §9 runtime check: digest intact after JSONB, policy hash current, active.
     assert declaration_digest(declaration.doc) == applied.doc_sha256
-    assert declaration_refusal(declaration) is None
+    assert declaration_refusal(declaration, policy_hash=AI_TRIAL_POLICY_HASH) is None
     event = conn.execute("SELECT from_state, to_state, actor, reason FROM ai_trial_state_events").fetchone()
     assert event is not None and event[:3] == (None, "active", "supervisor")
     assert "https://example.invalid/3471#answer" in event[3]

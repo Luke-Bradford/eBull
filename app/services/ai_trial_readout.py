@@ -108,7 +108,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from fractions import Fraction
 from statistics import median
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import psycopg
 from psycopg.rows import dict_row
@@ -131,6 +131,10 @@ from app.services.market_regime_provider import BENCHMARK_SYMBOL
 from app.services.price_masked_bars import load_masked_bars
 from app.services.risk_metrics import RISK_METRICS_VERSION
 from app.services.strategy_decision_context import load_market_classification
+
+if TYPE_CHECKING:
+    # Runtime import would cycle: ai_trial_version → ai_trial_policy → this module.
+    from app.services.ai_trial_version import TrialVersion
 
 #: §9 "Cohort": NYSE sessions 1–60, session 1 = the first fill session (§8 answer, 2026-09-30).
 COHORT_SESSIONS: Final = 60
@@ -1785,12 +1789,12 @@ class ReadoutUnavailable(RuntimeError):
 def compute_readout(
     conn: psycopg.Connection[Any],
     *,
-    strategy_version: str,
+    version: TrialVersion,
     as_of: datetime | None = None,
     descriptives: bool = True,
 ) -> Readout:
-    """The readout for the arm's declaration of ``strategy_version`` (O14: each version is its
-    own declaration, so the version is never inferred). Read-only.
+    """The readout for ``version``'s declaration (O14: each version is its own declaration, so the
+    version is never inferred; fund-v1 spec §7: keyed on the descriptor's arm id). Read-only.
 
     ``descriptives=False`` skips the benchmark, exposure and v6 plan reads (a due readout then reports every
     SPY close and exposure fact as missing). ``ai_trial_halts`` passes it: it runs this every
@@ -1799,15 +1803,16 @@ def compute_readout(
     # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constants), and
     # ai_trial_halts imports this module for the harm looks.
     from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD
-    from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
 
     declaration = conn.execute(
         "SELECT declaration_id, strategy_version, doc_sha256 FROM ai_trial_declarations "
         "WHERE strategy_id = %s AND strategy_version = %s",
-        (TRIAL_ARM_STRATEGY_ID, strategy_version),
+        (version.arm_strategy_id, version.strategy_version),
     ).fetchone()
     if declaration is None:
-        raise ReadoutUnavailable(f"no frozen {strategy_version} declaration: the trial has not started (slice 3d)")
+        raise ReadoutUnavailable(
+            f"no frozen {version.arm_strategy_id}/{version.strategy_version} declaration: the trial has not started"
+        )
     declaration_id = int(declaration[0])
     pairs, first_fill = load_pairs(conn, declaration_id)
     as_of = as_of or datetime.now(UTC)
