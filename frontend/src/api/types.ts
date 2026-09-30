@@ -12,6 +12,7 @@
  *   - /audit              -> app/api/audit.py
  *   - /rankings            -> app/api/scores.py
  *   - /strategies/*        -> app/api/strategies.py
+ *   - /ai-trial/status     -> app/api/ai_trial.py
  *
  * Rule: when a backend response_model changes, update this file in the same
  * PR. Drift here breaks every page silently. There is no codegen yet (#59
@@ -3572,4 +3573,85 @@ export interface AllocationUpdateResponse {
   currency: string;
   enabled: boolean;
   revision: number;
+}
+
+// ---------------------------------------------------------------------------
+// /ai-trial/status (app/api/ai_trial.py, #3514). Decimals → string | null.
+// ---------------------------------------------------------------------------
+
+export type AiTrialState =
+  | "not_declared"
+  | "not_started"
+  | "active"
+  | "halted_harm"
+  | "halted_loss"
+  | "halted_mandate"
+  | "halted_operator";
+export type AiTrialDecisionState = "not_run" | "deciding" | "refused" | "abstained" | "no_valid_plan" | "legs_published";
+export type AiTrialExecutionState = "submitted" | "refused" | "awaiting_execution" | "not_run";
+
+export interface AiTrialJobFire {
+  job_name: string;
+  next_fire_at: string;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  last_status: string | null;
+  last_note: string | null;
+}
+
+export interface AiTrialDecision {
+  state: AiTrialDecisionState;
+  label: string;
+  legs: number;
+  refusal_reason: string | null;
+  decision_refusals: Record<string, number>;
+}
+
+export interface AiTrialExecution {
+  state: AiTrialExecutionState;
+  label: string;
+  count: number;
+  reason: string | null;
+}
+
+export interface AiTrialSession {
+  session_date: string;
+  decision: AiTrialDecision;
+  execution: AiTrialExecution[];
+}
+
+export interface AiTrialOpenLeg {
+  leg: string;
+  pair_seq: number;
+  strategy_trade_id: number;
+  symbol: string;
+  trade_status: string;
+  entry_price: string | null;
+  requested_stop: string | null;
+  requested_target: string | null;
+  broker_observed: boolean;
+  broker_stop: string | null;
+  broker_target: string | null;
+  pnl_usd: string | null;
+  exit_deadline_session: string | null;
+}
+
+export interface AiTrialLegLoss {
+  leg: string;
+  pnl_usd: string;
+  unmeasured: number;
+  limit_usd: string;
+  headroom_usd: string;
+}
+
+export interface AiTrialStatusResponse {
+  state: AiTrialState;
+  declaration_id: number | null;
+  state_reason: string | null;
+  state_at: string | null;
+  decision_job: AiTrialJobFire;
+  execute_job: AiTrialJobFire;
+  sessions: AiTrialSession[];
+  open_legs: AiTrialOpenLeg[];
+  loss: AiTrialLegLoss[];
 }

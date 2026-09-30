@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 # producing a false-stuck operator signal.
 import app.services.manifest_parsers  # noqa: F401, E402
 from app.api._debug_ws import router as debug_ws_router
+from app.api.ai_trial import router as ai_trial_router
 from app.api.alerts import router as alerts_router
 from app.api.attribution import router as attribution_router
 from app.api.audit import router as audit_router
@@ -642,6 +643,7 @@ app.include_router(reports_router)
 app.include_router(scores_router)
 app.include_router(sse_quotes_router)
 app.include_router(strategies_router)
+app.include_router(ai_trial_router)
 app.include_router(sync_router)
 app.include_router(system_router)
 app.include_router(tax_router)
