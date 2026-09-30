@@ -305,7 +305,8 @@ def build_fundamentals(
     events: Sequence[FilingEvent], facts: Sequence[Fact], *, as_of: datetime, audit: NameAudit
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, FilingEvent | None]:
     """§3 block for one name. ``facts`` are the name's K facts of original-form accessions, INCLUDING rows
-    stamped after ``as_of`` (counted as withheld, never shown). Returns (block, absent, newest shown report)."""
+    stamped after ``as_of``: never shown, and counted in ``audit.withheld_after_as_of`` per SHOWN accession (§2 —
+    the run record's audit is of the reports the model saw). Returns (block, absent, newest shown report)."""
     valid, audit.ambiguous_event = valid_events(events, as_of=as_of)
     visible: dict[str, list[Fact]] = {}
     late: Counter[str] = Counter()
@@ -348,7 +349,8 @@ def build_fundamentals(
 # --- §4 MD&A --------------------------------------------------------------------------------------------------
 def cut_text(text: str) -> tuple[str, bool]:
     """At most ``MDNA_MAX_CHARS``: cut at the last whitespace at or before that position (excluded), or at
-    exactly that position when there is none."""
+    exactly that position when there is none. Normalised text is trimmed, so index 0 is never whitespace; the
+    ``pos > 0`` guard only keeps a non-normalised input from cutting to empty."""
     if len(text) <= MDNA_MAX_CHARS:
         return text, False
     head = text[: MDNA_MAX_CHARS + 1]
@@ -391,10 +393,11 @@ def build_mdna(
     ]
     withdrawn = {r.invalidates_row_id for r in visible if r.status == "invalidated"}
     live = [r for r in visible if r.row_id not in withdrawn]
-    usable = [(r, normalise_mdna(r.body)) for r in live if r.status == "extracted" and r.body is not None]
-    usable = [(r, t) for r, t in usable if t]
-    if usable:
-        row, text = max(usable, key=lambda u: u[0].row_id)
+    # Newest first, normalising only until the first non-empty extract: bodies can run to 600k characters.
+    extracted = (r for r in sorted(live, key=lambda r: r.row_id, reverse=True) if r.status == "extracted")
+    usable = next(((r, t) for r in extracted if r.body is not None and (t := normalise_mdna(r.body))), None)
+    if usable is not None:
+        row, text = usable
         shown, truncated = cut_text(text)
         return {
             **provenance,
