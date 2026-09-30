@@ -246,7 +246,7 @@ class PaperPool:
     @property
     def effective_max_concurrent_positions(self) -> int | None:
         """What the executor compares open lifecycles against (``EFFECTIVE_MAX_CONCURRENT_SQL``)."""
-        if self.max_concurrent_positions_override is not None and settings.etoro_env == "demo":
+        if self.max_concurrent_positions_override is not None and _OVERRIDE_COUNTS:
             return self.max_concurrent_positions_override
         return self.mandate.max_concurrent_positions
 
@@ -267,6 +267,8 @@ def effective_max_concurrent_sql(environment: str) -> LiteralString:
 #: column ignores the override, which is the pair-breaking defect the override exists to
 #: prevent.  ``etoro_env`` is process configuration, fixed at import like ``settings`` itself.
 EFFECTIVE_MAX_CONCURRENT_SQL: Final = effective_max_concurrent_sql(settings.etoro_env)
+#: The same import-time decision for the Python reader, so the API view and the SQL agree.
+_OVERRIDE_COUNTS: Final = settings.etoro_env == "demo"
 
 
 def paper_automation_enabled(conn: psycopg.Connection[Any]) -> bool:

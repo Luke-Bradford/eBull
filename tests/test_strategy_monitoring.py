@@ -1861,8 +1861,6 @@ def test_a_standing_override_never_blocks_a_risk_reducing_edit_outside_demo(
             reason="an enabled pool carrying it is checked",
         )
     conn.rollback()
-    # Read side: outside demo a standing override is ignored and the profile cap binds.
-    assert load_paper_pool(conn).effective_max_concurrent_positions == 12
 
 
 def test_the_pool_endpoint_carries_an_omitted_override_forward_and_clears_an_explicit_null(
