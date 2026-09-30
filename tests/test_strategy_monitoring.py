@@ -1824,8 +1824,8 @@ def test_a_standing_override_never_blocks_a_risk_reducing_edit_outside_demo(
     ebull_test_conn: psycopg.Connection[tuple],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review WARNING on PR #3512: carrying a standing override forward grants nothing new, so an
-    edit that keeps it (here a capital cut) is not demo-gated; changing it still is."""
+    """Review WARNING on PR #3512: carrying an unchanged override on a DISABLED pool authorises
+    nothing, so it is not demo-gated; changing it, or carrying it on an enabled pool, is."""
     from app.config import settings
 
     conn = ebull_test_conn
@@ -1848,6 +1848,21 @@ def test_a_standing_override_never_blocks_a_risk_reducing_edit_outside_demo(
     with pytest.raises(StrategyControlError, match="demo-only"):
         _override_pool(conn, 31, reason="a changed override is new authority")
     conn.rollback()
+    with pytest.raises(StrategyControlError, match="demo-only"):
+        configure_paper_pool(
+            conn,
+            enabled=True,
+            capital_limit=Decimal("30000"),
+            capital_mode="fixed",
+            risk_profile="growth",
+            approval_mode="manual",
+            max_concurrent_positions_override=30,
+            changed_by="test",
+            reason="an enabled pool carrying it is checked",
+        )
+    conn.rollback()
+    # Read side: outside demo a standing override is ignored and the profile cap binds.
+    assert load_paper_pool(conn).effective_max_concurrent_positions == 12
 
 
 def test_the_pool_endpoint_carries_an_omitted_override_forward_and_clears_an_explicit_null(

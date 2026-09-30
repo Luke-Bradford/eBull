@@ -46,6 +46,7 @@ from app.services.strategy_control_plane import (
     create_strategy_trade,
     current_stage,
     decide_funding,
+    effective_max_concurrent_sql,
     link_strategy_order,
     promote_strategy,
     record_order_position_execution,
@@ -2400,3 +2401,11 @@ def test_holdout_control_support_reads_do_not_scale_with_the_batch(
     stored_result_promotion_refusals_for(cast(Any, three), holdout_ids)
 
     assert one.statements == three.statements == 4
+
+
+def test_the_effective_cap_sql_counts_the_override_in_demo_only() -> None:
+    # #3471 §8 / PR #3512 ckpt-3: a standing override is inert outside demo at READ time.
+    assert effective_max_concurrent_sql("demo") == (
+        "COALESCE(max_concurrent_positions_override, max_concurrent_positions)"
+    )
+    assert effective_max_concurrent_sql("real") == "max_concurrent_positions"

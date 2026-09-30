@@ -12,11 +12,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, LiteralString, cast
 
 import psycopg
 import psycopg.rows
 
+from app.config import settings
 from app.services.result_ledger import holdout_access_counts, stored_result_promotion_refusals_for
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY,
@@ -245,15 +246,27 @@ class PaperPool:
     @property
     def effective_max_concurrent_positions(self) -> int | None:
         """What the executor compares open lifecycles against (``EFFECTIVE_MAX_CONCURRENT_SQL``)."""
-        if self.max_concurrent_positions_override is not None:
+        if self.max_concurrent_positions_override is not None and settings.etoro_env == "demo":
             return self.max_concurrent_positions_override
         return self.mandate.max_concurrent_positions
 
 
-#: The one spelling of the pool's effective concurrency cap for every SQL reader of
-#: ``strategy_paper_pool_events`` (sql/440).  A reader that selects the bare profile column
-#: ignores the override, which is the pair-breaking defect the override exists to prevent.
-EFFECTIVE_MAX_CONCURRENT_SQL: Final = "COALESCE(max_concurrent_positions_override, max_concurrent_positions)"
+def effective_max_concurrent_sql(environment: str) -> LiteralString:
+    """The pool's effective concurrency cap as a SQL expression over ``strategy_paper_pool_events``.
+
+    The override counts in ``demo`` only.  Anywhere else a STANDING override (set in demo, then
+    the environment changed) is ignored at read time and the profile cap binds, so the fence
+    does not rest on set-time checks alone (review WARNING + Codex ckpt-3 on PR #3512).
+    """
+    if environment == "demo":
+        return "COALESCE(max_concurrent_positions_override, max_concurrent_positions)"
+    return "max_concurrent_positions"
+
+
+#: The one spelling for every SQL reader (sql/440).  A reader that selects the bare profile
+#: column ignores the override, which is the pair-breaking defect the override exists to
+#: prevent.  ``etoro_env`` is process configuration, fixed at import like ``settings`` itself.
+EFFECTIVE_MAX_CONCURRENT_SQL: Final = effective_max_concurrent_sql(settings.etoro_env)
 
 
 def paper_automation_enabled(conn: psycopg.Connection[Any]) -> bool:
@@ -384,13 +397,13 @@ def configure_paper_pool(
     # already-sized order between its authority read and demo broker submit.
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
     current = load_paper_pool(conn)
-    if (
-        max_concurrent_positions_override is not None
-        and max_concurrent_positions_override != current.max_concurrent_positions_override
+    if max_concurrent_positions_override is not None and (
+        enabled or max_concurrent_positions_override != current.max_concurrent_positions_override
     ):
-        # Only SETTING or CHANGING it grants authority. Carrying a standing value forward (a
-        # disable, a capital cut) must stay reachable in any state: risk reduction is never
-        # blocked. Under the lock: `patch_config` takes the same one to refuse the inverse order.
+        # Exempt only carrying an UNCHANGED override on a DISABLED pool, where it authorises
+        # nothing: disabling is risk reduction and is never blocked. Setting, changing, or
+        # carrying it on an enabled pool is checked. Under the lock: `patch_config` takes the
+        # same one to refuse the inverse order.
         _refuse_non_demo_override(conn)
     if (
         current.enabled == enabled
@@ -496,7 +509,6 @@ def _refuse_non_demo_override(conn: psycopg.Connection[Any]) -> None:
     """The demo half of the override's chokepoint (#3471 §8); ``app.api.config.patch_config``
     holds the other half, refusing live enable while an override stands. Both read under
     ``PAPER_ALLOCATOR_ADVISORY_LOCK`` in their callers' transactions."""
-    from app.config import settings
     from app.services.runtime_config import get_runtime_config
 
     if settings.etoro_env != "demo":
