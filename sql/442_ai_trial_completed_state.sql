@@ -9,9 +9,10 @@
 --    SUPERVISOR only, from `active` or from a resumable halt, and admits no further transition.
 --    Every trial reader keys on `= 'active'`, so a completed trial is treated as a halted one: no
 --    new entries, open positions still run to their exits.
--- 2. `ai_trial_declarations.strategy_id` admits `ai-discretionary-fund-v<N>` (spec §7: fund-v1's
---    legs are `ai-discretionary-fund-v1` / `-control`, declared in this same table). The bind
---    trigger still requires the #2599 row to carry the same id and version.
+-- 2. `ai_trial_declarations.strategy_id` admits `ai-discretionary-fund-v<N>` (spec §7). As for
+--    v1, the column holds the ARM's id only; the control leg's id (`<arm>-control`) is derived,
+--    never declared (sql/432 §1). The bind trigger still requires the #2599 row to carry the
+--    same id and version.
 --
 -- Nothing existing changes: every stored state and strategy id satisfies the new CHECKs, and the
 -- transition function keeps every sql/432 rule; `completed` is the only addition.
