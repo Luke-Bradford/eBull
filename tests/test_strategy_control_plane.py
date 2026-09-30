@@ -1114,6 +1114,7 @@ def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="fund virtual sleeve",
     )
@@ -1125,6 +1126,7 @@ def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
             capital_limit=Decimal("99"),
             risk_profile="balanced",
             approval_mode="manual",
+            max_concurrent_positions_override=None,
             changed_by="operator",
             reason="invalid withdrawal",
         )
@@ -1143,6 +1145,7 @@ def test_paper_principal_check_includes_recorded_active_core_commitment(
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="fund virtual sleeve",
     )
@@ -1164,6 +1167,7 @@ def test_paper_principal_check_includes_recorded_active_core_commitment(
             capital_limit=Decimal("399"),
             risk_profile="balanced",
             approval_mode="manual",
+            max_concurrent_positions_override=None,
             changed_by="operator",
             reason="invalid core withdrawal",
         )
@@ -1180,6 +1184,7 @@ def test_enabled_paper_pool_requires_and_persists_exact_versioned_mandate(
             capital_limit=Decimal("1000"),
             risk_profile="unconfigured",
             approval_mode="manual",
+            max_concurrent_positions_override=None,
             changed_by="operator",
             reason="missing mandate",
         )
@@ -1190,6 +1195,7 @@ def test_enabled_paper_pool_requires_and_persists_exact_versioned_mandate(
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="balanced mandate",
     )
@@ -1612,6 +1618,7 @@ def test_first_paper_setup_creates_a_disabled_deployment_and_its_policy_atomical
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="bound the demo pool",
     )
@@ -1659,6 +1666,7 @@ def test_a_refused_policy_leaves_no_orphan_deployment_behind(
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="bound the demo pool",
     )
@@ -1697,6 +1705,7 @@ def test_setup_clears_only_the_missing_policy_refusal_and_no_other(
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="bound the demo pool",
     )
@@ -1736,6 +1745,7 @@ def test_setup_refuses_when_a_deployment_already_exists_even_without_a_policy(
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="bound the demo pool",
     )
@@ -1786,6 +1796,7 @@ def test_setup_refuses_a_capital_limit_above_the_shared_paper_pool(
         capital_limit=Decimal("50"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="bound the demo pool small",
     )
@@ -1814,6 +1825,7 @@ def test_setup_refuses_before_the_strategy_is_paper_approved(
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="bound the demo pool",
     )

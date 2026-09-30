@@ -10,9 +10,12 @@ from decimal import Decimal
 
 import pytest
 
+from app.services.ai_trial_executor import TRIAL_MAX_CONCURRENT_PER_LEG
 from app.services.ai_trial_start_gate import (
     PREVIEW_STOP_PCT,
     PREVIEW_TICKET,
+    TRIAL_POOL_MAX_CONCURRENT,
+    TRIAL_POOL_NON_TRIAL_HEADROOM,
     PreviewLeg,
     PreviewShared,
     start_gate_reason,
@@ -38,7 +41,8 @@ SHARED = PreviewShared(
     mandate_max_daily_loss_pct=Decimal("2"),
     mandate_active_risk_budget_pct=Decimal("30"),
     mandate_cash_reserve_pct=Decimal("10"),
-    mandate_max_concurrent_positions=12,
+    # The demo pool's §8 override (sql/440); the `growth` profile alone is 12.
+    mandate_max_concurrent_positions=TRIAL_POOL_MAX_CONCURRENT,
 )
 LEG = PreviewLeg(
     deployment_base=Decimal("1000"),
@@ -70,7 +74,31 @@ def test_the_measured_2026_09_28_pot_refuses() -> None:
         mandate_cash_reserve_pct=Decimal("25"),
         mandate_max_concurrent_positions=4,
     )
-    assert start_gate_reason(cautious, (LEG, LEG)) == "trial_capacity_unavailable:loss_at_stop"
+    assert start_gate_reason(cautious, (LEG, LEG)) == "trial_capacity_unavailable:trial_pool_concurrency_below_design"
+    # Its capacity refusal still stands once the cap is out of the way.
+    widened = replace(cautious, mandate_max_concurrent_positions=TRIAL_POOL_MAX_CONCURRENT)
+    assert start_gate_reason(widened, (LEG, LEG)) == "trial_capacity_unavailable:loss_at_stop"
+
+
+def test_the_pool_cap_must_hold_both_full_legs_plus_headroom() -> None:
+    # §8 answer (2026-09-30): 2 x 12 slots + 6 = 30. The bare `growth` cap of 12 admits the
+    # first pair and would refuse a later leg, breaking its pair, so the start gate refuses it.
+    assert TRIAL_POOL_MAX_CONCURRENT == 2 * TRIAL_MAX_CONCURRENT_PER_LEG + 6 == 30
+    growth = replace(SHARED, mandate_max_concurrent_positions=12)
+    assert start_gate_reason(growth, (LEG, LEG)) == "trial_capacity_unavailable:trial_pool_concurrency_below_design"
+    at_design = replace(SHARED, mandate_max_concurrent_positions=TRIAL_POOL_MAX_CONCURRENT - 1)
+    assert start_gate_reason(at_design, (LEG, LEG)) == "trial_capacity_unavailable:trial_pool_concurrency_below_design"
+    assert start_gate_reason(SHARED, (LEG, LEG)) is None
+
+
+def test_non_trial_lifecycles_past_the_headroom_refuse() -> None:
+    # Codex ckpt-2: 7 non-trial + 10 per leg = 27 open under a 30 cap passes the concurrency term,
+    # yet leaves 3 slots for legs that still have 2 x 2 free.
+    legs = (replace(LEG, open_trades=10), replace(LEG, open_trades=10))
+    at = replace(SHARED, open_lifecycles=20 + TRIAL_POOL_NON_TRIAL_HEADROOM)
+    assert start_gate_reason(at, legs) is None
+    over = replace(SHARED, open_lifecycles=21 + TRIAL_POOL_NON_TRIAL_HEADROOM)
+    assert start_gate_reason(over, legs) == "trial_capacity_unavailable:trial_pool_non_trial_over_headroom"
 
 
 # §8 answer (supervisor 2026-09-29): the active-risk budget charges NON-core committed only;
@@ -158,10 +186,10 @@ def test_shared_terms_hold_both_legs_jointly(committed: Decimal, expected: str |
     ("shared", "leg", "expected"),
     [
         (replace(SHARED, within_bound=False), LEG, "sandbox_exceeded"),
-        (replace(SHARED, open_lifecycles=11), LEG, "portfolio_concurrency_limit"),
+        (replace(SHARED, open_lifecycles=TRIAL_POOL_MAX_CONCURRENT - 1), LEG, "portfolio_concurrency_limit"),
         (replace(SHARED, daily_realised_pnl=Decimal("-200")), LEG, "portfolio_daily_loss_limit"),
         (replace(SHARED, drawdown_pct=Decimal("20")), LEG, "account_drawdown_limit"),
-        (SHARED, replace(LEG, open_trades=4), "trial_leg_slots_full"),
+        (SHARED, replace(LEG, open_trades=TRIAL_MAX_CONCURRENT_PER_LEG), "trial_leg_slots_full"),
         (SHARED, replace(LEG, max_ticket_amount=Decimal("124.99")), "max_ticket_amount"),
         (SHARED, replace(LEG, deployment_reserved=Decimal("900")), "deployment_remaining"),
         (replace(SHARED, equity=Decimal("400")), LEG, "instrument_exposure"),

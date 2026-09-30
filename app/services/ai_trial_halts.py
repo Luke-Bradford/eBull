@@ -9,7 +9,8 @@ positions run to their exits.
 
 - **Loss halt (checked first: safety, not statistics).** Either leg's realised + unrealised USD
   loss ≥ ``TRIAL_LOSS_HALT_PCT`` of that leg's capital. The capital is the §8 fixed-mode cap,
-  ``TRIAL_MAX_CONCURRENT_PER_LEG`` × the full ticket = $1,000, so the limit is the spec's $200.
+  ``TRIAL_LEG_CAPITAL_USD`` = ``TRIAL_MAX_CONCURRENT_PER_LEG`` × the full ticket, and the limit is
+  ``TRIAL_LOSS_LIMIT_USD``.
   Every trade of the leg in the declaration counts, cohort and exploration alike.
   - Realised = Σ ``realized_pnl_usd`` over the trade's broker close slices (``load_close_rows``,
     the readout's reach, the unowned partial-close sibling included). Every slice counts: the

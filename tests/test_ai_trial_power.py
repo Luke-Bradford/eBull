@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from app.services.ai_trial_decision import measure_atr
+from app.services.ai_trial_executor import TRIAL_MAX_CONCURRENT_PER_LEG
 from app.services.ai_trial_halts import TRIAL_LEG_CAPITAL_USD
 from app.services.ai_trial_levels import LEVEL_IDS, Level
 from app.services.ai_trial_stats import EXACT_MAX_CLUSTERS, flip_set, sign_flip_p, sign_flip_p_batch
@@ -188,6 +189,7 @@ def test_no_executable_bar_before_the_censor_session_censors_at_the_latest_close
     assert (split.label, split.price) == ("censored", D(97))
 
 
+FULL = TRIAL_MAX_CONCURRENT_PER_LEG
 PLAN = LegPlan(1, Fraction(96), Fraction(110), Fraction(955, 10), D("4.5"), D("10"))
 
 
@@ -202,25 +204,34 @@ def test_open_leg_refusals_in_order() -> None:
     for open_ in ("95.5", "96", "110"):
         assert _open(_name([FLAT, (open_, "111", "95", open_)] + [FLAT] * 6)) == "plan_invalidated"
     # Capacity is judged after the plan: an invalidated plan is named first.
-    assert _open(_name([FLAT, ("96", "97", "95", "96")] + [FLAT] * 6), slots=4) == "plan_invalidated"
-    assert _open(_name([FLAT] * 8), slots=4) == "capacity"
+    assert _open(_name([FLAT, ("96", "97", "95", "96")] + [FLAT] * 6), slots=FULL) == "plan_invalidated"
+    assert _open(_name([FLAT] * 8), slots=FULL) == "capacity"
 
 
 def test_a_candidate_concurrency_moves_only_the_capacity_refusal() -> None:
-    assert _open(_name([FLAT] * 8), slots=4) == "capacity"
+    assert _open(_name([FLAT] * 8), slots=FULL) == "capacity"
     trade = open_leg(
-        _name([FLAT] * 8), CAL[0], CAL[1], PLAN, 5, calendar=CAL, fill_position=1, slots_held=4, max_concurrent=8
+        _name([FLAT] * 8),
+        CAL[0],
+        CAL[1],
+        PLAN,
+        5,
+        calendar=CAL,
+        fill_position=1,
+        slots_held=FULL,
+        max_concurrent=FULL + 4,
     )
     assert isinstance(trade, Trade)
 
 
 def test_the_default_terms_are_the_frozen_trial_terms() -> None:
     # The grid's defaults must stay the declaration's: leg capital as ai_trial_halts derives it, and the
-    # pre-parameterisation path length (20 start + 40 cohort + 20 hold + 10 censor + 6 wait → 100).
+    # path length (20 start + 60 cohort + 20 hold + 10 censor + 6 wait = 116, rounded up to 120; §8 answer
+    # 2026-09-30).
     assert FROZEN_TERMS == Terms()
     assert FROZEN_TERMS.leg_capital_usd == TRIAL_LEG_CAPITAL_USD
-    assert FROZEN_TERMS.loss_limit_usd == pytest.approx(200.0)
-    assert PATH_SESSIONS == 100
+    assert FROZEN_TERMS.loss_limit_usd == pytest.approx(600.0)
+    assert PATH_SESSIONS == 120
     wider = Terms(max_concurrent=8, cohort_sessions=80)
     assert (wider.leg_capital_usd, wider.loss_limit_usd, wider.path_sessions) == (
         Decimal(2000),
@@ -321,7 +332,8 @@ def test_decide_excludes_arm_and_control_holdings_and_is_reproducible() -> None:
 
 
 def test_a_flat_path_enrolls_hits_capacity_and_reads_d_zero() -> None:
-    result = simulate_path(_context(), horizon=5, shift=0.0)
+    # 4 slots, so the synthetic path's name count fills them (12 would not bind here).
+    result = simulate_path(_context(), horizon=5, shift=0.0, terms=Terms(max_concurrent=4))
     diag = result.diagnostics
     assert not result.halted_loss and not result.no_start
     assert set(diag.refused_legs) <= {"capacity"} and diag.refused_legs["capacity"] > 0
@@ -331,7 +343,9 @@ def test_a_flat_path_enrolls_hits_capacity_and_reads_d_zero() -> None:
 
 
 def test_a_wider_concurrency_refuses_fewer_legs_for_capacity() -> None:
-    frozen = simulate_path(_context(), horizon=5, shift=0.0).diagnostics.refused_legs["capacity"]
+    frozen = simulate_path(_context(), horizon=5, shift=0.0, terms=Terms(max_concurrent=4)).diagnostics.refused_legs[
+        "capacity"
+    ]
     wider = simulate_path(_context(), horizon=5, shift=0.0, terms=Terms(max_concurrent=8))
     assert wider.diagnostics.refused_legs["capacity"] < frozen
 

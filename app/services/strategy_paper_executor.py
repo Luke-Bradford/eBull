@@ -48,6 +48,7 @@ from app.services.strategy_capital_sandbox import (
     sandbox_bound,
 )
 from app.services.strategy_control_plane import (
+    EFFECTIVE_MAX_CONCURRENT_SQL,
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
     create_strategy_trade,
@@ -390,7 +391,7 @@ def _load_intent(
                 SELECT strategy_paper_pool_event_id,enabled,capital_limit,capital_mode,risk_profile,
                        max_portfolio_drawdown_pct,max_loss_per_position_pct,
                        max_daily_loss_pct,active_risk_budget_pct,cash_reserve_pct,
-                       max_concurrent_positions
+                       {EFFECTIVE_MAX_CONCURRENT_SQL} AS max_concurrent_positions
                 FROM strategy_paper_pool_events
                 ORDER BY strategy_paper_pool_event_id DESC
                 LIMIT 1

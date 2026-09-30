@@ -3240,6 +3240,10 @@ export interface StrategyPaperPool {
   capital_mode: "fixed" | "compound";
   /** #2843. Who may approve a stage promotion under this authority. */
   approval_mode: "manual" | "autonomous";
+  /** #3471 §8. Demo-only pool override; null = the mandate's own cap. */
+  max_concurrent_positions_override: number | null;
+  /** What the executor enforces: the override when set, else the mandate's cap. */
+  effective_max_concurrent_positions: number | null;
   effective_capital: string | null;
   currency: "USD";
   reserved_capital: string;

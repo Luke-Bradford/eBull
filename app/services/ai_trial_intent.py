@@ -38,7 +38,7 @@ from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
     SUPPORTED_DEPLOYMENT_CURRENCIES,
 )
-from app.services.strategy_control_plane import registered_strategy_purpose
+from app.services.strategy_control_plane import EFFECTIVE_MAX_CONCURRENT_SQL, registered_strategy_purpose
 from app.services.strategy_halt_identity import INSTRUMENT_HALT_SYMBOL_SQL
 from app.services.strategy_paper_executor import _NY, _age_ok, _session_is_open
 
@@ -287,7 +287,8 @@ _TRIAL_INTENT_SQL = f"""
     LEFT JOIN LATERAL (
         SELECT enabled, capital_limit, capital_mode, risk_profile,
                max_portfolio_drawdown_pct, max_loss_per_position_pct, max_daily_loss_pct,
-               active_risk_budget_pct, cash_reserve_pct, max_concurrent_positions
+               active_risk_budget_pct, cash_reserve_pct,
+               {EFFECTIVE_MAX_CONCURRENT_SQL} AS max_concurrent_positions
         FROM strategy_paper_pool_events
         ORDER BY strategy_paper_pool_event_id DESC
         LIMIT 1

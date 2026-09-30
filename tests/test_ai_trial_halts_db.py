@@ -46,7 +46,8 @@ def test_a_leg_loss_at_the_limit_halts_the_trial_once(ebull_test_conn: Conn, mon
     assert _states(conn)[-1][0] == "active"
 
     # Two partial-close slices of a quarter each, each under a new, unowned position id
-    # sharing the entry orderId (eToro's booking), realise −198.75; the open half is −0.625 at the bid. −199.375.
+    # sharing the entry orderId (eToro's booking), realise −598.75; the open half is −0.625 at the bid.
+    # −599.375, under the $600 limit.
     def _slice(position_id: int, pnl: str) -> None:
         conn.execute(
             """
@@ -59,17 +60,17 @@ def test_a_leg_loss_at_the_limit_halts_the_trial_once(ebull_test_conn: Conn, mon
         )
         conn.commit()
 
-    _slice(_POSITION_ID + 1, "-198.75")
+    _slice(_POSITION_ID + 1, "-598.75")
     _slice(_POSITION_ID + 2, "0")
     assert _enforce(conn) == [HaltCheck(declaration_id, None, 0)]
 
-    # The bid falls to 96: the open half is 0.625 × −4 = −2.5, total −201.25 ≥ 200.
+    # The bid falls to 96: the open half is 0.625 × −4 = −2.5, total −601.25 ≥ 600.
     conn.execute("UPDATE quotes SET bid = 96 WHERE instrument_id = %s", (ARM_INSTRUMENT,))
     conn.commit()
     assert _enforce(conn) == [HaltCheck(declaration_id, "halted_loss", 0)]
     to_state, actor, reason = _states(conn)[-1]
     assert (to_state, actor) == ("halted_loss", "engine")
-    assert reason.startswith("loss_halt:leg=arm:loss_usd=201.25:limit_usd=200.00")
+    assert reason.startswith("loss_halt:leg=arm:loss_usd=601.25:limit_usd=600.00")
 
     # Terminal: the trial is no longer checked, and nothing stacks.
     assert _enforce(conn) == []
@@ -150,7 +151,7 @@ def test_a_measured_breach_with_an_unmeasured_trade_halts_resumably(
     _opened_arm_leg(conn, monkeypatch)
     measured = LegTrade("arm", "closed", True, Decimal(1), Decimal(100), None, ())
     monkeypatch.setattr(
-        "app.services.ai_trial_halts.trade_pnl_usd", lambda trade: None if trade is not measured else Decimal(-250)
+        "app.services.ai_trial_halts.trade_pnl_usd", lambda trade: None if trade is not measured else Decimal(-650)
     )
     monkeypatch.setattr("app.services.ai_trial_halts.load_leg_trades", lambda *_: [measured, replace(measured)])
     looks = [HarmLook(1, 10, 8, 0.2, 0.025, False, flows_final=True)]
@@ -159,12 +160,12 @@ def test_a_measured_breach_with_an_unmeasured_trade_halts_resumably(
     )
 
     (check,) = _enforce(conn)
-    # −250 measured, but the unmeasured trade could offset it: the terminal state is not proven.
+    # −650 measured, but the unmeasured trade could offset it: the terminal state is not proven.
     assert (check.halted, check.unmeasured) == ("halted_operator", 1)
     assert _states(conn)[-1] == (
         "halted_operator",
         "engine",
-        "loss_halt_unproven:leg=arm:loss_usd=250.00:limit_usd=200.00:unmeasured=1",
+        "loss_halt_unproven:leg=arm:loss_usd=650.00:limit_usd=600.00:unmeasured=1",
     )
 
     # Resumed while the breach is still unproven: a final harm look now outranks it (terminal).

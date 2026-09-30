@@ -55,7 +55,8 @@ def _book(n: int) -> LegBook:
 
 @pytest.mark.parametrize(
     ("arm", "control", "expected"),
-    [(0, 0, 2), (3, 0, 1), (0, 3, 1), (4, 0, 0), (2, 2, 2), (5, 1, 0)],
+    # 12 slots per leg (§8 answer, 2026-09-30).
+    [(0, 0, 2), (11, 0, 1), (0, 11, 1), (12, 0, 0), (2, 2, 2), (13, 1, 0)],
 )
 def test_max_new_entries_is_min_of_two_and_both_legs_free_slots(arm: int, control: int, expected: int) -> None:
     assert max_new_entries({"arm": _book(arm), "control": _book(control)}) == expected

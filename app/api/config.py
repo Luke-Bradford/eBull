@@ -57,6 +57,7 @@ from app.services.runtime_config import (
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     paper_automation_enabled,
+    paper_pool_concurrency_override,
 )
 
 logger = logging.getLogger(__name__)
@@ -260,6 +261,13 @@ def patch_config(
                     raise HTTPException(
                         status_code=409,
                         detail="live trading cannot be enabled while strategy paper automation is enabled",
+                    )
+                # #3471 §8: the live half of the demo-only concurrency override. Same lock
+                # as `configure_paper_pool`'s demo check, so neither order slips through.
+                if paper_pool_concurrency_override(conn) is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="live trading cannot be enabled while the paper pool carries a concurrency override",
                     )
                 updated = _apply()
         else:

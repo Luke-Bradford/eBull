@@ -60,8 +60,10 @@ from app.services.strategy_paper_executor import (
 #: §8 "Cost cap", frozen by construction: stressed what-if cost ≤ 1.0% of the amount. Shares
 #: the number with the §3.1 spread cap by construction only; they measure different things.
 TRIAL_COST_CAP_PCT: Final = Decimal("1.0")
-#: §8 trial caps: ``max_concurrent`` per leg.
-TRIAL_MAX_CONCURRENT_PER_LEG: Final = 4
+#: §8 trial caps: ``max_concurrent`` per leg. 12 × a 60-session cohort is the supervisor's §8 answer
+#: (2026-09-30): the only power-grid cell (``scripts/ai_trial_power.py``) clearing the cohort minimum
+#: at every horizon. Both legs count against the pool cap, hence ``TRIAL_POOL_MAX_CONCURRENT``.
+TRIAL_MAX_CONCURRENT_PER_LEG: Final = 12
 TRIAL_ALLOCATED_REASON: Final = "all_trial_entry_gates_passed"
 
 

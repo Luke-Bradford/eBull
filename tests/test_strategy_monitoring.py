@@ -34,7 +34,7 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import get_runtime_config, update_runtime_config
-from app.services.strategy_control_plane import configure_paper_pool, load_paper_pool
+from app.services.strategy_control_plane import StrategyControlError, configure_paper_pool, load_paper_pool
 from app.services.strategy_core_mandate import CoreMandate
 from app.services.strategy_core_selection import CoreSelection
 from app.services.strategy_manifest import STRATEGY_MANIFEST
@@ -1685,6 +1685,7 @@ def test_live_trading_enable_is_refused_while_paper_automation_is_enabled(
         capital_mode="fixed",
         risk_profile="balanced",
         approval_mode=load_paper_pool(conn).approval_mode,
+        max_concurrent_positions_override=None,
         changed_by="test-precondition",
         reason="establish an enabled paper lane",
     )
@@ -1712,6 +1713,7 @@ def test_live_trading_enable_is_refused_while_paper_automation_is_enabled(
             capital_mode="fixed",
             risk_profile="balanced",
             approval_mode=load_paper_pool(conn).approval_mode,
+            max_concurrent_positions_override=None,
             changed_by="test-cleanup",
             reason="restore disabled paper lane",
         )
@@ -1723,6 +1725,133 @@ def test_live_trading_enable_is_refused_while_paper_automation_is_enabled(
                 enable_live_trading=runtime_before.enable_live_trading,
             )
         conn.commit()
+
+
+def _override_pool(conn: psycopg.Connection[tuple], override: int | None, *, reason: str) -> None:
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("40000"),
+        capital_mode="fixed",
+        risk_profile="growth",
+        approval_mode="manual",
+        max_concurrent_positions_override=override,
+        changed_by="test",
+        reason=reason,
+    )
+
+
+def test_live_trading_enable_is_refused_while_a_concurrency_override_stands(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3471 §8 — the live half of the demo-only override. The pool is DISABLED, so the
+    paper-automation refusal cannot be what fires."""
+    conn = ebull_test_conn
+    runtime_before = get_runtime_config(conn)
+    _override_pool(conn, 30, reason="demo trial pool")
+    conn.commit()
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            patch_config(
+                ConfigPatchRequest(
+                    updated_by="test-operator",
+                    reason="live must not inherit a demo-only widened cap",
+                    enable_live_trading=True,
+                    confirm_live_enable=True,
+                ),
+                conn,
+            )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == (
+            "live trading cannot be enabled while the paper pool carries a concurrency override"
+        )
+        assert not get_runtime_config(conn).enable_live_trading
+    finally:
+        _override_pool(conn, None, reason="clear the override")
+        if get_runtime_config(conn).enable_live_trading != runtime_before.enable_live_trading:
+            update_runtime_config(
+                conn,
+                updated_by="test-cleanup",
+                reason="restore runtime flags after override proof",
+                enable_live_trading=runtime_before.enable_live_trading,
+            )
+        conn.commit()
+
+
+def test_a_concurrency_override_is_refused_outside_demo_or_under_live_trading(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3471 §8 — refused at SET time, and nothing is written."""
+    from app.config import settings
+
+    conn = ebull_test_conn
+    monkeypatch.setattr(settings, "etoro_env", "real")
+    with pytest.raises(StrategyControlError, match="demo-only"):
+        _override_pool(conn, 30, reason="must refuse outside demo")
+    conn.rollback()
+    # The profile cap alone stays configurable in any environment.
+    _override_pool(conn, None, reason="no override is not demo-gated")
+    conn.commit()
+    monkeypatch.setattr(settings, "etoro_env", "demo")
+
+    runtime_before = get_runtime_config(conn)
+    update_runtime_config(
+        conn,
+        updated_by="test-precondition",
+        reason="prove the override refuses live state",
+        enable_auto_trading=False if runtime_before.enable_auto_trading else None,
+        enable_live_trading=True,
+    )
+    conn.commit()
+    try:
+        with pytest.raises(StrategyControlError, match="live trading is enabled"):
+            _override_pool(conn, 30, reason="must refuse under live trading")
+        conn.rollback()
+        assert load_paper_pool(conn).max_concurrent_positions_override is None
+    finally:
+        update_runtime_config(
+            conn,
+            updated_by="test-cleanup",
+            reason="restore runtime flags after override refusal proof",
+            enable_auto_trading=(True if runtime_before.enable_auto_trading else None),
+            enable_live_trading=runtime_before.enable_live_trading,
+        )
+        conn.commit()
+
+
+def test_the_pool_endpoint_carries_an_omitted_override_forward_and_clears_an_explicit_null(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+
+    def put(capital: str, **override: int | None) -> Any:
+        return update_strategy_paper_pool(
+            StrategyPaperPoolUpdateRequest.model_validate(
+                {
+                    "enabled": False,
+                    "capital_limit": Decimal(capital),
+                    "capital_mode": "fixed",
+                    "risk_profile": "growth",
+                    "reason": "override resolution",
+                    **override,
+                }
+            ),
+            _session(),
+            conn,
+        )
+
+    set_ = put("40000", max_concurrent_positions_override=30)
+    assert (set_.max_concurrent_positions_override, set_.effective_max_concurrent_positions) == (30, 30)
+    carried = put("41000")
+    assert (carried.max_concurrent_positions_override, carried.effective_max_concurrent_positions) == (30, 30)
+    cleared = put("41000", max_concurrent_positions_override=None)
+    assert (cleared.max_concurrent_positions_override, cleared.effective_max_concurrent_positions) == (None, 12)
+    rows = conn.execute(
+        "SELECT max_concurrent_positions_override FROM strategy_paper_pool_events ORDER BY strategy_paper_pool_event_id"
+    ).fetchall()
+    assert rows == [(30,), (30,), (None,)]
 
 
 def test_evidence_refresh_queues_one_fixed_pinned_request(

@@ -11,7 +11,9 @@ is a broken pair.
 * **Preview terms (frozen):** a 25% stop, which is adverse for loss-at-stop capacity, and zero
   existing instrument exposure, which is favourable.
 * **Joint admission:** the shared terms (pool, cash, portfolio exposure, active risk, cash
-  reserve, concurrency) must hold BOTH legs' tickets; the per-leg terms (deployment,
+  reserve, concurrency) must hold BOTH legs' tickets, and the pool's effective concurrency cap
+  must reach ``TRIAL_POOL_MAX_CONCURRENT`` with non-trial lifecycles inside
+  ``TRIAL_POOL_NON_TRIAL_HEADROOM``, so it cannot bind before the legs' slots; the per-leg terms (deployment,
   instrument, loss at stop, max ticket, leg slots) must each hold one.
 
 The arithmetic is the paper path's own (``strategy_paper_executor._capacities``), so the preview
@@ -35,6 +37,7 @@ from app.providers.broker import BrokerAccountRiskSnapshot
 from app.services.ai_trial_executor import TRIAL_MAX_CONCURRENT_PER_LEG
 from app.services.ai_trial_intent import TRIAL_CAPITAL_MODE, TRIAL_TICKET_USD
 from app.services.strategy_capital_sandbox import SANDBOX_EXCEEDED, sandbox_bound
+from app.services.strategy_control_plane import EFFECTIVE_MAX_CONCURRENT_SQL
 from app.services.strategy_core_mandate import load_core_mandate
 from app.services.strategy_engine_capital import (
     EngineCapitalObservationError,
@@ -55,6 +58,14 @@ from app.services.strategy_paper_executor import (
 PREVIEW_STOP_PCT: Final = Decimal("25")
 PREVIEW_TICKET: Final = TRIAL_TICKET_USD["half"]
 REFUSAL_PREFIX: Final = "trial_capacity_unavailable:"
+#: §8 supervisor answer (2026-09-30): lifecycles the trial reserves beyond its own legs, so a core
+#: lifecycle opened mid-trial cannot push the pool cap into the legs and break pairs. 2 core
+#: lifecycles were open on 2026-09-30 (``SELECT count(*) FROM strategy_trades WHERE status NOT IN
+#: ('closed','failed') AND core_rebalance_intent_id IS NOT NULL``) plus 4 spare.
+TRIAL_POOL_NON_TRIAL_HEADROOM: Final = 6
+#: The pool concurrency cap the trial needs: both legs full plus the headroom, set on the demo pool
+#: as ``max_concurrent_positions_override`` (sql/440). No v1 profile reaches it (``growth`` = 12).
+TRIAL_POOL_MAX_CONCURRENT: Final = 2 * TRIAL_MAX_CONCURRENT_PER_LEG + TRIAL_POOL_NON_TRIAL_HEADROOM
 
 
 @dataclass(frozen=True)
@@ -120,6 +131,14 @@ def start_gate_reason(
         return refuse(SANDBOX_EXCEEDED)
     if shared.open_lifecycles + len(legs) > shared.mandate_max_concurrent_positions:
         return refuse("portfolio_concurrency_limit")
+    if shared.mandate_max_concurrent_positions < TRIAL_POOL_MAX_CONCURRENT:
+        # Admissible today, but the cap would bind before the legs' slots do: a later leg is
+        # refused `portfolio_concurrency_limit` and its pair breaks.
+        return refuse("trial_pool_concurrency_below_design")
+    if shared.open_lifecycles - sum(leg.open_trades for leg in legs) > TRIAL_POOL_NON_TRIAL_HEADROOM:
+        # The cap reserves only the declared headroom for non-trial lifecycles (Codex ckpt-2):
+        # past it, the legs' own slots no longer fit under the cap.
+        return refuse("trial_pool_non_trial_over_headroom")
     if shared.daily_realised_pnl <= -(shared.pool_base * shared.mandate_max_daily_loss_pct / Decimal("100")):
         return refuse("portfolio_daily_loss_limit")
     shared_room: dict[str, Decimal] = {}
@@ -202,9 +221,9 @@ _LEGS_SQL = """
     WHERE dcl.declaration_id = %s
 """
 
-_POOL_SQL = """
+_POOL_SQL = f"""
     SELECT enabled, max_portfolio_drawdown_pct, max_loss_per_position_pct, max_daily_loss_pct,
-           active_risk_budget_pct, cash_reserve_pct, max_concurrent_positions
+           active_risk_budget_pct, cash_reserve_pct, {EFFECTIVE_MAX_CONCURRENT_SQL}
     FROM strategy_paper_pool_events
     ORDER BY strategy_paper_pool_event_id DESC
     LIMIT 1

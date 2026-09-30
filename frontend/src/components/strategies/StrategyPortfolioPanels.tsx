@@ -576,7 +576,7 @@ export function AutomationControl({
             <div><dt className="text-slate-500">Max daily loss</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.max_daily_loss_pct)}</dd></div>
             <div><dt className="text-slate-500">Active risk budget</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.active_risk_budget_pct)}</dd></div>
             <div><dt className="text-slate-500">Cash reserve</dt><dd className="font-semibold">{pctPointsUnsigned(selectedMandate.cash_reserve_pct)}</dd></div>
-            <div><dt className="text-slate-500">Concurrent positions</dt><dd className="font-semibold">{selectedMandate.max_concurrent_positions}</dd></div>
+            <div><dt className="text-slate-500">Concurrent positions</dt><dd className="font-semibold">{selectedMandate === pool.mandate && pool.max_concurrent_positions_override != null ? `${pool.max_concurrent_positions_override} (demo override; profile ${selectedMandate.max_concurrent_positions})` : selectedMandate.max_concurrent_positions}</dd></div>
             <div><dt className="text-slate-500">Authority</dt><dd className="font-semibold">Long only · No leverage</dd></div>
           </dl>
         </div>

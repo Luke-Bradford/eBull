@@ -335,6 +335,7 @@ def test_a_compounding_pool_does_not_make_a_leg_compound(ebull_test_conn: Conn) 
         capital_mode="compound",
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="test",
         reason="#3471 compound pool",
     )

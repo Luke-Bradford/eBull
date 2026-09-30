@@ -159,6 +159,7 @@ def _seed(
             capital_limit=Decimal("2000"),
             risk_profile="balanced",
             approval_mode="manual",
+            max_concurrent_positions_override=None,
             changed_by="test",
             reason="shared paper pool fixture",
         )
@@ -976,6 +977,7 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
         capital_limit=Decimal("400"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="bounded shared pot",
     )
@@ -1149,6 +1151,43 @@ def test_mandate_concurrency_refuses_before_order_submission(
     broker.place_demo_strategy_order.assert_not_called()
 
 
+@pytest.mark.parametrize(("override", "refused"), [(None, True), (30, False)])
+def test_a_demo_pool_concurrency_override_replaces_the_profile_cap(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    override: int | None,
+    refused: bool,
+) -> None:
+    """#3471 §8: 25 open lifecycles on a `growth` pool (profile cap 12). Without the override the
+    executor refuses; with the demo pool's override of 30 it does not."""
+    conn = ebull_test_conn
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("2000"),
+        risk_profile="growth",
+        approval_mode="manual",
+        max_concurrent_positions_override=override,
+        changed_by="test",
+        reason="growth pool with and without the trial override",
+    )
+    signal_id = _seed(conn)
+    for index in range(25):
+        _existing_allocated_trade(conn, index=index, amount=Decimal("1"))
+    conn.commit()
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {("S-ALLOC", "v1"): Decimal("0")},
+    )
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert (result.reason_code == "portfolio_concurrency_limit") is refused
+    if not refused:
+        assert result.verdict == "submitted"
+
+
 def test_mandate_cash_reserve_refuses_when_allocated_capital_reaches_boundary(
     ebull_test_conn: psycopg.Connection[Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -1310,6 +1349,7 @@ def test_shared_paper_pool_excludes_future_live_reservations(
         capital_limit=Decimal("400"),
         risk_profile="balanced",
         approval_mode="manual",
+        max_concurrent_positions_override=None,
         changed_by="operator",
         reason="paper-only shared pot",
     )
