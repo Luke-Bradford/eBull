@@ -168,7 +168,7 @@ report). The event row supplies `form_type`, `filing_date`, `report_date`.
 
 **Facts per report.** K rows of that accession with `fetched_at ≤ as_of`: drop non-finite `val` (NUMERIC admits
 `NaN` and `±Infinity`; §9: 0), counted `skipped_non_finite`; drop us-gaap facts with `period_end > report_date`
-and the dei `EntityCommonStockSharesOutstanding` fact (the cover-page count) with `period_end > filing_date`, counted `excluded_future_dated` (§9: the only post-report
+and the dei `EntityCommonStockSharesOutstanding` fact (the cover-page count) with `period_end > filing_date` (K holds exactly one dei concept, so the census applies this bound to every dei row; a second dei concept would need its own rule), counted `excluded_future_dated` (§9: the only post-report
 facts in the census are dei cover counts); then order and cap. Each fact: `fact_id`, `taxonomy:concept`, `unit`,
 `period_start` (null for instants), `period_end`, `end_minus_start_days` (null for instants; named for what it is,
 not an XBRL duration convention), `val` (exact NUMERIC string: the XBRL fact value in the stated unit, not scaled
@@ -203,7 +203,7 @@ three statements plus share count; no comparability claim across issuer types; d
 
 ## 4. Pack block `mdna` (per name) and its producer
 
-**Producer: separate spec and ticket, #3518** ( corpus rung: its own ckpt-1, full-population census,
+**Producer: separate spec and ticket, #3518** (corpus rung: its own ckpt-1, full-population census,
 Definition-of-Done clauses 8–12). A new store `periodic_report_sections` filled from the primary document of each
 eligible name's original periodic reports, parsed by the edgartools item accessor on HTML fetched through the house
 SEC client (shared rate clock, sec-edgar §4). Codex round 1 findings 26–29, 31–40, 42 and round 2 findings 43, 47,
