@@ -76,7 +76,7 @@ def test_a_fund_v1_decision_routes_without_reading_or_writing_v1_rows(
     assert run == (fund_id, FUND_POLICY_HASH, FUND_V1.system_prompt_sha256, {"coverage": {"names": len(PACK.complete)}})
     # fund-v1's pair sequence is its own (v1 already holds pair_seq 0).
     pair = conn.execute(
-        "SELECT declaration_id, pair_seq FROM ai_trial_pairs WHERE pair_id = %s", outcome.pair_ids
+        "SELECT declaration_id, pair_seq FROM ai_trial_pairs WHERE pair_id = %s", (outcome.pair_ids[0],)
     ).fetchone()
     assert pair == (fund_id, 0)
     links = conn.execute(
@@ -85,7 +85,7 @@ def test_a_fund_v1_decision_routes_without_reading_or_writing_v1_rows(
         FROM ai_trial_leg_links l JOIN strategy_signals s ON s.signal_id = l.signal_id
         WHERE l.pair_id = %s ORDER BY l.leg
         """,
-        outcome.pair_ids,
+        (outcome.pair_ids[0],),
     ).fetchall()
     assert links == [
         ("arm", "ai-discretionary-fund-v1", "v1", {"ai_trial_policy": FUND_POLICY_HASH}),
