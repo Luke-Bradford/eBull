@@ -27,8 +27,9 @@ def test_a_published_session_with_one_leg_submitted(ebull_test_conn: Conn, monke
     status = load_trial_status(conn, now=NOW + timedelta(hours=1))
     conn.commit()
     assert (status.state, status.declaration_id is not None) == ("active", True)
-    (session,) = status.sessions
-    assert session.session_date == SESSION
+    # Other sessions may be listed as `not_run`, depending on when the fixture's genesis event
+    # was written (wall clock); this session's row is what is under test.
+    session = {s.session_date: s for s in status.sessions}[SESSION]
     assert session.decision.label == "legs_published:2"
     # The arm was submitted; the control has no funding decision and no in-window fire has run.
     assert [o.label for o in session.execution] == ["submitted:1", "awaiting_execution:1"]
@@ -36,6 +37,8 @@ def test_a_published_session_with_one_leg_submitted(ebull_test_conn: Conn, monke
     (leg,) = status.open_legs
     assert (leg.leg, leg.strategy_trade_id, leg.trade_status) == ("arm", trade_id, "open")
     assert leg.entry_price == Decimal("100")
+    # The fixture writes no broker_positions row: nothing observed, not "no levels".
+    assert (leg.broker_observed, leg.broker_stop, leg.broker_target) == (False, None, None)
     assert leg.requested_stop is not None and leg.requested_target is not None
     # 1.25 units at 100, bid 99.
     assert leg.pnl_usd == Decimal("-1.25")
@@ -44,18 +47,17 @@ def test_a_published_session_with_one_leg_submitted(ebull_test_conn: Conn, monke
     assert (control.leg, control.pnl_usd) == ("control", Decimal("0"))
 
 
-def test_a_session_the_decision_fire_never_claimed_is_not_run(
+def test_a_leg_no_fire_reached_before_its_close_is_not_run(
     ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     conn = ebull_test_conn
     _opened_arm_leg(conn, monkeypatch)
 
-    # Tuesday 23:45 UTC: Tuesday's fire targeted Wednesday and left no run row.
+    # Tuesday 23:45 UTC: Monday's session closed with the control leg never executed.
     status = load_trial_status(conn, now=datetime(2026, 10, 6, 23, 45, tzinfo=UTC))
     conn.commit()
-    assert [(s.session_date, s.decision.label) for s in status.sessions] == [
-        (date(2026, 10, 7), "not_run"),
-        (SESSION, "legs_published:2"),
-    ]
-    # Monday's control leg was never reached by a fire, and its session has passed.
-    assert [o.label for o in status.sessions[1].execution] == ["submitted:1", "not_run:1"]
+    by_date = {s.session_date: s for s in status.sessions}
+    assert by_date[SESSION].decision.label == "legs_published:2"
+    assert [o.label for o in by_date[SESSION].execution] == ["submitted:1", "not_run:1"]
+    # Every other listed session had no run row at all.
+    assert {s.decision.label for d, s in by_date.items() if d != SESSION} <= {"not_run"}

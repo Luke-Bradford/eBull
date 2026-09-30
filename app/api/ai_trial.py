@@ -69,6 +69,7 @@ class OpenLegResponse(BaseModel):
     entry_price: Decimal | None
     requested_stop: Decimal | None
     requested_target: Decimal | None
+    broker_observed: bool
     broker_stop: Decimal | None
     broker_target: Decimal | None
     pnl_usd: Decimal | None

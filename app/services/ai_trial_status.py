@@ -39,7 +39,7 @@ from app.services.ai_trial_halts import (
 from app.services.ai_trial_pack_reader import next_us_session
 from app.services.ai_trial_readout import load_close_rows
 from app.services.ai_trial_run import load_declaration
-from app.services.market_calendar import latest_completed_us_session
+from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.strategy_paper_executor import _NY
 from app.workers.scheduler import (
     JOB_AI_TRIAL_DECISION_RUN,
@@ -149,15 +149,16 @@ def execute_fired(session_date: date, execute_fires: Sequence[datetime]) -> bool
 
 
 def execution_states(
-    session_date: date, legs: Sequence[LegFunding], *, today: date, execute_fires: Sequence[datetime]
+    session_date: date, legs: Sequence[LegFunding], *, completed: date, execute_fires: Sequence[datetime]
 ) -> list[ExecutionOutcome]:
     """What the execute job did with one session's published legs.
 
     ``submitted`` (allocated) and ``refused`` (by ``reason_code``) are the executor's persisted
-    verdicts. A leg with no funding decision is ``awaiting_execution`` while its session's
-    in-window fire is still ahead, and ``not_run`` once it is not: a later session day's fire
-    refuses it ``decision_expired``, so a leg left here is a fire that did not reach it (or
-    raised on it — the job's own run row counts those)."""
+    verdicts. A leg with no funding decision is ``awaiting_execution`` while its session has not
+    closed (``completed`` is the latest closed session) and no in-window fire has run for it, and
+    ``not_run`` otherwise: after the close the executor cannot act on it that session (a later
+    fire refuses it ``decision_expired``), and a fire that ran and left it had raised on it — the
+    job's own run row counts those."""
     submitted = sum(1 for leg in legs if leg.verdict == "allocated")
     refused: dict[str, int] = {}
     for leg in legs:
@@ -170,7 +171,7 @@ def execution_states(
         outcomes.append(ExecutionOutcome("submitted", submitted))
     outcomes.extend(ExecutionOutcome("refused", count, code) for code, count in sorted(refused.items()))
     if pending:
-        waiting = session_date > today or (session_date == today and not execute_fired(session_date, execute_fires))
+        waiting = session_date > completed and not execute_fired(session_date, execute_fires)
         outcomes.append(ExecutionOutcome("awaiting_execution" if waiting else "not_run", pending))
     return outcomes
 
@@ -183,6 +184,31 @@ def expected_decision_session(now: datetime) -> tuple[datetime, date]:
     if fire > observed:
         fire -= timedelta(days=1)
     return fire, next_us_session(latest_completed_us_session(fire))
+
+
+def _previous_us_session(session: date) -> date:
+    candidate = session - timedelta(days=1)
+    while us_market_status(candidate) == "closed":
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def missable_sessions(
+    latest_fire: datetime, expected: date, genesis_at: datetime, *, limit: int = RECENT_SESSIONS
+) -> list[date]:
+    """Target sessions, newest first from ``expected`` (``latest_fire``'s target), that a decision
+    fire after the trial started has already had the chance to decide. A session qualifies when
+    its last possible fire — 23:30 UTC on the calendar day before it, or ``latest_fire`` if that
+    is still ahead — came at or after ``genesis_at``."""
+    sessions: list[date] = []
+    session = expected
+    while len(sessions) < limit:
+        last_fire = datetime.combine(session - timedelta(days=1), DECISION_FIRE_UTC, tzinfo=UTC)
+        if min(last_fire, latest_fire) < genesis_at:
+            break
+        sessions.append(session)
+        session = _previous_us_session(session)
+    return sessions
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +243,10 @@ class OpenLeg:
     entry_price: Decimal | None
     requested_stop: Decimal | None
     requested_target: Decimal | None
-    #: The broker's own levels from the active owned position; ``None`` = not observed.
+    #: Whether the active owned position's broker row was found. When it was, a ``None`` level
+    #: means the broker holds NO such level (``is_no_stop_loss`` / ``is_no_take_profit``); when
+    #: it was not, both levels are ``None`` because nothing was observed.
+    broker_observed: bool
     broker_stop: Decimal | None
     broker_target: Decimal | None
     #: ``ai_trial_halts.trade_pnl_usd``; ``None`` = unmeasured.
@@ -296,7 +325,7 @@ _EXECUTE_FIRES_SQL: Final = """
 _OPEN_LEGS_SQL: Final = """
     SELECT tl.leg, p.pair_seq, t.strategy_trade_id, i.symbol, t.status, t.exit_deadline_session,
            pf.stop_loss_rate, pf.take_profit_rate, bp.stop_loss_rate, bp.take_profit_rate,
-           bp.is_no_stop_loss, bp.is_no_take_profit,
+           bp.is_no_stop_loss, bp.is_no_take_profit, bp.position_id IS NOT NULL,
            i.currency = 'USD', entry.units, entry.average_price, q.bid, entry.filled_at, q.quoted_at
     FROM ai_trial_trade_links tl
     JOIN ai_trial_pairs p ON p.pair_id = tl.pair_id
@@ -342,7 +371,7 @@ def _open_legs(conn: Conn, declaration_id: int) -> list[OpenLeg]:
     legs: list[OpenLeg] = []
     for row in rows:
         (leg, pair_seq, trade_id, symbol, status, deadline, req_sl, req_tp, bp_sl, bp_tp, no_sl, no_tp) = row[:12]
-        usd, units, average_price, bid, filled_at, bid_at = row[12:]
+        observed, usd, units, average_price, bid, filled_at, bid_at = row[12:]
         pnl = trade_pnl_usd(
             LegTrade(
                 leg=str(leg),
@@ -366,6 +395,7 @@ def _open_legs(conn: Conn, declaration_id: int) -> list[OpenLeg]:
                 entry_price=_dec(average_price),
                 requested_stop=_dec(req_sl),
                 requested_target=_dec(req_tp),
+                broker_observed=bool(observed),
                 # eToro reports a removed level as a flag, not a null rate.
                 broker_stop=None if no_sl else _dec(bp_sl),
                 broker_target=None if no_tp else _dec(bp_tp),
@@ -377,34 +407,39 @@ def _open_legs(conn: Conn, declaration_id: int) -> list[OpenLeg]:
 
 
 def _sessions(conn: Conn, declaration_id: int, *, now: datetime, genesis_at: datetime | None) -> list[SessionStatus]:
-    runs = conn.execute(_RUNS_SQL, (declaration_id, RECENT_SESSIONS)).fetchall()
-    run_ids = [int(row[0]) for row in runs]
+    runs = {row[1]: row for row in conn.execute(_RUNS_SQL, (declaration_id, RECENT_SESSIONS)).fetchall()}
     funding: dict[int, list[LegFunding]] = {}
-    for run_id, leg, verdict, reason in conn.execute(_LEG_FUNDING_SQL, (run_ids,)).fetchall():
+    for run_id, leg, verdict, reason in conn.execute(_LEG_FUNDING_SQL, ([int(r[0]) for r in runs.values()],)):
         funding.setdefault(int(run_id), []).append(LegFunding(str(leg), verdict, reason))
-    oldest = min((row[1] for row in runs), default=now.astimezone(_NY).date())
+    # Every session a fire since the trial started could have decided, run row or not, so a
+    # missed day stays visible after a later one succeeds; plus the stored runs themselves.
+    latest_fire, expected = expected_decision_session(now)
+    calendar = [] if genesis_at is None else missable_sessions(latest_fire, expected, genesis_at)
+    dates = sorted(set(calendar) | set(runs), reverse=True)[:RECENT_SESSIONS]
+    oldest = min(dates, default=now.astimezone(_NY).date())
     execute_fires = [
         row[0]
         for row in conn.execute(
             _EXECUTE_FIRES_SQL, (JOB_AI_TRIAL_EXECUTE, datetime.combine(oldest, time(0), tzinfo=_NY))
         ).fetchall()
     ]
-    today = now.astimezone(_NY).date()
+    completed = latest_completed_us_session(now)
     sessions: list[SessionStatus] = []
-    for run_id, session_date, status, refusal, decisions, refusals, legs in runs:
+    for session_date in dates:
+        row = runs.get(session_date)
+        if row is None:
+            sessions.append(SessionStatus(session_date, decision_state(None), []))
+            continue
+        run_id, _, status, refusal, decisions, refusals, legs = row
         facts = RunFacts(session_date, str(status), refusal, int(decisions), dict(refusals), int(legs))
+        legs_funding = funding.get(int(run_id), [])
         sessions.append(
             SessionStatus(
                 session_date,
                 decision_state(facts),
-                execution_states(session_date, funding.get(int(run_id), []), today=today, execute_fires=execute_fires),
+                execution_states(session_date, legs_funding, completed=completed, execute_fires=execute_fires),
             )
         )
-    # The session the latest decision fire targeted, when the trial was already running then and
-    # that fire left no run row at all: the job did not run, or returned before its claim.
-    fire, expected = expected_decision_session(now)
-    if genesis_at is not None and genesis_at <= fire and all(s.session_date != expected for s in sessions):
-        sessions.insert(0, SessionStatus(expected, decision_state(None), []))
     return sessions
 
 
@@ -449,5 +484,6 @@ __all__ = [
     "execute_fired",
     "execution_states",
     "expected_decision_session",
+    "missable_sessions",
     "load_trial_status",
 ]

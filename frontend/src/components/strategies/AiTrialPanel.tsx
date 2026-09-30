@@ -83,13 +83,12 @@ function JobRow({ label, fire }: { label: string; fire: AiTrialJobFire }) {
   );
 }
 
-function levels(stop: string | null, target: string | null): string {
-  return `SL ${money(stop)} / TP ${money(target)}`;
+function levels(stop: string | null, target: string | null, absent = "—"): string {
+  return `SL ${stop === null ? absent : money(stop)} / TP ${target === null ? absent : money(target)}`;
 }
 
 function LegRow({ leg }: { leg: AiTrialOpenLeg }) {
   const pnl = number(leg.pnl_usd);
-  const brokerObserved = leg.broker_stop !== null || leg.broker_target !== null;
   return (
     <li className="flex flex-wrap items-baseline justify-between gap-2 py-2 text-sm">
       <span>
@@ -101,8 +100,8 @@ function LegRow({ leg }: { leg: AiTrialOpenLeg }) {
       </span>
       <span className="tabular-nums text-slate-700 dark:text-slate-200">
         entry {money(leg.entry_price)} ·{" "}
-        {brokerObserved
-          ? `broker ${levels(leg.broker_stop, leg.broker_target)}`
+        {leg.broker_observed
+          ? `broker ${levels(leg.broker_stop, leg.broker_target, "none")}`
           : `requested ${levels(leg.requested_stop, leg.requested_target)} (broker levels not observed)`}{" "}
         ·{" "}
         <span

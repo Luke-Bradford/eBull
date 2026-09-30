@@ -3629,6 +3629,7 @@ export interface AiTrialOpenLeg {
   entry_price: string | null;
   requested_stop: string | null;
   requested_target: string | null;
+  broker_observed: boolean;
   broker_stop: string | null;
   broker_target: string | null;
   pnl_usd: string | null;
