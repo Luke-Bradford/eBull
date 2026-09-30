@@ -110,8 +110,9 @@ def test_the_endpoint_serialises_every_field(monkeypatch: pytest.MonkeyPatch) ->
             )
         ],
         open_legs=[
-            OpenLeg("arm", 0, 11, "AAPL", "open", Decimal("100"), Decimal("95"), Decimal("110"), None, None,
-                    None, SESSION)
+            OpenLeg(
+                "arm", 0, 11, "AAPL", "open", Decimal("100"), Decimal("95"), Decimal("110"), None, None, None, SESSION
+            )
         ],  # fmt: skip
         loss=[LegLossStatus("arm", Decimal("-5"), 1, Decimal("600"))],
     )
@@ -123,6 +124,4 @@ def test_the_endpoint_serialises_every_field(monkeypatch: pytest.MonkeyPatch) ->
         {"state": "submitted", "label": "submitted:1", "count": 1, "reason": None},
     ]
     assert body["open_legs"][0]["broker_stop"] is None and body["open_legs"][0]["pnl_usd"] is None
-    assert body["loss"] == [
-        {"leg": "arm", "pnl_usd": "-5", "unmeasured": 1, "limit_usd": "600", "headroom_usd": "595"}
-    ]
+    assert body["loss"] == [{"leg": "arm", "pnl_usd": "-5", "unmeasured": 1, "limit_usd": "600", "headroom_usd": "595"}]
