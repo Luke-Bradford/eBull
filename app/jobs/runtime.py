@@ -99,6 +99,7 @@ from app.workers.scheduler import (
     JOB_ACCOUNT_RECONCILIATION_CHECK,
     JOB_AI_TRIAL_DECISION_RUN,
     JOB_AI_TRIAL_EXECUTE,
+    JOB_AI_TRIAL_FUND_DECISION_RUN,
     JOB_AQR_REFERENCE_REFRESH,
     JOB_ATTRIBUTION_SUMMARY,
     JOB_BLOCKHOLDER_LINK_SWEEP,
@@ -188,6 +189,7 @@ from app.workers.scheduler import (
     account_reconciliation_check_job,
     ai_trial_decision_run,
     ai_trial_execute,
+    ai_trial_fund_decision_run,
     aqr_reference_refresh,
     attribution_summary_job,
     blockholder_link_sweep,
@@ -469,6 +471,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_ETORO_PERISHABLES_SNAPSHOT: _adapt_zero_arg(etoro_perishables_snapshot),
     JOB_AI_TRIAL_DECISION_RUN: _adapt_zero_arg(ai_trial_decision_run),
     JOB_AI_TRIAL_EXECUTE: _adapt_zero_arg(ai_trial_execute),
+    JOB_AI_TRIAL_FUND_DECISION_RUN: _adapt_zero_arg(ai_trial_fund_decision_run),
     JOB_CORE_ELIGIBILITY_REFRESH: _adapt_zero_arg(core_eligibility_refresh),
     JOB_STRATEGY_AUTONOMOUS_PROMOTION: _adapt_zero_arg(strategy_autonomous_promotion),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
@@ -946,7 +949,7 @@ def execution_lane_for(job_name: str) -> str:
         return EXECUTION_LANE_SEC
     if job_name == JOB_STRATEGY_PAPER_CYCLE:
         return EXECUTION_LANE_PAPER
-    if job_name in (JOB_AI_TRIAL_DECISION_RUN, JOB_AI_TRIAL_EXECUTE):
+    if job_name in (JOB_AI_TRIAL_DECISION_RUN, JOB_AI_TRIAL_EXECUTE, JOB_AI_TRIAL_FUND_DECISION_RUN):
         # #3471 — the AI trial's jobs are paper-lifecycle work and join its reserved lane
         # rather than taking one (zero connection headroom, see below). On the single general
         # permit the decision run's up-to-10-minute model call would park every other

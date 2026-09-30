@@ -53,7 +53,8 @@ from app.services.ai_trial_executor import execute_trial_signal
 from app.services.ai_trial_invocation import TRIAL_MODEL_ID, build_argv, build_env
 from app.services.ai_trial_pack_reader import INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT, next_us_session
 from app.services.ai_trial_run import RunEnvironment, RunOutcome, load_declaration, run_trial_decision
-from app.services.ai_trial_version import V1, TrialVersion
+from app.services.ai_trial_version import FUND_V1, V1, TrialVersion
+from app.services.ai_trial_wind_down import read_v1_declarations, wind_down_refusal
 from app.services.market_calendar import latest_completed_us_session
 from app.services.strategy_paper_executor import _NY, _session_is_open
 from app.services.strategy_position_manager import configure_position_manager
@@ -342,6 +343,22 @@ def run_trial_execution(
     return ExecutionJobResult(session_open=True, verdicts=dict(verdicts), errors=errors)
 
 
+def run_fund_decision_job(conn: Conn, **kwargs: Any) -> DecisionJobResult:
+    """fund-v1's decision job (#3515 spec §0 rule 2, §7): v1's job under ``FUND_V1``, behind the
+    start gate. Every fire re-checks that v1 is wound down, so after a v1 resumption fund-v1 opens
+    nothing new; the gate refuses before the claim, so a refused fire records no run. Residual
+    (spec §0 rule 3): the check and a concurrent supervisor action are not atomic."""
+    declaration = load_declaration(conn, version=FUND_V1)
+    conn.commit()
+    if declaration is None:
+        return DecisionJobResult("declaration_missing")
+    refusal = wind_down_refusal(read_v1_declarations(conn))
+    conn.commit()
+    if refusal is not None:
+        return DecisionJobResult(refusal)
+    return run_decision_job(conn, version=FUND_V1, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Position-age backstop (slice 3 calls this when it configures the deployments)
 # ---------------------------------------------------------------------------
@@ -381,6 +398,7 @@ __all__ = [
     "orphan_model_pids",
     "resolve_run_environment",
     "run_decision_job",
+    "run_fund_decision_job",
     "run_trial_execution",
     "sweep_orphan_model_processes",
     "verify_run_environment",

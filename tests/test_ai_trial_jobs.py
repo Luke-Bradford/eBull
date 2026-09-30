@@ -33,9 +33,14 @@ from app.services.ai_trial_pack_reader import INTRADAY_INTERVAL, INTRADAY_REQUES
 from app.services.ai_trial_pair_lifecycle import TRIAL_CENSOR_SESSIONS, clock_instant
 from app.services.ai_trial_policy import FROZEN_CONSTANTS
 from app.services.ai_trial_run import RunEnvironment, RunOutcome
-from app.services.ai_trial_version import V1, TrialVersion
+from app.services.ai_trial_version import FUND_V1, V1, TrialVersion
 from app.services.market_calendar import us_market_status
-from app.workers.scheduler import JOB_AI_TRIAL_DECISION_RUN, JOB_AI_TRIAL_EXECUTE, SCHEDULED_JOBS
+from app.workers.scheduler import (
+    JOB_AI_TRIAL_DECISION_RUN,
+    JOB_AI_TRIAL_EXECUTE,
+    JOB_AI_TRIAL_FUND_DECISION_RUN,
+    SCHEDULED_JOBS,
+)
 
 EXE = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 SHA = "a" * 40
@@ -446,9 +451,55 @@ def test_the_deployed_environment_is_resolved_once_per_process(monkeypatch: pyte
 # ---------------------------------------------------------------------------
 # Scheduling
 # ---------------------------------------------------------------------------
-def test_both_jobs_are_scheduled_on_the_trial_lane_and_invocable() -> None:
+def test_the_trial_jobs_are_scheduled_on_the_trial_lane_and_invocable() -> None:
     jobs = {job.name: job for job in SCHEDULED_JOBS}
-    for name, hour in ((JOB_AI_TRIAL_DECISION_RUN, 23), (JOB_AI_TRIAL_EXECUTE, 15)):
+    for name, (hour, minute) in (
+        (JOB_AI_TRIAL_DECISION_RUN, (23, 30)),
+        (JOB_AI_TRIAL_FUND_DECISION_RUN, (23, 45)),
+        (JOB_AI_TRIAL_EXECUTE, (15, 0)),
+    ):
         job = jobs[name]
         assert job.source == "ai_trial" and job.catch_up_on_boot and name in _INVOKERS
-        assert (job.cadence.hour, job.cadence.minute) == (hour, 30 if hour == 23 else 0)
+        assert (job.cadence.hour, job.cadence.minute) == (hour, minute)
+
+
+# ---------------------------------------------------------------------------
+# fund-v1's decision job (#3515 spec §0 rule 2)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("declared", "refusal", "expected"),
+    [
+        (False, None, "declaration_missing"),
+        (True, "v1_not_wound_down:trial_active", "v1_not_wound_down:trial_active"),
+        (True, None, "decided"),
+    ],
+)
+def test_the_fund_job_runs_only_with_its_declaration_and_v1_wound_down(
+    monkeypatch: pytest.MonkeyPatch, declared: bool, refusal: str | None, expected: str
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def load(_conn: Any, *, version: TrialVersion) -> object | None:
+        seen["loaded"] = version
+        return object() if declared else None
+
+    def gate(decls: Any) -> str | None:
+        seen["gated"] = decls
+        return refusal
+
+    def run(_conn: Any, *, version: TrialVersion, **kwargs: Any) -> ai_trial_jobs.DecisionJobResult:
+        seen["run"] = (version, kwargs)
+        return ai_trial_jobs.DecisionJobResult("decided")
+
+    monkeypatch.setattr(ai_trial_jobs, "load_declaration", load)
+    monkeypatch.setattr(ai_trial_jobs, "read_v1_declarations", lambda _conn: ["v1 rows"])
+    monkeypatch.setattr(ai_trial_jobs, "wind_down_refusal", gate)
+    monkeypatch.setattr(ai_trial_jobs, "run_decision_job", run)
+    result = ai_trial_jobs.run_fund_decision_job(cast(Any, _Conn()), broker="b", get_intraday_candles="c")
+    assert result.status == expected
+    assert seen["loaded"] is FUND_V1
+    # The gate reads v1's rows on every fire that has a declaration, before any claim.
+    assert seen.get("gated") == (["v1 rows"] if declared else None)
+    assert seen.get("run") == (
+        (FUND_V1, {"broker": "b", "get_intraday_candles": "c"}) if expected == "decided" else None
+    )

@@ -587,6 +587,7 @@ JOB_ETORO_PERISHABLES_SNAPSHOT = "etoro_perishables_snapshot"
 # tool-less model call, one-transaction publish) and the in-session execution of its legs.
 JOB_AI_TRIAL_DECISION_RUN = "ai_trial_decision_run"
 JOB_AI_TRIAL_EXECUTE = "ai_trial_execute"
+JOB_AI_TRIAL_FUND_DECISION_RUN = "ai_trial_fund_decision_run"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -2748,6 +2749,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=True,
         # The body bounds its own lateness (the target-date guard) and is idempotent (one
         # claim per session), so a fire delayed by a host pause is still worth running.
+        misfire_grace_seconds=4 * 60 * 60,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_AI_TRIAL_FUND_DECISION_RUN,
+        display_name="AI trial fund-v1 decision run (#3515)",
+        source="ai_trial",
+        description=(
+            "Daily 23:45 UTC — the AI-discretionary-fund-v1 demo trial's decision run: v1's run with two "
+            "extra pack blocks (periodic-report figures and MD&A). Does nothing without its own frozen "
+            "declaration, and refuses v1_not_wound_down on every fire until the v1 trial is terminal with "
+            "nothing outstanding (fund-v1 spec §0 rule 2)."
+        ),
+        # 15 minutes after v1's run so the two never contend for the lane in the normal case; they
+        # never both have work (fund-v1 runs only after v1 is wound down).
+        cadence=Cadence.daily(hour=23, minute=45),
+        # Same lateness bound and idempotence as v1's decision run (the target-date guard, one
+        # claim per session).
+        catch_up_on_boot=True,
         misfire_grace_seconds=4 * 60 * 60,
         prerequisite=_bootstrap_complete,
     ),
@@ -6912,29 +6932,51 @@ def ai_trial_decision_run() -> None:
     Informational broker reads only (the account-risk snapshot and intraday candles); the model
     call is the tool-less subprocess in ``ai_trial_invocation``. Nothing here submits an order.
     """
-    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
     from app.services.ai_trial_jobs import run_decision_job
 
+    creds = _ai_trial_decision_creds(JOB_AI_TRIAL_DECISION_RUN)
+    if creds is not None:
+        with _tracked_job(JOB_AI_TRIAL_DECISION_RUN) as tracker:
+            _ai_trial_decision(JOB_AI_TRIAL_DECISION_RUN, tracker, creds, run_decision_job)
+
+
+def ai_trial_fund_decision_run() -> None:
+    """fund-v1's decision run (#3515): v1's, under fund-v1's descriptor and start gate."""
+    from app.services.ai_trial_jobs import run_fund_decision_job
+
+    creds = _ai_trial_decision_creds(JOB_AI_TRIAL_FUND_DECISION_RUN)
+    if creds is not None:
+        with _tracked_job(JOB_AI_TRIAL_FUND_DECISION_RUN) as tracker:
+            _ai_trial_decision(JOB_AI_TRIAL_FUND_DECISION_RUN, tracker, creds, run_fund_decision_job)
+
+
+def _ai_trial_decision_creds(job_name: str) -> tuple[str, str] | None:
     if settings.etoro_env != "demo":
-        _record_prereq_skip(JOB_AI_TRIAL_DECISION_RUN, "the AI trial is demo-only")
-        return
-    creds = _load_etoro_credentials(JOB_AI_TRIAL_DECISION_RUN)
+        _record_prereq_skip(job_name, "the AI trial is demo-only")
+        return None
+    creds = _load_etoro_credentials(job_name)
     if creds is None:
-        _record_prereq_skip(JOB_AI_TRIAL_DECISION_RUN, "etoro credentials missing")
-        return
+        _record_prereq_skip(job_name, "etoro credentials missing")
+    return creds
+
+
+def _ai_trial_decision(job_name: str, tracker: _JobTracker, creds: tuple[str, str], run: Callable[..., Any]) -> None:
+    """One decision job's body inside its caller's ``_tracked_job`` (each caller opens its own, so
+    the manual-dispatch prelude row is finalised — ``tests/test_layer_123_wiring.py``)."""
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+
     api_key, user_key = creds
-    with _tracked_job(JOB_AI_TRIAL_DECISION_RUN) as tracker:
-        with (
-            EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker,
-            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
-            connect_job() as conn,
-        ):
-            result = run_decision_job(conn, broker=broker, get_intraday_candles=market.get_intraday_candles)
-        tracker.row_count = 0 if result.outcome is None else len(result.outcome.pair_ids)
-        tracker.note = result.note
-        if result.orphans_killed is None:
-            tracker.progress = JobProgress(errors={"orphan_sweep": 1})
-        logger.info("ai_trial_decision_run: %s", result.note)
+    with (
+        EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker,
+        EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
+        connect_job() as conn,
+    ):
+        result = run(conn, broker=broker, get_intraday_candles=market.get_intraday_candles)
+    tracker.row_count = 0 if result.outcome is None else len(result.outcome.pair_ids)
+    tracker.note = result.note
+    if result.orphans_killed is None:
+        tracker.progress = JobProgress(errors={"orphan_sweep": 1})
+    logger.info("%s: %s", job_name, result.note)
 
 
 def ai_trial_execute() -> None:
