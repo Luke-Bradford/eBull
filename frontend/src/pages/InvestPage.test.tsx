@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as aiTrialApi from "@/api/aiTrial";
 import * as strategiesApi from "@/api/strategies";
 import type { StrategyOverviewResponse } from "@/api/types";
 import { BENCHMARK_REFUSALS } from "@/components/strategies/__fixtures__/benchmarkRefusals";
@@ -76,6 +77,7 @@ describe("InvestPage", () => {
       live_quote_instrument_ids: [],
     } as never);
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [], return_since: null } as never);
+    vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockRejectedValue(new Error("not under test here"));
   });
 
   it("leads with the honest no-strategy message and the sleeve holding", async () => {

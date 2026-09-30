@@ -9,6 +9,7 @@ import {
 import type { StrategyOwnedPosition } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { StatTile } from "@/components/dashboard/StatTile";
+import { AiTrialPanel } from "@/components/strategies/AiTrialPanel";
 import { AutomationControl, BenchmarkRefusals, BlockerRow } from "@/components/strategies/StrategyPortfolioPanels";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatMoney, formatPct } from "@/lib/format";
@@ -196,6 +197,8 @@ export function InvestPage() {
           </p>
         ) : null}
       </section>
+
+      <AiTrialPanel />
 
       <section aria-labelledby="invest-next" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
         <h2 id="invest-next" className="text-sm font-semibold">What happens next</h2>
