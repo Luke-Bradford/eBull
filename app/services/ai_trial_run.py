@@ -157,10 +157,11 @@ def load_declaration(conn: Conn, *, version: TrialVersion = V1) -> Declaration |
     return Declaration(int(row[0]), row[1], str(row[2]), row[3], row[4])
 
 
-def declaration_refusal(declaration: Declaration, *, policy_hash: str = V1.policy_hash) -> str | None:
+def declaration_refusal(declaration: Declaration, *, policy_hash: str) -> str | None:
     """§9 runtime checks, before any read that costs: the stored document is digest-intact and
-    named by its #2599 contract (the loader's rule), its ``policy_hash`` is this code's
-    (``policy_drift``, O6), and the trial is ``active``."""
+    named by its #2599 contract (the loader's rule), its ``policy_hash`` is the version's
+    (``policy_drift``, O6; required, so no caller can check one version against another's hash),
+    and the trial is ``active``."""
     try:
         digest = declaration_digest(declaration.doc)
     except NonCanonicalValue:

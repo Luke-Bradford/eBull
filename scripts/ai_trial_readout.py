@@ -123,8 +123,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     with psycopg.connect(settings.database_url) as conn:
         try:
-            readout = compute_readout(conn, version=trial_version(args.arm, args.version))
-        except (ReadoutUnavailable, LookupError) as exc:
+            version = trial_version(args.arm, args.version)
+        except LookupError as exc:
+            print(f"no readout: {exc}")
+            return 0
+        try:
+            readout = compute_readout(conn, version=version)
+        except ReadoutUnavailable as exc:
             print(f"no readout: {exc}")
             return 0
     print(render(readout, arm_strategy_id=args.arm))
