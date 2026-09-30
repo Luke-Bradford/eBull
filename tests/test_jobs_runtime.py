@@ -2511,6 +2511,8 @@ class TestMisfireVisibilityAndGrace:
             "core_candidate_quote_refresh",
             "ai_trial_decision_run",
             "ai_trial_execute",
+            # #3515 — fund-v1's decision run: the same target-date guard and one claim per session.
+            "ai_trial_fund_decision_run",
         }
 
     def test_grace_cannot_reach_the_next_frontier_advance(self) -> None:
@@ -2752,6 +2754,7 @@ class TestReservedLaneSchedulerExecutors:
         from app.workers.scheduler import (
             JOB_AI_TRIAL_DECISION_RUN,
             JOB_AI_TRIAL_EXECUTE,
+            JOB_AI_TRIAL_FUND_DECISION_RUN,
             JOB_CORE_CANDIDATE_QUOTE_REFRESH,
             JOB_QUOTES_REFRESH,
             JOB_STRATEGY_HALT_FEED_REFRESH,
@@ -2762,7 +2765,13 @@ class TestReservedLaneSchedulerExecutors:
         expected = {
             # #3471 — the AI trial's jobs are paper-lifecycle work; on the single general
             # permit the nightly model call would park every other non-SEC job.
-            runtime.EXECUTION_LANE_PAPER: {JOB_STRATEGY_PAPER_CYCLE, JOB_AI_TRIAL_DECISION_RUN, JOB_AI_TRIAL_EXECUTE},
+            runtime.EXECUTION_LANE_PAPER: {
+                JOB_STRATEGY_PAPER_CYCLE,
+                JOB_AI_TRIAL_DECISION_RUN,
+                JOB_AI_TRIAL_EXECUTE,
+                # #3515 — fund-v1's decision run, the same paper-lifecycle work as v1's.
+                JOB_AI_TRIAL_FUND_DECISION_RUN,
+            },
             runtime.EXECUTION_LANE_QUOTE: {
                 JOB_QUOTES_REFRESH,
                 JOB_CORE_CANDIDATE_QUOTE_REFRESH,

@@ -501,11 +501,12 @@ The final lane is bootstrap-only:
   (#1233 PR-1b). SD-1 cross-reference: ``docs/settled-decisions.md``.
   Resolver: ``app/services/openfigi_resolver.py``.
 
-* ``ai_trial`` — ``ai_trial_decision_run`` (#3471, daily 23:30 UTC) and
-  ``ai_trial_execute`` (daily 15:00 UTC). Its own lane because both fire
+* ``ai_trial`` — ``ai_trial_decision_run`` (#3471, daily 23:30 UTC),
+  ``ai_trial_fund_decision_run`` (#3515, daily 23:45 UTC) and
+  ``ai_trial_execute`` (daily 15:00 UTC). Its own lane because they fire
   inside other holders' windows: ``etoro`` is held by the 3-4 h candle sweep
-  across 23:30, and ``strategy_execution`` by the 5-minute paper cycle. The two
-  jobs share it and never overlap in time. Broker safety is not the lane's: the
+  across 23:30, and ``strategy_execution`` by the 5-minute paper cycle. The
+  jobs share it and are spaced so they do not overlap. Broker safety is not the lane's: the
   executor serialises with the paper path under the allocator advisory lock,
   and the intraday fetch paces on the process-wide eToro read clock. Their
   EXECUTION permit is the paper-lifecycle reservation
