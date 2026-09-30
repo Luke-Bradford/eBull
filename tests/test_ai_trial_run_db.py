@@ -82,7 +82,7 @@ def _invoke(structured: object = None, refusal: str | None = None) -> Any:
     return fake
 
 
-def _seed(conn: Conn, *, policy_hash: str = AI_TRIAL_POLICY_HASH) -> int:
+def _seed(conn: Conn, *, policy_hash: str = AI_TRIAL_POLICY_HASH, strategy_id: str = "ai-discretionary-v1") -> int:
     conn.execute(
         "INSERT INTO exchanges (exchange_id, country, asset_class) VALUES ('2', 'US', 'us_equity') "
         "ON CONFLICT (exchange_id) DO UPDATE SET asset_class='us_equity'"
@@ -93,7 +93,7 @@ def _seed(conn: Conn, *, policy_hash: str = AI_TRIAL_POLICY_HASH) -> int:
             "VALUES (%s, %s, %s, '2', 'USD', TRUE) ON CONFLICT (instrument_id) DO NOTHING",
             (iid, symbol, symbol),
         )
-    doc = {"strategy_id": "ai-discretionary-v1", "strategy_version": "v1", "policy_hash": policy_hash}
+    doc = {"strategy_id": strategy_id, "strategy_version": "v1", "policy_hash": policy_hash}
     digest = declaration_digest(doc)
     row = conn.execute(
         """
@@ -103,18 +103,18 @@ def _seed(conn: Conn, *, policy_hash: str = AI_TRIAL_POLICY_HASH) -> int:
             declared_fx_unmodelled, expected_structural_refusals, min_forward_decision_dates,
             min_forward_calendar_weeks, forward_shadow_derivation, declared_by, declaration_sha256
         ) VALUES (
-            'ai-discretionary-v1', 'v1', %(contract)s, 'falsification_only', 'test-policy',
+            %(strategy_id)s, 'v1', %(contract)s, 'falsification_only', 'test-policy',
             'survivor_only', true, true, '{}', 40, 8, 'spec §9 cohort', 'test', %(digest)s
         )
         RETURNING declaration_id
         """,
-        {"contract": DECLARATION_CONTRACT_PREFIX + digest, "digest": digest},
+        {"strategy_id": strategy_id, "contract": DECLARATION_CONTRACT_PREFIX + digest, "digest": digest},
     ).fetchone()
     assert row is not None
     conn.execute(
         "INSERT INTO ai_trial_declarations (declaration_id, strategy_id, strategy_version, doc_path, doc, doc_sha256) "
-        "VALUES (%s, 'ai-discretionary-v1', 'v1', 'docs/test.json', %s, %s)",
-        (row[0], Jsonb(doc), digest),
+        "VALUES (%s, %s, 'v1', 'docs/test.json', %s, %s)",
+        (row[0], strategy_id, Jsonb(doc), digest),
     )
     conn.execute(
         "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
