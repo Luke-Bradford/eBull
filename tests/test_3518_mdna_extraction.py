@@ -28,7 +28,7 @@ _FIXTURES = Path(__file__).parent / "fixtures" / "sec" / "mdna"
 #: an existing one. A bump is a new extractor id, which re-extracts every target and must be refused while a
 #: fund-v1 declaration is live (#3515 slice 3).
 _REVISION_SOURCE_SHA256: dict[int, str] = {
-    1: "8100ccae13f24ebf042c3729751820ca60a8cb71129b4c1ff51f570437ef4190",
+    1: "55e58b79ae0db9e65a318b7e1452f643f2b45c96ccf781d8066edb02840cf674",
 }
 
 

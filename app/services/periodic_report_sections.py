@@ -319,8 +319,10 @@ _INSERT_SQL: Final = """
 def select_worklist(conn: psycopg.Connection[Any], extractor: str, result: SectionsRunResult) -> Worklist:
     """One REPEATABLE READ transaction materialises targets, due state and accession groups, then commits."""
     conn.commit()
-    conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-    with conn.cursor(row_factory=dict_row) as cur:
+    # An explicit transaction block, so the snapshot holds whether or not the connection is in autocommit mode:
+    # SET TRANSACTION is its first statement either way.
+    with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         cur.execute("SELECT now() AS as_of")
         as_of: datetime = cur.fetchone()["as_of"]  # type: ignore[index]
         cur.execute(_IN_SCOPE_SQL)
@@ -359,7 +361,6 @@ def select_worklist(conn: psycopg.Connection[Any], extractor: str, result: Secti
                     fetched_at=h["fetched_at"],
                 )
             )
-    conn.commit()
 
     states: dict[int, DueState] = {t.instrument_id: due_state(history.get(t.instrument_id, []), as_of) for t in targets}
     tally = Counter(states.values())

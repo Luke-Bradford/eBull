@@ -32,7 +32,7 @@ FORM_FAMILY: Final[dict[str, str]] = {"10-K": "10-K", "10-KT": "10-K", "10-Q": "
 SECTION_ID: Final[dict[str, str]] = {"10-K": "10-K:Item 7", "10-Q": "10-Q:Part I, Item 2"}
 
 # --- fund-v1 §4 normalisation, in its stated order (moved verbatim from the #3518 census) ---------------------
-_VERTICAL = "\n\r\x0b\x0c\x1c\x1d\x1e\x1f\x85  "  # the census carries the last two as literals
+_VERTICAL = "\n\r\x0b\x0c\x1c\x1d\x1e\x1f\x85" + chr(0x2028) + chr(0x2029)  # U+2028/9: line/paragraph separators
 _HSPACE = re.compile(r"[^\S" + re.escape(_VERTICAL) + r"]")
 _SPACES = re.compile(r" {2,}")
 _NL3 = re.compile(r"\n{3,}")
