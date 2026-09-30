@@ -11744,3 +11744,17 @@ neighbouring container and match it.**
   anchors a flow-window clock on the LATER of every exit signal (release and execution), never on one of them.
 - Enforced in: `ai_trial_readout.settled_unvalued`, the loader's `resolved_session`, and
   `tests/test_ai_trial_readout.py::test_a_unit_with_a_leg_still_open_holds_the_looks_whatever_its_first_exit_age`.
+
+### A BEFORE TRUNCATE trigger on an FK child of `instruments` breaks every `TRUNCATE … CASCADE` fixture (#3518)
+
+- Failure: sql/441 made `periodic_report_sections` refuse TRUNCATE (append-only, spec §3). The table's FK to
+  `instruments` puts it in the CASCADE set of any `TRUNCATE instruments … CASCADE`, so the pre-push db tier
+  errored in 20 tests across four mirror-equity fixtures that truncate by hand, plus the shared harness's
+  TRUNCATE fallback. The fast tier and the new table's own tests were green; only the full db tier saw it.
+- Prevention: before adding a BEFORE TRUNCATE trigger, grep tests for `TRUNCATE` over a multi-line string
+  (`grep -rn -A3 '"TRUNCATE' tests`), not a one-line pattern. Every truncating fixture whose CASCADE can reach the
+  table runs the TRUNCATE under `SET LOCAL session_replication_role = replica`, which disables row and TRUNCATE
+  triggers alike (verified on PG 17). Run the full db tier before the first push.
+- Enforced in: `tests/fixtures/ebull_test_db.py::_truncate_planner_tables` and the `conn` fixtures of
+  `tests/test_mirror_equity.py`, `tests/test_api_portfolio_mirror_equity.py`,
+  `tests/test_execution_guard_mirror_aum.py`, `tests/test_portfolio_review_mirror_equity.py`.

@@ -43,6 +43,9 @@ def conn() -> Iterator[psycopg.Connection[Any]]:
     with psycopg.connect(_test_database_url()) as c:
         _assert_test_db(c)
         with c.cursor() as cur:
+            # CASCADE from instruments reaches append-only tables whose BEFORE TRUNCATE trigger
+            # refuses (sql/441); `replica` disables it, as in the shared harness.
+            cur.execute("SET LOCAL session_replication_role = replica")
             cur.execute(
                 "TRUNCATE copy_mirror_positions, copy_mirrors, "
                 "copy_traders, quotes, price_daily, scores, positions, "
