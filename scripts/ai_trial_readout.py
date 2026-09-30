@@ -110,6 +110,7 @@ def render(readout: Readout) -> str:
         f"singleton-self pools {plans.singleton_self_pools}",
         f"  plan_invalidated per leg {plans.plan_invalidated}; pool exhausted per setup {plans.exhausted_by_setup}",
         f"  d by response position: {plans.d_by_response_position}",
+        f"  d by selection contrast (secondary: 'contrast'): {plans.d_by_contrast}",
     ]
     return "\n".join(lines)
 

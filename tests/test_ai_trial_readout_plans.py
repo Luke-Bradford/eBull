@@ -217,6 +217,14 @@ def test_the_plan_readout_tabulates_pools_refusals_and_response_position() -> No
         ("1", 1, -1.0),
     ]
     assert readout.pool_size.median == 4
+    # §16.12: unit 0 is a singleton-self pool; unit 1 self-drew from 9 names, which is still contrast.
+    assert [(row.group, row.units, row.mean_d) for row in readout.d_by_contrast] == [
+        ("contrast", 1, -1.0),
+        ("singleton_self", 1, 2.0),
+    ]
+    # A unit with no plan row is reported apart, never folded into either group.
+    unplanned = plan_readout(units, units, PlanFacts({1: plans[1]}, {}, {}, None, None))
+    assert [(row.group, row.units) for row in unplanned.d_by_contrast] == [("contrast", 1), ("unlabelled", 1)]
     # Geometry covers the units only: the broken pair's legs are not in it.
     assert readout.geometry["arm"].stop_pct.n == 2
 
