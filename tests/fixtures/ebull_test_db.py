@@ -1394,11 +1394,16 @@ def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
         roots = {r[0] for r in cur.fetchall()}
         targets = sorted(_derive_wipe_set(roots, seed_tables))
 
+        # ``replica`` disables BEFORE TRUNCATE triggers, as it disables the DELETE ones on the fast path:
+        # sql/441 refuses TRUNCATE on the append-only ``periodic_report_sections``, which CASCADE reaches
+        # through its FK to ``instruments`` (verified on PG 17: the trigger fires under ``origin`` only).
+        cur.execute("SET LOCAL session_replication_role = replica")
         cur.execute(
             sql.SQL("TRUNCATE {tables} RESTART IDENTITY CASCADE").format(
                 tables=sql.SQL(", ").join(sql.Identifier(t) for t in targets),
             )
         )
+        cur.execute("SET LOCAL session_replication_role = origin")
         if seed_tables:
             _restore_seed_tables(cur, seed_tables)
     conn.commit()

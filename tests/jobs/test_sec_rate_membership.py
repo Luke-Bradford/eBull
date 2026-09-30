@@ -54,6 +54,12 @@ pytestmark = pytest.mark.db
 #     not the lane. Safe.
 #   def14a_drift_alerts → via detect_drift, whose _upsert_alert is guarded on the
 #     accession still being the holder's latest attributed row (#966). Safe.
+#
+# Write-safety audit, 2026-09-30 (#3518) — sec_periodic_report_sections:
+#   periodic_report_sections → sole writer of every non-`invalidated` row (the operator script writes
+#     only `invalidated` rows). Append-only INSERTs, one transaction per accession; no watermark,
+#     *_current table, data_freshness_index or manifest write. Self-overlap is excluded by the
+#     per-job-name lock, which is what makes identity order equal commit order (spec §3). Safe.
 EXPECTED_SEC_RATE_MEMBERS = frozenset(
     {
         "cusip_universe_backfill",
@@ -72,6 +78,7 @@ EXPECTED_SEC_RATE_MEMBERS = frozenset(
         "sec_8k_events_ingest",
         "sec_atom_fast_lane",
         "sec_business_summary_bootstrap",
+        "sec_periodic_report_sections",
         "sec_daily_index_reconcile",
         "sec_def14a_bootstrap",
         "sec_first_install_drain",
