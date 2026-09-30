@@ -26,7 +26,12 @@ _NO_DB = cast(Any, None)
 
 
 def test_trial_legs_resolve_to_demo_trial_and_are_not_manifest_entries() -> None:
-    assert DEMO_TRIAL_STRATEGY_IDS == {"ai-discretionary-v1", "ai-discretionary-v1-control"}
+    assert DEMO_TRIAL_STRATEGY_IDS == {
+        "ai-discretionary-v1",
+        "ai-discretionary-v1-control",
+        "ai-discretionary-fund-v1",
+        "ai-discretionary-fund-v1-control",
+    }
     assert not DEMO_TRIAL_STRATEGY_IDS & STRATEGY_MANIFEST.keys()
     for strategy_id in DEMO_TRIAL_STRATEGY_IDS:
         assert registered_strategy_purpose(strategy_id) == "demo_trial"
