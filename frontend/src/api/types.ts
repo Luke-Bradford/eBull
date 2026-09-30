@@ -3586,7 +3586,8 @@ export type AiTrialState =
   | "halted_harm"
   | "halted_loss"
   | "halted_mandate"
-  | "halted_operator";
+  | "halted_operator"
+  | "completed";
 export type AiTrialDecisionState = "not_run" | "deciding" | "refused" | "abstained" | "no_valid_plan" | "legs_published";
 export type AiTrialExecutionState = "submitted" | "refused" | "awaiting_execution" | "not_run";
 

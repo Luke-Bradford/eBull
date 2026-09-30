@@ -27,12 +27,13 @@ DONE = V1Declaration(
     [
         (DONE, None),
         (replace(DONE, state="halted_loss"), None),
+        (replace(DONE, state="completed"), None),
         (replace(DONE, state="active"), "v1_not_wound_down:trial_active"),
         # Resumable by the supervisor: a pause is not an end (§0 rule 3).
         (replace(DONE, state="halted_operator"), "v1_not_wound_down:trial_halted_operator"),
         (replace(DONE, state="halted_mandate"), "v1_not_wound_down:trial_halted_mandate"),
         (replace(DONE, state=None), "v1_not_wound_down:trial_no_state"),
-        (replace(DONE, state="completed"), "v1_not_wound_down:trial_unknown_state"),
+        (replace(DONE, state="finished"), "v1_not_wound_down:trial_unknown_state"),
         # Terminal, but v1 code still runs the exits.
         (replace(DONE, open_trades=1), "v1_not_wound_down:open_trade"),
         (replace(DONE, active_ownerships=1), "v1_not_wound_down:active_ownership"),

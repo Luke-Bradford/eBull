@@ -21,6 +21,7 @@ const STATE: Record<AiTrialState, { badge: string; tone: BadgeTone }> = {
   halted_loss: { badge: "Halted — loss limit", tone: "risk" },
   halted_mandate: { badge: "Halted — mandate", tone: "risk" },
   halted_operator: { badge: "Halted — needs supervisor", tone: "risk" },
+  completed: { badge: "Completed", tone: "neutral" },
 };
 
 function codes(counts: Record<string, number>): string {
