@@ -315,6 +315,45 @@ def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime, reg
     return written
 
 
+#: The pairs ``record_pair_lifecycle`` still owes work (alias ``p``; ends in a ``WHERE`` clause, so
+#: a caller may append ``AND …``). Shared with ``ai_trial_wind_down``: a pair the writer still
+#: reads is v1 lifecycle code still running (#3515 §0).
+UNFINISHED_PAIRS_FROM: Final = """
+    ai_trial_pairs p
+    CROSS JOIN LATERAL (
+        SELECT count(*) FILTER (WHERE closed OR refused) AS terminal_legs,
+               count(*) FILTER (WHERE closed) AS closed_legs
+        FROM (
+            SELECT
+                EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                        WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'closed') AS closed,
+                EXISTS (
+                    SELECT 1 FROM ai_trial_leg_links l
+                    JOIN strategy_funding_decisions fd ON fd.signal_id = l.signal_id
+                    LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
+                    WHERE l.pair_id = p.pair_id AND l.leg = legs.leg
+                      AND (fd.verdict = 'rejected'
+                           OR (t.status = 'failed' AND EXISTS (
+                               SELECT 1 FROM ai_trial_pair_events e
+                               WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'submitted')))
+                ) AS refused
+            FROM (VALUES ('arm'), ('control')) AS legs (leg)
+        ) leg_state
+    ) pair_state
+    WHERE NOT (
+        pair_state.terminal_legs = 2
+        AND (pair_state.closed_legs = 2
+             OR EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                        WHERE e.pair_id = p.pair_id AND e.event = 'broken'))
+        AND NOT (
+            EXISTS (SELECT 1 FROM ai_trial_pair_events e
+                    WHERE e.pair_id = p.pair_id AND e.leg = 'arm' AND e.event = 'filled')
+            AND NOT EXISTS (SELECT 1 FROM ai_trial_pair_labels lb WHERE lb.pair_id = p.pair_id)
+        )
+    )
+"""
+
+
 def record_pair_lifecycle(
     conn: psycopg.Connection[Any],
     *,
@@ -337,43 +376,7 @@ def record_pair_lifecycle(
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     pair_ids = [
         int(row[0])
-        for row in conn.execute(
-            """
-            SELECT p.pair_id FROM ai_trial_pairs p
-            CROSS JOIN LATERAL (
-                SELECT count(*) FILTER (WHERE closed OR refused) AS terminal_legs,
-                       count(*) FILTER (WHERE closed) AS closed_legs
-                FROM (
-                    SELECT
-                        EXISTS (SELECT 1 FROM ai_trial_pair_events e
-                                WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'closed') AS closed,
-                        EXISTS (
-                            SELECT 1 FROM ai_trial_leg_links l
-                            JOIN strategy_funding_decisions fd ON fd.signal_id = l.signal_id
-                            LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
-                            WHERE l.pair_id = p.pair_id AND l.leg = legs.leg
-                              AND (fd.verdict = 'rejected'
-                                   OR (t.status = 'failed' AND EXISTS (
-                                       SELECT 1 FROM ai_trial_pair_events e
-                                       WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'submitted')))
-                        ) AS refused
-                    FROM (VALUES ('arm'), ('control')) AS legs (leg)
-                ) leg_state
-            ) pair_state
-            WHERE NOT (
-                pair_state.terminal_legs = 2
-                AND (pair_state.closed_legs = 2
-                     OR EXISTS (SELECT 1 FROM ai_trial_pair_events e
-                                WHERE e.pair_id = p.pair_id AND e.event = 'broken'))
-                AND NOT (
-                    EXISTS (SELECT 1 FROM ai_trial_pair_events e
-                            WHERE e.pair_id = p.pair_id AND e.leg = 'arm' AND e.event = 'filled')
-                    AND NOT EXISTS (SELECT 1 FROM ai_trial_pair_labels lb WHERE lb.pair_id = p.pair_id)
-                )
-            )
-            ORDER BY p.pair_id
-            """
-        ).fetchall()
+        for row in conn.execute(f"SELECT p.pair_id FROM {UNFINISHED_PAIRS_FROM} ORDER BY p.pair_id").fetchall()
     ]
     conn.commit()
     written = 0
@@ -390,6 +393,7 @@ __all__ = [
     "TRIAL_CENSOR_SESSIONS",
     "TRIAL_UNRESOLVED_SESSIONS",
     "UNCLASSIFIED",
+    "UNFINISHED_PAIRS_FROM",
     "LegFacts",
     "TrialPairLifecycleError",
     "broken_reasons",

@@ -2,8 +2,9 @@
 
 fund-v1 may start only when v1 is FULLY wound down (spec §0 rule 2): every v1 declaration is in a
 terminal state AND, on either v1 leg, nothing is still in flight — no claimed-but-undecided run,
-no published leg awaiting its order, and no open or pending lifecycle. Exits of open v1 positions
-still run v1 code, so a terminal declaration with an open trade is NOT wound down.
+no published leg awaiting its order, no open or pending trade, and no pair the lifecycle writer
+still owes an event or a regime label. Exits of open v1 positions still run v1 code, so a
+terminal declaration with an open trade is NOT wound down.
 
 Two readers share this module:
 
@@ -23,6 +24,7 @@ from typing import Any, Final
 
 import psycopg
 
+from app.services.ai_trial_pair_lifecycle import UNFINISHED_PAIRS_FROM
 from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
 
 REFUSAL: Final = "v1_not_wound_down"
@@ -52,6 +54,9 @@ class V1Declaration:
     open_trades: int
     #: ``strategy_position_ownership`` rows still ``active`` for a trade on either leg.
     active_ownerships: int
+    #: Pairs ``record_pair_lifecycle`` still reads (``UNFINISHED_PAIRS_FROM``): a leg event, the
+    #: ``broken`` verdict or the arm's regime label is still owed.
+    unfinished_pairs: int
 
     def outstanding(self) -> tuple[str, ...]:
         """Every reason this declaration is not wound down, in a fixed order; empty when it is."""
@@ -67,6 +72,7 @@ class V1Declaration:
             (self.undispatched_legs, "undispatched_leg"),
             (self.open_trades, "open_trade"),
             (self.active_ownerships, "active_ownership"),
+            (self.unfinished_pairs, "unfinished_pair"),
         ):
             if count:
                 reasons.append(name)
@@ -90,7 +96,7 @@ def wind_down_refusal(declarations: Sequence[V1Declaration]) -> str | None:
     return None
 
 
-_V1_DECLARATIONS_SQL: Final = """
+_V1_DECLARATIONS_SQL: Final = f"""
     SELECT dcl.declaration_id,
            (SELECT se.to_state FROM ai_trial_state_events se
              WHERE se.declaration_id = dcl.declaration_id
@@ -116,7 +122,9 @@ _V1_DECLARATIONS_SQL: Final = """
               JOIN strategy_position_ownership ow
                 ON ow.strategy_trade_id = t.strategy_trade_id AND ow.status = 'active'
              WHERE d.strategy_id IN (dcl.strategy_id, dcl.strategy_id || '-control')
-               AND d.strategy_version = dcl.strategy_version) AS active_ownerships
+               AND d.strategy_version = dcl.strategy_version) AS active_ownerships,
+           (SELECT count(*) FROM {UNFINISHED_PAIRS_FROM}
+               AND p.declaration_id = dcl.declaration_id) AS unfinished_pairs
     FROM ai_trial_declarations dcl
     WHERE dcl.strategy_id = %s
     ORDER BY dcl.declaration_id
@@ -136,6 +144,7 @@ def read_v1_declarations(conn: psycopg.Connection[Any]) -> list[V1Declaration]:
             undispatched_legs=int(r[4]),
             open_trades=int(r[5]),
             active_ownerships=int(r[6]),
+            unfinished_pairs=int(r[7]),
         )
         for r in rows
     ]

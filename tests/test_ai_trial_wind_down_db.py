@@ -33,11 +33,18 @@ def test_a_terminal_trial_with_an_open_leg_and_a_queued_leg_is_not_wound_down(
     [declaration] = read_v1_declarations(conn)
     assert (declaration.state, declaration.claimed_runs) == ("active", 0)
     assert (declaration.undispatched_legs, declaration.open_trades, declaration.active_ownerships) == (1, 1, 1)
-    assert declaration.outstanding() == ("trial_active", "undispatched_leg", "open_trade", "active_ownership")
+    assert declaration.unfinished_pairs == 1
+    assert declaration.outstanding() == (
+        "trial_active",
+        "undispatched_leg",
+        "open_trade",
+        "active_ownership",
+        "unfinished_pair",
+    )
 
     _halt(conn, declaration.declaration_id, "halted_harm")
     [declaration] = read_v1_declarations(conn)
-    assert declaration.outstanding() == ("undispatched_leg", "open_trade", "active_ownership")
+    assert declaration.outstanding() == ("undispatched_leg", "open_trade", "active_ownership", "unfinished_pair")
     assert wind_down_refusal([declaration]) == "v1_not_wound_down:undispatched_leg"
 
 

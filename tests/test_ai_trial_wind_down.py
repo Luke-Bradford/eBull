@@ -18,6 +18,7 @@ DONE = V1Declaration(
     undispatched_legs=0,
     open_trades=0,
     active_ownerships=0,
+    unfinished_pairs=0,
 )
 
 
@@ -37,6 +38,8 @@ DONE = V1Declaration(
         (replace(DONE, active_ownerships=1), "v1_not_wound_down:active_ownership"),
         (replace(DONE, claimed_runs=1), "v1_not_wound_down:claimed_run"),
         (replace(DONE, undispatched_legs=2), "v1_not_wound_down:undispatched_leg"),
+        # Every trade closed, but the lifecycle writer still owes an event or a label.
+        (replace(DONE, unfinished_pairs=1), "v1_not_wound_down:unfinished_pair"),
         # The state is reported first; every reason is still listed by outstanding().
         (replace(DONE, state="active", open_trades=3), "v1_not_wound_down:trial_active"),
     ],
