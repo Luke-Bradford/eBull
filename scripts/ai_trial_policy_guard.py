@@ -44,7 +44,9 @@ def verdict(tree_hash: str, declarations: list[V1Declaration]) -> tuple[list[str
             f"  declaration {d.declaration_id}: {'MATCH' if match else 'MISMATCH'} "
             f"stored={d.policy_hash} outstanding={','.join(d.outstanding())}"
         )
-    lines.append("OK" if ok else "REFUSED: a hashed v1 module or frozen constant changed while v1 is live")
+    lines.append(
+        "OK" if ok else "REFUSED: a live v1 declaration's policy_hash is missing or differs from the working tree"
+    )
     return lines, ok
 
 
