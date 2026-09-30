@@ -696,11 +696,11 @@ def _decide(
     pack = built.pack
     # The version's own run columns (v1: none) ride every later record of this run.
     extra = dict(built.run_record)
-    reached.update(_provenance(env, version, step1=step1, pack=pack), **extra)
+    reached.update({**_provenance(env, version, step1=step1, pack=pack), **extra})
 
     # Step 3: one call, never retried for the session.
     prompt = render_user_prompt(pack.pack)
-    reached.update(_provenance(env, version, step1=step1, pack=pack, prompt=prompt), **extra)
+    reached.update({**_provenance(env, version, step1=step1, pack=pack, prompt=prompt), **extra})
     result = invoke(
         executable=env.executable,
         prompt=prompt.text,

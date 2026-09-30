@@ -9,7 +9,7 @@ lease, every refusal record, and the one-transaction publish through ``sql/432``
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
@@ -23,6 +23,7 @@ from app.services.ai_trial_decision import pack_atr_measurements
 from app.services.ai_trial_guard import PlanRecord, control_plan, pack_structures, price_decimal, validate_response
 from app.services.ai_trial_intent import DECLARATION_CONTRACT_PREFIX, declaration_digest
 from app.services.ai_trial_invocation import InvocationResult
+from app.services.ai_trial_pack import canonical_json
 from app.services.ai_trial_pack_reader import (
     ScoresRun,
     SetupLibraryMismatch,
@@ -315,14 +316,16 @@ def test_a_version_run_record_rides_the_decided_run(ebull_test_conn: Conn, stubb
     """The builder's run columns are written with the ``decided`` publish; v1 writes none."""
     conn = ebull_test_conn
     _seed(conn)
-    record = {"fund_blocks": Jsonb({"coverage": {"names": 5}})}
+    # The builder's own serialiser, with a timestamp as `run_record` writes one.
+    snapshot = datetime(2026, 10, 1, 23, 30, 5, tzinfo=UTC)
+    record = {"fund_blocks": Jsonb({"snapshot_at": snapshot, "coverage": {"names": 5}}, dumps=canonical_json)}
     version = dataclasses.replace(V1, build_pack=lambda _conn, **_kw: BuiltPack(PACK, record))
     outcome = run_trial_decision(
         conn, env=ENV, risk=RISK, fetch_intraday=lambda _iid: [], invoke=_invoke(_decisions()), version=version
     )
     assert outcome.status == "decided"
     row = conn.execute("SELECT fund_blocks FROM ai_trial_runs WHERE run_id = %s", (outcome.run_id,)).fetchone()
-    assert row == ({"coverage": {"names": 5}},)
+    assert row == ({"snapshot_at": "2026-10-01T23:30:05+00:00", "coverage": {"names": 5}},)
     conn.commit()
     assert _run(conn, _invoke(_decisions())).status == "duplicate"
 
