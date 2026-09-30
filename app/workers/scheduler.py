@@ -639,6 +639,9 @@ JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
 JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP = "sec_business_summary_bootstrap"
+# #3518 — MD&A text (10-K Item 7 / 10-Q Part I Item 2) of each tradable US name's current periodic report, the
+# store the fund-v1 `mdna` pack block reads.
+JOB_SEC_PERIODIC_REPORT_SECTIONS = "sec_periodic_report_sections"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
@@ -1604,6 +1607,23 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
+    ),
+    ScheduledJob(
+        name=JOB_SEC_PERIODIC_REPORT_SECTIONS,
+        display_name="SEC periodic-report MD&A sections (#3518)",
+        source="sec_rate",
+        description=(
+            "Daily — extract the MD&A of each tradable US name's newest original 10-K / 10-Q into "
+            "periodic_report_sections (docs/proposals/etl/2026-09-30-3518-periodic-report-sections.md). "
+            "State-based: only targets never attempted, or whose retryable failure is past its backoff, are "
+            "fetched; at most 500 accessions and 45 minutes of starts per run, the rest deferred to the next."
+        ),
+        # 22:30 UTC: clear of the filing_events arrival windows measured in spec §8.1 (query stated there) and an
+        # hour before the fund-v1 23:30 decision (spec §5).
+        cadence=Cadence.daily(hour=22, minute=30),
+        # State-based and idempotent: a late run extracts the same due set, so a missed fire is worth recovering.
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL,
@@ -9295,6 +9315,29 @@ def sec_business_summary_bootstrap() -> None:
             result.fetch_errors,
             result.parse_misses,
         )
+
+
+def sec_periodic_report_sections() -> None:
+    """Extract due MD&A sections into ``periodic_report_sections`` (#3518).
+
+    One fetch per due accession through the shared SEC client (process-wide ``sec_rate_gate``), one parse in
+    the isolated worker child, one transaction per accession. The run's counters land in ``job_runs.error_msg``
+    as the success note, so a bootstrap batch can be read off the run row.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.mdna_parse_worker import ParseWorker
+    from app.services.periodic_report_sections import run_periodic_report_sections
+
+    with _tracked_job(JOB_SEC_PERIODIC_REPORT_SECTIONS) as tracker:
+        with (
+            connect_job() as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+            ParseWorker() as worker,
+        ):
+            result = run_periodic_report_sections(conn, provider, worker)
+        tracker.row_count = result.rows_written
+        tracker.note = result.digest()
+        logger.info("sec_periodic_report_sections complete: %s", result.digest())
 
 
 def sec_insider_transactions_ingest() -> None:

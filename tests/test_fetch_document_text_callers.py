@@ -59,6 +59,11 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # #2351 — cover 12(b) instance → sec_cover_12b_fetches / _pairs, raw
         # stored first (xbrl_cover_instance).
         "app/services/def14a_recipients.py",
+        # #3518 — MD&A text of original 10-K / 10-Q primary documents → periodic_report_sections
+        # (append-only; one row per extraction outcome). The HTML itself is not retained.
+        "app/services/periodic_report_sections.py",
+        "tests/test_3518_periodic_report_sections.py",
+        "tests/test_3518_periodic_report_sections_db.py",
         # Manifest-worker adapters (#1126 / #1128 / #1129 / #1130 /
         # #1133 / #1134 / #1151). Each one wraps a legacy service-layer
         # ingester whose SQL normalisation already lives on this allow-
