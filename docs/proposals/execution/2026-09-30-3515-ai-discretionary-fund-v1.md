@@ -168,7 +168,7 @@ report). The event row supplies `form_type`, `filing_date`, `report_date`.
 
 **Facts per report.** K rows of that accession with `fetched_at ≤ as_of`: drop non-finite `val` (NUMERIC admits
 `NaN` and `±Infinity`; §9: 0), counted `skipped_non_finite`; drop us-gaap facts with `period_end > report_date`
-and a dei cover count with `period_end > filing_date`, counted `excluded_future_dated` (§9: the only post-report
+and the dei `EntityCommonStockSharesOutstanding` fact (the cover-page count) with `period_end > filing_date`, counted `excluded_future_dated` (§9: the only post-report
 facts in the census are dei cover counts); then order and cap. Each fact: `fact_id`, `taxonomy:concept`, `unit`,
 `period_start` (null for instants), `period_end`, `end_minus_start_days` (null for instants; named for what it is,
 not an XBRL duration convention), `val` (exact NUMERIC string: the XBRL fact value in the stated unit, not scaled
@@ -182,7 +182,7 @@ as of its own `period_end`.
   first, `unit`, then order by (rank, K's declared order). A cap therefore cuts the deepest comparatives of every
   concept before any concept's newest fact.
 - Cap `FACTS_PER_REPORT_MAX` = 120 after the drops; beyond it the tail is cut, `truncated: true` and the full count
-  shown. It did not bind in the 2026-09-30 census (max 107 per report, 15 for one concept); the freeze re-runs the
+  shown. It did not bind in the 2026-09-30 census (max 118 per report, 15 for one concept); the freeze re-runs the
   census (§9).
 
 **Per report:** `accession_number`, `form_type`, `filing_date`, `report_date`, `amendment_filed`, `known_at` = max
@@ -321,7 +321,7 @@ name.
   `ai-discretionary-fund-v1` (`searches=1`, `EXACT`), `TRIAL_REGISTER_VERSION` bumped (v1 spec O14). fund-v1's
   policy manifest hashes its new modules, v1's ten hashed modules, the non-hashed shared modules slice 3 changes,
   and its constants (K, forms, selection rule, `FACTS_PER_REPORT_MAX`, `MDNA_MAX_CHARS`,
-  `MDNA_MIN_SHORTLIST_SHARE`, `INPUT_TOKEN_CEILING`, the extractor version, the budget fixture's sha and measured
+  `MIN_BLOCK_SHARE`, `MDNA_MIN_SUBSTANTIVE_CHARS`, `MAX_CLAIM_TO_SNAPSHOT`, `INPUT_TOKEN_CEILING`, the extractor version, the budget fixture's sha and measured
   pair). The declaration also records, per v1 hashed module, whether its sha equals the sha in v1's declaration
   document, so the side-by-side readout can state whether the two versions ran the same **hashed** v1 modules —
   and only that; shared non-hashed modules changed by slice 3 differ by construction. Residual: modules outside
@@ -355,31 +355,41 @@ name.
 ## 9. Full-population verification (premise)
 
 `PYTHONPATH=. uv run python -m scripts.measure_3515_fund_pack_coverage` — one REPEATABLE READ snapshot, `as_of` =
-2026-09-30 15:0xZ (last run), scores run `v1.5-balanced` 2026-09-30 09:08:37Z, population by the production functions
-(`read_scores_run`, the `read_shortlist` candidate query, `drop_symbol_collisions`, `is_eligible`): **1,328
-eligible names**. It applies §3's event and selection rule including the current-period condition (the cap never
-bound, so delivered counts are post-cap).
+2026-09-30 15:32:23Z (US market hours, so quotes were fresh), scores run `v1.5-balanced` 2026-09-30 09:08:37Z,
+population by the production functions (`read_scores_run`, the `read_shortlist` candidate query,
+`drop_symbol_collisions`, `is_eligible`): **1,410 eligible names**. It applies §3's event and selection rule,
+including the current-period condition and the per-taxonomy date drops. The cap never bound, so delivered counts
+are post-cap. (An earlier run at 14:47Z, with pre-market quotes, had 1,328 eligible names and the same shape.)
 
-- Original-form events (`created_at ≤ as_of`): 46,931 accessions; 0 with more than one event row, 0 with NULL
+- Original-form events (`created_at ≤ as_of`): 49,734 accessions; 0 with more than one event row, 0 with NULL
   `report_date`, 0 with `report_date` after `as_of`.
 - K concept names stored under another taxonomy: 0. Non-finite `val` among K rows: 0.
-- Names with ≥ 1 shown report: **1,328**; annual shown 1,327; quarterly shown 1,262 (one name is quarterly-only).
-- Facts per shown report (us-gaap facts dated ≤ `report_date` plus dei counts dated ≤ `report_date`): p50 30, p99
-  60, max 107; max for one concept in one report 15. K facts dated after `report_date` in shown reports: 2,239, all
-  dei cover counts (maximum 763 days after `report_date`); none us-gaap.
-- Report age (`as_of` − `report_date`): annual p50 273 days, p90 273, max 548; quarterly p50 92, p90 96, max 1,644
-  (the quarterly-only name).
-- Names flagged `newer_report_without_facts` (per-kind rule): 97.
-- Delivered, names per concept: Revenues 497; RevenueFromContract…Excluding 825 (either 1,135; both 187);
-  GrossProfit 529; OperatingIncomeLoss 965; NetIncomeLoss 1,268; EPS diluted 1,280; operating cash flow 1,317;
-  capex 907; Assets 1,326; Liabilities 1,106; StockholdersEquity 1,254; cash 1,124; LongTermDebtNoncurrent 614;
-  us-gaap shares 982; dei shares 1,191.
-- Ingestion lag, first surviving `fetched_at` − filing date at NY midnight, over the 1,250 shown reports filed in
-  the last 120 days: p50 0.94 days, p90 1.94, p99 17.8. Descriptive of the ingest path; `fetched_at` can move on a
-  correction, so this is first *surviving* stamp, not first arrival.
-- MD&A target equals the newest shown report for 1,232 of 1,328 names (the 96 above).
-- A dev-DB snapshot is not the future population. The freeze dry run re-runs this script and records its output in
-  the declaration; the binding protections during the trial are the per-run gates (§4, §6).
+- Names with ≥ 1 shown report: **1,410**. An annual is shown for 1,409 and a quarter for 1,342; one name is
+  quarterly-only.
+- Facts per shown report after §3's drops: p50 30, p99 61.5, **max 118**, against the cap of 120. The most facts
+  for one concept in one report is 15.
+- K facts dated after `report_date` in shown reports: 2,373. All are dei cover counts, none is us-gaap, and 4
+  are dated after the filing date (dropped).
+- Report age (`as_of` − `report_date`):
+  - annual: p50 273 days, p90 273, max 638;
+  - quarterly: p50 92, p90 95, max 1,644 (the quarterly-only name).
+- Names flagged `newer_report_without_facts`: 98.
+- Delivered, names per concept:
+  - Revenues 530; RevenueFromContract…Excluding 870 (either: 1,202; both: 198); GrossProfit 561;
+    OperatingIncomeLoss 1,017; NetIncomeLoss 1,347; EPS diluted 1,358;
+  - operating cash flow 1,399; capex 966;
+  - Assets 1,408; Liabilities 1,181; StockholdersEquity 1,331; cash 1,191; LongTermDebtNoncurrent 644;
+  - us-gaap shares 1,041; dei shares 1,259.
+- Ingestion lag over the 1,336 shown reports filed in the last 120 days, measured as the first surviving
+  `fetched_at` minus the filing date at NY midnight: p50 0.94 days, p90 1.94, p99 17.8.
+  - This describes the ingest path. `fetched_at` can move on a correction, so it is the first *surviving* stamp,
+    not the first arrival.
+- The MD&A target equals the newest shown report for 1,315 of 1,410 names.
+- The cap's headroom is small (118 against 120). Round-robin order (§3) means a cut removes the deepest
+  comparatives first.
+- A dev-DB snapshot is not the future population, and the eligible count moves with quote freshness within a
+  day. The freeze dry run re-runs this script and records its output in the declaration. During the trial, the
+  per-run gates (§4, §6) are what bind.
 
 ## 10. Out of scope
 

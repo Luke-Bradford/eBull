@@ -137,7 +137,9 @@ def main() -> None:
         )
         print(
             "non-finite val among K rows (NaN, +/-Infinity):",
-            conn.execute("SELECT count(*) FROM kf WHERE val IN ('NaN', 'Infinity', '-Infinity')").fetchone(),
+            conn.execute(
+                "SELECT count(*) FROM kf WHERE val IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)"
+            ).fetchone(),
         )
         conn.execute(
             """
@@ -145,15 +147,16 @@ def main() -> None:
             WITH cand AS (
               SELECT ev.*, CASE WHEN ev.form_type = ANY(%(annual)s) THEN 'a' ELSE 'q' END AS kind,
                      (SELECT count(*) FROM kf WHERE kf.instrument_id = ev.instrument_id
-                         AND kf.accession_number = ev.accession_number AND kf.period_end <= ev.report_date
-                         AND kf.val NOT IN ('NaN', 'Infinity', '-Infinity'))
+                         AND kf.accession_number = ev.accession_number
+                         AND kf.period_end <= CASE WHEN kf.taxonomy = 'dei' THEN ev.filing_date ELSE ev.report_date END
+                         AND kf.val NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric))
                        AS n_facts
                 FROM ev
                WHERE n_rows = 1 AND report_date IS NOT NULL AND report_date <= %(d)s::date
                  AND EXISTS (SELECT 1 FROM kf WHERE kf.instrument_id = ev.instrument_id
                                AND kf.accession_number = ev.accession_number AND kf.taxonomy = 'us-gaap'
                                AND kf.period_end = ev.report_date
-                               AND kf.val NOT IN ('NaN', 'Infinity', '-Infinity'))),
+                               AND kf.val NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric))),
             ranked AS (
               SELECT c.*, row_number() OVER (PARTITION BY instrument_id, kind
                                              ORDER BY report_date DESC, filing_date DESC, accession_number DESC) AS rn
@@ -189,9 +192,10 @@ def main() -> None:
                 ).fetchone(),
             )
         print(
-            "K facts in shown reports with period_end after report_date, by taxonomy:",
+            "K facts dated after report_date in shown reports: taxonomy, count, max days after, after filing_date:",
             conn.execute(
-                "SELECT kf.taxonomy, count(*), max(kf.period_end - sel.report_date) FROM kf "
+                "SELECT kf.taxonomy, count(*), max(kf.period_end - sel.report_date), "
+                "count(*) FILTER (WHERE kf.period_end > sel.filing_date) FROM kf "
                 "JOIN sel USING (instrument_id, accession_number) "
                 "WHERE kf.period_end > sel.report_date GROUP BY 1 ORDER BY 1"
             ).fetchall(),
@@ -200,7 +204,8 @@ def main() -> None:
             "max facts for one concept in one shown report:",
             conn.execute(
                 "SELECT max(n) FROM (SELECT count(*) n FROM kf JOIN sel USING (instrument_id, accession_number) "
-                "WHERE kf.period_end <= sel.report_date GROUP BY kf.instrument_id, kf.accession_number, kf.concept) x"
+                "WHERE kf.period_end <= CASE WHEN kf.taxonomy = 'dei' THEN sel.filing_date ELSE sel.report_date END "
+                "GROUP BY kf.instrument_id, kf.accession_number, kf.concept) x"
             ).fetchone(),
         )
         print(
