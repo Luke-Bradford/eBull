@@ -56,7 +56,14 @@ DECISION_FIRE_UTC: Final = time(23, 30)
 RECENT_SESSIONS: Final = 10
 
 TrialState = Literal[
-    "not_declared", "not_started", "active", "halted_harm", "halted_loss", "halted_mandate", "halted_operator"
+    "not_declared",
+    "not_started",
+    "active",
+    "halted_harm",
+    "halted_loss",
+    "halted_mandate",
+    "halted_operator",
+    "completed",
 ]
 DecisionState = Literal["not_run", "deciding", "refused", "abstained", "no_valid_plan", "legs_published"]
 ExecutionState = Literal["submitted", "refused", "awaiting_execution", "not_run"]

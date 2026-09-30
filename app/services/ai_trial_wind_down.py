@@ -29,11 +29,12 @@ from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
 
 REFUSAL: Final = "v1_not_wound_down"
 
-#: ``sql/432``'s ``ai_trial_state_events_transition``: these two admit no further transition.
-#: ``halted_mandate`` / ``halted_operator`` are resumable by the supervisor, so a v1 trial paused
-#: in either is NOT wound down — starting fund-v1 on a pause would strand v1 (§0 rule 3).
-TERMINAL_STATES: Final = frozenset({"halted_harm", "halted_loss"})
-#: The ``to_state`` CHECK in ``sql/432``. A state outside it is refused as ``trial_unknown_state``.
+#: ``ai_trial_state_events_transition`` (``sql/442``): these admit no further transition —
+#: the two engine halts and the supervisor's ``completed``. ``halted_mandate`` /
+#: ``halted_operator`` are resumable by the supervisor, so a v1 trial paused in either is NOT
+#: wound down — starting fund-v1 on a pause would strand v1 (§0 rule 3).
+TERMINAL_STATES: Final = frozenset({"halted_harm", "halted_loss", "completed"})
+#: The ``to_state`` CHECK (``sql/442``). A state outside it is refused as ``trial_unknown_state``.
 KNOWN_STATES: Final = TERMINAL_STATES | {"active", "halted_mandate", "halted_operator"}
 
 

@@ -242,6 +242,70 @@ def test_state_events_follow_the_legal_transitions(ebull_test_conn: Conn) -> Non
     _refused(ebull_test_conn, sql, (declaration_id, "halted_harm", "active", "supervisor"), "halted_harm is terminal")
 
 
+def test_only_the_supervisor_completes_a_trial_and_completed_is_terminal(ebull_test_conn: Conn) -> None:
+    """#3515 sql/442: a trial that finishes needs a terminal state that is not an engine halt."""
+    declaration_id = _seed(ebull_test_conn)
+    sql = (
+        "INSERT INTO ai_trial_state_events (declaration_id, from_state, to_state, reason, actor) "
+        "VALUES (%s, %s, %s, 'r', %s)"
+    )
+    _refused(ebull_test_conn, sql, (declaration_id, None, "completed", "supervisor"), "genesis event must be")
+    ebull_test_conn.execute(sql, (declaration_id, None, "active", "supervisor"))
+    ebull_test_conn.commit()
+    _refused(ebull_test_conn, sql, (declaration_id, "active", "completed", "engine"), "supervisor action")
+    # From a resumable halt, the supervisor may resume or complete; nothing else.
+    ebull_test_conn.execute(sql, (declaration_id, "active", "halted_operator", "engine"))
+    ebull_test_conn.commit()
+    _refused(ebull_test_conn, sql, (declaration_id, "halted_operator", "halted_harm", "engine"), "illegal transition")
+    _refused(ebull_test_conn, sql, (declaration_id, "halted_operator", "completed", "operator"), "supervisor action")
+    ebull_test_conn.execute(sql, (declaration_id, "halted_operator", "completed", "supervisor"))
+    ebull_test_conn.commit()
+    _refused(ebull_test_conn, sql, (declaration_id, "completed", "active", "supervisor"), "completed is terminal")
+
+
+def test_a_fund_version_declares_in_the_same_table(ebull_test_conn: Conn) -> None:
+    """#3515 §7: ``ai-discretionary-fund-v<N>`` is an admissible trial id; anything else is not."""
+    conn = ebull_test_conn
+    insert = (
+        "INSERT INTO ai_trial_declarations (declaration_id, strategy_id, strategy_version, doc_path, doc, doc_sha256) "
+        "VALUES (%s, %s, 'v1', 'x', jsonb_build_object('strategy_id', %s::text, 'strategy_version', 'v1'), %s)"
+    )
+
+    def prereg(strategy_id: str) -> int:
+        # A #2599 row naming the same id, so the bind trigger passes and only the CHECK decides.
+        row = conn.execute(
+            """
+            INSERT INTO strategy_preregistration_declarations (
+                strategy_id, strategy_version, contract_version, prereg_purpose,
+                structural_refusal_policy_version, declared_universe_basis, declared_carry_unmodelled,
+                declared_fx_unmodelled, expected_structural_refusals, min_forward_decision_dates,
+                min_forward_calendar_weeks, forward_shadow_derivation, declared_by, declaration_sha256
+            ) VALUES (
+                %(id)s, 'v1', %(contract)s, 'falsification_only', 'test-policy', 'survivor_only', true, true,
+                '{}', 40, 8, 'spec §9 cohort, sessions 1-40', 'test', %(digest)s
+            )
+            RETURNING declaration_id
+            """,
+            {"id": strategy_id, "contract": f"ai-trial-declaration-v1:{DOC_SHA}", "digest": DOC_SHA},
+        ).fetchone()
+        assert row is not None
+        conn.commit()
+        return int(row[0])
+
+    for strategy_id in ("ai-discretionary-fund-v1", "ai-discretionary-fund-v12"):
+        declaration_id = prereg(strategy_id)
+        conn.execute(insert, (declaration_id, strategy_id, strategy_id, DOC_SHA))
+        conn.commit()
+    for strategy_id in ("ai-discretionary-fund-v0", "ai-discretionary-fundv1", "ai-discretionary-x-v1"):
+        declaration_id = prereg(strategy_id)
+        _refused(
+            conn,
+            insert,
+            (declaration_id, strategy_id, strategy_id, DOC_SHA),
+            "ai_trial_declarations_strategy_id_check",
+        )
+
+
 def test_a_run_publishes_once_and_only_in_its_decided_transaction(ebull_test_conn: Conn) -> None:
     declaration_id = _seed(ebull_test_conn)
     _refused(
