@@ -196,7 +196,9 @@ class TestResolveMarketCapBasis:
     def test_dual_class_total_company_cap(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         # Two siblings sharing a CIK, each with a curated FSDS class row at a fresh
         # instant, a combined us-gaap count near that instant, and quotes.
-        pe = date.today().replace(day=1)  # recent → within the 548-day freshness window
+        # UTC, as the resolver's future-date guard is: a local date is "future" to it on the 1st
+        # between local and UTC midnight.
+        pe = datetime.now(UTC).date().replace(day=1)  # recent → within the 548-day freshness window
         cik = "0009990001"
         a = _seed_instrument(ebull_test_conn, symbol="RMA")
         c = _seed_instrument(ebull_test_conn, symbol="RMC")
@@ -228,7 +230,7 @@ class TestResolveMarketCapBasis:
     def test_dual_class_unpriced_sibling_suppressed(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         # Curated dual-class but one class has no quote → fail closed (suppress),
         # never fall back to the structurally-wrong combined × this-class price.
-        pe = date.today().replace(day=1)
+        pe = datetime.now(UTC).date().replace(day=1)
         cik = "0009990002"
         a = _seed_instrument(ebull_test_conn, symbol="RMD")
         c = _seed_instrument(ebull_test_conn, symbol="RME")
