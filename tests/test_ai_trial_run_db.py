@@ -8,6 +8,7 @@ lease, every refusal record, and the one-transaction publish through ``sql/432``
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -17,7 +18,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import BrokerAccountRiskSnapshot
-from app.services import ai_trial_run
+from app.services import ai_trial_run, ai_trial_version
 from app.services.ai_trial_decision import pack_atr_measurements
 from app.services.ai_trial_guard import PlanRecord, control_plan, pack_structures, price_decimal, validate_response
 from app.services.ai_trial_intent import DECLARATION_CONTRACT_PREFIX, declaration_digest
@@ -31,6 +32,7 @@ from app.services.ai_trial_pack_reader import (
 )
 from app.services.ai_trial_policy import AI_TRIAL_POLICY_HASH
 from app.services.ai_trial_run import Claim, RunEnvironment, run_trial_decision
+from app.services.ai_trial_version import V1, PackRefusal
 from app.services.market_calendar import latest_completed_us_session
 from scripts.ai_trial_synthetic import _NAMES, synthetic_pack
 
@@ -132,7 +134,8 @@ def stubbed(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return Step1(as_of, last, next_us_session(last), ScoresRun("v1.5", as_of), 1, state["step1_refusal"])
 
     monkeypatch.setattr(ai_trial_run, "read_step1", step1)
-    monkeypatch.setattr(ai_trial_run, "assemble_pack", lambda _conn, **_kw: PACK)
+    # v1's pack builder (`ai_trial_version.V1.build_pack`) resolves this at call time.
+    monkeypatch.setattr(ai_trial_version, "assemble_pack", lambda _conn, **_kw: PACK)
     monkeypatch.setattr(ai_trial_run, "preview_trial_capacity", lambda _conn, **_kw: state["preview"])
     return state
 
@@ -270,10 +273,37 @@ def test_a_library_mismatch_refuses_the_whole_run(
         calls.append(kwargs)
         return invoke(**kwargs)
 
-    monkeypatch.setattr(ai_trial_run, "assemble_pack" if stage == "pack" else "load_setup_library", mismatch)
+    if stage == "pack":
+        monkeypatch.setattr(ai_trial_version, "assemble_pack", mismatch)
+    else:
+        monkeypatch.setattr(ai_trial_run, "load_setup_library", mismatch)
     outcome = _run(conn, counted)
     assert (outcome.status, outcome.refusal_reason) == ("refused", "library_sha_mismatch")
     assert len(calls) == (0 if stage == "pack" else 1)
+    assert conn.execute("SELECT count(*) FROM ai_trial_decisions").fetchone() == (0,)
+
+
+def test_a_version_pack_refusal_refuses_the_run_before_the_model(
+    ebull_test_conn: Conn, stubbed: dict[str, Any]
+) -> None:
+    """fund-v1 spec §5: a version's pack builder refuses the RUN with its reason, before the model
+    call and with no decision rows. v1's builder never raises it; the hook is the descriptor's."""
+    conn = ebull_test_conn
+    _seed(conn)
+
+    def refusing(_conn: Conn, **_kw: object) -> Any:
+        raise PackRefusal("mdna_coverage_below_floor")
+
+    def never(**_: object) -> InvocationResult:
+        raise AssertionError("a refused pack must not call the model")
+
+    version = dataclasses.replace(V1, build_pack=refusing)
+    outcome = run_trial_decision(
+        conn, env=ENV, risk=RISK, fetch_intraday=lambda _iid: [], invoke=never, version=version
+    )
+    assert (outcome.status, outcome.refusal_reason) == ("refused", "mdna_coverage_below_floor")
+    row = conn.execute("SELECT pack_sha256 FROM ai_trial_runs WHERE run_id = %s", (outcome.run_id,)).fetchone()
+    assert row == (None,)
     assert conn.execute("SELECT count(*) FROM ai_trial_decisions").fetchone() == (0,)
 
 
@@ -330,7 +360,7 @@ def test_a_pack_read_race_is_recorded_run_failed_before_any_pack(
 ) -> None:
     """#3471 slice 3b: ``read_bars`` raises ``PackReadRace`` when the break map moves mid-read; the
     publisher's handler records the run refused, and no pack is published."""
-    from app.services import ai_trial_pack_reader, ai_trial_run
+    from app.services import ai_trial_pack_reader
 
     conn = ebull_test_conn
     _seed(conn)
@@ -338,7 +368,7 @@ def test_a_pack_read_race_is_recorded_run_failed_before_any_pack(
     def racing(_conn: object, **_kw: object) -> object:
         raise ai_trial_pack_reader.PackReadRace("break map moved")
 
-    monkeypatch.setattr(ai_trial_run, "assemble_pack", racing)
+    monkeypatch.setattr(ai_trial_version, "assemble_pack", racing)
     with pytest.raises(ai_trial_pack_reader.PackReadRace):
         _run(conn, _invoke({"decisions": []}))
     row = conn.execute("SELECT status, refusal_reason, pack_sha256 FROM ai_trial_runs").fetchone()

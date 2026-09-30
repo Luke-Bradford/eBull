@@ -44,7 +44,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import psycopg
 
@@ -53,6 +53,10 @@ from app.services.ai_trial_intent import TRIAL_TICKET_USD
 from app.services.ai_trial_pair_lifecycle import LEGS
 from app.services.ai_trial_protection import EngineHalt, halt_active_trial
 from app.services.ai_trial_readout import CloseRow, compute_readout, load_close_rows
+
+if TYPE_CHECKING:
+    # Runtime import would cycle: ai_trial_version → ai_trial_policy → this module.
+    from app.services.ai_trial_version import TrialVersion
 
 logger = logging.getLogger(__name__)
 
@@ -187,18 +191,19 @@ class HaltCheck:
     failed: bool = False
 
 
+#: EVERY active declaration, registered version or not: an unregistered one must reach
+#: ``trial_version`` and fail closed, never be filtered out before it (Codex ckpt-2 P1).
 _ACTIVE_DECLARATIONS_SQL: Final = """
-    SELECT d.declaration_id, d.strategy_version
+    SELECT d.declaration_id, d.strategy_id, d.strategy_version
     FROM ai_trial_declarations d
-    WHERE d.strategy_id = %s
-      AND (SELECT se.to_state FROM ai_trial_state_events se
+    WHERE (SELECT se.to_state FROM ai_trial_state_events se
            WHERE se.declaration_id = d.declaration_id ORDER BY se.event_id DESC LIMIT 1) = 'active'
     ORDER BY d.declaration_id
 """
 
 
 def _decide(
-    conn: Conn, losses: Sequence[LegLoss], strategy_version: str, now: datetime | None
+    conn: Conn, losses: Sequence[LegLoss], version: TrialVersion, now: datetime | None
 ) -> tuple[EngineHalt, str] | None:
     """The strongest halt due: a proven loss breach, then a final harm look (both terminal), then
     an unproven loss breach (resumable). A terminal halt is never masked by the resumable one."""
@@ -211,7 +216,7 @@ def _decide(
     )
     if breach is not None and breach.unmeasured == 0:
         return "halted_loss", f"loss_halt:{detail}"
-    readout = compute_readout(conn, strategy_version=strategy_version, as_of=now, descriptives=False)
+    readout = compute_readout(conn, version=version, as_of=now, descriptives=False)
     look = next((look for look in readout.harm_looks if look.halts and look.flows_final), None)
     if look is not None:
         return "halted_harm", (
@@ -224,11 +229,11 @@ def _decide(
     return None
 
 
-def _check_declaration(conn: Conn, declaration_id: int, strategy_version: str, now: datetime | None) -> HaltCheck:
+def _check_declaration(conn: Conn, declaration_id: int, version: TrialVersion, now: datetime | None) -> HaltCheck:
     losses = leg_losses(load_leg_trades(conn, declaration_id))
     unmeasured = sum(leg.unmeasured for leg in losses)
     halted: EngineHalt | None = None
-    decision = _decide(conn, losses, strategy_version, now)
+    decision = _decide(conn, losses, version, now)
     if decision is not None:
         target, reason = decision
         if halt_active_trial(conn, declaration_id=declaration_id, to_state=target, reason=reason):
@@ -262,14 +267,16 @@ def enforce_trial_halts(conn: Conn, *, now: datetime | None = None) -> list[Halt
     ⚠ A check that cannot run fails CLOSED: the trial moves to ``halted_operator``, the same
     resumable refusal surface O10 uses for an unprotected leg. A loss or harm halt that cannot be
     evaluated must not let entries continue behind a note on the job (review round 2)."""
-    # Imported here: ai_trial_run → ai_trial_policy → this module (its §9 constant).
-    from app.services.ai_trial_run import TRIAL_ARM_STRATEGY_ID
+    # Imported here: ai_trial_version → ai_trial_policy → this module (its §9 constant).
+    from app.services.ai_trial_version import trial_version
 
     checks: list[HaltCheck] = []
-    for declaration_id, strategy_version in conn.execute(_ACTIVE_DECLARATIONS_SQL, (TRIAL_ARM_STRATEGY_ID,)).fetchall():
+    for declaration_id, strategy_id, strategy_version in conn.execute(_ACTIVE_DECLARATIONS_SQL).fetchall():
         try:
             with conn.transaction():
-                checks.append(_check_declaration(conn, int(declaration_id), str(strategy_version), now))
+                # An active declaration of an unregistered version has no code: it fails closed below.
+                version = trial_version(str(strategy_id), str(strategy_version))
+                checks.append(_check_declaration(conn, int(declaration_id), version, now))
         except Exception as exc:
             logger.exception("ai trial %s: halt check failed; halting it for the supervisor", declaration_id)
             checks.append(_fail_closed(conn, int(declaration_id), exc))

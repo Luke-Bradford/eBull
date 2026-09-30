@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from app.services import ai_trial_readout
 from app.services.ai_trial_pair_lifecycle import previous_session, record_pair_lifecycle
 from app.services.ai_trial_readout import compute_readout, load_exposure_facts, load_pairs, load_plan_facts
+from app.services.ai_trial_version import trial_version
 from app.services.market_regime import Regime
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.risk_metrics import RISK_METRICS_VERSION
@@ -89,9 +90,9 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
         raise AssertionError("SPY loaded before the readout is due")
 
     monkeypatch.setattr(ai_trial_readout, "load_spy_reference", _boom)
-    version = conn.execute("SELECT strategy_version FROM ai_trial_declarations").fetchone()
-    assert version is not None
-    readout = compute_readout(conn, strategy_version=str(version[0]), as_of=closed_at)
+    row = conn.execute("SELECT strategy_id, strategy_version FROM ai_trial_declarations").fetchone()
+    assert row is not None
+    readout = compute_readout(conn, version=trial_version(str(row[0]), str(row[1])), as_of=closed_at)
     conn.commit()
     assert (readout.cohort.status, readout.spy_capital) == ("not_due", None)
 

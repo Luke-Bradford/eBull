@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.ai_trial_halts import HaltCheck, LegTrade, enforce_trial_halts
 from app.services.ai_trial_readout import HarmLook
+from app.services.ai_trial_version import V1, TrialVersion
 from tests.test_ai_trial_deadline_db import _POSITION_ID, _opened_arm_leg
 from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW
 
@@ -106,12 +107,12 @@ def test_a_check_that_cannot_run_fails_closed_to_a_resumable_halt(
     conn.commit()
     assert row is not None
     looks = [HarmLook(1, 10, 8, 0.001, 0.025, True, flows_final=True)]
-    calls: list[str] = []
+    calls: list[TrialVersion] = []
 
-    def readout(_conn: Conn, *, strategy_version: str, as_of: Any, descriptives: bool) -> SimpleNamespace:
+    def readout(_conn: Conn, *, version: TrialVersion, as_of: Any, descriptives: bool) -> SimpleNamespace:
         # The 5-minute halt check reads no descriptives (benchmark, exposure): only the harm looks.
         assert descriptives is False
-        calls.append(strategy_version)
+        calls.append(version)
         # The halt is written first, then this declaration's own check raises: its savepoint
         # takes the halt with it, and the pass reports it failed instead of raising.
         _conn.execute(
@@ -129,7 +130,7 @@ def test_a_check_that_cannot_run_fails_closed_to_a_resumable_halt(
         # The NUL makes the detailed reason unwritable; the class-only reason still halts.
         ("halted_operator", "engine", "halt_check_failed:RuntimeError")
     ]
-    assert calls == ["v1"]
+    assert calls == [V1]
 
     # The supervisor resumes; a clean pass then halts on the harm look.
     conn.execute(
@@ -194,3 +195,20 @@ def test_an_unrenderable_error_still_fails_closed(ebull_test_conn: Conn, monkeyp
     (check,) = _enforce(conn)
     assert (check.failed, check.halted) == (True, "halted_operator")
     assert _states(conn)[-1] == ("halted_operator", "engine", "halt_check_failed:_Unprintable")
+
+
+def test_an_active_declaration_of_an_unregistered_version_fails_closed(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fund-v1 spec §7 (Codex ckpt-2 P1): an active declaration whose version has no descriptor is
+    still checked, and halts for the supervisor — never silently skipped while its legs execute."""
+    conn = ebull_test_conn
+    _opened_arm_leg(conn, monkeypatch)
+    monkeypatch.setattr("app.services.ai_trial_version.TRIAL_VERSIONS", ())
+    (check,) = _enforce(conn)
+    assert (check.failed, check.halted) == (True, "halted_operator")
+    assert _states(conn)[-1] == (
+        "halted_operator",
+        "engine",
+        "halt_check_failed:LookupError:no registered trial version ai-discretionary-v1/v1",
+    )
