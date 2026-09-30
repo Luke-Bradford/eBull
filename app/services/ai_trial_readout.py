@@ -1062,6 +1062,10 @@ class PlanReadout:
     exhausted_by_setup: dict[str, int]
     #: *d* over the cohort units by the arm decision's position in the model's response.
     d_by_response_position: list[GroupRow]
+    #: *d* over the cohort units split by selection contrast (§16.12, supervisor 2026-09-30):
+    #: ``contrast`` (the secondary line), ``singleton_self`` (no contrast, v63-8) and
+    #: ``unlabelled`` (no plan row). The units column is each group's share of the population.
+    d_by_contrast: list[GroupRow]
 
 
 def plan_readout(cohort_pairs: Sequence[PairRecord], units: Sequence[PairRecord], facts: PlanFacts) -> PlanReadout:
@@ -1069,9 +1073,11 @@ def plan_readout(cohort_pairs: Sequence[PairRecord], units: Sequence[PairRecord]
     completed = [pair for pair in cohort_pairs if pair.state == "unit"]
     cohort_plans = [plans[pair.pair_seq] for pair in cohort_pairs if pair.pair_seq in plans]
     positions: dict[int | None, list[float]] = {}
+    contrast: dict[str, list[float]] = {}
     for unit in units:
         plan = plans.get(unit.pair_seq)
         positions.setdefault(None if plan is None else plan.response_position, []).append(unit.d)
+        contrast.setdefault(_contrast_group(plan), []).append(unit.d)
     return PlanReadout(
         library_sha256=facts.library_sha256,
         library_caveat=facts.library_caveat,
@@ -1101,7 +1107,22 @@ def plan_readout(cohort_pairs: Sequence[PairRecord], units: Sequence[PairRecord]
             GroupRow("unlabelled" if k is None else str(k), len(ds), sum(ds) / len(ds))
             for k, ds in sorted(positions.items(), key=lambda item: (item[0] is None, item[0] or 0))
         ],
+        d_by_contrast=[
+            GroupRow(group, len(contrast[group]), sum(contrast[group]) / len(contrast[group]))
+            for group in _CONTRAST_GROUPS
+            if group in contrast
+        ],
     )
+
+
+_CONTRAST_GROUPS: Final = ("contrast", "singleton_self", "unlabelled")
+
+
+def _contrast_group(plan: PairPlan | None) -> str:
+    """A pool of one whose only member is the arm's own name has no selection contrast (v63-8)."""
+    if plan is None:
+        return "unlabelled"
+    return "singleton_self" if plan.self_draw and plan.pool_size == 1 else "contrast"
 
 
 # --------------------------------------------------------------------------------------------
