@@ -685,19 +685,22 @@ def _decide(
         max_new_entries=entries,
     )
     try:
-        pack = version.build_pack(conn, step1=step1, account=account, fetch_intraday=fetch)
+        built = version.build_pack(conn, step1=step1, account=account, fetch_intraday=fetch, declaration=declaration)
     except SetupLibraryMismatch:
         # §16.11: a missing or re-written library refuses the whole run before the model call.
         logger.warning("ai_trial run %s: setup library mismatch at pack build", claim.run_id, exc_info=True)
         return refuse_run(conn, claim, LIBRARY_SHA_MISMATCH, reached)
     except PackRefusal as refusal:  # never raised by v1's builder (fund-v1 spec §5)
-        return refuse_run(conn, claim, refusal.reason, reached)
+        return refuse_run(conn, claim, refusal.reason, {**reached, **refusal.run_record})
     conn.commit()
-    reached.update(_provenance(env, version, step1=step1, pack=pack))
+    pack = built.pack
+    # The version's own run columns (v1: none) ride every later record of this run.
+    extra = dict(built.run_record)
+    reached.update({**_provenance(env, version, step1=step1, pack=pack), **extra})
 
     # Step 3: one call, never retried for the session.
     prompt = render_user_prompt(pack.pack)
-    reached.update(_provenance(env, version, step1=step1, pack=pack, prompt=prompt))
+    reached.update({**_provenance(env, version, step1=step1, pack=pack, prompt=prompt), **extra})
     result = invoke(
         executable=env.executable,
         prompt=prompt.text,
@@ -705,7 +708,7 @@ def _decide(
         json_schema=decision_json_schema(),
         source_env=env.source_env,
     )
-    values = _provenance(env, version, step1=step1, pack=pack, prompt=prompt, result=result)
+    values = {**_provenance(env, version, step1=step1, pack=pack, prompt=prompt, result=result), **extra}
     reached.update(values)
     if result.refusal_reason is not None:
         return refuse_run(conn, claim, result.refusal_reason, values)

@@ -9,7 +9,7 @@ lease, every refusal record, and the one-transaction publish through ``sql/432``
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
@@ -23,6 +23,7 @@ from app.services.ai_trial_decision import pack_atr_measurements
 from app.services.ai_trial_guard import PlanRecord, control_plan, pack_structures, price_decimal, validate_response
 from app.services.ai_trial_intent import DECLARATION_CONTRACT_PREFIX, declaration_digest
 from app.services.ai_trial_invocation import InvocationResult
+from app.services.ai_trial_pack import canonical_json
 from app.services.ai_trial_pack_reader import (
     ScoresRun,
     SetupLibraryMismatch,
@@ -32,7 +33,7 @@ from app.services.ai_trial_pack_reader import (
 )
 from app.services.ai_trial_policy import AI_TRIAL_POLICY_HASH
 from app.services.ai_trial_run import Claim, RunEnvironment, run_trial_decision
-from app.services.ai_trial_version import V1, PackRefusal
+from app.services.ai_trial_version import V1, BuiltPack, PackRefusal
 from app.services.market_calendar import latest_completed_us_session
 from scripts.ai_trial_synthetic import _NAMES, synthetic_pack
 
@@ -160,6 +161,7 @@ def test_a_run_publishes_decisions_pairs_signals_and_links_in_one_transaction(
     ).fetchone()
     assert run is not None
     assert run[:4] == ("decided", PACK.sha256, AI_TRIAL_POLICY_HASH, Decimal("0.57"))
+    assert conn.execute("SELECT fund_blocks FROM ai_trial_runs").fetchone() == (None,)  # v1 writes none
     assert run[4] == outcome.session_date
 
     decisions = conn.execute(
@@ -292,7 +294,7 @@ def test_a_version_pack_refusal_refuses_the_run_before_the_model(
     _seed(conn)
 
     def refusing(_conn: Conn, **_kw: object) -> Any:
-        raise PackRefusal("mdna_coverage_below_floor")
+        raise PackRefusal("mdna_coverage_below_floor", {"fund_blocks": Jsonb({"coverage": {"names": 5}})})
 
     def never(**_: object) -> InvocationResult:
         raise AssertionError("a refused pack must not call the model")
@@ -302,9 +304,30 @@ def test_a_version_pack_refusal_refuses_the_run_before_the_model(
         conn, env=ENV, risk=RISK, fetch_intraday=lambda _iid: [], invoke=never, version=version
     )
     assert (outcome.status, outcome.refusal_reason) == ("refused", "mdna_coverage_below_floor")
-    row = conn.execute("SELECT pack_sha256 FROM ai_trial_runs WHERE run_id = %s", (outcome.run_id,)).fetchone()
-    assert row == (None,)
+    row = conn.execute(
+        "SELECT pack_sha256, fund_blocks FROM ai_trial_runs WHERE run_id = %s", (outcome.run_id,)
+    ).fetchone()
+    # The refusal carries the version's run record (sql/443), and no pack.
+    assert row == (None, {"coverage": {"names": 5}})
     assert conn.execute("SELECT count(*) FROM ai_trial_decisions").fetchone() == (0,)
+
+
+def test_a_version_run_record_rides_the_decided_run(ebull_test_conn: Conn, stubbed: dict[str, Any]) -> None:
+    """The builder's run columns are written with the ``decided`` publish; v1 writes none."""
+    conn = ebull_test_conn
+    _seed(conn)
+    # The builder's own serialiser, with a timestamp as `run_record` writes one.
+    snapshot = datetime(2026, 10, 1, 23, 30, 5, tzinfo=UTC)
+    record = {"fund_blocks": Jsonb({"snapshot_at": snapshot, "coverage": {"names": 5}}, dumps=canonical_json)}
+    version = dataclasses.replace(V1, build_pack=lambda _conn, **_kw: BuiltPack(PACK, record))
+    outcome = run_trial_decision(
+        conn, env=ENV, risk=RISK, fetch_intraday=lambda _iid: [], invoke=_invoke(_decisions()), version=version
+    )
+    assert outcome.status == "decided"
+    row = conn.execute("SELECT fund_blocks FROM ai_trial_runs WHERE run_id = %s", (outcome.run_id,)).fetchone()
+    assert row == ({"snapshot_at": "2026-10-01T23:30:05+00:00", "coverage": {"names": 5}},)
+    conn.commit()
+    assert _run(conn, _invoke(_decisions())).status == "duplicate"
 
 
 @pytest.mark.parametrize(

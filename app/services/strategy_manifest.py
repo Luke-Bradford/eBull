@@ -203,7 +203,15 @@ STRATEGY_PURPOSES: frozenset[str] = frozenset(get_args(StrategyPurpose))
 #: control plane's two narrow branches (``promote_strategy`` refuses every advancing stage;
 #: ``configure_deployment`` admits a paper deployment only) are the whole of what they may do.
 DemoTrialPurpose = Literal["demo_trial"]
-DEMO_TRIAL_STRATEGY_IDS: Final[frozenset[str]] = frozenset({"ai-discretionary-v1", "ai-discretionary-v1-control"})
+#: #3515 adds fund-v1's two legs (fund-v1 spec §7), under the same restriction.
+DEMO_TRIAL_STRATEGY_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "ai-discretionary-v1",
+        "ai-discretionary-v1-control",
+        "ai-discretionary-fund-v1",
+        "ai-discretionary-fund-v1-control",
+    }
+)
 #: The purpose any registered strategy id resolves to: a manifest purpose, or ``demo_trial``.
 RegisteredPurpose = StrategyPurpose | DemoTrialPurpose
 
