@@ -383,10 +383,15 @@ def configure_paper_pool(
     # Conflict with the executor's session lock so a pause/lower cannot race an
     # already-sized order between its authority read and demo broker submit.
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
-    if max_concurrent_positions_override is not None:
-        # Under the lock: `patch_config` takes the same one to refuse the inverse order.
-        _refuse_non_demo_override(conn)
     current = load_paper_pool(conn)
+    if (
+        max_concurrent_positions_override is not None
+        and max_concurrent_positions_override != current.max_concurrent_positions_override
+    ):
+        # Only SETTING or CHANGING it grants authority. Carrying a standing value forward (a
+        # disable, a capital cut) must stay reachable in any state: risk reduction is never
+        # blocked. Under the lock: `patch_config` takes the same one to refuse the inverse order.
+        _refuse_non_demo_override(conn)
     if (
         current.enabled == enabled
         and current.capital_limit == capital_limit

@@ -1820,6 +1820,36 @@ def test_a_concurrency_override_is_refused_outside_demo_or_under_live_trading(
         conn.commit()
 
 
+def test_a_standing_override_never_blocks_a_risk_reducing_edit_outside_demo(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WARNING on PR #3512: carrying a standing override forward grants nothing new, so an
+    edit that keeps it (here a capital cut) is not demo-gated; changing it still is."""
+    from app.config import settings
+
+    conn = ebull_test_conn
+    _override_pool(conn, 30, reason="demo trial pool")
+    conn.commit()
+    monkeypatch.setattr(settings, "etoro_env", "real")
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("30000"),
+        capital_mode="fixed",
+        risk_profile="growth",
+        approval_mode="manual",
+        max_concurrent_positions_override=30,
+        changed_by="test",
+        reason="risk reduction outside demo",
+    )
+    conn.commit()
+    assert load_paper_pool(conn).max_concurrent_positions_override == 30
+    with pytest.raises(StrategyControlError, match="demo-only"):
+        _override_pool(conn, 31, reason="a changed override is new authority")
+    conn.rollback()
+
+
 def test_the_pool_endpoint_carries_an_omitted_override_forward_and_clears_an_explicit_null(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
