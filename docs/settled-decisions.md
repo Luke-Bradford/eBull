@@ -1269,6 +1269,23 @@ universe; a tilt that returns less than the market after costs is a failure.
 If arms 2–4 all fail on a PIT-correct spine, the honest conclusion is that we have no selection
 edge either, and the product is the low-cost market sleeve already queued as Phase 1 on #2437.
 
+## 2026-10-01 — Strategy design is delegated; use any freely available factor; no SPY.RTH stand-in (operator)
+
+Operator, verbatim: *"you should be making use of everything and anything that helps make money … go after anything that
+is freely available to us in deciding a strategy which is often made up of a number of key factors. You don't need my say
+on anything here."*
+
+- **Delegated to the engine/supervisor:** strategy design, data and factor choice, and demo deployment. This includes the
+  admission route for published factors via ETFs (gap register P6, #3544).
+- **Supersedes the 2026-08-22 price-only steer for demo research.** Insider purchases, 13D, PEAD, eToro crowd, news and
+  short-volume may be used as FACTORS in multi-factor strategies. Their recorded lessons still apply as priors.
+- **No passive stand-in.** Unassigned engine budget stays in cash until a real strategy uses it. It is never parked in
+  SPY.RTH to look busy. The core sleeve mandate stays at its existing 50% (event 35 reverted a same-day 75% raise).
+- **Every engine trade states the factors that selected it** (#3542). "Beta" is not a trade reason.
+- **Unchanged:** the capital tier (live money) still needs the evidence bar, the #2844 sandbox and the operator's funding.
+  "No factor mix knows a trade wins": strategies are judged against SPY total return net of costs, plus a random-basket
+  control.
+
 ## 2026-09-13 — The #2844 reconciliation countdown counts DAYS OF EVIDENCE on the held-session calendar
 
 `account_reconciliation_days` stores one verdict per `(environment, reconciliation_rule_version,

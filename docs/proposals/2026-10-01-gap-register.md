@@ -10,7 +10,7 @@ This is fixed by an existing settled decision, not chosen here (`docs/settled-de
 
 Operator north star (2026-09-26): *"trade profitably, hands-off"*.
 
-So the bar is a **net-of-all-costs return above the investable passive alternative, inside the mandate's risk limits**, judged on the engine's own capital. Positive nominal return alone is not the bar. **Operator to confirm.** Every gap below is ranked by how directly it blocks measuring or achieving that.
+So the bar is a **net-of-all-costs return above the investable passive alternative, inside the mandate's risk limits**, judged on the engine's own capital. Positive nominal return alone is not the bar. **Fixed by the supervisor 2026-10-01: SPY total return, net of costs, same period.** Every gap below is ranked by how directly it blocks measuring or achieving that.
 
 ## 1. Where we stand: facts only
 
@@ -69,7 +69,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
   - sector checks exist only on the recommendation path (`execution_guard.py:588`).
 - **Plug.** A daily persisted risk snapshot for the engine book: realised and forecast vol, beta, concentration, a stress loss (e.g. the 2020 or 2022 drawdown applied to current weights), and stale-mark count, compared with the mandate. It is **measurement and alerting only** until the operator defines the vol semantics. It adds no new whole-account authority over the engine (#2844 boundary).
 
-### P5. The allocation policy is undetermined (operator decision — no ticket until decided)
+### P5. The allocation policy — RESOLVED 2026-10-01: unassigned budget funds strategies (#2842), never a SPY.RTH stand-in; core stays 50%
 
 - **Facts.**
   - The core mandate is 50% `core_target_pct` (`strategy_core_mandate_events` event 27, 2026-09-18). The stored reason is operational. No derivation was found, but absence is not proven.
@@ -78,7 +78,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
 - **Question.** How much of the engine pot should sit in the passive sleeve while no active strategy qualifies? And how is capital released when one does, without forced whole-position churn?
 - **Researched starting point.** A rule that holds unassigned budget in the sleeve up to a cap below `100 − reserve − band`, plus a partial-close capability. Before adoption it needs the P1 net benchmark, and a comparison against the operator's feasible passive alternative after tax and wrapper.
 
-### P6. No admission route for published, replicated premia (operator decision; touches the 08-23 bar) — #3544
+### P6. No admission route for published, replicated premia (DELEGATED 2026-10-01; the ETF basket becomes #2842's benchmark) — #3544
 
 - **Facts.** The strict bar exists for novel signals, and the search count justifies that. #2834 ARM A passed only the cost bar: p75 spreads of 8.1 / 14.3 / 42.0 bps from 41–43 observations over 5 dates. That is not executability or alpha (`2026-09-16-arm-a-tilt-selection.md:299`).
 - **What a route would need** before it is proposed:
