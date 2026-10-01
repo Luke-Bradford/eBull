@@ -384,9 +384,15 @@ def probe_walk(probe: Callable[[int, int], Probe], n0: int) -> tuple[int | None,
             if passes(n):
                 best = n
                 break
-    # Only the counted attempt at each n (a retry supersedes its discarded first attempt).
-    counted = {p.n: p for p in probes}.values()
-    measured = sorted((p.n, p.input_tokens) for p in counted if p.input_tokens is not None)
+    # Each n's HIGHEST measured attempt, discarded first attempts included: a retry can decide pass or fail, but
+    # it never hides a measurement. (A ``failed`` attempt is never over the ceiling — ``classify`` says
+    # ``over_ceiling`` first — so the certified pass is the only judge of the ceiling.) A larger earlier attempt
+    # can refuse a walk whose retries alone look monotone; that refusal is the conservative side.
+    highest: dict[int, int] = {}
+    for p in probes:
+        if p.input_tokens is not None:
+            highest[p.n] = max(highest.get(p.n, 0), p.input_tokens)
+    measured = sorted(highest.items())
     if any(t2 < t1 for (n1, t1), (n2, t2) in itertools.pairwise(measured) if n2 > n1):
         return None, probes, REFUSE_FIXTURE_PROBE_NONMONOTONE
     if best is None:

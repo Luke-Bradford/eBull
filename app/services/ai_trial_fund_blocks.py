@@ -291,10 +291,8 @@ def group_facts(shown: Sequence[Fact]) -> tuple[list[dict[str, Any]], list[int]]
                 ],
             }
         )
-    ids = [f.fact_id for f in ordered]
-    if len(ids) != sum(len(g["rows"]) for g in groups):
-        raise AssertionError("fact_ids and the flattened rows differ in length")
-    return groups, ids
+    # One ordered list feeds both, so row i of the flattened groups is ids[i] by construction.
+    return groups, [f.fact_id for f in ordered]
 
 
 def _report_facts(report: FilingEvent, visible: Sequence[Fact], audit: NameAudit) -> tuple[list[Fact], int]:

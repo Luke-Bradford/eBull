@@ -11786,3 +11786,15 @@ neighbouring container and match it.**
   still win.
 - Enforced in: `tests/fixtures/thirteen_f_clock.py`, imported by `tests/test_manifest_parser_sec_13f_hr.py` and
   `tests/test_institutional_holdings_ingester.py`.
+
+### A retry may decide an outcome, never erase a measurement (#3515)
+
+- Failure: the fund-v1 budget fixture's probe walk retries a probe that failed without a usable outcome and lets
+  the retry decide pass or fail. The first version also checked usage-rises-with-`n` over the retries only, so a
+  discarded attempt that measured MORE tokens than the certified one disappeared from the evidence (review bot on
+  #3536; Codex had flagged the opposite case, a discarded smaller attempt faking a decrease).
+- Prevention: in walk or retry logic, keep every measured attempt in the evidence and judge consistency on each
+  step's worst (highest) measurement; let the retry decide only the step's outcome. Over-threshold measurements
+  are classified before "failed", so they are never retried at all.
+- Enforced in: `scripts/ai_trial_fund_budget_fixture.py::probe_walk`/`classify` and
+  `tests/test_3515_budget_fixture.py::test_a_discarded_larger_attempt_still_counts_in_the_monotone_check`.

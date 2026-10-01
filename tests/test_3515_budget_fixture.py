@@ -199,12 +199,20 @@ def test_a_non_monotone_walk_refuses_the_freeze() -> None:
     assert probe_walk(probe, 10)[::2] == (None, REFUSE_FIXTURE_PROBE_NONMONOTONE)
 
 
-def test_a_discarded_first_attempt_is_not_part_of_the_monotone_check() -> None:
+def test_a_discarded_smaller_attempt_cannot_fake_a_decrease() -> None:
     # n=30's first attempt measured 690k but failed (e.g. no structured output); its retry measured 700k.
     probe, _ = _scripted(
         {29: [("pass", 695_000)], 30: [("failed", 690_000), ("pass", 700_000)], 31: [("over_ceiling", 900_000)]}
     )
     assert probe_walk(probe, 29)[::2] == (30, None)
+
+
+def test_a_discarded_larger_attempt_still_counts_in_the_monotone_check() -> None:
+    # n=29's discarded first attempt measured 720k; its retry 695k; n=30 700k: usage fell, so refuse.
+    probe, _ = _scripted(
+        {29: [("failed", 720_000), ("pass", 695_000)], 30: [("pass", 700_000)], 31: [("over_ceiling", 900_000)]}
+    )
+    assert probe_walk(probe, 29)[::2] == (None, REFUSE_FIXTURE_PROBE_NONMONOTONE)
 
 
 def _result(refusal: str | None, usage: object) -> InvocationResult:
