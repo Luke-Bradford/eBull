@@ -203,7 +203,13 @@ BEGIN
             RAISE EXCEPTION 'executing is entered from shadow_only or a halt by the supervisor (not % from %)',
                 NEW.actor, cur;
         END IF;
-        -- §7.3 `v1_active`, locked: a v1 state write takes the same declaration row lock.
+        -- §7.3 `v1_active`, locked against both writers that can make a trial active:
+        --   * a NEW declaration (an AI-trial freeze inserts it with its genesis `active` event):
+        --     SHARE conflicts with the inserter's ROW EXCLUSIVE, so this waits for an in-flight
+        --     freeze to commit and blocks new ones until this transaction ends (Codex ckpt-2: a row
+        --     lock alone cannot see an uncommitted phantom);
+        --   * a RESUMPTION of an existing one: its state trigger takes the declaration row lock.
+        LOCK TABLE ai_trial_declarations IN SHARE MODE;
         PERFORM 1 FROM ai_trial_declarations FOR NO KEY UPDATE;
         IF EXISTS (
             SELECT 1 FROM ai_trial_declarations d
