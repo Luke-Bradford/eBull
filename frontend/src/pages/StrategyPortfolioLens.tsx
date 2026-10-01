@@ -519,8 +519,8 @@ export function StrategyPortfolioLens() {
       <section aria-labelledby="pot-next" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
         <h2 id="pot-next" className="text-sm font-semibold">What happens next</h2>
         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700 dark:text-slate-200">
-          {nextSteps.map((line) => (
-            <li key={line}>{line}</li>
+          {nextSteps.map((line, index) => (
+            <li key={index}>{line}</li>
           ))}
         </ul>
       </section>

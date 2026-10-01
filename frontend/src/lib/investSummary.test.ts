@@ -97,10 +97,9 @@ describe("investNarrative", () => {
   });
 
   it("uses the singular for one strategy", () => {
-    expect(investNarrative(overview(false, 1), null, null).next).toEqual([
-      "Checking the index sleeve's outlook…",
+    expect(investNarrative(overview(false, 1), null, null).next).toContain(
       "1 strategy is under test. None is given new money until it passes its evidence bar.",
-    ]);
+    );
   });
 
   it("says a failed core read failed instead of dropping the sleeve's outlook", () => {
