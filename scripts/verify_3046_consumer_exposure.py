@@ -423,6 +423,13 @@ INVENTORY: tuple[Occurrence, ...] = (
         "METADATA",
         note="#3471: max(price_date) only; the pack's bars come through price_masked_bars",
     ),
+    Occurrence(
+        "app/services/ranking_pot_rebalance.py",
+        757,
+        "§4 step-2 bar coverage count",
+        "METADATA",
+        note="#2842: counts valid last-session bars (an outage gate); snapshot bars come via price_masked_bars",
+    ),
     Occurrence("app/services/portfolio_eod.py", 337, "_resolve_snapshot_date", "METADATA"),
     Occurrence("app/services/fair_value_band.py", 853, "corpus frontier", "METADATA"),
     Occurrence("app/services/strategy_scan_freshness.py", 119, "frontier", "METADATA"),
