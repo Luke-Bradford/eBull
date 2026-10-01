@@ -202,7 +202,13 @@ from typing import Final
 #: "Freeze"). The random control leg is not a search. Not a `hunt-` entry, so it counts in
 #: M_inh: 474 -> 475. Measured the same way before the bump: the SAME five groups, 488 rows,
 #: every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-09-29-r19"
+#:
+#: r20 (2026-10-01, #3515 slice 4) adds `ai-discretionary-fund-v1`, fund-v1's one search,
+#: declared for its own `falsification_only` #2599 row before its freeze (fund-v1 spec §7). Its
+#: random control leg is not a search. Not a `hunt-` entry, so it counts in M_inh: 475 -> 476.
+#: Measured the same way before the bump: the SAME five groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-01-r20"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1301,6 +1307,20 @@ TRIAL_REGISTER: Final = TrialRegister(
             exactness=TrialExactness.EXACT,
             searches=1,
             declared_for=("ai-discretionary-v1", "v1"),
+        ),
+        # ``ai_trial_fund_freeze.EXPECTED_FUND_REGISTER_ENTRY``; a test pins the two equal.
+        DeclaredTrial(
+            trial_id="ai-discretionary-fund-v1",
+            description=(
+                "#3515 AI-discretionary-fund-v1: v1's daily long picks with point-in-time periodic-report "
+                "fundamentals and MD&A text, against its own random-draw control leg on demo; one declared "
+                "hypothesis (the arm-minus-control pair unit d, fund-v1 spec §1)."
+            ),
+            evidence="docs/proposals/execution/2026-09-30-3515-ai-discretionary-fund-v1.md §7 'Declaration and "
+            "manifest'; frozen by scripts/ai_trial_fund_freeze.py (#3515)",
+            exactness=TrialExactness.EXACT,
+            searches=1,
+            declared_for=("ai-discretionary-fund-v1", "v1"),
         ),
     ),
 )

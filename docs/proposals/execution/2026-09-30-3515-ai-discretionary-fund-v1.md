@@ -400,6 +400,18 @@ name.
   document, so the side-by-side readout can state whether the two versions ran the same **hashed** v1 modules —
   and only that; shared non-hashed modules changed by slice 3 differ by construction. Residual: modules outside
   both manifests (e.g. the broker provider) are not frozen by either.
+- **Amended 2026-10-01 (slice 4): where the fixture's figures live.** The budget fixture's `n`, probes, sha,
+  bytes, usage and the two slice-2b start measurements are measured at freeze time on the frozen code, so the
+  freeze writes them into the declaration document (`budget_fixture`), which is digest-bound and named by
+  the #2599 row's `contract_version`. They are not constants in fund-v1's code hash, because putting them
+  there needs a code change after the measurement. One declaration per version
+  (`ai_trial_declarations_one_per_version`) means one byte gate per policy hash. The walk runs in the
+  freeze's own process (`scripts/ai_trial_fund_freeze.py`), never from a supplied file, and only after a
+  precheck that nothing else refuses. The freeze code (`ai_trial_freeze`, `ai_trial_fund_freeze`) is
+  bound by the document's `code_git_sha`, not hashed: it never runs per decision (v1's precedent).
+  Also in the document: §9's coverage output, §6's real-prompt-size output with the real pack's grouped
+  bytes against the fixture's, the per-v1-declaration hashed-module parity, and §0 rule 3. Capacity
+  is checked at the freeze: both legs at $3,000 (`trial_capital_not_spec`).
 - **Multiplicity, stated:** each version charges one search. If either result is ever cited as strategy evidence,
   the register holds both charges and the citing work applies the register's deflation.
 - **Ordering:** freeze before any real-shortlist fund-v1 model call.
