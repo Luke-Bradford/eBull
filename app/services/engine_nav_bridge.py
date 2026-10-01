@@ -638,10 +638,6 @@ def load_bridge(
             {"env": environment, "ids": ids, "dates": [snapshot.snapshot_date for snapshot in snapshots]},
         )
         marks_by_date: dict[date, dict[int, Mark]] = defaultdict(dict)
-        # Every currency a position's marks report. More than one is impossible for one
-        # instrument; if it ever happens the position gets None (-> `not_recomputable`) rather
-        # than whichever row happened to be read last.
-        currencies: dict[int, set[int]] = defaultdict(set)
         for row in cur.fetchall():
             pid = int(row["position_id"])
             marks_by_date[row["snapshot_date"]][pid] = Mark(
@@ -655,8 +651,22 @@ def load_bridge(
                 is_partially_altered=row["is_partially_altered"],
                 total_fees=_dec(row["total_fees"]),
             )
-            if row["asset_currency_id"] is not None:
-                currencies[pid].add(int(row["asset_currency_id"]))
+
+        # Every currency a position's marks EVER reported -- not just the window's. The first
+        # interval checks closes and opens from before the window, whose positions may have no
+        # mark inside it; a window-only read made them `not_recomputable`. More than one
+        # currency is impossible for one instrument; if it happens the position gets None
+        # (-> `not_recomputable`) rather than whichever row was read last.
+        cur.execute(
+            """
+            SELECT DISTINCT position_id, asset_currency_id FROM broker_account_position_marks
+            WHERE environment = %(env)s AND position_id = ANY(%(ids)s) AND asset_currency_id IS NOT NULL
+            """,
+            {"env": environment, "ids": ids},
+        )
+        currencies: dict[int, set[int]] = defaultdict(set)
+        for row in cur.fetchall():
+            currencies[int(row["position_id"])].add(int(row["asset_currency_id"]))
 
         # ⚠ Unscoped, deliberately: this is the ONE engine pool's event log -- the table has no
         # pool or environment column, and every reader (`strategy_wealth`,
