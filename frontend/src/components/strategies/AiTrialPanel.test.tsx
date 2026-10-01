@@ -31,6 +31,8 @@ const LEG: AiTrialOpenLeg = {
 };
 
 const ACTIVE: AiTrialStatusResponse = {
+  arm_strategy_id: "ai-discretionary-v1",
+  strategy_version: "v1",
   state: "active",
   declaration_id: 9,
   state_reason: "start",
@@ -120,6 +122,16 @@ describe("AiTrialPanel", () => {
     render(<AiTrialPanel />);
     expect(await screen.findByText("Halted — loss limit")).toBeInTheDocument();
     expect(screen.getByText(/loss_halt:leg=arm/)).toBeInTheDocument();
+  });
+
+  it("reads the version it is given, under its own heading (#3515)", async () => {
+    const fetch = vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockResolvedValue({
+      ...ACTIVE,
+      arm_strategy_id: aiTrialApi.AI_TRIAL_FUND_V1_ARM,
+    });
+    render(<AiTrialPanel arm={aiTrialApi.AI_TRIAL_FUND_V1_ARM} title="AI trial (fund-v1)" />);
+    expect(await screen.findByRole("heading", { name: /AI trial \(fund-v1\)/ })).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(aiTrialApi.AI_TRIAL_FUND_V1_ARM);
   });
 
   it("shows a fixed error phrase when the read fails", async () => {

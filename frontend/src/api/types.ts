@@ -3646,6 +3646,8 @@ export interface AiTrialLegLoss {
 }
 
 export interface AiTrialStatusResponse {
+  arm_strategy_id: string;
+  strategy_version: string;
   state: AiTrialState;
   declaration_id: number | null;
   state_reason: string | null;

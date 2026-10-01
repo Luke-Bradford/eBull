@@ -888,9 +888,11 @@ _NEW_YORK = ZoneInfo("America/New_York")
 AI_TRIAL_DECISION_WINDOW_OPENS: Final = dt_time(23, 30)
 #: The retry interval inside the window: fires at :00 and :30, so the first is the frozen 23:30.
 AI_TRIAL_DECISION_RETRY_MINUTES: Final = 30
+#: The fund-v1 decision job's daily fire (#3515): 15 minutes after v1's window opens.
+AI_TRIAL_FUND_DECISION_FIRE: Final = dt_time(23, 45)
 
 
-def _ai_trial_decision_window_open(now: datetime) -> bool:
+def ai_trial_decision_window_open(now: datetime) -> bool:
     """Whether ``now`` falls between the latest 23:30 UTC opening and the end of that opening's
     New York date. Both ends are derived from ``AI_TRIAL_DECISION_WINDOW_OPENS``, so moving it
     moves the window, never desynchronises it."""
@@ -908,7 +910,7 @@ def _ai_trial_decision_window_open(now: datetime) -> bool:
 
 def _ai_trial_decision_in_window(_conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """The decision job retries through its window (#3529); outside it a fire is a no-op."""
-    if not _ai_trial_decision_window_open(datetime.now(tz=UTC)):
+    if not ai_trial_decision_window_open(datetime.now(tz=UTC)):
         return (False, "outside the AI-trial decision window (23:30 UTC to New York midnight)")
     return (True, "")
 
@@ -2801,7 +2803,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         # 15 minutes after v1's run so the two never contend for the lane in the normal case; they
         # never both have work (fund-v1 runs only after v1 is wound down).
-        cadence=Cadence.daily(hour=23, minute=45),
+        cadence=Cadence.daily(hour=AI_TRIAL_FUND_DECISION_FIRE.hour, minute=AI_TRIAL_FUND_DECISION_FIRE.minute),
         # Same lateness bound and idempotence as v1's decision run (the target-date guard, one
         # claim per session).
         catch_up_on_boot=True,

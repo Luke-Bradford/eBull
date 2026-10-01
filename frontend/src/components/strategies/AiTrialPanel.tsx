@@ -1,4 +1,4 @@
-import { fetchAiTrialStatus } from "@/api/aiTrial";
+import { AI_TRIAL_V1_ARM, fetchAiTrialStatus } from "@/api/aiTrial";
 import type {
   AiTrialDecision,
   AiTrialExecution,
@@ -194,21 +194,23 @@ function TrialBody({ status }: { status: AiTrialStatusResponse }) {
 }
 
 /**
- * The AI-discretionary trial's readiness on `/invest` (#3514). A day without a
- * trial trade has many causes — not started, halted, the job did not run, the
- * model abstained, every decision or leg refused, legs awaiting the execute
- * fire — and each is named here from stored rows so none reads like another.
+ * One AI-discretionary trial version's readiness on `/invest` (#3514; per
+ * version since #3515). A day without a trial trade has many causes — not
+ * started, halted, the job did not run, the model abstained, every decision or
+ * leg refused, legs awaiting the execute fire — and each is named here from
+ * stored rows so none reads like another.
  */
-export function AiTrialPanel() {
-  const status = useAsync(fetchAiTrialStatus, []);
+export function AiTrialPanel({ arm = AI_TRIAL_V1_ARM, title = "AI trial" }: { arm?: string; title?: string }) {
+  const status = useAsync(() => fetchAiTrialStatus(arm), [arm]);
   const state = status.data ? STATE[status.data.state] : null;
+  const headingId = `invest-${arm}`;
   return (
     <section
-      aria-labelledby="invest-ai-trial"
+      aria-labelledby={headingId}
       className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900"
     >
-      <h2 id="invest-ai-trial" className="flex items-center gap-2 text-sm font-semibold">
-        AI trial
+      <h2 id={headingId} className="flex items-center gap-2 text-sm font-semibold">
+        {title}
         {state ? <Badge tone={state.tone}>{state.badge}</Badge> : null}
         {status.data?.declaration_id != null ? (
           <span className="text-xs font-normal text-slate-500">declaration {status.data.declaration_id}</span>
