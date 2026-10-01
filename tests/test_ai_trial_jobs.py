@@ -485,6 +485,8 @@ def test_a_failed_fetch_is_not_ready_and_restores_the_connection() -> None:
     assert result == BarReadiness(date(2026, 9, 29), shortlist=3, refreshed=2, current=1, fetch_failed=True)
     assert result is not None and not result.ready and result.note.endswith("current=1 fetch_failed=1")
     assert (seen["autocommit_after"], seen["rollbacks"]) == (False, 1)
+    # Nothing is re-evaluated or re-read on a path that is already not ready.
+    assert "quarantine" not in seen and seen["reads"] == 1
 
 
 def test_prepare_does_nothing_when_every_name_is_current() -> None:

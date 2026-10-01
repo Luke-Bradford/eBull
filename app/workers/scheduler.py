@@ -884,9 +884,10 @@ _NEW_YORK = ZoneInfo("America/New_York")
 #: #3529 — the AI trial's decision window in UTC. It opens at the frozen 23:30 fire, after the
 #: close in both EDT (20:00) and EST (21:00) and after the 21:52 crowd snapshot the run reads.
 #: It closes at New York midnight, from which the job body refuses ``target_session_date``: 04:00
-#: in EDT, 05:00 in EST (``AI_TRIAL_DECISION_WINDOW_CLOSES`` is the latter, the UTC upper bound).
+#: in EDT, 05:00 in EST (``AI_TRIAL_DECISION_WINDOW_CLOSES_BY`` is the latter).
 AI_TRIAL_DECISION_WINDOW_OPENS: Final = dt_time(23, 30)
-AI_TRIAL_DECISION_WINDOW_CLOSES: Final = dt_time(5, 0)
+#: A UTC upper bound only (New York midnight in EST); the exact close is tested in New York time.
+AI_TRIAL_DECISION_WINDOW_CLOSES_BY: Final = dt_time(5, 0)
 #: The retry interval inside the window: fires at :00 and :30, so the first is the frozen 23:30.
 AI_TRIAL_DECISION_RETRY_MINUTES: Final = 30
 
@@ -899,7 +900,7 @@ def _ai_trial_decision_window_open(now: datetime) -> bool:
         return True
     # After UTC midnight the window runs to New York midnight exactly (04:00 UTC in EDT, 05:00 in
     # EST), so no fire lands where the body would only refuse `target_session_date`.
-    return at < AI_TRIAL_DECISION_WINDOW_CLOSES and now.astimezone(_NEW_YORK).hour >= 12
+    return at < AI_TRIAL_DECISION_WINDOW_CLOSES_BY and now.astimezone(_NEW_YORK).hour >= 12
 
 
 def _ai_trial_decision_in_window(_conn: psycopg.Connection[Any]) -> PrerequisiteResult:

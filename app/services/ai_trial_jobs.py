@@ -304,12 +304,18 @@ def prepare_trial_bars(
             fetch_failed = True
         finally:
             _restore_transactional(conn)
+        if fetch_failed:
+            # Not ready whatever landed: skip the re-evaluation and the re-read.
+            return BarReadiness(last_session, len(names), len(stale), len(current), fetch_failed=True)
+        # ⚠ A raise from here on is a database fault, not a data gap, and is deliberately NOT
+        # mapped to not-ready: it fails the job run loudly, no claim has been taken, and the next
+        # fire in the window starts over. Only the provider fetch is an expected, retryable miss.
         # The provisional window is pinned to the decision instant's UTC date, never the host's
         # local `date.today()` (the 23:30 UTC fire is already tomorrow in London during BST).
         refresh_quarantine(conn, instrument_ids=[iid for iid, _ in stale], as_of=as_of.astimezone(UTC).date())
         conn.commit()
         current = _current_names(conn, ids, last_session=last_session)
-    return BarReadiness(last_session, len(names), len(stale), len(current), fetch_failed)
+    return BarReadiness(last_session, len(names), len(stale), len(current))
 
 
 @dataclass(frozen=True)

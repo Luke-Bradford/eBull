@@ -11767,7 +11767,9 @@ neighbouring container and match it.**
   left mid-transaction, replacing the original exception.
 - Prevention: when a network call feeds a pre-claim readiness verdict, catch the provider's failure, log it, and
   return the not-ready verdict with the failure on the result (`fetch_failed`), which the job surfaces as a
-  degraded run. Never let names that were never fetched count toward "ready". An `autocommit` toggle restores
+  degraded run. Never let names that were never fetched count toward "ready". A DB step after the fetch is
+  different: its raise is a fault, not a data gap. Let it fail the run loudly (nothing is claimed yet) and say so
+  at the call site. An `autocommit` toggle restores
   through a helper that rolls back a non-IDLE transaction first, because psycopg refuses to switch `autocommit`
   mid-transaction.
 - Enforced in: `ai_trial_jobs._restore_transactional`, `BarReadiness.fetch_failed`, `scheduler._ai_trial_decision`
