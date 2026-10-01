@@ -68,6 +68,7 @@ from app.services.ai_trial_pack_reader import (
     read_step1,
 )
 from app.services.ai_trial_prompt import PROMPT_TEMPLATE_SHA256, RenderedPrompt, render_user_prompt
+from app.services.ai_trial_protection import halt_active_trial
 from app.services.ai_trial_start_gate import REFUSAL_PREFIX, preview_trial_capacity
 from app.services.ai_trial_version import TRIAL_VERSIONS, V1, PackRefusal, TrialVersion
 from app.services.market_calendar import latest_completed_us_session
@@ -725,6 +726,21 @@ def _decide(
     )
     values = {**_provenance(env, version, step1=step1, pack=pack, prompt=prompt, result=result), **extra}
     reached.update(values)
+    # A version's post-call rule (fund-v1 §6 budget): nothing executes and the trial halts for review.
+    # The refusal is recorded first, so a failing halt can never leave the run unrecorded.
+    halt = (
+        None if version.post_call_halt is None else version.post_call_halt(result.refusal_reason, result.result_event)
+    )
+    if halt is not None:
+        outcome = refuse_run(conn, claim, halt, values)
+        halted = halt_active_trial(
+            conn,
+            declaration_id=declaration.declaration_id,
+            to_state="halted_operator",
+            reason=f"{halt}: run {claim.run_id} of {version.arm_strategy_id} (post-call rule)",
+        )
+        logger.warning("ai_trial run %s: %s; trial halted=%s", claim.run_id, halt, halted)
+        return outcome
     if result.refusal_reason is not None:
         return refuse_run(conn, claim, result.refusal_reason, values)
 

@@ -9,9 +9,10 @@ keys on the descriptor's ids or the declaration id: persisted rows of one versio
 another.
 
 * ``V1`` reproduces today's values exactly (pinned by ``tests/test_ai_trial_version.py``).
-* ``FUND_V1`` (slice 3b-iii): fund-v1's ids, ``FUND_POLICY_HASH``, ``FUND_SYSTEM_PROMPT`` and
-  ``build_fund_pack``. Registered, so it has code; it runs only once its own declaration is
-  frozen, and its job's start gate refuses while v1 is not wound down (§0 rule 2).
+* ``FUND_V1`` (slice 3b-iii): fund-v1's ids, ``FUND_POLICY_HASH``, ``FUND_SYSTEM_PROMPT``,
+  ``build_fund_pack`` and (slice 2c) the §6 post-call budget halt. Registered, so it has code; it
+  runs only once its own declaration is frozen, and its job's start gate refuses while v1 is not
+  wound down (§0 rule 2).
 * This module is NOT one of ``ai_trial_policy.POLICY_MODULES``: adding a version here cannot
   move v1's ``policy_hash``. v1's hashed modules are called as they are, with the descriptor's
   values passed as arguments (fund-v1 spec §0 rule 1, §7).
@@ -20,12 +21,13 @@ another.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
 import psycopg
 
-from app.services.ai_trial_fund_blocks import FUND_SYSTEM_PROMPT
+from app.services.ai_trial_fund_blocks import FUND_SYSTEM_PROMPT, post_call_halt_reason
 from app.services.ai_trial_fund_pack import build_fund_pack
 from app.services.ai_trial_fund_policy import FUND_POLICY_HASH
 from app.services.ai_trial_pack_build import BuiltPack, PackBuilder, PackRefusal
@@ -48,6 +50,9 @@ class TrialVersion:
     policy_hash: str
     system_prompt: str
     build_pack: PackBuilder
+    #: After the model call: ``(refusal_reason, result_event) -> reason`` to refuse the run AND halt the trial
+    #: (``halted_operator``), or ``None``. v1 has none; fund-v1's is its §6 budget rule.
+    post_call_halt: Callable[[str | None, object], str | None] | None = None
 
     @property
     def control_strategy_id(self) -> str:
@@ -82,6 +87,7 @@ FUND_V1: Final = TrialVersion(
     policy_hash=FUND_POLICY_HASH,
     system_prompt=FUND_SYSTEM_PROMPT,
     build_pack=build_fund_pack,
+    post_call_halt=post_call_halt_reason,
 )
 
 #: Every version the engine serves. A declaration of any other ``(arm id, version)`` has no code.
