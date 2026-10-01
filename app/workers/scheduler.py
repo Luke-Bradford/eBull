@@ -898,11 +898,8 @@ def _ai_trial_decision_window_open(now: datetime) -> bool:
     return at >= AI_TRIAL_DECISION_WINDOW_OPENS or at < AI_TRIAL_DECISION_WINDOW_CLOSES
 
 
-def _ai_trial_decision_due(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+def _ai_trial_decision_in_window(_conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """The decision job retries through its window (#3529); outside it a fire is a no-op."""
-    bootstrap_met, reason = _bootstrap_complete(conn)
-    if not bootstrap_met:
-        return (False, reason)
     if not _ai_trial_decision_window_open(datetime.now(tz=UTC)):
         return (False, "outside the AI-trial decision window (23:30-05:00 UTC)")
     return (True, "")
@@ -2782,7 +2779,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # target-date guard), so a delayed fire is still worth running — but only within its own
         # slot: half the interval, so a late fire can never run alongside its successor.
         misfire_grace_seconds=AI_TRIAL_DECISION_RETRY_MINUTES * 60 // 2,
-        prerequisite=_ai_trial_decision_due,
+        prerequisite=_all_of(_bootstrap_complete, _ai_trial_decision_in_window),
     ),
     ScheduledJob(
         name=JOB_AI_TRIAL_FUND_DECISION_RUN,
