@@ -142,6 +142,13 @@ def render_side_by_side(entries: Sequence[tuple[str, Readout | str]]) -> str:
     return "\n".join(lines)
 
 
+def side_by_side_json(readout: Readout | str) -> dict[str, Any]:
+    """One schema per version: ``{"readout": {...}, "reason": null}`` or ``{"readout": null, "reason": "..."}``."""
+    if isinstance(readout, str):
+        return {"readout": None, "reason": readout}
+    return {"readout": dataclasses.asdict(readout), "reason": None}
+
+
 def _side_by_side(conn: psycopg.Connection[Any]) -> list[tuple[str, Readout | str]]:
     entries: list[tuple[str, Readout | str]] = []
     for version in TRIAL_VERSIONS:
@@ -160,12 +167,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, help="also write the readout as JSON here")
     parser.add_argument("--side-by-side", action="store_true", help="every registered version, one after another")
     args = parser.parse_args(argv)
+    if args.side_by_side and (args.arm != V1.arm_strategy_id or args.version != V1.strategy_version):
+        parser.error("--side-by-side reads every registered version; it takes no --arm or --version")
     if args.side_by_side:
         with psycopg.connect(settings.database_url) as conn:
             entries = _side_by_side(conn)
         print(render_side_by_side(entries))
         if args.json:
-            doc = {arm: r if isinstance(r, str) else dataclasses.asdict(r) for arm, r in entries}
+            doc = {arm: side_by_side_json(r) for arm, r in entries}
             args.json.write_text(json.dumps(doc, default=_jsonable, indent=2))
         return 0
     with psycopg.connect(settings.database_url) as conn:

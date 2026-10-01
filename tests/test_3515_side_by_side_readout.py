@@ -47,3 +47,14 @@ def test_side_by_side_reads_every_registered_version_and_survives_an_unavailable
     assert seen == [v.arm_strategy_id for v in TRIAL_VERSIONS]
     assert dict(entries) == {V1.arm_strategy_id: "READOUT", FUND_V1.arm_strategy_id: "no frozen declaration"}
     conn.rollback.assert_called_once()
+
+
+def test_the_json_has_one_schema_per_version() -> None:
+    assert cli.side_by_side_json("no frozen declaration") == {"readout": None, "reason": "no frozen declaration"}
+
+
+@pytest.mark.parametrize("extra", [["--arm", FUND_V1.arm_strategy_id], ["--version", "v2"]])
+def test_side_by_side_rejects_arm_or_version(extra: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--side-by-side", *extra])
+    assert exc.value.code == 2
