@@ -8,7 +8,11 @@ looks only — no primary number is computed early.
 
 Usage::
 
-    PYTHONPATH=. uv run python -m scripts.ai_trial_readout [--version v1] [--json out.json]
+    PYTHONPATH=. uv run python -m scripts.ai_trial_readout [--arm ID] [--version v1] [--json out.json]
+    PYTHONPATH=. uv run python -m scripts.ai_trial_readout --side-by-side [--json out.json]
+
+``--side-by-side`` prints every registered version's readout one after another (#3515 fund-v1 spec §1):
+side by side, never a contrast.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import argparse
 import dataclasses
 import json
 import sys
+from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +31,14 @@ import psycopg
 from app.config import settings
 from app.services.ai_trial_pair_lifecycle import LEGS
 from app.services.ai_trial_readout import Readout, ReadoutUnavailable, compute_readout
-from app.services.ai_trial_version import V1, trial_version
+from app.services.ai_trial_version import TRIAL_VERSIONS, V1, trial_version
+
+#: fund-v1 spec §1, printed above every side-by-side readout.
+SIDE_BY_SIDE_CAVEAT = (
+    "Side by side, never a contrast (#3515 fund-v1 spec §1): no difference between versions is tested and none "
+    "is called better. The windows differ and neither trial is powered for a difference. Each version's d is "
+    "its own arm against its own random control; it does not identify what the added blocks contribute."
+)
 
 
 def _jsonable(value: Any) -> Any:
@@ -115,12 +127,47 @@ def render(readout: Readout, *, arm_strategy_id: str = V1.arm_strategy_id) -> st
     return "\n".join(lines)
 
 
+def render_side_by_side(entries: Sequence[tuple[str, Readout | str]]) -> str:
+    """Every version's readout, one after another, under the §1 caveat. A version without a readout says why.
+    Refused runs are printed next to the pair count (fund-v1 spec §4 "Conditioning, stated")."""
+    lines = [SIDE_BY_SIDE_CAVEAT]
+    for arm, readout in entries:
+        lines += ["", f"=== {arm} ==="]
+        if isinstance(readout, str):
+            lines.append(f"no readout: {readout}")
+            continue
+        refused = sum(n for key, n in readout.run_census.items() if key.split(":", 1)[0] == "refused")
+        lines.append(f"refused runs {refused}, next to pairs {sum(readout.pair_states.values())}")
+        lines.append(render(readout, arm_strategy_id=arm))
+    return "\n".join(lines)
+
+
+def _side_by_side(conn: psycopg.Connection[Any]) -> list[tuple[str, Readout | str]]:
+    entries: list[tuple[str, Readout | str]] = []
+    for version in TRIAL_VERSIONS:
+        try:
+            entries.append((version.arm_strategy_id, compute_readout(conn, version=version)))
+        except ReadoutUnavailable as exc:
+            conn.rollback()
+            entries.append((version.arm_strategy_id, str(exc)))
+    return entries
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="#3471 §9 readout of the AI-discretionary-v1 demo trial")
     parser.add_argument("--arm", default=V1.arm_strategy_id, help="the arm's strategy id")
     parser.add_argument("--version", default=V1.strategy_version, help="the declared strategy version")
     parser.add_argument("--json", type=Path, help="also write the readout as JSON here")
+    parser.add_argument("--side-by-side", action="store_true", help="every registered version, one after another")
     args = parser.parse_args(argv)
+    if args.side_by_side:
+        with psycopg.connect(settings.database_url) as conn:
+            entries = _side_by_side(conn)
+        print(render_side_by_side(entries))
+        if args.json:
+            doc = {arm: r if isinstance(r, str) else dataclasses.asdict(r) for arm, r in entries}
+            args.json.write_text(json.dumps(doc, default=_jsonable, indent=2))
+        return 0
     with psycopg.connect(settings.database_url) as conn:
         try:
             version = trial_version(args.arm, args.version)
