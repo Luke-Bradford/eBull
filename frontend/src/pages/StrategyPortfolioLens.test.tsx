@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as aiTrialApi from "@/api/aiTrial";
 import * as configApi from "@/api/config";
 import * as strategiesApi from "@/api/strategies";
 import type { CoreSleeveResponse, StrategyOverviewResponse } from "@/api/types";
@@ -217,6 +218,8 @@ describe("StrategyPortfolioLens", () => {
       pending_entries: [],
       pending_entries_truncated: false,
     });
+    // Never settles: the panel stays in its skeleton and adds no alert of its own.
+    vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockReturnValue(new Promise(() => {}));
   });
 
   it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
@@ -1049,6 +1052,40 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.queryByText(/held outside the strategies/)).not.toBeInTheDocument();
   });
 
+  // #3516: the Invest page folded into these two tabs. Its plain-English status
+  // line sits on Setup above the controls; "what happens next" and the AI-trial
+  // panels sit on Portfolio with the results.
+  it("says where the money is on Setup, only when a sleeve holding is read", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [{ strategy_trade_id: 1, broker_position_id: 11, strategy_id: null, strategy_title: "Core sleeve", symbol: "SPY.RTH" }],
+      live_quote_instrument_ids: [],
+    } as never);
+    renderSetup();
+    expect(
+      await screen.findByText("No strategy has passed its tests yet. Your money is in the index sleeve (SPY.RTH)."),
+    ).toBeInTheDocument();
+  });
+
+  it("says a failed positions read failed on Setup instead of claiming the sleeve is empty", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockRejectedValue(new Error("boom"));
+    renderSetup();
+    expect(await screen.findByText(/What the index sleeve holds could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/Your money is in/)).not.toBeInTheDocument();
+  });
+
+  it("shows what happens next and both AI-trial panels on Portfolio", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    renderLens();
+    const next = await screen.findByRole("region", { name: "What happens next" });
+    expect(
+      await within(next).findByText("The index sleeve buys nothing while trading is blocked (see above)."),
+    ).toBeInTheDocument();
+    expect(within(next).getByText("No strategy is under test.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /AI trial \(v1\)/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /AI trial \(fund-v1\)/ })).toBeInTheDocument();
+  });
+
   describe("with open positions", () => {
     const POSITION = {
       strategy_trade_id: 1,
@@ -1141,6 +1178,7 @@ describe("StrategiesHubPage", () => {
     } as never);
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [] } as never);
     vi.spyOn(strategiesApi, "fetchFiredSignals").mockResolvedValue({ items: [], next_cursor: null } as never);
+    vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockReturnValue(new Promise(() => {}));
   });
 
   it("lands on the portfolio lens", async () => {

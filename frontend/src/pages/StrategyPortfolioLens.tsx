@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 
+import { AI_TRIAL_FUND_V1_ARM, AI_TRIAL_V1_ARM } from "@/api/aiTrial";
 import { postKillSwitch } from "@/api/config";
 import {
   closeStrategyOwnedPosition,
@@ -21,6 +22,7 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { StatTile } from "@/components/dashboard/StatTile";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { EmptyState } from "@/components/states/EmptyState";
+import { AiTrialPanel } from "@/components/strategies/AiTrialPanel";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
 import {
   AccountEvidence,
@@ -32,6 +34,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate, formatDateTime, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
+import { investNarrative } from "@/lib/investSummary";
 import { aggregate, namedList, positionsOutsideStrategyPnl, potWealthSummary } from "@/lib/strategyAggregate";
 import { money, number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
@@ -291,6 +294,12 @@ export function StrategyPortfolioLens() {
   // only when inception is inside the history window, so it is always labelled.
   const returnSince = pnlHistory.data?.return_since ?? null;
   const sp500Refusal = data.benchmark_refusals.find((refusal) => refusal.benchmark === "sp500_total_return");
+  // #3516: the plain-English "what happens next" from the folded Invest page.
+  // Only `next` is read here; the where-the-money-is sentence sits on Setup.
+  const nextSteps = investNarrative(data, coreSleeve.data ?? null, ownedPositions.data ? positions : null, {
+    core: coreSleeve.error !== null && !coreSleeve.data,
+    positions: ownedPositions.error !== null && !ownedPositions.data,
+  }).next;
 
   async function clearKillSwitch() {
     setBusy(true);
@@ -506,6 +515,26 @@ export function StrategyPortfolioLens() {
           onRetry={activity.refetch}
         />
       </section>
+
+      <section aria-labelledby="pot-next" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
+        <h2 id="pot-next" className="text-sm font-semibold">What happens next</h2>
+        {nextSteps.length > 0 ? (
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700 dark:text-slate-200">
+            {nextSteps.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-2 text-sm text-slate-500">
+            {coreSleeve.error ? "The index sleeve's status could not be loaded." : "Checking the index sleeve…"}
+          </p>
+        )}
+      </section>
+
+      {/* #3516: the AI trials are strategies too, so their status sits with
+          the pot's results rather than on a separate page. */}
+      <AiTrialPanel arm={AI_TRIAL_V1_ARM} title="AI trial (v1)" />
+      <AiTrialPanel arm={AI_TRIAL_FUND_V1_ARM} title="AI trial (fund-v1)" />
 
       <section aria-labelledby="pot-performance">
         <h2 id="pot-performance" className="text-sm font-semibold">

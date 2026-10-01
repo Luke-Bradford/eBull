@@ -2,8 +2,8 @@ import type { CoreSleeveResponse, StrategyOverviewResponse, StrategyOwnedPositio
 import { formatDate } from "@/lib/format";
 
 /**
- * The plain-English answer on the Invest page (#3423): where the operator's
- * money is, and what the engine does next.
+ * The plain-English answer (#3423; on the Strategies tabs since #3516): where
+ * the operator's money is (Setup) and what the engine does next (Portfolio).
  *
  * Operator north star (2026-09-26): "a very simple to use page that allows me
  * to put money in and then take my hands off the wheel". So this speaks in
@@ -122,7 +122,7 @@ export function investNarrative(
     } else if (core.state === "awaiting_verdict") {
       next.push("The index sleeve's result is reviewed next. It may name an instrument or cash.");
     } else {
-      next.push("The index sleeve buys nothing until the reason it is unavailable is fixed (see Advanced).");
+      next.push("The index sleeve buys nothing until the reason it is unavailable is fixed (see Setup).");
     }
   }
   const registered = overview.strategies.length;

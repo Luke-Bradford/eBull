@@ -200,8 +200,8 @@ function TrialBody({ status }: { status: AiTrialStatusResponse }) {
 }
 
 /**
- * One AI-discretionary trial version's readiness on `/invest` (#3514; per
- * version since #3515). A day without a trial trade has many causes — not
+ * One AI-discretionary trial version's readiness on the Strategies Portfolio
+ * tab (#3514, moved there by #3516; per version since #3515). A day without a trial trade has many causes — not
  * started, halted, the job did not run, the model abstained, every decision or
  * leg refused, legs awaiting the execute fire — and each is named here from
  * stored rows so none reads like another.
@@ -209,7 +209,7 @@ function TrialBody({ status }: { status: AiTrialStatusResponse }) {
 export function AiTrialPanel({ arm = AI_TRIAL_V1_ARM, title = "AI trial" }: { arm?: string; title?: string }) {
   const status = useAsync(() => fetchAiTrialStatus(arm), [arm]);
   const state = status.data ? STATE[status.data.state] : null;
-  const headingId = `invest-${arm}`;
+  const headingId = `ai-trial-${arm}`;
   return (
     <section
       aria-labelledby={headingId}

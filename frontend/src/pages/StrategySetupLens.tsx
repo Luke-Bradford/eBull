@@ -3,6 +3,7 @@ import { useState } from "react";
 import {
   fetchCoreSleeve,
   fetchStrategyOverview,
+  fetchStrategyOwnedPositions,
   rebalanceCoreSleeve,
   updateCoreMandate,
 } from "@/api/strategies";
@@ -14,6 +15,7 @@ import { AutomationControl, BlockerRow } from "@/components/strategies/StrategyP
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate } from "@/lib/format";
+import { investNarrative } from "@/lib/investSummary";
 import { decimalInput, moneyInput } from "@/lib/strategyFormat";
 import { useAsync } from "@/lib/useAsync";
 
@@ -406,15 +408,25 @@ function PolicyRules({
 export function StrategySetupLens() {
   const overview = useAsync(fetchStrategyOverview, []);
   const coreSleeve = useAsync(fetchCoreSleeve, [], { preserveOnRefetch: true });
+  /** Read only for the where-the-money-is sentence (#3516): "your money is in
+   *  the index sleeve" is said only when a sleeve holding is actually read. */
+  const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   if (overview.loading) return <SectionSkeleton rows={6} />;
   if (overview.error || !overview.data) return <SectionError onRetry={overview.refetch} />;
   const data: StrategyOverviewResponse = overview.data;
+  const whereMoney = investNarrative(data, coreSleeve.data ?? null, ownedPositions.data?.positions ?? null, {
+    core: coreSleeve.error !== null && !coreSleeve.data,
+    positions: ownedPositions.error !== null && !ownedPositions.data,
+  }).whereMoney;
 
   return (
     <div className="space-y-6">
+      {/* #3516: the folded Invest page's plain-English status line, above the
+          controls it describes. */}
+      <p className="text-base text-slate-800 dark:text-slate-100">{whereMoney}</p>
       {actionError ? (
         <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
           {actionError}
