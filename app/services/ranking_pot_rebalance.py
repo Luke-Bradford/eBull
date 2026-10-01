@@ -35,6 +35,12 @@ Fixed here by construction (each closes a spec Appendix A item; the PR lists the
   universe, no control-derived field: ``decode_snapshot`` + ``ranking_pot.build_universes`` re-derive them. Decimals
   are stored as their ``str`` (``NaN`` included), so the canonical JSON never refuses a stored value and the decode
   is exact.
+- **Snapshot transaction (Codex ckpt-2):** ``begin_rebalance`` opens it: REPEATABLE READ, then ``LOCK TABLE
+  ranking_pot_state_events IN SHARE MODE`` before any query, so the snapshot sees every committed state event and no
+  wind-down or halt commits until the rebalance does. ``sql/446``'s trigger refuses an attempt without the lock.
+- **Thesis provenance (r3-95):** each name carries the thesis the scoring call consumed (id, created_at, model,
+  prompt_version), passed in by the scoring step (slice 4b-ii). It is captured, never re-read from ``theses``, whose
+  latest row can move after scoring.
 - **Bars:** at most ``INDICATOR_BARS`` (260) of the latest price segment, for R members only. A name outside R fails
   a hold rule decided before any bar is read (``ranking_pot.hold_failure``), so omitting its bars changes no output.
 """
@@ -252,6 +258,17 @@ def _unbar(bar: Sequence[Any]) -> tuple[date, dict[str, Any]]:
     return date.fromisoformat(d), {"open": _d(o), "high": _d(h), "low": _d(low), "close": _d(c), "volume": v}
 
 
+def _thesis_json(t: ThesisUsed | None) -> dict[str, Any] | None:
+    if t is None:
+        return None
+    return {
+        "thesis_id": t.thesis_id,
+        "created_at": _ts(t.created_at),
+        "model": t.model,
+        "prompt_version": t.prompt_version,
+    }
+
+
 def _score_json(score: ScoreBreakdown) -> dict[str, Any]:
     return {
         "model_version": score.model_version,
@@ -282,6 +299,16 @@ class SpyInputs:
 
 
 @dataclass(frozen=True)
+class ThesisUsed:
+    """The thesis a scoring call consumed for one name (§6, §9.4)."""
+
+    thesis_id: int
+    created_at: datetime
+    model: str | None
+    prompt_version: str | None
+
+
+@dataclass(frozen=True)
 class SnapshotInputs:
     """Everything §5 and §9 read at one rebalance. ``facts`` covers S₀, ascending by id; ``scores`` the S₀ names
     with a score row; ``nyse_caps`` the breakpoint population as ``(instrument_id, overlaid cap)``, ascending."""
@@ -297,10 +324,14 @@ class SnapshotInputs:
     scores: Mapping[int, ScoreBreakdown]
     nyse_caps: tuple[tuple[int, Decimal | None], ...]
     spy: SpyInputs
+    #: S₀ names whose score consumed a thesis; absent = none consumed.
+    theses: Mapping[int, ThesisUsed]
 
 
 def encode_snapshot(inputs: SnapshotInputs) -> dict[str, Any]:
     """The canonical snapshot document: str/int/bool/None/list/dict only, so its JSONB round trip keeps its sha."""
+    if not set(inputs.theses) <= {f.instrument_id for f in inputs.facts}:
+        raise ValueError("a thesis for a name outside S₀")
     names = []
     for f in inputs.facts:
         score = inputs.scores.get(f.instrument_id)
@@ -319,6 +350,7 @@ def encode_snapshot(inputs: SnapshotInputs) -> dict[str, Any]:
                 "ask": _s(f.ask),
                 "quoted_at": _ts(f.quoted_at),
                 "score": None if score is None else _score_json(score),
+                "thesis": _thesis_json(inputs.theses.get(f.instrument_id)),
                 "bars": [_bar(d, r) for d, r in zip(f.bar_dates, f.bar_rows, strict=True)],
             }
         )
@@ -350,8 +382,13 @@ def decode_snapshot(doc: Mapping[str, Any]) -> SnapshotInputs:
         raise ValueError(f"not a {SNAPSHOT_KIND} document")
     facts: list[NameFacts] = []
     scores: dict[int, ScoreBreakdown] = {}
+    theses: dict[int, ThesisUsed] = {}
     for n in doc["names"]:
         iid = int(n["instrument_id"])
+        if (t := n["thesis"]) is not None:
+            theses[iid] = ThesisUsed(
+                int(t["thesis_id"]), datetime.fromisoformat(t["created_at"]), t["model"], t["prompt_version"]
+            )
         score = None if n["score"] is None else _score_from(n["score"])
         if score is not None:
             scores[iid] = score
@@ -391,6 +428,7 @@ def decode_snapshot(doc: Mapping[str, Any]) -> SnapshotInputs:
             quoted_at=None if spy["quoted_at"] is None else datetime.fromisoformat(spy["quoted_at"]),
             bar=None if spy["bar"] is None else _unbar(spy["bar"]),
         ),
+        theses=theses,
     )
 
 
@@ -528,6 +566,29 @@ def read_history(conn: Conn, declaration_id: int) -> AttemptHistory:
     )
 
 
+def begin_rebalance(conn: Conn) -> None:
+    """Make the open transaction a rebalance transaction: REPEATABLE READ, holding SHARE on
+    ``ranking_pot_state_events`` from before its snapshot (``sql/446`` SNAPSHOT RULE). Call first inside
+    ``conn.transaction()``; ``SET TRANSACTION`` raises if any query already ran, so a late call cannot pass."""
+    if conn.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError("begin_rebalance must run inside an open transaction")
+    conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+    conn.execute("LOCK TABLE ranking_pot_state_events IN SHARE MODE")
+
+
+def _assert_rebalance_transaction(conn: Conn) -> None:
+    row = conn.execute(
+        """
+        SELECT current_setting('transaction_isolation') = 'repeatable read'
+           AND EXISTS (SELECT 1 FROM pg_locks
+                        WHERE locktype = 'relation' AND relation = 'ranking_pot_state_events'::regclass
+                          AND pid = pg_backend_pid() AND granted AND mode = 'ShareLock')
+        """
+    ).fetchone()
+    if conn.info.transaction_status != TransactionStatus.INTRANS or row is None or not row[0]:
+        raise RuntimeError("the rebalance reads run inside begin_rebalance's transaction")
+
+
 def _overlaid_cap(conn: Conn, instrument_id: int, raw: object) -> Decimal | None:
     """The scorer's #1664 overlay; any failure to resolve or apply it is no cap (§2, r3-134)."""
     try:
@@ -571,11 +632,13 @@ def read_snapshot_inputs(
     *,
     as_of: datetime,
     scored_at: datetime,
+    theses: Mapping[int, ThesisUsed],
 ) -> InputsRead:
-    """Read every step-2/3 input. Call inside ONE REPEATABLE READ transaction opened after the scoring run commits
-    (§4); this function only reads."""
+    """Read every step-2/3 input inside ``begin_rebalance``'s transaction, opened after the scoring run commits
+    (§4). ``theses`` is what the scoring call consumed (slice 4b-ii). Only reads."""
     if conn.info.transaction_status != TransactionStatus.INTRANS:
         raise RuntimeError("read_snapshot_inputs must run inside the rebalance's transaction")
+    _assert_rebalance_transaction(conn)
     last_session = latest_completed_us_session(as_of)
     s0 = decl.s0_ids
     mv = _DEFAULT_MODEL_VERSION
@@ -680,6 +743,7 @@ def read_snapshot_inputs(
         scores=scores,
         nyse_caps=nyse_caps,
         spy=spy,
+        theses=dict(theses),
     )
     return InputsRead(
         inputs=inputs,
@@ -739,9 +803,10 @@ def prepare(
     *,
     as_of: datetime,
     scored_at: datetime,
+    theses: Mapping[int, ThesisUsed],
 ) -> Prepared | Refused:
     """§4 steps 2–3: read, gate, snapshot. Writes nothing."""
-    read = read_snapshot_inputs(conn, decl, as_of=as_of, scored_at=scored_at)
+    read = read_snapshot_inputs(conn, decl, as_of=as_of, scored_at=scored_at, theses=theses)
     inputs, cov = read.inputs, read.coverage
     detail: dict[str, Any] = {
         "s0_tradable": cov.s0_tradable,
@@ -846,6 +911,8 @@ __all__ = [
     "SnapshotInputs",
     "SnapshotIntegrityError",
     "SpyInputs",
+    "ThesisUsed",
+    "begin_rebalance",
     "decode_snapshot",
     "encode_snapshot",
     "first_month",

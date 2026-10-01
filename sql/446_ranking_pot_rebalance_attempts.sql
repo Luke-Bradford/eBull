@@ -24,8 +24,20 @@
 --
 -- ⚠ WHAT THE DATABASE CHECKS, AND WHAT IT CANNOT.
 --   * It CAN refuse any attempt once the trial is `winding_down` / `completed` or has no state
---     (§5.1 rule 3: after the wind-down event no rebalance runs), under the declaration row lock
---     the state trigger (sql/445) takes, so a concurrent wind-down serialises against it.
+--     (§5.1 rule 3: after the wind-down event no rebalance runs).
+--     ⚠ SNAPSHOT RULE (Codex ckpt-2). §4 reads in ONE REPEATABLE READ transaction, whose snapshot
+--     is fixed at its first query; a row lock taken later waits for a concurrent wind-down but the
+--     trigger's state read still sees the OLD snapshot. So under any isolation above READ
+--     COMMITTED the inserting transaction must hold a lock on `ranking_pot_state_events` that
+--     conflicts with a state writer's ROW EXCLUSIVE (SHARE or stronger), and must take it BEFORE
+--     its first query (`LOCK TABLE` takes no snapshot): every state event committed before the
+--     snapshot is then visible and none can commit until this transaction ends. The trigger
+--     refuses an insert without the lock; it CANNOT see whether the lock preceded the snapshot —
+--     `ranking_pot_rebalance.begin_rebalance` is the one place that opens the transaction, and does.
+--     Under READ COMMITTED each trigger query takes a fresh snapshot after the row-lock wait, so
+--     the plain check is exact there.
+--   * LOCK ORDER: `ranking_pot_state_events` (table) → pot declaration row, the same order a state
+--     writer takes them (its INSERT's ROW EXCLUSIVE, then its trigger's row lock).
 --   * It CANNOT check that `snapshot_sha256` is the canonical sha256 of `snapshot` (JSONB does not
 --     preserve the canonical byte form): the writer reads the row back and asserts it, as the
 --     freeze does for the declaration document.
@@ -81,13 +93,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS ranking_pot_rebalance_attempts_one_per_month
 CREATE INDEX IF NOT EXISTS ranking_pot_rebalance_attempts_declaration
     ON ranking_pot_rebalance_attempts (declaration_id, attempt_id);
 
--- §5.1 rule 3: no rebalance once the trial winds down. The declaration row lock is the one the
--- state trigger takes (sql/445), so this check and a concurrent `→ winding_down` serialise.
+-- §5.1 rule 3: no rebalance once the trial winds down (the header's SNAPSHOT RULE).
 CREATE OR REPLACE FUNCTION ranking_pot_rebalance_attempts_state_guard()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     cur TEXT;
 BEGIN
+    IF current_setting('transaction_isolation') <> 'read committed' AND NOT EXISTS (
+        SELECT 1 FROM pg_locks
+        WHERE locktype = 'relation' AND relation = 'ranking_pot_state_events'::regclass
+          AND pid = pg_backend_pid() AND granted
+          AND mode IN ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+    ) THEN
+        RAISE EXCEPTION 'a rebalance attempt under % isolation must hold SHARE on ranking_pot_state_events, '
+                        'taken before its snapshot (sql/446 header)', current_setting('transaction_isolation');
+    END IF;
     PERFORM 1 FROM ranking_pot_declarations WHERE declaration_id = NEW.declaration_id FOR NO KEY UPDATE;
     SELECT to_state INTO cur
     FROM ranking_pot_state_events WHERE declaration_id = NEW.declaration_id

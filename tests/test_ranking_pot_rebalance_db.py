@@ -14,6 +14,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from app.services import ranking_pot_rebalance as rb
+from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_ranking_pot_schema_db import _frozen, _move
 
 Conn = psycopg.Connection[Any]
@@ -148,3 +149,48 @@ def test_writers_and_history_round_trip(ebull_test_conn: Conn) -> None:
     _insert(conn, decl_id, **_decided(month=date(2027, 1, 1), target_session=date(2027, 1, 4)))
     history = rb.read_history(conn, decl_id)
     assert history.previous_r_count == 1650
+
+
+def test_repeatable_read_attempts_need_the_state_lock_taken_before_the_snapshot(ebull_test_conn: Conn) -> None:
+    """Codex ckpt-2: under REPEATABLE READ a row lock cannot refresh the trigger's view of the state."""
+    conn = ebull_test_conn
+    decl = _frozen(conn)
+    with conn.transaction():
+        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        with pytest.raises(psycopg.errors.RaiseException, match="must hold SHARE"):
+            _insert_raw(conn, decl)
+    with conn.transaction():
+        rb.begin_rebalance(conn)
+        _insert_raw(conn, decl)  # holds the lock: admitted
+    with conn.transaction():
+        conn.execute("SELECT 1")
+        with pytest.raises(psycopg.errors.ActiveSqlTransaction):
+            rb.begin_rebalance(conn)  # a late call cannot pass: a snapshot may already exist
+
+    # An uncommitted wind-down blocks the rebalance from taking its snapshot; once it commits, the rebalance
+    # sees it and the attempt is refused.
+    with psycopg.connect(test_database_url()) as other:
+        other.execute(
+            "INSERT INTO ranking_pot_state_events (declaration_id, from_state, to_state, wind_down_reason, reason, "
+            "actor) VALUES (%s, 'shadow_only', 'winding_down', 'operator', 't', 'operator')",
+            (decl,),
+        )
+        conn.execute("SET lock_timeout = '200ms'")
+        conn.commit()
+        with pytest.raises(psycopg.errors.LockNotAvailable), conn.transaction():
+            rb.begin_rebalance(conn)
+        other.commit()
+    conn.execute("SET lock_timeout = 0")
+    conn.commit()
+    with conn.transaction(), pytest.raises(psycopg.errors.RaiseException, match="no rebalance runs"):
+        rb.begin_rebalance(conn)
+        _insert_raw(conn, decl)
+
+
+def _insert_raw(conn: Conn, decl: int) -> None:
+    conn.execute(
+        "INSERT INTO ranking_pot_rebalance_attempts "
+        "(declaration_id, fired_at, target_session, month, outcome, refusal, policy_hash) "
+        "VALUES (%s, %s, %s, %s, 'refused', 'price_daily_stale', %s)",
+        (decl, FIRE, date(2026, 10, 2), OCT, "a" * 64),
+    )

@@ -207,6 +207,7 @@ def _inputs(monkeypatch: pytest.MonkeyPatch) -> rb.SnapshotInputs:
         scores=scores,
         nyse_caps=((1, Decimal(10**11)), (99, Decimal(10**9)), (100, None)),
         spy=_spy(),
+        theses={1: rb.ThesisUsed(41, AS_OF - timedelta(days=40), "claude-x", "p7")},
     )
 
 
@@ -226,6 +227,7 @@ def test_snapshot_round_trips_through_json_and_re_derives_the_universes(monkeypa
     assert dict(u.hold_failure) == {3: "score_not_positive", 4: "not_tradable", 5: "completeness_insufficient"}
     assert back.scores[3].total_score.is_nan()
     assert back.scores[1].families["sentiment"] is None
+    assert back.theses == inputs.theses  # r3-95: captured provenance survives the round trip
 
 
 def test_snapshot_holds_inputs_only_r3_9(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,6 +242,10 @@ def test_snapshot_refuses_facts_that_disagree_with_their_score_row(monkeypatch: 
     inputs = _inputs(monkeypatch)
     with pytest.raises(ValueError):
         rb.encode_snapshot(rb.SnapshotInputs(**{**inputs.__dict__, "scores": {}}))
+    with pytest.raises(ValueError):
+        rb.encode_snapshot(
+            rb.SnapshotInputs(**{**inputs.__dict__, "theses": {999: rb.ThesisUsed(1, AS_OF, None, None)}})
+        )
     with pytest.raises(ValueError):
         rb.decode_snapshot({"kind": "something-else"})
 
