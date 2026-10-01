@@ -5,7 +5,7 @@ import { NavLink } from "react-router-dom";
  * Strategies leads because it is the landing page; simplicity lives in its
  * tabs, not in a separate summary page or a collapsed nav group.
  */
-const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
+const NAV_ITEMS: { to: string; label: string }[] = [
   { to: "/strategies", label: "Strategies" },
   { to: "/dashboard", label: "Dashboard" },
   { to: "/portfolio", label: "Portfolio" },
@@ -37,7 +37,7 @@ export function Sidebar() {
       </div>
       <nav className="flex flex-col gap-1 px-2">
         {NAV_ITEMS.map((item) => (
-          <NavLink key={item.to} to={item.to} end={item.end} className={navClass}>
+          <NavLink key={item.to} to={item.to} className={navClass}>
             {item.label}
           </NavLink>
         ))}
