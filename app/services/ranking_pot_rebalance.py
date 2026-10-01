@@ -1,11 +1,10 @@
 """Ranking-pot-v1 monthly rebalance, steps 0–3 (#2842 slice 4b-i).
 
 Spec ``docs/proposals/execution/2026-10-01-2842-ranking-pot-v1.md`` §4: step 0 (due), step 2 (input checks) and
-step 3 (the snapshot). Step 1 (the pot's own scoring run) and step 4 (every book's decisions, published with the
-snapshot in one transaction) are slice 4b-ii; it calls ``prepare`` inside its REPEATABLE READ transaction, after its
-scoring run commits, and writes the ``decided`` row from what ``prepare`` returns.
+step 3 (the snapshot). ``ranking_pot_job`` (slice 4b-ii) runs step 1 (the pot's own scoring run), then calls
+``prepare`` inside its REPEATABLE READ transaction and writes the ``decided`` row from what ``prepare`` returns.
 
-Writes here are ``ranking_pot_rebalance_attempts`` rows for ``refused`` and ``skipped`` only (``sql/446``).
+Writes here are ``ranking_pot_rebalance_attempts`` rows (``sql/446``): ``refused``, ``decided`` and ``skipped``.
 
 Fixed here by construction (each closes a spec Appendix A item; the PR lists them):
 
@@ -768,6 +767,19 @@ def _count_valid_bars(conn: Conn, instrument_ids: Sequence[int], session: date) 
     return len(valid)
 
 
+def bars_ready(conn: Conn, decl: PotDeclaration, *, as_of: datetime) -> tuple[int, int]:
+    """(S₀ names tradable now with a valid bar on the last completed session, S₀ names tradable now). The job's
+    pre-scoring wait (slice 4b-ii): a proxy for the ``price_daily_stale`` gate, which ``prepare`` still applies."""
+    tradable = [
+        int(r[0])
+        for r in conn.execute(
+            "SELECT instrument_id FROM instruments WHERE instrument_id = ANY(%(ids)s::bigint[]) AND is_tradable",
+            {"ids": list(decl.s0_ids)},
+        ).fetchall()
+    ]
+    return _count_valid_bars(conn, tradable, latest_completed_us_session(as_of)), len(tradable)
+
+
 def _read_spy(conn: Conn, spy_bars: tuple[list[date], list[Mapping[str, Any]]] | None) -> SpyInputs:
     row = conn.execute(
         "SELECT i.symbol, q.bid, q.ask, q.quoted_at FROM instruments i "
@@ -850,8 +862,52 @@ def prepare(
 
 
 # ---------------------------------------------------------------------------
-# Writes: refused and skipped rows (the decided row is slice 4b-ii's)
+# Writes: refused, decided and skipped rows
 # ---------------------------------------------------------------------------
+def record_decided(
+    conn: Conn,
+    decl: PotDeclaration,
+    due: DuePlan,
+    prepared: Prepared,
+    *,
+    as_of: datetime,
+    scored_at: datetime,
+) -> int:
+    """The month's ``decided`` row: the published snapshot (slice 4b-ii). Runs inside ``begin_rebalance``'s
+    transaction. The row is read back and its stored document re-hashed, because the database cannot check the
+    canonical sha256 (``sql/446`` header); a mismatch raises and the transaction rolls back."""
+    _assert_rebalance_transaction(conn)
+    if "r_count" not in prepared.detail:
+        raise ValueError("a decided row's detail carries r_count (read_history's outage guard)")
+    if prepared.snapshot.get("target_session") != due.target_session.isoformat():
+        raise ValueError("the snapshot is for another target session")
+    row = conn.execute(
+        "INSERT INTO ranking_pot_rebalance_attempts "
+        "(declaration_id, fired_at, target_session, month, outcome, scored_at, policy_hash, detail, "
+        " snapshot, snapshot_sha256) "
+        "VALUES (%s, %s, %s, %s, 'decided', %s, %s, %s, %s, %s) RETURNING attempt_id",
+        (
+            decl.declaration_id,
+            as_of,
+            due.target_session,
+            due.month,
+            scored_at,
+            RANKING_POT_POLICY_HASH,
+            Jsonb(prepared.detail),
+            Jsonb(prepared.snapshot),
+            prepared.snapshot_sha256,
+        ),
+    ).fetchone()
+    assert row is not None
+    attempt_id = int(row[0])
+    stored = conn.execute(
+        "SELECT snapshot, snapshot_sha256 FROM ranking_pot_rebalance_attempts WHERE attempt_id = %s", (attempt_id,)
+    ).fetchone()
+    if stored is None or not (canonical_sha256(stored[0]) == stored[1] == prepared.snapshot_sha256):
+        raise SnapshotIntegrityError(f"attempt {attempt_id}: the stored snapshot does not hash to its sha256")
+    return attempt_id
+
+
 def record_refused(
     conn: Conn,
     decl: PotDeclaration,
@@ -918,6 +974,7 @@ __all__ = [
     "SnapshotIntegrityError",
     "SpyInputs",
     "ThesisUsed",
+    "bars_ready",
     "begin_rebalance",
     "decode_snapshot",
     "encode_snapshot",
@@ -928,6 +985,7 @@ __all__ = [
     "prepare",
     "read_history",
     "read_snapshot_inputs",
+    "record_decided",
     "record_refused",
     "record_skips",
     "session_ordinal",

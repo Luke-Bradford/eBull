@@ -16,7 +16,7 @@ from typing import Any, cast
 import psycopg
 import pytest
 
-from app.services import ai_trial_freeze
+from app.services import ai_trial_freeze, ranking_pot_policy
 from app.services.ai_trial_freeze import Provenance
 from app.services.ai_trial_intent import load_trial_intent
 from app.services.ai_trial_pack import canonical_sha256
@@ -61,9 +61,17 @@ def _counts(conn: Conn) -> tuple[int, int, int]:
     return (int(row[0]), int(row[1]), int(row[2]))
 
 
+@pytest.fixture(autouse=True)
+def _build_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the applied freeze, which refuses ``build_incomplete`` until slice 7."""
+    monkeypatch.setattr(ranking_pot_policy, "BUILD_COMPLETE", True)
+
+
 def _frozen(conn: Conn) -> int:
     _seed_scores(conn)
-    report = freeze_pot(conn, provenance=PROVENANCE, apply=True, declared_by="supervisor")
+    with pytest.MonkeyPatch.context() as mp:  # imported by other modules, which lack the autouse fixture
+        mp.setattr(ranking_pot_policy, "BUILD_COMPLETE", True)
+        report = freeze_pot(conn, provenance=PROVENANCE, apply=True, declared_by="supervisor")
     assert (report.refusals, report.applied) == ((), True)
     assert report.declaration_id is not None
     return report.declaration_id
@@ -126,6 +134,17 @@ def test_freeze_refuses_without_a_scores_run_or_a_declarer(ebull_test_conn: Conn
     assert freeze_pot(conn, provenance=PROVENANCE, apply=False).refusals == ("s0_no_scores_run",)
     _seed_scores(conn)
     assert freeze_pot(conn, provenance=PROVENANCE, apply=True).refusals == ("declared_by_missing",)
+
+
+def test_apply_refuses_until_the_build_is_complete(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Slice 4b-ii (Codex ckpt-1): a declaration frozen on a partial build could never be measured."""
+    conn = ebull_test_conn
+    _seed_scores(conn)
+    monkeypatch.setattr(ranking_pot_policy, "BUILD_COMPLETE", False)
+    report = freeze_pot(conn, provenance=PROVENANCE, apply=True, declared_by="supervisor")
+    assert (report.refusals, report.applied) == (("build_incomplete",), False)
+    assert _counts(conn) == (0, 0, 0)
+    assert freeze_pot(conn, provenance=PROVENANCE, apply=False).refusals == ()  # the dry run still runs
     assert _counts(conn) == (0, 0, 0)
 
 
