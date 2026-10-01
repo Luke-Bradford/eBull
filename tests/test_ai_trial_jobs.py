@@ -417,8 +417,8 @@ def _prepare(
         # #2269: per-instrument commits need autocommit for the fetch, and only for it.
         seen["candles"] = (market, c.autocommit, instruments, kwargs)
 
-    def quarantine(c: Any, *, instrument_ids: list[int]) -> None:
-        seen["quarantine"] = (c.autocommit, instrument_ids)
+    def quarantine(c: Any, *, instrument_ids: list[int], as_of: date) -> None:
+        seen["quarantine"] = (c.autocommit, instrument_ids, as_of)
 
     result = prepare_trial_bars(
         cast(Any, conn),
@@ -441,7 +441,9 @@ def test_prepare_refreshes_only_the_stale_names_then_rereads() -> None:
         [(2, "S2"), (3, "S3")],
         {"skip_quotes": True, "fresh_through": date(2026, 9, 29)},
     )
-    assert seen["quarantine"] == (False, [2, 3]) and seen["autocommit_after"] is False and seen["reads"] == 2
+    # The provisional window follows the decision instant's UTC date, not the host's local date.
+    assert seen["quarantine"] == (False, [2, 3], date(2026, 9, 29))
+    assert seen["autocommit_after"] is False and seen["reads"] == 2
 
 
 def test_prepare_does_nothing_when_every_name_is_current() -> None:

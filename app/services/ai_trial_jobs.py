@@ -283,7 +283,9 @@ def prepare_trial_bars(
             refresh_candles(market, conn, stale, skip_quotes=True, fresh_through=last_session)
         finally:
             conn.autocommit = False
-        refresh_quarantine(conn, instrument_ids=[iid for iid, _ in stale])
+        # The provisional window is pinned to the decision instant's UTC date, never the host's
+        # local `date.today()` (the 23:30 UTC fire is already tomorrow in London during BST).
+        refresh_quarantine(conn, instrument_ids=[iid for iid, _ in stale], as_of=as_of.astimezone(UTC).date())
         conn.commit()
         current = _current_names(conn, ids, last_session=last_session)
     return BarReadiness(last_session, len(names), len(stale), len(current))
