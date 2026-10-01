@@ -228,9 +228,9 @@ def _cli_version(executable: str, env: Mapping[str, str]) -> str:
     except (OSError, subprocess.SubprocessError) as exc:
         return f"unavailable: {type(exc).__name__}"
     version = out.stdout.strip()
-    if out.returncode != 0 or not version:
+    if out.returncode != 0:
         return f"unavailable: exit {out.returncode}"
-    return version
+    return version or "unavailable: empty output"
 
 
 @dataclass(frozen=True)

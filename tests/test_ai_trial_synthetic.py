@@ -139,6 +139,6 @@ def test_cli_version_is_never_empty_and_never_raises(tmp_path: Any) -> None:
 
     assert _cli_version(script("ok", "echo '2.1.285 (Claude Code)'\n"), _ENV) == "2.1.285 (Claude Code)"
     assert _cli_version(script("fails", "echo oops >&2; exit 3\n"), _ENV) == "unavailable: exit 3"
-    assert _cli_version(script("silent", "exit 0\n"), _ENV) == "unavailable: exit 0"
+    assert _cli_version(script("silent", "exit 0\n"), _ENV) == "unavailable: empty output"
     assert _cli_version(script("bytes", "printf '\\377v1\\n'\n"), _ENV).endswith("v1")  # invalid UTF-8 is replaced
     assert _cli_version(str(tmp_path / "missing"), _ENV) == "unavailable: FileNotFoundError"
