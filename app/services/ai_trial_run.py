@@ -30,6 +30,7 @@ by the job (slice 2c-iv-c), which also resolves the CLI and records the git sha 
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -586,6 +587,16 @@ def publish_run(
 # ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
+def pack_empty_reason(incomplete: Mapping[str, str]) -> str:
+    """``pack_empty`` qualified by the most common incomplete reason (ties: the first by name), or
+    bare when the shortlist itself was empty."""
+    if not incomplete:
+        return "pack_empty"
+    counts = Counter(incomplete.values())
+    reason = min(counts, key=lambda r: (-counts[r], r))
+    return f"pack_empty:{reason}"
+
+
 def run_trial_decision(
     conn: Conn,
     *,
@@ -697,6 +708,10 @@ def _decide(
     # The version's own run columns (v1: none) ride every later record of this run.
     extra = dict(built.run_record)
     reached.update({**_provenance(env, version, step1=step1, pack=pack), **extra})
+    # #3529: a pack with no complete name leaves the model nothing to decide. Calling it records a
+    # data gap as a paid abstention, so the run is refused with the dominant incomplete reason.
+    if not pack.complete:
+        return refuse_run(conn, claim, pack_empty_reason(pack.incomplete), reached)
 
     # Step 3: one call, never retried for the session.
     prompt = render_user_prompt(pack.pack)
@@ -775,6 +790,7 @@ __all__ = [
     "declaration_refusal",
     "load_declaration",
     "max_new_entries",
+    "pack_empty_reason",
     "publish_run",
     "read_leg_books",
     "refuse_run",

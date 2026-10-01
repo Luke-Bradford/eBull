@@ -312,6 +312,27 @@ def test_a_version_pack_refusal_refuses_the_run_before_the_model(
     assert conn.execute("SELECT count(*) FROM ai_trial_decisions").fetchone() == (0,)
 
 
+def test_an_empty_pack_refuses_the_run_before_the_model(
+    ebull_test_conn: Conn, stubbed: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3529: no complete name → ``refused`` / ``pack_empty:<dominant reason>`` with the pack it
+    reached, never a paid ``decided`` abstention."""
+    conn = ebull_test_conn
+    _seed(conn)
+    empty = dataclasses.replace(
+        PACK, complete={}, incomplete={"A": "stale_last_bar", "B": "quarantined_bar", "C": "stale_last_bar"}
+    )
+    monkeypatch.setattr(ai_trial_version, "assemble_pack", lambda _conn, **_kw: empty)
+
+    def never(**_: object) -> InvocationResult:
+        raise AssertionError("an empty pack must not call the model")
+
+    outcome = _run(conn, never)
+    assert (outcome.status, outcome.refusal_reason) == ("refused", "pack_empty:stale_last_bar")
+    row = conn.execute("SELECT pack_sha256, stdout FROM ai_trial_runs WHERE run_id = %s", (outcome.run_id,)).fetchone()
+    assert row == (PACK.sha256, None)
+
+
 def test_a_version_run_record_rides_the_decided_run(ebull_test_conn: Conn, stubbed: dict[str, Any]) -> None:
     """The builder's run columns are written with the ``decided`` publish; v1 writes none."""
     conn = ebull_test_conn

@@ -6,6 +6,7 @@ import signal
 import subprocess
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -21,25 +22,29 @@ from app.services.ai_trial_deadline import (
 )
 from app.services.ai_trial_decision import HORIZON_SESSIONS
 from app.services.ai_trial_jobs import (
+    BarReadiness,
     DecisionJobResult,
     TrialJobError,
     orphan_model_pids,
+    prepare_trial_bars,
     resolve_run_environment,
     run_decision_job,
     run_trial_execution,
     sweep_orphan_model_processes,
 )
-from app.services.ai_trial_pack_reader import INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT
+from app.services.ai_trial_pack_reader import INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT, ScoresRun
 from app.services.ai_trial_pair_lifecycle import TRIAL_CENSOR_SESSIONS, clock_instant
 from app.services.ai_trial_policy import FROZEN_CONSTANTS
-from app.services.ai_trial_run import RunEnvironment, RunOutcome
+from app.services.ai_trial_run import RunEnvironment, RunOutcome, pack_empty_reason
 from app.services.ai_trial_version import FUND_V1, V1, TrialVersion
 from app.services.market_calendar import us_market_status
 from app.workers.scheduler import (
+    AI_TRIAL_DECISION_RETRY_MINUTES,
     JOB_AI_TRIAL_DECISION_RUN,
     JOB_AI_TRIAL_EXECUTE,
     JOB_AI_TRIAL_FUND_DECISION_RUN,
     SCHEDULED_JOBS,
+    _ai_trial_decision_window_open,
 )
 
 EXE = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
@@ -190,14 +195,26 @@ class _Broker:
         return cast(BrokerAccountRiskSnapshot, "snapshot")
 
 
+_DECLARATION = SimpleNamespace(declaration_id=16, state="active")
+READY = BarReadiness(date(2026, 9, 29), shortlist=50, refreshed=50, current=50)
+NOT_READY = BarReadiness(date(2026, 9, 29), shortlist=50, refreshed=50, current=0)
+
+
 def _decision(
-    monkeypatch: pytest.MonkeyPatch, *, now: datetime, declared: bool = True, broker: _Broker | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    now: datetime,
+    declared: bool = True,
+    broker: _Broker | None = None,
+    state: str = "active",
+    claimed: bool = False,
+    readiness: BarReadiness | None = READY,
 ) -> tuple[DecisionJobResult, dict[str, Any]]:
-    seen: dict[str, Any] = {"resolved": 0, "swept": [], "fetched": []}
+    seen: dict[str, Any] = {"resolved": 0, "swept": [], "fetched": [], "prepared": [], "decided": 0}
 
     def load(_conn: Any, *, version: TrialVersion) -> object | None:
         seen["loaded_version"] = version
-        return object() if declared else None
+        return SimpleNamespace(declaration_id=16, state=state) if declared else None
 
     monkeypatch.setattr(ai_trial_jobs, "load_declaration", load)
 
@@ -211,6 +228,7 @@ def _decision(
 
     def decide(conn: Any, *, env: RunEnvironment, risk: Any, fetch_intraday: Any, version: TrialVersion) -> RunOutcome:
         seen["env"], seen["risk"], seen["version"] = env, risk, version
+        seen["decided"] += 1
         fetch_intraday(7)
         return RunOutcome("decided", 11, date(2026, 9, 30), None, (5,))
 
@@ -218,16 +236,27 @@ def _decision(
         seen["fetched"].append((instrument_id, interval, count))
         return []
 
+    def is_claimed(_conn: Any, declaration_id: int, session_date: date) -> bool:
+        seen["claim_checked"] = (declaration_id, session_date)
+        return claimed
+
+    def prepare(_conn: Any, *, as_of: datetime, market: Any) -> BarReadiness | None:
+        seen["prepared"].append((as_of, market))
+        return readiness
+
     seen["broker"] = broker or _Broker()
     result = run_decision_job(
         cast(Any, _Conn()),
         broker=cast(BrokerProvider, seen["broker"]),
+        market=cast(Any, "market"),
         get_intraday_candles=candles,
         now=now,
         resolve=resolve,
         verify=lambda env: seen.setdefault("verified", env),
         sweep=sweep,
         decide=decide,
+        claimed=is_claimed,
+        prepare=prepare,
     )
     return result, seen
 
@@ -239,7 +268,12 @@ def test_the_decision_job_runs_after_the_close(monkeypatch: pytest.MonkeyPatch) 
     # v1 by default: the declaration and the run are both v1's (fund-v1 spec §7).
     assert seen["loaded_version"] is V1 and seen["version"] is V1
     assert seen["fetched"] == [(7, INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT)]
-    assert result.note == "status=decided session=2026-09-30 run_id=11 pairs=1 orphans_killed=2"
+    # #3529: the bars are prepared for the claim's own target session, before the run.
+    assert seen["claim_checked"] == (16, date(2026, 9, 30)) and seen["prepared"] == [(AFTER_CLOSE, "market")]
+    assert result.note == (
+        "status=decided last_session=2026-09-29 shortlist=50 refreshed=50 current=50 "
+        "session=2026-09-30 run_id=11 pairs=1 orphans_killed=2"
+    )
 
 
 def test_the_decision_job_does_nothing_without_a_declaration(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,7 +308,7 @@ def test_a_late_catch_up_still_runs_before_the_target_date(monkeypatch: pytest.M
 
 
 def test_a_failed_orphan_sweep_is_surfaced_and_never_blocks_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ai_trial_jobs, "load_declaration", lambda _conn, **_kw: object())
+    monkeypatch.setattr(ai_trial_jobs, "load_declaration", lambda _conn, **_kw: _DECLARATION)
 
     def sweep() -> int:
         raise subprocess.CalledProcessError(1, ["ps"])
@@ -282,7 +316,10 @@ def test_a_failed_orphan_sweep_is_surfaced_and_never_blocks_the_run(monkeypatch:
     result = run_decision_job(
         cast(Any, _Conn()),
         broker=cast(BrokerProvider, _Broker()),
+        market=cast(Any, "market"),
         get_intraday_candles=lambda *_a: [],
+        claimed=lambda *_a: False,
+        prepare=lambda _conn, **_kw: READY,
         now=AFTER_CLOSE,
         resolve=lambda: ENV,
         verify=lambda _env: None,
@@ -297,6 +334,146 @@ def test_an_unavailable_risk_snapshot_reaches_the_run_as_none(monkeypatch: pytes
     """The run records it as `trial_capacity_unavailable:account_risk_unavailable`."""
     result, seen = _decision(monkeypatch, now=AFTER_CLOSE, broker=_Broker(fail=True))
     assert result.status == "decided" and seen["risk"] is None
+
+
+# ---------------------------------------------------------------------------
+# #3529: bar readiness before the claim
+# ---------------------------------------------------------------------------
+def test_bars_not_ready_returns_before_the_claim_and_a_later_fire_decides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stale bars at fire time → no claim, no broker call, no model; a named not-ready result.
+    A later fire in the window with the bars in claims and decides."""
+    result, seen = _decision(monkeypatch, now=AFTER_CLOSE, readiness=NOT_READY)
+    assert result.status == "bars_not_ready" and result.outcome is None
+    assert (seen["decided"], seen["resolved"], seen["swept"], seen["broker"].calls) == (0, 0, [], 0)
+    assert result.note == (
+        "status=bars_not_ready last_session=2026-09-29 shortlist=50 refreshed=50 current=0 orphans_killed=0"
+    )
+    later, seen = _decision(monkeypatch, now=AFTER_CLOSE + timedelta(minutes=30), readiness=READY)
+    assert later.status == "decided" and seen["decided"] == 1
+
+
+@pytest.mark.parametrize(
+    ("readiness", "ready"),
+    [
+        (BarReadiness(date(2026, 9, 29), shortlist=50, refreshed=3, current=49), True),  # one name's own gap
+        (BarReadiness(date(2026, 9, 29), shortlist=50, refreshed=50, current=0), False),  # nothing published
+        (BarReadiness(date(2026, 9, 29), shortlist=0, refreshed=0, current=0), True),  # the run records it
+        (None, True),  # no scores run: step 1 refuses it after the claim, as before
+    ],
+)
+def test_only_a_systemic_gap_holds_the_claim(
+    monkeypatch: pytest.MonkeyPatch, readiness: BarReadiness | None, ready: bool
+) -> None:
+    result, _seen = _decision(monkeypatch, now=AFTER_CLOSE, readiness=readiness)
+    assert result.status == ("decided" if ready else "bars_not_ready")
+
+
+def test_a_claimed_session_returns_before_any_fetch_or_broker_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    result, seen = _decision(monkeypatch, now=AFTER_CLOSE, claimed=True)
+    assert result.status == "duplicate"
+    assert (seen["prepared"], seen["resolved"], seen["broker"].calls, seen["decided"]) == ([], 0, 0, 0)
+
+
+def test_an_inactive_declaration_skips_the_fetch_and_reaches_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run refuses ``trial_not_active`` itself; fetching bars for it would be wasted calls."""
+    result, seen = _decision(monkeypatch, now=AFTER_CLOSE, state="halted", readiness=NOT_READY)
+    assert (result.status, seen["prepared"], seen["decided"]) == ("decided", [], 1)
+
+
+class _PrepConn:
+    def __init__(self) -> None:
+        self.autocommit = False
+        self.commits = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def _prepare(
+    monkeypatch: pytest.MonkeyPatch, *, before: set[int], after: set[int], scored_at: datetime | None = AFTER_CLOSE
+) -> tuple[BarReadiness | None, dict[str, Any]]:
+    """Shortlist ids 1-3; ``before`` / ``after`` are the names current through 09-29 on the
+    pack's reader before and after the refresh."""
+    seen: dict[str, Any] = {"reads": 0}
+    last = date(2026, 9, 29)
+    monkeypatch.setattr(
+        ai_trial_jobs,
+        "read_scores_run",
+        lambda _conn, *, as_of: None if scored_at is None else ScoresRun("v1.5-balanced", scored_at),
+    )
+    names = [SimpleNamespace(instrument_id=i, symbol=f"S{i}") for i in (1, 2, 3)]
+    monkeypatch.setattr(ai_trial_jobs, "read_shortlist", lambda _conn, *, step1: SimpleNamespace(names=names))
+
+    def bars(_conn: Any, ids: list[int], *, last_session: date) -> dict[int, tuple[list[date], list[Any]]]:
+        assert last_session == last
+        current = before if seen["reads"] == 0 else after
+        seen["reads"] += 1
+        return {i: ([last if i in current else date(2026, 9, 28)], [{}]) for i in ids}
+
+    monkeypatch.setattr(ai_trial_jobs, "read_bars", bars)
+    conn = _PrepConn()
+
+    def candles(market: Any, c: Any, instruments: list[tuple[int, str]], **kwargs: Any) -> None:
+        # #2269: per-instrument commits need autocommit for the fetch, and only for it.
+        seen["candles"] = (market, c.autocommit, instruments, kwargs)
+
+    def quarantine(c: Any, *, instrument_ids: list[int]) -> None:
+        seen["quarantine"] = (c.autocommit, instrument_ids)
+
+    result = prepare_trial_bars(
+        cast(Any, conn),
+        as_of=AFTER_CLOSE,
+        market=cast(Any, "market"),
+        refresh_candles=candles,
+        refresh_quarantine=quarantine,
+    )
+    seen["autocommit_after"] = conn.autocommit
+    return result, seen
+
+
+def test_prepare_refreshes_only_the_stale_names_then_rereads() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        result, seen = _prepare(mp, before={1}, after={1, 2, 3})
+    assert result == BarReadiness(date(2026, 9, 29), shortlist=3, refreshed=2, current=3)
+    assert seen["candles"] == (
+        "market",
+        True,
+        [(2, "S2"), (3, "S3")],
+        {"skip_quotes": True, "fresh_through": date(2026, 9, 29)},
+    )
+    assert seen["quarantine"] == (False, [2, 3]) and seen["autocommit_after"] is False and seen["reads"] == 2
+
+
+def test_prepare_does_nothing_when_every_name_is_current() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        result, seen = _prepare(mp, before={1, 2, 3}, after=set())
+    assert result == BarReadiness(date(2026, 9, 29), shortlist=3, refreshed=0, current=3)
+    assert "candles" not in seen and "quarantine" not in seen and seen["reads"] == 1
+
+
+def test_prepare_is_not_ready_when_the_refresh_lands_nothing() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        result, _seen = _prepare(mp, before=set(), after=set())
+    assert result is not None and not result.ready
+
+
+@pytest.mark.parametrize("scored_at", [None, AFTER_CLOSE - timedelta(days=3, seconds=1)])
+def test_prepare_has_no_shortlist_without_a_fresh_scores_run(scored_at: datetime | None) -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        result, seen = _prepare(mp, before=set(), after=set(), scored_at=scored_at)
+    assert result is None and seen["reads"] == 0
+
+
+@pytest.mark.parametrize(
+    ("incomplete", "expected"),
+    [
+        ({}, "pack_empty"),
+        ({"A": "too_few_bars", "B": "stale_last_bar"}, "pack_empty:stale_last_bar"),  # tie → first by name
+        ({"A": "too_few_bars", "B": "too_few_bars", "C": "stale_last_bar"}, "pack_empty:too_few_bars"),
+    ],
+)
+def test_the_pack_empty_reason_names_the_dominant_incomplete_reason(incomplete: dict[str, str], expected: str) -> None:
+    assert pack_empty_reason(incomplete) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -453,8 +630,13 @@ def test_the_deployed_environment_is_resolved_once_per_process(monkeypatch: pyte
 # ---------------------------------------------------------------------------
 def test_the_trial_jobs_are_scheduled_on_the_trial_lane_and_invocable() -> None:
     jobs = {job.name: job for job in SCHEDULED_JOBS}
+    decision = jobs[JOB_AI_TRIAL_DECISION_RUN]
+    # #3529: retried through the window; :00 and :30 only, so never on the fund job's 23:45.
+    assert decision.cadence.kind == "every_n_minutes" and decision.cadence.interval_minutes == 30
+    assert decision.source == "ai_trial" and decision.catch_up_on_boot and JOB_AI_TRIAL_DECISION_RUN in _INVOKERS
+    assert decision.misfire_grace_seconds is not None
+    assert decision.misfire_grace_seconds < AI_TRIAL_DECISION_RETRY_MINUTES * 60
     for name, (hour, minute) in (
-        (JOB_AI_TRIAL_DECISION_RUN, (23, 30)),
         (JOB_AI_TRIAL_FUND_DECISION_RUN, (23, 45)),
         (JOB_AI_TRIAL_EXECUTE, (15, 0)),
     ):
@@ -503,3 +685,19 @@ def test_the_fund_job_runs_only_with_its_declaration_and_v1_wound_down(
     assert seen.get("run") == (
         (FUND_V1, {"broker": "b", "get_intraday_candles": "c"}) if expected == "decided" else None
     )
+
+
+@pytest.mark.parametrize(
+    ("now", "open_"),
+    [
+        (datetime(2026, 9, 30, 23, 29, tzinfo=UTC), False),  # before the frozen first fire
+        (datetime(2026, 9, 30, 23, 30, tzinfo=UTC), True),
+        (datetime(2026, 10, 1, 4, 30, tzinfo=UTC), True),  # still before New York midnight in EST
+        (datetime(2026, 10, 1, 5, 0, tzinfo=UTC), False),
+        (datetime(2026, 10, 1, 15, 0, tzinfo=UTC), False),
+    ],
+)
+def test_the_decision_window_opens_at_the_frozen_fire_and_closes_by_new_york_midnight(
+    now: datetime, open_: bool
+) -> None:
+    assert _ai_trial_decision_window_open(now) is open_

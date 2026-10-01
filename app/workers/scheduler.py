@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString, cast
 from uuid import UUID
@@ -879,6 +880,32 @@ def _bootstrap_complete(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
 
 
 _NEW_YORK = ZoneInfo("America/New_York")
+
+#: #3529 — the AI trial's decision window in UTC. It opens at the frozen 23:30 fire, after the
+#: close in both EDT (20:00) and EST (21:00) and after the 21:52 crowd snapshot the run reads.
+#: It closes at 05:00, New York midnight in EST (04:00 in EDT); from New York midnight the job
+#: body refuses ``target_session_date`` anyway, so the bound only keeps daytime fires off the lane.
+AI_TRIAL_DECISION_WINDOW_OPENS: Final = dt_time(23, 30)
+AI_TRIAL_DECISION_WINDOW_CLOSES: Final = dt_time(5, 0)
+#: The retry interval inside the window: fires at :00 and :30, so the first is the frozen 23:30.
+AI_TRIAL_DECISION_RETRY_MINUTES: Final = 30
+
+
+def _ai_trial_decision_window_open(now: datetime) -> bool:
+    if now.tzinfo is None:
+        raise ValueError("the AI-trial decision window requires an aware datetime")
+    at = now.astimezone(UTC).time()
+    return at >= AI_TRIAL_DECISION_WINDOW_OPENS or at < AI_TRIAL_DECISION_WINDOW_CLOSES
+
+
+def _ai_trial_decision_due(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """The decision job retries through its window (#3529); outside it a fire is a no-op."""
+    bootstrap_met, reason = _bootstrap_complete(conn)
+    if not bootstrap_met:
+        return (False, reason)
+    if not _ai_trial_decision_window_open(datetime.now(tz=UTC)):
+        return (False, "outside the AI-trial decision window (23:30-05:00 UTC)")
+    return (True, "")
 
 
 def _strategy_intraday_collection_window_open(now: datetime) -> bool:
@@ -2736,21 +2763,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         display_name="AI trial decision run (#3471)",
         source="ai_trial",
         description=(
-            "Daily 23:30 UTC — the AI-discretionary-v1 demo trial's decision for the next NYSE session: "
-            "one claimed run, a point-in-time pack, one tool-less claude -p call, a validated response and "
-            "the random control drawn, all published in one transaction. Refused runs are recorded. Does "
-            "nothing without a frozen declaration, and never runs while the regular session is open."
+            "Every 30 minutes from 23:30 UTC until New York midnight — the AI-discretionary-v1 demo "
+            "trial's decision for the next NYSE session: the shortlist's bars brought to the last "
+            "session first (not there yet → no claim, retried next fire), then one claimed run, a "
+            "point-in-time pack, one tool-less claude -p call, a validated response and the random "
+            "control drawn, all published in one transaction. Refused runs are recorded. Does nothing "
+            "without a frozen declaration, and never runs while the regular session is open."
         ),
-        # Daily, not Mon-Fri: a weekend fire targets the same session as Friday's run and the
-        # unique claim refuses it as a duplicate before any model call (spec §3).
-        cadence=Cadence.daily(hour=23, minute=30),
+        # #3529: retried through the window, because the first fire can precede the session's bars
+        # and the claim is one per session. Every day, not Mon-Fri: a fire whose target session
+        # already has a run returns `duplicate` from a read before any fetch or broker call. :00
+        # and :30 only, so no fire lands on the fund-v1 job's 23:45 in the shared lane.
+        cadence=Cadence.every_n_minutes(interval=AI_TRIAL_DECISION_RETRY_MINUTES),
         # A post-close boot catch-up is the same decision a little later; one on the target
         # session's own date is skipped by the service (it would read that session's bars).
         catch_up_on_boot=True,
-        # The body bounds its own lateness (the target-date guard) and is idempotent (one
-        # claim per session), so a fire delayed by a host pause is still worth running.
-        misfire_grace_seconds=4 * 60 * 60,
-        prerequisite=_bootstrap_complete,
+        # The body is idempotent (one claim per session) and bounds its own lateness (the
+        # target-date guard), so a delayed fire is still worth running — but only within its own
+        # slot: half the interval, so a late fire can never run alongside its successor.
+        misfire_grace_seconds=AI_TRIAL_DECISION_RETRY_MINUTES * 60 // 2,
+        prerequisite=_ai_trial_decision_due,
     ),
     ScheduledJob(
         name=JOB_AI_TRIAL_FUND_DECISION_RUN,
@@ -6971,7 +7003,7 @@ def _ai_trial_decision(job_name: str, tracker: _JobTracker, creds: tuple[str, st
         EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
         connect_job() as conn,
     ):
-        result = run(conn, broker=broker, get_intraday_candles=market.get_intraday_candles)
+        result = run(conn, broker=broker, market=market, get_intraday_candles=market.get_intraday_candles)
     tracker.row_count = 0 if result.outcome is None else len(result.outcome.pair_ids)
     tracker.note = result.note
     if result.orphans_killed is None:
