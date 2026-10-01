@@ -123,7 +123,7 @@ jobs:
             # is not matched by safe_merge's exclude either (its entry
             # normalizes to `.autonomy/`), so the two still agree: both fall
             # through and classify it not-doc-only for having no doc extension.
-            if [[ "$f" == .autonomy/* ]]; then
+            if [[ "$f" == .autonomy/* || "$f" == .claude/* ]]; then
               is_docs_only=false
               break
             fi
@@ -301,6 +301,20 @@ jobs:
               "file:line evidence, that rebuttal is authoritative. Do NOT re-post the same "
               "finding on a subsequent round — either cite new evidence that contradicts the "
               "rebuttal, or omit.\n\n"
+
+              "## Prior findings — every round after the first\n"
+              "If the PR Comment History contains [BLOCKING] or [WARNING] findings from an earlier "
+              "review round, your output MUST begin with a `### Prior findings` section listing EACH "
+              "one as `RESOLVED` or `OPEN`. Judge it against the FULL diff, never only the incremental "
+              "diff: a later push that touches other files (or only docs) does not resolve it.\n"
+              "- `RESOLVED` requires either a quoted `+` line in the FULL diff that fixes it, or an "
+              "author reply marking it REBUTTED or DEFERRED (with an issue number) that you accept.\n"
+              "- An author reply saying FIXED is a CLAIM: verify it against the full diff before "
+              "marking RESOLVED.\n"
+              "- Name each prior finding by `file` plus a short phrase. NEVER write the literal tags "
+              "`[BLOCKING]` or `[WARNING]` in this section: the merge gate greps the review text for "
+              "them, and a RESOLVED item carrying the tag would block the merge.\n"
+              "- If ANY prior finding is OPEN, the verdict MUST be **REQUEST CHANGES**.\n\n"
 
               "## Check for\n"
               "Correctness and edge cases IN ADDED LINES, SQL injection / missing parameterisation "

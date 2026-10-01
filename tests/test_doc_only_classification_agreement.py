@@ -186,6 +186,8 @@ def test_exclusions_are_tested_before_the_doc_patterns() -> None:
     [
         (".autonomy/loop_prompt.md", False),
         (".autonomy/config.yaml", False),
+        (".claude/skills/quant/strategy-evidence.md", False),
+        ("CLAUDE.md", True),
         ("docs/settled-decisions.md", True),
         ("docs/proposals/ta/whatever.md", True),
         ("README.md", True),
