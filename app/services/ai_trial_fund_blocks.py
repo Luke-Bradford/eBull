@@ -19,7 +19,9 @@ Nothing here writes, calls the model or touches the broker.
 
 from __future__ import annotations
 
+import itertools
 import math
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -92,7 +94,10 @@ FUND_PARAGRAPH: Final = """
 Periodic-report blocks
 - "fundamentals" holds figures from the name's latest annual report (10-K) and, when it is newer, \
 its latest quarterly report (10-Q), as the company tagged them in XBRL: concept names verbatim, values \
-in the stated unit and not scaled, no adjustment by us. Quarterly statements are reviewed, not audited. \
+in the stated unit and not scaled, no adjustment by us. Each report's "facts" has one entry per concept \
+and unit, whose "rows" are [period_start, period_end, days from start to end, value]; an instant (a \
+balance-sheet figure or a share count) has a null start and null days. Quarterly statements are reviewed, \
+not audited. \
 "known_at" is when we learned them. "newer_report_without_facts" names a newer report whose figures we do \
 not have yet. A null block means we hold no report with current-period figures.
 - "mdna" is the Management's Discussion and Analysis of the latest report only; a 10-Q's discussion \
@@ -148,6 +153,8 @@ class NameAudit:
     skipped_non_finite: int = 0
     excluded_future_dated: int = 0
     withheld_after_as_of: dict[str, int] = field(default_factory=dict)
+    #: §3 encoding: per shown accession, the shown facts' ids in the pack's flattened row order.
+    fact_ids: dict[str, list[int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -246,16 +253,48 @@ def order_facts(facts: Sequence[Fact]) -> list[Fact]:
     return [f for _, _, f in ranked]
 
 
-def _fact_json(f: Fact) -> dict[str, Any]:
-    return {
-        "fact_id": f.fact_id,
-        "concept": f"{f.taxonomy}:{f.concept}",
-        "unit": f.unit,
-        "period_start": f.period_start,
-        "period_end": f.period_end,
-        "end_minus_start_days": None if f.period_start is None else (f.period_end - f.period_start).days,
-        "val": f.val,
-    }
+_FIXED_POINT: Final = re.compile(r"-?[0-9]+(\.[0-9]+)?")
+
+
+def trim_val(val: str) -> str:
+    """§3: ``val::text`` without the trailing zeros of ``NUMERIC(30,6)``'s fixed scale, and without the point when
+    nothing follows it — the same decimal value, never rounded. Fixed point only (how PostgreSQL prints a finite
+    NUMERIC); anything else raises, which refuses the run (§5)."""
+    if not _FIXED_POINT.fullmatch(val):
+        raise ValueError(f"not a fixed-point NUMERIC string: {val!r}")
+    return val.rstrip("0").rstrip(".") if "." in val else val
+
+
+def _group_key(f: Fact) -> tuple[int, str]:
+    return _K_ORDER[(f.taxonomy, f.concept)], f.unit
+
+
+def group_facts(shown: Sequence[Fact]) -> tuple[list[dict[str, Any]], list[int]]:
+    """§3 encoding of a report's shown facts: one group per (concept, unit), groups in K's order then by unit,
+    rows in the concept rank order. Returns the groups and the facts' ids in the flattened row order."""
+    ordered = sorted(shown, key=lambda f: (_group_key(f), _concept_rank_key(f)))
+    groups: list[dict[str, Any]] = []
+    for _, members in itertools.groupby(ordered, key=_group_key):
+        rows = list(members)
+        groups.append(
+            {
+                "concept": f"{rows[0].taxonomy}:{rows[0].concept}",
+                "unit": rows[0].unit,
+                "rows": [
+                    [
+                        f.period_start,
+                        f.period_end,
+                        None if f.period_start is None else (f.period_end - f.period_start).days,
+                        trim_val(f.val),
+                    ]
+                    for f in rows
+                ],
+            }
+        )
+    ids = [f.fact_id for f in ordered]
+    if len(ids) != sum(len(g["rows"]) for g in groups):
+        raise AssertionError("fact_ids and the flattened rows differ in length")
+    return groups, ids
 
 
 def _report_facts(report: FilingEvent, visible: Sequence[Fact], audit: NameAudit) -> tuple[list[Fact], int]:
@@ -336,6 +375,7 @@ def build_fundamentals(
         rows = visible[r.accession_number]
         shown, count = _report_facts(r, rows, audit)
         audit.withheld_after_as_of[r.accession_number] = late[r.accession_number]
+        groups, audit.fact_ids[r.accession_number] = group_facts(shown)
         reports.append(
             {
                 "accession_number": r.accession_number,
@@ -344,7 +384,7 @@ def build_fundamentals(
                 "report_date": r.report_date,
                 "amendment_filed": amendment_filed(r, events, as_of=as_of),
                 "known_at": max([r.created_at, *(f.fetched_at for f in rows)]),
-                "facts": [_fact_json(f) for f in shown],
+                "facts": groups,
                 "fact_count": count,
                 "truncated": count > len(shown),
             }
@@ -474,13 +514,15 @@ def prompt_budget_refusal(*, rendered_bytes: int, fixture_bytes: int) -> str | N
 
 def reported_input_tokens(usage: object) -> int | None:
     """§6 input usage of one CLI request: uncached + cache-creation + cache-read tokens, which covers the system
-    prompt and every CLI-added context. ``None`` when any of the three is missing or not a non-negative int."""
+    prompt and every CLI-added context. ``None`` when any of the three is missing or not a non-negative int, or
+    when they sum to zero: no real request has zero input, so that is a missing measurement (§6)."""
     if not isinstance(usage, Mapping):
         return None
     parts = [usage.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
     if not all(isinstance(p, int) and not isinstance(p, bool) and p >= 0 for p in parts):
         return None
-    return sum(parts)  # type: ignore[arg-type]
+    total: int = sum(parts)  # type: ignore[arg-type]
+    return total if total > 0 else None
 
 
 def post_call_halt_reason(refusal_reason: str | None, result_event: object) -> str | None:

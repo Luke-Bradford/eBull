@@ -217,7 +217,7 @@ def test_pit_late_fact_event_and_update_are_absent_and_counted() -> None:
     block, _, audit = fund([K_A, late_q], [kept, updated, fact("Q-Q2", Q2)])
     assert shown(block) == ["A-FY25"]
     assert block is not None
-    assert [f["fact_id"] for f in block["reports"][0]["facts"]] == [kept.fact_id]
+    assert audit.fact_ids == {"A-FY25": [kept.fact_id]}
     assert audit.withheld_after_as_of == {"A-FY25": 1}
     assert block["newer_report_without_facts"] == []  # the late event is not known at all
     assert "withheld" not in json.dumps(block, default=str)
@@ -237,20 +237,15 @@ def test_known_at_is_max_over_event_and_every_visible_fact_shown_or_not() -> Non
 
 # --- §3 facts ---------------------------------------------------------------------------------------------------
 def test_fact_fields_and_exact_value() -> None:
-    f = fact("A-FY25", FY25, "Revenues", start=date(2025, 1, 1), val="123456789012345678.90")
-    block, _, _ = fund([K_A], [f])
+    f = fact("A-FY25", FY25, "Revenues", start=date(2025, 1, 1), val="123456789012345678.900000")
+    block, _, audit = fund([K_A], [f])
     assert block is not None
     assert block["reports"][0]["facts"] == [
-        {
-            "fact_id": f.fact_id,
-            "concept": "us-gaap:Revenues",
-            "unit": "USD",
-            "period_start": date(2025, 1, 1),
-            "period_end": FY25,
-            "end_minus_start_days": 364,
-            "val": "123456789012345678.90",
-        }
+        {"concept": "us-gaap:Revenues", "unit": "USD", "rows": [[date(2025, 1, 1), FY25, 364, "123456789012345678.9"]]}
     ]
+    # fact_id is on the run record, never in the pack.
+    assert audit.fact_ids == {"A-FY25": [f.fact_id]}
+    assert "fact_id" not in json.dumps(block, default=str)
 
 
 def test_future_dated_drop_is_per_concept_dei_by_filing_date() -> None:
@@ -260,14 +255,14 @@ def test_future_dated_drop_is_per_concept_dei_by_filing_date() -> None:
     gaap_late = fact("A-FY25", FY25 + timedelta(days=1), "CommonStockSharesOutstanding")
     block, _, audit = fund([K_A], [fact("A-FY25", FY25), dei_ok, dei_late, gaap_late])
     assert block is not None
-    ids = {f["fact_id"] for f in block["reports"][0]["facts"]}
+    ids = set(audit.fact_ids["A-FY25"])
     assert dei_ok.fact_id in ids and dei_late.fact_id not in ids and gaap_late.fact_id not in ids
     assert audit.excluded_future_dated == 2
 
 
 def test_concepts_outside_k_are_never_shown() -> None:
     block, _, _ = fund([K_A], [fact("A-FY25", FY25), fact("A-FY25", FY25, "Goodwill")])
-    assert block is not None and [f["concept"] for f in block["reports"][0]["facts"]] == ["us-gaap:Assets"]
+    assert block is not None and [g["concept"] for g in block["reports"][0]["facts"]] == ["us-gaap:Assets"]
 
 
 def test_round_robin_order_and_truncation() -> None:
@@ -281,13 +276,11 @@ def test_round_robin_order_and_truncation() -> None:
     assert block is not None
     report = block["reports"][0]
     assert report["truncated"] is True and report["fact_count"] == 135
-    shown_facts = report["facts"]
-    assert len(shown_facts) == fb.FACTS_PER_REPORT_MAX
-    first_round = [f["concept"] for f in shown_facts[: len(fb.K)]]
-    assert first_round == [f"{t}:{c}" for t, c in fb.K]
-    assert all(f["period_end"] == FY25 for f in shown_facts[: len(fb.K)])
-    # every concept keeps its newest fact; the cut rows are all from the deepest rank
-    assert {f["concept"] for f in shown_facts} == {f"{t}:{c}" for t, c in fb.K}
+    groups = report["facts"]
+    # Groups in K's order; the cap cut one row (the deepest, 2017) from every concept: 15 x 8 = 120.
+    assert [g["concept"] for g in groups] == [f"{t}:{c}" for t, c in fb.K]
+    assert all(len(g["rows"]) == 8 for g in groups)
+    assert all(g["rows"][0][1] == FY25 and g["rows"][-1][1] == date(2018, 12, 31) for g in groups)
 
 
 def test_rank_within_concept_period_start_desc_nulls_first_then_unit() -> None:
@@ -295,14 +288,85 @@ def test_rank_within_concept_period_start_desc_nulls_first_then_unit() -> None:
     ytd = fact("A-FY25", FY25, "Revenues", start=date(2025, 1, 1))
     qtr = fact("A-FY25", FY25, "Revenues", start=date(2025, 10, 1))
     eur = fact("A-FY25", FY25, "Revenues", start=date(2025, 10, 1), unit="EUR")
-    block, _, _ = fund([K_A], [ytd, eur, instant, qtr])
+    # The cap's order (rank within the concept) ...
+    assert fb.order_facts([ytd, eur, instant, qtr]) == [instant, eur, qtr, ytd]
+    # ... and the pack's: one group per unit (EUR before USD), rows in that rank order.
+    block, _, audit = fund([K_A], [ytd, eur, instant, qtr])
     assert block is not None
-    assert [f["fact_id"] for f in block["reports"][0]["facts"]] == [
-        instant.fact_id,
-        eur.fact_id,
-        qtr.fact_id,
-        ytd.fact_id,
+    assert [(g["unit"], len(g["rows"])) for g in block["reports"][0]["facts"]] == [("EUR", 1), ("USD", 3)]
+    assert audit.fact_ids["A-FY25"] == [eur.fact_id, instant.fact_id, qtr.fact_id, ytd.fact_id]
+
+
+@pytest.mark.parametrize(
+    ("stored", "shown"),
+    [
+        ("94930000000.000000", "94930000000"),
+        ("1234.500000", "1234.5"),
+        ("-0.010000", "-0.01"),
+        ("0.000000", "0"),
+        ("100", "100"),
+        ("-1000000000000000000.010000", "-1000000000000000000.01"),
+    ],
+)
+def test_trim_val_drops_only_the_storage_scale(stored: str, shown: str) -> None:
+    assert fb.trim_val(stored) == shown
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "1.2e+10", "1E3", "", ".5", "1.", " 1"])
+def test_trim_val_refuses_anything_but_fixed_point(bad: str) -> None:
+    with pytest.raises(ValueError, match="fixed-point"):
+        fb.trim_val(bad)
+
+
+def test_grouping_interleaved_concepts_and_units_across_two_reports() -> None:
+    # Facts listed out of order on purpose; the expected ids below are written by hand, not by the encoder.
+    a_rev_prior = fact("A-FY25", date(2024, 12, 31), "Revenues", start=date(2024, 1, 1))
+    a_assets = fact("A-FY25", FY25, "Assets")
+    a_rev = fact("A-FY25", FY25, "Revenues", start=date(2025, 1, 1))
+    a_assets_eur = fact("A-FY25", FY25, "Assets", unit="EUR")
+    a_assets_prior = fact("A-FY25", date(2024, 12, 31), "Assets")
+    q_ni = fact("Q-Q2", Q2, "NetIncomeLoss", start=date(2026, 4, 1))
+    q_rev = fact("Q-Q2", Q2, "Revenues", start=date(2026, 4, 1))
+    q_rev_ytd = fact("Q-Q2", Q2, "Revenues", start=date(2026, 1, 1))
+    facts = [a_rev_prior, q_ni, a_assets, q_rev_ytd, a_rev, a_assets_eur, q_rev, a_assets_prior]
+    block, _, audit = fund([K_A, Q_2], facts)
+    assert block is not None
+    annual, quarter = block["reports"]
+    # K order: Revenues before NetIncomeLoss before Assets; units sorted within a concept.
+    assert [(g["concept"], g["unit"]) for g in annual["facts"]] == [
+        ("us-gaap:Revenues", "USD"),
+        ("us-gaap:Assets", "EUR"),
+        ("us-gaap:Assets", "USD"),
     ]
+    assert audit.fact_ids["A-FY25"] == [
+        a_rev.fact_id,
+        a_rev_prior.fact_id,
+        a_assets_eur.fact_id,
+        a_assets.fact_id,
+        a_assets_prior.fact_id,
+    ]
+    assert [g["concept"] for g in quarter["facts"]] == ["us-gaap:Revenues", "us-gaap:NetIncomeLoss"]
+    # Same period end: the later start (the quarter) ranks before the year-to-date row.
+    assert audit.fact_ids["Q-Q2"] == [q_rev.fact_id, q_rev_ytd.fact_id, q_ni.fact_id]
+    flat = [row for g in annual["facts"] for row in g["rows"]]
+    assert len(flat) == len(audit.fact_ids["A-FY25"]) == annual["fact_count"]
+
+
+def test_a_cap_that_cuts_inside_a_concept_keeps_ids_aligned() -> None:
+    # 2 concepts x 70 periods = 140 > 120: round robin keeps 60 of each, newest first.
+    facts = [
+        fact("A-FY25", date(2025, 12, 31) - timedelta(days=7 * d), c, val=f"{d}.000000")
+        for c in ("Revenues", "Assets")
+        for d in range(70)
+    ]
+    block, _, audit = fund([K_A], facts)
+    assert block is not None
+    groups = block["reports"][0]["facts"]
+    assert [len(g["rows"]) for g in groups] == [60, 60]
+    by_id = {f.fact_id: f for f in facts}
+    for g, ids in zip(groups, itertools.batched(audit.fact_ids["A-FY25"], 60), strict=True):
+        assert [row[3] for row in g["rows"]] == [fb.trim_val(by_id[i].val) for i in ids]
+        assert all(f"us-gaap:{by_id[i].concept}" == g["concept"] for i in ids)
 
 
 def test_non_finite_dropped_before_the_cap() -> None:
