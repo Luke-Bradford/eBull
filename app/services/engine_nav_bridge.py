@@ -638,7 +638,10 @@ def load_bridge(
             {"env": environment, "ids": ids, "dates": [snapshot.snapshot_date for snapshot in snapshots]},
         )
         marks_by_date: dict[date, dict[int, Mark]] = defaultdict(dict)
-        currency: dict[int, int] = {}
+        # Every currency a position's marks report. More than one is impossible for one
+        # instrument; if it ever happens the position gets None (-> `not_recomputable`) rather
+        # than whichever row happened to be read last.
+        currencies: dict[int, set[int]] = defaultdict(set)
         for row in cur.fetchall():
             pid = int(row["position_id"])
             marks_by_date[row["snapshot_date"]][pid] = Mark(
@@ -653,7 +656,7 @@ def load_bridge(
                 total_fees=_dec(row["total_fees"]),
             )
             if row["asset_currency_id"] is not None:
-                currency[pid] = int(row["asset_currency_id"])
+                currencies[pid].add(int(row["asset_currency_id"]))
 
         # ⚠ Unscoped, deliberately: this is the ONE engine pool's event log -- the table has no
         # pool or environment column, and every reader (`strategy_wealth`,
@@ -709,7 +712,7 @@ def load_bridge(
                 open=position_opens[0] if len(position_opens) == 1 else None,
                 closes=tuple(closes.get(pid, [])),
                 leverage=int(broker["leverage"]) if broker and broker["leverage"] is not None else None,
-                asset_currency_id=currency.get(pid),
+                asset_currency_id=next(iter(currencies[pid])) if len(currencies[pid]) == 1 else None,
                 closed_total_fees=_dec(broker["closed_total_fees"]) if broker else None,
             )
         )
