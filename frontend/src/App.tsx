@@ -5,7 +5,6 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { ConfigProvider } from "@/lib/ConfigContext";
 import { DisplayCurrencyProvider } from "@/lib/DisplayCurrencyContext";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { InvestPage } from "@/pages/InvestPage";
 import { ResearchHubPage } from "@/pages/ResearchHubPage";
 import { PresetRedirect } from "@/pages/PresetRedirect";
 import { InstrumentDetailRedirect } from "@/pages/InstrumentDetailRedirect";
@@ -68,11 +67,12 @@ export function App() {
             </RequireAuth>
           }
         >
-          {/* #3423: the hands-off Invest page is the landing route; the
-              dashboard and everything else sit under "Advanced". */}
-          <Route index element={<InvestPage />} />
+          {/* #3516: Strategies is the landing route — its Portfolio tab is the
+              simple view, its Setup tab holds the controls. The Invest page
+              (#3423) folded into it; old links redirect. */}
+          <Route index element={<Navigate to="/strategies" replace />} />
           <Route path="dashboard" element={<DashboardPage />} />
-          <Route path="invest" element={<Navigate to="/" replace />} />
+          <Route path="invest" element={<Navigate to="/strategies" replace />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="calendar" element={<CalendarPage />} />
           <Route path="strategies" element={<StrategiesHubPage />} />

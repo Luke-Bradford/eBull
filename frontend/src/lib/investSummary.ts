@@ -2,8 +2,8 @@ import type { CoreSleeveResponse, StrategyOverviewResponse, StrategyOwnedPositio
 import { formatDate } from "@/lib/format";
 
 /**
- * The plain-English answer on the Invest page (#3423): where the operator's
- * money is, and what the engine does next.
+ * The plain-English answer (#3423; on the Strategies tabs since #3516): where
+ * the operator's money is (Setup) and what the engine does next (Portfolio).
  *
  * Operator north star (2026-09-26): "a very simple to use page that allows me
  * to put money in and then take my hands off the wheel". So this speaks in
@@ -99,14 +99,17 @@ export function investNarrative(
   }
 
   const next: string[] = [];
-  if (core !== null) {
+  if (core === null) {
+    // Unknown is not "no plan" (#3222): say the outlook is pending or failed.
+    next.push(failed.core ? "The index sleeve's outlook could not be loaded." : "Checking the index sleeve's outlook…");
+  } else {
     if (core.state === "ready" && core.mandate.enabled === true) {
       // ⚠ Never promise a trade the executor can refuse (Codex ckpt-2): the kill
       // switch and every execution block stop the sleeve too, and a gap below the
       // mandate's minimum trade is held rather than traded.
       next.push(
         overview.entry_block.new_entries_blocked
-          ? "The index sleeve buys nothing while trading is blocked (see above)."
+          ? "The index sleeve buys nothing while new entries are blocked."
           : "The index sleeve is checked once a day while the US market is open. It trades only if it has drifted outside its band by at least the minimum trade, and every safety check passes.",
       );
     } else if (core.state === "evidence_collecting") {
@@ -122,7 +125,7 @@ export function investNarrative(
     } else if (core.state === "awaiting_verdict") {
       next.push("The index sleeve's result is reviewed next. It may name an instrument or cash.");
     } else {
-      next.push("The index sleeve buys nothing until the reason it is unavailable is fixed (see Advanced).");
+      next.push("The index sleeve buys nothing until the reason it is unavailable is fixed (see Setup).");
     }
   }
   const registered = overview.strategies.length;
