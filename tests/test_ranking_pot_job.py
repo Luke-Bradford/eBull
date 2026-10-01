@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
 
 import pytest
 
@@ -69,7 +70,7 @@ def test_the_score_carries_the_consumed_thesis_and_nothing_else_changes() -> Non
     without = _score_from_data(7, data, weights, "v1-balanced", _NOW, None)
     assert without.thesis_used is None  # a row read without its id carries no provenance
 
-    thesis = dict(data["thesis_row"])  # type: ignore[call-overload]
+    thesis: dict[str, Any] = dict(data["thesis_row"])  # type: ignore[call-overload]
     thesis |= {"thesis_id": 99, "model": "m", "prompt_version": "p1"}
     with_id = _score_from_data(7, data | {"thesis_row": thesis}, weights, "v1-balanced", _NOW, None)
     assert with_id.thesis_used == ThesisProvenance(99, thesis["created_at"], "m", "p1")
