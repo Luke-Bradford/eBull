@@ -467,8 +467,13 @@ def test_reconciles() -> None:
     assert not rp.reconciles(_score(raw_total=None))
     assert not rp.reconciles(_score(raw_total=Decimal("NaN")))
     assert not rp.reconciles(_score(penalties_json=[{"name": "x", "deduction": float("nan"), "kind": "penalty"}]))
+    # A writer-vocabulary breach is malformed data and raises, whatever the other fields hold.
     with pytest.raises(ValueError):
         rp.reconciles(_score(penalties_json=[{"name": "x", "kind": "bonus"}]))
+    with pytest.raises(ValueError):
+        rp.reconciles(_score(raw_total=None, penalties_json=[{"name": "x", "kind": "bonus"}]))
+    with pytest.raises(KeyError):
+        rp.reconciles(_score(penalties_json=[{"name": "x", "kind": "penalty"}]))
 
 
 def test_entry_ticket_separates_recipient_and_donor() -> None:
