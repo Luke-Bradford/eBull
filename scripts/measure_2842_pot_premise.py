@@ -217,18 +217,18 @@ def main() -> None:
         )
         print("  symbols:", " ".join(r["symbol"] for r in top))
 
-        # A run with under 95% of the largest run's rows is treated as partial and skipped (the month's next run
-        # is used instead), so a half-written run cannot distort the screen.
+        # A run with under 95% of the MEDIAN run's rows is treated as partial and skipped (the month's next run is
+        # used instead), so a half-written run cannot distort the screen and one oversized run cannot skip the rest.
         run_counts = cur.execute(
             "SELECT scored_at AS t, count(*) AS n FROM scores "
             "WHERE model_version = 'v1.5-balanced' AND scored_at <= %(a)s GROUP BY 1 ORDER BY 1",
             {"a": as_of},
         ).fetchall()
-        largest = max((int(r["n"]) for r in run_counts), default=0)
-        runs = [r["t"] for r in run_counts if int(r["n"]) * 100 >= largest * 95]
+        typical = statistics.median([int(r["n"]) for r in run_counts]) if run_counts else 0
+        runs = [r["t"] for r in run_counts if int(r["n"]) * 100 >= typical * 95]
         print(
             f"stored runs: {len(run_counts)}; skipped as partial "
-            f"(< 95% of {largest} rows): {len(run_counts) - len(runs)}"
+            f"(< 95% of the median {typical} rows): {len(run_counts) - len(runs)}"
         )
         held: set[int] = set()
         formed = False
