@@ -220,11 +220,17 @@ def synthetic_pack() -> Pack:
 
 
 def _cli_version(executable: str, env: Mapping[str, str]) -> str:
+    """The CLI's ``--version`` line, or ``unavailable: <why>``: never raises, never an empty string."""
     try:
-        out = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=30, env=dict(env))
+        out = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True, errors="replace", timeout=30, env=dict(env)
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return f"unavailable: {type(exc).__name__}"
-    return out.stdout.strip()
+    version = out.stdout.strip()
+    if out.returncode != 0 or not version:
+        return f"unavailable: exit {out.returncode}"
+    return version
 
 
 @dataclass(frozen=True)

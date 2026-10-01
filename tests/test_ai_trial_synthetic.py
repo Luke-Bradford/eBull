@@ -126,3 +126,19 @@ def test_dry_run_cli_needs_no_claude_executable(
     monkeypatch.setattr("scripts.ai_trial_synthetic.shutil.which", lambda _: None)
     assert main(["--synthetic", "--dry-run"]) == 0
     assert "rendered_prompt" in capsys.readouterr().out
+
+
+def test_cli_version_is_never_empty_and_never_raises(tmp_path: Any) -> None:
+    from scripts.ai_trial_synthetic import _cli_version
+
+    def script(name: str, body: str) -> str:
+        path = tmp_path / name
+        path.write_bytes(b"#!/bin/sh\n" + body.encode())
+        path.chmod(0o755)
+        return str(path)
+
+    assert _cli_version(script("ok", "echo '2.1.285 (Claude Code)'\n"), _ENV) == "2.1.285 (Claude Code)"
+    assert _cli_version(script("fails", "echo oops >&2; exit 3\n"), _ENV) == "unavailable: exit 3"
+    assert _cli_version(script("silent", "exit 0\n"), _ENV) == "unavailable: exit 0"
+    assert _cli_version(script("bytes", "printf '\\377v1\\n'\n"), _ENV).endswith("v1")  # invalid UTF-8 is replaced
+    assert _cli_version(str(tmp_path / "missing"), _ENV) == "unavailable: FileNotFoundError"
