@@ -72,17 +72,17 @@ def _last_sessions(last: date, count: int) -> list[date]:
 
 
 def _overlaid_cap(conn: psycopg.Connection[Any], instrument_id: int, cap: object) -> Decimal | None:
-    """The scorer's #1664 overlay; any failure to resolve the basis fails closed (no cap)."""
+    """The scorer's #1664 overlay; any failure to resolve or apply it fails closed (no cap)."""
     try:
         with conn.transaction():
             resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id)
-    except psycopg.Error:
+        overlaid = _apply_market_cap_basis({"market_cap_live": cap, "fcf_ttm": None}, resolution)
+        value = None if overlaid is None else overlaid["market_cap_live"]
+        if not _finite_positive(value):
+            return None
+        return value if isinstance(value, Decimal) else Decimal(str(value))
+    except psycopg.Error, ArithmeticError, ValueError, TypeError:
         return None
-    overlaid = _apply_market_cap_basis({"market_cap_live": cap, "fcf_ttm": None}, resolution)
-    value = None if overlaid is None else overlaid["market_cap_live"]
-    if not _finite_positive(value):
-        return None
-    return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
 def main() -> None:
@@ -95,7 +95,7 @@ def main() -> None:
     last_session = latest_completed_us_session(as_of)
     max_sessions = _last_sessions(last_session, MAX_WINDOW + 1)
     with psycopg.connect(settings.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         nyse = cur.execute(
             "SELECT exchange_id FROM exchanges WHERE description = %(d)s", {"d": NYSE_DESCRIPTION}
         ).fetchall()
@@ -152,7 +152,7 @@ def main() -> None:
             and r["instrument_id"] in caps
             and caps[r["instrument_id"]] >= bp
         ]
-        ranking.sort(key=lambda r: (-Decimal(r["total_score"]), r["instrument_id"]))
+        ranking.sort(key=lambda r: (-Decimal(str(r["total_score"])), r["instrument_id"]))
         r_rank = {r["instrument_id"]: k + 1 for k, r in enumerate(ranking)}
 
         def quote_ok(r: dict[str, Any]) -> bool:
@@ -217,14 +217,19 @@ def main() -> None:
         )
         print("  symbols:", " ".join(r["symbol"] for r in top))
 
-        runs = [
-            r["t"]
-            for r in cur.execute(
-                "SELECT DISTINCT scored_at AS t FROM scores "
-                "WHERE model_version = 'v1.5-balanced' AND scored_at <= %(a)s ORDER BY 1",
-                {"a": as_of},
-            ).fetchall()
-        ]
+        # A run with under 95% of the largest run's rows is treated as partial and skipped (the month's next run
+        # is used instead), so a half-written run cannot distort the screen.
+        run_counts = cur.execute(
+            "SELECT scored_at AS t, count(*) AS n FROM scores "
+            "WHERE model_version = 'v1.5-balanced' AND scored_at <= %(a)s GROUP BY 1 ORDER BY 1",
+            {"a": as_of},
+        ).fetchall()
+        largest = max((int(r["n"]) for r in run_counts), default=0)
+        runs = [r["t"] for r in run_counts if int(r["n"]) * 100 >= largest * 95]
+        print(
+            f"stored runs: {len(run_counts)}; skipped as partial "
+            f"(< 95% of {largest} rows): {len(run_counts) - len(runs)}"
+        )
         held: set[int] = set()
         formed = False
         history: list[str] = []
@@ -234,7 +239,7 @@ def main() -> None:
                 continue
             seen_month = t.strftime("%Y-%m")
             scored = [
-                (Decimal(r["total_score"]), r["instrument_id"])
+                (Decimal(str(r["total_score"])), r["instrument_id"])
                 for r in cur.execute(
                     "SELECT instrument_id, total_score FROM scores WHERE model_version = 'v1.5-balanced' "
                     "AND scored_at = %(t)s AND total_score > 0",
