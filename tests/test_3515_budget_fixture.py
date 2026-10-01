@@ -139,7 +139,9 @@ def test_the_cli_exits_non_zero_whenever_the_freeze_gate_refuses(
         "scripts.ai_trial_fund_budget_fixture.run_fixture",
         lambda **kw: run_fixture(**kw, invoke=fake),
     )
-    assert main(["--claude-bin", "/bin/sh"]) == code
+    # No real subprocess: the executable is only resolved (``realpath``) and its version stubbed.
+    monkeypatch.setattr("scripts.ai_trial_fund_budget_fixture._cli_version", lambda *_a: "stub")
+    assert main(["--claude-bin", "/nonexistent/claude"]) == code
 
 
 def test_a_dry_run_makes_no_call() -> None:
