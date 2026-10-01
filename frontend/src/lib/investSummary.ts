@@ -99,14 +99,17 @@ export function investNarrative(
   }
 
   const next: string[] = [];
-  if (core !== null) {
+  if (core === null) {
+    // Unknown is not "no plan" (#3222): say the outlook is pending or failed.
+    next.push(failed.core ? "The index sleeve's outlook could not be loaded." : "Checking the index sleeve's outlook…");
+  } else {
     if (core.state === "ready" && core.mandate.enabled === true) {
       // ⚠ Never promise a trade the executor can refuse (Codex ckpt-2): the kill
       // switch and every execution block stop the sleeve too, and a gap below the
       // mandate's minimum trade is held rather than traded.
       next.push(
         overview.entry_block.new_entries_blocked
-          ? "The index sleeve buys nothing while trading is blocked (see above)."
+          ? "The index sleeve buys nothing while new entries are blocked."
           : "The index sleeve is checked once a day while the US market is open. It trades only if it has drifted outside its band by at least the minimum trade, and every safety check passes.",
       );
     } else if (core.state === "evidence_collecting") {

@@ -53,7 +53,7 @@ describe("investNarrative", () => {
 
   it("does not promise a rebalance while trading is blocked", () => {
     const n = investNarrative(overview(false, 11, true), core("ready", true), [position(null, "SPY")]);
-    expect(n.next[0]).toBe("The index sleeve buys nothing while trading is blocked (see above).");
+    expect(n.next[0]).toBe("The index sleeve buys nothing while new entries are blocked.");
   });
 
   it("does not say the closing window chooses the sleeve", () => {
@@ -98,7 +98,14 @@ describe("investNarrative", () => {
 
   it("uses the singular for one strategy", () => {
     expect(investNarrative(overview(false, 1), null, null).next).toEqual([
+      "Checking the index sleeve's outlook…",
       "1 strategy is under test. None is given new money until it passes its evidence bar.",
     ]);
+  });
+
+  it("says a failed core read failed instead of dropping the sleeve's outlook", () => {
+    expect(investNarrative(overview(false, 1), null, null, { core: true, positions: false }).next[0]).toBe(
+      "The index sleeve's outlook could not be loaded.",
+    );
   });
 });

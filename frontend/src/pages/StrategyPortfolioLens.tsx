@@ -518,17 +518,11 @@ export function StrategyPortfolioLens() {
 
       <section aria-labelledby="pot-next" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
         <h2 id="pot-next" className="text-sm font-semibold">What happens next</h2>
-        {nextSteps.length > 0 ? (
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700 dark:text-slate-200">
-            {nextSteps.map((line) => (
-              <li key={line}>{line}</li>
-            ))}
-          </ul>
-        ) : (
-          <p className="mt-2 text-sm text-slate-500">
-            {coreSleeve.error ? "The index sleeve's status could not be loaded." : "Checking the index sleeve…"}
-          </p>
-        )}
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700 dark:text-slate-200">
+          {nextSteps.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
       </section>
 
       {/* #3516: the AI trials are strategies too, so their status sits with

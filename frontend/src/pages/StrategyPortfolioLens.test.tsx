@@ -1079,7 +1079,7 @@ describe("StrategyPortfolioLens", () => {
     renderLens();
     const next = await screen.findByRole("region", { name: "What happens next" });
     expect(
-      await within(next).findByText("The index sleeve buys nothing while trading is blocked (see above)."),
+      await within(next).findByText("The index sleeve buys nothing while new entries are blocked."),
     ).toBeInTheDocument();
     expect(within(next).getByText("No strategy is under test.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /AI trial \(v1\)/ })).toBeInTheDocument();

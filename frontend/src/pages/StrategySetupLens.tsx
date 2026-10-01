@@ -427,6 +427,7 @@ export function StrategySetupLens() {
       {/* #3516: the folded Invest page's plain-English status line, above the
           controls it describes. */}
       <p className="text-base text-slate-800 dark:text-slate-100">{whereMoney}</p>
+      {ownedPositions.error && !ownedPositions.data ? <SectionError onRetry={ownedPositions.refetch} /> : null}
       {actionError ? (
         <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
           {actionError}
@@ -441,6 +442,7 @@ export function StrategySetupLens() {
         onUpdated={() => {
           void overview.refetch();
           void coreSleeve.refetch();
+          void ownedPositions.refetch();
         }}
       />
       {coreSleeve.loading ? <SectionSkeleton rows={3} /> : null}
@@ -522,6 +524,7 @@ export function StrategySetupLens() {
             onUpdated={() => {
               void coreSleeve.refetch();
               void overview.refetch();
+              void ownedPositions.refetch();
             }}
           />
         </section>
