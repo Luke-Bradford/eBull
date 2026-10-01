@@ -49,6 +49,8 @@ class DecisionResponse(BaseModel):
     legs: int
     refusal_reason: str | None
     decision_refusals: dict[str, int]
+    job_status: str | None
+    job_note: str | None
 
 
 class ExecutionResponse(BaseModel):
@@ -142,6 +144,8 @@ def get_ai_trial_status(
                     legs=session.decision.legs,
                     refusal_reason=session.decision.refusal_reason,
                     decision_refusals=dict(session.decision.decision_refusals),
+                    job_status=session.decision.job_status,
+                    job_note=session.decision.job_note,
                 ),
                 execution=[
                     ExecutionResponse(state=item.state, label=item.label, count=item.count, reason=item.reason)

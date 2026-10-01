@@ -3588,7 +3588,14 @@ export type AiTrialState =
   | "halted_mandate"
   | "halted_operator"
   | "completed";
-export type AiTrialDecisionState = "not_run" | "deciding" | "refused" | "abstained" | "no_valid_plan" | "legs_published";
+export type AiTrialDecisionState =
+  | "not_run"
+  | "no_run_recorded"
+  | "deciding"
+  | "refused"
+  | "abstained"
+  | "no_valid_plan"
+  | "legs_published";
 export type AiTrialExecutionState = "submitted" | "refused" | "awaiting_execution" | "not_run";
 
 export interface AiTrialJobFire {
@@ -3606,6 +3613,9 @@ export interface AiTrialDecision {
   legs: number;
   refusal_reason: string | null;
   decision_refusals: Record<string, number>;
+  /** `no_run_recorded` only: the latest decision-job fire that targeted the session (#3515). */
+  job_status: string | null;
+  job_note: string | null;
 }
 
 export interface AiTrialExecution {

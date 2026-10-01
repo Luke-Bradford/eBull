@@ -35,6 +35,11 @@ function decisionText(decision: AiTrialDecision): { text: string; tone: BadgeTon
   switch (decision.state) {
     case "not_run":
       return { text: "Decision job did not run", tone: "risk" };
+    case "no_run_recorded":
+      return {
+        text: `Job ran, no run recorded (${decision.job_status ?? "unknown"}${decision.job_note ? `: ${decision.job_note}` : ""})`,
+        tone: "warn",
+      };
     case "deciding":
       return { text: "Deciding", tone: "info" };
     case "refused":
@@ -130,7 +135,8 @@ function TrialBody({ status }: { status: AiTrialStatusResponse }) {
       ) : null}
       {!declared ? (
         <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-          No frozen declaration yet, so both jobs run and do nothing until the trial is started.
+          No frozen declaration yet, so this version&apos;s decision job runs and does nothing until the
+          trial is started. The execute job is shared and acts only on published legs.
         </p>
       ) : null}
 

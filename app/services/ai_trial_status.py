@@ -64,6 +64,10 @@ RECENT_SESSIONS: Final = 10
 #: ``job_runs`` rows read to find a windowed job's latest in-window fire: the window is closed
 #: for ~20 hours a day, so 40 out-of-window skips a day; this covers several days of them.
 _WINDOWED_FIRE_SCAN: Final = 200
+#: Calendar days back from a session within which every fire targeting it started: a fire targets
+#: the next session after the latest close, and the longest routine gap (Good Friday: Thursday's
+#: close to Monday) is 4 days. A longer unscheduled closure only loses the note, never a session.
+_LONGEST_SESSION_GAP_DAYS: Final = 5
 
 
 @dataclass(frozen=True)
@@ -96,7 +100,9 @@ TrialState = Literal[
     "halted_operator",
     "completed",
 ]
-DecisionState = Literal["not_run", "deciding", "refused", "abstained", "no_valid_plan", "legs_published"]
+DecisionState = Literal[
+    "not_run", "no_run_recorded", "deciding", "refused", "abstained", "no_valid_plan", "legs_published"
+]
 ExecutionState = Literal["submitted", "refused", "awaiting_execution", "not_run"]
 
 
@@ -125,12 +131,26 @@ class DecisionOutcome:
     legs: int = 0
     refusal_reason: str | None = None
     decision_refusals: Mapping[str, int] = field(default_factory=dict)
+    #: ``no_run_recorded`` only: the latest decision-job fire that targeted the session.
+    job_status: str | None = None
+    job_note: str | None = None
 
 
-def decision_state(run: RunFacts | None) -> DecisionOutcome:
+@dataclass(frozen=True)
+class FireFacts:
+    """One decision-job ``job_runs`` row: its ``status`` and ``error_msg`` (the job's note)."""
+
+    status: str
+    note: str | None
+
+
+def decision_state(run: RunFacts | None, fire: FireFacts | None = None) -> DecisionOutcome:
     """What the decision run did for one target session.
 
-    * no run row → ``not_run``;
+    * no run row and no decision-job fire targeted it → ``not_run``;
+    * no run row but a fire did → ``no_run_recorded:<status>``, with ``fire``'s note: a fire that
+      stops before the claim records no run (bars not ready, the fund-v1 start gate, a missing
+      declaration, a raise), and must not read as a job that never ran;
     * ``claimed`` → ``deciding`` (the 15-minute lease is live, or the stale-claim sweep has not
       closed it yet);
     * ``refused`` → ``refused:<refusal_reason>`` — the whole run, before or after the model call;
@@ -140,7 +160,11 @@ def decision_state(run: RunFacts | None) -> DecisionOutcome:
     * otherwise ``legs_published:<n>``.
     """
     if run is None:
-        return DecisionOutcome("not_run", "not_run")
+        if fire is None:
+            return DecisionOutcome("not_run", "not_run")
+        return DecisionOutcome(
+            "no_run_recorded", f"no_run_recorded:{fire.status}", job_status=fire.status, job_note=fire.note
+        )
     if run.status == "claimed":
         return DecisionOutcome("deciding", "deciding")
     if run.status == "refused":
@@ -274,9 +298,26 @@ def latest_fire_row(
     hide the night's decision. A manual fire outside the window ran the body, so it still counts.
     With none in the scan, the newest row: a skip shown is still true."""
     for row in rows:
-        if in_window is None or row[2] != "skipped" or in_window(row[0]):
+        if _fire_counts(row, in_window):
             return row
     return rows[0] if rows else None
+
+
+def _fire_counts(row: Sequence[Any], in_window: Callable[[datetime], bool] | None) -> bool:
+    return in_window is None or row[2] != "skipped" or in_window(row[0])
+
+
+def latest_fire_by_session(rows: Sequence[Sequence[Any]], job: DecisionJob) -> dict[date, FireFacts]:
+    """The latest counting fire (``latest_fire_row``'s rule) per target session, from a decision
+    job's ``job_runs`` rows newest first. A fire's target is the claim's own rule applied at its
+    start (``expected_decision_session``), so a retry after UTC midnight maps to the same night."""
+    by_session: dict[date, FireFacts] = {}
+    for row in rows:
+        if not _fire_counts(row, job.in_window):
+            continue
+        _, session = expected_decision_session(row[0], opens_utc=job.opens_utc)
+        by_session.setdefault(session, FireFacts(str(row[2]), row[3]))
+    return by_session
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +430,12 @@ _JOB_RUNS_SQL: Final = """
     LIMIT %s
 """
 
+_DECISION_FIRES_SQL: Final = """
+    SELECT started_at, finished_at, status, error_msg
+    FROM job_runs WHERE job_name = %s AND started_at >= %s
+    ORDER BY started_at DESC
+"""
+
 _EXECUTE_FIRES_SQL: Final = """
     SELECT started_at FROM job_runs WHERE job_name = %s AND started_at >= %s
 """
@@ -475,7 +522,7 @@ def _open_legs(conn: Conn, declaration_id: int) -> list[OpenLeg]:
 
 
 def _sessions(
-    conn: Conn, declaration_id: int, *, now: datetime, genesis_at: datetime | None, opens_utc: time
+    conn: Conn, declaration_id: int, *, now: datetime, genesis_at: datetime | None, job: DecisionJob
 ) -> list[SessionStatus]:
     runs = {row[1]: row for row in conn.execute(_RUNS_SQL, (declaration_id, RECENT_SESSIONS)).fetchall()}
     funding: dict[int, list[LegFunding]] = {}
@@ -483,8 +530,10 @@ def _sessions(
         funding.setdefault(int(run_id), []).append(LegFunding(str(leg), verdict, reason))
     # Every session a fire since the trial started could have decided, run row or not, so a
     # missed day stays visible after a later one succeeds; plus the stored runs themselves.
-    latest_fire, expected = expected_decision_session(now, opens_utc=opens_utc)
-    calendar = [] if genesis_at is None else missable_sessions(latest_fire, expected, genesis_at, opens_utc=opens_utc)
+    latest_fire, expected = expected_decision_session(now, opens_utc=job.opens_utc)
+    calendar = (
+        [] if genesis_at is None else missable_sessions(latest_fire, expected, genesis_at, opens_utc=job.opens_utc)
+    )
     dates = sorted(set(calendar) | set(runs), reverse=True)[:RECENT_SESSIONS]
     oldest = min(dates, default=now.astimezone(_NY).date())
     execute_fires = [
@@ -493,12 +542,16 @@ def _sessions(
             _EXECUTE_FIRES_SQL, (JOB_AI_TRIAL_EXECUTE, datetime.combine(oldest, time(0), tzinfo=_NY))
         ).fetchall()
     ]
+    # Every fire that can target the oldest session: its night opens after the previous session's
+    # close, at most a long weekend before it.
+    fires_since = datetime.combine(oldest - timedelta(days=_LONGEST_SESSION_GAP_DAYS), time(0), tzinfo=UTC)
+    fires = latest_fire_by_session(conn.execute(_DECISION_FIRES_SQL, (job.name, fires_since)).fetchall(), job)
     completed = latest_completed_us_session(now)
     sessions: list[SessionStatus] = []
     for session_date in dates:
         row = runs.get(session_date)
         if row is None:
-            sessions.append(SessionStatus(session_date, decision_state(None), []))
+            sessions.append(SessionStatus(session_date, decision_state(None, fires.get(session_date)), []))
             continue
         run_id, _, status, refusal, decisions, refusals, legs = row
         facts = RunFacts(session_date, str(status), refusal, int(decisions), dict(refusals), int(legs))
@@ -539,7 +592,7 @@ def load_trial_status(conn: Conn, *, version: TrialVersion = V1, now: datetime |
         state_at=None if event is None else event[2],
         decision_job=decision_job,
         execute_job=execute_job,
-        sessions=_sessions(conn, declaration_id, now=observed, genesis_at=genesis_at, opens_utc=job.opens_utc),
+        sessions=_sessions(conn, declaration_id, now=observed, genesis_at=genesis_at, job=job),
         open_legs=_open_legs(conn, declaration_id),
         loss=loss,
     )
@@ -550,6 +603,7 @@ __all__ = [
     "DecisionJob",
     "DecisionOutcome",
     "ExecutionOutcome",
+    "FireFacts",
     "JobFire",
     "LegFunding",
     "LegLossStatus",
@@ -561,6 +615,7 @@ __all__ = [
     "execute_fired",
     "execution_states",
     "expected_decision_session",
+    "latest_fire_by_session",
     "latest_fire_row",
     "missable_sessions",
     "load_trial_status",

@@ -14,6 +14,7 @@ from app.services.ai_trial_status import (
     DECISION_JOBS,
     DecisionOutcome,
     ExecutionOutcome,
+    FireFacts,
     JobFire,
     LegFunding,
     LegLossStatus,
@@ -24,6 +25,7 @@ from app.services.ai_trial_status import (
     decision_state,
     execution_states,
     expected_decision_session,
+    latest_fire_by_session,
     latest_fire_row,
     missable_sessions,
     next_fire,
@@ -247,3 +249,27 @@ def test_out_of_window_skips_never_hide_the_nights_decision() -> None:
     assert latest_fire_row([], in_window) is None
     # An unwindowed job shows its newest row, whatever it was.
     assert latest_fire_row(rows, None) == rows[0]
+
+
+def test_a_fire_that_recorded_no_run_is_not_a_job_that_never_ran() -> None:
+    outcome = decision_state(None, FireFacts("success", "status=bars_not_ready"))
+    assert (outcome.state, outcome.label) == ("no_run_recorded", "no_run_recorded:success")
+    assert (outcome.job_status, outcome.job_note) == ("success", "status=bars_not_ready")
+    assert decision_state(None).state == "not_run"
+
+
+def test_each_session_gets_the_latest_counting_fire_that_targeted_it() -> None:
+    job = DECISION_JOBS[V1.arm_strategy_id]
+    rows = [
+        # Tuesday daytime: an out-of-window skip, never a decision for any session.
+        (datetime(2026, 10, 6, 14, 0, tzinfo=UTC), None, "skipped", "outside the window"),
+        # Monday night's retry after UTC midnight still targets Tuesday.
+        (datetime(2026, 10, 6, 1, 0, tzinfo=UTC), None, "success", "status=bars_not_ready late"),
+        (datetime(2026, 10, 5, 23, 30, tzinfo=UTC), None, "success", "status=bars_not_ready early"),
+        # Sunday night targets Monday.
+        (datetime(2026, 10, 4, 23, 30, tzinfo=UTC), None, "failure", "boom"),
+    ]
+    assert latest_fire_by_session(rows, job) == {
+        date(2026, 10, 6): FireFacts("success", "status=bars_not_ready late"),
+        SESSION: FireFacts("failure", "boom"),
+    }
