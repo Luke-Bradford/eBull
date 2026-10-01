@@ -360,7 +360,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary, result = run_fixture(executable=executable, source_env=os.environ, dry_run=args.dry_run)
     json.dump(summary, sys.stdout, indent=2, sort_keys=True, default=str)
     sys.stdout.write("\n")
-    return 1 if result is not None and not result.ok else 0
+    # A call that ran but measured over the ceiling (or without usage) fails the freeze gate: exit non-zero too.
+    return 1 if result is not None and (not result.ok or summary["freeze_refusal"] is not None) else 0
 
 
 if __name__ == "__main__":

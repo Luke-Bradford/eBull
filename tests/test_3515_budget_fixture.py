@@ -19,7 +19,7 @@ from app.services.ai_trial_fund_blocks import (
 from app.services.ai_trial_invocation import InvocationResult
 from app.services.ai_trial_pack import DISCLOSURE_LIMIT, SMALL_CAP_N, TITLE_MAX_CHARS, TOP_N
 from app.services.ai_trial_pack_reader import INTRADAY_BAR_LENGTH, INTRADAY_WINDOW, Pack
-from scripts.ai_trial_fund_budget_fixture import budget_fixture_pack, run_fixture
+from scripts.ai_trial_fund_budget_fixture import budget_fixture_pack, main, run_fixture
 
 _ENV = {"PATH": "/usr/bin", "HOME": "/tmp"}
 
@@ -124,6 +124,22 @@ def test_a_call_within_the_ceiling_passes(fixture: Pack) -> None:
     assert (summary["input_tokens"], summary["freeze_refusal"]) == (600_002, None)
     assert summary["pack_sha256"] == fixture.sha256
     assert summary["rendered_prompt_bytes"] == len(calls[0]["prompt"].encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("refusal", "tokens", "code"),
+    [(None, 600_000, 0), (None, INPUT_TOKEN_CEILING + 1, 1), ("nonzero_exit", 0, 1)],
+)
+def test_the_cli_exits_non_zero_whenever_the_freeze_gate_refuses(
+    monkeypatch: pytest.MonkeyPatch, refusal: str | None, tokens: int, code: int
+) -> None:
+    usage = {"input_tokens": tokens, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+    fake = _fake_invoke(refusal, usage, [])
+    monkeypatch.setattr(
+        "scripts.ai_trial_fund_budget_fixture.run_fixture",
+        lambda **kw: run_fixture(**kw, invoke=fake),
+    )
+    assert main(["--claude-bin", "/bin/sh"]) == code
 
 
 def test_a_dry_run_makes_no_call() -> None:
