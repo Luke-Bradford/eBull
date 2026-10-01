@@ -103,7 +103,9 @@ def test_inventory_lines_point_at_their_occurrence() -> None:
     assert drifted == []
 
 
-def test_the_stale_line_debt_only_shrinks() -> None:
+def test_every_stale_line_names_a_declared_occurrence() -> None:
+    """Correcting an entry's line orphans its debt key, which fails here until it is removed. This does NOT stop a
+    drifted entry being ADDED to the debt; review does (the comment on ``_STALE_LINES``)."""
     declared = {(occ.path, occ.line) for occ in INVENTORY}
     assert _STALE_LINES <= declared, "a _STALE_LINES entry no longer names a declared occurrence: remove it"
 
