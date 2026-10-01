@@ -352,7 +352,11 @@ def freeze_pot(
                 raise _Rollback
             try:
                 declaration_id = _write(
-                    conn, doc=doc, doc_sha256=doc_sha256, declared_by=declared_by.strip() or "dry-run"
+                    # The placeholder exists only for a dry run; an apply always carries its declarer.
+                    conn,
+                    doc=doc,
+                    doc_sha256=doc_sha256,
+                    declared_by=declared_by.strip() if apply else "dry-run",
                 )
             except PreregDeclarationRefused as exc:
                 refusals += [f"prereg_refused:{code}" for code in exc.refusals]
