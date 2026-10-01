@@ -146,6 +146,10 @@ def _finite_positive(value: Decimal | Fraction | float | None) -> bool:
     return math.isfinite(value) and value > 0
 
 
+def _finite(value: Decimal | float) -> bool:
+    return value.is_finite() if isinstance(value, Decimal) else math.isfinite(value)
+
+
 def _exact(value: Decimal | float) -> Fraction:
     """The rational a stored value denotes; a float by its shortest round-trip form."""
     return Fraction(Decimal(repr(value)) if isinstance(value, float) else value)
@@ -248,7 +252,7 @@ def _quote_ok(f: NameFacts, as_of: datetime) -> bool:
         bid=f.bid,
         ask=f.ask,
         quoted_at=f.quoted_at,
-        total_score=float(f.total_score) if f.total_score is not None else None,
+        total_score=float(f.total_score) if f.total_score is not None and _finite_positive(f.total_score) else None,
         market_cap_usd=None,
     )
     return is_eligible(candidate, as_of=as_of)
@@ -273,7 +277,8 @@ def build_universes(
     if len(caps) < MIN_NYSE_CAPS:
         return "breakpoint_unavailable"
     breakpoint = nearest_rank([c for c in caps if c is not None], BREAKPOINT_PERCENTILE)
-    assert isinstance(breakpoint, Decimal)
+    if not isinstance(breakpoint, Decimal):
+        raise TypeError("nyse_caps must be Decimal")
 
     hold_failure: dict[int, HoldRule] = {}
     ranking: list[NameFacts] = []
@@ -291,7 +296,8 @@ def build_universes(
     if len(cut_population) < MIN_VALID_MAX:
         return "max_cut_unavailable"
     cut = nearest_rank(cut_population, MAX_CUT_PERCENTILE)
-    assert isinstance(cut, Fraction)
+    if not isinstance(cut, Fraction):
+        raise TypeError("MAX values must be exact")
 
     entry_failure: dict[int, EntryRule] = {}
     atr: dict[int, Fraction] = {}
@@ -617,12 +623,21 @@ def _adjustments(penalties_json: Sequence[Mapping[str, Any]]) -> tuple[list[dict
 
 def reconciles(score: ScoreBreakdown) -> bool:
     """§6: ``total_score = clip(raw_total − P + R)`` within storage rounding (r3-107)."""
+    penalties, rewards = _adjustments(score.penalties_json)
     if score.raw_total is None:
         return False
-    penalties, rewards = _adjustments(score.penalties_json)
+    raw_total = score.raw_total
+    values = [
+        raw_total,
+        score.total_score,
+        *(p["deduction"] for p in penalties),
+        *(r["addition"] for r in rewards),
+    ]
+    if not all(isinstance(v, Decimal | float | int) and not isinstance(v, bool) and _finite(v) for v in values):
+        return False  # NUMERIC can store NaN; an unreconcilable row fails closed
     lo, hi = SCORE_CLIP
     value = (
-        _exact(score.raw_total)
+        _exact(raw_total)
         - sum((_exact(p["deduction"]) for p in penalties), Fraction(0))
         + sum((_exact(r["addition"]) for r in rewards), Fraction(0))
     )

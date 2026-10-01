@@ -465,6 +465,8 @@ def test_reconciles() -> None:
     assert not rp.reconciles(_score(total_score=Decimal("0.6200")))
     assert rp.reconciles(_score(raw_total=Decimal("0.05"), total_score=Decimal("0")))  # clipped at 0
     assert not rp.reconciles(_score(raw_total=None))
+    assert not rp.reconciles(_score(raw_total=Decimal("NaN")))
+    assert not rp.reconciles(_score(penalties_json=[{"name": "x", "deduction": float("nan"), "kind": "penalty"}]))
     with pytest.raises(ValueError):
         rp.reconciles(_score(penalties_json=[{"name": "x", "kind": "bonus"}]))
 
