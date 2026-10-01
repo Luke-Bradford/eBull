@@ -208,7 +208,13 @@ from typing import Final
 #: random control leg is not a search. Not a `hunt-` entry, so it counts in M_inh: 475 -> 476.
 #: Measured the same way before the bump: the SAME five groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-01-r20"
+#:
+#: r21 (2026-10-01, #2842 slice 4a) adds `ranking-pot-v1`, the ranking pot's one search, declared for
+#: its own `falsification_only` #2599 row before its freeze (spec §8). Its K order-reassignment
+#: controls are the null distribution, not searches. Not a `hunt-` entry, so it counts in M_inh:
+#: 476 -> 477. Measured the same way before the bump: the SAME five groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-01-r21"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1321,6 +1327,19 @@ TRIAL_REGISTER: Final = TrialRegister(
             exactness=TrialExactness.EXACT,
             searches=1,
             declared_for=("ai-discretionary-fund-v1", "v1"),
+        ),
+        # ``ranking_pot_freeze.EXPECTED_REGISTER_ENTRY``; a test pins the two equal.
+        DeclaredTrial(
+            trial_id="ranking-pot-v1",
+            description=(
+                "#2842 ranking-pot-v1: the v1.5-balanced ranking held as a 25-name monthly demo book, against "
+                "K = 9,999 order-reassignment controls; one declared hypothesis (the shadow's T, spec §9)."
+            ),
+            evidence="docs/proposals/execution/2026-10-01-2842-ranking-pot-v1.md §8 'Declaration'; frozen by "
+            "scripts/ranking_pot_freeze.py (#2842)",
+            exactness=TrialExactness.EXACT,
+            searches=1,
+            declared_for=("ranking-pot-v1", "v1"),
         ),
     ),
 )

@@ -203,13 +203,17 @@ STRATEGY_PURPOSES: frozenset[str] = frozenset(get_args(StrategyPurpose))
 #: control plane's two narrow branches (``promote_strategy`` refuses every advancing stage;
 #: ``configure_deployment`` admits a paper deployment only) are the whole of what they may do.
 DemoTrialPurpose = Literal["demo_trial"]
-#: #3515 adds fund-v1's two legs (fund-v1 spec §7), under the same restriction.
+#: #3515 adds fund-v1's two legs (fund-v1 spec §7), under the same restriction. #2842 adds
+#: ``ranking-pot-v1`` (ranking-pot spec §7.1): one placed book; its shadow and controls are computed, so they
+#: have no strategy id. ⚠ Membership here is the PURPOSE only: the AI-trial loader still refuses a pot signal
+#: (it has no AI-trial pair), and the AI-trial start gate counts pot lifecycles as non-trial (spec §7.3).
 DEMO_TRIAL_STRATEGY_IDS: Final[frozenset[str]] = frozenset(
     {
         "ai-discretionary-v1",
         "ai-discretionary-v1-control",
         "ai-discretionary-fund-v1",
         "ai-discretionary-fund-v1-control",
+        "ranking-pot-v1",
     }
 )
 #: The purpose any registered strategy id resolves to: a manifest purpose, or ``demo_trial``.
