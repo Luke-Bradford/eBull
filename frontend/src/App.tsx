@@ -67,11 +67,11 @@ export function App() {
             </RequireAuth>
           }
         >
-          {/* #3516: Strategies is the landing route — its Portfolio tab is the
-              simple view, its Setup tab holds the controls. The Invest page
-              (#3423) folded into it; old links redirect. */}
-          <Route index element={<Navigate to="/strategies" replace />} />
-          <Route path="dashboard" element={<DashboardPage />} />
+          {/* Dashboard is the landing route, then Portfolio, then Strategies -- the
+              operator's drill-down order (2026-10-01). The Invest page (#3423)
+              folded into Strategies (#3516); old links redirect. */}
+          <Route index element={<DashboardPage />} />
+          <Route path="dashboard" element={<Navigate to="/" replace />} />
           <Route path="invest" element={<Navigate to="/strategies" replace />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="calendar" element={<CalendarPage />} />

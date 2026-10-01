@@ -39,3 +39,8 @@ The hub composes the same extracted table primitives, not re-implemented ones (`
 ## Standing execution rule
 
 The consolidation shape above is decided. Implement it against this skill: behavior-preserving per lens (each preset renders what its page renders today), one PR for the hub shell + presets + redirects + sidebar collapse, run typecheck + `test:unit` + the dark gate. Surface to the operator only a genuinely new nav paradigm — never the assembly of a hub from pages that already exist.
+
+## Navigation order and landing page (operator, 2026-09-30 / 2026-10-01)
+
+- **The sidebar is one flat list in drill-down order: Dashboard (`/`, the landing page) → Portfolio → Calendar → Strategies → Research → …** Do not reorder it to promote a page; the order follows how the operator drills down.
+- **Simplicity lives inside each page, in its tabs**, and never in a separate summary page or a collapsed "Advanced" group. Precedent: #3423 added an Invest landing page and an Advanced group, and the operator rejected both. #3516 folded Invest into Strategies, and its "Strategies leads" ordering was itself corrected the next day.

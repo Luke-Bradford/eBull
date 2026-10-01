@@ -12,15 +12,24 @@ function renderAt(path: string) {
   );
 }
 
-describe("Sidebar (#3516)", () => {
-  it("is one flat list led by Strategies, with no Invest item and no Advanced group", () => {
-    renderAt("/strategies");
+describe("Sidebar", () => {
+  it("is one flat list in drill-down order: Dashboard, Portfolio, Calendar, Strategies", () => {
+    renderAt("/");
     const links = screen.getAllByRole("link").filter((link) => link.closest("nav"));
-    expect(links[0]).toHaveTextContent("Strategies");
-    expect(links[0]).toHaveAttribute("href", "/strategies");
-    expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute("href", "/dashboard");
-    expect(screen.getByRole("link", { name: "Portfolio" })).toBeInTheDocument();
+    expect(links.slice(0, 4).map((link) => link.textContent)).toEqual([
+      "Dashboard",
+      "Portfolio",
+      "Calendar",
+      "Strategies",
+    ]);
+    expect(links[0]).toHaveAttribute("href", "/");
     expect(screen.queryByRole("link", { name: "Invest" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Advanced/ })).not.toBeInTheDocument();
+  });
+
+  it("marks Dashboard active only on the root path", () => {
+    renderAt("/strategies");
+    expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("link", { name: "Strategies" })).toHaveAttribute("aria-current", "page");
   });
 });

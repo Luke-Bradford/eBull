@@ -1,15 +1,15 @@
 import { NavLink } from "react-router-dom";
 
 /**
- * One flat list (#3516, operator correction of #3423's "Advanced" grouping).
- * Strategies leads because it is the landing page; simplicity lives in its
- * tabs, not in a separate summary page or a collapsed nav group.
+ * One flat list in the operator's drill-down order: Dashboard, then Portfolio,
+ * then Strategies (operator 2026-10-01). #3516 removed #3423's Invest page and
+ * "Advanced" group; simplicity lives in each page's tabs, not in the nav.
  */
-const NAV_ITEMS: { to: string; label: string }[] = [
-  { to: "/strategies", label: "Strategies" },
-  { to: "/dashboard", label: "Dashboard" },
+const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
+  { to: "/", label: "Dashboard", end: true },
   { to: "/portfolio", label: "Portfolio" },
   { to: "/calendar", label: "Calendar" },
+  { to: "/strategies", label: "Strategies" },
   // #1917 — one Research item; Instruments/Rankings/Theses/Recommendations are
   // now view presets under /research.
   { to: "/research", label: "Research" },
@@ -37,7 +37,7 @@ export function Sidebar() {
       </div>
       <nav className="flex flex-col gap-1 px-2">
         {NAV_ITEMS.map((item) => (
-          <NavLink key={item.to} to={item.to} className={navClass}>
+          <NavLink key={item.to} to={item.to} end={item.end} className={navClass}>
             {item.label}
           </NavLink>
         ))}
