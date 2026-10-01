@@ -48,7 +48,9 @@ def render(intervals: list[BridgeInterval], census: BridgeCensus) -> list[str]:
             lines.append(f"  {label:<24}{_fmt(value):>16}")
         lines.append(f"  fees memo: {interval.fees_memo}  ({len(interval.fees_detail)} observations)")
         if interval.fees_memo != "fees_zero":
-            lines.extend(f"    position {pid}: {_fmt(value)}" for pid, value in interval.fees_detail if value != 0)
+            # One line per (position, value): both endpoints usually repeat the same observation.
+            distinct = dict.fromkeys((pid, value) for pid, value in interval.fees_detail if value != 0)
+            lines.extend(f"    position {pid}: {_fmt(value)}" for pid, value in distinct)
         for residual in interval.residuals:
             flag = "EXCEEDS" if residual.exceeds else "ok"
             lines.append(
