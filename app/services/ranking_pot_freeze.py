@@ -230,19 +230,19 @@ def _next_family_seq(conn: psycopg.Connection[Any]) -> int:
 
 
 def _existing_doc_sha256(conn: psycopg.Connection[Any]) -> tuple[bool, str | None]:
-    """Any #2599 row for the pot identity, and its document's sha if one was stored."""
+    """Any #2599 row for the pot identity, and the stored document's sha. Read independently: the document stays
+    bound to the ROOT #2599 row when a later revision supersedes it (Codex ckpt-2)."""
     row = conn.execute(
         """
-        SELECT p.declaration_id, d.doc_sha256
-        FROM strategy_preregistration_declarations p
-        LEFT JOIN ranking_pot_declarations d ON d.declaration_id = p.declaration_id
-        WHERE p.strategy_id = %s AND p.strategy_version = %s
-        ORDER BY p.declaration_id DESC
-        LIMIT 1
+        SELECT EXISTS (SELECT 1 FROM strategy_preregistration_declarations
+                       WHERE strategy_id = %(id)s AND strategy_version = %(v)s),
+               (SELECT doc_sha256 FROM ranking_pot_declarations
+                WHERE strategy_id = %(id)s AND strategy_version = %(v)s)
         """,
-        (STRATEGY_ID, STRATEGY_VERSION),
+        {"id": STRATEGY_ID, "v": STRATEGY_VERSION},
     ).fetchone()
-    return (row is not None, None if row is None or row[1] is None else str(row[1]))
+    assert row is not None
+    return (bool(row[0]), None if row[1] is None else str(row[1]))
 
 
 # ---------------------------------------------------------------------------
