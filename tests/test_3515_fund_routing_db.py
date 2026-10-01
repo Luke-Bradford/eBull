@@ -13,8 +13,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
+from app.services.ai_trial_fund_blocks import INPUT_TOKEN_CEILING
 from app.services.ai_trial_fund_policy import FUND_POLICY_HASH
 from app.services.ai_trial_halts import HaltCheck, enforce_trial_halts
 from app.services.ai_trial_run import run_trial_decision
@@ -22,6 +24,9 @@ from app.services.ai_trial_version import FUND_V1, BuiltPack
 from tests.test_ai_trial_run_db import ENV, PACK, RISK, _decisions, _invoke, _run, _seed, stubbed  # noqa: F401
 
 Conn = psycopg.Connection[Any]
+
+#: A completed call's input usage at the ceiling: fund-v1's §6 post-call rule passes it.
+_USAGE = {"input_tokens": 2, "cache_creation_input_tokens": INPUT_TOKEN_CEILING - 2, "cache_read_input_tokens": 0}
 
 _V1_ROWS: dict[str, str] = {
     "runs": "SELECT * FROM ai_trial_runs WHERE declaration_id = %(d)s ORDER BY run_id",
@@ -63,7 +68,12 @@ def test_a_fund_v1_decision_routes_without_reading_or_writing_v1_rows(
     record = {"fund_blocks": Jsonb({"coverage": {"names": len(PACK.complete)}})}
     fund = dataclasses.replace(FUND_V1, build_pack=lambda _conn, **_kw: BuiltPack(PACK, record))
     outcome = run_trial_decision(
-        conn, env=ENV, risk=RISK, fetch_intraday=lambda _iid: [], invoke=_invoke(_decisions()), version=fund
+        conn,
+        env=ENV,
+        risk=RISK,
+        fetch_intraday=lambda _iid: [],
+        invoke=_invoke(_decisions(), usage=_USAGE),
+        version=fund,
     )
     assert outcome.status == "decided" and len(outcome.pair_ids) == 1
     # Same target session as v1's, its own claim: the unique key is per declaration.
@@ -99,3 +109,61 @@ def test_a_fund_v1_decision_routes_without_reading_or_writing_v1_rows(
     assert sorted(checks, key=lambda c: c.declaration_id) == [HaltCheck(v1_id, None, 0), HaltCheck(fund_id, None, 0)]
 
     assert _v1_rows(conn, v1_id) == before
+
+
+@pytest.mark.parametrize(
+    ("invoke_kw", "reason"),
+    [
+        ({"usage": {**_USAGE, "cache_read_input_tokens": 1}}, "budget_breach"),  # one token over the ceiling
+        ({}, "budget_breach"),  # a completed call with no usage
+        ({"refusal": "nonzero_exit"}, "nonzero_exit"),  # "Prompt is too long" exits 1
+        ({"refusal": "is_error"}, "is_error"),
+    ],
+)
+def test_a_fund_v1_budget_breach_refuses_the_run_and_halts_only_fund_v1(
+    ebull_test_conn: Conn,
+    stubbed: dict[str, Any],  # noqa: F811
+    invoke_kw: dict[str, Any],
+    reason: str,
+) -> None:
+    conn = ebull_test_conn
+    v1_id = _seed(conn)
+    before = _v1_rows(conn, v1_id)
+    fund_id = _seed(conn, policy_hash=FUND_POLICY_HASH, strategy_id=FUND_V1.arm_strategy_id)
+    fund = dataclasses.replace(FUND_V1, build_pack=lambda _conn, **_kw: BuiltPack(PACK, {}))
+    outcome = run_trial_decision(
+        conn,
+        env=ENV,
+        risk=RISK,
+        fetch_intraday=lambda _iid: [],
+        invoke=_invoke(_decisions(), **invoke_kw),
+        version=fund,
+    )
+    assert (outcome.status, outcome.refusal_reason, outcome.pair_ids) == ("refused", reason, ())
+    assert conn.execute(
+        "SELECT count(*) FROM ai_trial_decisions d JOIN ai_trial_runs r USING (run_id) WHERE r.declaration_id = %s",
+        (fund_id,),
+    ).fetchone() == (0,)
+    state = conn.execute(
+        "SELECT to_state, actor, reason FROM ai_trial_state_events WHERE declaration_id = %s "
+        "ORDER BY event_id DESC LIMIT 1",
+        (fund_id,),
+    ).fetchone()
+    assert state is not None and state[:2] == ("halted_operator", "engine") and state[2].startswith(reason + ":")
+    conn.commit()
+    assert _v1_rows(conn, v1_id) == before
+
+
+def test_v1_has_no_post_call_halt(
+    ebull_test_conn: Conn,
+    stubbed: dict[str, Any],  # noqa: F811
+) -> None:
+    # v1's own behaviour is unchanged: a completed call without usage decides, and nothing halts.
+    conn = ebull_test_conn
+    v1_id = _seed(conn)
+    outcome = _run(conn, _invoke(_decisions()))
+    assert outcome.status == "decided"
+    state = conn.execute(
+        "SELECT to_state FROM ai_trial_state_events WHERE declaration_id = %s ORDER BY event_id DESC LIMIT 1", (v1_id,)
+    ).fetchone()
+    assert state == ("active",)

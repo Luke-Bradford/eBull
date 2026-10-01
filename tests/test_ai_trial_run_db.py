@@ -65,13 +65,17 @@ def _decisions() -> dict[str, Any]:
     }
 
 
-def _invoke(structured: object = None, refusal: str | None = None) -> Any:
+def _invoke(structured: object = None, refusal: str | None = None, usage: dict[str, int] | None = None) -> Any:
+    event: dict[str, Any] = {"type": "result", "num_turns": 1, "total_cost_usd": 0.57}
+    if usage is not None:
+        event["usage"] = usage
+
     def fake(**_: object) -> InvocationResult:
         return InvocationResult(
             refusal_reason=refusal,  # type: ignore[arg-type]
             detail="",
             init_event={"type": "system", "subtype": "init", "tools": ["StructuredOutput"]},
-            result_event={"type": "result", "num_turns": 1, "total_cost_usd": 0.57},
+            result_event=event,
             structured_output=structured if refusal is None else None,
             exit_code=0 if refusal is None else None,
             stdout=b'{"type":"result"}\n',

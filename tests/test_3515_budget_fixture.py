@@ -14,11 +14,13 @@ from app.services.ai_trial_fund_blocks import (
     MDNA_MAX_CHARS,
     REFUSE_PROMPT_BUDGET_EXCEEDED,
     budget_fixture_refusal,
+    post_call_halt_reason,
     reported_input_tokens,
 )
 from app.services.ai_trial_invocation import InvocationResult
 from app.services.ai_trial_pack import DISCLOSURE_LIMIT, SMALL_CAP_N, TITLE_MAX_CHARS, TOP_N
 from app.services.ai_trial_pack_reader import INTRADAY_BAR_LENGTH, INTRADAY_WINDOW, Pack
+from app.services.ai_trial_version import FUND_V1, V1
 from scripts.ai_trial_fund_budget_fixture import budget_fixture_pack, main, run_fixture
 
 _ENV = {"PATH": "/usr/bin", "HOME": "/tmp"}
@@ -149,3 +151,28 @@ def test_a_dry_run_makes_no_call() -> None:
     summary, result = run_fixture(executable="", source_env=_ENV, invoke=_fake_invoke(None, _ZERO, calls), dry_run=True)
     assert result is None and calls == []
     assert summary["rendered_prompt_bytes"] > 0
+
+
+_AT = {"input_tokens": 0, "cache_creation_input_tokens": INPUT_TOKEN_CEILING, "cache_read_input_tokens": 0}
+
+
+@pytest.mark.parametrize(
+    ("refusal", "usage", "expected"),
+    [
+        (None, _AT, None),  # at the ceiling passes
+        (None, {**_AT, "input_tokens": 1}, "budget_breach"),
+        (None, None, "budget_breach"),  # completed but unmeasured
+        (None, {"input_tokens": 5}, "budget_breach"),
+        ("nonzero_exit", None, "nonzero_exit"),  # CLI rejection / context overflow halts too
+        ("is_error", _AT, "is_error"),
+        ("model_timeout", None, None),  # v1's refusal, no halt
+        ("no_structured_output", {**_AT, "input_tokens": 1}, None),
+    ],
+)
+def test_the_post_call_rule(refusal: str | None, usage: object, expected: str | None) -> None:
+    assert post_call_halt_reason(refusal, usage) == expected
+
+
+def test_only_fund_v1_carries_the_post_call_rule() -> None:
+    assert V1.post_call_halt is None
+    assert FUND_V1.post_call_halt is post_call_halt_reason

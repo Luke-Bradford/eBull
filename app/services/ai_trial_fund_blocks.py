@@ -80,6 +80,9 @@ REFUSE_MDNA_COVERAGE: Final = "mdna_coverage_below_floor"
 REFUSE_SNAPSHOT_TOO_LATE: Final = "snapshot_too_late"
 REFUSE_PROMPT_OVER_BUDGET: Final = "prompt_over_budget"
 REFUSE_PROMPT_BUDGET_EXCEEDED: Final = "prompt_budget_exceeded"
+REFUSE_BUDGET_BREACH: Final = "budget_breach"
+#: §6: the invocation refusals that halt fund-v1 as a budget breach does (a CLI rejection or a context overflow).
+HALTING_INVOCATION_REFUSALS: Final = frozenset({"nonzero_exit", "is_error"})
 
 #: §6: 150k of the 1,000,000-token context the CLI reports for ``TRIAL_MODEL_ID`` left for output and margin.
 INPUT_TOKEN_CEILING: Final = 850_000
@@ -478,6 +481,18 @@ def reported_input_tokens(usage: object) -> int | None:
     if not all(isinstance(p, int) and not isinstance(p, bool) and p >= 0 for p in parts):
         return None
     return sum(parts)  # type: ignore[arg-type]
+
+
+def post_call_halt_reason(refusal_reason: str | None, usage: object) -> str | None:
+    """§6 after the call: the reason to refuse the run AND halt the trial, or ``None``. A CLI rejection or context
+    overflow (``nonzero_exit`` / ``is_error``) keeps its own reason; a completed call whose input usage is over
+    ``INPUT_TOKEN_CEILING`` or missing is ``budget_breach``. Any other refusal is v1's, with no halt."""
+    if refusal_reason in HALTING_INVOCATION_REFUSALS:
+        return refusal_reason
+    if refusal_reason is not None:
+        return None
+    tokens = reported_input_tokens(usage)
+    return REFUSE_BUDGET_BREACH if tokens is None or tokens > INPUT_TOKEN_CEILING else None
 
 
 def budget_fixture_refusal(input_tokens: int | None) -> str | None:
