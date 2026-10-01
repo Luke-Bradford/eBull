@@ -162,12 +162,12 @@ def _side_by_side(conn: psycopg.Connection[Any]) -> list[tuple[str, Readout | st
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="#3471 §9 readout of the AI-discretionary-v1 demo trial")
-    parser.add_argument("--arm", default=V1.arm_strategy_id, help="the arm's strategy id")
-    parser.add_argument("--version", default=V1.strategy_version, help="the declared strategy version")
+    parser.add_argument("--arm", help=f"the arm's strategy id (default {V1.arm_strategy_id})")
+    parser.add_argument("--version", help=f"the declared strategy version (default {V1.strategy_version})")
     parser.add_argument("--json", type=Path, help="also write the readout as JSON here")
     parser.add_argument("--side-by-side", action="store_true", help="every registered version, one after another")
     args = parser.parse_args(argv)
-    if args.side_by_side and (args.arm != V1.arm_strategy_id or args.version != V1.strategy_version):
+    if args.side_by_side and (args.arm is not None or args.version is not None):
         parser.error("--side-by-side reads every registered version; it takes no --arm or --version")
     if args.side_by_side:
         with psycopg.connect(settings.database_url) as conn:
@@ -177,9 +177,11 @@ def main(argv: list[str] | None = None) -> int:
             doc = {arm: side_by_side_json(r) for arm, r in entries}
             args.json.write_text(json.dumps(doc, default=_jsonable, indent=2))
         return 0
+    arm = V1.arm_strategy_id if args.arm is None else args.arm
+    strategy_version = V1.strategy_version if args.version is None else args.version
     with psycopg.connect(settings.database_url) as conn:
         try:
-            version = trial_version(args.arm, args.version)
+            version = trial_version(arm, strategy_version)
         except LookupError as exc:
             print(f"no readout: {exc}")
             return 0
@@ -188,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         except ReadoutUnavailable as exc:
             print(f"no readout: {exc}")
             return 0
-    print(render(readout, arm_strategy_id=args.arm))
+    print(render(readout, arm_strategy_id=arm))
     if args.json:
         args.json.write_text(json.dumps(dataclasses.asdict(readout), default=_jsonable, indent=2))
     return 0

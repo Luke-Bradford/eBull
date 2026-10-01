@@ -53,7 +53,10 @@ def test_the_json_has_one_schema_per_version() -> None:
     assert cli.side_by_side_json("no frozen declaration") == {"readout": None, "reason": "no frozen declaration"}
 
 
-@pytest.mark.parametrize("extra", [["--arm", FUND_V1.arm_strategy_id], ["--version", "v2"]])
+@pytest.mark.parametrize(
+    "extra",
+    [["--arm", FUND_V1.arm_strategy_id], ["--version", "v2"], ["--arm", V1.arm_strategy_id], ["--version", "v1"]],
+)
 def test_side_by_side_rejects_arm_or_version(extra: list[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--side-by-side", *extra])
