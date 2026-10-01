@@ -169,17 +169,37 @@ report). The event row supplies `form_type`, `filing_date`, `report_date`.
 **Facts per report.** K rows of that accession with `fetched_at ≤ as_of`: drop non-finite `val` (NUMERIC admits
 `NaN` and `±Infinity`; §9: 0), counted `skipped_non_finite`; drop us-gaap facts with `period_end > report_date`
 and the dei `EntityCommonStockSharesOutstanding` fact (the cover-page count) with `period_end > filing_date` (K holds exactly one dei concept, so the census applies this bound to every dei row; a second dei concept would need its own rule), counted `excluded_future_dated` (§9: the only post-report
-facts in the census are dei cover counts); then order and cap. Each fact: `fact_id`, `taxonomy:concept`, `unit`,
+facts in the census are dei cover counts); then order and cap. Each fact carries `taxonomy:concept`, `unit`,
 `period_start` (null for instants), `period_end`, `end_minus_start_days` (null for instants; named for what it is,
-not an XBRL duration convention), `val` (exact NUMERIC string: the XBRL fact value in the stated unit, not scaled
-to thousands or millions as a filing's HTML tables often are). `decimals` is not shown: it is stored metadata the
-upsert never corrects (§2).
+not an XBRL duration convention), `val` (the XBRL fact value in the stated unit, not scaled to thousands or
+millions as a filing's HTML tables often are). `decimals` is not shown: it is stored metadata the upsert never
+corrects (§2).
+- **Encoding (resize, 2026-10-01).** The cap selects the shown facts in the round-robin order below; the pack then
+  shows them grouped, one group per (`taxonomy:concept`, `unit`), groups in K's declared order and then by `unit`,
+  rows within a group in the concept rank order below (`period_end` desc, `period_start` desc nulls first, `unit`,
+  then `fact_id`, which is unique, so the order is total):
+  `{"concept": "us-gaap:Revenues", "unit": "USD", "rows": [[period_start, period_end, end_minus_start_days, val], …]}`. Grouping changes the
+  order the model reads, not which facts are shown: each row keeps its own dates and value.
+  - **`fact_id` moves to the run record** (`ai_trial_runs.fund_blocks`, written in the same update as the pack):
+    `fact_ids` per symbol per shown accession (key: symbol, then accession number), in the flattened group order (group by group, row by row), so row
+    *i* of a report's flattened groups is `fact_ids[i]`; the two lengths are asserted equal at build. The pack still
+    holds every shown value and date, so what the model saw never depends on resolving an id later.
+  - **`val`** is `val::text` with the trailing zeros of the column's fixed scale removed, and the point too when
+    nothing follows it (`financial_facts_raw.val` is `NUMERIC(30,6)`, so `94930000000.000000` is the stored form of
+    `94930000000`; `0.000000` becomes `0`): the same decimal value, never rounded. The input must match
+    `^-?[0-9]+(\.[0-9]+)?$` (fixed point, which is how PostgreSQL prints a finite NUMERIC); anything else raises
+    and refuses the run (§5).
+  - Measured on the real shortlist (§9): 575,316 → 223,591 bytes over 48 names.
+  - A period × (concept, unit) matrix was smaller still (158,559) and rejected. It needs one cell per (period,
+    concept, unit), so its worst case grows with distinct periods times rows (empty cells), and it holds one value
+    per cell, a
+    property of the data rather than the rule (the measurement found no cell collision on these 48 names).
 These are the facts companyfacts attributes to that accession as extracted by the chokepoint (current period and
 any comparatives it tagged), not the filing's full tag set. Figures are as filed; we apply no adjustment, and any
 retrospective adjustment the filer made stands. `dei:EntityCommonStockSharesOutstanding` is the cover-page count
 as of its own `period_end`.
 - Order: round-robin across concepts — rank each concept's facts by `period_end` desc, `period_start` desc nulls
-  first, `unit`, then order by (rank, K's declared order). A cap therefore cuts the deepest comparatives of every
+  first, `unit`, `fact_id`, then order by (rank, K's declared order). A cap therefore cuts the deepest comparatives of every
   concept before any concept's newest fact.
 - Cap `FACTS_PER_REPORT_MAX` = 120 after the drops; beyond it the tail is cut, `truncated: true` and the full count
   shown. It did not bind in the 2026-09-30 census (max 118 per report, 15 for one concept); the freeze re-runs the
@@ -280,34 +300,76 @@ name.
   entry on a shortlist name, or none). That is a risk to the trial's result, not to capital, and the bound is
   structural: no tools, no MCP, init-event assertion, output parsed only as data. The synthetic call includes an
   adversarial extract as a regression check, not proof.
-- **Budget.**
-  - Slice 2 builds a synthetic 50-name pack at every cap: both blocks full (120 facts per report with 20-digit
-    values and the longest unit string in the stored K rows; 6,000 characters of prose), the maximum intraday bar
-    count v1 accepts, full account context. Fictitious symbols, as every pre-freeze call (v1 §9). One tool-less
-    call. Recorded in the declaration: the fixture's sha, the rendered prompt's UTF-8 byte length, and the CLI's
-    reported input usage (uncached + cache-creation + cache-read tokens, which covers the system prompt and all
-    CLI-added context of that request).
-  - Freeze refuses `prompt_budget_exceeded` if that usage > `INPUT_TOKEN_CEILING` = 850,000 (150k of the
-    1,000,000-token context the CLI reported left for output and margin).
+- **Budget (resized 2026-10-01; the original "50 names at every cap" fixture is measured impossible, below).**
+  - **What the fixture is.** A byte-to-token calibration at the size the per-run gate admits, not a maximal pack.
+    The per-run gate compares bytes only. The fixture shows that one prompt of its byte length, built from
+    fund-v1's own shapes at their caps, stays under the ceiling. It does not bound each part of a real pack, and
+    bytes do not bound tokens: a real prompt could be denser per byte than the fixture (unusual numbers, Unicode,
+    identifiers). That residual is stated, not tested away; the post-call check is what catches it.
+  - **Construction.** `budget_fixture_pack(n)`: the every-cap pack restricted to its first `n` names, built by the
+    production builders. Restricted: the shortlist, the pack-complete map, the name entries and the blocks.
+    Kept whole: the account context (12 held positions, the cap, whatever `n` is), the setup library and the rest
+    of the document. Every part of every name is at its cap: both blocks full (120 facts per report with
+    23-character values, the longest `val::text` stored for K, and the longest stored unit; 6,000 characters of
+    prose), 180 intraday bars (the most a 30-day window holds and v1 accepts), five filings and five headlines at
+    200 characters. The adversarial filing title moves to the first name, so every `n` ≥ 1 carries it. Fictitious
+    symbols, as every pre-freeze call (v1 §9). Recorded in the declaration: `n`, every probe below with its
+    outcome, the fixture's sha, the rendered prompt's UTF-8 byte length, the CLI version and the reported input
+    usage (uncached + cache-creation + cache-read tokens of that request).
+  - **Choosing `n` (`FIXTURE_NAMES`), by construction: the largest passing `n` on a walk.** Start at
+    `n₀` = ⌊(`INPUT_TOKEN_CEILING` − 14,527) / ⌈`bytes_per_name` / 1.95⌉⌋, clamped to [1, 50] (a
+    `bytes_per_name` ≤ 0 is a builder defect and raises), where `bytes_per_name` is
+    the dry-run's rendered bytes of `n` = 2 minus `n` = 1 and 14,527 / 1.95 are slice 2b's measured base tokens and
+    incremental bytes per token (a starting point only; nothing is frozen on it). One call per probe, each a
+    fresh tool-less invocation through the production `invoke_model` path with the fund system prompt, the
+    decision schema and the asserted model, exactly as a run. A probe passes when the call succeeds and its usage
+    is > 0 and ≤ the ceiling. It fails on usage over the ceiling, or on a rejection, error, timeout, or missing or
+    zero usage; a failure with no usage (anything but over-ceiling) is retried once at the same `n`, and only the
+    retry's outcome counts. If `n₀` passes, probe `n₀` + 1, `n₀` + 2, … up to 50 and stop at the first failure;
+    if it fails, probe `n₀` − 1, … down to 1 and stop at the first pass. `n` is the largest passing probe. None
+    passing refuses the freeze `prompt_budget_exceeded`; a larger `n` measuring fewer tokens than a smaller one
+    refuses it `fixture_probe_nonmonotone`. A walk, not a search: "largest" means largest on this walk. The tool
+    prints every probe; a passing walk's probes go into the declaration, and a refused walk's output is posted on
+    #3515 (there is no declaration to hold it).
+  - **No margin below the ceiling is added**: a later call that measures over it is caught by the post-call
+    check. The passing probe is a real request with the CLI's own output reservation at that input size, so a run
+    that uses no more input tokens fits the same way; the ceiling sits 150k under the 1,000,000-token context the
+    CLI reported, and nothing here claims the reservation is that size.
   - **Every run**, before the call: refused `prompt_over_budget` if the rendered prompt's byte length exceeds the
-    fixture's (equal passes). Bytes are not tokens, so this is a proxy, and the fixture is maximal only over the
-    bounds it states (values, the longest stored unit, the caps), not over every string a filer can write.
-  - **After** the call: if the reported input usage exceeds `INPUT_TOKEN_CEILING`, or is missing, the run's
-    decisions are refused (`budget_breach`, nothing executes) and the trial halts for review. A CLI rejection or
-    context overflow is v1's `nonzero_exit` / `is_error` refusal and also halts under this rule. The model id is
-    asserted per call (v1 §4 layer 3) and the CLI version recorded; a different context capacity for the declared
-    model is a new strategy version.
+    fixture's (equal passes). The byte length is read from the frozen declaration, whose document
+    `declaration_refusal` digest-checks (`trial_declaration_not_intact`) before anything else; a declaration without it, or with anything but a positive
+    integer, refuses `budget_fixture_missing` (`fixture_bytes`). The freeze writes `n`, the bytes, the sha and the
+    usage from the one passing probe, so they cannot come from different calls.
+  - **After** the call, in this order (`post_call_halt_reason`): (1) `nonzero_exit` or `is_error` (a CLI
+    rejection or context overflow) refuses and halts, with or without a result event; (2) otherwise, if the call
+    returned a result event (v1's parser accepts exactly one; a second is a `protocol_violation`), its usage is
+    measured whatever else the run refused: each of the three counters must be a non-negative integer (not a
+    boolean), and a missing or malformed counter, a zero sum, or a sum over `INPUT_TOKEN_CEILING` refuses the
+    run's decisions (`budget_breach`, nothing executes) and halts the trial for review; (3) a refusal with no
+    result event (a timeout, a pre-call isolation failure) stays v1's refusal with no halt: nothing executes
+    either way, and there is no usage to measure. This check bounds what executes, not what was sent or spent. The model id is asserted
+    per call (v1 §4 layer 3) and the CLI version recorded; usage is the CLI's own report of the request. A
+    different context capacity or hidden context for the declared model would be a new strategy version, but
+    nothing detects one except the post-call check; that is a stated residual.
+  - **Envelope against real runs (measured, §9; estimates marked).** The real 48-name pack at 2026-10-01 04:04Z
+    rendered 1,537,204 bytes in the old encoding and 1,185,479 in the grouped one. In the grouped encoding the second
+    capped name adds 54,121 bytes and the 30-name fixture renders 1,639,800 (`--fixture`). Estimate, untested until
+    the calls: at slice 2b's 1.95 bytes per token that is about 27.8k tokens a name (an average slope: slice 2b's 1/5-name slope missed its own 50-name byte
+    count by 918 bytes), so `n₀` = 30, a fixture 1.38× the real pack's
+    grouped bytes. A run over the fixture is refused, counted, and never retried (§4 conditioning), so the
+    envelope sets a refusal rate, not a safety bound. The freeze dry run (slice 4) re-runs the measurement and
+    prints the fixture's bytes against the real pack's.
   - Cost is stored per run. v1 measured $0.57 for 68,908 input tokens.
-  - ⚠ **Measured 2026-10-01 (slice 2b): the fixture FAILS the ceiling, so this section is not yet satisfiable.**
-    `PYTHONPATH=. uv run python -m scripts.ai_trial_fund_budget_fixture` renders 4,325,732 bytes; the call exits 1
-    with `Prompt is too long` and zero usage (cost 0). Slices of the same fixture, same call: 1 name 106,355
-    bytes / 58,618 tokens; 5 names 450,719 bytes / 234,981 tokens. So 44,091 tokens per capped name (1.95 bytes
-    per token) over a 14,527-token base, about 2.22M tokens at 50 names. v1's own share of a capped name is
-    about 30.7 KB (intraday 19.9 KB of it), about 800k tokens at 50, so at the caps fund-v1's blocks have almost
-    no room. Real blocks on the 50-name shortlist at 2026-10-01 02:09Z (`read_fund_blocks`, read-only): facts per
-    name p50 63, max 96; fundamentals 596,924 bytes, MD&A 325,622 bytes in total. A typical run is over the
-    ceiling as well, not only the fixture. The block encoding and caps must be resized, with a new ckpt-1, before
-    the fixture's sha and pair can freeze.
+  - **Why the resize (measured 2026-10-01, slice 2b).** The original fixture, 50 names at every cap, rendered
+    4,325,732 bytes; the call exited 1 with `Prompt is too long` and zero usage. Slices of it: 1 name 106,355
+    bytes / 58,618 tokens; 5 names 450,719 bytes / 234,981 tokens, so 44,091 tokens per capped name (86,091 bytes,
+    1.95 bytes per token incremental) over a 14,527-token base, about 2.22M at 50. A capped name's v1 entry is
+    about 30.8 KB (intraday 19,902 bytes): at the same incremental rate about 15.8k tokens, so 50 capped names are about
+    800k before any fund-v1 block (estimate). Real names are far smaller than capped ones (§9: v1 entry p50 12,601
+    bytes; 42 intraday bars p50 against 180), which is why the fixture now calibrates an envelope instead of
+    bounding every part. ⚠ The slice-2b handoff estimated a real run "over the ceiling as well", from about 25 KB
+    per real v1 name; the §9 measurement falsifies the input to that estimate (12.6 KB p50). No real fund-v1-shaped
+    prompt has been sent to the model, so its token count is not known; the resize is driven by the fixture.
 
 ## 7. Legs, capacity, declaration
 
@@ -331,8 +393,8 @@ name.
   `ai-discretionary-fund-v1` (`searches=1`, `EXACT`), `TRIAL_REGISTER_VERSION` bumped (v1 spec O14). fund-v1's
   policy manifest hashes its new modules, v1's ten hashed modules, the non-hashed shared modules slice 3 changes,
   and its constants (K, forms, selection rule, `FACTS_PER_REPORT_MAX`, `MDNA_MAX_CHARS`,
-  `MIN_BLOCK_SHARE`, `MDNA_MIN_SUBSTANTIVE_CHARS`, `MAX_CLAIM_TO_SNAPSHOT`, `INPUT_TOKEN_CEILING`, the extractor version, the budget fixture's sha and measured
-  pair). The declaration also records, per v1 hashed module, whether its sha equals the sha in v1's declaration
+  `MIN_BLOCK_SHARE`, `MDNA_MIN_SUBSTANTIVE_CHARS`, `MAX_CLAIM_TO_SNAPSHOT`, `INPUT_TOKEN_CEILING`, the extractor version, the fact encoding, the budget fixture's `n`, sha,
+  bytes, measured usage and the two slice measurements that chose `n`). The declaration also records, per v1 hashed module, whether its sha equals the sha in v1's declaration
   document, so the side-by-side readout can state whether the two versions ran the same **hashed** v1 modules —
   and only that; shared non-hashed modules changed by slice 3 differ by construction. Residual: modules outside
   both manifests (e.g. the broker provider) are not frozen by either.
@@ -358,6 +420,22 @@ name.
    terminal with an open lifecycle, missing row, unknown state), halts/readout/status/Invest panel by version,
    `scripts/ai_trial_policy_guard.py`, and end-to-end routing tests driving a fund-v1 decision through control
    draw, capacity, execution intent and halts with v1 rows present, asserting no v1 row is read or written.
+   Rung: behavioural (ckpt-2).
+3a. **Budget resize (2026-10-01)** — §3 encoding (grouped rows, trimmed `val`, `fact_ids` on the run record),
+   §6 fixture as `budget_fixture_pack(n)` with the probe walk, the freeze of `n`, the probes, sha, bytes and usage,
+   zero usage as `budget_breach`, and `scripts/measure_3515_prompt_budget.py` moved onto the production encoding
+   (counting rows, not groups). Tests:
+   - encoding: interleaved concepts and two units of one concept across two reports, with expected `fact_ids`
+     written independently of the encoder; a cap that cuts inside a concept; the length assertion;
+   - `val`: `…000000`, `….500000`, a negative, `0.000000`, an integer with no point; `NaN`, `Infinity` and an
+     exponent form raise;
+   - probe walk: pass then fail upward, fail then pass downward, endpoints 1 and 50, all failing, a no-usage
+     failure retried once (retry passes; retry fails), an over-ceiling failure not retried, a non-monotone pair,
+     `bytes_per_name` ≤ 0;
+   - the adversarial filing title present at `n` = 1;
+   - byte gate: equal passes, one over refuses, missing or non-integer declaration bytes refuse;
+   - post-call order: nonzero exit with and without a result event, over-ceiling, missing counter, boolean
+     counter, zero sum, and a timeout with no result event (no halt).
    Rung: behavioural (ckpt-2).
 4. **Readout side by side, then the freeze dry run.** Expected refusals: `v1_not_wound_down` while v1 runs, which is
    correct; none after. `--apply` is the supervisor's step.
@@ -400,6 +478,25 @@ are post-cap. (An earlier run at 14:47Z, with pre-market quotes, had 1,328 eligi
 - A dev-DB snapshot is not the future population, and the eligible count moves with quote freshness within a
   day. The freeze dry run re-runs this script and records its output in the declaration. During the trial, the
   per-run gates (§4, §6) are what bind.
+
+**Real prompt size, for §6 (2026-10-01 04:04Z).** `PYTHONPATH=. uv run python -m scripts.measure_3515_prompt_budget`
+builds v1's pack at `now` with the production reader and the broker's informational candle read, then both blocks,
+and prints per-part byte sizes and the rendered prompt's byte length in both encodings. It writes nothing but the
+credential-access audit row every credential load writes. Its output for the run below is posted on #3515. It does not pass the production
+refusals (it calls `merge_blocks`, not `build_fund_pack`; sizes do not depend on them) and its account context is
+empty (the job's holds at most 12 positions). 48 pack-complete names (2 `stale_last_bar`):
+- v1 name entry bytes p50 12,601, p95 20,150, max 21,698; intraday bars p50 42, p95 111, max 121 (cap 180);
+  v1 rendered prompt 647,274 bytes.
+- Facts per name p50 64, max 96. Fundamentals: old encoding 575,316 bytes; grouped 223,591; matrix 158,559.
+- MD&A: all 48 cut at the cap (text p50 5,996 characters: the cut lands on the last whitespace); blocks 311,254
+  bytes.
+- fund-v1 rendered prompt: old encoding 1,537,204 bytes, grouped 1,185,479.
+- `--fixture` (no DB, no broker; the shortlist and names restricted together, as §6's construction): rendered
+  bytes at `n` = 1, 2, 30 and 50 and each name's part sizes. `n` = 1: 70,041; 2: 124,162; 30: 1,639,800; 50:
+  2,723,032. Per capped name: v1 entry 30,813–30,916 (intraday 19,902), fundamentals 16,751, MD&A 6,354–6,355. The fixture's caps are set by its builder (`scripts/ai_trial_fund_budget_fixture.py`, whose
+  docstring carries the stored-maximum query); this script does not re-verify them.
+- One snapshot, outside the 23:30Z decision time; the freeze dry run re-runs it. The script's own grouping is an
+  approximation of §3's (first-appearance group order); byte counts do not depend on group order.
 
 ## 10. Out of scope
 
@@ -480,3 +577,46 @@ sound directions."
   the MD&A gate makes the freeze depend on it).
 - §6: 53, 54 (proxy and fixture bounds stated), 55 (model asserted, capacity change = new version), 56, 57
   (missing usage / CLI error: decisions refused and trial halts), 58 (boundary tests specified).
+
+**Round 4, budget resize amendment (44 findings).**
+- Density, 1–8: the real-v1 density check is removed (wrong prompt shape, one run, overhead not comparable, 4–6),
+  and with it the evidence it would have frozen (7) and its missing-usage cases (8). Bytes are stated not to bound
+  tokens; the residual is named and the post-call check carries it (1–3).
+- Post-call, 9–14: 9 (bounds what executes, not what was sent), 10 (no-result-event refusal deliberately does not
+  halt, as merged in slice 2c; §6 now says so), 11 (zero usage → `budget_breach`, slice 3a), 12, 13 (usage is the
+  CLI's report; hidden-context change = new version), 14 (the passing probe is a real request with the CLI's own
+  output reservation).
+- `n` rule, 15–20: linear extrapolation replaced by a probe walk to the largest passing `n`, every probe recorded;
+  failure modes defined (rejection, timeout, error, missing or zero usage); 19: no extra margin, by the post-call
+  check.
+- Fixture, 21–24: restriction defined (account context kept whole); injection on the first name; slice 3a builds
+  `budget_fixture_pack(n)`; 24: the byte figure lives in the digest-checked declaration.
+- Encoding, 25–31: group order and row order defined; `fact_ids` per symbol per accession in flattened order with a
+  length assertion; the pack keeps every value and date, so audit never depends on re-resolving an id (28, 29);
+  tests with interleaved concepts (30); fixed-point input enforced by regex (31).
+- 32: rebutted — the fixture is a calibration now, not a width bound; 23 is the stored maximum.
+- 39: "every fixture figure has a command" narrowed: this amendment's figures have one; slice 2b's are cited to
+  its #3515 handoff.
+- Measurement, 33–44: refusals bypassed and empty account stated (33, 34); grouped prompt now rendered, not
+  inferred (35); script updates in slice 3a (36); ratios labelled incremental and estimates marked (37–41); MD&A
+  "most at cap" replaced by the count, 48 of 48 cut (42); snapshot time stated, `--fixture` added so every
+  fixture figure has a command (43); matrix wording narrowed (44).
+
+**Round 5 (42 findings, on the revised amendment).**
+- Text consistency 1–5, 15, 16, 34, 40, 42: fixed (slice 3a list, `fact_ids` name, JSON example, matrix rows,
+  15.8k, byte lengths, dispositions 7–8).
+- Script 6–13, 17, 36–41: `--fixture` restricts shortlist and names together and prints rendered bytes at fixed `n`
+  (no intercept); per-name parts for every name; regex enforced; matrix labelled "no cell collision"; migration to
+  the production encoding is in slice 3a; margin printed by the freeze dry run; output posted on #3515; the
+  credential audit write stated. 38: the caps belong to the fixture builder, stated.
+- Encoding 14: `fact_id` closes the order.
+- Probe walk 18–23, 33: clamp to [1, 50], `bytes_per_name` ≤ 0 raises, one retry for a failure without usage,
+  `fixture_probe_nonmonotone`, probes through the production invocation path, a refused walk's output goes on
+  #3515; tests listed.
+- 24: wording fixed — the probe shows fit at its own input size; no claim about the reservation's size.
+- Post-call 25–29, 32: order stated as implemented (`post_call_halt_reason`), counters typed, zero sum refused, one
+  result event (v1's parser refuses a second); tests listed.
+- 30: residual stated — nothing but the post-call check detects a hidden-context change.
+- 31: `fixture_bytes` refuses a non-positive or non-integer value; the freeze writes `n`, bytes, sha and usage
+  from one probe.
+- 35: the slope is labelled an average with its 918-byte miss.
