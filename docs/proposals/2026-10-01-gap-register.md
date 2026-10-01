@@ -27,7 +27,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
 
 ## 2. Ranked gaps, prerequisites first
 
-### P1. We cannot yet state the engine's net P&L with confidence
+### P1. We cannot yet state the engine's net P&L with confidence — #3540
 
 - **Facts.**
   - Exact-owned P&L exists (`strategy_monitoring.load_owned_pnl`) and returns `None` when incomplete.
@@ -38,7 +38,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
 - **Plug.** An engine-book NAV/P&L bridge: opening value, flows, realised and unrealised P&L, fees, dividends, FX, closing value. It reconciles to broker `netProfit` per closed position, and every unexplained difference gets a named residual.
 - **Acceptance.** For the current core sleeve, the bridge closes to the cent against the broker over a full week, or names each residual.
 
-### P2. The account's holdings are not all explained by provenance
+### P2. The account's holdings are not all explained by provenance — #3541
 
 - **Facts.** Broker portfolio read at 2026-10-01 15:39Z, via `EtoroBrokerProvider(env='demo').get_portfolio()`:
   - **SPY.RTH:** 4 positions, $16,180. These are the only exact-owned engine positions.
@@ -51,7 +51,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
   - Diagnose the actual `refused` reason codes.
 - **Operator decision.** Whether operator-manual and mirror holdings stay in the demo account (positions are never closed implicitly).
 
-### P3. Capital actions are not explainable at the point of action
+### P3. Capital actions are not explainable at the point of action — #3542
 
 - **Facts.**
   - The AI trial stores a thesis and plan.
@@ -61,7 +61,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
   - **Exits and protective actions are exempt.** The settled EXIT rule says an exit is never blocked.
   - Provider-direct scripts are barred for engine actions.
 
-### P4. The book is not measured against its mandate after entry
+### P4. The book is not measured against its mandate after entry — #3543
 
 - **Facts.** Entry-time portfolio limits *are* enforced: capacity, reserve, concurrency, realised daily loss, and account/mandate drawdown (`strategy_paper_executor.py:963,1068,1197`). Health blocks stop entries on drawdown, stale data and reconciliation (`strategy_paper_runtime.py:446`). What is missing:
   - `target_volatility_pct` is shown but read by no executor or monitor (`app/api/strategies.py:673,712,2918`), and its semantics (target, ceiling or band) were never defined;
@@ -69,7 +69,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
   - sector checks exist only on the recommendation path (`execution_guard.py:588`).
 - **Plug.** A daily persisted risk snapshot for the engine book: realised and forecast vol, beta, concentration, a stress loss (e.g. the 2020 or 2022 drawdown applied to current weights), and stale-mark count, compared with the mandate. It is **measurement and alerting only** until the operator defines the vol semantics. It adds no new whole-account authority over the engine (#2844 boundary).
 
-### P5. The allocation policy is undetermined (operator decision)
+### P5. The allocation policy is undetermined (operator decision — no ticket until decided)
 
 - **Facts.**
   - The core mandate is 50% `core_target_pct` (`strategy_core_mandate_events` event 27, 2026-09-18). The stored reason is operational. No derivation was found, but absence is not proven.
@@ -78,7 +78,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
 - **Question.** How much of the engine pot should sit in the passive sleeve while no active strategy qualifies? And how is capital released when one does, without forced whole-position churn?
 - **Researched starting point.** A rule that holds unassigned budget in the sleeve up to a cap below `100 − reserve − band`, plus a partial-close capability. Before adoption it needs the P1 net benchmark, and a comparison against the operator's feasible passive alternative after tax and wrapper.
 
-### P6. No admission route for published, replicated premia (operator decision; touches the 08-23 bar)
+### P6. No admission route for published, replicated premia (operator decision; touches the 08-23 bar) — #3544
 
 - **Facts.** The strict bar exists for novel signals, and the search count justifies that. #2834 ARM A passed only the cost bar: p75 spreads of 8.1 / 14.3 / 42.0 bps from 41–43 observations over 5 dates. That is not executability or alpha (`2026-09-16-arm-a-tilt-selection.md:299`).
 - **What a route would need** before it is proposed:
@@ -91,7 +91,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
   - an error-controlled monitoring rule.
 - **Status.** Research question. No recommendation yet.
 
-### P7. Cost model scope and calibration
+### P7. Cost model scope and calibration — #3545
 
 - **Facts.**
   - The long, x1, real, USD lane is priced from 1,159 quotes, 1,149 of them at UTC hour 19, over 9 summer dates (`cost_model.py:104-166`).
@@ -99,7 +99,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
   - Fill-vs-ask is not total cost: an ask fill still pays the spread.
 - **Plug.** Recalibrate across session hours from the perishables recorder as a new model version that re-runs its dependent evidence. Total-cost measurement means effective spread versus mid, on both sides.
 
-### P8. Launch and run readiness
+### P8. Launch and run readiness — #3546
 
 - **Fact.** #3529: the AI trial's first fire raced its upstream data job.
 - **Plug.** A readiness contract for any scheduled capital pipeline, beyond a one-day rehearsal:
@@ -108,7 +108,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
   - partial-failure and recovery paths;
   - durable submission identity.
 
-### P9. Data limits, split by type
+### P9. Data limits, split by type — #3547
 
 - **Defects, to measure:** `period_end` values up to 2034 in `financial_periods`, `fundamentals_snapshot` and `financial_facts_raw` (`select max(period_end) from financial_periods`).
 - **Missing history:**
@@ -118,7 +118,7 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
 - **Possibly irrelevant:** `price_adjustments` is empty, but corpora carry their own adjustments.
 - Each must be tied to the hypothesis it would unblock before it is built.
 
-## 3. Open check, not yet a gap
+## 3. Open check, not yet a gap — #3548
 
 - On 2026-09-26, 96 hold-out evaluate rows were written without a declaration id (s4, s8, s11, s12; purpose *"complete declared recent-regime evidence denominator"*, `strategy_holdout_accesses`). This is consistent with the designed recent-evidence refresh of harness controls (request 578). **To verify:** those results stay terminal, harness-only evidence that cannot inform selection. The register counts eyeballing as search (`trial_register.py:50`).
 
