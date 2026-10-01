@@ -201,8 +201,8 @@ function TrialBody({ status }: { status: AiTrialStatusResponse }) {
 
 /**
  * One AI-discretionary trial version's readiness on the Strategies Portfolio
- * tab (#3514, moved there by #3516; per version since #3515). A day without a trial trade has many causes — not
- * started, halted, the job did not run, the model abstained, every decision or
+ * tab (#3514, moved there by #3516; per version since #3515). A day without
+ * a trial trade has many causes — not started, halted, the job did not run, the model abstained, every decision or
  * leg refused, legs awaiting the execute fire — and each is named here from
  * stored rows so none reads like another.
  */
