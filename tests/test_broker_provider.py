@@ -2363,6 +2363,22 @@ class TestAccountPnlMarkOperands:
         assert stamped.tzinfo is not None
         assert stamped.isoformat().startswith("2026-09-15T04:02:27")
 
+    @pytest.mark.parametrize(
+        ("total_fees", "expected"),
+        [(-1.5, Decimal("-1.5")), (0.0, Decimal("0.0")), (_ABSENT, None), ("x", None), (True, None), (None, None)],
+    )
+    def test_total_fees_is_a_lenient_memo(self, total_fees: object, expected: Decimal | None) -> None:
+        """#3540: carried signed when numeric; anything else is None, never a failed snapshot."""
+        payload = self._payload()
+        position = payload["clientPortfolio"]["positions"][0]  # type: ignore[index]
+        if total_fees is _ABSENT:
+            position.pop("totalFees", None)
+        else:
+            position["totalFees"] = total_fees
+        snapshot = _parse_account_risk_snapshot(payload, observed_at=datetime.now(UTC))
+        assert snapshot.direct_positions[0].total_fees == expected
+        assert snapshot.direct_positions[0].close_rate == Decimal("22")
+
     @pytest.mark.parametrize("overrides", [{"timestamp": _ABSENT}, {"timestamp": "not-a-date"}, {"timestamp": 7}])
     def test_an_unusable_timestamp_is_dropped_rather_than_failing_the_snapshot(
         self, overrides: dict[str, object]
