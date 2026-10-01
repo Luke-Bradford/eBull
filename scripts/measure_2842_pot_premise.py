@@ -10,7 +10,8 @@ Applies spec ``docs/proposals/execution/2026-10-01-2842-ranking-pot-v1.md`` §5.
    20th percentile of the overlaid caps of every scored tradable NYSE name (Fama-French 2008 microcap cut);
 2. the entry-feasible set F ⊆ R: the v1 trial's quote rule (``ai_trial_pack.is_eligible``), MAX valid (22
    closes on exactly the last 22 NYSE sessions) and ≤ the nearest-rank 90th percentile of valid MAX over
-   R ∩ quote-eligible (Bali/Cakici/Whitelaw), stored ATR14 finite and ``0 < 3 × ATR14 < ask``;
+   R ∩ quote-eligible (Bali/Cakici/Whitelaw), and ``0 < 3 × ATR14 < ask`` using the STORED ``price_daily.atr_14``
+   as a proxy (the spec's rule is the house ``atr_series`` over the latest price segment; the two can differ);
 3. the entrants under §5.1 (F-rank ≤ N and R-rank ≤ 2N): thesis share and age (latest thesis written at or
    before the run — a proxy: the score row does not record which thesis it used);
 4. stored-score entrants on the first stored run of each calendar month, applying TODAY's R and F (labelled
@@ -102,13 +103,20 @@ def main() -> None:
         if len(nyse) != 1:
             raise SystemExit(f"expected one {NYSE_DESCRIPTION} exchange row, found {len(nyse)}")
         nyse_id = nyse[0]["exchange_id"]
-        run = cur.execute(
-            "SELECT max(scored_at) AS t FROM scores WHERE model_version = 'v1.5-balanced' AND scored_at <= %(a)s",
+        # Runs below 95% of the median run's row count are treated as partial: a heuristic screen (it cannot prove
+        # a run complete, and real universe growth can push old complete runs under it), applied to every use.
+        run_counts = cur.execute(
+            "SELECT scored_at AS t, count(*) AS n FROM scores "
+            "WHERE model_version = 'v1.5-balanced' AND scored_at <= %(a)s GROUP BY 1 ORDER BY 1",
             {"a": as_of},
-        ).fetchone()
-        if run is None or run["t"] is None:
+        ).fetchall()
+        if not run_counts:
             raise SystemExit("no v1.5-balanced run at or before as_of")
-        scored_at = run["t"]
+        typical = statistics.median([int(r["n"]) for r in run_counts])
+        runs = [r["t"] for r in run_counts if int(r["n"]) * 100 >= typical * 95]
+        if not runs:
+            raise SystemExit("no run passes the partial-run screen")
+        scored_at = runs[-1]
         rows = cur.execute(
             """
             SELECT i.instrument_id, i.symbol, i.exchange, q.bid, q.ask, q.quoted_at, s.total_score,
@@ -134,7 +142,6 @@ def main() -> None:
                 "WHERE instrument_id = ANY(%(ids)s::bigint[])",
                 {"ids": [r["instrument_id"] for r in rows]},
             ).fetchall()
-            if r["market_cap_live"] is not None
         }
         caps = {iid: cap for iid, raw in view_caps.items() if (cap := _overlaid_cap(conn, iid, raw)) is not None}
         nyse_caps = [caps[r["instrument_id"]] for r in rows if r["exchange"] == nyse_id and r["instrument_id"] in caps]
@@ -217,15 +224,6 @@ def main() -> None:
         )
         print("  symbols:", " ".join(r["symbol"] for r in top))
 
-        # A run with under 95% of the MEDIAN run's rows is treated as partial and skipped (the month's next run is
-        # used instead), so a half-written run cannot distort the screen and one oversized run cannot skip the rest.
-        run_counts = cur.execute(
-            "SELECT scored_at AS t, count(*) AS n FROM scores "
-            "WHERE model_version = 'v1.5-balanced' AND scored_at <= %(a)s GROUP BY 1 ORDER BY 1",
-            {"a": as_of},
-        ).fetchall()
-        typical = statistics.median([int(r["n"]) for r in run_counts]) if run_counts else 0
-        runs = [r["t"] for r in run_counts if int(r["n"]) * 100 >= typical * 95]
         print(
             f"stored runs: {len(run_counts)}; skipped as partial "
             f"(< 95% of the median {typical} rows): {len(run_counts) - len(runs)}"
@@ -235,9 +233,10 @@ def main() -> None:
         history: list[str] = []
         seen_month: str | None = None
         for t in runs:
-            if t.strftime("%Y-%m") == seen_month:
+            month = t.astimezone(UTC).strftime("%Y-%m")
+            if month == seen_month:
                 continue
-            seen_month = t.strftime("%Y-%m")
+            seen_month = month
             scored = [
                 (Decimal(str(r["total_score"])), r["instrument_id"])
                 for r in cur.execute(
@@ -269,6 +268,7 @@ def main() -> None:
                   JOIN price_daily p1 ON p1.instrument_id = u.instrument_id AND p1.price_date = %(ls)s
                   JOIN LATERAL (SELECT close FROM price_daily WHERE instrument_id = u.instrument_id
                                    AND price_date BETWEEN %(ls)s::date - 372 AND %(ls)s::date - 365
+                                   AND close > 0
                                  ORDER BY price_date DESC LIMIT 1) p0 ON TRUE
                  WHERE p0.close > 0 AND p1.close > 0
                 """,
@@ -278,10 +278,16 @@ def main() -> None:
         ]
         rets = [x for x in rets if x.is_finite()]
         population = len(rets)
-        if population < 2 or n >= population:
-            print(f"power input unavailable: {population} one-year returns for N = {n}")
+        if population < 2:
+            print(f"power input unavailable: {population} one-year returns")
             return
         sd = statistics.pstdev([float(x) for x in rets])
+        if n >= population:
+            print(
+                f"≈1-year price return over F: n={population}; median {float(statistics.median(rets)):.3f} sd {sd:.3f}"
+            )
+            print(f"N = {n} ≥ population: a basket is the whole population, sampling SE 0")
+            return
         fpc = math.sqrt((population - n) / (population - 1))
         se = sd / math.sqrt(n) * fpc
         print(
