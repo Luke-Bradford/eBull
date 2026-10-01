@@ -142,7 +142,7 @@ describe("NotificationBell (#646)", () => {
 
     const bell = await screen.findByTestId("notification-bell");
     await userEvent.click(bell);
-    expect(navigateMock).toHaveBeenCalledWith("/dashboard");
+    expect(navigateMock).toHaveBeenCalledWith("/");
   });
 
   it("polls again after the interval — refresh picks up new unseen state", async () => {

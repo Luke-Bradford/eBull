@@ -71,7 +71,7 @@ export function NotificationBell(): JSX.Element {
   return (
     <button
       type="button"
-      onClick={() => navigate("/dashboard")}
+      onClick={() => navigate("/")}
       aria-label={count > 0 ? `${count} unread notifications` : "Notifications"}
       data-testid="notification-bell"
       data-unseen-count={count}
