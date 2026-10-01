@@ -450,6 +450,7 @@ def _valid_bar(row: Mapping[str, Any] | None) -> bool:
         v = row.get(k)
         if isinstance(v, bool) or not isinstance(v, Decimal | float | int):
             return False
+        # A float by its shortest round-trip form, as ``ranking_pot._exact`` reads one.
         exact.append(Decimal(repr(v)) if isinstance(v, float) else Decimal(v))
     if not all(v.is_finite() and v > 0 for v in exact):
         return False
@@ -530,7 +531,9 @@ class AttemptHistory:
     last_refusal: Mapping[date, str]
     #: |R| of the latest decided rebalance (``detail.r_count``).
     previous_r_count: int | None
-    #: Resolved months immediately before now, newest first, skipped with ``universe_collapse``.
+    #: The streak of the NEWEST resolved months skipped with ``universe_collapse`` as their last refusal. Any other
+    #: resolution ends it: a ``decided`` month, or a skip for another reason (``not_attempted`` included — a month
+    #: with no verdict is no evidence of a collapse).
     consecutive_collapses: int
 
 
@@ -590,9 +593,12 @@ def _assert_rebalance_transaction(conn: Conn) -> None:
 
 
 def _overlaid_cap(conn: Conn, instrument_id: int, raw: object) -> Decimal | None:
-    """The scorer's #1664 overlay; any failure to resolve or apply it is no cap (§2, r3-134)."""
+    """The scorer's #1664 overlay; any failure to resolve or apply it is no cap (§2, r3-134). The savepoint keeps a
+    caught database error from aborting the rebalance's transaction (``_market_cap`` also takes one around its own
+    reads; this one does not rely on it)."""
     try:
-        cap = _market_cap(conn, instrument_id, raw)
+        with conn.transaction():
+            cap = _market_cap(conn, instrument_id, raw)
     except psycopg.Error, ArithmeticError, ValueError, TypeError:
         return None
     if cap is None or not cap.is_finite() or cap <= 0:
