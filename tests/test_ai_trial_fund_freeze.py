@@ -328,9 +328,15 @@ def test_a_failed_measurement_and_a_moved_head_refuse(monkeypatch: pytest.Monkey
     def exits() -> None:
         raise SystemExit(2)
 
+    freezes = _Freezes(("budget_fixture_not_run",))
+    monkeypatch.setattr(script, "freeze_trial", freezes)
     report, _ = script.run(_steps([], coverage=exits, provenance_shas=("a", "b")), apply=False, measure=False)
     assert "measurement_failed:scripts.measure_3515_fund_pack_coverage:SystemExit" in report.refusals
-    assert "provenance_changed" in report.refusals
+    # Both refuse INSIDE the final freeze, so an apply cannot commit: provenance carries one, and a
+    # failed measurement leaves nothing to freeze with.
+    final = freezes.calls[1]
+    assert "provenance_changed" in final["provenance"].refusals
+    assert final["outside"] == {}
 
 
 def test_the_real_bytes_line_must_appear_exactly_once() -> None:

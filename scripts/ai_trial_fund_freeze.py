@@ -179,7 +179,10 @@ def run(
             }
     again = steps.provenance()
     if again.code_git_sha != provenance.code_git_sha:
-        refusals.append("provenance_changed")
+        # A provenance refusal, so ``freeze_trial`` itself refuses: appending it after the call would
+        # let an apply commit first (Codex ckpt-2). The other refusals above leave ``outside`` empty,
+        # which the freeze refuses on its own.
+        again = dataclasses.replace(again, refusals=(*again.refusals, "provenance_changed"))
     with steps.connect() as conn:
         report = freeze_trial(conn, provenance=again, outside=outside, **common)
     return dataclasses.replace(report, refusals=tuple(report.refusals) + tuple(refusals)), summary
