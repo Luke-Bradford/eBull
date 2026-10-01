@@ -34,6 +34,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import math
@@ -347,6 +348,8 @@ class Probe:
     refusal_reason: str | None
     detail: str
     cost_usd: object
+    #: sha256 of the rendered user prompt: equal bytes need not be equal text (#3515 slice 4 ckpt-1).
+    rendered_prompt_sha256: str = ""
 
 
 def classify(result: InvocationResult) -> tuple[Outcome, int | None]:
@@ -414,6 +417,11 @@ def run_fixture(
     summary: dict[str, Any] = {
         "mode": "budget_fixture",
         "model_id": TRIAL_MODEL_ID,
+        "system_prompt_sha256": hashlib.sha256(FUND_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+        "decision_schema_sha256": canonical_sha256(decision_json_schema()),
+        # §7: the two slice-2b measurements that chose the walk's start.
+        "start_base_tokens": _START_BASE_TOKENS,
+        "start_bytes_per_token": str(_START_BYTES_PER_TOKEN.numerator / _START_BYTES_PER_TOKEN.denominator),
         "bytes_per_name": bytes_per_name,
         "n0": n0,
         "n0_pack_sha256": pack.sha256,
@@ -443,6 +451,7 @@ def run_fixture(
             refusal_reason=result.refusal_reason,
             detail=result.detail,
             cost_usd=(result.result_event or {}).get("total_cost_usd"),
+            rendered_prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         )
 
     n, probes, refusal = probe_walk(probe, n0)
@@ -452,6 +461,8 @@ def run_fixture(
         chosen = next(p for p in reversed(probes) if p.n == n and p.outcome == "pass")
         summary.update(
             {
+                "attempt": chosen.attempt,
+                "rendered_prompt_sha256": chosen.rendered_prompt_sha256,
                 "pack_sha256": chosen.pack_sha256,
                 "rendered_prompt_bytes": chosen.rendered_prompt_bytes,
                 "input_tokens": chosen.input_tokens,
