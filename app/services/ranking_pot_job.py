@@ -163,22 +163,26 @@ def run_rebalance_job(
         return JobResult(f"target {due.target_session}: refused scoring_failed", attempt, skipped)
 
     s0 = set(decl.s0_ids)
-    with conn.transaction():
+    # An early exit below rolls the transaction back explicitly (``psycopg.Rollback``) rather than returning
+    # through the block, which would COMMIT it: nothing is written before them today, and nothing must be.
+    early: str | None = None
+    with conn.transaction() as tx:
         rb.begin_rebalance(conn)
         # The first query fixes the REPEATABLE READ snapshot; `as_of` is read after it, so every quote the
         # snapshot can see is at or before `as_of` (`is_eligible` refuses a quote stamped after it).
         conn.execute("SELECT 1")
         snap_as_of = now()
         if rb.target_session(snap_as_of) != due.target_session or window_phase(snap_as_of) == "closed":
-            return JobResult(f"target {due.target_session}: the window passed during scoring", None, skipped)
+            early = f"target {due.target_session}: the window passed during scoring"
+            raise psycopg.Rollback(tx)
         live = rb.load_declaration(conn)
         if live is None or live.declaration_id != decl.declaration_id or live.state != "shadow_only":
-            return JobResult(
-                f"declaration changed during the fire ({live and live.state}); retried next fire", None, skipped
-            )
+            early = f"declaration changed during the fire ({live and live.state}); retried next fire"
+            raise psycopg.Rollback(tx)
         history = rb.read_history(conn, decl.declaration_id)
         if due.month in history.resolved:
-            return JobResult(f"month {due.month} already resolved", None, skipped)
+            early = f"month {due.month} already resolved"
+            raise psycopg.Rollback(tx)
         result = rb.prepare(
             conn,
             live,
@@ -191,6 +195,8 @@ def run_rebalance_job(
             attempt = rb.record_refused(conn, live, due, result, as_of=snap_as_of, scored_at=run.scored_at)
             return JobResult(f"target {due.target_session}: refused {result.refusal}", attempt, skipped)
         attempt = rb.record_decided(conn, live, due, result, as_of=snap_as_of, scored_at=run.scored_at)
+    if early is not None:
+        return JobResult(early, None, skipped)
     return JobResult(
         f"target {due.target_session}: decided (R={result.detail['r_count']}, F={result.detail['f_count']}, "
         f"snapshot {result.snapshot_sha256[:12]})",

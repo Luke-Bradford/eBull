@@ -526,7 +526,7 @@ def load_declaration(conn: Conn) -> PotDeclaration | None:
 @dataclass(frozen=True)
 class AttemptHistory:
     resolved: frozenset[date]
-    #: Each unresolved month's latest refusal.
+    #: Each unresolved month's latest refusal by a gate, else its latest pre-score (waiting) refusal.
     last_refusal: Mapping[date, str]
     #: |R| of the latest decided rebalance (``detail.r_count``).
     previous_r_count: int | None
@@ -545,10 +545,14 @@ def read_history(conn: Conn, declaration_id: int) -> AttemptHistory:
         ).fetchall()
     resolved: dict[date, dict[str, Any]] = {}
     last_refusal: dict[date, str] = {}
+    last_waiting: dict[date, str] = {}
     previous_r: int | None = None
     for r in rows:
         if r["outcome"] == "refused":
-            last_refusal[r["month"]] = r["refusal"]
+            # A fire that waited for bars without scoring (``detail.pre_score``, slice 4b-ii) says less than a
+            # gate's verdict, so it names the month's refusal only when no gate ever reached one.
+            target = last_waiting if (r["detail"] or {}).get("pre_score") else last_refusal
+            target[r["month"]] = r["refusal"]
         else:
             resolved[r["month"]] = r
             if r["outcome"] == "decided":
@@ -562,7 +566,7 @@ def read_history(conn: Conn, declaration_id: int) -> AttemptHistory:
             break
     return AttemptHistory(
         resolved=frozenset(resolved),
-        last_refusal={m: v for m, v in last_refusal.items() if m not in resolved},
+        last_refusal={m: v for m, v in (last_waiting | last_refusal).items() if m not in resolved},
         previous_r_count=previous_r,
         consecutive_collapses=collapses,
     )

@@ -150,3 +150,21 @@ def test_record_decided_publishes_the_snapshot_and_checks_its_hash(ebull_test_co
 
     again = job.run_rebalance_job(conn, score=_never_scores, now=lambda: as_of)
     assert again.note.endswith("not due") and _attempts(conn) == [("decided", None)]
+
+
+def test_a_waiting_refusal_never_masks_a_gate_verdict(ebull_test_conn: Conn) -> None:
+    """Bot WARNING on #3558: the month's last refusal (a skip's reason, the collapse streak) is the latest GATE
+    verdict; a pre-score waiting row names it only when no gate ever reached one."""
+    conn = ebull_test_conn
+    _frozen(conn)
+    conn.autocommit = True
+    d, decl = _first_window(conn)
+    as_of = datetime.combine(d, time(23, 40), UTC)
+    due = rb.plan(as_of, first=rb.first_month(decl.frozen_at), resolved=frozenset())
+    waiting = rb.Refused("price_daily_stale", {"pre_score": True})
+
+    rb.record_refused(conn, decl, due, waiting, as_of=as_of, scored_at=None)
+    assert rb.read_history(conn, decl.declaration_id).last_refusal == {due.month: "price_daily_stale"}
+    rb.record_refused(conn, decl, due, rb.Refused("universe_collapse", {}), as_of=as_of, scored_at=SCORED_AT)
+    rb.record_refused(conn, decl, due, waiting, as_of=as_of, scored_at=None)  # the next night's waiting fire
+    assert rb.read_history(conn, decl.declaration_id).last_refusal == {due.month: "universe_collapse"}
