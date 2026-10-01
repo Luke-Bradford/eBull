@@ -792,14 +792,19 @@ class TestOfficialPositionMarks:
         # computes every operand from one constant cannot see two endpoints disagree.
         snapshot = _snapshot(
             observed_at=now,
-            direct_positions=(_position(9001, units="1500", amount="33885", pnl="-1635", close_rate="21.50"),),
+            direct_positions=(
+                replace(
+                    _position(9001, units="1500", amount="33885", pnl="-1635", close_rate="21.50"),
+                    total_fees=Decimal("-1.25"),
+                ),
+            ),
         )
         assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot)
 
         row = ebull_test_conn.execute(
             """
             SELECT units, amount, unrealized_pnl, market_value, close_rate,
-                   close_conversion_rate, asset_currency_id
+                   close_conversion_rate, asset_currency_id, total_fees
               FROM broker_account_position_marks
              WHERE environment='demo' AND position_id=9001
             """
@@ -809,6 +814,8 @@ class TestOfficialPositionMarks:
         assert row[4] == Decimal("21.50000000")
         assert row[5] == Decimal("1.0000000000")
         assert row[6] == 1
+        # #3540: the fee-and-distribution counter rides the same row, sign preserved.
+        assert row[7] == Decimal("-1.25")
 
     def test_a_rejected_parent_write_leaves_the_stored_marks_untouched(
         self, ebull_test_conn: psycopg.Connection[tuple]

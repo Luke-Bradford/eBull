@@ -551,6 +551,11 @@ class BrokerDirectPositionInvestment:
     #: and the local end-of-day book can be measured. ``None`` when absent or unparseable,
     #: because a missing timestamp must not take down a comparand that does not use it.
     pnl_timestamp: datetime | None = None
+    #: ``totalFees`` -- "Total overnight fees and dividends charged/paid on the position in
+    #: USD. Negative amount represents refund". One signed number; the two cannot be
+    #: separated. A MEMO for the #3540 NAV bridge, never an operand of this snapshot, so
+    #: ``None`` when absent or malformed rather than failing the snapshot.
+    total_fees: Decimal | None = None
 
 
 @dataclass(frozen=True)

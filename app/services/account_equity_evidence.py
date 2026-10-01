@@ -323,8 +323,8 @@ def _replace_position_marks(
             INSERT INTO broker_account_position_marks (
                 environment,snapshot_date,position_id,instrument_id,is_buy,
                 units,amount,unrealized_pnl,market_value,is_partially_altered,
-                close_rate,close_conversion_rate,asset_currency_id,pnl_timestamp
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                close_rate,close_conversion_rate,asset_currency_id,pnl_timestamp,total_fees
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             [
                 (
@@ -342,6 +342,7 @@ def _replace_position_marks(
                     position.close_conversion_rate,
                     position.asset_currency_id,
                     position.pnl_timestamp,
+                    position.total_fees,
                 )
                 for position in positions
             ],

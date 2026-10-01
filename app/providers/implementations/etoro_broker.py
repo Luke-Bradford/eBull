@@ -1875,6 +1875,21 @@ def _parse_account_risk_snapshot(
             return None
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
+    def _total_fees(row: dict[str, Any]) -> Decimal | None:
+        """``totalFees`` or ``None``. Never raises (#3540).
+
+        Lenient for the reason ``_pnl_timestamp`` is: no verdict on this snapshot reads it.
+        The NAV bridge names a ``None`` as ``fees_unobserved`` instead of treating it as 0.
+        """
+        raw = row.get("totalFees")
+        if isinstance(raw, bool) or not isinstance(raw, int | float | str):
+            return None
+        try:
+            value = Decimal(str(raw))
+        except decimal.DecimalException:
+            return None
+        return value if value.is_finite() else None
+
     def _is_partially_altered(row: dict[str, Any]) -> bool:
         if "isPartiallyAltered" not in row:
             raise TradingPreflightParseError("account P&L position isPartiallyAltered is required")
@@ -1976,6 +1991,7 @@ def _parse_account_risk_snapshot(
                     close_conversion_rate=_pnl_operand(pnl_row, "closeConversionRate"),
                     asset_currency_id=_asset_currency_id(pnl_row),
                     pnl_timestamp=_pnl_timestamp(pnl_row),
+                    total_fees=_total_fees(row),
                 )
             )
             total_invested += amount
