@@ -900,6 +900,9 @@ def _ai_trial_decision_window_open(now: datetime) -> bool:
     opened = datetime.combine(utc.date(), AI_TRIAL_DECISION_WINDOW_OPENS, tzinfo=UTC)
     if opened > utc:
         opened -= timedelta(days=1)
+    # Holds because 23:30 UTC is always New York evening (19:30 EDT / 18:30 EST): the opening's
+    # New York date ends at the next New York midnight, hours before the next opening, so the
+    # match is true from the opening to that midnight and false through the New York daytime.
     return utc.astimezone(_NEW_YORK).date() == opened.astimezone(_NEW_YORK).date()
 
 
