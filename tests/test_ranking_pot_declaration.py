@@ -122,6 +122,12 @@ def test_prereg_declaration_is_coherent_and_names_the_document() -> None:
 def test_no_pot_module_writes_evidence() -> None:
     """§7.1: no writes to the results store, promotion tables or another strategy's evidence."""
     banned = ("strategy_results_store", "strategy_promotions", "strategy_stage", "INSERT INTO ai_trial")
-    for name in ("ranking_pot.py", "ranking_pot_sim.py", "ranking_pot_policy.py", "ranking_pot_freeze.py"):
+    for name in (
+        "ranking_pot.py",
+        "ranking_pot_sim.py",
+        "ranking_pot_policy.py",
+        "ranking_pot_freeze.py",
+        "ranking_pot_rebalance.py",
+    ):
         text = (_SERVICES / name).read_text()
         assert not [b for b in banned if b in text], name

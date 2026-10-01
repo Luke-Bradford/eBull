@@ -18,6 +18,7 @@ from datetime import date
 from pathlib import Path
 
 from scripts.verify_3046_consumer_exposure import (
+    _FROM_PRICE_DAILY,
     INVENTORY,
     KINDS,
     SLICES,
@@ -41,6 +42,72 @@ def test_inventory_declares_the_same_files_the_scanner_finds() -> None:
     declared = {occ.path for occ in INVENTORY}
     found = set(scan_occurrences(REPO_ROOT))
     assert declared == found
+
+
+#: Entries whose ``line`` had already drifted when the line check below landed (#2842 slice 4b-i review): 38 of 84
+#: on 2026-10-01. Frozen as debt, not re-mapped by guesswork — a file with several occurrences cannot be re-mapped
+#: without re-reading which query each label means. Remove an entry when you correct its line; never add one.
+_STALE_LINES: frozenset[tuple[str, int]] = frozenset(
+    {
+        ("app/api/copy_trading.py", 288),
+        ("app/api/copy_trading.py", 409),
+        ("app/api/instruments.py", 1232),
+        ("app/api/instruments.py", 1242),
+        ("app/api/portfolio.py", 575),
+        ("app/api/portfolio.py", 757),
+        ("app/api/portfolio.py", 764),
+        ("app/api/portfolio.py", 995),
+        ("app/services/ai_trial_pack_reader.py", 177),
+        ("app/services/market_data.py", 1042),
+        ("app/services/market_data.py", 1114),
+        ("app/services/market_data.py", 1235),
+        ("app/services/market_data.py", 1520),
+        ("app/services/market_data.py", 1583),
+        ("app/services/market_data.py", 1611),
+        ("app/services/portfolio.py", 248),
+        ("app/services/portfolio.py", 337),
+        ("app/services/portfolio_eod.py", 337),
+        ("app/services/portfolio_eod.py", 372),
+        ("app/services/price_quarantine_store.py", 50),
+        ("app/services/price_quarantine_store.py", 59),
+        ("app/services/price_quarantine_store.py", 421),
+        ("app/services/price_window_verdict.py", 251),
+        ("app/services/price_window_verdict.py", 266),
+        ("app/services/price_window_verdict.py", 269),
+        ("app/services/ranking_ablation_reader.py", 258),
+        ("app/services/scoring.py", 1261),
+        ("app/services/scoring.py", 1378),
+        ("app/services/scoring.py", 1622),
+        ("app/services/scoring.py", 1733),
+        ("app/services/scoring.py", 2277),
+        ("app/services/strategies/s2_cross_sectional_momentum.py", 206),
+        ("app/services/strategies/s2_cross_sectional_momentum.py", 300),
+        ("app/services/strategy_monitoring.py", 690),
+        ("app/workers/scheduler.py", 419),
+        ("app/workers/scheduler.py", 664),
+        ("app/workers/scheduler.py", 3175),
+        ("app/workers/scheduler.py", 3418),
+    }
+)
+
+
+def test_inventory_lines_point_at_their_occurrence() -> None:
+    """A declared ``line`` must hold the ``FROM price_daily`` it classifies, so an edit above it fails here instead
+    of silently pointing the reader at the wrong query (the guard above binds counts only)."""
+    drifted = []
+    for occ in INVENTORY:
+        lines = (REPO_ROOT / occ.path).read_text().splitlines()
+        ok = 0 < occ.line <= len(lines) and _FROM_PRICE_DAILY.search(lines[occ.line - 1]) is not None
+        if not ok and (occ.path, occ.line) not in _STALE_LINES:
+            drifted.append(f"{occ.path}:{occ.line} ({occ.label})")
+    assert drifted == []
+
+
+def test_every_stale_line_names_a_declared_occurrence() -> None:
+    """Correcting an entry's line orphans its debt key, which fails here until it is removed. This does NOT stop a
+    drifted entry being ADDED to the debt; review does (the comment on ``_STALE_LINES``)."""
+    declared = {(occ.path, occ.line) for occ in INVENTORY}
+    assert _STALE_LINES <= declared, "a _STALE_LINES entry no longer names a declared occurrence: remove it"
 
 
 def test_every_occurrence_carries_a_known_kind() -> None:
