@@ -370,8 +370,12 @@ def _step(
 
     occupied = {p.slot for p in kept}
     next_lifecycle = state.next_lifecycle
+    future: list[PendingEntry] = []
     for e in state.pending:
-        if e.session != session:
+        if e.session > session:
+            future.append(e)  # a rebalance applied before this session's step: still pending
+            continue
+        if e.session < session:
             refusals.append(EntryRefusal(e.instrument_id, session, "entry_session_missed"))
             continue
         bar = bars.get(e.instrument_id)
@@ -427,7 +431,7 @@ def _step(
         n=state.n,
         cash=tuple(cash),
         positions=tuple(sorted(kept, key=lambda q: q.instrument_id)),
-        pending=(),
+        pending=tuple(future),
         next_lifecycle=next_lifecycle,
         last_session=session,
     )

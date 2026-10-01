@@ -97,6 +97,14 @@ def test_entry_session_missed_and_no_free_slot() -> None:
     book2 = sim.apply_rebalance(sim.new_book(1), target_session=S1, exits={}, entries=[_entry(1)], h_exit={})
     r2 = sim.step(book2, session=S2, bars={1: _flat("100")}, reference_closes={})
     assert [(x.instrument_id, x.reason) for x in r2.refusals] == [(1, "entry_session_missed")]
+    # An entry for a later session stays pending through an earlier step.
+    book3 = sim.apply_rebalance(
+        sim.new_book(1), target_session=S2, exits={}, entries=[_entry(1, session=S2)], h_exit={}
+    )
+    r3 = sim.step(book3, session=S1, bars={}, reference_closes={})
+    assert r3.refusals == () and r3.state.pending == book3.pending
+    r4 = sim.step(r3.state, session=S2, bars={1: _flat("100")}, reference_closes={})
+    assert [p.instrument_id for p in r4.state.positions] == [1]
 
 
 # ---------------------------------------------------------------------------
