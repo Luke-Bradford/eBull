@@ -30,6 +30,9 @@
 --   * It CAN refuse `→ executing` while any AI-trial declaration is `active` (§7.3 `v1_active`),
 --     under a lock on that declaration, so a concurrent v1 resumption serialises against it
 --     (r3-127). The entry path re-checks it at every rebalance (§7.1, slice 5).
+--   * LOCK ORDER (deadlock-free by construction): pot declaration row → `ai_trial_declarations`.
+--     No AI-trial writer touches a ranking_pot table, so nothing takes them in the reverse order;
+--     a future writer that needs both MUST take them in this order.
 --   * It CANNOT check "before the 12-month look" (the look table is slice 6, which extends this
 --     trigger) nor that the executed book is flat at `completed` (r3-63/64: slice 5's
 --     wind-down writer asserts it, including uncertain submissions and pending orders).
@@ -110,7 +113,10 @@ BEGIN
     END IF;
 
     -- §7.1: one non-terminal declaration per strategy id. A declaration with no event yet is
-    -- non-terminal (the freeze writes its genesis event in the same transaction).
+    -- non-terminal (the freeze writes its genesis event in the same transaction). The earlier
+    -- declarations' rows are locked first: their state trigger takes the same row lock, so the
+    -- check below reads their committed latest state, never one a concurrent transition is writing.
+    PERFORM 1 FROM ranking_pot_declarations WHERE strategy_id = NEW.strategy_id FOR NO KEY UPDATE;
     IF EXISTS (
         SELECT 1 FROM ranking_pot_declarations d
         WHERE d.strategy_id = NEW.strategy_id
