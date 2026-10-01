@@ -38,4 +38,6 @@ merge_gate:
   # fails it. The earlier "keep this list identical" instruction did not hold:
   # the excludes were reconciled and doc_only_extensions was not, leaving an
   # .rst-only PR unmergeable by construction until #2849's second pass.
-  doc_only_excludes: [".autonomy/"]
+  # .claude/ added 2026-10-01: CLAUDE.md and skills are standing instructions agents
+  # execute -- behaviour wearing a .md extension, the same reasoning as .autonomy/.
+  doc_only_excludes: [".autonomy/", ".claude/"]
