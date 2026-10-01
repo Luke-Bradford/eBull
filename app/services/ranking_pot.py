@@ -495,11 +495,8 @@ def decide(
         else:
             rows[iid] = DecisionRow(iid, "not_selected", reason, r, f)
 
-    ordered_rows = tuple(
-        sorted(rows.values(), key=lambda row: (ACTION_PRECEDENCE.index(row.action), row.instrument_id))
-    )
     return BookDecision(
-        rows=ordered_rows,
+        rows=_sorted_rows(rows.values()),
         entries=tuple(entries),
         exits=tuple(exits),
         slots_unfilled=capacity - len(entries),
