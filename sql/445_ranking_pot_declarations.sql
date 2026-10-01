@@ -59,8 +59,9 @@ CREATE TABLE IF NOT EXISTS ranking_pot_declarations (
                      REFERENCES strategy_preregistration_declarations (declaration_id) ON DELETE RESTRICT,
     strategy_id      TEXT NOT NULL CHECK (strategy_id ~ '^ranking-pot-v[1-9][0-9]*$'),
     strategy_version TEXT NOT NULL CHECK (strategy_version ~ '^v[1-9][0-9]*$'),
-    -- §8 family spending: the m-th declaration of the family spends 0.05 * 2^-m. Assigned by the
-    -- bind trigger (dense, from 1), never by the writer, so a re-declaration cannot re-use an m.
+    -- §8 family spending: the m-th declaration of the family spends 0.05 * 2^-m. The writer supplies
+    -- it; the bind trigger refuses any value but the next dense one (from 1), so a re-declaration
+    -- cannot re-use an m.
     family           TEXT NOT NULL CHECK (family = 'ranking-pot'),
     family_seq       INTEGER NOT NULL CHECK (family_seq >= 1),
     doc_path         TEXT NOT NULL CHECK (btrim(doc_path) <> ''),
