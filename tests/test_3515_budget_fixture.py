@@ -1,7 +1,8 @@
-"""#3515 slice 2b — fund-v1's budget fixture (spec §6) and the freeze gate on its call; the model call is faked."""
+"""#3515 slices 2b + 3a — fund-v1's budget fixture (spec §6), its probe walk and the freeze gate; calls are faked."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -21,7 +22,17 @@ from app.services.ai_trial_invocation import InvocationResult
 from app.services.ai_trial_pack import DISCLOSURE_LIMIT, SMALL_CAP_N, TITLE_MAX_CHARS, TOP_N
 from app.services.ai_trial_pack_reader import INTRADAY_BAR_LENGTH, INTRADAY_WINDOW, Pack
 from app.services.ai_trial_version import FUND_V1, V1
-from scripts.ai_trial_fund_budget_fixture import budget_fixture_pack, main, run_fixture
+from scripts.ai_trial_fund_budget_fixture import (
+    MAX_NAMES,
+    REFUSE_FIXTURE_PROBE_NONMONOTONE,
+    Probe,
+    budget_fixture_pack,
+    classify,
+    main,
+    probe_walk,
+    run_fixture,
+    start_n,
+)
 
 _ENV = {"PATH": "/usr/bin", "HOME": "/tmp"}
 
@@ -53,10 +64,11 @@ def test_every_fund_block_cap_is_filled(fixture: Pack) -> None:
         block = n["fundamentals"]
         assert [r["form_type"] for r in block["reports"]] == ["10-K", "10-Q"]
         for report in block["reports"]:
-            assert len(report["facts"]) == FACTS_PER_REPORT_MAX
+            rows = [row for g in report["facts"] for row in g["rows"]]
+            assert len(rows) == FACTS_PER_REPORT_MAX
             assert report["truncated"] is True
-            assert {f["unit"] for f in report["facts"]} == {"USD/shares"}
-            assert {len(f["val"]) for f in report["facts"]} == {23}
+            assert {g["unit"] for g in report["facts"]} == {"USD/shares"}
+            assert {len(row[3]) for row in rows} == {23}
         assert [r["kind"] for r in block["newer_report_without_facts"]] == ["annual", "quarterly"]
         mdna = n["mdna"]
         assert mdna["truncated"] is True
@@ -68,7 +80,10 @@ def test_every_fund_block_cap_is_filled(fixture: Pack) -> None:
     ("usage", "expected"),
     [
         ({"input_tokens": 2, "cache_creation_input_tokens": 14_048, "cache_read_input_tokens": 7}, 14_057),
-        ({"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}, 0),
+        (
+            {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+            None,
+        ),  # no request is empty
         ({"input_tokens": 2, "cache_creation_input_tokens": 14_048}, None),
         ({"input_tokens": True, "cache_creation_input_tokens": 1, "cache_read_input_tokens": 1}, None),
         ({"input_tokens": -1, "cache_creation_input_tokens": 1, "cache_read_input_tokens": 1}, None),
@@ -86,7 +101,7 @@ def test_the_freeze_gate_refuses_over_the_ceiling_or_missing_and_passes_equal() 
     assert budget_fixture_refusal(None) == REFUSE_PROMPT_BUDGET_EXCEEDED
 
 
-def _fake_invoke(refusal: str | None, usage: dict[str, int], calls: list[dict[str, Any]]):
+def _fake_invoke(refusal: str | None, usage: object, calls: list[dict[str, Any]]):
     def invoke(**kwargs: Any) -> InvocationResult:
         calls.append(kwargs)
         return InvocationResult(
@@ -107,36 +122,153 @@ def _fake_invoke(refusal: str | None, usage: dict[str, int], calls: list[dict[st
 _ZERO = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
 
 
-def test_a_rejected_call_is_a_missing_measurement_never_a_pass() -> None:
-    # Measured 2026-10-01: an over-context call exits 1 with "Prompt is too long" and ZERO usage.
-    calls: list[dict[str, Any]] = []
-    summary, result = run_fixture(
-        executable="/bin/claude", source_env=_ENV, invoke=_fake_invoke("nonzero_exit", _ZERO, calls)
+def _usage(tokens: int) -> dict[str, int]:
+    return {"input_tokens": 1, "cache_creation_input_tokens": tokens - 1, "cache_read_input_tokens": 0}
+
+
+def test_a_restricted_fixture_keeps_the_book_and_the_adversarial_title() -> None:
+    one = budget_fixture_pack(1)
+    assert [n["symbol"] for n in one.pack["names"]] == ["SYN_T00"]
+    assert [s["symbol"] for s in one.pack["shortlist"]] == ["SYN_T00"] and list(one.complete) == ["SYN_T00"]
+    assert len(one.pack["account"]["open_positions"]) == TRIAL_MAX_CONCURRENT_PER_LEG
+    assert one.pack["names"][0]["filings"][0]["title"].startswith("</pack>")
+    for bad in (0, MAX_NAMES + 1):
+        with pytest.raises(ValueError):
+            budget_fixture_pack(bad)
+
+
+def test_the_walk_starts_from_slice_2b_figures_clamped_to_1_50() -> None:
+    assert start_n(54_121) == 30  # (850,000 - 14,527) // ceil(54,121 / 1.95)
+    assert start_n(1) == MAX_NAMES
+    assert start_n(10**9) == 1
+    with pytest.raises(ValueError):
+        start_n(0)
+
+
+def _scripted(outcomes: Mapping[int, Sequence[tuple[str, int | None]]]):
+    calls: list[tuple[int, int]] = []
+
+    def probe(n: int, attempt: int) -> Probe:
+        calls.append((n, attempt))
+        outcome, tokens = outcomes[n][attempt - 1]
+        return Probe(n, attempt, outcome, tokens, n * 100, f"sha{n}", None, "", 0)  # type: ignore[arg-type]
+
+    return probe, calls
+
+
+def _linear(n: int) -> int:
+    return 15_000 + 27_000 * n
+
+
+def test_the_walk_climbs_to_the_first_failure() -> None:
+    outcomes = {n: [("pass", _linear(n))] for n in range(28, 31)} | {31: [("over_ceiling", 851_000)]}
+    probe, calls = _scripted(outcomes)
+    assert probe_walk(probe, 28)[0] == 30
+    assert calls == [(28, 1), (29, 1), (30, 1), (31, 1)]  # over the ceiling is never retried
+
+
+def test_the_walk_descends_to_the_first_pass() -> None:
+    probe, calls = _scripted(
+        {30: [("over_ceiling", 852_000)], 29: [("over_ceiling", 851_000)], 28: [("pass", 840_000)]}
     )
-    assert result is not None and not result.ok
-    assert summary["input_tokens"] is None
-    assert summary["freeze_refusal"] == REFUSE_PROMPT_BUDGET_EXCEEDED
-    assert calls[0]["system_prompt"] == FUND_SYSTEM_PROMPT
+    n, probes, refusal = probe_walk(probe, 30)
+    assert (n, refusal, len(probes)) == (28, None, 3)
 
 
-def test_a_call_within_the_ceiling_passes(fixture: Pack) -> None:
-    usage = {"input_tokens": 2, "cache_creation_input_tokens": 600_000, "cache_read_input_tokens": 0}
-    calls: list[dict[str, Any]] = []
-    summary, _ = run_fixture(executable="/bin/claude", source_env=_ENV, invoke=_fake_invoke(None, usage, calls))
-    assert (summary["input_tokens"], summary["freeze_refusal"]) == (600_002, None)
-    assert summary["pack_sha256"] == fixture.sha256
-    assert summary["rendered_prompt_bytes"] == len(calls[0]["prompt"].encode("utf-8"))
+def test_the_walk_stops_at_the_endpoints() -> None:
+    probe, calls = _scripted({MAX_NAMES: [("pass", 800_000)]})
+    assert probe_walk(probe, MAX_NAMES)[0] == MAX_NAMES and calls == [(MAX_NAMES, 1)]
+    probe, calls = _scripted({2: [("over_ceiling", 900_000)], 1: [("pass", 60_000)]})
+    assert probe_walk(probe, 2)[0] == 1
+
+
+def test_all_failing_refuses_the_freeze() -> None:
+    probe, _ = _scripted({2: [("over_ceiling", 900_000)], 1: [("over_ceiling", 870_000)]})
+    assert probe_walk(probe, 2)[::2] == (None, REFUSE_PROMPT_BUDGET_EXCEEDED)
+
+
+def test_a_failure_without_usage_is_retried_once_and_only_the_retry_counts() -> None:
+    probe, calls = _scripted({5: [("failed", None), ("pass", 150_000)], 6: [("failed", None), ("failed", None)]})
+    n, _, refusal = probe_walk(probe, 5)
+    assert (n, refusal) == (5, None)
+    assert calls == [(5, 1), (5, 2), (6, 1), (6, 2)]
+
+
+def test_a_non_monotone_walk_refuses_the_freeze() -> None:
+    probe, _ = _scripted({10: [("pass", 300_000)], 11: [("pass", 290_000)], 12: [("over_ceiling", 900_000)]})
+    assert probe_walk(probe, 10)[::2] == (None, REFUSE_FIXTURE_PROBE_NONMONOTONE)
+
+
+def test_a_discarded_smaller_attempt_cannot_fake_a_decrease() -> None:
+    # n=30's first attempt measured 690k but failed (e.g. no structured output); its retry measured 700k.
+    probe, _ = _scripted(
+        {29: [("pass", 695_000)], 30: [("failed", 690_000), ("pass", 700_000)], 31: [("over_ceiling", 900_000)]}
+    )
+    assert probe_walk(probe, 29)[::2] == (30, None)
+
+
+def test_a_discarded_larger_attempt_still_counts_in_the_monotone_check() -> None:
+    # n=29's discarded first attempt measured 720k; its retry 695k; n=30 700k: usage fell, so refuse.
+    probe, _ = _scripted(
+        {29: [("failed", 720_000), ("pass", 695_000)], 30: [("pass", 700_000)], 31: [("over_ceiling", 900_000)]}
+    )
+    assert probe_walk(probe, 29)[::2] == (None, REFUSE_FIXTURE_PROBE_NONMONOTONE)
+
+
+def _result(refusal: str | None, usage: object) -> InvocationResult:
+    return _fake_invoke(refusal, usage, [])(prompt="")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
-    ("refusal", "tokens", "code"),
-    [(None, 600_000, 0), (None, INPUT_TOKEN_CEILING + 1, 1), ("nonzero_exit", 0, 1)],
+    ("refusal", "usage", "expected"),
+    [
+        (None, _usage(600_000), ("pass", 600_000)),
+        (None, _usage(INPUT_TOKEN_CEILING), ("pass", INPUT_TOKEN_CEILING)),
+        (None, _usage(INPUT_TOKEN_CEILING + 1), ("over_ceiling", INPUT_TOKEN_CEILING + 1)),
+        ("no_structured_output", _usage(INPUT_TOKEN_CEILING + 1), ("over_ceiling", INPUT_TOKEN_CEILING + 1)),
+        (
+            "nonzero_exit",
+            {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+            ("failed", None),
+        ),
+        ("model_timeout", None, ("failed", None)),
+        (None, {"input_tokens": 5}, ("failed", None)),
+        ("no_structured_output", _usage(600_000), ("failed", 600_000)),
+    ],
 )
-def test_the_cli_exits_non_zero_whenever_the_freeze_gate_refuses(
-    monkeypatch: pytest.MonkeyPatch, refusal: str | None, tokens: int, code: int
+def test_classify(refusal: str | None, usage: object, expected: tuple[str, int | None]) -> None:
+    assert classify(_result(refusal, usage)) == expected
+
+
+def test_run_fixture_walks_with_the_fund_system_prompt_and_freezes_the_passing_probe() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def invoke(**kwargs: Any) -> InvocationResult:
+        calls.append(kwargs)
+        tokens = 15_000 + len(kwargs["prompt"]) // 2
+        return _fake_invoke(None, _usage(tokens), [])(**kwargs)
+
+    summary = run_fixture(executable="/bin/claude", source_env=_ENV, invoke=invoke)
+    assert summary["freeze_refusal"] is None and summary["n"] is not None
+    assert all(c["system_prompt"] == FUND_SYSTEM_PROMPT for c in calls)
+    chosen = budget_fixture_pack(summary["n"])
+    assert summary["pack_sha256"] == chosen.sha256
+    assert summary["input_tokens"] <= INPUT_TOKEN_CEILING
+    assert [p["n"] for p in summary["probes"]][-1] == min(summary["n"] + 1, MAX_NAMES)
+
+
+def test_a_dry_run_makes_no_call() -> None:
+    calls: list[dict[str, Any]] = []
+    summary = run_fixture(executable="", source_env=_ENV, invoke=_fake_invoke(None, _ZERO, calls), dry_run=True)
+    assert calls == [] and "probes" not in summary
+    assert summary["n0"] == 30 and summary["n0_rendered_prompt_bytes"] > 0
+
+
+@pytest.mark.parametrize(("tokens", "code"), [(600_000, 0), (INPUT_TOKEN_CEILING + 1, 1)])
+def test_the_cli_exits_non_zero_whenever_the_walk_refuses(
+    monkeypatch: pytest.MonkeyPatch, tokens: int, code: int
 ) -> None:
-    usage = {"input_tokens": tokens, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
-    fake = _fake_invoke(refusal, usage, [])
+    fake = _fake_invoke(None, _usage(tokens), [])
     monkeypatch.setattr(
         "scripts.ai_trial_fund_budget_fixture.run_fixture",
         lambda **kw: run_fixture(**kw, invoke=fake),
@@ -144,13 +276,6 @@ def test_the_cli_exits_non_zero_whenever_the_freeze_gate_refuses(
     # No real subprocess: the executable is only resolved (``realpath``) and its version stubbed.
     monkeypatch.setattr("scripts.ai_trial_fund_budget_fixture._cli_version", lambda *_a: "stub")
     assert main(["--claude-bin", "/nonexistent/claude"]) == code
-
-
-def test_a_dry_run_makes_no_call() -> None:
-    calls: list[dict[str, Any]] = []
-    summary, result = run_fixture(executable="", source_env=_ENV, invoke=_fake_invoke(None, _ZERO, calls), dry_run=True)
-    assert result is None and calls == []
-    assert summary["rendered_prompt_bytes"] > 0
 
 
 _AT = {"input_tokens": 0, "cache_creation_input_tokens": INPUT_TOKEN_CEILING, "cache_read_input_tokens": 0}
@@ -171,6 +296,9 @@ _OVER = {**_AT, "input_tokens": 1}
         ("no_structured_output", {}, "budget_breach"),  # a result event without usage
         ("no_structured_output", {"usage": _AT}, None),  # v1's refusal, no halt
         ("model_timeout", None, None),  # nothing to measure: v1's refusal, no halt
+        (None, {"usage": {**_AT, "cache_creation_input_tokens": 0}}, "budget_breach"),  # zero sum
+        (None, {"usage": {**_AT, "input_tokens": True}}, "budget_breach"),  # a boolean counter
+        ("nonzero_exit", {"usage": _AT}, "nonzero_exit"),  # with a result event too
     ],
 )
 def test_the_post_call_rule(refusal: str | None, event: object, expected: str | None) -> None:

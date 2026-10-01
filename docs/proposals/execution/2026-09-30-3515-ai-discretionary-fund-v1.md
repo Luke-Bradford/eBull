@@ -182,7 +182,8 @@ corrects (§2).
   order the model reads, not which facts are shown: each row keeps its own dates and value.
   - **`fact_id` moves to the run record** (`ai_trial_runs.fund_blocks`, written in the same update as the pack):
     `fact_ids` per symbol per shown accession (key: symbol, then accession number), in the flattened group order (group by group, row by row), so row
-    *i* of a report's flattened groups is `fact_ids[i]`; the two lengths are asserted equal at build. The pack still
+    *i* of a report's flattened groups is `fact_ids[i]`; one ordered list builds both, so they align by
+    construction, and a test checks it against hand-written ids. The pack still
     holds every shown value and date, so what the model saw never depends on resolving an id later.
   - **`val`** is `val::text` with the trailing zeros of the column's fixed scale removed, and the point too when
     nothing follows it (`financial_facts_raw.val` is `NUMERIC(30,6)`, so `94930000000.000000` is the stored form of
@@ -328,7 +329,8 @@ name.
     retry's outcome counts. If `n₀` passes, probe `n₀` + 1, `n₀` + 2, … up to 50 and stop at the first failure;
     if it fails, probe `n₀` − 1, … down to 1 and stop at the first pass. `n` is the largest passing probe. None
     passing refuses the freeze `prompt_budget_exceeded`; a larger `n` measuring fewer tokens than a smaller one
-    refuses it `fixture_probe_nonmonotone`. A walk, not a search: "largest" means largest on this walk. The tool
+    refuses it `fixture_probe_nonmonotone`, comparing each `n`'s highest measured attempt (a discarded first
+    attempt included, so a retry never hides a measurement). A walk, not a search: "largest" means largest on this walk. The tool
     prints every probe; a passing walk's probes go into the declaration, and a refused walk's output is posted on
     #3515 (there is no declaration to hold it).
   - **No margin below the ceiling is added**: a later call that measures over it is caught by the post-call

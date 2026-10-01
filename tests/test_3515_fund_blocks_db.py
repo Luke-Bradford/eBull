@@ -92,8 +92,11 @@ def test_read_fund_blocks_end_to_end(ebull_test_conn: Conn) -> None:
     assert one.fundamentals is not None
     [report] = one.fundamentals["reports"]
     assert report["accession_number"] == "A-FY25"
-    # val is the stored NUMERIC(30, 6) as text: exact, at the column's scale.
-    assert [(f["concept"], f["val"]) for f in report["facts"]] == [("us-gaap:Assets", "123456789012345678.900000")]
+    # val is the stored NUMERIC(30, 6) as text, without the column scale's trailing zeros (§3): exact.
+    assert [(g["concept"], [row[3] for row in g["rows"]]) for g in report["facts"]] == [
+        ("us-gaap:Assets", ["123456789012345678.9"])
+    ]
+    assert len(one.audit.fact_ids["A-FY25"]) == 1
     assert one.fundamentals["newer_report_without_facts"] == []
     assert one.audit.withheld_after_as_of == {"A-FY25": 1}
     assert one.mdna is not None and one.mdna["row_id"] == shown_row and "x" * 50 in one.mdna["text"]
