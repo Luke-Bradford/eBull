@@ -39,6 +39,7 @@ from app.jobs.sec_manifest_worker import (
 )
 from app.services.sec_manifest import get_manifest_row, record_manifest_entry
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
+from tests.fixtures.thirteen_f_clock import pin_thirteen_f_retention_clock  # noqa: F401 — autouse
 
 pytestmark = pytest.mark.integration
 

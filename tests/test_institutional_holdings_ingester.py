@@ -33,6 +33,7 @@ from app.services.institutional_holdings import (
     seed_filer,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
+from tests.fixtures.thirteen_f_clock import pin_thirteen_f_retention_clock  # noqa: F401 — autouse
 
 pytestmark = pytest.mark.integration
 

@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString, cast
 from uuid import UUID
@@ -879,6 +880,37 @@ def _bootstrap_complete(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
 
 
 _NEW_YORK = ZoneInfo("America/New_York")
+
+#: #3529 — the AI trial's decision window. It opens at the frozen 23:30 UTC fire, after the close
+#: in both EDT (20:00) and EST (21:00) and after the 21:52 crowd snapshot the run reads, and runs
+#: until New York midnight of that same New York evening (04:00 UTC in EDT, 05:00 in EST). On a
+#: session night that is where the job body starts refusing ``target_session_date``.
+AI_TRIAL_DECISION_WINDOW_OPENS: Final = dt_time(23, 30)
+#: The retry interval inside the window: fires at :00 and :30, so the first is the frozen 23:30.
+AI_TRIAL_DECISION_RETRY_MINUTES: Final = 30
+
+
+def _ai_trial_decision_window_open(now: datetime) -> bool:
+    """Whether ``now`` falls between the latest 23:30 UTC opening and the end of that opening's
+    New York date. Both ends are derived from ``AI_TRIAL_DECISION_WINDOW_OPENS``, so moving it
+    moves the window, never desynchronises it."""
+    if now.tzinfo is None:
+        raise ValueError("the AI-trial decision window requires an aware datetime")
+    utc = now.astimezone(UTC)
+    opened = datetime.combine(utc.date(), AI_TRIAL_DECISION_WINDOW_OPENS, tzinfo=UTC)
+    if opened > utc:
+        opened -= timedelta(days=1)
+    # Holds because 23:30 UTC is always New York evening (19:30 EDT / 18:30 EST): the opening's
+    # New York date ends at the next New York midnight, hours before the next opening, so the
+    # match is true from the opening to that midnight and false through the New York daytime.
+    return utc.astimezone(_NEW_YORK).date() == opened.astimezone(_NEW_YORK).date()
+
+
+def _ai_trial_decision_in_window(_conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """The decision job retries through its window (#3529); outside it a fire is a no-op."""
+    if not _ai_trial_decision_window_open(datetime.now(tz=UTC)):
+        return (False, "outside the AI-trial decision window (23:30 UTC to New York midnight)")
+    return (True, "")
 
 
 def _strategy_intraday_collection_window_open(now: datetime) -> bool:
@@ -2736,21 +2768,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         display_name="AI trial decision run (#3471)",
         source="ai_trial",
         description=(
-            "Daily 23:30 UTC — the AI-discretionary-v1 demo trial's decision for the next NYSE session: "
-            "one claimed run, a point-in-time pack, one tool-less claude -p call, a validated response and "
-            "the random control drawn, all published in one transaction. Refused runs are recorded. Does "
-            "nothing without a frozen declaration, and never runs while the regular session is open."
+            "Every 30 minutes from 23:30 UTC until New York midnight — the AI-discretionary-v1 demo "
+            "trial's decision for the next NYSE session: the shortlist's bars brought to the last "
+            "session first (not there yet → no claim, retried next fire), then one claimed run, a "
+            "point-in-time pack, one tool-less claude -p call, a validated response and the random "
+            "control drawn, all published in one transaction. Refused runs are recorded. Does nothing "
+            "without a frozen declaration, and never runs while the regular session is open."
         ),
-        # Daily, not Mon-Fri: a weekend fire targets the same session as Friday's run and the
-        # unique claim refuses it as a duplicate before any model call (spec §3).
-        cadence=Cadence.daily(hour=23, minute=30),
+        # #3529: retried through the window, because the first fire can precede the session's bars
+        # and the claim is one per session. Every day, not Mon-Fri: a fire whose target session
+        # already has a run returns `duplicate` from a read before any fetch or broker call. :00
+        # and :30 only, so no fire lands on the fund-v1 job's 23:45 in the shared lane.
+        cadence=Cadence.every_n_minutes(interval=AI_TRIAL_DECISION_RETRY_MINUTES),
         # A post-close boot catch-up is the same decision a little later; one on the target
         # session's own date is skipped by the service (it would read that session's bars).
         catch_up_on_boot=True,
-        # The body bounds its own lateness (the target-date guard) and is idempotent (one
-        # claim per session), so a fire delayed by a host pause is still worth running.
-        misfire_grace_seconds=4 * 60 * 60,
-        prerequisite=_bootstrap_complete,
+        # The body is idempotent (one claim per session) and bounds its own lateness (the
+        # target-date guard), so a delayed fire is still worth running — but only within its own
+        # slot: half the interval, so a late fire can never run alongside its successor.
+        misfire_grace_seconds=AI_TRIAL_DECISION_RETRY_MINUTES * 60 // 2,
+        prerequisite=_all_of(_bootstrap_complete, _ai_trial_decision_in_window),
     ),
     ScheduledJob(
         name=JOB_AI_TRIAL_FUND_DECISION_RUN,
@@ -6971,11 +7008,17 @@ def _ai_trial_decision(job_name: str, tracker: _JobTracker, creds: tuple[str, st
         EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
         connect_job() as conn,
     ):
-        result = run(conn, broker=broker, get_intraday_candles=market.get_intraday_candles)
+        result = run(conn, broker=broker, market=market, get_intraday_candles=market.get_intraday_candles)
     tracker.row_count = 0 if result.outcome is None else len(result.outcome.pair_ids)
     tracker.note = result.note
+    errors: dict[str, int] = {}
     if result.orphans_killed is None:
-        tracker.progress = JobProgress(errors={"orphan_sweep": 1})
+        errors["orphan_sweep"] = 1
+    if result.readiness is not None and result.readiness.fetch_failed:
+        # #3529: retried next fire, but a failing fetch must not read as a clean `bars_not_ready`.
+        errors["bar_fetch"] = 1
+    if errors:
+        tracker.progress = JobProgress(errors=errors)
     logger.info("%s: %s", job_name, result.note)
 
 

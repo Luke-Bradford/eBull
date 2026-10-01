@@ -6,7 +6,9 @@
   deployment), sweeps orphaned model processes
   left by a crashed run, takes one informational account-risk snapshot and calls
   ``ai_trial_run.run_trial_decision``. Without a frozen declaration it returns before any broker
-  call, process sweep or subprocess (§12: scheduling before slice 3 is harmless).
+  call, process sweep or subprocess (§12: scheduling before slice 3 is harmless). Before the
+  claim it brings the shortlist's daily bars up to the last session (``prepare_trial_bars``,
+  #3529) and, when none is there yet, returns ``bars_not_ready`` unclaimed for the next fire.
 * **Execute** (``run_trial_execution``, 15:00 UTC): every published trial leg whose target session
   is today or earlier and that has no funding decision goes through
   ``ai_trial_executor.execute_trial_signal``, in §7's submission order (``pair_seq`` parity, even =
@@ -47,15 +49,26 @@ import psycopg
 from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerProvider
-from app.providers.market_data import IntradayBar
+from app.providers.market_data import IntradayBar, MarketDataProvider
 from app.services.ai_trial_deadline import TRIAL_ENTRY_TIME_UTC, TRIAL_MAX_POSITION_AGE_SECONDS
 from app.services.ai_trial_executor import execute_trial_signal
 from app.services.ai_trial_invocation import TRIAL_MODEL_ID, build_argv, build_env
-from app.services.ai_trial_pack_reader import INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT, next_us_session
+from app.services.ai_trial_pack_reader import (
+    INTRADAY_INTERVAL,
+    INTRADAY_REQUEST_COUNT,
+    SCORES_MAX_AGE,
+    Step1,
+    next_us_session,
+    read_bars,
+    read_scores_run,
+    read_shortlist,
+)
 from app.services.ai_trial_run import RunEnvironment, RunOutcome, load_declaration, run_trial_decision
 from app.services.ai_trial_version import FUND_V1, V1, TrialVersion
 from app.services.ai_trial_wind_down import read_v1_declarations, wind_down_refusal
 from app.services.market_calendar import latest_completed_us_session
+from app.services.market_data import refresh_market_data
+from app.services.price_quarantine_store import refresh_price_quarantine
 from app.services.strategy_paper_executor import _NY, _session_is_open
 from app.services.strategy_position_manager import configure_position_manager
 from app.system.git_identity import head_commit
@@ -193,17 +206,133 @@ IntradaySource = Callable[[int, Any, int], Sequence[IntradayBar]]
 
 
 @dataclass(frozen=True)
+class BarReadiness:
+    """The shortlist's daily bars before the claim (#3529).
+
+    ``shortlist`` names, of which ``refreshed`` were behind ``last_session`` on the pack's own
+    reader and were re-fetched and re-quarantined, and ``current`` reach ``last_session`` after.
+    """
+
+    last_session: date
+    shortlist: int
+    refreshed: int
+    current: int
+    #: The candle fetch raised (``refresh_market_data`` raises only on a systemic failure — its
+    #: batch breaker; a per-name 404 is handled inside it). The stale names were never asked for.
+    fetch_failed: bool = False
+
+    @property
+    def ready(self) -> bool:
+        """A failed fetch, or zero current names after a post-close fetch, means the session's bars
+        are not there yet — a systemic gap, so the run waits. A name still behind after a clean
+        fetch while others are current is that name's own gap: the pack drops it as
+        ``stale_last_bar`` (O1, nothing replenished), exactly as for any other incomplete name.
+        An empty shortlist has nothing to wait for; the run records it."""
+        if self.fetch_failed:
+            return False
+        return self.shortlist == 0 or self.current > 0
+
+    @property
+    def note(self) -> str:
+        failed = " fetch_failed=1" if self.fetch_failed else ""
+        return (
+            f"last_session={self.last_session.isoformat()} shortlist={self.shortlist} "
+            f"refreshed={self.refreshed} current={self.current}{failed}"
+        )
+
+
+def _current_names(conn: Conn, instrument_ids: Sequence[int], *, last_session: date) -> set[int]:
+    """The names whose pack bars (``read_bars``: the masked reader, cut to the latest segment)
+    end on ``last_session`` — the same test ``build_bar_series`` applies as ``stale_last_bar``."""
+    bars = read_bars(conn, instrument_ids, last_session=last_session)
+    conn.commit()
+    return {iid for iid, (dates, _rows) in bars.items() if dates and dates[-1] == last_session}
+
+
+def _restore_transactional(conn: Conn) -> None:
+    """Leave the autocommit window. A ``conn.transaction()`` block that did not exit cleanly can
+    leave a transaction open, and psycopg refuses to change ``autocommit`` mid-transaction, so it
+    is rolled back first (in autocommit mode every completed statement is already committed)."""
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
+    conn.autocommit = False
+
+
+def prepare_trial_bars(
+    conn: Conn,
+    *,
+    as_of: datetime,
+    market: MarketDataProvider,
+    refresh_candles: Callable[..., object] = refresh_market_data,
+    refresh_quarantine: Callable[..., object] = refresh_price_quarantine,
+) -> BarReadiness | None:
+    """Bring the shortlist's bars to ``last_session`` before the claim (#3529).
+
+    The nightly full-universe candle sweep runs at 03:00 UTC and the quarantine refresh after
+    it, so at the 23:30 fire the pack's masked reader can still end every name on the session
+    before. Each stale shortlist name is fetched (``refresh_market_data``, bounded by
+    ``fresh_through=last_session`` like the nightly sweep) and re-evaluated
+    (``refresh_price_quarantine`` over those ids only). Writes only through those two producers;
+    nothing here changes what the pack reads or how (``ai_trial_pack_reader`` is a policy module).
+
+    ``None`` when there is no scores run within ``SCORES_MAX_AGE``: there is no shortlist, and
+    step 1 records that refusal itself.
+    """
+    last_session = latest_completed_us_session(as_of)
+    run = read_scores_run(conn, as_of=as_of)
+    if run is None or as_of - run.scored_at > SCORES_MAX_AGE:
+        conn.commit()
+        return None
+    step1 = Step1(as_of, last_session, next_us_session(last_session), run, None, None)
+    names = [(n.instrument_id, n.symbol) for n in read_shortlist(conn, step1=step1).names]
+    conn.commit()
+    ids = [iid for iid, _ in names]
+    current = _current_names(conn, ids, last_session=last_session)
+    stale = [(iid, symbol) for iid, symbol in names if iid not in current]
+    fetch_failed = False
+    if stale:
+        # `refresh_market_data` needs an autocommit connection for its per-instrument commits
+        # (#2269); the job's connection is idle here, so it is switched rather than a second
+        # connection opened on a cluster with no headroom.
+        conn.autocommit = True
+        try:
+            refresh_candles(market, conn, stale, skip_quotes=True, fresh_through=last_session)
+        except Exception:
+            # Retryable, not a job error: no claim is taken, and the next fire in the window asks
+            # again. Surfaced on the result (`fetch_failed`), which degrades the job run.
+            logger.exception("ai_trial bars: candle fetch for %d stale shortlist names failed", len(stale))
+            fetch_failed = True
+        finally:
+            _restore_transactional(conn)
+        if fetch_failed:
+            # Not ready whatever landed: skip the re-evaluation and the re-read.
+            return BarReadiness(last_session, len(names), len(stale), len(current), fetch_failed=True)
+        # ⚠ A raise from here on is a database fault, not a data gap, and is deliberately NOT
+        # mapped to not-ready: it fails the job run loudly, no claim has been taken, and the next
+        # fire in the window starts over. Only the provider fetch is an expected, retryable miss.
+        # The provisional window is pinned to the decision instant's UTC date, never the host's
+        # local `date.today()` (the 23:30 UTC fire is already tomorrow in London during BST).
+        refresh_quarantine(conn, instrument_ids=[iid for iid, _ in stale], as_of=as_of.astimezone(UTC).date())
+        conn.commit()
+        current = _current_names(conn, ids, last_session=last_session)
+    return BarReadiness(last_session, len(names), len(stale), len(current))
+
+
+@dataclass(frozen=True)
 class DecisionJobResult:
-    #: ``target_session_date`` / ``declaration_missing`` when the job returned before the run,
-    #: else the run's own status.
+    #: ``target_session_date`` / ``declaration_missing`` / ``duplicate`` / ``bars_not_ready`` when
+    #: the job returned before the run, else the run's own status.
     status: str
     outcome: RunOutcome | None = None
     #: ``None`` when the sweep itself failed; the run still went ahead.
     orphans_killed: int | None = 0
+    readiness: BarReadiness | None = None
 
     @property
     def note(self) -> str:
         parts = [f"status={self.status}"]
+        if self.readiness is not None:
+            parts.append(self.readiness.note)
         if self.outcome is not None:
             if self.outcome.session_date is not None:
                 parts.append(f"session={self.outcome.session_date.isoformat()}")
@@ -216,26 +345,52 @@ class DecisionJobResult:
         return " ".join(parts)
 
 
+def session_claimed(conn: Conn, declaration_id: int, session_date: date) -> bool:
+    """Whether the session already has a run. A read ahead of the claim so a retry fire after the
+    decision costs no broker call or fetch; ``claim_run``'s unique insert stays the authority."""
+    row = conn.execute(
+        "SELECT 1 FROM ai_trial_runs WHERE declaration_id = %s AND session_date = %s",
+        (declaration_id, session_date),
+    ).fetchone()
+    conn.commit()
+    return row is not None
+
+
 def run_decision_job(
     conn: Conn,
     *,
     broker: BrokerProvider,
+    market: MarketDataProvider,
     get_intraday_candles: IntradaySource,
     now: datetime | None = None,
     resolve: Callable[[], RunEnvironment] = deployed_run_environment,
     verify: Callable[[RunEnvironment], None] = verify_run_environment,
     sweep: Callable[[], int] = sweep_orphan_model_processes,
     decide: Callable[..., RunOutcome] = run_trial_decision,
+    claimed: Callable[[Conn, int, date], bool] = session_claimed,
+    prepare: Callable[..., BarReadiness | None] = prepare_trial_bars,
     version: TrialVersion = V1,
 ) -> DecisionJobResult:
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     # The claim's own target-session rule (`ai_trial_run.claim_run`, §3).
-    if next_us_session(latest_completed_us_session(observed)) == observed.astimezone(_NY).date():
+    session_date = next_us_session(latest_completed_us_session(observed))
+    if session_date == observed.astimezone(_NY).date():
         return DecisionJobResult("target_session_date")
     declaration = load_declaration(conn, version=version)
     conn.commit()
     if declaration is None:
         return DecisionJobResult("declaration_missing")
+    if claimed(conn, declaration.declaration_id, session_date):
+        return DecisionJobResult("duplicate")
+
+    # #3529: the claim is one per session and final, so the shortlist's bars must be there
+    # BEFORE it. Not ready → no claim and no model call; the next fire in the window retries.
+    # An inactive declaration skips the fetch: the run refuses it right after the claim anyway.
+    readiness: BarReadiness | None = None
+    if declaration.state == "active":
+        readiness = prepare(conn, as_of=observed, market=market)
+        if readiness is not None and not readiness.ready:
+            return DecisionJobResult("bars_not_ready", readiness=readiness)
 
     env = resolve()
     # Fail closed BEFORE the claim, whatever raises (a changed CLI, a failed re-resolve): the
@@ -261,7 +416,7 @@ def run_decision_job(
         return get_intraday_candles(instrument_id, INTRADAY_INTERVAL, INTRADAY_REQUEST_COUNT)
 
     outcome = decide(conn, env=env, risk=risk, fetch_intraday=fetch_intraday, version=version)
-    return DecisionJobResult(outcome.status, outcome, orphans)
+    return DecisionJobResult(outcome.status, outcome, orphans, readiness)
 
 
 # ---------------------------------------------------------------------------
