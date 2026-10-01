@@ -79,6 +79,10 @@ REFUSE_FUNDAMENTALS_COVERAGE: Final = "fundamentals_coverage_below_floor"
 REFUSE_MDNA_COVERAGE: Final = "mdna_coverage_below_floor"
 REFUSE_SNAPSHOT_TOO_LATE: Final = "snapshot_too_late"
 REFUSE_PROMPT_OVER_BUDGET: Final = "prompt_over_budget"
+REFUSE_PROMPT_BUDGET_EXCEEDED: Final = "prompt_budget_exceeded"
+
+#: §6: 150k of the 1,000,000-token context the CLI reports for ``TRIAL_MODEL_ID`` left for output and margin.
+INPUT_TOKEN_CEILING: Final = 850_000
 
 # --- §6 system prompt: v1's frozen text plus one paragraph (v1's text and sha are unchanged) --------------------
 FUND_PARAGRAPH: Final = """
@@ -463,6 +467,22 @@ def snapshot_refusal(*, as_of: datetime, snapshot_at: datetime) -> str | None:
 def prompt_budget_refusal(*, rendered_bytes: int, fixture_bytes: int) -> str | None:
     """§6 per-run byte proxy: over the budget fixture's rendered length is refused, equal passes."""
     return REFUSE_PROMPT_OVER_BUDGET if rendered_bytes > fixture_bytes else None
+
+
+def reported_input_tokens(usage: object) -> int | None:
+    """§6 input usage of one CLI request: uncached + cache-creation + cache-read tokens, which covers the system
+    prompt and every CLI-added context. ``None`` when any of the three is missing or not a non-negative int."""
+    if not isinstance(usage, Mapping):
+        return None
+    parts = [usage.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    if not all(isinstance(p, int) and not isinstance(p, bool) and p >= 0 for p in parts):
+        return None
+    return sum(parts)  # type: ignore[arg-type]
+
+
+def budget_fixture_refusal(input_tokens: int | None) -> str | None:
+    """§6 freeze gate on the fixture call: usage over ``INPUT_TOKEN_CEILING``, or missing, is refused."""
+    return REFUSE_PROMPT_BUDGET_EXCEEDED if input_tokens is None or input_tokens > INPUT_TOKEN_CEILING else None
 
 
 # --- DB half ----------------------------------------------------------------------------------------------------

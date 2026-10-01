@@ -8,8 +8,9 @@ fund-v1 declaration whose stored hash differs is refused ``policy_drift`` exactl
 ⚠ v1's own ``policy_hash`` is untouched: this module is not in ``ai_trial_policy.POLICY_MODULES``
 and adds nothing to ``FROZEN_CONSTANTS`` (spec §0 rule 1).
 
-Slice 2b adds the budget fixture's sha, its measured pair and ``INPUT_TOKEN_CEILING`` to
-``FUND_FROZEN_CONSTANTS``; nothing is frozen before then, so the hash moving is expected.
+``INPUT_TOKEN_CEILING`` is frozen here (slice 2b). The budget fixture's sha and measured pair join once
+the fixture passes the ceiling (spec §6, measured 2026-10-01: it does not yet); nothing is frozen before
+then, so the hash moving is expected.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import Final
 from app.services.ai_trial_fund_blocks import (
     AMENDMENT_FORMS,
     FACTS_PER_REPORT_MAX,
+    INPUT_TOKEN_CEILING,
     MAX_CLAIM_TO_SNAPSHOT,
     MDNA_MAX_CHARS,
     MDNA_MIN_SUBSTANTIVE_CHARS,
@@ -53,6 +55,7 @@ FUND_FROZEN_CONSTANTS: Final[dict[str, object]] = {
     **FROZEN_CONSTANTS,
     "ai_trial_fund_blocks.AMENDMENT_FORMS": AMENDMENT_FORMS,
     "ai_trial_fund_blocks.FACTS_PER_REPORT_MAX": FACTS_PER_REPORT_MAX,
+    "ai_trial_fund_blocks.INPUT_TOKEN_CEILING": INPUT_TOKEN_CEILING,
     "ai_trial_fund_blocks.K": K,
     "ai_trial_fund_blocks.MAX_CLAIM_TO_SNAPSHOT": MAX_CLAIM_TO_SNAPSHOT,
     "ai_trial_fund_blocks.MDNA_MAX_CHARS": MDNA_MAX_CHARS,
