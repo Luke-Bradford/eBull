@@ -883,8 +883,8 @@ _NEW_YORK = ZoneInfo("America/New_York")
 
 #: #3529 — the AI trial's decision window in UTC. It opens at the frozen 23:30 fire, after the
 #: close in both EDT (20:00) and EST (21:00) and after the 21:52 crowd snapshot the run reads.
-#: It closes at 05:00, New York midnight in EST (04:00 in EDT); from New York midnight the job
-#: body refuses ``target_session_date`` anyway, so the bound only keeps daytime fires off the lane.
+#: It closes at New York midnight, from which the job body refuses ``target_session_date``: 04:00
+#: in EDT, 05:00 in EST (``AI_TRIAL_DECISION_WINDOW_CLOSES`` is the latter, the UTC upper bound).
 AI_TRIAL_DECISION_WINDOW_OPENS: Final = dt_time(23, 30)
 AI_TRIAL_DECISION_WINDOW_CLOSES: Final = dt_time(5, 0)
 #: The retry interval inside the window: fires at :00 and :30, so the first is the frozen 23:30.
@@ -895,13 +895,17 @@ def _ai_trial_decision_window_open(now: datetime) -> bool:
     if now.tzinfo is None:
         raise ValueError("the AI-trial decision window requires an aware datetime")
     at = now.astimezone(UTC).time()
-    return at >= AI_TRIAL_DECISION_WINDOW_OPENS or at < AI_TRIAL_DECISION_WINDOW_CLOSES
+    if at >= AI_TRIAL_DECISION_WINDOW_OPENS:
+        return True
+    # After UTC midnight the window runs to New York midnight exactly (04:00 UTC in EDT, 05:00 in
+    # EST), so no fire lands where the body would only refuse `target_session_date`.
+    return at < AI_TRIAL_DECISION_WINDOW_CLOSES and now.astimezone(_NEW_YORK).hour >= 12
 
 
 def _ai_trial_decision_in_window(_conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """The decision job retries through its window (#3529); outside it a fire is a no-op."""
     if not _ai_trial_decision_window_open(datetime.now(tz=UTC)):
-        return (False, "outside the AI-trial decision window (23:30-05:00 UTC)")
+        return (False, "outside the AI-trial decision window (23:30 UTC to New York midnight)")
     return (True, "")
 
 
@@ -7003,8 +7007,14 @@ def _ai_trial_decision(job_name: str, tracker: _JobTracker, creds: tuple[str, st
         result = run(conn, broker=broker, market=market, get_intraday_candles=market.get_intraday_candles)
     tracker.row_count = 0 if result.outcome is None else len(result.outcome.pair_ids)
     tracker.note = result.note
+    errors: dict[str, int] = {}
     if result.orphans_killed is None:
-        tracker.progress = JobProgress(errors={"orphan_sweep": 1})
+        errors["orphan_sweep"] = 1
+    if result.readiness is not None and result.readiness.fetch_failed:
+        # #3529: retried next fire, but a failing fetch must not read as a clean `bars_not_ready`.
+        errors["bar_fetch"] = 1
+    if errors:
+        tracker.progress = JobProgress(errors=errors)
     logger.info("%s: %s", job_name, result.note)
 
 

@@ -11758,3 +11758,29 @@ neighbouring container and match it.**
 - Enforced in: `tests/fixtures/ebull_test_db.py::_truncate_planner_tables` and the `conn` fixtures of
   `tests/test_mirror_equity.py`, `tests/test_api_portfolio_mirror_equity.py`,
   `tests/test_execution_guard_mirror_aum.py`, `tests/test_portfolio_review_mirror_equity.py`.
+
+### A pre-claim fetch that feeds "not ready, retry" maps provider failure to not-ready (#3529)
+
+- Failure: `ai_trial_jobs.prepare_trial_bars` let a raising `refresh_market_data` (its batch breaker) propagate,
+  so a provider outage became a failed job run instead of the retryable `bars_not_ready` the readiness gate
+  exists to produce. Its `finally: conn.autocommit = False` could also raise on a connection the failed fetch
+  left mid-transaction, replacing the original exception.
+- Prevention: when a network call feeds a pre-claim readiness verdict, catch the provider's failure, log it, and
+  return the not-ready verdict with the failure on the result (`fetch_failed`), which the job surfaces as a
+  degraded run. Never let names that were never fetched count toward "ready". An `autocommit` toggle restores
+  through a helper that rolls back a non-IDLE transaction first, because psycopg refuses to switch `autocommit`
+  mid-transaction.
+- Enforced in: `ai_trial_jobs._restore_transactional`, `BarReadiness.fetch_failed`, `scheduler._ai_trial_decision`
+  (`errors["bar_fetch"]`) and `tests/test_ai_trial_jobs.py::test_a_failed_fetch_is_not_ready_and_restores_the_connection`.
+
+### A test fixture dated against a wall-clock retention floor is a time bomb (#3529)
+
+- Failure: the 13F parser and ingester fixtures are locked at period 2024-Q3/Q4. `thirteen_f_retention_cutoff`
+  follows the wall clock, so when 2026-Q3 completed on 2026-10-01 the floor passed them and 15 db-tier tests on
+  `origin/main` failed with `error='retention floor'`, blocking every push through the pre-push hook.
+- Prevention: a fixture whose dates must sit inside a clock-relative window pins the clock (an autouse fixture,
+  or the module's `datetime` patched as the cap tests already do); it never relies on today's date staying close
+  to the fixture's. Pin by capping the default clock at a fixed instant, so tests that patch an earlier clock
+  still win.
+- Enforced in: `tests/fixtures/thirteen_f_clock.py`, imported by `tests/test_manifest_parser_sec_13f_hr.py` and
+  `tests/test_institutional_holdings_ingester.py`.

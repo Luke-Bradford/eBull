@@ -382,15 +382,41 @@ def test_an_inactive_declaration_skips_the_fetch_and_reaches_the_run(monkeypatch
 
 class _PrepConn:
     def __init__(self) -> None:
-        self.autocommit = False
+        self._autocommit = False
         self.commits = 0
+        self.rollbacks = 0
+        self.status = TransactionStatus.IDLE
+
+    @property
+    def info(self) -> Any:
+        return SimpleNamespace(transaction_status=self.status)
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        # psycopg refuses the switch mid-transaction.
+        if self.status != TransactionStatus.IDLE:
+            raise RuntimeError("can't change autocommit inside a transaction")
+        self._autocommit = value
 
     def commit(self) -> None:
         self.commits += 1
 
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self.status = TransactionStatus.IDLE
+
 
 def _prepare(
-    monkeypatch: pytest.MonkeyPatch, *, before: set[int], after: set[int], scored_at: datetime | None = AFTER_CLOSE
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    before: set[int],
+    after: set[int],
+    scored_at: datetime | None = AFTER_CLOSE,
+    fetch_raises: bool = False,
 ) -> tuple[BarReadiness | None, dict[str, Any]]:
     """Shortlist ids 1-3; ``before`` / ``after`` are the names current through 09-29 on the
     pack's reader before and after the refresh."""
@@ -416,6 +442,9 @@ def _prepare(
     def candles(market: Any, c: Any, instruments: list[tuple[int, str]], **kwargs: Any) -> None:
         # #2269: per-instrument commits need autocommit for the fetch, and only for it.
         seen["candles"] = (market, c.autocommit, instruments, kwargs)
+        if fetch_raises:
+            c.status = TransactionStatus.INTRANS
+            raise RuntimeError("upstream unreachable")
 
     def quarantine(c: Any, *, instrument_ids: list[int], as_of: date) -> None:
         seen["quarantine"] = (c.autocommit, instrument_ids, as_of)
@@ -428,6 +457,7 @@ def _prepare(
         refresh_quarantine=quarantine,
     )
     seen["autocommit_after"] = conn.autocommit
+    seen["rollbacks"] = conn.rollbacks
     return result, seen
 
 
@@ -444,6 +474,17 @@ def test_prepare_refreshes_only_the_stale_names_then_rereads() -> None:
     # The provisional window follows the decision instant's UTC date, not the host's local date.
     assert seen["quarantine"] == (False, [2, 3], date(2026, 9, 29))
     assert seen["autocommit_after"] is False and seen["reads"] == 2
+
+
+def test_a_failed_fetch_is_not_ready_and_restores_the_connection() -> None:
+    """A systemic fetch failure is retryable (`bars_not_ready`), never a job error, even when the
+    names already current would otherwise make the run ready; the open transaction it left is
+    rolled back so the connection leaves autocommit cleanly."""
+    with pytest.MonkeyPatch.context() as mp:
+        result, seen = _prepare(mp, before={1}, after={1}, fetch_raises=True)
+    assert result == BarReadiness(date(2026, 9, 29), shortlist=3, refreshed=2, current=1, fetch_failed=True)
+    assert result is not None and not result.ready and result.note.endswith("current=1 fetch_failed=1")
+    assert (seen["autocommit_after"], seen["rollbacks"]) == (False, 1)
 
 
 def test_prepare_does_nothing_when_every_name_is_current() -> None:
@@ -694,8 +735,10 @@ def test_the_fund_job_runs_only_with_its_declaration_and_v1_wound_down(
     [
         (datetime(2026, 9, 30, 23, 29, tzinfo=UTC), False),  # before the frozen first fire
         (datetime(2026, 9, 30, 23, 30, tzinfo=UTC), True),
-        (datetime(2026, 10, 1, 4, 30, tzinfo=UTC), True),  # still before New York midnight in EST
-        (datetime(2026, 10, 1, 5, 0, tzinfo=UTC), False),
+        (datetime(2026, 10, 1, 3, 59, tzinfo=UTC), True),  # 23:59 EDT
+        (datetime(2026, 10, 1, 4, 0, tzinfo=UTC), False),  # New York midnight in EDT
+        (datetime(2026, 11, 3, 4, 30, tzinfo=UTC), True),  # 23:30 EST: still the evening
+        (datetime(2026, 11, 3, 5, 0, tzinfo=UTC), False),  # New York midnight in EST
         (datetime(2026, 10, 1, 15, 0, tzinfo=UTC), False),
     ],
 )

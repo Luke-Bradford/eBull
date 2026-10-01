@@ -217,21 +217,27 @@ class BarReadiness:
     shortlist: int
     refreshed: int
     current: int
+    #: The candle fetch raised (``refresh_market_data`` raises only on a systemic failure — its
+    #: batch breaker; a per-name 404 is handled inside it). The stale names were never asked for.
+    fetch_failed: bool = False
 
     @property
     def ready(self) -> bool:
-        """Zero current names after a post-close fetch means the session's bars are not there yet
-        (the provider has not published, or the fetch failed) — a systemic gap, so the run waits.
-        A name still behind once others are current is that name's own gap: the pack drops it as
+        """A failed fetch, or zero current names after a post-close fetch, means the session's bars
+        are not there yet — a systemic gap, so the run waits. A name still behind after a clean
+        fetch while others are current is that name's own gap: the pack drops it as
         ``stale_last_bar`` (O1, nothing replenished), exactly as for any other incomplete name.
         An empty shortlist has nothing to wait for; the run records it."""
+        if self.fetch_failed:
+            return False
         return self.shortlist == 0 or self.current > 0
 
     @property
     def note(self) -> str:
+        failed = " fetch_failed=1" if self.fetch_failed else ""
         return (
             f"last_session={self.last_session.isoformat()} shortlist={self.shortlist} "
-            f"refreshed={self.refreshed} current={self.current}"
+            f"refreshed={self.refreshed} current={self.current}{failed}"
         )
 
 
@@ -241,6 +247,15 @@ def _current_names(conn: Conn, instrument_ids: Sequence[int], *, last_session: d
     bars = read_bars(conn, instrument_ids, last_session=last_session)
     conn.commit()
     return {iid for iid, (dates, _rows) in bars.items() if dates and dates[-1] == last_session}
+
+
+def _restore_transactional(conn: Conn) -> None:
+    """Leave the autocommit window. A ``conn.transaction()`` block that did not exit cleanly can
+    leave a transaction open, and psycopg refuses to change ``autocommit`` mid-transaction, so it
+    is rolled back first (in autocommit mode every completed statement is already committed)."""
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
+    conn.autocommit = False
 
 
 def prepare_trial_bars(
@@ -274,6 +289,7 @@ def prepare_trial_bars(
     ids = [iid for iid, _ in names]
     current = _current_names(conn, ids, last_session=last_session)
     stale = [(iid, symbol) for iid, symbol in names if iid not in current]
+    fetch_failed = False
     if stale:
         # `refresh_market_data` needs an autocommit connection for its per-instrument commits
         # (#2269); the job's connection is idle here, so it is switched rather than a second
@@ -281,14 +297,19 @@ def prepare_trial_bars(
         conn.autocommit = True
         try:
             refresh_candles(market, conn, stale, skip_quotes=True, fresh_through=last_session)
+        except Exception:
+            # Retryable, not a job error: no claim is taken, and the next fire in the window asks
+            # again. Surfaced on the result (`fetch_failed`), which degrades the job run.
+            logger.exception("ai_trial bars: candle fetch for %d stale shortlist names failed", len(stale))
+            fetch_failed = True
         finally:
-            conn.autocommit = False
+            _restore_transactional(conn)
         # The provisional window is pinned to the decision instant's UTC date, never the host's
         # local `date.today()` (the 23:30 UTC fire is already tomorrow in London during BST).
         refresh_quarantine(conn, instrument_ids=[iid for iid, _ in stale], as_of=as_of.astimezone(UTC).date())
         conn.commit()
         current = _current_names(conn, ids, last_session=last_session)
-    return BarReadiness(last_session, len(names), len(stale), len(current))
+    return BarReadiness(last_session, len(names), len(stale), len(current), fetch_failed)
 
 
 @dataclass(frozen=True)
