@@ -298,6 +298,16 @@ name.
     asserted per call (v1 §4 layer 3) and the CLI version recorded; a different context capacity for the declared
     model is a new strategy version.
   - Cost is stored per run. v1 measured $0.57 for 68,908 input tokens.
+  - ⚠ **Measured 2026-10-01 (slice 2b): the fixture FAILS the ceiling, so this section is not yet satisfiable.**
+    `PYTHONPATH=. uv run python -m scripts.ai_trial_fund_budget_fixture` renders 4,325,732 bytes; the call exits 1
+    with `Prompt is too long` and zero usage (cost 0). Slices of the same fixture, same call: 1 name 106,355
+    bytes / 58,618 tokens; 5 names 450,719 bytes / 234,981 tokens. So 44,091 tokens per capped name (1.95 bytes
+    per token) over a 14,527-token base, about 2.22M tokens at 50 names. v1's own share of a capped name is
+    about 30.7 KB (intraday 19.9 KB of it), about 800k tokens at 50, so at the caps fund-v1's blocks have almost
+    no room. Real blocks on the 50-name shortlist at 2026-10-01 02:09Z (`read_fund_blocks`, read-only): facts per
+    name p50 63, max 96; fundamentals 596,924 bytes, MD&A 325,622 bytes in total. A typical run is over the
+    ceiling as well, not only the fixture. The block encoding and caps must be resized, with a new ckpt-1, before
+    the fixture's sha and pair can freeze.
 
 ## 7. Legs, capacity, declaration
 
