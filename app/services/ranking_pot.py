@@ -229,7 +229,21 @@ class Universes:
     nyse_cap_population: int
 
 
-def _hold_failure(f: NameFacts, breakpoint: Decimal) -> HoldRule | None:
+def cap_breakpoint(nyse_caps: Sequence[Decimal | None]) -> Decimal | Literal["breakpoint_unavailable"]:
+    """§2 microcap breakpoint: the nearest-rank 20th percentile of the valid overlaid NYSE caps, or a refusal below
+    ``MIN_NYSE_CAPS`` of them."""
+    caps = [c for c in nyse_caps if c is not None and _finite_positive(c)]
+    if len(caps) < MIN_NYSE_CAPS:
+        return "breakpoint_unavailable"
+    breakpoint = nearest_rank(caps, BREAKPOINT_PERCENTILE)
+    if not isinstance(breakpoint, Decimal):
+        raise TypeError("nyse_caps must be Decimal")
+    return breakpoint
+
+
+def hold_failure(f: NameFacts, breakpoint: Decimal) -> HoldRule | None:
+    """A name's first failed §5.0 hold rule, or ``None`` when it is in R_t. Own facts only: no bar is read, so the
+    snapshot stores bars only for the names this admits (#2842 slice 4b)."""
     checks: dict[HoldRule, bool] = {
         "not_tradable": f.is_tradable,
         "not_us_equity": f.asset_class == "us_equity",
@@ -273,21 +287,18 @@ def build_universes(
     ids = [f.instrument_id for f in facts]
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate instrument_id among S₀ facts")
-    caps = [c for c in nyse_caps if _finite_positive(c)]
-    if len(caps) < MIN_NYSE_CAPS:
-        return "breakpoint_unavailable"
-    breakpoint = nearest_rank([c for c in caps if c is not None], BREAKPOINT_PERCENTILE)
+    breakpoint = cap_breakpoint(nyse_caps)
     if not isinstance(breakpoint, Decimal):
-        raise TypeError("nyse_caps must be Decimal")
+        return breakpoint
 
-    hold_failure: dict[int, HoldRule] = {}
+    failures: dict[int, HoldRule] = {}
     ranking: list[NameFacts] = []
     for f in facts:
-        failed = _hold_failure(f, breakpoint)
+        failed = hold_failure(f, breakpoint)
         if failed is None:
             ranking.append(f)
         else:
-            hold_failure[f.instrument_id] = failed
+            failures[f.instrument_id] = failed
 
     sessions = max_window_sessions(last_session)
     quoted = {f.instrument_id for f in ranking if _quote_ok(f, as_of)}
@@ -330,13 +341,13 @@ def build_universes(
         max_cut=cut,
         r_ids=frozenset(f.instrument_id for f in ranking),
         f_ids=frozenset(feasible),
-        hold_failure=hold_failure,
+        hold_failure=failures,
         entry_failure=entry_failure,
         own_score={f.instrument_id: f.total_score for f in ranking if f.total_score is not None},
         max_return=max_return,
         atr=atr,
         max_population=len(cut_population),
-        nyse_cap_population=len(caps),
+        nyse_cap_population=sum(1 for c in nyse_caps if c is not None and _finite_positive(c)),
     )
 
 
@@ -724,10 +735,12 @@ __all__ = [
     "atr14",
     "basis_unchanged",
     "build_universes",
+    "cap_breakpoint",
     "control_order",
     "decide",
     "entry_ticket",
     "half_spread",
+    "hold_failure",
     "max_daily_return",
     "max_window_sessions",
     "nearest_rank",

@@ -6,7 +6,8 @@ reuses, unedited): sha256 of each module FILE's bytes plus the ``repr`` of const
 
 Hashed by bytes (§8): the scorer ``scoring.py`` and its direct in-repo imports (a test pins this list to the file's
 own import statements, so a new import cannot slip out of the hash), ``market_calendar``, ``indicator_series``,
-``ai_trial_pack`` (``is_eligible``, ``build_bar_series``), and the pot's own modules. Each later slice appends its
+``ai_trial_pack`` (``is_eligible``, ``build_bar_series``), ``ai_trial_pack_reader`` (``read_bars``, the #1664 cap
+overlay; reused by the rebalance, slice 4b-i), and the pot's own modules. Each later slice appends its
 module (rebalance, loader, executor wrapper, exits, readout) here; the freeze happens after the last slice lands.
 
 Residual, stated (v1's, spec §8 / r3-90..92): transitive imports beyond the scorer's direct ones, package versions,
@@ -47,7 +48,9 @@ POLICY_MODULES: Final = tuple(
             "market_calendar.py",
             "indicator_series.py",
             "ai_trial_pack.py",
+            "ai_trial_pack_reader.py",
             "ranking_pot.py",
+            "ranking_pot_rebalance.py",
             "ranking_pot_sim.py",
             "ranking_pot_policy.py",
         )
