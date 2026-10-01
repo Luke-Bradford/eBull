@@ -881,26 +881,26 @@ def _bootstrap_complete(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
 
 _NEW_YORK = ZoneInfo("America/New_York")
 
-#: #3529 — the AI trial's decision window in UTC. It opens at the frozen 23:30 fire, after the
-#: close in both EDT (20:00) and EST (21:00) and after the 21:52 crowd snapshot the run reads.
-#: It closes at New York midnight, from which the job body refuses ``target_session_date``: 04:00
-#: in EDT, 05:00 in EST (``AI_TRIAL_DECISION_WINDOW_CLOSES_BY`` is the latter).
+#: #3529 — the AI trial's decision window. It opens at the frozen 23:30 UTC fire, after the close
+#: in both EDT (20:00) and EST (21:00) and after the 21:52 crowd snapshot the run reads, and runs
+#: until New York midnight of that same New York evening (04:00 UTC in EDT, 05:00 in EST). On a
+#: session night that is where the job body starts refusing ``target_session_date``.
 AI_TRIAL_DECISION_WINDOW_OPENS: Final = dt_time(23, 30)
-#: A UTC upper bound only (New York midnight in EST); the exact close is tested in New York time.
-AI_TRIAL_DECISION_WINDOW_CLOSES_BY: Final = dt_time(5, 0)
 #: The retry interval inside the window: fires at :00 and :30, so the first is the frozen 23:30.
 AI_TRIAL_DECISION_RETRY_MINUTES: Final = 30
 
 
 def _ai_trial_decision_window_open(now: datetime) -> bool:
+    """Whether ``now`` falls between the latest 23:30 UTC opening and the end of that opening's
+    New York date. Both ends are derived from ``AI_TRIAL_DECISION_WINDOW_OPENS``, so moving it
+    moves the window, never desynchronises it."""
     if now.tzinfo is None:
         raise ValueError("the AI-trial decision window requires an aware datetime")
-    at = now.astimezone(UTC).time()
-    if at >= AI_TRIAL_DECISION_WINDOW_OPENS:
-        return True
-    # After UTC midnight the window runs to New York midnight exactly (04:00 UTC in EDT, 05:00 in
-    # EST), so no fire lands where the body would only refuse `target_session_date`.
-    return at < AI_TRIAL_DECISION_WINDOW_CLOSES_BY and now.astimezone(_NEW_YORK).hour >= 12
+    utc = now.astimezone(UTC)
+    opened = datetime.combine(utc.date(), AI_TRIAL_DECISION_WINDOW_OPENS, tzinfo=UTC)
+    if opened > utc:
+        opened -= timedelta(days=1)
+    return utc.astimezone(_NEW_YORK).date() == opened.astimezone(_NEW_YORK).date()
 
 
 def _ai_trial_decision_in_window(_conn: psycopg.Connection[Any]) -> PrerequisiteResult:

@@ -739,7 +739,7 @@ def test_the_fund_job_runs_only_with_its_declaration_and_v1_wound_down(
         (datetime(2026, 9, 30, 23, 30, tzinfo=UTC), True),
         (datetime(2026, 10, 1, 3, 59, tzinfo=UTC), True),  # 23:59 EDT
         (datetime(2026, 10, 1, 4, 0, tzinfo=UTC), False),  # New York midnight in EDT
-        (datetime(2026, 11, 3, 4, 30, tzinfo=UTC), True),  # 23:30 EST: still the evening
+        (datetime(2026, 11, 3, 4, 59, tzinfo=UTC), True),  # 23:59 EST: still the evening
         (datetime(2026, 11, 3, 5, 0, tzinfo=UTC), False),  # New York midnight in EST
         (datetime(2026, 10, 1, 15, 0, tzinfo=UTC), False),
     ],
