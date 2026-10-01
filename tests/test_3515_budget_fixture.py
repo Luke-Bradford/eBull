@@ -154,23 +154,27 @@ def test_a_dry_run_makes_no_call() -> None:
 
 
 _AT = {"input_tokens": 0, "cache_creation_input_tokens": INPUT_TOKEN_CEILING, "cache_read_input_tokens": 0}
+_OVER = {**_AT, "input_tokens": 1}
 
 
 @pytest.mark.parametrize(
-    ("refusal", "usage", "expected"),
+    ("refusal", "event", "expected"),
     [
-        (None, _AT, None),  # at the ceiling passes
-        (None, {**_AT, "input_tokens": 1}, "budget_breach"),
-        (None, None, "budget_breach"),  # completed but unmeasured
-        (None, {"input_tokens": 5}, "budget_breach"),
+        (None, {"usage": _AT}, None),  # at the ceiling passes
+        (None, {"usage": _OVER}, "budget_breach"),
+        (None, {}, "budget_breach"),  # completed but unmeasured
+        (None, None, "budget_breach"),
+        (None, {"usage": {"input_tokens": 5}}, "budget_breach"),
         ("nonzero_exit", None, "nonzero_exit"),  # CLI rejection / context overflow halts too
-        ("is_error", _AT, "is_error"),
-        ("model_timeout", None, None),  # v1's refusal, no halt
-        ("no_structured_output", {**_AT, "input_tokens": 1}, None),
+        ("is_error", {"usage": _AT}, "is_error"),
+        ("no_structured_output", {"usage": _OVER}, "budget_breach"),  # measured over: halts whatever else refused
+        ("no_structured_output", {}, "budget_breach"),  # a result event without usage
+        ("no_structured_output", {"usage": _AT}, None),  # v1's refusal, no halt
+        ("model_timeout", None, None),  # nothing to measure: v1's refusal, no halt
     ],
 )
-def test_the_post_call_rule(refusal: str | None, usage: object, expected: str | None) -> None:
-    assert post_call_halt_reason(refusal, usage) == expected
+def test_the_post_call_rule(refusal: str | None, event: object, expected: str | None) -> None:
+    assert post_call_halt_reason(refusal, event) == expected
 
 
 def test_only_fund_v1_carries_the_post_call_rule() -> None:

@@ -729,9 +729,7 @@ def _decide(
     # A version's post-call rule (fund-v1 §6 budget): nothing executes and the trial halts for review.
     # The refusal is recorded first, so a failing halt can never leave the run unrecorded.
     halt = (
-        None
-        if version.post_call_halt is None
-        else version.post_call_halt(result.refusal_reason, (result.result_event or {}).get("usage"))
+        None if version.post_call_halt is None else version.post_call_halt(result.refusal_reason, result.result_event)
     )
     if halt is not None:
         outcome = refuse_run(conn, claim, halt, values)

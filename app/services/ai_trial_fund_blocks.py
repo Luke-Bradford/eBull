@@ -483,15 +483,19 @@ def reported_input_tokens(usage: object) -> int | None:
     return sum(parts)  # type: ignore[arg-type]
 
 
-def post_call_halt_reason(refusal_reason: str | None, usage: object) -> str | None:
-    """§6 after the call: the reason to refuse the run AND halt the trial, or ``None``. A CLI rejection or context
-    overflow (``nonzero_exit`` / ``is_error``) keeps its own reason; a completed call whose input usage is over
-    ``INPUT_TOKEN_CEILING`` or missing is ``budget_breach``. Any other refusal is v1's, with no halt."""
+def post_call_halt_reason(refusal_reason: str | None, result_event: object) -> str | None:
+    """§6 after the call: the reason to refuse the run AND halt the trial, or ``None``.
+
+    - A CLI rejection or context overflow (``nonzero_exit`` / ``is_error``) halts under its own reason.
+    - A call that produced a result event is measured whatever else was refused: input usage over
+      ``INPUT_TOKEN_CEILING``, or missing, is ``budget_breach``.
+    - A refusal with no result event (a timeout, a pre-call isolation failure) has nothing to measure: it stays
+      v1's refusal, with no halt."""
     if refusal_reason in HALTING_INVOCATION_REFUSALS:
         return refusal_reason
-    if refusal_reason is not None:
-        return None
-    tokens = reported_input_tokens(usage)
+    if not isinstance(result_event, Mapping):
+        return None if refusal_reason is not None else REFUSE_BUDGET_BREACH
+    tokens = reported_input_tokens(result_event.get("usage"))
     return REFUSE_BUDGET_BREACH if tokens is None or tokens > INPUT_TOKEN_CEILING else None
 
 

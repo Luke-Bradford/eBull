@@ -50,7 +50,7 @@ class TrialVersion:
     policy_hash: str
     system_prompt: str
     build_pack: PackBuilder
-    #: After the model call: ``(refusal_reason, usage) -> reason`` to refuse the run AND halt the trial
+    #: After the model call: ``(refusal_reason, result_event) -> reason`` to refuse the run AND halt the trial
     #: (``halted_operator``), or ``None``. v1 has none; fund-v1's is its §6 budget rule.
     post_call_halt: Callable[[str | None, object], str | None] | None = None
 
