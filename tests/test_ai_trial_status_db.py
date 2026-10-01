@@ -12,6 +12,7 @@ import pytest
 
 from app.services.ai_trial_halts import TRIAL_LOSS_LIMIT_USD
 from app.services.ai_trial_status import load_trial_status
+from app.services.ai_trial_version import FUND_V1
 from tests.test_ai_trial_deadline_db import _opened_arm_leg
 from tests.test_ai_trial_intent_db import NOW
 
@@ -45,6 +46,13 @@ def test_a_published_session_with_one_leg_submitted(ebull_test_conn: Conn, monke
     arm, control = status.loss
     assert (arm.leg, arm.pnl_usd, arm.unmeasured, arm.limit_usd) == ("arm", Decimal("-1.25"), 0, TRIAL_LOSS_LIMIT_USD)
     assert (control.leg, control.pnl_usd) == ("control", Decimal("0"))
+
+    # #3515: fund-v1's status never reads v1's declaration, runs, legs or decision job.
+    fund = load_trial_status(conn, version=FUND_V1, now=NOW + timedelta(hours=1))
+    conn.commit()
+    assert (fund.arm_strategy_id, fund.state, fund.declaration_id) == (FUND_V1.arm_strategy_id, "not_declared", None)
+    assert (fund.sessions, fund.open_legs, fund.loss) == ([], [], [])
+    assert fund.decision_job.job_name == "ai_trial_fund_decision_run"
 
 
 def test_a_leg_no_fire_reached_before_its_close_is_not_run(

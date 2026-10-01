@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 
+import { AI_TRIAL_FUND_V1_ARM, AI_TRIAL_V1_ARM } from "@/api/aiTrial";
 import {
   fetchCoreSleeve,
   fetchStrategyOverview,
@@ -198,7 +199,8 @@ export function InvestPage() {
         ) : null}
       </section>
 
-      <AiTrialPanel />
+      <AiTrialPanel arm={AI_TRIAL_V1_ARM} title="AI trial (v1)" />
+      <AiTrialPanel arm={AI_TRIAL_FUND_V1_ARM} title="AI trial (fund-v1)" />
 
       <section aria-labelledby="invest-next" className="border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
         <h2 id="invest-next" className="text-sm font-semibold">What happens next</h2>

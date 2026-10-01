@@ -44,7 +44,7 @@ from app.workers.scheduler import (
     JOB_AI_TRIAL_EXECUTE,
     JOB_AI_TRIAL_FUND_DECISION_RUN,
     SCHEDULED_JOBS,
-    _ai_trial_decision_window_open,
+    ai_trial_decision_window_open,
 )
 
 EXE = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
@@ -747,4 +747,4 @@ def test_the_fund_job_runs_only_with_its_declaration_and_v1_wound_down(
 def test_the_decision_window_opens_at_the_frozen_fire_and_closes_by_new_york_midnight(
     now: datetime, open_: bool
 ) -> None:
-    assert _ai_trial_decision_window_open(now) is open_
+    assert ai_trial_decision_window_open(now) is open_

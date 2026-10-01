@@ -31,6 +31,8 @@ const LEG: AiTrialOpenLeg = {
 };
 
 const ACTIVE: AiTrialStatusResponse = {
+  arm_strategy_id: "ai-discretionary-v1",
+  strategy_version: "v1",
   state: "active",
   declaration_id: 9,
   state_reason: "start",
@@ -40,17 +42,17 @@ const ACTIVE: AiTrialStatusResponse = {
   sessions: [
     {
       session_date: "2026-10-07",
-      decision: { state: "not_run", label: "not_run", legs: 0, refusal_reason: null, decision_refusals: {} },
+      decision: { state: "not_run", label: "not_run", legs: 0, refusal_reason: null, decision_refusals: {}, job_status: null, job_note: null },
       execution: [],
     },
     {
       session_date: "2026-10-06",
-      decision: { state: "abstained", label: "abstained", legs: 0, refusal_reason: null, decision_refusals: {} },
+      decision: { state: "abstained", label: "abstained", legs: 0, refusal_reason: null, decision_refusals: {}, job_status: null, job_note: null },
       execution: [],
     },
     {
       session_date: "2026-10-05",
-      decision: { state: "legs_published", label: "legs_published:2", legs: 2, refusal_reason: null, decision_refusals: {} },
+      decision: { state: "legs_published", label: "legs_published:2", legs: 2, refusal_reason: null, decision_refusals: {}, job_status: null, job_note: null },
       execution: [
         { state: "submitted", label: "submitted:1", count: 1, reason: null },
         { state: "refused", label: "refused:trial_cost_cap×1", count: 1, reason: "trial_cost_cap" },
@@ -120,6 +122,40 @@ describe("AiTrialPanel", () => {
     render(<AiTrialPanel />);
     expect(await screen.findByText("Halted — loss limit")).toBeInTheDocument();
     expect(screen.getByText(/loss_halt:leg=arm/)).toBeInTheDocument();
+  });
+
+  it("names a fire that recorded no run apart from a job that never ran (#3515)", async () => {
+    vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockResolvedValue({
+      ...ACTIVE,
+      sessions: [
+        {
+          session_date: "2026-10-07",
+          decision: {
+            state: "no_run_recorded",
+            label: "no_run_recorded:success",
+            legs: 0,
+            refusal_reason: null,
+            decision_refusals: {},
+            job_status: "success",
+            job_note: "status=bars_not_ready current=0/50",
+          },
+          execution: [],
+        },
+      ],
+    });
+    render(<AiTrialPanel />);
+    expect(await screen.findByText(/Job ran, no run recorded \(success: status=bars_not_ready/)).toBeInTheDocument();
+    expect(screen.queryByText("Decision job did not run")).not.toBeInTheDocument();
+  });
+
+  it("reads the version it is given, under its own heading (#3515)", async () => {
+    const fetch = vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockResolvedValue({
+      ...ACTIVE,
+      arm_strategy_id: aiTrialApi.AI_TRIAL_FUND_V1_ARM,
+    });
+    render(<AiTrialPanel arm={aiTrialApi.AI_TRIAL_FUND_V1_ARM} title="AI trial (fund-v1)" />);
+    expect(await screen.findByRole("heading", { name: /AI trial \(fund-v1\)/ })).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(aiTrialApi.AI_TRIAL_FUND_V1_ARM);
   });
 
   it("shows a fixed error phrase when the read fails", async () => {
