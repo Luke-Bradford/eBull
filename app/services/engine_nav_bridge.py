@@ -592,6 +592,9 @@ def load_bridge(
         census_row = cur.fetchone()
         trades_without_ownership = int(census_row["n"]) if census_row else 0
 
+        # ⚠ No environment predicate, deliberately: `trade_events` has no environment column.
+        # The population is the ownership set, keyed by the broker's globally assigned position
+        # id -- the same join `strategy_monitoring._OWNED_LIFECYCLE_SQL` and `strategy_wealth` use.
         cur.execute(
             """
             SELECT position_id, event_kind, executed_at, units, price, investment_usd,
@@ -652,6 +655,10 @@ def load_bridge(
             if row["asset_currency_id"] is not None:
                 currency[pid] = int(row["asset_currency_id"])
 
+        # ⚠ Unscoped, deliberately: this is the ONE engine pool's event log -- the table has no
+        # pool or environment column, and every reader (`strategy_wealth`,
+        # `strategy_control_plane`, `ai_trial_start_gate`) reads it whole. A second pool would
+        # need the same scoping added to all of them at once.
         cur.execute(
             """
             SELECT strategy_paper_pool_event_id AS event_id, changed_at, capital_limit
