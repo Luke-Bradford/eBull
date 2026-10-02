@@ -91,6 +91,7 @@ from app.services.strategy_result_universe import (
 from app.services.strategy_statistics import periods_per_year
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.fixtures.ebull_test_db import seed_universe_anchor
+from tests.fixtures.entry_ticket import seed_entry_ticket
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
     build_control,
@@ -1230,6 +1231,7 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
     _position(conn, manual_position_id, instrument_id)
     entry_order = _order(conn, instrument_id=instrument_id)
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=entry_order, purpose="entry")
+    seed_entry_ticket(conn, entry_order, trade_id)
     duplicate_entry_order = _order(conn, instrument_id=instrument_id)
     with pytest.raises(psycopg.errors.UniqueViolation):
         with conn.transaction():

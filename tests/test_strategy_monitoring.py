@@ -47,6 +47,7 @@ from app.services.strategy_monitoring import (
 from app.services.strategy_position_manager import PositionManagerResult
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
 from tests.fixtures.ebull_test_db import seed_universe_anchor
+from tests.fixtures.entry_ticket import seed_entry_ticket
 
 # #2224 — pinned like `tests/test_strategy_live_gate.py`; see the long note
 # there for the mechanism. In short: this module's shared-paper-pool tests read
@@ -320,6 +321,7 @@ def test_order_activity_shows_owned_fills_and_unfilled_alpha_entries_only(
         "INSERT INTO strategy_trade_orders (strategy_trade_id, order_id, purpose) VALUES (%s, %s, 'entry')",
         (submitted, order[0]),
     )
+    seed_entry_ticket(ebull_test_conn, order[0], submitted)
     ebull_test_conn.execute(
         """
         INSERT INTO trade_events (
@@ -727,6 +729,7 @@ def test_shadow_statistics_do_not_depend_on_later_allocation_configuration(
         """,
         (trade_id, order[0]),
     )
+    seed_entry_ticket(ebull_test_conn, order[0], trade_id)
     ebull_test_conn.execute(
         """
         INSERT INTO strategy_order_position_executions (

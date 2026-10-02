@@ -51,6 +51,7 @@ from app.services.strategy_order_reconciliation import (
     try_reconciliation_order_lock,
 )
 from tests.fixtures.ebull_test_db import test_database_url
+from tests.fixtures.entry_ticket import seed_entry_ticket
 from tests.test_strategy_order_reconciliation import _seed_deployment
 
 pytestmark = pytest.mark.integration
@@ -114,6 +115,7 @@ def _seed_order(conn: psycopg.Connection[Any], *, symbol: str, deployment_id: in
     assert order is not None
     order_id = int(order[0])
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose="entry")
+    seed_entry_ticket(conn, order_id, trade_id)
     ensure_strategy_request_id(conn, order_id=order_id)
     conn.commit()
     return trade_id, order_id

@@ -29,6 +29,7 @@ from app.services.strategy_core_submission_gate import (
     admit_core_rebalance_intent,
     core_submission_lock,
 )
+from tests.fixtures.entry_ticket import seed_entry_ticket
 
 _INSTRUMENT_ID = 920705
 _PAST = datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
@@ -206,6 +207,7 @@ def _seed_blocking_trade(
             "INSERT INTO strategy_trade_orders (strategy_trade_id,order_id,purpose) VALUES (%s,%s,'entry')",
             (trade_id, order_id),
         )
+        seed_entry_ticket(conn, order_id, trade_id)
         if reconciliation_state is not None:
             conn.execute(
                 "INSERT INTO strategy_order_reconciliation_state (order_id,state,reconciled_at) VALUES (%s,%s,%s)",
