@@ -214,7 +214,7 @@ def test_control_columns_store_the_endpoint_charged_sum_beside_the_plain_one() -
         used=set(),
     )
     cols = st.ControlColumns()
-    cols.add(result)
+    cols.add(result, FRI)
     doc = cols.doc()
     assert doc["records"] == [1] and doc["held"] == [1] and "decision" not in doc
     plain, charged = D(doc["sum_return"][0]), D(doc["sum_return_charged"][0])

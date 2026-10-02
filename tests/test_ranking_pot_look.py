@@ -42,9 +42,9 @@ def _rows(controls: int = 2) -> list[look.StepRow]:
             )
             books[b] = book
             if b == 0:
-                shadow = st.shadow_doc(result, decision)
+                shadow = st.shadow_doc(result, decision, session)
             else:
-                cols.add(result)
+                cols.add(result, session)
         rows.append(look.StepRow(session, False, shadow, cols.doc(), SPY))
     return rows
 
