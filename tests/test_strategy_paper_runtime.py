@@ -611,6 +611,32 @@ def test_cycle_keeps_managing_owned_positions_after_deployment_is_paused(
     assert managed == [(trade_id, position_id)]
 
 
+def test_entries_withheld_still_manages_owned_positions(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3546: withholding entries (failed halt refresh) never withholds position management."""
+    conn = ebull_test_conn
+    trade_id, _deployment_id, broker, _manual = _opened_trade(conn, monkeypatch)
+    managed: list[int] = []
+
+    def observe_management(
+        _conn: psycopg.Connection[tuple],
+        *,
+        broker: object,
+        strategy_trade_id: int,
+        broker_position_id: int,
+        now: object,
+    ) -> None:
+        managed.append(strategy_trade_id)
+
+    monkeypatch.setattr("app.services.strategy_paper_runtime.manage_owned_position", observe_management)
+
+    result = run_strategy_paper_cycle(conn, broker=broker, strategy_versions=["no-candidates"], entries=False)
+
+    assert (result.managed_positions, result.evaluated_signals) == (1, 0)
+    assert managed == [trade_id]
+
+
 def test_health_refresh_persists_pot_and_deployment_max_drawdown(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
