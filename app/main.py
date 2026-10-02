@@ -52,6 +52,7 @@ from app.api.orders import router as orders_router
 from app.api.portfolio import router as portfolio_router
 from app.api.price_quarantine import router as price_quarantine_router
 from app.api.processes import router as processes_router
+from app.api.ranking_pot import router as ranking_pot_router
 from app.api.recommendations import router as recommendations_router
 from app.api.reports import router as reports_router
 from app.api.scores import router as scores_router
@@ -644,6 +645,7 @@ app.include_router(scores_router)
 app.include_router(sse_quotes_router)
 app.include_router(strategies_router)
 app.include_router(ai_trial_router)
+app.include_router(ranking_pot_router)
 app.include_router(sync_router)
 app.include_router(system_router)
 app.include_router(tax_router)

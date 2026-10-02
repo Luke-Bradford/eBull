@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as aiTrialApi from "@/api/aiTrial";
+import * as rankingPotApi from "@/api/rankingPot";
 import * as strategiesApi from "@/api/strategies";
 import type { FiredSignal, StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
 import { BENCHMARK_REFUSALS } from "@/components/strategies/__fixtures__/benchmarkRefusals";
@@ -514,6 +515,7 @@ describe("StrategiesPage", () => {
       pending_entries_truncated: false,
     });
     vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(rankingPotApi, "fetchRankingPotStatus").mockReturnValue(new Promise(() => {}));
   });
 
   it("keeps unapproved backtests out of portfolio performance", async () => {

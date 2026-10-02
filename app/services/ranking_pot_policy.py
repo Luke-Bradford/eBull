@@ -83,11 +83,11 @@ FROZEN_CONSTANTS: Final[dict[str, object]] = {
 # §8 family spending and §9.3 looks (frozen by this file's bytes)
 # ---------------------------------------------------------------------------
 STRATEGY_VERSION: Final = "v1"
-#: Slice 7 sets this True. Until then a freeze ``--apply`` refuses ``build_incomplete``: a declaration frozen on a
-#: partial build would fix its control seed from snapshots no book consumes, and the next slice's code change would
-#: then refuse every rebalance as ``ranking_drift`` — a charged declaration that can never be measured (Codex ckpt-1,
-#: slice 4b-ii).
-BUILD_COMPLETE: Final = False
+#: Set True by slice 7, the last slice (its page reader is outside the hash). While False a freeze ``--apply``
+#: refused ``build_incomplete``: a declaration frozen on a partial build would fix its control seed from snapshots no
+#: book consumes, and the next slice's code change would then refuse every rebalance as ``ranking_drift`` — a charged
+#: declaration that can never be measured (Codex ckpt-1, slice 4b-ii).
+BUILD_COMPLETE: Final = True
 FAMILY: Final = "ranking-pot"
 #: §8: the family's total efficacy budget; the m-th declaration spends ``FAMILY_ALPHA * 2^-m`` over its looks.
 FAMILY_ALPHA: Final = Fraction(1, 20)
