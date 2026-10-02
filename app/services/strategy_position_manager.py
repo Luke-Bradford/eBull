@@ -62,6 +62,8 @@ _ADVISORY_HASH_SEED = 0
 #: #3546 gap G: an edit released because its pre-call marker never committed, so the
 #: PATCH was provably never sent.  A LOCAL rejection, not a broker one, which is why
 #: ``_prior_same_edit`` does not let it block the same repair later.
+#: ⚠ Spelled out again in ``sql/462``'s material-identity index predicate, which cannot
+#: import it: renaming this means a migration rebuilding that index.
 EDIT_NEVER_SUBMITTED: Final = "edit_never_submitted"
 
 
