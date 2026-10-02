@@ -703,3 +703,131 @@ def test_restart_with_unidentified_intent_fails_closed_without_retrying_broker_w
     assert conn.execute("SELECT status FROM strategy_trades WHERE strategy_trade_id=%s", (trade_id,)).fetchone() == (
         "reconcile_required",
     )
+
+
+def _ownership_id(conn: psycopg.Connection[Any]) -> int:
+    row = conn.execute(
+        "SELECT ownership_id FROM strategy_position_ownership WHERE broker_position_id=%s", (_POSITION_ID,)
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _insert_edit(conn: psycopg.Connection[Any], *, status: str, marker: bool, error_code: str | None = None) -> int:
+    """A fixed-exit repair at the levels `_opened_trade`'s position needs (95 / 110)."""
+    resolved = status in ("applied", "rejected", "reconcile_required")
+    row = conn.execute(
+        """
+        INSERT INTO strategy_position_operations (
+            ownership_id, operation_type, trigger_code, request_id, status,
+            prior_stop_rate, desired_stop_rate, desired_take_profit_rate,
+            edit_marker_enforced, last_error_code, resolved_at
+        ) VALUES (%s,'fixed_exit_repair','entry_exit_gap',gen_random_uuid(),%s,NULL,95,110,%s,%s,
+                  CASE WHEN %s THEN now() END)
+        RETURNING position_operation_id
+        """,
+        (_ownership_id(conn), status, marker, error_code, resolved),
+    ).fetchone()
+    assert row is not None
+    conn.commit()
+    return int(row[0])
+
+
+def test_a_marked_edit_that_never_reached_the_broker_is_released_and_repaired_afresh(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3546 gap G: `intent_persisted` under the marker proves the PATCH was never sent.
+
+    Before the marker this row was written `reconcile_required`, and `_prior_same_edit`
+    then refused the same stable repair on every visit, leaving the position unprotected.
+    """
+    conn = ebull_test_conn
+    trade_id, _, broker, _ = _opened_trade(conn, monkeypatch)
+    stranded = _insert_edit(conn, status="intent_persisted", marker=True)
+
+    result = manage_owned_position(
+        conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+    )
+
+    assert conn.execute(
+        "SELECT status, last_error_code FROM strategy_position_operations WHERE position_operation_id=%s",
+        (stranded,),
+    ).fetchone() == ("rejected", "edit_never_submitted")
+    # The same visit carried on and sent ONE fresh repair under a new UUID.
+    assert result.state == "submitted"
+    broker.edit_demo_strategy_position.assert_called_once()
+    stranded_request = conn.execute(
+        "SELECT request_id FROM strategy_position_operations WHERE position_operation_id=%s", (stranded,)
+    ).fetchone()
+    assert stranded_request is not None
+    assert broker.edit_demo_strategy_position.call_args.kwargs["request_id"] != stranded_request[0]
+    assert conn.execute("SELECT status FROM strategy_trades WHERE strategy_trade_id=%s", (trade_id,)).fetchone() == (
+        "open",
+    )
+
+
+def test_a_submitting_edit_stays_contained(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker committed, so the PATCH may have been sent: lost identity, never re-keyed."""
+    conn = ebull_test_conn
+    trade_id, _, broker, _ = _opened_trade(conn, monkeypatch)
+    _insert_edit(conn, status="submitting", marker=True)
+
+    result = manage_owned_position(
+        conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+    )
+
+    assert (result.state, result.reason_code) == ("reconcile_required", "crash_before_submission_identity")
+    broker.edit_demo_strategy_position.assert_not_called()
+
+
+def test_the_edit_marker_commits_before_the_patch(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At PATCH time the row is `submitting` AND the connection holds no open transaction,
+    so the marker is durable: a crash inside the call leaves `submitting`, never
+    `intent_persisted`, and is never released as unsent."""
+    conn = ebull_test_conn
+    trade_id, _, broker, _ = _opened_trade(conn, monkeypatch)
+    seen: list[tuple[object, ...]] = []
+    original = broker.edit_demo_strategy_position.side_effect
+
+    def _observe(**kwargs: Any) -> BrokerPositionEditSubmission:
+        seen.append((conn.info.transaction_status,))
+        row = conn.execute(
+            "SELECT status, edit_marker_enforced FROM strategy_position_operations WHERE request_id=%s",
+            (kwargs["request_id"],),
+        ).fetchone()
+        conn.commit()
+        assert row is not None
+        seen.append(tuple(row))
+        return original(**kwargs)
+
+    broker.edit_demo_strategy_position.side_effect = _observe
+
+    result = manage_owned_position(
+        conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+    )
+
+    assert result.state == "submitted"
+    assert seen == [(psycopg.pq.TransactionStatus.IDLE,), ("submitting", True)]
+    assert conn.execute("SELECT status FROM strategy_position_operations").fetchone() == ("submitted",)
+
+
+def test_a_released_edit_does_not_unblock_an_older_matching_refusal(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exemption is applied before `LIMIT 1`: an older uncertain edit at the same levels
+    still blocks, so the release cannot become a route around never-re-keyed (Codex ckpt-1)."""
+    conn = ebull_test_conn
+    trade_id, _, broker, _ = _opened_trade(conn, monkeypatch)
+    _insert_edit(conn, status="reconcile_required", marker=True, error_code="broker_edit_uncertain")
+    _insert_edit(conn, status="rejected", marker=True, error_code="edit_never_submitted")
+
+    result = manage_owned_position(
+        conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+    )
+
+    assert (result.state, result.reason_code) == ("reconcile_required", "broker_edit_uncertain")
+    broker.edit_demo_strategy_position.assert_not_called()

@@ -59,6 +59,11 @@ logger = logging.getLogger(__name__)
 _RATE_QUANTUM = Decimal("0.000001")
 _ADVISORY_HASH_SEED = 0
 
+#: #3546 gap G: an edit released because its pre-call marker never committed, so the
+#: PATCH was provably never sent.  A LOCAL rejection, not a broker one, which is why
+#: ``_prior_same_edit`` does not let it block the same repair later.
+EDIT_NEVER_SUBMITTED: Final = "edit_never_submitted"
+
 
 class StrategyPositionManagerError(StrategyControlError):
     """An exact-position mutation cannot safely proceed."""
@@ -709,9 +714,34 @@ def _resume_operation(
             "close_never_submitted",
             operation_id,
         )
+    if (
+        operation["status"] == "intent_persisted"
+        and operation["operation_type"] != "close"
+        and operation["edit_marker_enforced"]
+        and not _edit_landed(
+            owned=owned,
+            position=position,
+            desired_stop=operation["desired_stop_rate"],
+            desired_take=operation["desired_take_profit_rate"],
+        )
+    ):
+        # #3546 gap G: `mark_edit_submitting` commits BEFORE the PATCH, so a marked-era
+        # edit still at `intent_persisted` provably never reached the broker.  Released
+        # as a LOCAL rejection, trade untouched, and the visit then CONTINUES as if no
+        # operation were outstanding (`None`): gap detection, the trial/pot exits, the
+        # ratchet and the repair streak all run on their normal terms, against the
+        # current bar and position (Codex ckpt-1).  A release that RETURNED would skip
+        # a due exit for the visit and count a refusal against a position that may be
+        # protected.  Legacy rows (`edit_marker_enforced` FALSE) fall through to the
+        # lost-identity branch below, unchanged.
+        with conn.transaction():
+            _terminal(conn, operation_id=operation_id, status="rejected", error_code=EDIT_NEVER_SUBMITTED)
+        return None
     if operation["status"] in ("intent_persisted", "submitting"):
-        # An EDIT has no marker, so it arrives here at `intent_persisted` and is
-        # resolved by comparing the broker's exact position to the intent, as before.
+        # An EDIT arrives here at `submitting` (the PATCH may have been sent), at
+        # `intent_persisted` when its levels already landed, or as a legacy row
+        # written before the marker.  Resolved by comparing the broker's exact
+        # position to the intent, as before.
         #
         # A CLOSE arrives here only as `submitting`: the verb WAS entered, and there
         # is no close lookup by request UUID, so what the broker did stays unknown.
@@ -888,8 +918,8 @@ def _persist_edit_intent(
             prior_stop_rate, desired_stop_rate, desired_take_profit_rate,
             completed_bar_at, level_known_at, close_rate,
             highest_close_since_entry, atr_rate, resistance_rate,
-            ratchet_variant_id
-        ) VALUES (%s,%s,%s,%s,'intent_persisted',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ratchet_variant_id, edit_marker_enforced
+        ) VALUES (%s,%s,%s,%s,'intent_persisted',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
         RETURNING position_operation_id
         """,
         (
@@ -937,6 +967,10 @@ def _prior_same_edit(
     # refused that exact edit, and re-entering the same verb every five minutes is
     # hammering, not repair.
     #
+    # ⚠ EXCEPT `edit_never_submitted` (#3546 gap G): the broker never saw that edit, so
+    # it refused nothing.  Excluded in the WHERE, before `LIMIT 1`, so an OLDER matching
+    # blocker behind it still blocks (Codex ckpt-1).
+    #
     # ⚠ The SIGNAL arm is deliberately left as it was.  It has the same latent wedge --
     # `max(current_stop, entry_stop)` also reproduces a stable pair -- but changing it
     # alters alpha-arm behaviour that nothing in this ticket exercises.  Noted on the
@@ -955,6 +989,7 @@ def _prior_same_edit(
           AND desired_take_profit_rate IS NOT DISTINCT FROM %s
           AND completed_bar_at IS NOT DISTINCT FROM %s
           AND (status <> 'applied' OR NOT %s)
+          AND NOT (status = 'rejected' AND last_error_code IS NOT DISTINCT FROM %s)
         ORDER BY position_operation_id DESC LIMIT 1
         """,
         (
@@ -964,6 +999,7 @@ def _prior_same_edit(
             desired_take,
             bar.completed_at if bar else None,
             owned.is_core,
+            EDIT_NEVER_SUBMITTED,
         ),
     ).fetchone()
     if row is None:
@@ -990,6 +1026,7 @@ def _submit_edit(
     desired_stop: Decimal,
     desired_take: Decimal | None,
 ) -> PositionManagerResult:
+    mark_edit_submitting(conn, operation_id=operation_id)
     try:
         submission = broker.edit_demo_strategy_position(
             position_id=owned.broker_position_id,
@@ -1021,19 +1058,48 @@ def _submit_edit(
             operation_id,
         )
     with conn.transaction():
-        conn.execute(
+        accepted = conn.execute(
             """
             UPDATE strategy_position_operations
             SET status='submitted', broker_operation_id=%s, submitted_at=now(), updated_at=now()
-            WHERE position_operation_id=%s AND status='intent_persisted'
+            WHERE position_operation_id=%s AND status='submitting'
             """,
             (submission.operation_id, operation_id),
         )
+        if accepted.rowcount != 1:
+            raise StrategyPositionManagerError(f"edit operation {operation_id} left submitting before its acceptance")
     # The 202 response is acceptance only. A future invocation re-syncs the
     # exact position before changing this operation to applied.
     return PositionManagerResult(
         owned.strategy_trade_id, owned.broker_position_id, "submitted", "broker_edit_accepted", operation_id
     )
+
+
+def mark_edit_submitting(conn: psycopg.Connection[Any], *, operation_id: int) -> None:
+    """Commit "the PATCH is about to be sent" BEFORE sending it -- #2979's marker, for edits.
+
+    #3546 gap G.  Without it an edit crashed before the PATCH and one crashed after it
+    left the same ``intent_persisted`` row, so both were written ``reconcile_required``
+    and ``_prior_same_edit`` then refused the same stable repair on every later visit.
+
+    ⚠ Durable means COMMITTED: the connection must be idle so this transaction is
+    top-level, not a savepoint inside the caller's.  Exactly one row must move; on any
+    failure this raises and the PATCH is never sent.  The allocator and position locks
+    held by ``manage_owned_position`` are session-scoped, so they span this commit.
+
+    Public, like ``mark_close_submitting``, so a test can place a fault between the
+    two commits by name.
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise StrategyPositionManagerError("the edit marker must commit on an idle connection")
+    with conn.transaction():
+        marked = conn.execute(
+            "UPDATE strategy_position_operations SET status='submitting', updated_at=now() "
+            "WHERE position_operation_id=%s AND status='intent_persisted' AND edit_marker_enforced",
+            (operation_id,),
+        )
+        if marked.rowcount != 1:
+            raise StrategyPositionManagerError(f"edit operation {operation_id} was not at a markable intent")
 
 
 def mark_close_submitting(conn: psycopg.Connection[Any], *, operation_id: int) -> None:
