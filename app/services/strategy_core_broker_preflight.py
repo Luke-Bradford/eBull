@@ -41,6 +41,7 @@ from decimal import Decimal
 from typing import Final, Literal
 
 from app.providers.broker import (
+    BrokerAccountRiskSnapshot,
     BrokerProvider,
     BrokerWhatIfOrder,
 )
@@ -234,7 +235,9 @@ class CoreBrokerPreflightVerdict:
     amount: Decimal
     cost_rate: Decimal | None
     snapshot_observed_at: datetime | None
-    account_equity: Decimal | None
+    #: The snapshot the admission was decided on; the executor's drawdown observation
+    #: prices the engine pot from it (#3541), so it must be the same instant.
+    account_snapshot: BrokerAccountRiskSnapshot | None
     max_account_risk_age_seconds: int = CORE_MAX_ACCOUNT_RISK_AGE_SECONDS
     policy_version: str = CORE_BROKER_PREFLIGHT_POLICY_VERSION
 
@@ -253,7 +256,7 @@ def _refused(
         amount=_ZERO,
         cost_rate=None,
         snapshot_observed_at=snapshot_observed_at,
-        account_equity=None,
+        account_snapshot=None,
     )
 
 
@@ -446,5 +449,5 @@ def assess_core_broker_preflight(
         amount=sized.amount,
         cost_rate=sized.cost_rate,
         snapshot_observed_at=snapshot.observed_at,
-        account_equity=snapshot.equity,
+        account_snapshot=snapshot,
     )

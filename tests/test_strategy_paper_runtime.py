@@ -581,7 +581,7 @@ def test_cycle_keeps_managing_owned_positions_after_deployment_is_paused(
     assert managed == [(trade_id, position_id)]
 
 
-def test_health_refresh_persists_account_and_deployment_max_drawdown(
+def test_health_refresh_persists_pot_and_deployment_max_drawdown(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     conn = ebull_test_conn
@@ -605,16 +605,25 @@ def test_health_refresh_persists_account_and_deployment_max_drawdown(
     )
     refresh_strategy_health(conn, broker=broker, now=observed + timedelta(minutes=2))
 
-    account = conn.execute(
-        "SELECT equity_high_water,last_equity,last_drawdown_pct FROM strategy_paper_account_risk_state"
+    # #3541: the account fell 8.3% from its peak, but the engine owns nothing, so the
+    # pot's NAV is its principal throughout and the drawdown gate stays clear.
+    pot = conn.execute(
+        "SELECT nav_index,index_high_water,last_nav,last_drawdown_pct FROM strategy_engine_pot_risk_state"
     ).fetchone()
+    block = conn.execute("SELECT active FROM strategy_execution_blocks WHERE source='drawdown'").fetchone()
+    assert conn.execute("SELECT count(*) FROM strategy_paper_account_risk_state").fetchone() == (0,)
+    assert pot is not None and block == (False,)
+    assert (pot[0], pot[1], pot[3]) == (Decimal("1"), Decimal("1"), Decimal("0"))
+    principal = conn.execute(
+        "SELECT capital_limit FROM strategy_paper_pool_events ORDER BY strategy_paper_pool_event_id DESC LIMIT 1"
+    ).fetchone()
+    assert principal is not None and pot[2] == principal[0]
+    # The per-deployment row is still account-based until #3541 slice 2.
     deployment = conn.execute(
         "SELECT equity_high_water,last_equity,max_drawdown_pct FROM strategy_paper_deployment_risk_state"
     ).fetchone()
-    assert account is not None and deployment is not None
-    assert account[0:2] == (Decimal("1200.000000"), Decimal("1100.000000"))
+    assert deployment is not None
     assert deployment[0:2] == (Decimal("1200.000000"), Decimal("1100.000000"))
-    assert Decimal(str(account[2])) > Decimal("8.33")
     assert Decimal(str(deployment[2])) > Decimal("8.33")
 
     report = assess_live_gate(

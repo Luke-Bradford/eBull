@@ -30,6 +30,7 @@ from app.services.broker_settlement_arms import (
     effective_open_minimum,
 )
 from app.services.core_exit_levels import CoreExitLevels, CoreExitLevelsUnderivable, core_exit_levels
+from app.services.engine_pot_risk import advance_pot_drawdown, observe_pot_nav
 from app.services.strategy_control_plane import link_strategy_order, load_paper_pool
 from app.services.strategy_core_allocator import CoreMandate, CoreSleeveState, evaluate_core_rebalance
 from app.services.strategy_core_broker_preflight import (
@@ -173,53 +174,34 @@ def _capital_refusal_result(exc: EngineCapitalObservationError) -> CoreExecution
 def _observe_core_portfolio_drawdown(
     conn: psycopg.Connection[Any],
     *,
-    equity: Decimal,
-    observed_at: datetime,
+    snapshot: BrokerAccountRiskSnapshot,
     max_drawdown_pct: Decimal,
 ) -> str | None:
-    """Advance the shared account high-water mark and enforce the pool mandate.
+    """Advance the shared engine-pot high-water mark and enforce the pool mandate.
 
     The periodic health job derives its policy from enabled alpha deployments. A
     core-only pool therefore cannot rely on its global ``drawdown`` block. This
     submission-local observation uses the same shared risk-state row and refuses
     before durable order authority is created.
+
+    #3541: the drawdown is the ENGINE POT's (``engine_pot_risk``), never the
+    account's, which also holds the operator's own positions. Every failure is a
+    returned code, never a raise, so the caller still lets ``sell_core`` through.
     """
     if (
-        not equity.is_finite()
-        or equity <= 0
-        or not max_drawdown_pct.is_finite()
+        not max_drawdown_pct.is_finite()
         or not (Decimal("0") < max_drawdown_pct < Decimal("100"))
-        or observed_at.tzinfo is None
+        or snapshot.observed_at.tzinfo is None
     ):
         return "core_account_risk_unobservable"
-    row = conn.execute(
-        """
-        SELECT equity_high_water, observed_at
-        FROM strategy_paper_account_risk_state
-        WHERE id=true
-        FOR UPDATE
-        """
-    ).fetchone()
-    if row is not None and row[1] > observed_at:
+    try:
+        drawdown = advance_pot_drawdown(conn, observe_pot_nav(conn, snapshot))
+    except EngineCapitalObservationError as exc:
+        return exc.reason_code
+    if drawdown == "engine_pot_risk_stale":
         return "core_account_risk_stale"
-    previous_high_water = Decimal(str(row[0])) if row is not None else equity
-    if not previous_high_water.is_finite() or previous_high_water <= 0:
-        return "core_account_risk_unobservable"
-    high_water = max(previous_high_water, equity)
-    drawdown = (high_water - equity) / high_water * Decimal("100")
-    conn.execute(
-        """
-        INSERT INTO strategy_paper_account_risk_state (
-            id,equity_high_water,last_equity,last_drawdown_pct,observed_at
-        ) VALUES (true,%s,%s,%s,%s)
-        ON CONFLICT (id) DO UPDATE SET
-          equity_high_water=EXCLUDED.equity_high_water,
-          last_equity=EXCLUDED.last_equity,
-          last_drawdown_pct=EXCLUDED.last_drawdown_pct,
-          observed_at=EXCLUDED.observed_at
-        """,
-        (high_water, equity, drawdown, observed_at),
-    )
+    if isinstance(drawdown, str):
+        return drawdown
     return "portfolio_drawdown_limit" if drawdown >= max_drawdown_pct else None
 
 
@@ -1211,8 +1193,7 @@ def execute_core_rebalance(
             # when this core-only path cannot rely on alpha's periodic health job.
             initial_drawdown_refusal = _observe_core_portfolio_drawdown(
                 conn,
-                equity=snapshot.equity,
-                observed_at=snapshot.observed_at,
+                snapshot=snapshot,
                 max_drawdown_pct=drawdown_limit,
             )
             # The drawdown refusal blocks new risk; a rebalance close reduces it.  The
@@ -1275,13 +1256,12 @@ def execute_core_rebalance(
                     0 <= broker_evidence_age <= broker_verdict.max_account_risk_age_seconds
                 ):
                     return _result("refused", "core_account_risk_stale", intent_id=intent_id)
-                account_equity = broker_verdict.account_equity
-                if account_equity is None or snapshot_observed_at is None:
+                account_snapshot = broker_verdict.account_snapshot
+                if account_snapshot is None or snapshot_observed_at is None:
                     return _result("refused", "core_account_risk_unobservable", intent_id=intent_id)
                 drawdown_refusal = _observe_core_portfolio_drawdown(
                     conn,
-                    equity=account_equity,
-                    observed_at=snapshot_observed_at,
+                    snapshot=account_snapshot,
                     max_drawdown_pct=drawdown_limit,
                 )
                 if drawdown_refusal is not None:

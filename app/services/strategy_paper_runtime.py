@@ -19,11 +19,13 @@ import psycopg
 import psycopg.rows
 from psycopg.pq import TransactionStatus
 
-from app.providers.broker import BrokerProvider
+from app.providers.broker import BrokerAccountRiskSnapshot, BrokerProvider
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
+from app.services.engine_pot_risk import advance_pot_drawdown, load_stored_pot_drawdown, observe_pot_nav
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
+from app.services.strategy_engine_capital import EngineCapitalObservationError
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_manifest import DEMO_TRIAL_STRATEGY_IDS, STRATEGY_MANIFEST
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
@@ -216,6 +218,34 @@ def _set_block(conn: psycopg.Connection[Any], *, source: str, active: bool, reas
     )
 
 
+def _pot_drawdown_block(
+    conn: psycopg.Connection[Any], *, risk: BrokerAccountRiskSnapshot | None, limit: Decimal
+) -> tuple[bool, str]:
+    """The ``drawdown`` block's verdict from the engine pot (#3541). Fails closed.
+
+    ``risk`` is ``None`` when the probe failed or is stale. A probe older than the stored
+    state defers to the stored figure: it is newer evidence, and this tick decides nothing
+    on its own snapshot.
+    """
+    if risk is None:
+        return True, "engine pot drawdown unavailable because broker risk is unavailable or stale"
+    try:
+        with conn.transaction():
+            drawdown = advance_pot_drawdown(conn, observe_pot_nav(conn, risk))
+    except EngineCapitalObservationError as exc:
+        return True, f"engine pot drawdown unobservable: {exc.reason_code} ({exc})"
+    if drawdown == "engine_pot_risk_stale":
+        stored = load_stored_pot_drawdown(conn)
+        if stored is None:  # pragma: no cover - stale implies a stored row
+            return True, "engine pot drawdown unavailable"
+        drawdown = stored
+    elif isinstance(drawdown, str):
+        return True, f"engine pot drawdown refused: {drawdown}"
+    if drawdown >= limit:
+        return True, f"engine pot drawdown {drawdown:.4f}% reached the configured paper limit {limit}%"
+    return False, "engine pot drawdown is within the configured paper limit"
+
+
 def refresh_strategy_health(
     conn: psycopg.Connection[Any], *, broker: BrokerProvider, now: datetime | None = None
 ) -> int:
@@ -366,46 +396,15 @@ def refresh_strategy_health(
 
     scan_active = int(scan["stale"]) > 0
     quote_active = int(quotes["stale"]) > 0
-    high_water = Decimal("0")
-    drawdown = Decimal("100")
     with conn.transaction():
-        if risk is None:
-            drawdown_active = True
-            drawdown_reason = "drawdown unavailable because broker risk is unavailable"
-        else:
-            drawdown_row = conn.execute(
-                "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id=true"
-            ).fetchone()
-            high_water = max(Decimal(str(drawdown_row[0])) if drawdown_row else risk.equity, risk.equity)
-            drawdown = (high_water - risk.equity) / high_water * Decimal("100") if high_water > 0 else Decimal("100")
-            drawdown_active = drawdown > Decimal(str(policy["drawdown_limit"]))
-            drawdown_reason = (
-                f"account drawdown {drawdown}% exceeds configured paper limit"
-                if drawdown_active
-                else "account drawdown is within configured paper limit"
-            )
+        # #3541: the ENGINE POT's drawdown, never the account's -- the account also holds
+        # the operator's own positions. Advanced only from a fresh probe, as before.
+        drawdown_active, drawdown_reason = _pot_drawdown_block(
+            conn,
+            risk=None if broker_active else risk,
+            limit=Decimal(str(policy["drawdown_limit"])),
+        )
         if risk is not None and not broker_active:
-            conn.execute(
-                """
-                INSERT INTO strategy_paper_account_risk_state (
-                    id,equity_high_water,last_equity,last_drawdown_pct,observed_at
-                ) VALUES (true,%s,%s,%s,%s)
-                ON CONFLICT (id) DO UPDATE SET
-                  equity_high_water=GREATEST(
-                    strategy_paper_account_risk_state.equity_high_water,EXCLUDED.last_equity
-                  ),
-                  last_equity=EXCLUDED.last_equity,
-                  last_drawdown_pct=(
-                    GREATEST(strategy_paper_account_risk_state.equity_high_water,EXCLUDED.last_equity)
-                    - EXCLUDED.last_equity
-                  ) / GREATEST(
-                    strategy_paper_account_risk_state.equity_high_water,EXCLUDED.last_equity
-                  ) * 100,
-                  observed_at=EXCLUDED.observed_at
-                WHERE EXCLUDED.observed_at >= strategy_paper_account_risk_state.observed_at
-                """,
-                (high_water, risk.equity, drawdown, risk.observed_at),
-            )
             with conn.cursor() as cur:
                 cur.executemany(
                     """

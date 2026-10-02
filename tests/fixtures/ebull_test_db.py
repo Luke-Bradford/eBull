@@ -315,6 +315,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "strategy_halt_feed_state",
     "strategy_market_halts",
     "strategy_paper_account_risk_state",
+    "strategy_engine_pot_risk_state",
     "positions",
     "quotes",
     # #1919 — thesis generation attempts (FK → instruments + theses).

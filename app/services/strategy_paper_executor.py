@@ -35,6 +35,7 @@ from app.providers.broker import (
 )
 from app.services.broker_settlement_arms import effective_open_minimum, select_underlying_long_arms
 from app.services.cost_model import COST_MODEL_ID
+from app.services.engine_pot_risk import advance_pot_drawdown, observe_pot_nav
 from app.services.market_calendar import us_market_status
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
@@ -861,11 +862,12 @@ def _protective_rates(intent: _SizingIntent) -> tuple[Decimal, Decimal]:
 # history and missed the first entirely.  Classify a query by the DECISION IT
 # FEEDS, not by the tables it touches.
 #
-# Why every OTHER mandate control needed no change: `portfolio_capacity`,
-# `instrument_capacity` and `drawdown` read `risk.total_invested`,
-# `risk.instrument_investments` and `risk.equity` -- the broker account snapshot,
-# which already counts a core position with no code at all.  So the split was
-# never a policy decision; it was an artefact of where each number came from.
+# Why every OTHER mandate control needed no change: `portfolio_capacity` and
+# `instrument_capacity` read `risk.total_invested` and `risk.instrument_investments`
+# -- the broker account snapshot, which already counts a core position with no code
+# at all.  So the split was never a policy decision; it was an artefact of where
+# each number came from.  (`drawdown` now reads the engine pot, #3541, whose
+# exact-owned population includes both arms by construction.)
 #
 # Counting core here is settled by sql/311, not by preference: the mandate is a
 # PORTFOLIO mandate (stored on `strategy_paper_pool_events`, every limit
@@ -940,7 +942,7 @@ def _observe_local_mandate_risk(
     now: datetime,
     shared_pool_bound: Decimal,
 ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | str:
-    """Read local allocation risk and advance the high-water mark atomically."""
+    """Read local allocation risk and advance the engine pot's high-water mark atomically."""
     with conn.transaction():
         pending_row = conn.execute(_PENDING_RISK_SQL, (intent.instrument_id,)).fetchone()
         if pending_row is None:  # pragma: no cover - aggregate SELECT always returns one row
@@ -967,24 +969,17 @@ def _observe_local_mandate_risk(
         daily_loss_limit = pool_base * intent.mandate_max_daily_loss_pct / Decimal("100")
         if daily_realised_pnl <= -daily_loss_limit:
             return "portfolio_daily_loss_limit"
-        row = conn.execute(
-            "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id = true FOR UPDATE"
-        ).fetchone()
-        high_water = max(Decimal(str(row[0])) if row else risk.equity, risk.equity)
-        drawdown = (high_water - risk.equity) / high_water * Decimal("100")
-        conn.execute(
-            """
-            INSERT INTO strategy_paper_account_risk_state (
-                id, equity_high_water, last_equity, last_drawdown_pct, observed_at
-            ) VALUES (true, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                equity_high_water = EXCLUDED.equity_high_water,
-                last_equity = EXCLUDED.last_equity,
-                last_drawdown_pct = EXCLUDED.last_drawdown_pct,
-                observed_at = EXCLUDED.observed_at
-            """,
-            (high_water, risk.equity, drawdown, risk.observed_at),
-        )
+        # #3541: the ENGINE POT's drawdown, never the account's. A refusal returns from
+        # inside the block, which commits the reads and nothing else.
+        try:
+            drawdown = advance_pot_drawdown(conn, observe_pot_nav(conn, risk))
+        except EngineCapitalObservationError as exc:
+            logger.warning(
+                "paper signal %s: engine pot drawdown refused as %s (%s)", intent.signal_id, exc.reason_code, exc
+            )
+            return exc.reason_code
+        if isinstance(drawdown, str):
+            return drawdown
     return deployment_base, pool_base, pending_total, pending_instrument, drawdown
 
 

@@ -33,6 +33,7 @@ from app.services import ranking_pot as pot
 from app.services import ranking_pot_exec as exec_book
 from app.services import ranking_pot_loss as loss
 from app.services.ai_trial_start_gate import PreviewShared
+from app.services.engine_pot_risk import observe_pot_nav, preview_pot_drawdown
 from app.services.ranking_pot_intent import _rehashes
 from app.services.ranking_pot_policy import RANKING_POT_POLICY_HASH, STRATEGY_VERSION
 from app.services.strategy_capital_sandbox import SANDBOX_EXCEEDED
@@ -329,12 +330,14 @@ def _read_shared(conn: Conn, risk: BrokerAccountRiskSnapshot, now: datetime) -> 
     mandate_row = conn.execute(
         _MANDATE_OBSERVATION_SQL, (day_start.astimezone(UTC), (day_start + timedelta(days=1)).astimezone(UTC))
     ).fetchone()
-    high_water_row = conn.execute(
-        "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id = true"
-    ).fetchone()
     assert pending is not None and mandate_row is not None  # aggregate SELECTs always return a row
-    high_water = max(Decimal(str(high_water_row[0])) if high_water_row else risk.equity, risk.equity)
-    drawdown = (high_water - risk.equity) / high_water * Decimal("100") if high_water > 0 else Decimal("100")
+    # #3541: the ENGINE POT's drawdown, never the account's; previewed, not advanced.
+    try:
+        drawdown = preview_pot_drawdown(conn, observe_pot_nav(conn, risk))
+    except EngineCapitalObservationError as exc:
+        return CAPITAL_UNAVAILABLE + exc.reason_code
+    if isinstance(drawdown, str):
+        return CAPITAL_UNAVAILABLE + drawdown
     return PreviewShared(
         within_bound=usage.headroom.within_bound,
         pool_base=usage.headroom.bound,
