@@ -22,6 +22,7 @@ from app.services.strategy_paper_runtime import (
     refresh_strategy_health,
     run_strategy_paper_cycle,
 )
+from app.services.strategy_position_manager import PositionManagerResult
 from tests.fixtures.entry_ticket import assert_entry_ticket
 from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _authorise_forecast_scope, _broker, _seed
 from tests.test_strategy_position_manager import (
@@ -600,8 +601,9 @@ def test_cycle_keeps_managing_owned_positions_after_deployment_is_paused(
         strategy_trade_id: int,
         broker_position_id: int,
         now: object,
-    ) -> None:
+    ) -> PositionManagerResult:
         managed.append((strategy_trade_id, broker_position_id))
+        return PositionManagerResult(strategy_trade_id, broker_position_id, "no_change", "observed")
 
     monkeypatch.setattr("app.services.strategy_paper_runtime.manage_owned_position", observe_management)
 
@@ -626,8 +628,9 @@ def test_entries_withheld_still_manages_owned_positions(
         strategy_trade_id: int,
         broker_position_id: int,
         now: object,
-    ) -> None:
+    ) -> PositionManagerResult:
         managed.append(strategy_trade_id)
+        return PositionManagerResult(strategy_trade_id, broker_position_id, "no_change", "observed")
 
     monkeypatch.setattr("app.services.strategy_paper_runtime.manage_owned_position", observe_management)
 

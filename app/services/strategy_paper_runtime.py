@@ -9,8 +9,9 @@ place and unchanged position polls add no rows.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -94,7 +95,13 @@ class StrategyPaperCycleResult:
     reconciled_orders: int
     managed_positions: int
     evaluated_signals: int
-    active_health_blocks: int
+    # ``None`` when the health refresh itself failed (#3546): the blocks were not re-read.
+    active_health_blocks: int | None
+    # ``PositionManagerResult.state`` -> count: what management DID, where
+    # ``managed_positions`` counts visits only.
+    management: Mapping[str, int] = field(default_factory=dict)
+    # Stage -> items whose unmodelled failure was contained (#3546 gap B).
+    errors: Mapping[str, int] = field(default_factory=dict)
 
 
 def _load_ranked_opportunities(
@@ -484,39 +491,72 @@ def run_strategy_paper_cycle(
     ``entries=False`` runs reconciliation, health and position management only -- the
     risk-reducing half -- and evaluates no new signal (#3546: the caller withholds entries
     when an entry-only input, the halt feed, could not be refreshed).
+
+    #3546 gap B: every stage and every item is contained. One failure used to raise out of
+    the cycle and skip everything after it -- a poison position stopped the protection of
+    every later one. A failed reconciliation or health refresh also withholds entries, since
+    both are entry inputs; management never waits on either. Failures are counted on
+    ``errors`` so the caller degrades the run instead of recording it clean.
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise ValueError("strategy paper cycle requires an idle connection")
     if signal_limit <= 0 or reconciliation_limit <= 0 or position_limit <= 0:
         raise ValueError("strategy paper cycle limits must be positive")
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
+    # A fresh instant per item unless the caller pinned one: the executor refuses an account
+    # snapshot stamped more than 5 s after its `now`, so the cycle's start instant would
+    # turn a slow cycle's later fresh snapshots into stale refusals (as `ai_trial_jobs`).
+    clock: Callable[[], datetime] = (lambda: observed_at) if now is not None else (lambda: datetime.now(UTC))
+    errors: Counter[str] = Counter()
 
-    reconciled = reconcile_backlog(conn, broker=broker, limit=reconciliation_limit)
-    active_blocks = refresh_strategy_health(conn, broker=broker, now=observed_at)
-    conn.commit()
+    reconciled = 0
+    try:
+        reconciled = len(reconcile_backlog(conn, broker=broker, limit=reconciliation_limit))
+    except Exception:
+        logger.exception("strategy paper cycle: reconciliation failed; entries withheld, management continues")
+        _reset(conn)
+        errors["reconcile"] += 1
+    active_blocks: int | None = None
+    try:
+        active_blocks = refresh_strategy_health(conn, broker=broker, now=observed_at)
+        conn.commit()
+    except Exception:
+        logger.exception("strategy paper cycle: health refresh failed; entries withheld, management continues")
+        _reset(conn)
+        errors["health"] += 1
 
     # Rotate the bounded ownership batch by five-minute slot. A fixed
     # ``ORDER BY ... LIMIT`` would protect the same oldest positions forever
     # and starve later positions once the sleeve grows past the cap.
     position_offset = (int(observed_at.timestamp()) // 300) * position_limit
-    owned = conn.execute(
-        _OWNED_BATCH_SQL,
-        (position_offset, position_limit),
-    ).fetchall()
-    conn.commit()
-    managed = 0
+    management: Counter[str] = Counter()
+    try:
+        owned = conn.execute(_OWNED_BATCH_SQL, (position_offset, position_limit)).fetchall()
+        conn.commit()
+    except Exception:
+        logger.exception("strategy paper cycle: owned-position batch read failed")
+        _reset(conn)
+        errors["manage"] += 1
+        owned = []
     for trade_id, position_id in owned:
-        manage_owned_position(
-            conn,
-            broker=broker,
-            strategy_trade_id=int(trade_id),
-            broker_position_id=int(position_id),
-            now=observed_at,
-        )
-        managed += 1
+        try:
+            outcome = manage_owned_position(
+                conn,
+                broker=broker,
+                strategy_trade_id=int(trade_id),
+                broker_position_id=int(position_id),
+                now=clock(),
+            )
+        except Exception:
+            logger.exception("strategy paper cycle: managing trade %s raised; continuing with the batch", trade_id)
+            _reset(conn)
+            errors["manage"] += 1
+            continue
+        management[outcome.state] += 1
+    managed = sum(management.values())
 
-    if not entries:
-        return StrategyPaperCycleResult(len(reconciled), managed, 0, active_blocks)
+    if not entries or errors["reconcile"] or errors["health"]:
+        return StrategyPaperCycleResult(reconciled, managed, 0, active_blocks, dict(management), dict(errors))
     versions = (
         list(strategy_versions)
         if strategy_versions is not None
@@ -526,22 +566,47 @@ def run_strategy_paper_cycle(
             if entry.purpose == "capital_candidate"
         ]
     )
-    candidates = _load_ranked_opportunities(conn, strategy_versions=versions, observed_at=observed_at)
-    members = persist_ranking_batch(
-        conn,
-        opportunities=candidates,
-        selection_limit=signal_limit,
-        decided_at=observed_at,
-    )
-    for member in members:
-        execute_fired_paper_signal(
+    try:
+        candidates = _load_ranked_opportunities(conn, strategy_versions=versions, observed_at=observed_at)
+        members = persist_ranking_batch(
             conn,
-            broker=broker,
-            signal_id=member.opportunity.signal_id,
-            ranking_member_id=member.ranking_member_id,
-            now=observed_at,
+            opportunities=candidates,
+            selection_limit=signal_limit,
+            decided_at=observed_at,
         )
-    return StrategyPaperCycleResult(len(reconciled), managed, len(members), active_blocks)
+    except Exception:
+        # Fails closed: no ranking, no entry (a duplicate economic identity raises here).
+        logger.exception("strategy paper cycle: ranking failed; no entries this cycle")
+        _reset(conn)
+        errors["ranking"] += 1
+        members = []
+    evaluated = 0
+    for member in members:
+        # A signal that raises has no funding decision, so the next cycle re-selects it;
+        # containing it here keeps it from also skipping the rest of the batch.
+        try:
+            execute_fired_paper_signal(
+                conn,
+                broker=broker,
+                signal_id=member.opportunity.signal_id,
+                ranking_member_id=member.ranking_member_id,
+                now=clock(),
+            )
+        except Exception:
+            logger.exception(
+                "strategy paper cycle: signal %s raised; continuing with the batch", member.opportunity.signal_id
+            )
+            _reset(conn)
+            errors["execute"] += 1
+            continue
+        evaluated += 1
+    return StrategyPaperCycleResult(reconciled, managed, evaluated, active_blocks, dict(management), dict(errors))
+
+
+def _reset(conn: psycopg.Connection[Any]) -> None:
+    """Leave the connection usable for the next item after a contained failure."""
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
 
 
 __all__ = ["StrategyPaperCycleResult", "refresh_strategy_health", "run_strategy_paper_cycle"]
