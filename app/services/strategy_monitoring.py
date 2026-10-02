@@ -91,7 +91,7 @@ class StrategyAttribution:
     broker_rejection_rate: Decimal | None = None
     average_slippage_pct: Decimal | None = None
     average_stressed_cost_usd: Decimal | None = None
-    max_observed_account_drawdown_pct: Decimal | None = None
+    max_observed_pot_drawdown_pct: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -244,7 +244,8 @@ _ATTRIBUTION_SQL = """
                AS average_slippage_pct,
            AVG(pre.stressed_cost_amount) FILTER (WHERE pre.stressed_cost_amount IS NOT NULL)
                AS average_stressed_cost_usd,
-           MAX(pre.account_drawdown_pct) AS max_observed_account_drawdown_pct
+           -- The column holds the ENGINE POT's drawdown since #3541 slice 1 (sql/457 comment).
+           MAX(pre.account_drawdown_pct) AS max_observed_pot_drawdown_pct
     FROM strategy_signals s
     LEFT JOIN strategy_outcomes o
       ON o.signal_id = s.signal_id
@@ -312,7 +313,7 @@ def load_attribution(
             broker_rejection_rate=Decimal(broker_rejected) / Decimal(funded) if funded else None,
             average_slippage_pct=row["average_slippage_pct"],
             average_stressed_cost_usd=row["average_stressed_cost_usd"],
-            max_observed_account_drawdown_pct=row["max_observed_account_drawdown_pct"],
+            max_observed_pot_drawdown_pct=row["max_observed_pot_drawdown_pct"],
         )
     return result
 

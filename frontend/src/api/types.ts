@@ -3069,7 +3069,7 @@ export interface StrategyAttribution {
   broker_rejection_rate: string | null;
   average_slippage_pct: string | null;
   average_stressed_cost_usd: string | null;
-  max_observed_account_drawdown_pct: string | null;
+  max_observed_pot_drawdown_pct: string | null;
 }
 
 export interface StrategyPnl {

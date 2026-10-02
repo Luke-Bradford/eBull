@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -448,14 +448,23 @@ def assess_live_gate(
         evidence = cur.fetchone()
         assert evidence is not None
 
+        # #3541 slice 3: the deployment's OWN book (sql/457). A row whose latest observation
+        # refused is not evidence, the same as no row; nor is one the broker probe stopped
+        # advancing (probe failure, disabled deployment), aged by the probe's own bound.
         cur.execute(
             """
             SELECT rs.max_drawdown_pct
             FROM strategy_deployments d
-            JOIN strategy_paper_deployment_risk_state rs ON rs.deployment_id=d.deployment_id
+            JOIN strategy_deployment_nav_risk_state rs ON rs.deployment_id=d.deployment_id
             WHERE d.strategy_id=%s AND d.strategy_version=%s AND d.mode='paper'
+              AND rs.last_refusal IS NULL
+              AND rs.observed_at >= %s
             """,
-            (strategy_id, strategy_version),
+            (
+                strategy_id,
+                strategy_version,
+                observed_at - timedelta(seconds=policy.max_broker_health_age_seconds if policy else 0),
+            ),
         )
         risk_state = cur.fetchone()
 
