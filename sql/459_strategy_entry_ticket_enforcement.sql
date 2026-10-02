@@ -64,6 +64,7 @@ BEGIN
     RETURN NEW;
 END $$;
 
+-- Row-level, so TRUNCATE (test isolation only) is not refused -- the same as the ticket trigger.
 DROP TRIGGER IF EXISTS trg_strategy_trade_orders_immutable_link ON strategy_trade_orders;
 CREATE TRIGGER trg_strategy_trade_orders_immutable_link
 BEFORE UPDATE OF purpose, order_id, strategy_trade_id OR DELETE ON strategy_trade_orders

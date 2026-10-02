@@ -40,7 +40,7 @@ def _new_order(conn: psycopg.Connection[Any], trade_id: int) -> int:
     return int(row[0])
 
 
-def _insert_ticket(conn: psycopg.Connection[Any], order_id: int, trade_id: int, **override: str) -> None:
+def _insert_ticket(conn: psycopg.Connection[Any], order_id: int, trade_id: int, **override: object) -> None:
     values = {**_VALID, **override, "order_id": order_id, "strategy_trade_id": trade_id}
     conn.execute(
         sql.SQL("INSERT INTO strategy_entry_tickets ({}) VALUES ({})").format(
