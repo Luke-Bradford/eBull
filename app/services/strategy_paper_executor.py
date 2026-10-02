@@ -114,16 +114,35 @@ COST_BASIS_BROKER_PREFLIGHT_VALUE = "broker_preflight_value"
 COST_BASES: frozenset[str] = frozenset({COST_BASIS_BROKER_PREFLIGHT_AMOUNT, COST_BASIS_BROKER_PREFLIGHT_VALUE})
 _ALLOCATOR_ADVISORY_LOCK = PAPER_ALLOCATOR_ADVISORY_LOCK
 
-#: #3546 gap F (readiness contract R1): refusals whose input was never observed (a broker read
-#: raised) or that withhold EVERY entry for an operational reason. The paper executor writes
-#: nothing for these, so the signal keeps no funding decision and the next cycle re-selects it;
-#: the forecast's own validity (``opportunity_forecast_not_current``) is the terminal bound.
-#: Every other refusal -- policy, mandate, sizing, a price or cost the broker DID return, the
+#: #3546 gap F (readiness contract R1): refusals whose input is not yet available -- a broker read
+#: raised, a feed is missing or stale, the session is not open -- or that withhold EVERY entry for
+#: an operational reason (an overdue reconciliation, any active execution block). The paper
+#: executor writes nothing for these: the signal keeps no funding decision, the next cycle
+#: re-selects it, and every gate re-runs. The bound is the selector's ``f.valid_through``: past it
+#: the signal is no longer selected and stays undecided, as one the cycle's limit never reached
+#: does. No order is placed while a deferral holds, so deferring is never less safe than consuming.
+#: Every other refusal -- policy, mandate sizing, a quote or cost the broker DID return, the
 #: trading switch -- is terminal and persisted. ⚠ Paper path only: the #3471 trial (spec §8, "each
 #: executor refusal is persisted and final") and the ranking pot (spec r3-119, one attempt per
 #: rebalance) keep persisting these through the shared ``_persist_rejection``.
 PAPER_ENTRY_DEFERRALS: frozenset[str] = frozenset(
-    {"reconciliation_overdue", "account_risk_unavailable", "eligibility_unavailable", "costs_unavailable"}
+    {
+        # operational: every entry is withheld
+        "reconciliation_overdue",
+        "execution_block_active",
+        # a broker read raised
+        "account_risk_unavailable",
+        "eligibility_unavailable",
+        "costs_unavailable",
+        # data not landed or stale; the session not yet open
+        "quote_missing",
+        "quote_stale",
+        "scan_watermark_missing",
+        "scan_stale",
+        "halt_feed_missing",
+        "halt_feed_stale",
+        "market_session_closed",
+    }
 )
 
 

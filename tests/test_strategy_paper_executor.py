@@ -1434,24 +1434,48 @@ def test_undocumented_cost_units_refuse_before_any_order_exists(
     assert ebull_test_conn.execute("SELECT count(*) FROM orders WHERE execution_origin='strategy'").fetchone() == (0,)
 
 
-@pytest.mark.parametrize(
-    "code",
-    ["reconciliation_overdue", "account_risk_unavailable", "eligibility_unavailable", "costs_unavailable"],
+_BROKER_READ_DEFERRALS = ("account_risk_unavailable", "eligibility_unavailable", "costs_unavailable")
+_LOADER_DEFERRALS = (
+    "quote_missing",
+    "quote_stale",
+    "scan_watermark_missing",
+    "scan_stale",
+    "halt_feed_missing",
+    "halt_feed_stale",
+    "market_session_closed",
 )
+_DEFERRAL_CASES = ("reconciliation_overdue", "execution_block_active", *_BROKER_READ_DEFERRALS, *_LOADER_DEFERRALS)
+
+
+def test_every_deferral_code_has_a_case() -> None:
+    assert set(_DEFERRAL_CASES) == strategy_paper_executor.PAPER_ENTRY_DEFERRALS
+
+
+@pytest.mark.parametrize("code", _DEFERRAL_CASES)
 def test_a_transient_refusal_defers_without_consuming_the_signal(
     ebull_test_conn: psycopg.Connection[Any],
     monkeypatch: pytest.MonkeyPatch,
     code: str,
 ) -> None:
-    """#3546 gap F: a refusal whose input was never observed writes nothing, so the same signal
+    """#3546 gap F: a refusal whose input is not yet available writes nothing, so the same signal
     is evaluated afresh -- and submits -- once the input is available again."""
     conn = ebull_test_conn
     signal_id = _seed(conn)
     broker = _broker()
     monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
     overdue = strategy_paper_executor._reconciliation_overdue
+    load_intent = strategy_paper_executor._load_intent
     if code == "reconciliation_overdue":
         monkeypatch.setattr(strategy_paper_executor, "_reconciliation_overdue", lambda *_: True)
+    elif code == "execution_block_active":
+        # The real block row (Codex ckpt-2 P1): a broker-availability outage, cleared below.
+        conn.execute(
+            "INSERT INTO strategy_execution_blocks (source,active,reason,blocked_at) "
+            "VALUES ('broker_availability',true,'probe failed',now())"
+        )
+        conn.commit()
+    elif code in _LOADER_DEFERRALS:
+        monkeypatch.setattr(strategy_paper_executor, "_load_intent", lambda *_a, **_k: (None, code, True))
     else:
         method = {
             "account_risk_unavailable": broker.get_account_risk_snapshot,
@@ -1473,6 +1497,12 @@ def test_a_transient_refusal_defers_without_consuming_the_signal(
     broker.place_demo_strategy_order.assert_not_called()
 
     monkeypatch.setattr(strategy_paper_executor, "_reconciliation_overdue", overdue)
+    monkeypatch.setattr(strategy_paper_executor, "_load_intent", load_intent)
+    conn.execute(
+        "UPDATE strategy_execution_blocks SET active=false, blocked_at=NULL, cleared_at=now() "
+        "WHERE source='broker_availability'"
+    )
+    conn.commit()
     retried = execute_fired_paper_signal(conn, broker=_broker(), signal_id=signal_id, now=_NOW)
 
     assert retried.verdict == "submitted"
