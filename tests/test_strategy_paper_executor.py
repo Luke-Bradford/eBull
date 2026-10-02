@@ -471,8 +471,11 @@ def _existing_allocated_trade(
     *,
     index: int,
     amount: Decimal,
-    status: str = "open",
+    status: str = "submitted",
 ) -> int:
+    # `submitted`, not `open`: reconciliation sets `open` in the same transaction that
+    # claims ownership, and this fixture claims none -- an ownerless `open` trade is a
+    # state production cannot reach, and the engine-pot NAV reader refuses it (#3541).
     deployment = conn.execute(
         "SELECT deployment_id FROM strategy_deployments WHERE strategy_id='S-ALLOC' AND strategy_version='v1'"
     ).fetchone()
@@ -1210,18 +1213,23 @@ def test_mandate_cash_reserve_refuses_when_allocated_capital_reaches_boundary(
 
 
 @pytest.mark.parametrize(
-    ("mandate_drawdown_pct", "equity", "reason_code"),
+    ("mandate_drawdown_pct", "pot_index", "reason_code"),
     [
-        (Decimal("15"), Decimal("900"), "account_drawdown_limit"),
-        (Decimal("5"), Decimal("950"), "portfolio_drawdown_limit"),
+        (Decimal("15"), Decimal("0.9"), "account_drawdown_limit"),
+        (Decimal("5"), Decimal("0.95"), "portfolio_drawdown_limit"),
     ],
 )
 def test_stricter_drawdown_limit_refuses_at_the_exact_boundary(
     ebull_test_conn: psycopg.Connection[Any],
     mandate_drawdown_pct: Decimal,
-    equity: Decimal,
+    pot_index: Decimal,
     reason_code: str,
 ) -> None:
+    """#3541: the ENGINE POT's drawdown decides; the account is flat at its peak.
+
+    The pot index sits at 0.9 / 0.95 of its high water (10% / 5% drawdown) and the
+    empty book re-links at a zero return, so the boundary is exact.
+    """
     conn = ebull_test_conn
     signal_id = _seed(conn)
     conn.execute(
@@ -1230,19 +1238,19 @@ def test_stricter_drawdown_limit_refuses_at_the_exact_boundary(
     )
     conn.execute(
         """
-        INSERT INTO strategy_paper_account_risk_state (
-            id,equity_high_water,last_equity,last_drawdown_pct,observed_at
-        ) VALUES (true,1000,1000,0,%s)
+        INSERT INTO strategy_engine_pot_risk_state (
+            id,epoch_started_at,nav_index,index_high_water,last_nav,last_pnl,last_drawdown_pct,observed_at
+        ) SELECT true,min(changed_at),%s,1,2000,0,0,%s FROM strategy_paper_pool_events
         """,
-        (_NOW,),
+        (pot_index, _NOW - timedelta(minutes=1)),
     )
     conn.commit()
     broker = _broker()
     broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
-        available_cash=equity,
+        available_cash=Decimal("1000"),
         total_invested=Decimal("0"),
-        unrealized_pnl=equity - Decimal("1000"),
-        equity=equity,
+        unrealized_pnl=Decimal("0"),
+        equity=Decimal("1000"),
         instrument_investments=(),
         observed_at=_NOW,
         account_currency_id=1,

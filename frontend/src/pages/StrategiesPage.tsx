@@ -675,8 +675,10 @@ const REFUSAL_LABELS: Record<string, string> = {
   // Account and mandate risk
   account_risk_unavailable: "The broker account risk snapshot could not be reached",
   account_risk_stale: "The account risk snapshot was older than policy allows",
-  account_drawdown_limit: "The account is beyond its drawdown limit",
-  portfolio_drawdown_limit: "The portfolio is beyond the mandate's drawdown limit",
+  account_drawdown_limit: "The engine pot is beyond this strategy's drawdown limit",
+  portfolio_drawdown_limit: "The engine pot is beyond the mandate's drawdown limit",
+  engine_pot_risk_stale: "The account risk snapshot is older than the engine pot's last drawdown observation",
+  engine_pot_epoch_mismatch: "The engine pot's drawdown record belongs to a different pot epoch",
   portfolio_concurrency_limit: "The mandate's concurrent-position limit is reached",
   portfolio_daily_loss_limit: "The mandate's daily loss limit is reached",
   portfolio_cash_reserve_limit: "The mandate's cash reserve leaves no room to open",

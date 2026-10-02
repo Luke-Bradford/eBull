@@ -192,7 +192,7 @@ def _run(
         amount=Decimal("49.9"),
         snapshot_observed_at=snapshot_observed_at or datetime.now(UTC),
         max_account_risk_age_seconds=30,
-        account_equity=Decimal("1000"),
+        account_snapshot=SimpleNamespace(observed_at=datetime.now(UTC)),
     )
     capital_authority = SimpleNamespace(enabled=True, pool_event_id=5)
     paper_pool = SimpleNamespace(
@@ -266,40 +266,38 @@ def _run(
     return result, events
 
 
+def _observe_core(advanced: object, *, raises: Exception | None = None) -> str | None:
+    """Drive the core drawdown observation over a stubbed engine-pot reader (#3541)."""
+    snapshot = SimpleNamespace(observed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC))
+    with (
+        patch("app.services.strategy_core_executor.observe_pot_nav", side_effect=raises, return_value=object()),
+        patch("app.services.strategy_core_executor.advance_pot_drawdown", return_value=advanced),
+    ):
+        return _observe_core_portfolio_drawdown(
+            MagicMock(),
+            snapshot=snapshot,  # type: ignore[arg-type]
+            max_drawdown_pct=Decimal("15"),
+        )
+
+
 def test_core_drawdown_observation_refuses_at_the_portfolio_limit() -> None:
-    conn = MagicMock()
-    conn.execute.return_value.fetchone.return_value = (
-        Decimal("1000"),
-        datetime(2026, 8, 24, 11, 59, tzinfo=UTC),
-    )
-
-    refusal = _observe_core_portfolio_drawdown(
-        conn,
-        equity=Decimal("850"),
-        observed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
-        max_drawdown_pct=Decimal("15"),
-    )
-
-    assert refusal == "portfolio_drawdown_limit"
-    assert any("INSERT INTO strategy_paper_account_risk_state" in call.args[0] for call in conn.execute.call_args_list)
+    # `>=`: exactly the limit refuses, as it always has on this path.
+    assert _observe_core(Decimal("15")) == "portfolio_drawdown_limit"
+    assert _observe_core(Decimal("14.99")) is None
 
 
 def test_core_drawdown_observation_refuses_an_older_broker_snapshot() -> None:
-    conn = MagicMock()
-    conn.execute.return_value.fetchone.return_value = (
-        Decimal("1000"),
-        datetime(2026, 8, 24, 12, 1, tzinfo=UTC),
-    )
+    assert _observe_core("engine_pot_risk_stale") == "core_account_risk_stale"
 
-    refusal = _observe_core_portfolio_drawdown(
-        conn,
-        equity=Decimal("999"),
-        observed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
-        max_drawdown_pct=Decimal("15"),
-    )
 
-    assert refusal == "core_account_risk_stale"
-    assert conn.execute.call_count == 1
+def test_core_drawdown_observation_returns_a_pot_refusal_instead_of_raising() -> None:
+    # Returned, not raised: the caller lets `sell_core` through on any refusal.
+    refusal = _observe_core(
+        Decimal("0"),
+        raises=EngineCapitalObservationError("absent", "engine_capital_ownership_unwitnessed"),
+    )
+    assert refusal == "engine_capital_ownership_unwitnessed"
+    assert _observe_core("engine_pot_epoch_mismatch") == "engine_pot_epoch_mismatch"
 
 
 def test_core_drawdown_refusal_precedes_durable_order_authority() -> None:

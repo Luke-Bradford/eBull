@@ -36,6 +36,7 @@ from psycopg.pq import TransactionStatus
 from app.providers.broker import BrokerAccountRiskSnapshot
 from app.services.ai_trial_executor import TRIAL_MAX_CONCURRENT_PER_LEG
 from app.services.ai_trial_intent import TRIAL_CAPITAL_MODE, TRIAL_TICKET_USD
+from app.services.engine_pot_risk import observe_pot_nav, preview_pot_drawdown
 from app.services.strategy_capital_sandbox import SANDBOX_EXCEEDED, sandbox_bound
 from app.services.strategy_control_plane import EFFECTIVE_MAX_CONCURRENT_SQL
 from app.services.strategy_core_mandate import load_core_mandate
@@ -278,13 +279,15 @@ def _preview(
     mandate_row = conn.execute(
         _MANDATE_OBSERVATION_SQL, (day_start.astimezone(UTC), (day_start + timedelta(days=1)).astimezone(UTC))
     ).fetchone()
-    high_water_row = conn.execute(
-        "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id = true"
-    ).fetchone()
     if pending is None or mandate_row is None:  # pragma: no cover - aggregate SELECTs always return a row
         raise StrategyPaperExecutionError("pending or mandate observation was unavailable")
-    high_water = max(Decimal(str(high_water_row[0])) if high_water_row else risk.equity, risk.equity)
-    drawdown = (high_water - risk.equity) / high_water * Decimal("100") if high_water > 0 else Decimal("100")
+    # #3541: the ENGINE POT's drawdown, never the account's; previewed, not advanced.
+    try:
+        drawdown = preview_pot_drawdown(conn, observe_pot_nav(conn, risk))
+    except EngineCapitalObservationError as exc:
+        return REFUSAL_PREFIX + exc.reason_code
+    if isinstance(drawdown, str):
+        return REFUSAL_PREFIX + drawdown
 
     realised = load_paper_realised_pnl(conn)
     if realised is None:

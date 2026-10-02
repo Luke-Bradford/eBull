@@ -55,8 +55,8 @@ def test_the_preview_reads_both_legs_and_writes_nothing(ebull_test_conn: Conn) -
     assert preview_trial_capacity(conn, declaration_id=declaration_id, risk=RISK, now=NOW) == below_design
     growth(TRIAL_POOL_MAX_CONCURRENT)
     assert preview_trial_capacity(conn, declaration_id=declaration_id, risk=RISK, now=NOW) is None
-    # Read-only: the account high-water state `_observe_local_mandate_risk` advances is untouched.
-    assert conn.execute("SELECT count(*) FROM strategy_paper_account_risk_state").fetchone() == (0,)
+    # Read-only: the engine-pot high-water state `_observe_local_mandate_risk` advances is untouched.
+    assert conn.execute("SELECT count(*) FROM strategy_engine_pot_risk_state").fetchone() == (0,)
     conn.commit()
     # A declaration with no deployed legs refuses rather than previewing half a pair.
     assert (
