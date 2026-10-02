@@ -18,6 +18,7 @@ from decimal import Decimal
 from typing import Any
 
 import psycopg
+from psycopg.pq import TransactionStatus
 
 # Row-wise IS NOT DISTINCT FROM: NULL equals NULL, and NUMERIC compares by value.
 _INSERT_IF_CHANGED_SQL = """
@@ -51,8 +52,15 @@ def record_held_levels(
     is_no_take_profit: bool,
     observed_at: datetime,
 ) -> bool:
-    """Append the held levels when they changed; True when a row was written. The caller holds the position's
-    advisory lock (so the compare and the insert are serialised per position) and owns the transaction."""
+    """Append the held levels when they changed; True when a row was written. Runs inside the caller's transaction,
+    and serialises the compare-and-insert per position itself with a transaction-scoped advisory lock: unserialised,
+    an uncommitted change could be overtaken by a later observation of the old value, losing the transition."""
+    if conn.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError("record_held_levels must run inside a transaction")
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('ranking_pot_exec_level_observations:' || %s::text, 0))",
+        (broker_position_id,),
+    )
     cur = conn.execute(
         _INSERT_IF_CHANGED_SQL,
         {

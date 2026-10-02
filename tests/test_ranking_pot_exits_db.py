@@ -253,6 +253,18 @@ def test_the_held_levels_are_recorded_change_only_before_any_repair(
             (trade_id,),
         )
     conn.rollback()
+    # The writer serialises itself with a transaction-scoped lock, so it refuses to run outside a transaction.
+    with pytest.raises(RuntimeError, match="inside a transaction"):
+        record_held_levels(
+            conn,
+            strategy_trade_id=trade_id,
+            broker_position_id=_POSITION_ID,
+            stop_loss_rate=None,
+            take_profit_rate=None,
+            is_no_stop_loss=True,
+            is_no_take_profit=True,
+            observed_at=t1,
+        )
 
 
 def test_a_failed_held_level_record_never_blocks_the_repair(
