@@ -14,7 +14,14 @@ import psycopg
 import pytest
 
 from app.providers.broker import BrokerAccountRiskSnapshot, BrokerDirectPositionInvestment
-from app.services.engine_pot_risk import advance_pot_drawdown, observe_pot_nav, preview_pot_drawdown
+from app.services.engine_pot_risk import (
+    advance_deployment_drawdown,
+    advance_pot_drawdown,
+    observe_deployment_nav,
+    observe_pot_nav,
+    preview_pot_drawdown,
+    record_deployment_refusal,
+)
 from app.services.strategy_engine_capital import EngineCapitalObservationError
 from tests.test_strategy_paper_executor import _NOW
 from tests.test_strategy_position_manager import _MANUAL_POSITION_ID, _POSITION_ID, _opened_trade
@@ -135,3 +142,71 @@ def test_advance_bootstraps_links_and_refuses_stale_or_foreign_state(
     assert advance_pot_drawdown(conn, replace(loss, observed_at=loss.observed_at + timedelta(minutes=1))) == (
         "engine_pot_epoch_mismatch"
     )
+
+
+def test_deployment_nav_prices_its_own_book_and_keeps_its_max_drawdown(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3541 slice 3: one deployment's own book, and its paper-period max drawdown."""
+    conn = ebull_test_conn
+    _trade, deployment_id, _broker, _manual = _opened_trade(conn, monkeypatch)
+    conn.execute("UPDATE strategy_position_ownership SET claimed_at=%s", (_NOW - timedelta(days=1),))
+    # The index's base is the deployment at creation; the fixture clock is in the past.
+    conn.execute("UPDATE strategy_deployments SET created_at=%s", (_NOW - timedelta(days=2),))
+    capital = conn.execute(
+        "SELECT capital_limit FROM strategy_deployments WHERE deployment_id=%s", (deployment_id,)
+    ).fetchone()
+    assert capital is not None
+
+    # The operator's manual position moves by 500; only the deployment's own 7 counts.
+    nav = observe_deployment_nav(
+        conn, _snapshot(_held(_POSITION_ID, "7"), _held(_MANUAL_POSITION_ID, "-500")), deployment_id
+    )
+    assert (nav.principal, nav.realised, nav.unrealised) == (capital[0], Decimal("0"), Decimal("7"))
+
+    with pytest.raises(EngineCapitalObservationError) as exc:
+        observe_deployment_nav(conn, _snapshot(), deployment_id + 1000)
+    assert exc.value.reason_code == "engine_capital_population_incomplete"
+
+    # The base is creation (P&L 0), so the 7 earned before the first observation is linked.
+    assert advance_deployment_drawdown(conn, deployment_id, nav) == Decimal("0")
+    index = conn.execute("SELECT nav_index FROM strategy_deployment_nav_risk_state").fetchone()
+    assert index is not None and index[0] == (1 + Decimal("7") / capital[0]).quantize(index[0])
+    # A 10% loss, then a recovery: the max stays at the trough.
+    loss = replace(nav, unrealised=nav.unrealised - nav.nav / 10, observed_at=nav.observed_at + timedelta(minutes=1))
+    assert advance_deployment_drawdown(conn, deployment_id, loss) == Decimal("10")
+    recovered = replace(nav, observed_at=nav.observed_at + timedelta(minutes=2))
+    # Back to the base NAV: zero up to Decimal's 28-digit linking residue.
+    recovered_drawdown = advance_deployment_drawdown(conn, deployment_id, recovered)
+    assert recovered_drawdown is not None and recovered_drawdown < Decimal("1E-20")
+    assert advance_deployment_drawdown(conn, deployment_id, nav) is None  # older than the row
+
+    record_deployment_refusal(conn, deployment_id, "engine_capital_ownership_unwitnessed: test")
+    row = conn.execute(
+        "SELECT max_drawdown_pct,last_drawdown_pct,last_refusal FROM strategy_deployment_nav_risk_state"
+    ).fetchone()
+    assert row == (Decimal("10.00000000"), Decimal("0E-8"), "engine_capital_ownership_unwitnessed: test")
+    advance_deployment_drawdown(
+        conn, deployment_id, replace(recovered, observed_at=recovered.observed_at + timedelta(minutes=1))
+    )
+    cleared = conn.execute("SELECT last_refusal FROM strategy_deployment_nav_risk_state").fetchone()
+    assert cleared == (None,)
+
+    # A pure capital revision is a flow, not a return: the index does not move.
+    before = conn.execute("SELECT nav_index FROM strategy_deployment_nav_risk_state").fetchone()
+    doubled = replace(
+        recovered, principal=recovered.principal * 2, observed_at=recovered.observed_at + timedelta(minutes=5)
+    )
+    advance_deployment_drawdown(conn, deployment_id, doubled)
+    assert conn.execute("SELECT nav_index FROM strategy_deployment_nav_risk_state").fetchone() == before
+
+    # Bootstrap is the FIRST funded capital: a raise before the first observation is a flow,
+    # so a half-capital loss reads as 50%, not as 5% of the raised limit (Codex ckpt-2).
+    conn.execute("DELETE FROM strategy_deployment_nav_risk_state")
+    raised = replace(nav, principal=capital[0] * 10, unrealised=-capital[0] / 2)
+    assert advance_deployment_drawdown(conn, deployment_id, raised) == Decimal("50")
+
+    conn.execute("UPDATE strategy_deployments SET capital_limit=0 WHERE deployment_id=%s", (deployment_id,))
+    with pytest.raises(EngineCapitalObservationError) as zero:
+        observe_deployment_nav(conn, _snapshot(_held(_POSITION_ID, "7")), deployment_id)
+    assert zero.value.reason_code == "engine_capital_population_incomplete"

@@ -580,7 +580,7 @@ class StrategyAttributionView(BaseModel):
     broker_rejection_rate: Decimal | None
     average_slippage_pct: Decimal | None
     average_stressed_cost_usd: Decimal | None
-    max_observed_account_drawdown_pct: Decimal | None
+    max_observed_pot_drawdown_pct: Decimal | None
 
 
 class StrategyFireRateView(BaseModel):

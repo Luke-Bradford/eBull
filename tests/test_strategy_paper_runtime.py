@@ -618,13 +618,18 @@ def test_health_refresh_persists_pot_and_deployment_max_drawdown(
         "SELECT capital_limit FROM strategy_paper_pool_events ORDER BY strategy_paper_pool_event_id DESC LIMIT 1"
     ).fetchone()
     assert principal is not None and pot[2] == principal[0]
-    # The per-deployment row is still account-based until #3541 slice 2.
+    # #3541 slice 3: the deployment's row measures its OWN book, which holds nothing, so its
+    # NAV is its capital limit and its drawdown 0 while the account fell 8.3%.
     deployment = conn.execute(
-        "SELECT equity_high_water,last_equity,max_drawdown_pct FROM strategy_paper_deployment_risk_state"
+        """
+        SELECT rs.nav_index,rs.last_nav,rs.max_drawdown_pct,rs.last_refusal,d.capital_limit
+        FROM strategy_deployment_nav_risk_state rs
+        JOIN strategy_deployments d USING (deployment_id)
+        """
     ).fetchone()
     assert deployment is not None
-    assert deployment[0:2] == (Decimal("1200.000000"), Decimal("1100.000000"))
-    assert Decimal(str(deployment[2])) > Decimal("8.33")
+    assert deployment[0:4] == (Decimal("1"), deployment[4], Decimal("0"), None)
+    assert conn.execute("SELECT count(*) FROM strategy_paper_deployment_risk_state").fetchone() == (0,)
 
     report = assess_live_gate(
         conn,
@@ -633,7 +638,29 @@ def test_health_refresh_persists_pot_and_deployment_max_drawdown(
         requested_capital=Decimal("1"),
         now=observed + timedelta(minutes=2),
     )
-    assert report.facts.max_observed_drawdown_pct == deployment[2]
+    assert report.facts.max_observed_drawdown_pct == Decimal("0")
+
+    # A row the probe stopped advancing ages out on the policy's broker-health bound. No
+    # policy is registered here, so the bound is 0 (that gate refuses `policy_missing` anyway).
+    aged = assess_live_gate(
+        conn,
+        strategy_id="S-ALLOC",
+        strategy_version="v1",
+        requested_capital=Decimal("1"),
+        now=observed + timedelta(minutes=2, seconds=1),
+    )
+    assert aged.facts.max_observed_drawdown_pct is None
+
+    # A refused observation withdraws the evidence until the next clean advance.
+    conn.execute("UPDATE strategy_deployment_nav_risk_state SET last_refusal='test refusal'")
+    refused = assess_live_gate(
+        conn,
+        strategy_id="S-ALLOC",
+        strategy_version="v1",
+        requested_capital=Decimal("1"),
+        now=observed + timedelta(minutes=2),
+    )
+    assert refused.facts.max_observed_drawdown_pct is None
 
 
 def test_demo_trial_paper_deployment_does_not_trip_scan_freshness(

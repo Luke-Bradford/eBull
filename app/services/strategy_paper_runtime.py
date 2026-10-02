@@ -22,7 +22,14 @@ from psycopg.pq import TransactionStatus
 from app.providers.broker import BrokerAccountRiskSnapshot, BrokerProvider
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
-from app.services.engine_pot_risk import advance_pot_drawdown, load_stored_pot_drawdown, observe_pot_nav
+from app.services.engine_pot_risk import (
+    advance_deployment_drawdown,
+    advance_pot_drawdown,
+    load_stored_pot_drawdown,
+    observe_deployment_nav,
+    observe_pot_nav,
+    record_deployment_refusal,
+)
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
 from app.services.strategy_engine_capital import EngineCapitalObservationError
@@ -246,6 +253,22 @@ def _pot_drawdown_block(
     return False, "engine pot drawdown is within the configured paper limit"
 
 
+def _advance_deployment_risk(
+    conn: psycopg.Connection[Any], *, risk: BrokerAccountRiskSnapshot, deployment_id: int
+) -> None:
+    """Link one deployment's own-book drawdown (#3541 slice 3); a failure marks only its row.
+
+    Its own savepoint, so one deployment's defect neither rolls back another's advance nor the
+    pot's ``drawdown`` block. The refusal is written after the savepoint rolled back.
+    """
+    try:
+        with conn.transaction():
+            advance_deployment_drawdown(conn, deployment_id, observe_deployment_nav(conn, risk, deployment_id))
+    except EngineCapitalObservationError as exc:
+        logger.warning("paper deployment %s drawdown unobservable: %s", deployment_id, exc)
+        record_deployment_refusal(conn, deployment_id, f"{exc.reason_code}: {exc}")
+
+
 def refresh_strategy_health(
     conn: psycopg.Connection[Any], *, broker: BrokerProvider, now: datetime | None = None
 ) -> int:
@@ -405,40 +428,8 @@ def refresh_strategy_health(
             limit=Decimal(str(policy["drawdown_limit"])),
         )
         if risk is not None and not broker_active:
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO strategy_paper_deployment_risk_state (
-                      deployment_id,equity_high_water,last_equity,last_drawdown_pct,
-                      max_drawdown_pct,observed_at
-                    ) VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (deployment_id) DO UPDATE SET
-                      equity_high_water=GREATEST(
-                        strategy_paper_deployment_risk_state.equity_high_water,EXCLUDED.last_equity
-                      ),
-                      last_equity=EXCLUDED.last_equity,
-                      last_drawdown_pct=(
-                        GREATEST(strategy_paper_deployment_risk_state.equity_high_water,EXCLUDED.last_equity)
-                        - EXCLUDED.last_equity
-                      ) / GREATEST(
-                        strategy_paper_deployment_risk_state.equity_high_water,EXCLUDED.last_equity
-                      ) * 100,
-                      max_drawdown_pct=GREATEST(
-                        strategy_paper_deployment_risk_state.max_drawdown_pct,
-                        (GREATEST(
-                          strategy_paper_deployment_risk_state.equity_high_water,EXCLUDED.last_equity
-                        ) - EXCLUDED.last_equity) / GREATEST(
-                          strategy_paper_deployment_risk_state.equity_high_water,EXCLUDED.last_equity
-                        ) * 100
-                      ),
-                      observed_at=EXCLUDED.observed_at
-                    WHERE EXCLUDED.observed_at >= strategy_paper_deployment_risk_state.observed_at
-                    """,
-                    [
-                        (deployment_id, risk.equity, risk.equity, Decimal("0"), Decimal("0"), risk.observed_at)
-                        for deployment_id in policy["deployment_ids"]
-                    ],
-                )
+            for deployment_id in policy["deployment_ids"]:
+                _advance_deployment_risk(conn, risk=risk, deployment_id=int(deployment_id))
         _set_block(
             conn,
             source="scan_freshness",

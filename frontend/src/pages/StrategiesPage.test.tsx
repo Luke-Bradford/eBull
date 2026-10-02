@@ -314,7 +314,7 @@ const OVERVIEW: StrategyOverviewResponse = {
       broker_rejection_rate: null,
       average_slippage_pct: null,
       average_stressed_cost_usd: null,
-      max_observed_account_drawdown_pct: null,
+      max_observed_pot_drawdown_pct: null,
     },
     // Mirrors what all four strategies actually return today: a share IS present
     // (0.5210 / 0.0000 / 0.0039 / 0.0340 on dev), while every one of them has a
