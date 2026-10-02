@@ -6984,10 +6984,19 @@ def strategy_paper_cycle() -> None:
         # scheduled poll keeps monitoring alive when automation is disabled;
         # this second fail-closed read prevents same-tick job ordering or a
         # tight policy age from making the execution cycle use stale state.
-        halt_snapshot = _refresh_strategy_halt_feed()
+        # ⚠ #3546: a failed refresh withholds ENTRIES only. Reconciliation,
+        # de-risking and the AI-trial halts below reduce risk, and the halt feed
+        # gates new risk alone -- `manage_owned_position` is not blocked even by
+        # the kill switch. Aborting the whole cycle on a feed outage turned an
+        # entry input into an exit outage.
+        try:
+            halt_snapshot: HaltSnapshot | None = _refresh_strategy_halt_feed()
+        except Exception:
+            logger.exception("strategy_paper_cycle: halt feed refresh failed; entries withheld this cycle")
+            halt_snapshot = None
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
             with connect_job() as conn:
-                result = run_strategy_paper_cycle(conn, broker=broker)
+                result = run_strategy_paper_cycle(conn, broker=broker, entries=halt_snapshot is not None)
                 pair_events = _record_trial_pair_lifecycle(conn)
                 trial_halts = _enforce_trial_halts(conn)
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
@@ -6996,11 +7005,16 @@ def strategy_paper_cycle() -> None:
             f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
             f"trial_pair_events={'error' if pair_events is None else pair_events} "
             f"trial_halts={'error' if trial_halts is None else trial_halts} "
-            f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
+            f"halt_source_pub_at="
+            f"{'error (entries withheld)' if halt_snapshot is None else halt_snapshot.source_pub_at.isoformat()}"
         )
         errors = {
             name: 1
-            for name, failed in (("trial_pair_lifecycle", pair_events is None), ("trial_halts", trial_halts is None))
+            for name, failed in (
+                ("halt_feed_refresh", halt_snapshot is None),
+                ("trial_pair_lifecycle", pair_events is None),
+                ("trial_halts", trial_halts is None),
+            )
             if failed
         }
         if errors:

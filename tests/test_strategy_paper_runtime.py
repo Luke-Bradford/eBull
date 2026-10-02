@@ -122,6 +122,28 @@ def test_cycle_refreshes_health_then_executes_one_current_paper_candidate(
     ]
 
 
+def test_entries_withheld_evaluates_no_signal_and_leaves_it_for_the_next_cycle(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3546: ``entries=False`` still refreshes health but neither ranks nor funds a signal."""
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    broker = _broker()
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+
+    withheld = run_strategy_paper_cycle(conn, broker=broker, now=_NOW, strategy_versions=["v1"], entries=False)
+
+    assert withheld.evaluated_signals == 0
+    assert conn.execute("SELECT count(*) FROM strategy_funding_decisions").fetchone() == (0,)
+    assert conn.execute("SELECT count(*) FROM strategy_execution_blocks").fetchone() == (5,)
+    conn.commit()
+    resumed = run_strategy_paper_cycle(conn, broker=broker, now=_NOW, strategy_versions=["v1"])
+    assert resumed.evaluated_signals == 1
+    assert conn.execute(
+        "SELECT verdict FROM strategy_funding_decisions WHERE signal_id=%s", (signal_id,)
+    ).fetchone() == ("allocated",)
+
+
 def test_generated_demo_trade_is_auditable_through_reconciliation_and_operator_reads(
     ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
 ) -> None:
