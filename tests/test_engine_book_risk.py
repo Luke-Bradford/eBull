@@ -14,6 +14,7 @@ from app.services.engine_book_risk import (
     MandateLimits,
     compute_snapshot,
     ewma_vol,
+    nyse_sessions,
     session_returns,
 )
 
@@ -66,12 +67,19 @@ def _inputs(
         measured_at=datetime(2026, 10, 2, 9, tzinfo=UTC),
         pool_event_id=1,
         capital=Decimal(capital),
+        calendar=tuple(_days(n)[-253:]),
         positions=positions,
         open_trade_count=len(positions) if open_trades is None else open_trades,
         mandate=mandate,
         closes=closes,
         spy_closes=spy,
     )
+
+
+def test_nyse_sessions_skip_closures() -> None:
+    sessions = nyse_sessions(date(2026, 1, 5), 3)
+    # 2026-01-01 is a holiday and 01-03/04 a weekend.
+    assert sessions == (date(2025, 12, 31), date(2026, 1, 2), date(2026, 1, 5))
 
 
 def test_a_gap_drops_both_returns_it_touches() -> None:
@@ -133,6 +141,7 @@ def test_short_history_is_insufficient_and_defaults_beta() -> None:
     snap = compute_snapshot(_inputs((_position(1, _A),), {_A: a}))
     assert snap.history_status == "insufficient_history"
     assert (snap.hist_vol_pct, snap.ewma_vol_pct, snap.beta) == (None, None, None)
+    assert snap.beta_n_obs == snap.vol_n_obs > 0
     assert snap.beta_defaulted_count == 1 and snap.beta_defaulted_weight_pct > 0
     assert snap.positions[0]["beta"] == "defaulted"
     assert snap.checks["forecast_vol_vs_target"]["status"] == "unknown"

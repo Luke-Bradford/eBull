@@ -26,7 +26,7 @@ import psycopg
 
 from app.db.snapshot import snapshot_read
 from app.services.engine_pot_risk import book_membership, engine_book_rows
-from app.services.market_calendar import latest_completed_us_session
+from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.risk_metrics import (
     MIN_RETURNS_VOL_BETA,
     SPY_SYMBOL,
@@ -47,7 +47,7 @@ EWMA_LAMBDA: Final = Decimal("0.94")
 # SPY close, peak -> trough (spec "Source rule"; reproduce from research series 7694).
 STRESS_2020: Final = Decimal("-0.34104747")  # 2020-02-19 -> 2020-03-23
 STRESS_2022: Final = Decimal("-0.25360574")  # 2022-01-03 -> 2022-10-12
-# Calendar lookback that always holds WINDOW_RETURNS + 1 sessions.
+# Calendar-day bound on the WINDOW_RETURNS + 1 session window (asserted per run).
 LOOKBACK_DAYS: Final = 400
 
 _ZERO = Decimal("0")
@@ -90,6 +90,9 @@ class BookInputs:
     measured_at: datetime
     pool_event_id: int
     capital: Decimal
+    # NYSE sessions up to and including ``session``, ascending, WINDOW_RETURNS + 1 long. Built from
+    # the exchange calendar, never from bars, so a missing close cannot merge two sessions.
+    calendar: tuple[date, ...]
     positions: tuple[HeldPosition, ...]
     open_trade_count: int
     mandate: MandateLimits
@@ -177,7 +180,7 @@ def _q(value: Decimal) -> Decimal:
 def compute_snapshot(inputs: BookInputs) -> Snapshot:
     """The snapshot of ``inputs``. Pure: no I/O."""
     session = inputs.session
-    calendar = sorted(d for d, c in inputs.spy_closes.items() if d <= session and _valid(c))[-(WINDOW_RETURNS + 1) :]
+    calendar = list(inputs.calendar)
 
     # Marks: last valid close on or before the session; cost basis (remaining) when none.
     rows: list[dict[str, Any]] = []
@@ -250,14 +253,14 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
         vol_n = len(book)
         if book:
             first, last = book[0][0], book[-1][0]
+        fit = ols_beta(book, spy_returns)
+        beta_n = fit.n_obs
         if vol_n < MIN_OBS:
             status = "insufficient_history"
         else:
             values = [r for _, r in book]
             hist_vol = annualized_vol(values)
             ewma = ewma_vol(values)
-            fit = ols_beta(book, spy_returns)
-            beta_n = fit.n_obs
             beta = fit.beta
             status = "ok" if beta is not None else "degenerate"
 
@@ -313,9 +316,22 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
     )
 
 
+def nyse_sessions(last: date, count: int) -> tuple[date, ...]:
+    """The ``count`` NYSE sessions ending at ``last``, ascending."""
+    out: list[date] = []
+    day = last
+    while len(out) < count:
+        if us_market_status(day) != "closed":
+            out.append(day)
+        day -= timedelta(days=1)
+    return tuple(reversed(out))
+
+
 def load_inputs(conn: psycopg.Connection[Any], measured_at: datetime) -> BookInputs:
     """Read everything one snapshot needs in one REPEATABLE READ snapshot. Raises on a refusal."""
     session = latest_completed_us_session(measured_at)
+    calendar = nyse_sessions(session, WINDOW_RETURNS + 1)
+    assert (session - calendar[0]).days <= LOOKBACK_DAYS
     with snapshot_read(conn):
         authority = load_engine_capital_authority(conn)
         if authority is None:
@@ -392,9 +408,20 @@ def load_inputs(conn: psycopg.Connection[Any], measured_at: datetime) -> BookInp
             SELECT instrument_id, price_date, close FROM price_daily
             WHERE instrument_id = ANY(%s::bigint[]) AND price_date BETWEEN %s AND %s
             """,
-            (wanted, session - timedelta(days=LOOKBACK_DAYS), session),
+            (wanted, calendar[0], session),
         ):
             closes[int(instrument_id)][price_date] = None if close is None else Decimal(str(close))
+        # The mark is the last valid close however old: a position stale past the return window
+        # is still marked, never silently valued at cost.
+        for instrument_id, price_date, close in conn.execute(
+            """
+            SELECT DISTINCT ON (instrument_id) instrument_id, price_date, close FROM price_daily
+            WHERE instrument_id = ANY(%s::bigint[]) AND price_date <= %s AND close > 0 AND close <> 'NaN'
+            ORDER BY instrument_id, price_date DESC
+            """,
+            (wanted, session),
+        ):
+            closes[int(instrument_id)][price_date] = Decimal(str(close))
 
     spy_closes = dict(closes[spy_id])
     if spy_id not in {p.instrument_id for p in positions}:
@@ -406,6 +433,7 @@ def load_inputs(conn: psycopg.Connection[Any], measured_at: datetime) -> BookInp
         measured_at=measured_at,
         pool_event_id=authority.pool_event_id,
         capital=capital,
+        calendar=calendar,
         positions=tuple(positions),
         open_trade_count=open_trades,
         mandate=mandate,
