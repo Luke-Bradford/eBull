@@ -480,6 +480,17 @@ class RewardRecord:
 
 
 @dataclass(frozen=True)
+class ThesisProvenance:
+    """The thesis a score consumed (#2842 r3-95): captured by the scoring call itself, because the
+    latest ``theses`` row can move after the run. Provenance only — never enters the score."""
+
+    thesis_id: int
+    created_at: datetime
+    model: str | None
+    prompt_version: str | None
+
+
+@dataclass(frozen=True)
 class ScoreResult:
     instrument_id: int
     model_version: str
@@ -504,6 +515,8 @@ class ScoreResult:
     sector: str | None = None
     # Per-family data usability (#3389 c), persisted to scores.family_usability.
     family_usability: Mapping[str, FamilyUsability] | None = None
+    # The usable thesis this score consumed (#2842), or None. Not persisted to `scores`.
+    thesis_used: ThesisProvenance | None = None
     # Set after ranking pass
     rank: int | None = None
     rank_delta: int | None = None
@@ -1390,7 +1403,7 @@ def _load_instrument_data(
         cur.execute(
             """
             SELECT confidence_score, base_value, bear_value, stance, created_at,
-                   subject_identity_ok
+                   subject_identity_ok, thesis_id, model, prompt_version
             FROM theses
             WHERE instrument_id = %(id)s
             ORDER BY thesis_version DESC
@@ -1748,7 +1761,7 @@ def _bulk_load_instrument_data(
             """
             SELECT DISTINCT ON (instrument_id)
                    instrument_id, confidence_score, base_value, bear_value, stance, created_at,
-                   subject_identity_ok
+                   subject_identity_ok, thesis_id, model, prompt_version
             FROM theses
             WHERE instrument_id = ANY(%(ids)s::bigint[])
             ORDER BY instrument_id, thesis_version DESC
@@ -2291,6 +2304,19 @@ def _score_from_data(
             thesis_stale=any(p.name == "stale_thesis" for p in penalties),
             thesis_quarantined=bool(data.get("thesis_quarantined")),
         ),
+        thesis_used=_thesis_provenance(thesis_row),
+    )
+
+
+def _thesis_provenance(thesis_row: Mapping[str, Any] | None) -> ThesisProvenance | None:
+    """The consumed thesis's identity, or None (no usable thesis, or a row read without its id)."""
+    if not thesis_row or thesis_row.get("thesis_id") is None:
+        return None
+    return ThesisProvenance(
+        thesis_id=int(thesis_row["thesis_id"]),
+        created_at=thesis_row["created_at"],
+        model=thesis_row.get("model"),
+        prompt_version=thesis_row.get("prompt_version"),
     )
 
 
@@ -2517,6 +2543,7 @@ def compute_rankings(
                 analytics=analytics,
                 family_usability=result.family_usability,
                 sector=result.sector,
+                thesis_used=result.thesis_used,
                 rank=position,
                 rank_delta=rank_delta,
             )

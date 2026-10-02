@@ -26,6 +26,7 @@ from psycopg import errors
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
+from app.services import ranking_pot_policy
 from app.services.ai_trial_freeze import (
     _PREREG_COLUMNS,
     CARRY_UNMODELLED,
@@ -323,6 +324,8 @@ def freeze_pot(
         refusals.append("policy_hash_stale")
     if apply and not declared_by.strip():
         refusals.append("declared_by_missing")
+    if apply and not ranking_pot_policy.BUILD_COMPLETE:
+        refusals.append("build_incomplete")
     doc: dict[str, Any] | None = None
     doc_sha256: str | None = None
     existing_sha: str | None = None

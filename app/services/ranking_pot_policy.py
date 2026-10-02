@@ -7,7 +7,8 @@ reuses, unedited): sha256 of each module FILE's bytes plus the ``repr`` of const
 Hashed by bytes (§8): the scorer ``scoring.py`` and its direct in-repo imports (a test pins this list to the file's
 own import statements, so a new import cannot slip out of the hash), ``market_calendar``, ``indicator_series``,
 ``ai_trial_pack`` (``is_eligible``, ``build_bar_series``), ``ai_trial_pack_reader`` (``read_bars``, the #1664 cap
-overlay; reused by the rebalance, slice 4b-i), and the pot's own modules. Each later slice appends its
+overlay; reused by the rebalance, slice 4b-i), and the pot's own modules (the rebalance job, slice 4b-ii, included:
+its decision window decides ``as_of`` and therefore the §5.0 quote rule). Each later slice appends its
 module (rebalance, loader, executor wrapper, exits, readout) here; the freeze happens after the last slice lands.
 
 Residual, stated (v1's, spec §8 / r3-90..92): transitive imports beyond the scorer's direct ones, package versions,
@@ -50,6 +51,7 @@ POLICY_MODULES: Final = tuple(
             "ai_trial_pack.py",
             "ai_trial_pack_reader.py",
             "ranking_pot.py",
+            "ranking_pot_job.py",
             "ranking_pot_rebalance.py",
             "ranking_pot_sim.py",
             "ranking_pot_policy.py",
@@ -66,6 +68,11 @@ FROZEN_CONSTANTS: Final[dict[str, object]] = {
 # §8 family spending and §9.3 looks (frozen by this file's bytes)
 # ---------------------------------------------------------------------------
 STRATEGY_VERSION: Final = "v1"
+#: Slice 7 sets this True. Until then a freeze ``--apply`` refuses ``build_incomplete``: a declaration frozen on a
+#: partial build would fix its control seed from snapshots no book consumes, and the next slice's code change would
+#: then refuse every rebalance as ``ranking_drift`` — a charged declaration that can never be measured (Codex ckpt-1,
+#: slice 4b-ii).
+BUILD_COMPLETE: Final = False
 FAMILY: Final = "ranking-pot"
 #: §8: the family's total efficacy budget; the m-th declaration spends ``FAMILY_ALPHA * 2^-m`` over its looks.
 FAMILY_ALPHA: Final = Fraction(1, 20)
@@ -96,6 +103,7 @@ RANKING_POT_POLICY_HASH: Final = policy_manifest_now().digest()
 
 
 __all__ = [
+    "BUILD_COMPLETE",
     "FAMILY",
     "FAMILY_ALPHA",
     "FROZEN_CONSTANTS",

@@ -589,6 +589,8 @@ JOB_ETORO_PERISHABLES_SNAPSHOT = "etoro_perishables_snapshot"
 JOB_AI_TRIAL_DECISION_RUN = "ai_trial_decision_run"
 JOB_AI_TRIAL_EXECUTE = "ai_trial_execute"
 JOB_AI_TRIAL_FUND_DECISION_RUN = "ai_trial_fund_decision_run"
+# #2842 — ranking-pot-v1's monthly rebalance: its own scoring run and the published input snapshot.
+JOB_RANKING_POT_REBALANCE = "ranking_pot_rebalance"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -890,6 +892,10 @@ AI_TRIAL_DECISION_WINDOW_OPENS: Final = dt_time(23, 30)
 AI_TRIAL_DECISION_RETRY_MINUTES: Final = 30
 #: The fund-v1 decision job's daily fire (#3515): 15 minutes after v1's window opens.
 AI_TRIAL_FUND_DECISION_FIRE: Final = dt_time(23, 45)
+#: #2842 — the ranking pot's hourly fire minute: a copy of ``ranking_pot_job.FIRE_MINUTE`` (policy-hashed
+#: there; ``tests/test_ranking_pot_job.py`` pins the two equal). Kept here so importing the scheduler
+#: does not import the pot's policy hash.
+RANKING_POT_FIRE_MINUTE: Final = 40
 
 
 def ai_trial_decision_window_open(now: datetime) -> bool:
@@ -2808,6 +2814,23 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # claim per session).
         catch_up_on_boot=True,
         misfire_grace_seconds=4 * 60 * 60,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_RANKING_POT_REBALANCE,
+        display_name="Ranking pot monthly rebalance (#2842)",
+        # The scheduled scorer's lane: the pot's own `compute_rankings` run (§4 step 1) must never
+        # overlap it. :40 keeps clear of retry_deferred_recommendations (:30) on the same lane.
+        source="db",
+        description=(
+            "Hourly — ranking-pot-v1's monthly rebalance. Acts only in the first five NYSE sessions of a "
+            "month, between 23:30 UTC after a session and 12:00 UTC the next day, once that session's bars "
+            "have landed: its own scoring run, the input gates, and the published input snapshot. Closes "
+            "any month that can no longer be decided as skipped. Does nothing without a frozen declaration."
+        ),
+        cadence=Cadence.hourly(minute=RANKING_POT_FIRE_MINUTE),
+        # A late fire is the next hourly fire's work: the body re-derives the window and the month.
+        catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -6987,6 +7010,18 @@ def ai_trial_fund_decision_run() -> None:
     if creds is not None:
         with _tracked_job(JOB_AI_TRIAL_FUND_DECISION_RUN) as tracker:
             _ai_trial_decision(JOB_AI_TRIAL_FUND_DECISION_RUN, tracker, creds, run_fund_decision_job)
+
+
+def ranking_pot_rebalance() -> None:
+    """ranking-pot-v1's monthly rebalance fire (#2842 spec §4; ``app/services/ranking_pot_job.py``)."""
+    from app.services.ranking_pot_job import run_rebalance_job, scoring_step
+
+    with _tracked_job(JOB_RANKING_POT_REBALANCE) as tracker:
+        with connect_job(autocommit=True) as conn:
+            result = run_rebalance_job(conn, score=lambda: scoring_step(connect_job))
+        tracker.row_count = (1 if result.attempt_id is not None else 0) + result.skipped_months
+        tracker.note = result.note
+        logger.info("%s: %s", JOB_RANKING_POT_REBALANCE, result.note)
 
 
 def _ai_trial_decision_creds(job_name: str) -> tuple[str, str] | None:
