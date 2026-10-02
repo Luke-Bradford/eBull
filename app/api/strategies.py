@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Final, Literal, cast, get_args
@@ -3950,7 +3949,7 @@ def read_engine_book_risk(
     No snapshot yet is a 200 with ``latest = null``; the job's last fire carries any refusal reason
     (``benchmark_not_ready`` / ``book_shape_unsupported`` / ``pot_exhausted`` / ``no_pool``).
     """
-    return EngineBookRiskResponse.model_validate(asdict(load_engine_book_risk_status(conn)))  # type: ignore[arg-type]
+    return EngineBookRiskResponse.model_validate(load_engine_book_risk_status(conn), from_attributes=True)
 
 
 @router.get("/core-mandate", response_model=CoreMandateResponse, status_code=status.HTTP_200_OK)

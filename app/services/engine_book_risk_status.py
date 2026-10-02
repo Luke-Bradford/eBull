@@ -9,7 +9,7 @@ answers a different question, so it is never shown as the current one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -84,7 +84,7 @@ class EngineBookRiskStatus:
     recent: list[RecentSnapshot]
 
 
-_LATEST_FIELDS: Final = tuple(LatestSnapshot.__dataclass_fields__)
+_LATEST_FIELDS: Final = tuple(f.name for f in fields(LatestSnapshot))
 
 _ROWS_SQL: Final = """
     SELECT session_date, measured_at, pool_event_id, capital_usd, gross_usd, position_count, instrument_count,
