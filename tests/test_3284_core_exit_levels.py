@@ -147,6 +147,8 @@ def _owned(*, is_core: bool) -> _OwnedPosition:
         quoted_at=None,
         is_demo_trial=False,
         exit_deadline_session=None,
+        is_ranking_pot=False,
+        pot_exit_session=None,
     )
 
 
