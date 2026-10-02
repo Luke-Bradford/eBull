@@ -63,6 +63,13 @@ from app.services.strategy_engine_capital import (
     load_engine_capital_authority,
     resolve_engine_capital_usage,
 )
+from app.services.strategy_entry_ticket import (
+    EntryTicket,
+    authorising_promotion_id,
+    position_manager_exit,
+    protective_exit_rule,
+    write_entry_ticket,
+)
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_halt_identity import (
     HALT_IDENTITY_RULE_VERSION,
@@ -1619,6 +1626,30 @@ def _execute_fired_paper_signal_locked(
                 net_expectancy,
                 stop_rate,
                 take_rate,
+            ),
+        )
+        # #3542: the entry's trade ticket, from the values just persisted.
+        write_entry_ticket(
+            conn,
+            EntryTicket(
+                order_id=order_id,
+                strategy_trade_id=trade_id,
+                rationale_class="signal",
+                rule_id=f"{intent.strategy_id}@{intent.strategy_version}",
+                evidence_kind="strategy_promotion",
+                evidence_id=authorising_promotion_id(conn, intent.strategy_id, intent.strategy_version),
+                why_now=(
+                    f"signal {signal_id} fired and passed every paper entry gate "
+                    f"(forecast {intent.forecast_id}, ranking member {intent.ranking_member_id}, "
+                    f"net expectancy {net_expectancy}%)"
+                ),
+                exit_rule=protective_exit_rule(
+                    stop_rate,
+                    take_rate,
+                    then=position_manager_exit(conn, intent.deployment_id),
+                ),
+                expected_cost_usd=stressed_cost,
+                cost_basis=assessed.basis,
             ),
         )
     return _submit_recorded_order(

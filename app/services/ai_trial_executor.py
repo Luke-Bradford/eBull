@@ -39,6 +39,7 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
     registered_strategy_purpose,
 )
+from app.services.strategy_entry_ticket import EntryTicket, protective_exit_rule, write_entry_ticket
 from app.services.strategy_halt_identity import HALT_IDENTITY_RULE_VERSION
 from app.services.strategy_order_reconciliation import ensure_strategy_request_id
 from app.services.strategy_paper_executor import (
@@ -381,6 +382,30 @@ def _commit_authority(
     conn.execute(
         "INSERT INTO ai_trial_trade_links (pair_id, leg, strategy_trade_id, requested_amount) VALUES (%s, %s, %s, %s)",
         (intent.pair_id, intent.leg, trade_id, intent.requested_amount),
+    )
+    # #3542: the entry's trade ticket, from the values just persisted. A declared trial is an
+    # experiment until its readout says otherwise.
+    write_entry_ticket(
+        conn,
+        EntryTicket(
+            order_id=order_id,
+            strategy_trade_id=trade_id,
+            rationale_class="experiment",
+            rule_id=f"{intent.strategy_id}@{intent.strategy_version}",
+            evidence_kind="ai_trial_declaration",
+            evidence_id=intent.declaration_id,
+            why_now=(
+                f"AI-trial decision {intent.decision_id} (run {intent.run_id}) for session {intent.session_date}: "
+                f"pair {intent.pair_seq}, {intent.leg} leg, {intent.size_tier} tier"
+            ),
+            exit_rule=protective_exit_rule(
+                stop_rate,
+                take_rate,
+                then=f"then the trial's mechanical exit at the {intent.horizon_days}-session horizon",
+            ),
+            expected_cost_usd=stressed_cost,
+            cost_basis=cost_basis,
+        ),
     )
     return trade_id, order_id, request_id
 

@@ -21,6 +21,7 @@ from app.services import ranking_pot_intent as pi
 from app.services.ranking_pot_policy import RANKING_POT_POLICY_HASH
 from app.services.strategy_control_plane import configure_deployment, configure_execution_policy
 from app.services.strategy_paper_executor import PaperExecutionResult, StrategyPaperExecutionError
+from tests.fixtures.entry_ticket import assert_entry_ticket
 from tests.test_ai_trial_executor_db import _broker, _enable_trading
 from tests.test_ranking_pot_exec_db import _decide_month, _next_month_session, _universes
 from tests.test_ranking_pot_job_db import _first_window
@@ -188,6 +189,9 @@ def test_an_entry_submits_from_its_slot_and_a_reentry_waits_for_the_booking(
     broker = _pot_broker(2842, now)
     result = px.execute_pot_signal(conn, broker=broker, signal_id=signal, now=now)
     assert (result.verdict, result.reason_code) == ("submitted", "broker_accepted")
+    assert_entry_ticket(
+        conn, signal, rationale_class="experiment", evidence_kind="ranking_pot_declaration", evidence_id=decl_id
+    )
     body = broker.place_demo_strategy_order.call_args.args[0]
     # Slot wealth = 1000 / 25 = 40; the frozen 3 × ATR stop and 2R target off the 100 ask.
     assert (body.amount, body.stop_loss_rate, body.take_profit_rate) == (
