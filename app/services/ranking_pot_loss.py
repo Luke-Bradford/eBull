@@ -33,7 +33,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_UP, Decimal
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol
 
 import psycopg
 from psycopg.rows import dict_row
@@ -93,7 +93,22 @@ def stop_bound(amount: Decimal, ask: Decimal, stop_loss_rate: Decimal) -> Decima
     return max(bound, Decimal(0)).quantize(_CENT, rounding=ROUND_UP)
 
 
-def _position_pnl(position: PotPosition, mark: BrokerDirectPositionInvestment | None) -> tuple[Decimal, bool] | None:
+class PositionMark(Protocol):
+    """The fields of a per-position mark this figure reads: a live snapshot row or a stored mark (slice 6c-ii-c-2b)."""
+
+    @property
+    def is_buy(self) -> bool | None: ...
+    @property
+    def units(self) -> Decimal | None: ...
+    @property
+    def unrealized_pnl(self) -> Decimal | None: ...
+    @property
+    def total_fees(self) -> Decimal | None: ...
+    @property
+    def is_partially_altered(self) -> bool | None: ...
+
+
+def _position_pnl(position: PotPosition, mark: PositionMark | None) -> tuple[Decimal, bool] | None:
     """(known P&L, reconciled) for one position, or ``None`` on a data defect."""
     known = Decimal(0)
     closed_units = Decimal(0)
@@ -108,10 +123,11 @@ def _position_pnl(position: PotPosition, mark: BrokerDirectPositionInvestment | 
             return None
         if not _finite(mark.total_fees):
             return None
-        assert mark.total_fees is not None
-        marked = mark.unrealized_pnl - max(mark.total_fees, Decimal(0))
+        pnl, units, fees = mark.unrealized_pnl, mark.units, mark.total_fees
+        assert pnl is not None and units is not None and fees is not None
+        marked = pnl - max(fees, Decimal(0))
         if position.open_units is not None:
-            exact = closed_units + mark.units == position.open_units
+            exact = closed_units + units == position.open_units
         else:
             # No open event ingested yet (a fresh fill): only an unaltered, never-closed position is whole.
             exact = not position.closes and mark.is_partially_altered is False
@@ -333,6 +349,7 @@ __all__ = [
     "PotClose",
     "PotExposure",
     "PotPosition",
+    "PositionMark",
     "breached",
     "check_loss",
     "executing_declarations",

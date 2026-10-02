@@ -53,6 +53,8 @@ def test_the_readout_reads_the_stored_rows_in_one_read_only_transaction(
     # The test database has no SPY bars, so the regime is unavailable rather than guessed.
     assert per[0]["regime"]["label"] == "unavailable" and set(out["regime_cohorts"]) == {"unavailable"}
     assert out["exits"]["flag"] is False and "policy_drift" in out
+    # Slice 6c-ii-c-2b: no activation row, so the executed section says so and nothing else.
+    assert out["executed"] == {"activated": False}
     # §9.4 exposures: the applied step row stores its table (sql/455), a later one does not; R_t's names have
     # only a sector in the test table.
     stored = conn.execute(

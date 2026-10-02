@@ -24,6 +24,8 @@ Fixed here by construction (each closes a spec item; the PR lists them):
   process's register count (deliberately unhashed: it grows after the freeze), ρ = 0 so N̂ = M, V[SR_n] = 1/T.
 - **The no-SL/TP variant (slice 6c-ii-a).** Its stored document streams through its own ``LookFacts`` (no controls),
   so its path, T and lifecycles are the shadow's constructions; it is reported beside the shadow and decides nothing.
+- **Executed vs shadow and the executed NAV vs SPY (slice 6c-ii-c-2b).** ``ranking_pot_exec_readout.executed``, on
+  this transaction, returned as ``executed``.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from typing import Any, Final, Literal
 
 import psycopg
 
+from app.services import ranking_pot_exec_readout as xr
 from app.services import ranking_pot_exposure as ex
 from app.services import ranking_pot_look as look
 from app.services import ranking_pot_rebalance as rb
@@ -811,8 +814,9 @@ def _spy_closes(conn: Conn) -> dict[date, Decimal | None]:
     }
 
 
-def _rebalances(conn: Conn, declaration_id: int, end: date) -> dict[int, RebalanceInfo]:
-    spy = _spy_closes(conn)
+def _rebalances(
+    conn: Conn, declaration_id: int, end: date, spy: Mapping[date, Decimal | None]
+) -> dict[int, RebalanceInfo]:
     rows = conn.execute(
         "SELECT attempt_id, snapshot, snapshot_sha256 FROM ranking_pot_rebalance_attempts "
         "WHERE declaration_id = %s AND outcome = 'decided' AND target_session <= %s ORDER BY target_session",
@@ -865,12 +869,13 @@ def readout(conn: Conn, decl: rb.PotDeclaration, endpoint: date) -> dict[str, An
         if t0 is None or endpoint < t0:
             raise ValueError(f"declaration {decl.declaration_id}: no stepped window ends at {endpoint}")
         terms = look.terms_of(decl)
+        spy = _spy_closes(conn)
         acc = ReadoutFacts(
             t0=t0,
             endpoint=endpoint,
             n=terms.n,
             k=terms.k,
-            rebalances=_rebalances(conn, decl.declaration_id, endpoint),
+            rebalances=_rebalances(conn, decl.declaration_id, endpoint, spy),
         )
         for row in _rows(conn, decl.declaration_id, t0=t0, end=endpoint):
             acc.add(row)
@@ -878,6 +883,7 @@ def readout(conn: Conn, decl: rb.PotDeclaration, endpoint: date) -> dict[str, An
         if not spreads or spreads[0][0] != t0:
             raise rb.SnapshotIntegrityError("the first decided snapshot does not target T0")
         out = acc.finish(h0=spreads[0][1], h_end=spreads[-1][1])
+        out["executed"] = xr.executed(conn, decl.declaration_id, endpoint, spy)
     return out | {
         "declaration_id": decl.declaration_id,
         "policy_hash": RANKING_POT_POLICY_HASH,
