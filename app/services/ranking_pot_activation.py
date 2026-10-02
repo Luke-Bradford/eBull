@@ -491,9 +491,10 @@ def _activate_locked(
         refusals.append("pot_policy_drift")
     if state == "executing" and stored is not None:
         return report("already_active", [], pot_capital=stored)
-    if state in ("winding_down", "completed", None) or state == "executing":
+    if state in ("winding_down", "completed", None):
         return report("none", [*refusals, f"pot_not_activatable:{state}"])
-    if (state == "shadow_only") != (stored is None):
+    # An activation row in `shadow_only`, or `executing` / a halt without one (sql/452 forbids the latter).
+    if state == "executing" or (state == "shadow_only") != (stored is None):
         return report("none", [*refusals, "pot_activation_inconsistent"])
     n = int(doc["terms"]["n"]) if isinstance(doc, dict) else pot.N
     v1 = conn.execute(exec_book.V1_ACTIVE_SQL).fetchone()

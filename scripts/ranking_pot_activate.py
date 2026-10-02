@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                 declared_by=args.declared_by,
                 apply=args.apply,
             )
-    except (psycopg.Error, OSError) as exc:
+    except Exception as exc:  # any setup, DB or HTTP failure: report it, the transaction did not commit
         print(f"activation FAILED: {type(exc).__name__}: {exc}\nRun the dry run before retrying.")
         return 1
     print(render(report, apply=args.apply))
