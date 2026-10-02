@@ -264,14 +264,22 @@ def _advance_deployment_risk(
     try:
         with conn.transaction():
             advance_deployment_drawdown(conn, deployment_id, observe_deployment_nav(conn, risk, deployment_id))
+        return
     except EngineCapitalObservationError as exc:
         logger.warning("paper deployment %s drawdown unobservable: %s", deployment_id, exc)
-        record_deployment_refusal(conn, deployment_id, f"{exc.reason_code}: {exc}")
+        refusal = f"{exc.reason_code}: {exc}"
     except Exception as exc:
         # Any other failure (a DB error, a violated CHECK) rolled back only this savepoint; it
         # must not abort the other deployments or the freshness blocks written after the loop.
         logger.exception("paper deployment %s drawdown advance failed", deployment_id)
-        record_deployment_refusal(conn, deployment_id, f"unexpected {type(exc).__name__}")
+        refusal = f"unexpected {type(exc).__name__}"
+    # The refusal write is isolated the same way: if it fails, the row keeps its last state and
+    # the live gate's age bound withdraws it once the probe stops advancing it.
+    try:
+        with conn.transaction():
+            record_deployment_refusal(conn, deployment_id, refusal)
+    except Exception:
+        logger.exception("paper deployment %s drawdown refusal could not be recorded", deployment_id)
 
 
 def refresh_strategy_health(

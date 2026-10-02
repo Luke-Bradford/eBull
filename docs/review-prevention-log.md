@@ -11819,6 +11819,7 @@ neighbouring container and match it.**
   `_set_block` writes — the isolation the spec promised held for one exception class only.
 - Prevention: when a loop's contract is "one item's failure never blocks the others or the caller's later
   writes", the `except` around the per-item savepoint catches `Exception`, logs with the traceback, and records
-  a fail-closed per-item state after the rollback. A narrow catch is correct only where propagating is the
-  intended outcome — say so at the call site.
+  a fail-closed per-item state after the rollback. That state write gets its own savepoint and `except`
+  too — otherwise the refusal path is the one that aborts the caller. A narrow catch is correct only where
+  propagating is the intended outcome — say so at the call site.
 - Enforced in: `app/services/strategy_paper_runtime.py::_advance_deployment_risk`.
