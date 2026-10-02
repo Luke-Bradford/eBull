@@ -164,8 +164,9 @@ class LookFacts:
             for r in valued:
                 self.terminal.setdefault(r.lifecycle, r.end_value)
             self.endpoint_forced = row.forced
-        spy_valid = sim.valid_bar(row.spy) and row.spy is not None
-        self.spy_closes.append(row.spy.close if spy_valid and row.spy is not None else None)
+        spy = row.spy if row.spy is not None and sim.valid_bar(row.spy) else None
+        spy_valid = spy is not None
+        self.spy_closes.append(spy.close if spy is not None else None)
         self.forced_sessions += row.forced
         self.spy_invalid_sessions += not spy_valid
         self.last_session = row.session
@@ -517,8 +518,11 @@ def compute_due_looks(conn: Conn, decl: rb.PotDeclaration, *, as_of: datetime) -
             # A wind-down applied before E liquidated the books inside the window: no look (spec §9.3).
             if last is None or last < end or (wound is not None and wound < end):
                 continue
-            if not rb._policy_ok(decl):  # r3-92: the verdict runs only under the declared code
-                raise RuntimeError(f"ranking pot {decl.declaration_id}: policy drift; look {months}m not computed")
+            if not rb._policy_ok(decl):
+                # r3-92: the verdict runs only under the declared code. No raise here: the step that follows records
+                # its own ``policy_drift`` refusal and fails the run, which a raise before it would pre-empt.
+                notes.append(f"look {months}m not computed: policy drift")
+                return notes
             result = compute_look(conn, decl, months=months, t0=t0)
             conn.execute(
                 "INSERT INTO ranking_pot_looks (declaration_id, look_months, endpoint_session, kind, verdict, harm, "

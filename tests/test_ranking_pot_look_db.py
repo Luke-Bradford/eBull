@@ -58,10 +58,9 @@ def _state(conn: Conn, decl_id: int) -> tuple[str, str | None]:
     return row[0], row[1]
 
 
-def test_looks_are_stored_once_clear_look_pending_and_wind_the_trial_down(
-    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    conn = ebull_test_conn
+def _stepped_pot(conn: Conn, monkeypatch: pytest.MonkeyPatch) -> tuple[int, date, date, date]:
+    """A frozen pot with one decided snapshot at T₀, E_12 / E_24 pulled in to the first / second session after T₀,
+    N = 2, K = 3 and flat synthetic bars. Returns (declaration_id, T₀, E_12, E_24); ``conn`` is left autocommit."""
     decl_id = _frozen(conn)
     d, _ = _first_window(conn)
     t0 = sim.next_session(d)
@@ -87,6 +86,14 @@ def test_looks_are_stored_once_clear_look_pending_and_wind_the_trial_down(
         return st.SessionBars(session, {iid: FLAT for iid in ids}, prev, SPY)
 
     monkeypatch.setattr(st, "read_session_bars", bars)
+    return decl_id, t0, e12, e24
+
+
+def test_looks_are_stored_once_clear_look_pending_and_wind_the_trial_down(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    decl_id, t0, e12, e24 = _stepped_pot(conn, monkeypatch)
 
     assert st.run_step_job(conn, now=lambda: _at(t0)).stepped == 1
     assert look.look_pending(conn, decl_id, sim.next_session(e12)) == {"look_months": 12, "endpoint": e12.isoformat()}
@@ -124,6 +131,28 @@ def test_looks_are_stored_once_clear_look_pending_and_wind_the_trial_down(
     # incomplete (and two of them still hold positions, and no step has applied the wind-down).
     with pytest.raises(psycopg.errors.RaiseException, match="books_incomplete"):
         _move(conn, decl_id, "winding_down", "completed", "engine")
+
+
+def test_policy_drift_with_a_look_due_still_records_the_steps_refusal(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    decl_id, t0, e12, e24 = _stepped_pot(conn, monkeypatch)
+    with monkeypatch.context() as m:  # step T₀ and E_12 without computing the 12-month look
+        m.setattr(look, "compute_due_looks", lambda *_a, **_k: [])
+        assert st.run_step_job(conn, now=lambda: _at(t0)).stepped == 1
+        assert st.run_step_job(conn, now=lambda: _at(e12)).stepped == 1
+
+    # The look is due under drifted code: it is not computed, and the start-of-fire look pass does not pre-empt the
+    # step's own `policy_drift` refusal, which is recorded before the run fails.
+    monkeypatch.setattr(rb, "_policy_ok", lambda _decl: False)
+    with pytest.raises(RuntimeError, match="policy_drift"):
+        st.run_step_job(conn, now=lambda: _at(e24))
+    refusals = conn.execute(
+        "SELECT session, reason FROM ranking_pot_step_refusals WHERE declaration_id = %s", (decl_id,)
+    ).fetchall()
+    assert refusals == [(e24, "policy_drift")]
+    assert conn.execute("SELECT count(*) FROM ranking_pot_looks").fetchone() == (0,)
 
 
 def test_a_harm_look_winds_down_and_a_missing_event_holds_look_pending(
