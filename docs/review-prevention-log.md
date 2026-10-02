@@ -11798,3 +11798,15 @@ neighbouring container and match it.**
   are classified before "failed", so they are never retried at all.
 - Enforced in: `scripts/ai_trial_fund_budget_fixture.py::probe_walk`/`classify` and
   `tests/test_3515_budget_fixture.py::test_a_discarded_larger_attempt_still_counts_in_the_monotone_check`.
+
+### A live trial's hashed module is frozen code — a refactor that edits it halts the trial (#3541)
+
+- Failure: #3574 moved the drawdown gate onto the engine pot at five sites, one of which is
+  `ai_trial_start_gate.py`. That file is in v1's `POLICY_MODULES`, so the tree's `policy_hash` stopped matching
+  live declaration 16 and every v1 decision run from the next reload would refuse `policy_drift`. Every existing
+  test compared the tree's hash with itself, and `scripts.ai_trial_policy_guard` is run only by fund-v1 slices.
+- Prevention: before editing a shared call site, check it against every live declaration's hashed module list
+  (`ai_trial_policy.POLICY_MODULES`, `ranking_pot_policy.POLICY_MODULES` once frozen). A frozen file keeps its
+  frozen semantics; a cross-cutting change routes around it, and anything it imports must stay call-compatible.
+- Enforced in: `tests/test_ai_trial_freeze.py::test_the_tree_still_runs_the_policy_the_live_v1_declaration_froze`
+  (pins declaration 16's stored hash; fast tier, so the pre-push hook refuses the edit).
