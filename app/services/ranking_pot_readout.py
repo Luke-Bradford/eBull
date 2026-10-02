@@ -490,7 +490,12 @@ class ReadoutFacts:
         self.universe_exposure.add(self.universe_session)
 
     def _exposures(self) -> dict[str, Any]:
-        """§9.4: the shadow, the controls' median (each control's own window value first) and R_t."""
+        """§9.4: the shadow, the controls' median (each control's own window value first) and R_t. Its own
+        ``sim.CTX``, not only the caller's (review nitpick, #3570)."""
+        with localcontext(sim.CTX):
+            return self._exposures_ctx()
+
+    def _exposures_ctx(self) -> dict[str, Any]:
         windows = [s.window() for s in self.control_exposure if s.capital]
         sectors = sorted({k for s in self.control_exposure for k in s.sector})
         controls: dict[str, Any] = {
