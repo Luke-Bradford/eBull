@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
+from app.services import ranking_pot_exec_readout as xr
 from app.services import ranking_pot_executor as px
 from app.services import ranking_pot_intent as pi
 from app.services.ranking_pot_policy import RANKING_POT_POLICY_HASH
@@ -253,6 +254,27 @@ def test_an_entry_submits_from_its_slot_and_a_reentry_waits_for_the_booking(
         (signal2,),
     ).fetchone()
     assert wealth == (Decimal("47.50"),)
+    conn.commit()
+
+    # §9.4 slice 6c-ii-c-2b: the readout's executed section over these rows. No step job ran, so no shadow side.
+    out = xr.executed(conn, decl_id, t2, {})
+    assert out["activated"] is True and out["nav_vs_spy"]["pot_capital"] == "1000.00"
+    per = out["vs_shadow"]["per_rebalance"]
+    assert [p["attempt_id"] for p in per] == [a1, a2] and per[0]["shadow"] is None
+    (first,), (second,) = per[0]["entries"], per[1]["entries"]
+    # Trade 1 owns position 2842001, whose open event never landed; trade 2 is submitted with no position yet.
+    assert (first["status"], Decimal(first["ask"]), first["fill_reason"]) == (
+        "closed",
+        Decimal(100),
+        "open_event_missing",
+    )
+    assert (second["status"], Decimal(second["amount"]), second["fill_reason"]) == (
+        "entry_pending",
+        Decimal("47.50"),
+        "no_position",
+    )
+    assert out["vs_shadow"]["statuses"] == {"closed": 1, "entry_pending": 1}
+    conn.rollback()
 
 
 def test_refusals_persist_and_the_submission_row_binds_its_own_authority(
