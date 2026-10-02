@@ -26,6 +26,9 @@ quote rule moves with it: ``as_of`` is the time read just after the snapshot tra
   snapshot and each book's ledger stepped through the last completed session (r3-41 by construction). Their
   decisions are a pure function of those two, so nothing is chosen after publication.
 
+**Looks (§9.3, slice 6b).** Before the bar wait and scoring, a target session after a look endpoint whose look is not
+stored (or whose wind-down event is not yet written) refuses ``look_pending`` (``ranking_pot_look.look_pending``).
+
 **Scoring (§4 step 1).** ``compute_rankings`` on its own connection, committed before the snapshot transaction opens
 (r3-80); the job runs on the ``db`` source lane, the scheduled scorer's, so the two never overlap. Each name's thesis
 provenance is the one the scoring call consumed (``ScoreResult.thesis_used``, r3-95), never re-read.
@@ -43,6 +46,7 @@ from typing import Any, Final, Literal
 
 import psycopg
 
+from app.services import ranking_pot_look as look
 from app.services import ranking_pot_rebalance as rb
 from app.services.market_calendar import latest_completed_us_session
 from app.services.scoring import compute_rankings
@@ -141,6 +145,15 @@ def run_rebalance_job(
             f"ranking pot {decl.declaration_id} is {decl.state}: executed-book decisions are slice 5's, so this "
             "build refuses to rebalance outside shadow_only"
         )
+    pending = look.look_pending(conn, decl.declaration_id, due.target_session)
+    if pending is not None:
+        # §9.3: no rebalance targets a session after a look endpoint until that look is stored (and its wind-down,
+        # if any, written). Both only ever clear, so this pre-score check cannot go stale in the pass direction.
+        with conn.transaction():
+            attempt = rb.record_refused(
+                conn, decl, due, rb.Refused("look_pending", pending), as_of=as_of, scored_at=None
+            )
+        return JobResult(f"target {due.target_session}: refused look_pending ({pending})", attempt, skipped)
     if phase == "waiting":
         barred, tradable = rb.bars_ready(conn, decl, as_of=as_of)
         if not (tradable > 0 and Fraction(barred, tradable) >= rb.BAR_COVERAGE_MIN):

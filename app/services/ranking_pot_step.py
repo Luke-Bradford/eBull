@@ -3,7 +3,8 @@
 Spec ``docs/proposals/execution/2026-10-01-2842-ranking-pot-v1.md`` §9.1 ("The step job" paragraph) and §4 (**): the
 shadow (book 0) and the K order-reassignment controls (books 1..K) are advanced one NYSE session at a time from the
 stored bars, and each published ``decided`` snapshot is applied to every book before its target session's step.
-Looks, the endpoint valuation, ``look_pending``, harm and the readout are slice 6b.
+After each committed step (and at the start of each fire) the §9.3 looks are computed and the state reconciled
+(``ranking_pot_look``, slice 6b).
 
 Writes: one ``ranking_pot_steps`` row per stepped session and every book's ``ranking_pot_book_checkpoints`` row, in
 one transaction (``sql/447``).
@@ -55,6 +56,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.services import ranking_pot as pot
+from app.services import ranking_pot_look as look
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_sim as sim
 from app.services.ai_trial_pack import canonical_sha256
@@ -425,13 +427,7 @@ class ControlColumns:
         return out
 
 
-def session_sum(records: Sequence[sim.PositionSession]) -> Decimal:
-    """Σ net return of one session's records, added in the simulator's order under its context."""
-    total = Decimal(0)
-    with localcontext(sim.CTX):
-        for r in records:
-            total += r.net_return()
-    return total
+session_sum = sim.session_sum
 
 
 def _records_json(records: Sequence[sim.PositionSession]) -> list[list[Any]]:
@@ -838,6 +834,8 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
 
     stepped = 0
     notes: list[str] = []
+    # §9.3 looks: first repair a look committed without its state event or a step committed without its look.
+    _looks(conn, decl, now(), notes)
     while True:
         with conn.transaction():
             outcome = step_next_session(conn, decl, as_of=now(), first=first, donor=donor)
@@ -852,7 +850,19 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
         if not outcome.stepped:
             break
         stepped += 1
+        _looks(conn, decl, now(), notes)
     return StepJobResult("; ".join(notes), stepped)
+
+
+def _looks(conn: Conn, decl: rb.PotDeclaration, as_of: datetime, notes: list[str]) -> None:
+    """Reconcile the state, compute every due look (each its own transaction), reconcile again (spec §9.3)."""
+    for note in (look.reconcile_state(conn, decl.declaration_id), *look.compute_due_looks(conn, decl, as_of=as_of)):
+        if note is not None:
+            notes.append(note)
+            logger.info("ranking pot look: %s", note)
+    if (note := look.reconcile_state(conn, decl.declaration_id)) is not None:
+        notes.append(note)
+        logger.info("ranking pot look: %s", note)
 
 
 __all__ = [

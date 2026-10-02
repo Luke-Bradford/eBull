@@ -809,7 +809,8 @@ class Prepared:
 
 @dataclass(frozen=True)
 class Refused:
-    refusal: InputRefusal
+    #: A §4 step-2 gate, or the §9.3 ``look_pending`` refusal the rebalance job records before scoring.
+    refusal: InputRefusal | Literal["look_pending"]
     detail: dict[str, Any]
 
 

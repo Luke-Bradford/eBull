@@ -450,6 +450,16 @@ def t_statistic(records: Iterable[PositionSession]) -> Decimal | None:
         return sum(returns, Decimal(0)) / len(returns)
 
 
+def session_sum(records: Sequence[PositionSession]) -> Decimal:
+    """Σ net return of one session's records, added in the simulator's order under ``CTX`` (the stored session sum
+    every book's T is built from)."""
+    total = Decimal(0)
+    with localcontext(CTX):
+        for r in records:
+            total += r.net_return()
+    return total
+
+
 def liquidation_charged(state: BookState, endpoint_records: Sequence[PositionSession]) -> tuple[PositionSession, ...]:
     """The endpoint session's records with every still-open position valued at ``value × (1 − h_exit)`` (r3-16).
     A separate valuation: the state and the stored ledger are unchanged (r3-28)."""
@@ -555,6 +565,7 @@ __all__ = [
     "new_book",
     "next_session",
     "p_values",
+    "session_sum",
     "step",
     "t_statistic",
     "valid_bar",
