@@ -171,7 +171,7 @@ _STEP_SQL: Final = """
 """
 
 _POSITIONS_SQL: Final = """
-    SELECT l.lifecycle_id, l.slot, l.instrument_id, i.symbol, l.ticket, l.ticket_sha256, a.target_session,
+    SELECT l.lifecycle_id, l.slot, l.instrument_id, i.symbol, a.target_session,
            fd.verdict AS funding_verdict, fd.reason_code AS funding_reason,
            t.strategy_trade_id, t.status AS trade_status,
            st.exit_session, st.reason AS exit_reason,
@@ -221,6 +221,13 @@ _MARKS_SQL: Final = """
 """
 
 _USD_CURRENCY_IDS: Final = sorted(k for k, v in DOCUMENTED_ACCOUNT_CURRENCIES.items() if v == "USD")
+if not _USD_CURRENCY_IDS:  # every mark would read as unmarked, silently
+    raise RuntimeError("DOCUMENTED_ACCOUNT_CURRENCIES names no USD account currency")
+
+#: Tickets (the large column) are read only for the rows the page shows.
+_TICKETS_SQL: Final = """
+    SELECT lifecycle_id, ticket, ticket_sha256 FROM ranking_pot_exec_lifecycles WHERE lifecycle_id = ANY(%s)
+"""
 
 
 def _pnl(conn: Conn, trade_ids: list[int]) -> dict[int, tuple[Decimal | None, Decimal | None, date | None]]:
@@ -254,16 +261,29 @@ def _pnl(conn: Conn, trade_ids: list[int]) -> dict[int, tuple[Decimal | None, De
 def _positions(conn: Conn, declaration_id: int, ny_today: date) -> tuple[list[Position], list[Position]]:
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(_POSITIONS_SQL, (declaration_id,)).fetchall()
-    pnl = _pnl(conn, [int(r["strategy_trade_id"]) for r in rows if r["strategy_trade_id"] is not None])
-    held: list[Position] = []
-    recent: list[Position] = []
-    for r in rows:
+    kept: list[tuple[dict[str, Any], Status]] = []
+    others = 0
+    for r in rows:  # newest first
         status = classify(
             funding_verdict=r["funding_verdict"],
             trade_status=r["trade_status"],
             target_session=r["target_session"],
             ny_today=ny_today,
         )
+        if status not in HELD:
+            if others >= RECENT_LIMIT:
+                continue
+            others += 1
+        kept.append((r, status))
+    tickets = {
+        int(t[0]): (t[1], t[2])
+        for t in conn.execute(_TICKETS_SQL, ([int(r["lifecycle_id"]) for r, _ in kept],)).fetchall()
+    }
+    pnl = _pnl(conn, [int(r["strategy_trade_id"]) for r, _ in kept if r["strategy_trade_id"] is not None])
+    held: list[Position] = []
+    recent: list[Position] = []
+    for r, status in kept:
+        ticket, ticket_sha256 = tickets[int(r["lifecycle_id"])]
         realized, unrealized, marked_on = (
             pnl.get(int(r["strategy_trade_id"]), (None, None, None))
             if r["strategy_trade_id"] is not None
@@ -293,13 +313,10 @@ def _positions(conn: Conn, declaration_id: int, ny_today: date) -> tuple[list[Po
             realized_pnl_usd=realized,
             unrealized_pnl_usd=unrealized,
             marked_on=marked_on,
-            ticket=dict(r["ticket"]),
-            ticket_verified=canonical_sha256(r["ticket"]) == r["ticket_sha256"],
+            ticket=dict(ticket),
+            ticket_verified=canonical_sha256(ticket) == ticket_sha256,
         )
-        if status in HELD:
-            held.append(position)
-        elif len(recent) < RECENT_LIMIT:
-            recent.append(position)
+        (held if status in HELD else recent).append(position)
     held.sort(key=lambda p: p.slot)
     return held, recent
 

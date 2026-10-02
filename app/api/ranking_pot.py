@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from app.api.ai_trial import JobFireResponse
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
+from app.services.ranking_pot_exec import Status
 from app.services.ranking_pot_status import load_readout, load_status
 
 router = APIRouter(
@@ -70,7 +71,7 @@ class PositionResponse(BaseModel):
     slot: int
     instrument_id: int
     symbol: str | None
-    status: str
+    status: Status
     trade_status: str | None
     target_session: date
     funding_reason: str | None
