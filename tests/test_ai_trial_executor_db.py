@@ -18,6 +18,7 @@ import pytest
 from app.providers.broker import (
     BrokerAccountRiskSnapshot,
     BrokerCostComponent,
+    BrokerDirectPositionInvestment,
     BrokerEligibilityResponse,
     BrokerInstrumentEligibility,
     BrokerLeverageConfig,
@@ -54,7 +55,14 @@ def _enable_trading(conn: Conn, *, kill: bool = False) -> None:
     conn.commit()
 
 
-def _broker(instrument_id: int, *, equity: str = "1000", spread_value: str = "0.5") -> MagicMock:
+def _broker(
+    instrument_id: int,
+    *,
+    equity: str = "1000",
+    spread_value: str = "0.5",
+    held: tuple[BrokerDirectPositionInvestment, ...] = (),
+) -> MagicMock:
+    """``held``: the engine's already-owned positions, which the engine-pot drawdown prices (#3541)."""
     broker = MagicMock(spec=BrokerProvider)
     broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
         available_cash=Decimal("600"),
@@ -65,6 +73,7 @@ def _broker(instrument_id: int, *, equity: str = "1000", spread_value: str = "0.
         observed_at=NOW,
         account_currency_id=1,
         raw_payload={},
+        direct_positions=held,
     )
     broker.check_instrument_eligibility.return_value = BrokerEligibilityResponse(
         currency="USD",

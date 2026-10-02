@@ -15,6 +15,7 @@ import psycopg
 import pytest
 
 from app.providers.broker import (
+    BrokerDirectPositionInvestment,
     BrokerOrderDetail,
     BrokerPortfolio,
     BrokerPosition,
@@ -82,6 +83,13 @@ def _opened_arm_leg(
         raw_payload={},
     )
     assert reconcile_strategy_order(conn, broker=broker, order_id=submitted.order_id).state == "resolved"
+    # Claimed at the fill, not at the wall clock: the engine-pot reader's membership is
+    # point-in-time (#3541), and `NOW` is a fixed instant the real clock overtakes.
+    conn.execute(
+        "UPDATE strategy_position_ownership SET claimed_at = %s WHERE broker_position_id = %s",
+        (filled_at, _POSITION_ID),
+    )
+    conn.commit()
     broker.get_portfolio.return_value = BrokerPortfolio(
         positions=(_position(open_at=filled_at),), available_cash=Decimal("500"), raw_payload={}
     )
@@ -93,6 +101,25 @@ def _opened_arm_leg(
 
     broker.close_demo_strategy_position.side_effect = _close_position
     return submitted.strategy_trade_id, broker
+
+
+def _arm_held() -> tuple[BrokerDirectPositionInvestment, ...]:
+    """The arm leg's open position as the broker snapshot reports it, flat at its entry."""
+    return (
+        BrokerDirectPositionInvestment(
+            position_id=_POSITION_ID,
+            instrument_id=ARM_INSTRUMENT,
+            is_buy=True,
+            units=Decimal("1.25"),
+            amount=Decimal("125"),
+            unrealized_pnl=Decimal("0"),
+            market_value=Decimal("125"),
+            is_partially_altered=False,
+            close_rate=Decimal("100"),
+            close_conversion_rate=Decimal("1"),
+            asset_currency_id=1,
+        ),
+    )
 
 
 def _deadline(conn: Conn, trade_id: int) -> tuple[str, date | None]:
@@ -224,7 +251,7 @@ def test_the_schema_keeps_the_deadline_trial_only_immutable_and_present_once_ope
     conn.commit()
     monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", uuid4)
     control = execute_trial_signal(
-        conn, broker=_broker(_control_instrument(conn, signal[0])), signal_id=signal[0], now=NOW
+        conn, broker=_broker(_control_instrument(conn, signal[0]), held=_arm_held()), signal_id=signal[0], now=NOW
     ).strategy_trade_id
     assert control is not None
     with pytest.raises(psycopg.errors.RaiseException, match="without an exit deadline"):

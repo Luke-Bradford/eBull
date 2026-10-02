@@ -21,7 +21,7 @@ from app.services.ai_trial_pair_lifecycle import (
 )
 from app.services.market_regime import Regime
 from app.services.market_regime_provider import MarketRegimeProvider
-from tests.test_ai_trial_deadline_db import _opened_arm_leg
+from tests.test_ai_trial_deadline_db import _arm_held, _opened_arm_leg
 from tests.test_ai_trial_executor_db import _broker, _control_instrument
 from tests.test_ai_trial_intent_db import NOW, _published_pair
 
@@ -49,7 +49,7 @@ def test_a_filled_leg_and_an_uncertain_leg_block_the_pair(
     conn = ebull_test_conn
     _opened_arm_leg(conn, monkeypatch)
     control_signal = _control_signal(conn, monkeypatch)
-    broker = _broker(_control_instrument(conn, control_signal))
+    broker = _broker(_control_instrument(conn, control_signal), held=_arm_held())
     broker.place_demo_strategy_order.side_effect = BrokerOrderSubmissionUncertain("timeout")
     assert execute_trial_signal(conn, broker=broker, signal_id=control_signal, now=NOW).verdict == (
         "submission_uncertain"
@@ -82,7 +82,7 @@ def test_a_refused_leg_breaks_the_pair_with_its_refusal_code(
     conn = ebull_test_conn
     _opened_arm_leg(conn, monkeypatch)
     control_signal = _control_signal(conn, monkeypatch)
-    broker = _broker(_control_instrument(conn, control_signal))
+    broker = _broker(_control_instrument(conn, control_signal), held=_arm_held())
     # The next day: the decision's target session has passed.
     refused = execute_trial_signal(conn, broker=broker, signal_id=control_signal, now=NOW + timedelta(days=1))
     assert refused.verdict == "rejected"
