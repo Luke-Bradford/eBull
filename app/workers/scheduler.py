@@ -591,6 +591,8 @@ JOB_AI_TRIAL_EXECUTE = "ai_trial_execute"
 JOB_AI_TRIAL_FUND_DECISION_RUN = "ai_trial_fund_decision_run"
 # #2842 — ranking-pot-v1's monthly rebalance: its own scoring run and the published input snapshot.
 JOB_RANKING_POT_REBALANCE = "ranking_pot_rebalance"
+# #2842 — ranking-pot-v1's online step: the shadow and the K controls advanced one session at a time.
+JOB_RANKING_POT_STEP = "ranking_pot_step"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -896,6 +898,9 @@ AI_TRIAL_FUND_DECISION_FIRE: Final = dt_time(23, 45)
 #: there; ``tests/test_ranking_pot_job.py`` pins the two equal). Kept here so importing the scheduler
 #: does not import the pot's policy hash.
 RANKING_POT_FIRE_MINUTE: Final = 40
+#: #2842 slice 6a — the step job's hourly minute. Not policy-relevant: a session is stepped once it is due and its
+#: gate passes, at whichever fire first sees that; the minute only keeps it clear of the rebalance (:40) on the lane.
+RANKING_POT_STEP_FIRE_MINUTE: Final = 10
 
 
 def ai_trial_decision_window_open(now: datetime) -> bool:
@@ -2830,6 +2835,22 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=RANKING_POT_FIRE_MINUTE),
         # A late fire is the next hourly fire's work: the body re-derives the window and the month.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_RANKING_POT_STEP,
+        display_name="Ranking pot daily step (#2842)",
+        # The rebalance's lane, so a step never overlaps the publication it may consume.
+        source="db",
+        description=(
+            "Hourly — ranking-pot-v1's online books: from 09:00 UTC after each NYSE session, advances the shadow "
+            "and the 9,999 controls one session from that session's stored bars, applying a published monthly "
+            "rebalance first when one targets the session. Refuses (and retries) when too many bars are missing. "
+            "Does nothing before the first decided rebalance."
+        ),
+        cadence=Cadence.hourly(minute=RANKING_POT_STEP_FIRE_MINUTE),
+        # The body steps every due session in order, so a missed fire is the next fire's work.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -7022,6 +7043,18 @@ def ranking_pot_rebalance() -> None:
         tracker.row_count = (1 if result.attempt_id is not None else 0) + result.skipped_months
         tracker.note = result.note
         logger.info("%s: %s", JOB_RANKING_POT_REBALANCE, result.note)
+
+
+def ranking_pot_step() -> None:
+    """ranking-pot-v1's online step (#2842 spec §9.1; ``app/services/ranking_pot_step.py``)."""
+    from app.services.ranking_pot_step import run_step_job
+
+    with _tracked_job(JOB_RANKING_POT_STEP) as tracker:
+        with connect_job(autocommit=True) as conn:
+            result = run_step_job(conn)
+        tracker.row_count = result.stepped
+        tracker.note = result.note
+        logger.info("%s: %s", JOB_RANKING_POT_STEP, result.note)
 
 
 def _ai_trial_decision_creds(job_name: str) -> tuple[str, str] | None:
