@@ -1,6 +1,6 @@
 # #3546 — readiness contract for scheduled capital pipelines (gap register P8)
 
-Status: contract + audit (slice 1, gap A); slice 2 = gap B; slice 3 = gap C window A + D; F (paper); H. Later: C re-send (probe-gated), E, G.
+Status: contract + audit (slice 1, gap A); slice 2 = gap B; slice 3 = gap C window A + D; F (paper); H. G (edit marker). Later: C re-send (probe-gated), E.
 
 ## Contract
 
@@ -30,7 +30,7 @@ broker state. Every property needs a named test, and a cell without one is marke
 | `ai_trial_decision_run` / `_fund_` | ⚠ **E**: bars are checked pre-claim (`ai_trial_jobs.py:390-399`); account risk, declaration validity, step 1 and pack are checked after `claim_run` (`ai_trial_run.py:664-715`), so a transient account-risk outage consumes the session | ✅ `ai_trial_runs_one_per_session` (sql/432:201) | ✅ publish in one transaction; `run_failed` / `publish_failed` recorded | ⚠ a crashed `claimed` row is swept only by a later run that reaches the sweep; same-session fires return `duplicate` first (`ai_trial_jobs.py:383`). Session consumed either way | n/a |
 | `ai_trial_execute` | ⚠ **F** | ✅ `strategy_funding_decisions.signal_id` UNIQUE (sql/281:113) | ✅ per-leg try/except (`ai_trial_jobs.py:489-496`) | ✅ pre-call crash released (slice 3); ⚠ transport-uncertain contained, unbounded (**C** re-send) | ✅ entry |
 | `ranking_pot_execute` | ⚠ **F** (deferrals write nothing; other refusals consume) | ✅ funding-decision UNIQUE plus `ranking_pot_exec_submissions` | ✅ per-entry try/except (`ranking_pot_executor.py:507-516`) | ✅ pre-call crash released (slice 3); ⚠ transport-uncertain contained, unbounded (**C** re-send) | ✅ entry |
-| `strategy_paper_cycle` | ⚠ **F** | ✅ funding-decision UNIQUE | ❌ **A (fixed)**, ⚠ **B** | ✅ pre-call crash released (slice 3); ⚠ transport-uncertain contained, unbounded (**C** re-send; reached by `reconcile_backlog` every fire, lookup only) | ✅ entry; ⚠ **G** edits/closes |
+| `strategy_paper_cycle` | ⚠ **F** | ✅ funding-decision UNIQUE | ❌ **A (fixed)**, ⚠ **B** | ✅ pre-call crash released (slice 3); ⚠ transport-uncertain contained, unbounded (**C** re-send; reached by `reconcile_backlog` every fire, lookup only) | ✅ entry; ✅ edits (**G**, pre-call marker); closes #2979 |
 | `ranking_pot_rebalance` | ✅ gates in `prepare` (`ranking_pot_rebalance.py:845-885`) are persisted as refused rows by the job (`ranking_pot_job.py:204-206`) | ✅ `..._one_per_month` over decided/skipped (sql/446:89); refusals append by design | ✅ decided plus book in one transaction | ✅ next hourly fire | n/a |
 | `ranking_pot_step` | ✅ bar gate; forced after 10 sessions (stated exception) | ✅ PK (sql/447:59) | ✅ one transaction per session | ✅ | n/a |
 | `core_rebalance_execution` | ✅ preflight refusals persist on the intent; daily, no catch-up (stated: waits a session) | ✅ `strategy_trades_core_rebalance_intent_id_key` (sql/349:83) | ✅ distinct rejected / uncertain outcomes | contained: a lookup miss blocks new authority until attended release (`strategy_core_executor.py:393+`, `tests/test_2949_core_restart_recovery_db.py`); unbounded | ✅ |
@@ -107,7 +107,41 @@ broker state. Every property needs a named test, and a cell without one is marke
   - **Bound and residual:** the selector requires `f.valid_through >= observed_at`, so a signal deferred until its forecast lapses is no longer selected and stays undecided with no preflight row, as one the cycle's limit never reached already does. Its only trace is the job notes' `deferred=` counts. No paper reader counts undecided signals (`strategy_entry_preflights` is read only by `ai_trial_readout.py`).
   - **Not changed, by their specs:** the #3471 trial (§8: "each executor refusal is persisted and final"; changes only with E under a new version) and the ranking pot (r3-119: one attempt per rebalance; `ranking_pot_executor.py` is hashed). Both keep calling the shared `_persist_rejection`, which is unchanged.
   - Dev DB at `5bc3dc1b`: `strategy_funding_decisions` held 2 rejected rows, both `quote_spread_flagged`; no transient code had fired. The only paper deployments are the trial legs (8, 9), so the paper fix has no live consumer yet.
-- **G — R5 for edits and closes.** Position edits use operation records, not `X-Request-Id` lookup (`strategy_position_manager.py`, etoro-api skill §position boundary). This needs its own assessment.
+- **G — R5 for edits and closes.** Position edits use operation records, not `X-Request-Id` lookup (`strategy_position_manager.py`, etoro-api skill §position boundary).
+  - **Assessment (2026-10-02, at `096dadb9`).** The skill's rule is: persist the UUID first; on lost identity, re-sync once; accept an exact landed SL/TP; anything else is `reconcile_required`, never re-keyed. The code follows it.
+    - Closes have the #2979 pre-call marker (`mark_close_submitting`). An `intent_persisted` close is provably unsent and is released as `close_never_submitted`. A `submitting` close stays contained.
+    - Uncertain transport (`broker_edit_uncertain`, `broker_close_uncertain`) is contained.
+    - A `reconcile_required` trade still loads for management (`_LOAD_OWNED_SQL`, `t.status IN ('open','closing','reconcile_required')`).
+  - **Defect: edits have no pre-call marker.** `_persist_edit_intent` commits `intent_persisted`, and `_submit_edit` calls the PATCH directly. So a crash before the PATCH and a crash after it leave the same row.
+    - `_resume_operation` therefore treats every unlanded `intent_persisted` edit as lost identity. It writes the operation and the trade `reconcile_required` (`crash_before_submission_identity`).
+    - A `fixed_exit_repair`'s desired levels are a pure function of entry, so they are stable. `_prior_same_edit` treats a `reconcile_required` prior as blocking. The repair the position needs is therefore refused on every later visit. The streak alerts after 2 visits, and the position stays unprotected until an operator acts.
+    - This applies to the SL/TP-on-every-position rule.
+  - **Fix (this slice): the edit analogue of #2979.**
+    - **Marker.** `_submit_edit` calls `mark_edit_submitting` before the PATCH. It refuses a non-idle connection, so the commit is top-level and not a savepoint, and it requires exactly one row. Any failure raises with no call. Acceptance then moves `submitting → submitted`, and that also requires exactly one row.
+    - **Provenance (`sql/462`).** `edit_marker_enforced` is set TRUE by `_persist_edit_intent` only. Legacy edits and all closes stay FALSE and keep the old lost-identity treatment. A pre-marker row that sent its PATCH is therefore never re-classified as unsent.
+    - **Release.** On resume, a marked edit at `intent_persisted` whose levels did not land is `rejected` with `edit_never_submitted`. The trade is untouched, and `_resume_operation` returns `None`, so the same visit carries on normally: gap detection, trial and pot exits, the ratchet against the current bar, the repair streak, missing-position handling. A landed one is `applied`, as before.
+    - **Unblock, both layers.** `_prior_same_edit` excludes `rejected`+`edit_never_submitted` in its WHERE, before `LIMIT 1`, so an older matching blocker still blocks. The comparison is NULL-safe. `sql/462` rebuilds `idx_strategy_position_operation_material_identity` (sql/406) to exclude the same rows, as it already excludes `applied`.
+    - A `submitting` edit keeps today's treatment: landed → `applied`, otherwise `reconcile_required`.
+  - **Tests** (`tests/test_strategy_position_manager.py`):
+    - a marked unsent edit is released and repaired afresh in the same visit under a new UUID, with the trade staying `open`;
+    - `submitting` stays contained;
+    - at PATCH time the row is `submitting` on an idle connection;
+    - an older `broker_edit_uncertain` at the same levels still blocks behind a released row;
+    - the existing legacy test (marker FALSE → `reconcile_required`) is unchanged.
+  - **Not changed:**
+    - `broker_edit_uncertain` stays `reconcile_required`. It blocks only the exact same edit (levels plus bar); per the skill it is never re-keyed.
+    - The signal arm's `rejected`-prior wedge (`_prior_same_edit` docstring) is a separate refusal-policy question.
+    - A crash after the marker commits but before the call leaves `submitting`. That is contained, the same window closes have.
+    - A `submitting` close stays unresolved (#2979).
+    - `mark_close_submitting` still does not check its row count.
+  - Dev count at `096dadb9`: `select count(*) from strategy_position_operations where operation_type<>'close' and status in ('intent_persisted','submitting','submitted')` = 0. All 6 operations ever written are `applied`, so there are no stuck rows to recover.
+  - **Codex ckpt-1 (22 findings) — dispositions:**
+    - **Applied:** #2 (acceptance keyed on `submitting`); #3–#6 (provenance column instead of a dev count; the "duplicate PATCH is harmless" argument is withdrawn); #8–#12, #14, #15 (release falls through instead of returning); #13 (a marker failure raises; slice B's per-item containment records it, and the row stays `intent_persisted` and is released on the next visit); #16 (containment wording narrowed); #17, #18 (exclusion in WHERE, NULL-safe); #19 (idle-connection check); #22 (noted above).
+    - **Rebutted:**
+      - #1: `grep -rn edit_demo_strategy_position app` shows one caller, `_submit_edit`, and `tests/test_unattended_broker_mutation_guard.py` asserts no script reaches it.
+      - #7: no stuck rows exist (count above).
+      - #20: both locks are session-level `pg_advisory_lock` (`_position_lock`, `_paper_allocator_lock`), so they span the marker commit.
+      - #21: inherent to any client-side marker, and stated above.
 - **H — promotion fire idempotency and isolation.**
   - **R3, fixed.** `run_autonomous_promotion_cycle` caught only `_Refused` and `_AuthorityRevoked`, so any other exception in one strategy (a DB error, a bug in evidence assembly) ended the cycle and skipped every strategy after it in sorted order. Now a fault rolls back that strategy's own transaction, is logged and listed in `report.errors`, and the cycle continues. The job records the run `degraded` (`errors={"strategy_fault": n}`) and the note carries `faulted=<ids>`. If every strategy visited faulted, the last fault is re-raised, so the run fails with the cause; this keeps the job's prior rule that a no-op must never read as success.
   - **R2, no change — the ⚠ was a documented decision.** The idempotency unit is the transition, not the fire. `idx_strategy_promotions_one_successor` (sql/281:46) lets each stage be departed once, and every action re-runs `advance_strategy`'s evidence gates under the per-strategy lock. "At most one step per cycle" is stated in the cycle's docstring as hygiene, not a safety bound. The elapsed-time bound that holds is `prospective_assessment_predates_forward_observation`. So a re-fire that advances a further stage is a fresh evidence-gated decision, not a duplicate.
