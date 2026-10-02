@@ -6999,33 +6999,62 @@ def strategy_paper_cycle() -> None:
             logger.exception("strategy_paper_cycle: halt feed refresh failed; entries withheld this cycle")
             halt_snapshot = None
             halt_failure = str(exc) if isinstance(exc, HaltFeedError) else type(exc).__name__
-        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
+        # #3546 gap B: the AI-trial pair events and loss halts run on their OWN connection,
+        # after the cycle whatever it did. The cycle contains its per-item failures; one that
+        # still escapes (or a connection it broke) must not also skip the halts. Its
+        # exception is re-raised afterwards, so the run is still recorded as failed.
+        cycle_failure: BaseException | None = None
+        result = None
+        # The try spans the provider context too: its construction or teardown failing must
+        # not skip the halts either (Codex ckpt-2).
+        try:
+            with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
+                with connect_job() as conn:
+                    result = run_strategy_paper_cycle(conn, broker=broker, entries=halt_snapshot is not None)
+        except Exception as exc:
+            logger.exception("strategy_paper_cycle: cycle failed; AI-trial halts still run")
+            cycle_failure = exc
+        # Both helpers contain their own failures; this catches the connection itself, which
+        # would otherwise replace the cycle's exception with its own. Recorded as `error`.
+        pair_events: int | None = None
+        trial_halts: str | None = None
+        try:
             with connect_job() as conn:
-                result = run_strategy_paper_cycle(conn, broker=broker, entries=halt_snapshot is not None)
                 pair_events = _record_trial_pair_lifecycle(conn)
                 trial_halts = _enforce_trial_halts(conn)
+        except Exception:
+            logger.exception("strategy_paper_cycle: AI-trial halt connection failed")
+        if cycle_failure is not None:
+            raise cycle_failure
+        if result is None:
+            raise RuntimeError("strategy paper cycle returned no result")
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
         halt_note = (
             f"error ({halt_failure}; entries withheld)"
             if halt_snapshot is None
             else halt_snapshot.source_pub_at.isoformat()
         )
+        management = ",".join(f"{state}:{n}" for state, n in sorted(result.management.items())) or "none"
         tracker.note = (
-            f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
-            f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
+            f"reconciled={result.reconciled_orders} managed={result.managed_positions} ({management}) "
+            f"evaluated={result.evaluated_signals} "
+            f"active_blocks={'error' if result.active_health_blocks is None else result.active_health_blocks} "
             f"trial_pair_events={'error' if pair_events is None else pair_events} "
             f"trial_halts={'error' if trial_halts is None else trial_halts} "
             f"halt_source_pub_at={halt_note}"
         )
-        errors = {
-            name: 1
-            for name, failed in (
-                ("halt_feed_refresh", halt_snapshot is None),
-                ("trial_pair_lifecycle", pair_events is None),
-                ("trial_halts", trial_halts is None),
-            )
-            if failed
-        }
+        errors = dict(result.errors)
+        errors.update(
+            {
+                name: 1
+                for name, failed in (
+                    ("halt_feed_refresh", halt_snapshot is None),
+                    ("trial_pair_lifecycle", pair_events is None),
+                    ("trial_halts", trial_halts is None),
+                )
+                if failed
+            }
+        )
         if errors:
             tracker.progress = JobProgress(errors=errors)
 
