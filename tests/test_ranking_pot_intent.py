@@ -153,3 +153,18 @@ def test_the_execute_job_is_hourly_on_the_trial_lane_and_inert_before_its_window
         result = run_pot_execution(conn, broker=MagicMock(), refresh_halts=MagicMock(), clock=lambda at=at: at)
         assert (result.session_open, result.note) == (False, "session_closed")
     conn.execute.assert_not_called()
+
+
+def test_the_loss_check_runs_every_in_session_fire_and_entries_wait_for_15_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from app.services import ranking_pot_executor as px
+
+    calls: list[object] = []
+    monkeypatch.setattr(px, "evaluate_losses", lambda conn, *, broker: calls.append(broker) or {7: "ok"})
+    monkeypatch.setattr(px, "due_pot_entries", MagicMock(side_effect=AssertionError("no entries before 15:00")))
+    # 14:40 UTC on 2026-11-02 (EST): the session is open, entries are not yet due.
+    at = datetime(2026, 11, 2, 14, 40, tzinfo=UTC)
+    result = px.run_pot_execution(MagicMock(), broker=MagicMock(), refresh_halts=MagicMock(), clock=lambda: at)
+    assert (result.session_open, result.note, len(calls)) == (False, "session_closed loss[7]=ok", 1)

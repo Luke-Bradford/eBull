@@ -60,6 +60,7 @@ POLICY_MODULES: Final = tuple(
             "ranking_pot_intent.py",
             "ranking_pot_job.py",
             "ranking_pot_look.py",
+            "ranking_pot_loss.py",
             "ranking_pot_rebalance.py",
             "ranking_pot_sim.py",
             "ranking_pot_step.py",
