@@ -64,6 +64,7 @@ from app.services.strategy_core_eligibility import (
     CORE_ELIGIBILITY_POLICY_VERSION,
 )
 from app.services.strategy_core_mandate import CORE_MANDATE_MODE, CORE_MANDATE_POLICY_VERSION
+from tests.fixtures.entry_ticket import seed_entry_ticket
 
 #: #2833's declared candidate set.  All three must exist in ``instruments`` or
 #: ``load_core_selection`` reports ``missing_candidate_ids`` and refuses.
@@ -962,6 +963,7 @@ def seed_non_core_strategy_order(
         "INSERT INTO strategy_trade_orders (strategy_trade_id, order_id, purpose) VALUES (%s,%s,'entry')",
         (trade[0], order[0]),
     )
+    seed_entry_ticket(conn, order[0], trade[0])
     conn.execute(
         "INSERT INTO strategy_order_reconciliation_state (order_id) VALUES (%s)",
         (order[0],),

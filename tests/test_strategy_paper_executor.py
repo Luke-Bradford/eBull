@@ -67,6 +67,7 @@ from app.services.strategy_result_universe import (
 )
 from app.services.strategy_statistics import periods_per_year
 from tests.fixtures.ebull_test_db import test_database_url
+from tests.fixtures.entry_ticket import seed_entry_ticket
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
     build_control,
@@ -1499,6 +1500,7 @@ def test_unresolved_local_strategy_order_consumes_risk_before_broker_snapshot_ca
         order_id=int(order[0]),
         purpose="entry",
     )
+    seed_entry_ticket(ebull_test_conn, int(order[0]), trade_id)
     ebull_test_conn.execute(
         "UPDATE strategy_trades SET status='reconcile_required' WHERE strategy_trade_id=%s",
         (trade_id,),

@@ -31,6 +31,7 @@ from app.services.strategy_order_reconciliation import (
     reconcile_backlog,
     reconcile_strategy_order,
 )
+from tests.fixtures.entry_ticket import seed_entry_ticket
 
 pytestmark = pytest.mark.integration
 
@@ -70,13 +71,8 @@ def _seed_deployment(conn: psycopg.Connection[Any], *, capital_limit: Decimal = 
     return deployment.deployment_id
 
 
-def _seed_order(conn: psycopg.Connection[Any], *, deployment_id: int, instrument_id: int) -> tuple[int, int]:
-    """Seed one funded strategy trade and its submitted order.
-
-    Split out of ``_seed_trade`` for #2948: a fairness test needs several
-    orders under ONE deployment, and the promotion rows may only be inserted
-    once.
-    """
+def _seed_funded_trade(conn: psycopg.Connection[Any], *, deployment_id: int, instrument_id: int) -> int:
+    """Seed one funded strategy trade with no order yet (#3542: a test may link its own)."""
     conn.execute(
         "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, %s, %s, true)",
         (instrument_id, f"R{instrument_id}", "Reconciliation test"),
@@ -103,7 +99,17 @@ def _seed_order(conn: psycopg.Connection[Any], *, deployment_id: int, instrument
         amount=Decimal("100"),
         reason_code="test",
     )
-    trade_id = create_strategy_trade(conn, decision_id)
+    return create_strategy_trade(conn, decision_id)
+
+
+def _seed_order(conn: psycopg.Connection[Any], *, deployment_id: int, instrument_id: int) -> tuple[int, int]:
+    """Seed one funded strategy trade and its submitted, ticketed entry order.
+
+    Split out of ``_seed_trade`` for #2948: a fairness test needs several
+    orders under ONE deployment, and the promotion rows may only be inserted
+    once.
+    """
+    trade_id = _seed_funded_trade(conn, deployment_id=deployment_id, instrument_id=instrument_id)
     order_row = conn.execute(
         """
         INSERT INTO orders (
@@ -117,6 +123,7 @@ def _seed_order(conn: psycopg.Connection[Any], *, deployment_id: int, instrument
     assert order_row is not None
     order_id = order_row[0]
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=int(order_id), purpose="entry")
+    seed_entry_ticket(conn, int(order_id), trade_id)
     return trade_id, int(order_id)
 
 

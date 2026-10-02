@@ -1,12 +1,36 @@
-"""Assert an entry's #3542 trade ticket against the preflight its path wrote."""
+"""#3542 trade tickets in tests: assert a path's ticket, or seed one for a hand-built entry link."""
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import psycopg
 
-from app.services.strategy_entry_ticket import format_rate
+from app.services.strategy_entry_ticket import EntryTicket, format_rate, write_entry_ticket
+
+
+def seed_entry_ticket(conn: psycopg.Connection[Any], order_id: int, strategy_trade_id: int) -> None:
+    """A placeholder ticket for a test that links an entry by hand.
+
+    sql/459 refuses to commit an entry link without a ticket for the same order and trade, so every
+    fixture that inserts one must seed one in the same transaction.
+    """
+    write_entry_ticket(
+        conn,
+        EntryTicket(
+            order_id=order_id,
+            strategy_trade_id=strategy_trade_id,
+            rationale_class="signal",
+            rule_id="test-fixture",
+            evidence_kind="strategy_promotion",
+            evidence_id=1,
+            why_now="test fixture entry",
+            exit_rule="not_applicable: test fixture",
+            expected_cost_usd=Decimal("0"),
+            cost_basis="test_fixture",
+        ),
+    )
 
 
 def assert_entry_ticket(
