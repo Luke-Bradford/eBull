@@ -3668,3 +3668,146 @@ export interface AiTrialStatusResponse {
   open_legs: AiTrialOpenLeg[];
   loss: AiTrialLegLoss[];
 }
+
+// #2842 slice 7 — `GET /ranking-pot/status` and `/ranking-pot/readout`
+// (`app/api/ranking_pot.py`). Decimals arrive as strings.
+export interface RankingPotDeclaration {
+  declaration_id: number;
+  frozen_at: string;
+  /** Latest state event (`shadow_only`, `executing`, `halted_*`, `winding_down`, …); null = no event. */
+  state: string | null;
+  state_reason: string | null;
+  state_at: string | null;
+  pot_capital: string | null;
+}
+
+export interface RankingPotRebalance {
+  month: string;
+  target_session: string;
+  outcome: string;
+  refusal: string | null;
+  fired_at: string;
+  executed_state: string | null;
+  entries_allowed: boolean | null;
+  v1_active: boolean | null;
+}
+
+export interface RankingPotStep {
+  latest_session: string | null;
+  refusal_session: string | null;
+  refusal_reason: string | null;
+  refusal_at: string | null;
+}
+
+export interface RankingPotLook {
+  look_months: number;
+  endpoint_session: string;
+  kind: string;
+  verdict: string;
+  harm: boolean;
+  reasons: string[];
+  computed_at: string;
+}
+
+/** The §6 trade ticket as written before any order (`ranking_pot.entry_ticket`). */
+export interface RankingPotTicket {
+  rule_id: string;
+  r_rank: number | null;
+  f_rank: number | null;
+  score: {
+    model_version: string;
+    total_score: string | number | null;
+    raw_total: string | number | null;
+    families: Record<string, string | number | null>;
+    penalties: unknown[];
+    rewards: unknown[];
+    reconciles: boolean;
+  };
+  thesis: { thesis_id: number; age_days: number; model: string; prompt_version: string } | null;
+  exit_rule: unknown;
+  planned_levels: { stop_loss?: string; take_profit?: string; refused?: string; atr14: string };
+  [key: string]: unknown;
+}
+
+export type RankingPotPositionStatus = "entry_pending" | "expired" | "refused" | "open" | "failed" | "closed";
+
+export interface RankingPotPosition {
+  lifecycle_id: number;
+  slot: number;
+  instrument_id: number;
+  symbol: string | null;
+  status: RankingPotPositionStatus;
+  trade_status: string | null;
+  target_session: string;
+  funding_reason: string | null;
+  exit_session: string | null;
+  exit_reason: string | null;
+  amount: string | null;
+  ask: string | null;
+  quote_at: string | null;
+  sent_stop_loss: string | null;
+  sent_take_profit: string | null;
+  held_observed_at: string | null;
+  held_stop_loss: string | null;
+  held_take_profit: string | null;
+  held_no_stop_loss: boolean | null;
+  held_no_take_profit: boolean | null;
+  realized_pnl_usd: string | null;
+  unrealized_pnl_usd: string | null;
+  marked_on: string | null;
+  ticket: RankingPotTicket;
+  ticket_verified: boolean;
+}
+
+export interface RankingPotStatusResponse {
+  strategy_id: string;
+  strategy_version: string;
+  build_complete: boolean;
+  declaration: RankingPotDeclaration | null;
+  jobs: AiTrialJobFire[];
+  rebalances: RankingPotRebalance[];
+  step: RankingPotStep | null;
+  looks: RankingPotLook[];
+  held: RankingPotPosition[];
+  recent: RankingPotPosition[];
+}
+
+/** The fields the panel headlines; the full document is shown raw beneath them. */
+export interface RankingPotReadoutDoc {
+  endpoint: string;
+  sessions: number;
+  policy_drift: boolean;
+  lifecycles: {
+    count: number;
+    mean: string | null;
+    median: string | null;
+    profit_factor: { value: string | null; wins: number; losses: number; flat: number };
+  };
+  turnover_occupancy: {
+    window: {
+      shadow_turnover_mean: string | null;
+      controls_median_turnover_mean: string | null;
+      shadow_occupancy: string | null;
+      controls_median_occupancy: string | null;
+    };
+  };
+  variant: { nav_return: { shadow: string | null; variant: string | null } };
+  deflated_sharpe: { dsr: string | null; reason: string | null };
+  executed:
+    | { activated: false }
+    | {
+        activated: true;
+        nav_vs_spy: {
+          last: { snapshot_date: string; nav: string | null; spy: string | null; difference: string | null } | null;
+        };
+      };
+  [key: string]: unknown;
+}
+
+export interface RankingPotReadoutResponse {
+  declaration_id: number | null;
+  endpoint: string | null;
+  readout: RankingPotReadoutDoc | null;
+  /** `not_declared` · `not_stepped` · `invariant_violation` (figures withheld, see the server log). */
+  reason: string | null;
+}

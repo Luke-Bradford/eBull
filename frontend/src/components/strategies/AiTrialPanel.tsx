@@ -68,7 +68,7 @@ function executionText(item: AiTrialExecution): { text: string; tone: BadgeTone 
   }
 }
 
-function JobRow({ label, fire }: { label: string; fire: AiTrialJobFire }) {
+export function JobRow({ label, fire }: { label: string; fire: AiTrialJobFire }) {
   return (
     <li className="py-1.5 text-sm">
       <span className="font-medium">{label}</span>

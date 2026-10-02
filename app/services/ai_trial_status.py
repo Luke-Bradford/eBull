@@ -472,7 +472,7 @@ def _dec(value: object) -> Decimal | None:
     return None if value is None else Decimal(str(value))
 
 
-def _job_fire(conn: Conn, name: str, now: datetime, in_window: Callable[[datetime], bool] | None = None) -> JobFire:
+def job_fire(conn: Conn, name: str, now: datetime, in_window: Callable[[datetime], bool] | None = None) -> JobFire:
     cadence = next(job.cadence for job in SCHEDULED_JOBS if job.name == name)
     scan = 1 if in_window is None else _WINDOWED_FIRE_SCAN
     row = latest_fire_row(conn.execute(_JOB_RUNS_SQL, (name, scan)).fetchall(), in_window)
@@ -569,8 +569,8 @@ def _sessions(
 def load_trial_status(conn: Conn, *, version: TrialVersion = V1, now: datetime | None = None) -> TrialStatus:
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     job = DECISION_JOBS[version.arm_strategy_id]
-    decision_job = _job_fire(conn, job.name, observed, job.in_window)
-    execute_job = _job_fire(conn, JOB_AI_TRIAL_EXECUTE, observed)
+    decision_job = job_fire(conn, job.name, observed, job.in_window)
+    execute_job = job_fire(conn, JOB_AI_TRIAL_EXECUTE, observed)
     ids = (version.arm_strategy_id, version.strategy_version)
     declaration = load_declaration(conn, version=version)
     if declaration is None:
@@ -615,6 +615,7 @@ __all__ = [
     "execute_fired",
     "execution_states",
     "expected_decision_session",
+    "job_fire",
     "latest_fire_by_session",
     "latest_fire_row",
     "missable_sessions",

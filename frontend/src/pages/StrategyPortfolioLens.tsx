@@ -23,6 +23,7 @@ import { StatTile } from "@/components/dashboard/StatTile";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { EmptyState } from "@/components/states/EmptyState";
 import { AiTrialPanel } from "@/components/strategies/AiTrialPanel";
+import { RankingPotPanel } from "@/components/strategies/RankingPotPanel";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
 import {
   AccountEvidence,
@@ -527,6 +528,7 @@ export function StrategyPortfolioLens() {
 
       {/* #3516: the AI trials are strategies too, so their status sits with
           the pot's results rather than on a separate page. */}
+      <RankingPotPanel />
       <AiTrialPanel arm={AI_TRIAL_V1_ARM} title="AI trial (v1)" />
       <AiTrialPanel arm={AI_TRIAL_FUND_V1_ARM} title="AI trial (fund-v1)" />
 
