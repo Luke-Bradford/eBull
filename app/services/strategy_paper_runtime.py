@@ -267,6 +267,11 @@ def _advance_deployment_risk(
     except EngineCapitalObservationError as exc:
         logger.warning("paper deployment %s drawdown unobservable: %s", deployment_id, exc)
         record_deployment_refusal(conn, deployment_id, f"{exc.reason_code}: {exc}")
+    except Exception as exc:
+        # Any other failure (a DB error, a violated CHECK) rolled back only this savepoint; it
+        # must not abort the other deployments or the freshness blocks written after the loop.
+        logger.exception("paper deployment %s drawdown advance failed", deployment_id)
+        record_deployment_refusal(conn, deployment_id, f"unexpected {type(exc).__name__}")
 
 
 def refresh_strategy_health(

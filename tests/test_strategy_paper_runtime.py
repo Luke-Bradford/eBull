@@ -663,6 +663,34 @@ def test_health_refresh_persists_pot_and_deployment_max_drawdown(
     assert refused.facts.max_observed_drawdown_pct is None
 
 
+def test_one_deployment_advance_failure_neither_aborts_health_nor_counts_as_evidence(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    broker = _broker()
+    observed = datetime.now(UTC)
+    initial = broker.get_account_risk_snapshot.return_value
+    broker.get_account_risk_snapshot.return_value = replace(initial, observed_at=observed)
+    refresh_strategy_health(conn, broker=broker, now=observed)
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.strategy_paper_runtime.advance_deployment_drawdown", explode)
+    conn.execute("DELETE FROM strategy_execution_blocks WHERE source='scan_freshness'")
+    later = observed + timedelta(minutes=1)
+    broker.get_account_risk_snapshot.return_value = replace(initial, observed_at=later)
+    refresh_strategy_health(conn, broker=broker, now=later)
+
+    refusal = conn.execute("SELECT last_refusal FROM strategy_deployment_nav_risk_state").fetchone()
+    assert refusal == ("unexpected RuntimeError",)
+    # The freshness block written AFTER the loop still landed.
+    assert conn.execute("SELECT count(*) FROM strategy_execution_blocks WHERE source='scan_freshness'").fetchone() == (
+        1,
+    )
+
+
 def test_demo_trial_paper_deployment_does_not_trip_scan_freshness(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

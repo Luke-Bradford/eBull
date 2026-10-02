@@ -11810,3 +11810,15 @@ neighbouring container and match it.**
   frozen semantics; a cross-cutting change routes around it, and anything it imports must stay call-compatible.
 - Enforced in: `tests/test_ai_trial_freeze.py::test_the_tree_still_runs_the_policy_the_live_v1_declaration_froze`
   (pins declaration 16's stored hash; fast tier, so the pre-push hook refuses the edit).
+
+### A per-item savepoint isolates only the exceptions its `except` catches (#3541)
+
+- Failure: #3577's per-deployment drawdown loop wrapped each deployment in `with conn.transaction()` and caught
+  only `EngineCapitalObservationError`. The savepoint rolled back any other failure (a psycopg error, a
+  violated CHECK), but the exception still propagated and aborted `refresh_strategy_health` before its later
+  `_set_block` writes — the isolation the spec promised held for one exception class only.
+- Prevention: when a loop's contract is "one item's failure never blocks the others or the caller's later
+  writes", the `except` around the per-item savepoint catches `Exception`, logs with the traceback, and records
+  a fail-closed per-item state after the rollback. A narrow catch is correct only where propagating is the
+  intended outcome — say so at the call site.
+- Enforced in: `app/services/strategy_paper_runtime.py::_advance_deployment_risk`.
