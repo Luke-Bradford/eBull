@@ -18,6 +18,10 @@ Fixed here by construction (each closes a spec item; the PR lists them):
 - **Regime (#2901's rule).** Sign of SPY's stored close at the last NYSE session ≤ D over the one ≤ D − 365 days, D =
   the snapshot's ``last_session``; ``unavailable`` when either close is unusable.
 - **SPY total return: not reported** (no ex-dated distribution source; the spec lists what was checked).
+- **Deflated Sharpe (slice 6c-ii-b, r3-148).** Bailey & López de Prado (2014) equations (1)/(6) and (2) with the
+  house conventions of ``deflated_sharpe.py`` (population moments, raw kurtosis, per observation), re-implemented here
+  because that module is outside the hash: the shadow's per-interval NAV returns, T = their count, M = the reading
+  process's register count (deliberately unhashed: it grows after the freeze), ρ = 0 so N̂ = M, V[SR_n] = 1/T.
 - **The no-SL/TP variant (slice 6c-ii-a).** Its stored document streams through its own ``LookFacts`` (no controls),
   so its path, T and lifecycles are the shadow's constructions; it is reported beside the shadow and decides nothing.
 """
@@ -25,6 +29,7 @@ Fixed here by construction (each closes a spec item; the PR lists them):
 from __future__ import annotations
 
 import math
+import statistics
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,6 +47,7 @@ from app.services.ai_trial_pack import canonical_sha256
 from app.services.market_calendar import us_market_status
 from app.services.price_masked_bars import load_masked_bars
 from app.services.ranking_pot_policy import RANKING_POT_POLICY_HASH
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 Conn = psycopg.Connection[Any]
 
@@ -52,6 +58,14 @@ REGIME_LOOKBACK: Final = timedelta(days=365)
 #: Best-tail share of lifecycles (⌈count × this⌉, at least one).
 BEST_TAIL: Final = Fraction(1, 100)
 SPY_TOTAL_RETURN_REASON: Final = "no_ex_dated_distribution_source"
+#: Equation (1)'s Euler–Mascheroni constant; a test pins it to ``numpy.euler_gamma``.
+EULER_GAMMA: Final = 0.5772156649015329
+#: The skew needs three returns.
+DSR_MIN_RETURNS: Final = 3
+_NORMAL: Final = statistics.NormalDist()
+DsrReason = Literal[
+    "too_few_returns", "zero_variance", "register_below_two", "quantile_out_of_range", "degenerate_moments"
+]
 
 Regime = Literal["up", "down", "flat", "unavailable"]
 _STEP_CONTROL_FIELDS: Final = (
@@ -175,6 +189,70 @@ def lifecycle_distribution(lifecycles: Sequence[Lifecycle]) -> dict[str, Any]:
             "pnl_share": _s(share),
         }
     }
+
+
+def deflated_sharpe(
+    returns: Sequence[Decimal], *, declared_trials: int, floored_searches: int, register_version: str
+) -> dict[str, Any]:
+    """§9.4 deflated Sharpe of per-observation returns (spec "Deflated Sharpe"; descriptive). The moments are exact
+    (``Fraction``): zero variance and the bracket's sign are decided without rounding (Codex ckpt-1). SR and the
+    reported moments are ``Decimal`` under ``sim.CTX``; Φ and Φ⁻¹ run in binary floating point. ``dsr`` is ``None``
+    with one ``reason``; the moments are reported once computed, SR₀ once M ≥ 2."""
+    t = len(returns)
+    out: dict[str, Any] = {
+        "dsr": None,
+        "reason": None,
+        "sr": None,
+        "sr0": None,
+        "skew": None,
+        "kurtosis": None,
+        "t": t,
+        "t_kind": "nominal",
+        "v": None,
+        "v_kind": "floor_1_over_t",
+        "average_correlation": 0,
+        "m": declared_trials,
+        "floored_searches": floored_searches,
+        "register_version": register_version,
+        "returns": [_s(r) for r in returns],
+    }
+
+    def refuse(reason: DsrReason) -> dict[str, Any]:
+        return out | {"reason": reason}
+
+    if t < DSR_MIN_RETURNS:
+        return refuse("too_few_returns")
+    xs = [Fraction(r) for r in returns]
+    mu = sum(xs, Fraction(0)) / t
+    m2 = sum(((x - mu) ** 2 for x in xs), Fraction(0)) / t
+    if m2 == 0:
+        return refuse("zero_variance")
+    m3 = sum(((x - mu) ** 3 for x in xs), Fraction(0)) / t
+    m4 = sum(((x - mu) ** 4 for x in xs), Fraction(0)) / t
+    # 1 − y3·SR + ((y4 − 1)/4)·SR², exactly: y3·SR = m3·μ / m2² and SR² = μ² / m2 are rational.
+    bracket = 1 - m3 * mu / (m2 * m2) + (m4 / (m2 * m2) - 1) / 4 * (mu * mu / m2)
+    with localcontext(sim.CTX):
+        root = _dec_of(m2).sqrt()
+        sr, y3, y4 = _dec_of(mu) / root, _dec_of(m3) / (_dec_of(m2) * root), _dec_of(m4 / (m2 * m2))
+    out |= {"sr": _s(sr), "skew": _s(y3), "kurtosis": _s(y4), "v": repr(1 / t)}
+    if declared_trials < 2:
+        return refuse("register_below_two")
+    n = float(declared_trials)  # ρ = 0: N̂ = M
+    upper = 1 - 1 / (n * math.e)
+    if not upper < 1.0:
+        return refuse("quantile_out_of_range")
+    max_z = (1 - EULER_GAMMA) * _NORMAL.inv_cdf(1 - 1 / n) + EULER_GAMMA * _NORMAL.inv_cdf(upper)
+    sr0 = math.sqrt(1 / t) * max_z
+    out["sr0"] = repr(sr0)
+    if bracket <= 0:
+        return refuse("degenerate_moments")
+    dsr = _NORMAL.cdf((float(sr) - sr0) * math.sqrt(t - 1) / math.sqrt(float(bracket)))
+    return out | {"dsr": repr(dsr)}
+
+
+def _dec_of(x: Fraction) -> Decimal:
+    """A ``Fraction`` as a ``Decimal`` under the caller's context."""
+    return Decimal(x.numerator) / Decimal(x.denominator)
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +546,12 @@ class ReadoutFacts:
             "missing_donors": self._missing_donors(),
             "thesis_provenance": self._theses(lifecycles),
             "variant": self._variant(),
+            "deflated_sharpe": deflated_sharpe(
+                self._interval_returns(),
+                declared_trials=TRIAL_REGISTER.declared_count,
+                floored_searches=TRIAL_REGISTER.floored_searches,
+                register_version=TRIAL_REGISTER_VERSION,
+            ),
             "spy_total_return": None,
             "spy_total_return_reason": SPY_TOTAL_RETURN_REASON,
         }
@@ -486,6 +570,12 @@ class ReadoutFacts:
                 raise ValueError(f"lifecycle {lc}: a non-positive value ({invested}, {terminal})")
             out.append(Lifecycle(lc, iid, entry, invested, terminal))
         return out
+
+    def _interval_returns(self) -> list[Decimal]:
+        """The shadow's NAV return over each applied rebalance's interval on the look path (the cohorts' ratios)."""
+        path = self.facts.shadow_path
+        with localcontext(sim.CTX):
+            return [path[iv.end] / path[iv.start] - 1 for iv in self.intervals]
 
     def _variant(self) -> dict[str, Any]:
         """§9.4 the no-SL/TP variant beside the shadow at E: path return and their difference, maximum drawdown,
