@@ -120,12 +120,17 @@ def test_queued_unfunded_replacements_do_not_exhaust_n() -> None:
     assert occupancy_refusal(lifecycle_id=4, instrument_id=1004, slot=2, n=2, lifecycles=lcs) == "pot_slot_not_released"
 
 
-def test_sent_levels_are_the_frozen_three_atr_two_r_rounded_down_and_validated_as_sent() -> None:
-    assert sent_levels(Decimal(100), Fraction(2)) == (Decimal("94.000000"), Decimal("112.000000"))
+def test_sent_levels_are_the_frozen_three_atr_two_r_floored_to_the_cent_and_validated_as_sent() -> None:
+    assert sent_levels(Decimal(100), Fraction(2)) == (Decimal("94.00"), Decimal("112.00"))
     stop, take = sent_levels(Decimal("33.333333"), Fraction(1, 3))  # type: ignore[misc]
-    assert (stop, take) == (Decimal("32.333333"), Decimal("35.333333"))
+    assert (str(stop), str(take)) == ("32.33", "35.33")
     # 3 × ATR at or above the ask: no valid stop.
     assert sent_levels(Decimal(5), Fraction(2)) is None
+    # §7.4 "The broker-held levels": what the cent newly refuses. A SPAC-like ATR of 0.4¢: the floored stop sits
+    # 5 ATR away (10.788 → 10.78), past the 4-ATR cap (at 6 dp it was 3 ATR and passed).
+    assert sent_levels(Decimal("10.80"), Fraction(4, 1000)) is None
+    # A stop that floors to 0.
+    assert sent_levels(Decimal(3), Fraction(999, 1000)) is None
 
 
 @pytest.mark.parametrize(

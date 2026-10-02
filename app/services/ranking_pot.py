@@ -57,6 +57,11 @@ ATR_PERIOD: Final = 14
 #: §7.2 "Cost cap", v1's constant by construction: stressed what-if cost ≤ 1.0% of the amount. Also bounds an
 #: unmarked position's loss in the §7.4 loss check (``ranking_pot_loss.stop_bound``).
 POT_COST_CAP_PCT: Final = Decimal("1.0")
+#: §7.4 "The broker-held levels" (slice 5c-ii-c), by construction: the sent SL/TP are floored to the cent. The
+#: manager's pot arm compares the held levels to the sent ones exactly, so a rate finer than the broker stores would
+#: read as a gap every cycle; a cent is representable at any price precision ≥ 2 and is the only measured
+#: round-trip (the core sleeve's repairs, ``core_exit_levels.CORE_EXIT_RATE_QUANTUM``).
+RATE_QUANTUM: Final = Decimal("0.01")
 ATR_UNIVERSE: Final = "survivor_only"  # as v1's `ai_trial_pack.indicators` passes it
 #: §4 step 2 — minimum reference samples.
 MIN_NYSE_CAPS: Final = 500

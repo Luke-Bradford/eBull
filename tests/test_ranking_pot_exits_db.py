@@ -209,6 +209,68 @@ def test_an_untradable_name_is_repaired_and_its_close_retried(
     assert [op[:3] for op in _operations(conn)] == [("fixed_exit_repair", "entry_exit_gap", "submitted")]
 
 
+def _held(conn: Conn) -> list[tuple[Any, ...]]:
+    rows = conn.execute(
+        "SELECT stop_loss_rate, take_profit_rate, is_no_stop_loss, is_no_take_profit, observed_at "
+        "FROM ranking_pot_exec_level_observations ORDER BY observation_id"
+    ).fetchall()
+    conn.commit()
+    return rows
+
+
+def test_the_held_levels_are_recorded_change_only_before_any_repair(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§7.4 "The broker-held levels" (slice 5c-ii-c, r3-108)."""
+    conn = ebull_test_conn
+    _, d, trade_id, broker = _opened(conn, monkeypatch)
+    t0 = datetime.combine(_next_month_session(d), time(14), UTC)
+
+    # The first cycle records the level the broker holds; an unchanged cycle writes nothing.
+    assert _manage(conn, broker, trade_id, t0) == ("no_change", "position_protected")
+    assert _manage(conn, broker, trade_id, t0 + timedelta(minutes=5)) == ("no_change", "position_protected")
+    assert _held(conn) == [(Decimal("94"), Decimal("112"), False, False, t0)]
+
+    # A removed SL is recorded as held, then repaired: the row precedes the edit it causes.
+    _portfolio(broker, _position(stop_loss_rate=None, is_no_stop_loss=True))
+    t1 = t0 + timedelta(minutes=10)
+    assert _manage(conn, broker, trade_id, t1) == ("submitted", "broker_edit_accepted")
+    assert _held(conn)[1:] == [(None, Decimal("112"), True, False, t1)]
+    first_edit = conn.execute("SELECT min(created_at) FROM strategy_position_operations").fetchone()
+    recorded = conn.execute("SELECT max(recorded_at) FROM ranking_pot_exec_level_observations").fetchone()
+    conn.commit()
+    assert first_edit is not None and recorded is not None and recorded[0] <= first_edit[0]
+
+    # Append-only, and bound to a position the trade owns.
+    with pytest.raises(psycopg.errors.RaiseException):
+        conn.execute("DELETE FROM ranking_pot_exec_level_observations")
+    conn.rollback()
+    with pytest.raises(psycopg.errors.RaiseException, match="is not owned by pot trade"):
+        conn.execute(
+            "INSERT INTO ranking_pot_exec_level_observations (strategy_trade_id, broker_position_id, observed_at, "
+            "is_no_stop_loss, is_no_take_profit) VALUES (%s, 1, now(), FALSE, FALSE)",
+            (trade_id,),
+        )
+    conn.rollback()
+
+
+def test_a_failed_held_level_record_never_blocks_the_repair(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _, d, trade_id, broker = _opened(conn, monkeypatch)
+
+    def _fail(*_: Any, **__: Any) -> bool:
+        raise psycopg.errors.InternalError("recorder down")
+
+    monkeypatch.setattr("app.services.strategy_position_manager.record_held_levels", _fail)
+    _portfolio(broker, _position(stop_loss_rate=None, is_no_stop_loss=True))
+    at = datetime.combine(_next_month_session(d), time(14), UTC)
+    assert _manage(conn, broker, trade_id, at) == ("submitted", "broker_edit_accepted")
+    assert broker.edit_demo_strategy_position.call_args.kwargs["stop_loss_rate"] == Decimal("94")
+    assert _held(conn) == []
+
+
 def test_a_wind_down_stamps_the_book_and_completed_waits_for_it_to_be_flat(
     ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
