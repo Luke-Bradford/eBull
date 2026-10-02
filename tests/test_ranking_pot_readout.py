@@ -235,3 +235,60 @@ def test_ratios_use_the_fixed_context_whatever_the_callers() -> None:
         assert _facts(rows, infos).finish(h0=H, h_end=H) == reference
     finally:
         getcontext().prec = saved
+
+
+def test_deflated_sharpe_matches_the_house_implementation() -> None:
+    """§9.4 slice 6c-ii-b: the in-hash re-implementation agrees with ``deflated_sharpe.py`` on the same inputs
+    (T = the count, V = 1/T, ρ = 0, one measured trial)."""
+    import numpy as np
+
+    from app.services import deflated_sharpe as house
+
+    assert ro.EULER_GAMMA == float(np.euler_gamma)
+    returns = [D(x) for x in ("0.031", "-0.012", "0.044", "0.002", "-0.027", "0.019", "0.058", "-0.004")]
+    for m in (2, 480):
+        got = ro.deflated_sharpe(returns, declared_trials=m, floored_searches=0, register_version="r")
+        moments = house.trade_moments([float(x) for x in returns])
+        assert moments is not None
+        ref = house.deflated_sharpe(
+            moments,
+            effective_sample_size=float(len(returns)),
+            trial_sharpe_variance=1 / len(returns),
+            declared_trials=m,
+            average_correlation=0.0,
+            measured_trials=1,
+            trial_register_version="r",
+            null_floor_variance=True,
+        )
+        assert ref is not None and got["reason"] is None
+        assert abs(float(got["dsr"]) - ref.deflated_sharpe) < 1e-9
+        assert abs(float(got["sr0"]) - ref.expected_max_sharpe) < 1e-12
+        assert abs(float(got["sr"]) - moments.sharpe) < 1e-12 and abs(float(got["kurtosis"]) - moments.kurtosis) < 1e-9
+        assert (got["t"], got["m"], len(got["returns"]), got["v"]) == (8, m, 8, "0.125")
+
+
+def test_deflated_sharpe_refusals() -> None:
+    def reason(returns: list[str], m: int = 480) -> str | None:
+        return ro.deflated_sharpe([D(x) for x in returns], declared_trials=m, floored_searches=0, register_version="r")[
+            "reason"
+        ]
+
+    assert reason(["0.1", "0.2"]) == "too_few_returns"
+    assert reason(["0.1", "0.1", "0.1"]) == "zero_variance"
+    assert reason(["0.1", "0.2", "0.4"], m=1) == "register_below_two"
+    out = ro.deflated_sharpe(
+        [D("0.1"), D("0.2"), D("0.4")], declared_trials=1, floored_searches=0, register_version="r"
+    )
+    assert out["sr"] is not None and out["dsr"] is None and out["sr0"] is None  # the moments are still reported
+    # Codex ckpt-1: exact moments. Identical returns are zero variance however they round, and a two-point series
+    # on Pearson's boundary has a bracket of exactly zero (SR₀ is still reported).
+    assert reason(["0.1234567890123456789012345678901235"] * 24) == "zero_variance"
+    edge = ro.deflated_sharpe(
+        [D("0.001"), D("0.001"), D("0.002")], declared_trials=480, floored_searches=0, register_version="r"
+    )
+    assert edge["reason"] == "degenerate_moments" and edge["sr0"] is not None
+    assert reason(["0.1", "0.2", "0.4"], m=10**16) == "quantile_out_of_range"
+    # The readout over the two-interval stream: too few returns, with the register's count reported.
+    rows, infos = _stream()
+    dsr = _facts(rows, infos).finish(h0=H, h_end=H)["deflated_sharpe"]
+    assert dsr["reason"] == "too_few_returns" and dsr["t"] == 2 and dsr["m"] >= 2
