@@ -6,6 +6,7 @@ covers the decisions); the database parts are real."""
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any
 
 import psycopg
@@ -22,7 +23,7 @@ from tests.test_ranking_pot_schema_db import _frozen
 from tests.test_ranking_pot_step import FLAT, _rebalance
 
 Conn = psycopg.Connection[Any]
-SPY = sim.Bar(st.Decimal(500), st.Decimal(501), st.Decimal(499), st.Decimal(500))
+SPY = sim.Bar(Decimal(500), Decimal(501), Decimal(499), Decimal(500))
 
 
 def _at(session: date) -> datetime:
@@ -63,7 +64,7 @@ def test_the_step_job_writes_books_refuses_forces_and_fences(
     spy: dict[str, sim.Bar | None] = {"bar": SPY}
 
     def bars(_conn: Conn, ids: Any, session: date) -> st.SessionBars:
-        prev = {iid: {s: st.Decimal(100) for s in (d, target, session - timedelta(days=1))} for iid in r}
+        prev = {iid: {s: Decimal(100) for s in (d, target, session - timedelta(days=1))} for iid in r}
         return st.SessionBars(session, {iid: FLAT for iid in ids}, prev, spy["bar"])
 
     monkeypatch.setattr(st, "read_session_bars", bars)
