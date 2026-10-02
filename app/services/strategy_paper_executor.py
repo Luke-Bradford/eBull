@@ -941,14 +941,15 @@ def _observe_local_mandate_risk(
     risk: BrokerAccountRiskSnapshot,
     now: datetime,
     shared_pool_bound: Decimal,
-) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | str:
+) -> tuple[Decimal, Decimal, Decimal, Decimal] | str:
     """Read local allocation risk and advance the engine pot's high-water mark atomically."""
     with conn.transaction():
+        # Only the total is read: it is the cash term's deduction. The per-instrument column
+        # served the account-basis exposure cap, which the executors no longer use (#3541).
         pending_row = conn.execute(_PENDING_RISK_SQL, (intent.instrument_id,)).fetchone()
         if pending_row is None:  # pragma: no cover - aggregate SELECT always returns one row
             raise StrategyPaperExecutionError("pending strategy risk observation was unavailable")
         pending_total = Decimal(str(pending_row[0]))
-        pending_instrument = Decimal(str(pending_row[1]))
         deployment_base = _effective_deployment_base(conn, intent)
         if isinstance(deployment_base, str):
             return deployment_base
@@ -980,7 +981,7 @@ def _observe_local_mandate_risk(
             return exc.reason_code
         if isinstance(drawdown, str):
             return drawdown
-    return deployment_base, pool_base, pending_total, pending_instrument, drawdown
+    return deployment_base, pool_base, pending_total, drawdown
 
 
 @dataclass(frozen=True)
@@ -1228,7 +1229,7 @@ def _risk_and_amount(
     )
     if isinstance(observed, str):
         return observed
-    deployment_base, pool_base, pending_total, _pending_instrument, drawdown = observed
+    deployment_base, pool_base, pending_total, drawdown = observed
     if drawdown >= intent.max_drawdown_pct:
         return "account_drawdown_limit"
     if drawdown >= intent.mandate_max_drawdown_pct:
