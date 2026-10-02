@@ -188,7 +188,7 @@ def _inputs(monkeypatch: pytest.MonkeyPatch) -> rb.SnapshotInputs:
     monkeypatch.setattr(rp, "MIN_NYSE_CAPS", 1)
     monkeypatch.setattr(rp, "MIN_VALID_MAX", 1)
     facts = (
-        _name(1, Decimal("0.9"), sic="7372"),
+        _name(1, Decimal("0.9"), sic="7372", dps_ttm=Decimal("0.96")),
         _name(2, Decimal("0.8"), quoted_at=AS_OF - timedelta(days=2)),  # in R, fails an entry rule
         _name(3, Decimal("NaN"), bars=False),  # stored NaN: fails `score_not_positive`, decodes exactly
         _name(4, None, bars=False, is_tradable=False, bid=None, ask=None, quoted_at=None, market_cap_usd=None),
@@ -230,6 +230,7 @@ def test_snapshot_round_trips_through_json_and_re_derives_the_universes(monkeypa
     assert back.theses == inputs.theses  # r3-95: captured provenance survives the round trip
     # Slice 6c-ii-c-1's exposure inputs: the SIC and SPY's whole segment survive too.
     assert [f.sic for f in back.facts] == ["7372", None, None, None, None]
+    assert [f.dps_ttm for f in back.facts] == [Decimal("0.96"), None, None, None, None]
     assert [(d, r["close"]) for d, r in back.spy.bars] == [(d, r["close"]) for d, r in inputs.spy.bars]
 
 

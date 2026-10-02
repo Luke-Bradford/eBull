@@ -351,6 +351,9 @@ def encode_snapshot(inputs: SnapshotInputs) -> dict[str, Any]:
                 "ask": _s(f.ask),
                 "quoted_at": _ts(f.quoted_at),
                 "sic": f.sic,
+                "dps_ttm": _s(f.dps_ttm),
+                "valuation_yield_pct": _s(f.valuation_yield_pct),
+                "valuation_price": _s(f.valuation_price),
                 "score": None if score is None else _score_json(score),
                 "thesis": _thesis_json(inputs.theses.get(f.instrument_id)),
                 "bars": [_bar(d, r) for d, r in zip(f.bar_dates, f.bar_rows, strict=True)],
@@ -410,6 +413,9 @@ def decode_snapshot(doc: Mapping[str, Any]) -> SnapshotInputs:
                 ask=_d(n["ask"]),
                 quoted_at=None if n["quoted_at"] is None else datetime.fromisoformat(n["quoted_at"]),
                 sic=n["sic"],
+                dps_ttm=_d(n["dps_ttm"]),
+                valuation_yield_pct=_d(n["valuation_yield_pct"]),
+                valuation_price=_d(n["valuation_price"]),
                 bar_dates=tuple(d for d, _ in bars),
                 bar_rows=tuple(r for _, r in bars),
             )
@@ -694,16 +700,20 @@ def read_snapshot_inputs(
                 ).fetchall()
             ]
         cap_ids = sorted(set(s0) | set(nyse_ids))
-        view_caps = {
-            int(r["instrument_id"]): r["market_cap_live"]
+        valuation = {
+            int(r["instrument_id"]): (
+                r["market_cap_live"],
+                (r["dps_declared_ttm"], r["dividend_yield"], r["current_price"]),
+            )
             for r in cur.execute(
-                "SELECT instrument_id, market_cap_live FROM instrument_valuation "
+                "SELECT instrument_id, market_cap_live, dps_declared_ttm, dividend_yield, current_price "
+                "FROM instrument_valuation "
                 "WHERE instrument_id = ANY(%(ids)s::bigint[])",
                 {"ids": cap_ids},
             ).fetchall()
         }
     # No view row → no cap, as in the scorer, which overlays only ids that have one.
-    caps = {iid: _overlaid_cap(conn, iid, raw) for iid, raw in view_caps.items()}
+    caps = {iid: _overlaid_cap(conn, iid, raw) for iid, (raw, _) in valuation.items()}
 
     scores: dict[int, ScoreBreakdown] = {}
     facts: list[NameFacts] = []
@@ -712,6 +722,7 @@ def read_snapshot_inputs(
         score = _score_row(r)
         if score is not None:
             scores[iid] = score
+        dividend = valuation.get(iid, (None, (None, None, None)))[1]
         facts.append(
             NameFacts(
                 instrument_id=iid,
@@ -726,6 +737,9 @@ def read_snapshot_inputs(
                 ask=r["ask"],
                 quoted_at=r["quoted_at"],
                 sic=r["sic"],
+                dps_ttm=dividend[0],
+                valuation_yield_pct=dividend[1],
+                valuation_price=dividend[2],
             )
         )
 

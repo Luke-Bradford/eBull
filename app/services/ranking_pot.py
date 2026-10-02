@@ -142,6 +142,13 @@ class NameFacts:
     quoted_at: datetime | None
     #: ``instrument_sec_profile.sic`` as stored (slice 6c-ii-c-1: the exposures' sector input, never a decision input).
     sic: str | None = None
+    #: ``instrument_valuation.dps_declared_ttm`` as read with the cap (slice 6c-ii-c-2a: the yield gap's input, never
+    #: a decision input).
+    dps_ttm: Decimal | None = None
+    #: The same view's ``dividend_yield`` (a percent, ADS-ratio corrected, NULL for a ratio-unknown ADR) and its
+    #: ``current_price``: their product / 100 is the DPS per tradable unit.
+    valuation_yield_pct: Decimal | None = None
+    valuation_price: Decimal | None = None
     bar_dates: tuple[date, ...] = ()
     bar_rows: tuple[Mapping[str, Any], ...] = ()
 

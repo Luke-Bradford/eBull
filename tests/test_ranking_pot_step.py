@@ -19,7 +19,7 @@ D = Decimal
 THU, FRI, MON, TUE = date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5), date(2026, 10, 6)
 #: A characteristics table for names 1..3 (§9.4 exposures): 2 has no beta, 3 has no sector, size or ATR%.
 TABLE = {
-    1: ex.Characteristic("XLK", D(20), D("1.5"), None, D("0.02")),
+    1: ex.Characteristic("XLK", D(20), D("1.5"), None, D("0.02"), D("0.03")),
     2: ex.Characteristic("XLF", D(22), None, "too_few_pairs", D("0.04")),
     3: ex.Characteristic(ex.NO_SECTOR, None, D("0.5"), None, None),
 }
