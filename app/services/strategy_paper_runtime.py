@@ -477,8 +477,14 @@ def run_strategy_paper_cycle(
     position_limit: int = 5,
     now: datetime | None = None,
     strategy_versions: Sequence[str] | None = None,
+    entries: bool = True,
 ) -> StrategyPaperCycleResult:
-    """Run one bounded demo-only strategy lifecycle cycle."""
+    """Run one bounded demo-only strategy lifecycle cycle.
+
+    ``entries=False`` runs reconciliation, health and position management only -- the
+    risk-reducing half -- and evaluates no new signal (#3546: the caller withholds entries
+    when an entry-only input, the halt feed, could not be refreshed).
+    """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise ValueError("strategy paper cycle requires an idle connection")
     if signal_limit <= 0 or reconciliation_limit <= 0 or position_limit <= 0:
@@ -509,6 +515,8 @@ def run_strategy_paper_cycle(
         )
         managed += 1
 
+    if not entries:
+        return StrategyPaperCycleResult(len(reconciled), managed, 0, active_blocks)
     versions = (
         list(strategy_versions)
         if strategy_versions is not None

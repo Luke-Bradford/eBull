@@ -122,6 +122,28 @@ def test_cycle_refreshes_health_then_executes_one_current_paper_candidate(
     ]
 
 
+def test_entries_withheld_evaluates_no_signal_and_leaves_it_for_the_next_cycle(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3546: ``entries=False`` still refreshes health but neither ranks nor funds a signal."""
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    broker = _broker()
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+
+    withheld = run_strategy_paper_cycle(conn, broker=broker, now=_NOW, strategy_versions=["v1"], entries=False)
+
+    assert withheld.evaluated_signals == 0
+    assert conn.execute("SELECT count(*) FROM strategy_funding_decisions").fetchone() == (0,)
+    assert conn.execute("SELECT count(*) FROM strategy_execution_blocks").fetchone() == (5,)
+    conn.commit()
+    resumed = run_strategy_paper_cycle(conn, broker=broker, now=_NOW, strategy_versions=["v1"])
+    assert resumed.evaluated_signals == 1
+    assert conn.execute(
+        "SELECT verdict FROM strategy_funding_decisions WHERE signal_id=%s", (signal_id,)
+    ).fetchone() == ("allocated",)
+
+
 def test_generated_demo_trade_is_auditable_through_reconciliation_and_operator_reads(
     ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -587,6 +609,32 @@ def test_cycle_keeps_managing_owned_positions_after_deployment_is_paused(
 
     assert result.managed_positions == 1
     assert managed == [(trade_id, position_id)]
+
+
+def test_entries_withheld_still_manages_owned_positions(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3546: withholding entries (failed halt refresh) never withholds position management."""
+    conn = ebull_test_conn
+    trade_id, _deployment_id, broker, _manual = _opened_trade(conn, monkeypatch)
+    managed: list[int] = []
+
+    def observe_management(
+        _conn: psycopg.Connection[tuple],
+        *,
+        broker: object,
+        strategy_trade_id: int,
+        broker_position_id: int,
+        now: object,
+    ) -> None:
+        managed.append(strategy_trade_id)
+
+    monkeypatch.setattr("app.services.strategy_paper_runtime.manage_owned_position", observe_management)
+
+    result = run_strategy_paper_cycle(conn, broker=broker, strategy_versions=["no-candidates"], entries=False)
+
+    assert (result.managed_positions, result.evaluated_signals) == (1, 0)
+    assert managed == [trade_id]
 
 
 def test_health_refresh_persists_pot_and_deployment_max_drawdown(
