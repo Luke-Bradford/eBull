@@ -301,9 +301,13 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
 
         r21 (2026-10-01, #2842) added ``ranking-pot-v1`` (one search); the same
         command returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r22 (2026-10-02, #3548) charged request 578's cost-v4 recent-evidence refresh
+        (24 searches); the same command returned the same five groups, 488 rows, all
+        ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 480
-        assert len(TRIAL_REGISTER.trials) == 49
+        assert TRIAL_REGISTER.declared_count == 504
+        assert len(TRIAL_REGISTER.trials) == 50
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

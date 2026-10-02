@@ -214,7 +214,13 @@ from typing import Final
 #: controls are the null distribution, not searches. Not a `hunt-` entry, so it counts in M_inh:
 #: 476 -> 477. Measured the same way before the bump: the SAME five groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-01-r21"
+#:
+#: r22 (2026-10-02, #3548) charges `recent-evidence-refresh-cost-v4-2026-09-26`, request 578's
+#: undeclared refresh of s4/s8/s11/s12 on the six pinned hold-out windows under cost v4 (s11/s12
+#: first evaluations; s4/s8 a changed cost model, clause 2): 24 searches. Not a `hunt-` entry, so it
+#: counts in M_inh: 477 -> 501. Measured the same way before the bump: the SAME five groups, 488
+#: rows, every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-02-r22"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1340,6 +1346,30 @@ TRIAL_REGISTER: Final = TrialRegister(
             exactness=TrialExactness.EXACT,
             searches=1,
             declared_for=("ranking-pot-v1", "v1"),
+        ),
+        DeclaredTrial(
+            trial_id="recent-evidence-refresh-cost-v4-2026-09-26",
+            description=(
+                "Request 578 (`POST` recent-evidence refresh, 2026-09-26): s4, s8, s11 and s12 evaluated on the "
+                "six pinned hold-out windows (primary-2022-plus, rolling-36m, rolling-24m, year-2022/23/24) "
+                "under cost `static-p75-insession-v4+archive-basis-band` and quarantine "
+                "`price-quarantine-v1+49ff29fea766`, with no declaration. s11 and s12 had no earlier hold-out "
+                "rows, so theirs are first evaluations. s4 and s8 are re-evaluations whose cost model changed "
+                "from v3; under reconstruction clause 2 a changed estimand counts, so this is not an exempt "
+                "identical-estimand re-run. Their 2026-08-21/22 rows stay stored and stay charged. 6 windows "
+                "x 4 strategies = 24 searches, counted per window as the 2026-08-21 entry was, because no "
+                "declaration made the windows jointly required. The four robustness arms collapse per the "
+                "fan rule. The results are `purpose = harness_validation`, which "
+                "`purpose_promotion_refusals` refuses for promotion."
+            ),
+            evidence=(
+                "strategy_holdout_accesses 643-738 (96 evaluate, accessed_by ghasst, purpose 'complete declared "
+                "recent-regime evidence denominator', declaration_id NULL, 2026-09-26 11:46-17:12Z); "
+                "strategy_results_store 738-833 (96 rows, namespace hold_out, purpose harness_validation); "
+                "pending_job_requests 578 (strategy_backtest_run, refresh_recent); issue #3548"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=24,
         ),
     ),
 )
