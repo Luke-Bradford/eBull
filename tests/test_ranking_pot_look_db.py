@@ -146,6 +146,9 @@ def test_policy_drift_with_a_look_due_still_records_the_steps_refusal(
     # The look is due under drifted code: it is not computed, and the start-of-fire look pass does not pre-empt the
     # step's own `policy_drift` refusal, which is recorded before the run fails.
     monkeypatch.setattr(rb, "_policy_ok", lambda _decl: False)
+    # No step due yet (E_24 has not closed): nothing to refuse, but the skipped look still fails the run.
+    with pytest.raises(RuntimeError, match="look 12m not computed: policy drift"):
+        st.run_step_job(conn, now=lambda: _at(e12))
     with pytest.raises(RuntimeError, match="policy_drift"):
         st.run_step_job(conn, now=lambda: _at(e24))
     refusals = conn.execute(

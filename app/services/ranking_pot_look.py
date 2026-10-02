@@ -500,7 +500,8 @@ def _lock(conn: Conn, declaration_id: int) -> None:
 
 def compute_due_looks(conn: Conn, decl: rb.PotDeclaration, *, as_of: datetime) -> list[str]:
     """Every look whose endpoint has been stepped and which has no ``result`` row, each in its own transaction.
-    ``conn`` must be autocommit. Returns one note per look written."""
+    ``conn`` must be autocommit. Returns one note per look written, or a closing note when
+    policy drift stops the pass (nothing is computed under drifted code)."""
     notes: list[str] = []
     for months in LOOK_MONTHS:
         with conn.transaction():

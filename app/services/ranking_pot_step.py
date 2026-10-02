@@ -684,7 +684,7 @@ def step_next_session(
     if not rb._policy_ok(decl):
         _refuse(conn, decl.declaration_id, session, as_of, "policy_drift", {"process": RANKING_POT_POLICY_HASH})
         return StepOutcome(
-            session, False, f"{session}: refused policy_drift (the process hash differs)", "policy_drift"
+            session, False, f"{session}: refused policy_drift (the policy hash check failed)", "policy_drift"
         )
     if behind := _unapplied_behind(conn, decl.declaration_id, session):
         raise rb.SnapshotIntegrityError(f"decided attempts {behind} target sessions already stepped without them")
@@ -851,6 +851,9 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
             break
         stepped += 1
         _looks(conn, decl, now(), notes)
+    if not rb._policy_ok(decl):
+        # No step was due to record the refusal, but a look may have been skipped: drift still fails the run.
+        raise RuntimeError(f"ranking pot {decl.declaration_id}: policy drift ({'; '.join(notes)})")
     return StepJobResult("; ".join(notes), stepped)
 
 
