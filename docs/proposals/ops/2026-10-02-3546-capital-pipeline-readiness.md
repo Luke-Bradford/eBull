@@ -1,6 +1,6 @@
 # #3546 — readiness contract for scheduled capital pipelines (gap register P8)
 
-Status: contract + audit (slice 1, gap A); slice 2 = gap B; slice 3 = gap C window A + D. Later slices: C re-send (probe-gated), E–H.
+Status: contract + audit (slice 1, gap A); slice 2 = gap B; slice 3 = gap C window A + D; F (paper); H. Later: C re-send (probe-gated), E, G.
 
 ## Contract
 
@@ -36,7 +36,7 @@ broker state. Every property needs a named test, and a cell without one is marke
 | `core_rebalance_execution` | ✅ preflight refusals persist on the intent; daily, no catch-up (stated: waits a session) | ✅ `strategy_trades_core_rebalance_intent_id_key` (sql/349:83) | ✅ distinct rejected / uncertain outcomes | contained: a lookup miss blocks new authority until attended release (`strategy_core_executor.py:393+`, `tests/test_2949_core_restart_recovery_db.py`); unbounded | ✅ |
 | `core_rebalance_observation` | — submits nothing | none, deliberately (`scheduler.py:2956-2960`) | single unit | lost-fire rearm | n/a |
 | `execute_approved_orders` / `_reconcile` | ✅ guard plus `_assert_submission_controls` | ✅ `idx_orders_recommendation_open_attempt` (sql/375:70) | ✅ per recommendation | window A unattended; window B contained, attended (#2961), unbounded | ✅ |
-| `strategy_autonomous_promotion` | ✅ `cycle_precondition_refusal` | ⚠ **H**: unique per transition, not per fire; a re-fire may advance a further stage | ⚠ **H**: only `_Refused` / `_AuthorityRevoked` are caught | next daily fire | n/a |
+| `strategy_autonomous_promotion` | ✅ `cycle_precondition_refusal` | ✅ unit = the transition (`idx_strategy_promotions_one_successor`, sql/281:46); a re-fire re-runs every evidence gate (**H**) | ✅ **H (fixed)**: a per-strategy fault is contained; run degraded | next daily fire | n/a |
 
 ## Gaps
 
@@ -108,7 +108,10 @@ broker state. Every property needs a named test, and a cell without one is marke
   - **Not changed, by their specs:** the #3471 trial (§8: "each executor refusal is persisted and final"; changes only with E under a new version) and the ranking pot (r3-119: one attempt per rebalance; `ranking_pot_executor.py` is hashed). Both keep calling the shared `_persist_rejection`, which is unchanged.
   - Dev DB at `5bc3dc1b`: `strategy_funding_decisions` held 2 rejected rows, both `quote_spread_flagged`; no transient code had fired. The only paper deployments are the trial legs (8, 9), so the paper fix has no live consumer yet.
 - **G — R5 for edits and closes.** Position edits use operation records, not `X-Request-Id` lookup (`strategy_position_manager.py`, etoro-api skill §position boundary). This needs its own assessment.
-- **H — promotion fire idempotency and isolation**, per the audit row above.
+- **H — promotion fire idempotency and isolation.**
+  - **R3, fixed.** `run_autonomous_promotion_cycle` caught only `_Refused` and `_AuthorityRevoked`, so any other exception in one strategy (a DB error, a bug in evidence assembly) ended the cycle and skipped every strategy after it in sorted order. Now a fault rolls back that strategy's own transaction, is logged and listed in `report.errors`, and the cycle continues. The job records the run `degraded` (`errors={"strategy_fault": n}`) and the note carries `faulted=<ids>`. If every strategy visited faulted, the last fault is re-raised, so the run fails with the cause; this keeps the job's prior rule that a no-op must never read as success.
+  - **R2, no change — the ⚠ was a documented decision.** The idempotency unit is the transition, not the fire. `idx_strategy_promotions_one_successor` (sql/281:46) lets each stage be departed once, and every action re-runs `advance_strategy`'s evidence gates under the per-strategy lock. "At most one step per cycle" is stated in the cycle's docstring as hygiene, not a safety bound. The elapsed-time bound that holds is `prospective_assessment_predates_forward_observation`. So a re-fire that advances a further stage is a fresh evidence-gated decision, not a duplicate.
+  - Dev DB (2026-10-02): `select status, count(*) from job_runs where job_name='strategy_autonomous_promotion' group by 1` returns `success` 23 and nothing else, and the latest notes read `skipped=approval_mode_manual`. The pool is manual, so the fixed path has no live consumer yet; it becomes live with `approval_mode: autonomous`.
 
 Additional limit: within a cycle, freshness checks use the cycle's start instant (`strategy_paper_runtime.py:486`), so a slow cycle evaluates entries against an older clock. It belongs with B.
 
