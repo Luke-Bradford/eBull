@@ -53,6 +53,7 @@ POLICY_MODULES: Final = tuple(
             "ai_trial_pack.py",
             "ai_trial_pack_reader.py",
             "ranking_pot.py",
+            "ranking_pot_activation.py",
             "ranking_pot_exec.py",
             "ranking_pot_executor.py",
             "ranking_pot_exit_rule.py",

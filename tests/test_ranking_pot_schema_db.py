@@ -79,6 +79,13 @@ def _frozen(conn: Conn) -> int:
 
 def _move(conn: Conn, decl: int, frm: str, to: str, actor: str, wind_down: str | None = None) -> None:
     try:
+        if to == "executing":
+            # sql/452: `→ executing` needs the activation row (the activation script writes it first).
+            conn.execute(
+                "INSERT INTO ranking_pot_activations (declaration_id, pot_capital) VALUES (%s, 1000) "
+                "ON CONFLICT (declaration_id) DO NOTHING",
+                (decl,),
+            )
         conn.execute(
             "INSERT INTO ranking_pot_state_events "
             "(declaration_id, from_state, to_state, wind_down_reason, reason, actor) VALUES (%s, %s, %s, %s, 't', %s)",

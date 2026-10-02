@@ -102,7 +102,11 @@ def _deploy_pot(conn: Conn, decl_id: int) -> None:
         changed_by="test",
         reason="#2842 pot executor fixture",
     )
-    conn.execute("INSERT INTO ranking_pot_activations (declaration_id, pot_capital) VALUES (%s, 1000)", (decl_id,))
+    conn.execute(
+        "INSERT INTO ranking_pot_activations (declaration_id, pot_capital) VALUES (%s, 1000) "
+        "ON CONFLICT (declaration_id) DO NOTHING",
+        (decl_id,),
+    )
     conn.commit()
 
 
