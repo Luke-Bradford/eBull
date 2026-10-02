@@ -28,6 +28,7 @@ from app.providers.broker import (
 from app.services import ranking_pot_executor as px
 from app.services import ranking_pot_exits as exits
 from app.services import ranking_pot_rebalance as rb
+from app.services.ranking_pot_held_levels import record_held_levels
 from app.services.ranking_pot_policy import RANKING_POT_POLICY_HASH
 from app.services.ranking_pot_step import run_step_job, wind_down_session
 from app.services.strategy_order_reconciliation import reconcile_strategy_order
@@ -260,10 +261,11 @@ def test_a_failed_held_level_record_never_blocks_the_repair(
     conn = ebull_test_conn
     _, d, trade_id, broker = _opened(conn, monkeypatch)
 
-    def _fail(*_: Any, **__: Any) -> bool:
-        raise psycopg.errors.InternalError("recorder down")
+    def _unowned(conn: Conn, **kwargs: Any) -> bool:
+        # Through the real table: sql/453's ownership guard refuses the pair.
+        return record_held_levels(conn, **{**kwargs, "broker_position_id": 1})
 
-    monkeypatch.setattr("app.services.strategy_position_manager.record_held_levels", _fail)
+    monkeypatch.setattr("app.services.strategy_position_manager.record_held_levels", _unowned)
     _portfolio(broker, _position(stop_loss_rate=None, is_no_stop_loss=True))
     at = datetime.combine(_next_month_session(d), time(14), UTC)
     assert _manage(conn, broker, trade_id, at) == ("submitted", "broker_edit_accepted")

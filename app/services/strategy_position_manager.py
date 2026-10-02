@@ -1469,6 +1469,9 @@ def _record_pot_held_levels(
                 observed_at=observed_at,
             )
     except psycopg.Error:
+        # A dead connection is not a recorder failure: the repair below would fail on it anyway, so say so here.
+        if conn.closed or conn.broken:
+            raise
         logger.exception(
             "ranking-pot held-level record failed for trade %s position %s",
             owned.strategy_trade_id,
