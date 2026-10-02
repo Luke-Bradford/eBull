@@ -54,6 +54,9 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         "etoro_core_eligibility",
         # #3381 — the crowd recorder: a skipped fire is a lost day of forward-only data.
         "etoro_crowd",
+        # #3543 — the engine-book risk snapshot joins the orchestrator's DB-only risk lane
+        # (no connection headroom for a new one); risk_metrics_refresh itself is unscheduled.
+        "risk_metrics",
         "sec_rate",
         # #1478 — sec_manifest_worker extracted from sec_rate into its own
         # lane so the heavy drainer stops starving the SEC producers. A lane

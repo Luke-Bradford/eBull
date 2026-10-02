@@ -722,6 +722,8 @@ JOB_SEC_MASTER_IDX_GAP_CLOSE = "sec_master_idx_gap_close"
 JOB_SEC_REBUILD = "sec_rebuild"
 JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
 JOB_FINRA_REGSHO_DAILY_REFRESH = "finra_regsho_daily_refresh"
+# #3543 — daily engine-book risk snapshot vs mandate (measurement only).
+JOB_ENGINE_BOOK_RISK_SNAPSHOT = "engine_book_risk_snapshot"
 
 # #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional).
 # Closes the post-bootstrap freshness drift: bulk archives are
@@ -2522,6 +2524,22 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=12, minute=0),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_ENGINE_BOOK_RISK_SNAPSHOT,
+        display_name="Engine book risk snapshot (#3543)",
+        source="risk_metrics",
+        description=(
+            "Daily 09:00 UTC, after the 03:00 full sync's candles — one row per completed NYSE "
+            "session: the engine book's volatility (historical + EWMA), beta to SPY, concentration, "
+            "2020/2022 stress and stale marks over the effective pot capital, compared with the "
+            "mandate. Measurement only: nothing refuses, sizes or pages on it. A second run for a "
+            "session is a no-op; no SPY close for the session yet fails the run with its reason, and "
+            "the next daily fire (or a manual trigger) retries."
+        ),
+        cadence=Cadence.daily(hour=9, minute=0),
+        catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -10957,6 +10975,17 @@ def finra_short_interest_refresh() -> None:
         # run_finra_short_interest_refresh so _tracked_job records
         # status='failure'; this block just surfaces operator-visible
         # row_count + summary log.
+
+
+def engine_book_risk_snapshot() -> None:
+    """``_INVOKERS['engine_book_risk_snapshot']`` — #3543. Measurement only; a refusal fails the run
+    with its reason code and writes no row."""
+    from app.services.engine_book_risk import run_engine_book_risk_snapshot
+
+    with _tracked_job(JOB_ENGINE_BOOK_RISK_SNAPSHOT) as tracker:
+        with connect_job() as conn:
+            snap = run_engine_book_risk_snapshot(conn, datetime.now(UTC))
+        tracker.row_count = 0 if snap is None else 1
 
 
 def finra_regsho_daily_refresh() -> None:

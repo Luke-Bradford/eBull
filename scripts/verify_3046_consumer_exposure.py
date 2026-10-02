@@ -59,10 +59,12 @@ import psycopg
 
 from app.api.portfolio import _ROLLING_PERIODS
 from app.config import settings
+from app.services.engine_book_risk import LOOKBACK_DAYS
 from app.services.market_data import _RETURN_WINDOWS, most_recent_trading_day
 from app.services.price_quarantine import RULE_SET_VERSION, rule_w1
 from app.services.risk_metrics import (
     _RISK_BUSINESS_COLS,
+    MIN_RETURNS_VOL_BETA,
     TRAILING_LOOKBACK_DAYS,
     WINDOW_LOOKBACK_DAYS,
 )
@@ -262,6 +264,15 @@ INVENTORY: tuple[Occurrence, ...] = (
         "whole series <= as_of; sliced to 1y/3y/full + trailing_* by compute_instrument_risk",
     ),
     Occurrence("app/services/risk_metrics.py", 1659, "eligibility pre-filter", "METADATA"),
+    Occurrence(
+        "app/services/engine_book_risk.py",
+        408,
+        "load_inputs return history",
+        "WINDOWED",
+        ("engine_book_risk",),
+        "held instruments + SPY over the last 253 NYSE sessions (bounded by LOOKBACK_DAYS)",
+    ),
+    Occurrence("app/services/engine_book_risk.py", 418, "load_inputs latest mark", "SINGLE_BAR"),
     Occurrence(
         "app/services/market_regime_provider.py",
         206,
@@ -761,6 +772,17 @@ def _consumer_specs() -> list[WindowSpec]:
             oldest_after=_PRICE_ANCHOR_LOOKBACK_DAYS,
             min_bars=1,
             source="_PRICE_ANCHOR_LOOKBACK_DAYS, uncapped",
+        ),
+        # #3543 — reads LOOKBACK_DAYS of closes; the operand span is the last 253 SPY sessions inside
+        # it, so the calendar lookback is reported as an upper bound.
+        WindowSpec(
+            "engine_book_risk",
+            "engine_book_risk.load_inputs",
+            "close_uncapped",
+            oldest_after=LOOKBACK_DAYS,
+            min_bars=MIN_RETURNS_VOL_BETA + 1,
+            upper_bound=True,
+            source="engine_book_risk.LOOKBACK_DAYS; floor = risk_metrics.MIN_RETURNS_VOL_BETA returns",
         ),
         WindowSpec(
             "comparator_series",
