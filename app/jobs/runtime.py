@@ -146,6 +146,7 @@ from app.workers.scheduler import (
     JOB_PORTFOLIO_EOD_SNAPSHOT,
     JOB_PRICE_QUARANTINE_REFRESH,
     JOB_QUOTES_REFRESH,
+    JOB_RANKING_POT_EXECUTE,
     JOB_RANKING_POT_REBALANCE,
     JOB_RANKING_POT_STEP,
     JOB_RAW_DATA_RETENTION_SWEEP,
@@ -240,6 +241,7 @@ from app.workers.scheduler import (
     portfolio_eod_snapshot_job,
     price_quarantine_refresh,
     quotes_refresh,
+    ranking_pot_execute,
     ranking_pot_rebalance,
     ranking_pot_step,
     raw_data_retention_sweep,
@@ -476,6 +478,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_AI_TRIAL_DECISION_RUN: _adapt_zero_arg(ai_trial_decision_run),
     JOB_AI_TRIAL_EXECUTE: _adapt_zero_arg(ai_trial_execute),
     JOB_AI_TRIAL_FUND_DECISION_RUN: _adapt_zero_arg(ai_trial_fund_decision_run),
+    JOB_RANKING_POT_EXECUTE: _adapt_zero_arg(ranking_pot_execute),
     JOB_RANKING_POT_REBALANCE: _adapt_zero_arg(ranking_pot_rebalance),
     JOB_RANKING_POT_STEP: _adapt_zero_arg(ranking_pot_step),
     JOB_CORE_ELIGIBILITY_REFRESH: _adapt_zero_arg(core_eligibility_refresh),
@@ -955,7 +958,12 @@ def execution_lane_for(job_name: str) -> str:
         return EXECUTION_LANE_SEC
     if job_name == JOB_STRATEGY_PAPER_CYCLE:
         return EXECUTION_LANE_PAPER
-    if job_name in (JOB_AI_TRIAL_DECISION_RUN, JOB_AI_TRIAL_EXECUTE, JOB_AI_TRIAL_FUND_DECISION_RUN):
+    if job_name in (
+        JOB_AI_TRIAL_DECISION_RUN,
+        JOB_AI_TRIAL_EXECUTE,
+        JOB_AI_TRIAL_FUND_DECISION_RUN,
+        JOB_RANKING_POT_EXECUTE,
+    ):
         # #3471 — the AI trial's jobs are paper-lifecycle work and join its reserved lane
         # rather than taking one (zero connection headroom, see below). On the single general
         # permit the decision run's up-to-10-minute model call would park every other

@@ -65,6 +65,7 @@ def _decide_month(
     universes: pot.Universes,
     *,
     state: str = "executing",
+    policy_hash: str = "e" * 64,
 ) -> tuple[int, ex.ExecutedResult]:
     """One decided attempt for the month after completed session ``d``, with its executed decision."""
     as_of = datetime.combine(d, time(23, 40), UTC)
@@ -77,7 +78,7 @@ def _decide_month(
     inputs = rb.SnapshotInputs(
         declaration_id=decl.declaration_id,
         declaration_sha256=decl.doc_sha256,
-        policy_hash="e" * 64,
+        policy_hash=policy_hash,
         as_of=as_of,
         last_session=d,
         target_session=due.target_session,
