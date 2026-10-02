@@ -593,6 +593,8 @@ JOB_AI_TRIAL_FUND_DECISION_RUN = "ai_trial_fund_decision_run"
 JOB_RANKING_POT_REBALANCE = "ranking_pot_rebalance"
 # #2842 — ranking-pot-v1's online step: the shadow and the K controls advanced one session at a time.
 JOB_RANKING_POT_STEP = "ranking_pot_step"
+# #2842 — ranking-pot-v1's executed-book entries, submitted to demo on the target session.
+JOB_RANKING_POT_EXECUTE = "ranking_pot_execute"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -901,6 +903,8 @@ RANKING_POT_FIRE_MINUTE: Final = 40
 #: #2842 slice 6a — the step job's hourly minute. Not policy-relevant: a session is stepped once it is due and its
 #: gate passes, at whichever fire first sees that; the minute only keeps it clear of the rebalance (:40) on the lane.
 RANKING_POT_STEP_FIRE_MINUTE: Final = 10
+#: #2842 slice 5b — the pot's entry fire minute (the window itself is the executor's, policy-hashed).
+RANKING_POT_EXECUTE_FIRE_MINUTE: Final = 5
 
 
 def ai_trial_decision_window_open(now: datetime) -> bool:
@@ -2851,6 +2855,23 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=RANKING_POT_STEP_FIRE_MINUTE),
         # The body steps every due session in order, so a missed fire is the next fire's work.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_RANKING_POT_EXECUTE,
+        display_name="Ranking pot entry execution (#2842)",
+        # The AI trial's lane: both submit demo entries under the allocator lock (`runtime.execution_lane_for`).
+        source="ai_trial",
+        description=(
+            "Hourly — submits ranking-pot-v1's executed-book entries for today's session to demo through the "
+            "pot executor's gates, in entry order, from 15:00 UTC while the regular session is open. An entry "
+            "whose slot is still held by a closing position is retried by a later fire that session. Demo only; "
+            "does nothing before the pot is activated."
+        ),
+        # :05, clear of `ai_trial_execute` (15:00) and the decision runs (:00 / :30) on the same lane.
+        cadence=Cadence.hourly(minute=RANKING_POT_EXECUTE_FIRE_MINUTE),
+        # The body refuses outside the session and before 15:00 UTC, and the executor is idempotent per signal.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -7117,6 +7138,34 @@ def ai_trial_execute() -> None:
                 errors={"leg_raised": result.errors},
             )
         logger.info("ai_trial_execute: %s", result.note)
+
+
+def ranking_pot_execute() -> None:
+    """Submit today's ranking-pot executed-book entries to demo (#2842 spec §7.2;
+    ``app/services/ranking_pot_executor.py``)."""
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.ranking_pot_executor import run_pot_execution
+
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_RANKING_POT_EXECUTE, "the ranking pot is demo-only")
+        return
+    creds = _load_etoro_credentials(JOB_RANKING_POT_EXECUTE)
+    if creds is None:
+        _record_prereq_skip(JOB_RANKING_POT_EXECUTE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_RANKING_POT_EXECUTE) as tracker:
+        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker, connect_job() as conn:
+            result = run_pot_execution(conn, broker=broker, refresh_halts=_refresh_strategy_halt_feed)
+        tracker.row_count = result.entries
+        tracker.note = result.note
+        if result.errors:
+            tracker.progress = JobProgress(
+                candidates_seen=result.entries + result.errors,
+                outcomes=dict(result.verdicts),
+                errors={"entry_raised": result.errors},
+            )
+        logger.info("ranking_pot_execute: %s", result.note)
 
 
 def recommendation_order_reconcile() -> None:

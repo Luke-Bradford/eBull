@@ -503,7 +503,8 @@ The final lane is bootstrap-only:
 
 * ``ai_trial`` — ``ai_trial_decision_run`` (#3471, daily 23:30 UTC),
   ``ai_trial_fund_decision_run`` (#3515, daily 23:45 UTC) and
-  ``ai_trial_execute`` (daily 15:00 UTC). Its own lane because they fire
+  ``ai_trial_execute`` (daily 15:00 UTC), and #2842's ``ranking_pot_execute``
+  (hourly :05, acting from 15:00 UTC in session). Its own lane because they fire
   inside other holders' windows: ``etoro`` is held by the 3-4 h candle sweep
   across 23:30, and ``strategy_execution`` by the 5-minute paper cycle. The
   jobs share it and are spaced so they do not overlap. Broker safety is not the lane's: the

@@ -2757,6 +2757,7 @@ class TestReservedLaneSchedulerExecutors:
             JOB_AI_TRIAL_FUND_DECISION_RUN,
             JOB_CORE_CANDIDATE_QUOTE_REFRESH,
             JOB_QUOTES_REFRESH,
+            JOB_RANKING_POT_EXECUTE,
             JOB_STRATEGY_HALT_FEED_REFRESH,
             JOB_STRATEGY_PAPER_CYCLE,
             SCHEDULED_JOBS,
@@ -2771,6 +2772,8 @@ class TestReservedLaneSchedulerExecutors:
                 JOB_AI_TRIAL_EXECUTE,
                 # #3515 — fund-v1's decision run, the same paper-lifecycle work as v1's.
                 JOB_AI_TRIAL_FUND_DECISION_RUN,
+                # #2842 — the ranking pot's entries, the same submission path under the allocator lock.
+                JOB_RANKING_POT_EXECUTE,
             },
             runtime.EXECUTION_LANE_QUOTE: {
                 JOB_QUOTES_REFRESH,
