@@ -9,7 +9,7 @@ import pytest
 
 from app.jobs.runtime import _INVOKERS
 from app.jobs.sources import source_for
-from app.services.strategy_halts import HaltSnapshot
+from app.services.strategy_halts import HaltFeedError, HaltSnapshot
 from app.workers import scheduler
 from app.workers.scheduler import SCHEDULED_JOBS, Cadence
 
@@ -88,7 +88,7 @@ def test_a_failed_halt_refresh_withholds_entries_but_never_the_risk_reducing_hal
     cycle = MagicMock(return_value=MagicMock(reconciled_orders=1, managed_positions=2, evaluated_signals=0))
     halts = MagicMock(return_value="checked=1 halted=none unmeasured=0")
     refresh = (
-        MagicMock(side_effect=RuntimeError("Nasdaq halt feed request failed"))
+        MagicMock(side_effect=HaltFeedError("halt feed request failed"))
         if refresh_fails
         else MagicMock(return_value=snapshot)
     )
@@ -109,6 +109,6 @@ def test_a_failed_halt_refresh_withholds_entries_but_never_the_risk_reducing_hal
     halts.assert_called_once()
     if refresh_fails:
         assert tracker.progress.errors == {"halt_feed_refresh": 1}
-        assert "halt_source_pub_at=error (entries withheld)" in tracker.note
+        assert "halt_source_pub_at=error (halt feed request failed; entries withheld)" in tracker.note
     else:
         assert "halt_source_pub_at=2026-08-10T13:50:00+00:00" in tracker.note

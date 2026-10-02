@@ -6969,6 +6969,7 @@ def fred_reference_refresh() -> None:
 def strategy_paper_cycle() -> None:
     """Run the bounded demo strategy lifecycle; never select live credentials."""
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.strategy_halts import HaltFeedError
     from app.services.strategy_paper_runtime import run_strategy_paper_cycle
 
     if settings.etoro_env != "demo":
@@ -6989,24 +6990,32 @@ def strategy_paper_cycle() -> None:
         # gates new risk alone -- `manage_owned_position` is not blocked even by
         # the kill switch. Aborting the whole cycle on a feed outage turned an
         # entry input into an exit outage.
+        # The note names the failure: an outage and a regressed publication (a
+        # data-integrity verdict) withhold entries alike but are different events.
+        halt_failure: str | None = None
         try:
             halt_snapshot: HaltSnapshot | None = _refresh_strategy_halt_feed()
-        except Exception:
+        except Exception as exc:
             logger.exception("strategy_paper_cycle: halt feed refresh failed; entries withheld this cycle")
             halt_snapshot = None
+            halt_failure = str(exc) if isinstance(exc, HaltFeedError) else type(exc).__name__
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
             with connect_job() as conn:
                 result = run_strategy_paper_cycle(conn, broker=broker, entries=halt_snapshot is not None)
                 pair_events = _record_trial_pair_lifecycle(conn)
                 trial_halts = _enforce_trial_halts(conn)
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
+        halt_note = (
+            f"error ({halt_failure}; entries withheld)"
+            if halt_snapshot is None
+            else halt_snapshot.source_pub_at.isoformat()
+        )
         tracker.note = (
             f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
             f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
             f"trial_pair_events={'error' if pair_events is None else pair_events} "
             f"trial_halts={'error' if trial_halts is None else trial_halts} "
-            f"halt_source_pub_at="
-            f"{'error (entries withheld)' if halt_snapshot is None else halt_snapshot.source_pub_at.isoformat()}"
+            f"halt_source_pub_at={halt_note}"
         )
         errors = {
             name: 1
