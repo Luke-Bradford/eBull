@@ -56,6 +56,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.services import ranking_pot as pot
+from app.services import ranking_pot_exits as exits
 from app.services import ranking_pot_look as look
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_sim as sim
@@ -827,13 +828,17 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
     decl = rb.load_declaration(conn)
     if decl is None:
         return StepJobResult("no ranking-pot declaration")
+    notes: list[str] = []
+    # §7.4 wind-down stamps first, before anything below can raise: they are what closes the executed book.
+    _stamps(conn, decl, notes)
     first = _first_decided(conn, decl.declaration_id)
     if first is None:
-        return StepJobResult("no decided rebalance yet")
+        # No books to step or look at: a trial winding down before its first decision completes at once.
+        _complete(conn, decl, now(), notes)
+        return StepJobResult("; ".join(notes or ["no decided rebalance yet"]))
     donor = control_drawer(decl.s0_ids, declaration_sha256=decl.doc_sha256, first_snapshot_sha256=first[1])
 
     stepped = 0
-    notes: list[str] = []
     # §9.3 looks: first repair a look committed without its state event or a step committed without its look.
     _looks(conn, decl, now(), notes)
     while True:
@@ -854,7 +859,22 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
     if not rb._policy_ok(decl):
         # No step was due to record the refusal, but a look may have been skipped: drift still fails the run.
         raise RuntimeError(f"ranking pot {decl.declaration_id}: policy drift ({'; '.join(notes)})")
+    # §7.4 `completed`: after this fire's looks and steps (this job is their only writer, so none can become due
+    # in between).
+    _complete(conn, decl, now(), notes)
     return StepJobResult("; ".join(notes), stepped)
+
+
+def _stamps(conn: Conn, decl: rb.PotDeclaration, notes: list[str]) -> None:
+    if written := exits.stamp_wind_down(conn, decl.declaration_id):
+        notes.append(f"wind-down stamps {written}")
+        logger.info("ranking pot exits: %s wind-down stamps", written)
+
+
+def _complete(conn: Conn, decl: rb.PotDeclaration, as_of: datetime, notes: list[str]) -> None:
+    if (note := exits.complete_if_flat(conn, decl, now=as_of)) is not None:
+        notes.append(note)
+        logger.info("ranking pot exits: %s", note)
 
 
 def _looks(conn: Conn, decl: rb.PotDeclaration, as_of: datetime, notes: list[str]) -> None:
@@ -866,6 +886,8 @@ def _looks(conn: Conn, decl: rb.PotDeclaration, as_of: datetime, notes: list[str
     if (note := look.reconcile_state(conn, decl.declaration_id)) is not None:
         notes.append(note)
         logger.info("ranking pot look: %s", note)
+    # A harm wind-down written just now is stamped in this fire.
+    _stamps(conn, decl, notes)
 
 
 __all__ = [

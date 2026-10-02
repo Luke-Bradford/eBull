@@ -41,6 +41,7 @@ from app.services.core_exit_levels import (
     core_exit_level_satisfied,
     core_exit_levels,
 )
+from app.services.ranking_pot_exit_rule import pot_exit_due
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -116,6 +117,11 @@ class _OwnedPosition:
     # same reason ``is_core`` is: absence must not decide which exit rules apply.
     is_demo_trial: bool
     exit_deadline_session: date | None
+    # #2842 §7.4: a ranking-pot trade is linked by its `ranking_pot_exec_submissions` row, its own flag (never
+    # `is_demo_trial`: v1's deadline and O10 rules are not the pot's). The stamp is set by the pot's rebalance or
+    # wind-down; NULL means no exit is due yet.
+    is_ranking_pot: bool
+    pot_exit_session: date | None
 
 
 @contextmanager
@@ -337,7 +343,9 @@ _LOAD_OWNED_SQL = f"""
                    variant.structure_atr_multiple,
                    q.bid AS quote_bid, q.quoted_at,
                    t.exit_deadline_session,
-                   trial_link.strategy_trade_id IS NOT NULL AS is_demo_trial
+                   trial_link.strategy_trade_id IS NOT NULL AS is_demo_trial,
+                   pot_sub.lifecycle_id IS NOT NULL AS is_ranking_pot,
+                   pot_stamp.exit_session AS pot_exit_session
             FROM strategy_position_ownership own
             JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
             LEFT JOIN strategy_funding_decisions funding
@@ -354,6 +362,8 @@ _LOAD_OWNED_SQL = f"""
               ON variant.ratchet_variant_id=manager.ratchet_variant_id
             LEFT JOIN quotes q ON q.instrument_id=t.instrument_id
             LEFT JOIN ai_trial_trade_links trial_link ON trial_link.strategy_trade_id=t.strategy_trade_id
+            LEFT JOIN ranking_pot_exec_submissions pot_sub ON pot_sub.strategy_trade_id=t.strategy_trade_id
+            LEFT JOIN ranking_pot_exec_exit_stamps pot_stamp ON pot_stamp.lifecycle_id=pot_sub.lifecycle_id
             WHERE own.strategy_trade_id=%s AND own.broker_position_id=%s AND own.status='active'
               AND t.status IN ('open','closing','reconcile_required')
               AND (
@@ -419,6 +429,8 @@ def _load_owned(conn: psycopg.Connection[Any], *, strategy_trade_id: int, broker
         quoted_at=cast(datetime | None, row["quoted_at"]),
         is_demo_trial=bool(row["is_demo_trial"]),
         exit_deadline_session=cast(date | None, row["exit_deadline_session"]),
+        is_ranking_pot=bool(row["is_ranking_pot"]),
+        pot_exit_session=cast(date | None, row["pot_exit_session"]),
     )
 
 
@@ -1057,6 +1069,7 @@ def _submit_close(
         "emergency_risk",
         "operator_close",
         "core_rebalance",
+        "rerank_exit",
     ],
     core_rebalance_intent_id: int | None = None,
 ) -> PositionManagerResult:
@@ -1410,20 +1423,10 @@ def _trial_supersede_trigger(
     return "protection_failed"
 
 
-def _trial_close(
-    conn: psycopg.Connection[Any],
-    *,
-    broker: BrokerProvider,
-    owned: _OwnedPosition,
-    trigger_code: Literal["exit_deadline", "protection_failed"],
-    observed_at: datetime,
-) -> PositionManagerResult:
-    """Close a demo-trial leg. O10: when the close for a failed protection is refused too, the
-    trial halts (``halted_operator``) and the position alerts; an unprotected position is a
-    refusal surface."""
-    # An earlier close whose outcome the broker never confirmed may still execute, so a second
-    # request is not sent over it (Codex ckpt-2); the #2979 witness settles it. Same predicate
-    # as the core executor's `core_operation_outstanding`.
+def _close_outstanding(conn: psycopg.Connection[Any], owned: _OwnedPosition) -> bool:
+    """An earlier close whose outcome the broker never confirmed may still execute, so a second
+    request is not sent over it (Codex ckpt-2); the #2979 witness settles it. Same predicate
+    as the core executor's `core_operation_outstanding`."""
     outstanding = conn.execute(
         """
         SELECT EXISTS (
@@ -1435,7 +1438,70 @@ def _trial_close(
         (owned.ownership_id,),
     ).fetchone()
     conn.commit()
-    if outstanding is not None and outstanding[0]:
+    return outstanding is not None and bool(outstanding[0])
+
+
+def _pot_exit_due(owned: _OwnedPosition, observed_at: datetime) -> bool:
+    return (
+        owned.is_ranking_pot
+        and owned.pot_exit_session is not None
+        and pot_exit_due(owned.pot_exit_session, observed_at)
+    )
+
+
+def _pot_close_refusal(
+    conn: psycopg.Connection[Any], *, broker: BrokerProvider, owned: _OwnedPosition
+) -> PositionManagerResult | None:
+    """Why a due ranking-pot close (#2842 §7.4) cannot be sent this cycle, or None. Both are retried next cycle."""
+    if _close_outstanding(conn, owned):
+        return PositionManagerResult(
+            owned.strategy_trade_id, owned.broker_position_id, "reconcile_required", "pot_close_outstanding"
+        )
+    if not _eligibility_for_owned(broker, owned).allow_close_position:
+        return PositionManagerResult(
+            owned.strategy_trade_id, owned.broker_position_id, "rejected", "broker_close_not_allowed"
+        )
+    return None
+
+
+def _pot_close(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    owned: _OwnedPosition,
+    superseding_operation_id: int | None = None,
+) -> PositionManagerResult:
+    """Close a ranking-pot position whose stamped exit is due (#2842 §7.4), trigger ``rerank_exit``.
+
+    A close that cannot be sent this cycle returns its refusal and is retried next cycle; only then is a pending
+    edit (``superseding_operation_id``) terminalised, so a refused close keeps the edit. ``reconcile_required``,
+    never ``rejected``: the broker accepted that edit and may yet apply it (#3284)."""
+    refusal = _pot_close_refusal(conn, broker=broker, owned=owned)
+    if refusal is not None:
+        return refusal
+    if superseding_operation_id is not None:
+        with conn.transaction():
+            _terminal(
+                conn,
+                operation_id=superseding_operation_id,
+                status="reconcile_required",
+                error_code="superseded_by_pot_exit",
+            )
+    return _submit_close(conn, broker=broker, owned=owned, trigger_code="rerank_exit")
+
+
+def _trial_close(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    owned: _OwnedPosition,
+    trigger_code: Literal["exit_deadline", "protection_failed"],
+    observed_at: datetime,
+) -> PositionManagerResult:
+    """Close a demo-trial leg. O10: when the close for a failed protection is refused too, the
+    trial halts (``halted_operator``) and the position alerts; an unprotected position is a
+    refusal surface."""
+    if _close_outstanding(conn, owned):
         return PositionManagerResult(
             owned.strategy_trade_id, owned.broker_position_id, "reconcile_required", "trial_close_outstanding"
         )
@@ -1516,6 +1582,16 @@ def manage_owned_position(
         # abort every later position in the cycle.
         resumed = _resume_operation(conn, broker=broker, owned=owned, observed_at=observed_at)
         if resumed is not None:
+            # #2842 §7.4: a pending accepted-but-unlanded edit yields to a due ranking-pot exit, as a trial
+            # leg's does to its deadline. Only when the close can be sent now: a refused close keeps the edit.
+            if (
+                _pot_exit_due(owned, observed_at)
+                and (resumed.state, resumed.reason_code) == ("pending", "broker_edit_pending")
+                and resumed.position_operation_id is not None
+            ):
+                return _pot_close(
+                    conn, broker=broker, owned=owned, superseding_operation_id=resumed.position_operation_id
+                )
             supersede = _trial_supersede_trigger(
                 conn, broker=broker, owned=owned, resumed=resumed, observed_at=observed_at
             )
@@ -1574,6 +1650,7 @@ def manage_owned_position(
             and owned.exit_deadline_session is not None
             and deadline_exit_due(owned.exit_deadline_session, observed_at)
         )
+        pot_due = _pot_exit_due(owned, observed_at)
         timed_out = (
             age_seconds is not None
             and position.open_date_time is not None
@@ -1581,7 +1658,7 @@ def manage_owned_position(
         )
         # A due deadline does not depend on the broker's open time, so its absence (which only
         # the age-out needs) must not hold a due trial exit in reconciliation (Codex ckpt-2).
-        if age_seconds is not None and position.open_date_time is None and not deadline_due:
+        if age_seconds is not None and position.open_date_time is None and not deadline_due and not pot_due:
             with conn.transaction():
                 conn.execute(
                     "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "
@@ -1596,6 +1673,13 @@ def manage_owned_position(
             )
         if close_reason is None and not timed_out and deadline_due:
             return _trial_close(conn, broker=broker, owned=owned, trigger_code="exit_deadline", observed_at=observed_at)
+        # #2842 §7.4: a stamped ranking-pot exit closes from 15:00 UTC on its exit session, before the gap repair
+        # and the ratchet. A close the broker does not allow now falls through to the protection repair below, so
+        # an untradable position is still repaired; the close is retried next cycle.
+        if close_reason is None and not timed_out and pot_due:
+            closed = _pot_close(conn, broker=broker, owned=owned)
+            if (closed.state, closed.reason_code) != ("rejected", "broker_close_not_allowed"):
+                return closed
         if close_reason is not None or timed_out:
             eligibility = _eligibility_for_owned(broker, owned)
             if not eligibility.allow_close_position:
