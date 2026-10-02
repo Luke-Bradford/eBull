@@ -81,6 +81,14 @@ class EngineCapitalAuthority:
     core_pending_committed: Decimal
     core_active_recorded_committed: Decimal
     core_active_position_ids: tuple[int, ...]
+    #: ``alpha_committed`` and ``core_pending_committed`` split by instrument, as sorted
+    #: ``(instrument_id, amount)`` pairs (#3541 slice 2: the exposure caps' numerator).
+    alpha_committed_by_instrument: tuple[tuple[int, Decimal], ...]
+    core_pending_by_instrument: tuple[tuple[int, Decimal], ...]
+
+
+def _by_instrument(totals: dict[int, Decimal]) -> tuple[tuple[int, Decimal], ...]:
+    return tuple(sorted(totals.items()))
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,17 @@ class EngineCapitalUsage:
     working: Decimal
     core_market_value: Decimal
     core_active_committed: Decimal
+    core_instrument_id: int | None
+
+    def committed_in(self, instrument_id: int) -> Decimal:
+        """``committed`` restricted to one instrument: alpha, core pending, and core active
+        when ``instrument_id`` is the core instrument. Summed over every instrument it is
+        ``committed``."""
+        amount = dict(self.authority.alpha_committed_by_instrument).get(instrument_id, _ZERO)
+        amount += dict(self.authority.core_pending_by_instrument).get(instrument_id, _ZERO)
+        if instrument_id == self.core_instrument_id:
+            amount += self.core_active_committed
+        return amount
 
 
 def _money(value: object, *, label: str, reason: EngineCapitalRefusal, positive: bool = False) -> Decimal:
@@ -244,21 +263,25 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
         """
         SELECT funding.funding_decision_id,funding.amount,
                trade.strategy_trade_id,trade.status,
-               count(DISTINCT ownership.ownership_id) FILTER (WHERE ownership.status='active') AS active_owned
+               count(DISTINCT ownership.ownership_id) FILTER (WHERE ownership.status='active') AS active_owned,
+               signal.instrument_id,trade.instrument_id
         FROM strategy_funding_decisions funding
         JOIN strategy_deployments deployment
           ON deployment.deployment_id=funding.deployment_id AND deployment.mode='paper'
+        JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
         LEFT JOIN strategy_trades trade ON trade.funding_decision_id=funding.funding_decision_id
         LEFT JOIN strategy_position_ownership ownership
           ON ownership.strategy_trade_id=trade.strategy_trade_id
         WHERE funding.verdict='allocated' AND funding.decided_at >= %s
-        GROUP BY funding.funding_decision_id,funding.amount,trade.strategy_trade_id,trade.status
+        GROUP BY funding.funding_decision_id,funding.amount,trade.strategy_trade_id,trade.status,
+                 signal.instrument_id,trade.instrument_id
         ORDER BY funding.funding_decision_id
         """,
         (epoch,),
     ).fetchall()
     alpha_committed = _ZERO
     alpha_working = _ZERO
+    alpha_by_instrument: dict[int, Decimal] = {}
     for row in alpha_rows:
         amount = _money(
             row[1],
@@ -267,9 +290,17 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
             positive=True,
         )
         trade_id = row[2]
+        instrument_id = int(row[5])
         if trade_id is None:
             alpha_committed += amount
+            alpha_by_instrument[instrument_id] = alpha_by_instrument.get(instrument_id, _ZERO) + amount
             continue
+        if int(row[6]) != instrument_id:
+            # The per-instrument exposure cap charges the signal's instrument; a trade on
+            # another one would be charged to the wrong bucket while the totals still agree.
+            raise EngineCapitalObservationError(
+                f"paper trade {trade_id} instrument differs from its signal's", "engine_capital_population_incomplete"
+            )
         status = str(row[3])
         active_owned = int(row[4])
         terminal = status in _TERMINAL_TRADES
@@ -279,6 +310,7 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
             )
         if not terminal:
             alpha_committed += amount
+            alpha_by_instrument[instrument_id] = alpha_by_instrument.get(instrument_id, _ZERO) + amount
             if active_owned:
                 alpha_working += amount
 
@@ -310,6 +342,7 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
         (epoch,),
     ).fetchall()
     core_pending = _ZERO
+    core_pending_by_instrument: dict[int, Decimal] = {}
     core_active_recorded = _ZERO
     active_ids: list[int] = []
     for row in core_rows:
@@ -344,12 +377,14 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
                     f"core trade {trade_id} owns positions before entry resolution",
                     "engine_capital_population_incomplete",
                 )
-            core_pending += _money(
+            requested = _money(
                 row[8],
                 label=f"core trade {trade_id} requested amount",
                 reason="engine_capital_population_incomplete",
                 positive=True,
             )
+            core_pending += requested
+            core_pending_by_instrument[int(row[2])] = core_pending_by_instrument.get(int(row[2]), _ZERO) + requested
             continue
         if not owned_ids:
             raise EngineCapitalObservationError(
@@ -379,6 +414,8 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
         core_pending_committed=core_pending,
         core_active_recorded_committed=core_active_recorded,
         core_active_position_ids=tuple(sorted(active_ids)),
+        alpha_committed_by_instrument=_by_instrument(alpha_by_instrument),
+        core_pending_by_instrument=_by_instrument(core_pending_by_instrument),
     )
 
 
@@ -446,7 +483,9 @@ def resolve_engine_capital_usage(
         realised_delta=authority.realised_delta,
         committed=committed,
     )
-    return EngineCapitalUsage(authority, headroom, committed, working, core_market_value, core_committed)
+    return EngineCapitalUsage(
+        authority, headroom, committed, working, core_market_value, core_committed, core_instrument_id
+    )
 
 
 __all__ = [

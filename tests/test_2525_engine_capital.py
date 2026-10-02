@@ -37,6 +37,8 @@ def authority(*, ids: tuple[int, ...] = (11,), alpha: str = "200", pending: str 
         core_pending_committed=Decimal(pending),
         core_active_recorded_committed=Decimal("300") if ids else Decimal("0"),
         core_active_position_ids=ids,
+        alpha_committed_by_instrument=((7, Decimal(alpha)),),
+        core_pending_by_instrument=((42, Decimal(pending)),),
     )
 
 
@@ -94,6 +96,17 @@ def test_only_exact_owned_positions_enter_the_shared_boundary() -> None:
     assert usage.committed == Decimal("600")
     assert usage.working == Decimal("450")
     assert usage.headroom.remaining == Decimal("400")
+
+
+def test_committed_in_splits_committed_by_instrument_without_loss() -> None:
+    # #3541 slice 2: the per-instrument exposure cap's numerator. Core active counts only
+    # under the core instrument; the split sums back to `committed`.
+    usage = resolve_engine_capital_usage(authority(), snapshot(position(11)), core_instrument_id=42)
+
+    assert usage.committed_in(42) == Decimal("400")  # core pending 100 + core active 300
+    assert usage.committed_in(7) == Decimal("200")  # alpha
+    assert usage.committed_in(99) == Decimal("0")
+    assert usage.committed_in(42) + usage.committed_in(7) == usage.committed
 
 
 @pytest.mark.parametrize(
@@ -290,5 +303,90 @@ def test_a_trade_backed_by_a_non_actionable_core_intent_refuses_instead_of_disap
     )
 
     with pytest.raises(EngineCapitalObservationError, match="entry authority is incomplete") as raised:
+        load_engine_capital_authority(conn)
+    assert raised.value.reason_code == "engine_capital_population_incomplete"
+
+
+def _alpha_allocation(
+    conn: psycopg.Connection[Any], *, deployment_id: int, signal_instrument: int, amount: str, day: int
+) -> int:
+    signal = conn.execute(
+        """
+        INSERT INTO strategy_signals (
+            strategy_id,strategy_version,instrument_id,signal_bar_date,
+            signal_kind,verdict,fill_bar_date,fill_price,universe,input_rule_set_versions
+        ) VALUES ('split','v1',%s,DATE '2026-08-20' + %s,'entry','fired',
+                  DATE '2026-08-21' + %s,10,'survivor_only','{"test":"v1"}'::jsonb)
+        RETURNING signal_id
+        """,
+        (signal_instrument, day, day),
+    ).fetchone()
+    assert signal is not None
+    decision = conn.execute(
+        """
+        INSERT INTO strategy_funding_decisions (signal_id,deployment_id,verdict,amount,reason_code)
+        VALUES (%s,%s,'allocated',%s,'split') RETURNING funding_decision_id
+        """,
+        (signal[0], deployment_id, amount),
+    ).fetchone()
+    assert decision is not None
+    return int(decision[0])
+
+
+def _split_fixture(conn: psycopg.Connection[Any]) -> int:
+    conn.execute(
+        "INSERT INTO instruments (instrument_id,symbol,company_name,is_tradable) "
+        "VALUES (42,'SPLIT.A','Split A',TRUE),(43,'SPLIT.B','Split B',TRUE)"
+    )
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("1250"),
+        capital_mode="fixed",
+        risk_profile="balanced",
+        approval_mode="manual",
+        max_concurrent_positions_override=None,
+        changed_by="operator",
+        reason="assign the engine pot",
+    )
+    deployment = conn.execute(
+        """
+        INSERT INTO strategy_deployments (
+            strategy_id,strategy_version,mode,capital_limit,currency,enabled,updated_by,reason
+        ) VALUES ('split','v1','paper',1000,'USD',TRUE,'test','test')
+        RETURNING deployment_id
+        """
+    ).fetchone()
+    assert deployment is not None
+    return int(deployment[0])
+
+
+def test_the_authority_splits_alpha_committed_by_the_funded_signals_instrument(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    deployment_id = _split_fixture(conn)
+    # An allocation with no trade yet is committed too -- it is the reservation itself.
+    _alpha_allocation(conn, deployment_id=deployment_id, signal_instrument=42, amount="100", day=0)
+    traded = _alpha_allocation(conn, deployment_id=deployment_id, signal_instrument=43, amount="250", day=1)
+    conn.execute("INSERT INTO strategy_trades (funding_decision_id,instrument_id) VALUES (%s,43)", (traded,))
+
+    loaded = load_engine_capital_authority(conn)
+
+    assert loaded is not None
+    assert loaded.alpha_committed == Decimal("350")
+    assert loaded.alpha_committed_by_instrument == ((42, Decimal("100")), (43, Decimal("250")))
+    assert loaded.core_pending_by_instrument == ()
+
+
+def test_an_alpha_trade_on_another_instrument_than_its_signal_refuses(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    deployment_id = _split_fixture(conn)
+    decision = _alpha_allocation(conn, deployment_id=deployment_id, signal_instrument=42, amount="100", day=0)
+    conn.execute("INSERT INTO strategy_trades (funding_decision_id,instrument_id) VALUES (%s,43)", (decision,))
+
+    with pytest.raises(EngineCapitalObservationError, match="differs from its signal") as raised:
         load_engine_capital_authority(conn)
     assert raised.value.reason_code == "engine_capital_population_incomplete"

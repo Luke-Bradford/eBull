@@ -175,6 +175,8 @@ def capital_authority() -> EngineCapitalAuthority:
         core_pending_committed=Decimal("0"),
         core_active_recorded_committed=Decimal("500"),
         core_active_position_ids=(9001,),
+        alpha_committed_by_instrument=(),
+        core_pending_by_instrument=(),
     )
 
 

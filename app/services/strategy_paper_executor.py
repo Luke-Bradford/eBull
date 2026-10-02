@@ -862,12 +862,12 @@ def _protective_rates(intent: _SizingIntent) -> tuple[Decimal, Decimal]:
 # history and missed the first entirely.  Classify a query by the DECISION IT
 # FEEDS, not by the tables it touches.
 #
-# Why every OTHER mandate control needed no change: `portfolio_capacity` and
-# `instrument_capacity` read `risk.total_invested` and `risk.instrument_investments`
-# -- the broker account snapshot, which already counts a core position with no code
-# at all.  So the split was never a policy decision; it was an artefact of where
-# each number came from.  (`drawdown` now reads the engine pot, #3541, whose
-# exact-owned population includes both arms by construction.)
+# Why every OTHER mandate control needed no change: the exposure caps then read
+# `risk.total_invested` and `risk.instrument_investments` -- the broker account
+# snapshot, which already counts a core position with no code at all.  So the split
+# was never a policy decision; it was an artefact of where each number came from.
+# (#3541 moved `drawdown` and both exposure caps onto the engine pot; its committed
+# population includes both arms by construction.)
 #
 # Counting core here is settled by sql/311, not by preference: the mandate is a
 # PORTFOLIO mandate (stored on `strategy_paper_pool_events`, every limit
@@ -1035,12 +1035,57 @@ def _capacities(
     mandate_max_loss_per_position_pct: Decimal,
     stop_loss_pct: Decimal,
 ) -> _Capacities | str:
+    """``_capacity_terms`` with the exposure pair on the broker ACCOUNT: ``equity`` scaled by each
+    percentage, less ``total_invested`` / ``current_instrument`` and the pending orders.
+
+    ⚠ Kept, with this exact signature, for ONE caller: the #3471 v1 step-0 preview
+    (``ai_trial_start_gate``), which is policy-hashed and must keep the semantics declaration 16
+    froze. The executors size on the engine pot instead (#3541 slice 2, ``_risk_and_amount``).
+    """
+    return _capacity_terms(
+        pool_base=pool_base,
+        committed=committed,
+        active_committed=active_committed,
+        deployment_base=deployment_base,
+        deployment_reserved=deployment_reserved,
+        cash=available_cash - pending_total,
+        portfolio=equity * max_portfolio_exposure_pct / Decimal("100") - total_invested - pending_total,
+        instrument=equity * max_instrument_exposure_pct / Decimal("100") - current_instrument - pending_instrument,
+        mandate_cash_reserve_pct=mandate_cash_reserve_pct,
+        mandate_active_risk_budget_pct=mandate_active_risk_budget_pct,
+        mandate_max_loss_per_position_pct=mandate_max_loss_per_position_pct,
+        stop_loss_pct=stop_loss_pct,
+    )
+
+
+def _pot_exposure(pool_base: Decimal, committed: Decimal, exposure_pct: Decimal) -> Decimal:
+    """An exposure cap's room on the engine pot (#3541 slice 2): ``pool_base`` -- the
+    denominator of every other mandate limit -- less the sandbox's own ``committed``."""
+    return pool_base * exposure_pct / Decimal("100") - committed
+
+
+def _capacity_terms(
+    *,
+    pool_base: Decimal,
+    committed: Decimal,
+    active_committed: Decimal,
+    deployment_base: Decimal,
+    deployment_reserved: Decimal,
+    cash: Decimal,
+    portfolio: Decimal,
+    instrument: Decimal,
+    mandate_cash_reserve_pct: Decimal,
+    mandate_active_risk_budget_pct: Decimal,
+    mandate_max_loss_per_position_pct: Decimal,
+    stop_loss_pct: Decimal,
+) -> _Capacities | str:
     """The capacity arithmetic of ``_risk_and_amount`` over explicit inputs: pure, no I/O.
 
     Returns the named refusal for a limit already exhausted, else every capacity term.
 
     ``committed`` is everything the shared pot holds (core + pending core + alpha);
     ``active_committed`` is the NON-core share only, and feeds the active-risk budget alone.
+    ``cash``, ``portfolio`` and ``instrument`` are the caller's rooms, floored at zero here.
     """
     deployment_remaining = max(Decimal("0"), deployment_base - deployment_reserved)
     # `pool_base` IS the shared bound resolved from exact-owned alpha and core
@@ -1060,14 +1105,8 @@ def _capacities(
     # report a breach of the operator's assignment when one strategy's slice is full.
     if pool_remaining.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
         return SANDBOX_EXCEEDED
-    portfolio_capacity = max(
-        Decimal("0"),
-        equity * max_portfolio_exposure_pct / Decimal("100") - total_invested - pending_total,
-    )
-    instrument_capacity = max(
-        Decimal("0"),
-        equity * max_instrument_exposure_pct / Decimal("100") - current_instrument - pending_instrument,
-    )
+    portfolio_capacity = max(Decimal("0"), portfolio)
+    instrument_capacity = max(Decimal("0"), instrument)
     cash_reserve_capacity = max(
         Decimal("0"),
         pool_base * (Decimal("100") - mandate_cash_reserve_pct) / Decimal("100") - committed,
@@ -1094,7 +1133,7 @@ def _capacities(
     return _Capacities(
         deployment_remaining=deployment_remaining,
         pool_remaining=pool_remaining,
-        cash=max(Decimal("0"), available_cash - pending_total),
+        cash=max(Decimal("0"), cash),
         portfolio=portfolio_capacity,
         instrument=instrument_capacity,
         active_risk=active_risk_capacity,
@@ -1189,25 +1228,25 @@ def _risk_and_amount(
     )
     if isinstance(observed, str):
         return observed
-    deployment_base, pool_base, pending_total, pending_instrument, drawdown = observed
+    deployment_base, pool_base, pending_total, _pending_instrument, drawdown = observed
     if drawdown >= intent.max_drawdown_pct:
         return "account_drawdown_limit"
     if drawdown >= intent.mandate_max_drawdown_pct:
         return "portfolio_drawdown_limit"
-    capacities = _capacities(
+    # #3541 slice 2: both exposure caps on the ENGINE POT -- `pool_base` less the sandbox's own
+    # committed population -- never the account, whose equity and holdings include the
+    # operator's. Cash stays the account's: it is the ability-to-pay ceiling and only narrows.
+    capacities = _capacity_terms(
         pool_base=pool_base,
         committed=usage.committed,
         active_committed=usage.authority.alpha_committed,
         deployment_base=deployment_base,
         deployment_reserved=intent.reserved,
-        equity=risk.equity,
-        total_invested=risk.total_invested,
-        available_cash=risk.available_cash,
-        pending_total=pending_total,
-        pending_instrument=pending_instrument,
-        current_instrument=current_instrument,
-        max_portfolio_exposure_pct=intent.max_portfolio_exposure_pct,
-        max_instrument_exposure_pct=intent.max_instrument_exposure_pct,
+        cash=risk.available_cash - pending_total,
+        portfolio=_pot_exposure(pool_base, usage.committed, intent.max_portfolio_exposure_pct),
+        instrument=_pot_exposure(
+            pool_base, usage.committed_in(intent.instrument_id), intent.max_instrument_exposure_pct
+        ),
         mandate_cash_reserve_pct=intent.mandate_cash_reserve_pct,
         mandate_active_risk_budget_pct=intent.mandate_active_risk_budget_pct,
         mandate_max_loss_per_position_pct=intent.mandate_max_loss_per_position_pct,
