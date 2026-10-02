@@ -1464,6 +1464,32 @@ def _pot_close_refusal(
     return None
 
 
+def _pot_close(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    owned: _OwnedPosition,
+    superseding_operation_id: int | None = None,
+) -> PositionManagerResult:
+    """Close a ranking-pot position whose stamped exit is due (#2842 §7.4), trigger ``rerank_exit``.
+
+    A close that cannot be sent this cycle returns its refusal and is retried next cycle; only then is a pending
+    edit (``superseding_operation_id``) terminalised, so a refused close keeps the edit. ``reconcile_required``,
+    never ``rejected``: the broker accepted that edit and may yet apply it (#3284)."""
+    refusal = _pot_close_refusal(conn, broker=broker, owned=owned)
+    if refusal is not None:
+        return refusal
+    if superseding_operation_id is not None:
+        with conn.transaction():
+            _terminal(
+                conn,
+                operation_id=superseding_operation_id,
+                status="reconcile_required",
+                error_code="superseded_by_pot_exit",
+            )
+    return _submit_close(conn, broker=broker, owned=owned, trigger_code="rerank_exit")
+
+
 def _trial_close(
     conn: psycopg.Connection[Any],
     *,
@@ -1563,17 +1589,9 @@ def manage_owned_position(
                 and (resumed.state, resumed.reason_code) == ("pending", "broker_edit_pending")
                 and resumed.position_operation_id is not None
             ):
-                refusal = _pot_close_refusal(conn, broker=broker, owned=owned)
-                if refusal is not None:
-                    return refusal
-                with conn.transaction():
-                    _terminal(
-                        conn,
-                        operation_id=resumed.position_operation_id,
-                        status="reconcile_required",
-                        error_code="superseded_by_pot_exit",
-                    )
-                return _submit_close(conn, broker=broker, owned=owned, trigger_code="rerank_exit")
+                return _pot_close(
+                    conn, broker=broker, owned=owned, superseding_operation_id=resumed.position_operation_id
+                )
             supersede = _trial_supersede_trigger(
                 conn, broker=broker, owned=owned, resumed=resumed, observed_at=observed_at
             )
@@ -1659,11 +1677,9 @@ def manage_owned_position(
         # and the ratchet. A close the broker does not allow now falls through to the protection repair below, so
         # an untradable position is still repaired; the close is retried next cycle.
         if close_reason is None and not timed_out and pot_due:
-            refusal = _pot_close_refusal(conn, broker=broker, owned=owned)
-            if refusal is None:
-                return _submit_close(conn, broker=broker, owned=owned, trigger_code="rerank_exit")
-            if refusal.reason_code != "broker_close_not_allowed":
-                return refusal
+            closed = _pot_close(conn, broker=broker, owned=owned)
+            if (closed.state, closed.reason_code) != ("rejected", "broker_close_not_allowed"):
+                return closed
         if close_reason is not None or timed_out:
             eligibility = _eligibility_for_owned(broker, owned)
             if not eligibility.allow_close_position:
