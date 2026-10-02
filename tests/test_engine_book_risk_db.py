@@ -50,6 +50,8 @@ def test_an_empty_book_writes_one_append_only_row(ebull_test_conn: psycopg.Conne
 
     snap = run_engine_book_risk_snapshot(conn, _NOW)
     assert snap is not None and snap.history_status == "empty_book"
+    # snapshot_read commits on exit, so the writer's transaction is top-level and committed.
+    assert conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
     row = conn.execute(
         "SELECT capital_usd, gross_usd, history_status, checks->'stale_marks'->>'flagged' "
         "FROM engine_book_risk_snapshots WHERE session_date = %s AND policy_version = %s",

@@ -2535,7 +2535,8 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "session: the engine book's volatility (historical + EWMA), beta to SPY, concentration, "
             "2020/2022 stress and stale marks over the effective pot capital, compared with the "
             "mandate. Measurement only: nothing refuses, sizes or pages on it. A second run for a "
-            "session is a no-op; no SPY close for the session yet refuses and the next fire retries."
+            "session is a no-op; no SPY close for the session yet fails the run with its reason, and "
+            "the next daily fire (or a manual trigger) retries."
         ),
         cadence=Cadence.daily(hour=9, minute=0),
         catch_up_on_boot=True,
