@@ -93,3 +93,16 @@ def test_config_refusals_check_structure_only() -> None:
     ]
     assert config_refusals({arm: _leg(currency="GBP"), control: _leg()}) == ["trial_deployment_not_usd"]
     assert config_refusals({arm: _leg(capital_limit="999.000000"), control: _leg()}) == ["trial_capital_parity"]
+
+
+#: Declaration 16's stored ``policy_hash`` (frozen 2026-09-30, live). ``declaration_refusal``
+#: refuses every v1 run whose hash differs, so an edit to a ``POLICY_MODULES`` file or a
+#: ``FROZEN_CONSTANTS`` value halts the live trial at the next jobs reload. #3574 did exactly that
+#: (an edit to ``ai_trial_start_gate.py``) and nothing failed before merge, because every other
+#: check here compares the tree's hash with itself. Change this literal ONLY once
+#: ``scripts.ai_trial_policy_guard`` reports every v1 declaration wound down.
+LIVE_V1_POLICY_HASH = "7f333bacbb9365f305629999d6305982c2ab469fcb3a32382527574688e4d1e3"
+
+
+def test_the_tree_still_runs_the_policy_the_live_v1_declaration_froze() -> None:
+    assert policy_hash() == LIVE_V1_POLICY_HASH
