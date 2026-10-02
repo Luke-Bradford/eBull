@@ -165,6 +165,29 @@ def test_a_broker_teardown_failure_still_runs_the_trial_halts() -> None:
     halts.assert_called_once()
 
 
+def test_a_halt_connection_failure_never_masks_the_cycle_failure() -> None:
+    tracker = MagicMock()
+    halts = MagicMock()
+    cycle = MagicMock(side_effect=RuntimeError("cycle broke"))
+    with _paper_cycle_patches(cycle, tracker, halts) as stack:
+        connect = stack.enter_context(patch("app.workers.scheduler.connect_job"))
+        connect.side_effect = [MagicMock(), RuntimeError("too many clients")]
+        with pytest.raises(RuntimeError, match="cycle broke"):
+            scheduler.strategy_paper_cycle()
+
+
+def test_a_halt_connection_failure_degrades_a_clean_cycle() -> None:
+    tracker = MagicMock()
+    halts = MagicMock()
+    cycle = MagicMock(return_value=StrategyPaperCycleResult(0, 0, 0, 0))
+    with _paper_cycle_patches(cycle, tracker, halts) as stack:
+        connect = stack.enter_context(patch("app.workers.scheduler.connect_job"))
+        connect.side_effect = [MagicMock(), RuntimeError("too many clients")]
+        scheduler.strategy_paper_cycle()
+    assert tracker.progress.errors == {"trial_pair_lifecycle": 1, "trial_halts": 1}
+    assert "trial_halts=error" in tracker.note
+
+
 def test_contained_cycle_failures_degrade_the_run() -> None:
     tracker = MagicMock()
     halts = MagicMock(return_value="checked=0 halted=none unmeasured=0")

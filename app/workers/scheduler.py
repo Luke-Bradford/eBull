@@ -7014,12 +7014,20 @@ def strategy_paper_cycle() -> None:
         except Exception as exc:
             logger.exception("strategy_paper_cycle: cycle failed; AI-trial halts still run")
             cycle_failure = exc
-        with connect_job() as conn:
-            pair_events = _record_trial_pair_lifecycle(conn)
-            trial_halts = _enforce_trial_halts(conn)
+        # Both helpers contain their own failures; this catches the connection itself, which
+        # would otherwise replace the cycle's exception with its own. Recorded as `error`.
+        pair_events: int | None = None
+        trial_halts: str | None = None
+        try:
+            with connect_job() as conn:
+                pair_events = _record_trial_pair_lifecycle(conn)
+                trial_halts = _enforce_trial_halts(conn)
+        except Exception:
+            logger.exception("strategy_paper_cycle: AI-trial halt connection failed")
         if cycle_failure is not None:
             raise cycle_failure
-        assert result is not None
+        if result is None:
+            raise RuntimeError("strategy paper cycle returned no result")
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
         halt_note = (
             f"error ({halt_failure}; entries withheld)"
