@@ -6,6 +6,7 @@ import type {
   CoreMandate,
   CoreMandateUpdate,
   CoreRebalanceResponse,
+  EngineBookRiskResponse,
   FiredSignalsResponse,
   StrategyAdvanceResponse,
   StrategyOrderActivityResponse,
@@ -25,6 +26,10 @@ export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
 
 export function fetchCoreSleeve(): Promise<CoreSleeveResponse> {
   return apiFetch("/strategies/core-sleeve");
+}
+
+export function fetchEngineBookRisk(): Promise<EngineBookRiskResponse> {
+  return apiFetch("/strategies/engine-book-risk");
 }
 
 export function updateCoreMandate(body: CoreMandateUpdate): Promise<CoreMandate> {

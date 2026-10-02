@@ -10,6 +10,7 @@ import psycopg
 import pytest
 
 from app.services.engine_book_risk import ENGINE_BOOK_RISK_POLICY, run_engine_book_risk_snapshot
+from app.services.engine_book_risk_status import load_engine_book_risk_status
 from app.services.market_calendar import latest_completed_us_session
 from app.services.strategy_control_plane import configure_paper_pool
 
@@ -67,3 +68,56 @@ def test_an_empty_book_writes_one_append_only_row(ebull_test_conn: psycopg.Conne
     ):
         with pytest.raises(psycopg.errors.RaiseException, match="stated once"), conn.transaction():
             conn.execute(statement)  # type: ignore[arg-type]
+
+
+def test_the_read_model_shows_the_running_policy_newest_first(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    """#3543 slice 2: the endpoint's read -- running policy only, newest first, symbols joined, flags named."""
+    conn = ebull_test_conn
+    session = latest_completed_us_session(_NOW)
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("10000"),
+        risk_profile="growth",
+        approval_mode="manual",
+        max_concurrent_positions_override=None,
+        changed_by="test",
+        reason="#3543 fixture",
+    )
+    _seed_spy(conn, session)
+    conn.commit()
+    assert load_engine_book_risk_status(conn, now=_NOW).latest is None
+
+    assert run_engine_book_risk_snapshot(conn, _NOW) is not None
+    copy = """
+        INSERT INTO engine_book_risk_snapshots
+        SELECT (s.session_date + %s)::date, %s, s.measured_at, s.pool_event_id, s.capital_usd, s.gross_usd,
+               s.position_count, s.instrument_count, s.open_trade_count, s.cost_marked_count, s.stale_count,
+               s.largest_share_pct, s.top5_share_pct, s.hhi, s.hist_vol_pct, s.ewma_vol_pct, s.beta, s.vol_n_obs,
+               s.beta_n_obs, s.sample_first, s.sample_last, s.history_status, s.beta_defaulted_count,
+               s.beta_defaulted_weight_pct, s.stress_2020_pct, s.stress_2022_pct, %s::jsonb, %s::jsonb
+        FROM engine_book_risk_snapshots s WHERE s.policy_version = %s
+    """
+    # A newer row under another policy version answers a different question: never shown.
+    conn.execute(copy, (2, "engine-book-risk-v0", "{}", "[]", ENGINE_BOOK_RISK_POLICY))
+    # A newer row under the running policy, with one flagged check and one position.
+    conn.execute(
+        copy,
+        (
+            1,
+            ENGINE_BOOK_RISK_POLICY,
+            '{"stale_marks": {"status": "evaluated", "flagged": true}, "x": {"status": "no_limit", "flagged": false}}',
+            '[{"instrument_id": %d}]' % _SPY_ID,
+            ENGINE_BOOK_RISK_POLICY,
+        ),
+    )
+    conn.commit()
+
+    status = load_engine_book_risk_status(conn, now=_NOW)
+    assert status.policy_version == ENGINE_BOOK_RISK_POLICY
+    assert status.latest is not None and status.latest.session_date == session + timedelta(days=1)
+    assert status.latest.positions == [{"instrument_id": _SPY_ID, "symbol": "SPY"}]
+    assert [(r.session_date, r.flagged) for r in status.recent] == [
+        (session + timedelta(days=1), ["stale_marks"]),
+        (session, []),
+    ]
