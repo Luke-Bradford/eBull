@@ -157,6 +157,7 @@ def test_a_ticket_is_stated_once(
         "UPDATE strategy_trade_orders SET purpose = 'exit' WHERE strategy_trade_id = %s",
         "UPDATE strategy_trade_orders SET order_id = order_id + 1000000 WHERE strategy_trade_id = %s",
         "UPDATE strategy_trade_orders SET strategy_trade_id = strategy_trade_id + 1000000 WHERE strategy_trade_id = %s",
+        "DELETE FROM strategy_trade_orders WHERE strategy_trade_id = %s",
     ],
 )
 def test_a_link_is_immutable(

@@ -1,6 +1,6 @@
 -- 459_strategy_entry_ticket_enforcement.sql
 -- #3542 (gap register P3) slice 2: an engine ENTRY order cannot commit without its trade ticket,
--- and neither the ticket nor the link it vouches for can be rewritten afterwards. Spec:
+-- and neither the ticket nor the link it vouches for can be rewritten or deleted afterwards. Spec:
 -- docs/proposals/execution/2026-10-02-3542-entry-trade-ticket.md (design 2).
 --
 -- Enforcement is a DEFERRED constraint trigger on the link, so a path may write the link and the
@@ -49,12 +49,14 @@ BEFORE UPDATE OR DELETE ON strategy_entry_tickets
 FOR EACH ROW EXECUTE FUNCTION prevent_strategy_entry_ticket_mutation();
 
 -- The link's identity is what the ticket was checked against at commit; re-pointing it afterwards
--- would leave a ticket vouching for a different order, trade or purpose. No app path updates
--- these columns (grep "UPDATE strategy_trade_orders" app: none at sql/459).
+-- would leave a ticket vouching for a different order, trade or purpose, and deleting it would drop
+-- the provenance monitoring and reconciliation read. No app path updates these columns or deletes a
+-- link (grep "UPDATE strategy_trade_orders\|DELETE FROM strategy_trade_orders" app: none at sql/459).
 CREATE OR REPLACE FUNCTION prevent_strategy_trade_order_relink()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF NEW.purpose IS DISTINCT FROM OLD.purpose
+    IF TG_OP = 'DELETE'
+       OR NEW.purpose IS DISTINCT FROM OLD.purpose
        OR NEW.order_id IS DISTINCT FROM OLD.order_id
        OR NEW.strategy_trade_id IS DISTINCT FROM OLD.strategy_trade_id THEN
         RAISE EXCEPTION 'strategy order link % is immutable once written (#3542)', OLD.strategy_trade_order_id;
@@ -64,5 +66,5 @@ END $$;
 
 DROP TRIGGER IF EXISTS trg_strategy_trade_orders_immutable_link ON strategy_trade_orders;
 CREATE TRIGGER trg_strategy_trade_orders_immutable_link
-BEFORE UPDATE OF purpose, order_id, strategy_trade_id ON strategy_trade_orders
+BEFORE UPDATE OF purpose, order_id, strategy_trade_id OR DELETE ON strategy_trade_orders
 FOR EACH ROW EXECUTE FUNCTION prevent_strategy_trade_order_relink();
