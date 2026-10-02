@@ -33,6 +33,7 @@ from app.services.ai_trial_intent import TRIAL_CAPITAL_MODE, load_trial_intent
 from app.services.strategy_control_plane import configure_paper_pool
 from app.services.strategy_paper_executor import COST_BASIS_BROKER_PREFLIGHT_VALUE, StrategyPaperExecutionError
 from tests.fixtures.ebull_test_db import test_database_url
+from tests.fixtures.entry_ticket import assert_entry_ticket
 from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW, _published_pair, _signal
 
 Conn = psycopg.Connection[Any]
@@ -154,6 +155,17 @@ def test_the_arm_leg_submits_its_ticket_with_its_own_levels_and_no_evidence(
         "real",
     )
     assert broker.place_demo_strategy_order.call_args.kwargs["request_id"] == _REQUEST_ID
+    declaration = conn.execute(
+        "SELECT pair.declaration_id FROM ai_trial_trade_links link JOIN ai_trial_pairs pair USING (pair_id)"
+    ).fetchone()
+    assert declaration is not None
+    assert_entry_ticket(
+        conn,
+        signals["arm"],
+        rationale_class="experiment",
+        evidence_kind="ai_trial_declaration",
+        evidence_id=declaration[0],
+    )
     preflight = conn.execute(
         "SELECT verdict, reason_code, allocated_amount, forecast_id, ranking_member_id, scan_at, "
         "gross_expectancy_ci_low_pct, net_expectancy_pct, stressed_cost_amount, cost_basis, quote_ask "

@@ -22,6 +22,7 @@ from app.services.strategy_paper_runtime import (
     refresh_strategy_health,
     run_strategy_paper_cycle,
 )
+from tests.fixtures.entry_ticket import assert_entry_ticket
 from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _authorise_forecast_scope, _broker, _seed
 from tests.test_strategy_position_manager import (
     _MANUAL_POSITION_ID,
@@ -154,6 +155,13 @@ def test_generated_demo_trade_is_auditable_through_reconciliation_and_operator_r
     assert forecast_id is not None and ranking_member_id is not None
     assert verdict == "allocated"
     assert amount == Decimal("200.000000")  # #3541 slice 2: the account's manual holding no longer caps it
+    promotion = conn.execute(
+        "SELECT max(promotion_id) FROM strategy_promotions WHERE strategy_id='S-ALLOC' AND strategy_version='v1'"
+    ).fetchone()
+    assert promotion is not None
+    assert_entry_ticket(
+        conn, signal_id, rationale_class="signal", evidence_kind="strategy_promotion", evidence_id=promotion[0]
+    )
     conn.commit()
 
     # The next bounded cycle observes the broker fill, claims only its exact

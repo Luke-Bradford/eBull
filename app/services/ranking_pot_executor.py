@@ -45,6 +45,7 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
     registered_strategy_purpose,
 )
+from app.services.strategy_entry_ticket import EntryTicket, protective_exit_rule, write_entry_ticket
 from app.services.strategy_halt_identity import HALT_IDENTITY_RULE_VERSION
 from app.services.strategy_order_reconciliation import ensure_strategy_request_id
 from app.services.strategy_paper_executor import (
@@ -233,6 +234,26 @@ def _commit_authority(
             Decimal(intent.atr14.numerator) / Decimal(intent.atr14.denominator),
             intent.stop_rate,
             intent.take_rate,
+        ),
+    )
+    # #3542: the entry's trade ticket, from the values just persisted. The pot is a declared
+    # trial: an experiment until its readout says otherwise.
+    write_entry_ticket(
+        conn,
+        EntryTicket(
+            order_id=order_id,
+            strategy_trade_id=trade_id,
+            rationale_class="experiment",
+            rule_id=f"{intent.strategy_id}@{intent.strategy_version}",
+            evidence_kind="ranking_pot_declaration",
+            evidence_id=intent.declaration_id,
+            why_now=(
+                f"ranking-pot lifecycle {intent.lifecycle_id} (attempt {intent.attempt_id}): slot {intent.slot} "
+                f"enters for session {intent.target_session}; its §6 ticket is on the lifecycle row"
+            ),
+            exit_rule=protective_exit_rule(intent.stop_rate, intent.take_rate, then=f"declared: {pot.EXIT_RULE}"),
+            expected_cost_usd=stressed_cost,
+            cost_basis=cost_basis,
         ),
     )
     return trade_id, order_id, request_id

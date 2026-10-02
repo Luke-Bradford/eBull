@@ -56,6 +56,7 @@ from app.services.strategy_engine_capital import (
     load_engine_capital_authority,
     resolve_engine_capital_usage,
 )
+from app.services.strategy_entry_ticket import EntryTicket, protective_exit_rule, write_entry_ticket
 from app.services.strategy_order_reconciliation import (
     reconcile_strategy_order,
     reconciliation_order_lock,
@@ -1363,6 +1364,39 @@ def execute_core_rebalance(
                     ),
                 )
                 link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose=order_purpose)
+                if order_purpose == "entry":
+                    # #3542: the entry's trade ticket. Cost is the admitted quote at the amount
+                    # the order is placed at; an admitted verdict without one cannot be stated.
+                    if broker_verdict.cost_rate is None or not broker_verdict.cost_rate.is_finite():
+                        raise StrategyCoreExecutionError("the admitted core verdict carries no quoted cost rate")
+                    if mandate.base_currency.strip().upper() != "USD":
+                        raise StrategyCoreExecutionError("a core ticket's cost is stated in USD only")
+                    write_entry_ticket(
+                        conn,
+                        EntryTicket(
+                            order_id=order_id,
+                            strategy_trade_id=trade_id,
+                            rationale_class="rebalance",
+                            rule_id="core-mandate",
+                            evidence_kind="core_mandate_event",
+                            evidence_id=current.event_id,
+                            why_now=(
+                                f"core rebalance intent {intent_id} decided {intent.decision.action} under mandate "
+                                f"event {current.event_id}: the passive sleeve is below its band. Beta, not an "
+                                "entry signal"
+                            ),
+                            exit_rule=protective_exit_rule(
+                                exit_levels.stop_loss_rate,
+                                exit_levels.take_profit_rate,
+                                then=(
+                                    f"initial protection (policy {exit_levels.policy_version}, re-anchored to the "
+                                    "fill on repair); otherwise held to the core mandate"
+                                ),
+                            ),
+                            expected_cost_usd=amount * broker_verdict.cost_rate,
+                            cost_basis="broker_what_if_open_quote",
+                        ),
+                    )
                 # ⚠ `submission_phase` is declared HERE, in the authority transaction,
                 # and advanced by `mark_core_submission_entered` in a SEPARATE commit
                 # before the broker verb (#2961).  Two distinct commits is the whole

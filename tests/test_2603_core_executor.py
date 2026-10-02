@@ -93,6 +93,13 @@ class FakeConn:
             assert isinstance(_params, tuple)
             self.events.append(f"exit_levels={_params[3]}/{_params[4]}")
             return FakeResult()
+        if normalized.startswith("INSERT INTO strategy_entry_tickets"):
+            # #3542: the entry's ticket, in the authority transaction. Bound params:
+            # class, rule, evidence kind, evidence id ... cost, basis.
+            assert isinstance(_params, tuple)
+            self.events.append("persist_entry_ticket")
+            self.events.append(f"ticket={_params[2]}/{_params[4]}/{_params[5]}/{_params[8]}/{_params[9]}")
+            return FakeResult()
         if normalized.startswith("INSERT INTO strategy_order_reconciliation_state"):
             self.events.append("persist_reconciliation")
             # The authority transaction DECLARES the phase; nothing else may.
@@ -165,7 +172,7 @@ def _run(
 ) -> tuple[CoreExecutionResult, list[str]]:
     events: list[str] = []
     conn = FakeConn(events)
-    mandate = SimpleNamespace(event_id=1, enabled=True, core_instrument_id=3417)
+    mandate = SimpleNamespace(event_id=1, enabled=True, core_instrument_id=3417, base_currency="USD")
     proof = SimpleNamespace(
         proof_id=7,
         api_key_credential_id=API_CREDENTIAL,
@@ -190,6 +197,7 @@ def _run(
         admitted=True,
         reason_code=None,
         amount=Decimal("49.9"),
+        cost_rate=Decimal("0.002"),
         snapshot_observed_at=snapshot_observed_at or datetime.now(UTC),
         max_account_risk_age_seconds=30,
         account_snapshot=SimpleNamespace(observed_at=datetime.now(UTC)),
@@ -387,6 +395,9 @@ def test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target() -> None:
     # 759.86 is the live core entry; -50% / +200% under `core-exit-v2`.
     assert "exit_levels=379.93/2279.58" in events
     assert events.index("persist_exit_levels") < events.index("broker_submit")
+    # #3542: a beta rebalance ticket under mandate event 1, costed at the placed amount.
+    assert "ticket=rebalance/core_mandate_event/1/0.0998/broker_what_if_open_quote" in events
+    assert events.index("persist_entry_ticket") < events.index("broker_submit")
     order = sink[0].last_order  # type: ignore[attr-defined]
     assert (order.stop_loss_rate, order.take_profit_rate) == (Decimal("379.93"), Decimal("2279.58"))
 
