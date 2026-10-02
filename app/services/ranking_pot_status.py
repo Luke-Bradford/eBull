@@ -423,6 +423,8 @@ def load_readout(conn: Conn) -> ReadoutView:
         logger.exception(
             "ranking pot readout: declaration %s at %s violates an invariant", decl.declaration_id, endpoint
         )
+        # ``readout``'s ``conn.transaction()`` already rolled back (measured: IDLE after a raise); explicit anyway.
+        conn.rollback()
         return ReadoutView(decl.declaration_id, endpoint, None, "invariant_violation")
     return ReadoutView(decl.declaration_id, endpoint, doc, None)
 
