@@ -100,15 +100,16 @@ def test_downtime_skips_are_written_by_any_fire(ebull_test_conn: Conn) -> None:
     assert rb.read_history(conn, decl.declaration_id).resolved
 
 
-def test_refuses_to_decide_outside_shadow_only(ebull_test_conn: Conn) -> None:
+def test_an_executing_pot_rebalances_through_the_same_gates(ebull_test_conn: Conn) -> None:
+    """Slice 5a: ``executing`` no longer raises; it runs the same window and gates (the executed book's decision is
+    ``tests/test_ranking_pot_exec_db.py``'s)."""
     conn = ebull_test_conn
     decl_id = _frozen(conn)
     _move(conn, decl_id, "shadow_only", "executing", "supervisor")
     conn.autocommit = True
     d, _ = _first_window(conn)
-    with pytest.raises(RuntimeError, match="executed-book decisions are slice 5"):
-        job.run_rebalance_job(conn, score=_never_scores, now=lambda: datetime.combine(d, time(23, 40), UTC))
-    assert _attempts(conn) == []
+    job.run_rebalance_job(conn, score=_never_scores, now=lambda: datetime.combine(d, time(23, 40), UTC))
+    assert _attempts(conn) == [("refused", "price_daily_stale")]
 
 
 def _prepared(due: rb.DuePlan, **over: Any) -> rb.Prepared:

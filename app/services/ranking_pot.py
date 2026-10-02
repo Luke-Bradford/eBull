@@ -667,14 +667,15 @@ def entry_ticket(
     order_donor_id: int,
     order_score: Decimal | None,
     thesis: ThesisRef | None,
-    levels: Levels,
+    levels: Levels | None,
     atr: Fraction,
     expected_half_spread: Fraction,
 ) -> dict[str, Any]:
     """The §6 ticket for an ``enter`` row, written before any order. ``own_score`` is the RECIPIENT's score and
     factors; ``order_donor_id`` / ``order_score`` record the score that placed it in the order (the recipient itself
-    in the real book, the donor in a control — r3-106). Planned levels use the snapshot close basis; actual levels
-    are slice 5's, recorded before I/O."""
+    in the real book, the donor in a control — r3-106). Planned levels use the snapshot close basis; ``None`` = that
+    basis gives no valid levels (``protective_levels_invalid``; the executor prices from the ask). Actual levels are
+    slice 5's, recorded before I/O."""
     if row.action != "enter" or row.instrument_id != instrument_id:
         raise ValueError("a ticket is written only for this name's enter row")
     penalties, rewards = _adjustments(own_score.penalties_json)
@@ -709,7 +710,9 @@ def entry_ticket(
             "prompt_version": thesis.prompt_version,
         },
         "exit_rule": EXIT_RULE,
-        "planned_levels": {
+        "planned_levels": {"refused": "protective_levels_invalid", "atr14": str(atr)}
+        if levels is None
+        else {
             "basis": str(levels.basis),
             "stop_loss": str(levels.stop_loss),
             "take_profit": str(levels.take_profit),

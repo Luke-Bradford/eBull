@@ -17,11 +17,11 @@ now, the gate counts those the run scored: the proxy only decides whether scorin
 quote rule moves with it: ``as_of`` is the time read just after the snapshot transaction's first query, and
 ``is_eligible``'s 24 h quote age still admits the post-close quote.
 
-**Books (spec deviation; the PR records it).** This slice publishes the decided snapshot. It decides no book:
+**Books (§4 (**)).** This job publishes the decided snapshot and decides only the executed book:
 
-- the executed book exists only in ``executing`` / ``halted_*``, which only slice 5's activation script reaches;
-  until slice 5 lands its holdings reader and decision writer, a fire in any state but ``shadow_only`` raises
-  (fail closed, visible as a failed job);
+- the executed book exists only in ``executing`` / ``halted_*`` (slice 5's activation script reaches them); there
+  ``ranking_pot_exec.record_executed`` decides it in the same transaction (slice 5a). In ``shadow_only`` no executed
+  row is written. A state change between the fire's start and the snapshot transaction rolls back (retried);
 - the shadow and the controls are decided by slice 6's online step job when it steps the target session, from this
   snapshot and each book's ledger stepped through the last completed session (r3-41 by construction). Their
   decisions are a pure function of those two, so nothing is chosen after publication.
@@ -46,6 +46,7 @@ from typing import Any, Final, Literal
 
 import psycopg
 
+from app.services import ranking_pot_exec as exec_book
 from app.services import ranking_pot_look as look
 from app.services import ranking_pot_rebalance as rb
 from app.services.market_calendar import latest_completed_us_session
@@ -140,11 +141,6 @@ def run_rebalance_job(
     phase = window_phase(as_of)
     if phase == "closed":
         return JobResult(f"target {due.target_session}: outside the decision window", skipped_months=skipped)
-    if decl.state != "shadow_only":
-        raise RuntimeError(
-            f"ranking pot {decl.declaration_id} is {decl.state}: executed-book decisions are slice 5's, so this "
-            "build refuses to rebalance outside shadow_only"
-        )
     pending = look.look_pending(conn, decl.declaration_id, due.target_session)
     if pending is not None:
         # §9.3: no rebalance targets a session after a look endpoint until that look is stored (and its wind-down,
@@ -179,6 +175,7 @@ def run_rebalance_job(
     # An early exit below rolls the transaction back explicitly (``psycopg.Rollback``) rather than returning
     # through the block, which would COMMIT it: nothing is written before them today, and nothing must be.
     early: str | None = None
+    executed: exec_book.ExecutedResult | None = None
     with conn.transaction() as tx:
         rb.begin_rebalance(conn)
         # The first query fixes the REPEATABLE READ snapshot; `as_of` is read after it, so every quote the
@@ -189,7 +186,7 @@ def run_rebalance_job(
             early = f"target {due.target_session}: the window passed during scoring"
             raise psycopg.Rollback(tx)
         live = rb.load_declaration(conn)
-        if live is None or live.declaration_id != decl.declaration_id or live.state != "shadow_only":
+        if live is None or live.declaration_id != decl.declaration_id or live.state != decl.state:
             early = f"declaration changed during the fire ({live and live.state}); retried next fire"
             raise psycopg.Rollback(tx)
         history = rb.read_history(conn, decl.declaration_id)
@@ -208,11 +205,13 @@ def run_rebalance_job(
             attempt = rb.record_refused(conn, live, due, result, as_of=snap_as_of, scored_at=run.scored_at)
             return JobResult(f"target {due.target_session}: refused {result.refusal}", attempt, skipped)
         attempt = rb.record_decided(conn, live, due, result, as_of=snap_as_of, scored_at=run.scored_at)
+        if live.state != "shadow_only":
+            executed = exec_book.record_executed(conn, live, attempt, result, state=str(live.state))
     if early is not None:
         return JobResult(early, None, skipped)
     return JobResult(
         f"target {due.target_session}: decided (R={result.detail['r_count']}, F={result.detail['f_count']}, "
-        f"snapshot {result.snapshot_sha256[:12]})",
+        f"snapshot {result.snapshot_sha256[:12]})" + ("" if executed is None else f"; {executed.note}"),
         attempt,
         skipped,
     )
