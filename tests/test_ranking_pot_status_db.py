@@ -132,3 +132,16 @@ def test_status_shows_positions_with_tickets_pnl_and_rebalances(
     assert next(p for p in s2.recent if p.lifecycle_id == lc2).status == "expired"
     assert [p.symbol for p in s2.held] == ["POT2843"]
     assert [r.target_session for r in s2.rebalances] == sorted((r.target_session for r in s2.rebalances), reverse=True)
+
+
+def test_a_completed_declaration_keeps_its_page(ebull_test_conn: Conn) -> None:
+    """Codex ckpt-2: ``rb.load_declaration`` returns only a live declaration; the page falls back to the newest
+    completed one rather than reading as never frozen."""
+    conn = ebull_test_conn
+    decl_id = _frozen(conn)
+    _move(conn, decl_id, "shadow_only", "winding_down", "supervisor", wind_down="operator")
+    _move(conn, decl_id, "winding_down", "completed", "engine")
+    s = status.load_status(conn)
+    assert s.declaration is not None
+    assert (s.declaration.declaration_id, s.declaration.state) == (decl_id, "completed")
+    assert status.load_readout(conn).reason == "not_stepped"

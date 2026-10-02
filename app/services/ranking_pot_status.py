@@ -304,6 +304,31 @@ def _positions(conn: Conn, declaration_id: int, ny_today: date) -> tuple[list[Po
     return held, recent
 
 
+_LATEST_COMPLETED_SQL: Final = """
+    SELECT d.declaration_id, d.doc, d.doc_sha256, d.frozen_at
+      FROM ranking_pot_declarations d
+     WHERE d.strategy_id = %s
+       AND (SELECT e.to_state FROM ranking_pot_state_events e
+             WHERE e.declaration_id = d.declaration_id ORDER BY e.event_id DESC LIMIT 1) = 'completed'
+     ORDER BY d.declaration_id DESC
+     LIMIT 1
+"""
+
+
+def page_declaration(conn: Conn) -> rb.PotDeclaration | None:
+    """The live declaration (``rb.load_declaration``), else the newest ``completed`` one: a finished trial keeps its
+    page and its final readout instead of reading as never frozen. Same document integrity check."""
+    live = rb.load_declaration(conn)
+    if live is not None:
+        return live
+    row = conn.execute(_LATEST_COMPLETED_SQL, (rb.STRATEGY_ID,)).fetchone()
+    if row is None:
+        return None
+    if canonical_sha256(row[1]) != row[2]:
+        raise rb.SnapshotIntegrityError(f"declaration {row[0]} does not hash to its doc_sha256")
+    return rb.PotDeclaration(int(row[0]), row[1], str(row[2]), row[3], "completed")
+
+
 def load_status(conn: Conn, *, now: datetime | None = None) -> PotStatus:
     observed = now or datetime.now(UTC)
     jobs = tuple(
@@ -316,12 +341,12 @@ def load_status(conn: Conn, *, now: datetime | None = None) -> PotStatus:
         "build_complete": ranking_pot_policy.BUILD_COMPLETE,
         "jobs": jobs,
     }
-    decl = rb.load_declaration(conn)
+    decl = page_declaration(conn)
     if decl is None:
         return PotStatus(**base, declaration=None, rebalances=(), step=None, looks=(), held=(), recent=())
     d = decl.declaration_id
     head = conn.execute(_DECLARATION_SQL, (d,)).fetchone()
-    assert head is not None  # load_declaration just read the row
+    assert head is not None  # page_declaration just read the row
     with conn.cursor(row_factory=dict_row) as cur:
         rebalances = tuple(Rebalance(**r) for r in cur.execute(_REBALANCES_SQL, (d, REBALANCE_LIMIT)).fetchall())
         looks = tuple(
@@ -363,7 +388,7 @@ def load_readout(conn: Conn) -> ReadoutView:
     The readout raises on a malformed row or a violated invariant (spec §9.4: nothing partial); here that becomes
     ``reason = "invariant_violation"`` with the error in the server log, so the page says the figures are withheld
     rather than failing as a whole."""
-    decl = rb.load_declaration(conn)
+    decl = page_declaration(conn)
     if decl is None:
         conn.rollback()
         return ReadoutView(None, None, None, "not_declared")
@@ -397,4 +422,5 @@ __all__ = [
     "StepState",
     "load_readout",
     "load_status",
+    "page_declaration",
 ]
