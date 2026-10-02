@@ -79,13 +79,14 @@ describe("EngineBookRiskPanel", () => {
     render(<EngineBookRiskPanel />);
     expect(await screen.findByText(/No snapshot yet/)).toBeInTheDocument();
     expect(screen.getByText(/benchmark_not_ready/)).toBeInTheDocument();
-    expect(screen.queryByText("Within mandate")).not.toBeInTheDocument();
+    expect(screen.queryByText("Checks within limits")).not.toBeInTheDocument();
   });
 
   it("lists every check against its limit, the stress as a signed loss", async () => {
     mockRisk({ policy_version: "engine-book-risk-v1", job: JOB, latest: LATEST, recent: [] });
     render(<EngineBookRiskPanel />);
-    expect(await screen.findByText("Within mandate")).toBeInTheDocument();
+    expect(await screen.findByText("Checks within limits")).toBeInTheDocument();
+    expect(screen.getByText(/Not measured yet/)).toBeInTheDocument();
     const checks = within(screen.getByRole("list", { name: "Mandate checks" }));
     const stress = checks.getByText("2020 crash stress vs max drawdown").closest("li")!;
     expect(stress).toHaveTextContent("-13.18% vs -25.00%");

@@ -171,6 +171,9 @@ function Body({ view }: { view: EngineBookRiskResponse }) {
             <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">{HISTORY_NOTE[snap.history_status]}</p>
           ) : null}
           <CheckList checks={snap.checks} />
+          <p className="mt-1 text-xs text-slate-500">
+            Not measured yet (so not checked): cash reserve, daily loss, per-position loss, active risk budget.
+          </p>
           <Figures snap={snap} />
           <Positions snap={snap} />
           <Recent view={view} />
@@ -202,7 +205,7 @@ export function EngineBookRiskPanel() {
         {checks === null ? null : flagged > 0 ? (
           <Badge tone="warn">{flagged} over limit</Badge>
         ) : checks.every((c) => c.status === "evaluated") ? (
-          <Badge tone="ok">Within mandate</Badge>
+          <Badge tone="ok">Checks within limits</Badge>
         ) : (
           // An unset limit or an unmeasured figure is not compliance.
           <Badge tone="neutral">Partly checked</Badge>

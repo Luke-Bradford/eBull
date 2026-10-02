@@ -107,7 +107,7 @@ def test_the_read_model_shows_the_running_policy_newest_first(ebull_test_conn: p
             1,
             ENGINE_BOOK_RISK_POLICY,
             '{"stale_marks": {"status": "evaluated", "flagged": true}, "x": {"status": "no_limit", "flagged": false}}',
-            '[{"instrument_id": %d}]' % _SPY_ID,
+            f'[{{"instrument_id": {_SPY_ID}}}]',
             ENGINE_BOOK_RISK_POLICY,
         ),
     )
