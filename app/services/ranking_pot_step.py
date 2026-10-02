@@ -388,8 +388,30 @@ _CONTROL_FIELDS: Final = (
     "missing_exits",
     "refusals",
     "rescales",
+    "entered",
+    "bought",
+    "ineligible_exits",
 )
 _DECISION_FIELDS: Final = ("entries", "exits", "unfilled", "occupied", "missing_donors")
+
+
+@dataclass(frozen=True)
+class EntryStats:
+    """Slice 6c-i's per-session readout inputs (§9.4 "The readout", Storage)."""
+
+    #: Positions whose entry session is this session.
+    entered: int
+    #: Σ of their ``invested``.
+    bought: Decimal
+    #: Lifecycles closed this session with an ``ineligible:`` reason.
+    ineligible_exits: int
+
+    @classmethod
+    def of(cls, result: sim.StepResult, session: date) -> EntryStats:
+        new = [p for p in result.state.positions if p.entry_session == session]
+        with localcontext(sim.CTX):
+            bought = sum((p.invested for p in new), Decimal(0))
+        return cls(len(new), bought, sum(1 for c in result.closed if c.reason.startswith("ineligible:")))
 
 
 @dataclass
@@ -399,7 +421,7 @@ class ControlColumns:
     values: dict[str, list[Any]] = field(default_factory=lambda: {k: [] for k in _CONTROL_FIELDS})
     decisions: dict[str, list[int]] = field(default_factory=lambda: {k: [] for k in _DECISION_FIELDS})
 
-    def add(self, result: sim.StepResult) -> None:
+    def add(self, result: sim.StepResult, session: date) -> None:
         charged = sim.liquidation_charged(result.state, result.position_sessions)
         v = self.values
         v["records"].append(len(result.position_sessions))
@@ -412,6 +434,10 @@ class ControlColumns:
         v["missing_exits"].append(sum(1 for c in result.closed if c.reason == "missing_bars"))
         v["refusals"].append(len(result.refusals))
         v["rescales"].append(len(result.rescales))
+        stats = EntryStats.of(result, session)
+        v["entered"].append(stats.entered)
+        v["bought"].append(str(stats.bought))
+        v["ineligible_exits"].append(stats.ineligible_exits)
 
     def add_decision(self, decision: pot.BookDecision, missing_donors: int) -> None:
         d = self.decisions
@@ -435,7 +461,8 @@ def _records_json(records: Sequence[sim.PositionSession]) -> list[list[Any]]:
     return [[r.instrument_id, r.lifecycle, str(r.start_value), str(r.end_value)] for r in records]
 
 
-def shadow_doc(result: sim.StepResult, decision: pot.BookDecision | None) -> dict[str, Any]:
+def shadow_doc(result: sim.StepResult, decision: pot.BookDecision | None, session: date) -> dict[str, Any]:
+    stats = EntryStats.of(result, session)
     doc: dict[str, Any] = {
         "nav": str(result.nav),
         "nav_charged": str(sim.charged_nav(result.state)),
@@ -459,6 +486,9 @@ def shadow_doc(result: sim.StepResult, decision: pot.BookDecision | None) -> dic
         ],
         "refusals": [[r.instrument_id, r.reason] for r in result.refusals],
         "rescales": [[iid, str(k)] for iid, k in result.rescales],
+        "entered": stats.entered,
+        "bought": str(stats.bought),
+        "ineligible_exits": stats.ineligible_exits,
     }
     if decision is not None:
         doc["decision"] = {
@@ -746,9 +776,9 @@ def step_next_session(
                 used=used,
             )
             if b == SHADOW_BOOK:
-                shadow = shadow_doc(result, decision)
+                shadow = shadow_doc(result, decision, session)
             else:
-                columns.add(result)
+                columns.add(result, session)
                 if decision is not None and donor_of is not None and rebalance is not None:
                     columns.add_decision(decision, rebalance.missing_donors(donor_of))
             doc = encode_book(stepped)

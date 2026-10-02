@@ -9,7 +9,7 @@ own import statements, so a new import cannot slip out of the hash), ``market_ca
 ``ai_trial_pack`` (``is_eligible``, ``build_bar_series``), ``ai_trial_pack_reader`` (``read_bars``, the #1664 cap
 overlay; reused by the rebalance, slice 4b-i), and the pot's own modules (the rebalance job, slice 4b-ii, included:
 its decision window decides ``as_of`` and therefore the §5.0 quote rule; the online step job, slice 6a, r3-92; the
-looks, slice 6b). Each
+looks, slice 6b; the readout, slice 6c-i). Each
 later slice appends its module (loader, executor wrapper, exits, readout) here; the freeze happens after the last
 slice lands.
 
@@ -63,6 +63,7 @@ POLICY_MODULES: Final = tuple(
             "ranking_pot_job.py",
             "ranking_pot_look.py",
             "ranking_pot_loss.py",
+            "ranking_pot_readout.py",
             "ranking_pot_rebalance.py",
             "ranking_pot_sim.py",
             "ranking_pot_step.py",
