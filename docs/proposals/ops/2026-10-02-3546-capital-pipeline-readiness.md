@@ -1,6 +1,6 @@
 # #3546 — readiness contract for scheduled capital pipelines (gap register P8)
 
-Status: contract + audit (slice 1). Slice 1 also fixes gap A; gaps B–H are later slices.
+Status: contract + audit (slice 1, gap A); slice 2 = gap B; slice 3 = gap C window A + D. Later slices: C re-send (probe-gated), E–H.
 
 ## Contract
 
@@ -28,9 +28,9 @@ broker state. Every property needs a named test, and a cell without one is marke
 | Pipeline | R1 | R2 | R3 | R4 | R5 |
 |---|---|---|---|---|---|
 | `ai_trial_decision_run` / `_fund_` | ⚠ **E**: bars are checked pre-claim (`ai_trial_jobs.py:390-399`); account risk, declaration validity, step 1 and pack are checked after `claim_run` (`ai_trial_run.py:664-715`), so a transient account-risk outage consumes the session | ✅ `ai_trial_runs_one_per_session` (sql/432:201) | ✅ publish in one transaction; `run_failed` / `publish_failed` recorded | ⚠ a crashed `claimed` row is swept only by a later run that reaches the sweep; same-session fires return `duplicate` first (`ai_trial_jobs.py:383`). Session consumed either way | n/a |
-| `ai_trial_execute` | ⚠ **F** | ✅ `strategy_funding_decisions.signal_id` UNIQUE (sql/281:113) | ✅ per-leg try/except (`ai_trial_jobs.py:489-496`) | ⚠ **C** | ✅ entry |
-| `ranking_pot_execute` | ⚠ **F** (deferrals write nothing; other refusals consume) | ✅ funding-decision UNIQUE plus `ranking_pot_exec_submissions` | ✅ per-entry try/except (`ranking_pot_executor.py:507-516`) | ⚠ **C** | ✅ entry |
-| `strategy_paper_cycle` | ⚠ **F** | ✅ funding-decision UNIQUE | ❌ **A (fixed)**, ⚠ **B** | ⚠ **C** (orders reached by `reconcile_backlog` every fire, lookup only) | ✅ entry; ⚠ **G** edits/closes |
+| `ai_trial_execute` | ⚠ **F** | ✅ `strategy_funding_decisions.signal_id` UNIQUE (sql/281:113) | ✅ per-leg try/except (`ai_trial_jobs.py:489-496`) | ✅ pre-call crash released (slice 3); ⚠ transport-uncertain contained, unbounded (**C** re-send) | ✅ entry |
+| `ranking_pot_execute` | ⚠ **F** (deferrals write nothing; other refusals consume) | ✅ funding-decision UNIQUE plus `ranking_pot_exec_submissions` | ✅ per-entry try/except (`ranking_pot_executor.py:507-516`) | ✅ pre-call crash released (slice 3); ⚠ transport-uncertain contained, unbounded (**C** re-send) | ✅ entry |
+| `strategy_paper_cycle` | ⚠ **F** | ✅ funding-decision UNIQUE | ❌ **A (fixed)**, ⚠ **B** | ✅ pre-call crash released (slice 3); ⚠ transport-uncertain contained, unbounded (**C** re-send; reached by `reconcile_backlog` every fire, lookup only) | ✅ entry; ⚠ **G** edits/closes |
 | `ranking_pot_rebalance` | ✅ gates in `prepare` (`ranking_pot_rebalance.py:845-885`) are persisted as refused rows by the job (`ranking_pot_job.py:204-206`) | ✅ `..._one_per_month` over decided/skipped (sql/446:89); refusals append by design | ✅ decided plus book in one transaction | ✅ next hourly fire | n/a |
 | `ranking_pot_step` | ✅ bar gate; forced after 10 sessions (stated exception) | ✅ PK (sql/447:59) | ✅ one transaction per session | ✅ | n/a |
 | `core_rebalance_execution` | ✅ preflight refusals persist on the intent; daily, no catch-up (stated: waits a session) | ✅ `strategy_trades_core_rebalance_intent_id_key` (sql/349:83) | ✅ distinct rejected / uncertain outcomes | contained: a lookup miss blocks new authority until attended release (`strategy_core_executor.py:393+`, `tests/test_2949_core_restart_recovery_db.py`); unbounded | ✅ |
@@ -58,7 +58,48 @@ broker state. Every property needs a named test, and a cell without one is marke
 - **C — scheduled resume of uncertain entries.** All three entry executors (paper, AI trial, ranking pot) have a resume branch that re-sends on the stored UUID. None of their schedulers selects funded signals (`strategy_paper_runtime.py:165`, `ai_trial_jobs.py:431`, `ranking_pot_executor.py:417-424`), so a scheduled fire never reaches an uncertain submission. `reconcile_backlog` only looks up, and per the source rule a miss proves nothing.
   - Before a scheduled re-send is added, it must re-pass the entry's permission checks: halt, session, declaration and trial state, authority expiry. It must also be withheld whenever entries are.
   - Latent: `select count(*) from ai_trial_trade_links` = 0, and `strategy_order_reconciliation_state` holds 5 rows, all `resolved` (dev, 2026-10-02). Unexercised is not low-consequence: this is the identity path every engine order takes.
-- **D — tests.** No test drives a scheduled fire through an uncertain submission for any of the three executors. This is folded into C.
+  - **Slice 3 (C) research, 2026-10-02 — the scheduled re-send is NOT built; its premise does not hold.**
+    - The create-order page (`trading--demo/create-an-order`, fetched 2026-10-02) says only "A unique X-Request-Id header (GUID) is required for idempotency". It states no idempotency window and does not say what a second POST with the same key does. With the 2026-09-17 probe (a filled order whose `referenceId` lookup returned 404), nothing on record shows a same-key re-POST is deduplicated. An unattended re-send could therefore double the exposure.
+    - Settling it takes a demo order POSTed twice with one key, which is a broker mutation and cannot run from the loop. **Wake for the re-send:** an attended same-key re-POST probe on demo, posted on this issue (one order, POST twice, count positions carrying that `referenceId`). The supervisor can produce it on demand.
+    - The resume branch is unreachable today: all three selectors exclude funded signals and no endpoint calls the executors. So an uncertain entry the lookup misses stays unresolved for good. Once past its SLO age the `order_reconciliation` block refuses every entry on all three arms (each intent reads `execution_blocked`; `ai_trial_intent.py:238`, `ranking_pot_intent.py:368`, `strategy_paper_executor.py:352`). Nothing releases it, attended or not. Core has a release (#2961); these arms do not.
+  - **Slice 3 builds the part that needs no broker evidence: release an entry the broker provably never received.** This is core's #2961 discriminator applied to the three non-core arms.
+    - **Marker.** `ensure_strategy_request_id` inserts the reconciliation row with `submission_phase='authority_committed'`, in the authority transaction. Only the three entry paths call it. `ON CONFLICT DO NOTHING` leaves existing rows NULL, and NULL is never terminalisable. `_submit_recorded_order` and `_resume_uncertain_submission_locked` commit `submission_phase='broker_verb_entered'` under the per-order lock, before the provider call, and require exactly one affected row. All three arms send through these two functions.
+    - **Liveness.** `_allocator_lock` (`PAPER_ALLOCATOR_ADVISORY_LOCK`, session-scoped) is held by every non-core submitter from before the authority commit, through the call. A try on that key that succeeds proves no OTHER session is mid-submission. Postgres frees the key when a backend dies.
+    - **Release.** `terminalise_unsubmitted_entry` runs in `reconcile_strategy_order` beside the core one. The conditions match core's candidacy SQL except that it requires `core_rebalance_intent_id IS NULL`. It tries the allocator key, then the per-order lock, and skips with `Busy` if either is held. In one transaction it sets `orders.status='rejected'`, reconciliation `state='rejected'` with `last_error_code='entry_authority_never_submitted'`, and `strategy_trades.status='failed'`. It makes zero broker calls.
+    - **Not released:** `broker_verb_entered`. A transport-uncertain submission stays contained until the probe above settles re-send.
+    - **Hashed files:** none edited. `ranking_pot_executor.py` and the AI-trial `POLICY_MODULES` are untouched, and `scripts.ai_trial_policy_guard` reports MATCH.
+    - **AI-trial lifecycle.** `ai_trial_pair_lifecycle.py` used to treat `failed` as "rejected after the call", so a released leg would have been recorded `submitted`. The leg facts now carry `never_submitted`, read from the reconciliation code. A released leg writes no `submitted`, breaks its pair with reason `entry_authority_never_submitted`, and counts as terminal in `UNFINISHED_PAIRS_FROM`. The ranking pot already reads `failed` as flat and never filled (`ranking_pot_exec.py:76`, `ranking_pot_exits.py:94`).
+  - **Codex ckpt-1 (24 findings) — dispositions:**
+    - **Applied:**
+      - #1: the core precheck is now arm-scoped. Tested: an alpha release proceeds while the core key is held.
+      - #4, #10: the marker and the candidacy both require the pre-broker states, meaning order `submitted`, no broker reference, reconciliation not terminal, and trade `planned` (the marker also accepts `reconcile_required`).
+      - #5: the marker refuses unless this backend holds the allocator key (read from `pg_locks`).
+      - #6: the marker sits before both provider calls. A marker failure means no call.
+      - #7: only a freshly minted UUID is stamped.
+      - #11: candidacy is re-read inside the write transaction, with both locks held.
+      - #14: `failed` is excluded by the allocator (`strategy_paper_executor.py:939`), the pot intent (`ranking_pot_intent.py:374`) and the trial slots (`ai_trial_executor.py`).
+      - #15: the signal stays consumed; this is stated in the docstring.
+      - #16: the trial lifecycle fix above.
+      - #17, #23: tested. The block clears, the release is skipped under contention, a released authority cannot be marked, and the marker is visible mid-call from another session.
+      - #21, #22: wording narrowed (below).
+      - #24: `sql/461` rewrites the column comment.
+    - **Rebutted:**
+      - #2: all three public executors hold `_allocator_lock` around their locked body (`strategy_paper_executor.py` `execute_fired_paper_signal`, `ai_trial_executor.py:427`, `ranking_pot_executor.py:410`). The marker now enforces this, so a gap would refuse rather than release.
+      - #3: the one same-session reconcile (`_execute_fired_paper_signal_locked`, non-capital-candidate branch) only looks up. Asserted by test.
+      - #8: the jobs daemon is one process restarted whole, and no API route calls an entry executor.
+      - #9: resume behaviour is unchanged (it still re-sends on the stored UUID) and stays unreachable. It now marks before its call.
+      - #12: the release's writes follow the module lock order, and no submitter can run while it holds the allocator key.
+      - #13: inherited lock-cleanup behaviour, unchanged here.
+      - #18: a `Busy` row keeps its place at the front of the rotation (`reconcile_backlog`). The allocator key is held only for the length of an executor call.
+      - #19: stated (`broker_verb_entered` is never released).
+      - #20: out of scope; that is re-send work behind the probe.
+  - **Codex ckpt-2 (1 finding) — applied.** `orders.status='rejected'` was read as "the broker refused" in two places: `_existing_result` returned `broker_rejected`, and the attribution counted the entry in `broker_rejected_entries`. Both now separate a local release by its reconciliation code. The test includes a control row that flips the code and is counted. (The core arm's `core_authority_never_submitted` has the same pre-existing overlap; it is left as is.)
+  - **Re-send wording (Codex #21/#22).** The page states an intent to deduplicate. It does not state a retention window or what a second same-key POST does. The probe must cover an immediate re-POST and a re-POST after a delay (≥1 h). It should look up by `orderId` as well as `referenceId`, and count positions after the fill settles.
+- **D — tests.** No test drives a scheduled fire through an uncertain submission for any of the three executors. This is folded into C. Slice 3 tests:
+  - the marker is visible from a second connection at call time;
+  - a crash after the authority commit is released by the scheduled backlog with zero broker calls;
+  - the release skips while another session holds the allocator key;
+  - `broker_verb_entered` and NULL rows go to the normal lookup.
 - **E — AI-trial decision consumes on transient inputs.** `account_risk_unavailable` and the other post-claim refusals burn the session.
   - ⚠ `ai_trial_run.py` is in a frozen declaration's hashed `POLICY_MODULES`. The fix ships only under a new trial version, never by editing v1's hashed files.
 - **F — transient refusals are terminal funding decisions.** Executors persist `decide_funding(verdict='rejected')` for transient causes such as unavailable account risk, eligibility or costs. Their selectors then exclude the signal for good. R1's transient/terminal split has to be applied per refusal code.

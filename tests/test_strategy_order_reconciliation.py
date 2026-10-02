@@ -36,6 +36,14 @@ from tests.fixtures.entry_ticket import seed_entry_ticket
 pytestmark = pytest.mark.integration
 
 
+def _mark_verb_entered(conn: psycopg.Connection[Any], *, order_id: int) -> None:
+    """Model the submit path's pre-call marker (#3546): this order's broker verb MAY have run."""
+    conn.execute(
+        "UPDATE strategy_order_reconciliation_state SET submission_phase='broker_verb_entered' WHERE order_id=%s",
+        (order_id,),
+    )
+
+
 def _seed_deployment(conn: psycopg.Connection[Any], *, capital_limit: Decimal = Decimal("1000")) -> int:
     """Promote ``S-REC`` to paper and return one funded deployment id.
 
@@ -182,6 +190,8 @@ def test_crash_identity_is_stable_and_recovery_is_idempotent(
     conn.commit()
 
     # During-call transport uncertainty: retain the same UUID and fail closed.
+    _mark_verb_entered(conn, order_id=order_id)
+    conn.commit()
     uncertain_broker = MagicMock(spec=BrokerProvider)
     uncertain_broker.lookup_order.side_effect = BrokerOrderLookupError("timeout")
     uncertain = reconcile_strategy_order(conn, broker=uncertain_broker, order_id=order_id)
@@ -220,6 +230,7 @@ def test_pending_partial_fill_is_owned_but_remains_in_backlog(
     conn = ebull_test_conn
     trade_id, order_id = _seed_trade(conn)
     ensure_strategy_request_id(conn, order_id=order_id)
+    _mark_verb_entered(conn, order_id=order_id)
     conn.commit()
     broker = MagicMock(spec=BrokerProvider)
     broker.lookup_order.return_value = _detail(broker_status="Pending", position_ids=(910010,))
@@ -251,6 +262,7 @@ def test_same_instrument_manual_position_is_observed_but_never_claimed(
         """
     )
     ensure_strategy_request_id(conn, order_id=order_id)
+    _mark_verb_entered(conn, order_id=order_id)
     conn.commit()
     broker = MagicMock(spec=BrokerProvider)
     broker.lookup_order.return_value = _detail(position_ids=(910020,))
@@ -271,6 +283,7 @@ def test_not_found_and_overdue_backlog_activate_entry_kill(
     conn = ebull_test_conn
     _, order_id = _seed_trade(conn)
     ensure_strategy_request_id(conn, order_id=order_id)
+    _mark_verb_entered(conn, order_id=order_id)
     conn.commit()
     broker = MagicMock(spec=BrokerProvider)
     broker.lookup_order.side_effect = BrokerOrderNotFound("not yet visible")
@@ -316,6 +329,7 @@ def _seed_backlog(
         _, order_id = _seed_order(conn, deployment_id=deployment_id, instrument_id=first_instrument_id + offset)
         # ensure_strategy_request_id is what creates the unresolved state row.
         ensure_strategy_request_id(conn, order_id=order_id)
+        _mark_verb_entered(conn, order_id=order_id)
         order_ids.append(order_id)
     conn.commit()
     return order_ids
@@ -382,6 +396,7 @@ def test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit(
     # else's rotation — but only because fewer than ``limit`` rows are unattempted.
     _, arrival = _seed_order(conn, deployment_id=deployment_id, instrument_id=2451299)
     ensure_strategy_request_id(conn, order_id=arrival)
+    _mark_verb_entered(conn, order_id=arrival)
     conn.commit()
     slo_ages_at_seed[arrival] = _slo_ages(conn)[arrival]
 
@@ -504,6 +519,7 @@ def test_manual_order_cannot_receive_strategy_submission_identity(
     manual_order_id = manual_order_row[0]
     with pytest.raises(StrategyControlError, match="strategy-origin"):
         ensure_strategy_request_id(conn, order_id=int(manual_order_id))
+        _mark_verb_entered(conn, order_id=int(manual_order_id))
 
 
 # --------------------------------------------------------------------------

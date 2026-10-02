@@ -20,6 +20,7 @@ import psycopg
 import psycopg.rows
 
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_order_reconciliation import ENTRY_NEVER_SUBMITTED_CODE
 from app.services.strategy_result import PINNED_EVIDENCE_FILTER_SQL
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
 from app.services.valuation import resolve_quote_price
@@ -209,9 +210,13 @@ _ATTRIBUTION_SQL = """
         GROUP BY sto.strategy_trade_id
     ), entry_order AS (
         SELECT DISTINCT ON (sto.strategy_trade_id)
-               sto.strategy_trade_id, o.status
+               sto.strategy_trade_id, o.status,
+               -- #3546: an entry released as never sent is a LOCAL rejection, not the broker's.
+               (o.status = 'rejected'
+                AND rs.last_error_code IS DISTINCT FROM %(never_submitted)s) AS broker_rejected
         FROM strategy_trade_orders sto
         JOIN orders o ON o.order_id = sto.order_id
+        LEFT JOIN strategy_order_reconciliation_state rs ON rs.order_id = o.order_id
         WHERE sto.purpose = 'entry'
         ORDER BY sto.strategy_trade_id, sto.linked_at DESC, sto.order_id DESC
     )
@@ -236,7 +241,7 @@ _ATTRIBUTION_SQL = """
            COUNT(*) FILTER (
                WHERE fd.verdict = 'allocated'
                  AND ee.average_price IS NULL
-                 AND eo.status = 'rejected'
+                 AND eo.broker_rejected
            )
                AS broker_rejected_entries,
            AVG(((ee.average_price - s.fill_price) / NULLIF(s.fill_price, 0)) * 100)
@@ -276,6 +281,7 @@ def load_attribution(
                 "versions": versions,
                 "outcome_version": outcome_version,
                 "input_version": input_version,
+                "never_submitted": ENTRY_NEVER_SUBMITTED_CODE,
             },
         )
         rows = cur.fetchall()

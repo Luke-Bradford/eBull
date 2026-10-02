@@ -97,6 +97,12 @@ def test_a_closed_leg_is_judged_by_its_close_time_not_by_when_the_pass_saw_it() 
         (LegFacts(funding_verdict="rejected", refusal_code="Odd:Code-1"), IN_SESSION, "odd_code_1"),
         (LegFacts(funding_verdict="rejected", refusal_code="9"), IN_SESSION, "refused"),
         (LegFacts(funding_verdict="allocated", trade_status="failed"), IN_SESSION, "broker_rejected"),
+        # #3546: released as never sent -- its own reason, never a broker rejection.
+        (
+            LegFacts(funding_verdict="allocated", trade_status="failed", never_submitted=True),
+            IN_SESSION,
+            "entry_authority_never_submitted",
+        ),
         # Undetermined until the unresolved clock runs out, whatever the leg's state.
         (LegFacts(funding_verdict="allocated", trade_status="reconcile_required"), IN_SESSION, None),
         (LegFacts(), UNRESOLVED_AT - timedelta(seconds=1), None),
@@ -106,6 +112,13 @@ def test_a_closed_leg_is_judged_by_its_close_time_not_by_when_the_pass_saw_it() 
 )
 def test_leg_outcomes(facts: LegFacts, now: datetime, outcome: str | None) -> None:
     assert leg_outcome(facts, TARGET, now) == outcome
+
+
+def test_a_leg_released_as_never_sent_is_never_recorded_submitted() -> None:
+    """#3546: ``failed`` used to mean only a broker rejection, which follows the call."""
+    released = LegFacts(funding_verdict="allocated", trade_status="failed", never_submitted=True)
+    assert next_leg_events(released, None, IN_SESSION) == []
+    assert next_leg_events(replace(released, never_submitted=False), None, IN_SESSION) == ["submitted"]
 
 
 @pytest.mark.parametrize(

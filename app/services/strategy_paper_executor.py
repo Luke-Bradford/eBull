@@ -79,6 +79,7 @@ from app.services.strategy_monitoring import load_paper_realised_pnl
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
 from app.services.strategy_opportunity_ranker import RANKING_POLICY_VERSION
 from app.services.strategy_order_reconciliation import (
+    ENTRY_NEVER_SUBMITTED_CODE,
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
     reconcile_strategy_order,
@@ -280,12 +281,13 @@ def _existing_result(conn: psycopg.Connection[Any], signal_id: int) -> PaperExec
         cur.execute(
             """
             SELECT d.verdict, d.reason_code, d.amount, t.strategy_trade_id,
-                   o.order_id, o.status, o.broker_order_ref
+                   o.order_id, o.status, o.broker_order_ref, rs.last_error_code
             FROM strategy_funding_decisions d
             LEFT JOIN strategy_trades t ON t.funding_decision_id = d.funding_decision_id
             LEFT JOIN strategy_trade_orders sto
               ON sto.strategy_trade_id = t.strategy_trade_id AND sto.purpose = 'entry'
             LEFT JOIN orders o ON o.order_id = sto.order_id
+            LEFT JOIN strategy_order_reconciliation_state rs ON rs.order_id = o.order_id
             WHERE d.signal_id = %s
             """,
             (signal_id,),
@@ -293,8 +295,12 @@ def _existing_result(conn: psycopg.Connection[Any], signal_id: int) -> PaperExec
         row = cur.fetchone()
     if row is None:
         return None
+    reason_code = str(row["reason_code"])
     if row["verdict"] == "rejected":
         verdict: Literal["rejected", "submitted", "submission_uncertain", "broker_rejected"] = "rejected"
+    elif row["status"] == "rejected" and row["last_error_code"] == ENTRY_NEVER_SUBMITTED_CODE:
+        # #3546: released before any broker call -- refused locally, never by the broker.
+        verdict, reason_code = "rejected", ENTRY_NEVER_SUBMITTED_CODE
     elif row["status"] == "rejected":
         verdict = "broker_rejected"
     elif row["status"] == "submitted" and row["broker_order_ref"] is None:
@@ -304,7 +310,7 @@ def _existing_result(conn: psycopg.Connection[Any], signal_id: int) -> PaperExec
     return PaperExecutionResult(
         signal_id=signal_id,
         verdict=verdict,
-        reason_code=str(row["reason_code"]),
+        reason_code=reason_code,
         amount=Decimal(str(row["amount"])) if row["amount"] is not None else None,
         strategy_trade_id=int(row["strategy_trade_id"]) if row["strategy_trade_id"] is not None else None,
         order_id=int(row["order_id"]) if row["order_id"] is not None else None,
@@ -1293,6 +1299,58 @@ def _effective_deployment_base(
     )
 
 
+def mark_entry_verb_entered(conn: psycopg.Connection[Any], *, order_id: int) -> None:
+    """Commit "this entry's broker verb is about to be entered" BEFORE entering it (#3546).
+
+    The alpha-arm twin of ``strategy_core_executor.mark_core_submission_entered``: a crash
+    that leaves ``authority_committed`` proves the verb was never entered, and
+    ``terminalise_unsubmitted_entry`` may then release the authority. Public so a test can
+    place a fault between the two commits.
+
+    Refuses -- so the caller makes no provider call -- unless all of these hold:
+
+    - the connection is idle, since inside an open transaction ``conn.transaction()`` is a
+      SAVEPOINT and the "commit" would not be durable;
+    - this session holds ``PAPER_ALLOCATOR_ADVISORY_LOCK``, the key the release's liveness
+      proof reads; a submitter outside it could be released mid-flight;
+    - exactly one row is still a pre-broker entry: order ``submitted`` with no broker
+      reference, reconciliation not terminal, trade ``planned`` or ``reconcile_required``
+      (the resume). An authority already released must not then be sent.
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise StrategyPaperExecutionError("the entry submission marker requires an idle connection")
+    with conn.transaction():
+        held = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_locks
+                WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
+                  AND classid=%s AND objid=%s AND objsubid=2
+            )
+            """,
+            _ALLOCATOR_ADVISORY_LOCK,
+        ).fetchone()
+        if held != (True,):
+            raise StrategyPaperExecutionError("an entry submission requires the paper allocator lock")
+        marked = conn.execute(
+            """
+            UPDATE strategy_order_reconciliation_state state
+            SET submission_phase='broker_verb_entered', updated_at=now()
+            FROM orders o, strategy_trade_orders link, strategy_trades trade
+            WHERE state.order_id=%s
+              AND o.order_id=state.order_id
+              AND link.order_id=o.order_id AND link.purpose='entry'
+              AND trade.strategy_trade_id=link.strategy_trade_id
+              AND state.state NOT IN ('resolved', 'rejected')
+              AND o.status='submitted' AND o.broker_order_ref IS NULL
+              AND trade.status IN ('planned', 'reconcile_required')
+            """,
+            (order_id,),
+        )
+        if marked.rowcount != 1:
+            raise StrategyPaperExecutionError(f"entry order {order_id} is no longer a pre-broker authority")
+
+
 def _resume_uncertain_submission(
     conn: psycopg.Connection[Any],
     *,
@@ -1342,6 +1400,7 @@ def _resume_uncertain_submission_locked(
     if row is None or row["strategy_request_id"] is None:
         raise StrategyPaperExecutionError("uncertain strategy submission identity is incomplete")
     request_id = row["strategy_request_id"]
+    mark_entry_verb_entered(conn, order_id=existing.order_id)
     try:
         submission = broker.place_demo_strategy_order(
             BrokerStrategyOrder(
@@ -1691,7 +1750,9 @@ def _submit_recorded_order(
     # ⚠ BLOCKS rather than trying: a refusal here would abandon a durable
     # authority, which is the one outcome this path must never produce.
     with reconciliation_order_lock(conn, order_id):
-        # The transaction context commits before this broker call.
+        # The transaction context commits before this broker call. The marker commits
+        # last of all: a crash before it is provably pre-broker (#3546 slice 3).
+        mark_entry_verb_entered(conn, order_id=order_id)
         try:
             submission = broker.place_demo_strategy_order(
                 BrokerStrategyOrder(
@@ -1796,4 +1857,9 @@ def execute_fired_paper_signal(
         )
 
 
-__all__ = ["PaperExecutionResult", "StrategyPaperExecutionError", "execute_fired_paper_signal"]
+__all__ = [
+    "PaperExecutionResult",
+    "StrategyPaperExecutionError",
+    "execute_fired_paper_signal",
+    "mark_entry_verb_entered",
+]

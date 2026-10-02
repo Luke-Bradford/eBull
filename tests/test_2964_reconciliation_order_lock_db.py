@@ -62,6 +62,14 @@ pytestmark = pytest.mark.integration
 # --------------------------------------------------------------------------
 
 
+def _mark_verb_entered(conn: psycopg.Connection[Any], *, order_id: int) -> None:
+    """Model the submit path's pre-call marker (#3546): this order's broker verb MAY have run."""
+    conn.execute(
+        "UPDATE strategy_order_reconciliation_state SET submission_phase='broker_verb_entered' WHERE order_id=%s",
+        (order_id,),
+    )
+
+
 def _seed_order(conn: psycopg.Connection[Any], *, symbol: str, deployment_id: int) -> tuple[int, int]:
     """A funded strategy trade and its submitted order. Returns (trade, order).
 
@@ -117,6 +125,7 @@ def _seed_order(conn: psycopg.Connection[Any], *, symbol: str, deployment_id: in
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose="entry")
     seed_entry_ticket(conn, order_id, trade_id)
     ensure_strategy_request_id(conn, order_id=order_id)
+    _mark_verb_entered(conn, order_id=order_id)
     conn.commit()
     return trade_id, order_id
 
