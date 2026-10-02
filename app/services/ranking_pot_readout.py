@@ -511,11 +511,22 @@ class ReadoutFacts:
             }
         ln = controls["ln_cap"]["value"]
         controls["ln_cap"]["exp"] = None if ln is None else str(Decimal(ln).exp())
+        shadow, r_t = self.shadow_exposure.window(), self.universe_exposure.window()
+
+        def gap(a: str | None, b: str | None) -> str | None:
+            return None if a is None or b is None else _s(Decimal(a) - Decimal(b))
+
+        own = shadow["div_yield"]["value"]
         return {
-            "shadow": self.shadow_exposure.window(),
+            "shadow": shadow,
             "controls_median": controls,
-            "r_t": self.universe_exposure.window(),
+            "r_t": r_t,
             "beta_null_reasons": dict(sorted(self.beta_null_reasons.items())),
+            # Slice 6c-ii-c-2a: a trailing declared-yield exposure gap, beside the price-only returns (§9.4).
+            "yield_gap": {
+                "shadow_minus_controls_median": gap(own, controls["div_yield"]["value"]),
+                "shadow_minus_r_t": gap(own, r_t["div_yield"]["value"]),
+            },
         }
 
     def _close_controls(self) -> None:

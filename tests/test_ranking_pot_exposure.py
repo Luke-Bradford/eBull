@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,7 @@ from app.services import ranking_pot_exposure as ex
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_sim as sim
 from app.services.market_calendar import us_market_status
-from tests.test_ranking_pot_rebalance import _inputs
+from tests.test_ranking_pot_rebalance import _inputs, _name
 from tests.test_ranking_pot_step import TABLE
 
 D = Decimal
@@ -99,6 +100,8 @@ def test_characteristics_from_the_snapshot(monkeypatch: pytest.MonkeyPatch) -> N
     two = ex.characteristics(replace(inputs, facts=facts, spy=spy), [2])[2]
     assert two.ln_cap is None and two.beta is not None and abs(two.beta - 3) < D("1e-25")
     assert ex.decode_table(ex.encode_table(table)) == table
+    with pytest.raises(rb.SnapshotIntegrityError, match="not finite"):
+        ex.decode_table([[1, "XLK", None, None, "too_few_pairs", None, "NaN"]])
 
 
 def _position(iid: int, value: str) -> sim.Position:
@@ -140,3 +143,38 @@ def test_window_sums_add_sessions_and_r_t_weighs_members_equally() -> None:
     assert all(abs(D(v) - D(1) / 3) < TOL for v in r["sector"].values())
     assert abs(D(r["beta"]["value"]) - 1) < TOL and abs(D(r["beta"]["coverage"]) - D(2) / 3) < TOL
     assert ex.universe_sums(set(), TABLE, 5).capital == 0
+
+
+# ---------------------------------------------------------------------------
+# Slice 6c-ii-c-2a — the yield gap
+# ---------------------------------------------------------------------------
+def test_dividend_yield_is_per_tradable_unit_and_covered_only_where_the_dps_is_known() -> None:
+    def y(dps: str | None, pct: str | None = None, price: str | None = None, close: str | None = "210") -> Any:
+        f = _name(1, D("0.9"), dps_ttm=None if dps is None else D(dps))
+        f = replace(
+            f, valuation_yield_pct=None if pct is None else D(pct), valuation_price=None if price is None else D(price)
+        )
+        return ex.dividend_yield(f, None if close is None else D(close))
+
+    # An ordinary share: the view's yield 0.5% at 210 → DPS 1.05 per unit.
+    assert y("1.05", "0.5", "210") == D("0.005")
+    # A 4:1 ADS: DPS 1.05 per ordinary is 4.2 per ADS; the view's ratio-corrected yield is 2% at 210.
+    assert y("1.05", "2", "210") == D("0.02")
+    assert y("1.05", None, "210") is None  # a ratio-unknown ADR: the view publishes no yield
+    assert y("0") == 0  # a covered 0 (not proof of a non-payer), whatever the ratio
+    assert y(None, "0.5", "210") is None  # NULL is "not covered", never 0
+    assert y("-1") is None and y("NaN") is None
+    assert y("1", "0.5", "210", None) is None and y("1", "0.5", "210", "0") is None
+
+
+def test_div_yield_reaches_the_table_and_its_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    inputs = _inputs(monkeypatch)
+    facts = tuple(
+        replace(f, dps_ttm=D("0.5"), valuation_yield_pct=D(1), valuation_price=D(50)) if f.instrument_id == 1 else f
+        for f in inputs.facts
+    )
+    table = ex.characteristics(replace(inputs, facts=facts), [1, 2])
+    close = inputs.facts[0].bar_rows[-1]["close"]
+    assert table[1].div_yield is not None and abs(table[1].div_yield - D("0.5") / close) < TOL
+    assert table[2].div_yield is None
+    assert ex.decode_table(ex.encode_table(table)) == table

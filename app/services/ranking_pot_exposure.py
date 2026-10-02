@@ -31,7 +31,7 @@ BETA_MIN_PAIRS: Final = 200
 BETA_WINDOW: Final = timedelta(days=365)
 NO_SECTOR: Final = "none"
 #: The weighted characteristics, in storage order.
-FIELDS: Final = ("ln_cap", "beta", "atr_pct")
+FIELDS: Final = ("ln_cap", "beta", "atr_pct", "div_yield")
 
 BetaReason = Literal["too_few_pairs", "zero_market_variance"]
 
@@ -44,9 +44,11 @@ class Characteristic:
     #: Why ``beta`` is ``None``; ``None`` when it is defined.
     beta_reason: BetaReason | None
     atr_pct: Decimal | None
+    #: Slice 6c-ii-c-2a: trailing dividend yield (XBRL TTM DPS / close), ``None`` when the name is not covered.
+    div_yield: Decimal | None = None
 
     def value(self, name: str) -> Decimal | None:
-        return {"ln_cap": self.ln_cap, "beta": self.beta, "atr_pct": self.atr_pct}[name]
+        return {"ln_cap": self.ln_cap, "beta": self.beta, "atr_pct": self.atr_pct, "div_yield": self.div_yield}[name]
 
 
 def _usable(close: Any) -> bool:
@@ -98,6 +100,25 @@ def beta(
         return sxy / sxx, None
 
 
+def dividend_yield(f: pot.NameFacts, close: Decimal | None) -> Decimal | None:
+    """Trailing XBRL DPS per tradable unit / the close on D; ``None`` = not covered. A DPS of 0 is 0 whatever the ADS
+    ratio. A positive DPS is taken per tradable unit from the valuation view's own ratio-corrected yield ×
+    its price / 100 (= DPS × the ADS ratio; NULL for a ratio-unknown ADR, ``sql/241``), never the raw per-ordinary
+    DPS against a per-ADS close (Codex ckpt-2)."""
+    dps = f.dps_ttm
+    if dps is None or not dps.is_finite() or dps < 0 or not _usable(close):
+        return None
+    assert close is not None
+    if dps == 0:
+        return Decimal(0)
+    pct, price = f.valuation_yield_pct, f.valuation_price
+    if not (_usable(pct) and _usable(price)):
+        return None
+    assert pct is not None and price is not None
+    with localcontext(sim.CTX):
+        return pct * price / 100 / close
+
+
 def characteristics(inputs: rb.SnapshotInputs, ids: Iterable[int]) -> dict[int, Characteristic]:
     """The table for ``ids`` (each an S₀ name of the snapshot) at D = ``inputs.last_session``."""
     d = inputs.last_session
@@ -121,6 +142,7 @@ def characteristics(inputs: rb.SnapshotInputs, ids: Iterable[int]) -> dict[int, 
                 beta=b,
                 beta_reason=reason,
                 atr_pct=None if atr is None or close is None else Decimal(atr.numerator) / atr.denominator / close,
+                div_yield=dividend_yield(f, close),
             )
     return out
 
@@ -134,13 +156,19 @@ def _d(x: str | None) -> Decimal | None:
 
 
 def encode_table(table: Mapping[int, Characteristic]) -> list[list[Any]]:
-    return [[iid, c.sector, _s(c.ln_cap), _s(c.beta), c.beta_reason, _s(c.atr_pct)] for iid, c in sorted(table.items())]
+    return [
+        [iid, c.sector, _s(c.ln_cap), _s(c.beta), c.beta_reason, _s(c.atr_pct), _s(c.div_yield)]
+        for iid, c in sorted(table.items())
+    ]
 
 
 def decode_table(doc: Sequence[Sequence[Any]]) -> dict[int, Characteristic]:
     out: dict[int, Characteristic] = {}
-    for iid, sector, ln_cap, b, reason, atr in doc:
-        out[int(iid)] = Characteristic(str(sector), _d(ln_cap), _d(b), reason, _d(atr))
+    for iid, sector, ln_cap, b, reason, atr, dy in doc:
+        c = Characteristic(str(sector), _d(ln_cap), _d(b), reason, _d(atr), _d(dy))
+        if any((x := c.value(name)) is not None and not x.is_finite() for name in FIELDS):
+            raise rb.SnapshotIntegrityError(f"{iid}: a stored characteristic is not finite")
+        out[int(iid)] = c
     return out
 
 

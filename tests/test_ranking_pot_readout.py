@@ -163,6 +163,12 @@ def test_the_readout_over_real_step_outputs() -> None:
     assert exp["beta_null_reasons"] == {"too_few_pairs": 2}
     controls = exp["controls_median"]
     assert controls["controls_with_capital"] == 2 and controls["beta"]["null_controls"] == 0
+    # Yield gap: only name 1 is covered (3%), so the shadow's yield is 3%; R_t's is 3% too (coverage 1/3).
+    assert abs(D(sh["div_yield"]["value"]) - D("0.03")) < D("1e-25")
+    assert abs(D(r_t["div_yield"]["value"]) - D("0.03")) < D("1e-25")
+    assert abs(D(exp["yield_gap"]["shadow_minus_r_t"])) < D("1e-25")
+    gap = exp["yield_gap"]["shadow_minus_controls_median"]
+    assert gap is not None and abs(D(gap)) < D("1e-25")  # the controls hold name 1 (covered) too
 
 
 def test_an_interim_endpoint_and_the_invariants() -> None:
