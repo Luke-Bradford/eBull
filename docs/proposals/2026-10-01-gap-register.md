@@ -121,6 +121,11 @@ So the bar is a **net-of-all-costs return above the investable passive alternati
 ## 3. Open check, not yet a gap — #3548
 
 - On 2026-09-26, 96 hold-out evaluate rows were written without a declaration id (s4, s8, s11, s12; purpose *"complete declared recent-regime evidence denominator"*, `strategy_holdout_accesses`). This is consistent with the designed recent-evidence refresh of harness controls (request 578). **To verify:** those results stay terminal, harness-only evidence that cannot inform selection. The register counts eyeballing as search (`trial_register.py:50`).
+- **Resolved 2026-10-02 (#3548): charged as r22, 24 searches.**
+  - The 96 results (`strategy_results_store` 738-833) are `harness_validation`, which promotion refuses.
+  - They are not a control. Request 578 re-ran the six pinned windows under cost v4 (`archive-basis-band`), and the numbers moved: s4 primary expectancy went from −0.629% to +0.081%.
+  - Reconstruction clause 2 (`docs/proposals/ta/2026-08-12-trial-register-reconstruction.md:44`) therefore counts the look, as it did the same-purpose 2026-08-12 batch.
+  - `M_inh` moves from 477 to 501.
 
 ## 4. Codex review disposition (53 findings)
 
