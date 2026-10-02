@@ -58,7 +58,11 @@ from app.providers.broker import (
     BrokerProvider,
 )
 from app.services.ai_trial_deadline import trial_exit_deadline
-from app.services.strategy_control_plane import StrategyControlError, StrategyOwnershipError
+from app.services.strategy_control_plane import (
+    PAPER_ALLOCATOR_ADVISORY_LOCK,
+    StrategyControlError,
+    StrategyOwnershipError,
+)
 from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
 
 logger = logging.getLogger(__name__)
@@ -334,6 +338,13 @@ def ensure_strategy_request_id(conn: psycopg.Connection[Any], *, order_id: int) 
 
     The caller must commit after this function and before broker I/O. Repeated
     calls return the same UUID, including a retry after a pre-call crash.
+
+    #3546 slice 3: a freshly minted UUID's reconciliation row is written
+    ``submission_phase='authority_committed'`` -- the alpha-arm half of #2961's
+    write-ordering marker; ``mark_entry_verb_entered`` commits the other half before
+    the provider call. Only the three non-core ENTRY paths call this. A UUID that
+    already existed keeps whatever row it has: certifying "never entered" for an
+    identity minted before the marker existed would be evidence nobody recorded.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -358,11 +369,11 @@ def ensure_strategy_request_id(conn: psycopg.Connection[Any], *, order_id: int) 
         )
     conn.execute(
         """
-        INSERT INTO strategy_order_reconciliation_state (order_id)
-        VALUES (%s)
+        INSERT INTO strategy_order_reconciliation_state (order_id, submission_phase)
+        VALUES (%s, %s)
         ON CONFLICT (order_id) DO NOTHING
         """,
-        (order_id,),
+        (order_id, "authority_committed" if stored_request_id is None else None),
     )
     return request_id
 
@@ -799,7 +810,14 @@ def _core_submission_try_lock(conn: psycopg.Connection[Any]) -> Iterator[bool]:
     ⚠ Never blocks.  The submitter's ``reconciliation_order_lock`` acquire DOES
     block, so a waiting try-lock here would close a deadlock cycle; a try cannot.
     """
-    acquired = conn.execute("SELECT pg_try_advisory_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK).fetchone()
+    with _try_advisory_key(conn, CORE_SUBMISSION_ADVISORY_LOCK, name="core submission") as acquired:
+        yield acquired
+
+
+@contextmanager
+def _try_advisory_key(conn: psycopg.Connection[Any], key: tuple[int, int], *, name: str) -> Iterator[bool]:
+    """Try a two-int4 session advisory key without waiting; release it on the way out."""
+    acquired = conn.execute("SELECT pg_try_advisory_lock(%s, %s)", key).fetchone()
     conn.commit()
     if acquired != (True,):
         yield False
@@ -812,12 +830,12 @@ def _core_submission_try_lock(conn: psycopg.Connection[Any]) -> Iterator[bool]:
         # Same discipline as `_release_order_lock`: never let a release failure
         # replace the body's exception, and never leave the key held on the way out.
         try:
-            released = conn.execute("SELECT pg_advisory_unlock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK).fetchone()
+            released = conn.execute("SELECT pg_advisory_unlock(%s, %s)", key).fetchone()
             conn.commit()
             if released != (True,):
-                logger.error("core submission advisory lock ownership was lost during terminalisation")
+                logger.error("%s advisory lock ownership was lost during terminalisation", name)
         except Exception:
-            logger.exception("releasing the core submission advisory lock failed")
+            logger.exception("releasing the %s advisory lock failed", name)
 
 
 def terminalise_unsubmitted_core_entry(
@@ -857,8 +875,17 @@ def terminalise_unsubmitted_core_entry(
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyReconciliationError("core terminalisation requires an idle connection")
+    # ⚠ Arm-scoped (#3546 slice 3): alpha-arm entries now carry the same marker, and a
+    # phase-only precheck would send them to the core key -- one unrelated core
+    # submission would then make every alpha entry skip reconciliation.
     phase = conn.execute(
-        "SELECT submission_phase FROM strategy_order_reconciliation_state WHERE order_id=%s",
+        """
+        SELECT state.submission_phase
+        FROM strategy_order_reconciliation_state state
+        JOIN strategy_trade_orders link ON link.order_id = state.order_id
+        JOIN strategy_trades trade ON trade.strategy_trade_id = link.strategy_trade_id
+        WHERE state.order_id = %s AND trade.core_rebalance_intent_id IS NOT NULL
+        """,
         (order_id,),
     ).fetchone()
     conn.commit()
@@ -909,6 +936,125 @@ def terminalise_unsubmitted_core_entry(
             )
 
 
+#: The reconciliation ``last_error_code`` of an alpha-arm entry released because its broker
+#: verb was provably never entered. Read by the AI-trial lifecycle, which must not record
+#: such a leg as submitted.
+ENTRY_NEVER_SUBMITTED_CODE: Final = "entry_authority_never_submitted"
+
+#: Window A for the three non-core ENTRY arms (paper, AI trial, ranking pot). Core's
+#: predicate, plus the pre-call states the authority transaction leaves behind: the order
+#: still ``submitted`` with no broker reference, the trade still ``planned``.
+_UNSUBMITTED_ENTRY_SQL: Final[LiteralString] = """
+SELECT trade.strategy_trade_id
+FROM strategy_order_reconciliation_state state
+JOIN orders o ON o.order_id = state.order_id
+JOIN strategy_trade_orders link ON link.order_id = o.order_id
+JOIN strategy_trades trade ON trade.strategy_trade_id = link.strategy_trade_id
+WHERE state.order_id = %(order_id)s
+  AND state.submission_phase = 'authority_committed'
+  AND state.state NOT IN ('resolved', 'rejected')
+  AND o.execution_origin = 'strategy'
+  AND o.status = 'submitted'
+  AND o.broker_order_ref IS NULL
+  AND link.purpose = 'entry'
+  AND trade.core_rebalance_intent_id IS NULL
+  AND trade.status = 'planned'
+  AND NOT EXISTS (
+      SELECT 1 FROM strategy_order_position_executions execution
+      WHERE execution.order_id = o.order_id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM strategy_position_ownership ownership
+      WHERE ownership.strategy_trade_id = trade.strategy_trade_id
+        AND ownership.status = 'active'
+  )
+  AND (
+      SELECT count(*) FROM strategy_trade_orders sibling
+      WHERE sibling.strategy_trade_id = trade.strategy_trade_id
+  ) = 1
+"""
+
+
+def terminalise_unsubmitted_entry(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+) -> ReconciliationResult | None:
+    """Terminalise an alpha-arm ENTRY whose broker verb was provably never entered (#3546).
+
+    :func:`terminalise_unsubmitted_core_entry` for the paper, AI-trial and ranking-pot
+    arms, with the same contract: ``None`` means not this path's business, and
+    :class:`StrategyReconciliationBusy` means a candidate something else owns.
+
+    Without it an entry that crashed between its authority commit and the provider call
+    was unresolvable: a ``referenceId`` lookup miss proves nothing (#2961), nothing
+    re-sends it on a schedule, and past its SLO age the ``order_reconciliation`` block
+    refused every entry on all three arms with no release, attended or not.
+
+    **Evidence, as for core: our own write ordering.** ``authority_committed`` means
+    ``mark_entry_verb_entered`` did not commit, and it commits before the provider call.
+    **Liveness:** every alpha submitter holds ``PAPER_ALLOCATOR_ADVISORY_LOCK`` (session
+    scope) from before the authority commit through the call, and Postgres frees it when
+    the backend dies, so a successful try proves no OTHER session is mid-submission. The
+    key is reentrant: the one same-session caller,
+    ``_execute_fired_paper_signal_locked``'s lookup of a non-capital-candidate's existing
+    order, never submits that order, so its nested success is correct (asserted by test).
+
+    The signal stays consumed -- its funding decision is kept, so no selector re-picks it
+    and the missed entry is not retried. A ``failed`` trade releases its capital
+    (allocator, sandbox and pot reads all exclude ``failed``).
+
+    ⚠ ``broker_verb_entered`` is never released here. It proves only that the call MAY
+    have happened; a same-key re-send is unbuilt until a measured probe shows eToro
+    deduplicates it (#3546 slice 3).
+
+    ⚠ Zero broker calls on every path.
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise StrategyReconciliationError("entry terminalisation requires an idle connection")
+    candidate = conn.execute(_UNSUBMITTED_ENTRY_SQL, {"order_id": order_id}).fetchone()
+    conn.commit()
+    if candidate is None:
+        return None
+    with _try_advisory_key(conn, PAPER_ALLOCATOR_ADVISORY_LOCK, name="paper allocator") as allocator_idle:
+        if not allocator_idle:
+            raise StrategyReconciliationBusy(
+                f"an entry submission is in flight; order {order_id} cannot be shown unsubmitted"
+            )
+        # Per-order lock is ALWAYS last (this module's stated lock ordering).
+        with try_reconciliation_order_lock(conn, order_id):
+            # Candidacy re-read and the writes in ONE transaction, both locks held, in the
+            # module's statement order: orders -> reconciliation state -> strategy_trades.
+            with conn.transaction():
+                candidate = conn.execute(_UNSUBMITTED_ENTRY_SQL, {"order_id": order_id}).fetchone()
+                if candidate is None:
+                    return None
+                trade_id = int(candidate[0])
+                conn.execute("UPDATE orders SET status='rejected' WHERE order_id=%s", (order_id,))
+                conn.execute(
+                    """
+                    UPDATE strategy_order_reconciliation_state
+                    SET state='rejected', reconciled_at=now(), last_attempt_at=now(),
+                        attempt_count=attempt_count+1,
+                        last_error_code=%s, updated_at=now()
+                    WHERE order_id=%s
+                    """,
+                    (ENTRY_NEVER_SUBMITTED_CODE, order_id),
+                )
+                conn.execute(
+                    "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
+                    (trade_id,),
+                )
+            return ReconciliationResult(
+                order_id=order_id,
+                state="rejected",
+                broker_order_ref=None,
+                broker_status=None,
+                position_ids=(),
+                error_code=ENTRY_NEVER_SUBMITTED_CODE,
+            )
+
+
 def reconcile_strategy_order(
     conn: psycopg.Connection[Any],
     *,
@@ -930,6 +1076,10 @@ def reconcile_strategy_order(
     # and every row predating `submission_phase` -- so ordinary reconciliation is
     # unaffected.  Zero broker calls either way.
     never_submitted = terminalise_unsubmitted_core_entry(conn, order_id=order_id)
+    if never_submitted is not None:
+        return never_submitted
+    # #3546 slice 3: the alpha arms' window A. Disjoint from the core one by arm.
+    never_submitted = terminalise_unsubmitted_entry(conn, order_id=order_id)
     if never_submitted is not None:
         return never_submitted
     # ⚠ The lock is taken BEFORE the identity read, not around the writes. That
@@ -1264,6 +1414,7 @@ def enforce_reconciliation_slo(
 
 
 __all__ = [
+    "ENTRY_NEVER_SUBMITTED_CODE",
     "ReconciliationHealth",
     "ReconciliationResult",
     "StrategyReconciliationBusy",
@@ -1275,5 +1426,6 @@ __all__ = [
     "reconcile_strategy_order",
     "reconciliation_order_lock",
     "terminalise_unsubmitted_core_entry",
+    "terminalise_unsubmitted_entry",
     "try_reconciliation_order_lock",
 ]

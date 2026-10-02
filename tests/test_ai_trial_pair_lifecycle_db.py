@@ -21,6 +21,7 @@ from app.services.ai_trial_pair_lifecycle import (
 )
 from app.services.market_regime import Regime
 from app.services.market_regime_provider import MarketRegimeProvider
+from app.services.strategy_order_reconciliation import ENTRY_NEVER_SUBMITTED_CODE, reconcile_backlog
 from tests.test_ai_trial_deadline_db import _arm_held, _opened_arm_leg
 from tests.test_ai_trial_executor_db import _broker, _control_instrument
 from tests.test_ai_trial_intent_db import NOW, _published_pair
@@ -92,6 +93,34 @@ def test_a_refused_leg_breaks_the_pair_with_its_refusal_code(
         ("arm", "submitted", None),
         ("arm", "filled", None),
         (None, "broken", [refused.reason_code]),
+    ]
+
+
+def test_a_leg_released_as_never_sent_breaks_the_pair_without_a_submitted_event(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3546: the control leg dies between its authority commit and the pre-call marker."""
+    conn = ebull_test_conn
+    _opened_arm_leg(conn, monkeypatch)
+    control_signal = _control_signal(conn, monkeypatch)
+    broker = _broker(_control_instrument(conn, control_signal), held=_arm_held())
+
+    def _crash(*_: object, **__: object) -> None:
+        raise RuntimeError("killed before the marker")
+
+    monkeypatch.setattr("app.services.strategy_paper_executor.mark_entry_verb_entered", _crash)
+    with pytest.raises(RuntimeError, match="killed before the marker"):
+        execute_trial_signal(conn, broker=broker, signal_id=control_signal, now=NOW)
+    broker.place_demo_strategy_order.assert_not_called()
+
+    released = reconcile_backlog(conn, broker=broker)
+    assert [r.error_code for r in released] == [ENTRY_NEVER_SUBMITTED_CODE]
+
+    assert record_pair_lifecycle(conn, now=NOW) == 3
+    assert _events(conn) == [
+        ("arm", "submitted", None),
+        ("arm", "filled", None),
+        (None, "broken", [ENTRY_NEVER_SUBMITTED_CODE]),
     ]
 
 

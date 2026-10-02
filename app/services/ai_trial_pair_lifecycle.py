@@ -50,6 +50,7 @@ from app.services.market_calendar import us_market_status
 from app.services.market_regime import REGIME_RULE_VERSION
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_RULE_SET_VERSION
 from app.services.market_regime_provider import BenchmarkUnavailableError, MarketRegimeProvider
+from app.services.strategy_order_reconciliation import ENTRY_NEVER_SUBMITTED_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,8 @@ TRIAL_CENSOR_SESSIONS: Final = 10
 TRIAL_UNRESOLVED_SESSIONS: Final = 10
 
 #: Trade statuses reached only after the broker submission was attempted. A trial trade is
-#: ``failed`` only by a broker rejection, which comes after the call.
+#: ``failed`` by a broker rejection, which comes after the call -- or by the #3546 release of
+#: an entry whose call was provably never made, which ``LegFacts.never_submitted`` carries.
 #: The label's classifier identity: the regime rule and the benchmark-source rule, the pair
 #: ``strategy_registry.INPUT_RULE_SETS`` carries for every regime-gated strategy.
 LABEL_CLASSIFIER_VERSION: Final = f"{REGIME_RULE_VERSION};{BENCHMARK_RULE_SET_VERSION}"
@@ -93,6 +95,8 @@ class LegFacts:
     exit_deadline: date | None = None
     #: Latest ownership release of the trade; read only when the trade is ``closed``.
     closed_at: datetime | None = None
+    #: The entry was released as never sent to the broker (#3546): ``failed`` without a call.
+    never_submitted: bool = False
 
 
 def clock_instant(session: date, sessions: int) -> datetime:
@@ -120,7 +124,8 @@ def next_leg_events(facts: LegFacts, last: LegEvent | None, now: datetime) -> li
     while True:
         nxt: LegEvent | None
         if state is None:
-            nxt = "submitted" if filled or facts.trade_status in _SUBMITTED_STATUSES else None
+            sent = facts.trade_status in _SUBMITTED_STATUSES and not facts.never_submitted
+            nxt = "submitted" if filled or sent else None
         elif state == "submitted":
             nxt = "filled" if filled else ("uncertain" if uncertain else None)
         elif state == "uncertain":
@@ -155,6 +160,8 @@ def leg_outcome(facts: LegFacts, target_session: date, now: datetime) -> str | N
         return "late_fill" if session > target_session else "early_fill"
     if facts.funding_verdict == "rejected":
         return _reason_code(facts.refusal_code)
+    if facts.trade_status == "failed" and facts.never_submitted:
+        return ENTRY_NEVER_SUBMITTED_CODE
     if facts.trade_status == "failed":
         return "broker_rejected"
     if now >= clock_instant(target_session, TRIAL_UNRESOLVED_SESSIONS):
@@ -195,7 +202,9 @@ _LEG_FACTS_SQL: Final = """
             WHERE e.order_id = o.order_id) AS filled_at,
            t.exit_deadline_session,
            (SELECT max(ow.released_at) FROM strategy_position_ownership ow
-            WHERE ow.strategy_trade_id = t.strategy_trade_id) AS closed_at
+            WHERE ow.strategy_trade_id = t.strategy_trade_id) AS closed_at,
+           EXISTS (SELECT 1 FROM strategy_order_reconciliation_state rs
+                   WHERE rs.order_id = o.order_id AND rs.last_error_code = %s) AS never_submitted
     FROM ai_trial_leg_links l
     LEFT JOIN strategy_funding_decisions fd ON fd.signal_id = l.signal_id
     LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
@@ -287,7 +296,7 @@ def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime, reg
         "SELECT leg, event FROM ai_trial_pair_events WHERE pair_id = %s ORDER BY event_id", (pair_id,)
     ).fetchall()
     facts = {leg: LegFacts() for leg in LEGS}
-    for row in conn.execute(_LEG_FACTS_SQL, (pair_id,)).fetchall():
+    for row in conn.execute(_LEG_FACTS_SQL, (ENTRY_NEVER_SUBMITTED_CODE, pair_id)).fetchall():
         facts[row[0]] = LegFacts(*row[1:])
 
     written = 0
@@ -318,7 +327,7 @@ def _record_pair(conn: psycopg.Connection[Any], pair_id: int, now: datetime, reg
 #: The pairs ``record_pair_lifecycle`` still owes work (alias ``p``; ends in a ``WHERE`` clause, so
 #: a caller may append ``AND …``). Shared with ``ai_trial_wind_down``: a pair the writer still
 #: reads is v1 lifecycle code still running (#3515 §0).
-UNFINISHED_PAIRS_FROM: Final = """
+UNFINISHED_PAIRS_FROM: Final = f"""
     ai_trial_pairs p
     CROSS JOIN LATERAL (
         SELECT count(*) FILTER (WHERE closed OR refused) AS terminal_legs,
@@ -335,7 +344,13 @@ UNFINISHED_PAIRS_FROM: Final = """
                       AND (fd.verdict = 'rejected'
                            OR (t.status = 'failed' AND EXISTS (
                                SELECT 1 FROM ai_trial_pair_events e
-                               WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'submitted')))
+                               WHERE e.pair_id = p.pair_id AND e.leg = legs.leg AND e.event = 'submitted'))
+                           -- #3546: released as never sent, so no `submitted` event is owed.
+                           OR (t.status = 'failed' AND EXISTS (
+                               SELECT 1 FROM strategy_trade_orders sto
+                               JOIN strategy_order_reconciliation_state rs ON rs.order_id = sto.order_id
+                               WHERE sto.strategy_trade_id = t.strategy_trade_id AND sto.purpose = 'entry'
+                                 AND rs.last_error_code = '{ENTRY_NEVER_SUBMITTED_CODE}')))
                 ) AS refused
             FROM (VALUES ('arm'), ('control')) AS legs (leg)
         ) leg_state

@@ -11823,3 +11823,16 @@ neighbouring container and match it.**
   too — otherwise the refusal path is the one that aborts the caller. A narrow catch is correct only where
   propagating is the intended outcome — say so at the call site.
 - Enforced in: `app/services/strategy_paper_runtime.py::_advance_deployment_risk`.
+
+### A new writer of an existing status breaks every reader that infers history from it (#3546)
+
+- Failure: #3546 slice 3 let reconciliation set an entry trade to `failed` when its broker call was provably
+  never made. `ai_trial_pair_lifecycle._SUBMITTED_STATUSES` held `failed` on the stated premise "a trial trade is
+  `failed` only by a broker rejection, which comes after the call", so the live trial's event log would have
+  recorded a leg that never reached the broker as `submitted`. Codex ckpt-1 caught it; no existing test would have.
+- Prevention: before adding a writer of an existing status value, grep every reader of that value
+  (`grep -rn "'failed'\|\"failed\"" app/`) and check what each one INFERS from it — history ("the call happened"),
+  not just state. Where a reader infers history, carry the distinguishing fact explicitly (here
+  `LegFacts.never_submitted`, read from the reconciliation `last_error_code`) rather than overloading the status.
+- Enforced in: `tests/test_ai_trial_pair_lifecycle.py::test_a_leg_released_as_never_sent_is_never_recorded_submitted`
+  and `tests/test_ai_trial_pair_lifecycle_db.py::test_a_leg_released_as_never_sent_breaks_the_pair_without_a_submitted_event`.
