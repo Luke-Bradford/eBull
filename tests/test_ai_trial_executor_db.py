@@ -59,13 +59,14 @@ def _broker(
     instrument_id: int,
     *,
     equity: str = "1000",
+    available_cash: str = "600",
     spread_value: str = "0.5",
     held: tuple[BrokerDirectPositionInvestment, ...] = (),
 ) -> MagicMock:
     """``held``: the engine's already-owned positions, which the engine-pot drawdown prices (#3541)."""
     broker = MagicMock(spec=BrokerProvider)
     broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
-        available_cash=Decimal("600"),
+        available_cash=Decimal(available_cash),
         total_invested=Decimal("0"),
         unrealized_pnl=Decimal("0"),
         equity=Decimal(equity),
@@ -205,9 +206,10 @@ def test_a_capacity_reduced_control_leg_records_requested_and_actual(ebull_test_
     _, signals = _published_pair(conn)
     _enable_trading(conn)
     control_instrument = _control_instrument(conn, signals["control"])
-    # The 30% instrument-exposure cap of $200 equity = $60 of capacity: below the $125 ticket,
-    # above the broker's $10 open minimum, so the leg is accepted REDUCED (§8 "Sizing").
-    broker = _broker(control_instrument, equity="200", spread_value="0.2")
+    # $60 of available cash: below the $125 ticket, above the broker's $10 open minimum, so the
+    # leg is accepted REDUCED (§8 "Sizing"). (Account equity no longer sizes anything -- #3541
+    # slice 2 put both exposure caps on the engine pot.)
+    broker = _broker(control_instrument, available_cash="60", spread_value="0.2")
 
     result = execute_trial_signal(conn, broker=broker, signal_id=signals["control"], now=NOW)
 

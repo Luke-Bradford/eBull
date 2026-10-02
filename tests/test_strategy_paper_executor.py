@@ -151,6 +151,7 @@ def _seed(
     *,
     auto: bool = True,
     ticket_sizing_mode: str = "percent",
+    max_instrument_exposure_pct: Decimal = Decimal("30"),
 ) -> int:
     if conn.execute("SELECT 1 FROM strategy_paper_pool_events LIMIT 1").fetchone() is None:
         configure_paper_pool(
@@ -297,7 +298,7 @@ def _seed(
         max_halt_feed_age_seconds=60,
         max_cost_age_seconds=60,
         max_reconciliation_age_seconds=60,
-        max_instrument_exposure_pct=Decimal("30"),
+        max_instrument_exposure_pct=max_instrument_exposure_pct,
         max_portfolio_exposure_pct=Decimal("80"),
         max_drawdown_pct=Decimal("10"),
         min_net_expectancy_pct=Decimal("1"),
@@ -663,7 +664,7 @@ def _broker(
     return broker
 
 
-def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
+def test_allocation_ignores_manual_risk_and_commits_identity_before_demo_io(
     ebull_test_conn: psycopg.Connection[Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -675,10 +676,13 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
     result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
 
     assert result.verdict == "submitted"
-    assert result.amount == Decimal("50.00")  # 30% equity cap - $250 manual/existing exposure
+    # #3541 slice 2: the account's $250 in this instrument is not the engine's, so the
+    # instrument cap is 30% of the $2,000 pot with nothing committed -- the 20% ticket of
+    # the $1,000 deployment binds (it was 30% of $1,000 ACCOUNT equity - $250 = $50).
+    assert result.amount == Decimal("200.00")
     submitted = broker.place_demo_strategy_order.call_args
     assert submitted.kwargs["request_id"] == _REQUEST_ID
-    assert submitted.args[0].amount == Decimal("50.00")
+    assert submitted.args[0].amount == Decimal("200.00")
     assert submitted.args[0].stop_loss_rate == Decimal("95.000000")
     assert submitted.args[0].take_profit_rate == Decimal("110.000000")
     assert conn.execute(
@@ -707,8 +711,8 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
         (signal_id,),
     ).fetchone() == (
         "allocated",
-        Decimal("50.000000"),
-        Decimal("3.00000000"),
+        Decimal("200.000000"),
+        Decimal("4.50000000"),  # the same fixed-dollar stressed cost over $200, not $50
         forecast_id[0],
         forecast_id[1],
         COST_BASIS_BROKER_PREFLIGHT_VALUE,
@@ -1448,7 +1452,10 @@ def test_non_positive_ask_is_a_preflight_rejection_not_submission_uncertainty(
 def test_unresolved_local_strategy_order_consumes_risk_before_broker_snapshot_catches_up(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
-    signal_id = _seed(ebull_test_conn)
+    # #3541 slice 2: the instrument cap is 10% of the $2,000 pot = $200, and the unresolved
+    # $200 allocation in the same instrument is committed from the moment it is funded --
+    # the broker snapshot (which does not show it) is never consulted.
+    signal_id = _seed(ebull_test_conn, max_instrument_exposure_pct=Decimal("10"))
     deployment = ebull_test_conn.execute(
         "SELECT deployment_id FROM strategy_deployments WHERE strategy_id='S-ALLOC' AND mode='paper'"
     ).fetchone()
@@ -1472,7 +1479,7 @@ def test_unresolved_local_strategy_order_consumes_risk_before_broker_snapshot_ca
         signal_id=int(prior_signal[0]),
         verdict="allocated",
         deployment_id=deployment_id,
-        amount=Decimal("60"),
+        amount=Decimal("200"),
         reason_code="test_unresolved_order",
     )
     trade_id = create_strategy_trade(ebull_test_conn, decision_id)
@@ -1481,7 +1488,7 @@ def test_unresolved_local_strategy_order_consumes_risk_before_broker_snapshot_ca
         INSERT INTO orders (
             instrument_id, action, order_type, requested_amount, status,
             raw_payload_json, execution_origin
-        ) VALUES (2449001, 'BUY', 'MARKET', 60, 'submitted', NULL, 'strategy')
+        ) VALUES (2449001, 'BUY', 'MARKET', 200, 'submitted', NULL, 'strategy')
         RETURNING order_id
         """
     ).fetchone()

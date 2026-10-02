@@ -153,7 +153,7 @@ def test_generated_demo_trade_is_auditable_through_reconciliation_and_operator_r
     assert broker_order_ref == "13902598"
     assert forecast_id is not None and ranking_member_id is not None
     assert verdict == "allocated"
-    assert amount == Decimal("50.000000")
+    assert amount == Decimal("200.000000")  # #3541 slice 2: the account's manual holding no longer caps it
     conn.commit()
 
     # The next bounded cycle observes the broker fill, claims only its exact

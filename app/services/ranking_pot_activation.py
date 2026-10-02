@@ -4,7 +4,7 @@ Spec ``docs/proposals/execution/2026-10-01-2842-ranking-pot-v1.md`` §7.3, "The 
 supervisor step, run by ``scripts/ranking_pot_activate.py`` from the main checkout; it refuses, never reserves.
 
 * **Activation** (``shadow_only``, no activation row): the ticket minimum over the frozen S₀, the read-only capital
-  preview (``_capacities`` at the policy's stop cap), then the pot's paper deployment, execution policy and manager
+  preview (``_capacity_terms`` at the policy's stop cap), then the pot's paper deployment, execution policy and manager
   policy, the ``ranking_pot_activations`` row and the ``executing`` event, in ONE transaction.
 * **Resumption** (a halt, the activation row present): the configuration intact and the §7.4 loss check, then the
   ``executing`` event. No capital and no configuration is written.
@@ -57,7 +57,8 @@ from app.services.strategy_paper_executor import (
     _PENDING_RISK_SQL,
     _age_ok,
     _allocator_lock,
-    _capacities,
+    _capacity_terms,
+    _pot_exposure,
 )
 from app.services.strategy_position_manager import configure_position_manager
 
@@ -181,20 +182,17 @@ def preview_capital(
         return refuse("account_drawdown_limit")
     if shared.drawdown_pct >= shared.mandate_max_drawdown_pct:
         return refuse("portfolio_drawdown_limit")
-    capacities = _capacities(
+    # #3541 slice 2: the exposure pair on the engine pot, as the executor sizes it. `shared.equity` /
+    # `total_invested` are the account's and are not read here.
+    capacities = _capacity_terms(
         pool_base=shared.pool_base,
         committed=shared.committed,
         active_committed=shared.active_committed,
         deployment_base=Decimal("0"),
         deployment_reserved=Decimal("0"),
-        equity=shared.equity,
-        total_invested=shared.total_invested,
-        available_cash=shared.available_cash,
-        pending_total=shared.pending_total,
-        pending_instrument=Decimal("0"),
-        current_instrument=Decimal("0"),
-        max_portfolio_exposure_pct=max_portfolio_exposure_pct,
-        max_instrument_exposure_pct=max_instrument_exposure_pct,
+        cash=shared.available_cash - shared.pending_total,
+        portfolio=_pot_exposure(shared.pool_base, shared.committed, max_portfolio_exposure_pct),
+        instrument=_pot_exposure(shared.pool_base, Decimal("0"), max_instrument_exposure_pct),
         mandate_cash_reserve_pct=shared.mandate_cash_reserve_pct,
         mandate_active_risk_budget_pct=shared.mandate_active_risk_budget_pct,
         mandate_max_loss_per_position_pct=shared.mandate_max_loss_per_position_pct,
