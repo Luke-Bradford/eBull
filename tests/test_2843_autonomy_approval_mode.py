@@ -22,6 +22,7 @@ from app.services.strategy_autonomous_promotion import (
     AUTONOMOUS_APPROVER,
     AUTONOMY_POLICY_VERSION,
     AutonomousAdvance,
+    _AuthorityRevoked,
     _Refused,
     cycle_precondition_refusal,
     planned_action,
@@ -162,6 +163,8 @@ def _cycle_with(monkeypatch: pytest.MonkeyPatch, behaviours: dict[str, str]) -> 
             raise RuntimeError(f"{strategy_id} broke")
         if behaviour == "refuse":
             raise _Refused("evidence_missing")
+        if behaviour == "revoke":
+            raise _AuthorityRevoked("approval_mode_manual")
         return AutonomousAdvance(strategy_id, strategy_version, None, "historical_validated", 1, None), None
 
     monkeypatch.setattr(strategy_autonomous_promotion, "load_paper_pool", lambda _conn: _pool())
@@ -190,3 +193,14 @@ def test_every_strategy_faulting_re_raises_the_cause(monkeypatch: pytest.MonkeyP
 def test_a_clean_cycle_reports_no_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     report = _cycle_with(monkeypatch, {"a": "advance", "b": "refuse"})
     assert report.errors == ()
+
+
+def test_a_fault_then_a_revocation_returns_the_revocation_not_the_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The revocation is the cycle's verdict, so it is reported, not masked by a re-raise.
+
+    The fault still reaches `errors` and so still degrades the run.
+    """
+    report = _cycle_with(monkeypatch, {"a": "fault", "b": "revoke", "c": "advance"})
+    assert report.skipped_reason == "approval_mode_manual"
+    assert report.errors == (("a", "RuntimeError"),)
+    assert report.advanced == ()
