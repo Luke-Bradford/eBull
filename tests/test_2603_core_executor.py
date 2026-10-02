@@ -152,7 +152,14 @@ def _tracking_lock(events: list[str]):
 
 
 def _decision(action: str = "buy_core") -> SimpleNamespace:
-    return SimpleNamespace(action=action, reason_code="within_band" if action == "hold" else None)
+    return SimpleNamespace(
+        action=action,
+        reason_code="within_band" if action == "hold" else None,
+        core_pct=Decimal("40"),
+        lower_pct=Decimal("45"),
+        upper_pct=Decimal("55"),
+        target_pct=Decimal("50"),
+    )
 
 
 def _run(

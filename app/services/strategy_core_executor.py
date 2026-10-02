@@ -1380,10 +1380,13 @@ def execute_core_rebalance(
                             rule_id="core-mandate",
                             evidence_kind="core_mandate_event",
                             evidence_id=current.event_id,
+                            # The allocator's own arithmetic, whatever the intent kind -- never a
+                            # reason asserted on its behalf.
                             why_now=(
                                 f"core rebalance intent {intent_id} decided {intent.decision.action} under mandate "
-                                f"event {current.event_id}: the passive sleeve is below its band. Beta, not an "
-                                "entry signal"
+                                f"event {current.event_id}: core {intent.decision.core_pct}% vs band "
+                                f"{intent.decision.lower_pct}-{intent.decision.upper_pct}% "
+                                f"(target {intent.decision.target_pct}%). Beta, not an entry signal"
                             ),
                             exit_rule=protective_exit_rule(
                                 exit_levels.stop_loss_rate,
