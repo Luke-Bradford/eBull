@@ -425,7 +425,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/ranking_pot_rebalance.py",
-        762,
+        766,
         "§4 step-2 bar coverage count",
         "METADATA",
         note="#2842: counts valid last-session bars (an outage gate); snapshot bars come via price_masked_bars",
