@@ -268,7 +268,7 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
         FROM strategy_funding_decisions funding
         JOIN strategy_deployments deployment
           ON deployment.deployment_id=funding.deployment_id AND deployment.mode='paper'
-        JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
+        LEFT JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
         LEFT JOIN strategy_trades trade ON trade.funding_decision_id=funding.funding_decision_id
         LEFT JOIN strategy_position_ownership ownership
           ON ownership.strategy_trade_id=trade.strategy_trade_id
@@ -290,6 +290,12 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
             positive=True,
         )
         trade_id = row[2]
+        if row[5] is None:
+            # Unreachable while `funding.signal_id` is a RESTRICT foreign key (sql/281); a LEFT
+            # JOIN keeps a decision that lost its signal in view so it refuses, never drops out.
+            raise EngineCapitalObservationError(
+                f"funding decision {row[0]} has no signal instrument", "engine_capital_population_incomplete"
+            )
         instrument_id = int(row[5])
         if trade_id is None:
             alpha_committed += amount
