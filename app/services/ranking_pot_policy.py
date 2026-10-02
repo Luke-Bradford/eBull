@@ -8,8 +8,9 @@ Hashed by bytes (§8): the scorer ``scoring.py`` and its direct in-repo imports 
 own import statements, so a new import cannot slip out of the hash), ``market_calendar``, ``indicator_series``,
 ``ai_trial_pack`` (``is_eligible``, ``build_bar_series``), ``ai_trial_pack_reader`` (``read_bars``, the #1664 cap
 overlay; reused by the rebalance, slice 4b-i), and the pot's own modules (the rebalance job, slice 4b-ii, included:
-its decision window decides ``as_of`` and therefore the §5.0 quote rule). Each later slice appends its
-module (rebalance, loader, executor wrapper, exits, readout) here; the freeze happens after the last slice lands.
+its decision window decides ``as_of`` and therefore the §5.0 quote rule; the online step job, slice 6a, r3-92). Each
+later slice appends its module (loader, executor wrapper, exits, readout) here; the freeze happens after the last
+slice lands.
 
 Residual, stated (v1's, spec §8 / r3-90..92): transitive imports beyond the scorer's direct ones, package versions,
 runtime configuration and database functions are not hashed; shared non-pot modules (``strategy_paper_executor``,
@@ -54,6 +55,7 @@ POLICY_MODULES: Final = tuple(
             "ranking_pot_job.py",
             "ranking_pot_rebalance.py",
             "ranking_pot_sim.py",
+            "ranking_pot_step.py",
             "ranking_pot_policy.py",
         )
     )

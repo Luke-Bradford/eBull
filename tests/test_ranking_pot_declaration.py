@@ -128,6 +128,8 @@ def test_no_pot_module_writes_evidence() -> None:
         "ranking_pot_policy.py",
         "ranking_pot_freeze.py",
         "ranking_pot_rebalance.py",
+        "ranking_pot_job.py",
+        "ranking_pot_step.py",
     ):
         text = (_SERVICES / name).read_text()
         assert not [b for b in banned if b in text], name

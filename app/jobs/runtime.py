@@ -147,6 +147,7 @@ from app.workers.scheduler import (
     JOB_PRICE_QUARANTINE_REFRESH,
     JOB_QUOTES_REFRESH,
     JOB_RANKING_POT_REBALANCE,
+    JOB_RANKING_POT_STEP,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RECOMMENDATION_ORDER_RECONCILE,
     JOB_RESEARCH_PRICE_QUARANTINE_REFRESH,
@@ -240,6 +241,7 @@ from app.workers.scheduler import (
     price_quarantine_refresh,
     quotes_refresh,
     ranking_pot_rebalance,
+    ranking_pot_step,
     raw_data_retention_sweep,
     recommendation_order_reconcile,
     research_price_quarantine_refresh,
@@ -475,6 +477,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_AI_TRIAL_EXECUTE: _adapt_zero_arg(ai_trial_execute),
     JOB_AI_TRIAL_FUND_DECISION_RUN: _adapt_zero_arg(ai_trial_fund_decision_run),
     JOB_RANKING_POT_REBALANCE: _adapt_zero_arg(ranking_pot_rebalance),
+    JOB_RANKING_POT_STEP: _adapt_zero_arg(ranking_pot_step),
     JOB_CORE_ELIGIBILITY_REFRESH: _adapt_zero_arg(core_eligibility_refresh),
     JOB_STRATEGY_AUTONOMOUS_PROMOTION: _adapt_zero_arg(strategy_autonomous_promotion),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
