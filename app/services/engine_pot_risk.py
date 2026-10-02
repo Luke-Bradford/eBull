@@ -121,16 +121,11 @@ def _snapshot_positions(snapshot: BrokerAccountRiskSnapshot) -> dict[int, Broker
     return positions
 
 
-def _price_book(
-    conn: psycopg.Connection[Any],
-    positions: dict[int, BrokerDirectPositionInvestment],
-    rows: list[tuple[Any, ...]],
-    at: datetime,
-) -> tuple[Decimal, Decimal]:
-    """``(realised, unrealised)`` of an exact-owned book at ``at``.
+def book_membership(rows: list[tuple[Any, ...]], at: datetime) -> tuple[dict[int, int], set[int]]:
+    """``(held position -> instrument, released positions)`` of the book at ``at``.
 
-    ``rows`` are ``(trade_id, status, instrument_id, position_id, claimed_at, released_at)``,
-    one per ownership row (NULLs when a trade has none).
+    ``rows`` are ``engine_book_rows``'s. Raises for a trade that reached the broker with no
+    ownership row.
     """
     # Membership is POINT-IN-TIME at the snapshot: a row claimed after it is not yet in the
     # book, a row released after it is still held in it. Every close counts only up to the
@@ -153,6 +148,21 @@ def _price_book(
             released.add(int(position_id))
         else:
             held[int(position_id)] = int(instrument_id)
+    return held, released
+
+
+def _price_book(
+    conn: psycopg.Connection[Any],
+    positions: dict[int, BrokerDirectPositionInvestment],
+    rows: list[tuple[Any, ...]],
+    at: datetime,
+) -> tuple[Decimal, Decimal]:
+    """``(realised, unrealised)`` of an exact-owned book at ``at``.
+
+    ``rows`` are ``(trade_id, status, instrument_id, position_id, claimed_at, released_at)``,
+    one per ownership row (NULLs when a trade has none).
+    """
+    held, released = book_membership(rows, at)
 
     unrealised = _ZERO
     for position_id, instrument_id in held.items():
@@ -230,9 +240,21 @@ def observe_pot_nav(conn: psycopg.Connection[Any], snapshot: BrokerAccountRiskSn
     principal = Decimal(str(pool[0]))
     epoch: datetime = pool[1]
 
-    # Eligibility is `_load_realised_delta`'s: an allocated paper-deployment trade or a core-arm
-    # trade, created at or after the pot epoch. One row per ownership row (NULL when none).
-    rows = conn.execute(
+    rows = engine_book_rows(conn, epoch)
+    realised, unrealised = _price_book(conn, positions, rows, snapshot.observed_at)
+    pot = PotNav(principal, epoch, realised, unrealised, snapshot.observed_at)
+    if not all(value.is_finite() for value in (principal, realised, unrealised)) or pot.nav <= 0:
+        raise EngineCapitalObservationError("engine pot NAV is not positive", "engine_capital_population_incomplete")
+    return pot
+
+
+def engine_book_rows(conn: psycopg.Connection[Any], epoch: datetime) -> list[tuple[Any, ...]]:
+    """``(trade_id, status, instrument_id, position_id, claimed_at, released_at)`` of the engine book.
+
+    Eligibility is `_load_realised_delta`'s: an allocated paper-deployment trade or a core-arm
+    trade, created at or after the pot epoch. One row per ownership row (NULL when none).
+    """
+    return conn.execute(
         f"""
         SELECT trade.strategy_trade_id,trade.status,trade.instrument_id,
                ownership.broker_position_id,ownership.claimed_at,ownership.released_at
@@ -252,12 +274,6 @@ def observe_pot_nav(conn: psycopg.Connection[Any], snapshot: BrokerAccountRiskSn
         """,
         (epoch,),
     ).fetchall()
-
-    realised, unrealised = _price_book(conn, positions, rows, snapshot.observed_at)
-    pot = PotNav(principal, epoch, realised, unrealised, snapshot.observed_at)
-    if not all(value.is_finite() for value in (principal, realised, unrealised)) or pot.nav <= 0:
-        raise EngineCapitalObservationError("engine pot NAV is not positive", "engine_capital_population_incomplete")
-    return pot
 
 
 def _load_state(conn: psycopg.Connection[Any], *, for_update: bool) -> PotRiskState | None:

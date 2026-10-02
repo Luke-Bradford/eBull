@@ -674,6 +674,8 @@ _INVOKERS[_scheduler.JOB_FINRA_SHORT_INTEREST_REFRESH] = _adapt_zero_arg(_schedu
 # G6/#916 — FINRA RegSHO daily short volume (daily 23:00 UTC). Same
 # shape — zero-param manual surface; extended-window backfill via REPL.
 _INVOKERS[_scheduler.JOB_FINRA_REGSHO_DAILY_REFRESH] = _adapt_zero_arg(_scheduler.finra_regsho_daily_refresh)
+# #3543 — daily engine-book risk snapshot (09:00 UTC). Zero-param manual surface.
+_INVOKERS[_scheduler.JOB_ENGINE_BOOK_RISK_SNAPSHOT] = _adapt_zero_arg(_scheduler.engine_book_risk_snapshot)
 
 # #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional).
 # Each invoker HEADs the SEC URL once per fire and re-downloads
