@@ -1508,6 +1508,32 @@ def test_a_transient_refusal_defers_without_consuming_the_signal(
     assert retried.verdict == "submitted"
 
 
+def test_a_stale_quote_defers_through_the_real_loader(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loader-code cases above stub `_load_intent`; this one drives the real loader, so a
+    write it made before returning a deferral code would show here as a preflight row."""
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+    conn.execute("UPDATE quotes SET quoted_at=%s WHERE instrument_id=2449001", (_NOW - timedelta(minutes=5),))
+    conn.commit()
+
+    deferred = execute_fired_paper_signal(conn, broker=_broker(), signal_id=signal_id, now=_NOW)
+
+    assert (deferred.verdict, deferred.reason_code) == ("deferred", "quote_stale")
+    assert conn.execute(
+        "SELECT (SELECT count(*) FROM strategy_funding_decisions WHERE signal_id=%(s)s),"
+        " (SELECT count(*) FROM strategy_entry_preflights WHERE signal_id=%(s)s)",
+        {"s": signal_id},
+    ).fetchone() == (0, 0)
+    conn.execute("UPDATE quotes SET quoted_at=%s WHERE instrument_id=2449001", (_NOW,))
+    conn.commit()
+
+    assert execute_fired_paper_signal(conn, broker=_broker(), signal_id=signal_id, now=_NOW).verdict == "submitted"
+
+
 def test_a_terminal_refusal_is_still_persisted(ebull_test_conn: psycopg.Connection[Any]) -> None:
     """The control for the deferral test: a cost the broker DID return but undocumented stays final."""
     signal_id = _seed(ebull_test_conn)

@@ -730,7 +730,11 @@ def _refuse_paper_entry(
     risk: BrokerAccountRiskSnapshot | None = None,
     halt_identity_evaluated: bool = False,
 ) -> PaperExecutionResult:
-    """The paper path's refusal: a ``PAPER_ENTRY_DEFERRALS`` code writes nothing; any other is persisted."""
+    """The paper path's refusal: a ``PAPER_ENTRY_DEFERRALS`` code writes nothing; any other is persisted.
+
+    A deferral ignores ``intent``, ``risk`` and ``halt_identity_evaluated``: they are evidence for the
+    persisted preflight row, and a deferral writes none. Its ``commit`` ends a read transaction only.
+    """
     if reason_code not in PAPER_ENTRY_DEFERRALS:
         return _persist_rejection(
             conn,
