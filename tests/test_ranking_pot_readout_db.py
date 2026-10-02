@@ -5,6 +5,7 @@ covers the arithmetic; bars are synthetic (``tests/test_ranking_pot_look_db._ste
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -52,6 +53,21 @@ def test_the_readout_reads_the_stored_rows_in_one_read_only_transaction(
     # The test database has no SPY bars, so the regime is unavailable rather than guessed.
     assert per[0]["regime"]["label"] == "unavailable" and set(out["regime_cohorts"]) == {"unavailable"}
     assert out["exits"]["flag"] is False and "policy_drift" in out
+    # §9.4 exposures: the applied step row stores its table (sql/455), a later one does not; R_t's names have
+    # only a sector in the test table.
+    stored = conn.execute(
+        "SELECT session, characteristics IS NOT NULL FROM ranking_pot_steps WHERE declaration_id = %s ORDER BY session",
+        (decl_id,),
+    ).fetchall()
+    assert [has for _, has in stored] == [True, False]
+    exposures = out["exposures"]
+    assert exposures["r_t"]["sector"] == {"XLE": "1"} and exposures["beta_null_reasons"] == {"too_few_pairs": 3}
+    assert exposures["shadow"]["sector"] == {"XLE": "1"} and Decimal(exposures["shadow"]["beta"]["coverage"]) == 0
+    check = conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'ranking_pot_steps_characteristics_applied'"
+    ).fetchone()
+    assert check is not None and "(characteristics IS NULL) = (applied_attempt_id IS NULL)" in check[0]
     with pytest.raises(ValueError, match="no stepped window"):
         ro.readout(conn, decl, date(2000, 1, 3))
     with conn.transaction(), pytest.raises(RuntimeError, match="own transaction"):

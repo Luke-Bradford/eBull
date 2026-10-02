@@ -13,7 +13,7 @@ from app.services import ranking_pot_look as look
 from app.services import ranking_pot_sim as sim
 from app.services import ranking_pot_step as st
 from app.services.ranking_pot_policy import HARM_ALPHA, LOOK_MONTHS
-from tests.test_ranking_pot_step import FLAT, FRI, MON, THU, TUE, _bars, _book, _rebalance
+from tests.test_ranking_pot_step import FLAT, FRI, MON, TABLE, THU, TUE, _bars, _book, _rebalance
 
 D = Decimal
 SPY = sim.Bar(D(500), D(501), D(499), D(500))
@@ -42,9 +42,9 @@ def _rows(controls: int = 2) -> list[look.StepRow]:
             )
             books[b] = book
             if b == 0:
-                shadow = st.shadow_doc(result, decision, session)
+                shadow = st.shadow_doc(result, decision, session, TABLE)
             else:
-                cols.add(result, session)
+                cols.add(result, session, TABLE)
         rows.append(look.StepRow(session, False, shadow, cols.doc(), SPY))
     return rows
 

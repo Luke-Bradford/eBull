@@ -10,12 +10,24 @@ from fractions import Fraction
 import pytest
 
 from app.services import ranking_pot as pot
+from app.services import ranking_pot_exposure as ex
 from app.services import ranking_pot_sim as sim
 from app.services import ranking_pot_step as st
 from app.services.ai_trial_pack import canonical_sha256
 
 D = Decimal
 THU, FRI, MON, TUE = date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5), date(2026, 10, 6)
+#: A characteristics table for names 1..3 (§9.4 exposures): 2 has no beta, 3 has no sector, size or ATR%.
+TABLE = {
+    1: ex.Characteristic("XLK", D(20), D("1.5"), None, D("0.02")),
+    2: ex.Characteristic("XLF", D(22), None, "too_few_pairs", D("0.04")),
+    3: ex.Characteristic(ex.NO_SECTOR, None, D("0.5"), None, None),
+}
+
+
+def table_of(ids: set[int]) -> dict[int, ex.Characteristic]:
+    """A table covering any ids: ``TABLE``'s rows where it has them, else a name with only a sector."""
+    return {i: TABLE.get(i, ex.Characteristic("XLE", None, None, "too_few_pairs", None)) for i in ids}
 
 
 def _universes(r: dict[int, str], f: set[int]) -> pot.Universes:
@@ -214,7 +226,7 @@ def test_control_columns_store_the_endpoint_charged_sum_beside_the_plain_one() -
         used=set(),
     )
     cols = st.ControlColumns()
-    cols.add(result, FRI)
+    cols.add(result, FRI, TABLE)
     doc = cols.doc()
     assert doc["records"] == [1] and doc["held"] == [1] and "decision" not in doc
     plain, charged = D(doc["sum_return"][0]), D(doc["sum_return_charged"][0])
