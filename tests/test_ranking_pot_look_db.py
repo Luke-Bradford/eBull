@@ -23,7 +23,7 @@ from app.services.market_calendar import us_market_status
 from tests.test_ranking_pot_job_db import _first_window
 from tests.test_ranking_pot_rebalance_db import _decided, _insert
 from tests.test_ranking_pot_schema_db import _frozen, _move
-from tests.test_ranking_pot_step import FLAT, _rebalance
+from tests.test_ranking_pot_step import FLAT, _rebalance, table_of
 from tests.test_ranking_pot_step_db import SPY, _at, replace_id
 
 Conn = psycopg.Connection[Any]
@@ -77,6 +77,7 @@ def _stepped_pot(conn: Conn, monkeypatch: pytest.MonkeyPatch) -> tuple[int, date
     real_terms = look.terms_of
     monkeypatch.setattr(look, "terms_of", lambda decl: replace(real_terms(decl), n=2, k=3))
     monkeypatch.setattr(rb, "decode_snapshot", lambda doc: doc)
+    monkeypatch.setattr(st, "table_for", lambda _reb, ids: table_of(ids))
     monkeypatch.setattr(
         st.Rebalance, "of", classmethod(lambda cls, aid, _doc: replace_id(_rebalance(t0, d, r, set(r)), aid))
     )

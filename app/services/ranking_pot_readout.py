@@ -40,6 +40,7 @@ from typing import Any, Final, Literal
 
 import psycopg
 
+from app.services import ranking_pot_exposure as ex
 from app.services import ranking_pot_look as look
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_sim as sim
@@ -81,6 +82,7 @@ _STEP_CONTROL_FIELDS: Final = (
     "rescales",
     "bought",
     "entered",
+    "exposure",
     "decision",
 )
 #: The variant has no controls: its ``LookFacts`` reads zero-width control columns.
@@ -315,6 +317,8 @@ class RebalanceInfo:
     #: name → (thesis_id, created_at, model, prompt_version) for every S₀ name whose score consumed a thesis.
     theses: Mapping[int, rb.ThesisUsed]
     regime: RegimeLabel
+    #: R_t's members (the exposures' equal-weight universe).
+    r_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -327,6 +331,8 @@ class ReadoutRow:
     controls: Mapping[str, Any]
     spy: sim.Bar | None
     variant: Mapping[str, Any]
+    #: The applied snapshot's characteristics table (``sql/455``), ``None`` at any other session.
+    characteristics: Sequence[Sequence[Any]] | None = None
 
     def look_row(self) -> look.StepRow:
         return look.StepRow(self.session, self.forced, self.shadow, self.controls, self.spy)
@@ -388,6 +394,12 @@ class ReadoutFacts:
     variant_entry_session: dict[int, date] = field(default_factory=dict)
     variant_exit_reasons: Counter[str] = field(default_factory=Counter)
     variant_refusals: int = 0
+    #: §9.4 exposures: additive sums over the window (each control its own, the median taken at the end).
+    shadow_exposure: ex.Sums = field(default_factory=ex.Sums)
+    control_exposure: list[ex.Sums] = field(default_factory=list)
+    universe_exposure: ex.Sums = field(default_factory=ex.Sums)
+    universe_session: ex.Sums | None = None
+    beta_null_reasons: Counter[str] = field(default_factory=Counter)
 
     def __post_init__(self) -> None:
         self.facts = look.LookFacts(t0=self.t0, endpoint=self.endpoint, k=self.k)
@@ -397,6 +409,7 @@ class ReadoutFacts:
         for name in ("held_total", "refusals", "missing_exits", "ineligible_exits", "rescales", "missing_donors"):
             setattr(self, name, [0] * self.k)
         self.turnover_sum = [Decimal(0)] * self.k
+        self.control_exposure = [ex.Sums() for _ in range(self.k)]
 
     # -- the stream ---------------------------------------------------------
     def add(self, row: ReadoutRow) -> None:
@@ -419,10 +432,13 @@ class ReadoutFacts:
                 raise ValueError(f"{row.session}: control column {width_field} is not {self.k} wide")
         if row.wind_down:
             self.wind_down_session = row.session
+        if (row.applied_attempt_id is None) != (row.characteristics is None):
+            raise ValueError(f"{row.session}: characteristics are stored exactly at an applied session")
         if row.applied_attempt_id is not None:
             self._open(row, index)
         elif not self.intervals:
             raise ValueError(f"{row.session}: a step row before the first applied rebalance")
+        self._exposure(row)
         for r in sh["records"]:
             self.entry_session.setdefault(int(r[1]), row.session)
         for c in sh["closed"]:
@@ -452,10 +468,55 @@ class ReadoutFacts:
         info = self.rebalances.get(int(row.applied_attempt_id or 0))
         if info is None or info.target_session != row.session:
             raise ValueError(f"{row.session}: applied attempt {row.applied_attempt_id} is not a decided snapshot here")
+        if len(info.r_ids) != info.r_size:
+            raise ValueError(f"attempt {info.attempt_id}: R_t's members disagree with its size")
+        table = ex.decode_table(row.characteristics or [])
+        self.universe_session = ex.universe_sums(info.r_ids, table, 1)
+        for iid in sorted(info.r_ids):
+            if (reason := table[iid].beta_reason) is not None:
+                self.beta_null_reasons[reason] += 1
         if self.intervals:
             self._close_controls()
         self.start_nav = list(self.prev_nav)
         self.intervals.append(_Interval(info.attempt_id, start=index, control_held=[0] * self.k))
+
+    def _exposure(self, row: ReadoutRow) -> None:
+        """Each book's stored additive sums for this session, and R_t's equal-weight sums for one session."""
+        self.shadow_exposure.add(ex.Sums.of_doc(row.shadow["exposure"]))
+        for i, doc in enumerate(row.controls["exposure"]):
+            self.control_exposure[i].add(ex.Sums.of_doc(doc))
+        if self.universe_session is None:
+            raise ValueError(f"{row.session}: exposures before the first applied table")
+        self.universe_exposure.add(self.universe_session)
+
+    def _exposures(self) -> dict[str, Any]:
+        """§9.4: the shadow, the controls' median (each control's own window value first) and R_t. Its own
+        ``sim.CTX``, not only the caller's (review nitpick, #3570)."""
+        with localcontext(sim.CTX):
+            return self._exposures_ctx()
+
+    def _exposures_ctx(self) -> dict[str, Any]:
+        windows = [s.window() for s in self.control_exposure if s.capital]
+        sectors = sorted({k for s in self.control_exposure for k in s.sector})
+        controls: dict[str, Any] = {
+            "controls_with_capital": len(windows),
+            "sector": {k: _s(median([Decimal(w["sector"].get(k, "0")) for w in windows])) for k in sectors},
+        }
+        for name in ex.FIELDS:
+            values = [Decimal(w[name]["value"]) for w in windows if w[name]["value"] is not None]
+            controls[name] = {
+                "value": _s(median(values)),
+                "coverage": _s(median([Decimal(w[name]["coverage"]) for w in windows])),
+                "null_controls": len(windows) - len(values),
+            }
+        ln = controls["ln_cap"]["value"]
+        controls["ln_cap"]["exp"] = None if ln is None else str(Decimal(ln).exp())
+        return {
+            "shadow": self.shadow_exposure.window(),
+            "controls_median": controls,
+            "r_t": self.universe_exposure.window(),
+            "beta_null_reasons": dict(sorted(self.beta_null_reasons.items())),
+        }
 
     def _close_controls(self) -> None:
         last = self.intervals[-1]
@@ -547,6 +608,7 @@ class ReadoutFacts:
             "missing_donors": self._missing_donors(),
             "thesis_provenance": self._theses(lifecycles),
             "variant": self._variant(),
+            "exposures": self._exposures(),
             "deflated_sharpe": deflated_sharpe(
                 self._interval_returns(),
                 declared_trials=TRIAL_REGISTER.declared_count,
@@ -761,6 +823,7 @@ def _rebalances(conn: Conn, declaration_id: int, end: date) -> dict[int, Rebalan
             r_size=len(universes.r_ids),
             theses=inputs.theses,
             regime=regime(spy, inputs.last_session),
+            r_ids=frozenset(universes.r_ids),
         )
     return out
 
@@ -772,13 +835,13 @@ def _rows(conn: Conn, declaration_id: int, *, t0: date, end: date) -> Iterator[R
         cur.itersize = 8
         cur.execute(
             "SELECT session, forced, applied_attempt_id, wind_down_event_id IS NOT NULL, shadow, "
-            f"inputs -> 'spy', jsonb_build_object({fields}), variant "  # noqa: S608 — field names are module literals
+            f"inputs -> 'spy', jsonb_build_object({fields}), variant, characteristics "  # noqa: S608 — module literals
             "FROM ranking_pot_steps WHERE declaration_id = %s AND session BETWEEN %s AND %s ORDER BY session",
             (declaration_id, t0, end),
         )
-        for session, forced, applied, wind, shadow, spy, controls, variant in cur:
+        for session, forced, applied, wind, shadow, spy, controls, variant, table in cur:
             bar = None if spy is None else sim.Bar(*(Decimal(v) for v in spy))
-            yield ReadoutRow(session, forced, applied, wind, shadow, controls, bar, variant)
+            yield ReadoutRow(session, forced, applied, wind, shadow, controls, bar, variant, table)
 
 
 def readout(conn: Conn, decl: rb.PotDeclaration, endpoint: date) -> dict[str, Any]:

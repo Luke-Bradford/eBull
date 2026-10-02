@@ -295,6 +295,8 @@ class SpyInputs:
     quoted_at: datetime | None
     #: The masked bar on the last completed session, or ``None``.
     bar: tuple[date, Mapping[str, Any]] | None
+    #: SPY's whole snapshot segment, ascending (slice 6c-ii-c-1: the exposures' beta input, never a decision input).
+    bars: tuple[tuple[date, Mapping[str, Any]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -348,6 +350,7 @@ def encode_snapshot(inputs: SnapshotInputs) -> dict[str, Any]:
                 "bid": _s(f.bid),
                 "ask": _s(f.ask),
                 "quoted_at": _ts(f.quoted_at),
+                "sic": f.sic,
                 "score": None if score is None else _score_json(score),
                 "thesis": _thesis_json(inputs.theses.get(f.instrument_id)),
                 "bars": [_bar(d, r) for d, r in zip(f.bar_dates, f.bar_rows, strict=True)],
@@ -372,6 +375,7 @@ def encode_snapshot(inputs: SnapshotInputs) -> dict[str, Any]:
             "ask": _s(spy.ask),
             "quoted_at": _ts(spy.quoted_at),
             "bar": None if spy.bar is None else _bar(*spy.bar),
+            "bars": [_bar(d, r) for d, r in spy.bars],
         },
     }
 
@@ -405,6 +409,7 @@ def decode_snapshot(doc: Mapping[str, Any]) -> SnapshotInputs:
                 bid=_d(n["bid"]),
                 ask=_d(n["ask"]),
                 quoted_at=None if n["quoted_at"] is None else datetime.fromisoformat(n["quoted_at"]),
+                sic=n["sic"],
                 bar_dates=tuple(d for d, _ in bars),
                 bar_rows=tuple(r for _, r in bars),
             )
@@ -426,6 +431,7 @@ def decode_snapshot(doc: Mapping[str, Any]) -> SnapshotInputs:
             ask=_d(spy["ask"]),
             quoted_at=None if spy["quoted_at"] is None else datetime.fromisoformat(spy["quoted_at"]),
             bar=None if spy["bar"] is None else _unbar(spy["bar"]),
+            bars=tuple(_unbar(b) for b in spy["bars"]),
         ),
         theses=theses,
     )
@@ -657,7 +663,7 @@ def read_snapshot_inputs(
             SELECT u.instrument_id, i.symbol, coalesce(i.is_tradable, FALSE) AS is_tradable, e.asset_class,
                    s.total_score, s.raw_total, s.quality_score, s.value_score, s.turnaround_score,
                    s.momentum_score, s.sentiment_score, s.confidence_score, s.penalties_json, s.completeness_tier,
-                   c.filings_status, q.bid, q.ask, q.quoted_at
+                   c.filings_status, q.bid, q.ask, q.quoted_at, p.sic
               FROM unnest(%(ids)s::bigint[]) AS u(instrument_id)
               LEFT JOIN instruments i ON i.instrument_id = u.instrument_id
               LEFT JOIN exchanges e ON e.exchange_id = i.exchange
@@ -665,6 +671,7 @@ def read_snapshot_inputs(
                                 AND s.model_version = %(mv)s AND s.scored_at = %(t)s
               LEFT JOIN coverage c ON c.instrument_id = u.instrument_id
               LEFT JOIN quotes q ON q.instrument_id = u.instrument_id
+              LEFT JOIN instrument_sec_profile p ON p.instrument_id = u.instrument_id
              ORDER BY u.instrument_id
             """,
             {"ids": list(s0), "mv": mv, "t": scored_at},
@@ -718,6 +725,7 @@ def read_snapshot_inputs(
                 bid=r["bid"],
                 ask=r["ask"],
                 quoted_at=r["quoted_at"],
+                sic=r["sic"],
             )
         )
 
@@ -793,7 +801,8 @@ def _read_spy(conn: Conn, spy_bars: tuple[list[date], list[Mapping[str, Any]]] |
     if row is None or row[0] != SPY_SYMBOL:
         return SpyInputs(None, None, None, None)
     bar = (spy_bars[0][-1], spy_bars[1][-1]) if spy_bars and spy_bars[0] else None
-    return SpyInputs(bid=row[1], ask=row[2], quoted_at=row[3], bar=bar)
+    bars = tuple(zip(spy_bars[0], spy_bars[1], strict=True)) if spy_bars else ()
+    return SpyInputs(bid=row[1], ask=row[2], quoted_at=row[3], bar=bar, bars=bars)
 
 
 # ---------------------------------------------------------------------------

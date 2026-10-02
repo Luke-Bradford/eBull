@@ -58,6 +58,7 @@ POLICY_MODULES: Final = tuple(
             "ranking_pot_executor.py",
             "ranking_pot_exit_rule.py",
             "ranking_pot_exits.py",
+            "ranking_pot_exposure.py",
             "ranking_pot_held_levels.py",
             "ranking_pot_intent.py",
             "ranking_pot_job.py",

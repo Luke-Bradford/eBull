@@ -140,6 +140,8 @@ class NameFacts:
     bid: Decimal | None
     ask: Decimal | None
     quoted_at: datetime | None
+    #: ``instrument_sec_profile.sic`` as stored (slice 6c-ii-c-1: the exposures' sector input, never a decision input).
+    sic: str | None = None
     bar_dates: tuple[date, ...] = ()
     bar_rows: tuple[Mapping[str, Any], ...] = ()
 

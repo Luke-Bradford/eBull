@@ -9,11 +9,12 @@ from typing import Any
 
 import pytest
 
+from app.services import ranking_pot_exposure as ex
 from app.services import ranking_pot_readout as ro
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_sim as sim
 from app.services import ranking_pot_step as st
-from tests.test_ranking_pot_step import FLAT, FRI, MON, THU, TUE, _bars, _book, _rebalance
+from tests.test_ranking_pot_step import FLAT, FRI, MON, TABLE, THU, TUE, _bars, _book, _rebalance
 
 D = Decimal
 WED = date(2026, 10, 7)
@@ -31,7 +32,7 @@ def _regime(label: ro.Regime) -> ro.RegimeLabel:
 
 
 def _info(attempt: int, target: date, last: date, label: ro.Regime, theses: dict[int, Any] | None = None):
-    return ro.RebalanceInfo(attempt, target, last, AS_OF, len(R), theses or {}, _regime(label))
+    return ro.RebalanceInfo(attempt, target, last, AS_OF, len(R), theses or {}, _regime(label), frozenset(R))
 
 
 def _stream() -> tuple[list[ro.ReadoutRow], dict[int, ro.RebalanceInfo]]:
@@ -70,14 +71,15 @@ def _stream() -> tuple[list[ro.ReadoutRow], dict[int, ro.RebalanceInfo]]:
             )
             books[b] = book
             if b == 0:
-                shadow = st.shadow_doc(result, decision, session)
+                shadow = st.shadow_doc(result, decision, session, TABLE)
             elif b == variant_at:
-                variant = st.shadow_doc(result, decision, session)
+                variant = st.shadow_doc(result, decision, session, TABLE)
             else:
-                cols.add(result, session)
+                cols.add(result, session, TABLE)
                 if decision is not None and donor is not None and reb is not None:
                     cols.add_decision(decision, reb.missing_donors(donor))
-        rows.append(ro.ReadoutRow(session, False, applied, False, shadow, cols.doc(), SPY, variant))
+        table = None if applied is None else ex.encode_table(TABLE)
+        rows.append(ro.ReadoutRow(session, False, applied, False, shadow, cols.doc(), SPY, variant, table))
     return rows, infos
 
 
@@ -148,6 +150,20 @@ def test_the_readout_over_real_step_outputs() -> None:
     # Both books bought both names at FRI's close, so up to MON the paths agree; the variant's drawdown is MON's mark.
     assert D(var["max_drawdown"]["variant"]) > 0 and var["t"]["variant"] is not None
 
+    # §9.4 exposures. The shadow held name 1 only on FRI (stopped MON) and name 2 throughout: its beta is name 1's
+    # alone (name 2 has none), covering only FRI's share of the capital-time.
+    exp = out["exposures"]
+    sh = exp["shadow"]
+    assert D(sh["beta"]["value"]) == D("1.5") and 0 < D(sh["beta"]["coverage"]) < 1
+    assert set(sh["sector"]) == {"XLK", "XLF"} and D(sh["atr_pct"]["coverage"]) == 1
+    # R_t = {1, 2, 3} at equal weight; two applied tables each count name 2's missing beta.
+    r_t = exp["r_t"]
+    assert abs(D(r_t["beta"]["value"]) - 1) < D("1e-25") and abs(D(r_t["ln_cap"]["value"]) - 21) < D("1e-25")
+    assert abs(D(r_t["sector"]["none"]) - D(1) / 3) < D("1e-25")
+    assert exp["beta_null_reasons"] == {"too_few_pairs": 2}
+    controls = exp["controls_median"]
+    assert controls["controls_with_capital"] == 2 and controls["beta"]["null_controls"] == 0
+
 
 def test_an_interim_endpoint_and_the_invariants() -> None:
     rows, infos = _stream()
@@ -162,7 +178,11 @@ def test_an_interim_endpoint_and_the_invariants() -> None:
     with pytest.raises(ValueError, match="not a decided snapshot here"):
         _facts(rows, {7: infos[7], 8: replace(infos[8], target_session=WED)})
     with pytest.raises(ValueError, match="before the first applied rebalance"):
-        ro.ReadoutFacts(t0=FRI, endpoint=WED, n=2, k=2, rebalances=infos).add(replace(rows[0], applied_attempt_id=None))
+        ro.ReadoutFacts(t0=FRI, endpoint=WED, n=2, k=2, rebalances=infos).add(
+            replace(rows[0], applied_attempt_id=None, characteristics=None)
+        )
+    with pytest.raises(ValueError, match="exactly at an applied session"):
+        _facts([rows[0], replace(rows[1], characteristics=rows[0].characteristics)], infos)
     narrow = dict(rows[1].controls) | {"bought": ["0"]}
     with pytest.raises(ValueError, match="not 2 wide"):
         _facts([rows[0], replace(rows[1], controls=narrow)], infos)
@@ -217,7 +237,7 @@ def test_step_storage_records_entries_and_ineligible_exits() -> None:
     )
     stats = st.EntryStats.of(result, FRI)
     assert (stats.entered, stats.bought, stats.ineligible_exits) == (2, D(1), 0)
-    doc = st.shadow_doc(result, None, FRI)
+    doc = st.shadow_doc(result, None, FRI, TABLE)
     assert (doc["entered"], D(doc["bought"]), doc["ineligible_exits"]) == (2, 1, 0)
     assert st.EntryStats.of(result, MON).entered == 0
     closed = sim.ClosedLifecycle(1, 1, 0, FRI, TUE, D(100), D(100), D("0.5"), D("0.5"), "ineligible:untradable")

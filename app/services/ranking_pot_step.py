@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -58,6 +58,7 @@ from psycopg.types.json import Jsonb
 
 from app.services import ranking_pot as pot
 from app.services import ranking_pot_exits as exits
+from app.services import ranking_pot_exposure as ex
 from app.services import ranking_pot_look as look
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_sim as sim
@@ -236,6 +237,8 @@ class Rebalance:
     half_spread: Mapping[int, Decimal]
     #: Per F_t name: its close on ``last_session`` (the split check's anchor for a pending entry).
     snapshot_close: Mapping[int, Decimal]
+    #: The decoded snapshot: the exposures' characteristics are computed from it (§9.4, slice 6c-ii-c-1).
+    inputs: rb.SnapshotInputs | None = None
 
     @classmethod
     def of(cls, attempt_id: int, inputs: rb.SnapshotInputs) -> Rebalance:
@@ -263,6 +266,7 @@ class Rebalance:
             run_scores={f.instrument_id: f.total_score for f in inputs.facts},
             half_spread=spreads,
             snapshot_close=closes,
+            inputs=inputs,
         )
 
     def order_for(self, donor_of: Mapping[int, int] | None) -> tuple[int, ...]:
@@ -398,6 +402,7 @@ _CONTROL_FIELDS: Final = (
     "entered",
     "bought",
     "ineligible_exits",
+    "exposure",
 )
 _DECISION_FIELDS: Final = ("entries", "exits", "unfilled", "occupied", "missing_donors")
 
@@ -428,7 +433,7 @@ class ControlColumns:
     values: dict[str, list[Any]] = field(default_factory=lambda: {k: [] for k in _CONTROL_FIELDS})
     decisions: dict[str, list[int]] = field(default_factory=lambda: {k: [] for k in _DECISION_FIELDS})
 
-    def add(self, result: sim.StepResult, session: date) -> None:
+    def add(self, result: sim.StepResult, session: date, table: Mapping[int, ex.Characteristic]) -> None:
         charged = sim.liquidation_charged(result.state, result.position_sessions)
         v = self.values
         v["records"].append(len(result.position_sessions))
@@ -445,6 +450,7 @@ class ControlColumns:
         v["entered"].append(stats.entered)
         v["bought"].append(str(stats.bought))
         v["ineligible_exits"].append(stats.ineligible_exits)
+        v["exposure"].append(ex.book_sums(result.state, table).doc())
 
     def add_decision(self, decision: pot.BookDecision, missing_donors: int) -> None:
         d = self.decisions
@@ -468,7 +474,12 @@ def _records_json(records: Sequence[sim.PositionSession]) -> list[list[Any]]:
     return [[r.instrument_id, r.lifecycle, str(r.start_value), str(r.end_value)] for r in records]
 
 
-def shadow_doc(result: sim.StepResult, decision: pot.BookDecision | None, session: date) -> dict[str, Any]:
+def shadow_doc(
+    result: sim.StepResult,
+    decision: pot.BookDecision | None,
+    session: date,
+    table: Mapping[int, ex.Characteristic],
+) -> dict[str, Any]:
     stats = EntryStats.of(result, session)
     doc: dict[str, Any] = {
         "nav": str(result.nav),
@@ -496,6 +507,7 @@ def shadow_doc(result: sim.StepResult, decision: pot.BookDecision | None, sessio
         "entered": stats.entered,
         "bought": str(stats.bought),
         "ineligible_exits": stats.ineligible_exits,
+        "exposure": ex.book_sums(result.state, table).doc(),
     }
     if decision is not None:
         doc["decision"] = {
@@ -581,6 +593,25 @@ def _unapplied_behind(conn: Conn, declaration_id: int, session: date) -> list[in
         {"d": declaration_id, "s": session},
     ).fetchall()
     return [int(r[0]) for r in rows]
+
+
+def table_for(rebalance: Rebalance, ids: Iterable[int]) -> dict[int, ex.Characteristic]:
+    """The applied snapshot's characteristics for ``ids`` (§9.4 exposures)."""
+    if rebalance.inputs is None:
+        raise rb.SnapshotIntegrityError(f"attempt {rebalance.attempt_id}: a rebalance without its snapshot")
+    return ex.characteristics(rebalance.inputs, ids)
+
+
+def _latest_table(conn: Conn, declaration_id: int) -> dict[int, ex.Characteristic]:
+    """The characteristics of the latest applied step row (``sql/455``: stored exactly when an attempt is applied)."""
+    row = conn.execute(
+        "SELECT characteristics FROM ranking_pot_steps WHERE declaration_id = %s AND applied_attempt_id IS NOT NULL "
+        "ORDER BY session DESC LIMIT 1",
+        (declaration_id,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        raise rb.SnapshotIntegrityError(f"declaration {declaration_id}: no applied step row carries characteristics")
+    return ex.decode_table(row[0])
 
 
 def _wind_down_event(conn: Conn, declaration_id: int) -> tuple[int, datetime] | None:
@@ -748,6 +779,13 @@ def step_next_session(
     if rebalance is not None and not wind:
         population = sorted(set(population) | rebalance.universes.f_ids)
     read = sorted(set(population) | set(variant_only))
+    # §9.4 exposures: an applied rebalance fixes the table for every position held after this step until the next
+    # applied target (entries happen only at a target session); any other session reads the latest stored one.
+    if rebalance is not None:
+        table = table_for(rebalance, rebalance.universes.r_ids | rebalance.universes.f_ids | set(read))
+        table_doc: list[list[Any]] | None = ex.encode_table(table)
+    else:
+        table, table_doc = _latest_table(conn, decl.declaration_id), None
 
     sb = read_session_bars(conn, read, session)
     forced = False
@@ -792,11 +830,11 @@ def step_next_session(
                 protective=b != variant_at,
             )
             if b == SHADOW_BOOK:
-                shadow = shadow_doc(result, decision, session)
+                shadow = shadow_doc(result, decision, session, table)
             elif b == variant_at:
-                variant = shadow_doc(result, decision, session)
+                variant = shadow_doc(result, decision, session, table)
             else:
-                columns.add(result, session)
+                columns.add(result, session, table)
                 if decision is not None and donor_of is not None and rebalance is not None:
                     columns.add_decision(decision, rebalance.missing_donors(donor_of))
             doc = encode_book(stepped)
@@ -811,8 +849,8 @@ def step_next_session(
     inputs_sha = canonical_sha256(inputs)
     conn.execute(
         "INSERT INTO ranking_pot_steps (declaration_id, session, stepped_at, policy_hash, applied_attempt_id, "
-        "wind_down_event_id, forced, inputs, inputs_sha256, shadow, controls, variant, checkpoint_sha256) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "wind_down_event_id, forced, inputs, inputs_sha256, shadow, controls, variant, checkpoint_sha256, "
+        "characteristics) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             decl.declaration_id,
             session,
@@ -827,6 +865,7 @@ def step_next_session(
             Jsonb(columns.doc()),
             Jsonb(variant),
             checkpoint_digest(shas),
+            None if table_doc is None else Jsonb(table_doc),
         ),
     )
     stored = conn.execute(

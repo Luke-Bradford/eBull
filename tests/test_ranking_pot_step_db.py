@@ -20,7 +20,7 @@ from app.services.ai_trial_pack import canonical_sha256
 from tests.test_ranking_pot_job_db import _first_window
 from tests.test_ranking_pot_rebalance_db import _decided, _insert
 from tests.test_ranking_pot_schema_db import _frozen
-from tests.test_ranking_pot_step import FLAT, _rebalance
+from tests.test_ranking_pot_step import FLAT, _rebalance, table_of
 
 Conn = psycopg.Connection[Any]
 SPY = sim.Bar(Decimal(500), Decimal(501), Decimal(499), Decimal(500))
@@ -58,6 +58,7 @@ def test_the_step_job_writes_books_refuses_forces_and_fences(
     r = {2842: "0.9", 2843: "0.8", 2844: "0.7"}
     monkeypatch.setattr(st, "book_terms", lambda _decl: (2, 3))
     monkeypatch.setattr(rb, "decode_snapshot", lambda doc: doc)
+    monkeypatch.setattr(st, "table_for", lambda _reb, ids: table_of(ids))
     monkeypatch.setattr(
         st.Rebalance, "of", classmethod(lambda cls, aid, _doc: replace_id(_rebalance(target, d, r, set(r)), aid))
     )
