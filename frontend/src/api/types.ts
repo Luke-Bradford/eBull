@@ -3811,3 +3811,81 @@ export interface RankingPotReadoutResponse {
   /** `not_declared` · `not_stepped` · `invariant_violation` (figures withheld, see the server log). */
   reason: string | null;
 }
+
+// #3543 slice 2 — `GET /strategies/engine-book-risk` (`app/api/strategies.py`).
+// Measurement only. Decimals arrive as strings; every `*_pct` is in percent POINTS.
+export interface EngineBookRiskCheck {
+  /** `evaluated` | `unknown` (no measure) | `no_limit` (mandate unconfigured or limit NULL). */
+  status: string;
+  value: string | null;
+  limit: string | null;
+  flagged: boolean;
+}
+
+export interface EngineBookRiskPosition {
+  trade_id: number;
+  position_id: number;
+  instrument_id: number;
+  symbol: string | null;
+  units: string;
+  mark: string | null;
+  /** ISO date of the close used, or `"cost"` when no close exists. */
+  mark_date: string;
+  market_value_usd: string;
+  weight_of_capital_pct: string;
+  /** Instrument beta to SPY, or `"defaulted"` (β = 1 used for stress). */
+  beta: string;
+  beta_n_obs: number;
+}
+
+export interface EngineBookRiskLatest {
+  session_date: string;
+  measured_at: string;
+  pool_event_id: number;
+  capital_usd: string;
+  gross_usd: string;
+  position_count: number;
+  instrument_count: number;
+  open_trade_count: number;
+  cost_marked_count: number;
+  stale_count: number;
+  largest_share_pct: string | null;
+  top5_share_pct: string | null;
+  hhi: string | null;
+  hist_vol_pct: string | null;
+  ewma_vol_pct: string | null;
+  beta: string | null;
+  vol_n_obs: number;
+  beta_n_obs: number;
+  sample_first: string | null;
+  sample_last: string | null;
+  history_status: "ok" | "insufficient_history" | "degenerate" | "empty_book";
+  beta_defaulted_count: number;
+  beta_defaulted_weight_pct: string;
+  stress_2020_pct: string;
+  stress_2022_pct: string;
+  checks: Record<string, EngineBookRiskCheck>;
+  positions: EngineBookRiskPosition[];
+}
+
+export interface EngineBookRiskRecent {
+  session_date: string;
+  measured_at: string;
+  capital_usd: string;
+  gross_usd: string;
+  hist_vol_pct: string | null;
+  ewma_vol_pct: string | null;
+  beta: string | null;
+  stress_2020_pct: string;
+  stress_2022_pct: string;
+  stale_count: number;
+  history_status: string;
+  flagged: string[];
+}
+
+export interface EngineBookRiskResponse {
+  policy_version: string;
+  job: AiTrialJobFire;
+  latest: EngineBookRiskLatest | null;
+  recent: EngineBookRiskRecent[];
+}

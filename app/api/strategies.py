@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from psycopg.pq import TransactionStatus
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.api.ai_trial import JobFireResponse
 from app.api.auth import require_session, require_session_or_service_token
 from app.api.portfolio import get_portfolio
 from app.config import settings
@@ -40,6 +41,7 @@ from app.services.broker_credentials import (
 )
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DSR_MODEL_ID
+from app.services.engine_book_risk_status import load_engine_book_risk_status
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
@@ -3884,6 +3886,70 @@ def update_strategy_paper_pool(
     except (StrategyControlError, RuntimeConfigCorrupt, RuntimeConfigNoOp) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return get_strategy_overview(conn).paper_pool
+
+
+class EngineBookRiskRecentResponse(BaseModel):
+    session_date: date
+    measured_at: datetime
+    capital_usd: Decimal
+    gross_usd: Decimal
+    hist_vol_pct: Decimal | None
+    ewma_vol_pct: Decimal | None
+    beta: Decimal | None
+    stress_2020_pct: Decimal
+    stress_2022_pct: Decimal
+    stale_count: int
+    history_status: str
+    flagged: list[str]
+
+
+class EngineBookRiskLatestResponse(BaseModel):
+    session_date: date
+    measured_at: datetime
+    pool_event_id: int
+    capital_usd: Decimal
+    gross_usd: Decimal
+    position_count: int
+    instrument_count: int
+    open_trade_count: int
+    cost_marked_count: int
+    stale_count: int
+    largest_share_pct: Decimal | None
+    top5_share_pct: Decimal | None
+    hhi: Decimal | None
+    hist_vol_pct: Decimal | None
+    ewma_vol_pct: Decimal | None
+    beta: Decimal | None
+    vol_n_obs: int
+    beta_n_obs: int
+    sample_first: date | None
+    sample_last: date | None
+    history_status: str
+    beta_defaulted_count: int
+    beta_defaulted_weight_pct: Decimal
+    stress_2020_pct: Decimal
+    stress_2022_pct: Decimal
+    checks: dict[str, dict[str, Any]]
+    positions: list[dict[str, Any]]
+
+
+class EngineBookRiskResponse(BaseModel):
+    policy_version: str
+    job: JobFireResponse
+    latest: EngineBookRiskLatestResponse | None
+    recent: list[EngineBookRiskRecentResponse]
+
+
+@router.get("/engine-book-risk", response_model=EngineBookRiskResponse, status_code=status.HTTP_200_OK)
+def read_engine_book_risk(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> EngineBookRiskResponse:
+    """The engine book's stored daily risk snapshots (#3543). Measurement only: it grants and refuses nothing.
+
+    No snapshot yet is a 200 with ``latest = null``; the job's last fire carries any refusal reason
+    (``benchmark_not_ready`` / ``book_shape_unsupported`` / ``pot_exhausted`` / ``no_pool``).
+    """
+    return EngineBookRiskResponse.model_validate(load_engine_book_risk_status(conn), from_attributes=True)
 
 
 @router.get("/core-mandate", response_model=CoreMandateResponse, status_code=status.HTTP_200_OK)

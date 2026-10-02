@@ -23,6 +23,7 @@ import { StatTile } from "@/components/dashboard/StatTile";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { EmptyState } from "@/components/states/EmptyState";
 import { AiTrialPanel } from "@/components/strategies/AiTrialPanel";
+import { EngineBookRiskPanel } from "@/components/strategies/EngineBookRiskPanel";
 import { RankingPotPanel } from "@/components/strategies/RankingPotPanel";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
 import {
@@ -525,6 +526,9 @@ export function StrategyPortfolioLens() {
           ))}
         </ul>
       </section>
+
+      {/* #3543: the whole engine book's daily risk vs its mandate. */}
+      <EngineBookRiskPanel />
 
       {/* #3516: the AI trials are strategies too, so their status sits with
           the pot's results rather than on a separate page. */}

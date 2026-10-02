@@ -197,6 +197,10 @@ def test_stress_flag_compares_the_signed_loss() -> None:
     # Fully invested at beta 1: a -34% scenario breaches a 20% drawdown limit, -25% does too; 40% breaches neither.
     full = compute_snapshot(_inputs((_position(1, _A, units="100"),), {_A: a}))
     assert full.checks["stress_2020_vs_max_drawdown"]["flagged"] is True
+    # The stored convention the panel renders (EngineBookRiskPanel.checkLimit shows the limit as -limit):
+    # the stress value is a signed loss, the drawdown limit is unsigned.
+    stored = full.checks["stress_2020_vs_max_drawdown"]
+    assert Decimal(stored["value"]) < 0 < Decimal(stored["limit"])
     loose = compute_snapshot(
         _inputs((_position(1, _A, units="100"),), {_A: a}, mandate=MandateLimits(True, Decimal("50"), Decimal("40"), 9))
     )

@@ -222,6 +222,7 @@ describe("StrategyPortfolioLens", () => {
     // Never settles: the panel stays in its skeleton and adds no alert of its own.
     vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockReturnValue(new Promise(() => {}));
     vi.spyOn(rankingPotApi, "fetchRankingPotStatus").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(strategiesApi, "fetchEngineBookRisk").mockReturnValue(new Promise(() => {}));
   });
 
   it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
@@ -1182,6 +1183,7 @@ describe("StrategiesHubPage", () => {
     vi.spyOn(strategiesApi, "fetchFiredSignals").mockResolvedValue({ items: [], next_cursor: null } as never);
     vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockReturnValue(new Promise(() => {}));
     vi.spyOn(rankingPotApi, "fetchRankingPotStatus").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(strategiesApi, "fetchEngineBookRisk").mockReturnValue(new Promise(() => {}));
   });
 
   it("lands on the portfolio lens", async () => {
