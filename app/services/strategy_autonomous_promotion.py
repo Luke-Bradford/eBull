@@ -286,8 +286,12 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
     ⚠ A FAULT in one strategy does not stop the others (#3546 gap H, readiness R3).
     Its transaction rolls back, it is logged and listed in ``errors``, and the job
     records the run degraded -- so a fault is never reported as a clean no-op.  When
-    EVERY strategy visited faulted, the last fault is re-raised instead: nothing was
-    decided, and the run must fail with the actionable cause rather than degrade.
+    no strategy produced an advance, a refusal OR a skip code (``stage_terminal`` and
+    the like count, being decisions about that strategy), every one visited faulted
+    and the last fault is re-raised: nothing was decided, so the run fails with the
+    cause rather than degrading.  One fault beside any decision degrades, and the
+    degraded status plus ``faulted=<ids>`` is the alarm; it is not escalated to a
+    failure, which would hide the decisions that did commit.
     The unit of idempotency is the transition, not the fire: a re-fire re-runs every
     evidence gate, and ``idx_strategy_promotions_one_successor`` (sql/281:46) lets each
     stage be departed once.
