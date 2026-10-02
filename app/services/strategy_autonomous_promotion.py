@@ -35,6 +35,7 @@ Spec: ``docs/proposals/ta/2026-08-22-autonomy-approval-mode.md``
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
@@ -56,6 +57,8 @@ from app.services.strategy_operator_promotion import (
     allowed_operator_action,
 )
 from app.services.strategy_result_identity import current_result_versions
+
+logger = logging.getLogger(__name__)
 
 #: The policy that approves.  Bumped when the rule set below changes -- the population
 #: of promotions it has stamped is irrelevant, exactly as ``CORE_MANDATE_POLICY_VERSION``
@@ -98,6 +101,9 @@ class AutonomousPromotionReport:
     skipped_reason: str | None
     advanced: tuple[AutonomousAdvance, ...]
     refusals: tuple[tuple[str, str], ...]
+    #: ``(strategy_id, exception type)`` for a strategy whose attempt FAULTED -- not a
+    #: refusal, which is normal output.  Non-empty degrades the job run (#3546 gap H).
+    errors: tuple[tuple[str, str], ...] = ()
 
     @property
     def refusal_codes(self) -> tuple[str, ...]:
@@ -276,6 +282,15 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
     so a mid-cycle operator revocation would block on the job rather than serialise
     with it.  Neither is visible in the source shape; both are a property of the
     CALLER's connection mode, which is why this is checked rather than documented.
+
+    ⚠ A FAULT in one strategy does not stop the others (#3546 gap H, readiness R3).
+    Its transaction rolls back, it is logged and listed in ``errors``, and the job
+    records the run degraded -- so a fault is never reported as a clean no-op.  When
+    EVERY strategy visited faulted, the last fault is re-raised instead: nothing was
+    decided, and the run must fail with the actionable cause rather than degrade.
+    The unit of idempotency is the transition, not the fire: a re-fire re-runs every
+    evidence gate, and ``idx_strategy_promotions_one_successor`` (sql/281:46) lets each
+    stage be departed once.
     """
     if not conn.autocommit:
         raise StrategyControlError(
@@ -293,6 +308,8 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
 
     advanced: list[AutonomousAdvance] = []
     refusals: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
+    last_fault: Exception | None = None
     revoked: str | None = None
     for strategy_id, strategy_version in sorted(current_result_versions().items()):
         try:
@@ -311,22 +328,33 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
         except _Refused as exc:
             refusals.append((strategy_id, exc.detail))
             continue
+        except Exception as exc:
+            # `_advance_one`'s transaction has already rolled back.  A broken connection
+            # faults every later strategy too, which the all-faulted re-raise below covers.
+            logger.exception("autonomous promotion faulted for %s", strategy_id)
+            errors.append((strategy_id, type(exc).__name__))
+            last_fault = exc
+            continue
         if outcome is not None:
             advanced.append(outcome)
         elif skip is not None:
             refusals.append((strategy_id, skip))
+    if last_fault is not None and revoked is None and not advanced and not refusals:
+        raise last_fault
     if revoked is not None:
         return AutonomousPromotionReport(
             approval_mode=load_paper_pool(conn).approval_mode,
             skipped_reason=revoked,
             advanced=tuple(advanced),
             refusals=tuple(refusals),
+            errors=tuple(errors),
         )
     return AutonomousPromotionReport(
         approval_mode=pool.approval_mode,
         skipped_reason=None,
         advanced=tuple(advanced),
         refusals=tuple(refusals),
+        errors=tuple(errors),
     )
 
 

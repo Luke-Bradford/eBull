@@ -8052,9 +8052,10 @@ def strategy_autonomous_promotion() -> None:
     the per-strategy allocator lock would be held for the whole cycle.  The service
     refuses a non-autocommit connection rather than trusting this call site.
 
-    Failures other than a per-strategy ``StrategyControlError`` PROPAGATE.  The
-    decision is the whole of the work here, so swallowing an error would make a
-    no-op indistinguishable from success.
+    A per-strategy fault does not stop the other strategies (#3546 gap H); it is
+    never swallowed either.  The run is recorded degraded with the fault count on
+    the errors axis, and a cycle in which every strategy faulted re-raises, so a
+    no-op stays distinguishable from success.
     """
     from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
 
@@ -8062,13 +8063,16 @@ def strategy_autonomous_promotion() -> None:
         with connect_job(autocommit=True) as conn:
             report = run_autonomous_promotion_cycle(conn, as_of=datetime.now(UTC))
         tracker.row_count = len(report.advanced)
+        if report.errors:
+            tracker.progress = JobProgress(errors={"strategy_fault": len(report.errors)})
+        faulted = f" faulted={','.join(sid for sid, _ in report.errors)}" if report.errors else ""
         if report.skipped_reason is not None:
-            tracker.note = f"skipped={report.skipped_reason} approval_mode={report.approval_mode}"
+            tracker.note = f"skipped={report.skipped_reason} approval_mode={report.approval_mode}{faulted}"
             return
         # A cycle that advanced nothing must say WHY rather than report a bare zero.
         tracker.note = (
             f"advanced={len(report.advanced)} refused={len(report.refusals)} "
-            f"codes={','.join(report.refusal_codes) or '-'}"
+            f"codes={','.join(report.refusal_codes) or '-'}{faulted}"
         )
 
 
