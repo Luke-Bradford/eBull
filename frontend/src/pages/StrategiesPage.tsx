@@ -695,6 +695,7 @@ const REFUSAL_LABELS: Record<string, string> = {
   all_paper_entry_gates_passed: "Every entry gate passed; capital was assigned",
   broker_submission_rejected: "The broker rejected the order",
   submission_uncertain: "The order's fate at the broker is unresolved",
+  entry_authority_never_submitted: "Interrupted before reaching the broker; capital released",
 };
 
 // ⚠ An UNKNOWN code is returned verbatim, on purpose. This used to be
