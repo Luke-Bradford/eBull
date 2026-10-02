@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from app.services import ranking_pot_rebalance as rb
+from app.services import ranking_pot_sim as sim
 
 # A module import, read at call time: ``ranking_pot_step`` imports this module for its job body.
 from app.services import ranking_pot_step as step
@@ -128,7 +129,7 @@ def _books_not_flat(conn: Conn, decl: rb.PotDeclaration) -> str | None:
         return None
     row = conn.execute(
         """
-        SELECT count(*),
+        SELECT count(*), max(book),
                count(*) FILTER (WHERE jsonb_array_length(state -> 'positions') > 0
                                    OR jsonb_array_length(state -> 'pending') > 0),
                EXISTS (SELECT 1 FROM ranking_pot_steps s
@@ -140,8 +141,10 @@ def _books_not_flat(conn: Conn, decl: rb.PotDeclaration) -> str | None:
         {"d": decl.declaration_id},
     ).fetchone()
     assert row is not None
-    books, holding, applied = int(row[0]), int(row[1]), bool(row[2])
-    if books != int(decl.doc["terms"]["k_controls"]) + 1:
+    books, top, holding, applied = int(row[0]), row[1], int(row[2]), bool(row[3])
+    k = int(decl.doc["terms"]["k_controls"])
+    # The count and the highest book: with the (declaration, book) key and ``book >= 0``, exactly books 0..K + 1.
+    if books != sim.book_count(k) or top != sim.variant_book(k):
         return f"books_incomplete ({books} checkpoints)"
     if holding:
         return f"books_not_flat ({holding} books)"

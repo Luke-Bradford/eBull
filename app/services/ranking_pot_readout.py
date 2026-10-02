@@ -18,6 +18,8 @@ Fixed here by construction (each closes a spec item; the PR lists them):
 - **Regime (#2901's rule).** Sign of SPY's stored close at the last NYSE session ≤ D over the one ≤ D − 365 days, D =
   the snapshot's ``last_session``; ``unavailable`` when either close is unusable.
 - **SPY total return: not reported** (no ex-dated distribution source; the spec lists what was checked).
+- **The no-SL/TP variant (slice 6c-ii-a).** Its stored document streams through its own ``LookFacts`` (no controls),
+  so its path, T and lifecycles are the shadow's constructions; it is reported beside the shadow and decides nothing.
 """
 
 from __future__ import annotations
@@ -67,6 +69,8 @@ _STEP_CONTROL_FIELDS: Final = (
     "entered",
     "decision",
 )
+#: The variant has no controls: its ``LookFacts`` reads zero-width control columns.
+_NO_CONTROLS: Final = {"records": [], "sum_return": [], "sum_return_charged": []}
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +247,13 @@ class ReadoutRow:
     shadow: Mapping[str, Any]
     controls: Mapping[str, Any]
     spy: sim.Bar | None
+    variant: Mapping[str, Any]
 
     def look_row(self) -> look.StepRow:
         return look.StepRow(self.session, self.forced, self.shadow, self.controls, self.spy)
+
+    def variant_row(self) -> look.StepRow:
+        return look.StepRow(self.session, self.forced, self.variant, _NO_CONTROLS, self.spy)
 
 
 def _d(values: Sequence[Any]) -> list[Decimal]:
@@ -296,9 +304,15 @@ class ReadoutFacts:
     #: label → per-control product of interval ratios.
     control_products: dict[str, list[Decimal]] = field(default_factory=dict)
     control_interval_occupancy: list[Decimal | None] = field(default_factory=list)
+    #: The no-SL/TP variant (book K + 1): its own accumulator, entry sessions, exit reasons and refusals.
+    variant: look.LookFacts = field(init=False)
+    variant_entry_session: dict[int, date] = field(default_factory=dict)
+    variant_exit_reasons: Counter[str] = field(default_factory=Counter)
+    variant_refusals: int = 0
 
     def __post_init__(self) -> None:
         self.facts = look.LookFacts(t0=self.t0, endpoint=self.endpoint, k=self.k)
+        self.variant = look.LookFacts(t0=self.t0, endpoint=self.endpoint, k=0)
         one = Decimal(1)
         self.prev_nav, self.start_nav = [one] * self.k, [one] * self.k
         for name in ("held_total", "refusals", "missing_exits", "ineligible_exits", "rescales", "missing_donors"):
@@ -313,6 +327,12 @@ class ReadoutFacts:
     def _add(self, row: ReadoutRow) -> None:
         index = self.facts.sessions  # this row's path index is index + 1
         self.facts.add(row.look_row())
+        self.variant.add(row.variant_row())
+        for r in row.variant["records"]:
+            self.variant_entry_session.setdefault(int(r[1]), row.session)
+        for c in row.variant["closed"]:
+            self.variant_exit_reasons[str(c[9])] += 1
+        self.variant_refusals += len(row.variant["refusals"])
         at_end = row.session == self.endpoint
         sh, co = row.shadow, row.controls
         for width_field in _STEP_CONTROL_FIELDS[:-1]:
@@ -432,7 +452,7 @@ class ReadoutFacts:
         if f.last_session != self.endpoint:
             raise ValueError(f"the rows end at {f.last_session}, not at the endpoint {self.endpoint}")
         self._close_controls()
-        lifecycles = self._lifecycles()
+        lifecycles = self._lifecycles(f, self.entry_session)
         spy = look.spy_path(f.spy_closes, h0=h0, h_end=h_end)
         return {
             "t0": self.t0.isoformat(),
@@ -447,25 +467,57 @@ class ReadoutFacts:
             "exits": self._exits(len(lifecycles)),
             "missing_donors": self._missing_donors(),
             "thesis_provenance": self._theses(lifecycles),
+            "variant": self._variant(),
             "spy_total_return": None,
             "spy_total_return_reason": SPY_TOTAL_RETURN_REASON,
         }
 
-    def _lifecycles(self) -> list[Lifecycle]:
-        f = self.facts
+    def _lifecycles(self, f: look.LookFacts, entry_session: Mapping[int, date]) -> list[Lifecycle]:
         if set(f.invested) != set(f.terminal):
             raise ValueError("every lifecycle needs both an entry record and a terminal value")
         targets = {info.target_session for info in self.rebalances.values()}
         out = []
         for lc in sorted(f.invested):
             iid, invested = f.invested[lc]
-            entry, terminal = self.entry_session[lc], f.terminal[lc]
+            entry, terminal = entry_session[lc], f.terminal[lc]
             if entry not in targets:
                 raise ValueError(f"lifecycle {lc} entered at {entry}, which is no applied rebalance's target")
             if not (invested > 0 and terminal > 0 and invested.is_finite() and terminal.is_finite()):
                 raise ValueError(f"lifecycle {lc}: a non-positive value ({invested}, {terminal})")
             out.append(Lifecycle(lc, iid, entry, invested, terminal))
         return out
+
+    def _variant(self) -> dict[str, Any]:
+        """§9.4 the no-SL/TP variant beside the shadow at E: path return and their difference, maximum drawdown,
+        T, lifecycles, occupancy, entry refusals and exits by reason."""
+        s, v = self.facts, self.variant
+        sessions, n = s.sessions, self.n
+        shadow_return, variant_return = s.shadow_path[-1] - 1, v.shadow_path[-1] - 1
+        return {
+            "nav_return": {
+                "shadow": _s(shadow_return),
+                "variant": _s(variant_return),
+                "shadow_minus_variant": _s(shadow_return - variant_return),
+            },
+            "max_drawdown": {
+                "shadow": _s(look.max_drawdown(s.shadow_path)),
+                "variant": _s(look.max_drawdown(v.shadow_path)),
+            },
+            "t": {
+                "shadow": _s(look._t(s.shadow_sum, s.shadow_count)),
+                "variant": _s(look._t(v.shadow_sum, v.shadow_count)),
+            },
+            "lifecycles": lifecycle_distribution(self._lifecycles(v, self.variant_entry_session)),
+            "occupancy": {
+                "shadow": _s(Decimal(s.held_total) / (sessions * n)),
+                "variant": _s(Decimal(v.held_total) / (sessions * n)),
+            },
+            "entry_refusals": {"shadow": self.shadow_refusals, "variant": self.variant_refusals},
+            "exits_by_reason": {
+                "shadow": dict(sorted(self.exit_reasons.items())),
+                "variant": dict(sorted(self.variant_exit_reasons.items())),
+            },
+        }
 
     def _info_at(self, session: date) -> RebalanceInfo:
         return next(i for i in self.rebalances.values() if i.target_session == session)
@@ -629,13 +681,13 @@ def _rows(conn: Conn, declaration_id: int, *, t0: date, end: date) -> Iterator[R
         cur.itersize = 8
         cur.execute(
             "SELECT session, forced, applied_attempt_id, wind_down_event_id IS NOT NULL, shadow, "
-            f"inputs -> 'spy', jsonb_build_object({fields}) "  # noqa: S608 — field names are module literals
+            f"inputs -> 'spy', jsonb_build_object({fields}), variant "  # noqa: S608 — field names are module literals
             "FROM ranking_pot_steps WHERE declaration_id = %s AND session BETWEEN %s AND %s ORDER BY session",
             (declaration_id, t0, end),
         )
-        for session, forced, applied, wind, shadow, spy, controls in cur:
+        for session, forced, applied, wind, shadow, spy, controls, variant in cur:
             bar = None if spy is None else sim.Bar(*(Decimal(v) for v in spy))
-            yield ReadoutRow(session, forced, applied, wind, shadow, controls, bar)
+            yield ReadoutRow(session, forced, applied, wind, shadow, controls, bar, variant)
 
 
 def readout(conn: Conn, decl: rb.PotDeclaration, endpoint: date) -> dict[str, Any]:

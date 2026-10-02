@@ -126,6 +126,39 @@ def test_protective_gap_ordering(bar: sim.Bar, price: str, reason: str) -> None:
     assert r.state.positions == () and r.state.cash == (c.proceeds,)
 
 
+@pytest.mark.parametrize(
+    "bar",
+    [_bar("80", "90", "79", "88"), _bar("135", "140", "120", "125"), _bar("100", "131", "84", "100")],
+)
+def test_the_variant_never_fires_a_protective_exit(bar: sim.Bar) -> None:
+    """§9.4 slice 6c-ii-a: the no-SL/TP variant marks through every bar the shadow would exit on."""
+    r = sim.step(_opened(), session=S2, bars={1: bar}, reference_closes={}, protective=False)
+    (p,) = r.state.positions
+    assert r.closed == () and p.value == p.units * bar.close and p.stop_loss == D(85)  # levels kept, unread
+
+
+def test_the_variant_takes_the_entry_the_shadow_refuses_and_keeps_the_other_rules() -> None:
+    entries = [_entry(1), _entry(2, atr="40")]  # 100 − 3 × 40 ≤ 0: the shadow refuses name 2
+    book = sim.apply_rebalance(sim.new_book(2), target_session=S1, exits={}, entries=entries, h_exit={})
+    bars = {1: None, 2: _flat("100")}
+    assert [x.reason for x in sim.step(book, session=S1, bars=bars, reference_closes={}).refusals] == [
+        "entry_bar_missing",
+        "protective_levels_invalid",
+    ]
+    r = sim.step(book, session=S1, bars=bars, reference_closes={}, protective=False)
+    assert [x.reason for x in r.refusals] == ["entry_bar_missing"]
+    (p,) = r.state.positions
+    assert p.instrument_id == 2 and p.stop_loss == D(-20)
+    # A stamped exit still fires at the close, and the 5-session missing-bar exit still runs.
+    stamped = sim.apply_rebalance(r.state, target_session=S2, exits={2: "rank_out"}, entries=[], h_exit={})
+    out = sim.step(stamped, session=S2, bars={2: _flat("90")}, reference_closes={}, protective=False)
+    assert [(c.reason, c.exit_fill) for c in out.closed] == [("rank_out", D(90))]
+    steps = [sim.step(r.state, session=S2, bars={}, reference_closes={}, protective=False)]
+    for s in (S3, S4, S5, S6):
+        steps.append(sim.step(steps[-1].state, session=s, bars={}, reference_closes={}, protective=False))
+    assert [len(x.closed) for x in steps] == [0, 0, 0, 0, 1] and steps[-1].closed[0].reason == "missing_bars"
+
+
 def test_spec_gap_example_tp_at_open() -> None:
     """§10.3: SL 90, TP 120, open 125 → TP at 125."""
     book = _opened()
