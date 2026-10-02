@@ -316,3 +316,106 @@ def test_refusals_persist_and_the_submission_row_binds_its_own_authority(
             (lc_id, trade_id[0]),
         )
     conn.rollback()
+
+
+def _marked(broker: MagicMock, *, position: int, pnl: str, fees: str | None = "0") -> MagicMock:
+    """The stub snapshot, now carrying the pot position's broker mark."""
+    from app.providers.broker import BrokerDirectPositionInvestment, BrokerInstrumentInvestment
+
+    mark = BrokerDirectPositionInvestment(
+        position_id=position,
+        instrument_id=2842,
+        is_buy=True,
+        units=Decimal("0.4"),
+        amount=Decimal(40),
+        unrealized_pnl=Decimal(pnl),
+        market_value=Decimal(40) + Decimal(pnl),
+        is_partially_altered=False,
+        close_rate=Decimal(100),
+        close_conversion_rate=Decimal(1),
+        asset_currency_id=1,
+        total_fees=None if fees is None else Decimal(fees),
+    )
+    snapshot = broker.get_account_risk_snapshot.return_value
+    broker.get_account_risk_snapshot.return_value = replace(
+        snapshot,
+        direct_positions=(mark,),
+        instrument_investments=(BrokerInstrumentInvestment(2842, Decimal(40), Decimal(40) + Decimal(pnl), 1, 0),),
+    )
+    return broker
+
+
+def _state(conn: Conn, decl_id: int) -> tuple[str, str]:
+    row = conn.execute(
+        "SELECT to_state, actor FROM ranking_pot_state_events WHERE declaration_id = %s ORDER BY event_id DESC LIMIT 1",
+        (decl_id,),
+    ).fetchone()
+    conn.commit()
+    assert row is not None
+    return str(row[0]), str(row[1])
+
+
+def test_the_loss_check_defers_on_a_defect_halts_an_entry_and_runs_without_one(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    decl_id = _frozen(conn)
+    _move(conn, decl_id, "shadow_only", "executing", "supervisor")
+    _deploy_pot(conn, decl_id)  # POT_CAPITAL 1000 → the limit is −200
+    _enable_trading(conn)
+    conn.autocommit = True
+    d, _ = _first_window(conn)
+    a1, _ = _decide_month(
+        conn, monkeypatch, d, _universes({2842: "0.9", 2843: "0.8"}, {2842, 2843}), policy_hash=RANKING_POT_POLICY_HASH
+    )
+    t1 = conn.execute("SELECT target_session FROM ranking_pot_rebalance_attempts WHERE attempt_id = %s", (a1,))
+    t1 = t1.fetchone()[0]  # type: ignore[index]
+    now = _at(t1)
+    _market(conn, now, {d: Decimal(100)})
+    conn.autocommit = False
+    s2842, s2843 = _signal_of(conn, a1, 2842), _signal_of(conn, a1, 2843)
+
+    # 2842 is submitted, then filled: the reconciliation's ownership row, simulated.
+    first = px.execute_pot_signal(conn, broker=_pot_broker(2842, now), signal_id=s2842, now=now)
+    assert isinstance(first, PaperExecutionResult) and first.strategy_trade_id is not None
+    conn.execute("UPDATE strategy_trades SET status = 'open' WHERE strategy_trade_id = %s", (first.strategy_trade_id,))
+    conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id, status, claimed_at) "
+        "VALUES (%s, 2842001, 'active', now())",
+        (first.strategy_trade_id,),
+    )
+    conn.commit()
+
+    # A mark with no totalFees is a data defect: deferred, nothing written.
+    deferred = px.execute_pot_signal(
+        conn, broker=_marked(_pot_broker(2843, now), position=2842001, pnl="-1", fees=None), signal_id=s2843, now=now
+    )
+    assert (deferred.verdict, deferred.reason_code) == ("deferred", "pot_loss_check_unavailable")
+    assert conn.execute("SELECT 1 FROM strategy_funding_decisions WHERE signal_id = %s", (s2843,)).fetchone() is None
+    conn.commit()
+
+    # The periodic evaluator, no entry involved: −100 is inside the limit.
+    assert px.evaluate_losses(conn, broker=_marked(_pot_broker(2843, now), position=2842001, pnl="-100")) == {
+        decl_id: "ok"
+    }
+    assert _state(conn, decl_id) == ("executing", "supervisor")
+
+    # −200 at the entry's own authority: refused, persisted, and the engine halts the pot.
+    refused = px.execute_pot_signal(
+        conn, broker=_marked(_pot_broker(2843, now), position=2842001, pnl="-200"), signal_id=s2843, now=now
+    )
+    assert (refused.verdict, refused.reason_code) == ("rejected", "pot_loss_limit")
+    assert _state(conn, decl_id) == ("halted_loss", "engine")
+    # Nothing is executing any more: no broker call.
+    idle = _pot_broker(2843, now)
+    assert px.evaluate_losses(conn, broker=idle) == {}
+    idle.get_account_risk_snapshot.assert_not_called()
+
+    # A supervisor resumption while still in breach is halted again by the evaluator alone.
+    conn.autocommit = True
+    _move(conn, decl_id, "halted_loss", "executing", "supervisor")
+    conn.autocommit = False
+    assert px.evaluate_losses(conn, broker=_marked(_pot_broker(2843, now), position=2842001, pnl="-250")) == {
+        decl_id: "halted"
+    }
+    assert _state(conn, decl_id) == ("halted_loss", "engine")

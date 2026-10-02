@@ -27,6 +27,7 @@ from app.services import ranking_pot as pot
 from app.services import ranking_pot_exec as exec_book
 from app.services import ranking_pot_look as look
 from app.services.ai_trial_pack import NonCanonicalValue, canonical_sha256
+from app.services.ranking_pot_loss import LOSS_UNAVAILABLE
 from app.services.ranking_pot_policy import RANKING_POT_POLICY_HASH
 from app.services.strategy_base_currency import DEPLOYMENT_CURRENCY_UNSUPPORTED, SUPPORTED_DEPLOYMENT_CURRENCIES
 from app.services.strategy_control_plane import EFFECTIVE_MAX_CONCURRENT_SQL, registered_strategy_purpose
@@ -42,8 +43,9 @@ _BP: Final = Decimal("0.0001")
 POT_CURRENCY: Final = "USD"
 POT_CAPITAL_MODE: Final = "fixed"
 
-#: Write nothing: the lifecycle stays ``entry_pending`` and a later fire this session retries (§7.2 "Deferrals").
-DEFERRALS: Final = frozenset({"pot_slot_not_released", "pot_slot_ledger_incomplete"})
+#: Write nothing: the lifecycle stays ``entry_pending`` and a later fire this session retries (§7.2 "Deferrals";
+#: §7.4 "The loss check" adds the loss check's data defect, which can heal within the session).
+DEFERRALS: Final = frozenset({"pot_slot_not_released", "pot_slot_ledger_incomplete", LOSS_UNAVAILABLE})
 
 #: Every reason code the paper loader ``_load_intent`` can return, and what the pot does with it: ``kept`` = the same
 #: gate under the same code; ``replaced:<code>`` = the evidence field is replaced by a pot source, refused under

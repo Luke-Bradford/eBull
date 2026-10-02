@@ -54,6 +54,9 @@ STOP_ATR_MIN: Final = 1
 STOP_ATR_MAX: Final = 4
 TARGET_R_MIN: Final = Fraction(3, 2)
 ATR_PERIOD: Final = 14
+#: §7.2 "Cost cap", v1's constant by construction: stressed what-if cost ≤ 1.0% of the amount. Also bounds an
+#: unmarked position's loss in the §7.4 loss check (``ranking_pot_loss.stop_bound``).
+POT_COST_CAP_PCT: Final = Decimal("1.0")
 ATR_UNIVERSE: Final = "survivor_only"  # as v1's `ai_trial_pack.indicators` passes it
 #: §4 step 2 — minimum reference samples.
 MIN_NYSE_CAPS: Final = 500
@@ -723,6 +726,7 @@ def entry_ticket(
 
 
 __all__ = [
+    "POT_COST_CAP_PCT",
     "ACTION_PRECEDENCE",
     "ENTRY_RULES",
     "HOLD_RULES",

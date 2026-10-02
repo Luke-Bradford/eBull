@@ -8,13 +8,15 @@ order authority, ``place_demo_strategy_order`` — with the pot's differences:
 
 * the requested ticket is the slot's wealth (``ranking_pot_intent.slot_wealth``), which capacity may reduce (down to
   the broker open minimum) and nothing may raise;
-* the stressed what-if cost may not exceed ``POT_COST_CAP_PCT`` of the amount (``pot_cost_cap``);
+* the stressed what-if cost may not exceed ``ranking_pot.POT_COST_CAP_PCT`` of the amount (``pot_cost_cap``);
 * the SL/TP are the frozen 3-ATR / 2R levels from the pre-submission ask, validated as sent (by the loader);
-* ``pot_slot_not_released`` and ``pot_slot_ledger_incomplete`` are DEFERRALS: nothing is written, the lifecycle stays
-  ``entry_pending`` and a later fire this session retries it. Every other refusal is persisted, so each entry has
-  one attempt per rebalance.
+* ``pot_slot_not_released``, ``pot_slot_ledger_incomplete`` and ``pot_loss_check_unavailable`` are DEFERRALS:
+  nothing is written, the lifecycle stays ``entry_pending`` and a later fire this session retries it. Every other
+  refusal is persisted, so each entry has one attempt per rebalance.
 
-Exits, protection repair and the §7.4 loss check are slice 5c's. Policy-hashed (``ranking_pot_policy``).
+The §7.4 loss check (``ranking_pot_loss``, slice 5c-ii-a) runs inside the authority transaction on the live snapshot
+the entry was sized from, and once per fire for every ``executing`` declaration (r3-69). Exits are the position
+manager's (slice 5c-i). Policy-hashed (``ranking_pot_policy``).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from app.providers.broker import BrokerAccountRiskSnapshot, BrokerProvider, Brok
 from app.services import ranking_pot as pot
 from app.services import ranking_pot_exec as exec_book
 from app.services import ranking_pot_look as look
+from app.services import ranking_pot_loss as loss
 from app.services.ranking_pot_intent import DEFERRALS, PotIntent, SlotState, load_pot_intent, slot_state
 from app.services.strategy_control_plane import (
     create_strategy_trade,
@@ -65,8 +68,6 @@ logger = logging.getLogger(__name__)
 Conn = psycopg.Connection[Any]
 
 _NEW_YORK: Final = ZoneInfo("America/New_York")
-#: §7.2 "Cost cap", v1's constant by construction: stressed what-if cost ≤ 1.0% of the amount.
-POT_COST_CAP_PCT: Final = Decimal("1.0")
 #: §4 step 5: entries from 15:00 UTC on the target session (in session in both EDT and EST).
 POT_ENTRY_TIME_UTC: Final = time(15, 0)
 POT_ALLOCATED_REASON: Final = "all_pot_entry_gates_passed"
@@ -82,14 +83,16 @@ class Deferred:
 
 
 def pot_cost_cap_reason(stressed_cost: Decimal, amount: Decimal) -> str | None:
-    """``pot_cost_cap`` when the stressed cost exceeds ``POT_COST_CAP_PCT`` of the amount (by multiplication;
-    exactly 1.0% passes)."""
+    """``pot_cost_cap`` when the stressed cost exceeds ``ranking_pot.POT_COST_CAP_PCT`` of the amount (by
+    multiplication; exactly 1.0% passes)."""
     if not (stressed_cost.is_finite() and amount.is_finite()) or amount <= 0 or stressed_cost < 0:
         return "pot_cost_cap"
-    return "pot_cost_cap" if stressed_cost * Decimal("100") > POT_COST_CAP_PCT * amount else None
+    return "pot_cost_cap" if stressed_cost * Decimal("100") > pot.POT_COST_CAP_PCT * amount else None
 
 
-def _authority_refusal(conn: Conn, intent: PotIntent, *, now: datetime) -> SlotState | str:
+def _authority_refusal(
+    conn: Conn, intent: PotIntent, *, now: datetime, risk: BrokerAccountRiskSnapshot
+) -> SlotState | str:
     """Re-check, inside the authority transaction and under locks, every fact a concurrent writer can move (r3-113).
 
     * The state: the declaration row ``FOR SHARE`` waits for an in-flight state event (the transition trigger holds
@@ -97,6 +100,8 @@ def _authority_refusal(conn: Conn, intent: PotIntent, *, now: datetime) -> SlotS
     * ``v1_active``: ``ai_trial_declarations`` in SHARE mode and its rows ``FOR SHARE``, as ``sql/445``'s
       ``executing`` trigger locks them, so an in-flight AI-trial freeze commits first and a resumption (its state
       trigger takes the declaration row ``FOR NO KEY UPDATE``) waits.
+    * The §7.4 loss check on the ledger as it stands now and the snapshot the entry was sized from: a breach refuses
+      ``pot_loss_limit`` (the caller then writes the halt), a data defect ``pot_loss_check_unavailable``.
     * ``look_pending`` at the target session (r3-89).
     * The slot, its wealth and the name, re-read from the ledger (the allocator lock serialises pot submissions).
 
@@ -114,6 +119,11 @@ def _authority_refusal(conn: Conn, intent: PotIntent, *, now: datetime) -> SlotS
     v1 = conn.execute(exec_book.V1_ACTIVE_SQL).fetchone()
     if v1 is None or bool(v1[0]):
         return "v1_active"
+    checked = loss.check_loss(conn, intent.declaration_id, pot_capital=intent.pot_capital, risk=risk)
+    if checked is None:
+        return loss.LOSS_UNAVAILABLE
+    if checked.breached:
+        return loss.LOSS_LIMIT
     if look.look_pending(conn, intent.declaration_id, intent.target_session) is not None:
         return "look_pending"
     return slot_state(
@@ -328,7 +338,7 @@ def _execute_pot_signal_locked(
     late: SlotState | str
     authority: tuple[int, int, Any] | None = None
     with conn.transaction():
-        late = _authority_refusal(conn, intent, now=evaluated_at)
+        late = _authority_refusal(conn, intent, now=evaluated_at, risk=risk)
         if isinstance(late, SlotState) and late.wealth == wealth:
             authority = _commit_authority(
                 conn,
@@ -348,6 +358,9 @@ def _execute_pot_signal_locked(
         code = late if isinstance(late, str) else "pot_slot_not_released"
         if code in DEFERRALS:
             return Deferred(signal_id, code)
+        if code == loss.LOSS_LIMIT:
+            # The halt in its own transaction (re-checked under the declaration row lock), then the refusal.
+            loss.halt_on_loss(conn, intent.declaration_id, pot_capital=intent.pot_capital, risk=risk)
         return _persist_rejection(
             conn, signal_id=signal_id, reason_code=code, now=evaluated_at, intent=intent, risk=risk
         )
@@ -398,11 +411,14 @@ def due_pot_entries(conn: Conn, *, today: date) -> list[int]:
 
 @dataclass(frozen=True)
 class PotExecutionJobResult:
-    #: ``False`` outside the regular session or before ``POT_ENTRY_TIME_UTC``.
+    #: ``False`` outside the regular session or before ``POT_ENTRY_TIME_UTC`` (the loss check still ran in session).
     session_open: bool
     verdicts: Mapping[str, int] = field(default_factory=dict)
     #: Entries whose executor call raised; each was logged and the batch continued.
     errors: int = 0
+    #: The fire's §7.4 evaluation per ``executing`` declaration: ``ranking_pot_loss.HaltOutcome`` or
+    #: ``snapshot_failed``.
+    loss_checks: Mapping[int, str] = field(default_factory=dict)
 
     @property
     def entries(self) -> int:
@@ -410,11 +426,41 @@ class PotExecutionJobResult:
 
     @property
     def note(self) -> str:
+        checks = "".join(f" loss[{d}]={v}" for d, v in sorted(self.loss_checks.items()))
         if not self.session_open:
-            return "session_closed"
+            return "session_closed" + checks
         breakdown = " ".join(f"{k}={v}" for k, v in sorted(self.verdicts.items()))
         errors = f" errors={self.errors}" if self.errors else ""
-        return f"entries={self.entries} {breakdown}".rstrip() + errors
+        return f"entries={self.entries} {breakdown}".rstrip() + errors + checks
+
+
+def evaluate_losses(conn: Conn, *, broker: BrokerProvider) -> dict[int, str]:
+    """§7.4's periodic evaluator (r3-69): every ``executing`` declaration against ONE live snapshot, halted on a breach
+    whether or not an entry is due. No broker call when none is ``executing``. A declaration with no activation row
+    is reported ``activation_missing`` (its entries refuse ``pot_capital_missing``); one that raises is rolled back,
+    reported ``error`` and does not stop the others."""
+    declarations = loss.executing_declarations(conn)
+    conn.commit()
+    if not declarations:
+        return {}
+    try:
+        risk = broker.get_account_risk_snapshot()
+    except Exception:
+        logger.warning("ranking_pot execute: account snapshot unavailable for the loss check", exc_info=True)
+        return {declaration_id: "snapshot_failed" for declaration_id, _ in declarations}
+    out: dict[int, str] = {}
+    for declaration_id, pot_capital in declarations:
+        if pot_capital is None:
+            out[declaration_id] = "activation_missing"
+            continue
+        try:
+            out[declaration_id] = loss.halt_on_loss(conn, declaration_id, pot_capital=pot_capital, risk=risk)
+        except Exception:
+            logger.exception("ranking_pot execute: loss check for declaration %s raised", declaration_id)
+            if conn.info.transaction_status != TransactionStatus.IDLE:
+                conn.rollback()
+            out[declaration_id] = "error"
+    return out
 
 
 def run_pot_execution(
@@ -425,8 +471,12 @@ def run_pot_execution(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> PotExecutionJobResult:
     observed = clock().astimezone(UTC)
-    if not _session_is_open(observed) or observed.time() < POT_ENTRY_TIME_UTC:
+    if not _session_is_open(observed):
         return PotExecutionJobResult(session_open=False)
+    # Every in-session fire, entries or not (r3-69); entries only from 15:00 UTC.
+    loss_checks = evaluate_losses(conn, broker=broker)
+    if observed.time() < POT_ENTRY_TIME_UTC:
+        return PotExecutionJobResult(session_open=False, loss_checks=loss_checks)
     signal_ids = due_pot_entries(conn, today=observed.astimezone(_NEW_YORK).date())
     conn.commit()
     verdicts: Counter[str] = Counter()
@@ -444,16 +494,16 @@ def run_pot_execution(
             errors += 1
             continue
         verdicts[result.verdict] += 1
-    return PotExecutionJobResult(session_open=True, verdicts=dict(verdicts), errors=errors)
+    return PotExecutionJobResult(session_open=True, verdicts=dict(verdicts), errors=errors, loss_checks=loss_checks)
 
 
 __all__ = [
     "POT_ALLOCATED_REASON",
-    "POT_COST_CAP_PCT",
     "POT_ENTRY_TIME_UTC",
     "Deferred",
     "PotExecutionJobResult",
     "due_pot_entries",
+    "evaluate_losses",
     "execute_pot_signal",
     "pot_cost_cap_reason",
     "run_pot_execution",
