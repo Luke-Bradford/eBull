@@ -71,6 +71,8 @@ Nothing makes an explanation mandatory, and no single row answers "why did the e
   `strategy_trade_orders.purpose`/`order_id`/`strategy_trade_id` immutable once linked), and the test-fixture
   tickets the trigger then requires (5 raw `entry` inserts + direct `link_strategy_order` callers).
   Pre-migration entries are grandfathered by construction (the trigger fires on INSERT only); dev holds 5.
+  Landed as `sql/459`. Fixtures seed tickets via `tests/fixtures/entry_ticket.py::seed_entry_ticket`;
+  `core_restart_child.py`'s `before_authority_commit` fault kills the process before commit, so it needs none.
 
 ## Codex ckpt-1 (37 findings) — dispositions
 
