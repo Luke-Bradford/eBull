@@ -62,6 +62,18 @@ ATR_STOP_MULTIPLE: Final = 3
 TARGET_ATR_MULTIPLE: Final = 6  # 2R at a 3-ATR stop
 #: §9.2.
 K_CONTROLS: Final = 9_999
+
+
+def variant_book(k: int) -> int:
+    """The no-SL/TP variant's book number (§9.4, slice 6c-ii-a): after the shadow (0) and the controls (1..K)."""
+    return k + 1
+
+
+def book_count(k: int) -> int:
+    """Every book the step job keeps: the shadow, K controls and the variant (``sql/454``'s completion fence)."""
+    return k + 2
+
+
 _DRAW_SPACE: Final = 1 << 256
 CTX: Final = Context(prec=34, rounding=ROUND_HALF_EVEN, traps=[InvalidOperation, DivisionByZero, Overflow])
 
@@ -283,6 +295,7 @@ def step(
     session: date,
     bars: Mapping[int, Bar | None],
     reference_closes: Mapping[int, Decimal | None],
+    protective: bool = True,
 ) -> StepResult:
     """Advance the book through ``session``, which must be the NYSE session after the last stepped one (r3-42): a
     skipped session could never be inserted later, so its records would be silently lost.
@@ -290,17 +303,23 @@ def step(
     ``bars``: the stored bar for ``session`` per held or entering name (absent or ``None`` = missing).
     ``reference_closes``: per held name, the CURRENT stored close of its ``last_close_session``; per pending entry,
     the current stored close of its ``snapshot_session``. Absent or invalid → no split check for that name.
+    ``protective``: ``False`` for the no-SL/TP variant (§9.4, slice 6c-ii-a): no protective check and no
+    ``protective_levels_invalid`` refusal; the levels are still computed and kept, unread.
     """
     if us_market_status(session) == "closed":
         raise ValueError("not an NYSE session")
     if state.last_session is not None and session != next_session(state.last_session):
         raise ValueError("each step must be the NYSE session after the last stepped one")
     with localcontext(CTX):
-        return _step(state, session, bars, reference_closes)
+        return _step(state, session, bars, reference_closes, protective)
 
 
 def _step(
-    state: BookState, session: date, bars: Mapping[int, Bar | None], reference_closes: Mapping[int, Decimal | None]
+    state: BookState,
+    session: date,
+    bars: Mapping[int, Bar | None],
+    reference_closes: Mapping[int, Decimal | None],
+    protective: bool,
 ) -> StepResult:
     rescales: list[tuple[int, Decimal]] = []
     records: list[PositionSession] = []
@@ -329,7 +348,7 @@ def _step(
         reason = ""
         if valid_bar(bar):
             assert bar is not None
-            hit = _protective_fill(p, bar) if p.entry_session < session else None
+            hit = _protective_fill(p, bar) if protective and p.entry_session < session else None
             if hit is not None:
                 exit_price, reason = hit
             elif p.exit_stamp is not None and p.exit_stamp[0] <= session:
@@ -397,7 +416,7 @@ def _step(
             rescales.append((e.instrument_id, k))
         fill = bar.close * (1 + e.h)
         stop_loss = fill - ATR_STOP_MULTIPLE * atr
-        if not (atr > 0 and stop_loss > 0):
+        if protective and not (atr > 0 and stop_loss > 0):
             refusals.append(EntryRefusal(e.instrument_id, session, "protective_levels_invalid"))
             continue
         slot = free[0]

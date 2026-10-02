@@ -78,12 +78,18 @@ def test_the_step_job_writes_books_refuses_forces_and_fences(
     books = conn.execute(
         "SELECT book, last_session, instrument_ids FROM ranking_pot_book_checkpoints ORDER BY book"
     ).fetchall()
-    assert [b[0] for b in books] == [0, 1, 2, 3] and {b[1] for b in books} == {target}
+    # The shadow, K = 3 controls and the no-SL/TP variant (book K + 1).
+    assert [b[0] for b in books] == [0, 1, 2, 3, 4] and {b[1] for b in books} == {target}
     assert sorted(books[0][2]) == [2842, 2843]  # the shadow entered the two best of F
-    shadow = conn.execute("SELECT shadow, controls FROM ranking_pot_steps").fetchone()
+    assert sorted(books[4][2]) == [2842, 2843]  # so did the variant: the real order, nothing refused
+    shadow = conn.execute("SELECT shadow, controls, variant FROM ranking_pot_steps").fetchone()
     assert shadow is not None
-    assert shadow[0]["decision"]["entries"] == [2842, 2843]
+    assert shadow[0]["decision"]["entries"] == [2842, 2843] == shadow[2]["decision"]["entries"]
     assert len(shadow[1]["records"]) == 3 and len(shadow[1]["decision"]["missing_donors"]) == 3
+    # The gate's population is books 0..K; the variant's own names are read, never gated.
+    for vb in range(5):
+        gated = {i for b in books if b[0] != vb for i in b[2]}
+        assert st._population(conn, decl_id, variant_book=vb) == (sorted(gated), sorted(set(books[vb][2]) - gated))
 
     # Exactly once: the same fire again steps nothing.
     assert st.run_step_job(conn, now=lambda: _at(target)).stepped == 0
@@ -123,8 +129,8 @@ def test_the_step_job_writes_books_refuses_forces_and_fences(
     with pytest.raises(psycopg.errors.RaiseException, match="must apply decided attempt"):
         conn.execute(
             "INSERT INTO ranking_pot_steps (declaration_id, session, stepped_at, policy_hash, forced, inputs, "
-            "inputs_sha256, shadow, controls, checkpoint_sha256) "
-            "VALUES (%s, %s, now(), %s, FALSE, '{}', %s, '{}', '{}', %s)",
+            "inputs_sha256, shadow, controls, variant, checkpoint_sha256) "
+            "VALUES (%s, %s, now(), %s, FALSE, '{}', %s, '{}', '{}', '{}', %s)",
             (decl_id, target, "a" * 64, "b" * 64, "c" * 64),
         )
     # Checkpoints only move forward; step rows are append-only.

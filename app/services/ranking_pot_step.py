@@ -1,10 +1,10 @@
 """Ranking-pot-v1 online step job (#2842 slice 6a).
 
 Spec ``docs/proposals/execution/2026-10-01-2842-ranking-pot-v1.md`` §9.1 ("The step job" paragraph) and §4 (**): the
-shadow (book 0) and the K order-reassignment controls (books 1..K) are advanced one NYSE session at a time from the
-stored bars, and each published ``decided`` snapshot is applied to every book before its target session's step.
-After each committed step (and at the start of each fire) the §9.3 looks are computed and the state reconciled
-(``ranking_pot_look``, slice 6b).
+shadow (book 0), the K order-reassignment controls (books 1..K) and the no-SL/TP variant (book K + 1, §9.4 slice
+6c-ii-a) are advanced one NYSE session at a time from the stored bars, and each published ``decided`` snapshot is
+applied to every book before its target session's step. After each committed step (and at the start of each fire) the
+§9.3 looks are computed and the state reconciled (``ranking_pot_look``, slice 6b).
 
 Writes: one ``ranking_pot_steps`` row per stepped session and every book's ``ranking_pot_book_checkpoints`` row, in
 one transaction (``sql/447``).
@@ -16,9 +16,10 @@ Fixed here by construction (each closes a spec Appendix A item or a §9.1 paragr
   values it reads are the values stepped and stored, and a bar absent or masked then is missing for S for good.
 - **Gate (r3-30..32).** SPY's bar for S is valid, and at least ``BAR_COVERAGE_MIN`` (inclusive) of the population has
   a valid bar (``ranking_pot_sim.valid_bar``; an empty population passes). The population is every name held or
-  pending in any book, plus F_t when a rebalance is applied at S and no wind-down falls on S (a superset of the names
-  entering in some book). A failed gate records a ``bar_gate`` refusal and steps nothing. Once ``FORCE_AFTER`` later
-  NYSE sessions have completed, S is stepped without the gate (``forced``), so an outage cannot stall the books.
+  pending in the shadow or a control (the variant's own names are read and stored, never gated), plus F_t when a
+  rebalance is applied at S and no wind-down falls on S (a superset of the names entering in some book). A failed
+  gate records a ``bar_gate`` refusal and steps nothing. Once ``FORCE_AFTER`` later NYSE sessions have completed, S
+  is stepped without the gate (``forced``), so an outage cannot stall the books.
 - **Decision (§4 (**)).** Applied before S's step from the ``decided`` row targeting S, with every book's ledger at
   the snapshot's ``last_session`` (asserted); the first decided snapshot creates the books there. A decided row whose
   target session is already behind the ledger and was never applied raises (no month dropped).
@@ -73,7 +74,7 @@ Conn = psycopg.Connection[Any]
 SHADOW_BOOK: Final = 0
 #: Spec §9.1: a session still unstepped once this many later NYSE sessions have completed is stepped without the gate.
 FORCE_AFTER: Final = 10
-#: Books decoded, stepped and written back at a time (memory bound: K + 1 books never sit in memory together).
+#: Books decoded, stepped and written back at a time (memory bound: K + 2 books never sit in memory together).
 CHUNK: Final = 500
 #: Sessions of each name's series kept for the split check's reference closes. A held position's
 #: ``last_close_session`` is at most ``MISSING_EXIT_RUN`` stepped sessions back, a pending entry's is the
@@ -361,15 +362,21 @@ def advance(
     donor_of: Mapping[int, int] | None,
     wind: bool,
     used: set[tuple[int, date]],
+    protective: bool = True,
 ) -> tuple[Book, sim.StepResult, pot.BookDecision | None]:
     """One book through ``session`` in the spec's order: the decision targeting it (§4 (**)), the wind-down stamps
-    (§5.1 rule 3), then the §9.1 step. ``donor_of`` is ``None`` for the shadow."""
+    (§5.1 rule 3), then the §9.1 step. ``donor_of`` is ``None`` for the shadow and the variant; ``protective`` is
+    ``False`` only for the variant."""
     decision: pot.BookDecision | None = None
     if rebalance is not None:
         book, decision = apply_decision(book, rebalance, rebalance.order_for(donor_of))
     state = sim.wind_down(book.state, session=session) if wind else book.state
     result = sim.step(
-        state, session=session, bars=bars.bars, reference_closes=reference_closes(state, bars.closes, used)
+        state,
+        session=session,
+        bars=bars.bars,
+        reference_closes=reference_closes(state, bars.closes, used),
+        protective=protective,
     )
     return Book(result.state, book.exited_since | {c.instrument_id for c in result.closed}), result, decision
 
@@ -635,12 +642,16 @@ def _checkpoint_chunks(conn: Conn, declaration_id: int, books: int, at: date) ->
         yield out
 
 
-def _population(conn: Conn, declaration_id: int) -> list[int]:
+def _population(conn: Conn, declaration_id: int, *, variant_book: int) -> tuple[list[int], list[int]]:
+    """(the gate's population: every name held or pending in the shadow or a control; every name held or pending
+    in the variant only). The variant's names are read and stored but never gated (§9.4, slice 6c-ii-a): a book that
+    enters no look must not move when the others step."""
     rows = conn.execute(
-        "SELECT DISTINCT unnest(instrument_ids) FROM ranking_pot_book_checkpoints WHERE declaration_id = %s",
-        (declaration_id,),
+        "SELECT DISTINCT unnest(instrument_ids), book = %s FROM ranking_pot_book_checkpoints WHERE declaration_id = %s",
+        (variant_book, declaration_id),
     ).fetchall()
-    return sorted(int(r[0]) for r in rows)
+    gated = {int(r[0]) for r in rows if not r[1]}
+    return sorted(gated), sorted({int(r[0]) for r in rows if r[1]} - gated)
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +717,8 @@ def step_next_session(
     due yet. ``donor(k)`` draws π_k, called per control book only when a rebalance is applied."""
     _lock(conn, decl.declaration_id)
     n, k = book_terms(decl)
-    books = k + 1
+    books = sim.book_count(k)
+    variant_at = sim.variant_book(k)
     last = _last_step(conn, decl.declaration_id)
     ledger_at = first[2] if last is None else last.session
     session = sim.next_session(ledger_at)
@@ -730,13 +742,14 @@ def step_next_session(
     if last is None:
         if rebalance is None or rebalance.attempt_id != first[0]:
             raise rb.SnapshotIntegrityError("the first step must apply the first decided snapshot")
-        population = []
+        population, variant_only = [], []
     else:
-        population = _population(conn, decl.declaration_id)
+        population, variant_only = _population(conn, decl.declaration_id, variant_book=variant_at)
     if rebalance is not None and not wind:
         population = sorted(set(population) | rebalance.universes.f_ids)
+    read = sorted(set(population) | set(variant_only))
 
-    sb = read_session_bars(conn, population, session)
+    sb = read_session_bars(conn, read, session)
     forced = False
     if not gate_passes(population, sb.bars, sb.spy):
         valid = sum(1 for iid in population if sim.valid_bar(sb.bars.get(iid)))
@@ -758,6 +771,7 @@ def step_next_session(
     used: set[tuple[int, date]] = set()
     columns = ControlColumns()
     shadow: dict[str, Any] | None = None
+    variant: dict[str, Any] | None = None
     before: list[str] = []
     shas: list[str] = []
     for chunk in chunks:
@@ -765,7 +779,8 @@ def step_next_session(
         for stored_book in chunk:
             b = stored_book.book
             before.append(stored_book.sha256)
-            donor_of = None if rebalance is None or b == SHADOW_BOOK else donor(b)
+            control = b not in (SHADOW_BOOK, variant_at)
+            donor_of = donor(b) if rebalance is not None and control else None
             stepped, result, decision = advance(
                 stored_book.value,
                 session=session,
@@ -774,9 +789,12 @@ def step_next_session(
                 donor_of=donor_of,
                 wind=wind,
                 used=used,
+                protective=b != variant_at,
             )
             if b == SHADOW_BOOK:
                 shadow = shadow_doc(result, decision, session)
+            elif b == variant_at:
+                variant = shadow_doc(result, decision, session)
             else:
                 columns.add(result, session)
                 if decision is not None and donor_of is not None and rebalance is not None:
@@ -788,13 +806,13 @@ def step_next_session(
     # The digest check: a failure raises and the whole step rolls back.
     if last is not None and checkpoint_digest(before) != last.checkpoint_sha256:
         raise rb.SnapshotIntegrityError(f"declaration {decl.declaration_id}: checkpoints do not match the last step")
-    assert shadow is not None
-    inputs = inputs_doc(sb, population, used)
+    assert shadow is not None and variant is not None
+    inputs = inputs_doc(sb, read, used)
     inputs_sha = canonical_sha256(inputs)
     conn.execute(
         "INSERT INTO ranking_pot_steps (declaration_id, session, stepped_at, policy_hash, applied_attempt_id, "
-        "wind_down_event_id, forced, inputs, inputs_sha256, shadow, controls, checkpoint_sha256) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "wind_down_event_id, forced, inputs, inputs_sha256, shadow, controls, variant, checkpoint_sha256) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             decl.declaration_id,
             session,
@@ -807,6 +825,7 @@ def step_next_session(
             inputs_sha,
             Jsonb(shadow),
             Jsonb(columns.doc()),
+            Jsonb(variant),
             checkpoint_digest(shas),
         ),
     )

@@ -36,12 +36,15 @@ def _info(attempt: int, target: date, last: date, label: ro.Regime, theses: dict
 
 def _stream() -> tuple[list[ro.ReadoutRow], dict[int, ro.RebalanceInfo]]:
     """FRI = T₀ (attempt 7, regime up): the shadow enters 1 and 2. MON: 1 gaps through its stop. TUE (attempt 8,
-    regime down): the shadow holds 2. WED = E. Real step outputs, three books (K = 2)."""
+    regime down): the shadow holds 2. WED = E. Real step outputs, three books (K = 2) and the no-SL/TP variant, which
+    rides name 1's gap and still holds both at E."""
     rebalances = {7: _rebalance(FRI, THU, R, set(R)), 8: replace(_rebalance(TUE, MON, R, set(R)), attempt_id=8)}
     thesis = rb.ThesisUsed(41, AS_OF - timedelta(days=3), "claude-x", "v5")
     infos = {7: _info(7, FRI, THU, "up", {2: thesis}), 8: _info(8, TUE, MON, "down")}
-    books = [_book() for _ in DONORS]
+    books = [_book() for _ in [*DONORS, None]]
+    variant_at = len(DONORS)
     closes = {i: {d: D(100) for d in (THU, FRI, MON, TUE)} for i in R}
+    closes[1][MON] = GAP.close  # the variant still holds name 1 at TUE: its split check reads MON's stored close
     rows = []
     sessions: list[tuple[date, dict[int, sim.Bar | None], int | None]] = [
         (FRI, {1: FLAT, 2: FLAT, 3: FLAT}, 7),
@@ -52,8 +55,9 @@ def _stream() -> tuple[list[ro.ReadoutRow], dict[int, ro.RebalanceInfo]]:
     for session, bars, applied in sessions:
         cols = st.ControlColumns()
         shadow: dict[str, Any] = {}
+        variant: dict[str, Any] = {}
         reb = None if applied is None else rebalances[applied]
-        for b, donor in enumerate(DONORS):
+        for b, donor in enumerate([*DONORS, None]):
             book, result, decision = st.advance(
                 books[b],
                 session=session,
@@ -62,15 +66,18 @@ def _stream() -> tuple[list[ro.ReadoutRow], dict[int, ro.RebalanceInfo]]:
                 donor_of=donor,
                 wind=False,
                 used=set(),
+                protective=b != variant_at,
             )
             books[b] = book
             if b == 0:
                 shadow = st.shadow_doc(result, decision, session)
+            elif b == variant_at:
+                variant = st.shadow_doc(result, decision, session)
             else:
                 cols.add(result, session)
                 if decision is not None and donor is not None and reb is not None:
                     cols.add_decision(decision, reb.missing_donors(donor))
-        rows.append(ro.ReadoutRow(session, False, applied, False, shadow, cols.doc(), SPY))
+        rows.append(ro.ReadoutRow(session, False, applied, False, shadow, cols.doc(), SPY, variant))
     return rows, infos
 
 
@@ -127,6 +134,19 @@ def test_the_readout_over_real_step_outputs() -> None:
     assert prov["no_thesis"] == 1 and prov["counts"] == [{"model": "claude-x", "prompt_version": "v5", "count": 1}]
     assert D(prov["age_days_median"]) == 3
     assert out["spy_total_return"] is None and out["spy_total_return_reason"] == "no_ex_dated_distribution_source"
+
+    # The no-SL/TP variant rode name 1's gap (96) back to 104: no exit, both lifecycles open and winning at E.
+    var = out["variant"]
+    assert var["exits_by_reason"] == {"shadow": {"stop_loss_gap": 1}, "variant": {}}
+    assert var["lifecycles"]["count"] == 2 and var["lifecycles"]["profit_factor"]["wins"] == 2
+    assert D(var["occupancy"]["variant"]) == 1 and D(var["occupancy"]["shadow"]) == D("0.625")
+    assert var["entry_refusals"] == {"shadow": 0, "variant": 0}
+    ret = var["nav_return"]
+    assert D(ret["shadow_minus_variant"]) < 0
+    assert abs(D(ret["shadow_minus_variant"]) - (D(ret["shadow"]) - D(ret["variant"]))) < D("1e-25")
+    assert abs(D(ret["shadow"]) - (path[-1] - 1)) < D("1e-25")
+    # Both books bought both names at FRI's close, so up to MON the paths agree; the variant's drawdown is MON's mark.
+    assert D(var["max_drawdown"]["variant"]) > 0 and var["t"]["variant"] is not None
 
 
 def test_an_interim_endpoint_and_the_invariants() -> None:
