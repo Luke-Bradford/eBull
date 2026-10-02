@@ -457,15 +457,16 @@ def _atr14(ticket: object) -> Fraction | None:
 
 
 def sent_levels(ask: Decimal, atr: Fraction) -> tuple[Decimal, Decimal] | None:
-    """The frozen 3-ATR / 2R levels from the ask (``ranking_pot.planned_levels``), rounded DOWN to 6 dp as the paper
-    path sends them, then validated AS SENT (``ranking_pot.validate_levels``). ``None`` = ``protective_levels_invalid``.
+    """The frozen 3-ATR / 2R levels from the ask (``ranking_pot.planned_levels``), rounded DOWN to the cent
+    (``ranking_pot.RATE_QUANTUM``, §7.4 "The broker-held levels"), then validated AS SENT
+    (``ranking_pot.validate_levels``). ``None`` = ``protective_levels_invalid``.
     """
     planned = pot.planned_levels(ask, atr)
     if isinstance(planned, str):
         return None
-    six = Decimal("0.000001")
-    stop = (Decimal(planned.stop_loss.numerator) / Decimal(planned.stop_loss.denominator)).quantize(six, ROUND_DOWN)
-    take = (Decimal(planned.take_profit.numerator) / Decimal(planned.take_profit.denominator)).quantize(six, ROUND_DOWN)
+    q = pot.RATE_QUANTUM
+    stop = (Decimal(planned.stop_loss.numerator) / Decimal(planned.stop_loss.denominator)).quantize(q, ROUND_DOWN)
+    take = (Decimal(planned.take_profit.numerator) / Decimal(planned.take_profit.denominator)).quantize(q, ROUND_DOWN)
     if not pot.validate_levels(Fraction(ask), Fraction(stop), Fraction(take), atr):
         return None
     return stop, take

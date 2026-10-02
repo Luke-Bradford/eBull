@@ -42,6 +42,7 @@ from app.services.core_exit_levels import (
     core_exit_levels,
 )
 from app.services.ranking_pot_exit_rule import pot_exit_due
+from app.services.ranking_pot_held_levels import record_held_levels
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -1449,6 +1450,35 @@ def _pot_exit_due(owned: _OwnedPosition, observed_at: datetime) -> bool:
     )
 
 
+def _record_pot_held_levels(
+    conn: psycopg.Connection[Any], *, owned: _OwnedPosition, position: BrokerPosition, observed_at: datetime
+) -> None:
+    """#2842 §7.4 "The broker-held levels": record a pot position's held SL/TP (change-only) before any exit or
+    repair decision. A record, never a gate: a failure is rolled back and logged, and the cycle's protection and
+    exit continue, because a recorder must never block a repair or a close (settled EXIT rule)."""
+    try:
+        with conn.transaction():
+            record_held_levels(
+                conn,
+                strategy_trade_id=owned.strategy_trade_id,
+                broker_position_id=owned.broker_position_id,
+                stop_loss_rate=position.stop_loss_rate,
+                take_profit_rate=position.take_profit_rate,
+                is_no_stop_loss=position.is_no_stop_loss,
+                is_no_take_profit=position.is_no_take_profit,
+                observed_at=observed_at,
+            )
+    except psycopg.Error:
+        # A dead connection is not a recorder failure: the repair below would fail on it anyway, so say so here.
+        if conn.closed or conn.broken:
+            raise
+        logger.exception(
+            "ranking-pot held-level record failed for trade %s position %s",
+            owned.strategy_trade_id,
+            owned.broker_position_id,
+        )
+
+
 def _pot_close_refusal(
     conn: psycopg.Connection[Any], *, broker: BrokerProvider, owned: _OwnedPosition
 ) -> PositionManagerResult | None:
@@ -1623,6 +1653,8 @@ def manage_owned_position(
             return PositionManagerResult(
                 strategy_trade_id, broker_position_id, "reconcile_required", "owned_position_missing"
             )
+        if owned.is_ranking_pot:
+            _record_pot_held_levels(conn, owned=owned, position=position, observed_at=observed_at)
 
         # ⚠ Age-out is exempted by an EXPLICIT `is_core` test, never by relying on
         # ``max_position_age_seconds`` being NULL for a core position.  Null-by-
