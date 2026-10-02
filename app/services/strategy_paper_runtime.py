@@ -102,6 +102,9 @@ class StrategyPaperCycleResult:
     management: Mapping[str, int] = field(default_factory=dict)
     # Stage -> items whose unmodelled failure was contained (#3546 gap B).
     errors: Mapping[str, int] = field(default_factory=dict)
+    # Reason -> entries deferred with nothing written (#3546 gap F, ``PAPER_ENTRY_DEFERRALS``);
+    # each is also counted in ``evaluated_signals`` and is re-selected next cycle.
+    deferred: Mapping[str, int] = field(default_factory=dict)
 
 
 def _load_ranked_opportunities(
@@ -581,11 +584,12 @@ def run_strategy_paper_cycle(
         errors["ranking"] += 1
         members = []
     evaluated = 0
+    deferred: Counter[str] = Counter()
     for member in members:
         # A signal that raises has no funding decision, so the next cycle re-selects it;
         # containing it here keeps it from also skipping the rest of the batch.
         try:
-            execute_fired_paper_signal(
+            outcome = execute_fired_paper_signal(
                 conn,
                 broker=broker,
                 signal_id=member.opportunity.signal_id,
@@ -600,7 +604,11 @@ def run_strategy_paper_cycle(
             errors["execute"] += 1
             continue
         evaluated += 1
-    return StrategyPaperCycleResult(reconciled, managed, evaluated, active_blocks, dict(management), dict(errors))
+        if outcome.verdict == "deferred":
+            deferred[outcome.reason_code] += 1
+    return StrategyPaperCycleResult(
+        reconciled, managed, evaluated, active_blocks, dict(management), dict(errors), dict(deferred)
+    )
 
 
 def _reset(conn: psycopg.Connection[Any]) -> None:

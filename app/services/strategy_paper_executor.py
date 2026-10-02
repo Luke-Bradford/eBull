@@ -114,6 +114,18 @@ COST_BASIS_BROKER_PREFLIGHT_VALUE = "broker_preflight_value"
 COST_BASES: frozenset[str] = frozenset({COST_BASIS_BROKER_PREFLIGHT_AMOUNT, COST_BASIS_BROKER_PREFLIGHT_VALUE})
 _ALLOCATOR_ADVISORY_LOCK = PAPER_ALLOCATOR_ADVISORY_LOCK
 
+#: #3546 gap F (readiness contract R1): refusals whose input was never observed (a broker read
+#: raised) or that withhold EVERY entry for an operational reason. The paper executor writes
+#: nothing for these, so the signal keeps no funding decision and the next cycle re-selects it;
+#: the forecast's own validity (``opportunity_forecast_not_current``) is the terminal bound.
+#: Every other refusal -- policy, mandate, sizing, a price or cost the broker DID return, the
+#: trading switch -- is terminal and persisted. ⚠ Paper path only: the #3471 trial (spec §8, "each
+#: executor refusal is persisted and final") and the ranking pot (spec r3-119, one attempt per
+#: rebalance) keep persisting these through the shared ``_persist_rejection``.
+PAPER_ENTRY_DEFERRALS: frozenset[str] = frozenset(
+    {"reconciliation_overdue", "account_risk_unavailable", "eligibility_unavailable", "costs_unavailable"}
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +137,8 @@ class StrategyPaperExecutionError(StrategyControlError):
 @dataclass(frozen=True)
 class PaperExecutionResult:
     signal_id: int
-    verdict: Literal["rejected", "submitted", "submission_uncertain", "broker_rejected"]
+    #: ``deferred`` is never persisted (``PAPER_ENTRY_DEFERRALS``).
+    verdict: Literal["rejected", "submitted", "submission_uncertain", "broker_rejected", "deferred"]
     reason_code: str
     amount: Decimal | None = None
     strategy_trade_id: int | None = None
@@ -686,6 +699,32 @@ def _persist_rejection(
             ),
         )
     return PaperExecutionResult(signal_id, "rejected", reason_code)
+
+
+def _refuse_paper_entry(
+    conn: psycopg.Connection[Any],
+    *,
+    signal_id: int,
+    reason_code: str,
+    now: datetime,
+    intent: _SizingIntent | None = None,
+    risk: BrokerAccountRiskSnapshot | None = None,
+    halt_identity_evaluated: bool = False,
+) -> PaperExecutionResult:
+    """The paper path's refusal: a ``PAPER_ENTRY_DEFERRALS`` code writes nothing; any other is persisted."""
+    if reason_code not in PAPER_ENTRY_DEFERRALS:
+        return _persist_rejection(
+            conn,
+            signal_id=signal_id,
+            reason_code=reason_code,
+            now=now,
+            intent=intent,
+            risk=risk,
+            halt_identity_evaluated=halt_identity_evaluated,
+        )
+    conn.commit()
+    logger.info("paper entry %s deferred: %s", signal_id, reason_code)
+    return PaperExecutionResult(signal_id, "deferred", reason_code)
 
 
 def _eligibility_reason(response: BrokerEligibilityResponse, intent: _SizingIntent, amount: Decimal) -> str | None:
@@ -1529,14 +1568,14 @@ def _execute_fired_paper_signal_locked(
             conn.commit()
             return refreshed or existing
         reason_code = "harness_validation_only" if purpose == "harness_validation" else "strategy_not_capital_candidate"
-        return _persist_rejection(conn, signal_id=signal_id, reason_code=reason_code, now=evaluated_at)
+        return _refuse_paper_entry(conn, signal_id=signal_id, reason_code=reason_code, now=evaluated_at)
     trading_refusal = _trading_enabled_refusal(conn)
     if trading_refusal is not None:
-        return _persist_rejection(conn, signal_id=signal_id, reason_code=trading_refusal, now=evaluated_at)
+        return _refuse_paper_entry(conn, signal_id=signal_id, reason_code=trading_refusal, now=evaluated_at)
     if existing is not None:
         return _resume_uncertain_submission(conn, broker=broker, existing=existing)
     if _reconciliation_overdue(conn, signal_id):
-        return _persist_rejection(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=evaluated_at)
+        return _refuse_paper_entry(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=evaluated_at)
 
     intent, reason, halt_identity_evaluated = _load_intent(
         conn,
@@ -1546,7 +1585,7 @@ def _execute_fired_paper_signal_locked(
     )
     conn.commit()
     if intent is None:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn,
             signal_id=signal_id,
             reason_code=reason or "preflight_unavailable",
@@ -1557,7 +1596,7 @@ def _execute_fired_paper_signal_locked(
     try:
         risk = broker.get_account_risk_snapshot()
     except Exception:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code="account_risk_unavailable", now=evaluated_at, intent=intent
         )
     sized = _risk_and_amount(
@@ -1568,19 +1607,19 @@ def _execute_fired_paper_signal_locked(
         requested_ticket=lambda base: _paper_requested_ticket(intent, base),
     )
     if isinstance(sized, str):
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code=sized, now=evaluated_at, intent=intent, risk=risk
         )
     amount, instrument_invested, drawdown = sized
     try:
         eligibility = broker.check_instrument_eligibility([intent.instrument_id])
     except Exception:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code="eligibility_unavailable", now=evaluated_at, intent=intent, risk=risk
         )
     eligibility_reason = _eligibility_reason(eligibility, intent, amount)
     if eligibility_reason:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code=eligibility_reason, now=evaluated_at, intent=intent, risk=risk
         )
     try:
@@ -1594,17 +1633,17 @@ def _execute_fired_paper_signal_locked(
             )
         )
     except Exception:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code="costs_unavailable", now=evaluated_at, intent=intent, risk=risk
         )
     assessed = _costs(costs, intent=intent, amount=amount, now=evaluated_at)
     if isinstance(assessed, str):
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code=assessed, now=evaluated_at, intent=intent, risk=risk
         )
     stressed_cost, net_expectancy = assessed.stressed, assessed.net
     if net_expectancy < intent.min_net_expectancy_pct:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn,
             signal_id=signal_id,
             reason_code="net_expectancy_below_policy",

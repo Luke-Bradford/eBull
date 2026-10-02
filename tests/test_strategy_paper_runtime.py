@@ -16,7 +16,7 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_live_gate import assess_live_gate
 from app.services.strategy_opportunity_forecast import OpportunityForecast, record_opportunity_forecast
 from app.services.strategy_opportunity_ranker import persist_ranking_batch
-from app.services.strategy_paper_executor import execute_fired_paper_signal
+from app.services.strategy_paper_executor import PaperExecutionResult, execute_fired_paper_signal
 from app.services.strategy_paper_runtime import (
     _load_ranked_opportunities,
     refresh_strategy_health,
@@ -314,10 +314,14 @@ def test_runtime_ranks_the_complete_set_before_applying_its_execution_limit(
     weaker_newer = _add_weaker_newer_forecast(conn)
     assert weaker_newer > stronger_older
     executed: list[int] = []
-    monkeypatch.setattr(
-        "app.services.strategy_paper_runtime.execute_fired_paper_signal",
-        lambda _conn, *, broker, signal_id, ranking_member_id, now: executed.append(signal_id),
-    )
+
+    def execute(_conn: object, *, broker: object, signal_id: int, ranking_member_id: int, now: object):
+        executed.append(signal_id)
+        if signal_id == weaker_newer:
+            return PaperExecutionResult(signal_id, "deferred", "costs_unavailable")
+        return PaperExecutionResult(signal_id, "rejected", "stub")
+
+    monkeypatch.setattr("app.services.strategy_paper_runtime.execute_fired_paper_signal", execute)
 
     result = run_strategy_paper_cycle(
         conn,
@@ -329,6 +333,7 @@ def test_runtime_ranks_the_complete_set_before_applying_its_execution_limit(
     )
 
     assert result.evaluated_signals == 2
+    assert result.deferred == {"costs_unavailable": 1}  # #3546 gap F: surfaced in the job note
     assert executed == [stronger_older, weaker_newer]
     assert conn.execute("SELECT count(*) FROM strategy_opportunity_ranking_batches").fetchone() == (2,)
     assert conn.execute(

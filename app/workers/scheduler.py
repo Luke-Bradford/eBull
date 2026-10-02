@@ -7038,6 +7038,7 @@ def strategy_paper_cycle() -> None:
         tracker.note = (
             f"reconciled={result.reconciled_orders} managed={result.managed_positions} ({management}) "
             f"evaluated={result.evaluated_signals} "
+            f"deferred={','.join(f'{code}:{n}' for code, n in sorted(result.deferred.items())) or 'none'} "
             f"active_blocks={'error' if result.active_health_blocks is None else result.active_health_blocks} "
             f"trial_pair_events={'error' if pair_events is None else pair_events} "
             f"trial_halts={'error' if trial_halts is None else trial_halts} "
