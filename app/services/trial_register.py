@@ -215,12 +215,11 @@ from typing import Final
 #: 476 -> 477. Measured the same way before the bump: the SAME five groups, 488 rows, every one
 #: `harness_validation`. It strands nothing that could have promoted.
 #:
-#: r22 (2026-10-02, #3548) charges `recent-evidence-refresh-cost-v4-2026-09-26`: request 578's
-#: refresh evaluated s4/s8/s11/s12 on the six pinned hold-out windows under cost v4, with no
-#: declaration. s11/s12 had no earlier hold-out rows; s4/s8 changed cost model (clause 2). Adds 24
-#: searches. Not a `hunt-` entry, so it counts in M_inh: 477 -> 501. Measured the same
-#: way before the bump: the SAME five groups, 488 rows, every one `harness_validation`. It strands
-#: nothing that could have promoted.
+#: r22 (2026-10-02, #3548) charges `recent-evidence-refresh-cost-v4-2026-09-26`, request 578's
+#: undeclared refresh of s4/s8/s11/s12 on the six pinned hold-out windows under cost v4 (s11/s12
+#: first evaluations; s4/s8 a changed cost model, clause 2): 24 searches. Not a `hunt-` entry, so it
+#: counts in M_inh: 477 -> 501. Measured the same way before the bump: the SAME five groups, 488
+#: rows, every one `harness_validation`. It strands nothing that could have promoted.
 TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-02-r22"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
