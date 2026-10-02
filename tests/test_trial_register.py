@@ -473,3 +473,11 @@ class TestReconstructionCutoff:
         """
         assert TRIAL_REGISTER_CUTOFF.tzinfo is not None
         assert TRIAL_REGISTER_CUTOFF.utcoffset() == UTC.utcoffset(None)
+
+
+def test_the_2026_09_26_refresh_is_charged_per_window_and_inside_m_inh() -> None:
+    """#3548: 4 strategies x 6 windows, robustness arms collapsed, exact, not a hunt entry."""
+    entry = next(t for t in TRIAL_REGISTER.trials if t.trial_id == "recent-evidence-refresh-cost-v4-2026-09-26")
+    assert entry.searches == 24
+    assert entry.exactness is TrialExactness.EXACT
+    assert not entry.trial_id.startswith(HUNT_TRIAL_PREFIX)
