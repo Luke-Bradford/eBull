@@ -264,7 +264,7 @@ def test_deflated_sharpe_matches_the_house_implementation() -> None:
         assert abs(float(got["dsr"]) - ref.deflated_sharpe) < 1e-9
         assert abs(float(got["sr0"]) - ref.expected_max_sharpe) < 1e-12
         assert abs(float(got["sr"]) - moments.sharpe) < 1e-12 and abs(float(got["kurtosis"]) - moments.kurtosis) < 1e-9
-        assert (got["t"], got["m"], len(got["returns"])) == (8, m, 8)
+        assert (got["t"], got["m"], len(got["returns"]), got["v"]) == (8, m, 8, "0.125")
 
 
 def test_deflated_sharpe_refusals() -> None:

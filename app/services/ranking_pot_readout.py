@@ -234,7 +234,8 @@ def deflated_sharpe(
     with localcontext(sim.CTX):
         root = _dec_of(m2).sqrt()
         sr, y3, y4 = _dec_of(mu) / root, _dec_of(m3) / (_dec_of(m2) * root), _dec_of(m4 / (m2 * m2))
-    out |= {"sr": _s(sr), "skew": _s(y3), "kurtosis": _s(y4), "v": repr(1 / t)}
+        v = Decimal(1) / t
+    out |= {"sr": _s(sr), "skew": _s(y3), "kurtosis": _s(y4), "v": _s(v)}
     if declared_trials < 2:
         return refuse("register_below_two")
     n = float(declared_trials)  # ρ = 0: N̂ = M
