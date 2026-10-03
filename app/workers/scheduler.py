@@ -595,6 +595,8 @@ JOB_RANKING_POT_REBALANCE = "ranking_pot_rebalance"
 JOB_RANKING_POT_STEP = "ranking_pot_step"
 # #2842 — ranking-pot-v1's executed-book entries, submitted to demo on the target session.
 JOB_RANKING_POT_EXECUTE = "ranking_pot_execute"
+# #3592 — ranking-pot-v2's monthly rebalance (shadow-only; v1's orchestration copied, v2's factor gates and snapshot).
+JOB_RANKING_POT_V2_REBALANCE = "ranking_pot_v2_rebalance"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -907,6 +909,9 @@ RANKING_POT_FIRE_MINUTE: Final = 40
 RANKING_POT_STEP_FIRE_MINUTE: Final = 10
 #: #2842 slice 5b — the pot's entry fire minute (the window itself is the executor's, policy-hashed).
 RANKING_POT_EXECUTE_FIRE_MINUTE: Final = 5
+#: #3592 — ranking-pot-v2's hourly rebalance minute: a copy of ``ranking_pot_v2_job.FIRE_MINUTE`` (policy-hashed there;
+#: ``tests/test_ranking_pot_v2_job.py`` pins the two equal). After v1's :40 on the same lane (v2 spec §4).
+RANKING_POT_V2_FIRE_MINUTE: Final = 50
 
 
 def ai_trial_decision_window_open(now: datetime) -> bool:
@@ -2873,6 +2878,23 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=RANKING_POT_STEP_FIRE_MINUTE),
         # The body steps every due session in order, so a missed fire is the next fire's work.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_RANKING_POT_V2_REBALANCE,
+        display_name="Ranking pot v2 monthly rebalance (#3592)",
+        # v1's lane (the scheduled scorer's): v2's own `compute_rankings` run never overlaps it or v1's. No new
+        # lane — the dev cluster has no connection headroom (v2 spec §4).
+        source="db",
+        description=(
+            "Hourly — ranking-pot-v2's monthly rebalance (shadow only). v1's window and due rule; before scoring, "
+            "the days-to-cover and insider-history gates against the frozen baselines; then its own scoring run, "
+            "the input gates, the insider and short-interest read, and the published input snapshot. Closes any "
+            "month that can no longer be decided as skipped. Does nothing without a frozen v2 declaration."
+        ),
+        cadence=Cadence.hourly(minute=RANKING_POT_V2_FIRE_MINUTE),
+        # A late fire is the next hourly fire's work: the body re-derives the window and the month.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -7135,6 +7157,18 @@ def ranking_pot_rebalance() -> None:
         tracker.row_count = (1 if result.attempt_id is not None else 0) + result.skipped_months
         tracker.note = result.note
         logger.info("%s: %s", JOB_RANKING_POT_REBALANCE, result.note)
+
+
+def ranking_pot_v2_rebalance() -> None:
+    """ranking-pot-v2's monthly rebalance fire (#3592 spec §4; ``app/services/ranking_pot_v2_job.py``)."""
+    from app.services.ranking_pot_v2_job import run_rebalance_job, scoring_step
+
+    with _tracked_job(JOB_RANKING_POT_V2_REBALANCE) as tracker:
+        with connect_job(autocommit=True) as conn:
+            result = run_rebalance_job(conn, score=lambda: scoring_step(connect_job))
+        tracker.row_count = (1 if result.attempt_id is not None else 0) + result.skipped_months
+        tracker.note = result.note
+        logger.info("%s: %s", JOB_RANKING_POT_V2_REBALANCE, result.note)
 
 
 def ranking_pot_step() -> None:
