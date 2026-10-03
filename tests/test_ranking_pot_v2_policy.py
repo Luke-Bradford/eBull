@@ -171,7 +171,7 @@ def test_v1_constants_are_reused_unchanged_and_v2_terms_match_sql_463() -> None:
     )
     assert [policy.per_look_alpha(m) for m in (1, 2, 3)] == [v1_policy.per_look_alpha(m) for m in (1, 2, 3)]
     assert (policy.EXECUTION, policy.BOOK_COUNT) == ("none", K_CONTROLS + 3)
-    assert policy.BUILD_COMPLETE is False
+    assert policy.BUILD_COMPLETE is True  # slice 4c-ii, after A67's acceptance
 
 
 def test_no_subpackage_reaches_a_pot_module() -> None:
