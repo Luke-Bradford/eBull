@@ -121,9 +121,9 @@ def prereg_terms() -> dict[str, object]:
     }
 
 
-def prereg_declaration(*, doc_sha256: str, declared_by: str) -> PreregDeclaration:
+def prereg_declaration(*, doc_sha256: str, declared_by: str, strategy_id: str = STRATEGY_ID) -> PreregDeclaration:
     return PreregDeclaration(
-        strategy_id=STRATEGY_ID,
+        strategy_id=strategy_id,
         strategy_version=STRATEGY_VERSION,
         contract_version=CONTRACT_PREFIX + doc_sha256,
         prereg_purpose=PREREG_PURPOSE,
@@ -230,7 +230,7 @@ def _next_family_seq(conn: psycopg.Connection[Any]) -> int:
     return int(row[0])
 
 
-def _existing_doc_sha256(conn: psycopg.Connection[Any]) -> tuple[bool, str | None]:
+def _existing_doc_sha256(conn: psycopg.Connection[Any], strategy_id: str = STRATEGY_ID) -> tuple[bool, str | None]:
     """Any #2599 row for the pot identity, and the stored document's sha. Read independently: the document stays
     bound to the ROOT #2599 row when a later revision supersedes it (Codex ckpt-2)."""
     row = conn.execute(
@@ -240,7 +240,7 @@ def _existing_doc_sha256(conn: psycopg.Connection[Any]) -> tuple[bool, str | Non
                (SELECT doc_sha256 FROM ranking_pot_declarations
                 WHERE strategy_id = %(id)s AND strategy_version = %(v)s)
         """,
-        {"id": STRATEGY_ID, "v": STRATEGY_VERSION},
+        {"id": strategy_id, "v": STRATEGY_VERSION},
     ).fetchone()
     assert row is not None
     return (bool(row[0]), None if row[1] is None else str(row[1]))
@@ -264,9 +264,20 @@ class _Rollback(Exception):
     pass
 
 
-def _write(conn: psycopg.Connection[Any], *, doc: dict[str, Any], doc_sha256: str, declared_by: str) -> int:
+def _write(
+    conn: psycopg.Connection[Any],
+    *,
+    doc: dict[str, Any],
+    doc_sha256: str,
+    declared_by: str,
+    strategy_id: str = STRATEGY_ID,
+    builder: str = BUILDER,
+) -> int:
+    """The #2599 row, the document and the genesis event. ``strategy_id`` / ``builder``: v2's freeze reuses this
+    (``ranking_pot_freeze_v2``); the version is ``v1`` for both."""
     declaration_id = freeze_preregistration(
-        cast(psycopg.Connection[tuple], conn), prereg_declaration(doc_sha256=doc_sha256, declared_by=declared_by)
+        cast(psycopg.Connection[tuple], conn),
+        prereg_declaration(doc_sha256=doc_sha256, declared_by=declared_by, strategy_id=strategy_id),
     )
     stored = conn.execute(
         f"SELECT {', '.join(_PREREG_COLUMNS)} FROM strategy_preregistration_declarations WHERE declaration_id = %s",
@@ -284,11 +295,11 @@ def _write(conn: psycopg.Connection[Any], *, doc: dict[str, Any], doc_sha256: st
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             declaration_id,
-            STRATEGY_ID,
+            strategy_id,
             STRATEGY_VERSION,
             FAMILY,
             doc["family_seq"],
-            f"generated:{BUILDER}@{doc['code_git_sha']}",
+            f"generated:{builder}@{doc['code_git_sha']}",
             Jsonb(doc),
             doc_sha256,
         ),

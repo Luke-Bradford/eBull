@@ -23,7 +23,6 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from app.services import ranking_pot_v2 as v2
-from app.services import result_ledger
 from app.services.ai_trial_pack import canonical_sha256
 from app.services.ranking_pot_freeze import prereg_declaration
 from app.services.result_ledger import freeze_preregistration
@@ -50,21 +49,6 @@ EXECUTED_BOOK_RELATIONS = frozenset(
         "strategy_entry_tickets",
     }
 )
-
-
-class _RegisterWithV2:
-    """The trial register as it will be once the freeze slice adds v2's entry; the schema does not depend on it."""
-
-    def __init__(self, real: Any) -> None:
-        self._real = real
-
-    def trial_for_declaration(self, strategy_id: str, strategy_version: str) -> object | None:
-        return object() if strategy_id == V2 else self._real.trial_for_declaration(strategy_id, strategy_version)
-
-
-@pytest.fixture(autouse=True)
-def _v2_registered(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(result_ledger, "TRIAL_REGISTER", _RegisterWithV2(result_ledger.TRIAL_REGISTER))
 
 
 def _declaration_sql(conn: Conn, strategy_id: str, terms: dict[str, Any]) -> int:

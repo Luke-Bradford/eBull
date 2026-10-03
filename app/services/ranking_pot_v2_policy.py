@@ -38,6 +38,7 @@ SCORER_IMPORTS: Final = (
 #: Sorted; the digest is over ``name\\0sha256(bytes)\\n`` lines, so a rename is a change too.
 POLICY_MODULES: Final = (
     "ai_trial_pack.py",
+    "ai_trial_pack_reader.py",
     "ai_trial_policy.py",
     "indicator_series.py",
     "instrument_analytics.py",
@@ -45,8 +46,11 @@ POLICY_MODULES: Final = (
     "ranking_pot.py",
     "ranking_pot_exit_rule.py",
     "ranking_pot_held_levels.py",
+    "ranking_pot_policy.py",
+    "ranking_pot_rebalance.py",
     "ranking_pot_sim.py",
     "ranking_pot_v2.py",
+    "ranking_pot_v2_declaration.py",
     "ranking_pot_v2_inputs.py",
     "ranking_pot_v2_policy.py",
     "risk_metrics.py",
@@ -77,6 +81,9 @@ FAMILY: Final = "ranking-pot"
 FAMILY_ALPHA: Final = Fraction(1, 20)
 LOOK_MONTHS: Final = (12, 24)
 HARM_ALPHA: Final = Fraction(1, 40)
+#: §2 turnover bar, by construction (Novy-Marx & Velikov via ``strategy-evidence.md`` §2.1): mean shadow entries per
+#: slot over decided rebalances after the first ≤ this. A §7 look condition, frozen here.
+TURNOVER_BAR: Final = Fraction(1, 2)
 
 
 def declaration_alpha(family_seq: int) -> Fraction:
@@ -112,6 +119,7 @@ __all__ = [
     "RANKING_POT_V2_POLICY_HASH",
     "SCORER_IMPORTS",
     "STRATEGY_VERSION",
+    "TURNOVER_BAR",
     "declaration_alpha",
     "per_look_alpha",
     "policy_manifest_now",
