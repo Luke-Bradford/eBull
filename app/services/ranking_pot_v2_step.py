@@ -27,8 +27,10 @@ What differs from v1, and nothing else:
 - **Shadow-only lifecycle (Appendix A 62).** No executed book (sql/463), so no wind-down stamps and no executed-book
   flatness check: ``completed`` is written once the state is ``winding_down`` and the K + 3 books are flat with the
   wind-down applied, or at once when no rebalance was ever decided.
-- **Looks.** Not here yet: slice 4b adds v2's looks (v1's pure evaluation plus conditions 6–7). Until then
-  ``BUILD_COMPLETE`` is False and no v2 declaration can be frozen, so this job has nothing to step.
+- **Looks (slice 4b-i).** ``ranking_pot_v2_look.run_looks`` (v1's pure evaluation plus conditions 6–7, under v2's
+  hash) where v1's step calls its ``_looks``: at the start of a fire and after each stepped session. v1's
+  ``_stamps`` after it has no counterpart (no executed book), so a harm wind-down is applied by the books' own step
+  at W, as every wind-down is.
 
 Writes: one ``ranking_pot_steps`` row per stepped session and every book's ``ranking_pot_book_checkpoints`` row, in
 one transaction (``sql/447``).
@@ -85,6 +87,7 @@ from app.services import ranking_pot_exposure as ex
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_sim as sim
 from app.services import ranking_pot_v2 as v2
+from app.services import ranking_pot_v2_look as v2look
 from app.services.ai_trial_pack import canonical_sha256
 from app.services.market_calendar import latest_completed_us_session
 from app.services.price_masked_bars import load_masked_bars
@@ -1092,6 +1095,8 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
     )
 
     stepped = 0
+    # §7 looks (v1 spec §9.3): first repair a look committed without its state event or a step without its look.
+    v2look.run_looks(conn, decl, now(), notes)
     while True:
         with conn.transaction():
             outcome = step_next_session(conn, decl, as_of=now(), first=first, terms=terms, donor=donor)
@@ -1108,6 +1113,7 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
         if not outcome.stepped:
             break
         stepped += 1
+        v2look.run_looks(conn, decl, now(), notes)
     if terms is None or not policy_ok(decl):
         # No step was due to record the refusal: drift still fails the run, with this fire's progress in the error.
         # `completed` is deliberately not written under a drifted hash: it waits for the drift to be resolved.
