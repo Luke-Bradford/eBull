@@ -1,6 +1,6 @@
 """#3592 premise: does the v2 order pick different entrants from v1's on today's inputs? (read-only)
 
-    PYTHONPATH=. uv run python -m scripts.measure_3592_v2_entrant_overlap [--n 25]
+    PYTHONPATH=. uv run python -m scripts.measure_3592_v2_entrant_overlap [--n 25] [--insider-months 6]
 
 Reads one rebalance's inputs exactly as ranking-pot-v1 would (``ranking_pot_rebalance.read_snapshot_inputs`` inside
 ``begin_rebalance``'s transaction, which is then rolled back), with S₀ = the latest committed ``v1.5-balanced`` run's
@@ -10,7 +10,7 @@ names and that run's scores (no new scoring run, no thesis provenance). It deriv
 - v1: ``ranking_pot.real_order`` (the v1.5 score);
 - v2: the spec's composite (``docs/proposals/execution/2026-10-03-3592-ranking-pot-v2.md`` §5): the mean of the
   midrank percentiles within R of the v1.5 score, minus FINRA days-to-cover, and the CMP (2012) opportunistic-purchase
-  indicator, a missing component taking 1/2.
+  indicator over the last ``--insider-months`` calendar months (default 6), a missing DTC taking 1/2.
 
 It prints the counts behind each factor inside R and the two entrant sets' overlap. ⚠ ``quotes`` is a current-row
 table, so the F figures are a dated snapshot. Nothing is written: the transaction rolls back.
@@ -133,8 +133,11 @@ def days_to_cover(
     ).fetchall()
     out: dict[int, Fraction] = {}
     for iid, v in rows:
-        if v is not None and Decimal(str(v)).is_finite() and Decimal(str(v)) >= 0:
-            out[int(iid)] = Fraction(Decimal(str(v)))
+        if v is None:
+            continue
+        d = Decimal(str(v))
+        if d.is_finite() and d >= 0:
+            out[int(iid)] = Fraction(d)
     return settle, out
 
 
