@@ -56,6 +56,7 @@ POLICY_MODULES: Final = (
     "ranking_pot_v2_declaration.py",
     "ranking_pot_v2_inputs.py",
     "ranking_pot_v2_job.py",
+    "ranking_pot_v2_look.py",
     "ranking_pot_v2_policy.py",
     "ranking_pot_v2_step.py",
     "risk_metrics.py",
