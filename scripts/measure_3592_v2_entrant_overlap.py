@@ -63,7 +63,7 @@ def opportunistic_buyers(
     """Names with ≥ 1 open-market purchase in the ``months`` calendar months before ``target``'s month by an
     (insider, issuer) pair CMP (2012) classifies opportunistic at the start of that purchase's calendar year (the
     three preceding years), the filing known at ``as_of``."""
-    month_end = target.replace(day=1)
+    window_end = target.replace(day=1)
     first = month_back(target, months)
     rows = conn.execute(
         """
@@ -102,7 +102,7 @@ def opportunistic_buyers(
           FROM buys b JOIN pairs p USING (issuer_cik, filer_cik, by)
          WHERE p.classified AND NOT p.routine
         """,
-        {"ids": ids, "first": first, "end": month_end, "as_of": as_of},
+        {"ids": ids, "first": first, "end": window_end, "as_of": as_of},
     ).fetchall()
     return {int(r[0]) for r in rows}
 
