@@ -167,6 +167,19 @@ def test_v2_looks_are_stored_once_under_v2s_hash_and_wind_the_seat_down(
     shown = ro2.readout(conn, loaded, TUE)["looks"]
     assert shown[0]["invalidated"]["look_id"] == new_id and shown[1]["invalidated"] is None
 
+    # An exception after the insert rolls back even under apply (review WARNING: no commit in a `finally`).
+    real = inv._invalidate
+
+    def boom(c: Conn, **k: Any) -> tuple[str | None, int | None]:
+        real(c, **k)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(inv, "_invalidate", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        inv.invalidate(conn, **(kw | {"look_id": int(out["looks"][1]["look_id"])}), apply=True)
+    assert conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    assert ro2.readout(conn, loaded, TUE)["looks"][1]["invalidated"] is None
+
 
 def test_a_drifted_v2_look_is_not_computed(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = ebull_test_conn

@@ -31,46 +31,54 @@ Conn = psycopg.Connection[Any]
 
 
 def invalidate(conn: Conn, *, look_id: int, note: str, evidence: str, apply: bool) -> tuple[str | None, int | None]:
-    """(refusal, invalidation look_id). One transaction, committed only with ``apply``."""
+    """(refusal, invalidation look_id). One transaction, committed only with ``apply`` and no refusal; any refusal
+    or exception rolls it back."""
     if conn.autocommit:
         raise RuntimeError("invalidate needs a transaction (a dry run on an autocommit connection would persist)")
+    try:
+        refusal, new_id = _invalidate(conn, look_id=look_id, note=note, evidence=evidence)
+    except BaseException:
+        conn.rollback()
+        raise
+    if apply and refusal is None:
+        conn.commit()
+    else:
+        conn.rollback()
+    return refusal, new_id
+
+
+def _invalidate(conn: Conn, *, look_id: int, note: str, evidence: str) -> tuple[str | None, int | None]:
     if not note.strip() or not evidence.strip():
         return "note_and_evidence_required", None
-    try:
-        row = conn.execute(
-            "SELECT l.declaration_id, l.look_months, l.endpoint_session, l.kind, d.strategy_id "
-            "FROM ranking_pot_looks l JOIN ranking_pot_declarations d USING (declaration_id) WHERE l.look_id = %s",
-            (look_id,),
-        ).fetchone()
-        if row is None:
-            return "no_such_look", None
-        declaration_id, months, end, kind, strategy_id = row
-        if strategy_id != v2.STRATEGY_ID:
-            return "not_a_v2_look", None
-        if kind != "result":
-            return "not_a_result", None
-        # The step's look writer's lock: an invalidation never interleaves with a look being computed.
-        conn.execute(
-            "SELECT 1 FROM ranking_pot_declarations WHERE declaration_id = %s FOR NO KEY UPDATE", (declaration_id,)
-        )
-        prior = conn.execute(
-            "SELECT look_id FROM ranking_pot_looks WHERE cites_look_id = %s AND kind = 'invalidation'", (look_id,)
-        ).fetchone()
-        if prior is not None:
-            return f"already_invalidated ({prior[0]})", None
-        new = conn.execute(
-            "INSERT INTO ranking_pot_looks (declaration_id, look_months, endpoint_session, kind, cites_look_id, note, "
-            "detail, policy_hash, computed_at) VALUES (%s, %s, %s, 'invalidation', %s, %s, %s, %s, now()) "
-            "RETURNING look_id",
-            (declaration_id, months, end, look_id, note, Jsonb({"evidence": evidence}), RANKING_POT_V2_POLICY_HASH),
-        ).fetchone()
-        assert new is not None
-        return None, int(new[0])
-    finally:
-        if apply:
-            conn.commit()
-        else:
-            conn.rollback()
+    row = conn.execute(
+        "SELECT l.declaration_id, l.look_months, l.endpoint_session, l.kind, d.strategy_id "
+        "FROM ranking_pot_looks l JOIN ranking_pot_declarations d USING (declaration_id) WHERE l.look_id = %s",
+        (look_id,),
+    ).fetchone()
+    if row is None:
+        return "no_such_look", None
+    declaration_id, months, end, kind, strategy_id = row
+    if strategy_id != v2.STRATEGY_ID:
+        return "not_a_v2_look", None
+    if kind != "result":
+        return "not_a_result", None
+    # The step's look writer's lock: an invalidation never interleaves with a look being computed.
+    conn.execute(
+        "SELECT 1 FROM ranking_pot_declarations WHERE declaration_id = %s FOR NO KEY UPDATE", (declaration_id,)
+    )
+    prior = conn.execute(
+        "SELECT look_id FROM ranking_pot_looks WHERE cites_look_id = %s AND kind = 'invalidation'", (look_id,)
+    ).fetchone()
+    if prior is not None:
+        return f"already_invalidated ({prior[0]})", None
+    new = conn.execute(
+        "INSERT INTO ranking_pot_looks (declaration_id, look_months, endpoint_session, kind, cites_look_id, note, "
+        "detail, policy_hash, computed_at) VALUES (%s, %s, %s, 'invalidation', %s, %s, %s, %s, now()) "
+        "RETURNING look_id",
+        (declaration_id, months, end, look_id, note, Jsonb({"evidence": evidence}), RANKING_POT_V2_POLICY_HASH),
+    ).fetchone()
+    assert new is not None
+    return None, int(new[0])
 
 
 def main(argv: list[str] | None = None) -> int:
