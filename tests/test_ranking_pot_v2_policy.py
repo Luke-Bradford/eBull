@@ -100,6 +100,15 @@ def test_no_executed_book_module_is_in_c() -> None:
         assert any(EXECUTED_BOOK.match(d) for d in _closure(frozenset({name}), pot_only=True)), name
 
 
+def test_the_freeze_stays_outside_the_hash() -> None:
+    """§8 v6: the freeze imports the trial register (bumped often) and the result ledger; hashed, one register bump
+    would refuse every later rebalance as ``ranking_drift``. No hashed module may import it, so neither may a root."""
+    assert not (SERVICES / "ranking_pot_v2_freeze.py").exists()  # a v2-prefixed name would make it a root
+    assert "ranking_pot_freeze_v2" not in _closure(roots(), pot_only=False)
+    hashed = {name.removesuffix(".py") for name in policy.POLICY_MODULES}
+    assert not hashed & {"ranking_pot_freeze_v2", "ranking_pot_freeze", "trial_register", "result_ledger"}
+
+
 def test_scorer_imports_are_exactly_scoring_py_in_repo_imports() -> None:
     assert policy.SCORER_IMPORTS == tuple(sorted(f"{m}.py" for m in imports_of("scoring")))
 

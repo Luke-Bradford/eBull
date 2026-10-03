@@ -220,7 +220,14 @@ from typing import Final
 #: first evaluations; s4/s8 a changed cost model, clause 2): 24 searches. Not a `hunt-` entry, so it
 #: counts in M_inh: 477 -> 501. Measured the same way before the bump: the SAME five groups, 488
 #: rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-02-r22"
+#:
+#: r23 (2026-10-03, #3592 slice 3c) adds `ranking-pot-v2`, v2's one search, declared for its own
+#: `falsification_only` #2599 row before its freeze (v2 spec §8). Its K stratified attachment
+#: controls are the null distribution and its v1-reference book a realised hurdle, not searches.
+#: Not a `hunt-` entry, so it counts in M_inh: 501 -> 502. Measured the same way before the bump:
+#: the SAME five groups, 488 rows, every one `harness_validation`. It strands nothing that could
+#: have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-03-r23"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1346,6 +1353,20 @@ TRIAL_REGISTER: Final = TrialRegister(
             exactness=TrialExactness.EXACT,
             searches=1,
             declared_for=("ranking-pot-v1", "v1"),
+        ),
+        # ``ranking_pot_freeze_v2.EXPECTED_REGISTER_ENTRY``; a test pins the two equal.
+        DeclaredTrial(
+            trial_id="ranking-pot-v2",
+            description=(
+                "#3592 ranking-pot-v2: v1's 25-name monthly policy with the order by v1.5 score, low FINRA "
+                "days-to-cover and CMP opportunistic insider purchases (shadow only), against K = 9,999 stratified "
+                "(dtc, ins) attachment controls and a v1-reference book; one declared hypothesis (spec §7)."
+            ),
+            evidence="docs/proposals/execution/2026-10-03-3592-ranking-pot-v2.md §8 'Declaration'; frozen by "
+            "scripts/ranking_pot_freeze_v2.py (#3592)",
+            exactness=TrialExactness.EXACT,
+            searches=1,
+            declared_for=("ranking-pot-v2", "v1"),
         ),
         DeclaredTrial(
             trial_id="recent-evidence-refresh-cost-v4-2026-09-26",

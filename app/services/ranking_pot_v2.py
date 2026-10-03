@@ -162,30 +162,36 @@ def pair_cells(history: Iterable[InsiderRow], key: PairKey) -> tuple[tuple[int, 
     return tuple(sorted(cells))
 
 
+def months_back(m: date, k: int) -> date:
+    """The month start ``k`` calendar months before month start ``m``."""
+    n = m.year * 12 + m.month - 1 - k
+    return date(n // 12, n % 12 + 1, 1)
+
+
+def floor_threshold(month_counts: Mapping[date, int], *, freeze_month: date) -> Fraction:
+    """§8: 10% of the lower median of the ``FLOOR_REFERENCE_MONTHS`` complete months before ``freeze_month`` (absent
+    months count 0). Stored in the declaration beside the floor it set."""
+    if freeze_month.day != 1 or any(m.day != 1 for m in month_counts):
+        raise ValueError("months are month starts")
+    reference = [month_counts.get(months_back(freeze_month, k), 0) for k in range(1, FLOOR_REFERENCE_MONTHS + 1)]
+    return Fraction(median_low(reference), 10)
+
+
 def history_floor(
     month_counts: Mapping[date, int], *, freeze_month: date
 ) -> date | Literal["history_floor_unavailable"]:
     """§8 ``history_floor``, by construction. ``month_counts``: usable history rows (§2's history trades with both CIKs
-    and a manifest ``filed_at``) per calendar month (month starts). Threshold = 10% of the lower median of the
-    ``FLOOR_REFERENCE_MONTHS`` complete months before ``freeze_month`` (absent months count 0). The floor is the month
-    AFTER the first month of the trailing run of months at or above the threshold that ends with the last complete
-    month — the run's first month may be partly ingested, so it is treated as hidden. Refused when the reference window
-    has no rows or the last complete month is itself below the threshold."""
-    if freeze_month.day != 1 or any(m.day != 1 for m in month_counts):
-        raise ValueError("months are month starts")
-
-    def back(m: date, k: int) -> date:
-        n = m.year * 12 + m.month - 1 - k
-        return date(n // 12, n % 12 + 1, 1)
-
-    reference = [month_counts.get(back(freeze_month, k), 0) for k in range(1, FLOOR_REFERENCE_MONTHS + 1)]
-    threshold = Fraction(median_low(reference), 10)
-    if threshold == 0 or month_counts.get(back(freeze_month, 1), 0) < threshold:
+    and a manifest ``filed_at``) per calendar month (month starts). Threshold: ``floor_threshold``. The floor is the
+    month AFTER the first month of the trailing run of months at or above the threshold that ends with the last
+    complete month — the run's first month may be partly ingested, so it is treated as hidden. Refused when the
+    reference window has no rows or the last complete month is itself below the threshold."""
+    threshold = floor_threshold(month_counts, freeze_month=freeze_month)
+    if threshold == 0 or month_counts.get(months_back(freeze_month, 1), 0) < threshold:
         return "history_floor_unavailable"
     k = 1
-    while month_counts.get(back(freeze_month, k + 1), 0) >= threshold:
+    while month_counts.get(months_back(freeze_month, k + 1), 0) >= threshold:
         k += 1
-    return back(freeze_month, k - 1)
+    return months_back(freeze_month, k - 1)
 
 
 def guarded_months(frozen_counts: Mapping[date, int], *, history_floor: date, target_session: date) -> tuple[date, ...]:
