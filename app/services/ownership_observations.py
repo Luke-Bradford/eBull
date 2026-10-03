@@ -1171,7 +1171,12 @@ def record_treasury_observation(
                 period_start = EXCLUDED.period_start,
                 treasury_shares = EXCLUDED.treasury_shares,
                 ingest_run_id = EXCLUDED.ingest_run_id,
-                ingested_at = clock_timestamp()
+                ingested_at = clock_timestamp(),
+                -- Revive (#3547, mirrors the def14a/esop clauses): the xbrl_dei
+                -- synthetic id is ``instrument_id|period_end``, so a row closed as
+                -- a phantom period would otherwise swallow the real quarter that
+                -- later ends on the same date and keep it invisible to the refresh.
+                known_to = NULL
             """,
             {
                 "iid": instrument_id,

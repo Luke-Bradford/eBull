@@ -11836,3 +11836,18 @@ neighbouring container and match it.**
   `LegFacts.never_submitted`, read from the reconciliation `last_error_code`) rather than overloading the status.
 - Enforced in: `tests/test_ai_trial_pair_lifecycle.py::test_a_leg_released_as_never_sent_is_never_recorded_submitted`
   and `tests/test_ai_trial_pair_lifecycle_db.py::test_a_leg_released_as_never_sent_breaks_the_pair_without_a_submitted_event`.
+
+### A `max(period_end)` anchor is hijacked by any context that ends after the filing (#3547)
+
+- Failure: `_derive_periods_from_facts` takes a filing's primary period as the latest `period_end` among its
+  mapped facts. XBRL contexts are unbounded `xs:date`, so forward-looking disclosures (debt-maturity instants,
+  ASC 350 expected amortisation, an estimated annual ETR) and filer date typos won that max and relabelled the
+  whole filing — PMT's 2024 quarters were stored at 2030 and its real Q1 2024 row never existed. Excluding
+  such facts also exposed a filer's wrong `fy` stamp the hijack had masked (FAMI FY 2020, one label collision
+  on the full population) — a derived-row diff could not see it, only a post-merge survivor arm.
+- Prevention: a fact whose context ends after its own `filed_date` is not a reported period of that filing; drop
+  it before any per-filing anchor is taken (`_fact_period_ended_by_filing`), keep it in the raw layer as filed.
+  When a derivation feeds a merge keyed on a LABEL, the A/B must diff the merge's survivors, not just the
+  derived rows.
+- Enforced in: `tests/test_financial_normalization.py::TestFuturePeriodFactExcluded3547` and
+  `tests/test_canonical_merge_arrival_order_624.py::TestFuturePeriodRowRemoved3547` (Phase B3).
