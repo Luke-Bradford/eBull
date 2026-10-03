@@ -54,6 +54,8 @@ from app.services.ranking_pot_v2_policy import RANKING_POT_V2_POLICY_HASH
 Conn = psycopg.Connection[Any]
 
 _s = r1._s
+#: ``ranking_pot_v2_step.Rebalance.diagnostics``'s keys.
+_DIAGNOSTIC_KEYS = frozenset({"r_size", "r_buyers", "distinct_entry_sets", "strata_rank_corr"})
 
 
 def _v1_controls(controls: Mapping[str, Any]) -> dict[str, Any]:
@@ -131,7 +133,13 @@ class ReferenceFacts:
             raise rb.SnapshotIntegrityError(f"{row.session}: an applied rebalance without both books' decisions")
         s_in, r_in = [int(i) for i in s_dec["entries"]], [int(i) for i in r_dec["entries"]]
         diag, donor_buyers = s_dec.get("v2_controls"), (row.controls.get("decision") or {}).get("donor_buyers")
-        if not isinstance(diag, Mapping) or not isinstance(donor_buyers, list) or len(donor_buyers) != self.acc.k:
+        if (
+            not isinstance(diag, Mapping)
+            or set(diag) != _DIAGNOSTIC_KEYS
+            or not isinstance(diag["strata_rank_corr"], list)
+            or not isinstance(donor_buyers, list)
+            or len(donor_buyers) != self.acc.k
+        ):
             raise rb.SnapshotIntegrityError(f"{row.session}: an applied rebalance without §6's control diagnostics")
         r_size = int(diag["r_size"])
         shares = [Decimal(int(b)) / r_size for b in donor_buyers] if r_size else []

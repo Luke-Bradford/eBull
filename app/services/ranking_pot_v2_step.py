@@ -1064,6 +1064,9 @@ def step_next_session(
     shadow, variant, reference = docs[SHADOW_BOOK], docs[variant_at], docs[reference_at]
     if rebalance is not None:
         # §6's per-rebalance control diagnostics, known only once every control has decided (Codex ckpt-2, 4b-ii).
+        # `entry_sets` spans every chunk of this one-transaction step; the count below makes that a checked fact.
+        if len(columns.decisions["entries"]) != k:
+            raise rb.SnapshotIntegrityError(f"{session}: {len(columns.decisions['entries'])} control decisions, not K")
         shadow["decision"]["v2_controls"] = rebalance.diagnostics(terms.strata, len(entry_sets))
     inputs = inputs_doc(sb, read, used)
     inputs_sha = canonical_sha256(inputs)
