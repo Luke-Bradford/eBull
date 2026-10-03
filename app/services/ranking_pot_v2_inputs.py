@@ -176,7 +176,8 @@ def read_manifest_gaps(conn: Conn, *, s0_ids: Iterable[int], target_session: dat
             "as_of": _utc(as_of),
         },
     ).fetchone()
-    assert row is not None
+    if row is None:  # an aggregate always returns one row; explicit, not an assert, so `python -O` keeps it
+        raise RuntimeError("manifest gap count returned no row")
     return {"form4_manifest_unparsed": int(row[0]), "form4_manifest_tombstoned": int(row[1])}
 
 
