@@ -165,6 +165,11 @@ def test_the_v2_step_keeps_k_plus_3_books_and_completes_shadow_only(
     assert [e["instrument_id"] for e in shadow["decision"]["v2_entries"]] == [5, 1]
     assert "v2_entries" not in variant["decision"] and "v2_entries" not in reference["decision"]
     assert len(controls["records"]) == K and len(controls["decision"]["missing_donor_dtc"]) == K
+    # §6 diagnostics (slice 4b-iii): one stratum; scores (0.9 … 0.5) and DTC (9, 8, 7, 6, 1) both fall from 1 to 5.
+    assert len(controls["decision"]["donor_buyers"]) == K
+    diag = shadow["decision"]["v2_controls"]
+    assert (diag["r_size"], diag["r_buyers"]) == (5, 1) and 1 <= diag["distinct_entry_sets"] <= K
+    assert diag["strata_rank_corr"] == [[0, 5, 5, "1"]]
     # The reference is gated like the shadow; only the variant's own names are read without gating.
     gated, variant_only = st._population(conn, decl, variant_book=3)
     assert set(held[4]) <= set(gated) and variant_only == []

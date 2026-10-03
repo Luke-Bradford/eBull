@@ -147,6 +147,9 @@ def test_v2_looks_are_stored_once_under_v2s_hash_and_wind_the_seat_down(
     assert ref["per_session"][-1][6] == looks[1][5]["v2"]["reference"]["t_reference"]
     [reb] = ref["per_rebalance"]
     assert reb["entrants"] == {"shadow": [5, 1], "reference": [1, 2], "overlap": 1}
+    controls = reb["controls"]
+    assert controls["buyer_share"]["real"] == "0.2" and controls["strata_rank_corr"] == [[0, 5, 5, "1"]]
+    assert 1 <= controls["distinct_entry_sets"] <= K
     assert ref["lifecycles"]["count"] == 2 and "executed" not in out
     assert "missing_donor_dtc" in out and "missing_donors" not in out
     assert out["turnover_occupancy"]["per_rebalance"][0]["missing_donor_dtc_share"]["r_size"] == len(R5)

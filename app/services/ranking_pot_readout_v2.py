@@ -24,6 +24,9 @@ What differs from v1's readout, and nothing else:
   both books' decided entrants and their overlap, entries per slot and buy turnover (``bought`` / the book's NAV
   before the target session, v1's measure); the window's NAV return, maximum drawdown, T, occupancy, lifecycle
   distribution, entry refusals and exits by reason; and its exposures beside the shadow's.
+- **§6 control diagnostics (slice 4b-iii)**, per applied rebalance from what the step stored: the number of distinct
+  control entrant sets, the real buyer share of R_t beside the controls' (median, min, max of ``donor_buyers`` / |R_t|),
+  and the per-stratum Spearman ρ of score and DTC. A rebalance without them raises.
 - **Looks.** Every stored ``result`` with v1's verdict and v2's (``ranking_pot_v2_look.v2_detail_of``, which raises on
   a malformed block), and whether an ``invalidation`` row cites it (an invalidated look is shown as invalidated, §7).
 """
@@ -127,6 +130,11 @@ class ReferenceFacts:
         if not s_dec or not r_dec:
             raise rb.SnapshotIntegrityError(f"{row.session}: an applied rebalance without both books' decisions")
         s_in, r_in = [int(i) for i in s_dec["entries"]], [int(i) for i in r_dec["entries"]]
+        diag, donor_buyers = s_dec.get("v2_controls"), (row.controls.get("decision") or {}).get("donor_buyers")
+        if not isinstance(diag, Mapping) or not isinstance(donor_buyers, list) or len(donor_buyers) != self.acc.k:
+            raise rb.SnapshotIntegrityError(f"{row.session}: an applied rebalance without §6's control diagnostics")
+        r_size = int(diag["r_size"])
+        shares = [Decimal(int(b)) / r_size for b in donor_buyers] if r_size else []
         self.per_rebalance.append(
             {
                 "attempt_id": row.applied_attempt_id,
@@ -136,6 +144,17 @@ class ReferenceFacts:
                 "turnover": {
                     "shadow": _s(s_bought / self.acc.facts.shadow_path[index]),
                     "reference": _s(r_bought / self.facts.shadow_path[index]),
+                },
+                "controls": {
+                    "distinct_entry_sets": int(diag["distinct_entry_sets"]),
+                    "buyer_share": {
+                        "real": _s(Decimal(int(diag["r_buyers"])) / r_size) if r_size else None,
+                        "controls_median": _s(r1.median(shares)),
+                        "controls_min": _s(min(shares) if shares else None),
+                        "controls_max": _s(max(shares) if shares else None),
+                    },
+                    "strata_rank_corr": diag["strata_rank_corr"],
+                    "strata_rank_corr_columns": ["stratum", "r_members", "with_dtc", "spearman_score_dtc"],
                 },
             }
         )

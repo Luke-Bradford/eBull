@@ -217,8 +217,9 @@ def test_documents_carry_the_reasons_and_the_dtc_donor_count() -> None:
     assert doc["decision"]["v2_entries"] == reasons
     assert "v2_entries" not in st.shadow_doc(result, decision, FRI, table_of(set(R5)))["decision"]
     cols = st.ControlColumns()
-    cols.add_decision(decision, 3)
+    cols.add_decision(decision, 3, 1)
     assert cols.doc()["decision"]["missing_donor_dtc"] == [3] and "missing_donors" not in cols.doc()["decision"]
+    assert cols.doc()["decision"]["donor_buyers"] == [1]
 
 
 def _imports(path: Path) -> set[str]:
@@ -251,3 +252,38 @@ def test_the_step_minute_is_registered_on_the_rebalances_lane() -> None:
         scheduler.RANKING_POT_EXECUTE_FIRE_MINUTE,
         scheduler.RANKING_POT_V2_FIRE_MINUTE,
     )
+
+
+def test_rank_correlation_is_spearman_on_midranks() -> None:
+    f = {i: Fraction(i) for i in range(1, 5)}
+    assert st.rank_correlation(f, f) == 1
+    assert st.rank_correlation(f, {i: -v for i, v in f.items()}) == -1
+    # x = 1..4, y ranks 1, 3, 2, 4: ρ = 1 − 6·Σd² / (n(n² − 1)) = 1 − 12/60 = 0.8 (no ties).
+    assert st.rank_correlation(f, {1: Fraction(1), 2: Fraction(3), 3: Fraction(2), 4: Fraction(4)}) == D("0.8")
+    # Ties share their mean rank: y = 1, 1, 2, 2 against x = 1..4 → Pearson of (1.5, 1.5, 3.5, 3.5) and (1..4).
+    tied = st.rank_correlation(f, {1: Fraction(1), 2: Fraction(1), 3: Fraction(2), 4: Fraction(2)})
+    assert tied is not None and abs(tied - D("0.8944271909999158785636694674925104")) < D("1e-30")
+    assert st.rank_correlation(f, dict.fromkeys(f, Fraction(1))) is None  # a constant side
+    assert st.rank_correlation({1: Fraction(1)}, {1: Fraction(2)}) is None  # below two names
+    assert st.rank_correlation(f, {9: Fraction(1)}) is None  # names in only one side do not count
+
+
+def test_stratum_rank_correlations_and_control_diagnostics() -> None:
+    reb = _rebalance(R5, set(R5), {1: "8", 2: "9", 3: "1", 5: "2"}, {5})  # 4 has no DTC
+    strata = {1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 99: 2}
+    assert st.stratum_rank_correlations(reb.universes, strata, reb.dtc) == [
+        [0, 3, 3, "0.5"],  # score ranks (3, 2, 1), DTC ranks (2, 3, 1): ρ = 1 − 6·2 / (3·8)
+        [1, 2, 1, None],  # one name with a DTC
+    ]
+    with pytest.raises(rb.SnapshotIntegrityError, match="no freeze-time stratum"):
+        st.stratum_rank_correlations(reb.universes, {1: 0}, reb.dtc)
+    identity = {i: i for i in R5}
+    assert reb.donor_buyers(identity) == 1 and reb.donor_buyers({**identity, 1: 5, 5: 1}) == 1
+    assert reb.donor_buyers({**identity, 1: 5}) == 2  # two members draw the buyer's indicator
+    diag = reb.diagnostics(strata, 3)
+    assert diag | {"strata_rank_corr": None} == {
+        "r_size": 5,
+        "r_buyers": 1,
+        "distinct_entry_sets": 3,
+        "strata_rank_corr": None,
+    }
