@@ -19,3 +19,23 @@ def test_v2_control_decisions_map_onto_v1s_missing_donor_slot() -> None:
     for bad in ({"entries": [1]}, {"missing_donors": [0], "missing_donor_dtc": [0]}):
         with pytest.raises(rb.SnapshotIntegrityError):
             ro2._v1_controls({"decision": bad})
+
+
+def test_a_rebalance_without_complete_diagnostics_fails_closed() -> None:
+    from datetime import date
+    from decimal import Decimal
+
+    from app.services import ranking_pot_readout as r1
+
+    acc = r1.ReadoutFacts(t0=date(2026, 10, 2), endpoint=date(2026, 10, 2), n=2, k=2, rebalances={})
+    ref = ro2.ReferenceFacts(acc)
+    acc.facts.shadow_path.append(Decimal(1))
+    good = {"r_size": 5, "r_buyers": 1, "distinct_entry_sets": 1, "strata_rank_corr": []}
+    for diag, donors in (({k: v for k, v in good.items() if k != "r_size"}, [0, 0]), (good, [0])):
+        shadow = {"bought": "0", "entered": 0, "decision": {"entries": [], "v2_controls": diag}}
+        row = r1.ReadoutRow(
+            date(2026, 10, 2), False, 1, False, shadow, {"decision": {"donor_buyers": donors}}, None, {}
+        )
+        reference = {"bought": "0", "entered": 0, "decision": {"entries": []}}
+        with pytest.raises(rb.SnapshotIntegrityError, match="control diagnostics"):
+            ref._rebalance(row, reference, 0)

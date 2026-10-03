@@ -20,6 +20,10 @@ What differs from v1, and nothing else:
 - **Missing donors (Appendix A 61).** Per control, the R members whose donor has no DTC
   (``ranking_pot_v2.missing_donor_dtc``), stored as ``decision.missing_donor_dtc``: v1's missing-score count has no
   meaning here (each member keeps its own score).
+- **Control diagnostics (§6; slice 4b-iii).** Per control, the R members whose donor is a buyer
+  (``decision.donor_buyers``, K wide); on the shadow's decision, ``v2_controls``: |R_t|, its real buyers, the number of
+  distinct entrant sets over the K controls, and per freeze-time stratum Spearman's ρ of score and DTC over R_t. The
+  step computes them because it alone holds every π_k and control decision (only entry counts are stored).
 - **Explainability (§5).** The shadow's decision carries, per entry, its three percentiles, the composite, its DTC
   row and settlement date (or the missing reason), and its qualifying purchases with each pair's class and cells.
 - **Policy.** v2's hash (``ranking_pot_v2_job.policy_ok``), checked before the frozen terms are decoded, so a drifted
@@ -359,6 +363,20 @@ class Rebalance:
         """§6: R members whose donor has no DTC (Appendix A 61, in place of v1's missing-score count)."""
         return v2.missing_donor_dtc(self.universes, donor_of, self.dtc)
 
+    def donor_buyers(self, donor_of: Mapping[int, int]) -> int:
+        """§6 diagnostic: R members whose donor is a buyer (the control's buyer prevalence in R_t, times |R_t|)."""
+        return sum(1 for iid in self.universes.r_ids if donor_of[iid] in self.buyers)
+
+    def diagnostics(self, strata: Mapping[int, int], distinct_entry_sets: int) -> dict[str, Any]:
+        """§6's per-rebalance record for the readout: the real buyer count in R_t, the number of distinct control
+        entrant sets, and per stratum the within-stratum rank correlation of score and DTC over R_t."""
+        return {
+            "r_size": len(self.universes.r_ids),
+            "r_buyers": len(self.universes.r_ids & self.buyers),
+            "distinct_entry_sets": distinct_entry_sets,
+            "strata_rank_corr": stratum_rank_correlations(self.universes, strata, self.dtc),
+        }
+
     def explain(self, entries: Sequence[int]) -> list[dict[str, Any]]:
         """§5 "Explainability": per shadow entry, its three percentiles and composite (exact, as ``p/q``), its DTC
         row (or the missing reason) and its qualifying purchases with each pair's class and cells."""
@@ -428,6 +446,44 @@ def components(universes: pot.Universes, dtc: Mapping[int, Fraction], buyers: fr
     if any((u_score[i] + u_dtc[i] + u_ins[i]) / 3 != composite[i] for i in members):
         raise AssertionError("the explained percentiles do not reproduce the composite")
     return Components(u_score, u_dtc, u_ins, composite)
+
+
+def rank_correlation(xs: Mapping[int, Fraction], ys: Mapping[int, Fraction]) -> Decimal | None:
+    """Spearman's ρ over the names in both: Pearson's correlation of their midranks (ties share the mean rank), exact
+    up to the final square root (``ranking_pot_sim.CTX``). ``None`` below two names or with either side constant."""
+    names = sorted(xs.keys() & ys.keys())
+    if len(names) < 2:
+        return None
+    rx = v2.midrank_percentiles({i: xs[i] for i in names}, names)
+    ry = v2.midrank_percentiles({i: ys[i] for i in names}, names)
+    mx, my = sum(rx.values(), Fraction(0)) / len(names), sum(ry.values(), Fraction(0)) / len(names)
+    cov = sum(((rx[i] - mx) * (ry[i] - my) for i in names), Fraction(0))
+    vx = sum(((rx[i] - mx) ** 2 for i in names), Fraction(0))
+    vy = sum(((ry[i] - my) ** 2 for i in names), Fraction(0))
+    if vx == 0 or vy == 0:
+        return None
+    with localcontext(sim.CTX):
+        magnitude = (_dec(cov * cov / (vx * vy))).sqrt()
+        return magnitude if cov >= 0 else -magnitude
+
+
+def stratum_rank_correlations(
+    universes: pot.Universes, strata: Mapping[int, int], dtc: Mapping[int, Fraction]
+) -> list[list[Any]]:
+    """§6 diagnostic: per freeze-time stratum (ascending), [stratum, R_t members, members with a DTC, Spearman's ρ of
+    their v1.5 score and DTC as a string or ``None``]. Every R_t member is an S₀ name, so it has a stratum."""
+    by: dict[int, list[int]] = {}
+    for iid in universes.r_ids:
+        if iid not in strata:
+            raise rb.SnapshotIntegrityError(f"R_t member {iid} has no freeze-time stratum")
+        by.setdefault(strata[iid], []).append(iid)
+    out = []
+    for s in sorted(by):
+        members = by[s]
+        with_dtc = [i for i in members if i in dtc]
+        rho = rank_correlation({i: Fraction(universes.own_score[i]) for i in with_dtc}, {i: dtc[i] for i in with_dtc})
+        out.append([s, len(members), len(with_dtc), None if rho is None else str(rho)])
+    return out
 
 
 def apply_decision(book: Book, rebalance: Rebalance, order: Sequence[int]) -> tuple[Book, pot.BookDecision]:
@@ -551,7 +607,7 @@ _CONTROL_FIELDS: Final = (
     "ineligible_exits",
     "exposure",
 )
-_DECISION_FIELDS: Final = ("entries", "exits", "unfilled", "occupied", "missing_donor_dtc")
+_DECISION_FIELDS: Final = ("entries", "exits", "unfilled", "occupied", "missing_donor_dtc", "donor_buyers")
 
 
 @dataclass(frozen=True)
@@ -599,13 +655,14 @@ class ControlColumns:
         v["ineligible_exits"].append(stats.ineligible_exits)
         v["exposure"].append(ex.book_sums(result.state, table).doc())
 
-    def add_decision(self, decision: pot.BookDecision, missing_donor_dtc: int) -> None:
+    def add_decision(self, decision: pot.BookDecision, missing_donor_dtc: int, donor_buyers: int) -> None:
         d = self.decisions
         d["entries"].append(len(decision.entries))
         d["exits"].append(len(decision.exits))
         d["unfilled"].append(decision.slots_unfilled)
         d["occupied"].append(decision.occupied)
         d["missing_donor_dtc"].append(missing_donor_dtc)
+        d["donor_buyers"].append(donor_buyers)
 
     def doc(self) -> dict[str, Any]:
         out: dict[str, Any] = dict(self.values)
@@ -964,6 +1021,8 @@ def step_next_session(
     chunks = initial() if last is None else _checkpoint_chunks(conn, decl.declaration_id, books, ledger_at)
     used: set[tuple[int, date]] = set()
     columns = ControlColumns()
+    # §6 diagnostic: the distinct entrant sets over the K controls at an applied rebalance.
+    entry_sets: set[tuple[int, ...]] = set()
     docs: dict[int, dict[str, Any]] = {}
     before: list[str] = []
     shas: list[str] = []
@@ -993,7 +1052,8 @@ def step_next_session(
             else:
                 columns.add(result, session, table)
                 if decision is not None and donor_of is not None and rebalance is not None:
-                    columns.add_decision(decision, rebalance.missing_donors(donor_of))
+                    columns.add_decision(decision, rebalance.missing_donors(donor_of), rebalance.donor_buyers(donor_of))
+                    entry_sets.add(tuple(sorted(decision.entries)))
             doc = encode_book(stepped)
             shas.append(canonical_sha256(doc))
             writes.append((decl.declaration_id, b, session, Jsonb(doc), book_names(stepped.state), ledger_at))
@@ -1002,6 +1062,12 @@ def step_next_session(
     if last is not None and checkpoint_digest(before) != last.checkpoint_sha256:
         raise rb.SnapshotIntegrityError(f"declaration {decl.declaration_id}: checkpoints do not match the last step")
     shadow, variant, reference = docs[SHADOW_BOOK], docs[variant_at], docs[reference_at]
+    if rebalance is not None:
+        # §6's per-rebalance control diagnostics, known only once every control has decided (Codex ckpt-2, 4b-ii).
+        # `entry_sets` spans every chunk of this one-transaction step; the count below makes that a checked fact.
+        if len(columns.decisions["entries"]) != k:
+            raise rb.SnapshotIntegrityError(f"{session}: {len(columns.decisions['entries'])} control decisions, not K")
+        shadow["decision"]["v2_controls"] = rebalance.diagnostics(terms.strata, len(entry_sets))
     inputs = inputs_doc(sb, read, used)
     inputs_sha = canonical_sha256(inputs)
     conn.execute(
