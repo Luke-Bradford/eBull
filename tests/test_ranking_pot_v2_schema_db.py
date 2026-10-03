@@ -117,6 +117,7 @@ def _refused(conn: Conn, sql: LiteralString, params: tuple[Any, ...], match: str
         (V2, {"k_controls": K, "book_count": str(K + 3), "execution": "none"}, "unsigned integers"),
         (V2, {"k_controls": K, "book_count": float(K + 3), "execution": "none"}, "unsigned integers"),
         (V2, {"book_count": K + 3, "execution": "none"}, "unsigned integers"),
+        (V2, cast(dict[str, Any], "none"), "must be a JSON object"),
         (V1, {"k_controls": K, "book_count": K + 3}, r"is not k_controls 2 \+ 2"),
         (V1, {"k_controls": K, "execution": "full"}, "is the only value"),
     ],

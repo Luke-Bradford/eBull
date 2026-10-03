@@ -37,6 +37,9 @@ DECLARE
     bc    JSONB := NEW.doc -> 'terms' -> 'book_count';
     ex    JSONB := NEW.doc -> 'terms' -> 'execution';
 BEGIN
+    IF NEW.strategy_id = 'ranking-pot-v2' AND jsonb_typeof(terms) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'ranking-pot-v2 declaration % terms must be a JSON object, not %', NEW.declaration_id, terms;
+    END IF;
     IF ex IS NOT NULL AND ex IS DISTINCT FROM '"none"'::jsonb THEN
         RAISE EXCEPTION 'declaration % terms.execution is %, and "none" is the only value', NEW.declaration_id, ex;
     END IF;
