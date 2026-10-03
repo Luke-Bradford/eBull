@@ -75,11 +75,23 @@ function Reasons({ reasons }: { reasons: RankingPotV2EntryReasons | null }) {
             : `${opportunistic} opportunistic insider ${opportunistic === 1 ? "pair" : "pairs"} · Form 4 ${reasons.accessions.join(", ")}`}
         </dd>
       </dl>
+      {opportunistic > 0 ? (
+        <ul className="mt-1 list-disc pl-5" aria-label="Insider pairs">
+          {reasons.pairs.map(([filer, issuer, year, cls, cells]) => (
+            <li key={`${filer}-${issuer}-${year}`} className="tabular-nums">
+              filer CIK {filer} · issuer CIK {issuer} · {year} purchase classed {cls} from prior-year trades in{" "}
+              {cells.length === 0 ? "no month" : cells.map(([y, m]) => `${y}-${String(m).padStart(2, "0")}`).join(", ")}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </details>
   );
 }
 
-function HoldingRow({ holding }: { holding: RankingPotV2Holding }) {
+function HoldingRow({ holding, latestSession }: { holding: RankingPotV2Holding; latestSession: string | null }) {
+  // The simulator keeps a name's last close while its bar is missing, so the close can predate the NAV's session.
+  const stale = holding.last_close_session !== null && holding.last_close_session !== latestSession;
   const invested = number(holding.invested);
   const value = number(holding.value);
   const ret = invested !== null && value !== null && invested !== 0 ? value / invested - 1 : null;
@@ -94,8 +106,12 @@ function HoldingRow({ holding }: { holding: RankingPotV2Holding }) {
         <span className="tabular-nums text-slate-700 dark:text-slate-200">
           {holding.state === "pending"
             ? `enters ${formatDate(holding.entry_session)}`
-            : `entered ${formatDate(holding.entry_session)} at ${money(holding.entry_fill)} · last ${money(holding.last_close)}` +
+            : `entered ${formatDate(holding.entry_session)} at ${money(holding.entry_fill)} · close ${money(holding.last_close)}` +
+              ` on ${holding.last_close_session ? formatDate(holding.last_close_session) : "—"}` +
               ` (${formatPct(ret)}) · SL ${money(holding.stop_loss)} / TP ${money(holding.take_profit)}`}
+          {holding.state === "held" && stale ? (
+            <span className="ml-1 text-amber-700 dark:text-amber-400">· stale: no bar since</span>
+          ) : null}
         </span>
       </div>
       <Reasons reasons={holding.reasons} />
@@ -274,7 +290,11 @@ function PotBody({ status }: { status: RankingPotV2StatusResponse }) {
           ) : (
             <ul className="mt-1 divide-y divide-slate-200 dark:divide-slate-800" aria-label="Pot v2 shadow holdings">
               {status.holdings.map((h) => (
-                <HoldingRow key={`${h.state}-${h.instrument_id}`} holding={h} />
+                <HoldingRow
+                  key={`${h.state}-${h.instrument_id}`}
+                  holding={h}
+                  latestSession={status.step?.latest_session ?? null}
+                />
               ))}
             </ul>
           )}

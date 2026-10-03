@@ -43,7 +43,7 @@ const HELD: RankingPotV2Holding = {
   invested: "0.04",
   value: "0.044",
   last_close: "110",
-  last_close_session: "2026-11-05",
+  last_close_session: "2026-11-04",
   stop_loss: "94",
   take_profit: "118",
   reasons: {
@@ -57,7 +57,7 @@ const HELD: RankingPotV2Holding = {
     dtc_settlement_date: "2026-10-15",
     dtc_source_document_id: 9,
     accessions: ["0000320193-26-000101"],
-    pairs: [["0001", "0000320193", 2026, "opportunistic", []]],
+    pairs: [["0001", "0000320193", 2026, "opportunistic", [[2023, 3], [2024, 7], [2025, 11]]]],
   },
 };
 
@@ -127,6 +127,9 @@ describe("RankingPotV2Panel", () => {
     expect(screen.getByText(/0\.750 = mean of score 0\.500 · days-to-cover 0\.750 · insider 1\.000/)).toBeInTheDocument();
     expect(screen.getByText(/1 opportunistic insider pair · Form 4 0000320193-26-000101/)).toBeInTheDocument();
     expect(screen.getByText(/missing \(not_available\)/)).toBeInTheDocument();
+    expect(screen.getByText(/2026 purchase classed opportunistic from prior-year trades in 2023-03, 2024-07, 2025-11/)).toBeInTheDocument();
+    // The close predates the NAV's session (a missing bar): flagged, never shown as current.
+    expect(screen.getByText(/stale: no bar since/)).toBeInTheDocument();
     expect(screen.getByText(/enters/)).toBeInTheDocument();
     expect(screen.getByText("Invalidated: bad bars")).toBeInTheDocument();
     expect(screen.queryByText("Not passed")).not.toBeInTheDocument();

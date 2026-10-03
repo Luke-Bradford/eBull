@@ -3841,8 +3841,8 @@ export interface RankingPotV2EntryReasons {
   dtc_settlement_date: string | null;
   dtc_source_document_id: number | null;
   accessions: string[];
-  /** [filer CIK, issuer CIK, purchase year, class, cells]. */
-  pairs: [string, string, number, string, unknown][];
+  /** [filer CIK, issuer CIK, purchase year, class, the (year, month) cells it was classed from]. */
+  pairs: [string, string, number, string, [number, number][]][];
 }
 
 export interface RankingPotV2Holding {
