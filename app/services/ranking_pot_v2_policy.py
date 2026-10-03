@@ -75,9 +75,10 @@ FROZEN_CONSTANTS: Final[dict[str, object]] = {
 # §8 terms (frozen by this file's bytes)
 # ---------------------------------------------------------------------------
 STRATEGY_VERSION: Final = "v1"
-#: Set True by slice 4, the last slice. While False the v2 freeze ``--apply`` refuses ``build_incomplete`` (v1's
-#: reason: a declaration frozen on a partial build could never be measured). v1's flag is not read.
-BUILD_COMPLETE: Final = False
+#: Set True by slice 4c-ii, the last slice, after Appendix A (67)'s step-cost acceptance passed
+#: (``tests/test_ranking_pot_v2_step_cost_db.py``). While False the v2 freeze ``--apply`` refused ``build_incomplete``
+#: (v1's reason: a declaration frozen on a partial build could never be measured). v1's flag is not read.
+BUILD_COMPLETE: Final = True
 #: §4: no executed book; sql/463 refuses any other value for ``ranking-pot-v2`` and enforces it by trigger.
 EXECUTION: Final = "none"
 #: §4: books 0 (shadow), 1..K (controls), K + 1 (no-SL/TP variant), K + 2 (the v1-reference book); sql/463 requires it.

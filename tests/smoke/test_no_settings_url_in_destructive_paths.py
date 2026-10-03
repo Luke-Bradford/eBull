@@ -247,6 +247,14 @@ _ALLOWED: dict[str, str] = {
         "forbidden substring is inside the module docstring describing the "
         "antipattern, not a live call site (#1472/#1503)"
     ),
+    # #3592 A67: a dev MEASUREMENT, skipped unless EBULL_MEASURE_3592=1. Its dev
+    # connection only reads (scores, bars, §5 inputs) and runs the two freezes'
+    # own dry runs (apply=False), which roll back by design — the supervisor's
+    # documented pre-freeze step. Every step/book/checkpoint write goes to the
+    # scratch ``ebull_test_conn`` database.
+    "test_ranking_pot_v2_step_cost_db.py": (
+        "env-gated dev measurement: reads + rolled-back freeze dry runs on dev; writes only to the test DB (#3592)"
+    ),
 }
 
 _TESTS_DIR = Path(__file__).resolve().parents[1]
