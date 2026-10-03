@@ -142,7 +142,10 @@ def capture_session_rates(
         _collect(conn, source, cap, clock)
         assert cap.phase is not None
         status = STATUS_PARTIAL if cap.phase.errored else STATUS_COMPLETE
-        capture_id = _write(conn, cap, started_at, clock(), status, None)
+        finished_at = clock()
+        # `_write` is the LAST statement in the try: once its transaction commits, nothing here can raise
+        # and add a `failed` header beside the committed one.
+        capture_id = _write(conn, cap, started_at, finished_at, status, None)
     except Exception as exc:
         _record_failure(conn, cap, started_at, clock(), exc)
         raise
