@@ -64,6 +64,9 @@ DTC_COVERAGE_FLOOR: Final = Fraction(95, 100)
 V2_BLOCK_SCHEMA: Final = "ranking-pot-v2-snapshot-1"
 #: §8 history floor, by construction: reference window and threshold share.
 FLOOR_REFERENCE_MONTHS: Final = 24
+#: Appendix A S2-a, by construction (v1's 95% coverage convention reused): a guarded month below this share of its
+#: frozen usable-row count refuses ``insider_history_floor_moved``.
+FLOOR_GUARD_SHARE: Final = Fraction(95, 100)
 
 Classification = Literal["unclassifiable", "indeterminate", "routine", "opportunistic"]
 DtcMissing = Literal["no_row", "null", "non_finite", "negative", "not_available", "default_zero"]
@@ -183,6 +186,33 @@ def history_floor(
     while month_counts.get(back(freeze_month, k + 1), 0) >= threshold:
         k += 1
     return back(freeze_month, k - 1)
+
+
+def guarded_months(frozen_counts: Mapping[date, int], *, history_floor: date, target_session: date) -> tuple[date, ...]:
+    """Appendix A S2-a: the frozen months (from the floor on) that still lie inside the three-year history window of a
+    purchase year this rebalance's look-back can contain. Months that have aged out of every window are not checked."""
+    first, end = lookback_window(target_session)
+    years = {first.year, (end - timedelta(days=1)).year}
+    return tuple(
+        sorted(
+            m
+            for m in frozen_counts
+            if m >= history_floor and any(y - CMP_HISTORY_YEARS <= m.year <= y - 1 for y in years)
+        )
+    )
+
+
+def history_floor_moved(
+    frozen_counts: Mapping[date, int], live_counts: Mapping[date, int], *, history_floor: date, target_session: date
+) -> tuple[date, ...]:
+    """Appendix A S2-a: the guarded months whose live usable-row count fell below ``FLOOR_GUARD_SHARE`` of the frozen
+    one (absent = 0). Non-empty → ``insider_history_floor_moved``: a corpus wipe or re-ingest would otherwise hide
+    months the frozen floor calls observable."""
+    return tuple(
+        m
+        for m in guarded_months(frozen_counts, history_floor=history_floor, target_session=target_session)
+        if live_counts.get(m, 0) < FLOOR_GUARD_SHARE * frozen_counts[m]
+    )
 
 
 def hidden_months(year: int, history_floor: date) -> frozenset[int]:
