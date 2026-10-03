@@ -35,9 +35,9 @@ def render(report: FreezeReport) -> str:
     lines = [f"ranking-pot-v2 freeze: {mode}"]
     if report.doc is not None:
         s0, frozen = report.doc["s0"], report.doc["v2"]
-        sizes = Counter(s for _, s in frozen["strata"])
+        sizes = Counter(s for _, s, _ in frozen["strata"])
         floor = frozen["history_floor"]
-        counts = floor["month_counts"]
+        counts = [c for c in floor["month_counts"] if c[0] >= floor["floor"]]
         lines += [
             f"document sha256: {report.doc_sha256}  code: {report.doc['code_git_sha']}",
             f"policy_hash: {report.doc['policy_hash']}",

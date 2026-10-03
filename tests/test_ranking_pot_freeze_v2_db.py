@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import psycopg
@@ -21,7 +22,7 @@ from app.services.ai_trial_pack import canonical_sha256
 from app.services.ranking_pot_freeze import freeze_pot
 from app.services.ranking_pot_freeze_v2 import freeze_pot_v2
 from app.services.ranking_pot_rebalance import load_declaration as load_v1
-from app.services.ranking_pot_v2_declaration import frozen_terms
+from app.services.ranking_pot_v2_declaration import count_window, frozen_terms
 from app.services.ranking_pot_v2_declaration import load_declaration as load_v2
 from tests.test_ranking_pot_schema_db import PROVENANCE, _seed_scores
 from tests.test_ranking_pot_v2_inputs_db import _dtc, _txn
@@ -110,9 +111,13 @@ def test_dry_run_writes_nothing_and_apply_freezes_the_measured_terms(ebull_test_
     terms = frozen_terms(decl)
     floor = v2.months_back(FREEZE_MONTH, HISTORY_MONTHS - 1)  # the run's first month is treated as partly ingested
     assert terms.strata == dict.fromkeys(IDS, 0)  # equal scores: every name at or below the first cut
+    assert terms.scores == dict.fromkeys(IDS, Decimal("0.5"))
     assert (terms.dtc_settlement_date, terms.dtc_baseline) == (settle, len(IDS))
     assert (terms.history_floor, str(terms.floor_threshold)) == (floor, "1/10")
-    assert terms.floor_counts == {v2.months_back(FREEZE_MONTH, k): 1 for k in range(1, HISTORY_MONTHS)}
+    # The floor rules' window: the run back to its first below-threshold month (31 back, 0 rows) and the reference.
+    first = v2.months_back(FREEZE_MONTH, HISTORY_MONTHS + 1)
+    assert terms.month_counts == {m: int(m != first) for m in count_window(FREEZE_MONTH, floor)}
+    assert min(terms.month_counts) == first
     assert decl.doc["terms"]["book_count"] == decl.doc["terms"]["k_controls"] + 3
     row = conn.execute(
         "SELECT p.contract_version, d.doc_path FROM strategy_preregistration_declarations p "

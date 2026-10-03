@@ -19,18 +19,30 @@ from app.services.ranking_pot_freeze import S0
 from app.services.ranking_pot_freeze_v2 import EXPECTED_REGISTER_ENTRY, alpha_refusal, build_declaration
 from app.services.ranking_pot_rebalance import PotDeclaration
 from app.services.ranking_pot_sim import K_CONTROLS
-from app.services.ranking_pot_v2_declaration import FrozenTerms, decode_frozen, encode_frozen, frozen_terms
+from app.services.ranking_pot_v2_declaration import (
+    FrozenTerms,
+    count_window,
+    decode_frozen,
+    encode_frozen,
+    frozen_terms,
+)
 from app.services.trial_register import TRIAL_REGISTER
 
 S0_IDS = (11, 12, 13, 14)
+READ_AT = datetime(2026, 10, 3, 7, tzinfo=UTC)  # freeze month 2026-10
+FLOOR = date(2026, 7, 1)
+#: 2024-10..2026-09: 100 rows a month except 2026-05 (5, below the 10 threshold), so the trailing run is 2026-06..09 and
+#: the floor the month after its first.
+COUNTS = {m: (5 if m == date(2026, 5, 1) else 100) for m in count_window(date(2026, 10, 1), FLOOR)}
 TERMS = FrozenTerms(
-    strata={11: 0, 12: 0, 13: 1, 14: 1},
+    scores={11: Decimal("0.1"), 12: Decimal("0.1"), 13: None, 14: None},
+    strata={11: 0, 12: 0, 13: v2.UNSCORED_STRATUM, 14: v2.UNSCORED_STRATUM},
     dtc_settlement_date=date(2026, 9, 15),
     dtc_baseline=3,
-    dtc_read_at=datetime(2026, 10, 3, 7, tzinfo=UTC),
-    history_floor=date(2026, 7, 1),
-    floor_threshold=Fraction(41, 10),
-    floor_counts={date(2026, 7, 1): 50, date(2026, 8, 1): 60, date(2026, 9, 1): 5},
+    dtc_read_at=READ_AT,
+    history_floor=FLOOR,
+    floor_threshold=Fraction(10),
+    month_counts=COUNTS,
 )
 PROVENANCE = Provenance(code_git_sha="a" * 40, spec_sha256="b" * 64, python_version="3.14.0", refusals=())
 
@@ -46,33 +58,60 @@ def _block(**edits: Any) -> dict[str, Any]:
     return doc
 
 
+def _counts(counts: dict[date, int]) -> list[list[Any]]:
+    return [[m.isoformat(), n] for m, n in sorted(counts.items())]
+
+
+def test_the_fixture_is_what_the_rules_derive() -> None:
+    assert count_window(date(2026, 10, 1), FLOOR) == tuple(sorted(COUNTS))
+    assert (min(COUNTS), max(COUNTS), len(COUNTS)) == (date(2024, 10, 1), date(2026, 9, 1), 24)
+    assert v2.history_floor(COUNTS, freeze_month=date(2026, 10, 1)) == FLOOR
+    assert v2.score_strata(S0_IDS, TERMS.scores) == TERMS.strata
+
+
 def test_round_trip() -> None:
     assert decode_frozen(encode_frozen(TERMS), s0_ids=S0_IDS) == TERMS
+    assert TERMS.freeze_month == date(2026, 10, 1)
 
 
 @pytest.mark.parametrize(
     "edits",
     [
         {"schema": "ranking-pot-v2-frozen-0"},
-        {"strata": [[11, 0], [12, 0], [13, 1]]},  # S₀ not covered
-        {"strata": [[11, 0], [12, 0], [13, 1], [14, 1], [14, 1]]},  # a name twice
-        {"strata": [[11, 0], [12, 0], [13, 1], [14, 2]]},  # a stratum of one
-        {"strata": [[11, 0], [12, 0], [13, 11], [14, 11]]},  # past the unscored index
-        {"strata": [[11, 0], [12, 0], [13, True], [14, True]]},
+        {"strata": [[11, 0, "0.1"], [12, 0, "0.1"], [13, 10, None]]},  # S₀ not covered
+        {"strata": [[11, 0, "0.1"], [12, 0, "0.1"], [13, 10, None], [14, 10, None], [14, 10, None]]},  # twice
+        {"strata": [[11, 0, "0.1"], [12, 0, "0.1"], [13, 9, None], [14, 9, None]]},  # not score_strata
+        {"strata": [[11, 0, "0.1"], [12, 0, "0.2"], [13, 10, None], [14, 10, None]]},  # 0.2 is the upper decile
+        {"strata": [[11, 0, 0.1], [12, 0, "0.1"], [13, 10, None], [14, 10, None]]},  # a float score
+        {"strata": [[11, False, "0.1"], [12, 0, "0.1"], [13, 10, None], [14, 10, None]]},
+        {"strata": [[11, 0], [12, 0], [13, 10], [14, 10]]},  # no scores
         {"dtc_baseline__usable": 0},
+        {"dtc_baseline__usable": 5},  # more than |S₀|
         {"dtc_baseline__read_at": "2026-10-03T07:00:00"},  # naive
+        {"dtc_baseline__settlement_date": "2026-10-04"},  # after the read
+        {"dtc_baseline__settlement_date": "2026-09-01"},  # older than 31 days
         {"history_floor__floor": "2026-07-02"},
-        {"history_floor__threshold": "0/1"},
-        {"history_floor__threshold": 4.1},
-        {"history_floor__month_counts": [["2026-08-01", 60], ["2026-09-01", 5]]},  # not from the floor
-        {"history_floor__month_counts": [["2026-07-01", 50], ["2026-09-01", 5]]},  # a gap
-        {"history_floor__month_counts": [["2026-07-01", 4], ["2026-08-01", 60], ["2026-09-01", 5]]},  # below
+        {"history_floor__floor": "2026-08-01"},  # not history_floor of the counts
+        {"history_floor__threshold": "11/1"},  # not floor_threshold of the counts
+        {"history_floor__threshold": 10},
+        {"history_floor__month_counts": _counts({m: n for m, n in COUNTS.items() if m != min(COUNTS)})},
+        {"history_floor__month_counts": _counts(COUNTS | {date(2026, 10, 1): 7})},  # the freeze month
+        {"history_floor__month_counts": _counts(COUNTS | {date(2026, 5, 1): -1})},
+        {"history_floor__month_counts": _counts(COUNTS | {date(2026, 5, 1): 50})},  # the floor moves
         {"history_floor__month_counts": []},
     ],
 )
 def test_a_malformed_block_raises(edits: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="malformed ranking-pot-v2 frozen terms"):
         decode_frozen(_block(**edits), s0_ids=S0_IDS)
+
+
+def test_a_floor_at_the_freeze_month_is_refused_by_the_codec() -> None:
+    """A one-month run: the freeze refuses it, and the reader would too."""
+    counts = {m: (100 if m >= date(2026, 9, 1) else 5) for m in count_window(date(2026, 10, 1), date(2026, 10, 1))}
+    doc = _block(history_floor__floor="2026-10-01", history_floor__month_counts=_counts(counts))
+    with pytest.raises(ValueError, match="before the freeze month"):
+        decode_frozen(doc, s0_ids=S0_IDS)
 
 
 def test_an_extra_or_missing_key_raises() -> None:
@@ -125,16 +164,6 @@ def test_floor_threshold_is_the_floor_rule_s_own() -> None:
     counts = {v2.months_back(freeze, k): 100 + k for k in range(1, 25)}
     assert v2.floor_threshold(counts, freeze_month=freeze) == Fraction(112, 10)  # median_low of 101..124 = 112
     assert v2.history_floor(counts, freeze_month=freeze) == v2.months_back(freeze, 23)
-
-
-def test_strata_from_scores_feed_the_codec() -> None:
-    strata = v2.score_strata(S0_IDS, {11: Decimal("0.1"), 12: Decimal("0.1"), 13: None, 14: None})
-    assert decode_frozen(encode_frozen(FrozenTerms(**(TERMS.__dict__ | {"strata": strata}))), s0_ids=S0_IDS).strata == {
-        11: 0,
-        12: 0,
-        13: v2.UNSCORED_STRATUM,
-        14: v2.UNSCORED_STRATUM,
-    }
 
 
 def test_register_holds_the_expected_entry_verbatim() -> None:

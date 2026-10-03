@@ -12,12 +12,16 @@ On top of v1's reads, the freeze measures what §8 freezes and every v2 rebalanc
 - the DTC baseline: S* and the usable-DTC count there, read at the freeze transaction's own time (FINRA's ingest
   re-stamps ``known_from`` on every refresh, spec §5); no S*, or one older than 31 days, refuses ``dtc_unavailable``,
   and a zero count ``dtc_baseline_empty``;
-- the insider ``history_floor``, its threshold and the per-month usable-row counts from the floor through the last
-  complete month (``ranking_pot_v2.history_floor`` over ``ranking_pot_v2_inputs.usable_history_counts``); a floor at
+- the insider ``history_floor``, its threshold and the per-month usable-row counts over every month the floor rules
+  read (``ranking_pot_v2.history_floor`` over ``ranking_pot_v2_inputs.usable_history_counts``); a floor at
   the freeze month (a one-month run, whose month is treated as partly ingested) leaves no observable month and refuses
   ``history_floor_unavailable`` as the core's own two cases do;
 - §2 α resolution: the freeze refuses ``alpha_resolution`` unless 1/(K + 1) ≤ the per-look α of the family sequence
   it is assigned.
+
+The block stores each term's inputs (S₀'s scores, the count window), and the hashed ``decode_frozen`` re-derives every
+term from them, so a defect here cannot reach a rebalance as a plausible number. One REPEATABLE READ snapshot holds
+every read; ``transaction_timestamp()`` is its instant and the DTC read's ``as_of``.
 
 **Outside v2's policy hash, deliberately (spec §8 v6).** §8 hashes every ``ranking_pot_v2*`` module and the
 ``app.services`` modules they import directly. A freeze must import the trial register, the result ledger and the
@@ -34,6 +38,7 @@ slice 4 sets ``BUILD_COMPLETE``, never the loop's.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Final, cast
 
@@ -60,7 +65,7 @@ from app.services.ranking_pot_freeze import (
     read_s0,
 )
 from app.services.ranking_pot_sim import K_CONTROLS
-from app.services.ranking_pot_v2_declaration import FrozenTerms, decode_frozen, encode_frozen
+from app.services.ranking_pot_v2_declaration import FrozenTerms, count_window, decode_frozen, encode_frozen
 from app.services.result_ledger import PreregDeclarationRefused, _lock_trial
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.trial_register import DeclaredTrial, TrialExactness
@@ -155,19 +160,24 @@ def build_declaration(
 # ---------------------------------------------------------------------------
 # Reads (inside the freeze transaction)
 # ---------------------------------------------------------------------------
-def read_s0_scores(conn: psycopg.Connection[Any], s0: S0) -> dict[int, Any]:
-    """S₀'s ``total_score`` in its own run (NULL kept: an unscored name takes ``UNSCORED_STRATUM``)."""
+def read_s0_scores(conn: psycopg.Connection[Any], s0: S0) -> dict[int, Decimal | None]:
+    """Every S₀ name's ``total_score`` in S₀'s own run; ``None`` (a NULL score) takes ``UNSCORED_STRATUM``. S₀ is that
+    run's ids, so every name has exactly one row (``read_s0`` refuses duplicates)."""
     rows = conn.execute(
         "SELECT instrument_id, total_score FROM scores WHERE model_version = %s AND scored_at = %s",
         (_DEFAULT_MODEL_VERSION, s0.scored_at),
     ).fetchall()
-    return {int(r[0]): r[1] for r in rows}
+    scores: dict[int, Decimal | None] = {int(r[0]): r[1] for r in rows}
+    if sorted(scores) != list(s0.instrument_ids):
+        raise PotFreezeError("S₀'s scores run changed inside the freeze transaction")
+    return scores
 
 
 def measure_frozen(conn: psycopg.Connection[Any], s0: S0, *, read_at: datetime) -> FrozenTerms | list[str]:
     """Every §8 measured term, or the refusals that stop the freeze."""
     refusals: list[str] = []
-    strata = v2.score_strata(s0.instrument_ids, read_s0_scores(conn, s0))
+    scores = read_s0_scores(conn, s0)
+    strata = v2.score_strata(s0.instrument_ids, scores)
     if (refused := v2.strata_refusal(strata)) is not None:
         refusals.append(refused)
 
@@ -193,13 +203,14 @@ def measure_frozen(conn: psycopg.Connection[Any], s0: S0, *, read_at: datetime) 
     if refusals or isinstance(floor, str) or dtc.settlement_date is None:
         return refusals
     return FrozenTerms(
+        scores=scores,
         strata=strata,
         dtc_settlement_date=dtc.settlement_date,
         dtc_baseline=baseline,
         dtc_read_at=read_at.astimezone(UTC),
         history_floor=floor,
         floor_threshold=v2.floor_threshold(counts, freeze_month=freeze_month),
-        floor_counts={m: n for m, n in counts.items() if m >= floor},
+        month_counts={m: counts.get(m, 0) for m in count_window(freeze_month, floor)},
     )
 
 
@@ -240,6 +251,8 @@ def freeze_pot_v2(
     declaration_id: int | None = None
     try:
         with conn.transaction():
+            # One snapshot for every measured term; ``transaction_timestamp()`` is its instant (Codex ckpt-1).
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             _lock_trial(cast(psycopg.Connection[tuple], conn), v2.STRATEGY_ID, policy.STRATEGY_VERSION)
             exists, existing_sha = _existing_doc_sha256(conn, v2.STRATEGY_ID)
             if exists:
@@ -295,7 +308,10 @@ def freeze_pot_v2(
     except errors.UniqueViolation as exc:
         if exc.diag.constraint_name not in _ROOT_CONSTRAINTS:
             raise
-        refusals.append("already_frozen")
+        # Another family member froze concurrently and took this sequence (its lock is its own): retry, not a refusal
+        # of this identity.
+        family = exc.diag.constraint_name == "ranking_pot_declarations_family_seq_unique"
+        refusals.append("family_seq_race" if family else "already_frozen")
         declaration_id = None
     applied = apply and not refusals and declaration_id is not None
     return FreezeReport(
