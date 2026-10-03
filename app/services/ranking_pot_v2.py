@@ -68,6 +68,8 @@ FLOOR_REFERENCE_MONTHS: Final = 24
 Classification = Literal["unclassifiable", "indeterminate", "routine", "opportunistic"]
 DtcMissing = Literal["no_row", "null", "non_finite", "negative", "not_available", "default_zero"]
 DtcRefusal = Literal["dtc_unavailable", "dtc_incomplete"]
+#: §4 / Appendix A S2-a: `insider_history_floor_moved` before scoring, `insider_read_failed` after it.
+InsiderRefusal = Literal["insider_history_floor_moved", "insider_read_failed"]
 StrataRefusal = Literal["stratum_too_small"]
 PairKey = tuple[str, str, int]  # (filer CIK, issuer CIK, purchase year)
 
