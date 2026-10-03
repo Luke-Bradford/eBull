@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 
 from app.providers.implementations.sec_submissions import FilingIndexRow
-from app.services.sec_manifest import is_amendment_form, map_form_to_source
+from app.services.sec_manifest import complete_submission_url, is_amendment_form, map_form_to_source
 
 logger = logging.getLogger(__name__)
 
@@ -115,9 +115,14 @@ def parse_getcurrent_atom(body: bytes) -> Iterator[FilingIndexRow]:
                 accepted_at = None
         filed_at = accepted_at if accepted_at is not None else datetime.now(tz=UTC)
 
+        # #3590 — the ``alternate`` link is the filing INDEX page, not a
+        # document; recording it as the primary document made every Form
+        # 3/4/5 parser fetch HTML and tombstone. Record the complete
+        # submission ``.txt`` instead (the daily-index URL shape).
         primary_url: str | None = None
         if link_el is not None:
-            primary_url = link_el.attrib.get("href") or None
+            href = link_el.attrib.get("href") or None
+            primary_url = (complete_submission_url(href) or href) if href else None
 
         yield FilingIndexRow(
             accession_number=accession,

@@ -55,6 +55,8 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
+from app.services.sec_manifest import is_filing_index_url
+
 DocumentKind = Literal[
     "primary_doc",
     "infotable_13f",
@@ -443,9 +445,17 @@ def stored_body(
 
     Only valid for retained kinds (a payload reader on a SWEPT kind is
     barred by ``tests/test_raw_payload_retention.py``); SWEPT kinds always
-    return ``None`` here and fall through to the fetch path."""
+    return ``None`` here and fall through to the fetch path.
+
+    ⚠ "Present == fresh" holds only if the stored body is the right
+    DOCUMENT. #3590: bodies fetched from an EDGAR filing-INDEX page
+    (``source_url`` ``…-index.htm``) were stored under document kinds such
+    as ``form4_xml``; reusing one re-parses HTML and re-tombstones forever.
+    Such a body is never reused — the caller re-fetches from its own URL."""
     doc = read_raw(conn, accession_number=accession_number, document_kind=document_kind)
-    return doc.payload if doc is not None else None
+    if doc is None or is_filing_index_url(doc.source_url):
+        return None
+    return doc.payload
 
 
 def _row_to_document(row: dict[str, Any]) -> RawFilingDocument:
