@@ -390,6 +390,8 @@ class Rebalance:
                     "u_dtc": str(u.dtc[iid]),
                     "u_ins": str(u.ins[iid]),
                     "composite": str(u.composite[iid]),
+                    # The stored value when usable; a chosen but unusable row is ``None`` here, with its reason in
+                    # ``dtc_missing`` and its date and source still given below.
                     "dtc": None if iid not in self.dtc or row is None else str(row.days_to_cover),
                     "dtc_missing": self.dtc_read.missing.get(iid),
                     "dtc_settlement_date": None if row is None else row.settlement_date.isoformat(),
