@@ -157,6 +157,7 @@ class PotStatusV2Response(BaseModel):
     looks: list[V2LookResponse]
     looks_withheld: bool
     holdings: list[V2HoldingResponse]
+    holdings_withheld: bool
 
 
 @router.get("/status", response_model=PotStatusResponse)

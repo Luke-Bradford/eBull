@@ -92,7 +92,9 @@ class PotStatusV2:
     #: Empty with ``looks_withheld`` when a stored look's ``detail.v2`` fails to decode (the server log has it).
     looks: tuple[Look, ...]
     looks_withheld: bool
+    #: Empty with ``holdings_withheld`` when the shadow's checkpoint or its stored reasons fail to decode.
     holdings: tuple[Holding, ...]
+    holdings_withheld: bool
 
 
 _LATEST_COMPLETED_SQL: Final = """
@@ -112,6 +114,8 @@ _ENTRIES_SQL: Final = """
      ORDER BY session
 """
 
+#: The checkpoint is at the last stepped session, so the NAV is that session's step row (any step, not only an
+#: applied rebalance's): both describe the book as it stands. The reasons come from decisions, hence applied rows only.
 _SHADOW_SQL: Final = """
     SELECT c.state, (SELECT s.shadow ->> 'nav' FROM ranking_pot_steps s
                       WHERE s.declaration_id = c.declaration_id ORDER BY s.session DESC LIMIT 1)
@@ -214,20 +218,27 @@ def _looks(conn: Conn, declaration_id: int) -> tuple[tuple[Look, ...], bool]:
     ), False
 
 
-def _holdings(conn: Conn, declaration_id: int) -> tuple[list[Holding], Decimal | None]:
+def _holdings(conn: Conn, declaration_id: int) -> tuple[list[Holding], Decimal | None, bool]:
+    """(holdings, shadow NAV, withheld). A checkpoint or reason that does not decode withholds the holdings (logged),
+    as a malformed look withholds the looks, rather than failing the whole page."""
     row = conn.execute(_SHADOW_SQL, (declaration_id, st.SHADOW_BOOK)).fetchone()
     if row is None:  # not stepped yet
-        return [], None
-    book = st.decode_book(row[0])
-    entries = [(r[0], r[1]) for r in conn.execute(_ENTRIES_SQL, (declaration_id,)).fetchall()]
-    ids = st.book_names(book.state)
-    symbols = {
-        int(r[0]): str(r[1])
-        for r in conn.execute(
-            "SELECT instrument_id, symbol FROM instruments WHERE instrument_id = ANY(%s)", (ids,)
-        ).fetchall()
-    }
-    return holdings(book, entries, symbols), None if row[1] is None else Decimal(row[1])
+        return [], None, False
+    nav = None if row[1] is None else Decimal(row[1])
+    try:
+        book = st.decode_book(row[0])
+        entries = [(r[0], r[1]) for r in conn.execute(_ENTRIES_SQL, (declaration_id,)).fetchall()]
+        ids = st.book_names(book.state)
+        symbols = {
+            int(r[0]): str(r[1])
+            for r in conn.execute(
+                "SELECT instrument_id, symbol FROM instruments WHERE instrument_id = ANY(%s)", (ids,)
+            ).fetchall()
+        }
+        return holdings(book, entries, symbols), nav, False
+    except KeyError, IndexError, TypeError, ValueError, ArithmeticError:
+        logger.exception("ranking pot v2: declaration %s's shadow checkpoint does not decode", declaration_id)
+        return [], nav, True
 
 
 def load_status(conn: Conn, *, now: datetime | None = None) -> PotStatusV2:
@@ -251,6 +262,7 @@ def load_status(conn: Conn, *, now: datetime | None = None) -> PotStatusV2:
             looks=(),
             looks_withheld=False,
             holdings=(),
+            holdings_withheld=False,
         )
     d = decl.declaration_id
     head = conn.execute(s1._DECLARATION_SQL, (d,)).fetchone()
@@ -262,7 +274,7 @@ def load_status(conn: Conn, *, now: datetime | None = None) -> PotStatusV2:
     step = conn.execute(s1._STEP_SQL, {"d": d}).fetchone()
     assert step is not None  # one row by construction
     looks, withheld = _looks(conn, d)
-    held, nav = _holdings(conn, d)
+    held, nav, held_withheld = _holdings(conn, d)
     return PotStatusV2(
         **base,
         declaration=s1.Declaration(
@@ -279,6 +291,7 @@ def load_status(conn: Conn, *, now: datetime | None = None) -> PotStatusV2:
         looks=looks,
         looks_withheld=withheld,
         holdings=tuple(held),
+        holdings_withheld=held_withheld,
     )
 
 

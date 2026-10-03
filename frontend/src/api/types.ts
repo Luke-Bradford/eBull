@@ -3875,6 +3875,8 @@ export interface RankingPotV2StatusResponse {
   /** A stored look failed to decode: the looks are withheld (server log). */
   looks_withheld: boolean;
   holdings: RankingPotV2Holding[];
+  /** The shadow's checkpoint or its stored reasons did not decode: the holdings are withheld (server log). */
+  holdings_withheld: boolean;
 }
 
 /** The fields the v2 panel headlines; the full document is shown raw beneath them. */

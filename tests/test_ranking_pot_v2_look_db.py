@@ -166,7 +166,7 @@ def test_v2_looks_are_stored_once_under_v2s_hash_and_wind_the_seat_down(
         (12, "unevaluable", None),
         (24, looks[1][5]["v2"]["v2_verdict"], None),
     ]
-    assert not page.looks_withheld and page.shadow_nav is not None and page.step is not None
+    assert not (page.looks_withheld or page.holdings_withheld) and page.shadow_nav is not None and page.step is not None
     assert sorted(h.instrument_id for h in page.holdings) == [1, 5]
     assert all(h.reasons is not None and int(h.reasons["instrument_id"]) == h.instrument_id for h in page.holdings)
     view = ps2.load_readout(conn)

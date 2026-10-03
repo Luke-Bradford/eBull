@@ -31,6 +31,7 @@ const EMPTY: RankingPotV2StatusResponse = {
   looks: [],
   looks_withheld: false,
   holdings: [],
+  holdings_withheld: false,
 };
 
 const HELD: RankingPotV2Holding = {
@@ -135,5 +136,18 @@ describe("RankingPotV2Panel", () => {
     expect(screen.queryByText("Not passed")).not.toBeInTheDocument();
     expect(screen.getByText(/v1 reference not met · turnover met/)).toBeInTheDocument();
     expect(await screen.findByText(/No session has been stepped yet/)).toBeInTheDocument();
+  });
+
+  it("withholds undecodable holdings instead of showing them, and never renders an empty value as zero", async () => {
+    vi.spyOn(rankingPotApi, "fetchRankingPotV2Status").mockResolvedValue({
+      ...SHADOW,
+      shadow_nav: "",
+      holdings: [],
+      holdings_withheld: true,
+    });
+    vi.spyOn(rankingPotApi, "fetchRankingPotV2Readout").mockReturnValue(new Promise(() => {}));
+    render(<RankingPotV2Panel />);
+    expect(await screen.findByText(/holdings are withheld/)).toBeInTheDocument();
+    expect(screen.queryByText(/NAV 0\.000/)).not.toBeInTheDocument();
   });
 });

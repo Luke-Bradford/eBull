@@ -30,11 +30,15 @@ const VERDICT: Record<string, { text: string; tone: BadgeTone }> = {
   unevaluable: { text: "Unevaluable", tone: "neutral" },
 };
 
-/** An exact `p/q` (or decimal) string as a 3-dp number; anything unparseable is shown as stored. */
+const EXACT = /^(-?\d+(?:\.\d+)?)(?:\/(\d+))?$/;
+
+/** An exact `p/q` (or decimal) string shown to 3 dp (display only; the stored value is exact). Anything else —
+ * empty, malformed, a zero denominator — is shown as stored, never as a number it is not. */
 function exact(value: string | null): string {
   if (value === null) return "—";
-  const [p, q] = value.split("/");
-  const parsed = q === undefined ? Number(p) : Number(p) / Number(q);
+  const match = EXACT.exec(value);
+  if (match === null) return value === "" ? "—" : value;
+  const parsed = match[2] === undefined ? Number(match[1]) : Number(match[1]) / Number(match[2]);
   return Number.isFinite(parsed) ? parsed.toFixed(3) : value;
 }
 
@@ -285,7 +289,12 @@ function PotBody({ status }: { status: RankingPotV2StatusResponse }) {
               </span>
             ) : null}
           </h3>
-          {status.holdings.length === 0 ? (
+          {status.holdings_withheld ? (
+            <p className="mt-1 text-sm text-red-700 dark:text-red-400">
+              The shadow book&apos;s stored state does not decode, so its holdings are withheld (details in the server
+              log).
+            </p>
+          ) : status.holdings.length === 0 ? (
             <p className="mt-1 text-sm text-slate-500">The shadow book holds nothing yet.</p>
           ) : (
             <ul className="mt-1 divide-y divide-slate-200 dark:divide-slate-800" aria-label="Pot v2 shadow holdings">
