@@ -1157,6 +1157,34 @@ def is_amendment_form(form: str) -> bool:
     return canonical in _NON_SUFFIX_AMENDMENT_FORMS
 
 
+# #3590 — the EDGAR filing INDEX page: ``{archive}/{cik}/{acc_nodash}/{acc}-index.htm``.
+# It lists a filing's documents; it is never one of them. The getcurrent Atom
+# feed's ``<link rel="alternate">`` points here.
+_FILING_INDEX_URL_RE: Final = re.compile(
+    r"^(?P<base>https://www\.sec\.gov/Archives/edgar/data/\d+)/\d{18}/"
+    r"(?P<acc>\d{10}-\d{2}-\d{6})-index\.html?$"
+)
+
+
+def is_filing_index_url(url: str | None) -> bool:
+    """True when ``url`` is an EDGAR filing-index page, not a document."""
+    return url is not None and _FILING_INDEX_URL_RE.match(url) is not None
+
+
+def complete_submission_url(index_url: str) -> str | None:
+    """Map a filing-index URL to the filing's complete submission text file.
+
+    ``{archive}/{cik}/{acc}.txt`` is the ``Filename`` field of EDGAR's
+    ``master.idx`` (``.claude/skills/data-sources/sec-edgar.md`` §1 "Indexes +
+    Atom feeds") — the URL shape daily-index discovery records and every
+    manifest parser already consumes. ``None`` when ``index_url`` is not a
+    filing-index page."""
+    m = _FILING_INDEX_URL_RE.match(index_url)
+    if m is None:
+        return None
+    return f"{m['base']}/{m['acc']}.txt"
+
+
 # Per-cohort form allow-list for the bulk submissions.zip filer-writer
 # (#1337 P1 — see docs/proposals/etl/bulk-first-bootstrap.md §4). The
 # bulk path emits ``sec_filing_manifest`` rows for filer-cohort CIKs
