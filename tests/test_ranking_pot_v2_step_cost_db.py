@@ -58,6 +58,7 @@ from app.services import ranking_pot_v2_look as v2look
 from app.services import ranking_pot_v2_step as st
 from app.services.ai_trial_freeze import read_provenance
 from app.services.ai_trial_pack import canonical_sha256
+from app.services.market_calendar import us_market_status
 from app.services.ranking_pot_v2_declaration import decode_frozen
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.workers.scheduler import JOB_RANKING_POT_STEP, JOB_RANKING_POT_V2_STEP, SCHEDULED_JOBS
@@ -81,8 +82,9 @@ def _sessions(first: date, count: int) -> list[date]:
 
 
 def _prev_session(d: date) -> date:
+    """The NYSE session before ``d`` (``sim.next_session``'s calendar, run backwards)."""
     p = d - timedelta(days=1)
-    while sim.next_session(p) != d:
+    while us_market_status(p) == "closed":
         p -= timedelta(days=1)
     return p
 
