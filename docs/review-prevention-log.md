@@ -11848,6 +11848,8 @@ neighbouring container and match it.**
 - Prevention: a fact whose context ends after its own `filed_date` is not a reported period of that filing; drop
   it before any per-filing anchor is taken (`_fact_period_ended_by_filing`), keep it in the raw layer as filed.
   When a derivation feeds a merge keyed on a LABEL, the A/B must diff the merge's survivors, not just the
-  derived rows.
+  derived rows. A merge phase that deletes persisted rows by predicate logs what it removed (`RETURNING`) and
+  states at the call site why its key cannot false-fire (here: `filed_date` is the latest contributing filing,
+  so an amendment only raises it).
 - Enforced in: `tests/test_financial_normalization.py::TestFuturePeriodFactExcluded3547` and
   `tests/test_canonical_merge_arrival_order_624.py::TestFuturePeriodRowRemoved3547` (Phase B3).

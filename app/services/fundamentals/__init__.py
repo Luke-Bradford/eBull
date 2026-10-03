@@ -2229,16 +2229,23 @@ def _canonical_merge_instrument(
     # survive a rewash once their facts age out of the retention-swept raw layer,
     # so they must be removed here. Runs AFTER the insert so a stale
     # ``financial_periods_raw`` row (an instrument with no facts left to rewash
-    # it) cannot re-insert one either.
-    conn.execute(
+    # it) cannot re-insert one either. A row's ``filed_date`` is the LATEST filing
+    # among its facts, so a later amendment only raises it: the predicate holds
+    # only when every contributing filing predates the period end. NULL never
+    # matches. Hard delete, like B and B2 — this table is derived state; I6
+    # soft-close binds the observation tables.
+    b3 = conn.execute(
         """
         DELETE FROM financial_periods fp
         WHERE fp.instrument_id = %(iid)s
           AND fp.source = 'sec_edgar'
           AND fp.period_end_date > fp.filed_date
+        RETURNING fp.period_type, fp.period_end_date, fp.filed_date
         """,
         {"iid": instrument_id},
-    )
+    ).fetchall()
+    if b3:
+        logger.info("financial_periods B3 (#3547): instrument %d dropped future-period rows %s", instrument_id, b3)
 
     return upserted
 
