@@ -165,6 +165,33 @@ def test_history_floor_refusals() -> None:
         v2.history_floor({date(2026, 1, 2): 1}, freeze_month=date(2026, 10, 1))
 
 
+def test_guarded_months_are_the_live_history_windows_from_the_floor() -> None:
+    frozen = _months(date(2023, 1, 1), [100] * 45)  # 2023-01 .. 2026-09
+    floor = date(2023, 7, 1)
+    # Target 2026-10-05: window 2026-04..09, purchase year 2026 → history 2023–2025, from the floor.
+    months = v2.guarded_months(frozen, history_floor=floor, target_session=date(2026, 10, 5))
+    assert (months[0], months[-1], len(months)) == (date(2023, 7, 1), date(2025, 12, 1), 30)
+    # Target 2027-01-05: window 2026-07..12, still purchase year 2026 only.
+    assert v2.guarded_months(frozen, history_floor=floor, target_session=date(2027, 1, 5)) == months
+    # Target 2027-03-02: window 2026-09..2027-02 spans 2026 and 2027 → history 2023–2026.
+    spanning = v2.guarded_months(frozen, history_floor=floor, target_session=date(2027, 3, 2))
+    assert (spanning[0], spanning[-1]) == (date(2023, 7, 1), date(2026, 9, 1))
+    # Target 2027-08-02: window 2027-02..07, purchase year 2027 → 2024–2026: 2023 has aged out.
+    aged = v2.guarded_months(frozen, history_floor=floor, target_session=date(2027, 8, 2))
+    assert aged[0] == date(2024, 1, 1)
+
+
+def test_history_floor_moved_names_months_below_95_percent() -> None:
+    frozen = {date(2024, 1, 1): 100, date(2024, 2, 1): 100, date(2024, 3, 1): 100, date(2023, 6, 1): 100}
+    live = {date(2024, 1, 1): 95, date(2024, 2, 1): 94, date(2023, 6, 1): 0}
+    moved = v2.history_floor_moved(frozen, live, history_floor=date(2023, 7, 1), target_session=date(2026, 10, 5))
+    # 95 is not below 95%; an absent month counts 0; a month before the floor is never checked.
+    assert moved == (date(2024, 2, 1), date(2024, 3, 1))
+    assert (
+        v2.history_floor_moved(frozen, frozen, history_floor=date(2023, 7, 1), target_session=date(2026, 10, 5)) == ()
+    )
+
+
 def test_floor_at_the_first_years_start_is_cmp_exactly() -> None:
     cells = [(2023, 8), (2024, 3), (2025, 3)]
     assert _classify(cells, date(2023, 1, 1)) == _classify(cells) == "opportunistic"
