@@ -112,6 +112,7 @@ from app.services.return_attribution import (
     persist_attribution_summary,
 )
 from app.services.scoring import _DEFAULT_MODEL_VERSION, compute_rankings
+from app.services.session_rate_capture import capture_session_rates, session_open
 from app.services.strategy_core_eligibility import CORE_ELIGIBILITY_PASS_VERDICT
 from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
@@ -584,6 +585,8 @@ JOB_ETORO_INVESTOR_SNAPSHOT = "etoro_investor_snapshot"
 # #3381 slice 3 — the forward-only daily record of rates, eligibility (incl. x1
 # short availability) and what-if open costs. eToro serves no history for any of them.
 JOB_ETORO_PERISHABLES_SNAPSHOT = "etoro_perishables_snapshot"
+# #3545 — hourly eToro bid/ask for the validated universe while the NYSE session is open.
+JOB_ETORO_SESSION_RATES_CAPTURE = "etoro_session_rates_capture"
 # #3471 — the AI-discretionary-v1 demo trial: the after-close decision run (claim, pack, one
 # tool-less model call, one-transaction publish) and the in-session execution of its legs.
 JOB_AI_TRIAL_DECISION_RUN = "ai_trial_decision_run"
@@ -992,6 +995,13 @@ def _strategy_halt_collection_due(conn: psycopg.Connection[Any]) -> Prerequisite
         return (False, reason)
     if not _strategy_halt_collection_window_open(datetime.now(tz=UTC)):
         return (False, "outside the US pre-open/regular-session halt safety window")
+    return (True, "")
+
+
+def _nyse_session_open_now(_conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """#3545: the NYSE regular session is open now (the job re-checks it in its body)."""
+    if not session_open(datetime.now(tz=UTC)):
+        return (False, "the NYSE regular session is not open")
     return (True, "")
 
 
@@ -3104,6 +3114,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=True,
         rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_SESSION_RATES_CAPTURE,
+        display_name="eToro session rates capture — hourly bid/ask for the cost model's universe (#3545)",
+        # Same SOURCE lane as the #3381 recorders (no new lane). :37 UTC is :37 ET in both DST
+        # regimes, so the session fires are 09:37-15:37 ET (7 a full day, 4 a half day). Clear of
+        # core_eligibility_refresh (:20), quotes_refresh (:23) and the daily recorder (19:07,
+        # measured <= 23 min). Spec: docs/proposals/etl/2026-10-03-3545-session-rate-capture.md.
+        source="etoro_crowd",
+        description=(
+            "Hourly while the NYSE regular session is open — record eToro bid/ask for the validated "
+            "universe (the cost model's calibration population), so a recalibration can see every hour "
+            "of the session rather than the one the daily recorder samples. Forward-only."
+        ),
+        cadence=Cadence.hourly(minute=37),
+        # No catch-up and no rearm: a capture late enough to miss its hour is not that hour's
+        # sample. A lost hour stays absent and the coverage report shows it.
+        catch_up_on_boot=False,
+        prerequisite=_all_of(_bootstrap_complete, _nyse_session_open_now),
     ),
     ScheduledJob(
         name=JOB_CORE_ELIGIBILITY_REFRESH,
@@ -7775,6 +7804,43 @@ def etoro_perishables_snapshot() -> None:
             result.eligibility_rows,
             result.rate_rows,
             result.whatif_ok,
+        )
+
+
+def etoro_session_rates_capture() -> None:
+    """Append one session rates capture (#3545 slice 1), or skip when the session is not open.
+
+    Read-only: market-data rates only. A failed capture commits its own ``failed`` row; a ``partial`` one
+    commits and then raises, so the run never reports success for lost requests.
+    """
+    creds = _load_etoro_credentials(JOB_ETORO_SESSION_RATES_CAPTURE)
+    if creds is None:
+        _record_prereq_skip(JOB_ETORO_SESSION_RATES_CAPTURE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    if settings.etoro_env != "demo":
+        # The client is the perishables recorder's, which records the demo account only and refuses any
+        # other environment at construction. A visible skip, not a crash with no capture row.
+        _record_prereq_skip(JOB_ETORO_SESSION_RATES_CAPTURE, f"etoro_env {settings.etoro_env!r} is not demo")
+        return
+    if not session_open(datetime.now(tz=UTC)):
+        _record_prereq_skip(JOB_ETORO_SESSION_RATES_CAPTURE, "the NYSE regular session is not open")
+        return
+
+    with _tracked_job(JOB_ETORO_SESSION_RATES_CAPTURE) as tracker:
+        with (
+            EtoroPerishablesProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            connect_job() as conn,
+        ):
+            result = capture_session_rates(conn, provider)
+        tracker.row_count = result.row_count
+        logger.info(
+            "etoro_session_rates_capture: capture %s %s — universe %d, %d served, %d quoted",
+            result.capture_id,
+            result.status,
+            result.universe_size,
+            result.instruments_served,
+            result.instruments_quoted,
         )
 
 
