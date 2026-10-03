@@ -20,6 +20,19 @@
 //
 // Revert path: when pnpm ships bulk-advisory audit support, swap the CI
 // step back to `pnpm --dir frontend audit --audit-level high`.
+//
+// Accepted advisories (#3594): an advisory with NO patched version cannot be
+// cleared by an upgrade, so without an exception it fails every PR. An entry
+// below is honoured only while (a) today is before its `until` date — after
+// that the gate fails again and the entry must be re-justified or removed —
+// and (b) the package is NOT reachable from production dependencies. (b) is
+// a graph closure, not a tree walk: pnpm prints a shared subtree once and
+// every later occurrence as a childless `deduped` node, so a package first
+// expanded under a dev root would look dev-only (Codex ckpt-2, #3594). The
+// closure starts at the production roots and follows each name@version to its
+// one expanded occurrence anywhere in the listing; a deduped node with no
+// expansion is a harness failure (exit 2). Accepted findings are printed,
+// never hidden.
 
 const BULK_URL = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk";
 const SEVERITY_ORDER = { low: 0, moderate: 1, high: 2, critical: 3 };
@@ -32,6 +45,19 @@ const RETRY_DELAY_MS = 2000;
 // Fail fast into the documented exit(2) instead of hanging the CI job on a
 // stalled TCP connection (PR #2037 review WARNING).
 const FETCH_TIMEOUT_MS = 30_000;
+
+const ACCEPTED_ADVISORIES = [
+  {
+    // braces <= 3.0.3 stack-exhaustion DoS; first_patched_version null and
+    // 3.0.3 is the latest release. Reached only via tailwindcss (dev) ->
+    // chokidar/micromatch: build-time expansion of our own config globs.
+    url: "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+    name: "braces",
+    issue: "#3594",
+    // Re-check date, by construction 30 days from acceptance (2026-10-03).
+    until: "2026-11-02",
+  },
+];
 
 function parseArgs(argv) {
   const i = argv.indexOf("--audit-level");
@@ -49,6 +75,77 @@ async function readStdin() {
   return data;
 }
 
+// The registry package name: pnpm keys an aliased dependency
+// (`alias: npm:real@x`) by its alias and puts the real name in `from` (Codex
+// ckpt-2, #3594). Auditing or proving reachability by alias would miss it.
+function packageName(key, info) {
+  return typeof info.from === "string" && info.from.length > 0 ? info.from : key;
+}
+
+// Every package name reachable from the production roots
+// (dependencies/optionalDependencies), as a closure over package INSTANCES:
+// pnpm's `path` (the store directory) identifies one resolved instance, peer
+// variants included, and a `deduped` node carries the same `path` as its one
+// expanded occurrence, wherever pnpm printed it (verified on the real tree:
+// 101 of 101 deduped paths are expanded elsewhere). Exit 2 on anything that
+// would leave the closure incomplete — a node without a version or path, or a
+// deduped path never expanded — because an incomplete production set fails
+// OPEN (Codex ckpt-2, #3594).
+function productionClosure(projects) {
+  const nodes = new Map(); // path -> { name, children: [path] } (expanded occurrences)
+  const deduped = new Set();
+  const pathOf = (key, info) => {
+    if (!info || typeof info.version !== "string" || typeof info.path !== "string" || info.path.length === 0) {
+      console.error(`dependency ${key} has no version or path; cannot prove production reachability`);
+      process.exit(2);
+    }
+    return info.path;
+  };
+  const index = (deps) => {
+    for (const [key, info] of Object.entries(deps ?? {})) {
+      const path = pathOf(key, info);
+      if (info.deduped) {
+        deduped.add(path);
+      } else {
+        // Union, never overwrite: one instance can print more than once, and a
+        // circular back-edge prints as a childless non-deduped stub (Codex
+        // ckpt-2) — overwriting would truncate the closure and fail OPEN.
+        const kids = Object.entries(info.dependencies ?? {}).map(([k, c]) => pathOf(k, c));
+        const node = nodes.get(path) ?? { name: packageName(key, info), children: new Set() };
+        for (const kid of kids) node.children.add(kid);
+        nodes.set(path, node);
+      }
+      index(info.dependencies);
+    }
+  };
+  const roots = [];
+  for (const project of projects) {
+    index(project.dependencies);
+    index(project.devDependencies);
+    index(project.optionalDependencies);
+    for (const deps of [project.dependencies, project.optionalDependencies]) {
+      for (const [key, info] of Object.entries(deps ?? {})) roots.push(pathOf(key, info));
+    }
+  }
+  const unexpanded = [...deduped].filter((p) => !nodes.has(p));
+  if (unexpanded.length > 0) {
+    console.error(`deduped but never expanded in the listing: ${unexpanded.join(", ")}`);
+    process.exit(2);
+  }
+  const names = new Set();
+  const seen = new Set();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const p = stack.pop();
+    if (seen.has(p)) continue;
+    seen.add(p);
+    const node = nodes.get(p);
+    names.add(node.name);
+    stack.push(...node.children);
+  }
+  return names;
+}
+
 // Walk `pnpm list --json` output: an array of projects, each with
 // dependencies/devDependencies/optionalDependencies maps of
 // name -> {version, dependencies?: <nested same shape>}.
@@ -56,8 +153,9 @@ function collectPackages(projects) {
   const versions = new Map(); // name -> Set(version)
   const visit = (deps) => {
     if (!deps) return;
-    for (const [name, info] of Object.entries(deps)) {
+    for (const [key, info] of Object.entries(deps)) {
       if (!info || typeof info.version !== "string") continue;
+      const name = packageName(key, info);
       if (!versions.has(name)) versions.set(name, new Set());
       versions.get(name).add(info.version);
       visit(info.dependencies);
@@ -69,6 +167,15 @@ function collectPackages(projects) {
     visit(project.optionalDependencies);
   }
   return versions;
+}
+
+// Why an at/above-floor finding is accepted, or null when it blocks.
+function acceptance(finding, prod, today) {
+  const entry = ACCEPTED_ADVISORIES.find((a) => a.url === finding.url && a.name === finding.name);
+  if (!entry) return null;
+  if (today >= entry.until) return { blocked: `exception ${entry.issue} expired ${entry.until}` };
+  if (prod.has(finding.name)) return { blocked: `exception ${entry.issue} void: reachable from production dependencies` };
+  return { accepted: `dev-only, no patch; ${entry.issue} until ${entry.until}` };
 }
 
 async function postChunk(chunk, attempt = 1) {
@@ -110,7 +217,9 @@ try {
   console.error("stdin was not valid JSON — expected `pnpm list --depth Infinity --json` output");
   process.exit(2);
 }
-const versions = collectPackages(Array.isArray(projects) ? projects : [projects]);
+const projectList = Array.isArray(projects) ? projects : [projects];
+const versions = collectPackages(projectList);
+const prod = productionClosure(projectList);
 if (versions.size === 0) {
   // Fail-closed: an empty set means the list step broke, not a clean tree.
   console.error("no packages collected from stdin — refusing to pass an empty audit");
@@ -149,17 +258,28 @@ if (unknown.length > 0) {
   console.error(`unrecognized severity values from the bulk endpoint: ${unknown.map((f) => `${f.name}:${f.severity}`).join(", ")}`);
   process.exit(2);
 }
+const today = new Date().toISOString().slice(0, 10);
 const atOrAbove = findings.filter((f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[floor]);
 const below = findings.length - atOrAbove.length;
+const blocking = [];
 console.log(`audited ${versions.size} packages against the npm bulk advisory endpoint`);
 if (below > 0) console.log(`${below} advisories below the '${floor}' floor (ignored)`);
-if (atOrAbove.length === 0) {
-  console.log(`no advisories at or above '${floor}'`);
+for (const f of atOrAbove) {
+  const verdict = acceptance(f, prod, today);
+  if (verdict?.accepted) {
+    console.log(`ACCEPTED [${f.severity}] ${f.name} (installed: ${f.installed}) — ${f.url} — ${verdict.accepted}`);
+  } else {
+    blocking.push({ ...f, note: verdict?.blocked });
+  }
+}
+if (blocking.length === 0) {
+  console.log(`no unaccepted advisories at or above '${floor}'`);
   process.exit(0);
 }
-console.error(`\n${atOrAbove.length} advisories at or above '${floor}':`);
-for (const f of atOrAbove) {
+console.error(`\n${blocking.length} advisories at or above '${floor}':`);
+for (const f of blocking) {
   console.error(`  [${f.severity}] ${f.name} (installed: ${f.installed}; vulnerable: ${f.range})`);
   console.error(`    ${f.title} — ${f.url}`);
+  if (f.note) console.error(`    ${f.note}`);
 }
 process.exit(1);
