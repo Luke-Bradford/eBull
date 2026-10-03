@@ -11,9 +11,8 @@
 // so no client-side semver matching is needed.
 //
 // Usage (CI):
-//   pnpm --dir frontend list --prod --depth Infinity --json > prod-tree.json
 //   pnpm --dir frontend list --depth Infinity --json \
-//     | node scripts/audit_frontend_bulk.mjs --audit-level high --prod-tree prod-tree.json
+//     | node scripts/audit_frontend_bulk.mjs --audit-level high
 //
 // Exit codes: 0 = no advisory at/above the floor; 1 = advisories found;
 // 2 = harness failure (empty package set, endpoint error) — fail-closed,
@@ -26,16 +25,14 @@
 // cleared by an upgrade, so without an exception it fails every PR. An entry
 // below is honoured only while (a) today is before its `until` date — after
 // that the gate fails again and the entry must be re-justified or removed —
-// and (b) the package is NOT reachable from production dependencies,
-// read on every run from the `--prod-tree` listing (`pnpm list --prod`). The
-// combined listing cannot answer (b): pnpm prints a shared subtree once and
+// and (b) the package is NOT reachable from production dependencies. (b) is
+// a graph closure, not a tree walk: pnpm prints a shared subtree once and
 // every later occurrence as a childless `deduped` node, so a package first
-// expanded under a dev root looks dev-only (Codex ckpt-2, #3594). Within the
-// prod-only listing every deduped node is expanded elsewhere in that same
-// listing, which the script checks; no `--prod-tree` means no exception.
-// Accepted findings are printed, never hidden.
-
-import { readFileSync } from "node:fs";
+// expanded under a dev root would look dev-only (Codex ckpt-2, #3594). The
+// closure starts at the production roots and follows each name@version to its
+// one expanded occurrence anywhere in the listing; a deduped node with no
+// expansion is a harness failure (exit 2). Accepted findings are printed,
+// never hidden.
 
 const BULK_URL = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk";
 const SEVERITY_ORDER = { low: 0, moderate: 1, high: 2, critical: 3 };
@@ -69,8 +66,13 @@ function parseArgs(argv) {
     console.error(`unknown --audit-level ${level}; expected one of ${Object.keys(SEVERITY_ORDER)}`);
     process.exit(2);
   }
-  const j = argv.indexOf("--prod-tree");
-  return { level, prodTree: j >= 0 ? argv[j + 1] : null };
+  return level;
+}
+
+async function readStdin() {
+  let data = "";
+  for await (const chunk of process.stdin) data += chunk;
+  return data;
 }
 
 // The registry package name: pnpm keys an aliased dependency
@@ -80,82 +82,68 @@ function packageName(key, info) {
   return typeof info.from === "string" && info.from.length > 0 ? info.from : key;
 }
 
-// Every package name reachable from production roots, from a `pnpm list
-// --prod` listing, plus the listing's root keys (checked against the combined
-// listing by the caller). Exit 2 (harness failure) on anything that would make
-// the closure incomplete — an empty listing, a node without a version, a
-// deduped name never expanded: an incomplete production set would read as
-// "dev-only" and fail OPEN (Codex ckpt-2, #3594).
-function productionNames(path) {
-  let projects;
-  try {
-    projects = JSON.parse(readFileSync(path, "utf8"));
-  } catch (err) {
-    console.error(`--prod-tree ${path} unreadable: ${err.message}`);
+// Every package name reachable from the production roots
+// (dependencies/optionalDependencies), as a closure over package INSTANCES:
+// pnpm's `path` (the store directory) identifies one resolved instance, peer
+// variants included, and a `deduped` node carries the same `path` as its one
+// expanded occurrence, wherever pnpm printed it (verified on the real tree:
+// 101 of 101 deduped paths are expanded elsewhere). Exit 2 on anything that
+// would leave the closure incomplete — a node without a version or path, or a
+// deduped path never expanded — because an incomplete production set fails
+// OPEN (Codex ckpt-2, #3594).
+function productionClosure(projects) {
+  const nodes = new Map(); // path -> { name, children: [path] } (expanded occurrences)
+  const deduped = new Set();
+  const pathOf = (key, info) => {
+    if (!info || typeof info.version !== "string" || typeof info.path !== "string" || info.path.length === 0) {
+      console.error(`dependency ${key} has no version or path; cannot prove production reachability`);
+      process.exit(2);
+    }
+    return info.path;
+  };
+  const index = (deps) => {
+    for (const [key, info] of Object.entries(deps ?? {})) {
+      const path = pathOf(key, info);
+      if (info.deduped) {
+        deduped.add(path);
+      } else {
+        // Union, never overwrite: one instance can print more than once, and a
+        // circular back-edge prints as a childless non-deduped stub (Codex
+        // ckpt-2) — overwriting would truncate the closure and fail OPEN.
+        const kids = Object.entries(info.dependencies ?? {}).map(([k, c]) => pathOf(k, c));
+        const node = nodes.get(path) ?? { name: packageName(key, info), children: new Set() };
+        for (const kid of kids) node.children.add(kid);
+        nodes.set(path, node);
+      }
+      index(info.dependencies);
+    }
+  };
+  const roots = [];
+  for (const project of projects) {
+    index(project.dependencies);
+    index(project.devDependencies);
+    index(project.optionalDependencies);
+    for (const deps of [project.dependencies, project.optionalDependencies]) {
+      for (const [key, info] of Object.entries(deps ?? {})) roots.push(pathOf(key, info));
+    }
+  }
+  const unexpanded = [...deduped].filter((p) => !nodes.has(p));
+  if (unexpanded.length > 0) {
+    console.error(`deduped but never expanded in the listing: ${unexpanded.join(", ")}`);
     process.exit(2);
   }
   const names = new Set();
-  const roots = new Set();
-  const expanded = new Set();
-  const deduped = new Set();
-  const visit = (deps) => {
-    if (!deps) return;
-    for (const [key, info] of Object.entries(deps)) {
-      if (!info || typeof info.version !== "string") {
-        console.error(`--prod-tree ${path}: dependency ${key} has no version`);
-        process.exit(2);
-      }
-      const name = packageName(key, info);
-      names.add(name);
-      if (info.deduped) deduped.add(name);
-      else expanded.add(name);
-      visit(info.dependencies);
-    }
-  };
-  const list = Array.isArray(projects) ? projects : [projects];
-  if (list.length === 0) {
-    console.error(`--prod-tree ${path} lists no project`);
-    process.exit(2);
+  const seen = new Set();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const p = stack.pop();
+    if (seen.has(p)) continue;
+    seen.add(p);
+    const node = nodes.get(p);
+    names.add(node.name);
+    stack.push(...node.children);
   }
-  for (const project of list) {
-    for (const k of [...Object.keys(project.dependencies ?? {}), ...Object.keys(project.optionalDependencies ?? {})]) {
-      roots.add(k);
-    }
-    if (project.devDependencies && Object.keys(project.devDependencies).length > 0) {
-      console.error(`--prod-tree ${path} lists devDependencies; expected \`pnpm list --prod\` output`);
-      process.exit(2);
-    }
-    visit(project.dependencies);
-    visit(project.optionalDependencies);
-  }
-  const unexpanded = [...deduped].filter((n) => !expanded.has(n));
-  if (unexpanded.length > 0) {
-    console.error(`--prod-tree ${path}: deduped but never expanded: ${unexpanded.join(", ")}`);
-    process.exit(2);
-  }
-  if (names.size === 0) {
-    console.error(`--prod-tree ${path}: no production packages collected`);
-    process.exit(2);
-  }
-  return { names, roots };
-}
-
-// The prod listing must describe the same production roots as the combined
-// listing on stdin; otherwise it is a different or truncated tree.
-function sameRoots(prodRoots, projects) {
-  const combined = new Set();
-  for (const project of projects) {
-    for (const k of [...Object.keys(project.dependencies ?? {}), ...Object.keys(project.optionalDependencies ?? {})]) {
-      combined.add(k);
-    }
-  }
-  return combined.size === prodRoots.size && [...combined].every((k) => prodRoots.has(k));
-}
-
-async function readStdin() {
-  let data = "";
-  for await (const chunk of process.stdin) data += chunk;
-  return data;
+  return names;
 }
 
 // Walk `pnpm list --json` output: an array of projects, each with
@@ -181,13 +169,11 @@ function collectPackages(projects) {
   return versions;
 }
 
-// Why an at/above-floor finding is accepted, or null when it blocks. `prod`
-// is null when no --prod-tree was given: no exception can then be honoured.
+// Why an at/above-floor finding is accepted, or null when it blocks.
 function acceptance(finding, prod, today) {
   const entry = ACCEPTED_ADVISORIES.find((a) => a.url === finding.url && a.name === finding.name);
   if (!entry) return null;
   if (today >= entry.until) return { blocked: `exception ${entry.issue} expired ${entry.until}` };
-  if (prod === null) return { blocked: `exception ${entry.issue} needs --prod-tree to prove the package dev-only` };
   if (prod.has(finding.name)) return { blocked: `exception ${entry.issue} void: reachable from production dependencies` };
   return { accepted: `dev-only, no patch; ${entry.issue} until ${entry.until}` };
 }
@@ -222,8 +208,7 @@ async function postChunk(chunk, attempt = 1) {
   return res.json();
 }
 
-const { level: floor, prodTree } = parseArgs(process.argv.slice(2));
-const prodListing = prodTree === null ? null : productionNames(prodTree);
+const floor = parseArgs(process.argv.slice(2));
 const raw = await readStdin();
 let projects;
 try {
@@ -234,11 +219,7 @@ try {
 }
 const projectList = Array.isArray(projects) ? projects : [projects];
 const versions = collectPackages(projectList);
-if (prodListing !== null && !sameRoots(prodListing.roots, projectList)) {
-  console.error(`--prod-tree ${prodTree}: its production roots differ from the combined listing's`);
-  process.exit(2);
-}
-const prod = prodListing === null ? null : prodListing.names;
+const prod = productionClosure(projectList);
 if (versions.size === 0) {
   // Fail-closed: an empty set means the list step broke, not a clean tree.
   console.error("no packages collected from stdin — refusing to pass an empty audit");
