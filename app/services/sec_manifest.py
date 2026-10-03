@@ -1157,11 +1157,12 @@ def is_amendment_form(form: str) -> bool:
     return canonical in _NON_SUFFIX_AMENDMENT_FORMS
 
 
-# #3590 — the EDGAR filing INDEX page: ``{archive}/{cik}/{acc_nodash}/{acc}-index.htm``.
-# It lists a filing's documents; it is never one of them. The getcurrent Atom
-# feed's ``<link rel="alternate">`` points here.
+# #3590 — the EDGAR filing INDEX page: ``{archive}/{cik}/{acc_nodash}/{acc}-index.htm``,
+# or the flat ``{archive}/{cik}/{acc}-index.htm``. It lists a filing's documents;
+# it is never one of them. The getcurrent Atom feed's ``<link rel="alternate">``
+# points here.
 _FILING_INDEX_URL_RE: Final = re.compile(
-    r"^(?P<base>https://www\.sec\.gov/Archives/edgar/data/\d+)/\d{18}/"
+    r"^(?P<base>https://www\.sec\.gov/Archives/edgar/data/\d+)/(?:\d{18}/)?"
     r"(?P<acc>\d{10}-\d{2}-\d{6})-index\.html?$"
 )
 

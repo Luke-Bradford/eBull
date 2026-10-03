@@ -30,6 +30,12 @@ _TXT = "https://www.sec.gov/Archives/edgar/data/1813814/0001104659-26-112062.txt
         ("https://www.sec.gov/Archives/edgar/data/1813814/000110465926112062/form4.xml", False, None),
         # ``-index-headers.html`` is a different page and keeps its URL.
         (_INDEX.replace("-index.htm", "-index-headers.html"), False, None),
+        # The flat shape (no accession folder).
+        (
+            "https://www.sec.gov/Archives/edgar/data/320193/0000320193-26-000042-index.htm",
+            True,
+            "https://www.sec.gov/Archives/edgar/data/320193/0000320193-26-000042.txt",
+        ),
         # A one-digit CIK folder.
         (
             "https://www.sec.gov/Archives/edgar/data/7/000000000726000001/0000000007-26-000001-index.htm",

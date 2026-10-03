@@ -448,7 +448,7 @@ def stored_body(
     return ``None`` here and fall through to the fetch path.
 
     ⚠ "Present == fresh" holds only if the stored body is the right
-    DOCUMENT. #3590: ~31k bodies fetched from an EDGAR filing-INDEX page
+    DOCUMENT. #3590: bodies fetched from an EDGAR filing-INDEX page
     (``source_url`` ``…-index.htm``) were stored under document kinds such
     as ``form4_xml``; reusing one re-parses HTML and re-tombstones forever.
     Such a body is never reused — the caller re-fetches from its own URL."""
