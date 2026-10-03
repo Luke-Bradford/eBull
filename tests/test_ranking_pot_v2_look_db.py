@@ -20,6 +20,8 @@ from psycopg.types.json import Jsonb
 from app.services import ranking_pot_look as look
 from app.services import ranking_pot_readout_v2 as ro2
 from app.services import ranking_pot_rebalance as rb
+from app.services import ranking_pot_status as s1
+from app.services import ranking_pot_status_v2 as ps2
 from app.services import ranking_pot_v2 as v2
 from app.services import ranking_pot_v2_look as v2look
 from app.services import ranking_pot_v2_step as st
@@ -154,6 +156,22 @@ def test_v2_looks_are_stored_once_under_v2s_hash_and_wind_the_seat_down(
     assert "missing_donor_dtc" in out and "missing_donors" not in out
     assert out["turnover_occupancy"]["per_rebalance"][0]["missing_donor_dtc_share"]["r_size"] == len(R5)
     assert [(lk["look_months"], lk["invalidated"]) for lk in out["looks"]] == [(12, None), (24, None)]
+
+    # Slice 4c: the page reads the same declaration (v1's page never does), its looks by v2's verdict, and the
+    # shadow's holdings with the reasons the step stored at their entry.
+    page = ps2.load_status(conn, now=_at(TUE))
+    assert page.declaration is not None and page.declaration.state == "winding_down"
+    assert s1.page_declaration(conn) is None
+    assert [(lk.look_months, lk.v2_verdict, lk.invalidated_by) for lk in page.looks] == [
+        (12, "unevaluable", None),
+        (24, looks[1][5]["v2"]["v2_verdict"], None),
+    ]
+    assert not (page.looks_withheld or page.holdings_withheld) and page.shadow_nav is not None and page.step is not None
+    assert sorted(h.instrument_id for h in page.holdings) == [1, 5]
+    assert all(h.reasons is not None and int(h.reasons["instrument_id"]) == h.instrument_id for h in page.holdings)
+    view = ps2.load_readout(conn)
+    assert (view.reason, view.endpoint) == (None, TUE) and view.readout is not None
+    assert view.readout["reference"]["per_rebalance"] == ref["per_rebalance"]
 
     conn.autocommit = False
     twelve = int(out["looks"][0]["look_id"])

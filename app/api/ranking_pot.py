@@ -1,4 +1,5 @@
-"""#2842 slice 7 — ``GET /ranking-pot/status`` and ``GET /ranking-pot/readout``.
+"""#2842 slice 7 — ``GET /ranking-pot/status`` and ``GET /ranking-pot/readout``; #3592 slice 4c — the same pair for
+ranking-pot-v2 under ``/ranking-pot/v2/`` (``app.services.ranking_pot_status_v2``).
 
 Reads over stored rows (``app.services.ranking_pot_status``). They grant nothing and trigger nothing; the pot's
 freeze and activation stay with the supervisor scripts. The readout is its own route because it walks every step
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 from app.api.ai_trial import JobFireResponse
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
+from app.services import ranking_pot_status_v2 as status_v2
 from app.services.ranking_pot_exec import Status
 from app.services.ranking_pot_status import load_readout, load_status
 
@@ -114,6 +116,50 @@ class PotReadoutResponse(BaseModel):
     reason: str | None
 
 
+class V2LookResponse(BaseModel):
+    look_id: int
+    look_months: int
+    endpoint: date
+    v2_verdict: str
+    harm: bool
+    reasons: list[str]
+    reference_condition: bool | None
+    turnover_condition: bool | None
+    invalidated_by: int | None
+    invalidated_note: str | None
+
+
+class V2HoldingResponse(BaseModel):
+    instrument_id: int
+    symbol: str | None
+    state: str
+    slot: int | None
+    entry_session: date
+    entry_fill: Decimal | None
+    invested: Decimal | None
+    value: Decimal | None
+    last_close: Decimal | None
+    last_close_session: date | None
+    stop_loss: Decimal | None
+    take_profit: Decimal | None
+    reasons: dict[str, Any] | None
+
+
+class PotStatusV2Response(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    build_complete: bool
+    declaration: DeclarationResponse | None
+    jobs: list[JobFireResponse]
+    rebalances: list[RebalanceResponse]
+    step: StepResponse | None
+    shadow_nav: Decimal | None
+    looks: list[V2LookResponse]
+    looks_withheld: bool
+    holdings: list[V2HoldingResponse]
+    holdings_withheld: bool
+
+
 @router.get("/status", response_model=PotStatusResponse)
 def get_ranking_pot_status(conn: psycopg.Connection[object] = Depends(get_conn)) -> PotStatusResponse:
     return PotStatusResponse.model_validate(asdict(load_status(conn)))  # type: ignore[arg-type]
@@ -122,3 +168,13 @@ def get_ranking_pot_status(conn: psycopg.Connection[object] = Depends(get_conn))
 @router.get("/readout", response_model=PotReadoutResponse)
 def get_ranking_pot_readout(conn: psycopg.Connection[object] = Depends(get_conn)) -> PotReadoutResponse:
     return PotReadoutResponse.model_validate(asdict(load_readout(conn)))  # type: ignore[arg-type]
+
+
+@router.get("/v2/status", response_model=PotStatusV2Response)
+def get_ranking_pot_v2_status(conn: psycopg.Connection[object] = Depends(get_conn)) -> PotStatusV2Response:
+    return PotStatusV2Response.model_validate(asdict(status_v2.load_status(conn)))  # type: ignore[arg-type]
+
+
+@router.get("/v2/readout", response_model=PotReadoutResponse)
+def get_ranking_pot_v2_readout(conn: psycopg.Connection[object] = Depends(get_conn)) -> PotReadoutResponse:
+    return PotReadoutResponse.model_validate(asdict(status_v2.load_readout(conn)))  # type: ignore[arg-type]

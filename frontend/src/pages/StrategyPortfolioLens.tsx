@@ -25,6 +25,7 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { AiTrialPanel } from "@/components/strategies/AiTrialPanel";
 import { EngineBookRiskPanel } from "@/components/strategies/EngineBookRiskPanel";
 import { RankingPotPanel } from "@/components/strategies/RankingPotPanel";
+import { RankingPotV2Panel } from "@/components/strategies/RankingPotV2Panel";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
 import {
   AccountEvidence,
@@ -533,6 +534,7 @@ export function StrategyPortfolioLens() {
       {/* #3516: the AI trials are strategies too, so their status sits with
           the pot's results rather than on a separate page. */}
       <RankingPotPanel />
+      <RankingPotV2Panel />
       <AiTrialPanel arm={AI_TRIAL_V1_ARM} title="AI trial (v1)" />
       <AiTrialPanel arm={AI_TRIAL_FUND_V1_ARM} title="AI trial (fund-v1)" />
 

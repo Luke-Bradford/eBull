@@ -3812,6 +3812,99 @@ export interface RankingPotReadoutResponse {
   reason: string | null;
 }
 
+// #3592 slice 4c — `GET /ranking-pot/v2/status` and `/ranking-pot/v2/readout`
+// (`app/services/ranking_pot_status_v2.py`). Shadow-only: no positions, tickets or P&L.
+export interface RankingPotV2Look {
+  look_id: number;
+  look_months: number;
+  endpoint: string;
+  /** `research_pass` · `not_passed` · `unevaluable` (v1's verdict is never headlined for v2). */
+  v2_verdict: string;
+  harm: boolean;
+  reasons: string[];
+  /** Condition 6 (beats the v1-reference book) and 7 (turnover bar); null = unevaluable. */
+  reference_condition: boolean | null;
+  turnover_condition: boolean | null;
+  invalidated_by: number | null;
+  invalidated_note: string | null;
+}
+
+/** §5's per-entry reasons as stored by the step (`Rebalance.explain`); percentiles are exact `p/q` strings. */
+export interface RankingPotV2EntryReasons {
+  instrument_id: number;
+  u_score: string;
+  u_dtc: string;
+  u_ins: string;
+  composite: string;
+  dtc: string | null;
+  dtc_missing: string | null;
+  dtc_settlement_date: string | null;
+  dtc_source_document_id: number | null;
+  accessions: string[];
+  /** [filer CIK, issuer CIK, purchase year, class, the (year, month) cells it was classed from]. */
+  pairs: [string, string, number, string, [number, number][]][];
+}
+
+export interface RankingPotV2Holding {
+  instrument_id: number;
+  symbol: string | null;
+  state: "held" | "pending";
+  slot: number | null;
+  entry_session: string;
+  entry_fill: string | null;
+  invested: string | null;
+  value: string | null;
+  last_close: string | null;
+  last_close_session: string | null;
+  stop_loss: string | null;
+  take_profit: string | null;
+  reasons: RankingPotV2EntryReasons | null;
+}
+
+export interface RankingPotV2StatusResponse {
+  strategy_id: string;
+  strategy_version: string;
+  build_complete: boolean;
+  declaration: RankingPotDeclaration | null;
+  jobs: AiTrialJobFire[];
+  rebalances: RankingPotRebalance[];
+  step: RankingPotStep | null;
+  /** The shadow book's NAV (starts at 1) at `step.latest_session`. */
+  shadow_nav: string | null;
+  looks: RankingPotV2Look[];
+  /** A stored look failed to decode: the looks are withheld (server log). */
+  looks_withheld: boolean;
+  holdings: RankingPotV2Holding[];
+  /** The shadow's checkpoint or its stored reasons did not decode: the holdings are withheld (server log). */
+  holdings_withheld: boolean;
+}
+
+/** The fields the v2 panel headlines; the full document is shown raw beneath them. */
+export interface RankingPotV2ReadoutDoc {
+  endpoint: string;
+  sessions: number;
+  policy_drift: boolean;
+  lifecycles: {
+    count: number;
+    mean: string | null;
+    median: string | null;
+    profit_factor: { value: string | null; wins: number; losses: number; flat: number };
+  };
+  reference: {
+    nav_return: { shadow: string | null; reference: string | null; shadow_minus_reference: string | null };
+    t: { shadow: string | null; reference: string | null };
+  };
+  deflated_sharpe: { dsr: string | null; reason: string | null };
+  [key: string]: unknown;
+}
+
+export interface RankingPotV2ReadoutResponse {
+  declaration_id: number | null;
+  endpoint: string | null;
+  readout: RankingPotV2ReadoutDoc | null;
+  reason: string | null;
+}
+
 // #3543 slice 2 — `GET /strategies/engine-book-risk` (`app/api/strategies.py`).
 // Measurement only. Decimals arrive as strings; every `*_pct` is in percent POINTS.
 export interface EngineBookRiskCheck {

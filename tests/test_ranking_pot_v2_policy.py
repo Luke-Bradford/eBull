@@ -118,6 +118,15 @@ def test_the_readout_stays_outside_the_hash() -> None:
     assert not hashed & {"ranking_pot_readout_v2", "ranking_pot_readout", "ranking_pot_exec_readout"}
 
 
+def test_the_page_reader_stays_outside_the_hash() -> None:
+    """Slice 4c: the page reader composes the readout and v1's page reader; it decides nothing, and hashing it would
+    drift the seat on a label change."""
+    assert not (SERVICES / "ranking_pot_v2_status.py").exists()  # a v2-prefixed name would make it a root
+    assert "ranking_pot_status_v2" not in _closure(roots(), pot_only=False)
+    hashed = {name.removesuffix(".py") for name in policy.POLICY_MODULES}
+    assert not hashed & {"ranking_pot_status_v2", "ranking_pot_status"}
+
+
 def test_scorer_imports_are_exactly_scoring_py_in_repo_imports() -> None:
     assert policy.SCORER_IMPORTS == tuple(sorted(f"{m}.py" for m in imports_of("scoring")))
 
