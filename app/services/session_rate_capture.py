@@ -262,6 +262,8 @@ def _record_failure(
         try:
             capture_id = _write(conn, attempt, started_at, finished_at, STATUS_FAILED, error)
         except Exception:
+            # No explicit rollback needed: `_write`'s `conn.transaction()` block has already rolled back
+            # on the way out, so the connection is usable for the bare retry.
             logger.exception("session rate capture failed (%s) and its failed row could not be written", error)
             continue
         logger.warning("session rate capture %d failed: %s", capture_id, error)
