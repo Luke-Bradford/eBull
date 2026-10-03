@@ -153,6 +153,8 @@ the rate — it does not.
   Shared with ``etoro_investor_snapshot`` (#3381 slice 2, daily 22:07 UTC,
   quotas G and H) and ``etoro_perishables_snapshot`` (#3381 slice 3, daily
   19:07 UTC, quotas B, C and F): the lane serialises the three recorders.
+  ``etoro_session_rates_capture`` (#3545, hourly at :37 while the NYSE session
+  is open, ~135 requests of quota F) joins them for the same reason.
 * ``etoro_core_eligibility`` — ``core_eligibility_refresh`` (#2603 item 2).
   Both split off ``etoro`` because the multi-hour candle sweep spans their fire
   times: the daily 22:45 observation lost 4 of 4 fires and had **never completed
