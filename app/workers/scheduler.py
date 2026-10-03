@@ -597,6 +597,8 @@ JOB_RANKING_POT_STEP = "ranking_pot_step"
 JOB_RANKING_POT_EXECUTE = "ranking_pot_execute"
 # #3592 — ranking-pot-v2's monthly rebalance (shadow-only; v1's orchestration copied, v2's factor gates and snapshot).
 JOB_RANKING_POT_V2_REBALANCE = "ranking_pot_v2_rebalance"
+# #3592 — ranking-pot-v2's online step: shadow, controls, variant and the v1-reference book.
+JOB_RANKING_POT_V2_STEP = "ranking_pot_v2_step"
 # #2603 item 2, the revalidation half — re-ask the broker about instruments
 # already proved on this account, so a proof does not age past
 # CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
@@ -912,6 +914,9 @@ RANKING_POT_EXECUTE_FIRE_MINUTE: Final = 5
 #: #3592 — ranking-pot-v2's hourly rebalance minute: a copy of ``ranking_pot_v2_job.FIRE_MINUTE`` (policy-hashed there;
 #: ``tests/test_ranking_pot_v2_job.py`` pins the two equal). After v1's :40 on the same lane (v2 spec §4).
 RANKING_POT_V2_FIRE_MINUTE: Final = 50
+#: #3592 slice 4a — v2's step minute. Not policy-relevant (v1's step reasoning): a session is stepped at whichever fire
+#: first finds it due; :25 keeps it clear of v1's :05 / :10 / :40 and v2's :50 on the lane.
+RANKING_POT_V2_STEP_FIRE_MINUTE: Final = 25
 
 
 def ai_trial_decision_window_open(now: datetime) -> bool:
@@ -2895,6 +2900,22 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=RANKING_POT_V2_FIRE_MINUTE),
         # A late fire is the next hourly fire's work: the body re-derives the window and the month.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_RANKING_POT_V2_STEP,
+        display_name="Ranking pot v2 daily step (#3592)",
+        # The rebalances' lane, so a step never overlaps the publication it may consume.
+        source="db",
+        description=(
+            "Hourly — ranking-pot-v2's online books (shadow only): from 09:00 UTC after each NYSE session, advances "
+            "the shadow, the 9,999 stratified controls, the no-SL/TP variant and the v1-reference book one session "
+            "from that session's stored bars, applying a published v2 rebalance first when one targets the session. "
+            "Refuses (and retries) when too many bars are missing. Does nothing before the first decided rebalance."
+        ),
+        cadence=Cadence.hourly(minute=RANKING_POT_V2_STEP_FIRE_MINUTE),
+        # The body steps every due session in order, so a missed fire is the next fire's work.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -7169,6 +7190,18 @@ def ranking_pot_v2_rebalance() -> None:
         tracker.row_count = (1 if result.attempt_id is not None else 0) + result.skipped_months
         tracker.note = result.note
         logger.info("%s: %s", JOB_RANKING_POT_V2_REBALANCE, result.note)
+
+
+def ranking_pot_v2_step() -> None:
+    """ranking-pot-v2's online step (#3592 spec §4; ``app/services/ranking_pot_v2_step.py``)."""
+    from app.services.ranking_pot_v2_step import run_step_job
+
+    with _tracked_job(JOB_RANKING_POT_V2_STEP) as tracker:
+        with connect_job(autocommit=True) as conn:
+            result = run_step_job(conn)
+        tracker.row_count = result.stepped
+        tracker.note = result.note
+        logger.info("%s: %s", JOB_RANKING_POT_V2_STEP, result.note)
 
 
 def ranking_pot_step() -> None:
