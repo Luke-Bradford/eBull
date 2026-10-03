@@ -172,7 +172,7 @@ def test_the_v2_step_keeps_k_plus_3_books_and_completes_shadow_only(
     # Drift: the next due session records `policy_drift` and the run fails, and the frozen block is never decoded.
     monkeypatch.setattr(st, "policy_ok", lambda _decl: False)
     calls_before = len(terms_calls)
-    with pytest.raises(RuntimeError, match="policy_drift"):
+    with pytest.raises(RuntimeError, match=r"policy_drift .*\(stepped 0 first\)"):
         st.run_step_job(conn, now=lambda: _at(MON))
     assert len(terms_calls) == calls_before
     refusals = conn.execute(

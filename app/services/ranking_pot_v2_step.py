@@ -1100,13 +1100,18 @@ def run_step_job(conn: Conn, *, now: Callable[[], datetime] = lambda: datetime.n
         logger.info("ranking pot v2 step: %s", outcome.note)
         if outcome.refusal == "policy_drift":
             # Recorded (committed above), then raised: drift is a defect, not a wait, so the job run fails visibly.
-            raise RuntimeError(f"ranking pot v2 {decl.declaration_id}: {outcome.note}")
+            # The sessions this fire already stepped (each committed under the hash it checked) are named in the
+            # error, so the failed run still reports its progress.
+            raise RuntimeError(f"ranking pot v2 {decl.declaration_id}: {outcome.note} (stepped {stepped} first)")
         if not outcome.stepped:
             break
         stepped += 1
     if terms is None or not policy_ok(decl):
-        # No step was due to record the refusal: drift still fails the run.
-        raise RuntimeError(f"ranking pot v2 {decl.declaration_id}: policy drift ({'; '.join(notes)})")
+        # No step was due to record the refusal: drift still fails the run, with this fire's progress in the error.
+        # `completed` is deliberately not written under a drifted hash: it waits for the drift to be resolved.
+        raise RuntimeError(
+            f"ranking pot v2 {decl.declaration_id}: policy drift, stepped {stepped} ({'; '.join(notes)})"
+        )
     _complete(conn, decl, notes)
     return StepJobResult("; ".join(notes), stepped)
 
