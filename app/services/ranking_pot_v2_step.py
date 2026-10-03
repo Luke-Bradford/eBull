@@ -361,16 +361,24 @@ class Rebalance:
         row (or the missing reason) and its qualifying purchases with each pair's class and cells."""
         if self.dtc_read is None or self.insider is None:
             raise rb.SnapshotIntegrityError(f"attempt {self.attempt_id}: a rebalance without its v2 reads")
+        # Entries are F_t names, and F_t ⊆ R_t by construction (``ranking_pot.universes`` builds both from one loop
+        # over the ranking population); the percentiles exist only over R_t, so a breach is refused, not indexed.
+        if outside := sorted(set(entries) - self.universes.r_ids):
+            raise rb.SnapshotIntegrityError(f"attempt {self.attempt_id}: entries outside R_t {outside[:5]}")
         u = components(self.universes, self.dtc, self.buyers)
+        wanted = set(entries)
+        by_name: dict[int, list[v2.InsiderRow]] = {}
+        for r in self.purchases:
+            if r.instrument_id in wanted:
+                by_name.setdefault(r.instrument_id, []).append(r)
         out = []
         for iid in entries:
             row = self.dtc_read.chosen.get(iid)
             pairs = sorted(
                 {
                     key
-                    for r in self.purchases
-                    if r.instrument_id == iid
-                    and r.accession in self.insider.qualifying.get(iid, ())
+                    for r in by_name.get(iid, ())
+                    if r.accession in self.insider.qualifying.get(iid, ())
                     and (key := (r.filer_cik or "", r.issuer_cik or "", r.txn_date.year)) in self.insider.pair_class
                     and self.insider.pair_class[key] == "opportunistic"
                 }

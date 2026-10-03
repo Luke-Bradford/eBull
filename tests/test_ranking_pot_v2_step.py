@@ -149,6 +149,8 @@ def test_explain_reproduces_the_composite_and_names_the_purchases() -> None:
     assert (four["dtc"], four["dtc_missing"], four["accessions"], four["pairs"]) == (None, "no_row", [], [])
     with pytest.raises(rb.SnapshotIntegrityError, match="v2 reads"):
         _rebalance(R5, set(R5), {}, set()).explain([1])
+    with pytest.raises(rb.SnapshotIntegrityError, match="outside R_t"):
+        reb.explain([5, 99])
 
 
 def _v2_doc(monkeypatch: pytest.MonkeyPatch, *, policy_hash: str = RANKING_POT_V2_POLICY_HASH) -> dict[str, Any]:
