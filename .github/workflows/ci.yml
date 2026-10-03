@@ -268,9 +268,14 @@ jobs:
         # set -o pipefail: the default Actions shell is ``bash -e`` WITHOUT
         # pipefail — a failing ``pnpm list`` would otherwise be masked by a
         # passing audit script reading truncated-but-parseable JSON.
+        # --prod-tree (#3594): a production-only listing, from which the
+        # script decides whether an accepted advisory's package is dev-only
+        # (the combined listing prints shared subtrees once, as childless
+        # ``deduped`` nodes, so it cannot answer that).
         run: |
           set -o pipefail
-          pnpm --dir frontend list --depth Infinity --json | node scripts/audit_frontend_bulk.mjs --audit-level high
+          pnpm --dir frontend list --prod --depth Infinity --json > "$RUNNER_TEMP/frontend-prod-tree.json"
+          pnpm --dir frontend list --depth Infinity --json | node scripts/audit_frontend_bulk.mjs --audit-level high --prod-tree "$RUNNER_TEMP/frontend-prod-tree.json"
 
       - name: Set up Python
         uses: actions/setup-python@v5
