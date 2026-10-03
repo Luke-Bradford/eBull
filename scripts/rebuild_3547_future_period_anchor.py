@@ -54,8 +54,8 @@ SELECT
      WHERE superseded_at IS NULL AND source = 'sec_edgar' AND period_end_date > filed_date),
     (SELECT count(*) FROM fundamentals_snapshot WHERE as_of_date > current_date),
     (SELECT count(*) FROM ownership_treasury_observations
-     WHERE source = 'xbrl_dei' AND known_to IS NULL AND period_end > filed_at::date),
-    (SELECT count(*) FROM ownership_treasury_current WHERE period_end > filed_at::date)
+     WHERE source = 'xbrl_dei' AND known_to IS NULL AND period_end > (filed_at AT TIME ZONE 'UTC')::date),
+    (SELECT count(*) FROM ownership_treasury_current WHERE period_end > (filed_at AT TIME ZONE 'UTC')::date)
 """
 
 # Instruments normalization skipped: it ``continue``s when no facts remain, so
@@ -71,14 +71,15 @@ ORDER BY 1
 _PHANTOM_TREASURY_SQL = """
 UPDATE ownership_treasury_observations
 SET known_to = now()
-WHERE source = 'xbrl_dei' AND known_to IS NULL AND period_end > filed_at::date
+WHERE source = 'xbrl_dei' AND known_to IS NULL AND period_end > (filed_at AT TIME ZONE 'UTC')::date
 RETURNING instrument_id
 """
 
 
 def _counts(conn: psycopg.Connection[tuple]) -> tuple[int, ...]:
     row = conn.execute(_COUNTS_SQL).fetchone()
-    assert row is not None
+    if row is None:
+        raise RuntimeError("count query returned no row")
     return tuple(row)
 
 
