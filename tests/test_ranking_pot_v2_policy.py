@@ -161,4 +161,4 @@ def test_v1_and_v2_hash_disjoint_pot_modules() -> None:
     """v1's hash never covers a v2 module, so building v2 cannot drift v1; v2 hashes no v1 executed-book module
     through C (``test_no_executed_book_module_is_in_c``)."""
     assert not any(m.startswith("ranking_pot_v2") for m in v1_policy.POLICY_MODULES)
-    assert "ranking_pot_policy.py" not in roots()
+    assert "ranking_pot_policy" not in roots()  # stems, as roots() returns
