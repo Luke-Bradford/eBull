@@ -1,6 +1,7 @@
 """#3592 slice 4b-i — v2's looks against real Postgres (spec §7; Appendix A R2-16–20): the step job computes each
 look once its endpoint is stepped, reading the reference column beside the shadow; one ``result`` row per look under
-v2's hash with ``detail.v2``; the last look winds the seat down; a refused target is counted, not averaged.
+v2's hash with ``detail.v2``; the last look winds the seat down; a month with no decided attempt is counted, not
+averaged.
 
 Endpoints are pulled in to the next sessions and bars are synthetic (``tests/test_ranking_pot_v2_look.py`` covers the
 arithmetic); the database parts are real."""
@@ -47,7 +48,7 @@ def _decide(conn: Conn, decl: int) -> None:
         month=FRI.replace(day=1),
         **_decided(snapshot=Jsonb(snapshot), snapshot_sha256=canonical_sha256(snapshot)),
     )
-    # A refused target inside E_24's window: counted beside the turnover mean, never in it.
+    # A refusal in T₀'s own month: never a skipped month.
     _insert(conn, decl, target_session=TUE, month=TUE.replace(day=1))
     conn.commit()
 
@@ -101,7 +102,7 @@ def test_v2_looks_are_stored_once_under_v2s_hash_and_wind_the_seat_down(
         "bar": None,
         "rebalances": 0,  # the only applied rebalance is the initial fill
         "entered": [],
-        "skipped_targets": 0,
+        "skipped_months": 0,
     }
     assert look.look_pending(conn, decl, TUE) is None
 
@@ -109,7 +110,7 @@ def test_v2_looks_are_stored_once_under_v2s_hash_and_wind_the_seat_down(
     assert second.stepped == 1 and "winding_down (completed_window)" in second.note, second.note
     looks = _looks(conn, decl)
     assert [r[0] for r in looks] == [12, 24]
-    assert looks[1][5]["v2"]["turnover"]["skipped_targets"] == 1  # TUE's refused target
+    assert looks[1][5]["v2"]["turnover"]["skipped_months"] == 0
     state = conn.execute(
         "SELECT to_state, wind_down_reason FROM ranking_pot_state_events WHERE declaration_id = %s "
         "ORDER BY event_id DESC LIMIT 1",
@@ -135,3 +136,31 @@ def test_a_drifted_v2_look_is_not_computed(ebull_test_conn: Conn, monkeypatch: p
     out = st.run_step_job(conn, now=lambda: _at(FRI))
     assert out.stepped == 1 and "look 12m not computed: policy drift" in out.note, out.note
     assert _looks(conn, decl) == []
+
+
+def test_skipped_months_are_keyed_on_month_not_target(ebull_test_conn: Conn) -> None:
+    conn = ebull_test_conn
+    decl = _declare(conn)
+    _decide(conn, decl)  # T₀ = FRI; plus a refusal in T₀'s own month
+    attempts: list[dict[str, Any]] = [
+        # November refused twice (a retry): one month.
+        {"target_session": date(2026, 11, 2), "month": date(2026, 11, 1)},
+        {"target_session": date(2026, 11, 2), "month": date(2026, 11, 1)},
+        # December refused on one target, decided on a later one: not skipped.
+        {"target_session": date(2026, 12, 1), "month": date(2026, 12, 1)},
+        _decided(target_session=date(2026, 12, 2), month=date(2026, 12, 1)),
+        # January skipped by catch-up against February's target, which is decided: January counts, February not.
+        {
+            "target_session": date(2027, 2, 1),
+            "month": date(2027, 1, 1),
+            "outcome": "skipped",
+            "refusal": "not_attempted",
+        },
+        _decided(target_session=date(2027, 2, 1), month=date(2027, 2, 1)),
+    ]
+    for over in attempts:
+        _insert(conn, decl, **over)
+    conn.commit()
+    assert v2look._skipped_months(conn, decl, t0=FRI, end=date(2026, 11, 30)) == 1
+    assert v2look._skipped_months(conn, decl, t0=FRI, end=date(2026, 12, 31)) == 1  # by target: 2 (12-01)
+    assert v2look._skipped_months(conn, decl, t0=FRI, end=date(2027, 2, 26)) == 2  # November and January

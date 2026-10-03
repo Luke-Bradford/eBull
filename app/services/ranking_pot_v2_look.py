@@ -22,8 +22,8 @@ What differs from v1, and nothing else:
   ``reference_t_undefined`` when it has no records.
 - **Condition 7, turnover (§2).** The mean over the decided rebalances applied in T₀ … E **after the first** (the
   initial fill is not turnover) of the shadow's ``entered`` at that step (lifecycles opened at the target session) / N,
-  against the declaration's frozen ``turnover_bar`` (≤). Months whose target session has no decided attempt are not in
-  the mean; their count is stored. ``None`` with no rebalance after the first, which minimum evidence already makes
+  against the declaration's frozen ``turnover_bar`` (≤). Rebalance months with no decided attempt are not in the mean;
+  their count is stored. ``None`` with no rebalance after the first, which minimum evidence already makes
   unevaluable (lifecycles open only at applied rebalances, so ≥ 2N lifecycles needs one after the first fill).
 - **One representation, one insert (§7 "Verdict").** The ``result`` row's ``verdict`` / ``harm`` / ``reasons`` are
   v1's own; ``detail.v2`` holds conditions 6–7 with their operands, the v2 reasons and ``v2_verdict``:
@@ -106,7 +106,7 @@ def evaluate(
     h0: Decimal,
     h_end: Decimal,
     turnover_bar: Fraction,
-    skipped_targets: int,
+    skipped_months: int,
 ) -> look.LookResult:
     """§7: v1's evaluation with zero execution, then conditions 6–7 and ``v2_verdict`` in ``detail.v2``."""
     v1 = look.evaluate(shadow, terms, h0=h0, h_end=h_end, execution=NO_EXECUTION)
@@ -157,7 +157,7 @@ def evaluate(
             "bar": look._f(turnover_bar),
             "rebalances": len(turnover_facts.entries),
             "entered": [[d.isoformat(), e] for d, e in turnover_facts.entries],
-            "skipped_targets": skipped_targets,
+            "skipped_months": skipped_months,
         },
         "v2_verdict": v2_verdict,
     }
@@ -172,25 +172,51 @@ class V2Detail:
     condition_7: bool | None
 
 
+_REFERENCE_KEYS: Final = frozenset(
+    {"t_shadow", "t_reference", "shadow_return", "reference_return", "lifecycles", "occupancy", "sessions"}
+)
+_TURNOVER_KEYS: Final = frozenset({"mean", "bar", "rebalances", "entered", "skipped_months"})
+_BLOCK_KEYS: Final = frozenset({"reasons", "conditions", "reference", "turnover", "v2_verdict"})
+
+
 def v2_detail_of(detail: Mapping[str, Any]) -> V2Detail:
-    """A stored v2 look's ``detail.v2``; raises when it is absent or malformed (§7: readers fail closed)."""
+    """A stored v2 look's ``detail.v2``; raises when it is absent, incomplete, malformed or inconsistent with its own
+    operands (§7: readers fail closed)."""
     block = detail.get("v2")
     if not isinstance(block, Mapping):
         raise rb.SnapshotIntegrityError("a v2 look without its detail.v2 block")
-    verdict, reasons, conditions = block.get("v2_verdict"), block.get("reasons"), block.get("conditions")
+
+    def bad(what: str) -> rb.SnapshotIntegrityError:
+        return rb.SnapshotIntegrityError(f"detail.v2: {what}")
+
+    if set(block) != _BLOCK_KEYS:
+        raise bad(f"keys {sorted(block)}")
+    verdict, reasons, conditions = block["v2_verdict"], block["reasons"], block["conditions"]
+    ref, turn = block["reference"], block["turnover"]
     if verdict not in V2_VERDICTS:
-        raise rb.SnapshotIntegrityError(f"detail.v2: v2_verdict {verdict!r}")
-    if not isinstance(reasons, list) or not all(r in V2_REASONS for r in reasons):
-        raise rb.SnapshotIntegrityError(f"detail.v2: reasons {reasons!r}")
+        raise bad(f"v2_verdict {verdict!r}")
+    if not isinstance(reasons, list) or not all(r in V2_REASONS for r in reasons) or len(set(reasons)) != len(reasons):
+        raise bad(f"reasons {reasons!r}")
     if not isinstance(conditions, Mapping) or set(conditions) != {"6_reference", "7_turnover"}:
-        raise rb.SnapshotIntegrityError(f"detail.v2: conditions {conditions!r}")
+        raise bad(f"conditions {conditions!r}")
+    if not isinstance(ref, Mapping) or set(ref) != _REFERENCE_KEYS:
+        raise bad("reference operands")
+    if not isinstance(turn, Mapping) or set(turn) != _TURNOVER_KEYS:
+        raise bad("turnover operands")
     c6, c7 = conditions["6_reference"], conditions["7_turnover"]
     if not all(c is None or isinstance(c, bool) for c in (c6, c7)):
-        raise rb.SnapshotIntegrityError(f"detail.v2: conditions {conditions!r}")
+        raise bad(f"conditions {conditions!r}")
+    # Each outcome is undefined exactly when one of its operands is.
+    if ("reference_t_undefined" in reasons) != (ref["t_reference"] is None):
+        raise bad("reference_t_undefined disagrees with t_reference")
+    if (c6 is None) != (ref["t_shadow"] is None or ref["t_reference"] is None):
+        raise bad("condition 6 disagrees with its operands")
+    if (c7 is None) != (turn["mean"] is None):
+        raise bad("condition 7 disagrees with its operands")
     if verdict == "research_pass" and (reasons or c6 is not True or c7 is not True):
-        raise rb.SnapshotIntegrityError("detail.v2: research_pass without its conditions")
+        raise bad("research_pass without its conditions")
     if reasons and verdict != "unevaluable":
-        raise rb.SnapshotIntegrityError("detail.v2: v2 reasons on an evaluable verdict")
+        raise bad("v2 reasons on an evaluable verdict")
     return V2Detail(verdict, tuple(reasons), c6, c7)
 
 
@@ -229,13 +255,16 @@ def _step_rows(conn: Conn, declaration_id: int, *, t0: date, end: date, at_end: 
             )
 
 
-def _skipped_targets(conn: Conn, declaration_id: int, *, t0: date, end: date) -> int:
-    """Target sessions in (T₀, E] with an attempt but no decided one: the months not in the turnover mean."""
+def _skipped_months(conn: Conn, declaration_id: int, *, t0: date, end: date) -> int:
+    """Rebalance months after T₀'s with an attempt targeting a session ≤ E but no decided attempt: the months not in
+    the turnover mean. Keyed on ``month``, not ``target_session``: a month refused on one target and decided on a later
+    one is not skipped, and catch-up months recorded against one current target each count."""
     row = conn.execute(
-        "SELECT count(DISTINCT target_session) FROM ranking_pot_rebalance_attempts a "
-        "WHERE a.declaration_id = %(d)s AND a.target_session > %(t0)s AND a.target_session <= %(e)s "
+        "SELECT count(DISTINCT a.month) FROM ranking_pot_rebalance_attempts a "
+        "WHERE a.declaration_id = %(d)s AND a.month > date_trunc('month', %(t0)s::date)::date "
+        "AND a.target_session <= %(e)s "
         "AND NOT EXISTS (SELECT 1 FROM ranking_pot_rebalance_attempts b WHERE b.declaration_id = %(d)s "
-        "                AND b.target_session = a.target_session AND b.outcome = 'decided')",
+        "                AND b.month = a.month AND b.outcome = 'decided')",
         {"d": declaration_id, "t0": t0, "e": end},
     ).fetchone()
     return 0 if row is None else int(row[0])
@@ -278,7 +307,7 @@ def compute_look(conn: Conn, decl: rb.PotDeclaration, *, months: int, t0: date) 
         h0=spreads[0][1],
         h_end=spreads[-1][1],
         turnover_bar=Fraction(t["turnover_bar"]),
-        skipped_targets=_skipped_targets(conn, decl.declaration_id, t0=t0, end=end),
+        skipped_months=_skipped_months(conn, decl.declaration_id, t0=t0, end=end),
     )
     result.detail.update(look_months=months, anniversary=look.anniversary(t0, months).isoformat())
     return result

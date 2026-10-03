@@ -52,7 +52,7 @@ def _eval(shadow: look.LookFacts | None = None, reference: look.LookFacts | None
         h0=D("0.001"),
         h_end=D("0.001"),
         turnover_bar=BAR,
-        skipped_targets=kw.pop("skipped", 0),
+        skipped_months=kw.pop("skipped", 0),
     )
 
 
@@ -122,7 +122,7 @@ def test_turnover_excludes_the_initial_fill_and_unapplied_sessions() -> None:
         "bar": "1/2",
         "rebalances": 0,
         "entered": [],
-        "skipped_targets": 3,
+        "skipped_months": 3,
     }
     assert skipped.detail["v2"]["conditions"]["7_turnover"] is None
     assert skipped.detail["v2"]["v2_verdict"] == "not_passed"  # fail closed: an undefined condition never passes
@@ -138,11 +138,20 @@ def test_detail_v2_decode_fails_closed() -> None:
         {"conditions": {"6_reference": True}},
         {"conditions": {"6_reference": "yes", "7_turnover": True}},
         {"conditions": {"6_reference": False, "7_turnover": True}},  # a research_pass without condition 6
-        {"reasons": ["reference_t_undefined"]},  # a v2 reason on an evaluable verdict
+        {"reasons": ["reference_below_minimum"]},  # a v2 reason on an evaluable verdict
+        {"reasons": ["reference_t_undefined"], "v2_verdict": "unevaluable"},  # t_reference is defined
+        {"conditions": {"6_reference": None, "7_turnover": True}, "v2_verdict": "not_passed"},  # operands defined
+        {"conditions": {"6_reference": True, "7_turnover": None}, "v2_verdict": "not_passed"},
+        {"turnover": {"mean": "1/2"}},
+        {"reference": None},
+        {"extra": 1},
     ]
     for over in bad:
         with pytest.raises(rb.SnapshotIntegrityError):
             v2look.v2_detail_of(good | {"v2": good["v2"] | over})
+    missing = {k: v for k, v in good["v2"].items() if k != "turnover"}
+    with pytest.raises(rb.SnapshotIntegrityError, match="keys"):
+        v2look.v2_detail_of(good | {"v2": missing})
 
 
 def test_the_reference_facts_carry_no_controls() -> None:
