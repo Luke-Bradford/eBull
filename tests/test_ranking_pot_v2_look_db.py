@@ -8,8 +8,9 @@ arithmetic); the database parts are real."""
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -17,14 +18,16 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from app.services import ranking_pot_look as look
+from app.services import ranking_pot_readout_v2 as ro2
 from app.services import ranking_pot_rebalance as rb
 from app.services import ranking_pot_v2 as v2
 from app.services import ranking_pot_v2_look as v2look
 from app.services import ranking_pot_v2_step as st
 from app.services.ai_trial_pack import canonical_sha256
 from app.services.ranking_pot_v2_policy import HARM_ALPHA, RANKING_POT_V2_POLICY_HASH, TURNOVER_BAR
+from scripts import ranking_pot_v2_invalidate_look as inv
 from tests.test_ranking_pot_rebalance_db import _decided, _insert
-from tests.test_ranking_pot_step import FLAT
+from tests.test_ranking_pot_step import FLAT, _universes
 from tests.test_ranking_pot_v2_step import R5
 from tests.test_ranking_pot_v2_step_db import FRI, MON, SPY, THU, _at, _declare, _patch
 
@@ -121,6 +124,48 @@ def test_v2_looks_are_stored_once_under_v2s_hash_and_wind_the_seat_down(
     # Exactly once: a later fire computes nothing new.
     st.run_step_job(conn, now=lambda: _at(TUE) + timedelta(hours=1))
     assert len(_looks(conn, decl)) == 2
+
+    # Slice 4b-ii: the readout over the same rows, then an invalidation shown by it.
+    monkeypatch.setattr(
+        rb,
+        "decode_snapshot",
+        lambda doc: SimpleNamespace(
+            target_session=date.fromisoformat(doc["target_session"]),
+            last_session=date.fromisoformat(doc["last_session"]),
+            as_of=datetime(2026, 1, 1, tzinfo=UTC),
+            theses={},
+        ),
+    )
+    monkeypatch.setattr(rb, "universes_of", lambda _inputs: _universes({i: str(10 - i) for i in R5}, set(R5)))
+    loaded = st.load_declaration(conn)
+    assert loaded is not None
+    out = ro2.readout(conn, loaded, TUE)
+    assert conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    ref = out["reference"]
+    assert [s[0] for s in ref["per_session"]] == [FRI.isoformat(), MON.isoformat(), TUE.isoformat()]
+    assert ref["per_session"][-1][3] == looks[1][5]["v2"]["reference"]["t_shadow"]  # one T, the look's
+    assert ref["per_session"][-1][6] == looks[1][5]["v2"]["reference"]["t_reference"]
+    [reb] = ref["per_rebalance"]
+    assert reb["entrants"] == {"shadow": [5, 1], "reference": [1, 2], "overlap": 1}
+    assert ref["lifecycles"]["count"] == 2 and "executed" not in out
+    assert "missing_donor_dtc" in out and "missing_donors" not in out
+    assert out["turnover_occupancy"]["per_rebalance"][0]["missing_donor_dtc_share"]["r_size"] == len(R5)
+    assert [(lk["look_months"], lk["invalidated"]) for lk in out["looks"]] == [(12, None), (24, None)]
+
+    conn.autocommit = False
+    twelve = int(out["looks"][0]["look_id"])
+    kw: dict[str, Any] = {"look_id": twelve, "note": "bad bars", "evidence": "#3592"}
+    assert inv.invalidate(conn, **kw, apply=False)[0] is None  # dry run: rolled back
+    assert inv.invalidate(conn, note=" ", evidence="#3592", look_id=twelve, apply=True) == (
+        "note_and_evidence_required",
+        None,
+    )
+    refusal, new_id = inv.invalidate(conn, **kw, apply=True)
+    assert refusal is None and new_id is not None
+    assert inv.invalidate(conn, **kw, apply=True)[0] == f"already_invalidated ({new_id})"
+    assert inv.invalidate(conn, **(kw | {"look_id": new_id}), apply=True)[0] == "not_a_result"
+    shown = ro2.readout(conn, loaded, TUE)["looks"]
+    assert shown[0]["invalidated"]["look_id"] == new_id and shown[1]["invalidated"] is None
 
 
 def test_a_drifted_v2_look_is_not_computed(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
