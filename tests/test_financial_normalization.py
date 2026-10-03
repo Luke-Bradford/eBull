@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from app.services.fundamentals import (
     FactRow,
     PeriodRow,
     _derive_periods_from_facts,
+    _fact_period_ended_by_filing,
     _is_plausible_fiscal_year,
     _per_share_value_is_representable,
     _resolve_period_fiscal_year,
@@ -27,9 +28,12 @@ def _fact(
     fiscal_year: int = 2024,
     fiscal_period: str = "Q1",
     accession_number: str = "accn-q1",
-    filed_date: str = "2024-05-01",
+    filed_date: str | None = None,
     unit: str = "USD",
 ) -> FactRow:
+    # Default: filed 45 days after the period it reports. #3547 drops any fact whose
+    # context ends after its filing, so a fixed default would void later periods.
+    filed = date.fromisoformat(filed_date) if filed_date else date.fromisoformat(period_end) + timedelta(days=45)
     return FactRow(
         concept=concept,
         unit=unit,
@@ -41,7 +45,7 @@ def _fact(
         fiscal_year=fiscal_year,
         fiscal_period=fiscal_period,
         accession_number=accession_number,
-        filed_date=date.fromisoformat(filed_date),
+        filed_date=filed,
     )
 
 
@@ -2707,3 +2711,39 @@ def test_per_share_bound_matches_financial_periods_ddl() -> None:
     [(precision, scale)] = types
     assert _PER_SHARE_VALUE_BOUND == Decimal(10) ** (precision - scale)
     assert _PER_SHARE_SCALE == Decimal(10) ** -scale
+
+
+class TestFuturePeriodFactExcluded3547:
+    """#3547 — a fact whose context ends after its filing must not relabel the filing.
+
+    Shape is PMT's 2024 10-Qs: a ``LongTermDebt`` instant at a debt-maturity date
+    years ahead, in the same accession as the quarter's actuals. Before the fix
+    ``max(period_end)`` took the maturity date and the Q1 row landed at 2030.
+    """
+
+    def _q1_with_maturity(self) -> list[FactRow]:
+        return [
+            _fact(filed_date="2024-05-01"),  # Revenues, Q1 2024 ending 2024-03-31
+            _fact(
+                filed_date="2024-05-01",
+                concept="LongTermDebt",
+                val=Decimal("700000000"),
+                period_end="2030-03-31",
+                period_start=None,
+                frame=None,
+            ),
+        ]
+
+    def test_future_context_does_not_anchor_the_quarter(self) -> None:
+        periods = _derive_periods_from_facts(self._q1_with_maturity(), reported_currency="USD")
+        assert [(p.period_type, p.fiscal_year, p.period_end_date) for p in periods] == [("Q1", 2024, date(2024, 3, 31))]
+        assert periods[0].revenue == Decimal("50000000")
+        assert periods[0].long_term_debt is None
+
+    def test_period_ending_on_filed_date_is_kept(self) -> None:
+        assert _fact_period_ended_by_filing(_fact(period_end="2024-05-01", filed_date="2024-05-01"))
+        assert not _fact_period_ended_by_filing(_fact(period_end="2024-05-02", filed_date="2024-05-01"))
+
+    def test_filing_with_only_future_facts_yields_no_period(self) -> None:
+        facts = [_fact(period_end="2034-06-30", period_start="2034-04-01", filed_date="2024-08-01")]
+        assert _derive_periods_from_facts(facts, reported_currency="USD") == []

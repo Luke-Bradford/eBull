@@ -1117,6 +1117,8 @@ SEC's `xbrli:period` XSD typing is `xs:date`, which accepts year 1 → 9999 with
 
 Cleanup tool: `scripts/cleanup_1218_out_of_window_facts.py` (dry-run default, `--apply` to commit). Predicate MUST mirror the parser guard 1-to-1 — if you tune the window, tune both.
 
+**In-window but after the filing (#3547).** A context inside `[1900, 2100)` can still end after the filing that reports it — forward-looking disclosures (debt-maturity instants, ASC 350 expected amortisation, a Q1 10-Q's estimated annual ETR) and filer year typos. They are valid XBRL and stay in `financial_facts_raw` as filed, but period derivation ignores any fact with `period_end > filed_date` (`app/services/fundamentals/__init__.py::_fact_period_ended_by_filing`); canonical merge Phase B3 drops persisted rows of that shape. Measure with `select count(*), count(distinct instrument_id) from financial_facts_raw where period_end > filed_date`.
+
 ### 7.17 companyfacts/companyconcept strip XBRL dimensional facts → per-share-class counts are ABSENT for multi-class issuers (#1646)
 
 The `data.sec.gov` XBRL APIs (`companyfacts`, `companyconcept`, `frames`) return ONLY the **non-dimensional ("default") member** of each concept. Any fact tagged with a dimensional axis member — `us-gaap:StatementClassOfStockAxis`, `dei:LegalEntityAxis`, segment/product axes — is **dropped entirely** from these JSON APIs. It survives only in the per-filing inline XBRL instance (`<accession>/<ticker>-<date>_htm.xml`), where the fact carries a `contextRef` whose `<context>` defines the `explicitMember`.

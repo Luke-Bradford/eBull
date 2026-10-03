@@ -999,6 +999,42 @@ class TestTreasuryObservations:
         assert row is not None
         assert row["treasury_shares"] == Decimal("1300000000")
 
+    def test_reassert_revives_a_closed_observation(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#3547 — a row closed as a phantom period shares its synthetic id with
+        the real quarter later ending on that date; the reassert must be live."""
+        conn = _setup
+
+        def _record(shares: Decimal) -> None:
+            record_treasury_observation(
+                conn,
+                instrument_id=840_300,
+                source="xbrl_dei",
+                source_document_id="840300|2026-12-31",
+                source_accession=None,
+                source_field="TreasuryStockShares",
+                source_url=None,
+                filed_at=datetime(2027, 2, 20, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 12, 31),
+                ingest_run_id=uuid4(),
+                treasury_shares=shares,
+            )
+
+        _record(Decimal("5"))
+        conn.execute("UPDATE ownership_treasury_observations SET known_to = now() WHERE instrument_id = 840300")
+        _record(Decimal("7"))
+        conn.commit()
+        refresh_treasury_current(conn, instrument_id=840_300)
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT treasury_shares FROM ownership_treasury_current WHERE instrument_id = 840300"
+        ).fetchone()
+        assert row is not None and row[0] == Decimal("7")
+
 
 # ---------------------------------------------------------------------------
 # DEF 14A observations + _current (#840.D)

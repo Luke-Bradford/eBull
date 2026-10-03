@@ -340,3 +340,60 @@ class TestCanonicalMergeArrivalOrder:
                 (203, date(2025, 2, 1), 2024),
             )
         conn.rollback()
+
+
+class TestFuturePeriodRowRemoved3547:
+    def test_persisted_phantom_row_removed_after_its_raw_ages_out(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#3547 — a canonical row whose period ends after its filing must not
+        survive the merge: neither from a stale ``financial_periods_raw`` row nor
+        persisted before the derivation fix with its raw since aged out. A
+        legitimate aged-out row is durable history and stays (#1835 B2 rationale).
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=3547, symbol="PHNT")
+        _seed_raw(
+            conn,
+            instrument_id=3547,
+            period_end=date(2030, 3, 31),
+            period_type="Q1",
+            fiscal_year=2024,
+            fiscal_quarter=1,
+            source_ref="acc-q1-2024",
+            filed_date=date(2024, 5, 1),
+            revenue=Decimal("10"),
+        )
+        _seed_raw(
+            conn,
+            instrument_id=3547,
+            period_end=date(2023, 12, 31),
+            period_type="FY",
+            fiscal_year=2023,
+            fiscal_quarter=None,
+            source_ref="acc-fy-2023",
+            filed_date=date(2024, 2, 20),
+            revenue=Decimal("40"),
+        )
+        conn.commit()
+        _canonical_merge_instrument(conn, 3547)
+        conn.commit()
+        expected = [("FY", date(2023, 12, 31))]
+        assert [(r["period_type"], r["period_end_date"]) for r in _canonical_rows(conn, 3547)] == expected
+
+        # Both filings age out of the retention-swept raw layer; a phantom row
+        # persisted before the fix is still in the canonical table.
+        conn.execute("DELETE FROM financial_periods_raw WHERE instrument_id = 3547")
+        conn.execute(
+            """
+            INSERT INTO financial_periods (
+                instrument_id, period_end_date, period_type, fiscal_year, fiscal_quarter,
+                revenue, source, source_ref, reported_currency, filed_date
+            ) VALUES (3547, '2030-03-31', 'Q1', 2024, 1, 10, 'sec_edgar', 'acc-q1-2024', 'USD', '2024-05-01')
+            """
+        )
+        conn.commit()
+        _canonical_merge_instrument(conn, 3547)
+        conn.commit()
+        assert [(r["period_type"], r["period_end_date"]) for r in _canonical_rows(conn, 3547)] == expected

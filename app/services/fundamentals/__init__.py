@@ -1208,6 +1208,22 @@ def _per_share_value_is_representable(fact: FactRow) -> bool:
     return abs(fact.val).quantize(_PER_SHARE_SCALE, rounding=ROUND_HALF_UP) < _PER_SHARE_VALUE_BOUND
 
 
+def _fact_period_ended_by_filing(fact: FactRow) -> bool:
+    """False for a fact whose context ends after the filing that reports it.
+
+    #3547 — a filing cannot report actuals for a period that has not ended when it
+    is filed. ``xs:date`` contexts carry no semantic bound (sec-edgar skill §7.16),
+    so future contexts arrive as valid XBRL: forward-looking disclosures (PMT
+    ``LongTermDebt`` at debt-maturity instants through 2030, ASC 350 expected
+    amortisation, an estimated annual ETR in a Q1 10-Q) and filer date typos
+    (BCML 2034-06-30 in a 2024 10-Q). Left in, one such fact wins the
+    ``max(period_end)`` primary-period anchor and relabels the whole filing — PMT's
+    2024 quarters were stored at 2030. Rule fixed by construction; the raw layer
+    keeps the fact as filed, only period derivation ignores it.
+    """
+    return fact.period_end <= fact.filed_date
+
+
 def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
     """Indexes of EPS facts the same filing's own earnings and share count refute.
 
@@ -1336,7 +1352,7 @@ def _derive_periods_from_facts(
     for all flow columns.
     """
     # Filtered once here: the YTD pool below reads ``facts`` too, not only ``grouped``.
-    facts = [f for f in facts if _per_share_value_is_representable(f)]
+    facts = [f for f in facts if _per_share_value_is_representable(f) and _fact_period_ended_by_filing(f)]
     refuted = _eps_facts_contradicting_identity(facts)
     facts = [f for i, f in enumerate(facts) if i not in refuted]
 
@@ -2205,7 +2221,33 @@ def _canonical_merge_instrument(
         """,
         {"iid": instrument_id},
     )
-    return cur.rowcount
+    upserted = cur.rowcount
+
+    # Phase B3 (#3547): drop canonical rows whose period ends after the latest
+    # filing that reports it — structurally impossible, same reasoning as B2.
+    # ``_fact_period_ended_by_filing`` stops NEW ones; rows persisted before it
+    # survive a rewash once their facts age out of the retention-swept raw layer,
+    # so they must be removed here. Runs AFTER the insert so a stale
+    # ``financial_periods_raw`` row (an instrument with no facts left to rewash
+    # it) cannot re-insert one either. A row's ``filed_date`` is the LATEST filing
+    # among its facts, so a later amendment only raises it: the predicate holds
+    # only when every contributing filing predates the period end. NULL never
+    # matches. Hard delete, like B and B2 — this table is derived state; I6
+    # soft-close binds the observation tables.
+    b3 = conn.execute(
+        """
+        DELETE FROM financial_periods fp
+        WHERE fp.instrument_id = %(iid)s
+          AND fp.source = 'sec_edgar'
+          AND fp.period_end_date > fp.filed_date
+        RETURNING fp.period_type, fp.period_end_date, fp.filed_date
+        """,
+        {"iid": instrument_id},
+    ).fetchall()
+    if b3:
+        logger.info("financial_periods B3 (#3547): instrument %d dropped future-period rows %s", instrument_id, b3)
+
+    return upserted
 
 
 @dataclass(frozen=True)
