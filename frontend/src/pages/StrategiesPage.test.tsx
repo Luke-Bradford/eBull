@@ -516,6 +516,7 @@ describe("StrategiesPage", () => {
     });
     vi.spyOn(aiTrialApi, "fetchAiTrialStatus").mockReturnValue(new Promise(() => {}));
     vi.spyOn(rankingPotApi, "fetchRankingPotStatus").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(rankingPotApi, "fetchRankingPotV2Status").mockReturnValue(new Promise(() => {}));
     vi.spyOn(strategiesApi, "fetchEngineBookRisk").mockReturnValue(new Promise(() => {}));
   });
 
