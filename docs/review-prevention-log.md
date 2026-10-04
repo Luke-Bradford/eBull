@@ -11889,3 +11889,18 @@ neighbouring container and match it.**
   block; `ON COMMIT DROP` is only a backstop. Scripts that commit per unit connect with `autocommit=True` so the
   block is a real transaction.
 - Enforced in: `tests/test_load_3619_nport_returns_db.py::test_load_is_idempotent_and_refuses_a_changed_row`.
+
+### Refreshing a republished archive under its old vendor rewrites history beneath every reader (#3619)
+
+- Failure (caught before load): slice 3 was framed as "refresh PWB to 2026-08". The HF dataset is republished
+  monthly on `main` and re-bases history at each release: against the 2026-07-08 load, the 2026-09-09 capture
+  changes `close` on 1,863 of 7,693 symbols and `adj_close` on 56% of shared rows. The ingest upserts
+  `ON CONFLICT DO UPDATE`, so a reload under the existing vendor string would have changed every reader of that
+  vendor (`survivor_only` selection, `strategy_result`, outcome modules) with no version moving. The original
+  download was also unpinned (`resolve/main`), so its capture could no longer be re-fetched.
+- Prevention: a new capture of a re-basing archive is a new vendor (`<vendor>@<capture>`, the
+  `etoro/etoro-comparators-2026-07-08-v1` idiom) with a pinned revision; the old capture stays loaded, and the
+  switch is a reader constant measured by a full-population A/B in which the old capture is arm A.
+- Enforced in: `scripts/ingest_2282_research_archive.py::CAPTURES` (revision and per-shard SHA-256 per capture;
+  `shard_mismatches` refuses a cache filled from another revision before `--load`),
+  `tests/test_research_corpus_captures.py`, `total_return_reader._assert_pwb_capture`.

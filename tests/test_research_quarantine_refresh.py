@@ -140,7 +140,7 @@ def test_only_the_off_policy_vendor_is_re_evaluated(
 
     assert [vendor for vendor, _ in ran] == [HF_ARCHIVE.vendor]
     assert result.refreshed_vendors == (HF_ARCHIVE.vendor,)
-    assert result.skipped_vendors == (INTRADER_ARCHIVE.vendor,)
+    assert result.skipped_vendors == tuple(a.vendor for a in RESEARCH_ARCHIVES if a is not HF_ARCHIVE)
 
 
 def test_the_declared_as_of_is_what_reaches_run_quarantine(
@@ -150,10 +150,7 @@ def test_the_declared_as_of_is_what_reaches_run_quarantine(
     _uncovered(monkeypatch, {a.vendor: 1 for a in RESEARCH_ARCHIVES})
     refresh_research_quarantine(_StubConn())  # type: ignore[arg-type]
 
-    assert dict(ran) == {
-        HF_ARCHIVE.vendor: HF_ARCHIVE.quarantine_as_of,
-        INTRADER_ARCHIVE.vendor: INTRADER_ARCHIVE.quarantine_as_of,
-    }
+    assert dict(ran) == {a.vendor: a.quarantine_as_of for a in RESEARCH_ARCHIVES}
 
 
 def test_an_unloaded_archive_is_skipped_and_never_evaluated(

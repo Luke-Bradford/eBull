@@ -9,6 +9,12 @@ Run from repo root:
     uv run python -m scripts.ingest_2282_research_archive --attribute
     uv run python -m scripts.ingest_2282_research_archive --link-delistings
 
+``--capture`` picks which pinned HF revision a stage acts on (default ``2026-07-08``, the original
+load). #3619 slice 3 added ``2026-09-09`` as a SEPARATE vendor, ``HF_ARCHIVE_2026_09_09``, because
+the vendor re-bases history at every monthly update; see that constant's comment.
+
+    uv run python -m scripts.ingest_2282_research_archive --capture 2026-09-09 --download --load --quarantine --verify
+
 ⚠ Long-running (~20-40 min end to end on 25.8M rows). Launch it with the
 tool's own background mode — a ``nohup … &`` started inside an ordinary tool
 call is killed when that call's process group is cleaned up, and a load that
@@ -35,10 +41,12 @@ and a corpus that produces the opposite gradient says so in the output.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import statistics
 import sys
 import time
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -50,12 +58,70 @@ from app.services import research_corpus_ingest as ingest
 
 logger = logging.getLogger("ingest_2282")
 
-_HF_BASE = "https://huggingface.co/datasets/paperswithbacktest/Stocks-Daily-Price/resolve/main/data"
+_HF_RESOLVE = "https://huggingface.co/datasets/paperswithbacktest/Stocks-Daily-Price/resolve"
 _SHARDS = [f"train-{i:05d}-of-00004.parquet" for i in range(4)]
-_DEFAULT_CACHE = Path("var/research_corpus")
 
 
-def download(cache: Path) -> list[Path]:
+@dataclass(frozen=True)
+class Capture:
+    archive: ingest.ArchiveProvenance
+    #: The HF commit the shards are fetched at. The dataset is re-published monthly on ``main``, so
+    #: an unpinned download silently becomes a different capture.
+    revision: str
+    cache: Path
+    #: SHA-256 per shard in ``_SHARDS`` order, the LFS oids HF's tree API lists at ``revision``. A
+    #: cached shard is loaded only if it hashes to these, so a cache directory filled from another
+    #: revision cannot be loaded under this capture's vendor.
+    shard_sha256: tuple[str, str, str, str]
+
+
+#: ``2026-07-08``'s revision is the one ``main`` pointed at when it was downloaded (2026-08-05),
+#: read off the dataset's commit list; the download was unpinned at the time. The shards cached
+#: then hash to that revision's oids, which confirms the mapping.
+CAPTURES: dict[str, Capture] = {
+    "2026-07-08": Capture(
+        ingest.HF_ARCHIVE,
+        "ded0db4ccc8b0646dc9eae363dab924186796f78",
+        Path("var/research_corpus"),
+        (
+            "8ff3ce42e27815bd3aa46eeddbb7cb217306817c4dc9375b7710b109647fc9c8",
+            "a2bd1000ef346b133fd1dfbd0e341f2b850ba58f0c45f755a3cbd9a098ed39c6",
+            "e1d67b4540b92c986b68ecb3634d5745230e2edd94d34cc0babc3b6f6588aea8",
+            "0550af9001223d405c27b24c4a29fbfd121580eeea3e68db1900d7f4155023c8",
+        ),
+    ),
+    "2026-09-09": Capture(
+        ingest.HF_ARCHIVE_2026_09_09,
+        "c64377a3b717f9a1067e19350e82b35b8e8631f2",
+        Path("var/research_corpus/pwb-2026-09-09"),
+        (
+            "c582a4cb38b857aabb2fd5ffee10b6c7ca900f2a793ede87a2bfcea6361e03cf",
+            "b113e8b9bf7551de3c327f846955b8b24571a49f3a7178700238c3d1327b07df",
+            "ce23ed37ff9c612ca3230165fe388c78e97bc1d3459b06be856880380da98db2",
+            "8c84b997d73c040aded2e071602ad7096a1cf12d842c0d0ebbb57ced451185fd",
+        ),
+    ),
+}
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def shard_mismatches(cache: Path, capture: Capture) -> list[str]:
+    """Shards in ``cache`` that are missing or do not hash to ``capture``'s pinned oids."""
+    return [
+        name
+        for name, expected in zip(_SHARDS, capture.shard_sha256, strict=True)
+        if not (cache / name).exists() or _sha256(cache / name) != expected
+    ]
+
+
+def download(cache: Path, revision: str) -> list[Path]:
     """Fetch the four Parquet shards. ~525 MB total, ~30 s on a decent link.
 
     Plain HTTP against the public resolve URL rather than ``huggingface_hub``:
@@ -71,7 +137,8 @@ def download(cache: Path) -> list[Path]:
             logger.info("have %s (%.0f MB)", name, target.stat().st_size / 1e6)
             continue
         started = time.time()
-        with httpx.stream("GET", f"{_HF_BASE}/{name}", follow_redirects=True, timeout=300.0) as response:
+        url = f"{_HF_RESOLVE}/{revision}/data/{name}"
+        with httpx.stream("GET", url, follow_redirects=True, timeout=300.0) as response:
             response.raise_for_status()
             with target.open("wb") as handle:
                 for chunk in response.iter_bytes(1 << 20):
@@ -85,22 +152,26 @@ def download(cache: Path) -> list[Path]:
     return paths
 
 
-def load(conn: psycopg.Connection[tuple], cache: Path) -> int:
+def load(conn: psycopg.Connection[tuple], cache: Path, capture: Capture) -> int:
+    archive = capture.archive
     paths = [cache / name for name in _SHARDS]
-    missing = [p.name for p in paths if not p.exists()]
-    if missing:
-        logger.error("missing shard(s): %s — run --download first", ", ".join(missing))
+    if bad := shard_mismatches(cache, capture):
+        logger.error(
+            "shard(s) missing or not revision %s: %s — run --download into an empty cache",
+            capture.revision,
+            ", ".join(bad),
+        )
         return 1
 
     started = time.time()
-    census = ingest.load_archive(conn, ingest.ParquetArchive(paths), provenance=ingest.HF_ARCHIVE)
+    census = ingest.load_archive(conn, ingest.ParquetArchive(paths), provenance=archive)
     drift = ingest.census_drift(conn)
 
     print("\n=== stage 2b load census ===")
-    print(f"  vendor                : {ingest.HF_ARCHIVE.vendor}")
-    print(f"  upstream_source       : {ingest.HF_ARCHIVE.upstream_source}")
-    print(f"  licence               : {ingest.HF_ARCHIVE.licence}")
-    print(f"  adjustment_basis      : {ingest.HF_ARCHIVE.adjustment_basis}  (OHLC; adj_close is split+div)")
+    print(f"  vendor                : {archive.vendor}")
+    print(f"  upstream_source       : {archive.upstream_source}")
+    print(f"  licence               : {archive.licence}")
+    print(f"  adjustment_basis      : {archive.adjustment_basis}  (OHLC; adj_close is split+div)")
     print(f"  symbols seen          : {census.symbols_seen:,}")
     print(f"  series upserted       : {census.series_upserted:,}")
     print(f"    resolved            : {census.resolved_series:,}")
@@ -119,20 +190,20 @@ def load(conn: psycopg.Connection[tuple], cache: Path) -> int:
     return 0
 
 
-def quarantine(conn: psycopg.Connection[tuple], as_of: date) -> int:
+def quarantine(conn: psycopg.Connection[tuple], as_of: date, archive: ingest.ArchiveProvenance) -> int:
     # ⚠ Same explicit emptiness guard as the Intrader script. This archive
     # never measured its as_of, so it never had the implicit version either —
     # a --quarantine before --load printed a 0-series census, which is what a
     # healthy no-op prints. #3040.
-    if ingest.loaded_series_count(conn, ingest.HF_ARCHIVE) == 0:
+    if ingest.loaded_series_count(conn, archive) == 0:
         # logger.error, matching this file's own `missing shard(s) … run
         # --download first` guard above — `print` here is for census OUTPUT, and
         # a refusal is not output. Same surface as the Intrader script's twin.
-        logger.error("no bars loaded for %s — run --load first", ingest.HF_ARCHIVE.vendor)
+        logger.error("no bars loaded for %s — run --load first", archive.vendor)
         return 1
 
     started = time.time()
-    census = ingest.run_quarantine(conn, as_of=as_of)
+    census = ingest.run_quarantine(conn, vendor=archive.vendor, as_of=as_of)
     print("\n=== stage 2b quarantine census ===")
     print(f"  series evaluated      : {census.series_evaluated:,}")
     print(f"  bars evaluated        : {census.bars_evaluated:,}")
@@ -145,14 +216,14 @@ def quarantine(conn: psycopg.Connection[tuple], as_of: date) -> int:
     return 0
 
 
-def link_delistings(conn: psycopg.Connection[tuple]) -> int:
+def link_delistings(conn: psycopg.Connection[tuple], archive: ingest.ArchiveProvenance) -> int:
     """#2297 — wire the Form 25 register to the corpus. Writes dates, truncates nothing.
 
     Prints the NOT-covered side first, deliberately. A linkage that reports
     only what it matched reads as a completed guard; this one's headline
     finding is that the truncation set is empty by construction.
     """
-    census = ingest.link_form25_delistings(conn)
+    census = ingest.link_form25_delistings(conn, vendor=archive.vendor)
     print("\n=== #2297 Form 25 delisting linkage ===")
     print(f"  overlapping series      : {census.overlap_series:,}")
     print(f"  suspension dates written: {census.suspension_dates_written:,}")
@@ -252,7 +323,7 @@ FROM scored
 """
 
 
-def verify(conn: psycopg.Connection[tuple]) -> int:
+def verify(conn: psycopg.Connection[tuple], archive: ingest.ArchiveProvenance) -> int:
     """Acceptance item 4 — full-population regression guard on the adjustment basis.
 
     Every overlapping instrument, not a panel. An unadjusted research series
@@ -277,7 +348,7 @@ def verify(conn: psycopg.Connection[tuple]) -> int:
     Telling those apart per-instrument is a separate investigation into
     ``price_daily`` quality and is NOT this ticket.
     """
-    row = conn.execute(_VERIFY_SQL, {"vendor": ingest.VENDOR}).fetchone()
+    row = conn.execute(_VERIFY_SQL, {"vendor": archive.vendor}).fetchone()
     assert row is not None
     (
         instruments,
@@ -361,7 +432,7 @@ _OVERLAP_BANDS: tuple[tuple[str, int, int], ...] = (
 _TAIL_CORR = 0.90
 
 
-def attribute(conn: psycopg.Connection[tuple]) -> int:
+def attribute(conn: psycopg.Connection[tuple], archive: ingest.ArchiveProvenance) -> int:
     """#2293 — explain ``--verify``'s low-correlation tail.
 
     The ticket proposed three causes (frozen-snapshot split epoch, ticker reuse
@@ -385,7 +456,7 @@ def attribute(conn: psycopg.Connection[tuple]) -> int:
     carry a genuine ``price_daily`` corporate-action break; the deep-quintile
     tail members are where such a break is separable from this artefact.
     """
-    rows = conn.execute(_ATTRIBUTE_SQL, {"vendor": ingest.VENDOR}).fetchall()
+    rows = conn.execute(_ATTRIBUTE_SQL, {"vendor": archive.vendor}).fetchall()
     scored = [(int(r[0]), int(r[1]), float(r[2]), r[3]) for r in rows if r[2] is not None]
     banded = [(iid, n, c, float(dv)) for iid, n, c, dv in scored if dv is not None]
     banded.sort(key=lambda row: row[3])
@@ -495,20 +566,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--attribute", action="store_true")
     parser.add_argument("--link-delistings", action="store_true")
-    parser.add_argument("--cache", type=Path, default=_DEFAULT_CACHE)
+    parser.add_argument("--capture", choices=sorted(CAPTURES), default="2026-07-08")
+    parser.add_argument("--cache", type=Path, help="override the capture's own cache directory")
     parser.add_argument(
         "--as-of",
         type=date.fromisoformat,
-        default=ingest.HF_ARCHIVE.quarantine_as_of,
         help=(
             "Quarantine 'today' — sets which trailing bars count as provisional. "
-            "Defaults to this archive's declared quarantine_as_of so a manual run "
+            "Defaults to the capture's declared quarantine_as_of so a manual run "
             "and the scheduled job cannot write different verdicts (#3040); pass a "
             "value only to investigate, and expect the next scheduled run to "
             "restore the declared policy."
         ),
     )
     args = parser.parse_args(argv)
+    capture = CAPTURES[args.capture]
+    cache: Path = args.cache or capture.cache
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -518,21 +591,25 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.download:
-        download(args.cache)
+        download(cache, capture.revision)
+        if bad := shard_mismatches(cache, capture):
+            logger.error("shard(s) do not hash to revision %s: %s", capture.revision, ", ".join(bad))
+            return 1
 
     if not any((args.load, args.quarantine, args.verify, args.attribute, args.link_delistings)):
         return 0
 
     with psycopg.connect(settings.database_url) as conn:
-        if args.load and (rc := load(conn, args.cache)):
+        if args.load and (rc := load(conn, cache, capture)):
             return rc
-        if args.quarantine and (rc := quarantine(conn, args.as_of)):
+        as_of = args.as_of or capture.archive.quarantine_as_of
+        if args.quarantine and (rc := quarantine(conn, as_of, capture.archive)):
             return rc
-        if args.verify and (rc := verify(conn)):
+        if args.verify and (rc := verify(conn, capture.archive)):
             return rc
-        if args.attribute and (rc := attribute(conn)):
+        if args.attribute and (rc := attribute(conn, capture.archive)):
             return rc
-        if args.link_delistings and (rc := link_delistings(conn)):
+        if args.link_delistings and (rc := link_delistings(conn, capture.archive)):
             return rc
     return 0
 

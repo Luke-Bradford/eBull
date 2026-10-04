@@ -33,7 +33,6 @@ import psycopg
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.universe_selection import (
     INTRADER_CAPTURE_DATE,
-    SURVIVOR_ONLY_VENDOR,
     SURVIVORSHIP_FREE_VENDOR,
     UNIVERSE_SELECTION_RULE_VERSION,
     UniverseSelection,
@@ -51,12 +50,16 @@ TOTAL_RETURN_SPLICE_VERSION: Final[str] = f"{_RULE_ID}+{_code_hash()}"
 Month = tuple[int, int]
 
 INTRADER_VENDOR: Final = SURVIVORSHIP_FREE_VENDOR
-PWB_VENDOR: Final = SURVIVOR_ONLY_VENDOR
+#: The 2026-09-09 PWB capture (#3619 slice 3), a separate vendor from the 2026-07-08 load that
+#: ``universe_selection.SURVIVOR_ONLY_VENDOR`` still names. A literal, not an import of
+#: ``research_corpus_ingest.HF_ARCHIVE_2026_09_09.vendor``, so the capture this reads is inside this
+#: module's source hash and moving it is a new splice version; a test pins the two equal.
+PWB_VENDOR: Final = "paperswithbacktest/Stocks-Daily-Price@2026-09-09"
 
 #: PWB's freeze date. Declared and asserted equal to ``max(last_bar)`` at load, as
-#: ``universe_selection._assert_capture`` does for Intrader: a refreshed archive (#3619 slice 3)
-#: must refuse here until the constant is re-frozen deliberately.
-PWB_CAPTURE_DATE: Final = date(2026, 7, 8)
+#: ``universe_selection._assert_capture`` does for Intrader: a re-loaded capture must refuse here
+#: until the constant is re-frozen deliberately.
+PWB_CAPTURE_DATE: Final = date(2026, 9, 9)
 
 #: First month PWB supplies a spliced name's return. Slice 1's XBRL dividend miss rates cross
 #: here: Intrader 1.2% vs PWB 1.6% in 2021, 2.7% vs 1.5% in 2022.
@@ -83,7 +86,7 @@ def add_months(month: Month, k: int) -> Month:
 #: series alive at capture, and from that month the panel can no longer see names that die, so every
 #: later month is survivor-only.
 LAST_SURVIVORSHIP_FREE_MONTH: Final[Month] = add_months(month_of(INTRADER_CAPTURE_DATE), -1)
-#: The last month PWB supplies: its capture month (2026-07) is partial.
+#: The last month PWB supplies: its capture month (2026-09) is partial.
 LAST_PWB_MONTH: Final[Month] = add_months(month_of(PWB_CAPTURE_DATE), -1)
 
 
