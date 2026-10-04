@@ -66,7 +66,7 @@ jobs:
         # format and not a guarantee of harmlessness — `.autonomy/loop_prompt.md`
         # is the standing-order prompt an unattended loop executes, i.e.
         # behaviour wearing a doc extension. This list MUST stay identical to
-        # `merge_gate.doc_only_excludes` in `.autonomy/config.yaml`, which is
+        # `merge_gate.doc_only_exclude_paths` in `.autonomy/config.yaml`, which is
         # what the engine's `safe_merge.sh::is_doc_only` reads.
         #
         # This step and `safe_merge.sh::is_doc_only` are two implementations of

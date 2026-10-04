@@ -32,6 +32,7 @@ which is what has actually happened twice, is not.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -137,9 +138,39 @@ def test_every_workflow_pattern_is_EXPRESSIBLE_on_the_safe_merge_side() -> None:
 def test_the_config_declares_all_three_lists() -> None:
     """A missing key makes `safe_merge.sh` abort its whole gate silently."""
     merge_gate = _merge_gate()
-    for key in ("doc_only_extensions", "doc_only_paths", "doc_only_excludes"):
+    for key in ("doc_only_extensions", "doc_only_paths", "doc_only_exclude_paths"):
         assert key in merge_gate, f"{key} missing from merge_gate in {CONFIG_PATH}"
         assert merge_gate[key], f"{key} is empty; declare it explicitly or the engine default applies"
+
+
+#: The ``merge_gate.doc_only_*`` keys ``safe_merge.sh`` reads via ``CONFIG_GET``.
+#: Vendored so the config check runs on any checkout; the engine check below keeps
+#: this copy honest wherever the engine is present.
+SAFE_MERGE_DOC_ONLY_KEYS = frozenset({"doc_only_extensions", "doc_only_paths", "doc_only_exclude_paths"})
+
+
+def test_the_config_declares_every_key_safe_merge_reads() -> None:
+    """The keys must be spelled the way the engine's `CONFIG_GET` calls spell them.
+
+    `.autonomy/config.yaml` once declared `doc_only_excludes` while
+    `safe_merge.sh` read `merge_gate.doc_only_exclude_paths`. The engine
+    silently fell back to its `.autonomy/` default, so the `.claude/` exclusion
+    never reached the merge gate, and every other test here still passed because
+    they compare the config with the workflow, not with the engine (#3626).
+    """
+    missing = SAFE_MERGE_DOC_ONLY_KEYS - set(_merge_gate())
+    assert not missing, f"{CONFIG_PATH} does not declare {sorted(missing)}, which safe_merge.sh reads"
+
+
+def test_the_vendored_key_list_matches_the_engine() -> None:
+    """Re-derive the key list from the engine itself, where it is checked out."""
+    engine_home = os.environ.get("AUTONOMY_ENGINE_HOME")
+    if not engine_home:
+        pytest.skip("AUTONOMY_ENGINE_HOME unset; the vendored key list is checked by the test above")
+    safe_merge = Path(engine_home) / "bin" / "safe_merge.sh"
+    assert safe_merge.is_file(), f"AUTONOMY_ENGINE_HOME is set but {safe_merge} does not exist"
+    read_keys = set(re.findall(r"CONFIG_GET merge_gate\.(doc_only_\w+)", safe_merge.read_text()))
+    assert read_keys == SAFE_MERGE_DOC_ONLY_KEYS
 
 
 def test_extension_lists_agree() -> None:
@@ -164,7 +195,7 @@ def test_exclusion_lists_agree() -> None:
     """`.autonomy/` is behaviour wearing a `.md` extension. Never doc-only."""
     exclusion, _ = _blocks()
     workflow_excludes = {prefix for p in _patterns(exclusion) if (prefix := _as_prefix(p))}
-    config_excludes = {p if p.endswith("/") else f"{p}/" for p in _merge_gate()["doc_only_excludes"]}
+    config_excludes = {p if p.endswith("/") else f"{p}/" for p in _merge_gate()["doc_only_exclude_paths"]}
     assert workflow_excludes == config_excludes
     assert ".autonomy/" in workflow_excludes, "the loop's own standing order must never skip review"
 
@@ -204,7 +235,7 @@ def test_the_agreed_lists_classify_the_fixed_table_as_documented(path: str, expe
     meaningful only because the tests above pin those lists to both sides.
     """
     merge_gate = _merge_gate()
-    excludes = [p if p.endswith("/") else f"{p}/" for p in merge_gate["doc_only_excludes"]]
+    excludes = [p if p.endswith("/") else f"{p}/" for p in merge_gate["doc_only_exclude_paths"]]
     prefixes = [p if p.endswith("/") else f"{p}/" for p in merge_gate["doc_only_paths"]]
     extensions = list(merge_gate["doc_only_extensions"])
 

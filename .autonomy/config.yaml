@@ -40,4 +40,4 @@ merge_gate:
   # .rst-only PR unmergeable by construction until #2849's second pass.
   # .claude/ added 2026-10-01: CLAUDE.md and skills are standing instructions agents
   # execute -- behaviour wearing a .md extension, the same reasoning as .autonomy/.
-  doc_only_excludes: [".autonomy/", ".claude/"]
+  doc_only_exclude_paths: [".autonomy/", ".claude/"]
