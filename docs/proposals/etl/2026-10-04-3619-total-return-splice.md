@@ -156,3 +156,84 @@ Census on the dev DB, 2026-10-04, over 17,266 admitted names (reproduce:
 - PWB-only names (validated instruments Intrader lacks) are outside the selection and therefore
   outside this reader.
 - ETFs past 2024-08 need slice 2b; commodity pools have no N-PORT return.
+
+## Slice 2b — ETFs past 2024-08 (`etf-total-return-v1`)
+
+Code: `sql/470_sec_nport_monthly_returns.sql`, `scripts/load_3619_nport_returns.py`,
+`app/services/etf_total_return_reader.py`. Consumers: #3609 step 0 (static ETF mix) and #3620
+(cross-asset TSMOM). ETFs are outside the stock selection above, so this is a separate reader with
+its own version; it reuses the stock reader's month-end and return rules unchanged.
+
+### Source rule
+
+- **Form N-PORT Item B.5.a:** a registered fund reports, per class (Item B.5.b), its total return
+  for each of the three months ending at the report date, computed under Form N-1A Item 26(b)(1):
+  NAV-based, distributions reinvested. SEC's data-set readme (`nport_readme.htm`, §5.7, bundled in
+  each quarterly ZIP): table `MONTHLY_TOTAL_RETURN`, primary key `(ACCESSION_NUMBER,
+  MONTHLY_TOTAL_RETURN_ID)`, `CLASS_ID` nullable ("if any"), `MONTHLY_TOTAL_RETURN1..3` = "First /
+  Second / Third Month total returns", `NUMBER(36,12)`, in percent. `SUBMISSION.REPORT_DATE` (Item
+  A.3.b) is the date the information is as of, so RETURN3 is the report-date month and RETURN1 two
+  months earlier. Slice 1 confirms that alignment empirically: monthly correlation ≥ 0.985 against
+  Intrader on 22 ETFs, which a one-month shift would destroy.
+- **UITs and commodity pools file no N-PORT.** SPY is a UIT; GLD, IAU, SLV, USO and DBC are
+  commodity pools, not 1940-Act funds. QQQ filed none before its 2025 conversion.
+
+### Store (`sec_nport_monthly_returns`)
+
+- One row per source row and month position: `(accession_number, monthly_total_return_id,
+  month_position 1..3)` primary key, the readme's key plus the position. Columns: `class_id`
+  (nullable as in the source; 19,187 of 848,953 source rows to 2026q2 have none), `month` (first of
+  the month the position maps to), `return_pct` (as filed, percent), `report_date`,
+  `filing_date`, `sub_type` (`NPORT-P` or `NPORT-P/A`), `dataset_quarter`.
+- A blank return cell stores no row: missing, never zero. Rows are immutable filings, inserted
+  `ON CONFLICT DO NOTHING`; an amendment arrives as a new accession.
+- All classes are stored, not only the ETFs read today: the loader reads every row anyway, and
+  filtering would be a data-treatment decision with no consumer asking for it. About 2.5M rows.
+- Loader: every published quarter from 2019q4, the two tables read from the cached bulk ZIP when
+  present, otherwise over HTTP range through the shared SEC rate gate (slice 1's fetch, reused).
+
+### Resolution per (class, month)
+
+- The latest filing wins, by `(filing_date, accession_number)`, the same tiebreak as slice 1.
+- If the winning filing carries two different values for the class-month (10 source keys repeat a
+  class within one accession; 8 of them disagree), the month is absent: there is no rule to pick
+  one.
+- A class's first reported month is dropped: N-1A reports a fund's first period from inception,
+  so a fund launched mid-month reports a partial month.
+
+### Reader contract (`load_etf_total_return_panel(conn, symbols)`)
+
+1. **Through 2024-08:** the Intrader series with `vendor_symbol = symbol` (all 35 corpus ETF series
+   are unlinked, `instrument_id IS NULL`), month-end `adj_close` returns under the stock reader's
+   quarantine and month-end rules, up to `LAST_SURVIVORSHIP_FREE_MONTH`. Slice 1 measured ETF
+   `adj_close` carrying distributions; the report re-measures that over 2022-01..2024-08 alone,
+   where stock dividend capture degraded.
+2. **From 2024-09, the reference class:**
+   - a declared proxy first: SPY → IVV, QQQ → QQQM (slice 1's references, same index);
+   - otherwise the symbol's `cik_refresh_mf_directory` class, which must be unique. Two or more
+     classes under one symbol is verdict `ambiguous_class` and no extension.
+3. **Verdicts:** `nport`, `nport_proxy`, `price_return_only` (no class: the symbol has no N-PORT
+   filer), `ambiguous_class`, `no_intrader_series`.
+   - `nport` / `nport_proxy`: N-PORT months from 2024-09, resolved as above. A class with no
+     N-PORT months after 2024-08 gets no extension; there is no fallback to price.
+   - `price_return_only`: eToro `price_daily` month-end closes, chained, from 2024-09, for the
+     instrument whose `symbol` matches. Distributions are excluded, so every such row is flagged
+     `price_return_only`. Commodity pools pay little or nothing; the flag is how a consumer tells.
+4. **The join at 2024-09** chains returns, never levels: the 2024-08 return ends at Intrader's
+   August month-end close, and the 2024-09 return starts from the fund's August month-end NAV
+   (N-PORT) or eToro's August close. NAV against market close adds premium/discount noise to the
+   one join month, not drift.
+5. **Rows:** `(symbol, month, total_return, source, source_key, reference_symbol,
+   price_return_only)`. `source` is `icyDenev/Intrader`, `sec_nport` or `etoro_price_daily`;
+   `source_key` is the Intrader `series_id`, the N-PORT `class_id` or the eToro `instrument_id`.
+   N-PORT rows carry no bar dates: they are calendar months by rule.
+6. **Version:** `etf-total-return-v1+<module hash>|<quarantine rule version>`.
+
+### Retrospective, survivor-selected
+
+- The symbol list is chosen today: an ETF panel is survivor-selected by construction, whatever the
+  window. ETFs that closed are not in it.
+- N-PORT returns are published about 60 days after the quarter they close, and the latest filing
+  wins on today's data. The panel records realised returns, not what a researcher knew at month
+  end. A signal built on these returns uses the same months a market price would have shown in
+  real time, so the lag does not leak, but restated amendments do read through.
