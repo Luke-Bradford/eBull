@@ -143,23 +143,34 @@ def test_the_config_declares_all_three_lists() -> None:
         assert merge_gate[key], f"{key} is empty; declare it explicitly or the engine default applies"
 
 
-def test_the_config_keys_are_the_ones_safe_merge_reads() -> None:
+#: The ``merge_gate.doc_only_*`` keys ``safe_merge.sh`` reads via ``CONFIG_GET``.
+#: Vendored so the config check runs on any checkout; the engine check below keeps
+#: this copy honest wherever the engine is present.
+SAFE_MERGE_DOC_ONLY_KEYS = frozenset({"doc_only_extensions", "doc_only_paths", "doc_only_exclude_paths"})
+
+
+def test_the_config_declares_every_key_safe_merge_reads() -> None:
     """The keys must be spelled the way the engine's `CONFIG_GET` calls spell them.
 
     `.autonomy/config.yaml` once declared `doc_only_excludes` while
     `safe_merge.sh` read `merge_gate.doc_only_exclude_paths`. The engine
     silently fell back to its `.autonomy/` default, so the `.claude/` exclusion
-    never reached the merge gate, and every test here still passed because they
-    compare the config with the workflow, not with the engine.
+    never reached the merge gate, and every other test here still passed because
+    they compare the config with the workflow, not with the engine (#3626).
     """
-    engine_home = os.environ.get("AUTONOMY_ENGINE_HOME") or str(Path.home() / "Dev" / "autonomy-engine" / "engine")
+    missing = SAFE_MERGE_DOC_ONLY_KEYS - set(_merge_gate())
+    assert not missing, f"{CONFIG_PATH} does not declare {sorted(missing)}, which safe_merge.sh reads"
+
+
+def test_the_vendored_key_list_matches_the_engine() -> None:
+    """Re-derive the key list from the engine itself, where it is checked out."""
+    engine_home = os.environ.get("AUTONOMY_ENGINE_HOME")
+    if not engine_home:
+        pytest.skip("AUTONOMY_ENGINE_HOME unset; the vendored key list is checked by the test above")
     safe_merge = Path(engine_home) / "bin" / "safe_merge.sh"
-    if not safe_merge.is_file():
-        pytest.skip(f"autonomy-engine not checked out at {engine_home}")
+    assert safe_merge.is_file(), f"AUTONOMY_ENGINE_HOME is set but {safe_merge} does not exist"
     read_keys = set(re.findall(r"CONFIG_GET merge_gate\.(doc_only_\w+)", safe_merge.read_text()))
-    assert read_keys, "safe_merge.sh no longer reads any merge_gate.doc_only_* key; re-pin this test"
-    missing = read_keys - set(_merge_gate())
-    assert not missing, f"safe_merge.sh reads {sorted(missing)} but {CONFIG_PATH} does not declare them"
+    assert read_keys == SAFE_MERGE_DOC_ONLY_KEYS
 
 
 def test_extension_lists_agree() -> None:
