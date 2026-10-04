@@ -172,6 +172,22 @@ HF_ARCHIVE = ArchiveProvenance(
     quarantine_as_of=date(2026, 7, 14),
 )
 
+#: The same HF dataset re-captured at revision ``c64377a3`` (last bar 2026-09-09), #3619 slice 3.
+#: A SEPARATE vendor rather than an upsert over ``HF_ARCHIVE``: the vendor re-bases history at
+#: each capture — against the 2026-07-08 load it changes ``close`` on 1,863 of 7,693 symbols
+#: (post-capture splits rescaled back to 1962) and ``adj_close`` on 56% of the 25.8M shared rows —
+#: so an in-place reload would silently move every existing reader of ``HF_ARCHIVE``. The
+#: ``etoro/etoro-comparators-2026-07-08-v1`` idiom: the capture is part of the vendor string.
+#: Basis re-measured on this capture: AAPL 2020-08-27 close 125.01 (split-adjusted), adj_close
+#: 121.15. ``quarantine_as_of`` follows HF_ARCHIVE's rule: capture + PROVISIONAL_WINDOW_DAYS + 1.
+HF_ARCHIVE_2026_09_09 = ArchiveProvenance(
+    vendor=f"{VENDOR}@2026-09-09",
+    upstream_source=UPSTREAM_SOURCE,
+    licence=LICENCE,
+    adjustment_basis=ADJUSTMENT_BASIS,
+    quarantine_as_of=date(2026, 9, 15),
+)
+
 #: ⚠ ``unadjusted`` is MEASURED, and it is the opposite of what #2398 recorded
 #: for the same vendor. The same AAPL bar that reads 125.01 in the HF archive
 #: reads **500.04** here (2020-08-27, pre-split), and the 1980-12-12 IPO bar
@@ -208,7 +224,7 @@ INTRADER_ARCHIVE = ArchiveProvenance(
 #: coverage row, and covering them is a data-treatment decision rather than a
 #: registration one, because ``ASSET_CLASS`` below is hardcoded ``us_equity``
 #: and a VIX index series is not an equity (#3040 non-goal).
-RESEARCH_ARCHIVES: tuple[ArchiveProvenance, ...] = (HF_ARCHIVE, INTRADER_ARCHIVE)
+RESEARCH_ARCHIVES: tuple[ArchiveProvenance, ...] = (HF_ARCHIVE, INTRADER_ARCHIVE, HF_ARCHIVE_2026_09_09)
 
 
 # ---------------------------------------------------------------------------

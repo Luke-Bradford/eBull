@@ -3,7 +3,7 @@
 Status: slice 2 of #3619, revised after Codex checkpoint 1. Slice 1 (#3636, `bdfb5fc3`)
 measured the inputs; this fixes how they are combined. Code:
 `app/services/total_return_reader.py`. ETFs past 2024-08 (N-PORT Item B.5.a in the DB) are
-slice 2b; the PWB refresh to 2026-08 is slice 3.
+slice 2b; the PWB refresh to 2026-08 is slice 3 (§"Slice 3").
 
 ## Consumer, population and unit
 
@@ -50,8 +50,8 @@ are not in it.
    that die. A terminating series' final month is kept when it is 2024-08 or earlier, as an
    observed return to its last usable bar. It is not a realised termination: the consumer composes
    `series_termination` once, from the selection's evidence.
-4. **PWB supplies months up to 2026-06.** Its capture month (2026-07, capture 2026-07-08) is
-   partial. A PWB series ending before capture keeps its final month as an observed return; PWB
+4. **PWB supplies months up to 2026-08.** Its capture month (2026-09, capture 2026-09-09, slice 3)
+   is partial. A PWB series ending before capture keeps its final month as an observed return; PWB
    carries no termination evidence, and every month it supplies after 2024-08 is survivor-only
    anyway. Both capture dates are declared constants asserted against `max(last_bar)`. These are
    endpoint checks: prices, links and verdicts can move beneath them, so the panel's version
@@ -325,3 +325,64 @@ For those, identity rests on the directory's symbol → class mapping.
   These are realised returns, not a record of what was known at each month end. The NAV behind each
   month was published daily, so a signal that uses a month's return after that month ends uses a figure
   a market participant could have computed, but not necessarily this filed value.
+
+## Slice 3 — PWB re-captured at 2026-09-09
+
+**What changed.** The reader now reads `paperswithbacktest/Stocks-Daily-Price@2026-09-09`
+(`research_corpus_ingest.HF_ARCHIVE_2026_09_09`, HF revision `c64377a3`). `PWB_CAPTURE_DATE`
+is 2026-09-09 and `LAST_PWB_MONTH` is 2026-08. The splice rules are unchanged.
+
+**Why a separate vendor and not an upsert.** The dataset is republished monthly on `main`
+(commits 2026-07-09, 08-17, 09-01, 10-01), and each release re-bases history. Against the 2026-07-08
+load, the new capture has:
+- the same 25,819,061 `(symbol, date)` rows, plus 394,396 new ones and 177 new symbols;
+- `close` changed on 1,863 of 7,693 symbols, mostly constant-ratio rescaling for post-capture splits;
+- `adj_close` changed on 56% of shared rows.
+
+The ingest upserts `ON CONFLICT DO UPDATE`, so reloading under the old vendor would have moved
+every existing reader of that vendor (`universe_selection`'s `survivor_only`, `strategy_result`,
+the PEAD/insider outcome modules) without a version change. The old capture stays loaded and
+unchanged. Script: `scripts/ingest_2282_research_archive.py --capture 2026-09-09`, which pins
+the revision and each shard's SHA-256, so neither a later download nor a reused cache directory
+can load a different capture under this vendor. The 2026-07-08 cache hashes to revision
+`ded0db4c`'s shards, which confirms that capture's revision.
+
+**Load evidence (dev DB, 2026-10-04).**
+- 7,870 series, of which 5,280 resolved to an instrument; 26,212,994 bars; census drift 0.
+- Quarantine (`price-quarantine-v1+49ff29fea766`): 1,388 bar verdicts and 2,365 transition verdicts.
+- `--verify` against eToro `price_daily`: median return correlation 0.9919 over 5,221
+  instruments. The old capture gives 0.9919 over 5,174.
+
+**Full-population A/B** (`PYTHONPATH=. uv run python -m scripts.ab_3619_pwb_capture`). Arm A pins
+the reader's capture constants to 2026-07-08. Checked against a panel dumped by the unmodified
+reader at `24c37c0b`, arm A is identical row for row (1,928,646 rows) and verdict for verdict.
+
+| | A (07-08) | B (09-09) |
+|---|---:|---:|
+| spliced | 4,151 | 4,149 |
+| no_pwb_series | 206 | 207 |
+| refused_insufficient_overlap | 211 | 212 |
+| refused_price_disagreement | 62 | 62 |
+| terminating | 12,636 | 12,636 |
+| rows | 1,928,646 | 1,936,598 |
+
+- **Verdicts:** seven names move. Four go from spliced to `no_pwb_series`, two from
+  `no_pwb_series` to spliced, and one from `no_pwb_series` to `refused_insufficient_overlap`. The
+  instrument resolution is re-run at load.
+- **New rows:** 8,000, for 2026-07 and 2026-08.
+- **Shared PWB-sourced months:** 409 of 221,393 differ by more than 1e-6, and 80 by more than 1pp.
+- **Arbitration by Intrader, through 2024-08:** for 102 disputed months the two captures can be
+  compared against Intrader's own measurement of the month. B is nearer Intrader on 90, A on 12.
+- **2026-06, A's last complete month, holds 208 of the 305 disputes after 2024-08:**
+  - 162 differ in `adj_close` only, all with B higher than A: distributions posted after A's capture.
+  - 35 are A missing its late-June bars.
+  - 11 are other differences.
+- **Adopted: B.** It is nearer the independent measurement where one exists, and it is more
+  complete on A's final month.
+
+**Known limit introduced.** A re-capture can also place an adjustment boundary inside history. For
+example, `BURU` carries a ~39.9× factor from 2023-02-01, so its 2023-02 return reads +1,717%
+against A's −54%. That is the largest row in the A/B's worst-15 list. Up to 2024-08 such a month
+shows among the arbitrated disputes; after 2024-08 nothing can arbitrate. The identity gate's
+monthly median does not see a single-month step, and the reader does not screen monthly returns,
+so a consumer must.
