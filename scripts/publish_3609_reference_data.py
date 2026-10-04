@@ -100,11 +100,21 @@ def _snapshots(conn: psycopg.Connection[Any]) -> dict[str, dict[str, Any]]:
             if row is None:
                 raise RuntimeError(f"no accepted snapshot for {key}; run scripts/refresh_2912_reference_data.py")
             pinned[key] = row
-    returns_day = pinned["jkp_usa_monthly_vw_cap"]["fetched_at"].astimezone(UTC).date()
-    cutoffs_day = pinned["jkp_nyse_cutoffs"]["fetched_at"].astimezone(UTC).date()
-    if returns_day != cutoffs_day:
-        raise RuntimeError(f"JKP returns fetched {returns_day} but cutoffs {cutoffs_day}: not one download date")
     return pinned
+
+
+def _verify_jkp_current(client: httpx.Client, pinned: dict[str, dict[str, Any]]) -> str:
+    """One download date for JKP: both pinned snapshots must equal what JKP serves now, beside the PDF.
+
+    A snapshot's ``fetched_at`` is its first capture, and an unchanged refresh keeps it, so the dates
+    of two snapshots say nothing about whether they are one vintage. Re-fetching does.
+    """
+    for key in ("jkp_usa_monthly_vw_cap", "jkp_nyse_cutoffs"):
+        response = client.get(pinned[key]["source_url"])
+        response.raise_for_status()
+        if _sha256(response.content) != pinned[key]["response_sha256"]:
+            raise RuntimeError(f"{key} has changed upstream since its snapshot; refresh the factor_library group")
+    return datetime.now(UTC).isoformat()
 
 
 def _coverage(conn: psycopg.Connection[Any], pinned: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -126,7 +136,7 @@ def _coverage(conn: psycopg.Connection[Any], pinned: dict[str, dict[str, Any]]) 
     ).fetchone()
     cutoffs = conn.execute(
         """
-        SELECT count(DISTINCT observation_date) FROM reference_data_observations
+        SELECT count(*) FROM reference_data_observations
         WHERE snapshot_id = %(snapshot)s AND series_key IN ('nyse_p20', 'nyse_p80')
           AND observation_date BETWEEN %(lo)s AND %(hi)s
         """,
@@ -138,8 +148,9 @@ def _coverage(conn: psycopg.Connection[Any], pinned: dict[str, dict[str, Any]]) 
     months = (CUTOFF_WINDOW[1].year - CUTOFF_WINDOW[0].year) * 12 + CUTOFF_WINDOW[1].month - CUTOFF_WINDOW[0].month + 1
     if sessions == 0 or with_rf != sessions:
         raise RuntimeError(f"French daily RF covers {with_rf} of {sessions} SPY sessions in {RF_WINDOW}")
-    if int(cutoffs[0]) != months:
-        raise RuntimeError(f"nyse_cutoffs cover {cutoffs[0]} of {months} formation months in {CUTOFF_WINDOW}")
+    # Both breakpoints, every month: (snapshot, series, date) is unique, so 2 x months rows means no gap.
+    if int(cutoffs[0]) != 2 * months:
+        raise RuntimeError(f"nyse_cutoffs hold {cutoffs[0]} p20/p80 values for {months} months in {CUTOFF_WINDOW}")
     return {
         "rf_window": [d.isoformat() for d in RF_WINDOW],
         "spy_sessions": sessions,
@@ -219,6 +230,7 @@ def publish(out: Path) -> dict[str, Any]:
             documentation.raise_for_status()
             if _sha256(documentation.content) != JKP_DOCUMENTATION_SHA256:
                 raise RuntimeError("JKP Documentation.pdf no longer matches the pinned sha256")
+            jkp_verified_at = _verify_jkp_current(client, pinned)
             _write_new(out / "inputs" / "jkp_documentation.pdf", documentation.content)
             table9_sha256 = _write_new(out / "inputs" / TABLE9_SIGNS_PATH.name, TABLE9_SIGNS_PATH.read_bytes())
 
@@ -243,6 +255,7 @@ def publish(out: Path) -> dict[str, Any]:
                 for key, row in pinned.items()
             },
             "coverage": coverage,
+            "jkp_snapshots_verified_current_at": jkp_verified_at,
             "jkp_documentation": {
                 "url": JKP_DOCUMENTATION_URL,
                 "sha256": JKP_DOCUMENTATION_SHA256,
