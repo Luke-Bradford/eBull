@@ -5,7 +5,7 @@ the reader as committed (the 2026-09-09 capture). Both captures are separate ven
 the A/B re-runs at any time from one command. Everything else (selection, quarantine rule set,
 Intrader, the identity gate) is shared, so every difference is the capture.
 
-    PYTHONPATH=. uv run python -m scripts.ab_3619_pwb_capture [--baseline var/ab_3619_s3/panel_A.pkl]
+    PYTHONPATH=. uv run python -m scripts.ab_3619_pwb_capture [--baseline var/ab_3619_s3/panel_A_24c37c0b.json]
 
 ``--baseline`` checks arm A row-for-row against a panel dumped by the unmodified reader at
 ``24c37c0b``, so the pin is shown to reproduce the old code. Format: JSON
