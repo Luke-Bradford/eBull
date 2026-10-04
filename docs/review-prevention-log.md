@@ -11853,3 +11853,17 @@ neighbouring container and match it.**
   so an amendment only raises it).
 - Enforced in: `tests/test_financial_normalization.py::TestFuturePeriodFactExcluded3547` and
   `tests/test_canonical_merge_arrival_order_624.py::TestFuturePeriodRowRemoved3547` (Phase B3).
+
+### A vendor-identity gate built on the field being repaired refuses the names the repair is for (#3619)
+
+- Failure: #3619 slice 2 splices Intrader onto PWB from 2022 because Intrader's `adj_close` stops carrying
+  dividends. The first identity gate drafted for the splice compared `adj_close` returns. Over 2022+ months that
+  refuses every monthly dividend payer: Intrader's missing monthly dividend IS the median difference. Restricting
+  it to pre-2022 months instead left 956 names with fewer than 12 paired months, and checked identity in months
+  where the verdict decides nothing. A second trap: comparing two vendors' "month-end" returns whose last usable
+  bars differ measures two holding periods, not one security.
+- Prevention: when a check decides whether vendor B may replace vendor A's defective field, compute it on a field
+  the defect cannot touch (here raw/split-adjusted `close`, skipping return intervals that hold a split stamp),
+  over the window where the verdict is consumed, on returns that run between the SAME bar dates.
+- Enforced in: `tests/test_total_return_reader.py::test_identity_passes_on_the_same_price_path_despite_missing_dividends`,
+  `::test_identity_ignores_pre_switch_disagreement` and `::test_identity_compares_only_returns_over_the_same_bars`.
