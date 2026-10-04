@@ -26,6 +26,9 @@ from tests.test_ranking_pot_schema_db import _frozen, _move
 from tests.test_ranking_pot_step import FLAT, _rebalance, table_of
 from tests.test_ranking_pot_step_db import SPY, _at, replace_id
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 

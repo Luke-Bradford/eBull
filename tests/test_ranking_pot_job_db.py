@@ -15,6 +15,9 @@ from app.services.market_calendar import latest_completed_us_session, us_market_
 from app.services.ranking_pot import Universes
 from tests.test_ranking_pot_schema_db import SCORED_AT, _frozen, _move
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 

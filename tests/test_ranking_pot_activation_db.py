@@ -15,6 +15,9 @@ from app.services.strategy_control_plane import configure_paper_pool
 from app.services.strategy_position_manager import configure_position_manager
 from tests.test_ranking_pot_schema_db import POT, _frozen, _move
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 NOW = datetime(2026, 10, 2, 15, 30, tzinfo=UTC)
