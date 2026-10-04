@@ -421,6 +421,8 @@ _RESEARCH_PRICE_READER_MODULES: Final[frozenset[str]] = frozenset(
         "app.services.hunt_panel",
         # #3386: the persisted discovery panel; only ``hunt_panel`` (and ``hunt_harness``) import it.
         "app.services.hunt_store",
+        # #3619 slice 2: monthly total returns on the survivorship-free selection.
+        "app.services.total_return_reader",
     }
 )
 
@@ -479,6 +481,10 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # §16.3 order-7 REFUSAL of a setup whose mean net R is negative in either half — and its
     # method was fixed by the spec (ckpt-1 r1/r2) before it was run.
     "ai_trial_setup_base_rates.py": "#3471 §16.5 setup base-rate library (declaration input; refusal gate only)",
+    # #3619 slice 2 spec (2026-10-04-3619-total-return-splice.md) "Why these thresholds": the splice census
+    # compares two vendors' price paths for the same name to decide which vendor is trustworthy — a data-quality
+    # verdict with no signal, nothing ranked or selected. A hunt trial would charge M for a data audit.
+    "report_3619_splice_census.py": "#3619 slice 2 splice census (vendor agreement; data quality only)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"
