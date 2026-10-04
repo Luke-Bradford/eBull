@@ -43,7 +43,7 @@ Measured 2026-10-04:
 
 | data | history | point-in-time | backtestable now? |
 |---|---|---|---|
-| US research price corpus (`research_price_daily`), survivorship-free, incl. ~25 cross-asset ETFs | 1962 → 2024-09 (Intrader), → 2026-07 (PWB); eToro `price_daily` 2019-12 → now | frozen archive | **yes**. Intrader OHLC are raw but `adj_close` carries splits and dividends to 2024-09-27; the gap is extending total return to the present (#3619). ETF selection must handle closed funds and inception dates |
+| US research price corpus (`research_price_daily`), survivorship-free, incl. cross-asset ETFs (list in `quant/data-map.md`) | 1962 → 2024-09 (Intrader), → 2026-07 (PWB); eToro `price_daily` 2019-12 → now | frozen archive | **yes**. Intrader OHLC are raw but `adj_close` carries splits and dividends to 2024-09-27; the gap is extending total return to the present (#3619). ETF selection must handle closed funds and inception dates |
 | XBRL facts (`financial_facts_raw`, per accession) + the PIT bundle (`pit_fundamentals.py`) | filed 2009 → now, subject to the retention sweep (`financial_facts_retention.py`) | **yes** via the bundle (acceptance time; raw `filed_date` is not) | **yes**, 2009+; measure retained coverage first |
 | Form 4 insiders | dense only from 2023 | yes | thin before 2023 (sealed test: placebo-adjusted −0.72%) |
 | FINRA short interest | 2021-07 → now | **no as stored**: `filed_at` is settlement-date midnight, before publication; lag it | ~5 years: a screen, not an alpha test |
@@ -107,7 +107,7 @@ Unless at least one of mechanism, data or segment is new:
 
 ## Sources
 
-The full citation lists are in the five research reports, summarised in the supervisor's memory (`project_autotrading-review-2026-10_*`). Key ones:
+The load-bearing citations are listed below; each skill under `.claude/skills/quant/` cites its sources inline.
 
 - SPIVA US YE2024;
 - Barber & Odean 2000 (JF);

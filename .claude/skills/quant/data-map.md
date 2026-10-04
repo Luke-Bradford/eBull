@@ -6,7 +6,7 @@ Use this before choosing data for a signal or a backtest, or proposing a new dat
 
 ## Backtestable today
 
-- **Prices: `research_price_daily`.** 76M bars, 30,591 series, survivorship-free US, 1962 onward.
+- **Prices: `research_price_daily`.** Survivorship-free US, 1962 onward. Bar count, series count and date range: run the queries at the top of `data-sources/research-price-corpus.md` rather than quoting a figure.
   - The Intrader vendor ends 2024-09-27. Its OHLC are raw, but `adj_close` carries split and dividend adjustment (`research_corpus_ingest.py`), so total return is computable to 2024-09. PWB ends 2026-07-08; check its adjustment basis in `data-sources/research-price-corpus.md` before splicing.
   - It includes cross-asset ETFs (e.g. SPY, QQQ, IWM, EFA, EEM, sector SPDRs, TLT, IEF, SHY, AGG, LQD, HYG, TIP, GLD, IAU, SLV, DBC, USO, VNQ, VGK, EWJ, VTI, BND). Start dates vary by fund (XLRE 2015, XLC 2018); measure the list and each inception before quoting. Picking today's familiar funds is survivor selection: an ETF study must include closed funds, inception eligibility and mandate changes, or say it does not.
   - eToro `price_daily` covers 2019-12 onward for splicing to the present.
