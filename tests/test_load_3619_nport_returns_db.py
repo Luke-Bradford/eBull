@@ -54,14 +54,28 @@ def test_load_is_idempotent_and_refuses_a_changed_row(ebull_test_conn: psycopg.C
     ).fetchone()
     assert stored == ("4.29",)
 
-    (folder / "MONTHLY_TOTAL_RETURN.tsv").write_text(
-        _HEADER + "0001752724-24-232931\t761014\tC000012090\t-.77\t4.39\t4.29\n"
-    )
+    only_first = "0001752724-24-232931\t761014\tC000012090\t-.77\t4.39\t4.29\n"
+    (folder / "MONTHLY_TOTAL_RETURN.tsv").write_text(_HEADER + only_first)
     with pytest.raises(RuntimeError, match="1 stored rows are missing"):
         load_quarter(ebull_test_conn, "2024q4", folder)
 
     # Recovery: replacing the quarter reloads it from this read, and the guard is back afterwards.
     assert load_quarter(ebull_test_conn, "2024q4", folder, replace=True) == (3, 3)
+    ebull_test_conn.commit()  # the fixture connection is not autocommit; keep the replace past the rollbacks below
+    assert ebull_test_conn.execute("SELECT count(*) FROM sec_nport_monthly_returns").fetchone() == (3,)
+    with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+        ebull_test_conn.execute("DELETE FROM sec_nport_monthly_returns")
+    ebull_test_conn.rollback()
+
+    # A replace that fails AFTER its delete (a row the table's CHECK refuses) rolls back whole: the quarter's rows
+    # are back and so is the guard.
+    bad = "BADACCESSION"
+    (folder / "SUBMISSION.tsv").write_text(
+        _SUBMISSION + f"{bad}\t30-OCT-2024\t\tNPORT-P\t31-DEC-2024\t30-SEP-2024\tN\n"
+    )
+    (folder / "MONTHLY_TOTAL_RETURN.tsv").write_text(_HEADER + only_first + f"{bad}\t1\tC000012090\t1\t1\t1\n")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        load_quarter(ebull_test_conn, "2024q4", folder, replace=True)
     assert ebull_test_conn.execute("SELECT count(*) FROM sec_nport_monthly_returns").fetchone() == (3,)
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
         ebull_test_conn.execute("DELETE FROM sec_nport_monthly_returns")
