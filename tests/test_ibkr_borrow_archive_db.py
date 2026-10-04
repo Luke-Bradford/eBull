@@ -50,6 +50,8 @@ def test_archive_then_unchanged_then_stale_refused(ebull_test_conn: psycopg.Conn
         with pytest.raises(BorrowFileError, match="not moving"):
             archive_borrow_file(conn, fetch=lambda: old_file, now=fresh)
         assert conn.execute("SELECT count(*) FROM ibkr_borrow_snapshots").fetchone() == (2,)
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute("UPDATE ibkr_borrow_rates SET fee_rate_pct = 0 WHERE conid = 42")
     finally:
         conn.execute("DELETE FROM ibkr_borrow_rates")
         conn.execute("DELETE FROM ibkr_borrow_snapshots")

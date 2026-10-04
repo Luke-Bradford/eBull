@@ -44,6 +44,22 @@ CREATE TABLE IF NOT EXISTS ibkr_borrow_rates (
 
 CREATE INDEX IF NOT EXISTS idx_ibkr_borrow_rates_symbol ON ibkr_borrow_rates (symbol, snapshot_id);
 
+CREATE OR REPLACE FUNCTION ibkr_borrow_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+END $$;
+
+DROP TRIGGER IF EXISTS ibkr_borrow_snapshots_append_only ON ibkr_borrow_snapshots;
+CREATE TRIGGER ibkr_borrow_snapshots_append_only
+    BEFORE UPDATE ON ibkr_borrow_snapshots
+    FOR EACH ROW EXECUTE FUNCTION ibkr_borrow_append_only();
+
+DROP TRIGGER IF EXISTS ibkr_borrow_rates_append_only ON ibkr_borrow_rates;
+CREATE TRIGGER ibkr_borrow_rates_append_only
+    BEFORE UPDATE ON ibkr_borrow_rates
+    FOR EACH ROW EXECUTE FUNCTION ibkr_borrow_append_only();
+
 COMMENT ON TABLE ibkr_borrow_snapshots IS
     '#3622 daily archive of IBKR shortstock usa.txt: exact gzip payload + the provider #BOF as-of. Append-only.';
 COMMENT ON TABLE ibkr_borrow_rates IS

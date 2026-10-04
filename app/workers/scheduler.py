@@ -2838,6 +2838,8 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=20, minute=45),
         catch_up_on_boot=True,
+        # No upstream history and an idempotent, self-stamped append: a late fire beats a lost day.
+        rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
