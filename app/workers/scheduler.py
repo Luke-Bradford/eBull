@@ -7293,6 +7293,12 @@ def _execution_market_refresh(
     ``due`` is the executor's own due-query, re-run for today's New York session. A total quote-fetch
     failure raises, exactly as a halt-feed failure does: the fire aborts with nothing decided and the
     next fire retries, rather than deciding on the stale quote this exists to replace.
+
+    ⚠ A PARTIAL refresh does not abort (Codex ckpt-2 raised it). An instrument eToro omits is
+    usually omitted on every fire, and an undecided entry expires at the session's end, so one
+    unquoted name would veto every other entry for the month. Its entry is instead decided on the
+    stored quote under the executor's own ``max_quote_age_seconds`` — the pre-#3578 behaviour, for
+    that name only — and the shortfall is logged at WARNING.
     """
 
     def refresh() -> None:
@@ -7306,6 +7312,14 @@ def _execution_market_refresh(
             summary = refresh_signal_quotes(market, conn, due(conn, today=today))
         if summary.batch_error is not None:
             raise summary.batch_error
+        if summary.quotes_updated < summary.instruments_requested:
+            logger.warning(
+                "%s: execution-time quotes refreshed for %d of %d due instrument(s); the rest are gated on "
+                "their stored quote",
+                job_name,
+                summary.quotes_updated,
+                summary.instruments_requested,
+            )
         logger.info(
             "%s: execution-time quotes requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d",
             job_name,

@@ -50,3 +50,13 @@ def test_a_failed_quote_fetch_aborts_the_fire(monkeypatch: pytest.MonkeyPatch) -
     _wire(monkeypatch, QuoteRefreshSummary(2, 0, 2, 0, batch_failed=True, batch_error=boom))
     with pytest.raises(RuntimeError, match="eToro down"):
         scheduler._execution_market_refresh("job", ("k", "u"), _due)()
+
+
+def test_a_partial_refresh_proceeds_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = _wire(monkeypatch, QuoteRefreshSummary(2, 1, 1, 0))
+    with caplog.at_level("WARNING", logger=scheduler.logger.name):
+        scheduler._execution_market_refresh("job", ("k", "u"), _due)()
+    assert calls == ["halts", ("quotes", [7, 9])]
+    assert "refreshed for 1 of 2" in caplog.text
