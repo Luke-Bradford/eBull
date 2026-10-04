@@ -24,11 +24,14 @@ from openpyxl import load_workbook
 from psycopg.rows import dict_row
 
 ReferenceSource = Literal["kenneth_french", "aqr", "fred", "global_q", "jkp", "federal_reserve"]
-ReferenceUnit = Literal["decimal_return", "percent_per_annum", "binary_indicator", "probability"]
+ReferenceUnit = Literal[
+    "decimal_return", "percent_per_annum", "binary_indicator", "probability", "usd_millions", "count"
+]
 
 FRENCH_FTP: Final = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp"
 FRENCH_FIVE_FACTOR_URL: Final = f"{FRENCH_FTP}/F-F_Research_Data_5_Factors_2x3_CSV.zip"
 FRENCH_MOMENTUM_URL: Final = f"{FRENCH_FTP}/F-F_Momentum_Factor_CSV.zip"
+FRENCH_THREE_FACTOR_DAILY_URL: Final = f"{FRENCH_FTP}/F-F_Research_Data_Factors_daily_CSV.zip"
 AQR_DATA_SETS: Final = "https://www.aqr.com/-/media/AQR/Documents/Insights/Data-Sets"
 AQR_VME_MONTHLY_URL: Final = f"{AQR_DATA_SETS}/Value-and-Momentum-Everywhere-Factors-Monthly.xlsx"
 FRED_CSV_URL: Final = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_key}"
@@ -40,13 +43,17 @@ FED_EBP_URL: Final = "https://www.federalreserve.gov/econres/notes/feds-notes/eb
 JKP_USA_MONTHLY_VW_CAP_URL: Final = (
     "https://jkpfactors-data.s3.amazonaws.com/public/%5Busa%5D_%5Ball_factors%5D_%5Bmonthly%5D_%5Bvw_cap%5D.zip"
 )
+#: #3609 step 1: the NYSE size breakpoints JKP's factors are built on (``me`` percentiles, USD millions).
+JKP_NYSE_CUTOFFS_URL: Final = "https://jkpfactors-data.s3.amazonaws.com/public/other/nyse_cutoffs.csv"
 
 FRENCH_PARSER_VERSION: Final = "kenneth-french-monthly-csv-v2"
+FRENCH_DAILY_PARSER_VERSION: Final = "kenneth-french-daily-csv-v1"
 AQR_PARSER_VERSION: Final = "aqr-vme-monthly-xlsx-v2"
 AQR_FACTOR_PARSER_VERSION: Final = "aqr-factor-monthly-xlsx-v1"
 FRED_PARSER_VERSION: Final = "fred-csv-v1"
 GLOBAL_Q_PARSER_VERSION: Final = "global-q-monthly-csv-v1"
 JKP_PARSER_VERSION: Final = "jkp-monthly-csv-zip-v1"
+JKP_CUTOFFS_PARSER_VERSION: Final = "jkp-nyse-cutoffs-csv-v1"
 FED_EBP_PARSER_VERSION: Final = "fed-ebp-monthly-csv-v1"
 
 _FRENCH_MISSING: Final = frozenset({Decimal("-99.99"), Decimal("-999")})
@@ -206,6 +213,7 @@ _FED_EBP_UNITS: Final[Mapping[str, ReferenceUnit]] = {
     "est_prob": "probability",
 }
 _JKP_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_stocks", "n_stocks_min", "date", "ret")
+_JKP_CUTOFFS_HEADER: Final = ("eom", "n", "nyse_p1", "nyse_p20", "nyse_p50", "nyse_p80")
 
 
 class ReferenceDataSourceError(ValueError):
@@ -292,6 +300,24 @@ def parse_french_monthly_zip(
     expected_series_keys: tuple[str, ...] | None = None,
 ) -> ParsedReferenceData:
     """Parse the one monthly table and stop before French's annual section."""
+    return _parse_french_zip(payload, expected_series_keys=expected_series_keys, daily=False)
+
+
+def parse_french_daily_zip(
+    payload: bytes,
+    *,
+    expected_series_keys: tuple[str, ...] | None = None,
+) -> ParsedReferenceData:
+    """Parse a French daily file: one table of ``YYYYMMDD`` rows, percent returns per day."""
+    return _parse_french_zip(payload, expected_series_keys=expected_series_keys, daily=True)
+
+
+def _parse_french_zip(
+    payload: bytes,
+    *,
+    expected_series_keys: tuple[str, ...] | None,
+    daily: bool,
+) -> ParsedReferenceData:
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             names = [name for name in archive.namelist() if not name.endswith("/")]
@@ -316,25 +342,32 @@ def parse_french_monthly_zip(
 
     observations: list[ReferenceObservation] = []
     missing_count = 0
-    monthly_rows = 0
+    table_rows = 0
+    stamp_length = 8 if daily else 6
     for row_number, row in enumerate(rows[header_index + 1 :], start=header_index + 2):
         if not row:
-            if monthly_rows:
+            if table_rows:
                 break
             continue
         stamp = row[0].strip()
-        if len(stamp) != 6 or not stamp.isdigit():
-            if monthly_rows:
+        if len(stamp) != stamp_length or not stamp.isdigit():
+            if table_rows:
                 break
             continue
         if len(row) != len(series_keys) + 1:
-            raise ReferenceDataSourceError(f"French row {row_number}: ragged monthly row")
+            raise ReferenceDataSourceError(f"French row {row_number}: ragged row")
         year = int(stamp[:4])
-        month = int(stamp[4:])
-        if not 1 <= month <= 12:
+        month = int(stamp[4:6])
+        if daily:
+            try:
+                when = date(year, month, int(stamp[6:]))
+            except ValueError as exc:
+                raise ReferenceDataSourceError(f"French row {row_number}: invalid YYYYMMDD {stamp!r}") from exc
+        elif not 1 <= month <= 12:
             raise ReferenceDataSourceError(f"French row {row_number}: invalid YYYYMM {stamp!r}")
-        when = _month_end(year, month)
-        monthly_rows += 1
+        else:
+            when = _month_end(year, month)
+        table_rows += 1
         for series_key, raw in zip(series_keys, row[1:], strict=True):
             value = _decimal(raw, context=f"French row {row_number}/{series_key}")
             if value in _FRENCH_MISSING:
@@ -544,6 +577,62 @@ def parse_jkp_monthly_zip(
     return _validated(ParsedReferenceData(tuple(observations), missing_count))
 
 
+def parse_jkp_nyse_cutoffs_csv(payload: bytes) -> ParsedReferenceData:
+    """Parse JKP ``nyse_cutoffs.csv``: NYSE market-equity percentiles at each month end (#3609).
+
+    The percentiles are of JKP's ``me``, which their Documentation.pdf (Table "Market Equity") says
+    "is quoted in million USD"; ``n`` is the NYSE stock count. Every month from the first to the last
+    must be present, and the percentiles must be positive and non-decreasing.
+    """
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ReferenceDataSourceError("JKP cutoffs response is not UTF-8 CSV") from exc
+    reader = csv.reader(io.StringIO(text))
+    header = tuple(cell.strip() for cell in next(reader, ()))
+    if header != _JKP_CUTOFFS_HEADER:
+        raise ReferenceDataSourceError(f"JKP cutoffs header {header!r}; expected {_JKP_CUTOFFS_HEADER!r}")
+    observations: list[ReferenceObservation] = []
+    missing_count = 0
+    previous: date | None = None
+    for row_number, row in enumerate(reader, start=2):
+        if not row or all(not cell.strip() for cell in row):
+            continue
+        if len(row) != len(header):
+            raise ReferenceDataSourceError(f"JKP cutoffs row {row_number}: ragged row")
+        try:
+            when = date.fromisoformat(row[0].strip())
+        except ValueError as exc:
+            raise ReferenceDataSourceError(f"JKP cutoffs row {row_number}: invalid eom") from exc
+        if when != _month_end(when.year, when.month):
+            raise ReferenceDataSourceError(f"JKP cutoffs row {row_number}: {when} is not a month end")
+        if previous is not None and when != _month_end(*_next_month(previous)):
+            raise ReferenceDataSourceError(f"JKP cutoffs row {row_number}: {when} does not follow {previous}")
+        previous = when
+        percentiles: list[Decimal] = []
+        for series_key, raw in zip(header[1:], row[1:], strict=True):
+            if not raw.strip() or raw.strip().upper() in ("NA", "NAN"):
+                missing_count += 1
+                continue
+            value = _decimal(raw, context=f"JKP cutoffs row {row_number}/{series_key}")
+            if value <= 0:
+                raise ReferenceDataSourceError(f"JKP cutoffs row {row_number}/{series_key}: must be positive")
+            if series_key == "n":
+                if value != value.to_integral_value():
+                    raise ReferenceDataSourceError(f"JKP cutoffs row {row_number}/n: not an integer count")
+                observations.append(ReferenceObservation(series_key, when, value, "count"))
+                continue
+            percentiles.append(value)
+            observations.append(ReferenceObservation(series_key, when, value, "usd_millions"))
+        if percentiles != sorted(percentiles):
+            raise ReferenceDataSourceError(f"JKP cutoffs row {row_number}: percentiles decrease")
+    return _validated(ParsedReferenceData(tuple(observations), missing_count))
+
+
+def _next_month(when: date) -> tuple[int, int]:
+    return (when.year + 1, 1) if when.month == 12 else (when.year, when.month + 1)
+
+
 def parse_fred_csv(
     payload: bytes,
     *,
@@ -665,6 +754,13 @@ _FACTOR_LIBRARY: Final = (
         JKP_PARSER_VERSION,
         _jkp_parser("usa", "vw_cap"),
     ),
+    ReferenceDatasetSpec(
+        "jkp",
+        "jkp_nyse_cutoffs",
+        JKP_NYSE_CUTOFFS_URL,
+        JKP_CUTOFFS_PARSER_VERSION,
+        parse_jkp_nyse_cutoffs_csv,
+    ),
 )
 
 
@@ -682,6 +778,14 @@ REFERENCE_DATASETS: Final[Mapping[str, ReferenceDatasetSpec]] = {
         FRENCH_MOMENTUM_URL,
         FRENCH_PARSER_VERSION,
         _french_parser(("Mom",)),
+    ),
+    #: #3609 step 1: the daily risk-free rate (``RF``) that excess daily returns are measured against.
+    "french_three_factor_daily": ReferenceDatasetSpec(
+        "kenneth_french",
+        "french_three_factor_daily",
+        FRENCH_THREE_FACTOR_DAILY_URL,
+        FRENCH_DAILY_PARSER_VERSION,
+        lambda payload: parse_french_daily_zip(payload, expected_series_keys=("Mkt-RF", "SMB", "HML", "RF")),
     ),
     "aqr_vme_monthly": ReferenceDatasetSpec(
         "aqr",
@@ -713,6 +817,7 @@ REFERENCE_DATASETS: Final[Mapping[str, ReferenceDatasetSpec]] = {
 FRENCH_DATASET_KEYS: Final = (
     "french_five_factor_monthly",
     "french_momentum_monthly",
+    "french_three_factor_daily",
     *(spec.dataset_key for spec in _FRENCH_LIBRARY),
 )
 AQR_DATASET_KEYS: Final = ("aqr_vme_monthly", *(spec.dataset_key for spec in _AQR_LIBRARY))
@@ -949,9 +1054,11 @@ __all__ = [
     "FRED_DATASET_KEYS",
     "FACTOR_LIBRARY_DATASET_KEYS",
     "FRED_PARSER_VERSION",
+    "FRENCH_DAILY_PARSER_VERSION",
     "FRENCH_DATASET_KEYS",
     "FRENCH_PARSER_VERSION",
     "GLOBAL_Q_PARSER_VERSION",
+    "JKP_CUTOFFS_PARSER_VERSION",
     "JKP_PARSER_VERSION",
     "REFERENCE_DATASETS",
     "ParsedReferenceData",
@@ -963,9 +1070,11 @@ __all__ = [
     "parse_aqr_vme_monthly",
     "parse_fed_ebp_csv",
     "parse_fred_csv",
+    "parse_french_daily_zip",
     "parse_french_monthly_zip",
     "parse_global_q_monthly_csv",
     "parse_jkp_monthly_zip",
+    "parse_jkp_nyse_cutoffs_csv",
     "refresh_reference_dataset",
     "refresh_reference_group",
     "resolve_global_q_monthly_url",
