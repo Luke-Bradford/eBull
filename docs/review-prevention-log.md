@@ -11904,3 +11904,18 @@ neighbouring container and match it.**
 - Enforced in: `scripts/ingest_2282_research_archive.py::CAPTURES` (revision and per-shard SHA-256 per capture;
   `shard_mismatches` refuses a cache filled from another revision before `--load`),
   `tests/test_research_corpus_captures.py`, `total_return_reader._assert_pwb_capture`.
+
+### A "survivorship-free" archive is survivorship-free only from its capture start (#3609)
+
+- Failure: the research corpus was described as "survivorship-free, 1962 onward" (`quant/data-map.md`,
+  `data-sources/research-price-corpus.md`), and step 0 of #3609 labelled its 2010–2021 window that way. The
+  termination census says otherwise: one of 22,879 Intrader series ends before 2014-09, then 45–83 end every month.
+  The archive holds names alive at about 2014-09; every earlier delisting is missing. The 2023 Form 25 cohort test
+  that certified the archive measured one year only.
+- Prevention: before labelling any window survivorship-free, run the per-month termination census
+  (`select to_char(last_bar,'YYYY-MM'), count(*) … group by 1`) over the whole window and compare with an
+  independent exit count (Form 25) per year. A window before the first month of steady terminations is
+  survivor-conditioned. A window with steady terminations but no independent exit list is "unverified", not
+  survivorship-free.
+- Enforced in: `docs/research/2026-10-04-3609-step1-factor-panel.md` premise 1 (three survivorship regimes) and
+  step 0 Amendment 3. The skill text correction is posted on #2403 (loop worktree cannot write `.claude/**`).
