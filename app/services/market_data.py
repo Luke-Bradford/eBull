@@ -622,8 +622,7 @@ def refresh_signal_quotes(
     """Quote the instruments of *signal_ids* now, immediately before an execution batch reads them (#3578).
 
     ``quotes_refresh`` fires hourly at :23, so a batch at :00/:05 would otherwise gate spread, plan
-    invalidation and sizing on a quote up to an hour old — on 2026-10-02 that was the wide opening
-    half-hour's 1.156% spread refusing a name whose afternoon spread was 0.11–0.40%.
+    invalidation and sizing on a quote up to an hour old, e.g. the opening half-hour's wide spread.
 
     The scope read runs in its own transaction so the connection is idle again on return: the
     executors refuse a connection with a transaction open.
