@@ -15,11 +15,13 @@ from openpyxl import Workbook
 from app.services.reference_data import (
     AQR_DATASET_KEYS,
     FACTOR_LIBRARY_DATASET_KEYS,
+    FRED_DATASET_KEYS,
     FRENCH_DATASET_KEYS,
     GLOBAL_Q_INDEX_URL,
     REFERENCE_DATASETS,
     ReferenceDataSourceError,
     parse_aqr_monthly_sheet,
+    parse_fed_ebp_csv,
     parse_global_q_monthly_csv,
     parse_jkp_monthly_zip,
     resolve_global_q_monthly_url,
@@ -47,7 +49,7 @@ def _xlsx(sheet_name: str, *rows: tuple[Any, ...]) -> bytes:
 
 
 def test_every_dataset_belongs_to_exactly_one_scheduled_group() -> None:
-    groups = (*FRENCH_DATASET_KEYS, *AQR_DATASET_KEYS, "fred_dgs3mo", "fred_usrec", *FACTOR_LIBRARY_DATASET_KEYS)
+    groups = (*FRENCH_DATASET_KEYS, *AQR_DATASET_KEYS, *FRED_DATASET_KEYS, *FACTOR_LIBRARY_DATASET_KEYS)
     assert len(groups) == len(set(groups))
     assert set(groups) == set(REFERENCE_DATASETS)
     assert {REFERENCE_DATASETS[key].source for key in FACTOR_LIBRARY_DATASET_KEYS} == {"global_q", "jkp"}
@@ -146,3 +148,28 @@ def test_aqr_tsmom_sheet_with_a_blank_date_header_cell() -> None:
 def test_aqr_header_may_leave_only_the_date_cell_empty() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         parse_aqr_monthly_sheet(b"", sheet="x", header=("DATE", None))
+
+
+def test_fed_ebp_parser_types_spreads_and_probability() -> None:
+    parsed = parse_fed_ebp_csv(b"date,gz_spread,ebp,est_prob\n7/1/2026,0.84,-0.32,0.108\n8/1/2026,0.9,,0.2\n")
+    assert parsed.missing_count == 1
+    assert [(o.series_key, o.observation_date, o.value, o.unit) for o in parsed.observations] == [
+        ("ebp", date(2026, 7, 1), Decimal("-0.32"), "percent_per_annum"),
+        ("est_prob", date(2026, 7, 1), Decimal("0.108"), "probability"),
+        ("gz_spread", date(2026, 7, 1), Decimal("0.84"), "percent_per_annum"),
+        ("est_prob", date(2026, 8, 1), Decimal("0.2"), "probability"),
+        ("gz_spread", date(2026, 8, 1), Decimal("0.9"), "percent_per_annum"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        (b"date,gz_spread,ebp\n7/1/2026,1,1\n", "header"),
+        (b"date,gz_spread,ebp,est_prob\n2026-07-01,1,1,0.1\n", "invalid date"),
+        (b"date,gz_spread,ebp,est_prob\n7/1/2026,1,1,1.5\n", r"outside \[0, 1\]"),
+    ],
+)
+def test_fed_ebp_parser_refuses_drift(text: bytes, match: str) -> None:
+    with pytest.raises(ReferenceDataSourceError, match=match):
+        parse_fed_ebp_csv(text)
