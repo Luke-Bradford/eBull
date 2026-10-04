@@ -99,6 +99,9 @@ def compare_bundles(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
         ):
             failures.append(f"{cik}: shard header or accessions differ")
         for section in ("events", "rejections"):
+            # Ordered on purpose: the builder sorts shard rows by (taxonomy, concept, unit, …)
+            # (``pit_fundamentals._event_order`` / ``_rejection_order``), so removing the added concepts
+            # leaves A's rows in A's order, and a reorder is a difference too.
             kept = [row for row in shard_b[section] if (row["taxonomy"], row["concept"]) not in ADDED_CONCEPTS]
             if kept != shard_a[section]:
                 failures.append(f"{cik}: {section} differ on pre-existing concepts")
