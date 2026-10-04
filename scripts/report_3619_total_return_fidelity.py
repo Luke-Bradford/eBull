@@ -13,11 +13,13 @@ Intrader ``adj_close`` against two references that are not Yahoo, plus one inter
    fund tracking the same index (IVV, QQQM) and labelled as a proxy. Commodity pools (GLD, IAU, SLV, USO, DBC) file
    no N-PORT and are not covered.
 2. **Stocks vs SEC XBRL dividends.** Per-share dividends declared (``us-gaap:CommonStockDividendsPerShareDeclared``,
-   ``financial_periods.dps_declared``) summed over each instrument's covered fiscal quarters, against the vendor's
-   per-bar ``dividend`` stamps in the same windows. Full population of Intrader series linked to an instrument and
-   reporting in USD. Declaration precedes the ex-date by weeks, so single quarters can shift; the per-instrument
-   total over many quarters is the comparison. ``financial_periods`` restates comparatives in place, so a split can
-   leave XBRL split-adjusted against nominal vendor stamps; that stratum is reported separately.
+   ``financial_periods.dps_declared``) per fiscal quarter, against the payments implied by each vendor's own
+   ``adj_close`` in the same window (PWB has no dividend stamps, so both arms are measured the same way). Full
+   population of Intrader series linked to an instrument and reporting in USD, plus PWB, the candidate source past
+   Intrader's end, on the instruments both carry. Declaration precedes the ex-date by weeks, so single quarters
+   shift: ratios use each instrument's total over its quarters, and the by-year miss rate looks across the quarter
+   and the one after. ``financial_periods`` restates comparatives in place, so a split can leave XBRL
+   split-adjusted against nominal vendor amounts; that stratum is reported separately.
 3. **Internal identity.** On every dividend bar (no split that day) of the series above, is the ``adj_close`` return
    closer to the total-return formula ``(close + dividend) / prev_close`` than to the price-only ``close /
    prev_close``? A threshold-free test that the stamped dividends are applied.
@@ -404,17 +406,26 @@ splits AS (
       FROM research_price_daily d JOIN s USING (series_id)
      WHERE s.vendor = %(intrader)s AND d.split_factor <> 1
 ),
-p AS (
-    SELECT s.vendor, s.series_id, s.instrument_id, fp.period_start_date, fp.period_end_date,
-           fp.dps_declared::float8 AS dps
+q AS (
+    -- One row per instrument and period end: fiscal-year-rekey duplicates (two quarterly period_type rows
+    -- sharing a period_end_date) would otherwise join the same payments twice. Latest-filed wins, the same
+    -- tiebreak as fundamentals' _SNAPSHOT_WRITE_THROUGH_SQL.
+    SELECT DISTINCT ON (fp.instrument_id, fp.period_end_date)
+           fp.instrument_id, fp.period_start_date, fp.period_end_date, fp.dps_declared::float8 AS dps
       FROM financial_periods fp
-      JOIN s ON s.instrument_id = fp.instrument_id
      WHERE fp.superseded_at IS NULL
        AND fp.period_type IN ('Q1', 'Q2', 'Q3', 'Q4')
-       AND fp.dps_declared IS NOT NULL
        AND fp.reported_currency = 'USD'
-       AND fp.period_start_date >= s.first_bar
-       AND fp.period_end_date + interval '3 months' <= s.last_bar
+       AND fp.instrument_id IN (SELECT instrument_id FROM s)
+     ORDER BY fp.instrument_id, fp.period_end_date, fp.filed_date DESC NULLS LAST
+),
+p AS (
+    SELECT s.vendor, s.series_id, s.instrument_id, q.period_start_date, q.period_end_date, q.dps
+      FROM q
+      JOIN s ON s.instrument_id = q.instrument_id
+     WHERE q.dps IS NOT NULL
+       AND q.period_start_date >= s.first_bar
+       AND q.period_end_date + interval '3 months' <= s.last_bar
 )
 SELECT p.vendor, p.instrument_id, p.period_end_date, p.dps,
        COALESCE(sum(dv.amount) FILTER (WHERE dv.bar_date <= p.period_end_date), 0) AS quarter_sum,
@@ -481,27 +492,25 @@ def stock_report(conn: psycopg.Connection) -> list[int]:
     both = {c.instrument_id for c in cells if c.vendor == PWB_VENDOR} & {
         c.instrument_id for c in cells if c.vendor == INTRADER_VENDOR
     }
-    print(
-        "ratio = vendor / XBRL over the instrument's covered quarters | vendor | split | n | p5 | p25 | p50 | p75 | p95"
+    arms = (
+        ("Intrader, all", [c for c in cells if c.vendor == INTRADER_VENDOR]),
+        ("Intrader, matched", [c for c in cells if c.vendor == INTRADER_VENDOR and c.instrument_id in both]),
+        ("PWB, matched", [c for c in cells if c.vendor == PWB_VENDOR and c.instrument_id in both]),
     )
-    for vendor in vendors:
-        ratios = instrument_ratios(c for c in cells if c.vendor == vendor and c.instrument_id in both)
+    print(f"matched = instruments with cells on both vendors ({len(both)}); 'all' keeps Intrader-only names too.")
+    print("ratio = vendor / XBRL over the instrument's covered quarters | arm | split | n | p5 | p25 | p50 | p75 | p95")
+    for label, arm in arms:
+        ratios = instrument_ratios(arm)
         for has_split in (False, True):
-            q = quantiles([r for (_i, sp), r in ratios.items() if sp == has_split])
-            n = sum(1 for (_i, sp) in ratios if sp == has_split)
-            print(f"{vendor} | {has_split} | {n} | " + " | ".join(_fmt(x, 3) for x in q))
-    print(f"\nmisses by fiscal-quarter-end year, instruments on both vendors ({len(both)}):")
-    print("miss = XBRL declared > 0 and the vendor's payments over that quarter and the next < half of it")
-    print("year | Intrader cells | Intrader miss % | PWB cells | PWB miss %")
-    years = sorted({c.period_end.year for c in cells})
-    for year in years:
+            values = [r for (_i, sp), r in ratios.items() if sp == has_split]
+            print(f"{label} | {has_split} | {len(values)} | " + " | ".join(_fmt(x, 3) for x in quantiles(values)))
+    print("\nmisses by fiscal-quarter-end year (cells with XBRL declared > 0):")
+    print("miss = the vendor's payments over that quarter and the next < half the declared amount")
+    print("year | " + " | ".join(f"{label} cells | miss %" for label, _arm in arms))
+    for year in sorted({c.period_end.year for c in cells}):
         out = []
-        for vendor in vendors:
-            sub = [
-                c
-                for c in cells
-                if c.vendor == vendor and c.instrument_id in both and c.period_end.year == year and c.dps > 0
-            ]
+        for _label, arm in arms:
+            sub = [c for c in arm if c.period_end.year == year and c.dps > 0]
             out.append(f"{len(sub)} | {_fmt(100 * sum(map(is_miss, sub)) / len(sub), 1) if sub else '—'}")
         print(f"{year} | " + " | ".join(out))
     return sorted(
