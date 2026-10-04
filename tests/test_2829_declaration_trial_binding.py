@@ -216,6 +216,7 @@ class TestTheFreezeGate:
         assert "some-unregistered-trial@v1" in message
         assert "app/services/trial_register.py" in message
 
+    @pytest.mark.usefixtures("assume_trial_powered")  # #3610's gate sits after this one
     def test_a_claimed_declaration_reaches_the_connection(self) -> None:
         """The positive arm, and it must be present or the test above passes for
         a register that claims NOTHING.

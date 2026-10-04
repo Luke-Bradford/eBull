@@ -21,7 +21,6 @@ from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
 from app.services.trial_register import (
     DESIGN_ALPHA,
     MIN_DESIGN_POWER,
-    PRE_POWER_RULE_CLAIMS,
     TRIAL_REGISTER,
     DeclaredTrial,
     EvidenceTrack,
@@ -172,20 +171,16 @@ class TestTheFreezeGate:
 
 
 class TestTheShippedRegister:
-    def test_every_pre_rule_claim_is_a_real_claim(self) -> None:
-        """A typo in the closed list would grandfather nothing and refuse a frozen trial's re-freeze."""
-        claimed = {trial.declared_for for trial in TRIAL_REGISTER.trials if trial.declared_for is not None}
-        assert claimed >= PRE_POWER_RULE_CLAIMS
+    @pytest.mark.parametrize(
+        "pair", [("ranking-pot-v1", "v1"), ("ranking-pot-v2", "v1"), ("ai-discretionary-fund-v1", "v1")]
+    )
+    def test_no_claim_is_exempt_by_identity(self, pair: tuple[str, str]) -> None:
+        """Codex checkpoint 2: a pre-rule identity on a fresh database is a post-rule freeze.
 
-    @pytest.mark.parametrize("pair", [("ranking-pot-v2", "v1"), ("ai-discretionary-fund-v1", "v1")])
-    def test_the_unfrozen_claims_are_not_grandfathered(self, pair: tuple[str, str]) -> None:
+        Rows frozen before the rule keep a NULL ``power_check`` and cannot be frozen again, so
+        no exemption is needed for them and none may exist for anything else.
+        """
         trial = TRIAL_REGISTER.trial_for_declaration(*pair)
         assert trial is not None
-        assert pair not in PRE_POWER_RULE_CLAIMS
         with pytest.raises(ValueError, match="declares no TrialDesign"):
             TRIAL_REGISTER.freeze_power_record(trial)
-
-    def test_a_pre_rule_claim_records_nothing(self) -> None:
-        trial = TRIAL_REGISTER.trial_for_declaration("ranking-pot-v1", "v1")
-        assert trial is not None
-        assert TRIAL_REGISTER.freeze_power_record(trial) is None

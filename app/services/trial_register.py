@@ -473,8 +473,8 @@ class DeclaredTrial:
     #: twice, and ``strategy_id + "-v1"`` once.
     declared_for: tuple[str, str] | None = None
     #: #3610 — the evidence track and power inputs, checked at freeze by ``freeze_power_record``.
-    #: ``None`` on every entry that claims no declaration and on the declarations frozen before
-    #: the rule (``PRE_POWER_RULE_CLAIMS``); any other claim without one is refused at freeze.
+    #: ``None`` on entries that claim no declaration and on claims frozen before the rule; a
+    #: claim without one cannot be frozen now.
     design: TrialDesign | None = None
 
     def __post_init__(self) -> None:
@@ -644,33 +644,6 @@ class InheritedFloor:
     is_floor: bool
 
 
-#: #3610 — the declarations frozen before the power rule existed, so the freeze gate does not
-#: re-judge them (``sql/333``: no retroactive invalidation). A CLOSED list: every entry is a
-#: ``strategy_preregistration_declarations`` root row on dev at 2026-10-04 (``SELECT strategy_id,
-#: strategy_version FROM strategy_preregistration_declarations WHERE supersedes_declaration_id IS
-#: NULL``). ``ranking-pot-v2`` and
-#: ``ai-discretionary-fund-v1`` are claimed but NOT frozen, so they are not here and need a design.
-PRE_POWER_RULE_CLAIMS: Final[frozenset[tuple[str, str]]] = frozenset(
-    {
-        ("c4-schedule13d-public-catalyst", "schedule13d-public-catalyst-v1"),
-        ("pead-historical-sue-net-income", "pead-historical-sue-net-income-v1"),
-        ("form4-code-p-opportunistic-purchase", "form4-code-p-opportunistic-purchase-v1"),
-        ("mt1-capped-volatility-managed-relative-strength-v1", "strategy-registry-v1+32970feefa00"),
-        ("mt1-s8-capped-volatility-negative-control-v1", "strategy-registry-v1+b83c3e4fc997"),
-        ("se-ma-overlay-drawdown-insurance", "se-ma-overlay-drawdown-insurance-v1"),
-        ("s11-volatile-regime-gated-breakout", "strategy-registry-v1+d5f25fd08376"),
-        ("r6-quality-gpa", "r6-2901-quality-v1"),
-        ("hunt-3-validation", "v1"),
-        (
-            "ranking-ablation-1822-route-f",
-            "v1.5-balanced+ee86663bbe6ee9c2400200c20332972898ba11358aca243da70f3a1605fa70c6",
-        ),
-        ("ai-discretionary-v1", "v1"),
-        ("ranking-pot-v1", "v1"),
-    }
-)
-
-
 @dataclass(frozen=True)
 class TrialRegister:
     """Criterion 6's ``M``, and the ``V[{SR_n}]`` estimator over it."""
@@ -752,15 +725,17 @@ class TrialRegister:
                 return trial
         return None
 
-    def freeze_power_record(self, trial: DeclaredTrial) -> dict[str, object] | None:
-        """#3610 — the power check a freeze stores, or ``None`` for a pre-rule claim. Raises on refusal.
+    def freeze_power_record(self, trial: DeclaredTrial) -> dict[str, object]:
+        """#3610 — the power check a freeze stores. Raises on refusal.
+
+        ⚠ No identity is exempt. Declarations frozen before the rule keep a NULL ``power_check``
+        (``sql/469``) and cannot be frozen again (one root per trial), so an exemption list would
+        only let a fresh database freeze an old identity unchecked (Codex checkpoint 2).
 
         Track A is checked against ``declared_count`` (the global ``M``, this trial included);
         Track B against the trial's own ``searches``, the configurations tried for the
         implementation. ⚠ Read at freeze and stored, never recomputed at readout: ``M`` grows.
         """
-        if trial.declared_for in PRE_POWER_RULE_CLAIMS:
-            return None
         if trial.design is None:
             raise ValueError(
                 f"{trial.trial_id} claims {trial.declared_for} but declares no TrialDesign — #3610 refuses a "
@@ -1585,7 +1560,6 @@ __all__ = [
     "DESIGN_ALPHA",
     "HUNT_TRIAL_PREFIX",
     "MIN_DESIGN_POWER",
-    "PRE_POWER_RULE_CLAIMS",
     "TRIAL_REGISTER",
     "TRIAL_REGISTER_CUTOFF",
     "TRIAL_REGISTER_VERSION",

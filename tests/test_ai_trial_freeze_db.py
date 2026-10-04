@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 import psycopg
+import pytest
 
 from app.services.ai_trial_deadline import TRIAL_MAX_POSITION_AGE_SECONDS
 from app.services.ai_trial_freeze import Provenance, freeze_trial
@@ -18,6 +19,9 @@ from app.services.ai_trial_policy import AI_TRIAL_POLICY_HASH
 from app.services.ai_trial_run import declaration_refusal, load_declaration
 from app.services.strategy_control_plane import configure_deployment
 from tests.test_ai_trial_intent_db import _deploy, _seed_instruments
+
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
 
 Conn = psycopg.Connection[Any]
 

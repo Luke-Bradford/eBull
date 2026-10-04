@@ -1352,7 +1352,7 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
             "supersedes_declaration_id": None,
             "supersession_reason": None,
             "supersession_attestation": None,
-            "power_check": None if power_check is None else Jsonb(power_check),
+            "power_check": Jsonb(power_check),
         },
     ).fetchone()
     if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row

@@ -1299,8 +1299,8 @@ Source: the 2026-10-04 committee review (#2437). The rule text lives in `.claude
   planned data cannot reach 80% power against the deflated bar (`data_infeasible`). The check is
   `T = ((critical_t + z_power) / IR)^2`, with `critical_t = E[max of M null t-stats] + z_0.95`
   (`trial_register.power_check`). It is stored on the frozen row (`power_check`, `sql/469`), because M grows.
-- **Grandfathered:** the twelve declarations frozen before the rule (`PRE_POWER_RULE_CLAIMS`). `ranking-pot-v2` and
-  `ai-discretionary-fund-v1` are claimed but unfrozen, so they need a design before they freeze.
+- **No identity is exempt.** Rows frozen before the rule keep a NULL `power_check` and cannot be re-frozen (one root
+  per trial). `ranking-pot-v2` and `ai-discretionary-fund-v1` are claimed but unfrozen, so they need a design first.
 - **Consequence to plan around:** with the register at M = 505, a Track A study at IR 0.5 needs about 123 effective
   years. Reproduce: `PYTHONPATH=. uv run python -c "from app.services.trial_register import *; print(power_check(TrialDesign(EvidenceTrack.DISCOVERY, 0.5, 'x', 60.0, 'x'), trials=TRIAL_REGISTER.declared_count))"`.
   Realistic edges belong on Track B or need more breadth.

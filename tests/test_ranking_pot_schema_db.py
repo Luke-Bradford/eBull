@@ -26,6 +26,9 @@ from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.strategy_control_plane import StrategyControlError, configure_deployment
 from app.services.strategy_paper_executor import execute_fired_paper_signal
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 POT = "ranking-pot-v1"
