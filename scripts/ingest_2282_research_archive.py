@@ -593,7 +593,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.download:
         download(cache, capture.revision)
         if bad := shard_mismatches(cache, capture):
-            logger.error("shard(s) do not hash to revision %s: %s", capture.revision, ", ".join(bad))
+            logger.error(
+                "shard(s) do not hash to revision %s: %s — an existing shard is never re-fetched; empty %s and re-run",
+                capture.revision,
+                ", ".join(bad),
+                cache,
+            )
             return 1
 
     if not any((args.load, args.quarantine, args.verify, args.attribute, args.link_delistings)):
