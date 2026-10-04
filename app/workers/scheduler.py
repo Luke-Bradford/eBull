@@ -7290,9 +7290,10 @@ def _execution_market_refresh(
     14:30Z) a PRE-open one. Composed here, not in the executors, because ``ranking_pot_executor.py``
     is policy-hashed: the batch calls this hook only when entries are due, immediately before them.
 
-    ``due`` is the executor's own due-query, re-run for today's New York session. A total quote-fetch
-    failure raises, exactly as a halt-feed failure does: the fire aborts with nothing decided and the
-    next fire retries, rather than deciding on the stale quote this exists to replace.
+    ``due`` is the executor's own due-query, re-run for today's New York session. A total failure —
+    the fetch raised, or not one due instrument's quote was stored — raises, exactly as a halt-feed
+    failure does: the fire aborts with nothing decided and the next fire retries, rather than
+    deciding on the stale quote this exists to replace.
 
     ⚠ A PARTIAL refresh does not abort (Codex ckpt-2 raised it). An instrument eToro omits is
     usually omitted on every fire, and an undecided entry expires at the session's end, so one
@@ -7312,10 +7313,15 @@ def _execution_market_refresh(
             summary = refresh_signal_quotes(market, conn, due(conn, today=today))
         if summary.batch_error is not None:
             raise summary.batch_error
+        if summary.instruments_requested and not summary.quotes_updated:
+            raise RuntimeError(
+                f"{job_name}: no execution-time quote stored for any of {summary.instruments_requested} due "
+                f"instrument(s) (no_quote={summary.quotes_skipped}); aborting the batch"
+            )
         if summary.quotes_updated < summary.instruments_requested:
             logger.warning(
-                "%s: execution-time quotes refreshed for %d of %d due instrument(s); the rest are gated on "
-                "their stored quote",
+                "%s: execution-time quotes refreshed for %d of %d due instrument(s); the rest are decided on "
+                "their stored quote, if any, under the executor's age gate",
                 job_name,
                 summary.quotes_updated,
                 summary.instruments_requested,

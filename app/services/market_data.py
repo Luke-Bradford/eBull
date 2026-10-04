@@ -584,9 +584,6 @@ def refresh_quotes(
         try:
             with conn.transaction():
                 flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
-                quotes_updated += 1
-                if flagged:
-                    spread_flags_set += 1
         except Exception:
             logger.warning(
                 "Failed to upsert quote for %s (id=%d), skipping",
@@ -594,6 +591,11 @@ def refresh_quotes(
                 instrument_id,
                 exc_info=True,
             )
+            continue
+        # Counted only once the block has COMMITTED: a failed commit must not read as coverage.
+        quotes_updated += 1
+        if flagged:
+            spread_flags_set += 1
 
     return QuoteRefreshSummary(
         instruments_requested=len(instruments),
@@ -624,8 +626,9 @@ def refresh_signal_quotes(
     ``quotes_refresh`` fires hourly at :23, so a batch at :00/:05 would otherwise gate spread, plan
     invalidation and sizing on a quote up to an hour old, e.g. the opening half-hour's wide spread.
 
-    The scope read runs in its own transaction so the connection is idle again on return: the
-    executors refuse a connection with a transaction open.
+    The scope read runs in its own transaction so a connection passed in idle is idle again on
+    return (the executors refuse a connection with a transaction open). Inside a caller's open
+    transaction the block is only a savepoint, so pass an idle or autocommit connection.
     """
     if not signal_ids:
         return QuoteRefreshSummary(0, 0, 0, 0)
