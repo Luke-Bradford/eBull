@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from app.config import settings
 from app.services.reference_data import (
     AQR_DATASET_KEYS,
+    FACTOR_LIBRARY_DATASET_KEYS,
     FRED_DATASET_KEYS,
     FRENCH_DATASET_KEYS,
     refresh_reference_group,
@@ -22,7 +23,8 @@ _GROUPS = {
     "french": FRENCH_DATASET_KEYS,
     "aqr": AQR_DATASET_KEYS,
     "fred": FRED_DATASET_KEYS,
-    "all": FRENCH_DATASET_KEYS + AQR_DATASET_KEYS + FRED_DATASET_KEYS,
+    "factor_library": FACTOR_LIBRARY_DATASET_KEYS,
+    "all": FRENCH_DATASET_KEYS + AQR_DATASET_KEYS + FRED_DATASET_KEYS + FACTOR_LIBRARY_DATASET_KEYS,
 }
 
 
