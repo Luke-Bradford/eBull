@@ -449,3 +449,58 @@ def test_the_loss_check_defers_on_a_defect_halts_an_entry_and_runs_without_one(
         decl_id: "halted"
     }
     assert _state(conn, decl_id) == ("halted_loss", "engine")
+
+
+def test_the_batch_is_gated_on_the_execution_time_quote_not_the_stored_one(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3578: the scheduler's pre-batch hook re-quotes the due entries, so a stale flagged quote no longer refuses a
+    name whose execution-time spread is clean — and a clean stored quote no longer admits one that is now wide."""
+    from app.providers.market_data import MarketDataProvider, Quote
+    from app.services.market_data import refresh_signal_quotes
+
+    conn = ebull_test_conn
+    decl_id = _frozen(conn)
+    _move(conn, decl_id, "shadow_only", "executing", "supervisor")
+    _deploy_pot(conn, decl_id)
+    _enable_trading(conn)
+    conn.autocommit = True
+    d, _ = _first_window(conn)
+    a1, _ = _decide_month(
+        conn, monkeypatch, d, _universes({2842: "0.9", 2843: "0.8"}, {2842, 2843}), policy_hash=RANKING_POT_POLICY_HASH
+    )
+    t1 = conn.execute("SELECT target_session FROM ranking_pot_rebalance_attempts WHERE attempt_id = %s", (a1,))
+    t1 = t1.fetchone()[0]  # type: ignore[index]
+    now = _at(t1)
+    _market(conn, now, {d: Decimal(100)})
+    # Stored: 2842 wide (the opening half-hour), 2843 clean.
+    conn.execute(
+        "UPDATE quotes SET quoted_at = %s, bid = 98, spread_pct = 2, spread_flag = true WHERE instrument_id = 2842",
+        (now.replace(minute=29),),
+    )
+    conn.execute("UPDATE quotes SET quoted_at = %s WHERE instrument_id = 2843", (now.replace(minute=29),))
+    conn.autocommit = False
+    s2842, s2843 = _signal_of(conn, a1, 2842), _signal_of(conn, a1, 2843)
+
+    # At execution: 2842 clean, 2843 wide.
+    market = MagicMock(spec=MarketDataProvider)
+    market.get_quotes.return_value = [
+        Quote(instrument_id=2842, timestamp=now, bid=Decimal("99.9"), ask=Decimal(100), last=None),
+        Quote(instrument_id=2843, timestamp=now, bid=Decimal(98), ask=Decimal(100), last=None),
+    ]
+
+    def hook() -> None:
+        due = px.due_pot_entries(conn, today=t1)
+        conn.commit()
+        refresh_signal_quotes(market, conn, due)
+
+    result = px.run_pot_execution(conn, broker=_pot_broker(2842, now), refresh_halts=hook, clock=lambda: now)
+    assert sorted(market.get_quotes.call_args.args[0]) == [2842, 2843]
+    assert result.verdicts == {"submitted": 1, "rejected": 1}
+    reasons = conn.execute(
+        "SELECT signal_id, reason_code FROM strategy_funding_decisions WHERE signal_id = ANY(%s) ORDER BY signal_id",
+        ([s2842, s2843],),
+    ).fetchall()
+    assert dict(reasons)[s2843] == "quote_spread_flagged"
+    assert dict(reasons)[s2842] != "quote_spread_flagged"
+    conn.rollback()
