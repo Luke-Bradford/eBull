@@ -170,7 +170,9 @@ def test_the_vendored_key_list_matches_the_engine() -> None:
     safe_merge = Path(engine_home) / "bin" / "safe_merge.sh"
     assert safe_merge.is_file(), f"AUTONOMY_ENGINE_HOME is set but {safe_merge} does not exist"
     read_keys = set(re.findall(r"CONFIG_GET merge_gate\.(doc_only_\w+)", safe_merge.read_text()))
-    assert read_keys == SAFE_MERGE_DOC_ONLY_KEYS
+    assert read_keys == SAFE_MERGE_DOC_ONLY_KEYS, (
+        f"safe_merge.sh reads {sorted(read_keys)}; update SAFE_MERGE_DOC_ONLY_KEYS and {CONFIG_PATH} to match"
+    )
 
 
 def test_extension_lists_agree() -> None:
