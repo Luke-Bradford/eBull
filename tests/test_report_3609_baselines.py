@@ -29,6 +29,7 @@ from scripts.report_3609_baselines import (
     regression_months,
     screen_class,
     simulate,
+    windows_for,
 )
 
 FULL = set(month_range((2010, 1), (2026, 8)))
@@ -268,3 +269,17 @@ def test_screen_classes() -> None:
     assert screen_class(_row(1, (2023, 5), 3.5, end, PWB_VENDOR), 3.2) == ScreenClass.CORROBORATED
     assert screen_class(_row(1, (2023, 5), -0.95, end, INTRADER_VENDOR), None) == ScreenClass.UNARBITRATED
     assert screen_class(_row(1, (2025, 5), 4.0, date(2025, 5, 30), PWB_VENDOR), None) == ScreenClass.UNARBITRATED
+
+
+def test_w1_splits_at_the_first_holding_year_formed_after_terminations_begin() -> None:
+    """Amendment 3: W1a and W1b tile W1 exactly, split at 2014-12/2015-01."""
+    windows = windows_for((2026, 2))
+    assert windows["W1a"] == ((2010, 1), (2014, 12))
+    assert windows["W1b"] == ((2015, 1), (2021, 5))
+    assert windows["W1"] == ((2010, 1), (2021, 5))
+    w1a, w1b, w1 = windows["W1a"], windows["W1b"], windows["W1"]
+    assert w1a is not None and w1b is not None and w1 is not None
+    assert month_range(*w1a) + month_range(*w1b) == month_range(*w1)
+    # B3-5 ends 2024-08; W1a/W1b are unclipped there, so B3-5 shares their tables.
+    assert windows_for((2024, 8))["W1a"] == windows["W1a"]
+    assert windows_for((2024, 8))["W1b"] == windows["W1b"]

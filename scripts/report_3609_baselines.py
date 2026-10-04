@@ -80,7 +80,18 @@ OUT_ROOT: Final = Path("var/research/3609_step0")
 START: Final[Month] = (2009, 12)
 FIRST_RETURN_MONTH: Final[Month] = (2010, 1)
 W1: Final = ((2010, 1), (2021, 5))
+#: Amendment 3: Intrader records no termination before 2014-09, so B3's holding years formed through 2013-12
+#: are survivor-conditioned. W1 is split at the first holding year formed after terminations begin (2014-12).
+W1A: Final = ((2010, 1), (2014, 12))
+W1B: Final = ((2015, 1), (2021, 5))
 W2: Final = ((2021, 6), LAST_SURVIVORSHIP_FREE_MONTH)
+#: Windows with an FF6 regression (each still needs 60 covered months).
+REGRESSION_WINDOWS: Final = ("W1a", "W1b", "W1", "full (mixed coverage)")
+WINDOW_NOTES: Final[Mapping[str, str]] = {
+    "W1a": "Survivor-only for B3 (Amendment 3): formations 2009-12..2013-12 predate the archive's first terminations.",
+    "W1b": "Terminations recorded; completeness unverified against an independent exit list before 2019.",
+    "W1": "Supplementary; survivor-only for B3 through 2014 (Amendment 3).",
+}
 
 B1_WEIGHTS: Final[Mapping[str, float]] = {"SPY": 1.0}
 B2A_WEIGHTS: Final[Mapping[str, float]] = {"SPY": 0.60, "AGG": 0.40}
@@ -693,8 +704,10 @@ def holding_periods(decisions: Sequence[Month], end: Month) -> list[tuple[Month,
 
 
 def windows_for(end: Month) -> dict[str, tuple[Month, Month] | None]:
-    """W1/W2/W3 and the supplementary full window, clipped to the path end (Amendment 1, B3-5)."""
+    """W1a/W1b (Amendment 3), W1, W2, W3 and the full window, clipped to the path end (Amendment 1, B3-5)."""
     return {
+        "W1a": W1A,
+        "W1b": W1B,
         "W1": W1,
         "W2": (W2[0], min(W2[1], end)),
         "W3": (add_months(LAST_SURVIVORSHIP_FREE_MONTH, 1), end) if end > LAST_SURVIVORSHIP_FREE_MONTH else None,
@@ -727,7 +740,7 @@ def path_stats(
             out[name] = None
             continue
         months = month_range(*window)
-        regression = regression_months(months, factors) if name in ("W1", "full (mixed coverage)") else None
+        regression = regression_months(months, factors) if name in REGRESSION_WINDOWS else None
         out[name] = window_stats(months, net, gross, stress, benchmark, turnover, factors, regression)
     return out
 
@@ -1181,6 +1194,7 @@ def report(conn: psycopg.Connection[Any], *, draws: int, pins: Mapping[str, int]
     manifest = {
         "git": git,
         "spec": SPEC_PATH,
+        "amendments": ["1: common end month E", "2: formation names with no raw close", "3: W1 split at 2014-12"],
         "draws": draws,
         "declared_run": draws == B3_DRAWS,
         "versions": {
@@ -1326,9 +1340,11 @@ def print_results(
     for window, span, single_labels, b3_labels in tables:
         heading = "B3-5 only, its own endpoint" if not single_labels else window
         print(f"\n### {heading}: {ym(span[0])}..{ym(span[1])}\n")
+        if window in WINDOW_NOTES:
+            print(WINDOW_NOTES[window])
         if window == "W2":
             print("B3-5's path ends 2024-08, so its W2 carries its liquidation; no other W2 does.")
-        if window in ("W1", "full (mixed coverage)"):
+        if window in REGRESSION_WINDOWS:
             regression = regression_months(month_range(*span), factors)
             if regression is None:
                 print("FF6 regression: under 60 covered months, not run.")
