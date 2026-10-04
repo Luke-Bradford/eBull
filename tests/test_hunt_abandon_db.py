@@ -24,6 +24,9 @@ from tests.test_hunt_door_db import (  # noqa: F401 - fixtures are used by name
 )
 from tests.test_hunt_harness_db import _ok, _run, _spec
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 
 class _Flaky(RuntimeError):
     pass

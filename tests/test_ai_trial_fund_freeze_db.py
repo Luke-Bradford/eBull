@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 import psycopg
+import pytest
 
 from app.services.ai_trial_freeze import Provenance, freeze_trial
 from app.services.ai_trial_fund_freeze import FUND_TERMS
@@ -21,6 +22,9 @@ from app.services.ai_trial_version import FUND_V1
 from app.services.strategy_control_plane import configure_deployment
 from tests.test_ai_trial_fund_freeze import _fixture
 from tests.test_ai_trial_intent_db import _deploy, _seed_instruments
+
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
 
 Conn = psycopg.Connection[Any]
 

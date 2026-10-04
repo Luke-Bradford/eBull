@@ -109,6 +109,7 @@ flattering one.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import statistics
 from collections.abc import Mapping, Sequence
@@ -116,6 +117,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
+
+from app.services.deflated_sharpe import expected_max_sharpe
 
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
@@ -273,6 +276,130 @@ class TrialExactness(StrEnum):
     FLOOR = "floor"
 
 
+class EvidenceTrack(StrEnum):
+    """#3610 — which question a study answers (``quant/research-process.md`` §"Two tracks")."""
+
+    #: Track A: a signal we invented or found by search. Deflated against the GLOBAL trial count.
+    DISCOVERY = "discovery"
+    #: Track B: a published premium with independent out-of-sample support. The test is
+    #: non-inferiority against the post-publication prior, deflated for the configurations tried.
+    ADOPTION = "adoption"
+
+
+#: The DSR pass bar (DSR >= 0.95) is a one-sided 5% test, and Track B's non-inferiority test
+#: uses the same level.
+DESIGN_ALPHA: Final = 0.05
+#: ``docs/proposals/ta/2026-08-11-portfolio-alpha-viability-plan.md`` §5: "Power is 80% unless
+#: the preregistration justifies higher."
+MIN_DESIGN_POWER: Final = 0.80
+
+_STANDARD_NORMAL: Final = statistics.NormalDist()
+
+
+@dataclass(frozen=True)
+class TrialDesign:
+    """#3610 — the inputs to the pre-declaration power check. No field is derived here.
+
+    ``effect_ir`` is an annualised information ratio. Track A: the effect the study expects,
+    from prior evidence (never the candidate's own searched estimate). Track B: the
+    non-inferiority margin, which is what Track B's power is about.
+
+    ``effective_years`` is the independent years the planned data supplies AFTER dependence
+    (overlapping holdings, regime clustering), and ``dependence`` says how that was handled.
+    Nominal sample length is not effective sample size.
+    """
+
+    track: EvidenceTrack
+    effect_ir: float
+    effect_basis: str
+    effective_years: float
+    dependence: str
+    target_power: float = MIN_DESIGN_POWER
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.track, EvidenceTrack):
+            raise ValueError(f"track must be an EvidenceTrack, got {self.track!r}")
+        for name in ("effect_basis", "dependence"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"{name} is blank — a power input with no source is an invented number")
+        for name in ("effect_ir", "effective_years"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, float | int) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+        if not MIN_DESIGN_POWER <= self.target_power < 1.0:
+            raise ValueError(f"target_power must be in [{MIN_DESIGN_POWER}, 1), got {self.target_power!r}")
+
+
+@dataclass(frozen=True)
+class PowerCheck:
+    """The power check's result, stored on the frozen declaration row (``power_check``)."""
+
+    track: EvidenceTrack
+    #: Track A: the register's ``declared_count`` at freeze. Track B: the entry's own ``searches``.
+    trials: int
+    #: The pass bar in t units: ``E[max of trials null t-stats] + z_(1-alpha)``.
+    critical_t: float
+    #: ``((critical_t + z_power) / effect_ir)^2`` — the minimum track record, in years.
+    required_years: float
+    #: ``Phi(effect_ir * sqrt(effective_years) - critical_t)``.
+    power: float
+    design: TrialDesign
+
+    @property
+    def feasible(self) -> bool:
+        return self.required_years <= self.design.effective_years
+
+    def as_record(self, register_version: str) -> dict[str, object]:
+        return {
+            "register_version": register_version,
+            "track": self.track.value,
+            "trials": self.trials,
+            "critical_t": self.critical_t,
+            "required_years": self.required_years,
+            "power": self.power,
+            "alpha": DESIGN_ALPHA,
+            "target_power": self.design.target_power,
+            "effect_ir": self.design.effect_ir,
+            "effect_basis": self.design.effect_basis,
+            "effective_years": self.design.effective_years,
+            "dependence": self.design.dependence,
+        }
+
+
+def power_check(design: TrialDesign, *, trials: int) -> PowerCheck:
+    """Whether the planned data can clear the study's deflated pass bar at the expected effect.
+
+    The DSR (Bailey & López de Prado 2014) passes at ``(SR - SR_0) * sqrt(T) >= z_(1-alpha)``.
+    With ``SR_0`` from equation (2) evaluated at the trials' NULL variance (``1/T``: every trial
+    has true Sharpe 0), that is a t-stat above ``E[max of trials standard normals] + z_(1-alpha)``.
+    Planning one-sided against it gives ``T = ((critical_t + z_power) / IR)^2`` — the
+    ``quant/research-process.md`` formula with the deflated bar as the critical value.
+
+    ⚠ Two biases, in opposite directions, both stated rather than corrected:
+    - the null variance understates the realised spread of trial Sharpes (true Sharpes differ),
+      so the real ``SR_0`` is higher and this power is an UPPER bound — a pass here can still be
+      underpowered, a refusal is sound;
+    - ``trials`` is the declared count, not equation (9)'s effective ``N`` (no ``rho`` exists
+      before the study runs), which raises the bar.
+    Non-normal returns (skew, kurtosis) also widen the DSR denominator; ``effective_years`` is
+    where the declaration accounts for dependence.
+    """
+    if type(trials) is not int or trials < 1:
+        raise ValueError(f"trials must be a positive integer, got {trials!r}")
+    # One trial has no maximum to take; equation (2)'s quantile is undefined at N = 1.
+    expected_max_t = 0.0 if trials == 1 else expected_max_sharpe(trial_sharpe_variance=1.0, independent_trials=trials)
+    critical_t = expected_max_t + _STANDARD_NORMAL.inv_cdf(1.0 - DESIGN_ALPHA)
+    z_power = _STANDARD_NORMAL.inv_cdf(design.target_power)
+    return PowerCheck(
+        track=design.track,
+        trials=trials,
+        critical_t=critical_t,
+        required_years=((critical_t + z_power) / design.effect_ir) ** 2,
+        power=_STANDARD_NORMAL.cdf(design.effect_ir * math.sqrt(design.effective_years) - critical_t),
+        design=design,
+    )
+
+
 @dataclass(frozen=True)
 class DeclaredTrial:
     """One traceable declaration of variants evaluated against price data.
@@ -345,6 +472,10 @@ class DeclaredTrial:
     #: matching ``trial_id`` was ``strategy_version`` twice, ``strategy_id``
     #: twice, and ``strategy_id + "-v1"`` once.
     declared_for: tuple[str, str] | None = None
+    #: #3610 — the evidence track and power inputs, checked at freeze by ``freeze_power_record``.
+    #: ``None`` on every entry that claims no declaration and on the declarations frozen before
+    #: the rule (``PRE_POWER_RULE_CLAIMS``); any other claim without one is refused at freeze.
+    design: TrialDesign | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("trial_id", "description", "evidence"):
@@ -373,6 +504,8 @@ class DeclaredTrial:
         # on an entry that looked correct in the source.
         if not isinstance(self.exactness, TrialExactness):
             raise ValueError(f"exactness must be a TrialExactness, got {self.exactness!r}")
+        if self.design is not None and self.declared_for is None:
+            raise ValueError(f"{self.trial_id}: a design is checked at freeze, so it needs declared_for")
         if self.trial_id.startswith(HUNT_TRIAL_PREFIX):
             self._check_hunt_entry()
 
@@ -511,6 +644,33 @@ class InheritedFloor:
     is_floor: bool
 
 
+#: #3610 — the declarations frozen before the power rule existed, so the freeze gate does not
+#: re-judge them (``sql/333``: no retroactive invalidation). A CLOSED list: every entry is a
+#: ``strategy_preregistration_declarations`` root row on dev at 2026-10-04 (``SELECT strategy_id,
+#: strategy_version FROM strategy_preregistration_declarations WHERE supersedes_declaration_id IS
+#: NULL``). ``ranking-pot-v2`` and
+#: ``ai-discretionary-fund-v1`` are claimed but NOT frozen, so they are not here and need a design.
+PRE_POWER_RULE_CLAIMS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("c4-schedule13d-public-catalyst", "schedule13d-public-catalyst-v1"),
+        ("pead-historical-sue-net-income", "pead-historical-sue-net-income-v1"),
+        ("form4-code-p-opportunistic-purchase", "form4-code-p-opportunistic-purchase-v1"),
+        ("mt1-capped-volatility-managed-relative-strength-v1", "strategy-registry-v1+32970feefa00"),
+        ("mt1-s8-capped-volatility-negative-control-v1", "strategy-registry-v1+b83c3e4fc997"),
+        ("se-ma-overlay-drawdown-insurance", "se-ma-overlay-drawdown-insurance-v1"),
+        ("s11-volatile-regime-gated-breakout", "strategy-registry-v1+d5f25fd08376"),
+        ("r6-quality-gpa", "r6-2901-quality-v1"),
+        ("hunt-3-validation", "v1"),
+        (
+            "ranking-ablation-1822-route-f",
+            "v1.5-balanced+ee86663bbe6ee9c2400200c20332972898ba11358aca243da70f3a1605fa70c6",
+        ),
+        ("ai-discretionary-v1", "v1"),
+        ("ranking-pot-v1", "v1"),
+    }
+)
+
+
 @dataclass(frozen=True)
 class TrialRegister:
     """Criterion 6's ``M``, and the ``V[{SR_n}]`` estimator over it."""
@@ -591,6 +751,31 @@ class TrialRegister:
             if trial.declared_for == pair:
                 return trial
         return None
+
+    def freeze_power_record(self, trial: DeclaredTrial) -> dict[str, object] | None:
+        """#3610 — the power check a freeze stores, or ``None`` for a pre-rule claim. Raises on refusal.
+
+        Track A is checked against ``declared_count`` (the global ``M``, this trial included);
+        Track B against the trial's own ``searches``, the configurations tried for the
+        implementation. ⚠ Read at freeze and stored, never recomputed at readout: ``M`` grows.
+        """
+        if trial.declared_for in PRE_POWER_RULE_CLAIMS:
+            return None
+        if trial.design is None:
+            raise ValueError(
+                f"{trial.trial_id} claims {trial.declared_for} but declares no TrialDesign — #3610 refuses a "
+                "declaration whose track and power were not checked (quant/research-process.md §Power)"
+            )
+        trials = self.declared_count if trial.design.track is EvidenceTrack.DISCOVERY else trial.searches
+        check = power_check(trial.design, trials=trials)
+        if not check.feasible:
+            raise ValueError(
+                f"{trial.trial_id}: data_infeasible — {check.track.value} at IR {trial.design.effect_ir} against "
+                f"t > {check.critical_t:.3f} (trials={check.trials}) needs {check.required_years:.1f} effective years "
+                f"for {trial.design.target_power:.0%} power; the design supplies {trial.design.effective_years} "
+                f"(power {check.power:.3f}). Change the design (breadth, history, track) rather than declare."
+            )
+        return check.as_record(self.version)
 
     def sharpe_variance(self, measured: Mapping[str, float]) -> float | None:
         """``V[{SR_n}]`` over the trials measured this run. ``None`` below two.
@@ -1397,15 +1582,22 @@ TRIAL_REGISTER: Final = TrialRegister(
 
 
 __all__ = [
+    "DESIGN_ALPHA",
     "HUNT_TRIAL_PREFIX",
+    "MIN_DESIGN_POWER",
+    "PRE_POWER_RULE_CLAIMS",
     "TRIAL_REGISTER",
     "TRIAL_REGISTER_CUTOFF",
     "TRIAL_REGISTER_VERSION",
     "DeclaredTrial",
+    "EvidenceTrack",
     "InheritedFloor",
+    "PowerCheck",
+    "TrialDesign",
     "TrialExactness",
     "TrialRegister",
     "declaration_backed_evidence",
     "log_backed_evidence",
     "ordered_ids_sha256",
+    "power_check",
 ]

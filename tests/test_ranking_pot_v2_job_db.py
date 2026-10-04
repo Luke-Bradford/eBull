@@ -31,6 +31,9 @@ from tests.test_ranking_pot_freeze_v2_db import IDS, NOW, _seed_history
 from tests.test_ranking_pot_schema_db import PROVENANCE, SCORED_AT, _frozen, _seed_scores
 from tests.test_ranking_pot_v2_inputs_db import _dtc
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 

@@ -606,7 +606,21 @@ class _RegisterClaimingAnything:
             declared_for=(strategy_id, strategy_version),
         )
 
+    def freeze_power_record(self, trial: Any) -> None:
+        """#3610's power gate is not under test either; ``tests/test_3610_power_check*.py`` own it."""
+        return None
+
 
 @pytest.fixture
 def assume_trial_registered(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.result_ledger.TRIAL_REGISTER", _RegisterClaimingAnything())
+
+
+# #3610 — the same opt-in shape for the power gate. Modules that freeze a REAL or hunt-shaped
+# claim with no ``TrialDesign`` (ranking-pot-v2, fund-v1, synthetic hunt entries) while testing
+# something else opt in; ``tests/test_3610_power_check*.py`` do not. NOT autouse, for the reason above.
+@pytest.fixture
+def assume_trial_powered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.trial_register import TrialRegister
+
+    monkeypatch.setattr(TrialRegister, "freeze_power_record", lambda self, trial: None)

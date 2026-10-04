@@ -29,6 +29,9 @@ from app.services.result_ledger import freeze_preregistration
 from tests.test_ranking_pot_rebalance_db import _decided, _insert
 from tests.test_ranking_pot_schema_db import _move
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 V2 = "ranking-pot-v2"
