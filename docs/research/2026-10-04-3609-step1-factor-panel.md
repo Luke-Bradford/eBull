@@ -313,6 +313,29 @@ concepts and the three preferred concepts. These are exactly the additions; noth
 - Before editing, run `scripts.ai_trial_policy_guard`. On 2026-10-04, `pit_fundamentals.py` appeared in no
   `POLICY_MODULES` list.
 
+**Amendment 1 (2026-10-04, found while starting slice 2): the linkage is rebuilt too.**
+- **Coupling.** `security_linkage.POLICY_FILES` (`security_linkage.py:264-271`) hashes `pit_fundamentals.py`.
+  Editing `CONCEPT_SET` therefore changes the #3361 policy hash, and `load_security_linkage` refuses the
+  2026-09-24 linkage (`security_linkage.py:477-478`). Both linkage artefacts load under the current code on
+  2026-10-04; neither would after slice 2. The panel needs the linkage (§"Universe at M", step 2).
+- **A live rebuild is not an A/B.** `build_3361_security_linkage.py` re-reads the DB through `snapshot_db`
+  (lines 77-108). Since 2026-09-24, `research_price_series` grew from 30,591 rows (the frozen
+  `inputs/series_inventory.json`) to 38,461, from #3639's separate PWB capture vendor; `sec_form25_register`
+  also grows with new filings. A live rebuild would mix the code change with input drift.
+- **Rule.** Slice 2 adds a replay mode to the linkage builder that reads every input from a prior linkage
+  bundle's `inputs/` (the four DB dumps, `form345/`, `submissions.zip`) and verifies each against that
+  bundle's recorded `input_sha256`. It rebuilds `2026-09-24-f6ae1edd` (Form 25 mode) under the new code. The
+  #3360 `submissions.zip` input is the same pinned file, so the new #3360 bundle supplies the same bytes.
+- **Linkage A/B.** Every series document and the ledger must be byte-identical to the 2026-09-24 build. The
+  manifest may differ only in `policy` and `input_sha256.pit_manifest` (the new #3360 manifest digest).
+  Anything else refuses publication. The `-without-form25` cross-check
+  artefact is a #3361 diagnostic that step 1 does not read; it is not rebuilt.
+- **Bundle A/B arm A.** The 2026-09-24 #3360 bundle loads under the pre-change code (its manifest `policy`
+  equals `policy_sha256()` on 2026-10-04), so it is arm A. No pre-change worktree build is needed.
+- **Other #3360 readers** (`build_2901_quality_input.py`, `measure_2901_gpa_coverage.py`, the #3360 census and
+  causal scripts) are closed research. They keep working against the old bundle at their recorded SHAs; the
+  policy hash is what makes that explicit.
+
 ## Price characteristics and daily data
 
 **Daily bars.**
@@ -527,7 +550,8 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
    - FSDS SUB (`adsh`, `cik`, `sic`, `form`, `accepted`) for 2012Q1 .. 2021Q2.
 
    JKP returns, cutoffs and documentation are pinned to one download date.
-2. **Bundle extension and union A/B,** as above (corpus rung).
+2. **Bundle extension and union A/B,** as above (corpus rung), plus the linkage replay rebuild and its
+   byte-identity A/B (Amendment 1).
 3. **Panel builder,** `scripts/build_3609_factor_panel.py` (stage A), with pure-function tests for:
    - the state machines;
    - period anchors and the choosing algorithm;
