@@ -423,6 +423,8 @@ _RESEARCH_PRICE_READER_MODULES: Final[frozenset[str]] = frozenset(
         "app.services.hunt_store",
         # #3619 slice 2: monthly total returns on the survivorship-free selection.
         "app.services.total_return_reader",
+        # #3619 slice 2b: monthly ETF total returns, Intrader then N-PORT.
+        "app.services.etf_total_return_reader",
     }
 )
 
@@ -485,6 +487,10 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # compares two vendors' price paths for the same name to decide which vendor is trustworthy — a data-quality
     # verdict with no signal, nothing ranked or selected. A hunt trial would charge M for a data audit.
     "report_3619_splice_census.py": "#3619 slice 2 splice census (vendor agreement; data quality only)",
+    # #3619 slice 2b spec "Why these thresholds": the ETF acceptance matrix compares each ETF's Intrader series with
+    # its fund-reported N-PORT return (or eToro close) to decide which source supplies which months — a data-quality
+    # verdict on a fixed symbol list, nothing ranked or selected.
+    "report_3619_etf_total_return.py": "#3619 slice 2b ETF acceptance matrix (source agreement; data quality only)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"
