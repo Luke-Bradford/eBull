@@ -205,13 +205,15 @@ class _RangeFile(io.RawIOBase):
         self._url = url
         self._pos = 0
         first = self._get(0, 0)
-        self._size = int(first.headers["content-range"].rsplit("/", 1)[1])
+        self.size = int(first.headers["content-range"].rsplit("/", 1)[1])
 
     def _get(self, start: int, end: int) -> httpx.Response:
         get_sec_rate_gate().acquire()
         resp = self._client.get(self._url, headers={"Range": f"bytes={start}-{end}"})
         resp.raise_for_status()
         if resp.status_code != 206:
+            # Fail loudly on purpose: a server that ignores Range sends the whole ~450 MB archive on every read
+            # zipfile makes. Aborting the report is the safe outcome; silently degrading to that is not.
             raise RuntimeError(f"{self._url}: expected 206 Partial Content, got {resp.status_code}")
         return resp
 
@@ -225,14 +227,14 @@ class _RangeFile(io.RawIOBase):
         return self._pos
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self._size}[whence]
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self.size}[whence]
         self._pos = base + offset
         return self._pos
 
     def readinto(self, buffer: memoryview) -> int:  # type: ignore[override]
-        if self._pos >= self._size or len(buffer) == 0:
+        if self._pos >= self.size or len(buffer) == 0:
             return 0
-        end = min(self._pos + len(buffer), self._size) - 1
+        end = min(self._pos + len(buffer), self.size) - 1
         data = self._get(self._pos, end).content
         buffer[: len(data)] = data
         self._pos += len(data)
@@ -249,25 +251,35 @@ def _quarters(today: date) -> list[str]:
 
 
 def _cached_tables(quarter: str, client: httpx.Client) -> Path | None:
-    """Directory holding this quarter's two tables, extracting or fetching them on first use."""
-    target = CACHE_DIR / quarter
-    if all((target / t).exists() for t in NPORT_TABLES):
-        return target
+    """Directory holding this quarter's two tables, extracting or fetching them on first use.
+
+    The cache is keyed by the archive's byte size, so a quarter SEC re-issues is re-read rather than served stale;
+    learning the remote size costs one one-byte range request. Tables are written to a temp name and renamed, so an
+    interrupted run never leaves a truncated table that a later run would accept.
+    """
     local = resolve_data_dir() / "sec" / "bulk" / f"nport_{quarter}.zip"
-    try:
-        source: io.IOBase = (
-            local.open("rb")
-            if local.exists()
-            else io.BufferedReader(_RangeFile(client, NPORT_URL.format(q=quarter)), buffer_size=1 << 20)
-        )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (403, 404):
-            return None  # not published yet
-        raise
-    target.mkdir(parents=True, exist_ok=True)
-    with source, zipfile.ZipFile(source) as zf:  # type: ignore[arg-type]
-        for table in NPORT_TABLES:
-            (target / table).write_bytes(zf.read(table))
+    if local.exists():
+        size = local.stat().st_size
+        source: io.IOBase = local.open("rb")
+    else:
+        try:
+            remote = _RangeFile(client, NPORT_URL.format(q=quarter))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (403, 404):
+                return None  # not published yet
+            raise
+        size = remote.size
+        source = io.BufferedReader(remote, buffer_size=1 << 20)
+    target = CACHE_DIR / f"{quarter}-{size}"
+    with source:
+        if all((target / t).exists() for t in NPORT_TABLES):
+            return target
+        target.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(source) as zf:  # type: ignore[arg-type]
+            for table in NPORT_TABLES:
+                tmp = target / f".{table}.tmp"
+                tmp.write_bytes(zf.read(table))
+                tmp.replace(target / table)
     return target
 
 
@@ -360,7 +372,8 @@ def etf_report(conn: psycopg.Connection, today: date) -> list[int]:
             monthly_returns(month_end_levels(split_adjusted_closes([(d, c, s) for d, c, _a, s in bars]))), max
         )
         ref_returns = without_month({m: v for (cid, m), v in returns.items() if cid == class_id}, min)
-        last = "{}-{:02d}".format(*max(ref_returns)) if ref_returns else None
+        last_month = max(ref_returns, default=None)
+        last = f"{last_month[0]}-{last_month[1]:02d}" if last_month else None
         t = tracking(adj, price, ref_returns)
         label = ref if ref == symbol else f"{ref} (proxy)"
         if t is None:
