@@ -136,13 +136,14 @@ class TestCboeVixRegistration:
 
 
 class TestReferenceDataRegistration:
-    def test_four_source_groups_have_pinned_staggered_cadences(self) -> None:
+    def test_reference_jobs_have_pinned_staggered_cadences(self) -> None:
         jobs = {item.name: item for item in SCHEDULED_JOBS}
         expected = {
             scheduler.JOB_FRENCH_REFERENCE_REFRESH: Cadence.monthly(day=10, hour=3, minute=5),
             scheduler.JOB_AQR_REFERENCE_REFRESH: Cadence.monthly(day=10, hour=3, minute=15),
             scheduler.JOB_FRED_REFERENCE_REFRESH: Cadence.daily(hour=3, minute=25),
             scheduler.JOB_FACTOR_LIBRARY_REFERENCE_REFRESH: Cadence.monthly(day=10, hour=3, minute=35),
+            scheduler.JOB_IBKR_BORROW_ARCHIVE: Cadence.daily(hour=20, minute=45),
         }
         for name, cadence in expected.items():
             job = jobs[name]
@@ -159,6 +160,7 @@ class TestReferenceDataRegistration:
             scheduler.JOB_AQR_REFERENCE_REFRESH,
             scheduler.JOB_FRED_REFERENCE_REFRESH,
             scheduler.JOB_FACTOR_LIBRARY_REFERENCE_REFRESH,
+            scheduler.JOB_IBKR_BORROW_ARCHIVE,
         } <= _INVOKERS.keys()
 
 

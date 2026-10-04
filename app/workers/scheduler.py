@@ -538,6 +538,8 @@ JOB_AQR_REFERENCE_REFRESH = "aqr_reference_refresh"
 JOB_FRED_REFERENCE_REFRESH = "fred_reference_refresh"
 # #3623 — global-q q5 and JKP factor returns, same shared reference lane.
 JOB_FACTOR_LIBRARY_REFERENCE_REFRESH = "factor_library_reference_refresh"
+# #3622 — daily forward archive of IBKR's public borrow file (no history exists upstream).
+JOB_IBKR_BORROW_ARCHIVE = "ibkr_borrow_archive"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -2822,6 +2824,22 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.monthly(day=10, hour=3, minute=35),
         catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_IBKR_BORROW_ARCHIVE,
+        display_name="IBKR borrow-fee archive (#3622)",
+        source="reference_data",
+        description=(
+            "Daily 20:45 UTC — downloads IBKR's anonymous shortstock usa.txt (borrow "
+            "fee, rebate and availability per US name; no upstream history), keeps the "
+            "gzip payload and typed rows. FAILS on a file with broken framing, and "
+            "when the feed serves an already-archived file stamped over 24h ago."
+        ),
+        cadence=Cadence.daily(hour=20, minute=45),
+        catch_up_on_boot=True,
+        # No upstream history and an idempotent, self-stamped append: a late fire beats a lost day.
+        rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -7056,6 +7074,22 @@ def fred_reference_refresh() -> None:
 
     with _tracked_job(JOB_FRED_REFERENCE_REFRESH) as tracker:
         _record_reference_reports(tracker, _reference_data_refresh(FRED_DATASET_KEYS))
+
+
+def ibkr_borrow_archive() -> None:
+    """Archive today's IBKR borrow file (#3622)."""
+    from app.services.ibkr_borrow_archive import archive_borrow_file, fetch_borrow_file
+
+    with _tracked_job(JOB_IBKR_BORROW_ARCHIVE) as tracker:
+        # Download first: no DB connection is held across the FTP transfer (the dev cluster has no headroom).
+        payload = fetch_borrow_file()
+        with connect_job(autocommit=True) as conn:
+            report = archive_borrow_file(conn, fetch=lambda: payload)
+        tracker.row_count = report.row_count if report.status == "archived" else 0
+        tracker.note = (
+            f"status={report.status} snapshot={report.snapshot_id} rows={report.row_count} "
+            f"as_of={report.provider_as_of.isoformat()} sha={report.response_sha256[:12]}"
+        )
 
 
 def factor_library_reference_refresh() -> None:
