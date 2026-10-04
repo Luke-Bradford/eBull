@@ -33,7 +33,7 @@ Use this before choosing data for a signal or a backtest, or proposing a new dat
 | VIX term structure (VIX3M, VIX9D), Cboe CSV | Risk overlay. These are spot-tenor indices, not the VIX futures curve, so they cannot price SVXY's roll; that needs the futures benchmark | yes | free |
 | Fed Excess Bond Premium, ALFRED vintages | Credit-stress and regime overlays | archive releases / vintages | free |
 | 10-K/10-Q section text (our `periodic_report_sections` + Notre Dame SRAF parses) | Filing-change features (Cohen, Malloy & Nguyen 2020) | filing date | free |
-| Options-implied skew | Xing, Zhang & Zhao 2010 (10.9%/year) | no free history | ~$29–99/month; only if a sleeve needs it |
+| Options-implied skew | Xing, Zhang & Zhao 2010 (JFQA): high-skew stocks underperform; the paper reports ~10.9%/year for its long-short, a published in-sample figure, not ours | no free history | ~$29–99/month; only if a sleeve needs it |
 
 ## Data-quality hazards
 

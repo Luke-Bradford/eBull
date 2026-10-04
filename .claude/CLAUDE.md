@@ -141,7 +141,7 @@ This table is the single source for how much review a change gets. Climbing high
 
    PREVENTION items end as `EXTRACTED <file>`, `ALREADY_COVERED <file>` or `REBUTTED <reason>`. Details are in `engineering/review-resolution.md`. On a follow-up round the bot checks each earlier finding against the full diff.
 4. **Before each follow-up push**, re-run the gates and check the branch scope with `git diff --stat origin/main...HEAD`. This catches a silent revert of merged work.
-5. **Merge** with `bash $AUTONOMY_ENGINE_HOME/bin/safe_merge.sh <n>`, run from the repo root. `AUTONOMY_ENGINE_HOME` is `~/Dev/autonomy-engine/engine`.
+5. **Merge** with `bash $AUTONOMY_ENGINE_HOME/bin/safe_merge.sh <n>`, run from the repo root. The script lives in the separate `Luke-Bradford/autonomy-engine` repo (`engine/bin/safe_merge.sh`), not in eBull; `AUTONOMY_ENGINE_HOME` is `~/Dev/autonomy-engine/engine`, and the eBull side is configured in `.autonomy/config.yaml`.
    - **For a code PR**, the gate needs the latest marker-bearing bot comment to be posted after the head commit, with an APPROVE verdict and no `[BLOCKING]` section, plus green CI.
    - **For a PR whose every file is doc-only**, it needs no blocking bot comment and green CI. The bot posts a skip notice there, and that is a terminal state.
    - **After an engine merge**, fast-forward `~/Dev/autonomy-engine` with `git fetch && git merge --ff-only origin/main`. Nothing else updates it.
