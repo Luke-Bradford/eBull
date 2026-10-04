@@ -22,8 +22,10 @@ from app.services.reference_data import (
     ReferenceDataSourceError,
     parse_aqr_monthly_sheet,
     parse_fed_ebp_csv,
+    parse_french_daily_zip,
     parse_global_q_monthly_csv,
     parse_jkp_monthly_zip,
+    parse_jkp_nyse_cutoffs_csv,
     resolve_global_q_monthly_url,
 )
 
@@ -173,3 +175,68 @@ def test_fed_ebp_parser_types_spreads_and_probability() -> None:
 def test_fed_ebp_parser_refuses_drift(text: bytes, match: str) -> None:
     with pytest.raises(ReferenceDataSourceError, match=match):
         parse_fed_ebp_csv(text)
+
+
+_FRENCH_DAILY = (
+    "This file was created by using the 202608 CRSP database.\r\n"
+    "The Tbill return is the simple daily rate that, over the number of trading days\r\n"
+    "\r\n"
+    ",Mkt-RF,SMB,HML,RF\r\n"
+    "20140829,    0.29,   -0.02,   -0.18,    0.00\r\n"
+    "20140902,   -0.03,    0.31,   -0.05,   -99.99\r\n"
+    "\r\n"
+    "Copyright 2026 Eugene F. Fama and Kenneth R. French\r\n"
+)
+
+
+def test_french_daily_parser_reads_yyyymmdd_and_the_missing_code() -> None:
+    parsed = REFERENCE_DATASETS["french_three_factor_daily"].parser(_zip(_FRENCH_DAILY))
+    assert parsed.missing_count == 1
+    assert {(o.series_key, o.observation_date, o.value) for o in parsed.observations if o.series_key != "Mkt-RF"} == {
+        ("SMB", date(2014, 8, 29), Decimal("-0.0002")),
+        ("HML", date(2014, 8, 29), Decimal("-0.0018")),
+        ("RF", date(2014, 8, 29), Decimal("0")),
+        ("SMB", date(2014, 9, 2), Decimal("0.0031")),
+        ("HML", date(2014, 9, 2), Decimal("-0.0005")),
+    }
+    assert {o.unit for o in parsed.observations} == {"decimal_return"}
+
+
+def test_french_daily_parser_refuses_an_impossible_date_and_a_monthly_file() -> None:
+    with pytest.raises(ReferenceDataSourceError, match="invalid YYYYMMDD"):
+        parse_french_daily_zip(_zip(",RF\n20140231,0.01\n"))
+    # A monthly file's YYYYMM stamps are not daily rows: nothing parses, which the validator refuses.
+    with pytest.raises(ReferenceDataSourceError, match="zero observations"):
+        parse_french_daily_zip(_zip(",RF\n201408,0.01\n"))
+
+
+_CUTOFFS_HEADER = b"eom,n,nyse_p1,nyse_p20,nyse_p50,nyse_p80\n"
+
+
+def test_jkp_cutoffs_parser_types_usd_millions_and_counts() -> None:
+    parsed = parse_jkp_nyse_cutoffs_csv(
+        _CUTOFFS_HEADER + b"2014-08-31,1400,30.5,600.25,2500,15000\n" + b"2014-09-30,1401,31,610,NA,15100\n"
+    )
+    assert parsed.missing_count == 1
+    rows = {(o.series_key, o.observation_date): (o.value, o.unit) for o in parsed.observations}
+    assert rows[("n", date(2014, 9, 30))] == (Decimal("1401"), "count")
+    assert rows[("nyse_p20", date(2014, 8, 31))] == (Decimal("600.25"), "usd_millions")
+    assert ("nyse_p50", date(2014, 9, 30)) not in rows
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        (b"2014-08-31,1400,30,600,2500,15000\n2014-10-31,1400,30,600,2500,15000\n", "does not follow"),
+        (b"2014-08-30,1400,30,600,2500,15000\n", "not a month end"),
+        (b"2014-08-31,1400,30,2600,2500,15000\n", "percentiles decrease"),
+        (b"2014-08-31,1400.5,30,600,2500,15000\n", "not an integer count"),
+        (b"2014-08-31,1400,0,600,2500,15000\n", "must be positive"),
+        (b"2014-08-31,1400,30,600,2500\n", "ragged"),
+    ],
+)
+def test_jkp_cutoffs_parser_refuses_drift(body: bytes, match: str) -> None:
+    with pytest.raises(ReferenceDataSourceError, match=match):
+        parse_jkp_nyse_cutoffs_csv(_CUTOFFS_HEADER + body)
+    with pytest.raises(ReferenceDataSourceError, match="header"):
+        parse_jkp_nyse_cutoffs_csv(b"eom,n,nyse_p20\n2014-08-31,1,2\n")
