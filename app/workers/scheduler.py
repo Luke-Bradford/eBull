@@ -83,7 +83,7 @@ from app.services.job_progress import JobProgress, degradation_reason
 from app.services.job_telemetry import JobTelemetryAggregator, flush_to_job_run
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
 from app.services.market_calendar import latest_completed_us_session, us_market_status
-from app.services.market_data import refresh_market_data, refresh_quotes
+from app.services.market_data import refresh_market_data, refresh_quotes, refresh_signal_quotes
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
@@ -7280,10 +7280,68 @@ def _ai_trial_decision(job_name: str, tracker: _JobTracker, creds: tuple[str, st
     logger.info("%s: %s", job_name, result.note)
 
 
+def _execution_market_refresh(
+    job_name: str, creds: tuple[str, str], due: Callable[..., list[int]]
+) -> Callable[[], None]:
+    """The executors' pre-batch ``refresh_halts`` hook, widened to the quotes the batch is gated on (#3578).
+
+    ``quotes_refresh`` fires at :23 and these batches at :00/:05, so without this the spread,
+    plan-invalidation and sizing gates read a quote up to an hour old — after 2026-11-02 (NYSE opens
+    14:30Z) a PRE-open one. Composed here, not in the executors, because ``ranking_pot_executor.py``
+    is policy-hashed: the batch calls this hook only when entries are due, immediately before them.
+
+    ``due`` is the executor's own due-query, re-run for today's New York session. A total failure —
+    the fetch raised, or not one due instrument's quote was stored — raises, exactly as a halt-feed
+    failure does: the fire aborts with nothing decided and the next fire retries, rather than
+    deciding on the stale quote this exists to replace.
+
+    ⚠ A PARTIAL refresh does not abort (Codex ckpt-2 raised it). An instrument eToro omits is
+    usually omitted on every fire, and an undecided entry expires at the session's end, so one
+    unquoted name would veto every other entry for the month. Its entry is instead decided on the
+    stored quote under the executor's own ``max_quote_age_seconds`` — the pre-#3578 behaviour, for
+    that name only — and the shortfall is logged at WARNING.
+    """
+
+    def refresh() -> None:
+        _refresh_strategy_halt_feed()
+        api_key, user_key = creds
+        today = datetime.now(tz=UTC).astimezone(_NEW_YORK).date()
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
+            connect_job(autocommit=True) as conn,
+        ):
+            summary = refresh_signal_quotes(market, conn, due(conn, today=today))
+        if summary.batch_error is not None:
+            raise summary.batch_error
+        if summary.instruments_requested and not summary.quotes_updated:
+            raise RuntimeError(
+                f"{job_name}: no execution-time quote stored for any of {summary.instruments_requested} due "
+                f"instrument(s) (no_quote={summary.quotes_skipped}); aborting the batch"
+            )
+        if summary.quotes_updated < summary.instruments_requested:
+            logger.warning(
+                "%s: execution-time quotes refreshed for %d of %d due instrument(s); the rest are decided on "
+                "their stored quote, if any, under the executor's age gate",
+                job_name,
+                summary.quotes_updated,
+                summary.instruments_requested,
+            )
+        logger.info(
+            "%s: execution-time quotes requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d",
+            job_name,
+            summary.instruments_requested,
+            summary.quotes_updated,
+            summary.quotes_skipped,
+            summary.spread_flags_set,
+        )
+
+    return refresh
+
+
 def ai_trial_execute() -> None:
     """Submit today's published AI-trial legs to demo (#3471 spec §3 step 6, §8)."""
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
-    from app.services.ai_trial_jobs import run_trial_execution
+    from app.services.ai_trial_jobs import due_trial_legs, run_trial_execution
 
     if settings.etoro_env != "demo":
         _record_prereq_skip(JOB_AI_TRIAL_EXECUTE, "the AI trial is demo-only")
@@ -7295,7 +7353,11 @@ def ai_trial_execute() -> None:
     api_key, user_key = creds
     with _tracked_job(JOB_AI_TRIAL_EXECUTE) as tracker:
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker, connect_job() as conn:
-            result = run_trial_execution(conn, broker=broker, refresh_halts=_refresh_strategy_halt_feed)
+            result = run_trial_execution(
+                conn,
+                broker=broker,
+                refresh_halts=_execution_market_refresh(JOB_AI_TRIAL_EXECUTE, creds, due_trial_legs),
+            )
         tracker.row_count = result.legs
         tracker.note = result.note
         if result.errors:
@@ -7311,7 +7373,7 @@ def ranking_pot_execute() -> None:
     """Submit today's ranking-pot executed-book entries to demo (#2842 spec §7.2;
     ``app/services/ranking_pot_executor.py``)."""
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
-    from app.services.ranking_pot_executor import run_pot_execution
+    from app.services.ranking_pot_executor import due_pot_entries, run_pot_execution
 
     if settings.etoro_env != "demo":
         _record_prereq_skip(JOB_RANKING_POT_EXECUTE, "the ranking pot is demo-only")
@@ -7323,7 +7385,11 @@ def ranking_pot_execute() -> None:
     api_key, user_key = creds
     with _tracked_job(JOB_RANKING_POT_EXECUTE) as tracker:
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker, connect_job() as conn:
-            result = run_pot_execution(conn, broker=broker, refresh_halts=_refresh_strategy_halt_feed)
+            result = run_pot_execution(
+                conn,
+                broker=broker,
+                refresh_halts=_execution_market_refresh(JOB_RANKING_POT_EXECUTE, creds, due_pot_entries),
+            )
         tracker.row_count = result.entries
         tracker.note = result.note
         if result.errors:

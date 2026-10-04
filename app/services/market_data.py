@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Final, Literal
 
 import psycopg
 from psycopg.rows import dict_row
@@ -584,9 +584,6 @@ def refresh_quotes(
         try:
             with conn.transaction():
                 flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
-                quotes_updated += 1
-                if flagged:
-                    spread_flags_set += 1
         except Exception:
             logger.warning(
                 "Failed to upsert quote for %s (id=%d), skipping",
@@ -594,6 +591,11 @@ def refresh_quotes(
                 instrument_id,
                 exc_info=True,
             )
+            continue
+        # Counted only once the block has COMMITTED: a failed commit must not read as coverage.
+        quotes_updated += 1
+        if flagged:
+            spread_flags_set += 1
 
     return QuoteRefreshSummary(
         instruments_requested=len(instruments),
@@ -603,6 +605,36 @@ def refresh_quotes(
         core_observations_written=core_observations_written,
         core_observation_failures=core_observation_failures,
     )
+
+
+_SIGNAL_INSTRUMENTS_SQL: Final = """
+    SELECT DISTINCT i.instrument_id, i.symbol
+    FROM strategy_signals s
+    JOIN instruments i ON i.instrument_id = s.instrument_id
+    WHERE s.signal_id = ANY(%(signal_ids)s)
+    ORDER BY i.instrument_id
+"""
+
+
+def refresh_signal_quotes(
+    provider: MarketDataProvider,
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    signal_ids: Sequence[int],
+) -> QuoteRefreshSummary:
+    """Quote the instruments of *signal_ids* now, immediately before an execution batch reads them (#3578).
+
+    ``quotes_refresh`` fires hourly at :23, so a batch at :00/:05 would otherwise gate spread, plan
+    invalidation and sizing on a quote up to an hour old, e.g. the opening half-hour's wide spread.
+
+    The scope read runs in its own transaction so a connection passed in idle is idle again on
+    return (the executors refuse a connection with a transaction open). Inside a caller's open
+    transaction the block is only a savepoint, so pass an idle or autocommit connection.
+    """
+    if not signal_ids:
+        return QuoteRefreshSummary(0, 0, 0, 0)
+    with conn.transaction():
+        rows = conn.execute(_SIGNAL_INSTRUMENTS_SQL, {"signal_ids": list(signal_ids)}).fetchall()
+    return refresh_quotes(provider, conn, [(int(r[0]), str(r[1])) for r in rows])
 
 
 def refresh_market_data(
