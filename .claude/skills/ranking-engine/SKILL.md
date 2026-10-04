@@ -13,6 +13,16 @@ read path (`app/services/portfolio.py::_load_ranked_scores`), or the
 (`app/api/scores.py`) endpoints. Also read it before touching how the
 portfolio action layer consumes a score.
 
+
+## Known defects in v1.5-balanced (committee review, 2026-10-04): not fit to select capital
+
+These were measured on the 2026-10-04 run. The fix is a backtested successor built on the research panel (#3609), not a parameter patch.
+- **The LLM price targets drive the score.** corr(total_score, value_score) = 0.725 over 3,921 names, and 376 names sit at the value clip of 1.0. Absolute targets carry no demonstrated predictive value (`quant/llm-research.md`).
+- **Momentum rewards the 1-month return** (weight 0.20 in `_momentum_score`), although 1-month returns reverse on our data (`strategy-evidence.md` §2.8). There is no 12-1 momentum, and overbought oscillators penalise the trend.
+- **Absolute margin and FCF ramps with no within-industry ranking** produce sector concentration. 10 of the top 25 sit in one sector.
+- **The stale-thesis cliff:** a thesis older than 90 days costs −0.15, and the writer has been parked since 2026-08-22. Every thesis-carrying name takes the penalty by 2026-12-01, which reshuffles the top of the ranking without any change in the companies.
+- **A model_version bump now reaches live trials** (ranking-pot declarations pin it). Treat a bump as a new declaration, not a display change.
+
 ## What it is
 
 `compute_score(instrument_id, conn, model_version)` produces one `ScoreResult`

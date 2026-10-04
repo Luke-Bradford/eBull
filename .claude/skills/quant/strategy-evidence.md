@@ -28,6 +28,13 @@ measured 8.42 GB/year failure.
 
 ---
 
+## Current verdicts live in `quant/strategy-menu.md` (2026-10-04)
+
+`strategy-menu.md` is the current per-family verdict, and `research-process.md` sets the evidence bar. This file stays the evidence archive. Two items in §0 below have since been tested and closed:
+
+- **Opportunistic insider purchases:** our sealed opportunistic-minus-routine test came out at −0.72%/month placebo-adjusted, interval roughly −5.8% to +3.9% (`docs/proposals/ta/2026-08-10-insider-purchase-result.md`): not demonstrated on our data, not proven negative. It is no longer a "build"; the literature below is unchanged.
+- **The ≥12% shock short:** all 8 portfolio sizing arms lost money, with drawdowns of 41–69% (#2481). It is not an edge.
+
 ## 0. ⚠⚠ WHAT SURVIVED — read this first, the rest of the file is mostly what did not
 
 A day of falsification has a shape, and the shape is the finding:
