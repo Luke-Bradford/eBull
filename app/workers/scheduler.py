@@ -7078,11 +7078,13 @@ def fred_reference_refresh() -> None:
 
 def ibkr_borrow_archive() -> None:
     """Archive today's IBKR borrow file (#3622)."""
-    from app.services.ibkr_borrow_archive import archive_borrow_file
+    from app.services.ibkr_borrow_archive import archive_borrow_file, fetch_borrow_file
 
     with _tracked_job(JOB_IBKR_BORROW_ARCHIVE) as tracker:
+        # Download first: no DB connection is held across the FTP transfer (the dev cluster has no headroom).
+        payload = fetch_borrow_file()
         with connect_job(autocommit=True) as conn:
-            report = archive_borrow_file(conn)
+            report = archive_borrow_file(conn, fetch=lambda: payload)
         tracker.row_count = report.row_count if report.status == "archived" else 0
         tracker.note = (
             f"status={report.status} snapshot={report.snapshot_id} rows={report.row_count} "
