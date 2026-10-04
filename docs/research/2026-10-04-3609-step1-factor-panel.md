@@ -306,35 +306,58 @@ the matrix.
 **Concept-set extension** (slice 2). These are not in `CONCEPT_SET` (`pit_fundamentals.py:54`): `Liabilities`,
 `SellingGeneralAndAdministrativeExpense`, `InterestExpense`, `IncomeLossFromContinuingOperations`, both deferred-tax
 concepts and the three preferred concepts. These are exactly the additions; nothing else is added.
-- **A/B.** Build the old and new bundles from the **same pinned input zips**. The old one is built from a worktree at
-  the pre-change SHA, because the loader refuses a policy mismatch (`pit_fundamentals.py:632-635`).
-- Compare the **union** of CIKs, fact keys, statuses, accessions and integrity exclusions. The only permitted
-  difference is new keys for the added concepts. Anything else refuses publication.
+- **A/B:** superseded by Amendment 1 below, which keeps the same-pinned-inputs rule and makes the comparison row
+  for row.
 - Before editing, run `scripts.ai_trial_policy_guard`. On 2026-10-04, `pit_fundamentals.py` appeared in no
   `POLICY_MODULES` list.
 
-**Amendment 1 (2026-10-04, found while starting slice 2): the linkage is rebuilt too.**
-- **Coupling.** `security_linkage.POLICY_FILES` (`security_linkage.py:264-271`) hashes `pit_fundamentals.py`.
-  Editing `CONCEPT_SET` therefore changes the #3361 policy hash, and `load_security_linkage` refuses the
-  2026-09-24 linkage (`security_linkage.py:477-478`). Both linkage artefacts load under the current code on
-  2026-10-04; neither would after slice 2. The panel needs the linkage (§"Universe at M", step 2).
-- **A live rebuild is not an A/B.** `build_3361_security_linkage.py` re-reads the DB through `snapshot_db`
-  (lines 77-108). Since 2026-09-24, `research_price_series` grew from 30,591 rows (the frozen
-  `inputs/series_inventory.json`) to 38,461, from #3639's separate PWB capture vendor; `sec_form25_register`
-  also grows with new filings. A live rebuild would mix the code change with input drift.
-- **Rule.** Slice 2 adds a replay mode to the linkage builder that reads every input from a prior linkage
-  bundle's `inputs/` (the four DB dumps, `form345/`, `submissions.zip`) and verifies each against that
-  bundle's recorded `input_sha256`. It rebuilds `2026-09-24-f6ae1edd` (Form 25 mode) under the new code. The
-  #3360 `submissions.zip` input is the same pinned file, so the new #3360 bundle supplies the same bytes.
-- **Linkage A/B.** Every series document and the ledger must be byte-identical to the 2026-09-24 build. The
-  manifest may differ only in `policy` and `input_sha256.pit_manifest` (the new #3360 manifest digest).
-  Anything else refuses publication. The `-without-form25` cross-check
-  artefact is a #3361 diagnostic that step 1 does not read; it is not rebuilt.
-- **Bundle A/B arm A.** The 2026-09-24 #3360 bundle loads under the pre-change code (its manifest `policy`
-  equals `policy_sha256()` on 2026-10-04), so it is arm A. No pre-change worktree build is needed.
-- **Other #3360 readers** (`build_2901_quality_input.py`, `measure_2901_gpa_coverage.py`, the #3360 census and
-  causal scripts) are closed research. They keep working against the old bundle at their recorded SHAs; the
-  policy hash is what makes that explicit.
+**Amendment 1 (2026-10-04, found while starting slice 2; Codex checkpoint 1, 6 findings, all applied).**
+**Coupling.** `security_linkage.POLICY_FILES` (`security_linkage.py:264-271`) hashes `pit_fundamentals.py`.
+Editing `CONCEPT_SET` therefore changes the #3361 policy hash, and `load_security_linkage` refuses the 2026-09-24
+linkage (`security_linkage.py:477-478`). Both linkage artefacts load under the current code on 2026-10-04; neither
+would after slice 2. The panel needs the linkage (§"Universe at M", step 2). So slice 2 rebuilds it.
+
+**A live rebuild is not an A/B.** `build_3361_security_linkage.py` re-reads the DB through `snapshot_db` (lines
+77-108). Since 2026-09-24, `research_price_series` grew from 30,591 rows (the frozen `inputs/series_inventory.json`)
+to 38,461, from #3639's separate PWB capture vendor, and `sec_form25_register` grows with new filings. A live
+rebuild would mix the code change with input drift.
+
+**#3360 bundle A/B (replaces the two bullets above).**
+- **Arm A** is the 2026-09-24 bundle. It loads under the pre-change code: its manifest `policy` equals
+  `policy_sha256()` on 2026-10-04, which hashes code, constants, Python and `tzdata` (`pit_fundamentals.py:490-502`).
+  No pre-change worktree build is needed. **Arm B** is built by the new code from arm A's own `inputs/` ZIPs.
+- **Compared per CIK, row for row, with payload and multiplicity:** the shard list and every shard's `accessions`;
+  every `events` row (key, accession, acceptance, value, multiplicity) and every `rejections` row (key, accession,
+  acceptance, reason, row indices). Arm B's rows for the pre-existing concepts must equal arm A's exactly; its
+  only extra rows must be for the nine added concepts.
+- **Manifest:** `snapshot_integrity_failures`, `supported_through` and every pre-existing ledger key must be equal.
+  `policy` differs by construction. Any other difference refuses publication.
+- **Additions accepted on their own evidence,** since equality of the old rows says nothing about the new ones:
+  - every added concept has stored events (a zero refuses);
+  - per concept, the ledger outcome counts are reported;
+  - a cross-source check: the default panel's (AAPL, GME, MSFT, JPM, HD) latest 10-K value of `Liabilities` and
+    `InterestExpense` read through `value_as_of` against the same figure in SEC EDGAR's filing.
+
+  The admission rules for the new rows are the bundle's existing rules, unchanged; the concepts are taken as filed.
+
+**Linkage replay.**
+- Slice 2 adds a replay mode to the linkage builder. It takes a prior linkage bundle plus its pinned manifest
+  digest, and checks the digest and schema but not the policy (the policy is what changed). Every input it reads
+  (the four DB dumps, `form345/`, `submissions.zip`) comes from that bundle's `inputs/` and must match the recorded
+  `input_sha256`.
+- The #3360 side is the new bundle, passed as today with its manifest digest. Its `submissions.zip` must hash to the
+  linkage's recorded `submissions` digest, and its `supported_through` must equal the 2026-09-24 #3360 value, which
+  the linkage uses for coverage (`build_3361_security_linkage.py:220-228, 248-252`). Either difference refuses.
+- It rebuilds `2026-09-24-f6ae1edd` (Form 25 mode). The `-without-form25` cross-check artefact is a #3361 diagnostic
+  that step 1 does not read; it is not rebuilt.
+
+**Linkage A/B.** Every series document and `ledger.json` must be byte-identical to the 2026-09-24 build, and the
+loaded bundle must pass `verify_all()`. The manifest may differ only in `policy` and `input_sha256.pit_manifest`.
+Anything else refuses publication.
+
+**Other #3360 and #3361 readers** (`build_2901_quality_input.py`, `measure_2901_gpa_coverage.py`, the #3360/#3361
+census and causal scripts) are closed research. They reproduce against the old artefacts at their recorded SHAs
+**and** the same Python and `tzdata` versions, which both policy hashes include; slice 2's PR records those versions.
 
 ## Price characteristics and daily data
 
