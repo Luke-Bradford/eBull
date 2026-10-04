@@ -680,7 +680,7 @@ def _latest_accepted(conn: psycopg.Connection[Any], spec: ReferenceDatasetSpec) 
     with conn.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             """
-            SELECT snapshot_id, etag, last_modified, response_sha256,
+            SELECT snapshot_id, source_url, etag, last_modified, response_sha256,
                    row_count, missing_count, first_observation, last_observation
             FROM reference_data_snapshots
             WHERE source = %(source)s
@@ -728,13 +728,14 @@ def refresh_reference_dataset(
     if not conn.autocommit:
         raise RuntimeError("refresh_reference_dataset requires an autocommit connection")
     prior = _latest_accepted(conn, spec)
+    source_url = spec.resolve_url(client, spec.source_url) if spec.resolve_url is not None else spec.source_url
     headers: dict[str, str] = {}
-    if prior is not None:
+    # A prior snapshot's validators describe the file it came from; after a rename they do not apply.
+    if prior is not None and prior["source_url"] == source_url:
         if prior["etag"]:
             headers["If-None-Match"] = str(prior["etag"])
         if prior["last_modified"]:
             headers["If-Modified-Since"] = str(prior["last_modified"])
-    source_url = spec.resolve_url(client, spec.source_url) if spec.resolve_url is not None else spec.source_url
     response = client.get(source_url, headers=headers)
     if response.status_code == 304:
         if prior is None:

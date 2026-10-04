@@ -248,15 +248,20 @@ def test_a_resolved_source_url_is_fetched_and_recorded(ebull_test_conn: psycopg.
     )
 
     resolved = "https://global-q.org/uploads/1/q5_factors_monthly_2025.csv"
+    renamed = "https://global-q.org/uploads/1/q5_factors_monthly_2026.csv"
+    year = ["2025"]
     seen: list[str] = []
+    validators: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(str(request.url))
         if str(request.url) == GLOBAL_Q_INDEX_URL:
-            return httpx.Response(200, text='<a href="/uploads/1/q5_factors_monthly_2025.csv">', request=request)
-        return httpx.Response(
-            200, content=b"year,month,R_F,R_MKT,R_ME,R_IA,R_ROE,R_EG\n2025,1,0.4,1,1,1,1,1\n", request=request
-        )
+            return httpx.Response(200, text=f'<a href="/uploads/1/q5_factors_monthly_{year[0]}.csv">', request=request)
+        validators.append(request.headers.get("If-None-Match"))
+        if request.headers.get("If-None-Match") == '"v1"':
+            return httpx.Response(304, request=request)
+        body = f"year,month,R_F,R_MKT,R_ME,R_IA,R_ROE,R_EG\n{year[0]},1,0.4,1,1,1,1,1\n".encode()
+        return httpx.Response(200, content=body, headers={"ETag": '"v1"'}, request=request)
 
     spec = ReferenceDatasetSpec(
         "global_q",
@@ -270,7 +275,15 @@ def test_a_resolved_source_url_is_fetched_and_recorded(ebull_test_conn: psycopg.
     try:
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
             report = refresh_reference_dataset(ebull_test_conn, client=client, spec=spec)
-        assert seen == [GLOBAL_Q_INDEX_URL, resolved]
+            same = refresh_reference_dataset(ebull_test_conn, client=client, spec=spec)
+            year[0] = "2026"
+            after_rename = refresh_reference_dataset(ebull_test_conn, client=client, spec=spec)
+        assert seen == [GLOBAL_Q_INDEX_URL, resolved] * 2 + [GLOBAL_Q_INDEX_URL, renamed]
+        # Same file: the prior ETag is sent and honoured. Renamed file: the old file's ETag is not sent.
+        assert validators == [None, '"v1"', None]
+        assert same.status == "not_modified"
+        assert after_rename.status == "accepted"
+        assert after_rename.last_observation == date(2026, 1, 31)
         assert report.status == "accepted"
         assert report.row_count == 6
         assert ebull_test_conn.execute(
