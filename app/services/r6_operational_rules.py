@@ -19,7 +19,8 @@ from typing import Final, Literal
 TURN_OF_MONTH_RULE_VERSION: Final = "r6-2914-turn-of-month-preference-v1"
 FACTOR_VALUATION_RULE_VERSION: Final = "r6-2914-factor-valuation-record-v1"
 TURN_OF_MONTH_OFFSETS: Final = (-3, -2, -1, 0, 1, 2, 3)
-REFERENCE_RETURN_UNITS: Final = frozenset({"decimal_return", "percent_per_annum", "binary_indicator"})
+# `probability` (#3622, Fed EBP est_prob) is context, never a valuation spread.
+REFERENCE_RETURN_UNITS: Final = frozenset({"decimal_return", "percent_per_annum", "binary_indicator", "probability"})
 # source/dataset/series -> canonical spread unit. Empty under the frozen v1
 # contract because #2912 contains no valuation-spread series. A genuine future
 # source requires an explicit versioned admission; callers cannot self-certify

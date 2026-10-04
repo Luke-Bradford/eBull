@@ -23,8 +23,8 @@ import psycopg
 from openpyxl import load_workbook
 from psycopg.rows import dict_row
 
-ReferenceSource = Literal["kenneth_french", "aqr", "fred", "global_q", "jkp"]
-ReferenceUnit = Literal["decimal_return", "percent_per_annum", "binary_indicator"]
+ReferenceSource = Literal["kenneth_french", "aqr", "fred", "global_q", "jkp", "federal_reserve"]
+ReferenceUnit = Literal["decimal_return", "percent_per_annum", "binary_indicator", "probability"]
 
 FRENCH_FTP: Final = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp"
 FRENCH_FIVE_FACTOR_URL: Final = f"{FRENCH_FTP}/F-F_Research_Data_5_Factors_2x3_CSV.zip"
@@ -35,6 +35,8 @@ FRED_CSV_URL: Final = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={serie
 #: global-q republishes the whole history yearly under a new year-stamped filename, so the file is
 #: resolved from this index page at fetch time rather than pinned (a pin would go silently stale).
 GLOBAL_Q_INDEX_URL: Final = "https://global-q.org/factors.html"
+#: Re-estimated in full at every release (#3622), so every distinct response is archived as its own snapshot.
+FED_EBP_URL: Final = "https://www.federalreserve.gov/econres/notes/feds-notes/ebp_csv.csv"
 JKP_USA_MONTHLY_VW_CAP_URL: Final = (
     "https://jkpfactors-data.s3.amazonaws.com/public/%5Busa%5D_%5Ball_factors%5D_%5Bmonthly%5D_%5Bvw_cap%5D.zip"
 )
@@ -45,6 +47,7 @@ AQR_FACTOR_PARSER_VERSION: Final = "aqr-factor-monthly-xlsx-v1"
 FRED_PARSER_VERSION: Final = "fred-csv-v1"
 GLOBAL_Q_PARSER_VERSION: Final = "global-q-monthly-csv-v1"
 JKP_PARSER_VERSION: Final = "jkp-monthly-csv-zip-v1"
+FED_EBP_PARSER_VERSION: Final = "fed-ebp-monthly-csv-v1"
 
 _FRENCH_MISSING: Final = frozenset({Decimal("-99.99"), Decimal("-999")})
 _AQR_HEADER: Final = (
@@ -197,6 +200,11 @@ _FRENCH_49_INDUSTRIES: Final = (
 )
 _GLOBAL_Q_HEADER: Final = ("year", "month", "R_F", "R_MKT", "R_ME", "R_IA", "R_ROE", "R_EG")
 _GLOBAL_Q_FILE: Final = re.compile(r'href="(/uploads/[0-9/]+/q5_factors_monthly_(\d{4})\.csv)"')
+_FED_EBP_UNITS: Final[Mapping[str, ReferenceUnit]] = {
+    "gz_spread": "percent_per_annum",
+    "ebp": "percent_per_annum",
+    "est_prob": "probability",
+}
 _JKP_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_stocks", "n_stocks_min", "date", "ret")
 
 
@@ -443,6 +451,39 @@ def parse_global_q_monthly_csv(payload: bytes) -> ParsedReferenceData:
     return _validated(ParsedReferenceData(tuple(observations), missing_count))
 
 
+def parse_fed_ebp_csv(payload: bytes) -> ParsedReferenceData:
+    """Parse ``ebp_csv.csv``: ``date`` (M/D/YYYY, first of month) then GZ spread, EBP and recession probability."""
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ReferenceDataSourceError("EBP response is not UTF-8 CSV") from exc
+    reader = csv.reader(io.StringIO(text))
+    header = tuple(cell.strip() for cell in next(reader, ()))
+    expected = ("date", *_FED_EBP_UNITS)
+    if header != expected:
+        raise ReferenceDataSourceError(f"EBP header {header!r}; expected {expected!r}")
+    observations: list[ReferenceObservation] = []
+    missing_count = 0
+    for row_number, row in enumerate(reader, start=2):
+        if not row or all(not cell.strip() for cell in row):
+            continue
+        if len(row) != len(header):
+            raise ReferenceDataSourceError(f"EBP row {row_number}: ragged row")
+        try:
+            when = datetime.strptime(row[0].strip(), "%m/%d/%Y").date()
+        except ValueError as exc:
+            raise ReferenceDataSourceError(f"EBP row {row_number}: invalid date {row[0]!r}") from exc
+        for (series_key, unit), raw in zip(_FED_EBP_UNITS.items(), row[1:], strict=True):
+            if not raw.strip() or raw.strip().upper() == "NA":
+                missing_count += 1
+                continue
+            value = _decimal(raw, context=f"EBP row {row_number}/{series_key}")
+            if unit == "probability" and not Decimal(0) <= value <= Decimal(1):
+                raise ReferenceDataSourceError(f"EBP row {row_number}/{series_key}: probability outside [0, 1]")
+            observations.append(ReferenceObservation(series_key, when, value, unit))
+    return _validated(ParsedReferenceData(tuple(observations), missing_count))
+
+
 def resolve_global_q_monthly_url(client: httpx.Client, index_url: str) -> str:
     """The newest ``q5_factors_monthly_<year>.csv`` linked from global-q's factors page."""
     response = client.get(index_url)
@@ -663,6 +704,9 @@ REFERENCE_DATASETS: Final[Mapping[str, ReferenceDatasetSpec]] = {
         FRED_PARSER_VERSION,
         _fred_parser("USREC", "binary_indicator"),
     ),
+    "fed_ebp_monthly": ReferenceDatasetSpec(
+        "federal_reserve", "fed_ebp_monthly", FED_EBP_URL, FED_EBP_PARSER_VERSION, parse_fed_ebp_csv
+    ),
     **{spec.dataset_key: spec for spec in (*_FRENCH_LIBRARY, *_AQR_LIBRARY, *_FACTOR_LIBRARY)},
 }
 
@@ -672,7 +716,8 @@ FRENCH_DATASET_KEYS: Final = (
     *(spec.dataset_key for spec in _FRENCH_LIBRARY),
 )
 AQR_DATASET_KEYS: Final = ("aqr_vme_monthly", *(spec.dataset_key for spec in _AQR_LIBRARY))
-FRED_DATASET_KEYS: Final = ("fred_dgs3mo", "fred_usrec")
+#: The daily macro group. The EBP rides it so a release is archived within a day of publication.
+FRED_DATASET_KEYS: Final = ("fred_dgs3mo", "fred_usrec", "fed_ebp_monthly")
 FACTOR_LIBRARY_DATASET_KEYS: Final = tuple(spec.dataset_key for spec in _FACTOR_LIBRARY)
 
 
@@ -916,6 +961,7 @@ __all__ = [
     "ReferenceRefreshReport",
     "parse_aqr_monthly_sheet",
     "parse_aqr_vme_monthly",
+    "parse_fed_ebp_csv",
     "parse_fred_csv",
     "parse_french_monthly_zip",
     "parse_global_q_monthly_csv",

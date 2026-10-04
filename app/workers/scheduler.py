@@ -2806,7 +2806,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         source="reference_data",
         description=(
             "Daily 03:25 UTC — conditionally fetches official no-key FRED CSVs "
-            "for DGS3MO and USREC, retaining exact responses with explicit units."
+            "for DGS3MO and USREC, and the Federal Reserve's Excess Bond Premium CSV "
+            "(every re-estimated release kept, #3622), retaining exact responses "
+            "with explicit units."
         ),
         cadence=Cadence.daily(hour=3, minute=25),
         catch_up_on_boot=True,
@@ -7069,7 +7071,7 @@ def aqr_reference_refresh() -> None:
 
 
 def fred_reference_refresh() -> None:
-    """Refresh official FRED macro references (#2912)."""
+    """Refresh official FRED macro references (#2912) and the Fed EBP release archive (#3622)."""
     from app.services.reference_data import FRED_DATASET_KEYS
 
     with _tracked_job(JOB_FRED_REFERENCE_REFRESH) as tracker:
