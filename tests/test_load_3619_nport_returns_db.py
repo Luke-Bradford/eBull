@@ -60,6 +60,13 @@ def test_load_is_idempotent_and_refuses_a_changed_row(ebull_test_conn: psycopg.C
     with pytest.raises(RuntimeError, match="1 stored rows are missing"):
         load_quarter(ebull_test_conn, "2024q4", folder)
 
+    # Recovery: replacing the quarter reloads it from this read, and the guard is back afterwards.
+    assert load_quarter(ebull_test_conn, "2024q4", folder, replace=True) == (3, 3)
+    assert ebull_test_conn.execute("SELECT count(*) FROM sec_nport_monthly_returns").fetchone() == (3,)
+    with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+        ebull_test_conn.execute("DELETE FROM sec_nport_monthly_returns")
+    ebull_test_conn.rollback()
+
 
 def test_rows_refuse_update_and_delete(ebull_test_conn: psycopg.Connection[Any], tmp_path: Path) -> None:
     load_quarter(ebull_test_conn, "2024q4", _write(tmp_path / "q", "4.29"))

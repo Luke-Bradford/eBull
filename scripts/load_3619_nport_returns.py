@@ -88,6 +88,8 @@ WHERE (s.class_id, s.month, s.return_pct, s.report_date, s.filing_date, s.sub_ty
 """
 
 
+_GUARD = "sec_nport_monthly_returns_append_only"
+
 #: Stored rows of this quarter that the new read no longer carries: a re-issue that REMOVED a row.
 _REMOVED_SQL = """
 SELECT count(*)
@@ -101,12 +103,16 @@ WHERE t.dataset_quarter = %(quarter)s
 """
 
 
-def load_quarter(conn: psycopg.Connection, quarter: str, folder: Path) -> tuple[int, int]:
+def load_quarter(conn: psycopg.Connection, quarter: str, folder: Path, *, replace: bool = False) -> tuple[int, int]:
     """Insert one quarter in one transaction. Returns (rows offered, rows inserted).
 
     Rows already stored are kept, but a stored row whose values differ from this read, or that this read no longer
     carries (a re-issued data set that changed or removed a filing's row), aborts the quarter: an immutable filing
     that moved is a finding, not an update.
+
+    Recovery, once the re-issue is understood: ``replace=True`` (``--replace-quarter``) deletes that quarter's rows
+    and reloads it in the same transaction. The row-delete guard (sql/471) is lifted only inside that transaction;
+    accessions never span two data sets, so no other quarter is touched.
     """
     submissions = {s["ACCESSION_NUMBER"]: s for s in _tsv(folder / "SUBMISSION.tsv")}
     rows = list(month_rows(_tsv(folder / "MONTHLY_TOTAL_RETURN.tsv"), submissions))
@@ -114,6 +120,12 @@ def load_quarter(conn: psycopg.Connection, quarter: str, folder: Path) -> tuple[
         # Dropped explicitly as well: under a caller's open transaction this block is a savepoint, and
         # ON COMMIT DROP would leave the table for the next quarter.
         conn.execute("CREATE TEMP TABLE nport_stage (LIKE sec_nport_monthly_returns INCLUDING DEFAULTS) ON COMMIT DROP")
+        if replace:
+            conn.execute(f"ALTER TABLE sec_nport_monthly_returns DISABLE TRIGGER {_GUARD}")
+            conn.execute(
+                "DELETE FROM sec_nport_monthly_returns WHERE dataset_quarter = %(quarter)s", {"quarter": quarter}
+            )
+            conn.execute(f"ALTER TABLE sec_nport_monthly_returns ENABLE TRIGGER {_GUARD}")
         with conn.cursor().copy(f"COPY nport_stage ({_COLUMNS}) FROM STDIN") as copy:
             for row in rows:
                 copy.write_row(
@@ -147,6 +159,13 @@ def load_quarter(conn: psycopg.Connection, quarter: str, folder: Path) -> tuple[
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--today", type=date.fromisoformat, default=date.today())
+    parser.add_argument(
+        "--replace-quarter",
+        action="append",
+        default=[],
+        metavar="YYYYqN",
+        help="delete and reload this quarter (after a re-issue aborted it); repeatable",
+    )
     args = parser.parse_args()
     with (
         httpx.Client(headers={"User-Agent": settings.sec_user_agent}, timeout=120, follow_redirects=True) as client,
@@ -162,7 +181,7 @@ def main() -> None:
                 continue
             if unpublished:
                 raise SystemExit(f"{unpublished} unavailable but the later {quarter} is published: history gap")
-            offered, inserted = load_quarter(conn, quarter, folder)
+            offered, inserted = load_quarter(conn, quarter, folder, replace=quarter in args.replace_quarter)
             print(f"{quarter}: {offered} month rows offered, {inserted} inserted")
 
 
