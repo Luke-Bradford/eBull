@@ -22,6 +22,9 @@ from tests.test_ranking_pot_rebalance_db import _decided, _insert
 from tests.test_ranking_pot_schema_db import _frozen
 from tests.test_ranking_pot_step import FLAT, _rebalance, table_of
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 SPY = sim.Bar(Decimal(500), Decimal(501), Decimal(499), Decimal(500))
 

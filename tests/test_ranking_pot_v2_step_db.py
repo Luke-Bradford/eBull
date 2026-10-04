@@ -37,6 +37,9 @@ from tests.test_ranking_pot_schema_db import _move
 from tests.test_ranking_pot_step import FLAT, table_of
 from tests.test_ranking_pot_v2_step import R5, _rebalance
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 K = 2
 THU, FRI, MON = date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5)

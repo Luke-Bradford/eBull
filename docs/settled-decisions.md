@@ -1286,6 +1286,25 @@ on anything here."*
   "No factor mix knows a trade wins": strategies are judged against SPY total return net of costs, plus a random-basket
   control.
 
+## 2026-10-04 — Two evidence tracks, and no declaration without a passing power check (#3610, delegated 10-01)
+
+Source: the 2026-10-04 committee review (#2437). The rule text lives in `.claude/skills/quant/research-process.md`
+§"Two tracks" and §"Power, per track"; this records that it is enforced.
+
+- **Track A, discovery** (a signal we invented or found by search) is deflated against the register's GLOBAL trial
+  count. **Track B, adoption** (a published premium with independent out-of-sample support) is a non-inferiority test
+  against the post-publication prior, deflated for the configurations tried. Neither track relaxes the 2026-08-23 bar:
+  both stay preregistered, survivorship-free, cost-charged and deflated.
+- **`freeze_preregistration` refuses a declaration** whose claiming `DeclaredTrial` has no `TrialDesign`, or whose
+  planned data cannot reach 80% power against the deflated bar (`data_infeasible`). The check is
+  `T = ((critical_t + z_power) / IR)^2`, with `critical_t = E[max of M null t-stats] + z_0.95`
+  (`trial_register.power_check`). It is stored on the frozen row (`power_check`, `sql/469`), because M grows.
+- **No identity is exempt.** Rows frozen before the rule keep a NULL `power_check` and cannot be re-frozen (one root
+  per trial). `ranking-pot-v2` and `ai-discretionary-fund-v1` are claimed but unfrozen, so they need a design first.
+- **Consequence to plan around:** with the register at M = 505, a Track A study at IR 0.5 needs about 123 effective
+  years. Reproduce: `PYTHONPATH=. uv run python -c "from app.services.trial_register import *; print(power_check(TrialDesign(EvidenceTrack.DISCOVERY, 0.5, 'x', 60.0, 'x'), trials=TRIAL_REGISTER.declared_count))"`.
+  Realistic edges belong on Track B or need more breadth.
+
 ## 2026-09-13 — The #2844 reconciliation countdown counts DAYS OF EVIDENCE on the held-session calendar
 
 `account_reconciliation_days` stores one verdict per `(environment, reconciliation_rule_version,

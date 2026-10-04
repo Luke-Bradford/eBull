@@ -23,6 +23,9 @@ from tests.test_hunt_door_db import DOC_PATH, INHERITED, _count, _evaluate, _fre
 from tests.test_hunt_gate import gate_statistics
 from tests.test_hunt_harness_db import _spec, bound  # noqa: F401 - the fixture is used by name
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 SERIES = tuple(0.001 * math.sin(0.9 * i) + 0.0003 for i in range(60))
 
 

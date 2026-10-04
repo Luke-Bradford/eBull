@@ -18,6 +18,9 @@ from app.services.strategy_control_plane import configure_deployment
 from tests.test_ranking_pot_job_db import _first_window
 from tests.test_ranking_pot_schema_db import POT, SCORED_AT, _frozen, _move
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 S0: tuple[int, ...] = (2842, 2843, 2844)
 

@@ -27,6 +27,9 @@ from app.services.ranking_pot_v2_declaration import load_declaration as load_v2
 from tests.test_ranking_pot_schema_db import PROVENANCE, _seed_scores
 from tests.test_ranking_pot_v2_inputs_db import _dtc, _txn
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 IDS = (2842, 2843, 2844)

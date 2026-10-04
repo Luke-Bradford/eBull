@@ -17,6 +17,9 @@ from app.services import ranking_pot_rebalance as rb
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_ranking_pot_schema_db import _frozen, _move
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 
 OCT, NOV, DEC = date(2026, 10, 1), date(2026, 11, 1), date(2026, 12, 1)

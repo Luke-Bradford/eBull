@@ -351,14 +351,14 @@ _FREEZE_DECLARATION = """
         declared_fx_unmodelled,
         expected_structural_refusals, min_forward_decision_dates, min_forward_calendar_weeks,
         forward_shadow_derivation, declared_by, declaration_sha256,
-        supersedes_declaration_id, supersession_reason, supersession_attestation
+        supersedes_declaration_id, supersession_reason, supersession_attestation, power_check
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(contract_version)s, %(prereg_purpose)s,
         %(structural_refusal_policy_version)s, %(declared_universe_basis)s, %(declared_carry_unmodelled)s,
         %(declared_fx_unmodelled)s,
         %(expected_structural_refusals)s, %(min_forward_decision_dates)s, %(min_forward_calendar_weeks)s,
         %(forward_shadow_derivation)s, %(declared_by)s, %(declaration_sha256)s,
-        %(supersedes_declaration_id)s, %(supersession_reason)s, %(supersession_attestation)s
+        %(supersedes_declaration_id)s, %(supersession_reason)s, %(supersession_attestation)s, %(power_check)s
     )
     RETURNING declaration_id
 """
@@ -1314,7 +1314,8 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
     # nothing RETROSPECTIVELY — a mapping added after exposure is
     # indistinguishable from one that was always there, so no past run's
     # deflation is evidenced by it.
-    if TRIAL_REGISTER.trial_for_declaration(declaration.strategy_id, declaration.strategy_version) is None:
+    trial = TRIAL_REGISTER.trial_for_declaration(declaration.strategy_id, declaration.strategy_version)
+    if trial is None:
         raise ValueError(
             f"no trial in {TRIAL_REGISTER_VERSION} claims {declaration.strategy_id}@"
             f"{declaration.strategy_version}, so criterion 6's M does not count the search this declaration "
@@ -1324,6 +1325,10 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
             "because its own `searches` is what moves `declared_count`. ⚠ Re-pointing an existing trial's "
             "`declared_for` would pass this gate without moving M, and would orphan whatever it claimed before."
         )
+    # #3610 — the claiming trial's track and power, checked here for the same freeze-time-only
+    # reasons as the claim check above. Raises `data_infeasible` when the planned data cannot
+    # clear the deflated bar at the expected effect.
+    power_check = TRIAL_REGISTER.freeze_power_record(trial)
     _lock_trial(conn, declaration.strategy_id, declaration.strategy_version)
     row = conn.execute(
         _FREEZE_DECLARATION,
@@ -1347,6 +1352,7 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
             "supersedes_declaration_id": None,
             "supersession_reason": None,
             "supersession_attestation": None,
+            "power_check": Jsonb(power_check),
         },
     ).fetchone()
     if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row
@@ -1571,6 +1577,8 @@ def supersede_preregistration(
                 "supersedes_declaration_id": frozen.declaration_id,
                 "supersession_reason": supersession.reason,
                 "supersession_attestation": supersession.attestation,
+                # A successor repairs a policy string and cannot change terms (sql/469).
+                "power_check": None,
             },
         ).fetchone()
     except psycopg.errors.UniqueViolation as exc:

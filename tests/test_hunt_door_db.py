@@ -29,6 +29,9 @@ from app.services.trial_register import (
 )
 from tests.test_hunt_harness_db import _spec, bound  # noqa: F401 - the fixture is used by name
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 DOC_PATH = "hunts/hunt-1-validation.json"
 DISCOVERY_LAGS = tuple(range(1, 13))
 #: The one candidate the stub gives a decisive p; BY flags it and nothing else.

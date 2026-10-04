@@ -39,6 +39,9 @@ from tests.test_ranking_pot_executor_db import _at, _deploy_pot, _market, _pot_b
 from tests.test_ranking_pot_job_db import _first_window
 from tests.test_ranking_pot_schema_db import _frozen, _move
 
+# #3610: freezes a claim with no TrialDesign while testing something else (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("assume_trial_powered")
+
 Conn = psycopg.Connection[Any]
 _POSITION_ID = 28420001
 _EDIT_ID = UUID("28420000-0000-4000-8000-0000000028e1")
