@@ -77,6 +77,9 @@ class FactorComparison:
     correlation: float | None
     alpha: float
     beta: float
+    #: Annualised sample standard deviation of the monthly difference ``ebull − reference`` (#3623).
+    #: Reported, never gated: the failure rules below are frozen by the #2914 declaration.
+    tracking_error_annualised: float | None
     reference_lag_one_correlation: float | None
     reference_lead_one_correlation: float | None
     passed: bool
@@ -392,6 +395,7 @@ def compare_factor_series(
     correlation = _available_correlation(y, x)
     design = np.column_stack((np.ones(len(x)), x))
     alpha, beta = (float(value) for value in np.linalg.lstsq(design, y, rcond=None)[0])
+    tracking_error = float(np.std(y - x, ddof=1) * math.sqrt(12)) if len(y) >= 2 else None
     lag_y, lag_x, _ = _paired(dependent, reference, reference_displacement=-1)
     lead_y, lead_x, _ = _paired(dependent, reference, reference_displacement=1)
     lag = _available_correlation(lag_y, lag_x)
@@ -426,6 +430,7 @@ def compare_factor_series(
         correlation=correlation,
         alpha=alpha,
         beta=beta,
+        tracking_error_annualised=tracking_error,
         reference_lag_one_correlation=lag,
         reference_lead_one_correlation=lead,
         passed=not failures,

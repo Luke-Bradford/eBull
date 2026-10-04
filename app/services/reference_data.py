@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -22,21 +23,28 @@ import psycopg
 from openpyxl import load_workbook
 from psycopg.rows import dict_row
 
-ReferenceSource = Literal["kenneth_french", "aqr", "fred"]
+ReferenceSource = Literal["kenneth_french", "aqr", "fred", "global_q", "jkp"]
 ReferenceUnit = Literal["decimal_return", "percent_per_annum", "binary_indicator"]
 
-FRENCH_FIVE_FACTOR_URL: Final = (
-    "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip"
-)
-FRENCH_MOMENTUM_URL: Final = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_CSV.zip"
-AQR_VME_MONTHLY_URL: Final = (
-    "https://www.aqr.com/-/media/AQR/Documents/Insights/Data-Sets/Value-and-Momentum-Everywhere-Factors-Monthly.xlsx"
-)
+FRENCH_FTP: Final = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp"
+FRENCH_FIVE_FACTOR_URL: Final = f"{FRENCH_FTP}/F-F_Research_Data_5_Factors_2x3_CSV.zip"
+FRENCH_MOMENTUM_URL: Final = f"{FRENCH_FTP}/F-F_Momentum_Factor_CSV.zip"
+AQR_DATA_SETS: Final = "https://www.aqr.com/-/media/AQR/Documents/Insights/Data-Sets"
+AQR_VME_MONTHLY_URL: Final = f"{AQR_DATA_SETS}/Value-and-Momentum-Everywhere-Factors-Monthly.xlsx"
 FRED_CSV_URL: Final = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_key}"
+#: global-q republishes the whole history yearly under a new year-stamped filename, so the file is
+#: resolved from this index page at fetch time rather than pinned (a pin would go silently stale).
+GLOBAL_Q_INDEX_URL: Final = "https://global-q.org/factors.html"
+JKP_USA_MONTHLY_VW_CAP_URL: Final = (
+    "https://jkpfactors-data.s3.amazonaws.com/public/%5Busa%5D_%5Ball_factors%5D_%5Bmonthly%5D_%5Bvw_cap%5D.zip"
+)
 
 FRENCH_PARSER_VERSION: Final = "kenneth-french-monthly-csv-v2"
 AQR_PARSER_VERSION: Final = "aqr-vme-monthly-xlsx-v2"
+AQR_FACTOR_PARSER_VERSION: Final = "aqr-factor-monthly-xlsx-v1"
 FRED_PARSER_VERSION: Final = "fred-csv-v1"
+GLOBAL_Q_PARSER_VERSION: Final = "global-q-monthly-csv-v1"
+JKP_PARSER_VERSION: Final = "jkp-monthly-csv-zip-v1"
 
 _FRENCH_MISSING: Final = frozenset({Decimal("-99.99"), Decimal("-999")})
 _AQR_HEADER: Final = (
@@ -64,6 +72,132 @@ _AQR_HEADER: Final = (
     "VALLS_VME_COM",
     "MOMLS_VME_COM",
 )
+#: QMJ and BAB share one country/aggregate column surface.
+_AQR_COUNTRY_HEADER: Final = (
+    "DATE",
+    "AUS",
+    "AUT",
+    "BEL",
+    "CAN",
+    "CHE",
+    "DEU",
+    "DNK",
+    "ESP",
+    "FIN",
+    "FRA",
+    "GBR",
+    "GRC",
+    "HKG",
+    "IRL",
+    "ISR",
+    "ITA",
+    "JPN",
+    "NLD",
+    "NOR",
+    "NZL",
+    "PRT",
+    "SGP",
+    "SWE",
+    "USA",
+    "Global",
+    "Global Ex USA",
+    "Europe",
+    "North America",
+    "Pacific",
+)
+#: The TSMOM sheet leaves its date column's header cell empty.
+_AQR_TSMOM_HEADER: Final = (None, "TSMOM", "TSMOM^CM", "TSMOM^EQ", "TSMOM^FI", "TSMOM^FX")
+
+# Kenneth French univariate-sort files: the first table (value-weighted monthly returns) only.
+_FRENCH_SORT_QUINTILE_DECILE: Final = (
+    "Lo 20",
+    "Qnt 2",
+    "Qnt 3",
+    "Qnt 4",
+    "Hi 20",
+    "Lo 10",
+    "Dec 2",
+    "Dec 3",
+    "Dec 4",
+    "Dec 5",
+    "Dec 6",
+    "Dec 7",
+    "Dec 8",
+    "Dec 9",
+    "Hi 10",
+)
+_FRENCH_SORT_TERCILE: Final = ("Lo 30", "Med 40", "Hi 30")
+_FRENCH_SORT_DEC_ALT: Final = (
+    "Lo 20",
+    "Qnt 2",
+    "Qnt 3",
+    "Qnt 4",
+    "Hi 20",
+    "Lo 10",
+    "2-Dec",
+    "3-Dec",
+    "4-Dec",
+    "5-Dec",
+    "6-Dec",
+    "7-Dec",
+    "8-Dec",
+    "9-Dec",
+    "Hi 10",
+)
+_FRENCH_49_INDUSTRIES: Final = (
+    "Agric",
+    "Food",
+    "Soda",
+    "Beer",
+    "Smoke",
+    "Toys",
+    "Fun",
+    "Books",
+    "Hshld",
+    "Clths",
+    "Hlth",
+    "MedEq",
+    "Drugs",
+    "Chems",
+    "Rubbr",
+    "Txtls",
+    "BldMt",
+    "Cnstr",
+    "Steel",
+    "FabPr",
+    "Mach",
+    "ElcEq",
+    "Autos",
+    "Aero",
+    "Ships",
+    "Guns",
+    "Gold",
+    "Mines",
+    "Coal",
+    "Oil",
+    "Util",
+    "Telcm",
+    "PerSv",
+    "BusSv",
+    "Hardw",
+    "Softw",
+    "Chips",
+    "LabEq",
+    "Paper",
+    "Boxes",
+    "Trans",
+    "Whlsl",
+    "Rtail",
+    "Meals",
+    "Banks",
+    "Insur",
+    "RlEst",
+    "Fin",
+    "Other",
+)
+_GLOBAL_Q_HEADER: Final = ("year", "month", "R_F", "R_MKT", "R_ME", "R_IA", "R_ROE", "R_EG")
+_GLOBAL_Q_FILE: Final = re.compile(r'href="(/uploads/[0-9/]+/q5_factors_monthly_(\d{4})\.csv)"')
+_JKP_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_stocks", "n_stocks_min", "date", "ret")
 
 
 class ReferenceDataSourceError(ValueError):
@@ -94,6 +228,8 @@ class ReferenceDatasetSpec:
     source_url: str
     parser_version: str
     parser: Parser
+    #: Maps ``source_url`` to the file to fetch, for a source that renames its file on each release.
+    resolve_url: Callable[[httpx.Client, str], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -213,8 +349,19 @@ def _aqr_date(raw: object, *, row_number: int) -> date:
     raise ReferenceDataSourceError(f"AQR row {row_number}: invalid DATE type {type(raw).__name__}")
 
 
-def parse_aqr_vme_monthly(payload: bytes) -> ParsedReferenceData:
-    """Parse AQR's named monthly sheet and exact 23-column factor surface."""
+def parse_aqr_monthly_sheet(
+    payload: bytes,
+    *,
+    sheet: str,
+    header: tuple[str | None, ...],
+) -> ParsedReferenceData:
+    """Parse one named AQR monthly sheet whose header row matches *header* exactly.
+
+    Only the date column's header cell may be empty (the TSMOM sheet leaves it blank).
+    """
+    series_keys = tuple(key for key in header[1:] if key)
+    if len(series_keys) != len(header) - 1:
+        raise ValueError(f"AQR series header cells must be non-empty: {header!r}")
     try:
         workbook = load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
     except Exception as exc:
@@ -223,15 +370,14 @@ def parse_aqr_vme_monthly(payload: bytes) -> ParsedReferenceData:
         # loud (iteration and validation occur outside this catch).
         raise ReferenceDataSourceError("AQR response is not a readable XLSX workbook") from exc
     try:
-        if "VME Factors" not in workbook.sheetnames:
-            raise ReferenceDataSourceError("AQR workbook has no 'VME Factors' worksheet")
-        sheet = workbook["VME Factors"]
+        if sheet not in workbook.sheetnames:
+            raise ReferenceDataSourceError(f"AQR workbook has no {sheet!r} worksheet")
+        rows = workbook[sheet].iter_rows(values_only=True)
         header_row: int | None = None
-        rows = sheet.iter_rows(values_only=True)
         for row_number, row in enumerate(rows, start=1):
-            prefix = tuple(row[: len(_AQR_HEADER)])
-            if prefix == _AQR_HEADER:
-                if any(value is not None for value in row[len(_AQR_HEADER) :]):
+            prefix = tuple(row[: len(header)])
+            if prefix == header:
+                if any(value is not None for value in row[len(header) :]):
                     raise ReferenceDataSourceError("AQR header has unexpected trailing columns")
                 header_row = row_number
                 break
@@ -245,10 +391,10 @@ def parse_aqr_vme_monthly(payload: bytes) -> ParsedReferenceData:
         for row_number, row in enumerate(rows, start=header_row + 1):
             if not row or all(value is None or (isinstance(value, str) and not value.strip()) for value in row):
                 continue
-            if len(row) < len(_AQR_HEADER):
+            if len(row) < len(header):
                 raise ReferenceDataSourceError(f"AQR row {row_number}: ragged factor row")
             when = _aqr_date(row[0], row_number=row_number)
-            for series_key, raw in zip(_AQR_HEADER[1:], row[1 : len(_AQR_HEADER)], strict=True):
+            for series_key, raw in zip(series_keys, row[1 : len(header)], strict=True):
                 if raw is None or (isinstance(raw, str) and not raw.strip()):
                     missing_count += 1
                     continue
@@ -257,6 +403,104 @@ def parse_aqr_vme_monthly(payload: bytes) -> ParsedReferenceData:
         return _validated(ParsedReferenceData(tuple(observations), missing_count))
     finally:
         workbook.close()
+
+
+def parse_aqr_vme_monthly(payload: bytes) -> ParsedReferenceData:
+    """Parse AQR's named monthly sheet and exact 23-column factor surface."""
+    return parse_aqr_monthly_sheet(payload, sheet="VME Factors", header=_AQR_HEADER)
+
+
+def parse_global_q_monthly_csv(payload: bytes) -> ParsedReferenceData:
+    """Parse global-q's q5 monthly CSV: ``year,month`` then percent returns, normalised to decimal."""
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ReferenceDataSourceError("global-q response is not UTF-8 CSV") from exc
+    reader = csv.reader(io.StringIO(text))
+    header = tuple(cell.strip() for cell in next(reader, ()))
+    if header != _GLOBAL_Q_HEADER:
+        raise ReferenceDataSourceError(f"global-q header {header!r}; expected {_GLOBAL_Q_HEADER!r}")
+    observations: list[ReferenceObservation] = []
+    missing_count = 0
+    for row_number, row in enumerate(reader, start=2):
+        if not row or all(not cell.strip() for cell in row):
+            continue
+        if len(row) != len(header):
+            raise ReferenceDataSourceError(f"global-q row {row_number}: ragged row")
+        try:
+            year, month = int(row[0]), int(row[1])
+        except ValueError as exc:
+            raise ReferenceDataSourceError(f"global-q row {row_number}: invalid year/month") from exc
+        if not 1 <= month <= 12:
+            raise ReferenceDataSourceError(f"global-q row {row_number}: invalid month {month}")
+        when = _month_end(year, month)
+        for series_key, raw in zip(header[2:], row[2:], strict=True):
+            if not raw.strip():
+                missing_count += 1
+                continue
+            value = _decimal(raw, context=f"global-q row {row_number}/{series_key}")
+            observations.append(ReferenceObservation(series_key, when, value / Decimal(100), "decimal_return"))
+    return _validated(ParsedReferenceData(tuple(observations), missing_count))
+
+
+def resolve_global_q_monthly_url(client: httpx.Client, index_url: str) -> str:
+    """The newest ``q5_factors_monthly_<year>.csv`` linked from global-q's factors page."""
+    response = client.get(index_url)
+    response.raise_for_status()
+    links = {int(year): path for path, year in _GLOBAL_Q_FILE.findall(response.text)}
+    if not links:
+        raise ReferenceDataSourceError("global-q factors page links no q5_factors_monthly_<year>.csv")
+    return f"https://global-q.org{links[max(links)]}"
+
+
+def parse_jkp_monthly_zip(
+    payload: bytes,
+    *,
+    location: str,
+    weighting: str,
+) -> ParsedReferenceData:
+    """Parse one JKP ``[location]_[all_factors]_[monthly]_[weighting]`` ZIP: one long-format CSV.
+
+    ``ret`` is already a decimal return signed by the factor's ``direction`` (long the predicted
+    out-performer), so it is stored as published, one series per factor ``name``.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            names = [name for name in archive.namelist() if not name.endswith("/")]
+            if len(names) != 1:
+                raise ReferenceDataSourceError(f"JKP ZIP contains {len(names)} files; expected one")
+            text = archive.read(names[0]).decode("utf-8-sig")
+    except (UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        raise ReferenceDataSourceError("JKP response is not a valid UTF-8 CSV ZIP") from exc
+    reader = csv.reader(io.StringIO(text))
+    header = tuple(cell.strip() for cell in next(reader, ()))
+    if header != _JKP_HEADER:
+        raise ReferenceDataSourceError(f"JKP header {header!r}; expected {_JKP_HEADER!r}")
+    observations: list[ReferenceObservation] = []
+    missing_count = 0
+    for row_number, row in enumerate(reader, start=2):
+        if not row:
+            continue
+        if len(row) != len(header):
+            raise ReferenceDataSourceError(f"JKP row {row_number}: ragged row")
+        if (row[0], row[2], row[3]) != (location, "monthly", weighting):
+            raise ReferenceDataSourceError(
+                f"JKP row {row_number}: {row[0]}/{row[2]}/{row[3]}; expected {location}/monthly/{weighting}"
+            )
+        series_key = row[1].strip()
+        if not series_key:
+            raise ReferenceDataSourceError(f"JKP row {row_number}: empty factor name")
+        try:
+            when = date.fromisoformat(row[7].strip())
+        except ValueError as exc:
+            raise ReferenceDataSourceError(f"JKP row {row_number}: invalid date") from exc
+        raw = row[8].strip()
+        if not raw or raw.upper() in ("NA", "NAN"):
+            missing_count += 1
+            continue
+        value = _decimal(raw, context=f"JKP row {row_number}/{series_key}")
+        observations.append(ReferenceObservation(series_key, when, value, "decimal_return"))
+    return _validated(ParsedReferenceData(tuple(observations), missing_count))
 
 
 def parse_fred_csv(
@@ -303,6 +547,86 @@ def _french_parser(expected_series_keys: tuple[str, ...]) -> Parser:
     return lambda payload: parse_french_monthly_zip(payload, expected_series_keys=expected_series_keys)
 
 
+def _aqr_parser(sheet: str, header: tuple[str | None, ...]) -> Parser:
+    return lambda payload: parse_aqr_monthly_sheet(payload, sheet=sheet, header=header)
+
+
+def _jkp_parser(location: str, weighting: str) -> Parser:
+    return lambda payload: parse_jkp_monthly_zip(payload, location=location, weighting=weighting)
+
+
+def _french(dataset_key: str, filename: str, series_keys: tuple[str, ...]) -> ReferenceDatasetSpec:
+    return ReferenceDatasetSpec(
+        "kenneth_french", dataset_key, f"{FRENCH_FTP}/{filename}", FRENCH_PARSER_VERSION, _french_parser(series_keys)
+    )
+
+
+def _aqr(dataset_key: str, filename: str, sheet: str, header: tuple[str | None, ...]) -> ReferenceDatasetSpec:
+    return ReferenceDatasetSpec(
+        "aqr", dataset_key, f"{AQR_DATA_SETS}/{filename}", AQR_FACTOR_PARSER_VERSION, _aqr_parser(sheet, header)
+    )
+
+
+#: #3623 — the published series our constructions are validated against (#3609's factor families:
+#: reversal, value E/P CF/P B/M, profitability, investment, accruals, net issuance, low volatility, beta,
+#: and the 49 industries for within-industry ranks). Each sort file stores its value-weighted table.
+_FRENCH_LIBRARY: Final = (
+    _french("french_st_reversal_monthly", "F-F_ST_Reversal_Factor_CSV.zip", ("ST_Rev",)),
+    _french("french_lt_reversal_monthly", "F-F_LT_Reversal_Factor_CSV.zip", ("LT_Rev",)),
+    _french(
+        "french_sort_be_me_monthly",
+        "Portfolios_Formed_on_BE-ME_CSV.zip",
+        ("<= 0", *_FRENCH_SORT_TERCILE, *_FRENCH_SORT_DEC_ALT),
+    ),
+    _french(
+        "french_sort_e_p_monthly",
+        "Portfolios_Formed_on_E-P_CSV.zip",
+        ("<= 0", *_FRENCH_SORT_TERCILE, *_FRENCH_SORT_DEC_ALT),
+    ),
+    _french(
+        "french_sort_cf_p_monthly",
+        "Portfolios_Formed_on_CF-P_CSV.zip",
+        ("<= 0", *_FRENCH_SORT_TERCILE, *_FRENCH_SORT_DEC_ALT),
+    ),
+    _french(
+        "french_sort_op_monthly", "Portfolios_Formed_on_OP_CSV.zip", (*_FRENCH_SORT_TERCILE, *_FRENCH_SORT_DEC_ALT)
+    ),
+    _french(
+        "french_sort_inv_monthly", "Portfolios_Formed_on_INV_CSV.zip", (*_FRENCH_SORT_TERCILE, *_FRENCH_SORT_DEC_ALT)
+    ),
+    _french("french_sort_ac_monthly", "Portfolios_Formed_on_AC_CSV.zip", _FRENCH_SORT_QUINTILE_DECILE),
+    _french(
+        "french_sort_ni_monthly", "Portfolios_Formed_on_NI_CSV.zip", ("< 0", "ZERO", *_FRENCH_SORT_QUINTILE_DECILE)
+    ),
+    _french("french_sort_var_monthly", "Portfolios_Formed_on_VAR_CSV.zip", _FRENCH_SORT_QUINTILE_DECILE),
+    _french("french_sort_resvar_monthly", "Portfolios_Formed_on_RESVAR_CSV.zip", _FRENCH_SORT_QUINTILE_DECILE),
+    _french("french_sort_beta_monthly", "Portfolios_Formed_on_BETA_CSV.zip", _FRENCH_SORT_QUINTILE_DECILE),
+    _french("french_49_industries_monthly", "49_Industry_Portfolios_CSV.zip", _FRENCH_49_INDUSTRIES),
+)
+_AQR_LIBRARY: Final = (
+    _aqr("aqr_qmj_monthly", "Quality-Minus-Junk-Factors-Monthly.xlsx", "QMJ Factors", _AQR_COUNTRY_HEADER),
+    _aqr("aqr_bab_monthly", "Betting-Against-Beta-Equity-Factors-Monthly.xlsx", "BAB Factors", _AQR_COUNTRY_HEADER),
+    _aqr("aqr_tsmom_monthly", "Time-Series-Momentum-Factors-Monthly.xlsx", "TSMOM Factors", _AQR_TSMOM_HEADER),
+)
+_FACTOR_LIBRARY: Final = (
+    ReferenceDatasetSpec(
+        "global_q",
+        "global_q_q5_monthly",
+        GLOBAL_Q_INDEX_URL,
+        GLOBAL_Q_PARSER_VERSION,
+        parse_global_q_monthly_csv,
+        resolve_url=resolve_global_q_monthly_url,
+    ),
+    ReferenceDatasetSpec(
+        "jkp",
+        "jkp_usa_monthly_vw_cap",
+        JKP_USA_MONTHLY_VW_CAP_URL,
+        JKP_PARSER_VERSION,
+        _jkp_parser("usa", "vw_cap"),
+    ),
+)
+
+
 REFERENCE_DATASETS: Final[Mapping[str, ReferenceDatasetSpec]] = {
     "french_five_factor_monthly": ReferenceDatasetSpec(
         "kenneth_french",
@@ -339,18 +663,24 @@ REFERENCE_DATASETS: Final[Mapping[str, ReferenceDatasetSpec]] = {
         FRED_PARSER_VERSION,
         _fred_parser("USREC", "binary_indicator"),
     ),
+    **{spec.dataset_key: spec for spec in (*_FRENCH_LIBRARY, *_AQR_LIBRARY, *_FACTOR_LIBRARY)},
 }
 
-FRENCH_DATASET_KEYS: Final = ("french_five_factor_monthly", "french_momentum_monthly")
-AQR_DATASET_KEYS: Final = ("aqr_vme_monthly",)
+FRENCH_DATASET_KEYS: Final = (
+    "french_five_factor_monthly",
+    "french_momentum_monthly",
+    *(spec.dataset_key for spec in _FRENCH_LIBRARY),
+)
+AQR_DATASET_KEYS: Final = ("aqr_vme_monthly", *(spec.dataset_key for spec in _AQR_LIBRARY))
 FRED_DATASET_KEYS: Final = ("fred_dgs3mo", "fred_usrec")
+FACTOR_LIBRARY_DATASET_KEYS: Final = tuple(spec.dataset_key for spec in _FACTOR_LIBRARY)
 
 
 def _latest_accepted(conn: psycopg.Connection[Any], spec: ReferenceDatasetSpec) -> Mapping[str, Any] | None:
     with conn.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             """
-            SELECT snapshot_id, etag, last_modified, response_sha256,
+            SELECT snapshot_id, source_url, etag, last_modified, response_sha256,
                    row_count, missing_count, first_observation, last_observation
             FROM reference_data_snapshots
             WHERE source = %(source)s
@@ -398,13 +728,15 @@ def refresh_reference_dataset(
     if not conn.autocommit:
         raise RuntimeError("refresh_reference_dataset requires an autocommit connection")
     prior = _latest_accepted(conn, spec)
+    source_url = spec.resolve_url(client, spec.source_url) if spec.resolve_url is not None else spec.source_url
     headers: dict[str, str] = {}
-    if prior is not None:
+    # A prior snapshot's validators describe the file it came from; after a rename they do not apply.
+    if prior is not None and prior["source_url"] == source_url:
         if prior["etag"]:
             headers["If-None-Match"] = str(prior["etag"])
         if prior["last_modified"]:
             headers["If-Modified-Since"] = str(prior["last_modified"])
-    response = client.get(spec.source_url, headers=headers)
+    response = client.get(source_url, headers=headers)
     if response.status_code == 304:
         if prior is None:
             raise ReferenceDataSourceError("source returned 304 without an accepted prior snapshot")
@@ -432,7 +764,7 @@ def refresh_reference_dataset(
             {
                 "source": spec.source,
                 "dataset_key": spec.dataset_key,
-                "source_url": spec.source_url,
+                "source_url": source_url,
                 "etag": response.headers.get("ETag"),
                 "last_modified": response.headers.get("Last-Modified"),
                 "content_type": response.headers.get("Content-Type"),
@@ -566,21 +898,29 @@ def refresh_reference_group(
 
 __all__ = [
     "AQR_DATASET_KEYS",
+    "AQR_FACTOR_PARSER_VERSION",
     "AQR_PARSER_VERSION",
     "AQR_VME_MONTHLY_URL",
     "FRED_DATASET_KEYS",
+    "FACTOR_LIBRARY_DATASET_KEYS",
     "FRED_PARSER_VERSION",
     "FRENCH_DATASET_KEYS",
     "FRENCH_PARSER_VERSION",
+    "GLOBAL_Q_PARSER_VERSION",
+    "JKP_PARSER_VERSION",
     "REFERENCE_DATASETS",
     "ParsedReferenceData",
     "ReferenceDataSourceError",
     "ReferenceDatasetSpec",
     "ReferenceObservation",
     "ReferenceRefreshReport",
+    "parse_aqr_monthly_sheet",
     "parse_aqr_vme_monthly",
     "parse_fred_csv",
     "parse_french_monthly_zip",
+    "parse_global_q_monthly_csv",
+    "parse_jkp_monthly_zip",
     "refresh_reference_dataset",
     "refresh_reference_group",
+    "resolve_global_q_monthly_url",
 ]

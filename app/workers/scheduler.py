@@ -536,6 +536,8 @@ JOB_CBOE_VIX_REFRESH = "cboe_vix_refresh"
 JOB_FRENCH_REFERENCE_REFRESH = "french_reference_refresh"
 JOB_AQR_REFERENCE_REFRESH = "aqr_reference_refresh"
 JOB_FRED_REFERENCE_REFRESH = "fred_reference_refresh"
+# #3623 — global-q q5 and JKP factor returns, same shared reference lane.
+JOB_FACTOR_LIBRARY_REFERENCE_REFRESH = "factor_library_reference_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -2772,8 +2774,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         source="reference_data",
         description=(
             "Monthly day 10 at 03:05 UTC — conditionally fetches the official "
-            "French monthly five-factor and momentum ZIPs, retains exact raw "
-            "responses, and normalizes percent returns to decimal returns."
+            "French monthly five-factor, momentum and reversal ZIPs, the "
+            "value-weighted univariate-sort portfolios (B/M, E/P, CF/P, OP, INV, "
+            "accruals, net issues, variance, residual variance, beta) and the 49 "
+            "industries (#3623), retains exact raw responses, and normalizes "
+            "percent returns to decimal returns."
         ),
         cadence=Cadence.monthly(day=10, hour=3, minute=5),
         catch_up_on_boot=True,
@@ -2781,11 +2786,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_AQR_REFERENCE_REFRESH,
-        display_name="AQR VME factor references (#2912)",
+        display_name="AQR factor references (#2912, #3623)",
         source="reference_data",
         description=(
             "Monthly day 10 at 03:15 UTC — conditionally fetches AQR's official "
-            "Value and Momentum Everywhere monthly workbook, retaining the raw "
+            "Value and Momentum Everywhere, Quality Minus Junk, Betting Against "
+            "Beta and Time Series Momentum monthly workbooks, retaining the raw "
             "XLSX and its typed factor observations."
         ),
         cadence=Cadence.monthly(day=10, hour=3, minute=15),
@@ -2801,6 +2807,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "for DGS3MO and USREC, retaining exact responses with explicit units."
         ),
         cadence=Cadence.daily(hour=3, minute=25),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_FACTOR_LIBRARY_REFERENCE_REFRESH,
+        display_name="Published factor libraries (#3623)",
+        source="reference_data",
+        description=(
+            "Monthly day 10 at 03:35 UTC — conditionally fetches the global-q q5 "
+            "monthly factors (newest year-stamped file) and the JKP USA monthly "
+            "capped-value-weight factor returns, retaining exact raw responses and "
+            "typed decimal returns, for construction validation."
+        ),
+        cadence=Cadence.monthly(day=10, hour=3, minute=35),
         catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,
     ),
@@ -7036,6 +7056,14 @@ def fred_reference_refresh() -> None:
 
     with _tracked_job(JOB_FRED_REFERENCE_REFRESH) as tracker:
         _record_reference_reports(tracker, _reference_data_refresh(FRED_DATASET_KEYS))
+
+
+def factor_library_reference_refresh() -> None:
+    """Refresh the global-q and JKP published factor libraries (#3623)."""
+    from app.services.reference_data import FACTOR_LIBRARY_DATASET_KEYS
+
+    with _tracked_job(JOB_FACTOR_LIBRARY_REFERENCE_REFRESH) as tracker:
+        _record_reference_reports(tracker, _reference_data_refresh(FACTOR_LIBRARY_DATASET_KEYS))
 
 
 def strategy_paper_cycle() -> None:

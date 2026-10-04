@@ -235,3 +235,65 @@ def test_refresh_retains_rejected_raw_and_deduplicates_accepted_response(
         ebull_test_conn.execute("DELETE FROM reference_data_snapshots WHERE dataset_key LIKE 'test_%%'")
         ebull_test_conn.autocommit = False
         ebull_test_conn.commit()
+
+
+@pytest.mark.integration
+def test_a_resolved_source_url_is_fetched_and_recorded(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#3623: global-q renames its file yearly; the snapshot records the file actually fetched."""
+    from app.services.reference_data import (
+        GLOBAL_Q_INDEX_URL,
+        GLOBAL_Q_PARSER_VERSION,
+        parse_global_q_monthly_csv,
+        resolve_global_q_monthly_url,
+    )
+
+    resolved = "https://global-q.org/uploads/1/q5_factors_monthly_2025.csv"
+    renamed = "https://global-q.org/uploads/1/q5_factors_monthly_2026.csv"
+    year = ["2025"]
+    seen: list[str] = []
+    validators: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if str(request.url) == GLOBAL_Q_INDEX_URL:
+            return httpx.Response(200, text=f'<a href="/uploads/1/q5_factors_monthly_{year[0]}.csv">', request=request)
+        validators.append(request.headers.get("If-None-Match"))
+        if request.headers.get("If-None-Match") == '"v1"':
+            return httpx.Response(304, request=request)
+        body = f"year,month,R_F,R_MKT,R_ME,R_IA,R_ROE,R_EG\n{year[0]},1,0.4,1,1,1,1,1\n".encode()
+        return httpx.Response(200, content=body, headers={"ETag": '"v1"'}, request=request)
+
+    spec = ReferenceDatasetSpec(
+        "global_q",
+        "test_global_q",
+        GLOBAL_Q_INDEX_URL,
+        GLOBAL_Q_PARSER_VERSION,
+        parse_global_q_monthly_csv,
+        resolve_url=resolve_global_q_monthly_url,
+    )
+    ebull_test_conn.autocommit = True
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            report = refresh_reference_dataset(ebull_test_conn, client=client, spec=spec)
+            same = refresh_reference_dataset(ebull_test_conn, client=client, spec=spec)
+            year[0] = "2026"
+            after_rename = refresh_reference_dataset(ebull_test_conn, client=client, spec=spec)
+        assert seen == [GLOBAL_Q_INDEX_URL, resolved] * 2 + [GLOBAL_Q_INDEX_URL, renamed]
+        # Same file: the prior ETag is sent and honoured. Renamed file: the old file's ETag is not sent.
+        assert validators == [None, '"v1"', None]
+        assert same.status == "not_modified"
+        assert after_rename.status == "accepted"
+        assert after_rename.last_observation == date(2026, 1, 31)
+        assert report.status == "accepted"
+        assert report.row_count == 6
+        assert ebull_test_conn.execute(
+            "SELECT source, source_url FROM reference_data_snapshots WHERE snapshot_id = %s", (report.snapshot_id,)
+        ).fetchone() == ("global_q", resolved)
+    finally:
+        ebull_test_conn.execute(
+            "DELETE FROM reference_data_observations WHERE snapshot_id IN "
+            "(SELECT snapshot_id FROM reference_data_snapshots WHERE dataset_key LIKE 'test_%%')"
+        )
+        ebull_test_conn.execute("DELETE FROM reference_data_snapshots WHERE dataset_key LIKE 'test_%%'")
+        ebull_test_conn.autocommit = False
+        ebull_test_conn.commit()

@@ -46,6 +46,7 @@ def _comparison_lines(result: FactorComparison) -> list[str]:
         f"- Window: {result.overlap_start:%Y-%m} through {result.overlap_end:%Y-%m} ({result.overlap_months} months)",
         f"- Pearson correlation: {metric(result.correlation)}",
         f"- OLS `ebull = alpha + beta × reference`: alpha {result.alpha:+.8f}; beta {result.beta:+.6f}",
+        f"- Tracking error (annualised): {metric(result.tracking_error_annualised)}",
         f"- Reference lag one month: {metric(result.reference_lag_one_correlation)}",
         f"- Reference lead one month: {metric(result.reference_lead_one_correlation)}",
         f"- Failures: {failures}",

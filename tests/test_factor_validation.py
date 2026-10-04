@@ -23,6 +23,18 @@ def test_matching_construction_passes_frozen_sign_and_alignment_rules() -> None:
     assert result.correlation == pytest.approx(1.0)
     assert result.alpha == pytest.approx(0.001)
     assert result.beta == pytest.approx(1.4)
+    assert result.tracking_error_annualised == pytest.approx(float(np.std(0.4 * reference, ddof=1) * np.sqrt(12)))
+
+
+def test_tracking_error_is_reported_not_gated() -> None:
+    """#3623: an identical series has zero tracking error; a noisy one passes the frozen rules regardless."""
+    reference = np.random.default_rng(3623).normal(0, 0.04, 60)
+    identical = compare_factor_series(label="same", dependent=_series(reference), reference=_series(reference))
+    assert identical.tracking_error_annualised == pytest.approx(0.0)
+    noise = np.random.default_rng(1).normal(0, 0.01, 60)
+    noisy = compare_factor_series(label="noisy", dependent=_series(reference + noise), reference=_series(reference))
+    assert noisy.passed is True
+    assert noisy.tracking_error_annualised == pytest.approx(float(np.std(noise, ddof=1) * np.sqrt(12)))
 
 
 def test_sign_inversion_is_a_failure_not_a_market_finding() -> None:
