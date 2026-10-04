@@ -12,6 +12,7 @@ import statistics
 from dataclasses import replace
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from app.services.deflated_sharpe import expected_max_sharpe
@@ -95,6 +96,17 @@ class TestTheFormula:
         expected_max = expected_max_sharpe(trial_sharpe_variance=1.0, independent_trials=505)
         assert check.critical_t == pytest.approx(expected_max + _N.inv_cdf(1 - DESIGN_ALPHA))
 
+    def test_the_expected_maximum_is_in_t_units(self) -> None:
+        """Independent of ``expected_max_sharpe``: simulate E[max of 100 standard normals].
+
+        The exact value is 2.5076 (Tippett 1925); Bailey & Lopez de Prado's approximation is
+        within about 0.03 of it, so a wrong scaling (e.g. a 1/T factor) would miss by far more.
+        """
+        rng = np.random.default_rng(3610)
+        simulated = float(rng.standard_normal((20_000, 100)).max(axis=1).mean())
+        critical_t = power_check(_design(), trials=100).critical_t
+        assert critical_t - _N.inv_cdf(1 - DESIGN_ALPHA) == pytest.approx(simulated, abs=0.05)
+
     def test_required_years_deliver_exactly_the_target_power(self) -> None:
         """The two outputs are one formula read both ways."""
         check = power_check(_design(), trials=40)
@@ -114,6 +126,7 @@ class TestTheDesignInputs:
         [
             {"effect_basis": " "},
             {"dependence": ""},
+            {"effect_basis": None},
             {"effect_ir": 0.0},
             {"effect_ir": float("nan")},
             {"effective_years": -1.0},

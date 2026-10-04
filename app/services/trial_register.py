@@ -320,7 +320,8 @@ class TrialDesign:
         if not isinstance(self.track, EvidenceTrack):
             raise ValueError(f"track must be an EvidenceTrack, got {self.track!r}")
         for name in ("effect_basis", "dependence"):
-            if not getattr(self, name).strip():
+            text = getattr(self, name)
+            if not isinstance(text, str) or not text.strip():
                 raise ValueError(f"{name} is blank — a power input with no source is an invented number")
         for name in ("effect_ir", "effective_years"):
             value = getattr(self, name)
