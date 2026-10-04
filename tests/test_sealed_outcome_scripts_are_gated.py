@@ -494,6 +494,10 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # #3619 slice 3 spec §"Slice 3": the full-population A/B compares two captures of one vendor (and Intrader as
     # arbiter) month by month to decide which capture the splice reads — nothing ranked, selected or scored.
     "ab_3619_pwb_capture.py": "#3619 slice 3 capture A/B (vendor agreement; data quality only)",
+    # #3609 step 0 spec (2026-10-04-3609-step0-baselines.md) §"Registration and the hold-out": benchmark baselines
+    # (SPY, two published static ETF mixes, a random-basket control) fixed before the first run — no hypothesis,
+    # nothing selected or ranked, so they add zero to the programme's trial count.
+    "report_3609_baselines.py": "#3609 step 0 baselines (benchmarks fixed in advance; nothing selected)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"
