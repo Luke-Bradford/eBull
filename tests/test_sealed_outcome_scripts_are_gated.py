@@ -491,6 +491,9 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # its fund-reported N-PORT return (or eToro close) to decide which source supplies which months — a data-quality
     # verdict on a fixed symbol list, nothing ranked or selected.
     "report_3619_etf_total_return.py": "#3619 slice 2b ETF acceptance matrix (source agreement; data quality only)",
+    # #3619 slice 3 spec §"Slice 3": the full-population A/B compares two captures of one vendor (and Intrader as
+    # arbiter) month by month to decide which capture the splice reads — nothing ranked, selected or scored.
+    "ab_3619_pwb_capture.py": "#3619 slice 3 capture A/B (vendor agreement; data quality only)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"
