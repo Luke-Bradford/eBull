@@ -11867,3 +11867,25 @@ neighbouring container and match it.**
   over the window where the verdict is consumed, on returns that run between the SAME bar dates.
 - Enforced in: `tests/test_total_return_reader.py::test_identity_passes_on_the_same_price_path_despite_missing_dividends`,
   `::test_identity_ignores_pre_switch_disagreement` and `::test_identity_compares_only_returns_over_the_same_bars`.
+
+### A fidelity check averaged over a whole window hides a break inside it (#3619)
+
+- Failure: #3619 slice 1 reported Intrader ETF `adj_close` "carries distributions" from a 2019-10..2024-08
+  average tracking difference against N-PORT. Slice 2b found the stamps drop out from 2022 exactly as they do
+  for stocks (HYG 12 a year to 2021, 7 in 2022); the clean 2019–2021 months diluted the 2022–2024 shortfall
+  into a small average. The splice plan built on the average would have kept 32 months of missing distributions.
+- Prevention: when a vendor defect is known to start at a date for one population, measure every other
+  population on the window after that date separately before declaring it unaffected; count the raw events
+  (stamps per year) as well as the averaged return gap.
+- Enforced in: `scripts/report_3619_etf_total_return.py` (2022-01..2024-08 arms and stamps-per-year sections) and
+  `tests/test_etf_total_return_reader.py::test_identity_is_measured_before_the_switch_where_intrader_still_carries_distributions`.
+
+### `ON COMMIT DROP` does not fire inside a savepoint (#3619)
+
+- Failure: the N-PORT loader staged each quarter in `CREATE TEMP TABLE … ON COMMIT DROP` inside
+  `conn.transaction()`. Under a caller's open transaction (the DB test fixture) that block is a SAVEPOINT, so the
+  table survived into the next quarter and the second call failed with `DuplicateTable`.
+- Prevention: a staging temp table created inside `conn.transaction()` is dropped explicitly at the end of the
+  block; `ON COMMIT DROP` is only a backstop. Scripts that commit per unit connect with `autocommit=True` so the
+  block is a real transaction.
+- Enforced in: `tests/test_load_3619_nport_returns_db.py::test_load_is_idempotent_and_refuses_a_changed_row`.
