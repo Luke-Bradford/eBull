@@ -12,6 +12,18 @@ import pytest
 from scripts import ab_3609_concept_extension as ab
 
 
+class _Verified:
+    def verify_all(self) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _loaders(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fixtures are not real bundles; the loaders' own checks are covered by their own tests.
+    monkeypatch.setattr(ab, "load_pit_fundamentals", lambda *_a, **_k: _Verified())
+    monkeypatch.setattr(ab, "load_security_linkage", lambda *_a, **_k: _Verified())
+
+
 def _event(concept: str, value: str = "1") -> dict[str, Any]:
     return {
         "taxonomy": "us-gaap",
@@ -87,6 +99,22 @@ def test_an_added_concept_with_no_stored_events_is_refused(tmp_path: Path) -> No
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
     assert "added concept InterestExpense has no stored events" in failures
     assert not any("Liabilities has no stored" in f for f in failures)
+    # The ledger claiming stored rows is not enough: the shards must hold them.
+    c = _bundle(tmp_path / "c", [_event("Assets")], _all_added(_OLD_LEDGER))
+    failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "c", c)
+    assert "added concept Liabilities has no stored events" in failures
+
+
+def test_a_new_form_variant_key_on_an_old_concept_is_refused(tmp_path: Path) -> None:
+    a = _bundle(tmp_path / "a", [_event("Assets")], _OLD_LEDGER)
+    added = [_event(concept) for _, concept in sorted(ab.ADDED_CONCEPTS)]
+    b = _bundle(tmp_path / "b", [_event("Assets"), *added], _all_added(_OLD_LEDGER))
+    manifest_path = tmp_path / "b/manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["ledger"]["form_label_variants"] = {"us-gaap/Assets/USD": 1, "us-gaap/Liabilities/USD": 1}
+    b = _write(manifest_path, manifest)
+    failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
+    assert failures == ["ledger form_label_variants us-gaap/Assets/USD differs"]
 
 
 def test_a_pin_mismatch_stops_the_comparison(tmp_path: Path) -> None:

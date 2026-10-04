@@ -28,7 +28,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.services.pit_fundamentals import CONCEPT_SET
+from app.services.pit_fundamentals import CONCEPT_SET, load_pit_fundamentals
 from app.services.security_linkage import load_security_linkage
 
 #: Spec §"Concept-set extension": exactly these nine are added.
@@ -73,10 +73,10 @@ def compare_bundles(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
             failures.append(f"ledger {key}: {counts} -> {b_rows.get(key)}")
     extra_keys = sorted(set(b_rows) - set(a_rows))
     failures += [f"ledger key {key} is not an added concept" for key in extra_keys if not _added_ledger_key(key)]
-    for field in ("form_label_variants",):
-        for key, count in a["ledger"][field].items():
-            if b["ledger"][field].get(key) != count:
-                failures.append(f"ledger {field} {key} differs")
+    a_variants, b_variants = a["ledger"]["form_label_variants"], b["ledger"]["form_label_variants"]
+    for key in sorted(set(a_variants) | set(b_variants)):
+        if a_variants.get(key) != b_variants.get(key) and not (key not in a_variants and _added_ledger_key(key)):
+            failures.append(f"ledger form_label_variants {key} differs")
     if a["ledger"]["ignored_companyfacts_members"] != b["ledger"]["ignored_companyfacts_members"]:
         failures.append("ledger ignored_companyfacts_members differs")
     # NO_ACCEPTANCE is counted per CIK over every concept, so an added concept may only raise it.
@@ -111,11 +111,13 @@ def compare_bundles(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
     stored_by_concept: Counter[str] = Counter()
     for key in extra_keys:
         stored_by_concept[key.split("/")[1]] += b_rows[key].get(STORED, 0)
-    failures += [
-        f"added concept {concept} has no stored events"
-        for _, concept in sorted(ADDED_CONCEPTS)
-        if stored_by_concept[concept] == 0
-    ]
+    for _, concept in sorted(ADDED_CONCEPTS):
+        if stored_by_concept[concept] == 0 or added_rows[f"events:{concept}"] == 0:
+            failures.append(f"added concept {concept} has no stored events")
+        elif added_rows[f"events:{concept}"] > stored_by_concept[concept]:
+            failures.append(f"added concept {concept}: more event rows than the ledger stored")
+    # Arm B must also load under this code's policy, every shard verified by its own loader.
+    load_pit_fundamentals(b_root, expected_manifest_sha256=b_sha).verify_all()
     summary = {
         "shards": len(b_shards),
         "added_ledger": {key: b_rows[key] for key in extra_keys},
