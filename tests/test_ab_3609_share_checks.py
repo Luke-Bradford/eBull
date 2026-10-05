@@ -103,6 +103,8 @@ def test_a_lifted_reason_may_give_way_to_a_later_check() -> None:
     assert (
         classify(before, {**after, "exclusion": "shares_scale_conflict"}) == "other:reason_changed_admitted_differently"
     )
+    same = {**before, "me": {**before["me"], "shares": "7"}}
+    assert classify(before, same) == "other:same_reason_me_changed"
     kept = {**after, "characteristics": {"be_me": {"value": 1.0}}}
     assert classify(before, kept) == "other:reason_changed_row_kept_characteristics"
     moved = {**after, "me": {**after["me"], "shares": "7"}}

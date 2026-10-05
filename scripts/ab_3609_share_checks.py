@@ -91,7 +91,7 @@ def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
     if me_a.get("value") is None and me_b.get("value") is None and {old_reason, reason} <= AMENDMENT_2:
         # 3d-iii: the check that removed it passes now, and a later one fails; the row stays out.
         if old_reason == reason:
-            return "other:unclassified"
+            return "other:same_reason_me_changed"
         same = {k: v for k, v in me_a.items() if k not in ("missing",)}
         recovered = str(me_b.get("shares_scope", "")).startswith("dqc_recovered:")
         if not recovered and same != {k: v for k, v in me_b.items() if k not in ("missing",)}:

@@ -510,6 +510,35 @@ def test_recovery_takes_comparators_that_agree_with_each_other() -> None:
     assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
 
 
+def test_recovery_refuses_comparators_that_break_the_co_filed_invariant() -> None:
+    # ``value_as_of`` returns only accessions at one acceptance; a read that broke that would mis-basis recovery.
+    from app.services.factor_panel import _checked
+
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    _q(shard, "qa", "2017-05-08", "2017-03-31", cover=None, sheet=188_000_000)
+    view = shard.view(date(2017, 5, 31))
+    common: dict[str, Any] = {
+        "shares_scope": "cover",
+        "shares": Decimal(188_000_000_000),
+        "basis": date(2017, 4, 25),
+        "split_product": Decimal(1),
+        "facts": (),
+    }
+    with pytest.raises(PanelError, match="co-filed"):
+        _checked(
+            view,
+            Decimal(50),
+            [],
+            common,
+            Decimal(188_000_000_000),
+            ("q", "qa"),
+            date(2017, 5, 1),
+            None,
+            _ref(189_000_000),
+            None,
+        )
+
+
 def test_a_comparator_agreeing_with_the_cover_blocks_recovery_to_another() -> None:
     # Cover 188B; one co-filed comparator agrees with it, the other conflicts and matches the reference.
     shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)

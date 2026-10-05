@@ -899,6 +899,8 @@ def _checked(
         # acceptance (``value_as_of``), so the highest accession number is taken, for a deterministic provenance.
         recoverable = not agreeing and len({c.value for c in conflicts}) == 1
         if checks["scale"] is Check.FAIL and reference is not None and recoverable:
+            if len({c.acceptance for c in conflicts}) != 1:
+                raise PanelError(f"{view.cik10}: co-filed comparators with different acceptances: {conflicts}")
             sheet = max(conflicts, key=lambda c: c.accns)
             filed_on = acceptance_ny_date(str(sheet.acceptance))
             sheet_shares = Decimal(str(sheet.value)) * split_product(splits, filed_on, decision)
