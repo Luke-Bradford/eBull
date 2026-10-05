@@ -406,6 +406,10 @@ def measure(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if _sha(args.rows) != args.rows_sha256:
         raise SystemExit("rows file does not match its pin")
+    # ``load_pit_fundamentals`` also refuses a manifest digest mismatch (``pit_fundamentals.py``); checked here too
+    # so the pin is visible where it is passed. Shards are digest-verified by the loader on first read.
+    if _sha(args.bundle / pit_fundamentals.MANIFEST_FILENAME) != args.bundle_sha256:
+        raise SystemExit("bundle manifest does not match its pin")
     bundle = pit_fundamentals.load_pit_fundamentals(args.bundle, expected_manifest_sha256=args.bundle_sha256)
     fp.compute_ratio = _compute_ratio  # type: ignore[assignment]
     EVALUATIONS.clear()
