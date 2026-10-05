@@ -11987,10 +11987,16 @@ neighbouring container and match it.**
   oracle compares only (value, missing, period end, kind). Two defects passed that oracle: subtracted XI, DO and NCI
   facts kept coefficient +1 in the row's provenance, against the `_negated` convention every other subtraction in
   `factor_panel.py` follows; and a quarterly consolidated DO and NCI with different starts were combined, because
-  `companion` checks only the combined term's start (Codex checkpoint 2, PR for slice 3d-iv part 2).
+  `companion` checks only the combined term's start (Codex checkpoint 2, PR #3658). A third defect was in the oracle
+  itself: the witness veto skipped rows filed without a start, so the oracle agreed with the port. The full bundle
+  holds 147 such non-zero witness facts, and 5 imputed DO zeros (all ALCO) sat over one (review bot, PR #3658).
 - Prevention: when moving measurement code into a production module, list the output fields the oracle does not
   compare and review the port against the module's conventions for each (here the fact provenance). Check an
-  interval rule at every combine, not only at the outermost one.
+  interval rule at every combine, not only at the outermost one. For each class of row a veto or filter helper
+  skips, measure on the full population whether that class holds a fact the rule's wording covers; an oracle built
+  from the same filter cannot catch it.
 - Enforced in: `tests/test_3609_factor_panel.py::test_fallback_provenance_carries_each_facts_sign`,
-  `::test_quarterly_nci_over_a_different_interval_is_not_subtracted` (both revert-probed). The
+  `::test_quarterly_nci_over_a_different_interval_is_not_subtracted`,
+  `::test_an_absent_companion_is_zero_unless_a_public_non_zero_witness_overlaps` (all revert-probed);
+  `docs/research/3609-slice-3d-iv-adjudicated.csv`. The
   `engineering/pre-flight-review.md` text is parked on #2403, since a loop session cannot write `.claude/**`.
