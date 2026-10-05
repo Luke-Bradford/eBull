@@ -150,6 +150,33 @@ def test_census_counts_fallback_branches_imputed_zeros_and_vetoes() -> None:
     assert summary["branch_use"]["ni_me"]["zero_xi"] == 1
 
 
+def test_the_opex_bound_read_is_stored_as_guards_and_ope_vetoes_are_counted() -> None:
+    shard = _filer()
+    for concept, value in (
+        ("Revenues", 100),
+        ("CostOfRevenue", 40),
+        ("SellingGeneralAndAdministrativeExpense", 20),
+        ("ResearchAndDevelopmentExpense", 10),
+        ("OperatingExpenses", 50),
+    ):
+        shard.fact(concept, value, "k", "2016-12-31", "2016-01-01")
+    (row,) = _rows(shard)
+    ope = row["characteristics"]["ope_be"]
+    assert ope["value"] == 0.75  # (100 - 40 - 30 - 0) / 40
+    assert [(g["concept"], g["start"], g["end"]) for g in ope["guards"]] == [
+        ("OperatingExpenses", "2016-01-01", "2016-12-31")
+    ]
+    assert "OperatingExpenses" not in {f["concept"] for f in ope["facts"]}
+    # Only a characteristic with a guard read carries the key, so no other row changes shape.
+    assert [name for name, c in row["characteristics"].items() if "guards" in c] == ["ope_be"]
+    tally = Census()
+    vetoed = {**ope, "value": None, "missing": "no_period", "vetoes": ["veto_opex_bound:a:b:OperatingExpenses"]}
+    tally.add({**row, "characteristics": {**row["characteristics"], "ope_be": vetoed}})
+    assert tally.to_json()["veto_use"] == {
+        "ope_be": {"name-months with a veto: opex_bound": 1, "veto evaluations: opex_bound": 1}
+    }
+
+
 def test_excluded_names_past_the_bundle_gate_carry_their_me() -> None:
     (reit,) = _rows(_filer(), sic=6798)
     assert (reit["exclusion"], reit["me"]["value"]) == (Step.REIT, "100")

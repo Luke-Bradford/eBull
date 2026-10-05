@@ -822,6 +822,9 @@ def test_gp_star_is_gp_else_sale_minus_cogs_star_per_period() -> None:
     _quarter_rows(shard, "Revenues", (None, None, 30, 30))
     _quarter_rows(shard, "CostOfRevenue", (None, None, 10, 10))
     assert period_flow(gp_unit, shard.view(DECIDED), FY, Kind.QUARTERLY).value == Decimal(80)  # 20 x 2 + 20 x 2
+    # No annual GP or sale*: the TTM is the reading. 80 / Assets 100.
+    ttm = characteristic("gp_at", shard.view(DECIDED), date(2017, 4, 30), None)
+    assert (ttm.value, ttm.kind) == (pytest.approx(0.8), Kind.QUARTERLY)
 
 
 @pytest.mark.parametrize(
