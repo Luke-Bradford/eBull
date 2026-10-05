@@ -16,8 +16,11 @@ a panel rows file, for the current ``ni_me`` / ``ocf_me`` and for each variant b
 summary and the sha256 of the decompressed rows (the slice 3d-iv oracle). The input rows and the scratch bundle are
 bound by sha256.
 
-Closed research: it reproduces at ``62602dca``. From slice 3d-iv part 2 the panel's own ``ni_me`` / ``ocf_me`` are
-the adopted variants (``factor_panel.fallback_flow``), so the "current" readings here no longer mean IB / OANCF alone.
+Closed research. The m5 oracle (decompressed rows sha256 ``068afe2c…92dbe3``, from the 3d-iii rows) reproduces at
+``62602dca``. From slice 3d-iv part 2 the panel's own ``ni_me`` / ``ocf_me`` are the adopted variants
+(``factor_panel.fallback_flow``), so the "current" readings here no longer mean IB / OANCF alone. The m6 oracle
+(``scripts/ab_3609_vetoes.py``) dates start-less witnesses at their end, as the panel does, and replays the 3d-iv rows,
+whose stored ``ni_me`` / ``ocf_me`` are the panel's.
 
     PYTHONPATH=. uv run python scripts/measure_3609_amendment_2b.py tags --rows <rows.jsonl.gz>
     PYTHONPATH=. uv run python scripts/measure_3609_amendment_2b.py build --out <scratch bundle dir>
@@ -142,15 +145,16 @@ def witnessed(view: fp.CikView, concepts: tuple[str, ...], start: date, end: dat
 
     ``view.prefix`` is the acceptance-NY-date < s(M) slice (``PrefixCache.at``), so a later filing cannot veto an
     earlier formation. Per key, only the rows at the key's latest public acceptance count, so a non-zero fact later
-    corrected to zero does not veto.
+    corrected to zero does not veto. A fact filed without a start is dated at its end (from m6; m5 skipped such facts,
+    which left five ALCO readings to adjudication in #3658).
     """
     hits: list[str] = []
     for concept in concepts:
         latest: dict[tuple[str, str], tuple[str, set[str]]] = {}
         for row in view.prefix("us-gaap", concept).events:
-            if row["unit"] != fp.USD or row["start"] is None:
+            if row["unit"] != fp.USD:
                 continue
-            key = (row["start"], row["end"])
+            key = (row["start"] or row["end"], row["end"])
             held = latest.get(key)
             if held is None or row["acceptance"] > held[0]:
                 latest[key] = (row["acceptance"], {row["value"]})

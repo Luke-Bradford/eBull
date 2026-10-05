@@ -622,6 +622,14 @@ def be(view: CikView, end: date) -> Term:
 
 Reader = Callable[[CikView, str, date], Term]
 
+#: Per fallback characteristic: the primary branch label, the fallback branch label and its companions' names.
+FALLBACK_LABELS: Final = {
+    "ni_me": ("ib", "ni_minus_xido", ("xi", "do")),
+    "ocf_me": ("oancf", "continuing_plus_discontinued", ("ocf_disc",)),
+}
+#: Prefix of the label an absent term carries when a witness refused its companion's zero. The census reads it.
+VETO: Final = "veto_"
+
 
 def _interval_start(term: Term, end: date, kind: Kind) -> date | None:
     """The interval start of a VALUE term ending at ``end``."""
@@ -684,8 +692,10 @@ def companion(
         return term
     # No base interval to test a zero against: the base is blocked or absent (``combine`` returns its status either
     # way), or an annual base with no single start, which stays missing.
-    if start is None or witnessed(view, witnesses, start, end):
+    if start is None:
         return ABSENT
+    if hits := witnessed(view, witnesses, start, end):
+        return Term(TermStatus.ABSENT, branches=(f"{VETO}{name}:{start}:{end}:{'+'.join(hits)}",))
     return Term(TermStatus.VALUE, Decimal(0), branches=(f"zero_{name}:{start}:{end}",))
 
 
@@ -712,20 +722,20 @@ def do_read(view: CikView, reader: Reader, end: date) -> Term:
 def unit_term(view: CikView, name: str, end: date, kind: Kind) -> Term:
     """One period of ``ni*`` or ``ocf*``: an annual period, or one quarter before the TTM chain."""
     reader: Reader = annual_flow if kind is Kind.ANNUAL else quarter_flow
+    primary_label, label, _ = FALLBACK_LABELS[name]
     if name == "ni_me":
         primary = reader(view, IB[0], end)
         if primary.status is not TermStatus.ABSENT:
-            return _labelled(primary, "ib")
+            return _labelled(primary, primary_label)
         base = reader(view, NI, end)
         start = _interval_start(base, end, kind)
         xi = companion(view, lambda: reader(view, XI, end), end, kind, start, name="xi", witnesses=XI_WITNESSES)
         do = companion(view, lambda: do_read(view, reader, end), end, kind, start, name="do", witnesses=DO_WITNESSES)
         term = combine((1, base), (-1, _negated(xi)), (-1, _negated(do)))
-        label = "ni_minus_xido"
     else:
         primary = reader(view, OANCF[0], end)
         if primary.status is not TermStatus.ABSENT:
-            return _labelled(primary, "oancf")
+            return _labelled(primary, primary_label)
         base = reader(view, OCF_CONTINUING, end)
         start = _interval_start(base, end, kind)
         disc = companion(
@@ -738,7 +748,6 @@ def unit_term(view: CikView, name: str, end: date, kind: Kind) -> Term:
             witnesses=OCF_DO_WITNESSES,
         )
         term = combine((1, base), (1, disc))
-        label = "continuing_plus_discontinued"
     out_start = base.start if kind is Kind.QUARTERLY else None
     return Term(term.status, term.value, term.facts, out_start, (label, *term.branches))
 
@@ -796,6 +805,9 @@ class Characteristic:
     branches: tuple[str, ...] = ()
     #: Lag-eligible periods evaluated before one qualified (> 1: a later period's components were not public).
     candidates_tested: int = 0
+    #: Every companion zero a witness refused, in evaluation order over all tested periods (a vetoed period is
+    #: ``absent``, so the walk moves past it). A quarter shared by two tested TTM periods is refused once in each.
+    vetoes: tuple[str, ...] = ()
 
 
 def _status_missing(status: TermStatus) -> Missing:
@@ -811,6 +823,7 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
     of the two (annual on a tie); then the maximum age; then the read statuses; then eligibility."""
     chosen: list[tuple[date, Kind, Ratio]] = []
     tested = 0
+    vetoes: list[str] = []
     for kind in (Kind.ANNUAL, Kind.QUARTERLY):
         for end in view.periods[kind]:
             if not lag_eligible(end, formation):
@@ -818,18 +831,19 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
             tested += 1
             ratio = compute_ratio(name, view, end, kind)
             parts = [ratio.numerator] + ([] if ratio.denominator is None else [ratio.denominator])
+            vetoes += (b for p in parts for b in p.branches if b.startswith(VETO))
             if combine(*((1, p) for p in parts)).status is not TermStatus.ABSENT:
                 chosen.append((end, kind, ratio))
                 break
     if not chosen:
-        return Characteristic(name, None, Missing.NO_PERIOD, candidates_tested=tested)
+        return Characteristic(name, None, Missing.NO_PERIOD, candidates_tested=tested, vetoes=tuple(vetoes))
     end, kind, ratio = max(chosen, key=lambda c: (c[0], c[1] is Kind.ANNUAL))
     parts = [ratio.numerator] + ([] if ratio.denominator is None else [ratio.denominator])
     facts = tuple(f for p in parts for f in p.facts)
     branches = tuple(b for p in parts for b in p.branches)
 
     def missing(reason: Missing) -> Characteristic:
-        return Characteristic(name, None, reason, end, kind, facts, branches, tested)
+        return Characteristic(name, None, reason, end, kind, facts, branches, tested, tuple(vetoes))
 
     if aged_out(end, formation):
         return missing(Missing.AGED_OUT)
@@ -844,7 +858,7 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
     if denominator <= 0:
         return missing(Missing.NONPOSITIVE_DENOMINATOR)
     value = numerator / denominator - (1 if name == "at_gr1" else 0)
-    return Characteristic(name, float(value), None, end, kind, facts, branches, tested)
+    return Characteristic(name, float(value), None, end, kind, facts, branches, tested, tuple(vetoes))
 
 
 # --------------------------------------------------------------------------- market equity
