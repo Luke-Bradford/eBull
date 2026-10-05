@@ -246,3 +246,10 @@ def test_the_partner_is_the_last_count_that_passed_check_3_not_the_last_admitted
         ("q", "2017-05-10", "2017-03-31", "2017-05-05", 51), dollar_volumes=(10.0, None, 10.0)
     )
     assert [row["me"]["verified"] for row in (april, may, june)] == [False, False, True]
+
+
+def test_an_amendment_repeating_the_count_and_its_date_is_not_a_second_filing() -> None:
+    # "a" re-files k's cover count with k's own date 2017-02-10: a disjoint accession, the same count date.
+    april, may, _ = _consensus_rows(("a", "2017-05-10", "2016-12-31", "2017-02-10", 50))
+    assert may["me"]["facts"][0]["accns"] == ["a"]
+    assert [row["me"]["verified"] for row in (april, may)] == [False, False]

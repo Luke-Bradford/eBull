@@ -615,9 +615,7 @@ def build_cik_rows(
         if me.value is not None and me.checks["turnover"] is Check.PASS and me.checks["scale"] is not Check.RECOVERED:
             assert me.shares is not None
             fact = me.facts[0]
-            count = ShareReference(
-                candidate.formation, candidate.session, me.shares, cik10, fact.accns, str(fact.key.end)
-            )
+            count = ShareReference(candidate.formation, candidate.session, me.shares, cik10, fact.accns, fact.key.end)
             partners[sid] = count
             if me.verified:
                 references[sid] = count
