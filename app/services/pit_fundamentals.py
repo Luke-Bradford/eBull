@@ -50,7 +50,8 @@ MANIFEST_SCHEMA: Final = "pit-fundamentals-manifest-v1"
 MANIFEST_FILENAME: Final = "manifest.json"
 SHARDS_DIRNAME: Final = "shards"
 
-#: Rule 1. Storing a concept asserts nothing about its economic scope.
+#: Rule 1. Storing a concept asserts nothing about its economic scope. #3609 step 1 added the nine
+#: concepts its JKP mapping needs (``Liabilities`` through the three preferred-stock values).
 CONCEPT_SET: Final[tuple[tuple[str, str], ...]] = (
     ("dei", "EntityCommonStockSharesOutstanding"),
     ("us-gaap", "Assets"),
@@ -58,13 +59,22 @@ CONCEPT_SET: Final[tuple[tuple[str, str], ...]] = (
     ("us-gaap", "CostOfGoodsAndServicesSold"),
     ("us-gaap", "CostOfGoodsSold"),
     ("us-gaap", "CostOfRevenue"),
+    ("us-gaap", "DeferredIncomeTaxLiabilitiesNet"),
+    ("us-gaap", "DeferredTaxLiabilitiesNoncurrent"),
     ("us-gaap", "GrossProfit"),
+    ("us-gaap", "IncomeLossFromContinuingOperations"),
+    ("us-gaap", "InterestExpense"),
+    ("us-gaap", "Liabilities"),
     ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
     ("us-gaap", "NetIncomeLoss"),
+    ("us-gaap", "PreferredStockLiquidationPreferenceValue"),
+    ("us-gaap", "PreferredStockRedemptionAmount"),
+    ("us-gaap", "PreferredStockValue"),
     ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
     ("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"),
     ("us-gaap", "Revenues"),
     ("us-gaap", "SalesRevenueNet"),
+    ("us-gaap", "SellingGeneralAndAdministrativeExpense"),
     ("us-gaap", "StockholdersEquity"),
     ("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
 )

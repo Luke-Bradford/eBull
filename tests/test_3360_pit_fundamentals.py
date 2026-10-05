@@ -330,7 +330,7 @@ def test_gates_after_capture_and_concept_not_in_policy(tmp_path: Path) -> None:
     )
     assert manifest["supported_through"] == "2020-02-10"
     assert bundle.value_as_of(CIK, ASSETS, date(2020, 2, 11)).status is ReadStatus.AFTER_CAPTURE
-    other = FactKey("us-gaap", "Liabilities", "USD", None, "2019-12-31")
+    other = FactKey("us-gaap", "LiabilitiesCurrent", "USD", None, "2019-12-31")
     assert bundle.value_as_of(CIK, other, date(2020, 2, 1)).status is ReadStatus.CONCEPT_NOT_IN_POLICY
 
 

@@ -17,6 +17,10 @@ Usage::
         --pit-bundle ~/Library/Application\\ Support/eBull/research/pit_fundamentals_3360/<build> \\
         --pit-manifest-sha256 <#3360 manifest digest> \\
         --out <new bundle directory> [--bulk-dir DIR] [--without-form25]
+
+Replay (#3609 step 1 Amendment 1): ``--replay <prior bundle> --replay-manifest-sha256 <digest>``
+rebuilds a prior bundle from its own frozen ``inputs/`` under the current code, instead of the bulk
+directory and a fresh DB snapshot.
 """
 
 from __future__ import annotations
@@ -105,6 +109,39 @@ def snapshot_db(conn: Any) -> dict[str, Any]:
             "SELECT instrument_id, cik, effective_from, effective_to, source_event FROM instrument_cik_history"
         ),
     }
+
+
+def replay_inputs(prior: Path, prior_manifest_sha256: str) -> tuple[list[Path], dict[str, Any], bool]:
+    """Every input of a prior linkage bundle, for a rebuild under changed code (#3609 Amendment 1).
+
+    The prior manifest is authenticated by digest and schema but not by policy, since the policy is what
+    changed. Each Form 3/4/5 quarter and DB dump must hash to the prior manifest's ``input_sha256``.
+    ``submissions.zip`` still comes from the #3360 bundle passed to :func:`build`; the caller compares
+    the rebuilt manifest's ``input_sha256.submissions`` with the prior one.
+    """
+    digest, data = read_verified_document(prior / MANIFEST_FILENAME)
+    if digest != prior_manifest_sha256:
+        raise RuntimeError(f"prior manifest digest {digest} != pinned {prior_manifest_sha256}")
+    manifest = json.loads(data)
+    if manifest.get("schema") != MANIFEST_SCHEMA or not isinstance(manifest.get("form25_mode"), bool):
+        raise RuntimeError("prior manifest schema mismatch")
+    recorded = manifest["input_sha256"]
+    quarters = sorted((prior / "inputs" / "form345").iterdir())
+    if sorted(path.name for path in quarters) != sorted(recorded["quarters"]):
+        raise RuntimeError("prior form345/ does not hold exactly the recorded quarters")
+    for path in quarters:
+        with path.open("rb") as handle:
+            if hashlib.file_digest(handle, "sha256").hexdigest() != recorded["quarters"][path.name]:
+                raise RuntimeError(f"prior quarter {path.name} does not match its recorded sha256")
+    db: dict[str, Any] = {}
+    for name in DB_INPUTS:
+        if name not in recorded:
+            continue  # the without-form25 mode records no Form 25 input
+        dump_digest, dump = read_verified_document(prior / "inputs" / f"{name}.json")
+        if dump_digest != recorded[name]:
+            raise RuntimeError(f"prior dump {name} does not match its recorded sha256")
+        db[name] = json.loads(dump)
+    return quarters, db, manifest["form25_mode"]
 
 
 def _nulls_first(row: Sequence[Any]) -> tuple[Any, ...]:
@@ -466,23 +503,33 @@ def main() -> int:
     parser.add_argument("--pit-manifest-sha256", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--without-form25", action="store_true", help="cross-check (b) mode")
+    parser.add_argument("--replay", type=Path, help="read every input from this prior linkage bundle")
+    parser.add_argument("--replay-manifest-sha256", help="the prior bundle's pinned manifest digest")
     args = parser.parse_args()
+    if (args.replay is None) != (args.replay_manifest_sha256 is None):
+        parser.error("--replay and --replay-manifest-sha256 go together")
+    if args.replay is not None and (args.bulk_dir is not None or args.without_form25):
+        parser.error("--replay takes its quarters and mode from the prior bundle")
 
-    import psycopg
+    if args.replay is not None:
+        quarters, db, form25 = replay_inputs(args.replay, args.replay_manifest_sha256)
+    else:
+        import psycopg
 
-    from app.config import settings
-    from app.security.master_key import resolve_data_dir
+        from app.config import settings
+        from app.security.master_key import resolve_data_dir
 
-    bulk = args.bulk_dir or resolve_data_dir() / "sec" / "bulk"
-    with psycopg.connect(settings.database_url) as conn:
-        db = snapshot_db(conn)
+        bulk = args.bulk_dir or resolve_data_dir() / "sec" / "bulk"
+        with psycopg.connect(settings.database_url) as conn:
+            db = snapshot_db(conn)
+        quarters, form25 = sorted(bulk.glob("insider_*.zip")), not args.without_form25
     manifest = build(
-        quarters=sorted(bulk.glob("insider_*.zip")),
+        quarters=quarters,
         pit_bundle=args.pit_bundle,
         pit_manifest_sha256=args.pit_manifest_sha256,
         db=db,
         out=args.out,
-        form25=not args.without_form25,
+        form25=form25,
     )
     with (args.out / MANIFEST_FILENAME).open("rb") as handle:
         manifest_sha = hashlib.file_digest(handle, "sha256").hexdigest()
