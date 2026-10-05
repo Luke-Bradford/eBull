@@ -68,9 +68,12 @@ def compare(
     b_rows: Iterable[Mapping[str, Any]],
     oracle: Mapping[tuple[str, str, str], Mapping[str, Any]],
     adjudicated: Mapping[tuple[str, str, str, str], str] | None = None,
+    changed: Mapping[str, str] = CHANGED,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Pair A and B row by row (the builder's order is deterministic) and check each pair against the oracle."""
+    """Pair A and B row by row (the builder's order is deterministic) and check each pair against the oracle.
+    ``changed``: each characteristic allowed to change -> its oracle field (slice 3d-v reuses this)."""
     adjudicated = adjudicated or {}
+    names = "/".join(changed)
     departed: set[tuple[str, str, str, str]] = set()
     failures: list[str] = []
     transitions: Counter[str] = Counter()
@@ -98,19 +101,19 @@ def compare(
             if a_chars != b_chars:
                 failures.append(f"{_key(a)}: characteristics present on one arm only")
             continue
-        if set(a_chars) != set(b_chars) or any(a_chars[n] != b_chars[n] for n in a_chars if n not in CHANGED):
-            failures.append(f"{_key(a)}: a characteristic other than ni_me/ocf_me differs")
+        if set(a_chars) != set(b_chars) or any(a_chars[n] != b_chars[n] for n in a_chars if n not in changed):
+            failures.append(f"{_key(a)}: a characteristic other than {names} differs")
             continue
         if a.get("exclusion") is not None:
-            if any(a_chars[n] != b_chars[n] for n in CHANGED):
-                failures.append(f"{_key(a)}: an excluded row's ni_me/ocf_me changed")
+            if any(a_chars[n] != b_chars[n] for n in changed):
+                failures.append(f"{_key(a)}: an excluded row's {names} changed")
             continue
         counts["admitted"] += 1
         expected = oracle.get(_key(a))
         if expected is None:
             failures.append(f"{_key(a)}: admitted row has no oracle row")
             continue
-        for name, variant in CHANGED.items():
+        for name, variant in changed.items():
             before, after, want = _reading(a_chars[name]), _reading(b_chars[name]), _reading(expected[variant])
             if after != want:
                 if (*_key(a), name) in adjudicated:

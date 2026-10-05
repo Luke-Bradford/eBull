@@ -21,7 +21,7 @@ from __future__ import annotations
 import calendar
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -63,12 +63,44 @@ USD: Final = "USD"
 SHARES: Final = "shares"
 
 SALE: Final = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet")
-COGS: Final = ("CostOfGoodsAndServicesSold", "CostOfRevenue", "CostOfGoodsSold")
-#: Flagged ``cogs_scope=goods_only`` when it supplies COGS.
-COGS_GOODS_ONLY: Final = "CostOfGoodsSold"
 GP: Final = ("GrossProfit",)
+#: Amendment 2c's parts of ``ope*`` and ``gp*`` (spec §"Accounting"). COGS*: Compustat COGS excludes depreciation,
+#: so each excluding-DDA tag is read before its inclusive counterpart; else goods + services.
+COGS_TOTAL: Final = (
+    "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
+    "CostOfGoodsAndServicesSold",
+    "CostOfRevenue",
+)
+COGS_GOODS: Final = ("CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization", "CostOfGoodsSold")
+COGS_SERVICES: Final = ("CostOfServicesExcludingDepreciationDepletionAndAmortization", "CostOfServices")
+#: XSGA* (Compustat scope: SG&A plus R&D net of in-process R&D) = SG&A + RD*, else G&A + selling + RD*.
 XSGA: Final = ("SellingGeneralAndAdministrativeExpense",)
-XINT: Final = ("InterestExpense",)
+GA: Final = ("GeneralAndAdministrativeExpense",)
+SELL: Final = ("SellingAndMarketingExpense", "SellingExpense")
+SELL_WITNESSES: Final = (*SELL, "MarketingExpense", "MarketingAndAdvertisingExpense")
+#: RD*: the excluding-IPR&D tag excludes software R&D, which has its own concept, so software is added to it; the
+#: inclusive tag is the fallback (a proxy: it may hold expensed acquired IPR&D).
+RD_EXCL_IPR: Final = "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"
+RD_SOFTWARE: Final = "ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost"
+RD_INCL_IPR: Final = "ResearchAndDevelopmentExpense"
+RD_WITNESSES: Final = (RD_EXCL_IPR, RD_INCL_IPR, RD_SOFTWARE)
+#: XINT*: both fallbacks are proxies; absent, zero under the witness veto (adaptation d).
+XINT_TAGS: Final = ("InterestExpense", "InterestAndDebtExpense", "InterestExpenseDebt")
+XINT_WITNESSES: Final = (
+    *XINT_TAGS,
+    "InterestExpenseBorrowings",
+    "InterestExpenseLongTermDebt",
+    "InterestExpenseRelatedParty",
+    "InterestExpenseOther",
+    "InterestExpenseDeposits",
+    "InterestCostsIncurred",
+    "InterestPaidNet",
+    "InterestPaid",
+)
+#: The one-sided bound on a summed XSGA*: above ``OperatingExpenses`` by more than this share of it (fixed by
+#: construction).
+OPEX: Final = ("OperatingExpenses",)
+OPEX_TOLERANCE: Final = Decimal("0.005")
 IB: Final = ("IncomeLossFromContinuingOperations",)
 OANCF: Final = ("NetCashProvidedByUsedInOperatingActivities",)
 #: Amendment 2b fallbacks: ``ni*`` = NI − XI − DO when IB is absent; ``ocf*`` = continuing + discontinued when
@@ -247,6 +279,9 @@ class Term:
     #: Quarter flows only: the quarter's first day, which chains the TTM walk.
     start: date | None = None
     branches: tuple[str, ...] = ()
+    #: Reads a guard tested the term against, kept apart from the arithmetic ``facts`` (Amendment 2c's
+    #: ``OperatingExpenses`` bound).
+    guards: tuple[FactUse, ...] = ()
 
 
 ABSENT: Final = Term(TermStatus.ABSENT)
@@ -257,13 +292,14 @@ def combine(*parts: tuple[int, Term]) -> Term:
     """Σ coefficient × term. A blocking part wins over an absent one: a blocked newer key is never skipped."""
     facts = tuple(f for _, term in parts for f in term.facts)
     branches = tuple(b for _, term in parts for b in term.branches)
+    guards = tuple(g for _, term in parts for g in term.guards)
     for status in _BLOCKING:
         if any(term.status is status for _, term in parts):
-            return Term(status, facts=facts, branches=branches)
+            return Term(status, facts=facts, branches=branches, guards=guards)
     if any(term.status is TermStatus.ABSENT for _, term in parts):
-        return Term(TermStatus.ABSENT, facts=facts, branches=branches)
+        return Term(TermStatus.ABSENT, facts=facts, branches=branches, guards=guards)
     total = sum((coefficient * term.value for coefficient, term in parts if term.value is not None), Decimal(0))
-    return Term(TermStatus.VALUE, total, facts, branches=branches)
+    return Term(TermStatus.VALUE, total, facts, branches=branches, guards=guards)
 
 
 def first_available(branches: Iterable[tuple[str, Callable[[], Term]]]) -> Term:
@@ -271,7 +307,7 @@ def first_available(branches: Iterable[tuple[str, Callable[[], Term]]]) -> Term:
     for name, read in branches:
         term = read()
         if term.status is not TermStatus.ABSENT:
-            return Term(term.status, term.value, term.facts, term.start, (name, *term.branches))
+            return replace(term, branches=(name, *term.branches))
     return ABSENT
 
 
@@ -534,7 +570,7 @@ def _negated(term: Term) -> Term:
     facts = tuple(
         FactUse(f.key, -f.coefficient, f.status, f.accns, f.acceptance, f.branch, f.value) for f in term.facts
     )
-    return Term(term.status, term.value, facts, term.start, term.branches)
+    return replace(term, facts=facts)
 
 
 def _chain(view: CikView, quarter: Callable[[date], Term], end: date, count: int, *, skip_last: bool = False) -> Term:
@@ -562,7 +598,7 @@ def _chain(view: CikView, quarter: Callable[[date], Term], end: date, count: int
             quarterly, term.start - timedelta(days=1), term.start - timedelta(days=QUARTER_GAP_DAYS)
         )
     total = combine(*((1, t) for t in terms))
-    return Term(total.status, total.value, total.facts, terms[-1].start, total.branches)
+    return replace(total, start=terms[-1].start)
 
 
 def _prior_quarter_end(quarterly: Sequence[date], latest: date, earliest: date) -> date | None:
@@ -581,28 +617,6 @@ def flow(view: CikView, concepts: Sequence[str], end: date, kind: Kind) -> Term:
 
 
 # --------------------------------------------------------------------------- JKP Table 5 items
-
-
-def gp(view: CikView, end: date, kind: Kind) -> Term:
-    return first_available(
-        (
-            ("GP", lambda: flow(view, GP, end, kind)),
-            (
-                "sale-cogs",
-                lambda: combine((1, flow(view, SALE, end, kind)), (-1, _negated(flow(view, COGS, end, kind)))),
-            ),
-        )
-    )
-
-
-def ope(view: CikView, end: date, kind: Kind) -> Term:
-    """Proxy: ``sale*`` − COGS − XSGA − XINT (FF's OP numerator, which JKP's ``ope*`` targets)."""
-    return combine(
-        (1, flow(view, SALE, end, kind)),
-        (-1, _negated(flow(view, COGS, end, kind))),
-        (-1, _negated(flow(view, XSGA, end, kind))),
-        (-1, _negated(flow(view, XINT, end, kind))),
-    )
 
 
 def be(view: CikView, end: date) -> Term:
@@ -671,7 +685,7 @@ def witnessed(view: CikView, concepts: Sequence[str], start: date, end: date) ->
 
 
 def _labelled(term: Term, *labels: str) -> Term:
-    return Term(term.status, term.value, term.facts, term.start, (*labels, *term.branches))
+    return replace(term, branches=(*labels, *term.branches))
 
 
 def companion(
@@ -761,6 +775,160 @@ def fallback_flow(view: CikView, name: str, end: date, kind: Kind) -> Term:
     return _chain(view, lambda e: unit_term(view, name, e, Kind.QUARTERLY), end, 4)
 
 
+# --------------------------------------------------------------------------- Amendment 2c: ope* and gp*
+
+
+class Period:
+    """One annual period or one quarter of one CIK, with the start of its base interval (the base term of the
+    ``ebitda*`` or ``gp*`` branch); ``None`` while the base is not a value."""
+
+    def __init__(self, view: CikView, end: date, kind: Kind, start: date | None) -> None:
+        self.view, self.end, self.kind, self.start = view, end, kind, start
+
+    def read(self, concepts: Sequence[str]) -> Term:
+        reader: Reader = annual_flow if self.kind is Kind.ANNUAL else quarter_flow
+        return first_available((c, lambda c=c: reader(self.view, c, self.end)) for c in concepts)
+
+    def aligned(self, term: Term) -> Term:
+        """A value over another interval than the base's is ``absent``, as ``companion`` treats its terms."""
+        if term.status is not TermStatus.VALUE or self.start is None:
+            return term
+        if _interval_start(term, self.end, self.kind) != self.start:
+            return Term(TermStatus.ABSENT, branches=("interval_mismatch",))
+        return term
+
+    def companion(self, read: Callable[[], Term], name: str, witnesses: Sequence[str]) -> Term:
+        return companion(self.view, read, self.end, self.kind, self.start, name=name, witnesses=witnesses)
+
+
+def rd_read(p: Period) -> Term:
+    """RD*: excluding-IPR&D + software (zero if absent, under its own witness); else the inclusive tag (proxy)."""
+    excl = p.read((RD_EXCL_IPR,))
+    if excl.status is TermStatus.ABSENT:
+        return _labelled(p.read((RD_INCL_IPR,)), "rd_incl_ipr")
+    if excl.status is not TermStatus.VALUE:
+        return excl
+    software = p.companion(lambda: p.read((RD_SOFTWARE,)), "rd_software", (RD_SOFTWARE,))
+    total = combine((1, excl), (1, software))
+    return replace(total, start=excl.start, branches=("rd_excl_ipr", *total.branches))
+
+
+def bounded(p: Period, total: Term, *, refuse: Term) -> Term:
+    """A sum the rule makes, tested against the filer's ``OperatingExpenses`` over the same interval.
+
+    The ``OperatingExpenses`` reads go to ``guards``, never to the arithmetic ``facts``. A blocked one blocks the
+    sum (a guard in doubt is not a pass); an absent or other-interval one leaves it unchecked. More than
+    ``OPEX_TOLERANCE`` above it, ``refuse`` is returned. The bound is one-sided: a passing sum is not proved right.
+    """
+    if total.status is not TermStatus.VALUE:
+        return total
+    opex = p.aligned(p.read(OPEX))
+    if opex.status in _BLOCKING:
+        return Term(opex.status, facts=total.facts, branches=("opex_bound_blocked", *total.branches), guards=opex.facts)
+    if opex.status is not TermStatus.VALUE:
+        return _labelled(total, "opex_unchecked")
+    assert total.value is not None and opex.value is not None
+    if total.value > opex.value + abs(opex.value) * OPEX_TOLERANCE:
+        return replace(refuse, guards=(*refuse.guards, *opex.facts))
+    return replace(total, branches=("opex_checked", *total.branches), guards=(*total.guards, *opex.facts))
+
+
+def xsga_term(p: Period) -> Term:
+    """XSGA* = SG&A + RD*; else, with G&A filed, G&A + selling + RD*. Only a sum with a non-zero RD* added to SG&A,
+    and every sum of parts, is bounded: a filed SG&A is taken as filed."""
+    sga = p.aligned(p.read(XSGA))
+    rd = p.companion(lambda: rd_read(p), "rd", RD_WITNESSES)
+    if sga.status is not TermStatus.ABSENT:
+        total = combine((1, sga), (1, rd))
+        if rd.status is not TermStatus.VALUE or not rd.value:
+            return total
+        return bounded(p, total, refuse=_labelled(sga, "rd_excluded_opex_bound"))
+    ga = p.aligned(p.read(GA))
+    if ga.status is TermStatus.ABSENT:
+        return combine((1, ga), (1, rd))  # a blocked RD* still blocks
+    sell = p.companion(lambda: p.read(SELL), "sell", SELL_WITNESSES)
+    total = _labelled(combine((1, ga), (1, sell), (1, rd)), "xsga_parts")
+    refusal = Term(TermStatus.ABSENT, branches=(f"{VETO}opex_bound:{p.start}:{p.end}:{OPEX[0]}",))
+    return bounded(p, total, refuse=refusal)
+
+
+def cogs_term(p: Period) -> Term:
+    """COGS*: a total tag, else goods + services with one of the two filed and the other a witnessed zero
+    (adaptation e). With no cost-of-sales tag at all, COGS* is ``absent`` (a zero was measured and rejected)."""
+    total = p.aligned(p.read(COGS_TOTAL))
+    if total.status is not TermStatus.ABSENT:
+        return total
+    goods, services = p.aligned(p.read(COGS_GOODS)), p.aligned(p.read(COGS_SERVICES))
+    if goods.status is TermStatus.ABSENT and services.status is TermStatus.ABSENT:
+        return combine((1, goods), (1, services))
+    parts = (
+        p.companion(lambda: goods, "cogs_goods", COGS_GOODS),
+        p.companion(lambda: services, "cogs_services", COGS_SERVICES),
+    )
+    return _labelled(combine(*((1, t) for t in parts)), "cogs_goods_plus_services")
+
+
+def xint_term(p: Period) -> Term:
+    return p.companion(lambda: p.read(XINT_TAGS), "xint", XINT_WITNESSES)
+
+
+def ope_unit(view: CikView, end: date, kind: Kind) -> Term:
+    """One annual period or one quarter of ``ope*`` = ``ebitda*`` − XINT*. ``ebitda*`` = ``sale*`` − COGS* − XSGA*,
+    else GP − XSGA*; every part is aligned to the chosen branch's base interval. When both branches are ``absent``,
+    the refusals' labels and guard reads are kept, so a vetoed period is recorded as Amendment 2b's are.
+
+    The parts are read even when the base is not a value, because a blocked part blocks an absent base (``combine``).
+    A refusal or bound there tested no base interval, so its label and guard reads are dropped, except a blocked
+    ``OperatingExpenses`` read, which blocks the term; ``companion`` makes no label without an interval either."""
+
+    def deducted(base: Term, label: str, costs: Callable[[Period], Term]) -> Term:
+        p = Period(view, end, kind, _interval_start(base, end, kind))
+        term = combine((1, base), (-1, _negated(costs(p))), (-1, _negated(xint_term(p))))
+        if p.start is None:  # a blocked guard read is kept: it blocks whatever the base, so it explains the status
+            term = replace(
+                term,
+                branches=tuple(b for b in term.branches if not b.startswith(VETO)),
+                guards=tuple(g for g in term.guards if g.status in _BLOCKING),
+            )
+        return replace(term, start=base.start, branches=(label, *term.branches))
+
+    whole = Period(view, end, kind, None)
+    sale = deducted(
+        whole.read(SALE),
+        "sale_minus_opex",
+        lambda p: _labelled(combine((1, cogs_term(p)), (1, xsga_term(p))), "cogs_plus_xsga"),
+    )
+    if sale.status is not TermStatus.ABSENT:
+        return sale
+    gp_branch = deducted(whole.read(GP), "gp_minus_xsga", xsga_term)
+    if gp_branch.status is not TermStatus.ABSENT:
+        return gp_branch
+    return Term(
+        TermStatus.ABSENT,
+        branches=tuple(b for t in (sale, gp_branch) for b in t.branches if b.startswith(VETO)),
+        guards=(*sale.guards, *gp_branch.guards),
+    )
+
+
+def gp_unit(view: CikView, end: date, kind: Kind) -> Term:
+    """One annual period or one quarter of ``gp*`` = GP, else ``sale*`` − COGS*."""
+    whole = Period(view, end, kind, None)
+    gp = whole.read(GP)
+    if gp.status is not TermStatus.ABSENT:
+        return _labelled(gp, "GP")
+    sale = whole.read(SALE)
+    p = Period(view, end, kind, _interval_start(sale, end, kind))
+    term = combine((1, sale), (-1, _negated(cogs_term(p))))
+    return replace(term, start=sale.start, branches=("sale-cogs", *term.branches))
+
+
+def period_flow(unit: Callable[[CikView, date, Kind], Term], view: CikView, end: date, kind: Kind) -> Term:
+    """A formula read per period: the annual period, or each quarter before the TTM chain."""
+    if kind is Kind.ANNUAL:
+        return unit(view, end, kind)
+    return _chain(view, lambda e: unit(view, e, Kind.QUARTERLY), end, 4)
+
+
 @dataclass(frozen=True)
 class Ratio:
     """A characteristic's numerator and denominator at one period, before eligibility."""
@@ -772,11 +940,11 @@ class Ratio:
 def compute_ratio(name: str, view: CikView, end: date, kind: Kind) -> Ratio:
     match name:
         case "gp_at":
-            return Ratio(gp(view, end, kind), instant(view, AT, end))
+            return Ratio(period_flow(gp_unit, view, end, kind), instant(view, AT, end))
         case "be_me":
             return Ratio(be(view, end), None)
         case "ope_be":
-            return Ratio(ope(view, end, kind), be(view, end))
+            return Ratio(period_flow(ope_unit, view, end, kind), be(view, end))
         case "ni_me" | "ocf_me":
             return Ratio(fallback_flow(view, name, end, kind), None)
         case "at_gr1":
@@ -810,6 +978,9 @@ class Characteristic:
     #: Every companion zero a witness refused, in evaluation order over all tested periods (a vetoed period is
     #: ``absent``, so the walk moves past it). A quarter shared by two tested TTM periods is refused once in each.
     vetoes: tuple[str, ...] = ()
+    #: Every guard read (``Term.guards``) over all tested periods, in evaluation order, as ``vetoes``: "with every
+    #: tested sum" (Amendment 2c), so a refused or losing period's ``OperatingExpenses`` read stays on the row.
+    guards: tuple[FactUse, ...] = ()
 
 
 def _status_missing(status: TermStatus) -> Missing:
@@ -826,6 +997,7 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
     chosen: list[tuple[date, Kind, Ratio]] = []
     tested = 0
     vetoes: list[str] = []
+    guards: list[FactUse] = []
     for kind in (Kind.ANNUAL, Kind.QUARTERLY):
         for end in view.periods[kind]:
             if not lag_eligible(end, formation):
@@ -834,18 +1006,21 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
             ratio = compute_ratio(name, view, end, kind)
             parts = [ratio.numerator] + ([] if ratio.denominator is None else [ratio.denominator])
             vetoes += (b for p in parts for b in p.branches if b.startswith(VETO))
+            guards += (g for p in parts for g in p.guards)
             if combine(*((1, p) for p in parts)).status is not TermStatus.ABSENT:
                 chosen.append((end, kind, ratio))
                 break
     if not chosen:
-        return Characteristic(name, None, Missing.NO_PERIOD, candidates_tested=tested, vetoes=tuple(vetoes))
+        return Characteristic(
+            name, None, Missing.NO_PERIOD, candidates_tested=tested, vetoes=tuple(vetoes), guards=tuple(guards)
+        )
     end, kind, ratio = max(chosen, key=lambda c: (c[0], c[1] is Kind.ANNUAL))
     parts = [ratio.numerator] + ([] if ratio.denominator is None else [ratio.denominator])
     facts = tuple(f for p in parts for f in p.facts)
     branches = tuple(b for p in parts for b in p.branches)
 
     def missing(reason: Missing) -> Characteristic:
-        return Characteristic(name, None, reason, end, kind, facts, branches, tested, tuple(vetoes))
+        return Characteristic(name, None, reason, end, kind, facts, branches, tested, tuple(vetoes), tuple(guards))
 
     if aged_out(end, formation):
         return missing(Missing.AGED_OUT)
@@ -860,7 +1035,7 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
     if denominator <= 0:
         return missing(Missing.NONPOSITIVE_DENOMINATOR)
     value = numerator / denominator - (1 if name == "at_gr1" else 0)
-    return Characteristic(name, float(value), None, end, kind, facts, branches, tested, tuple(vetoes))
+    return Characteristic(name, float(value), None, end, kind, facts, branches, tested, tuple(vetoes), tuple(guards))
 
 
 # --------------------------------------------------------------------------- market equity

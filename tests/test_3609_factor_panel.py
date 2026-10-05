@@ -37,9 +37,12 @@ from app.services.factor_panel import (
     fallback_flow,
     flow,
     formation_months,
+    gp_unit,
     is_filer,
     lag_eligible,
     market_equity,
+    ope_unit,
+    period_flow,
     prefix_exclusion,
     sic_as_of,
     split_product,
@@ -557,6 +560,330 @@ def test_a_ttm_mixing_primary_and_fallback_quarters_chains() -> None:
     assert ttm.value == Decimal(60) and {"ib", "ni_minus_xido"} <= set(ttm.branches)
     got = characteristic("ni_me", shard.view(DECIDED), date(2017, 4, 30), ME)
     assert (got.value, got.kind) == (pytest.approx(0.06), Kind.QUARTERLY)
+
+
+# --------------------------------------------------------------------------- Amendment 2c: ope* and gp*
+# Expected values are computed by hand in each comment; spec §"Slices" 3d-v lists the cases.
+
+SGA = "SellingGeneralAndAdministrativeExpense"
+RD_EXCL = "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"
+RD_SOFT = "ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost"
+RD_INCL = "ResearchAndDevelopmentExpense"
+OPEX = "OperatingExpenses"
+H1_START, H1_END = "2016-01-01", "2016-06-30"
+#: sale 100 − COGS 40 − XSGA 20 − XINT 5 = 35, with RD* an unwitnessed zero.
+INCOME = {"Revenues": 100, "CostOfRevenue": 40, SGA: 20, "InterestExpense": 5}
+
+
+def _income(**changes: object) -> Shard:
+    """``INCOME`` with each change applied; ``None`` drops the concept."""
+    return _annual(**{k: v for k, v in (INCOME | changes).items() if v is not None})
+
+
+def _ope(shard: Shard, kind: Kind = Kind.ANNUAL) -> Any:
+    return period_flow(ope_unit, shard.view(DECIDED), FY, kind)
+
+
+def _quarter_rows(shard: Shard, concept: str, values: Sequence[object], starts: Sequence[str] = ()) -> Shard:
+    """One direct fact per FY2016 quarter; ``starts`` overrides each quarter's start."""
+    rows = (("q1", "2016-01-01", "2016-03-31"), ("q2", "2016-04-01", "2016-06-30"))
+    rows += (("q3", "2016-07-01", "2016-09-30"), ("k", "2016-10-01", "2016-12-31"))
+    for i, ((accn, start, end), value) in enumerate(zip(rows, values, strict=True)):
+        if value is not None:
+            shard.fact(concept, value, accn, end, starts[i] if starts else start)
+    return shard
+
+
+def test_ope_reads_sale_minus_cogs_xsga_and_xint_and_divides_by_book_equity() -> None:
+    term = _ope(_income())
+    assert term.value == Decimal(35)
+    assert {"sale_minus_opex", "cogs_plus_xsga", "InterestExpense", "xint_filed"} <= set(term.branches)
+    assert any(b.startswith("zero_rd:") for b in term.branches)
+    shard = _income().fact("StockholdersEquity", 70, "k", FY_END)
+    got = characteristic("ope_be", shard.view(DECIDED), date(2017, 4, 30), ME)
+    assert got.value == pytest.approx(0.5)  # 35 / 70
+    signs = {f.key.concept: f.coefficient for f in got.facts}
+    assert signs == {"Revenues": 1, "CostOfRevenue": -1, SGA: -1, "InterestExpense": -1, "StockholdersEquity": 1}
+
+
+def test_ope_is_read_per_quarter_through_every_quarter_branch() -> None:
+    shard = _quarters(Shard())
+    shard.fact("Revenues", 30, "q1", "2016-03-31", "2016-01-01")  # direct
+    shard.fact("Revenues", 60, "q2", "2016-06-30", "2016-01-01")  # H1 YTD -> Q2 = 30
+    shard.fact("Revenues", 30, "q3", "2016-09-30", "2016-07-01")  # direct
+    shard.fact("Revenues", 120, "k", FY_END, FY_START)  # Q4 residual: 120 - 90 = 30
+    _quarter_rows(shard, "CostOfRevenue", (10, 10, 10, 10))
+    _quarter_rows(shard, SGA, (5, 5, 5, 5))
+    ttm = _ope(shard, Kind.QUARTERLY)
+    assert ttm.value == Decimal(60)  # 4 x (30 - 10 - 5), XINT* and RD* unwitnessed zeros
+    assert {"direct", "ytd_difference", "q4_residual"} <= set(ttm.branches)
+
+
+def test_a_ttm_mixing_the_sale_and_gp_branches_chains() -> None:
+    shard = _quarters(Shard())
+    _quarter_rows(shard, "Revenues", (30, 30, None, None))
+    _quarter_rows(shard, "CostOfRevenue", (10, 10, None, None))
+    _quarter_rows(shard, "GrossProfit", (None, None, 25, 25))
+    _quarter_rows(shard, SGA, (5, 5, 5, 5))
+    ttm = _ope(shard, Kind.QUARTERLY)
+    assert ttm.value == Decimal(70)  # (30 - 10 - 5) x 2 + (25 - 5) x 2
+    assert {"sale_minus_opex", "gp_minus_xsga"} <= set(ttm.branches)
+
+
+def test_gp_minus_xsga_only_when_the_sale_branch_is_absent_and_its_parts_follow_gp() -> None:
+    # Revenues is filed over another interval and COGS* is absent, so the sale branch is absent. The GP branch's
+    # XINT* is aligned to GP's interval: read against Revenues' start it would be absent.
+    annual = _annual(GrossProfit=60, **{SGA: 20, "InterestExpense": 5}).fact("Revenues", 100, "k", FY_END, "2016-01-02")
+    term = _ope(annual)
+    assert term.value == Decimal(35) and term.branches[0] == "gp_minus_xsga"  # 60 - 20 - 5
+    # Filed COGS* keeps the sale branch, whatever GP says: 100 - 40 - 20 - 5.
+    assert _ope(_income(GrossProfit=90)).value == Decimal(35)
+    # Quarterly: Q4's Revenues starts 2016-10-10. A Q4 starting there would not chain to Q3; GP's start does.
+    shard = _quarters(Shard())
+    _quarter_rows(shard, "GrossProfit", (25, 25, 25, 25))
+    _quarter_rows(shard, SGA, (5, 5, 5, 5))
+    _quarter_rows(shard, "InterestExpense", (1, 1, 1, 1))
+    shard.fact("Revenues", 40, "k", FY_END, "2016-10-10")
+    assert _ope(shard, Kind.QUARTERLY).value == Decimal(76)  # 4 x (25 - 5 - 1)
+
+
+@pytest.mark.parametrize(
+    "concept",
+    [SGA, "CostOfRevenue", "InterestExpense"],
+)
+def test_a_part_over_another_interval_than_the_base_is_absent(concept: str) -> None:
+    shard = _income(**{concept: None}).fact(concept, 7, "k", FY_END, "2016-01-02")
+    assert _ope(shard).status is TermStatus.ABSENT
+
+
+def test_g_and_a_and_operating_expenses_over_another_interval() -> None:
+    ga = _income(**{SGA: None}).fact("GeneralAndAdministrativeExpense", 10, "k", FY_END, "2016-01-02")
+    assert _ope(ga).status is TermStatus.ABSENT
+    # OperatingExpenses over another interval leaves the sum unchecked: 20 + 10 stands although 30 > 25.
+    opex = _income(**{RD_INCL: 10}).fact(OPEX, 25, "k", FY_END, "2016-01-02")
+    term = _ope(opex)
+    assert term.value == Decimal(25) and "opex_unchecked" in term.branches and term.guards == ()  # 100-40-30-5
+
+
+def test_rd_star_reads_excluding_ipr_and_d_plus_software_else_the_inclusive_proxy() -> None:
+    both = _ope(_income(**{RD_EXCL: 8, RD_SOFT: 2, RD_INCL: 30}))
+    assert both.value == Decimal(25)  # 100 - 40 - (20 + 8 + 2) - 5; the inclusive tag is not read
+    assert {"rd_excl_ipr", "rd_software_filed"} <= set(both.branches)
+    no_software = _ope(_income(**{RD_EXCL: 8}))
+    assert no_software.value == Decimal(27)  # software an unwitnessed zero: 100 - 40 - 28 - 5
+    assert any(b.startswith("zero_rd_software:") for b in no_software.branches)
+    inclusive = _ope(_income(**{RD_INCL: 10}))
+    assert inclusive.value == Decimal(25) and "rd_incl_ipr" in inclusive.branches
+    # Absent: zero with no witness (35, above); a non-zero witness over part of the year vetoes the zero.
+    witnessed = _income().fact(RD_INCL, 4, "k", H1_END, H1_START)
+    term = _ope(witnessed)
+    assert term.status is TermStatus.ABSENT
+    assert f"veto_rd:{FY_START}:{FY_END}:{RD_INCL}" in term.branches
+
+
+def test_xsga_parts_only_without_sga() -> None:
+    parts = _income(**{SGA: None, "GeneralAndAdministrativeExpense": 10, "SellingAndMarketingExpense": 6, RD_INCL: 4})
+    term = _ope(parts)
+    assert term.value == Decimal(35) and "xsga_parts" in term.branches  # 100 - 40 - (10 + 6 + 4) - 5
+    with_sga = _ope(_income(GeneralAndAdministrativeExpense=10, SellingAndMarketingExpense=6))
+    assert with_sga.value == Decimal(35) and "xsga_parts" not in with_sga.branches  # SG&A 20 + RD* 0
+    # Selling: SellingExpense as the fallback tag; filed as zero; absent and unwitnessed; vetoed by a marketing fact.
+    ga_only = {SGA: None, "GeneralAndAdministrativeExpense": 10, RD_INCL: 4}
+    assert _ope(_income(**ga_only, SellingExpense=3)).value == Decimal(38)  # 100 - 40 - 17 - 5
+    filed_zero = _ope(_income(**ga_only, SellingExpense=0))
+    assert filed_zero.value == Decimal(41) and "sell_filed_zero" in filed_zero.branches  # 100 - 40 - 14 - 5
+    unwitnessed = _ope(_income(**ga_only))
+    assert unwitnessed.value == Decimal(41) and any(b.startswith("zero_sell:") for b in unwitnessed.branches)
+    for marketing in ("MarketingExpense", "MarketingAndAdvertisingExpense"):
+        assert _ope(_income(**ga_only, **{marketing: 3})).status is TermStatus.ABSENT
+    # G&A absent: the period is absent, unless RD* is blocked, which blocks it.
+    assert _ope(_income(**{SGA: None, RD_INCL: 4})).status is TermStatus.ABSENT
+    blocked = _income(**{SGA: None}).reject(RD_INCL, "k", FY_END, FY_START)
+    assert _ope(blocked).status is TermStatus.BLOCKED_BY_REJECTION
+
+
+def test_the_opex_bound_refuses_contradicted_sums_and_records_its_read_apart() -> None:
+    # R&D inside SG&A: 30 + 10 > 30, so SG&A is taken alone: 100 - 40 - 30 - 5.
+    inside = _ope(_income(**{SGA: 30, RD_INCL: 10, OPEX: 30}))
+    assert inside.value == Decimal(25) and "rd_excluded_opex_bound" in inside.branches
+    assert [(g.key, g.acceptance) for g in inside.guards] == [
+        (pf.FactKey("us-gaap", OPEX, "USD", FY_START, FY_END), _acc("2017-02-20"))
+    ]
+    assert OPEX not in {f.key.concept for f in inside.facts} and RD_INCL not in {f.key.concept for f in inside.facts}
+    # R&D in COGS with slack under the bound passes and is deducted twice: the one-sided residual the spec names.
+    slack = _ope(_income(**{RD_INCL: 10, OPEX: 50}))
+    assert slack.value == Decimal(25) and "opex_checked" in slack.branches and len(slack.guards) == 1
+    # Within 0.5%: 30 <= 29.9 x 1.005 = 30.0495 passes; 30 > 29.8 x 1.005 = 29.949 refuses.
+    assert "opex_checked" in _ope(_income(**{RD_INCL: 10, OPEX: Decimal("29.9")})).branches
+    assert "rd_excluded_opex_bound" in _ope(_income(**{RD_INCL: 10, OPEX: Decimal("29.8")})).branches
+    # Zero and negative OperatingExpenses refuse any positive sum: 30 > 0; 30 > -10 + 0.05.
+    for opex in (0, -10):
+        assert _ope(_income(**{RD_INCL: 10, OPEX: opex})).value == Decimal(35)
+    # SG&A with RD* zero is not tested, even against a bound it would fail.
+    untested = _ope(_income(**{OPEX: 10}))
+    assert untested.value == Decimal(35) and untested.guards == ()
+    assert not any(b.startswith(("opex_", "rd_excluded")) for b in untested.branches)
+    # Absent: unchecked.
+    assert "opex_unchecked" in _ope(_income(**{RD_INCL: 10})).branches
+
+
+def test_the_opex_bound_on_a_sum_of_parts_vetoes_and_a_blocked_bound_blocks() -> None:
+    parts = {SGA: None, "GeneralAndAdministrativeExpense": 10, "SellingAndMarketingExpense": 6, RD_INCL: 4}
+    shard = _income(**parts, **{OPEX: 15}).fact("StockholdersEquity", 70, "k", FY_END)
+    got = characteristic("ope_be", shard.view(DECIDED), date(2017, 4, 30), ME)
+    assert got.missing is Missing.NO_PERIOD  # 20 > 15 x 1.005 and GP is absent
+    assert got.vetoes == (f"veto_opex_bound:{FY_START}:{FY_END}:{OPEX}",)
+    # The refused sum's read stays on the row. The GP branch has no base, so its own bound read is not recorded.
+    assert [(g.key.concept, g.key.start) for g in got.guards] == [(OPEX, FY_START)]
+    passed = characteristic(
+        "ope_be",
+        _income(**parts, **{OPEX: 20}).fact("StockholdersEquity", 70, "k", FY_END).view(DECIDED),
+        date(2017, 4, 30),
+        ME,
+    )
+    assert passed.value == pytest.approx(0.5) and [g.key.concept for g in passed.guards] == [OPEX]  # 35 / 70
+    blocked = _income(**{RD_INCL: 10}).reject(OPEX, "k", FY_END, FY_START)
+    term = _ope(blocked)
+    assert term.status is TermStatus.BLOCKED_BY_REJECTION and "opex_bound_blocked" in term.branches
+    assert [g.status for g in term.guards] == [TermStatus.BLOCKED_BY_REJECTION]
+    # With no base interval, a bound's passing read is not evidence and is dropped, whatever the term's status; a
+    # blocked read is kept, since it blocks the term.
+    base_blocked = _income(**{RD_INCL: 10, OPEX: 50}).reject("Revenues", "k", FY_END, FY_START)
+    term = _ope(base_blocked)
+    assert term.status is TermStatus.BLOCKED_BY_REJECTION and term.guards == ()
+    base_absent = _income(Revenues=None, **{RD_INCL: 10}).reject(OPEX, "k", FY_END, FY_START)
+    term = _ope(base_absent)
+    assert term.status is TermStatus.BLOCKED_BY_REJECTION
+    assert [g.status for g in term.guards] == [TermStatus.BLOCKED_BY_REJECTION]
+
+
+def test_guards_are_kept_from_every_tested_period_as_vetoes_are() -> None:
+    # The annual period and the TTM ending at the same anchor both test a sum; the annual one is the reading
+    # (ties go annual), and the row keeps the annual read and each quarter's: 1 + 4.
+    shard = _quarters(Shard()).fact("StockholdersEquity", 70, "k", FY_END)
+    for concept, year, quarter in (
+        ("Revenues", 100, 25),
+        ("CostOfRevenue", 40, 10),
+        (SGA, 20, 5),
+        (RD_INCL, 8, 2),
+        (OPEX, 40, 10),
+        ("InterestExpense", 4, 1),
+    ):
+        shard.fact(concept, year, "k", FY_END, FY_START)
+        _quarter_rows(shard, concept, (quarter,) * 4)
+    got = characteristic("ope_be", shard.view(DECIDED), date(2017, 4, 30), ME)
+    # Annual 100 - 40 - (20 + 8) - 4 = 28 (28 <= 40); each quarter 25 - 10 - (5 + 2) - 1 = 7 (7 <= 10). 28 / 70.
+    assert (got.kind, got.value) == (Kind.ANNUAL, pytest.approx(0.4))
+    assert [(g.key.start, g.key.end) for g in got.guards] == [
+        (FY_START, FY_END),
+        ("2016-10-01", FY_END),
+        ("2016-07-01", "2016-09-30"),
+        ("2016-04-01", "2016-06-30"),
+        ("2016-01-01", "2016-03-31"),
+    ]
+    assert OPEX not in {f.key.concept for f in got.facts}
+
+
+@pytest.mark.parametrize("tag", ["InterestAndDebtExpense", "InterestExpenseDebt"])
+def test_xint_star_falls_back_to_each_proxy_tag(tag: str) -> None:
+    term = _ope(_income(InterestExpense=None, **{tag: 5}))
+    assert term.value == Decimal(35) and tag in term.branches
+
+
+@pytest.mark.parametrize(
+    "witness",
+    [
+        "InterestExpense",
+        "InterestAndDebtExpense",
+        "InterestExpenseDebt",
+        "InterestExpenseBorrowings",
+        "InterestExpenseLongTermDebt",
+        "InterestExpenseRelatedParty",
+        "InterestExpenseOther",
+        "InterestExpenseDeposits",
+        "InterestCostsIncurred",
+        "InterestPaidNet",
+        "InterestPaid",
+    ],
+)
+def test_an_absent_xint_is_zero_unless_any_witness_overlaps(witness: str) -> None:
+    unwitnessed = _ope(_income(InterestExpense=None))
+    assert unwitnessed.value == Decimal(40) and any(b.startswith("zero_xint:") for b in unwitnessed.branches)
+    vetoed = _ope(_income(InterestExpense=None).fact(witness, 2, "k", H1_END, H1_START))
+    assert vetoed.status is TermStatus.ABSENT and any(b.startswith("veto_xint:") for b in vetoed.branches)
+
+
+def test_an_annual_interest_fact_vetoes_a_quarter_and_stale_witnesses_do_not() -> None:
+    shard = _quarters(Shard())
+    _quarter_rows(shard, "Revenues", (30, 30, 30, 30))
+    _quarter_rows(shard, "CostOfRevenue", (10, 10, 10, 10))
+    _quarter_rows(shard, SGA, (5, 5, 5, 5))
+    assert _ope(shard, Kind.QUARTERLY).value == Decimal(60)
+    shard.fact("InterestPaid", 8, "k", FY_END, FY_START)
+    assert _ope(shard, Kind.QUARTERLY).status is TermStatus.ABSENT
+    corrected = _income(InterestExpense=None, InterestPaid=2).filing("ka", "2017-03-10", "10-K/A")
+    corrected.fact("InterestPaid", 0, "ka", FY_END, FY_START)
+    assert _ope(corrected).value == Decimal(40)
+    late = _income(InterestExpense=None).filing("ka", DECIDED.isoformat(), "10-K/A")
+    late.fact("InterestPaid", 2, "ka", FY_END, FY_START)
+    assert _ope(late).value == Decimal(40)
+
+
+def test_cogs_star_reads_excluding_dda_first_then_goods_plus_services() -> None:
+    excl = "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization"
+    assert _ope(_income(**{excl: 30})).value == Decimal(45)  # 100 - 30 - 20 - 5; CostOfRevenue 40 not read
+    both = _ope(_income(CostOfRevenue=None, CostOfGoodsSold=25, CostOfServices=15))
+    assert both.value == Decimal(35) and "cogs_goods_plus_services" in both.branches  # 100 - (25 + 15) - 20 - 5
+    goods_excl = _income(CostOfRevenue=None, CostOfGoodsSold=25, CostOfServices=15)
+    goods_excl.fact("CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization", 20, "k", FY_END, FY_START)
+    assert _ope(goods_excl).value == Decimal(40)  # 100 - (20 + 15) - 20 - 5
+    goods_only = _ope(_income(CostOfRevenue=None, CostOfGoodsSold=40))
+    assert goods_only.value == Decimal(35) and any(b.startswith("zero_cogs_services:") for b in goods_only.branches)
+    services_only = _ope(_income(CostOfRevenue=None, CostOfServices=40))
+    assert services_only.value == Decimal(35) and any(b.startswith("zero_cogs_goods:") for b in services_only.branches)
+    vetoed = _income(CostOfRevenue=None, CostOfGoodsSold=40).fact("CostOfServices", 7, "k", H1_END, H1_START)
+    assert _ope(vetoed).status is TermStatus.ABSENT
+    goods_vetoed = _income(CostOfRevenue=None, CostOfServices=40).fact("CostOfGoodsSold", 7, "k", H1_END, H1_START)
+    assert _ope(goods_vetoed).status is TermStatus.ABSENT
+    # No cost-of-sales tag: COGS* is absent, not zero (the rejected branch).
+    assert _ope(_income(CostOfRevenue=None)).status is TermStatus.ABSENT
+
+
+def test_gp_star_is_gp_else_sale_minus_cogs_star_per_period() -> None:
+    gp = characteristic("gp_at", _income(GrossProfit=70).view(DECIDED), date(2017, 4, 30), None)
+    assert gp.value == pytest.approx(0.7) and "GP" in gp.branches
+    parts = _income(CostOfRevenue=None, CostOfGoodsSold=25, CostOfServices=15)
+    got = characteristic("gp_at", parts.view(DECIDED), date(2017, 4, 30), None)
+    assert got.value == pytest.approx(0.6) and "cogs_goods_plus_services" in got.branches  # (100 - 40) / 100
+    shard = _quarters(Shard())
+    _quarter_rows(shard, "GrossProfit", (20, 20, None, None))
+    _quarter_rows(shard, "Revenues", (None, None, 30, 30))
+    _quarter_rows(shard, "CostOfRevenue", (None, None, 10, 10))
+    assert period_flow(gp_unit, shard.view(DECIDED), FY, Kind.QUARTERLY).value == Decimal(80)  # 20 x 2 + 20 x 2
+    # No annual GP or sale*: the TTM is the reading. 80 / Assets 100.
+    ttm = characteristic("gp_at", shard.view(DECIDED), date(2017, 4, 30), None)
+    assert (ttm.value, ttm.kind) == (pytest.approx(0.8), Kind.QUARTERLY)
+
+
+@pytest.mark.parametrize(
+    ("changes", "rejected"),
+    [
+        ({}, "Revenues"),
+        ({}, "CostOfRevenue"),
+        ({}, SGA),
+        ({}, "InterestExpense"),
+        ({RD_INCL: 4}, RD_INCL),
+        ({RD_EXCL: 4}, RD_SOFT),
+        ({SGA: None, "GeneralAndAdministrativeExpense": 10}, "GeneralAndAdministrativeExpense"),
+        ({SGA: None, "GeneralAndAdministrativeExpense": 10}, "SellingAndMarketingExpense"),
+        ({"CostOfRevenue": None, "CostOfGoodsSold": 40}, "CostOfServices"),
+        ({"CostOfRevenue": None, "CostOfServices": 40}, "CostOfGoodsSold"),
+        ({"Revenues": None, "GrossProfit": 60}, "GrossProfit"),
+    ],
+)
+def test_a_blocked_part_blocks_the_period(changes: dict[str, object], rejected: str) -> None:
+    shard = _income(**changes).reject(rejected, "k", FY_END, FY_START)
+    assert _ope(shard).status is TermStatus.BLOCKED_BY_REJECTION
 
 
 # --------------------------------------------------------------------------- market equity

@@ -1284,6 +1284,24 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
      - **Full-population A/B against the canonical stage-A rows:** only `ope_be` and `gp_at` may change, plus the
        provenance pins; each must equal the adopted variant of a measurement re-run against the built bundle,
        exactly. Branch, imputed-zero, bound and veto counts go into the census.
+     - **Part 2 result (2026-10-05).** `factor_panel.py` holds the adopted rule (`Period`, `rd_read`, `bounded`,
+       `xsga_term`, `cogs_term`, `xint_term`, `ope_unit`, `gp_unit`, `period_flow`); the measurement script now
+       imports its tags from there. The bound's `OperatingExpenses` reads are stored as `guards` on the
+       characteristic, apart from `facts`, over every tested period as `vetoes` are; the key is written only where a
+       bound read something, so no other characteristic's row changes shape. When both `ope*` branches are
+       `absent`, their refusal labels and guard reads stay on the row, except those of a branch whose base had no
+       interval to test against. The census adds `veto_use` for `ope_be` and `gp_at`.
+       - Oracle: the adopted variant re-run against bundle B from a clean `eeec97b2` worktree (`m5B`) reproduces
+         m4's rows exactly (decompressed sha256 `9d7c05ec…0cba`), with 0 replay mismatches.
+       - A/B (`scripts/ab_3609_ope_gp.py`): 1,381,280 rows, 243,445 admitted, 0 failures, none adjudicated;
+         `ope_be` values 101,328 and `gp_at` 145,283, as measured.
+       - Census refusals (name-month labels): RD* 896,542, selling 120,689 and XINT* 1,384,332 evaluations, equal
+         to m4's period-evaluation counts. COGS goods 1,991, services 2,415 and the bound 41,366 are lower than
+         m4's, because the census keeps only refusals that left a period `absent`. m4 also counted refusals the GP
+         branch rescued, and bound refusals tested without a base interval.
+       - Cross-source: every fact behind MSFT's and AAPL's `ope_be` and `gp_at` at 2019-06-30 equals SEC
+         `companyconcept` on accession, start and end. The ratios recomputed from SEC's values equal the stored
+         ones: MSFT 0.38406, AAPL 0.54774.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
    - the `DeclaredTrial` row;
    - the declared run;
