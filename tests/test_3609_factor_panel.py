@@ -87,10 +87,19 @@ class Shard:
         )
         return self
 
-    def reject(self, concept: str, accn: str, end: str, start: str | None = None, *, unit: str = "USD") -> Shard:
+    def reject(
+        self,
+        concept: str,
+        accn: str,
+        end: str,
+        start: str | None = None,
+        *,
+        taxonomy: str = "us-gaap",
+        unit: str = "USD",
+    ) -> Shard:
         self.rejections.append(
             {
-                "taxonomy": "us-gaap",
+                "taxonomy": taxonomy,
                 "concept": concept,
                 "unit": unit,
                 "start": start,
@@ -370,6 +379,14 @@ def test_me_falls_back_to_the_balance_sheet_count_with_acceptance_basis() -> Non
     _cover(shard, "k", "2015-01-30", 999)  # a comparative before the period end: not a cover count
     me = market_equity(shard.view(date(2017, 4, 28)), Decimal(2), [SplitStamp(date(2017, 3, 1), Decimal(2))])
     assert (me.shares_scope, me.basis, me.value) == ("balance_sheet", date(2017, 2, 20), Decimal(200))
+
+
+def test_rejected_share_context_after_the_decision_never_outranks_a_valid_count() -> None:
+    shard = _balance(Shard().filing("k", "2017-02-20", "10-K"), "k", "2016-12-31")
+    _cover(shard, "k", "2017-02-10", 50)
+    shard.reject("EntityCommonStockSharesOutstanding", "k", "2207-01-01", taxonomy="dei", unit="shares")
+    me = market_equity(shard.view(date(2017, 4, 28)), Decimal(2), [])
+    assert (me.missing, me.value) == (None, Decimal(100))
 
 
 def test_me_takes_no_fallback_when_the_cover_count_is_blocked() -> None:

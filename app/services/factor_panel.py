@@ -650,7 +650,8 @@ def _share_candidates(
     view: CikView, taxonomy: str, concept: str, decision: date, *, cover: bool
 ) -> list[tuple[date, str, str]]:
     """(context date, acceptance, accn) per public item; cover counts on or after the filing's period end,
-    balance-sheet counts at exactly it."""
+    balance-sheet counts at exactly it. A context after s(M) is a count as of no knowable date: a rejected
+    row dated in the far future would otherwise outrank every later valid count for good."""
     read = view.prefix(taxonomy, concept)
     floor = add_months(decision, -MAX_SHARES_AGE_MONTHS)
     out: list[tuple[date, str, str]] = []
@@ -658,7 +659,7 @@ def _share_candidates(
         if row["unit"] != SHARES or row["start"] is not None or not view.role_accession(row["accn"]):
             continue
         context, anchor = date.fromisoformat(row["end"]), view.anchors[row["accn"]]
-        if (context >= anchor if cover else context == anchor) and context >= floor:
+        if (context >= anchor if cover else context == anchor) and floor <= context <= decision:
             out.append((context, row["acceptance"], row["accn"]))
     return out
 
