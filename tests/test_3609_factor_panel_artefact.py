@@ -131,3 +131,69 @@ def test_every_value_read_in_the_builder_carries_the_hold_out_bound() -> None:
     assert {"_DAILY_SQL", "_DECISION_BARS_SQL", "_SNAPSHOT_SQL", "_SPLITS_SQL", "_SPY_SESSIONS_SQL"} <= set(reads)
     unbounded = sorted(name for name, sql in reads.items() if name not in counts_only and "%(bound)s" not in sql)
     assert unbounded == []
+
+
+def _fake_artefact(tmp_path: Path) -> tuple[Path, str]:
+    import json
+
+    from scripts.build_3609_factor_panel import BUNDLE, LINKAGE, MANIFEST_SCHEMA, REFERENCE
+
+    out = tmp_path / "artefact"
+    (out / "inputs").mkdir(parents=True)
+    write_gz_lines(out / "inputs" / Frozen.SESSIONS, ["2019-01-02"])
+    write_gz_lines(out / "rows.jsonl.gz", [{"M": "2019-01-31"}])
+    (out / "census.json").write_text("{}\n")
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "pinned_manifests": {
+            "pit_fundamentals_3360": BUNDLE[1],
+            "security_linkage_3361": LINKAGE[1],
+            "reference_3609": REFERENCE[1],
+        },
+        "inputs": {f"inputs/{Frozen.SESSIONS}": sha256_file(out / "inputs" / Frozen.SESSIONS)},
+        "rows": {
+            "path": "rows.jsonl.gz",
+            "sha256": sha256_file(out / "rows.jsonl.gz"),
+            "content_sha256": gz_content_sha256(out / "rows.jsonl.gz"),
+        },
+        "census": {"path": "census.json", "sha256": sha256_file(out / "census.json")},
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest))
+    return out, sha256_file(out / "manifest.json")
+
+
+def test_verify_artefact_accepts_an_intact_artefact(tmp_path: Path) -> None:
+    from scripts.build_3609_factor_panel import verify_artefact
+
+    out, digest = _fake_artefact(tmp_path)
+    assert verify_artefact(out, digest)["rows"]["path"] == "rows.jsonl.gz"
+
+
+@pytest.mark.parametrize(
+    ("target", "match"),
+    [
+        ("inputs/spy_sessions.jsonl.gz", "frozen input digest"),
+        ("rows.jsonl.gz", "published rows"),
+        ("census.json", "published census"),
+    ],
+)
+def test_verify_artefact_refuses_a_replaced_file(tmp_path: Path, target: str, match: str) -> None:
+    from scripts.build_3609_factor_panel import verify_artefact
+
+    out, digest = _fake_artefact(tmp_path)
+    (out / target).unlink()
+    if target.endswith(".gz"):
+        write_gz_lines(out / target, ["tampered"])
+    else:
+        (out / target).write_text('{"tampered": true}\n')
+    with pytest.raises(PanelError, match=match):
+        verify_artefact(out, digest)
+
+
+def test_verify_artefact_refuses_an_unlisted_input(tmp_path: Path) -> None:
+    from scripts.build_3609_factor_panel import verify_artefact
+
+    out, digest = _fake_artefact(tmp_path)
+    (out / "inputs" / "extra.json").write_text("{}")
+    with pytest.raises(PanelError, match="file list"):
+        verify_artefact(out, digest)

@@ -947,8 +947,8 @@ def publish(root: Path, formations: Sequence[date]) -> Path:
     return out
 
 
-def replay(artefact: Path, manifest_sha256: str, stem: Path) -> bool:
-    """Rebuild a published artefact from its own ``inputs/`` under the current code; True when rows and census match."""
+def verify_artefact(artefact: Path, manifest_sha256: str) -> dict[str, Any]:
+    """The artefact's manifest, after checking its digest, schema, pins, inputs and published outputs."""
     if sha256_file(artefact / MANIFEST_FILE) != manifest_sha256:
         raise PanelError(f"artefact manifest digest moved: {artefact}")
     manifest = json.loads((artefact / MANIFEST_FILE).read_bytes())
@@ -963,6 +963,18 @@ def replay(artefact: Path, manifest_sha256: str, stem: Path) -> bool:
     for relative, digest in manifest["inputs"].items():
         if sha256_file(artefact / relative) != digest:
             raise PanelError(f"frozen input digest moved: {relative}")
+    # The published outputs too: a match against the manifest proves nothing if the files beside it were replaced.
+    for key in ("rows", "census"):
+        if sha256_file(artefact / manifest[key]["path"]) != manifest[key]["sha256"]:
+            raise PanelError(f"published {key} file digest moved: {manifest[key]['path']}")
+    if gz_content_sha256(artefact / manifest["rows"]["path"]) != manifest["rows"]["content_sha256"]:
+        raise PanelError("published rows content digest moved")
+    return manifest
+
+
+def replay(artefact: Path, manifest_sha256: str, stem: Path) -> bool:
+    """Rebuild a published artefact from its own ``inputs/`` under the current code; True when rows and census match."""
+    manifest = verify_artefact(artefact, manifest_sha256)
     rows_path, census_path = stem.with_suffix(".jsonl.gz"), stem.with_suffix(".census.json")
     rows_path.unlink(missing_ok=True)
     census_path.unlink(missing_ok=True)
