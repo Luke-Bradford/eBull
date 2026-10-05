@@ -40,8 +40,11 @@ import psycopg
 from app.config import settings
 from app.services.factor_panel import (
     ACCOUNTING_CHARACTERISTICS,
+    DO_BRANCHES,
+    FALLBACK_LABELS,
     REIT_SIC,
     STAGE_A_LAST_FORMATION,
+    VETO,
     Check,
     CikView,
     MarketEquity,
@@ -648,6 +651,7 @@ def build_cik_rows(
                     "kind": None if got.kind is None else got.kind.value,
                     "branches": list(got.branches),
                     "periods_tested": got.candidates_tested,
+                    "vetoes": list(got.vetoes),
                     "facts": [f.to_json() for f in got.facts],
                 }
             yield {**row, "exclusion": None, "characteristics": chars}
@@ -676,7 +680,12 @@ class Census:
         self.chars_me: dict[str, dict[str, dict[str, float]]] = defaultdict(
             lambda: defaultdict(lambda: defaultdict(float))
         )
+        #: Per characteristic, name-months per branch label; a label's ``:``-suffix (an interval) is dropped. Only the
+        #: ``zero_*`` and ``veto_*`` labels carry one, so only their keys differ from slice 3d-iv part 2's census,
+        #: which keyed each interval apart; ``branch_use`` is read by no code (``git grep branch_use``).
         self.branches: dict[str, Counter[str]] = defaultdict(Counter)
+        #: Amendment 2b's ``ni_me`` / ``ocf_me`` counts (spec §"Slices" 3d-iv), in the measurement's terms.
+        self.fallback: dict[str, Counter[str]] = defaultdict(Counter)
         self.kinds: dict[str, Counter[str]] = defaultdict(Counter)
         self.sic_status: Counter[str] = Counter()
         self.shares_scope: Counter[str] = Counter()
@@ -724,9 +733,12 @@ class Census:
             outcome = got["missing"] or "value"
             self.chars[m][name][outcome] += 1
             self.chars_me[m][name][outcome] += me
-            self.branches[name].update(set(got["branches"]))
+            labels = {b.split(":", 1)[0] for b in got["branches"]}
+            self.branches[name].update(labels)
             if got["missing"] is None:
                 self.kinds[name][got["kind"]] += 1
+            if name in FALLBACK_LABELS:
+                self._add_fallback(name, got, labels)
         prices = row["prices"]
         for name in PRICE_CHARACTERISTICS:
             outcome = prices[name]["missing"] or "value"
@@ -743,6 +755,24 @@ class Census:
             self.diagnostics_me[m][kind][outcome] += me
         if prices["daily_monthly"] == DailyMonthly.UNEXPLAINED:
             self.unexplained_daily_monthly.append({"M": m, "series_id": row["series_id"], "symbol": label})
+
+    def _add_fallback(self, name: str, got: Mapping[str, Any], labels: set[str]) -> None:
+        """Vetoes on every admitted name-month; branch and imputed-zero counts on values that use the fallback."""
+        primary, fallback, companions = FALLBACK_LABELS[name]
+        tally = self.fallback[name]
+        for companion, n in Counter(v.split(":", 1)[0].removeprefix(VETO) for v in got["vetoes"]).items():
+            tally[f"veto evaluations: {companion}"] += n
+            tally[f"name-months with a veto: {companion}"] += 1
+        if got["missing"] is not None or fallback not in labels:
+            return
+        tally["values using the fallback"] += 1
+        if primary in labels:
+            tally["TTM mixing primary and fallback quarters"] += 1
+        for companion in companions:
+            if f"zero_{companion}" in labels:
+                tally[f"imputed zero: {companion}"] += 1
+        for label in labels & set(DO_BRANCHES):
+            tally[f"DO branch: {label}"] += 1
 
     def _add_checks(self, row: Mapping[str, Any], m: str, me: float | None, admitted: bool, label: str) -> None:
         """Amendment 2 census: per-check outcomes, and per removal reason its rows, names and raw-ME share."""
@@ -804,6 +834,7 @@ class Census:
             },
             "characteristics_total_counts": {name: dict(sorted(c.items())) for name, c in sorted(pooled.items())},
             "branch_use": {name: dict(sorted(c.items())) for name, c in sorted(self.branches.items())},
+            "fallback_use": {name: dict(sorted(c.items())) for name, c in sorted(self.fallback.items())},
             "period_kind": {name: dict(sorted(c.items())) for name, c in sorted(self.kinds.items())},
             "sic_status": dict(sorted(self.sic_status.items())),
             "shares_scope": dict(sorted(self.shares_scope.items())),

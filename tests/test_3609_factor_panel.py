@@ -473,6 +473,36 @@ def test_an_absent_companion_is_zero_unless_a_public_non_zero_witness_overlaps()
     assert _ni(late).value == Decimal(50)
 
 
+def test_a_veto_is_labelled_and_recorded_when_the_walk_moves_past_its_period() -> None:
+    veto = f"veto_do:{FY_START}:{FY_END}:{DO_BEFORE_TAX}"
+    shard = _annual(NetIncomeLoss=50, **{DO_BEFORE_TAX: 4}).filing("k15", "2016-02-20", "10-K")
+    shard.fact("Assets", 100, "k15", "2015-12-31").fact("NetIncomeLoss", 20, "k15", "2015-12-31", "2015-01-01")
+    assert veto in _ni(shard).branches
+    got = characteristic("ni_me", shard.view(DECIDED), date(2017, 4, 30), ME)
+    assert (got.period_end, got.vetoes) == (date(2015, 12, 31), (veto,))
+    assert veto not in got.branches
+    # A vetoed quarter ends the TTM chain, and its label survives the chain.
+    quarterly = _each_quarter(_quarters(Shard()), OCF_CONTINUING, 3)
+    quarterly.fact(DO_BEFORE_TAX, 2, "q3", "2016-09-30", "2016-07-01")
+    ttm = _ocf(quarterly, Kind.QUARTERLY)
+    assert ttm.status is TermStatus.ABSENT
+    assert f"veto_ocf_disc:2016-07-01:2016-09-30:{DO_BEFORE_TAX}" in ttm.branches
+    # No veto, no label.
+    assert characteristic("ni_me", _annual(NetIncomeLoss=50).view(DECIDED), date(2017, 4, 30), ME).vetoes == ()
+
+
+def test_a_vetoed_quarter_is_recorded_once_per_tested_period_that_reaches_it() -> None:
+    # The m6 measurement counts a refused zero per period evaluated; the census and the A/B count the same way.
+    shard = _each_quarter(_quarters(Shard()), OCF_CONTINUING, 3)
+    shard.filing("q1b", "2017-05-01", "10-Q").fact("Assets", 100, "q1b", "2017-03-31")
+    shard.fact(OCF_CONTINUING, 3, "q1b", "2017-03-31", "2017-01-01")
+    shard.fact(DO_BEFORE_TAX, 2, "q3", "2016-09-30", "2016-07-01")
+    got = characteristic("ocf_me", shard.view(date(2017, 7, 31)), date(2017, 7, 31), ME)
+    # TTM periods ending 2017-03-31, 2016-12-31 and 2016-09-30 each reach Q3 2016; none qualifies.
+    veto = f"veto_ocf_disc:2016-07-01:2016-09-30:{DO_BEFORE_TAX}"
+    assert (got.missing, got.vetoes) == (Missing.NO_PERIOD, (veto, veto, veto))
+
+
 def test_a_blocked_base_or_companion_blocks_the_period() -> None:
     base = _annual(**{XI: 3}).reject("NetIncomeLoss", "k", FY_END, FY_START)
     assert _ni(base).status is TermStatus.BLOCKED_BY_REJECTION
