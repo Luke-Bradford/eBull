@@ -86,3 +86,17 @@ def test_the_evidence_line_carries_the_count_used_and_its_cause() -> None:
     assert line["checks"] == '{"basis": "fail", "turnover": "pass"}'
     assert csv_row("restored:shares_discontinuity", _row())["cause"].startswith("shares_discontinuity no longer")
     assert csv_row("restored:shares_scale_conflict", _row())["cause"].startswith("DQC_0095 conflict now resolved")
+
+
+def test_a_lifted_reason_may_give_way_to_a_later_check() -> None:
+    # 3d-iii: check 2 no longer fails, check 3 does; the row stays out under its new reason.
+    before = {**_row(value=None, missing="shares_scale_conflict", raw="100"), "exclusion": "shares_scale_conflict"}
+    del before["characteristics"]
+    after = {**before, "me": {**before["me"], "missing": "shares_turnover_implausible"}}
+    after["exclusion"] = "shares_turnover_implausible"
+    verdict = "reason_changed:shares_scale_conflict->shares_turnover_implausible"
+    assert classify(before, after) == verdict
+    assert csv_row(verdict, after)["cause"].startswith("shares_scale_conflict no longer applies")
+    assert classify(before, {**after, "exclusion": "shares_scale_conflict"}) == "other:reason_changed_admitted_differently"
+    moved = {**after, "me": {**after["me"], "shares": "7"}}
+    assert classify(before, moved) == "other:reason_changed_me_provenance_changed"

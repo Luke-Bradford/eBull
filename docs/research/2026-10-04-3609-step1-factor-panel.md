@@ -274,15 +274,27 @@ the checks repairs a count, except the recovery in check 2.
    - **What is compared:**
      - for every accession the cover read returned (`FactUse.accns`), that accession's `CommonStockSharesOutstanding`
        at its own period anchor, read through the value state machine;
-     - the anchor count on its SAB Topic 4C basis, the comparator accession's acceptance (Amendment 2.2, below);
-     - only positive `VALUE` reads. Anything else leaves the check `untested`. The check passes when at least one
-       comparator was read and none conflicts; an accession without a usable comparator adds nothing.
-   - **What differs from the rule as published:**
-     - companyfacts drops dimensional facts, so only undimensioned facts are compared.
+     - the anchor count on the comparator accession's acceptance date, which stands in for SAB Topic 4C's issuance
+       date as it does for the fallback (Amendment 2.2, below);
+     - only positive `VALUE` reads. Any public rejection of the comparator's key blocks it, whatever its date; this
+       is conservative, and the check goes `untested` rather than reading around a rejection.
+   - **Outcome:** `fail` if any comparator conflicts, `pass` if at least one agrees and none conflicts, and
+     `untested` only when no usable comparator exists. A pass is agreement among the usable comparators, not
+     coverage of every accession.
+   - **Published DQC_0095 versus this adaptation.**
+     - From the rule: the two concepts, one filing, and the 100× tolerance.
+     - Ours:
+       - only undimensioned facts, since companyfacts drops dimensional ones;
+       - the comparator at the accession's own period anchor;
+       - positive `VALUE` reads only;
+       - rejection blocking;
+       - aggregation over the accessions one read returns;
+       - the acceptance basis;
+       - recovery against a reference.
    - **Recovery.** DQC_0095 does not say which side is wrong, and the data errs in both directions: AMTX's cover
      count is right and its balance-sheet count is in thousands, while GRMN is the reverse. If check 4 holds a
-     reference (below), the side within its 100× tolerance is used, unless both or neither are within it. All
-     conflicting comparators must carry one count (Amendment 2.2). A recovered row is flagged `shares_scope=dqc_recovered:<side>`; it is not verified, so it never becomes a
+     reference (below), the side within its 100× tolerance is used, unless both or neither are within it. Every
+     usable comparator must conflict and all must carry one count (Amendment 2.2). A recovered row is flagged `shares_scope=dqc_recovered:<side>`; it is not verified, so it never becomes a
      reference. If there is no reference, ME is missing.
 3. **Trailing dollar volume above 10 × ME → `shares_turnover_implausible`.**
    - **The metric:** the census liquidity measure (mean `close × volume` over admitted bars in the 126 sessions
@@ -441,27 +453,59 @@ slice-3d rows by `PYTHONPATH=. uv run python -m scripts.ab_3609_share_checks --a
   months, the stated gap.
 
 **Amendment 2.2 (2026-10-05): check 2's comparator basis and recovery.** Codex checkpoint 1 on Amendment 2.1 found
-these in Amendment 2's existing check 2 (findings 16–19 and 27).
+these in Amendment 2's existing check 2 (findings 16–19 and 27). Amendment 2.2's own checkpoint 1 is logged below.
 - **Comparator basis (16).** SAB Topic 4C requires a split effective before the financial statements are issued to
-  be reflected retroactively. A balance-sheet count therefore stands on its accession's acceptance date, as the
-  fallback's already does. Amendment 2 multiplied it by the stamps in (anchor, cover date] instead, which counted a
-  split before the filing twice. A 10:1 split then shrank a ×1,000 cover error to exactly 100× and passed it.
-  - The anchor count is now multiplied by the stamps in (acceptance, cover date]. That set is empty whenever the
-    cover date precedes the filing, so the comparison is of raw counts, as DQC_0095 publishes it with no date
-    condition.
+  be reflected retroactively. The acceptance date stands in for issuance, as it already does for the fallback (an
+  approximation, labelled in check 1). Amendment 2 instead multiplied the comparator by the stamps in
+  (anchor, cover date], which counted a split before the filing twice. A 10:1 split shrank a ×1,000 cover error to
+  exactly 100× and passed it, and a 1:10 reverse split did the same to a count in thousands.
+  - The comparator is now multiplied by the stamps in (acceptance, cover date]. That set is empty whenever the cover
+    date is on or before the filing, which is what a cover count is, so the comparison is of raw counts, as DQC_0095
+    publishes it.
+  - A cover dated after its own filing is malformed. It is compared on consistent bases rather than refused, and the
+    rebuild's A/B lists any row it changes.
   - A split between the cover date and the filing already fails check 1.
-- **Recovery with several comparators (17).** Amendment 2 recovered only with exactly one conflicting comparator.
-  It now recovers when every conflicting comparator carries the same count, and uses the latest-filed of them.
-  Comparators that disagree with each other leave the conflict unresolved.
-  - One read returns several accessions only when they share an acceptance timestamp (`value_as_of` keeps the
-    events at the latest acceptance), so this case is a co-filed pair.
+- **Recovery (17).** Amendment 2 recovered only with exactly one conflicting comparator. It now recovers when every
+  usable comparator conflicts and they all carry one count. A comparator that agrees with the cover, or comparators
+  that disagree with each other, leave the conflict unresolved.
+  - One read returns several accessions only when they share an acceptance timestamp (`value_as_of` keeps the events
+    at the latest acceptance), so these comparators form a co-filed set. The highest accession number supplies the
+    recovered fact, for a deterministic provenance.
 - **Recovered basis (18).** A recovered balance-sheet count takes its own accession's acceptance as its basis. That
-  equals the cover read's acceptance by the same invariant, so this changes no row; the code no longer relies on it.
-- **Partial coverage (19)** is settled in check 2's text above. The check passes when at least one comparator was
-  read and none conflicts. A filing without a usable comparator is no evidence either way, and checks 3 and 4 still
-  apply.
-- **Census (27).** The per-reason "share of final ME" was zero by construction. The census already printed only
-  the raw-ME share, and the text above now says so.
+  equals the cover read's acceptance by the same invariant, so this changes no row; it is a provenance assertion,
+  not a behavioural change, and has no revert probe.
+- **Partial coverage (19)** is settled in check 2's outcome text above.
+- **Census (27).** The per-reason "share of final ME" was zero by construction. The census already printed only the
+  raw-ME share, and the text above now says so.
+- **Known limits.**
+  - An amendment that repeats a pre-split balance-sheet count after a split is put on the new filing's date and is
+    read as post-split. Whether a re-filed statement must be restated is not settled by SAB Topic 4C's text.
+  - A later co-filed set displaces the original filing for check 2, since the read keeps only the latest acceptance.
+    If the amendment has no usable comparator, the original's conflict is no longer tested, and the check is
+    `untested`.
+
+**Slice 3d-iii result (2026-10-05).** A rebuild on the proof artefact's frozen inputs is compared with the 3d-ii rows
+by `scripts/ab_3609_share_checks.py`. Per-row evidence is in `docs/research/3609-slice3d-iii-check2-changes.csv`.
+- 1,381,227 rows are unchanged; none is unexplained.
+- Every changed row belongs to one of nine names, and each has a reverse-split stamp in the window: BLIN, CEI, DCTH,
+  EGLE, INPX, PHIO, SONN, SRRA and TARA. Amendment 2 had applied the reverse split to balance-sheet counts already
+  restated for it, which made false scale conflicts.
+
+  | verdict | rows |
+  |---|---|
+  | restored from `shares_scale_conflict` | 27 |
+  | restored from `shares_discontinuity` (CEI: a restored count became the reference) | 5 |
+  | check 2 now passes, and a later check removes the row (`shares_scale_conflict` → `shares_discontinuity` 16, → `shares_turnover_implausible` 2) | 18 |
+  | removed: `shares_discontinuity` | 3 |
+
+- **The three removals are clean counts:** DCTH's 9,007,952 at 2019-02 .. 2019-04. DCTH's restored 2018-02 count
+  (2,591,509) became the reference. Its genuine dilution before the 1:500 split of 2018-05-02 then put the later count
+  1,738× above it, split-adjusted. This is check 4's stated limit on real changes beyond 100×, which a correct
+  reference exposed; Amendment 2.2's comparison is not its cause. The rows were admitted before only because no
+  reference was within 15 months. DCTH's Intrader close is a flat 0.0999 through the period.
+- **Admitted rows** go from 243,416 to 243,445. Check 2 `fail` falls from 350 to 305.
+- **Recovered rows** stay at 996. The co-filed recovery rules (17) change no row in this population.
+- **Admitted ME above $1T** is unchanged: AAPL, MSFT, AMZN, GOOG and PTP.
 
 ## Accounting
 
@@ -855,10 +899,14 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
          rejected blocks adoption.**
      - `scripts/ab_3609_share_checks.py` gains a `--csv` writer, and the slice-3d evidence CSV is regenerated with it.
    - **3d-iii (Amendment 2.2): check 2's comparator basis and recovery.**
-     - **Pure tests:**
-       - a ×1,000 cover count against a post-split balance-sheet count fails check 2;
-       - co-filed comparators carrying one count recover, and comparators that disagree do not;
-       - each is revert-probed.
+     - **Pure tests, each revert-probed:**
+       - a ×1,000 cover count against a balance-sheet count already restated for a 10:1 split fails check 2;
+       - a count in thousands against one restated for a 1:10 reverse split fails;
+       - with a reference, co-filed comparators carrying one count recover to the highest accession number;
+       - comparators that disagree with each other do not recover, and neither does a conflict when another
+         comparator agrees with the cover.
+     - The existing tests keep recovery to each side, no recovery without a reference and `untested` with no usable
+       comparator. Finding 18 is a provenance assertion, not probed.
      - **Full-population A/B against the 3d-ii rows,** same frozen inputs and the same classes and refusal as 3d-ii.
        Every changed row is listed in an evidence CSV and adjudicated.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
@@ -1012,3 +1060,16 @@ None rebutted.
   - 18: a recovered balance-sheet count takes the cover read's acceptance;
   - 19: partial comparator coverage;
   - 27: a removed row's share of final ME is zero by construction.
+
+**Amendment 2.2, checkpoint 1 (12 findings).**
+- **Applied to the rule:**
+  - 3: no recovery when any comparator agrees with the cover;
+  - 9: the co-filed tie-break is the highest accession number.
+- **Applied to the text:**
+  - 1: acceptance is labelled the stand-in for issuance;
+  - 2, 5: the re-filed pre-split count and the co-filed displacement are known limits;
+  - 4: rejection blocking is stated as conservative;
+  - 6: a cover dated after its filing is stated;
+  - 7: the published-rule versus adaptation inventory;
+  - 8: the outcome definition;
+  - 10–12: the acceptance cases.
