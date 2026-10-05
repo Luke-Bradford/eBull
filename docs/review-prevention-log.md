@@ -12000,3 +12000,17 @@ neighbouring container and match it.**
   `::test_an_absent_companion_is_zero_unless_a_public_non_zero_witness_overlaps` (all revert-probed);
   `docs/research/3609-slice-3d-iv-adjudicated.csv`. The
   `engineering/pre-flight-review.md` text is parked on #2403, since a loop session cannot write `.claude/**`.
+
+### An XBRL tag named like a Compustat item is not that item's scope (#3609)
+
+- Failure: the slice-2 mapping read Compustat XSGA from `SellingGeneralAndAdministrativeExpense` alone. Compustat's
+  `xsga` includes R&D (net of in-process R&D), so every filer presenting R&D on its own line had `ope*` overstated
+  by its R&D, and filers presenting G&A, selling and R&D separately (MSFT) had no `ope*`. Found by Amendment 2c's
+  component census, not by review: `ope_be` covered 46,086 of 243,445 admitted name-months. Codex checkpoint 1 on the
+  amendment then found the measurement repeating the interval class above (parts summed over different intervals)
+  and a guard that passed when its own input was blocked.
+- Prevention: before mapping a Compustat item to a tag, cite the item's scope from a source (manual, or a paper
+  quoting it), not the tag's label, and list what the item includes that the tag does not. A guard that cannot be
+  evaluated because its input is blocked blocks; only an absent input is "unchecked", and both are counted.
+- Enforced in: `docs/research/2026-10-04-3609-step1-factor-panel.md` (Amendment 2c, its source rule and slice
+  3d-v's hand-computed cases); `scripts/measure_3609_amendment_2c.py` (`Period.aligned`, `bounded`).

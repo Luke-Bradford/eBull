@@ -1,0 +1,587 @@
+{
+ "admitted_rows": 243445,
+ "bundle_sha256": "f178b1e4707605c89517ed59ab7b05741ce6d22d6559bb8e5060836ecd79db53",
+ "counts": {
+  "decompositions (annual anchors, descriptive)": {
+   "opex vs sga+rd: opex SMALLER": 230,
+   "opex vs sga+rd: opex larger": 1647,
+   "opex vs sga+rd: within": 1197,
+   "sga absent; opex vs ga+sell+rd: opex SMALLER": 207,
+   "sga absent; opex vs ga+sell+rd: opex larger": 2000,
+   "sga absent; opex vs ga+sell+rd: within": 2880
+  },
+  "gp:r0": {
+   "  values with CostOfGoodsSold": 10576,
+   "missing:aged_out": 7282,
+   "missing:ambiguous": 92,
+   "missing:blocked_by_rejection": 9,
+   "missing:form_mismatch": 143,
+   "missing:no_period": 95239,
+   "transition missing:aged_out -> value": 21,
+   "transition missing:ambiguous -> missing:aged_out": 13,
+   "transition missing:form_mismatch -> missing:aged_out": 13,
+   "transition value -> missing:aged_out": 3,
+   "transition value -> missing:blocked_by_rejection": 6,
+   "value": 140680,
+   "value -> value: period changed": 382,
+   "value -> value: same period, value changed": 2563
+  },
+  "gp:r5": {
+   "  name-months with a refusal veto_cogs_goods": 273,
+   "  name-months with a refusal veto_cogs_services": 264,
+   "  values with CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": 1211,
+   "  values with CostOfGoodsSold": 10492,
+   "  values with CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization": 1819,
+   "  values with CostOfServices": 4845,
+   "  values with CostOfServicesExcludingDepreciationDepletionAndAmortization": 1281,
+   "  values with cogs_goods_plus_services": 15253,
+   "  values with zero_cogs_goods": 3141,
+   "  values with zero_cogs_services": 9247,
+   "missing:aged_out": 6923,
+   "missing:ambiguous": 92,
+   "missing:blocked_by_rejection": 9,
+   "missing:form_mismatch": 143,
+   "missing:no_period": 90995,
+   "transition missing:aged_out -> value": 1082,
+   "transition missing:ambiguous -> missing:aged_out": 13,
+   "transition missing:form_mismatch -> missing:aged_out": 13,
+   "transition missing:no_period -> missing:aged_out": 691,
+   "transition missing:no_period -> value": 3553,
+   "transition value -> missing:aged_out": 14,
+   "transition value -> missing:blocked_by_rejection": 6,
+   "value": 145283,
+   "value -> value: period changed": 1514,
+   "value -> value: same period, value changed": 4903
+  },
+  "gp_at stored": {
+   "missing:aged_out": 7274,
+   "missing:ambiguous": 105,
+   "missing:blocked_by_rejection": 3,
+   "missing:form_mismatch": 156,
+   "missing:no_period": 95239,
+   "value": 140668
+  },
+  "ope:adopted": {
+   "  name-months with a refusal veto_rd": 85,
+   "  name-months with a refusal veto_sell": 2,
+   "  name-months with a refusal veto_xint": 174,
+   "  values with CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": 1045,
+   "  values with CostOfGoodsSold": 18817,
+   "  values with CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization": 1467,
+   "  values with CostOfServices": 4339,
+   "  values with CostOfServicesExcludingDepreciationDepletionAndAmortization": 940,
+   "  values with InterestAndDebtExpense": 3428,
+   "  values with InterestExpenseDebt": 5453,
+   "  values with cogs_goods_plus_services": 22715,
+   "  values with gp_minus_xsga": 16183,
+   "  values with opex_checked": 38032,
+   "  values with opex_unchecked": 34799,
+   "  values with rd_excl_ipr": 2763,
+   "  values with rd_excluded_opex_bound": 1315,
+   "  values with rd_filed": 60838,
+   "  values with rd_filed_zero": 310,
+   "  values with rd_incl_ipr": 58374,
+   "  values with rd_software_filed": 1,
+   "  values with xsga_parts": 34494,
+   "  values with zero_cogs_goods": 2508,
+   "  values with zero_cogs_services": 17478,
+   "  values with zero_if_missing": 79972,
+   "  values with zero_rd": 40000,
+   "  values with zero_rd_software": 2762,
+   "  values with zero_sell": 8861,
+   "  values with zero_xint": 14821,
+   "missing:aged_out": 19820,
+   "missing:ambiguous": 377,
+   "missing:blocked_by_rejection": 15,
+   "missing:form_mismatch": 182,
+   "missing:no_period": 115873,
+   "missing:nonpositive_denominator": 5850,
+   "transition missing:aged_out -> missing:ambiguous": 4,
+   "transition missing:aged_out -> missing:form_mismatch": 7,
+   "transition missing:aged_out -> missing:no_period": 202,
+   "transition missing:aged_out -> missing:nonpositive_denominator": 513,
+   "transition missing:aged_out -> value": 5422,
+   "transition missing:ambiguous -> missing:aged_out": 83,
+   "transition missing:ambiguous -> missing:nonpositive_denominator": 7,
+   "transition missing:ambiguous -> value": 91,
+   "transition missing:form_mismatch -> missing:aged_out": 19,
+   "transition missing:form_mismatch -> value": 12,
+   "transition missing:no_period -> missing:aged_out": 11516,
+   "transition missing:no_period -> missing:ambiguous": 55,
+   "transition missing:no_period -> missing:blocked_by_rejection": 15,
+   "transition missing:no_period -> missing:nonpositive_denominator": 2696,
+   "transition missing:no_period -> value": 50032,
+   "transition missing:nonpositive_denominator -> missing:aged_out": 6,
+   "transition missing:nonpositive_denominator -> missing:no_period": 40,
+   "transition missing:nonpositive_denominator -> value": 84,
+   "transition value -> missing:aged_out": 177,
+   "transition value -> missing:ambiguous": 5,
+   "transition value -> missing:no_period": 137,
+   "transition value -> missing:nonpositive_denominator": 80,
+   "value": 101328,
+   "value -> value: period changed": 8247,
+   "value -> value: same period, value changed": 20458
+  },
+  "ope_be stored": {
+   "missing:aged_out": 14167,
+   "missing:ambiguous": 494,
+   "missing:form_mismatch": 206,
+   "missing:no_period": 179808,
+   "missing:nonpositive_denominator": 2684,
+   "value": 46086
+  }
+ },
+ "default_panel": [
+  {
+   "M": "2019-06-30",
+   "cik": "0000320193",
+   "gp:r0": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit",
+     "direct"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-29",
+    "value": 0.2674683385110203,
+    "vetoes": []
+   },
+   "gp:r5": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit",
+     "direct"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-29",
+    "value": 0.2674683385110203,
+    "vetoes": []
+   },
+   "gp_at": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit",
+     "direct"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-29",
+    "value": 0.2674683385110203,
+    "vetoes": []
+   },
+   "ope:adopted": {
+    "branches": [
+     "CostOfGoodsAndServicesSold",
+     "InterestExpense",
+     "ResearchAndDevelopmentExpense",
+     "RevenueFromContractWithCustomerExcludingAssessedTax",
+     "Revenues",
+     "SEQ",
+     "SellingGeneralAndAdministrativeExpense",
+     "StockholdersEquity",
+     "cogs_plus_xsga",
+     "direct",
+     "opex_checked",
+     "rd_filed",
+     "rd_incl_ipr",
+     "sale_minus_opex",
+     "xint_filed",
+     "ytd_difference",
+     "zero",
+     "zero_if_missing"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-29",
+    "value": 0.5477386082176907,
+    "vetoes": []
+   },
+   "ope_be": {
+    "branches": [
+     "CostOfGoodsAndServicesSold",
+     "InterestExpense",
+     "RevenueFromContractWithCustomerExcludingAssessedTax",
+     "Revenues",
+     "SEQ",
+     "SellingGeneralAndAdministrativeExpense",
+     "StockholdersEquity",
+     "direct",
+     "ytd_difference",
+     "zero",
+     "zero_if_missing"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-29",
+    "value": 0.6726919553489634,
+    "vetoes": []
+   },
+   "symbol": "AAPL"
+  },
+  {
+   "M": "2019-06-30",
+   "cik": "0001326380",
+   "gp:r0": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-02",
+    "value": 0.5707044482357886,
+    "vetoes": []
+   },
+   "gp:r5": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-02",
+    "value": 0.5707044482357886,
+    "vetoes": []
+   },
+   "gp_at": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-02",
+    "value": 0.5707044482357886,
+    "vetoes": []
+   },
+   "ope:adopted": {
+    "branches": [
+     "AT-LT",
+     "Assets",
+     "CostOfGoodsSold",
+     "DeferredTaxLiabilitiesNoncurrent",
+     "InterestExpense",
+     "Liabilities",
+     "RevenueFromContractWithCustomerExcludingAssessedTax",
+     "SellingGeneralAndAdministrativeExpense",
+     "TXDITC",
+     "cogs_goods_filed",
+     "cogs_goods_plus_services",
+     "cogs_plus_xsga",
+     "sale_minus_opex",
+     "xint_filed",
+     "zero",
+     "zero_cogs_services",
+     "zero_if_missing",
+     "zero_rd"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-02",
+    "value": 0.27142108807902415,
+    "vetoes": []
+   },
+   "ope_be": {
+    "branches": [
+     "AT-LT",
+     "Assets",
+     "CostOfGoodsSold",
+     "DeferredTaxLiabilitiesNoncurrent",
+     "InterestExpense",
+     "Liabilities",
+     "RevenueFromContractWithCustomerExcludingAssessedTax",
+     "SellingGeneralAndAdministrativeExpense",
+     "TXDITC",
+     "zero",
+     "zero_if_missing"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-02",
+    "value": 0.27142108807902415,
+    "vetoes": []
+   },
+   "symbol": "GME"
+  },
+  {
+   "M": "2019-06-30",
+   "cik": "0000354950",
+   "gp:r0": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-03",
+    "value": 0.8444878758266482,
+    "vetoes": []
+   },
+   "gp:r5": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-03",
+    "value": 0.8444878758266482,
+    "vetoes": []
+   },
+   "gp_at": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit"
+    ],
+    "kind": "annual",
+    "missing": null,
+    "period_end": "2019-02-03",
+    "value": 0.8444878758266482,
+    "vetoes": []
+   },
+   "ope:adopted": {
+    "branches": [
+     "CostOfRevenue",
+     "DeferredTaxLiabilitiesNoncurrent",
+     "InterestExpense",
+     "RevenueFromContractWithCustomerExcludingAssessedTax",
+     "SEQ",
+     "SellingGeneralAndAdministrativeExpense",
+     "StockholdersEquity",
+     "TXDITC",
+     "cogs_plus_xsga",
+     "sale_minus_opex",
+     "xint_filed",
+     "zero",
+     "zero_if_missing",
+     "zero_rd"
+    ],
+    "kind": "annual",
+    "missing": "nonpositive_denominator",
+    "period_end": "2019-02-03",
+    "value": null,
+    "vetoes": []
+   },
+   "ope_be": {
+    "branches": [
+     "CostOfRevenue",
+     "DeferredTaxLiabilitiesNoncurrent",
+     "InterestExpense",
+     "RevenueFromContractWithCustomerExcludingAssessedTax",
+     "SEQ",
+     "SellingGeneralAndAdministrativeExpense",
+     "StockholdersEquity",
+     "TXDITC",
+     "zero",
+     "zero_if_missing"
+    ],
+    "kind": "annual",
+    "missing": "nonpositive_denominator",
+    "period_end": "2019-02-03",
+    "value": null,
+    "vetoes": []
+   },
+   "symbol": "HD"
+  },
+  {
+   "M": "2019-06-30",
+   "cik": "0000019617",
+   "gp:r0": {
+    "branches": [],
+    "kind": null,
+    "missing": "no_period",
+    "period_end": null,
+    "value": null,
+    "vetoes": []
+   },
+   "gp:r5": {
+    "branches": [],
+    "kind": null,
+    "missing": "no_period",
+    "period_end": null,
+    "value": null,
+    "vetoes": []
+   },
+   "gp_at": {
+    "branches": [],
+    "kind": null,
+    "missing": "no_period",
+    "period_end": null,
+    "value": null,
+    "vetoes": []
+   },
+   "ope:adopted": {
+    "branches": [],
+    "kind": null,
+    "missing": "no_period",
+    "period_end": null,
+    "value": null,
+    "vetoes": []
+   },
+   "ope_be": {
+    "branches": [],
+    "kind": null,
+    "missing": "no_period",
+    "period_end": null,
+    "value": null,
+    "vetoes": []
+   },
+   "symbol": "JPM"
+  },
+  {
+   "M": "2019-06-30",
+   "cik": "0000789019",
+   "gp:r0": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit",
+     "direct"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-31",
+    "value": 0.29792280739707716,
+    "vetoes": []
+   },
+   "gp:r5": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit",
+     "direct"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-31",
+    "value": 0.29792280739707716,
+    "vetoes": []
+   },
+   "gp_at": {
+    "branches": [
+     "Assets",
+     "GP",
+     "GrossProfit",
+     "direct"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-31",
+    "value": 0.29792280739707716,
+    "vetoes": []
+   },
+   "ope:adopted": {
+    "branches": [
+     "CostOfGoodsAndServicesSold",
+     "DeferredTaxLiabilitiesNoncurrent",
+     "GeneralAndAdministrativeExpense",
+     "InterestExpense",
+     "ResearchAndDevelopmentExpense",
+     "RevenueFromContractWithCustomerExcludingAssessedTax",
+     "SEQ",
+     "SellingAndMarketingExpense",
+     "StockholdersEquity",
+     "TXDITC",
+     "cogs_plus_xsga",
+     "direct",
+     "opex_unchecked",
+     "rd_filed",
+     "rd_incl_ipr",
+     "sale_minus_opex",
+     "sell_filed",
+     "xint_filed",
+     "xsga_parts",
+     "ytd_difference",
+     "zero",
+     "zero_if_missing"
+    ],
+    "kind": "quarterly",
+    "missing": null,
+    "period_end": "2018-12-31",
+    "value": 0.3840641257033655,
+    "vetoes": []
+   },
+   "ope_be": {
+    "branches": [],
+    "kind": null,
+    "missing": "no_period",
+    "period_end": null,
+    "value": null,
+    "vetoes": []
+   },
+   "symbol": "MSFT"
+  }
+ ],
+ "input_rows_sha256": "9f1c3b65bc70a9f0a3cffbd66105b7cd37695fccaedbbb2885be6f2c81833cc8",
+ "output_rows_sha256": "9d7c05ec86a27c243ff9eb299efd6be80802704d3b518c5191148c7a4f460cba",
+ "period_evaluations": {
+  "decompositions: zero_rd_software": 396,
+  "gp:r5: veto_cogs_goods": 1368,
+  "gp:r5: veto_cogs_services": 1213,
+  "gp:r5: zero_cogs_goods": 18790,
+  "gp:r5: zero_cogs_services": 56031,
+  "ope:adopted: opex bound passed": 1113249,
+  "ope:adopted: opex bound refused (absent)": 43521,
+  "ope:adopted: opex bound refused (value)": 21497,
+  "ope:adopted: opex bound unchecked": 837875,
+  "ope:adopted: veto_cogs_goods": 2052,
+  "ope:adopted: veto_cogs_services": 2850,
+  "ope:adopted: veto_rd": 896542,
+  "ope:adopted: veto_rd_software": 5,
+  "ope:adopted: veto_sell": 120689,
+  "ope:adopted: veto_xint": 1384332,
+  "ope:adopted: zero_cogs_goods": 63119,
+  "ope:adopted: zero_cogs_services": 438314,
+  "ope:adopted: zero_rd": 2279800,
+  "ope:adopted: zero_rd_software": 65917,
+  "ope:adopted: zero_sell": 734681,
+  "ope:adopted: zero_xint": 348666
+ },
+ "replay_mismatch_vs_stored": {},
+ "same_period_change_quantiles": {
+  "gp:r0": {
+   "n": 2563,
+   "negative": 1994,
+   "p1": -0.5709035823491457,
+   "p10": -0.1678683342870378,
+   "p25": -0.06595713791139457,
+   "p50": -0.012432551294845995,
+   "p75": -3.762688134406611e-05,
+   "p90": 0.004996547839674403,
+   "p99": 0.3713494551819485
+  },
+  "gp:r5": {
+   "n": 4903,
+   "negative": 4220,
+   "p1": -0.7386604966326489,
+   "p10": -0.31985032356059045,
+   "p25": -0.19855001064984024,
+   "p50": -0.054798057064178174,
+   "p75": -0.006117087396648957,
+   "p90": 0.0002567394094993569,
+   "p99": 0.2462926286525892
+  },
+  "ope:adopted": {
+   "n": 20458,
+   "negative": 20344,
+   "p1": -5.054054054054054,
+   "p10": -0.6301990102137517,
+   "p25": -0.2648433686287439,
+   "p50": -0.10848270312215591,
+   "p75": -0.04430940152565502,
+   "p90": -0.017875225641702977,
+   "p99": -0.0012859682736954536
+  }
+ }
+}

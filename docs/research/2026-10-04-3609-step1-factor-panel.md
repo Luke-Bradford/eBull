@@ -551,11 +551,11 @@ matrix.
 | JKP item | XBRL, in order | dropped branches |
 |---|---|---|
 | SALE / REVT | `Revenues`; `RevenueFromContractWithCustomerExcludingAssessedTax`; `SalesRevenueNet` | "including assessed tax" variant (SALE is net of excise taxes) |
-| COGS | `CostOfGoodsAndServicesSold`; `CostOfRevenue`; `CostOfGoodsSold` (flag `cogs_scope=goods_only`) | — |
+| COGS | `CostOfGoodsAndServicesSold`; `CostOfRevenue`; `CostOfGoodsSold` (flag `cogs_scope=goods_only`). **Superseded by Amendment 2c's COGS*:** excluding-DDA total; `CostOfGoodsAndServicesSold`; `CostOfRevenue`; else goods + services | — |
 | GP | `GrossProfit` | — |
-| XSGA | `SellingGeneralAndAdministrativeExpense` | — |
-| `ope*` numerator | `sale*` − COGS − XSGA − XINT. This is FF's OP numerator, which JKP states it targets. Labelled a **proxy**: filed COGS and SG&A may include D&A, which Compustat's exclude | EBITDA, OIBDP, XOPR |
-| XINT | `InterestExpense` | — |
+| XSGA | `SellingGeneralAndAdministrativeExpense`. **Superseded by Amendment 2c's XSGA*:** SG&A + RD*; else G&A + selling + RD*; sums under the `OperatingExpenses` bound | — |
+| `ope*` numerator | `sale*` − COGS − XSGA − XINT. This is FF's OP numerator, which JKP states it targets. Labelled a **proxy**: filed COGS and SG&A may include D&A, which Compustat's exclude. **Amendment 2c:** `sale*` − COGS* − XSGA* − XINT*; else GP − XSGA* − XINT* | EBITDA, OIBDP, XOPR |
+| XINT | `InterestExpense`. **Amendment 2c's XINT*:** else `InterestAndDebtExpense`, else `InterestExpenseDebt` (proxies), else zero under the witness veto | — |
 | IB | `IncomeLossFromContinuingOperations`, which the US-GAAP taxonomy defines as attributable to the parent; else `NetIncomeLoss` − `xido*` (Amendment 2b) | PI − TXT − MII |
 | OANCF | `NetCashProvidedByUsedInOperatingActivities`; else continuing + discontinued (Amendment 2b) | NI − OACC; NI + DP − WCAPT |
 | AT | `Assets` | SEQ-based sum |
@@ -753,6 +753,193 @@ unchanged.
   standard tag outside the list, leaves a non-zero amount unwitnessed. That residual is not measurable.
 - The consolidated-DO proxy, the pre-ASU XI assumption and the OANCF scope assumption stay in the alignment matrix.
 
+**Amendment 2c (2026-10-05): `ope*` = `ebitda*` − XINT read as JKP and Compustat define its parts.**
+
+**Premise, measured** (`scripts/measure_3609_amendment_2c.py components`, over the canonical stage-A rows
+`2026-10-05-191d7b07-stageA`, decompressed sha256 `b9724baa…7805`). `ope_be` has a value on 46,086 of the 243,445
+admitted name-months; 179,808 are `no_period`. At the latest lag-eligible annual period of those 179,808, the absent
+components are: XSGA 134,101; COGS 102,179; XINT 68,869; `sale*` 58,688; BE 3,311 (a name-month can lack several).
+XSGA alone is the only gap in 18,259 and XINT alone in 11,707. Of the 4,715 admitted CIKs, 2,016 file
+`SellingGeneralAndAdministrativeExpense` in a 10-K/10-Q filed 2013-01-01 .. 2021-06-30; 2,194 file
+`GeneralAndAdministrativeExpense`, 2,164 `ResearchAndDevelopmentExpense`, 3,698 `InterestExpense` and 547
+`CostOfServices` (`… tags`, output in `docs/research/3609-amendment-2c-tags.txt`). The 16:41Z hypothesis was half
+right: MSFT's gap is XSGA (it tags R&D, sales and marketing, and G&A separately); MSFT does file `InterestExpense`.
+
+**Source rule.**
+- JKP Table 5 (the pinned Documentation.pdf), verbatim:
+  - `ope*`: "We use EBITDA*-XINT. Note that we target the same variable as the numerator of the profitability
+    characteristic used to create the Robust-minus weak factor in the fama-French 5 factor model";
+  - `ebitda*`: "We prefer to use EBITDA. If this is unavailable, we use OIBDP. If this is unavailable, we use
+    SALE*-OPEX*. If this is unavailable, we use GP*-XSGA";
+  - `opex*`: "We prefer to use XOPR. If this is unavailable, we use COGS+XSGA";
+  - `gp*`: "We prefer to use GP. If this is unavailable we use sale*-COGS";
+  - XSGA, COGS and XINT are each "Compustat item", with no missing rule.
+- **Compustat `xsga` includes R&D.** "Compustat item xsga includes SG&A and R&D (after excluding rdip)", and where
+  R&D sits in COGS "Compustat coded R&D expenses in item xrd, but did not include xrd in xsga" (Chiu, Jagannathan and
+  Tseng, "Franchise Value, Intangibles, and Tobin's Q", NBER w30829, revised March 2023, the data section and its
+  footnote on `xsga` < `xrd`; PDF sha256 `6850b463…6d6522`, downloaded 2026-10-05). This is a secondary source; the
+  Compustat manual is not available to us.
+- **The target variable's admission rule.** Ken French's 5-factor page (`f-f_5_factors_2x3.html`, fetched
+  2026-10-05, sha256 `67c2150c…bccc2`) admits a firm to RMW with "non-missing revenues and at least one of the
+  following: cost of goods sold, selling, general and administrative expenses, or interest expense"; the variable
+  definitions page (sha256 `48a73927…98c4454`) defines OP as "annual revenues minus cost of goods sold, interest
+  expense, and selling, general, and administrative expense divided by the sum of book equity and minority
+  interest". Neither page states how a missing component enters the sum. Admitting a firm with two of the three
+  missing implies they do not make OP missing; reading them as zero is our **inference**, used only where JKP is
+  silent (JKP stays the single source for everything it states, round 1, 18–20).
+- **US-GAAP definitions** of every tag the rule reads or uses as a witness are in
+  `docs/research/3609-amendment-2c-taxonomy.txt`, from the FASB documentation linkbases (2021, sha256
+  `b6c606d7…823f72`; 2017, sha256 `c276d7b3…a532b8`, for the tags the 2021 taxonomy no longer carries). The ones the
+  rule turns on:
+  - `OperatingExpenses`: "Generally recurring costs associated with normal operations except for the portion of
+    these expenses which can be clearly related to production and included in cost of sales or services. Includes
+    selling, general and administrative expense";
+  - `ResearchAndDevelopmentExpense` includes "costs allocated in accounting for a business combination to in-process
+    projects deemed to have no alternative future use"; `ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost`
+    excludes acquired in-process R&D and "Excludes software research and development, which has a separate
+    concept";
+  - `CostOfGoodsSold` (2017): "Total costs related to goods produced and sold"; `CostOfServices` (2017): "Total costs
+    related to services rendered"; the three excluding-DDA cost tags exclude "depreciation, depletion, and
+    amortization";
+  - `InterestAndDebtExpense`: "Interest and debt related expenses associated with nonoperating financing
+    activities"; `InterestExpenseDebt`: "Amount of the cost of borrowed funds accounted for as interest expense for
+    debt"; `CostsAndExpenses`: "Total costs of sales and operating expenses for the period".
+- EBITDA, OIBDP and XOPR have no US-GAAP tag of matching scope (unchanged from the mapping table).
+
+**Rule.** Every term of `ope*` and `gp*` is read per period: for the annual period, or for each quarter before the TTM
+chain, as Amendment 2b reads `ni*`. So `gp*` = GP, else `sale*` − COGS*, is chosen per quarter too. Within a period every part must cover the interval of the chosen `ebitda*` branch's base
+(`sale*`, or GP): a value over another interval is `absent`, as `factor_panel.companion` already treats companions.
+`combine`'s blocking precedence holds for every part, and only `absent` falls through.
+- **`ope*`** = `ebitda*` − XINT*.
+- **`ebitda*`** = `sale*` − COGS* − XSGA*; else GP − XSGA* − XINT* with GP filed (JKP's last branch, added), each
+  part aligned to GP's interval. EBITDA, OIBDP and XOPR stay dropped.
+- **XSGA*** (Compustat's scope: SG&A plus R&D net of in-process R&D):
+  - `SellingGeneralAndAdministrativeExpense` + RD*;
+  - else, when `GeneralAndAdministrativeExpense` is filed: G&A + selling + RD*. Selling is
+    `SellingAndMarketingExpense`, else `SellingExpense`; absent, it is zero unless a non-zero `SellingAndMarketingExpense`,
+    `SellingExpense`, `MarketingExpense` or `MarketingAndAdvertisingExpense` fact overlaps (the Amendment 2b veto).
+    With G&A absent the period is `absent`, unless RD* is blocked, which blocks it;
+  - RD* = `ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost` + software R&D (zero unless a non-zero
+    software R&D fact overlaps); else `ResearchAndDevelopmentExpense`, a **proxy** that can hold expensed acquired
+    in-process R&D. Absent, RD* is zero unless a non-zero fact on any of the three overlaps.
+- **The `OperatingExpenses` bound.** It tests only a sum the rule makes: SG&A + a non-zero RD*, and every G&A +
+  selling + RD*. A filed SG&A alone is taken as filed and not tested. With `OperatingExpenses` read as a value over the
+  base interval:
+  - a sum above it by more than 0.5% of it cannot be right as a scope (the taxonomy defines it as every non-COGS
+    operating cost, SG&A included). SG&A + RD* then falls back to SG&A alone, which is also Compustat's reading when
+    R&D sits in COGS, labelled `rd_excluded_opex_bound`; G&A + selling + RD* makes the period `absent`, labelled
+    `veto_opex_bound`;
+  - at or below it the sum stands. The bound is one-sided: a duplicated part hidden by other operating lines (SG&A
+    100 containing R&D 20, other lines 50: 120 against 150) passes. It is a refusal of contradicted sums, not a
+    proof that a passing sum is right.
+
+  A blocked `OperatingExpenses` blocks the sum (a guard in doubt is not a pass). An absent one, or one over another
+  interval, leaves the sum unchecked, labelled and counted. The 0.5% tolerance is fixed by construction. Slice 3d-v
+  records the `OperatingExpenses` key and acceptance with every tested sum, separately from the arithmetic facts.
+- **XINT*** = `InterestExpense`; else `InterestAndDebtExpense`; else `InterestExpenseDebt`. Both fallbacks are
+  **proxies**: Compustat's XINT definition is not available to us, and the first adds debt-related expense, the second
+  covers debt only. Absent, XINT* is zero unless a non-zero fact overlaps on any of those, `InterestExpenseBorrowings`,
+  `InterestExpenseLongTermDebt`, `InterestExpenseRelatedParty`, `InterestExpenseOther`, `InterestExpenseDeposits`,
+  `InterestCostsIncurred`, `InterestPaidNet` or `InterestPaid` (chosen from the admitted CIKs' tags).
+  - The zero is **adaptation d**, with three separate assumptions: FF's admission read as a zero (above); a missing
+    Compustat item read as an absent XBRL tag; and an annual rule applied to each quarter.
+  - The cash and incurred-interest witnesses are conservative, as in Amendment 2b. Interest paid can settle an
+    earlier accrual, and incurred interest can be capitalised, so they also refuse some true zeros. Refusals are
+    counted.
+- **COGS*** (shared with `gp*`): Compustat's COGS excludes depreciation, so each excluding-DDA tag is read before its
+  inclusive counterpart.
+  - `CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization`; else `CostOfGoodsAndServicesSold`; else
+    `CostOfRevenue`;
+  - else goods + services: goods is the goods excluding-DDA tag, else `CostOfGoodsSold`; services is the services
+    excluding-DDA tag, else `CostOfServices`. One of the two must be filed; the other is zero unless a non-zero fact on
+    its own two tags overlaps. That zero is **adaptation e**: a cost of the other kind tagged with an industry or
+    extension tag is not seen. Today's goods-only read (`cogs_scope=goods_only`) already reads goods alone with no
+    services term, so adaptation e adds services where filed and imputes nothing the current rule does not already
+    omit, except for services-only filers, whose goods zero is new and counted.
+- **Rejected, each measured below:**
+  - **COGS zero when no cost-of-sales tag is filed.** A cost-of-sales line carries industry tags with no bounded list
+    (`BenefitsLossesAndExpenses`, `CostOfRealEstateRevenue`, `DirectCostsOfLeasedAndRentedPropertyOrEquipment` among
+    the admitted CIKs' tags), so no witness list can veto a wrong zero, and the resulting `ope*` would be overstated for
+    exactly the filers whose costs are tagged differently.
+  - **`CostsAndExpenses` as XOPR** (in JKP's order, before COGS* + XSGA*). "Total costs of sales and operating
+    expenses" is the whole of the operating cost lines, so it holds whatever operating lines a filer presents
+    (depreciation, impairment, restructuring); JKP's fallback COGS + XSGA does not, and the tag carries no scope
+    detail to separate them.
+
+**Measurement** (`scripts/measure_3609_amendment_2c.py measure`; summaries `docs/research/3609-amendment-2c-m3.json`, every
+variant, and `-m4.json`, the adopted variant with period-evaluation counts; m3 ran before the counters were
+added, which change no reading: m4's adopted and `gp_at` rows equal m3's, 0 differences). m4's decompressed
+output rows sha256 is `9d7c05ec…0cba`.
+It replays `factor_panel.characteristic` on every admitted name-month of the canonical rows against a scratch #3360
+bundle built from the pinned bundle's own `inputs/` with exactly the 24 concepts below added (manifest sha256
+`f178b1e4…db53`; never published). The replayed current `ope_be` and `gp_at` equal the stored rows on value, missing
+reason, period end and kind for all 243,445 (0 mismatches). Rows r0–r5 each add one change to the one
+before; the rejected rows each add one branch to the adopted rule.
+
+| `ope_be` | values | `no_period` | same-period value changes | period changes |
+|---|---|---|---|---|
+| stored | 46,086 | 179,808 | — | — |
+| r0 per-period read of today's rule | 46,082 | 180,037 | 0 | 158 |
+| r1 + GP − XSGA | 53,478 | 172,248 | 5 | 1,732 |
+| r2 + RD* | 52,982 | 172,461 | 20,594 | 6,969 |
+| r3 + G&A + selling + RD* | 77,964 | 139,474 | 20,449 | 7,218 |
+| r4 + XINT* | 99,331 | 118,536 | 19,963 | 8,012 |
+| r5 + COGS* | 102,071 | 115,365 | 20,711 | 8,251 |
+| **adopted: r5 + the bound** | **101,328** | **115,873** | **20,458** | **8,247** |
+| rejected: adopted + COGS zero | 124,461 | 89,509 | 20,183 | 8,692 |
+| rejected: adopted + `CostsAndExpenses` as XOPR | 117,011 | 98,606 | 23,328 | 8,209 |
+
+Changes are against the stored row, counted where both readings have a value.
+
+- **Same-period value changes, adopted versus stored** (`ope_be` units): 20,458, of which 20,344 lower; p10 −0.630,
+  median −0.108, p90 −0.018. Lower is the direction R&D and the XINT* fallbacks move it (more cost deducted). AAPL at
+  2019-06-30 goes from 0.6727 to 0.5477.
+- **Adopted branch counts** (name-months with a value; a TTM can use several): G&A + selling + RD* 34,494; GP −
+  XSGA* 16,183; RD* filed 60,838 (inclusive tag 58,374, excluding-IPR&D 2,763), imputed RD* zero 40,000; R&D excluded
+  by the bound 1,315; bound tested and passed 38,032, unchecked 34,799; selling zero 8,861; XINT* zero 14,821,
+  `InterestAndDebtExpense` 3,428, `InterestExpenseDebt` 5,453; goods + services 22,715, with a services zero 17,478
+  and a goods zero 2,508.
+- **Refusals, as period evaluations** (m4, adopted only; a refused period leaves no label on a missing row):
+  - the bound: passed 1,113,249; refused 65,018 (R&D excluded 21,497, a sum of parts made `absent` 43,521);
+    unchecked 837,875; never blocked;
+  - imputed zero and veto refusal, per companion: RD* 2,279,800 and 896,542; selling 734,681 and 120,689; XINT*
+    348,666 and 1,384,332; services 438,314 and 2,850; goods 63,119 and 2,052; software R&D 65,917 and 5;
+  - the XINT* witnesses refuse about four zeros for each one they admit. Those periods stay missing, which is the
+    conservative direction; no cause is claimed here.
+- **`gp_at`** (stored 140,668 values): today's rule read per period, 140,680, with 2,563 same-period changes
+  (median −0.012) and 382 period changes, from quarters mixing GP and `sale*` − COGS; with COGS*, 145,283, with 4,903
+  same-period changes (median −0.055, 4,220 lower) and 1,514 period changes. Goods + services in 15,253 values, a
+  services zero in 9,247 and a goods zero in 3,141.
+- **Descriptive only:** at each CIK's annual anchors read at its last formation, with every term a value over
+  `OperatingExpenses`' interval, `OperatingExpenses` was within 0.5% of SG&A + RD* at 1,197 anchors, above
+  it at 1,647 and below at 230; with SG&A absent, within 0.5% of G&A + selling + RD* at 2,880, above at 2,000 and below
+  at 207. These motivated the bound; they do not validate it, which is the job of
+  the slice's hand-computed tests and the per-name-month refusal counts above.
+- **Default panel at 2019-06-30** (adopted): AAPL 0.5477 (was 0.6727); GME 0.2714 (unchanged); MSFT 0.3841 (was
+  missing: G&A + sales and marketing + R&D); HD `nonpositive_denominator` and JPM `no_period` (unchanged). `gp_at` is
+  unchanged for all five.
+
+**Concept-set extension: 24 concepts.** `CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization`,
+`CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization`, `CostOfServices`,
+`CostOfServicesExcludingDepreciationDepletionAndAmortization`, `CostsAndExpenses` (for the rejected branch's
+measurement only; not built), `GeneralAndAdministrativeExpense`, `InterestAndDebtExpense`, `InterestCostsIncurred`,
+`InterestExpenseBorrowings`, `InterestExpenseDebt`, `InterestExpenseDeposits`, `InterestExpenseLongTermDebt`,
+`InterestExpenseOther`, `InterestExpenseRelatedParty`, `InterestPaid`, `InterestPaidNet`,
+`MarketingAndAdvertisingExpense`, `MarketingExpense`, `OperatingExpenses`, `ResearchAndDevelopmentExpense`,
+`ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost`,
+`ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost`, `SellingAndMarketingExpense`,
+`SellingExpense`. The build adds the 23 without `CostsAndExpenses`.
+
+**Known limits.**
+- Filed SG&A, G&A and inclusive COGS may include depreciation, which Compustat's exclude; the `ope*` proxy label
+  stands.
+- Unmeasurable residuals: a duplicated part the bound cannot see (one-sided); a sum unchecked where
+  `OperatingExpenses` is not filed; a part tagged only with a company extension (selling or R&D undercounted); R&D in
+  COGS with room under the bound (counted twice); expensed acquired IPR&D under the inclusive R&D tag.
+- Imputed selling, R&D, software, goods, services and interest zeros are bounded by their witness lists, as in
+  Amendment 2b.
+- Filers with neither COGS* nor GP (banks, insurers, many utilities) stay without `ope_be`.
+
 ## Price characteristics and daily data
 
 **Daily bars.**
@@ -875,6 +1062,7 @@ independent accounting data. Every bar must hold under **both** arms:
 | Amendment 2 share checks (ME missing or DQC-recovered); identical mis-scaling of both counts passes undetected | per reason: row and name counts, final-ME share, raw-ME share labelled contaminated; recovered count; the undetected residual is not measurable |
 | Quarterly items reconstructed (YTD differences, Q4 residuals) | branch counts |
 | Amendment 2b: NI − XI − DO and continuing + discontinued OCF (OANCF scope assumed total); consolidated-DO proxy; imputed XI zeros outside ASU 2015-01; imputed DO and discontinued-OCF zeros under the witness veto; discontinued operations outside the witness list undetected | per branch: value counts, imputed-zero counts (XI by ASU certainty), DO-branch counts, veto refusals; the undetected residual is not measurable |
+| Amendment 2c: R&D added to SG&A (Compustat scope, secondary source); inclusive-R&D and XINT fallback proxies; G&A + selling + RD* where SG&A is not filed; the one-sided `OperatingExpenses` bound, unchecked where not filed; adaptations d (XINT zero) and e (goods or services zero); other imputed zeros under the witness veto; filers with neither COGS* nor GP stay missing | per branch: value counts, imputed-zero counts, bound refusals and unchecked sums, veto refusals; the residuals listed under the amendment are not measurable |
 | `ret_12_1` needs 11 of 11; `rvol_21d` minimum by analogy; daily screen | missing counts by reason |
 | Tercile tie and quantile convention is ours | — |
 | Holdings need a quote on s(M) | count of linked filers not quoted |
@@ -1072,6 +1260,30 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
          `docs/research/3609-amendment-2b-measurement-m6.json`. Against m5 it moves exactly those five readings;
          against the stored rows it moves none. `scripts/ab_3609_vetoes.py` checks it with no adjudication.
        - The branch, imputed-zero, DO-branch and veto counts go into the census.
+   - **3d-v (Amendment 2c): the `ope*`, XSGA*, XINT* and COGS* reads.** Same two parts as 3d-iv.
+     - **Bundle extension (corpus rung):** the 23 built concepts through Amendment 1's bundle A/B and the linkage
+       replay; the new manifest equals a scratch bundle built from the same 23 in every field but `policy`; the
+       cross-source sample check, one admitted filer's stored event per concept against its SEC EDGAR filing.
+     - **Panel reads: pure tests with hand-computed expected values, each revert-probed.** These, not the oracle, are
+       the independent check, since the oracle replays the measurement's own code:
+       - the per-period read, through direct, YTD-difference and Q4-residual quarters, and a TTM mixing branches;
+       - `gp*` − XSGA* only when `sale*` − COGS* − XSGA* is `absent`, with `sale*` present on another interval: XINT*
+         and the quarter start follow GP;
+       - a part over another interval than the base is `absent` (SG&A, G&A, COGS*, XINT*, `OperatingExpenses`);
+       - RD*: excluding-IPR&D plus software; the inclusive fallback labelled; absent with and without a witness;
+       - G&A + selling + RD* only without SG&A; selling absent, zero or vetoed by a marketing fact; G&A absent with a
+         blocked RD* blocks;
+       - the bound: R&D inside SG&A (sum above `OperatingExpenses`, SG&A alone kept); R&D in COGS with slack (passes:
+         the one-sided residual, asserted as such); parts above it (`absent`); within tolerance; zero and negative
+         `OperatingExpenses`; blocked (blocks); absent or another interval (unchecked); SG&A with RD* zero (not
+         tested); the `OperatingExpenses` key and acceptance recorded;
+       - XINT*: each branch; absent with no witness (zero); each witness kind vetoes, including an annual interest
+         fact over a quarter; a witness corrected to zero or accepted on or after s(M) does not veto;
+       - COGS*: excluding-DDA before inclusive; goods + services; each side's zero and veto; services-only;
+       - blocking states on every part.
+     - **Full-population A/B against the canonical stage-A rows:** only `ope_be` and `gp_at` may change, plus the
+       provenance pins; each must equal the adopted variant of a measurement re-run against the built bundle,
+       exactly. Branch, imputed-zero, bound and veto counts go into the census.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
    - the `DeclaredTrial` row;
    - the declared run;
@@ -1088,7 +1300,8 @@ the first push.
 - Survivorship is unverified 2014-09..2018 and selectively checked from 2019.
 - The panel is retrospectively filtered by undated integrity masks.
 - No point-in-time exchange: OTC-quoted filers and some funds can enter.
-- XBRL as filed is not Compustat; several JKP branches are dropped and two items are proxies.
+- XBRL as filed is not Compustat; several JKP branches are dropped and two items are proxies. Amendment 2c leaves
+  filers with neither COGS* nor GP (banks, insurers, many utilities) without `ope_be`.
 - Class scope of issuer-level share counts is unmeasurable.
 
 ## Checkpoint log
@@ -1282,3 +1495,17 @@ None rebutted.
   - 7: the published-rule versus adaptation inventory;
   - 8: the outcome definition;
   - 10–12: the acceptance cases.
+
+**Amendment 2c, checkpoint 1 (26 findings), all applied.** The measurement was rebuilt and re-run after it (m3).
+- **Measurement code:** 14, the GP branch aligns XINT* and the quarter start to GP; 15, every part aligned to the
+  base interval; 16, a blocked RD* blocks with G&A absent; 17, a blocked `OperatingExpenses` blocks; 18, the bound
+  tests only sums the rule makes, stated; 20, refusal, veto and fallback-tag counts and change quantiles; 21, a
+  per-period `gp_at` baseline; 22, each rejected branch measured alone on the adopted rule, XOPR in JKP's order.
+- **Rule:** 3, software R&D added to the excluding-IPR&D tag; 9, excluding-DDA cost tags read first.
+- **Labels and limits:** 1, the XINT zero is adaptation d with its three assumptions; 2, the inclusive R&D fallback a
+  proxy; 4, 11, 12, the bound is one-sided and its diagnostic descriptive; 5, 8, the reconstruction and goods or
+  services zero (adaptation e) residuals; 6, both XINT fallbacks proxies; 7, conservative cash witnesses; 10, the
+  rejection reasons rest on the cited definitions only; 24, the coverage limit names filers with neither COGS* nor GP.
+- **Spec text:** 13, the adopted results filled from m3; 19, the bound's evidence recorded in slice 3d-v; 23, the
+  mapping table; 25, every read or witness tag's definition in the taxonomy file; 26, hand-computed acceptance cases
+  in slice 3d-v.

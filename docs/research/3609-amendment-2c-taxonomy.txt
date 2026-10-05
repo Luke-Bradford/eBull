@@ -1,0 +1,67 @@
+# US-GAAP documentation-role labels, extracted 2026-10-05 for #3609 Amendment 2c.
+# 2021: https://xbrl.fasb.org/us-gaap/2021/elts/us-gaap-doc-2021-01-31.xml sha256 b6c606d758b73a7f4b4588879abc47c8f06e44af06c85289017e16ae48823f72
+# 2017: https://xbrl.fasb.org/us-gaap/2017/elts/us-gaap-doc-2017-01-31.xml sha256 c276d7b3e0d80f10d9444b06d347f7c8477c4a3a68a59a4eb70867c061a532b8
+# [year] = the linkbase the label came from: 2021 first, else 2017 (two cost tags are not in 2021).
+
+Revenues [2021] :: Amount of revenue recognized from goods sold, services rendered, insurance premiums, or other activities that constitute an earning process. Includes, but is not limited to, investment and interest income before deduction of interest expense when recognized as a component of revenue, and sales and trading gain (loss).
+
+SellingGeneralAndAdministrativeExpense [2021] :: The aggregate total costs related to selling a firm's product and services, as well as all other general and administrative expenses. Direct selling expenses (for example, credit, warranty, and advertising) are expenses that can be directly linked to the sale of specific products. Indirect selling expenses are expenses that cannot be directly linked to the sale of specific products, for example telephone expenses, Internet, and postal charges. General and administrative expenses include salaries of non-sales personnel, rent, utilities, communication, etc.
+
+GeneralAndAdministrativeExpense [2021] :: The aggregate total of expenses of managing and administering the affairs of an entity, including affiliates of the reporting entity, which are not directly or indirectly associated with the manufacture, sale or creation of a product or product line.
+
+SellingAndMarketingExpense [2021] :: The aggregate total amount of expenses directly related to the marketing or selling of products or services.
+
+SellingExpense [2021] :: Expenses recognized in the period that are directly related to the selling and distribution of products or services.
+
+MarketingExpense [2021] :: Expenditures for planning and executing the conception, pricing, promotion, and distribution of ideas, goods, and services. Costs of public relations and corporate promotions are typically considered to be marketing costs.
+
+MarketingAndAdvertisingExpense [2021] :: The total expense recognized in the period for promotion, public relations, and brand or product advertising.
+
+ResearchAndDevelopmentExpense [2021] :: The aggregate costs incurred (1) in a planned search or critical investigation aimed at discovery of new knowledge with the hope that such knowledge will be useful in developing a new product or service, a new process or technique, or in bringing about a significant improvement to an existing product or process; or (2) to translate research findings or other knowledge into a plan or design for a new product or process or for a significant improvement to an existing product or process whether intended for sale or the entity's use, during the reporting period charged to research and development projects, including the costs of developing computer software up to the point in time of achieving technological feasibility, and costs allocated in accounting for a business combination to in-process projects deemed to have no alternative future use.
+
+ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost [2021] :: The costs incurred in a planned search or critical investigation aimed at discovery of new knowledge with the hope that such knowledge will be useful in developing a new product or service, a new process or technique, or in bringing about a significant improvement to an existing product or process; or to translate research findings or other knowledge into a plan or design for a new product or process or for a significant improvement to an existing product or process whether intended for sale or the entity's use, during the reporting period charged to research and development projects, excluding in-process research and development acquired in a business combination consummated during the period. Excludes software research and development, which has a separate concept.
+
+ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost [2021] :: Research and development expense during the period related to the costs of developing and achieving technological feasibility of a computer software product to be sold, leased, or otherwise marketed.
+
+OperatingExpenses [2021] :: Generally recurring costs associated with normal operations except for the portion of these expenses which can be clearly related to production and included in cost of sales or services. Includes selling, general and administrative expense.
+
+CostsAndExpenses [2021] :: Total costs of sales and operating expenses for the period.
+
+GrossProfit [2021] :: Aggregate revenue less cost of goods and services sold or operating expenses directly attributable to the revenue generation activity.
+
+CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization [2021] :: Cost of product sold and service rendered, excluding depreciation, depletion, and amortization.
+
+CostOfGoodsAndServicesSold [2021] :: The aggregate costs related to goods produced and sold and services rendered by an entity during the reporting period. This excludes costs incurred during the reporting period related to financial services rendered and other revenue generating activities.
+
+CostOfRevenue [2021] :: The aggregate cost of goods produced and sold and services rendered during the reporting period.
+
+CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization [2021] :: The aggregate cost of goods produced and sold during the reporting period, excluding depreciation, depletion, and amortization.
+
+CostOfGoodsSold [2017] :: Total costs related to goods produced and sold during the reporting period.
+
+CostOfServicesExcludingDepreciationDepletionAndAmortization [2021] :: The aggregate cost of services rendered during the reporting period, excluding depreciation, depletion and amortization.
+
+CostOfServices [2017] :: Total costs related to services rendered by an entity during the reporting period.
+
+InterestExpense [2021] :: Amount of the cost of borrowed funds accounted for as interest expense.
+
+InterestAndDebtExpense [2021] :: Interest and debt related expenses associated with nonoperating financing activities of the entity.
+
+InterestExpenseDebt [2021] :: Amount of the cost of borrowed funds accounted for as interest expense for debt.
+
+InterestExpenseBorrowings [2021] :: Aggregate amount of interest expense on all borrowings.
+
+InterestExpenseLongTermDebt [2021] :: Aggregate amount of interest paid or due on all long-term debt.
+
+InterestExpenseRelatedParty [2021] :: Amount of interest expense incurred on a debt or other obligation to related party.
+
+InterestExpenseOther [2021] :: Amount of interest expense classified as other.
+
+InterestExpenseDeposits [2021] :: Aggregate amount of interest expense on all deposits.
+
+InterestCostsIncurred [2021] :: Total interest costs incurred during the period and either capitalized or charged against earnings.
+
+InterestPaidNet [2021] :: Amount of cash paid for interest, excluding capitalized interest, classified as operating activity. Includes, but is not limited to, payment to settle zero-coupon bond for accreted interest of debt discount and debt instrument with insignificant coupon interest rate in relation to effective interest rate of borrowing attributable to accreted interest of debt discount.
+
+InterestPaid [2021] :: Amount of cash paid for interest, including, but not limited to, capitalized interest and payment to settle zero-coupon bond attributable to accreted interest of debt discount and debt instrument with insignificant coupon interest rate in relation to effective interest rate of borrowing attributable to accreted interest of debt discount; classified as operating and investing activities.
+
