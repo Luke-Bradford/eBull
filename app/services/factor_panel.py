@@ -71,6 +71,27 @@ XSGA: Final = ("SellingGeneralAndAdministrativeExpense",)
 XINT: Final = ("InterestExpense",)
 IB: Final = ("IncomeLossFromContinuingOperations",)
 OANCF: Final = ("NetCashProvidedByUsedInOperatingActivities",)
+#: Amendment 2b fallbacks: ``ni*`` = NI − XI − DO when IB is absent; ``ocf*`` = continuing + discontinued when
+#: OANCF is absent.
+NI: Final = "NetIncomeLoss"
+XI: Final = "ExtraordinaryItemNetOfTax"
+XIDO_PARENT: Final = "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity"
+XIDO_CONSOLIDATED: Final = "IncomeLossFromDiscontinuedOperationsNetOfTax"
+DO_NCI: Final = "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToNoncontrollingInterest"
+OCF_CONTINUING: Final = "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"
+OCF_DISCONTINUED: Final = "CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations"
+#: Witness-only concepts.
+DO_DETAIL: Final = (
+    "DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax",
+    "DiscontinuedOperationGainLossOnDisposalOfDiscontinuedOperationNetOfTax",
+    "DiscontinuedOperationIncomeLossFromDiscontinuedOperationDuringPhaseOutPeriodNetOfTax",
+)
+DISCONTINUED_CASH: Final = "NetCashProvidedByUsedInDiscontinuedOperations"
+#: A public non-zero fact on one of these overlapping the interval vetoes an imputed zero.
+XI_WITNESSES: Final = (XI,)
+DO_WITNESSES: Final = (XIDO_PARENT, XIDO_CONSOLIDATED, DO_NCI, *DO_DETAIL)
+#: Conservative: discontinued operations in the interval leave a zero discontinued operating cash flow unsupported.
+OCF_DO_WITNESSES: Final = (OCF_DISCONTINUED, DISCONTINUED_CASH, *DO_WITNESSES)
 AT: Final = ("Assets",)
 LT: Final = ("Liabilities",)
 SEQ: Final = ("StockholdersEquity",)
@@ -597,6 +618,138 @@ def be(view: CikView, end: date) -> Term:
     return combine((1, seq), (1, txditc), (-1, pstk))
 
 
+# --------------------------------------------------------------------------- Amendment 2b: ni* and ocf* fallbacks
+
+Reader = Callable[[CikView, str, date], Term]
+
+
+def _interval_start(term: Term, end: date, kind: Kind) -> date | None:
+    """The interval start of a VALUE term ending at ``end``."""
+    if term.status is not TermStatus.VALUE:
+        return None
+    if kind is Kind.QUARTERLY:
+        return term.start
+    starts = {f.key.start for f in term.facts if f.key.start is not None and f.key.end == end.isoformat()}
+    return date.fromisoformat(min(starts)) if len(starts) == 1 else None
+
+
+def witnessed(view: CikView, concepts: Sequence[str], start: date, end: date) -> list[str]:
+    """Concepts with a public fact overlapping [start, end] whose CURRENT value is non-zero.
+
+    ``view.prefix`` holds only rows accepted before s(M), so a later filing cannot veto an earlier formation. Per
+    key, only the rows at the key's latest public acceptance count, so a non-zero fact later corrected to zero does
+    not veto. A fact filed without a start on these duration concepts is dated at its end, and overlaps when that
+    date is inside the interval.
+    """
+    hits: list[str] = []
+    for concept in concepts:
+        latest: dict[tuple[str, str], tuple[str, set[str]]] = {}
+        for row in view.prefix("us-gaap", concept).events:
+            if row["unit"] != USD:
+                continue
+            key = (row["start"] or row["end"], row["end"])
+            held = latest.get(key)
+            if held is None or row["acceptance"] > held[0]:
+                latest[key] = (row["acceptance"], {row["value"]})
+            elif row["acceptance"] == held[0]:
+                held[1].add(row["value"])
+        for (s, e), (_, values) in latest.items():
+            if date.fromisoformat(s) <= end and date.fromisoformat(e) >= start and any(Decimal(v) != 0 for v in values):
+                hits.append(concept)
+                break
+    return hits
+
+
+def _labelled(term: Term, *labels: str) -> Term:
+    return Term(term.status, term.value, term.facts, term.start, (*labels, *term.branches))
+
+
+def companion(
+    view: CikView,
+    read: Callable[[], Term],
+    end: date,
+    kind: Kind,
+    start: date | None,
+    *,
+    name: str,
+    witnesses: Sequence[str],
+) -> Term:
+    """A deducted or added term. Only ``absent`` may become zero; blocking states are returned for ``combine``."""
+    term = read()
+    if term.status is TermStatus.VALUE:
+        if start is not None and _interval_start(term, end, kind) != start:
+            return ABSENT
+        return _labelled(term, f"{name}_filed_zero" if term.value == 0 else f"{name}_filed")
+    if term.status is not TermStatus.ABSENT:
+        return term
+    # No base interval to test a zero against: the base is blocked or absent (``combine`` returns its status either
+    # way), or an annual base with no single start, which stays missing.
+    if start is None or witnessed(view, witnesses, start, end):
+        return ABSENT
+    return Term(TermStatus.VALUE, Decimal(0), branches=(f"zero_{name}:{start}:{end}",))
+
+
+def do_read(view: CikView, reader: Reader, end: date) -> Term:
+    """DO: the parent tag; else consolidated minus the noncontrolling share; else consolidated (proxy)."""
+    parent = reader(view, XIDO_PARENT, end)
+    if parent.status is not TermStatus.ABSENT:
+        return _labelled(parent, "do_parent")
+    consolidated = reader(view, XIDO_CONSOLIDATED, end)
+    if consolidated.status is TermStatus.ABSENT:
+        return ABSENT
+    nci = reader(view, DO_NCI, end)
+    if nci.status is TermStatus.ABSENT:
+        return _labelled(consolidated, "do_consolidated_proxy")
+    # Quarter terms carry their start, so a different one is a different interval (annual terms carry none; their
+    # fact keys are checked by ``companion``). Absent, either non-zero term vetoes the zero as a witness.
+    both = consolidated.status is TermStatus.VALUE and nci.status is TermStatus.VALUE
+    if both and consolidated.start != nci.start:
+        return ABSENT
+    term = combine((1, consolidated), (-1, _negated(nci)))
+    return Term(term.status, term.value, term.facts, consolidated.start, ("do_consolidated_minus_nci", *term.branches))
+
+
+def unit_term(view: CikView, name: str, end: date, kind: Kind) -> Term:
+    """One period of ``ni*`` or ``ocf*``: an annual period, or one quarter before the TTM chain."""
+    reader: Reader = annual_flow if kind is Kind.ANNUAL else quarter_flow
+    if name == "ni_me":
+        primary = reader(view, IB[0], end)
+        if primary.status is not TermStatus.ABSENT:
+            return _labelled(primary, "ib")
+        base = reader(view, NI, end)
+        start = _interval_start(base, end, kind)
+        xi = companion(view, lambda: reader(view, XI, end), end, kind, start, name="xi", witnesses=XI_WITNESSES)
+        do = companion(view, lambda: do_read(view, reader, end), end, kind, start, name="do", witnesses=DO_WITNESSES)
+        term = combine((1, base), (-1, _negated(xi)), (-1, _negated(do)))
+        label = "ni_minus_xido"
+    else:
+        primary = reader(view, OANCF[0], end)
+        if primary.status is not TermStatus.ABSENT:
+            return _labelled(primary, "oancf")
+        base = reader(view, OCF_CONTINUING, end)
+        start = _interval_start(base, end, kind)
+        disc = companion(
+            view,
+            lambda: reader(view, OCF_DISCONTINUED, end),
+            end,
+            kind,
+            start,
+            name="ocf_disc",
+            witnesses=OCF_DO_WITNESSES,
+        )
+        term = combine((1, base), (1, disc))
+        label = "continuing_plus_discontinued"
+    out_start = base.start if kind is Kind.QUARTERLY else None
+    return Term(term.status, term.value, term.facts, out_start, (label, *term.branches))
+
+
+def fallback_flow(view: CikView, name: str, end: date, kind: Kind) -> Term:
+    """``ni*`` or ``ocf*`` over the period. The branch is chosen per period: per quarter before the TTM chain."""
+    if kind is Kind.ANNUAL:
+        return unit_term(view, name, end, kind)
+    return _chain(view, lambda e: unit_term(view, name, e, Kind.QUARTERLY), end, 4)
+
+
 @dataclass(frozen=True)
 class Ratio:
     """A characteristic's numerator and denominator at one period, before eligibility."""
@@ -613,10 +766,8 @@ def compute_ratio(name: str, view: CikView, end: date, kind: Kind) -> Ratio:
             return Ratio(be(view, end), None)
         case "ope_be":
             return Ratio(ope(view, end, kind), be(view, end))
-        case "ni_me":
-            return Ratio(flow(view, IB, end, kind), None)
-        case "ocf_me":
-            return Ratio(flow(view, OANCF, end, kind), None)
+        case "ni_me" | "ocf_me":
+            return Ratio(fallback_flow(view, name, end, kind), None)
         case "at_gr1":
             prior = _prior_year_period(view.periods[kind], end)
             prior_at = ABSENT if prior is None else instant(view, AT, prior)
