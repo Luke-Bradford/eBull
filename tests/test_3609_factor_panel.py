@@ -410,13 +410,13 @@ def test_stale_cover_count_falls_back_and_missing_price_is_its_own_reason() -> N
 
 
 def test_filer_window_and_sic_by_exact_accession() -> None:
-    forms = {"k": "10-K", "q": "10-Q", "f": "20-F"}
-    accessions = {"k": _acc("2015-02-20"), "q": _acc("2016-11-01"), "f": _acc("2017-01-05")}
-    assert is_filer(accessions, forms, date(2017, 4, 28))
-    assert not is_filer({"k": accessions["k"]}, forms, date(2017, 4, 28))
-    assert sic_as_of(accessions, forms, {"q": 6798}, date(2017, 4, 28)).sic == 6798
-    assert sic_as_of(accessions, forms, {"q": None}, date(2017, 4, 28)).status is SicStatus.SIC_NULL
-    assert sic_as_of(accessions, forms, {"k": 1311}, date(2017, 4, 28)).status is SicStatus.SIC_UNLOADED
+    filings = {"k": (_acc("2015-02-20"), "10-K"), "q": (_acc("2016-11-01"), "10-Q"), "f": (_acc("2017-01-05"), "20-F")}
+    decision = date(2017, 4, 28)
+    assert is_filer(filings, decision)
+    assert not is_filer({"k": filings["k"], "f": filings["f"]}, decision)
+    assert sic_as_of(filings, {"q": 6798}, decision).sic == 6798
+    assert sic_as_of(filings, {"q": None}, decision).status is SicStatus.SIC_NULL
+    assert sic_as_of(filings, {"k": 1311}, decision).status is SicStatus.SIC_UNLOADED
 
 
 # --------------------------------------------------------------------------- terciles

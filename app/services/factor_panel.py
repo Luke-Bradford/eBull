@@ -256,7 +256,8 @@ class CikView:
         assets = self.prefix("us-gaap", "Assets")
         self.exclusion = prefix_exclusion(assets.status)
         self.forms: dict[str, str] = {a["accn"]: a["form"] for a in assets.accessions}
-        self.acceptances: dict[str, str] = {a["accn"]: a["acceptance"] for a in assets.accessions}
+        #: accn -> (acceptance, form): one map, so a lookup can never find one half without the other.
+        self.filings: dict[str, tuple[str, str]] = {a["accn"]: (a["acceptance"], a["form"]) for a in assets.accessions}
         self.anchors = period_anchors(assets.events, self.forms)
         self.unanchored = sorted(
             accn
@@ -723,13 +724,13 @@ def split_product(splits: Sequence[SplitStamp], basis: date, decision: date) -> 
 # --------------------------------------------------------------------------- universe helpers
 
 
-def is_filer(accessions: Mapping[str, str], forms: Mapping[str, str], decision: date) -> bool:
-    """A 10-K- or 10-Q-family accession accepted before s(M) and within the filer window. ``accessions`` are
-    already public (accn -> acceptance)."""
+def is_filer(filings: Mapping[str, tuple[str, str]], decision: date) -> bool:
+    """A 10-K- or 10-Q-family accession accepted before s(M) and within the filer window.
+    ``filings``: accn -> (acceptance, form), as ``CikView.filings``."""
     floor = add_months(decision, -FILER_WINDOW_MONTHS)
     return any(
-        form_family(forms[accn]) in _ROLE_FAMILIES and floor <= acceptance_ny_date(acceptance) < decision
-        for accn, acceptance in accessions.items()
+        form_family(form) in _ROLE_FAMILIES and floor <= acceptance_ny_date(acceptance) < decision
+        for acceptance, form in filings.values()
     )
 
 
@@ -747,14 +748,12 @@ class SicRead:
     accn: str | None = None
 
 
-def sic_as_of(
-    accessions: Mapping[str, str], forms: Mapping[str, str], sub_sic: Mapping[str, int | None], decision: date
-) -> SicRead:
+def sic_as_of(filings: Mapping[str, tuple[str, str]], sub_sic: Mapping[str, int | None], decision: date) -> SicRead:
     """SUB ``sic`` of the CIK's latest 10-K/10-Q-family accession accepted before s(M), by exact accession."""
     public = [
         (acceptance, accn)
-        for accn, acceptance in accessions.items()
-        if form_family(forms[accn]) in _ROLE_FAMILIES and acceptance_ny_date(acceptance) < decision
+        for accn, (acceptance, form) in filings.items()
+        if form_family(form) in _ROLE_FAMILIES and acceptance_ny_date(acceptance) < decision
     ]
     if not public:
         return SicRead(SicStatus.NO_ACCESSION)
