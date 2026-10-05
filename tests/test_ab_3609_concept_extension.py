@@ -66,7 +66,7 @@ def _bundle(root: Path, events: list[dict[str, Any]], ledger: dict[str, dict[str
 
 
 _OLD_LEDGER = {"us-gaap/Assets/USD": {"raw": 1, "stored": 1}}
-_NEW_LEDGER = {**_OLD_LEDGER, "us-gaap/ExtraordinaryItemNetOfTax/USD": {"raw": 1, "stored": 1}}
+_NEW_LEDGER = {**_OLD_LEDGER, "us-gaap/OperatingExpenses/USD": {"raw": 1, "stored": 1}}
 
 
 def _all_added(ledger: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
@@ -79,7 +79,7 @@ def test_identical_old_rows_plus_added_concepts_pass(tmp_path: Path) -> None:
     b = _bundle(tmp_path / "b", [_event("Assets"), *added], _all_added(_OLD_LEDGER))
     failures, summary = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
     assert failures == []
-    assert summary["added_rows"]["events:ExtraordinaryItemNetOfTax"] == 1
+    assert summary["added_rows"]["events:OperatingExpenses"] == 1
 
 
 def test_a_changed_old_value_and_an_unlisted_concept_are_refused(tmp_path: Path) -> None:
@@ -96,22 +96,20 @@ def test_a_changed_old_value_and_an_unlisted_concept_are_refused(tmp_path: Path)
 
 def test_an_added_concept_with_no_stored_events_is_refused(tmp_path: Path) -> None:
     a = _bundle(tmp_path / "a", [_event("Assets")], _OLD_LEDGER)
-    b = _bundle(tmp_path / "b", [_event("Assets"), _event("ExtraordinaryItemNetOfTax")], _NEW_LEDGER)
+    b = _bundle(tmp_path / "b", [_event("Assets"), _event("OperatingExpenses")], _NEW_LEDGER)
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
-    assert "added concept IncomeLossFromDiscontinuedOperationsNetOfTax has no stored events" in failures
-    assert not any("ExtraordinaryItemNetOfTax has no stored" in f for f in failures)
+    assert "added concept InterestPaid has no stored events" in failures
+    assert not any("OperatingExpenses has no stored" in f for f in failures)
     # The ledger claiming stored rows is not enough: the shards must hold them.
     c = _bundle(tmp_path / "c", [_event("Assets")], _all_added(_OLD_LEDGER))
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "c", c)
-    assert "added concept ExtraordinaryItemNetOfTax has no stored events" in failures
+    assert "added concept OperatingExpenses has no stored events" in failures
     # Rows present but fewer than the ledger stored: multiplicities must account for every stored row.
-    short = _all_added(_OLD_LEDGER) | {"us-gaap/ExtraordinaryItemNetOfTax/USD": {"raw": 2, "stored": 2}}
+    short = _all_added(_OLD_LEDGER) | {"us-gaap/OperatingExpenses/USD": {"raw": 2, "stored": 2}}
     added = [_event(concept) for _, concept in sorted(ab.ADDED_CONCEPTS)]
     d = _bundle(tmp_path / "d", [_event("Assets"), *added], short)
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "d", d)
-    assert failures == [
-        "added concept ExtraordinaryItemNetOfTax: event multiplicities do not sum to the ledger's stored"
-    ]
+    assert failures == ["added concept OperatingExpenses: event multiplicities do not sum to the ledger's stored"]
 
 
 def test_a_new_form_variant_key_on_an_old_concept_is_refused(tmp_path: Path) -> None:
@@ -120,7 +118,7 @@ def test_a_new_form_variant_key_on_an_old_concept_is_refused(tmp_path: Path) -> 
     b = _bundle(tmp_path / "b", [_event("Assets"), *added], _all_added(_OLD_LEDGER))
     manifest_path = tmp_path / "b/manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
-    manifest["ledger"]["form_label_variants"] = {"us-gaap/Assets/USD": 1, "us-gaap/ExtraordinaryItemNetOfTax/USD": 1}
+    manifest["ledger"]["form_label_variants"] = {"us-gaap/Assets/USD": 1, "us-gaap/OperatingExpenses/USD": 1}
     b = _write(manifest_path, manifest)
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
     assert failures == ["ledger form_label_variants us-gaap/Assets/USD differs"]
@@ -183,11 +181,16 @@ def test_replay_reads_the_prior_inputs_and_refuses_tampering(tmp_path: Path) -> 
         replay_inputs(tmp_path, digest)
 
 
-def test_added_concepts_are_the_measurements_ten() -> None:
-    from scripts.measure_3609_amendment_2b import EXTRA_CONCEPTS
+def test_added_concepts_are_the_measurements_less_xopr() -> None:
+    from scripts import measure_3609_amendment_2c as m
 
-    assert ab.ADDED_CONCEPTS == frozenset(EXTRA_CONCEPTS) and len(EXTRA_CONCEPTS) == 10
-    assert ab.ADDED_CONCEPTS <= set(ab.CONCEPT_SET)
+    named = {("us-gaap", c) for c in (*m.RD_WITNESSES, *m.GA, *m.SELL_WITNESSES, *m.XINT_WITNESSES, *m.COGS_WITNESSES)}
+    named |= {("us-gaap", c) for c in (*m.OPEX, *m.XOPR)}
+    before = set(ab.CONCEPT_SET) - ab.ADDED_CONCEPTS
+    # What the scratch bundle added on the pre-2c set, less the one concept only the rejected XOPR branch reads.
+    assert ab.ADDED_CONCEPTS == named - before - {("us-gaap", "CostsAndExpenses")}
+    assert len(ab.ADDED_CONCEPTS) == 23 and ab.ADDED_CONCEPTS <= set(ab.CONCEPT_SET)
+    assert m.EXTRA_CONCEPTS == (("us-gaap", "CostsAndExpenses"),)
 
 
 def test_scratch_manifest_may_differ_only_in_policy(tmp_path: Path) -> None:
