@@ -24,6 +24,7 @@ from app.services.factor_panel import (
     MeMissing,
     Missing,
     PanelError,
+    PrefixCache,
     SicStatus,
     SortInput,
     SplitStamp,
@@ -182,6 +183,19 @@ def test_timing_january_fiscal_year_first_eligible_in_may() -> None:
     assert april.missing is Missing.NO_PERIOD
     may = characteristic("be_me", shard.view(date(2017, 5, 31)), date(2017, 5, 31), ME)
     assert may.period_end == date(2017, 1, 31)
+
+
+def test_prefix_cache_reproduces_the_bundle_prefix_at_every_earlier_decision() -> None:
+    shard = _timing_shard("2017-05-02")
+    bundle = shard.bundle()
+    cache = PrefixCache(bundle, CIK, date(2017, 5, 31))
+    for decision in (date(2016, 11, 1), date(2016, 11, 2), date(2017, 4, 28), date(2017, 5, 2), date(2017, 5, 31)):
+        cached = CikView(bundle, CIK, decision, prefixes=cache)
+        direct = CikView(bundle, CIK, decision)
+        assert cached.prefix("us-gaap", "StockholdersEquity") == direct.prefix("us-gaap", "StockholdersEquity")
+        assert (cached.anchors, cached.filings) == (direct.anchors, direct.filings)
+    with pytest.raises(PanelError):
+        cache.at("us-gaap", "Assets", date(2017, 6, 1))
 
 
 def test_value_older_than_18_months_is_aged_out() -> None:
