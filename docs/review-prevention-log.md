@@ -12014,3 +12014,16 @@ neighbouring container and match it.**
   evaluated because its input is blocked blocks; only an absent input is "unchecked", and both are counted.
 - Enforced in: `docs/research/2026-10-04-3609-step1-factor-panel.md` (Amendment 2c, its source rule and slice
   3d-v's hand-computed cases); `scripts/measure_3609_amendment_2c.py` (`Period.aligned`, `bounded`).
+
+### Evidence kept from a failed branch must have been computed against its base (#3609)
+
+- Failure: slice 3d-v part 2 kept the veto labels of both `ope*` branches when both are absent, so a refused period
+  is recorded as Amendment 2b's are; the measurement had dropped them. The GP branch's parts are read even when GP
+  is absent, because a blocked part must still block, and its `OperatingExpenses` bound then ran with no base
+  interval and labelled `veto_opex_bound:None:…`. The slice's hand-computed test caught it. Codex checkpoint 2 then
+  found the new `guards` field kept only the chosen period's reads, where the spec says "with every tested sum".
+- Prevention: when a port starts keeping evidence the measurement discarded (labels, guard reads), state the field's
+  scope in the spec's own words (the chosen period, or every tested period as `vetoes` are) and test both, and drop
+  any evidence computed without the base interval the rule tests against.
+- Enforced in: `tests/test_3609_factor_panel.py::test_the_opex_bound_on_a_sum_of_parts_vetoes_and_a_blocked_bound_blocks`,
+  `::test_guards_are_kept_from_every_tested_period_as_vetoes_are` (both revert-probed); `factor_panel.ope_unit`.
