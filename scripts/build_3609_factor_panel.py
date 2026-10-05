@@ -19,17 +19,18 @@ Run: ``PYTHONPATH=. uv run python -m scripts.build_3609_factor_panel [--symbols 
 from __future__ import annotations
 
 import argparse
-import gzip
+import dataclasses
 import hashlib
 import heapq
 import itertools
 import json
+import shutil
 import sys
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -56,6 +57,17 @@ from app.services.factor_panel import (
     month_end,
     sic_as_of,
 )
+from app.services.factor_panel_artefact import (
+    GzLines,
+    construction_versions,
+    fsync_dir,
+    gz_content_sha256,
+    import_closure,
+    read_gz_lines,
+    sha256_file,
+    write_gz_lines,
+    write_json_once,
+)
 from app.services.factor_panel_prices import (
     DailyBar,
     DailyMonthly,
@@ -70,9 +82,16 @@ from app.services.factor_panel_reference import parse_fsds_sub
 from app.services.pit_fundamentals import PitFundamentalsBundle, load_pit_fundamentals
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.security_linkage import Reason, load_security_linkage
-from app.services.series_termination import classify_termination
+from app.services.series_termination import TERMINATION_RULE_VERSION, TerminationEvidence, classify_termination
 from app.services.strategies.validated_universe import load_validated_universe
-from app.services.universe_selection import SURVIVORSHIP_FREE_VENDOR, AdmittedSeries, load_universe_selection
+from app.services.total_return_reader import TOTAL_RETURN_SPLICE_VERSION
+from app.services.universe_selection import (
+    SURVIVORSHIP_FREE_VENDOR,
+    UNIVERSE_SELECTION_RULE_VERSION,
+    AdmittedSeries,
+    load_universe_selection,
+)
+from app.system.git_identity import head_commit, is_dirty
 
 RESEARCH_ROOT: Final = Path.home() / "Library/Application Support/eBull/research"
 #: Pins from the slice 1 and slice 2 close-outs on #3609 (2026-10-04, 2026-10-05).
@@ -102,6 +121,13 @@ RF_UNIT: Final = "decimal_return"
 SPY_SYMBOL: Final = "SPY"
 PRICE_CHARACTERISTICS: Final = ("ret_12_1", "rvol_21d")
 OUT_DIR: Final = Path("var/research/3609_step1")
+REPO_ROOT: Final = Path(__file__).resolve().parents[1]
+SPEC_PATH: Final = REPO_ROOT / "docs/research/2026-10-04-3609-step1-factor-panel.md"
+PUBLISH_ROOT: Final = RESEARCH_ROOT / "factor_panel_3609"
+MANIFEST_SCHEMA: Final = "factor-panel-3609-v1"
+MANIFEST_FILE: Final = "manifest.json"
+ROWS_FILE: Final = "rows.jsonl.gz"
+CENSUS_FILE: Final = "census.json"
 
 
 class Step:
@@ -128,11 +154,6 @@ def multiple_security_ciks(links: Mapping[int, str]) -> frozenset[str]:
 def holding_month(formation: date) -> str:
     following = add_months(date(formation.year, formation.month, 1), 1)
     return f"{following.year:04d}-{following.month:02d}"
-
-
-def sha256_file(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 # --------------------------------------------------------------------------- loads
@@ -237,36 +258,21 @@ WHERE d.series_id = ANY(%(series_ids)s::bigint[])
 ORDER BY d.series_id, d.bar_date
 """
 
-_RF_SQL = """
-SELECT o.observation_date, o.value::float8, o.unit
+_SNAPSHOT_FROM = """
 FROM reference_data_observations o
 JOIN reference_data_snapshots s USING (snapshot_id)
 WHERE o.snapshot_id = %(snapshot_id)s
   AND s.dataset_key = %(dataset_key)s
   AND s.response_sha256 = %(response_sha256)s
-  AND o.series_key = 'RF'
-  AND o.observation_date BETWEEN %(first)s AND %(bound)s
 """
-
-
-def load_rf(conn: psycopg.Connection[Any], manifest: Mapping[str, Any], first: date) -> dict[date, float]:
-    """French daily RF from the snapshot the slice 1 manifest pins, checked by its response digest."""
-    pinned = manifest["reference_snapshots"][RF_DATASET]
-    params = {
-        "snapshot_id": pinned["snapshot_id"],
-        "dataset_key": RF_DATASET,
-        "response_sha256": pinned["response_sha256"],
-        "first": first,
-        "bound": PRICE_BOUND,
-    }
-    out: dict[date, float] = {}
-    for day, value, unit in conn.execute(_RF_SQL, params).fetchall():
-        if unit != RF_UNIT:
-            raise PanelError(f"RF unit {unit!r} on {day}, expected {RF_UNIT!r}")
-        out[day] = value
-    if not out:
-        raise PanelError(f"pinned RF snapshot {pinned['snapshot_id']} returned nothing (digest or dataset moved?)")
-    return out
+#: The whole snapshot is counted against the slice 1 manifest (integrity, no values read); only observations up to
+#: ``PRICE_BOUND`` are read and frozen, so no hold-out value is accessed (§"Dates and stages", Stage A).
+_SNAPSHOT_COUNT_SQL = "SELECT count(*)" + _SNAPSHOT_FROM
+_SNAPSHOT_SQL = (
+    "SELECT o.series_key, o.observation_date, o.value::text, o.unit"
+    + _SNAPSHOT_FROM
+    + "  AND o.observation_date <= %(bound)s\nORDER BY o.series_key, o.observation_date\n"
+)
 
 
 def holding_last_sessions(formations: Iterable[date], sessions: Sequence[date]) -> dict[date, date]:
@@ -282,48 +288,18 @@ def holding_last_sessions(formations: Iterable[date], sessions: Sequence[date]) 
     return out
 
 
-def load_prices(
-    conn: psycopg.Connection[Any],
-    admitted: Sequence[AdmittedSeries],
-    grid: SessionGrid,
-    holding_last: Mapping[date, date],
-) -> tuple[dict[int, Mapping[date, FormationPrices]], Counter[int]]:
-    """Stream the daily window series by series (server-side cursor) into each series' formation prices."""
-    by_id = {a.series_id: a for a in admitted}
-    params = {
-        "series_ids": list(by_id),
-        "first": grid.sessions[0],
-        "bound": PRICE_BOUND,
-        "quarantine_version": QUARANTINE_RULE_SET_VERSION,
-    }
-    prices: dict[int, Mapping[date, FormationPrices]] = {}
-    flags: Counter[int] = Counter()
-    # A named cursor needs a transaction; the connection is autocommit.
-    with conn.transaction(), conn.cursor(name="factor_panel_daily") as cur:
-        cur.itersize = 100_000
-        cur.execute(_DAILY_SQL, params)
-        for sid, rows in itertools.groupby(cur, key=lambda row: row[0]):
-            series = by_id[int(sid)]
-            termination = None
-            if series.termination is not None:
-                if series.last_bar is None:
-                    raise PanelError(f"terminating series {sid} has no stored last_bar")
-                termination = (classify_termination(series.termination), series.last_bar)
-            bars = [
-                DailyBar(day, close, adj, volume, stamped, usable)
-                for _, day, close, adj, volume, stamped, usable in rows
-            ]
-            got = series_prices(bars, grid, holding_last_session=holding_last, termination=termination)
-            prices[int(sid)] = got.by_formation
-            flags.update(got.flags_by_year)
-    return prices, flags
-
-
 def reference_manifest(root: Path, expected_manifest_sha256: str) -> dict[str, Any]:
     manifest_path = root / "manifest.json"
     if sha256_file(manifest_path) != expected_manifest_sha256:
         raise PanelError(f"reference manifest digest moved: {manifest_path}")
     return json.loads(manifest_path.read_bytes())
+
+
+def reference_files(manifest: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """(relative path, sha256) of every file the slice 1 manifest lists."""
+    files = [(entry["path"], entry["sha256"]) for entry in manifest["fsds_sub"]]
+    files += [(manifest[key]["path"], manifest[key]["sha256"]) for key in ("jkp_documentation", "table9_signs")]
+    return files
 
 
 def load_sub_sic(root: Path, expected_manifest_sha256: str) -> dict[str, int | None]:
@@ -340,6 +316,177 @@ def load_sub_sic(root: Path, expected_manifest_sha256: str) -> dict[str, int | N
                 raise PanelError(f"SUB accession {record.adsh} carries two SIC codes")
             out[record.adsh] = record.sic
     return out
+
+
+# --------------------------------------------------------------------------- frozen inputs
+
+
+class Frozen:
+    """File names under ``inputs/``. Every DB read lands in one of these; the build reads nothing else."""
+
+    SESSIONS = "spy_sessions.jsonl.gz"
+    SELECTION = "universe_selection.json"
+    ADMITTED = "admitted.jsonl.gz"
+    DECISION_BARS = "decision_bars.jsonl.gz"
+    SPLITS = "split_stamps.jsonl.gz"
+    DAILY = "daily.jsonl.gz"
+    REFERENCE = "reference"
+
+    @staticmethod
+    def snapshot(dataset: str) -> str:
+        return f"reference_snapshot_{dataset}.jsonl.gz"
+
+
+def daily_start(formations: Sequence[date]) -> date:
+    first = min(formations)
+    return add_months(date(first.year, first.month, 1), -DAILY_LOOKBACK_MONTHS)
+
+
+def _admitted_json(series: AdmittedSeries, symbol: str | None) -> dict[str, Any]:
+    evidence = series.termination
+    return {
+        "series_id": series.series_id,
+        "name_key": series.name_key,
+        "instrument_id": series.instrument_id,
+        "termination": None if evidence is None else dataclasses.asdict(evidence),
+        "last_bar": None if series.last_bar is None else series.last_bar.isoformat(),
+        "symbol": symbol,
+    }
+
+
+def _admitted_from(line: Mapping[str, Any]) -> AdmittedSeries:
+    evidence = line["termination"]
+    return AdmittedSeries(
+        series_id=line["series_id"],
+        name_key=line["name_key"],
+        instrument_id=line["instrument_id"],
+        termination=None if evidence is None else TerminationEvidence(**evidence),
+        last_bar=None if line["last_bar"] is None else date.fromisoformat(line["last_bar"]),
+    )
+
+
+def dump_inputs(
+    conn: psycopg.Connection[Any], inputs: Path, *, symbols: frozenset[str] | None, formations: Sequence[date]
+) -> None:
+    """Every DB read and reference file the build uses, written into ``inputs`` (which must not exist)."""
+    inputs.mkdir(parents=True)
+    sessions = spy_sessions(conn)
+    # Every session is frozen; the window and the decisions use ``read_inputs``'s filtered list, so both phases
+    # derive s(M) from the same sessions.
+    windowed = [s for s in sessions if s >= daily_start(formations)]
+    first_session = windowed[0]
+    decision_days = sorted({decision_session(m, windowed) for m in formations})
+    selection = load_universe_selection(
+        conn, universe="survivorship_free", validated_ids=frozenset(load_validated_universe(conn))
+    )
+    admitted = list(selection.admitted)
+    symbol_of = series_symbols(conn, [a.series_id for a in admitted])
+    if symbols is not None:
+        admitted = [a for a in admitted if symbol_of.get(a.series_id) in symbols]
+    ids = [a.series_id for a in admitted]
+
+    write_gz_lines(inputs / Frozen.SESSIONS, (s.isoformat() for s in sessions))
+    write_json_once(
+        inputs / Frozen.SELECTION,
+        {
+            "universe": selection.universe,
+            "vendor": selection.vendor,
+            "capture_date": None if selection.capture_date is None else selection.capture_date.isoformat(),
+            "admitted_total": len(selection.admitted),
+            "unlinked_alive_excluded": selection.unlinked_alive_excluded,
+            "linked_early_reuse_suspect": selection.linked_early_reuse_suspect,
+            "exchange_test_issues_excluded": selection.exchange_test_issues_excluded,
+            "unharvested_excluded": selection.unharvested_excluded,
+            "vendor_series_total": selection.vendor_series_total,
+            "symbols_scope": None if symbols is None else sorted(symbols),
+        },
+    )
+    write_gz_lines(inputs / Frozen.ADMITTED, (_admitted_json(a, symbol_of.get(a.series_id)) for a in admitted))
+    bars = decision_bars(conn, ids, decision_days)
+    write_gz_lines(
+        inputs / Frozen.DECISION_BARS, ([sid, day.isoformat(), str(bars[sid, day])] for sid, day in sorted(bars))
+    )
+    write_gz_lines(
+        inputs / Frozen.SPLITS,
+        (
+            [sid, s.day.isoformat(), str(s.factor)]
+            for sid, stamps in sorted(split_stamps(conn, ids).items())
+            for s in stamps
+        ),
+    )
+
+    manifest = reference_manifest(*REFERENCE)
+    for dataset, pinned in sorted(manifest["reference_snapshots"].items()):
+        params = {
+            "snapshot_id": pinned["snapshot_id"],
+            "dataset_key": dataset,
+            "response_sha256": pinned["response_sha256"],
+        }
+        row = conn.execute(_SNAPSHOT_COUNT_SQL, params).fetchone()
+        total = 0 if row is None else row[0]
+        if total != pinned["row_count"]:
+            raise PanelError(f"pinned snapshot {dataset} holds {total} rows, manifest says {pinned['row_count']}")
+        rows = conn.execute(_SNAPSHOT_SQL, {**params, "bound": PRICE_BOUND}).fetchall()
+        write_gz_lines(inputs / Frozen.snapshot(dataset), ([k, d.isoformat(), v, u] for k, d, v, u in rows))
+    reference = inputs / Frozen.REFERENCE
+    for relative, digest in [("manifest.json", REFERENCE[1]), *reference_files(manifest)]:
+        target = reference / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REFERENCE[0] / relative, target)
+        if sha256_file(target) != digest:
+            raise PanelError(f"reference file digest moved: {relative}")
+
+    params = {
+        "series_ids": ids,
+        "first": first_session,
+        "bound": PRICE_BOUND,
+        "quarantine_version": QUARANTINE_RULE_SET_VERSION,
+    }
+    # A named cursor needs a transaction; the connection is autocommit.
+    with GzLines(inputs / Frozen.DAILY) as out, conn.transaction(), conn.cursor(name="factor_panel_daily") as cur:
+        cur.itersize = 100_000
+        cur.execute(_DAILY_SQL, params)
+        for sid, rows in itertools.groupby(cur, key=lambda row: row[0]):
+            out.write([int(sid), [[day.isoformat(), *rest] for _, day, *rest in rows]])
+
+
+def read_rf(inputs: Path, first: date) -> dict[date, float]:
+    """French daily RF from the frozen pinned snapshot, ``first`` .. ``PRICE_BOUND``."""
+    out: dict[date, float] = {}
+    for key, day, value, unit in read_gz_lines(inputs / Frozen.snapshot(RF_DATASET)):
+        observed = date.fromisoformat(day)
+        if key != "RF" or not first <= observed <= PRICE_BOUND:
+            continue
+        if unit != RF_UNIT:
+            raise PanelError(f"RF unit {unit!r} on {day}, expected {RF_UNIT!r}")
+        out[observed] = float(value)
+    if not out:
+        raise PanelError("frozen RF snapshot has no observation in the window")
+    return out
+
+
+def price_series(
+    inputs: Path, admitted: Sequence[AdmittedSeries], grid: SessionGrid, holding_last: Mapping[date, date]
+) -> tuple[dict[int, Mapping[date, FormationPrices]], Counter[int]]:
+    """Stream the frozen daily window series by series into each series' formation prices."""
+    by_id = {a.series_id: a for a in admitted}
+    prices: dict[int, Mapping[date, FormationPrices]] = {}
+    flags: Counter[int] = Counter()
+    for sid, rows in read_gz_lines(inputs / Frozen.DAILY):
+        series = by_id[sid]
+        termination = None
+        if series.termination is not None:
+            if series.last_bar is None:
+                raise PanelError(f"terminating series {sid} has no stored last_bar")
+            termination = (classify_termination(series.termination), series.last_bar)
+        bars = [
+            DailyBar(date.fromisoformat(day), close, adj, volume, stamped, usable)
+            for day, close, adj, volume, stamped, usable in rows
+        ]
+        got = series_prices(bars, grid, holding_last_session=holding_last, termination=termination)
+        prices[sid] = got.by_formation
+        flags.update(got.flags_by_year)
+    return prices, flags
 
 
 # --------------------------------------------------------------------------- the walk
@@ -639,23 +786,23 @@ class Inputs:
     flags_by_year: Counter[int]
 
 
-def load_inputs(conn: psycopg.Connection[Any], *, symbols: frozenset[str] | None, formations: Sequence[date]) -> Inputs:
-    first_formation = min(formations)
-    first_day = add_months(date(first_formation.year, first_formation.month, 1), -DAILY_LOOKBACK_MONTHS)
-    sessions = [s for s in spy_sessions(conn) if s >= first_day]
+def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
+    """``Inputs`` from a frozen ``inputs/`` directory only."""
+    first_day = daily_start(formations)
+    sessions = [d for d in map(date.fromisoformat, read_gz_lines(inputs / Frozen.SESSIONS)) if d >= first_day]
     decisions = {m: decision_session(m, sessions) for m in formations}
-    selection = load_universe_selection(
-        conn, universe="survivorship_free", validated_ids=frozenset(load_validated_universe(conn))
-    )
-    admitted = list(selection.admitted)
-    symbol_of = series_symbols(conn, [a.series_id for a in admitted])
-    if symbols is not None:
-        admitted = [a for a in admitted if symbol_of.get(a.series_id) in symbols]
-    ids = [a.series_id for a in admitted]
-    bars = decision_bars(conn, ids, sorted(set(decisions.values())))
-    rf = load_rf(conn, reference_manifest(*REFERENCE), first_day)
-    grid = SessionGrid.build(sessions, rf, decisions)
-    prices, flags = load_prices(conn, admitted, grid, holding_last_sessions(formations, sessions))
+    lines = list(read_gz_lines(inputs / Frozen.ADMITTED))
+    admitted = [_admitted_from(line) for line in lines]
+    symbol_of = {line["series_id"]: line["symbol"] for line in lines if line["symbol"] is not None}
+    bars = {
+        (sid, date.fromisoformat(day)): Decimal(close)
+        for sid, day, close in read_gz_lines(inputs / Frozen.DECISION_BARS)
+    }
+    splits: dict[int, list[SplitStamp]] = defaultdict(list)
+    for sid, day, factor in read_gz_lines(inputs / Frozen.SPLITS):
+        splits[sid].append(SplitStamp(date.fromisoformat(day), Decimal(factor)))
+    grid = SessionGrid.build(sessions, read_rf(inputs, first_day), decisions)
+    prices, flags = price_series(inputs, admitted, grid, holding_last_sessions(formations, sessions))
     # The two reads share their admission predicates: a decision bar the stream does not price is a drift.
     priced = {(sid, decisions[m]) for sid, per in prices.items() for m in per}
     if priced != set(bars):
@@ -665,11 +812,15 @@ def load_inputs(conn: psycopg.Connection[Any], *, symbols: frozenset[str] | None
         m: liquidity_terciles({sid: per[m].dollar_volume for sid, per in prices.items() if m in per}, name_key)
         for m in formations
     }
-    return Inputs(decisions, admitted, symbol_of, bars, split_stamps(conn, ids), prices, terciles, flags)
+    return Inputs(decisions, admitted, symbol_of, bars, splits, prices, terciles, flags)
 
 
-def walk(inputs: Inputs) -> Iterator[dict[str, Any]]:
-    """Every (M, admitted series) row, in formation order for steps 1-2 and then CIK by CIK."""
+def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
+    """Every (M, admitted series) row, in formation order for steps 1-2 and then CIK by CIK.
+
+    ``reference`` is the frozen copy of the slice 1 artefact; the #3360 bundle and #3361 linkage are published
+    artefacts read in place, pinned by manifest digest.
+    """
     bundle = load_pit_fundamentals(BUNDLE[0], expected_manifest_sha256=BUNDLE[1])
     # The shard cache is private to ``pit_fundamentals``, a hashed policy file (#3360 and #3361 manifests), so it
     # gains no public eviction method here. Resolve it once and refuse if it moved, so memory bounding cannot stop
@@ -678,7 +829,7 @@ def walk(inputs: Inputs) -> Iterator[dict[str, Any]]:
     if not isinstance(shard_cache, dict):
         raise PanelError("PitFundamentalsBundle._cache moved: per-CIK shard eviction would silently stop")
     linkage = load_security_linkage(LINKAGE[0], expected_manifest_sha256=LINKAGE[1])
-    sub_sic = load_sub_sic(*REFERENCE)
+    sub_sic = load_sub_sic(reference, REFERENCE[1])
     print(
         f"admitted series {len(inputs.admitted)}; decision bars {len(inputs.bars)}; SUB accessions {len(sub_sic)}",
         flush=True,
@@ -716,33 +867,128 @@ def walk(inputs: Inputs) -> Iterator[dict[str, Any]]:
             print(f"  {done}/{len(by_cik)} CIKs", flush=True)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
-    parser.add_argument("--symbols", help="comma-separated vendor symbols (hand checks); default all")
-    parser.add_argument("--formations", help="comma-separated month-ends; default the 80 stage-A formations")
-    parser.add_argument("--out", type=Path, help="output stem (default var/research/3609_step1/panel-stageA-<scope>)")
-    args = parser.parse_args(argv)
-    symbols = frozenset(args.symbols.split(",")) if args.symbols else None
-    formations = (
-        tuple(date.fromisoformat(m) for m in args.formations.split(",")) if args.formations else formation_months()
-    )
-    if max(formations) > STAGE_A_LAST_FORMATION:
-        raise PanelError("stage A ends at 2021-04-30; later formations are step 2's, under its declaration")
-    # Read phase, then close: no transaction stays open through the CPU-bound walk.
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
-        inputs = load_inputs(conn, symbols=symbols, formations=formations)
-    scope = "all" if symbols is None else "-".join(sorted(symbols))
-    stem = args.out or OUT_DIR / f"panel-stageA-{scope}"
-    stem.parent.mkdir(parents=True, exist_ok=True)
+def build(inputs: Path, formations: Sequence[date], rows_path: Path, census_path: Path) -> dict[str, Any]:
+    """Rows and census from a frozen ``inputs/``; returns the census summary plus the rows count."""
+    loaded = read_inputs(inputs, formations)
     tally = Census()
-    with gzip.open(stem.with_suffix(".jsonl.gz"), "wt") as handle:
-        for row in walk(inputs):
+    with GzLines(rows_path) as handle:
+        for row in walk(loaded, inputs / Frozen.REFERENCE):
             tally.add(row)
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.write(row)
+        count = handle.count
     summary = tally.to_json()
-    summary["me_reconciliation"] = me_reconciliation(tally.me_points, inputs.decisions, inputs.splits)
-    summary["daily_screen_flags_by_year"] = dict(sorted(inputs.flags_by_year.items()))
-    stem.with_suffix(".census.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    summary["me_reconciliation"] = me_reconciliation(tally.me_points, loaded.decisions, loaded.splits)
+    summary["daily_screen_flags_by_year"] = dict(sorted(loaded.flags_by_year.items()))
+    write_json_once(census_path, summary)
+    return {"summary": summary, "rows": count}
+
+
+def construction_sources() -> dict[str, str]:
+    """The builder and every ``app`` module it imports, transitively. Slice 4 adds the fidelity report's root."""
+    return import_closure([Path(__file__)], REPO_ROOT)
+
+
+def publish(root: Path, formations: Sequence[date]) -> Path:
+    """§"Panel artefact": exclusive directory, inputs frozen first, manifest last; a dirty checkout is refused."""
+    if is_dirty() is not False:
+        raise PanelError("refusing to publish from a dirty (or unreadable) checkout")
+    head = head_commit()
+    if head is None:
+        raise PanelError("refusing to publish without a readable HEAD")
+    out = root / f"{datetime.now(UTC).date().isoformat()}-{head[:8]}-stageA"
+    root.mkdir(parents=True, exist_ok=True)
+    out.mkdir()  # exclusive: an existing artefact directory is refused, never resumed
+    try:
+        sources = construction_sources()  # before the run: what is hashed is what ran
+        spec_sha256 = sha256_file(SPEC_PATH)
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            dump_inputs(conn, out / "inputs", symbols=None, formations=formations)
+        result = build(out / "inputs", formations, out / ROWS_FILE, out / CENSUS_FILE)
+        if construction_sources() != sources or sha256_file(SPEC_PATH) != spec_sha256:
+            raise PanelError("construction sources or the spec changed during the run")
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "stage": "A",
+            "git_sha": head,
+            "published_at": datetime.now(UTC).isoformat(),
+            "spec_sha256": spec_sha256,
+            "pinned_manifests": {
+                "pit_fundamentals_3360": BUNDLE[1],
+                "security_linkage_3361": LINKAGE[1],
+                "reference_3609": REFERENCE[1],
+            },
+            "formations": [m.isoformat() for m in formations],
+            "inputs": {
+                p.relative_to(out).as_posix(): sha256_file(p)
+                for p in sorted((out / "inputs").rglob("*"))
+                if p.is_file()
+            },
+            "rule_versions": {
+                "TOTAL_RETURN_SPLICE_VERSION": TOTAL_RETURN_SPLICE_VERSION,
+                "UNIVERSE_SELECTION_RULE_VERSION": UNIVERSE_SELECTION_RULE_VERSION,
+                "TERMINATION_RULE_VERSION": TERMINATION_RULE_VERSION,
+                "QUARANTINE_RULE_SET_VERSION": QUARANTINE_RULE_SET_VERSION,
+            },
+            "construction_sources": sources,
+            "construction_versions": construction_versions(
+                [*ACCOUNTING_CHARACTERISTICS, *PRICE_CHARACTERISTICS], spec_sha256, sources
+            ),
+            "rows": {
+                "path": ROWS_FILE,
+                "count": result["rows"],
+                "sha256": sha256_file(out / ROWS_FILE),
+                "content_sha256": gz_content_sha256(out / ROWS_FILE),
+            },
+            "census": {"path": CENSUS_FILE, "sha256": sha256_file(out / CENSUS_FILE)},
+        }
+        write_json_once(out / MANIFEST_FILE, manifest)
+        fsync_dir(out)
+    except BaseException:
+        # ``out`` was created by the exclusive mkdir above, so it holds only this build's output.
+        shutil.rmtree(out, ignore_errors=True)
+        raise
+    return out
+
+
+def verify_artefact(artefact: Path, manifest_sha256: str) -> dict[str, Any]:
+    """The artefact's manifest, after checking its digest, schema, pins, inputs and published outputs."""
+    if sha256_file(artefact / MANIFEST_FILE) != manifest_sha256:
+        raise PanelError(f"artefact manifest digest moved: {artefact}")
+    manifest = json.loads((artefact / MANIFEST_FILE).read_bytes())
+    if manifest.get("schema") != MANIFEST_SCHEMA:
+        raise PanelError(f"artefact schema {manifest.get('schema')!r}, expected {MANIFEST_SCHEMA!r}")
+    pinned = {"pit_fundamentals_3360": BUNDLE[1], "security_linkage_3361": LINKAGE[1], "reference_3609": REFERENCE[1]}
+    if manifest["pinned_manifests"] != pinned:
+        raise PanelError("the artefact's pinned bundle, linkage or reference differs from this code's pins")
+    listed = {p.relative_to(artefact).as_posix() for p in (artefact / "inputs").rglob("*") if p.is_file()}
+    if listed != set(manifest["inputs"]):
+        raise PanelError("the artefact's inputs/ does not match its manifest's file list")
+    for relative, digest in manifest["inputs"].items():
+        if sha256_file(artefact / relative) != digest:
+            raise PanelError(f"frozen input digest moved: {relative}")
+    # The published outputs too: a match against the manifest proves nothing if the files beside it were replaced.
+    for key in ("rows", "census"):
+        if sha256_file(artefact / manifest[key]["path"]) != manifest[key]["sha256"]:
+            raise PanelError(f"published {key} file digest moved: {manifest[key]['path']}")
+    if gz_content_sha256(artefact / manifest["rows"]["path"]) != manifest["rows"]["content_sha256"]:
+        raise PanelError("published rows content digest moved")
+    return manifest
+
+
+def replay(artefact: Path, manifest_sha256: str, stem: Path) -> bool:
+    """Rebuild a published artefact from its own ``inputs/`` under the current code; True when rows and census match."""
+    manifest = verify_artefact(artefact, manifest_sha256)
+    rows_path, census_path = stem.with_suffix(".jsonl.gz"), stem.with_suffix(".census.json")
+    rows_path.unlink(missing_ok=True)
+    census_path.unlink(missing_ok=True)
+    result = build(artefact / "inputs", [date.fromisoformat(m) for m in manifest["formations"]], rows_path, census_path)
+    rows_match = gz_content_sha256(rows_path) == manifest["rows"]["content_sha256"]
+    census_match = sha256_file(census_path) == manifest["census"]["sha256"]
+    print(json.dumps({"rows": result["rows"], "rows_match": rows_match, "census_match": census_match}, indent=1))
+    return rows_match and census_match
+
+
+def _print_summary(summary: Mapping[str, Any]) -> None:
     reconciliation = summary["me_reconciliation"]
     printed = {
         **{k: summary[k] for k in ("funnel_total_counts", "characteristics_total_counts", "diagnostics_total_counts")},
@@ -755,6 +1001,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
     }
     print(json.dumps(printed, indent=1))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    parser.add_argument("--symbols", help="comma-separated vendor symbols (hand checks); default all")
+    parser.add_argument("--formations", help="comma-separated month-ends; default the 80 stage-A formations")
+    parser.add_argument(
+        "--out", type=Path, help="scratch output stem (default var/research/3609_step1/panel-stageA-<scope>)"
+    )
+    parser.add_argument("--publish", action="store_true", help="publish the full stage-A artefact (clean checkout)")
+    parser.add_argument("--publish-root", type=Path, default=PUBLISH_ROOT)
+    parser.add_argument("--replay", type=Path, help="a published artefact to rebuild from its own inputs/")
+    parser.add_argument("--replay-manifest-sha256", help="the replayed artefact's pinned manifest digest")
+    args = parser.parse_args(argv)
+    if (args.replay is None) != (args.replay_manifest_sha256 is None):
+        parser.error("--replay and --replay-manifest-sha256 go together")
+    if (args.publish or args.replay) and (args.symbols or args.formations):
+        parser.error("--publish and --replay cover the full stage-A scope; --symbols/--formations are scratch-only")
+    if args.publish and args.replay:
+        parser.error("--publish and --replay are separate runs")
+    if args.replay:
+        stem = args.out or OUT_DIR / f"replay-{args.replay.name}"
+        stem.parent.mkdir(parents=True, exist_ok=True)
+        return 0 if replay(args.replay, args.replay_manifest_sha256, stem) else 1
+    symbols = frozenset(args.symbols.split(",")) if args.symbols else None
+    formations = (
+        tuple(date.fromisoformat(m) for m in args.formations.split(",")) if args.formations else formation_months()
+    )
+    if max(formations) > STAGE_A_LAST_FORMATION:
+        raise PanelError("stage A ends at 2021-04-30; later formations are step 2's, under its declaration")
+    if args.publish:
+        out = publish(args.publish_root, formations)
+        print(json.dumps({"published": str(out), "manifest_sha256": sha256_file(out / MANIFEST_FILE)}, indent=1))
+        return 0
+    scope = "all" if symbols is None else "-".join(sorted(symbols))
+    stem = args.out or OUT_DIR / f"panel-stageA-{scope}"
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    inputs = stem.with_name(f"{stem.name}.inputs")
+    shutil.rmtree(inputs, ignore_errors=True)  # scratch only: a published artefact is never rewritten
+    rows_path, census_path = stem.with_suffix(".jsonl.gz"), stem.with_suffix(".census.json")
+    rows_path.unlink(missing_ok=True)
+    census_path.unlink(missing_ok=True)
+    # Read phase, then close: no transaction stays open through the CPU-bound walk.
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        dump_inputs(conn, inputs, symbols=symbols, formations=formations)
+    _print_summary(build(inputs, formations, rows_path, census_path)["summary"])
     return 0
 
 
