@@ -715,7 +715,8 @@ class MarketEquity:
     split_product: Decimal | None = None
     facts: tuple[FactUse, ...] = ()
     #: Amendment 2: ME before the checks (contaminated when a check removed it), each check's own outcome, and
-    #: whether this count may become a check-4 reference (checks 2 and 3 tested and passed).
+    #: whether this count may become a check-4 reference: check 3 passed and either check 2 passed or, with check 2
+    #: untested, the count agrees with the run's previous admitted count from another accession (Amendment 2.1).
     raw_value: Decimal | None = None
     checks: Mapping[str, Check] = field(default_factory=dict)
     verified: bool = False
@@ -723,12 +724,16 @@ class MarketEquity:
 
 @dataclass(frozen=True)
 class ShareReference:
-    """Check 4's reference: a verified ME's split-adjusted share count at an earlier formation of the series."""
+    """A split-adjusted share count admitted at an earlier formation of the series: check 4's reference when
+    verified, or Amendment 2.1's consensus partner. ``accns`` and ``counted`` (the fact's own date) say which
+    filing's count it is."""
 
     formation: date
     session: date
     shares: Decimal
     cik10: str
+    accns: tuple[str, ...] = ()
+    counted: str | None = None
 
 
 def _share_candidates(
@@ -779,7 +784,7 @@ def _accession_balance_sheet(view: CikView, accn: str) -> FactUse | None:
 
 
 def usable_reference(reference: ShareReference | None, formation: date, cik10: str) -> ShareReference | None:
-    """Check 4's reference applies within the share-age bound and on the same linked CIK."""
+    """Check 4's reference, or the previous admitted count, applies within the share-age bound on the same CIK."""
     if reference is None or reference.cik10 != cik10:
         return None
     return None if add_months(reference.formation, MAX_SHARES_AGE_MONTHS) < formation else reference
@@ -797,10 +802,12 @@ def market_equity(
     *,
     dollar_volume: float | None = None,
     reference: ShareReference | None = None,
+    partner: ShareReference | None = None,
 ) -> MarketEquity:
     """§"Market equity": the filing's own cover count, else the balance-sheet count; never a fallback when blocked.
-    Then Amendment 2's four checks, in order; the first failure is the missing reason. ``reference`` must already
-    be ``usable_reference``-filtered by the caller."""
+    Then Amendment 2's four checks, in order; the first failure is the missing reason. ``reference`` (the last
+    verified count) and ``partner`` (Amendment 2.1: the last admitted count that passed check 3 and was not
+    recovered) must already be ``usable_reference``-filtered by the caller."""
     decision = view.decision
     for taxonomy, concept, scope in (
         ("dei", DEI_SHARES[1], "cover"),
@@ -837,7 +844,9 @@ def market_equity(
             return MarketEquity(None, MeMissing.NONPOSITIVE_SHARES, **common)
         if close is None or not close.is_finite() or close <= 0:
             return MarketEquity(None, MeMissing.NONPOSITIVE_PRICE, **common)
-        return _checked(view, close, splits, common, term.value, use.accns, acceptance, dollar_volume, reference)
+        return _checked(
+            view, close, splits, common, term.value, use.accns, acceptance, dollar_volume, reference, partner
+        )
     return MarketEquity(None, MeMissing.NO_SHARES)
 
 
@@ -851,6 +860,7 @@ def _checked(
     acceptance: date,
     dollar_volume: float | None,
     reference: ShareReference | None,
+    partner: ShareReference | None,
 ) -> MarketEquity:
     """Amendment 2 checks 1-4 on a computable ME. Every check is evaluated; the first failure is the reason."""
     decision = view.decision
@@ -904,7 +914,17 @@ def _checked(
     else:
         checks["discontinuity"] = Check.PASS if _consistent(shares, reference, splits, decision) else Check.FAIL
 
-    verified = checks["scale"] is Check.PASS and checks["turnover"] is Check.PASS
+    # Reference eligibility (Amendment 2.1): an untested check 2 needs a two-filing consensus. A recovered count
+    # never qualifies. Disjoint accessions and a different count date stop one filing's fact, read in consecutive
+    # months or repeated by an amendment, agreeing with itself.
+    consensus = (
+        checks["scale"] is Check.UNTESTED
+        and partner is not None
+        and not set(partner.accns) & set(accns)
+        and partner.counted != common["facts"][0].key.end
+        and _consistent(shares, partner, splits, decision)
+    )
+    verified = checks["turnover"] is Check.PASS and (checks["scale"] is Check.PASS or consensus)
     for name, reason in (
         ("basis", MeMissing.SHARES_BASIS_AMBIGUOUS),
         ("scale", MeMissing.SHARES_SCALE_CONFLICT),

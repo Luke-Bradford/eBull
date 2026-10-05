@@ -533,6 +533,34 @@ def test_a_reference_applies_only_within_15_months_on_the_same_cik() -> None:
     assert usable_reference(None, date(2017, 4, 30), CIK) is None
 
 
+def _partner(shares: object, accn: str, counted: str = "2017-04-25") -> ShareReference:
+    return ShareReference(date(2017, 3, 31), date(2017, 3, 31), Decimal(str(shares)), CIK, (accn,), counted)
+
+
+def test_an_untested_count_is_verified_only_by_agreement_with_another_filing() -> None:
+    # Amendment 2.1: no same-filing comparator, so check 2 is untested; the run's previous admitted count decides.
+    shard = _q(Shard(), "q2", "2017-08-01", "2017-06-30", cover=("2017-07-25", 30_100_000))
+    view = shard.view(date(2017, 8, 31))
+
+    def verified(partner: ShareReference | None, dollar_volume: float | None = 1e9) -> bool:
+        me = market_equity(view, Decimal(60), [], dollar_volume=dollar_volume, partner=partner)
+        assert (me.missing, me.checks["scale"]) == (None, Check.UNTESTED)  # never a check: admission is unchanged
+        return me.verified
+
+    assert verified(_partner(30_000_000, "q1"))
+    assert not verified(_partner(30_000_000, "q2"))  # the same filing's fact, read again, does not agree with itself
+    assert not verified(_partner(30_000_000, "q1", counted="2017-07-25"))  # the same count date: an amendment's repeat
+    assert not verified(_partner(30_000, "q1"))  # beyond 100x
+    assert not verified(_partner(30_000_000, "q1"), dollar_volume=None)  # check 3 untested
+    assert not verified(None)  # the first admitted count of a run
+    # A DQC-recovered count stays ineligible, whatever the previous count says.
+    grmn = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    me = market_equity(
+        grmn.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000), partner=_partner(188_000_000, "p")
+    )
+    assert (me.checks["scale"], me.verified) == (Check.RECOVERED, False)
+
+
 # --------------------------------------------------------------------------- universe helpers
 
 

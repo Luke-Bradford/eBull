@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from scripts.ab_3609_share_checks import classify
+from scripts.ab_3609_share_checks import classify, csv_row
 
 
 def _row(**me: Any) -> dict[str, Any]:
@@ -49,3 +49,40 @@ def test_a_recovered_row_may_still_be_removed_by_a_later_check() -> None:
     }
     del after["characteristics"]
     assert classify(_row(), after) == "removed_after_recovery:shares_turnover_implausible"
+
+
+def test_a_restored_me_must_be_admitted_with_its_characteristics() -> None:
+    # 3d-ii: a newer reference lifts the check-4 failure.
+    before = {**_row(value=None, missing="shares_discontinuity", raw="100"), "exclusion": "shares_discontinuity"}
+    del before["characteristics"]
+    assert classify(before, _row()) == "restored:shares_discontinuity"
+    assert classify(before, {**_row(), "exclusion": "shares_discontinuity"}) == "other:restored_but_not_admitted"
+    earlier = {**before, "exclusion": "not_filer"}
+    assert classify(earlier, {**_row(), "exclusion": "not_filer"}) == "restored:shares_discontinuity"
+    assert classify(earlier, _row()) == "other:earlier_exclusion_changed"
+    assert classify(before, _row(shares="100")) == "other:restored_me_provenance_changed"
+    assert classify(before, _row(missing="shares_discontinuity")) == "other:restored_with_a_missing_reason"
+    recovered = _row(shares="0.05", shares_scope="dqc_recovered:balance_sheet")
+    assert classify(before, recovered) == "restored:shares_discontinuity"
+
+
+def test_the_evidence_line_carries_the_count_used_and_its_cause() -> None:
+    after = _row(
+        value=None,
+        missing="shares_basis_ambiguous",
+        raw="1000",
+        split_product="0.0018",
+        checks={"turnover": "pass", "basis": "fail"},
+        facts=[{"concept": "EntityCommonStockSharesOutstanding", "value": "42757664"}],
+    )
+    after["prices"] = {"dollar_volume": 0.0}
+    line = csv_row("removed:shares_basis_ambiguous", after)
+    assert (line["fact_used"], line["filed_value"], line["raw_me"]) == (
+        "EntityCommonStockSharesOutstanding",
+        "42757664",
+        "1000",
+    )
+    assert (line["dollar_volume_over_raw_me"], line["cause"]) == ("0", "split stamp beyond [1/100,100]")
+    assert line["checks"] == '{"basis": "fail", "turnover": "pass"}'
+    assert csv_row("restored:shares_discontinuity", _row())["cause"].startswith("shares_discontinuity no longer")
+    assert csv_row("restored:shares_scale_conflict", _row())["cause"].startswith("DQC_0095 conflict now resolved")

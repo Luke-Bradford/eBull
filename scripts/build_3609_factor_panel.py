@@ -42,6 +42,7 @@ from app.services.factor_panel import (
     ACCOUNTING_CHARACTERISTICS,
     REIT_SIC,
     STAGE_A_LAST_FORMATION,
+    Check,
     CikView,
     MarketEquity,
     PanelError,
@@ -587,26 +588,37 @@ def build_cik_rows(
     census can weight those exclusions too; the funnel order is unchanged.
     """
     cache = PrefixCache(bundle, cik10, max(c.session for c, _ in candidates))
-    #: Amendment 2 check 4: series -> its latest verified count. ``candidates`` are in formation order.
+    #: Amendment 2 check 4: series -> its latest verified count; Amendment 2.1: series -> its latest admitted count
+    #: that passed check 3 and was not recovered (the consensus partner). ``candidates`` are in formation order.
     references: dict[int, ShareReference] = {}
+    partners: dict[int, ShareReference] = {}
     for candidate, row in candidates:
         view = CikView(bundle, cik10, candidate.session, prefixes=cache)
         if view.exclusion is not None:
             yield {**row, "exclusion": view.exclusion.value}
             continue
         sid = candidate.series_id
+
+        def usable(held: Mapping[int, ShareReference]) -> ShareReference | None:
+            return usable_reference(
+                _same_run(held.get(sid), link_runs, sid, candidate.formation), candidate.formation, cik10
+            )
+
         me = market_equity(
             view,
             candidate.close,
             splits.get(sid, ()),
             dollar_volume=row["prices"]["dollar_volume"],
-            reference=usable_reference(
-                _same_run(references.get(sid), link_runs, sid, candidate.formation), candidate.formation, cik10
-            ),
+            reference=usable(references),
+            partner=usable(partners),
         )
-        if me.verified:
+        if me.value is not None and me.checks["turnover"] is Check.PASS and me.checks["scale"] is not Check.RECOVERED:
             assert me.shares is not None
-            references[sid] = ShareReference(candidate.formation, candidate.session, me.shares, cik10)
+            fact = me.facts[0]
+            count = ShareReference(candidate.formation, candidate.session, me.shares, cik10, fact.accns, fact.key.end)
+            partners[sid] = count
+            if me.verified:
+                references[sid] = count
         sic = sic_as_of(view.filings, sub_sic, candidate.session)
         row = {
             **row,
