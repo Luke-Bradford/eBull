@@ -11967,3 +11967,16 @@ neighbouring container and match it.**
 - Prevention: test a guard that compares a stored copy with its source through the real producer: the shard, the
   bundle and `build_cik_rows`, not a literal. Revert-probe it: with the guard removed, the test must fail.
 - Enforced in: `tests/test_3609_factor_panel_builder.py::test_an_amendment_repeating_the_count_and_its_date_is_not_a_second_filing`.
+
+### A Compustat item mapped to one XBRL tag covers only the filers who tag it (#3609)
+
+- Failure: step 1 read JKP's IB from `IncomeLossFromContinuingOperations` only and dropped the NI − XIDO branch.
+  Filers without discontinued operations tag only `NetIncomeLoss`, so `ni_me` had a value on 40,475 of 243,445
+  admitted name-months, with AAPL, MSFT, JPM and HD all missing. Nobody had printed that share through slices 2–3d
+  (Amendment 2b measurement).
+- Prevention: print each characteristic's full-population coverage before adopting its XBRL mapping. Fill an absent
+  tag with zero only under the source's own missing-value rule or a labelled, counted assumption, never from a
+  presentation rule, and veto the zero when an overlapping non-zero related fact is public.
+- Enforced in: `docs/research/2026-10-04-3609-step1-factor-panel.md` (Amendment 2b);
+  `scripts/measure_3609_amendment_2b.py`. The `data-sources/sec-edgar.md` §7.19 text is parked on #2403, since a loop
+  session cannot write `.claude/**`.

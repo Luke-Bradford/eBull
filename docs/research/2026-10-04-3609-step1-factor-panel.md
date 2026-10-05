@@ -544,8 +544,9 @@ own latest public item; a restated earlier quarter therefore enters with its res
 
 **Annual flows:** 350–380-day facts ending at an annual anchor.
 
-**XBRL mapping of the JKP items.** "Dropped" means no XBRL tag of matching scope exists. Each dropped branch is in
-the matrix.
+**XBRL mapping of the JKP items.** "Dropped" means not built: either no XBRL tag of matching scope was found, or a
+multi-item construction (such as PI − TXT − MII) was deliberately left unimplemented. Each dropped branch is in the
+matrix.
 
 | JKP item | XBRL, in order | dropped branches |
 |---|---|---|
@@ -555,8 +556,8 @@ the matrix.
 | XSGA | `SellingGeneralAndAdministrativeExpense` | — |
 | `ope*` numerator | `sale*` − COGS − XSGA − XINT. This is FF's OP numerator, which JKP states it targets. Labelled a **proxy**: filed COGS and SG&A may include D&A, which Compustat's exclude | EBITDA, OIBDP, XOPR |
 | XINT | `InterestExpense` | — |
-| IB | `IncomeLossFromContinuingOperations`, which the US-GAAP taxonomy defines as attributable to the parent | NI − XIDO (extraordinary items were eliminated by ASU 2015-01; discontinued-operations branch not built); PI − TXT − MII |
-| OANCF | `NetCashProvidedByUsedInOperatingActivities` | NI − OACC; NI + DP − WCAPT |
+| IB | `IncomeLossFromContinuingOperations`, which the US-GAAP taxonomy defines as attributable to the parent; else `NetIncomeLoss` − `xido*` (Amendment 2b) | PI − TXT − MII |
+| OANCF | `NetCashProvidedByUsedInOperatingActivities`; else continuing + discontinued (Amendment 2b) | NI − OACC; NI + DP − WCAPT |
 | AT | `Assets` | SEQ-based sum |
 | LT | `Liabilities` | — |
 | SEQ | `StockholdersEquity` | CEQ + PSTK (no common-only tag) |
@@ -627,6 +628,129 @@ Anything else refuses publication.
 **Other #3360 and #3361 readers** (`build_2901_quality_input.py`, `measure_2901_gpa_coverage.py`, the #3360/#3361
 census and causal scripts) are closed research. They reproduce against the old artefacts at their recorded SHAs
 **and** the same Python and `tzdata` versions, which both policy hashes include; slice 2's PR records those versions.
+
+**Amendment 2b (2026-10-05): `ni*` = IB, else NI − `xido*`; `ocf*` = OANCF, else continuing + discontinued.**
+
+**Premise, measured.** With IB read only from `IncomeLossFromContinuingOperations`, `ni_me` has a value on 40,475 of
+the 243,445 admitted name-months in the 3d-iii rows. At M = 2019-06-30 it is missing for AAPL, MSFT, JPM and HD.
+`ocf_me` has a value on 176,855.
+
+**Source rule.** JKP Table 5 (the pinned Documentation.pdf), verbatim:
+- `ni*`: "We prefer to use IB. If this is unavailable, we use NI-XIDO*. If this is unavailable, we prefer
+  PI*-TXT-MII";
+- `xido*`: "We prefer to use XIDO. If this is unavailable, we use XI+DO where we set DO to zero if missing";
+- `ocf*`: "We prefer to use OANCF. If this is unavailable, we use NI*-OACC*. If this is unavailable, we use NI* +
+  DP - WCAPT". JKP states no zero rule for OANCF.
+
+No XBRL tag combines extraordinary items and discontinued operations, so `xido*` is always XI + DO here. ASC 205-20
+and ASC 230 require the presentation, not a tag, so neither justifies a zero by itself.
+
+**Rule.**
+- **Per period.** The branch is chosen for the annual period, or for each quarter before the TTM chain. IB and
+  NI − `xido*` are one Compustat item, so a TTM may mix quarters from both.
+- **Blocking precedence.** Every period's parts go through `combine`, as everywhere in the panel: `ambiguous`,
+  `blocked_by_rejection` and `form_mismatch` on any part (base or companion) block the period; only `absent` falls
+  through.
+- **`ni*`:** `IncomeLossFromContinuingOperations`; else `NetIncomeLoss` − XI − DO. Both base tags are attributable
+  to the parent in the US-GAAP taxonomy.
+  - **XI:** `ExtraordinaryItemNetOfTax`; if absent, zero (adaptation a).
+  - **DO:** `IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity`; else
+    `IncomeLossFromDiscontinuedOperationsNetOfTax` −
+    `IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToNoncontrollingInterest`, which restores the parent
+    scope; else the consolidated tag alone, a **proxy** that includes any noncontrolling share; else zero (JKP's rule,
+    with adaptation b).
+- **`ocf*`:** `NetCashProvidedByUsedInOperatingActivities`; else
+  `NetCashProvidedByUsedInOperatingActivitiesContinuingOperations` +
+  `CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations`, the discontinued term zero if absent
+  (adaptation b). This is **not** a JKP branch. It reconstructs OANCF on the **assumption** that Compustat's OANCF
+  is total operating cash flow, continuing plus discontinued; Compustat's definition is not available to us. The
+  zero is a second **assumption**: with no discontinued operations reported, continuing operating cash flow is the
+  total.
+- **Adaptations from JKP, each separate:**
+  - **a. XI absent is zero.** ASU 2015-01 eliminated extraordinary items for fiscal years beginning after
+    2015-12-15. An interval starting on or after 2015-12-16 (annual) or 2016-12-16 (quarter) lies in such a fiscal
+    year whatever the year end. For any other interval this is an **assumption**.
+  - **b. Witness veto.** An absent DO, or an absent discontinued operating cash flow, becomes zero only if no public
+    fact on a witness concept overlaps the interval with a non-zero current value. "Current" means the value at
+    that key's latest acceptance before s(M) (a correction to zero clears the veto). The prefix read is the
+    acceptance-NY-date < s(M) slice (`PrefixCache.at`), so a later filing cannot veto an earlier formation. The
+    veto is a conservative refusal, not a test of the target amount. An overlapping annual fact may belong to
+    another quarter, and pretax or noncontrolling detail can be non-zero while the target is zero. So it also
+    refuses some valid zeros, and those periods stay missing.
+    - DO witnesses: both DO tags, the noncontrolling DO tag,
+      `DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax`,
+      `DiscontinuedOperationGainLossOnDisposalOfDiscontinuedOperationNetOfTax` and
+      `DiscontinuedOperationIncomeLossFromDiscontinuedOperationDuringPhaseOutPeriodNetOfTax`.
+    - XI witness: `ExtraordinaryItemNetOfTax`.
+    - Discontinued operating cash flow witnesses: the DO witnesses,
+      `CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations` and
+      `NetCashProvidedByUsedInDiscontinuedOperations`.
+    - The witnesses were chosen from the USD duration tags the admitted CIKs file (`measure_3609_amendment_2b.py
+      tags`, output in `docs/research/3609-amendment-2b-disc-tags.txt`; all 4,715 admitted CIKs have a companyfacts
+      member).
+  - **c.** The consolidated-DO proxy, above.
+- **Interval match.** A companion whose interval differs from the base term's makes that period `absent`.
+- **Still dropped:** PI* − TXT − MII; NI* − OACC*; NI* + DP − WCAPT.
+
+**Measurement** (`scripts/measure_3609_amendment_2b.py measure`, summary in
+`docs/research/3609-amendment-2b-measurement.json`).
+- **Method.** It replays `factor_panel.characteristic` on every admitted name-month of the 3d-iii rows (sha256
+  `c2b3eb69…f060d`). The scratch #3360 bundle is built from the pinned bundle's own `inputs/` with exactly the 10
+  concepts below added (manifest sha256 `9e643922…6928b`; never published).
+- **Replay check.** The replayed current `ni_me` and `ocf_me` equal the stored rows on value, missing reason, period
+  end and kind for all 243,445 (0 mismatches). Facts and branches were not compared.
+- **The oracle.** Its per-row output (`output_rows_sha256` `f7e665a0…dc309`) is the oracle for slice 3d-iv.
+
+All counts are name-months:
+
+| variant | values | values using the fallback | with an imputed DO / discontinued-OCF zero | with an imputed zero overlapped by a non-zero witness |
+|---|---|---|---|---|
+| `ni_me` today | 40,475 | — | — | — |
+| NI − XI − DO, no imputed zero | 40,467 | 0 | 0 | — |
+| NI − XI − DO, zero if absent | 219,917 | 192,245 | 187,373 | 3,379 |
+| **NI − XI − DO, adopted** | **218,578** | **189,884** | **184,380** | **0 (the veto)** |
+| `ocf_me` today | 176,855 | — | — | — |
+| continuing + discontinued, no imputed zero | 180,688 | 4,397 | 0 | — |
+| continuing + discontinued, zero if absent | 234,671 | 70,271 | 66,830 | 2,624 |
+| **continuing + discontinued, adopted** | **233,252** | **68,244** | **64,423** | **0 (the veto)** |
+
+- **Without imputation `ni*` is IB alone.** XI is filed by 15 admitted CIKs, so NI − XI − DO without an imputed XI
+  zero yields no fallback value.
+- **Adopted `ni*`, 189,884 fallback values:**
+  - an imputed XI zero in every one, of which 91,374 are in an interval not certainly under ASU 2015-01;
+  - an imputed DO zero in at least one period in 184,380; DO filed or derived in every fallback period in 5,504;
+  - DO branches, by value (a TTM can use several): parent 1,738; consolidated minus noncontrolling 246; consolidated
+    proxy 5,513;
+  - 7,871 values mix IB and NI − XI − DO quarters.
+- **Adopted `ocf*`, 68,244 fallback values,** partitioned disjointly by precedence:
+  - an imputed zero in some period: 64,423;
+  - otherwise a non-imputed zero (filed, or derived by a YTD difference or Q4 residual): 1,343;
+  - otherwise all non-zero: 2,478.
+
+  9,792 values mix total and continuing + discontinued quarters.
+- **Witness evidence without the veto.** Of the 3,379 `ni*` values, 1,522 overlap a non-zero parent DO fact itself:
+  the filer reports DO for an overlapping interval from which the matched interval could not be derived. This is
+  overlapping evidence, not a proven wrong zero (see b).
+- **Period changes,** where both readings have a value:
+  - `ni_me`: the new period end is newer in all 11,414 changes, and 335 more keep the end but change kind;
+  - `ocf_me`: newer in all 11,795.
+- **Value to missing:** 32 (`ni_me`) and 52 (`ocf_me`), each choosing a newer period that is blocked. The choosing
+  rule stops there, as it does for every characteristic.
+- **Period evaluations** (not name-months), per variant: the adopted `ni*` veto refused a zero 30,140 times, and the
+  adopted `ocf*` veto 29,538. Interval mismatches: 235 and 12.
+- **Default panel at 2019-06-30.** AAPL, MSFT, JPM and HD gain `ni_me` from NI − XI − DO, with imputed XI and DO
+  zeros. GME's is unchanged (IB). `ocf_me` is unchanged for all five. The rows are in the summary's
+  `default_panel`.
+
+**Concept-set extension: 10 concepts.** The four branch concepts (both DO tags, continuing OCF, discontinued OCF),
+plus `ExtraordinaryItemNetOfTax`, the noncontrolling DO tag, the three DO detail tags and
+`NetCashProvidedByUsedInDiscontinuedOperations`. It goes through Amendment 1's bundle A/B and linkage replay
+unchanged.
+
+**Known limits.**
+- The veto is bounded by its concept list. A discontinued operation tagged only with a company extension, or with a
+  standard tag outside the list, leaves a non-zero amount unwitnessed. That residual is not measurable.
+- The consolidated-DO proxy, the pre-ASU XI assumption and the OANCF scope assumption stay in the alignment matrix.
 
 ## Price characteristics and daily data
 
@@ -749,6 +873,7 @@ independent accounting data. Every bar must hold under **both** arms:
 | Issuer-level shares for a security; unresolved class scope; 15-month share age; balance-sheet fallback | fallback count; discontinuity census; scope not measurable |
 | Amendment 2 share checks (ME missing or DQC-recovered); identical mis-scaling of both counts passes undetected | per reason: row and name counts, final-ME share, raw-ME share labelled contaminated; recovered count; the undetected residual is not measurable |
 | Quarterly items reconstructed (YTD differences, Q4 residuals) | branch counts |
+| Amendment 2b: NI − XI − DO and continuing + discontinued OCF (OANCF scope assumed total); consolidated-DO proxy; imputed XI zeros outside ASU 2015-01; imputed DO and discontinued-OCF zeros under the witness veto; discontinued operations outside the witness list undetected | per branch: value counts, imputed-zero counts (XI by ASU certainty), DO-branch counts, veto refusals; the undetected residual is not measurable |
 | `ret_12_1` needs 11 of 11; `rvol_21d` minimum by analogy; daily screen | missing counts by reason |
 | Tercile tie and quantile convention is ours | — |
 | Holdings need a quote on s(M) | count of linked filers not quoted |
@@ -909,6 +1034,38 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
        comparator. Finding 18 is a provenance assertion, not probed.
      - **Full-population A/B against the 3d-ii rows,** same frozen inputs and the same classes and refusal as 3d-ii.
        Every changed row is listed in an evidence CSV and adjudicated.
+   - **3d-iv (Amendment 2b): the `ni*` and `ocf*` branches.** Two parts, in order.
+     - **Bundle extension (corpus rung):**
+       - the 10 concepts go through Amendment 1's bundle A/B (`ADDED_CONCEPTS` in
+         `scripts/ab_3609_concept_extension.py` becomes this amendment's 10) and the linkage replay with its
+         byte-identity A/B;
+       - the new bundle's manifest must equal the scratch bundle's (`9e643922…6928b`) in every field except
+         `policy`, which hashes the edited source. Both are built by the same concept set from the same inputs, and
+         the manifest lists every shard's digest. A difference refuses until explained;
+       - **cross-source check, a sample validation, not population evidence:** for each of the 10 concepts, one
+         admitted filer's stored event against the same fact in its SEC EDGAR filing. Amount, start, end and
+         accession must agree; any disagreement refuses. Population safety rests on the A/B below.
+     - **Panel branches.** Pure tests, each revert-probed:
+       - IB and OANCF win over their fallbacks in the same period, annual and quarterly;
+       - companions read through each quarterly branch (direct, YTD difference, Q4 residual) and annually;
+       - an absent XI is zero; a filed XI is subtracted, filed DO or not;
+       - DO: the parent tag first; consolidated minus noncontrolling; the consolidated proxy flagged;
+       - an absent DO or discontinued OCF with no witness is zero. A witness overlapping with a non-zero current
+         value makes the period `absent`. A witness corrected to zero does not veto. A witness accepted on or after
+         s(M) does not veto;
+       - each blocking status on the base or on any companion blocks the period, including an absent base with a
+         blocked companion;
+       - an interval mismatch makes the period `absent`;
+       - a TTM mixing primary and fallback quarters chains.
+     - **Full-population A/B against the 3d-iii rows:**
+       - **Allowed changes.** The inputs are the frozen 3d-iii inputs, except that the `BUNDLE` and `LINKAGE` pins
+         move to the new artefacts. The linkage A/B makes every link identical. In each row, only `ni_me` and
+         `ocf_me` may change, plus the manifest's provenance pins. Any other difference refuses.
+       - **Oracle.** For every row, `ni_me` and `ocf_me` (value, missing reason, period end, kind) must equal
+         `ni_adopted` and `ocf_adopted` in the measurement's output rows (sha256 `f7e665a0…dc309`), exactly. Any
+         difference refuses. Adopting a different oracle needs a new measurement run, with its digest and the
+         reason, recorded on the PR.
+       - The branch, imputed-zero, DO-branch and veto counts go into the census.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
    - the `DeclaredTrial` row;
    - the declared run;
@@ -1036,8 +1193,54 @@ None rebutted.
   - 39: the docstring update is in 3d.
 - **Not applicable:** 35 (the 3f criterion) left with the IB and OANCF branches.
 - **Deferred to Amendment 2b on #3609:** 1–14 (the IB = NI − XIDO and OANCF continuing + discontinued branches,
-  their concept-set extension and the tag measurement). The period-level measurement and the zero-imputation rules
-  they need are not built yet.
+  their concept-set extension and the tag measurement). The checkpoint transcript was not kept. Amendment 2b
+  answers them as summarised in the 2026-10-05 05:21Z handoff on #3609:
+  - 1, 4: no zero rests on presentation rules. The DO zero is JKP's rule with the witness veto; XI and the OCF zero
+    are labelled adaptations, with their measured uses;
+  - 2, 3: the consolidated DO is a counted proxy, with consolidated minus noncontrolling preferred; the pre-ASU XI
+    zero is a counted assumption;
+  - 5: JKP's `ni*`, `xido*` and `ocf*` rules are quoted from the pinned PDF;
+  - 6–9: period-level replay through the choosing rule. Transitions are counted directly; the imputed, non-imputed
+    zero and non-zero partitions are disjoint;
+  - 11: the measurement binds its input rows and the scratch bundle by sha256, and pins its output;
+  - 12: a cross-source check for each added concept;
+  - 13: the branch is chosen per period, before the TTM chain;
+  - 14: only `absent` becomes zero;
+  - 10: the handoff summary does not name it, so its disposition cannot be traced. Amendment 2b's own checkpoint 1,
+    below, is the review of record for the whole branch design.
+
+**Amendment 2b, checkpoint 1 (30 findings), all applied.** The measurement was rebuilt and re-run after it.
+- **Rule:**
+  - 1: XI is read and subtracted whether or not DO is filed;
+  - 4: consolidated minus noncontrolling DO comes before the proxy;
+  - 10: witnesses use each key's current value;
+  - 12: every period's parts go through `combine`, so blocking precedence holds.
+- **Measurement:**
+  - 13: the replay compares period end and kind as well;
+  - 14: transitions compare kind and missing reason;
+  - 15, 16: a disjoint partition, with "non-imputed zero" covering derived zeros;
+  - 17: the witness counts use each rule's own witness set;
+  - 18: baseline totals are recorded;
+  - 19: XI zeros are classified by fiscal-year start;
+  - 20: DO-branch and mixed-TTM counts are recorded;
+  - 21: the direction of period changes is recorded;
+  - 22: the default panel rows are recorded;
+  - 24: the scratch bundle holds exactly the 10 adopted concepts;
+  - 30: evaluations are counted per variant.
+- **Text:**
+  - 2: the three adaptations are listed separately;
+  - 3: XI is classified by interval start against the ASU 2015-01 date;
+  - 5: the OANCF mapping is a labelled assumption;
+  - 6: "dropped" is redefined;
+  - 7–9: the veto is labelled a conservative detector, with its limits;
+  - 11: point-in-time witnesses are stated and tested;
+  - 23: the table's columns are labelled.
+- **Slice 3d-iv:**
+  - 25: a pinned row oracle with exact agreement;
+  - 26: the pure-test list widened;
+  - 27: the cross-source check is labelled a sample, with what must agree;
+  - 28: the allowed artefact changes are listed;
+  - 29: finding 10's disposition is stated as untraceable.
 
 **Amendment 2.1, checkpoint 1 (27 findings).**
 - **Applied to the rule:**
