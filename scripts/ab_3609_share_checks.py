@@ -96,6 +96,8 @@ def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
         recovered = str(me_b.get("shares_scope", "")).startswith("dqc_recovered:")
         if not recovered and same != {k: v for k, v in me_b.items() if k not in ("missing",)}:
             return "other:reason_changed_me_provenance_changed"
+        if "characteristics" in new:
+            return "other:reason_changed_row_kept_characteristics"
         if old["exclusion"] == old_reason and new["exclusion"] != reason:
             return "other:reason_changed_admitted_differently"
         if old["exclusion"] != old_reason and new["exclusion"] != old["exclusion"]:
@@ -143,7 +145,9 @@ def _cause(verdict: str, me: Mapping[str, Any]) -> str:
         before, _, after = reason.partition("->")
         return f"{before} no longer applies (Amendment 2.2); now {after}"
     if kind == "restored" and reason == MeMissing.SHARES_SCALE_CONFLICT:
-        return "DQC_0095 conflict now resolved to the side within 100x of a reference Amendment 2.1 made eligible"
+        if (me.get("checks") or {}).get("scale") == "recovered":
+            return "DQC_0095 conflict now resolved to the side within 100x of a reference Amendment 2.1 made eligible"
+        return "DQC_0095 conflict no longer found: the comparator stands on its acceptance basis (Amendment 2.2)"
     if kind == "restored":
         return f"{reason} no longer applies: the row's check-4 reference changed"
     if reason == MeMissing.SHARES_BASIS_AMBIGUOUS:
