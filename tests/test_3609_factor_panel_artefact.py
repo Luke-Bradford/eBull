@@ -121,3 +121,13 @@ def test_read_rf_takes_only_rf_in_the_window_and_checks_its_unit(tmp_path: Path)
     )
     with pytest.raises(PanelError, match="unit"):
         read_rf(tmp_path, date(2014, 1, 1))
+
+
+def test_every_value_read_in_the_builder_carries_the_hold_out_bound() -> None:
+    import scripts.build_3609_factor_panel as builder
+
+    reads = {name: sql for name, sql in vars(builder).items() if name.endswith("_SQL") and isinstance(sql, str)}
+    counts_only = {"_SNAPSHOT_COUNT_SQL"}  # integrity count of the pinned snapshot; reads no value
+    assert {"_DAILY_SQL", "_DECISION_BARS_SQL", "_SNAPSHOT_SQL", "_SPLITS_SQL", "_SPY_SESSIONS_SQL"} <= set(reads)
+    unbounded = sorted(name for name, sql in reads.items() if name not in counts_only and "%(bound)s" not in sql)
+    assert unbounded == []

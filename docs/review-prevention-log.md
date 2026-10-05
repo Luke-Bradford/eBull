@@ -11932,3 +11932,16 @@ neighbouring container and match it.**
   t. Test it with a jump one session after the decision.
 - Enforced in: `app/services/factor_panel_prices.py::series_prices` (`screened_at`),
   `tests/test_3609_factor_panel_prices.py::test_a_jump_after_s_m_does_not_screen_the_formation`.
+
+### Freezing "the whole pinned snapshot" into a stage artefact is hold-out access (#3609)
+
+- Failure: the first #3609 slice 3c-ii dump froze every observation of each pinned reference snapshot (JKP factor
+  returns, NYSE cutoffs, French RF) into the stage-A artefact. The pins run to 2025-2026, so a stage-A publish read
+  and stored post-2021-05 outcomes, against the spec's "no hold-out access" (Codex checkpoint 2, PR for slice
+  3c-ii). The price queries were bounded; the reference reads were added later and copied the slice 1 manifest's
+  row-count check, which only fits an unbounded read.
+- Prevention: every read that returns values carries the stage bound. Check integrity of a pinned snapshot with a
+  count, which reads no value, and read only bounded rows. A test lists the builder's `*_SQL` constants and fails
+  on any value read without the bound.
+- Enforced in: `scripts/build_3609_factor_panel.py` (`_SNAPSHOT_COUNT_SQL`, `_SNAPSHOT_SQL`),
+  `tests/test_3609_factor_panel_artefact.py::test_every_value_read_in_the_builder_carries_the_hold_out_bound`.

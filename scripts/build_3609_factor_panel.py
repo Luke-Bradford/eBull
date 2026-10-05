@@ -258,15 +258,21 @@ WHERE d.series_id = ANY(%(series_ids)s::bigint[])
 ORDER BY d.series_id, d.bar_date
 """
 
-_SNAPSHOT_SQL = """
-SELECT o.series_key, o.observation_date, o.value::text, o.unit
+_SNAPSHOT_FROM = """
 FROM reference_data_observations o
 JOIN reference_data_snapshots s USING (snapshot_id)
 WHERE o.snapshot_id = %(snapshot_id)s
   AND s.dataset_key = %(dataset_key)s
   AND s.response_sha256 = %(response_sha256)s
-ORDER BY o.series_key, o.observation_date
 """
+#: The whole snapshot is counted against the slice 1 manifest (integrity, no values read); only observations up to
+#: ``PRICE_BOUND`` are read and frozen, so no hold-out value is accessed (§"Dates and stages", Stage A).
+_SNAPSHOT_COUNT_SQL = "SELECT count(*)" + _SNAPSHOT_FROM
+_SNAPSHOT_SQL = (
+    "SELECT o.series_key, o.observation_date, o.value::text, o.unit"
+    + _SNAPSHOT_FROM
+    + "  AND o.observation_date <= %(bound)s\nORDER BY o.series_key, o.observation_date\n"
+)
 
 
 def holding_last_sessions(formations: Iterable[date], sessions: Sequence[date]) -> dict[date, date]:
@@ -387,6 +393,8 @@ def dump_inputs(
             "unlinked_alive_excluded": selection.unlinked_alive_excluded,
             "linked_early_reuse_suspect": selection.linked_early_reuse_suspect,
             "exchange_test_issues_excluded": selection.exchange_test_issues_excluded,
+            "unharvested_excluded": selection.unharvested_excluded,
+            "vendor_series_total": selection.vendor_series_total,
             "symbols_scope": None if symbols is None else sorted(symbols),
         },
     )
@@ -411,11 +419,11 @@ def dump_inputs(
             "dataset_key": dataset,
             "response_sha256": pinned["response_sha256"],
         }
-        rows = conn.execute(_SNAPSHOT_SQL, params).fetchall()
-        if len(rows) != pinned["row_count"]:
-            raise PanelError(
-                f"pinned snapshot {dataset} returned {len(rows)} rows, manifest says {pinned['row_count']}"
-            )
+        row = conn.execute(_SNAPSHOT_COUNT_SQL, params).fetchone()
+        total = 0 if row is None else row[0]
+        if total != pinned["row_count"]:
+            raise PanelError(f"pinned snapshot {dataset} holds {total} rows, manifest says {pinned['row_count']}")
+        rows = conn.execute(_SNAPSHOT_SQL, {**params, "bound": PRICE_BOUND}).fetchall()
         write_gz_lines(inputs / Frozen.snapshot(dataset), ([k, d.isoformat(), v, u] for k, d, v, u in rows))
     reference = inputs / Frozen.REFERENCE
     for relative, digest in [("manifest.json", REFERENCE[1]), *reference_files(manifest)]:
