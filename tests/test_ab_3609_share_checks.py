@@ -40,3 +40,12 @@ def test_a_recovered_me_may_change_only_me_denominated_characteristics() -> None
     assert classify(_row(), after) == "recovered"
     after["characteristics"]["gp_at"] = {"value": 0.2}
     assert classify(_row(), after) == "other:recovered_non_me_characteristic_changed"
+
+
+def test_a_recovered_row_may_still_be_removed_by_a_later_check() -> None:
+    after = {
+        **_row(value=None, missing="shares_turnover_implausible", shares="1", shares_scope="dqc_recovered:cover"),
+        "exclusion": "shares_turnover_implausible",
+    }
+    del after["characteristics"]
+    assert classify(_row(), after) == "removed_after_recovery:shares_turnover_implausible"

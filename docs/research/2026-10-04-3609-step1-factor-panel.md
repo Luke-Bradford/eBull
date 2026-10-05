@@ -337,6 +337,35 @@ the checks repairs a count, except the recovery in check 2.
   - the share of the formation's total final ME held by the rows the reason removed. Rows removed contribute zero.
     The share computed on raw ME is printed too, and labelled contaminated.
 
+**Slice 3d result (2026-10-05)** on the proof artefact's frozen inputs, built by
+`PYTHONPATH=. uv run python -m scripts.ab_3609_share_checks`. Per-row evidence is in
+`docs/research/3609-slice3d-share-check-changes.csv`.
+- 1,379,598 rows are unchanged.
+- 953 are DQC-recovered. Among admitted rows, 828 went to the cover count and 104 to the balance-sheet count. The
+  other 21 are excluded at an earlier universe step.
+- 6 more were recovered and then failed a later check. They are counted below.
+- 729 lose ME, by reason:
+
+  | reason | rows |
+  |---|---|
+  | `shares_basis_ambiguous` | 84 |
+  | `shares_scale_conflict` | 387 |
+  | `shares_turnover_implausible` | 191 |
+  | `shares_discontinuity` | 67 |
+
+- Of the 34 original split-reconciliation failures:
+  - 11 are now unavailable because a check removed an endpoint (NFLX, RAD, SHW, DD and others).
+  - 23 still fail on final ME. These are the corporate-event class, and they stay listed.
+
+**The residual blocks the canonical publish.** ME above $1T still includes WTW (9 name-months), YUM (4), WWD (3)
+and CCL (3), all ×1,000 cover counts, plus PTP's 5 months.
+
+The amendment's simulated effect caught WTW, YUM, WWD and CCL with check 4. The rule as amended cannot: their
+earlier counts had no same-filing balance-sheet comparator, so check 2 was `untested`. They were therefore never
+verified and never became a reference.
+
+Reference eligibility needs an Amendment 2.1 before the canonical publish. The handoff is on #3609.
+
 ## Accounting
 
 **Period anchors.** A 10-K/10-Q-family accession's period end is the latest instant date among its `Assets` facts.

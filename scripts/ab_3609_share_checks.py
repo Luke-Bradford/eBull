@@ -3,7 +3,8 @@
 Compares two stage-A row files built from the SAME frozen inputs (arm A: before the checks, arm B: after). Spec
 §"Slices" 3d: every row whose ME is unchanged is identical (the new keys ``me.raw``, ``me.checks``, ``me.verified``
 and ``prices.liquidity_screened`` aside); every changed row either lost its ME to exactly one Amendment 2 reason
-(its admission and characteristics following) or was DQC-recovered (only ME and the ME-denominated characteristics
+(its admission and characteristics following; a row check 2 recovered may still fail another check) or was
+DQC-recovered (only ME and the ME-denominated characteristics
 change). Anything else is a refusal and exits 1.
 
     PYTHONPATH=. uv run python -m scripts.ab_3609_share_checks --a <rows A> --b <rows B> --out <changes.json>
@@ -54,8 +55,10 @@ def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
         return "other:fields_outside_me_changed"
     reason = me_b.get("missing")
     if me_a.get("value") is not None and me_b.get("value") is None and reason in AMENDMENT_2:
+        # A row check 2 recovered can still fail another check: its provenance is the recovered side's.
+        recovered = str(me_b.get("shares_scope", "")).startswith("dqc_recovered:")
         unchanged_me = {k: v for k, v in me_a.items() if k not in ("value", "missing")}
-        if unchanged_me != {k: v for k, v in me_b.items() if k not in ("value", "missing")}:
+        if not recovered and unchanged_me != {k: v for k, v in me_b.items() if k not in ("value", "missing")}:
             return "other:removed_me_provenance_changed"
         if old["exclusion"] is None and new["exclusion"] != reason:
             return "other:removed_but_admitted_differently"
@@ -63,7 +66,7 @@ def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
             return "other:removed_row_kept_characteristics"
         if old["exclusion"] is not None and new["exclusion"] != old["exclusion"]:
             return "other:earlier_exclusion_changed"
-        return f"removed:{reason}"
+        return f"removed{'_after_recovery' if recovered else ''}:{reason}"
     if str(me_b.get("shares_scope", "")).startswith("dqc_recovered:"):
         if old["exclusion"] != new["exclusion"]:
             return "other:recovered_admission_changed"
