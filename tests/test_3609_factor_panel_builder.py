@@ -87,6 +87,7 @@ def test_census_is_per_formation_and_weights_exclusions_with_known_me() -> None:
     assert april["not_priced"] == {"count": 1, "me_share": None}
     assert summary["characteristics_by_formation"]["2017-05-31"]["be_me"]["value"] == {"count": 1, "me_share": 1.0}
     assert summary["characteristics_total_counts"]["be_me"] == {"value": 2}
+    assert summary["largest_me_by_formation"]["2017-04-30"] == [{"symbol": "None", "me": 100.0}]
 
 
 def test_excluded_names_past_the_bundle_gate_carry_their_me() -> None:

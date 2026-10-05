@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import heapq
 import json
 import sys
 from collections import Counter, defaultdict
@@ -73,8 +74,12 @@ REFERENCE: Final = (
     RESEARCH_ROOT / "factor_panel_3609_reference/2026-10-04-f59b9578",
     "0789833c2421c71b3952ab4a7d0ae7e74771ac3eea9f1a7b3ccd3d3a35d5dc60",
 )
-#: Stage A: the last holding month is 2021-05; nothing after it is read.
+#: Stage A: the last holding month is 2021-05; nothing after it is read. Decision sessions stay <= 2021-04-30
+#: whatever this bound admits: s(M) is the last SPY session on or before M, and ``main`` refuses M > 2021-04-30.
 PRICE_BOUND: Final = date(2021, 5, 31)
+#: Per formation, the census lists this many largest-ME admitted rows: a threshold-free flag for scale errors
+#: in filed share counts (EEFT's cover count is ~10^9 too large), which dominate any ME-weighted share.
+LARGEST_ME_LISTED: Final = 5
 SPY_SYMBOL: Final = "SPY"
 OUT_DIR: Final = Path("var/research/3609_step1")
 
@@ -321,6 +326,7 @@ class Census:
         self.kinds: dict[str, Counter[str]] = defaultdict(Counter)
         self.sic_status: Counter[str] = Counter()
         self.shares_scope: Counter[str] = Counter()
+        self.largest_me: dict[str, list[tuple[float, str]]] = defaultdict(list)
 
     def add(self, row: Mapping[str, Any]) -> None:
         m, reason = row["M"], row["exclusion"] or "admitted"
@@ -332,8 +338,12 @@ class Census:
             self.sic_status[row["sic_status"]] += 1
         if row["exclusion"] is not None:
             return
-        assert me is not None
+        if me is None:
+            raise PanelError(f"admitted row without ME: {row['M']} series {row.get('series_id')}")
         self.shares_scope[row["me"]["shares_scope"]] += 1
+        heapq.heappush(self.largest_me[m], (me, str(row.get("symbol"))))
+        if len(self.largest_me[m]) > LARGEST_ME_LISTED:
+            heapq.heappop(self.largest_me[m])
         for name, got in row["characteristics"].items():
             outcome = got["missing"] or "value"
             self.chars[m][name][outcome] += 1
@@ -366,6 +376,10 @@ class Census:
             "period_kind": {name: dict(sorted(c.items())) for name, c in sorted(self.kinds.items())},
             "sic_status": dict(sorted(self.sic_status.items())),
             "shares_scope": dict(sorted(self.shares_scope.items())),
+            "largest_me_by_formation": {
+                m: [{"symbol": symbol, "me": me} for me, symbol in sorted(rows, reverse=True)]
+                for m, rows in sorted(self.largest_me.items())
+            },
         }
 
 
@@ -398,6 +412,12 @@ def load_inputs(conn: psycopg.Connection[Any], *, symbols: frozenset[str] | None
 def walk(inputs: Inputs) -> Iterator[dict[str, Any]]:
     """Every (M, admitted series) row, in formation order for steps 1-2 and then CIK by CIK."""
     bundle = load_pit_fundamentals(BUNDLE[0], expected_manifest_sha256=BUNDLE[1])
+    # The shard cache is private to ``pit_fundamentals``, a hashed policy file (#3360 and #3361 manifests), so it
+    # gains no public eviction method here. Resolve it once and refuse if it moved, so memory bounding cannot stop
+    # silently.
+    shard_cache = getattr(bundle, "_cache", None)
+    if not isinstance(shard_cache, dict):
+        raise PanelError("PitFundamentalsBundle._cache moved: per-CIK shard eviction would silently stop")
     linkage = load_security_linkage(LINKAGE[0], expected_manifest_sha256=LINKAGE[1])
     sub_sic = load_sub_sic(*REFERENCE)
     print(
@@ -430,7 +450,7 @@ def walk(inputs: Inputs) -> Iterator[dict[str, Any]]:
     for done, (cik10, candidates) in enumerate(sorted(by_cik.items()), start=1):
         candidates.sort(key=lambda item: item[0].formation)
         yield from build_cik_rows(bundle, cik10, candidates, multi, sub_sic, inputs.splits)
-        bundle._cache.pop(cik10, None)  # bound memory: each CIK's shard is read once, by this loop only
+        shard_cache.pop(cik10, None)  # bound memory: each CIK's shard is read once, by this loop only
         if done % 500 == 0:
             print(f"  {done}/{len(by_cik)} CIKs", flush=True)
 
