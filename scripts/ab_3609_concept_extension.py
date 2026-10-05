@@ -10,7 +10,7 @@ slice 3d-iv for Amendment 2b's ten concepts.
   have stored events.
 * **#3361 linkage.** The replay rebuild against the pinned build: every series document and the ledger
   byte-identical; the manifest equal except ``policy`` and ``input_sha256.pit_manifest``.
-* **Scratch bundle** (slice 3d-iv, optional): arm B's manifest must equal the measurement's scratch bundle's in
+* **Scratch bundle** (slice 3d-iv): arm B's manifest must equal the measurement's scratch bundle's in
   every field except ``policy``. The manifest lists every shard's digest, so this covers every shard byte.
 
 Both arms are read as raw JSON with every file checked against its manifest digest: arm A's policy no
@@ -19,7 +19,7 @@ longer matches this code, so its loader would refuse it. Any difference exits no
     PYTHONPATH=. uv run python scripts/ab_3609_concept_extension.py \\
         --bundle-a <dir> --bundle-a-sha256 <digest> --bundle-b <dir> --bundle-b-sha256 <digest> \\
         --linkage-a <dir> --linkage-a-sha256 <digest> --linkage-b <dir> --linkage-b-sha256 <digest> \\
-        [--bundle-scratch <dir> --bundle-scratch-sha256 <digest>]
+        --bundle-scratch <dir> --bundle-scratch-sha256 <digest>
 """
 
 from __future__ import annotations
@@ -171,25 +171,21 @@ def compare_scratch(scratch_root: Path, scratch_sha: str, b_root: Path, b_sha: s
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for arm in ("bundle-a", "bundle-b", "linkage-a", "linkage-b"):
+    for arm in ("bundle-a", "bundle-b", "linkage-a", "linkage-b", "bundle-scratch"):
         parser.add_argument(f"--{arm}", type=Path, required=True)
         parser.add_argument(f"--{arm}-sha256", required=True)
-    parser.add_argument("--bundle-scratch", type=Path)
-    parser.add_argument("--bundle-scratch-sha256")
     args = parser.parse_args()
-    if (args.bundle_scratch is None) != (args.bundle_scratch_sha256 is None):
-        parser.error("--bundle-scratch and --bundle-scratch-sha256 go together")
     if not ADDED_CONCEPTS <= set(CONCEPT_SET):
         raise SystemExit("this code's CONCEPT_SET lacks an added concept")
     bundle_failures, bundle = compare_bundles(args.bundle_a, args.bundle_a_sha256, args.bundle_b, args.bundle_b_sha256)
     linkage_failures, linkage = compare_linkage(
         args.linkage_a, args.linkage_a_sha256, args.linkage_b, args.linkage_b_sha256
     )
-    failures = bundle_failures + linkage_failures
-    if args.bundle_scratch is not None:
-        failures += compare_scratch(
-            args.bundle_scratch, args.bundle_scratch_sha256, args.bundle_b, args.bundle_b_sha256
-        )
+    failures = (
+        bundle_failures
+        + linkage_failures
+        + compare_scratch(args.bundle_scratch, args.bundle_scratch_sha256, args.bundle_b, args.bundle_b_sha256)
+    )
     json.dump(
         {"bundle": bundle, "linkage": linkage, "failures": failures[:200], "failure_count": len(failures)},
         sys.stdout,
