@@ -4,8 +4,9 @@ Compares two stage-A row files built from the SAME frozen inputs (arm A: before 
 §"Slices" 3d and 3d-ii: every row whose ME is unchanged is identical (the keys ``me.raw``, ``me.checks``,
 ``me.verified`` and ``prices.liquidity_screened`` aside); every changed row either lost its ME to exactly one
 Amendment 2 reason (its admission and characteristics following; a row check 2 recovered may still fail another
-check), was DQC-recovered (only ME and the ME-denominated characteristics change), or had its Amendment 2 ME-missing
-reason lifted because its reference changed (3d-ii). Anything else is a refusal and exits 1.
+check), was DQC-recovered (only ME and the ME-denominated characteristics change), had its Amendment 2 ME-missing
+reason lifted (3d-ii), or kept its ME missing under another Amendment 2 reason (3d-iii). Anything else is a refusal
+and exits 1.
 
     PYTHONPATH=. uv run python -m scripts.ab_3609_share_checks --a <rows A> --b <rows B> --out <changes.json> \
         [--csv <evidence.csv>]
@@ -46,7 +47,8 @@ def _stripped(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
-    """``unchanged``, ``removed:<reason>``, ``recovered``, ``restored:<old reason>`` or ``other:<why>``."""
+    """``unchanged``, ``removed:<reason>``, ``recovered``, ``restored:<old reason>``,
+    ``reason_changed:<old>-><new>`` or ``other:<why>``."""
     old, new = _stripped(a), _stripped(b)
     if old == new:
         return "unchanged"
@@ -86,6 +88,21 @@ def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
         elif new["exclusion"] != old["exclusion"]:
             return "other:earlier_exclusion_changed"
         return f"restored:{old_reason}"
+    if me_a.get("value") is None and me_b.get("value") is None and {old_reason, reason} <= AMENDMENT_2:
+        # 3d-iii: the check that removed it passes now, and a later one fails; the row stays out.
+        if old_reason == reason:
+            return "other:same_reason_me_changed"
+        same = {k: v for k, v in me_a.items() if k not in ("missing",)}
+        recovered = str(me_b.get("shares_scope", "")).startswith("dqc_recovered:")
+        if not recovered and same != {k: v for k, v in me_b.items() if k not in ("missing",)}:
+            return "other:reason_changed_me_provenance_changed"
+        if "characteristics" in new:
+            return "other:reason_changed_row_kept_characteristics"
+        if old["exclusion"] == old_reason and new["exclusion"] != reason:
+            return "other:reason_changed_admitted_differently"
+        if old["exclusion"] != old_reason and new["exclusion"] != old["exclusion"]:
+            return "other:earlier_exclusion_changed"
+        return f"reason_changed:{old_reason}->{reason}"
     if str(me_b.get("shares_scope", "")).startswith("dqc_recovered:"):
         if old["exclusion"] != new["exclusion"]:
             return "other:recovered_admission_changed"
@@ -124,8 +141,13 @@ CSV_COLUMNS: tuple[str, ...] = (
 
 def _cause(verdict: str, me: Mapping[str, Any]) -> str:
     kind, _, reason = verdict.partition(":")
+    if kind == "reason_changed":
+        before, _, after = reason.partition("->")
+        return f"{before} no longer applies (Amendment 2.2); now {after}"
     if kind == "restored" and reason == MeMissing.SHARES_SCALE_CONFLICT:
-        return "DQC_0095 conflict now resolved to the side within 100x of a reference Amendment 2.1 made eligible"
+        if (me.get("checks") or {}).get("scale") == "recovered":
+            return "DQC_0095 conflict now resolved to the side within 100x of a reference Amendment 2.1 made eligible"
+        return "DQC_0095 conflict no longer found: the comparator stands on its acceptance basis (Amendment 2.2)"
     if kind == "restored":
         return f"{reason} no longer applies: the row's check-4 reference changed"
     if reason == MeMissing.SHARES_BASIS_AMBIGUOUS:

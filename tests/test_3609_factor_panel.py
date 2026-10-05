@@ -474,6 +474,79 @@ def test_dqc_0095_conflict_recovers_the_side_the_reference_supports() -> None:
     assert (me.shares_scope, me.shares) == ("dqc_recovered:cover", Decimal(20_432_827))
 
 
+def test_a_split_before_filing_is_already_in_the_balance_sheet_count() -> None:
+    # Amendment 2.2, SAB Topic 4C: the 10:1 split on 2017-04-10 precedes the filing, so the 2017-03-31 balance-sheet
+    # count of 4,000 is post-split. The cover count is x1,000. Adjusting the sheet count by the split again would
+    # make the gap exactly 100x and pass it.
+    split = [SplitStamp(date(2017, 4, 10), Decimal(10))]
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 4_000_000), sheet=4_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(5), split)
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
+    agree = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 4_000), sheet=4_000)
+    assert market_equity(agree.view(date(2017, 5, 31)), Decimal(5), split).checks["scale"] is Check.PASS
+    # A 1:10 reverse split the other way: a cover count in thousands against the restated sheet was 100x before.
+    reverse = [SplitStamp(date(2017, 4, 10), Decimal("0.1"))]
+    thousands = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 4_000), sheet=4_000_000)
+    me = market_equity(thousands.view(date(2017, 5, 31)), Decimal(5), reverse)
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
+
+
+def test_recovery_takes_comparators_that_agree_with_each_other() -> None:
+    # One read returns several accessions only when they share an acceptance timestamp (``value_as_of``): here a
+    # filing and a co-filed amendment, each with the same balance-sheet count against the x1,000 cover count.
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    _q(shard, "qa", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert me.facts[-1].accns == ("q", "qa")
+    assert (me.shares_scope, me.basis, me.shares) == (
+        "dqc_recovered:balance_sheet",
+        date(2017, 5, 1),
+        Decimal(188_000_000),
+    )
+    assert me.facts[0].accns == ("qa",)  # the highest accession number of the co-filed set
+    # Comparators that disagree with each other leave nothing to recover.
+    _q(shard, "qb", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
+
+
+def test_recovery_refuses_comparators_that_break_the_co_filed_invariant() -> None:
+    # ``value_as_of`` returns only accessions at one acceptance; a read that broke that would mis-basis recovery.
+    from app.services.factor_panel import _checked
+
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    _q(shard, "qa", "2017-05-08", "2017-03-31", cover=None, sheet=188_000_000)
+    view = shard.view(date(2017, 5, 31))
+    common: dict[str, Any] = {
+        "shares_scope": "cover",
+        "shares": Decimal(188_000_000_000),
+        "basis": date(2017, 4, 25),
+        "split_product": Decimal(1),
+        "facts": (),
+    }
+    with pytest.raises(PanelError, match="co-filed"):
+        _checked(
+            view,
+            Decimal(50),
+            [],
+            common,
+            Decimal(188_000_000_000),
+            ("q", "qa"),
+            date(2017, 5, 1),
+            None,
+            _ref(189_000_000),
+            None,
+        )
+
+
+def test_a_comparator_agreeing_with_the_cover_blocks_recovery_to_another() -> None:
+    # Cover 188B; one co-filed comparator agrees with it, the other conflicts and matches the reference.
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    _q(shard, "qa", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=187_000_000_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
+
+
 def test_a_rejected_comparator_leaves_check_2_untested_and_recovery_records_the_count_used() -> None:
     blocked = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
     blocked.reject("CommonStockSharesOutstanding", "q", "2017-03-31", unit="shares")
