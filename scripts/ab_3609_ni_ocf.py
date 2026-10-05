@@ -30,6 +30,7 @@ A_CONTENT_SHA256 = "defe34aaaaaccab0a3c50260817947c647af093a7393b620f21819724491
 ORACLE_CONTENT_SHA256 = "068afe2cef29782f45456463488234a360fce05572c5a9ef95d8718a8992dbe3"
 CHANGED = {"ni_me": "ni_adopted", "ocf_me": "ocf_adopted"}
 COMPARED = ("value", "missing", "period_end", "kind")
+MISSING = COMPARED.index("missing")
 
 
 def _key(row: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -41,7 +42,7 @@ def _reading(c: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 def _state(reading: tuple[Any, ...]) -> str:
-    return "value" if reading[1] is None else str(reading[1])
+    return "value" if reading[MISSING] is None else str(reading[MISSING])
 
 
 def index_oracle(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str, str], Mapping[str, Any]]:
@@ -119,7 +120,7 @@ def compare(
             if before != after:
                 counts[f"{name} changed"] += 1
                 transitions[f"{name}: {_state(before)} -> {_state(after)}"] += 1
-            if after[1] is None:
+            if after[MISSING] is None:  # the reading has a value
                 counts[f"{name} value"] += 1
     if unmatched := len(set(oracle) - used):
         failures.append(f"{unmatched} oracle rows have no admitted row")
