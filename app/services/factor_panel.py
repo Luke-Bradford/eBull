@@ -753,22 +753,29 @@ def _within_tolerance(ratio: Decimal) -> bool:
     return 1 / SCALE_TOLERANCE <= ratio <= SCALE_TOLERANCE
 
 
-def _accession_balance_sheet(view: CikView, accn: str) -> tuple[date, Decimal] | None:
+def _accession_balance_sheet(view: CikView, accn: str) -> FactUse | None:
     """The accession's own ``CommonStockSharesOutstanding`` at its period anchor, if it reported one positive value.
-    Read from that accession's rows, not by key: a later filing's comparative for the same date is not this filing."""
+    Read from that accession's rows, not by key: a later filing's comparative for the same date is not this filing.
+    A public rejection of that key blocks the comparator, as it blocks ``CikView.read``."""
     anchor = view.anchors.get(accn)
     if anchor is None:
         return None
     iso = anchor.isoformat()
-    values = {
-        Decimal(row["value"])
-        for row in view.prefix(*BALANCE_SHEET_SHARES).events
-        if row["accn"] == accn and row["unit"] == SHARES and row["start"] is None and row["end"] == iso
-    }
+    read = view.prefix(*BALANCE_SHEET_SHARES)
+
+    def at_anchor(row: Mapping[str, Any]) -> bool:
+        return row["unit"] == SHARES and row["start"] is None and row["end"] == iso
+
+    if any(at_anchor(row) for row in read.rejections):
+        return None
+    values = {row["value"] for row in read.events if at_anchor(row) and row["accn"] == accn}
     if len(values) != 1:
         return None
     (value,) = values
-    return (anchor, value) if value > 0 else None
+    if Decimal(value) <= 0:
+        return None
+    key = FactKey(*BALANCE_SHEET_SHARES, SHARES, None, iso)
+    return FactUse(key, 1, TermStatus.VALUE, (accn,), view.filings[accn][0], "dqc_comparator", value)
 
 
 def usable_reference(reference: ShareReference | None, formation: date, cik10: str) -> ShareReference | None:
@@ -860,18 +867,18 @@ def _checked(
     # 2. DQC_0095: the cover count against each returned accession's own anchor balance-sheet count.
     checks["scale"] = Check.UNTESTED
     if scope == "cover":
-        conflicts: list[tuple[date, Decimal]] = []
+        conflicts: list[FactUse] = []
         for accn in accns:
             sheet = _accession_balance_sheet(view, accn)
             if sheet is None:
                 continue
-            anchor, count = sheet
+            anchor, count = date.fromisoformat(str(sheet.key.end)), Decimal(str(sheet.value))
             checks["scale"] = Check.PASS if checks["scale"] is Check.UNTESTED else checks["scale"]
             if not _within_tolerance(filed / (count * split_product(splits, anchor, basis))):
                 checks["scale"] = Check.FAIL
                 conflicts.append(sheet)
         if checks["scale"] is Check.FAIL and reference is not None and len(conflicts) == 1:
-            sheet_shares = conflicts[0][1] * split_product(splits, acceptance, decision)
+            sheet_shares = Decimal(str(conflicts[0].value)) * split_product(splits, acceptance, decision)
             cover_ok = _consistent(shares, reference, splits, decision)
             sheet_ok = _consistent(sheet_shares, reference, splits, decision)
             if cover_ok != sheet_ok:
@@ -879,6 +886,8 @@ def _checked(
                 if sheet_ok:
                     common = {**common, "shares": sheet_shares, "basis": acceptance}
                     common["split_product"] = split_product(splits, acceptance, decision)
+                    # The count used comes first; the rejected cover fact stays for the audit.
+                    common["facts"] = (conflicts[0], *common["facts"])
                     shares = sheet_shares
                 common["shares_scope"] = f"dqc_recovered:{'balance_sheet' if sheet_ok else 'cover'}"
 

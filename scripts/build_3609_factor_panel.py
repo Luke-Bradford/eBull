@@ -576,8 +576,12 @@ def build_cik_rows(
     multi: Mapping[date, frozenset[str]],
     sub_sic: Mapping[str, int | None],
     splits: Mapping[int, Sequence[SplitStamp]],
+    link_runs: Mapping[tuple[int, date], date] | None = None,
 ) -> Iterable[dict[str, Any]]:
     """Steps 3-6 and the characteristics for every linked candidate of one CIK.
+
+    ``link_runs`` maps (series, formation) to the first formation of the series' current unbroken link to this CIK:
+    check 4's reference must come from the same run, so a series that left the CIK and came back starts afresh.
 
     ME is computed for every name past the bundle gate, before the filer / REIT / one-security steps, so the
     census can weight those exclusions too; the funnel order is unchanged.
@@ -596,7 +600,9 @@ def build_cik_rows(
             candidate.close,
             splits.get(sid, ()),
             dollar_volume=row["prices"]["dollar_volume"],
-            reference=usable_reference(references.get(sid), candidate.formation, cik10),
+            reference=usable_reference(
+                _same_run(references.get(sid), link_runs, sid, candidate.formation), candidate.formation, cik10
+            ),
         )
         if me.verified:
             assert me.shares is not None
@@ -632,6 +638,14 @@ def build_cik_rows(
                     "facts": [f.to_json() for f in got.facts],
                 }
             yield {**row, "exclusion": None, "characteristics": chars}
+
+
+def _same_run(
+    reference: ShareReference | None, link_runs: Mapping[tuple[int, date], date] | None, sid: int, formation: date
+) -> ShareReference | None:
+    if reference is None or link_runs is None:
+        return reference
+    return reference if reference.formation >= link_runs.get((sid, formation), formation) else None
 
 
 def _known_me(row: Mapping[str, Any]) -> float | None:
@@ -932,6 +946,9 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
     )
     by_cik: dict[str, list[tuple[Candidate, dict[str, Any]]]] = defaultdict(list)
     multi: dict[date, frozenset[str]] = {}
+    # Amendment 2 check 4: per series, the CIK of its current priced-link run and the run's first formation.
+    run: dict[int, tuple[str | None, date]] = {}
+    link_runs: dict[tuple[int, date], date] = {}
     for formation, session in sorted(inputs.decisions.items()):
         links: dict[int, str] = {}
         for series in inputs.admitted:
@@ -947,6 +964,11 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
             row["prices"] = _prices_json(inputs.prices[series.series_id][formation], tercile)
             link = linkage.link_as_of(series.series_id, session)
             row = {**row, "link_reason": link.reason.value, "link_basis": link.basis, "cik": link.cik}
+            linked = link.cik if link.reason is Reason.LINKED else None
+            current = run.get(series.series_id)
+            if current is None or current[0] != linked:
+                run[series.series_id] = current = (linked, formation)
+            link_runs[(series.series_id, formation)] = current[1]
             if link.reason is not Reason.LINKED:
                 yield {**row, "exclusion": link.label}
                 continue
@@ -957,7 +979,7 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
     print(f"linked candidates {sum(len(v) for v in by_cik.values())} over {len(by_cik)} CIKs", flush=True)
     for done, (cik10, candidates) in enumerate(sorted(by_cik.items()), start=1):
         candidates.sort(key=lambda item: item[0].formation)
-        yield from build_cik_rows(bundle, cik10, candidates, multi, sub_sic, inputs.splits)
+        yield from build_cik_rows(bundle, cik10, candidates, multi, sub_sic, inputs.splits, link_runs)
         shard_cache.pop(cik10, None)  # bound memory: each CIK's shard is read once, by this loop only
         if done % 500 == 0:
             print(f"  {done}/{len(by_cik)} CIKs", flush=True)

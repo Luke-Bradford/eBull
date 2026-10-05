@@ -59,6 +59,8 @@ def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
             return "other:removed_me_provenance_changed"
         if old["exclusion"] is None and new["exclusion"] != reason:
             return "other:removed_but_admitted_differently"
+        if "characteristics" in new:
+            return "other:removed_row_kept_characteristics"
         if old["exclusion"] is not None and new["exclusion"] != old["exclusion"]:
             return "other:earlier_exclusion_changed"
         return f"removed:{reason}"

@@ -228,6 +228,9 @@ def test_an_excused_ratio_move_is_counted_unless_a_split_factor_explains_it() ->
     split = [SplitStamp(SESSIONS[j], Decimal("0.5"))]
     explained = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None, split_stamps=split)
     assert explained.excused_unexplained_by_year == {}
+    wrong_way = [SplitStamp(SESSIONS[j], Decimal(2))]  # predicts the ratio doubling, not halving
+    reversed_ = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None, split_stamps=wrong_way)
+    assert reversed_.excused_unexplained_by_year == {2019: 1}
 
 
 def test_the_liquidity_window_reports_a_screened_bar() -> None:

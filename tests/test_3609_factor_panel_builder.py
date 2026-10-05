@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from app.services.factor_panel import SplitStamp
+from app.services.factor_panel import ShareReference, SplitStamp
 from scripts.build_3609_factor_panel import (
     Candidate,
     Census,
@@ -191,3 +191,13 @@ def test_a_verified_count_becomes_the_reference_that_rejects_the_next_x1000_coun
 def test_later_formations_never_change_an_earlier_row() -> None:
     (alone,) = _chain_rows(through_may=False)
     assert _chain_rows(through_may=True)[0] == alone
+
+
+def test_a_reference_from_before_the_series_left_the_cik_is_not_used() -> None:
+    from scripts.build_3609_factor_panel import _same_run
+
+    reference = ShareReference(M, S, Decimal(50), CIK)
+    may = date(2017, 5, 31)
+    assert _same_run(reference, {(7, may): M}, 7, may) is reference
+    assert _same_run(reference, {(7, may): may}, 7, may) is None
+    assert _same_run(reference, None, 7, may) is reference

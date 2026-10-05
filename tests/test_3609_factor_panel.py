@@ -474,6 +474,22 @@ def test_dqc_0095_conflict_recovers_the_side_the_reference_supports() -> None:
     assert (me.shares_scope, me.shares) == ("dqc_recovered:cover", Decimal(20_432_827))
 
 
+def test_a_rejected_comparator_leaves_check_2_untested_and_recovery_records_the_count_used() -> None:
+    blocked = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    blocked.reject("CommonStockSharesOutstanding", "q", "2017-03-31", unit="shares")
+    assert market_equity(blocked.view(date(2017, 5, 31)), Decimal(50), []).checks["scale"] is Check.UNTESTED
+    grmn = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    me = market_equity(grmn.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    used, cover = me.facts
+    assert (used.key.concept, used.value, used.branch, used.accns) == (
+        "CommonStockSharesOutstanding",
+        "188000000",
+        "dqc_comparator",
+        ("q",),
+    )
+    assert cover.key.concept == "EntityCommonStockSharesOutstanding"
+
+
 def test_counts_that_agree_pass_and_a_count_without_a_comparator_is_untested() -> None:
     agree = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 101), sheet=100)
     me = market_equity(agree.view(date(2017, 5, 31)), Decimal(2), [], dollar_volume=20.0)

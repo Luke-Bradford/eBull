@@ -29,6 +29,7 @@ def test_a_removed_me_must_move_admission_to_its_reason_and_nothing_else() -> No
     after = {**_row(value=None, missing="shares_discontinuity", raw="100"), "exclusion": "shares_discontinuity"}
     del after["characteristics"]
     assert classify(_row(), after) == "removed:shares_discontinuity"
+    assert classify(_row(), {**after, "characteristics": {}}) == "other:removed_row_kept_characteristics"
     after["prices"] = {"adj_close": 3.0}
     assert classify(_row(), after) == "other:fields_outside_me_changed"
 

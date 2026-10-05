@@ -240,8 +240,9 @@ def series_prices(
         flagged[admitted[1:][jump]] = True
         flagged[admitted[:-1][jump]] = True
         screened_at[admitted[1:][jump]] = True
-        factor = np.abs(log_split_through[admitted[1:]] - log_split_through[admitted[:-1]])
-        unexplained = np.abs(np.abs(np.log(ratio[1:] / ratio[:-1])) - factor) > math.log(1.0 + SCREEN_RATIO_MOVE)
+        # Intrader stamps new shares per old share, so a stamp f multiplies ``adj_close/close`` by f: signed.
+        factor = log_split_through[admitted[1:]] - log_split_through[admitted[:-1]]
+        unexplained = np.abs(np.log(ratio[1:] / ratio[:-1]) - factor) > math.log(1.0 + SCREEN_RATIO_MOVE)
         excused_unexplained = Counter(sessions[int(i)].year for i in admitted[1:][moved & ~unstamped & unexplained])
     else:
         excused_unexplained = Counter()
