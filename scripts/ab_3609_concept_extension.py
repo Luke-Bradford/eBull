@@ -34,10 +34,24 @@ from typing import Any
 
 from app.services.pit_fundamentals import CONCEPT_SET, load_pit_fundamentals
 from app.services.security_linkage import load_security_linkage
-from scripts.measure_3609_amendment_2b import EXTRA_CONCEPTS
 
-#: Amendment 2b (slice 3d-iv): exactly the measurement's ten are added. Slice 2's nine ran at ``dd6628f0``.
-ADDED_CONCEPTS = frozenset(EXTRA_CONCEPTS)
+#: Amendment 2b (slice 3d-iv): exactly the measurement's ten (``measure_3609_amendment_2b.EXTRA_CONCEPTS``, held
+#: equal by a test) are added. Slice 2's nine ran at ``dd6628f0``.
+ADDED_CONCEPTS = frozenset(
+    ("us-gaap", concept)
+    for concept in (
+        "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity",
+        "IncomeLossFromDiscontinuedOperationsNetOfTax",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+        "CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations",
+        "ExtraordinaryItemNetOfTax",
+        "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToNoncontrollingInterest",
+        "DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax",
+        "DiscontinuedOperationGainLossOnDisposalOfDiscontinuedOperationNetOfTax",
+        "DiscontinuedOperationIncomeLossFromDiscontinuedOperationDuringPhaseOutPeriodNetOfTax",
+        "NetCashProvidedByUsedInDiscontinuedOperations",
+    )
+)
 STORED = "stored"
 
 
@@ -162,11 +176,17 @@ def compare_linkage(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
 def compare_scratch(scratch_root: Path, scratch_sha: str, b_root: Path, b_sha: str) -> list[str]:
     _, scratch = _read(scratch_root / "manifest.json", scratch_sha)
     _, b = _read(b_root / "manifest.json", b_sha)
-    return [
+    failures = [
         f"scratch manifest {field} differs"
         for field in sorted(set(scratch) | set(b))
         if field != "policy" and scratch.get(field) != b.get(field)
     ]
+    # The digest list stands for the shards only while the files beside it still match it.
+    for entry in scratch["shards"]:
+        path = scratch_root / entry["path"]
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+            failures.append(f"scratch shard {entry['path']} is missing or does not match its digest")
+    return failures
 
 
 def main() -> int:

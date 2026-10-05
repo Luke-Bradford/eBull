@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -182,13 +183,35 @@ def test_replay_reads_the_prior_inputs_and_refuses_tampering(tmp_path: Path) -> 
         replay_inputs(tmp_path, digest)
 
 
+def test_added_concepts_are_the_measurements_ten() -> None:
+    from scripts.measure_3609_amendment_2b import EXTRA_CONCEPTS
+
+    assert ab.ADDED_CONCEPTS == frozenset(EXTRA_CONCEPTS) and len(EXTRA_CONCEPTS) == 10
+    assert ab.ADDED_CONCEPTS <= set(ab.CONCEPT_SET)
+
+
 def test_scratch_manifest_may_differ_only_in_policy(tmp_path: Path) -> None:
     added = [_event(concept) for _, concept in sorted(ab.ADDED_CONCEPTS)]
     b = _bundle(tmp_path / "b", [_event("Assets"), *added], _all_added(_OLD_LEDGER))
     manifest = json.loads((tmp_path / "b/manifest.json").read_bytes())
+    shutil.copytree(tmp_path / "b", tmp_path / "scratch")
     scratch = _write(tmp_path / "scratch/manifest.json", {**manifest, "policy": "scratch"})
     assert ab.compare_scratch(tmp_path / "scratch", scratch, tmp_path / "b", b) == []
+    # A shard file on disk that no longer matches the scratch manifest refuses.
+    shard_path = manifest["shards"][0]["path"]
+    (tmp_path / "scratch" / shard_path).write_bytes(b"{}")
+    assert ab.compare_scratch(tmp_path / "scratch", scratch, tmp_path / "b", b) == [
+        f"scratch shard {shard_path} is missing or does not match its digest"
+    ]
+    (tmp_path / "scratch" / shard_path).unlink()
+    assert ab.compare_scratch(tmp_path / "scratch", scratch, tmp_path / "b", b) == [
+        f"scratch shard {shard_path} is missing or does not match its digest"
+    ]
     # A different shard digest is a different shard byte.
+    shutil.copy(tmp_path / "b" / shard_path, tmp_path / "scratch" / shard_path)
     manifest["shards"][0]["sha256"] = "0" * 64
     scratch = _write(tmp_path / "scratch/manifest.json", {**manifest, "policy": "scratch"})
-    assert ab.compare_scratch(tmp_path / "scratch", scratch, tmp_path / "b", b) == ["scratch manifest shards differs"]
+    assert ab.compare_scratch(tmp_path / "scratch", scratch, tmp_path / "b", b) == [
+        "scratch manifest shards differs",
+        f"scratch shard {shard_path} is missing or does not match its digest",
+    ]
