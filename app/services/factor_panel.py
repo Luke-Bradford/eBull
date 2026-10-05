@@ -629,6 +629,8 @@ FALLBACK_LABELS: Final = {
 }
 #: Prefix of the label an absent term carries when a witness refused its companion's zero. The census reads it.
 VETO: Final = "veto_"
+#: ``do_read``'s branch labels: the parent tag, consolidated minus noncontrolling, the consolidated proxy.
+DO_BRANCHES: Final = ("do_parent", "do_consolidated_minus_nci", "do_consolidated_proxy")
 
 
 def _interval_start(term: Term, end: date, kind: Kind) -> date | None:
@@ -703,20 +705,20 @@ def do_read(view: CikView, reader: Reader, end: date) -> Term:
     """DO: the parent tag; else consolidated minus the noncontrolling share; else consolidated (proxy)."""
     parent = reader(view, XIDO_PARENT, end)
     if parent.status is not TermStatus.ABSENT:
-        return _labelled(parent, "do_parent")
+        return _labelled(parent, DO_BRANCHES[0])
     consolidated = reader(view, XIDO_CONSOLIDATED, end)
     if consolidated.status is TermStatus.ABSENT:
         return ABSENT
     nci = reader(view, DO_NCI, end)
     if nci.status is TermStatus.ABSENT:
-        return _labelled(consolidated, "do_consolidated_proxy")
+        return _labelled(consolidated, DO_BRANCHES[2])
     # Quarter terms carry their start, so a different one is a different interval (annual terms carry none; their
     # fact keys are checked by ``companion``). Absent, either non-zero term vetoes the zero as a witness.
     both = consolidated.status is TermStatus.VALUE and nci.status is TermStatus.VALUE
     if both and consolidated.start != nci.start:
         return ABSENT
     term = combine((1, consolidated), (-1, _negated(nci)))
-    return Term(term.status, term.value, term.facts, consolidated.start, ("do_consolidated_minus_nci", *term.branches))
+    return Term(term.status, term.value, term.facts, consolidated.start, (DO_BRANCHES[1], *term.branches))
 
 
 def unit_term(view: CikView, name: str, end: date, kind: Kind) -> Term:

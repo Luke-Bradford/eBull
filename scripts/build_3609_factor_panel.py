@@ -40,6 +40,7 @@ import psycopg
 from app.config import settings
 from app.services.factor_panel import (
     ACCOUNTING_CHARACTERISTICS,
+    DO_BRANCHES,
     FALLBACK_LABELS,
     REIT_SIC,
     STAGE_A_LAST_FORMATION,
@@ -768,9 +769,8 @@ class Census:
         for companion in companions:
             if f"zero_{companion}" in labels:
                 tally[f"imputed zero: {companion}"] += 1
-        for label in labels:
-            if label.startswith("do_") and not label.startswith("do_filed"):
-                tally[f"DO branch: {label}"] += 1
+        for label in labels & set(DO_BRANCHES):
+            tally[f"DO branch: {label}"] += 1
 
     def _add_checks(self, row: Mapping[str, Any], m: str, me: float | None, admitted: bool, label: str) -> None:
         """Amendment 2 census: per-check outcomes, and per removal reason its rows, names and raw-ME share."""
