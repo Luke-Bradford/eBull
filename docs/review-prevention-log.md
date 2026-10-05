@@ -11957,3 +11957,13 @@ neighbouring container and match it.**
   simulated effect on the exact rebuild before the spec cites it.
 - Enforced in: `docs/research/2026-10-04-3609-step1-factor-panel.md` (Amendment 2.1, census `me_checks.outcomes`
   cited in the slice 3d-ii result), `scripts/ab_3609_share_checks.py`.
+
+### A guard tested only with hand-built values can be dead in production (#3609)
+
+- Failure: Amendment 2.1's same-count-date guard compares `ShareReference.counted` with the fact's `FactKey.end`.
+  Its only test built the partner by hand with a literal date string, so it could not show that the builder stores
+  the same type and form as the fact. If they differed, the inequality would always hold and the guard would never
+  fire (review bot, PR #3654). They match here (`FactKey.end: str`), but the test could not have shown it.
+- Prevention: test a guard that compares a stored copy with its source through the real producer: the shard, the
+  bundle and `build_cik_rows`, not a literal. Revert-probe it: with the guard removed, the test must fail.
+- Enforced in: `tests/test_3609_factor_panel_builder.py::test_an_amendment_repeating_the_count_and_its_date_is_not_a_second_filing`.
