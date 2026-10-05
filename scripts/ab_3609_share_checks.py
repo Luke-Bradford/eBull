@@ -72,7 +72,14 @@ def classify(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
     old_reason = me_a.get("missing")
     if me_a.get("value") is None and old_reason in AMENDMENT_2 and me_b.get("value") is not None:
         # 3d-ii: the check that removed it no longer fails. Only the ME funnel step may lift; an earlier exclusion
-        # stays, and an admitted row gains its characteristics.
+        # stays, and an admitted row gains its characteristics. Unless DQC recovery chose another side, the count
+        # and its provenance are the ones the check had removed.
+        if me_b.get("missing") is not None:
+            return "other:restored_with_a_missing_reason"
+        recovered = str(me_b.get("shares_scope", "")).startswith("dqc_recovered:")
+        same = {k: v for k, v in me_a.items() if k not in ("value", "missing")}
+        if not recovered and same != {k: v for k, v in me_b.items() if k not in ("value", "missing")}:
+            return "other:restored_me_provenance_changed"
         if old["exclusion"] == old_reason:
             if new["exclusion"] is not None or "characteristics" not in new:
                 return "other:restored_but_not_admitted"

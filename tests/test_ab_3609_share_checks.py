@@ -60,6 +60,10 @@ def test_a_restored_me_must_be_admitted_with_its_characteristics() -> None:
     earlier = {**before, "exclusion": "not_filer"}
     assert classify(earlier, {**_row(), "exclusion": "not_filer"}) == "restored:shares_discontinuity"
     assert classify(earlier, _row()) == "other:earlier_exclusion_changed"
+    assert classify(before, _row(shares="100")) == "other:restored_me_provenance_changed"
+    assert classify(before, _row(missing="shares_discontinuity")) == "other:restored_with_a_missing_reason"
+    recovered = _row(shares="0.05", shares_scope="dqc_recovered:balance_sheet")
+    assert classify(before, recovered) == "restored:shares_discontinuity"
 
 
 def test_the_evidence_line_carries_the_count_used_and_its_cause() -> None:
