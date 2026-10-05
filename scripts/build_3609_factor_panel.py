@@ -680,7 +680,9 @@ class Census:
         self.chars_me: dict[str, dict[str, dict[str, float]]] = defaultdict(
             lambda: defaultdict(lambda: defaultdict(float))
         )
-        #: Per characteristic, name-months per branch label; a label's ``:``-suffix (an interval) is dropped.
+        #: Per characteristic, name-months per branch label; a label's ``:``-suffix (an interval) is dropped. Only the
+        #: ``zero_*`` and ``veto_*`` labels carry one, so only their keys differ from slice 3d-iv part 2's census,
+        #: which keyed each interval apart; ``branch_use`` is read by no code (``git grep branch_use``).
         self.branches: dict[str, Counter[str]] = defaultdict(Counter)
         #: Amendment 2b's ``ni_me`` / ``ocf_me`` counts (spec §"Slices" 3d-iv), in the measurement's terms.
         self.fallback: dict[str, Counter[str]] = defaultdict(Counter)
