@@ -70,6 +70,8 @@ def compare(
             break
         assert isinstance(a, Mapping) and isinstance(b, Mapping)
         counts["rows"] += 1
+        if a.get("exclusion") is None:
+            used.add(_key(a))
         a_chars, b_chars = a.get("characteristics"), b.get("characteristics")
         if {k: v for k, v in a.items() if k != "characteristics"} != {
             k: v for k, v in b.items() if k != "characteristics"
@@ -92,7 +94,6 @@ def compare(
         if expected is None:
             failures.append(f"{_key(a)}: admitted row has no oracle row")
             continue
-        used.add(_key(a))
         for name, variant in CHANGED.items():
             before, after, want = _reading(a_chars[name]), _reading(b_chars[name]), _reading(expected[variant])
             if after != want:
@@ -102,8 +103,8 @@ def compare(
                 transitions[f"{name}: {_state(before)} -> {_state(after)}"] += 1
             if after[1] is None:
                 counts[f"{name} value"] += 1
-    if len(used) != len(oracle):
-        failures.append(f"{len(oracle) - len(used)} oracle rows have no admitted row")
+    if unmatched := len(set(oracle) - used):
+        failures.append(f"{unmatched} oracle rows have no admitted row")
     return failures, {"counts": dict(counts), "transitions": dict(sorted(transitions.items()))}
 
 

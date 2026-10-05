@@ -16,6 +16,9 @@ a panel rows file, for the current ``ni_me`` / ``ocf_me`` and for each variant b
 summary and the sha256 of the decompressed rows (the slice 3d-iv oracle). The input rows and the scratch bundle are
 bound by sha256.
 
+Closed research: it reproduces at ``62602dca``. From slice 3d-iv part 2 the panel's own ``ni_me`` / ``ocf_me`` are
+the adopted variants (``factor_panel.fallback_flow``), so the "current" readings here no longer mean IB / OANCF alone.
+
     PYTHONPATH=. uv run python scripts/measure_3609_amendment_2b.py tags --rows <rows.jsonl.gz>
     PYTHONPATH=. uv run python scripts/measure_3609_amendment_2b.py build --out <scratch bundle dir>
     PYTHONPATH=. uv run python scripts/measure_3609_amendment_2b.py measure --bundle <dir> --bundle-sha256 <d> \\
