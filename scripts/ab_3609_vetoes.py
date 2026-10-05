@@ -29,8 +29,9 @@ from scripts.ab_3609_ni_ocf import CHANGED, _key, _reading, index_oracle
 
 #: Slice 3d-iv part 2 rows (``var/research/3609_step1/s3div2/rows3.jsonl.gz`` in the loop worktree).
 A_CONTENT_SHA256 = "5f0c153f57104f0d056a602883a998462f7de05f8376469db774f9ffb2df55a3"
-#: Amendment 2b m6 measurement rows (``var/research/3609_step1/a2b/m6/rows.jsonl.gz``).
-ORACLE_CONTENT_SHA256 = "TODO"
+#: Amendment 2b m6 measurement rows (``var/research/3609_step1/a2b/m6/rows.jsonl.gz``); its summary is
+#: ``docs/research/3609-amendment-2b-measurement-m6.json``.
+ORACLE_CONTENT_SHA256 = "0de6e95967c64160290bc845773aaace679d8a642f7d7c368110bf3ec983dbe0"
 
 
 def without_vetoes(row: Mapping[str, Any]) -> dict[str, Any]:

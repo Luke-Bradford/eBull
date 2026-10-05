@@ -1066,6 +1066,11 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
          `ni_adopted` and `ocf_adopted` in the measurement's output rows (decompressed sha256 `068afe2c…92dbe3`), exactly. Any
          difference refuses. Adopting a different oracle needs a new measurement run, with its digest and the
          reason, recorded on the PR.
+       - **Oracle m6 (adopted for the census clause).** #3658 passed against m5 with five ALCO `ni_me` readings
+         adjudicated, because m5's witness filter skipped facts filed without a start. m6 dates such a fact at its
+         end, as the panel does, and replays the 3d-iv part 2 rows: decompressed sha256 `0de6e959…dbe0`, summary
+         `docs/research/3609-amendment-2b-measurement-m6.json`. Against m5 it moves exactly those five readings;
+         against the stored rows it moves none. `scripts/ab_3609_vetoes.py` checks it with no adjudication.
        - The branch, imputed-zero, DO-branch and veto counts go into the census.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
    - the `DeclaredTrial` row;
