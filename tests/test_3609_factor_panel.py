@@ -30,9 +30,11 @@ from app.services.factor_panel import (
     SicStatus,
     SortInput,
     SplitStamp,
+    TermStatus,
     add_months,
     characteristic,
     decision_session,
+    fallback_flow,
     flow,
     formation_months,
     is_filer,
@@ -361,6 +363,140 @@ def test_asset_growth_matches_the_prior_year_period_and_needs_a_positive_base() 
     zero.fact("Assets", 0, "k15", "2015-12-31").fact("Assets", 100, "k16", "2016-12-31")
     got = characteristic("at_gr1", zero.view(date(2017, 4, 28)), date(2017, 4, 30), None)
     assert got.missing is Missing.NONPOSITIVE_DENOMINATOR
+
+
+# --------------------------------------------------------------------------- Amendment 2b: ni* and ocf*
+
+FY_START, FY_END, FY = "2016-01-01", "2016-12-31", date(2016, 12, 31)
+DECIDED = date(2017, 4, 28)
+DO_PARENT = "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity"
+DO_CONSOLIDATED = "IncomeLossFromDiscontinuedOperationsNetOfTax"
+DO_NCI = "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToNoncontrollingInterest"
+DO_BEFORE_TAX = "DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax"
+XI = "ExtraordinaryItemNetOfTax"
+OCF_CONTINUING = "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"
+OCF_DISCONTINUED = "CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations"
+
+
+def _annual(**facts: object) -> Shard:
+    """A FY2016 10-K reporting each ``concept=value`` over the fiscal year."""
+    shard = Shard().filing("k", "2017-02-20", "10-K").fact("Assets", 100, "k", FY_END)
+    for concept, value in facts.items():
+        shard.fact(concept, value, "k", FY_END, FY_START)
+    return shard
+
+
+def _ni(shard: Shard, kind: Kind = Kind.ANNUAL) -> Any:
+    return fallback_flow(shard.view(DECIDED), "ni_me", FY, kind)
+
+
+def _ocf(shard: Shard, kind: Kind = Kind.ANNUAL) -> Any:
+    return fallback_flow(shard.view(DECIDED), "ocf_me", FY, kind)
+
+
+def _each_quarter(shard: Shard, concept: str, value: object) -> Shard:
+    for accn, start, end in (
+        ("q1", "2016-01-01", "2016-03-31"),
+        ("q2", "2016-04-01", "2016-06-30"),
+        ("q3", "2016-07-01", "2016-09-30"),
+        ("k", "2016-10-01", "2016-12-31"),
+    ):
+        shard.fact(concept, value, accn, end, start)
+    return shard
+
+
+def test_ib_and_oancf_win_over_their_fallbacks_annual_and_quarterly() -> None:
+    annual = _annual(IncomeLossFromContinuingOperations=10, NetIncomeLoss=50)
+    annual.fact("NetCashProvidedByUsedInOperatingActivities", 7, "k", FY_END, FY_START)
+    annual.fact(OCF_CONTINUING, 3, "k", FY_END, FY_START)
+    assert (_ni(annual).value, _ni(annual).branches[0]) == (Decimal(10), "ib")
+    assert (_ocf(annual).value, _ocf(annual).branches[0]) == (Decimal(7), "oancf")
+    quarterly = _each_quarter(_quarters(Shard()), "IncomeLossFromContinuingOperations", 10)
+    _each_quarter(quarterly, "NetIncomeLoss", 50)
+    _each_quarter(quarterly, "NetCashProvidedByUsedInOperatingActivities", 7)
+    _each_quarter(quarterly, OCF_CONTINUING, 3)
+    ni, ocf = _ni(quarterly, Kind.QUARTERLY), _ocf(quarterly, Kind.QUARTERLY)
+    assert (ni.value, "ni_minus_xido" in ni.branches) == (Decimal(40), False)
+    assert (ocf.value, "continuing_plus_discontinued" in ocf.branches) == (Decimal(28), False)
+
+
+def test_companions_read_through_every_quarterly_branch_and_annually() -> None:
+    shard = _quarters(Shard())
+    for concept, q1, h1, q3, year in (("NetIncomeLoss", 10, 25, 12, 50), (DO_PARENT, 1, 3, 1, 5)):
+        shard.fact(concept, q1, "q1", "2016-03-31", "2016-01-01")  # direct
+        shard.fact(concept, h1, "q2", "2016-06-30", "2016-01-01")  # YTD difference
+        shard.fact(concept, q3, "q3", "2016-09-30", "2016-07-01")  # direct
+        shard.fact(concept, year, "k", FY_END, FY_START)  # Q4 residual, and the annual period
+    ttm = _ni(shard, Kind.QUARTERLY)
+    assert ttm.value == Decimal(45)  # NI 50 - DO 5, XI absent and unwitnessed
+    assert {"direct", "ytd_difference", "q4_residual", "do_parent", "do_filed"} <= set(ttm.branches)
+    assert _ni(shard).value == Decimal(45)
+
+
+def test_absent_xi_is_zero_and_filed_xi_is_subtracted_with_or_without_do() -> None:
+    assert _ni(_annual(NetIncomeLoss=50)).value == Decimal(50)
+    assert _ni(_annual(NetIncomeLoss=50, **{XI: 3})).value == Decimal(47)
+    both = _ni(_annual(NetIncomeLoss=50, **{XI: 3, DO_PARENT: 5}))
+    assert both.value == Decimal(42) and {"xi_filed", "do_filed"} <= set(both.branches)
+
+
+def test_do_reads_parent_then_consolidated_minus_nci_then_the_flagged_proxy() -> None:
+    parent = _ni(_annual(NetIncomeLoss=50, **{DO_PARENT: 5, DO_CONSOLIDATED: 8, DO_NCI: 1}))
+    assert parent.value == Decimal(45) and "do_parent" in parent.branches
+    minus = _ni(_annual(NetIncomeLoss=50, **{DO_CONSOLIDATED: 8, DO_NCI: 1}))
+    assert minus.value == Decimal(43) and "do_consolidated_minus_nci" in minus.branches
+    proxy = _ni(_annual(NetIncomeLoss=50, **{DO_CONSOLIDATED: 8}))
+    assert proxy.value == Decimal(42) and "do_consolidated_proxy" in proxy.branches
+
+
+def test_an_absent_companion_is_zero_unless_a_public_non_zero_witness_overlaps() -> None:
+    assert _ni(_annual(NetIncomeLoss=50)).value == Decimal(50)
+    assert _ocf(_annual(**{OCF_CONTINUING: 30})).value == Decimal(30)
+    witnessed = _annual(NetIncomeLoss=50, **{DO_BEFORE_TAX: 4})
+    assert _ni(witnessed).status is TermStatus.ABSENT
+    assert _ocf(_annual(**{OCF_CONTINUING: 30, DO_BEFORE_TAX: 4})).status is TermStatus.ABSENT
+    # The witness's interval need only overlap the period.
+    overlap = _annual(NetIncomeLoss=50).fact(DO_BEFORE_TAX, 4, "k", "2016-06-30", "2016-04-01")
+    assert _ni(overlap).status is TermStatus.ABSENT
+    # A witness whose current value is zero does not veto.
+    corrected = _annual(NetIncomeLoss=50, **{DO_BEFORE_TAX: 4}).filing("ka", "2017-03-10", "10-K/A")
+    corrected.fact(DO_BEFORE_TAX, 0, "ka", FY_END, FY_START)
+    assert _ni(corrected).value == Decimal(50)
+    # A witness accepted on or after s(M) is not public at s(M).
+    late = _annual(NetIncomeLoss=50).filing("ka", DECIDED.isoformat(), "10-K/A")
+    late.fact(DO_BEFORE_TAX, 4, "ka", FY_END, FY_START)
+    assert _ni(late).value == Decimal(50)
+
+
+def test_a_blocked_base_or_companion_blocks_the_period() -> None:
+    base = _annual(**{XI: 3}).reject("NetIncomeLoss", "k", FY_END, FY_START)
+    assert _ni(base).status is TermStatus.BLOCKED_BY_REJECTION
+    for concept in (XI, DO_PARENT):
+        blocked = _annual(NetIncomeLoss=50).reject(concept, "k", FY_END, FY_START)
+        assert _ni(blocked).status is TermStatus.BLOCKED_BY_REJECTION
+    absent_base = _annual().reject(XI, "k", FY_END, FY_START)
+    assert _ni(absent_base).status is TermStatus.BLOCKED_BY_REJECTION
+    ocf = _annual(**{OCF_CONTINUING: 30}).reject(OCF_DISCONTINUED, "k", FY_END, FY_START)
+    assert _ocf(ocf).status is TermStatus.BLOCKED_BY_REJECTION
+
+
+def test_a_companion_over_a_different_interval_leaves_the_period_absent() -> None:
+    shard = _annual(NetIncomeLoss=50).fact(XI, 3, "k", FY_END, "2016-01-02")
+    assert _ni(shard).status is TermStatus.ABSENT
+    ocf = _annual(**{OCF_CONTINUING: 30}).fact(OCF_DISCONTINUED, 2, "k", FY_END, "2016-01-02")
+    assert _ocf(ocf).status is TermStatus.ABSENT
+
+
+def test_a_ttm_mixing_primary_and_fallback_quarters_chains() -> None:
+    shard = _quarters(Shard())
+    shard.fact("IncomeLossFromContinuingOperations", 10, "q1", "2016-03-31", "2016-01-01")
+    shard.fact("IncomeLossFromContinuingOperations", 10, "q2", "2016-06-30", "2016-04-01")
+    shard.fact("NetIncomeLoss", 20, "q3", "2016-09-30", "2016-07-01")
+    shard.fact("NetIncomeLoss", 20, "k", FY_END, "2016-10-01")
+    ttm = _ni(shard, Kind.QUARTERLY)
+    assert ttm.value == Decimal(60) and {"ib", "ni_minus_xido"} <= set(ttm.branches)
+    got = characteristic("ni_me", shard.view(DECIDED), date(2017, 4, 30), ME)
+    assert (got.value, got.kind) == (pytest.approx(0.06), Kind.QUARTERLY)
 
 
 # --------------------------------------------------------------------------- market equity
