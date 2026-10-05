@@ -487,6 +487,31 @@ def test_a_companion_over_a_different_interval_leaves_the_period_absent() -> Non
     assert _ocf(ocf).status is TermStatus.ABSENT
 
 
+def test_fallback_provenance_carries_each_facts_sign() -> None:
+    got = _ni(_annual(NetIncomeLoss=50, **{XI: 3, DO_CONSOLIDATED: 8, DO_NCI: 1}))
+    assert got.value == Decimal(40)  # 50 - 3 - (8 - 1)
+    signs = {f.key.concept: f.coefficient for f in got.facts}
+    assert signs == {"NetIncomeLoss": 1, XI: -1, DO_CONSOLIDATED: -1, DO_NCI: 1}
+
+
+def test_quarterly_nci_over_a_different_interval_is_not_subtracted() -> None:
+    shard = _each_quarter(_quarters(Shard()), "NetIncomeLoss", 10)
+    _each_quarter(shard, DO_CONSOLIDATED, 2)
+    _each_quarter(shard, DO_NCI, 1)
+    assert _ni(shard, Kind.QUARTERLY).value == Decimal(36)  # 40 - 4 x (2 - 1)
+    mismatched = _each_quarter(_quarters(Shard()), "NetIncomeLoss", 10)
+    _each_quarter(mismatched, DO_CONSOLIDATED, 2)
+    for accn, start, end in (
+        ("q1", "2016-01-01", "2016-03-31"),
+        ("q2", "2016-04-01", "2016-06-30"),
+        ("q3", "2016-07-01", "2016-09-30"),
+        ("k", "2016-10-03", "2016-12-31"),  # a quarter, but not the consolidated DO's
+    ):
+        mismatched.fact(DO_NCI, 1, accn, end, start)
+    # Q4's DO is absent, and the non-zero consolidated DO witnesses against a zero: Q4 and the TTM are absent.
+    assert _ni(mismatched, Kind.QUARTERLY).status is TermStatus.ABSENT
+
+
 def test_a_ttm_mixing_primary_and_fallback_quarters_chains() -> None:
     shard = _quarters(Shard())
     shard.fact("IncomeLossFromContinuingOperations", 10, "q1", "2016-03-31", "2016-01-01")

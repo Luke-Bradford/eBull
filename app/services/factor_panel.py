@@ -699,7 +699,12 @@ def do_read(view: CikView, reader: Reader, end: date) -> Term:
     nci = reader(view, DO_NCI, end)
     if nci.status is TermStatus.ABSENT:
         return _labelled(consolidated, "do_consolidated_proxy")
-    term = combine((1, consolidated), (-1, nci))
+    # Quarter terms carry their start, so a different one is a different interval (annual terms carry none; their
+    # fact keys are checked by ``companion``). Absent, either non-zero term vetoes the zero as a witness.
+    both = consolidated.status is TermStatus.VALUE and nci.status is TermStatus.VALUE
+    if both and consolidated.start != nci.start:
+        return ABSENT
+    term = combine((1, consolidated), (-1, _negated(nci)))
     return Term(term.status, term.value, term.facts, consolidated.start, ("do_consolidated_minus_nci", *term.branches))
 
 
@@ -714,7 +719,7 @@ def unit_term(view: CikView, name: str, end: date, kind: Kind) -> Term:
         start = _interval_start(base, end, kind)
         xi = companion(view, lambda: reader(view, XI, end), end, kind, start, name="xi", witnesses=XI_WITNESSES)
         do = companion(view, lambda: do_read(view, reader, end), end, kind, start, name="do", witnesses=DO_WITNESSES)
-        term = combine((1, base), (-1, xi), (-1, do))
+        term = combine((1, base), (-1, _negated(xi)), (-1, _negated(do)))
         label = "ni_minus_xido"
     else:
         primary = reader(view, OANCF[0], end)
