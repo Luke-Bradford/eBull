@@ -878,17 +878,17 @@ def ope_unit(view: CikView, end: date, kind: Kind) -> Term:
     the refusals' labels and guard reads are kept, so a vetoed period is recorded as Amendment 2b's are.
 
     The parts are read even when the base is not a value, because a blocked part blocks an absent base (``combine``).
-    A refusal or bound there tested no base interval, so its label is dropped, and so are its guards unless the term
-    is blocked; ``companion`` makes no label without an interval either."""
+    A refusal or bound there tested no base interval, so its label and guard reads are dropped, except a blocked
+    ``OperatingExpenses`` read, which blocks the term; ``companion`` makes no label without an interval either."""
 
     def deducted(base: Term, label: str, costs: Callable[[Period], Term]) -> Term:
         p = Period(view, end, kind, _interval_start(base, end, kind))
         term = combine((1, base), (-1, _negated(costs(p))), (-1, _negated(xint_term(p))))
-        if p.start is None:  # a blocked term keeps its guards: a blocked OperatingExpenses read may be why
+        if p.start is None:  # a blocked guard read is kept: it blocks whatever the base, so it explains the status
             term = replace(
                 term,
                 branches=tuple(b for b in term.branches if not b.startswith(VETO)),
-                guards=() if term.status is TermStatus.ABSENT else term.guards,
+                guards=tuple(g for g in term.guards if g.status in _BLOCKING),
             )
         return replace(term, start=base.start, branches=(label, *term.branches))
 

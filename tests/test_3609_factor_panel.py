@@ -746,6 +746,15 @@ def test_the_opex_bound_on_a_sum_of_parts_vetoes_and_a_blocked_bound_blocks() ->
     term = _ope(blocked)
     assert term.status is TermStatus.BLOCKED_BY_REJECTION and "opex_bound_blocked" in term.branches
     assert [g.status for g in term.guards] == [TermStatus.BLOCKED_BY_REJECTION]
+    # With no base interval, a bound's passing read is not evidence and is dropped, whatever the term's status; a
+    # blocked read is kept, since it blocks the term.
+    base_blocked = _income(**{RD_INCL: 10, OPEX: 50}).reject("Revenues", "k", FY_END, FY_START)
+    term = _ope(base_blocked)
+    assert term.status is TermStatus.BLOCKED_BY_REJECTION and term.guards == ()
+    base_absent = _income(Revenues=None, **{RD_INCL: 10}).reject(OPEX, "k", FY_END, FY_START)
+    term = _ope(base_absent)
+    assert term.status is TermStatus.BLOCKED_BY_REJECTION
+    assert [g.status for g in term.guards] == [TermStatus.BLOCKED_BY_REJECTION]
 
 
 def test_guards_are_kept_from_every_tested_period_as_vetoes_are() -> None:
