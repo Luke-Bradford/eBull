@@ -458,6 +458,11 @@ def test_an_absent_companion_is_zero_unless_a_public_non_zero_witness_overlaps()
     # The witness's interval need only overlap the period.
     overlap = _annual(NetIncomeLoss=50).fact(DO_BEFORE_TAX, 4, "k", "2016-06-30", "2016-04-01")
     assert _ni(overlap).status is TermStatus.ABSENT
+    # A fact filed without a start is dated at its end: inside the interval it vetoes, outside it does not.
+    dated = _annual(NetIncomeLoss=50).fact(DO_BEFORE_TAX, 4, "k", "2016-05-15")
+    assert _ni(dated).status is TermStatus.ABSENT
+    outside = _annual(NetIncomeLoss=50).fact(DO_BEFORE_TAX, 4, "k", "2017-01-15")
+    assert _ni(outside).value == Decimal(50)
     # A witness whose current value is zero does not veto.
     corrected = _annual(NetIncomeLoss=50, **{DO_BEFORE_TAX: 4}).filing("ka", "2017-03-10", "10-K/A")
     corrected.fact(DO_BEFORE_TAX, 0, "ka", FY_END, FY_START)

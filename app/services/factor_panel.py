@@ -638,15 +638,16 @@ def witnessed(view: CikView, concepts: Sequence[str], start: date, end: date) ->
 
     ``view.prefix`` holds only rows accepted before s(M), so a later filing cannot veto an earlier formation. Per
     key, only the rows at the key's latest public acceptance count, so a non-zero fact later corrected to zero does
-    not veto.
+    not veto. A fact filed without a start on these duration concepts is dated at its end, and overlaps when that
+    date is inside the interval.
     """
     hits: list[str] = []
     for concept in concepts:
         latest: dict[tuple[str, str], tuple[str, set[str]]] = {}
         for row in view.prefix("us-gaap", concept).events:
-            if row["unit"] != USD or row["start"] is None:
+            if row["unit"] != USD:
                 continue
-            key = (row["start"], row["end"])
+            key = (row["start"] or row["end"], row["end"])
             held = latest.get(key)
             if held is None or row["acceptance"] > held[0]:
                 latest[key] = (row["acceptance"], {row["value"]})
