@@ -733,6 +733,8 @@ def test_the_opex_bound_on_a_sum_of_parts_vetoes_and_a_blocked_bound_blocks() ->
     got = characteristic("ope_be", shard.view(DECIDED), date(2017, 4, 30), ME)
     assert got.missing is Missing.NO_PERIOD  # 20 > 15 x 1.005 and GP is absent
     assert got.vetoes == (f"veto_opex_bound:{FY_START}:{FY_END}:{OPEX}",)
+    # The refused sum's read stays on the row. The GP branch has no base, so its own bound read is not recorded.
+    assert [(g.key.concept, g.key.start) for g in got.guards] == [(OPEX, FY_START)]
     passed = characteristic(
         "ope_be",
         _income(**parts, **{OPEX: 20}).fact("StockholdersEquity", 70, "k", FY_END).view(DECIDED),
@@ -744,6 +746,33 @@ def test_the_opex_bound_on_a_sum_of_parts_vetoes_and_a_blocked_bound_blocks() ->
     term = _ope(blocked)
     assert term.status is TermStatus.BLOCKED_BY_REJECTION and "opex_bound_blocked" in term.branches
     assert [g.status for g in term.guards] == [TermStatus.BLOCKED_BY_REJECTION]
+
+
+def test_guards_are_kept_from_every_tested_period_as_vetoes_are() -> None:
+    # The annual period and the TTM ending at the same anchor both test a sum; the annual one is the reading
+    # (ties go annual), and the row keeps the annual read and each quarter's: 1 + 4.
+    shard = _quarters(Shard()).fact("StockholdersEquity", 70, "k", FY_END)
+    for concept, year, quarter in (
+        ("Revenues", 100, 25),
+        ("CostOfRevenue", 40, 10),
+        (SGA, 20, 5),
+        (RD_INCL, 8, 2),
+        (OPEX, 40, 10),
+        ("InterestExpense", 4, 1),
+    ):
+        shard.fact(concept, year, "k", FY_END, FY_START)
+        _quarter_rows(shard, concept, (quarter,) * 4)
+    got = characteristic("ope_be", shard.view(DECIDED), date(2017, 4, 30), ME)
+    # Annual 100 - 40 - (20 + 8) - 4 = 28 (28 <= 40); each quarter 25 - 10 - (5 + 2) - 1 = 7 (7 <= 10). 28 / 70.
+    assert (got.kind, got.value) == (Kind.ANNUAL, pytest.approx(0.4))
+    assert [(g.key.start, g.key.end) for g in got.guards] == [
+        (FY_START, FY_END),
+        ("2016-10-01", FY_END),
+        ("2016-07-01", "2016-09-30"),
+        ("2016-04-01", "2016-06-30"),
+        ("2016-01-01", "2016-03-31"),
+    ]
+    assert OPEX not in {f.key.concept for f in got.facts}
 
 
 @pytest.mark.parametrize("tag", ["InterestAndDebtExpense", "InterestExpenseDebt"])

@@ -875,16 +875,22 @@ def xint_term(p: Period) -> Term:
 def ope_unit(view: CikView, end: date, kind: Kind) -> Term:
     """One annual period or one quarter of ``ope*`` = ``ebitda*`` − XINT*. ``ebitda*`` = ``sale*`` − COGS* − XSGA*,
     else GP − XSGA*; every part is aligned to the chosen branch's base interval. When both branches are ``absent``,
-    the refusals' labels are kept, so a vetoed period is recorded as Amendment 2b's are.
+    the refusals' labels and guard reads are kept, so a vetoed period is recorded as Amendment 2b's are.
 
     The parts are read even when the base is not a value, because a blocked part blocks an absent base (``combine``).
-    A refusal there tested no base interval, so its label is dropped; ``companion`` makes none without one."""
+    A refusal or bound there tested no base interval, so its label is dropped, and so are its guards unless the term
+    is blocked; ``companion`` makes no label without an interval either."""
 
     def deducted(base: Term, label: str, costs: Callable[[Period], Term]) -> Term:
         p = Period(view, end, kind, _interval_start(base, end, kind))
         term = combine((1, base), (-1, _negated(costs(p))), (-1, _negated(xint_term(p))))
-        branches = term.branches if p.start is not None else tuple(b for b in term.branches if not b.startswith(VETO))
-        return replace(term, start=base.start, branches=(label, *branches))
+        if p.start is None:  # a blocked term keeps its guards: a blocked OperatingExpenses read may be why
+            term = replace(
+                term,
+                branches=tuple(b for b in term.branches if not b.startswith(VETO)),
+                guards=() if term.status is TermStatus.ABSENT else term.guards,
+            )
+        return replace(term, start=base.start, branches=(label, *term.branches))
 
     whole = Period(view, end, kind, None)
     sale = deducted(
@@ -898,7 +904,9 @@ def ope_unit(view: CikView, end: date, kind: Kind) -> Term:
     if gp_branch.status is not TermStatus.ABSENT:
         return gp_branch
     return Term(
-        TermStatus.ABSENT, branches=tuple(b for t in (sale, gp_branch) for b in t.branches if b.startswith(VETO))
+        TermStatus.ABSENT,
+        branches=tuple(b for t in (sale, gp_branch) for b in t.branches if b.startswith(VETO)),
+        guards=(*sale.guards, *gp_branch.guards),
     )
 
 
@@ -970,7 +978,8 @@ class Characteristic:
     #: Every companion zero a witness refused, in evaluation order over all tested periods (a vetoed period is
     #: ``absent``, so the walk moves past it). A quarter shared by two tested TTM periods is refused once in each.
     vetoes: tuple[str, ...] = ()
-    #: The chosen period's guard reads (``Term.guards``), apart from ``facts``.
+    #: Every guard read (``Term.guards``) over all tested periods, in evaluation order, as ``vetoes``: "with every
+    #: tested sum" (Amendment 2c), so a refused or losing period's ``OperatingExpenses`` read stays on the row.
     guards: tuple[FactUse, ...] = ()
 
 
@@ -988,6 +997,7 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
     chosen: list[tuple[date, Kind, Ratio]] = []
     tested = 0
     vetoes: list[str] = []
+    guards: list[FactUse] = []
     for kind in (Kind.ANNUAL, Kind.QUARTERLY):
         for end in view.periods[kind]:
             if not lag_eligible(end, formation):
@@ -996,19 +1006,21 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
             ratio = compute_ratio(name, view, end, kind)
             parts = [ratio.numerator] + ([] if ratio.denominator is None else [ratio.denominator])
             vetoes += (b for p in parts for b in p.branches if b.startswith(VETO))
+            guards += (g for p in parts for g in p.guards)
             if combine(*((1, p) for p in parts)).status is not TermStatus.ABSENT:
                 chosen.append((end, kind, ratio))
                 break
     if not chosen:
-        return Characteristic(name, None, Missing.NO_PERIOD, candidates_tested=tested, vetoes=tuple(vetoes))
+        return Characteristic(
+            name, None, Missing.NO_PERIOD, candidates_tested=tested, vetoes=tuple(vetoes), guards=tuple(guards)
+        )
     end, kind, ratio = max(chosen, key=lambda c: (c[0], c[1] is Kind.ANNUAL))
     parts = [ratio.numerator] + ([] if ratio.denominator is None else [ratio.denominator])
     facts = tuple(f for p in parts for f in p.facts)
     branches = tuple(b for p in parts for b in p.branches)
-    guards = tuple(g for p in parts for g in p.guards)
 
     def missing(reason: Missing) -> Characteristic:
-        return Characteristic(name, None, reason, end, kind, facts, branches, tested, tuple(vetoes), guards)
+        return Characteristic(name, None, reason, end, kind, facts, branches, tested, tuple(vetoes), tuple(guards))
 
     if aged_out(end, formation):
         return missing(Missing.AGED_OUT)
@@ -1023,7 +1035,7 @@ def characteristic(name: str, view: CikView, formation: date, me: Decimal | None
     if denominator <= 0:
         return missing(Missing.NONPOSITIVE_DENOMINATOR)
     value = numerator / denominator - (1 if name == "at_gr1" else 0)
-    return Characteristic(name, float(value), None, end, kind, facts, branches, tested, tuple(vetoes), guards)
+    return Characteristic(name, float(value), None, end, kind, facts, branches, tested, tuple(vetoes), tuple(guards))
 
 
 # --------------------------------------------------------------------------- market equity
