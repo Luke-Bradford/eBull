@@ -89,6 +89,7 @@ def compare_bundles(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
     if set(a_shards) != set(b_shards):
         failures.append(f"shard CIKs differ: {len(a_shards)} vs {len(b_shards)}")
     added_rows: Counter[str] = Counter()
+    added_multiplicity: Counter[str] = Counter()
     for cik in sorted(set(a_shards) & set(b_shards)):
         _, shard_a = _read(a_root / a_shards[cik]["path"], a_shards[cik]["sha256"])
         _, shard_b = _read(b_root / b_shards[cik]["path"], b_shards[cik]["sha256"])
@@ -110,6 +111,8 @@ def compare_bundles(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
             for row in shard_b[section]:
                 if (row["taxonomy"], row["concept"]) in ADDED_CONCEPTS:
                     added_rows[f"{section}:{row['concept']}"] += 1
+                    if section == "events":
+                        added_multiplicity[row["concept"]] += row["multiplicity"]
 
     stored_by_concept: Counter[str] = Counter()
     for key in extra_keys:
@@ -117,8 +120,9 @@ def compare_bundles(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
     for _, concept in sorted(ADDED_CONCEPTS):
         if stored_by_concept[concept] == 0 or added_rows[f"events:{concept}"] == 0:
             failures.append(f"added concept {concept} has no stored events")
-        elif added_rows[f"events:{concept}"] > stored_by_concept[concept]:
-            failures.append(f"added concept {concept}: more event rows than the ledger stored")
+        elif added_multiplicity[concept] != stored_by_concept[concept]:
+            # Each STORED raw row adds 1 to its event's multiplicity and 1 to the ledger (build_shard).
+            failures.append(f"added concept {concept}: event multiplicities do not sum to the ledger's stored")
     # Arm B must also load under this code's policy, every shard verified by its own loader.
     load_pit_fundamentals(b_root, expected_manifest_sha256=b_sha).verify_all()
     summary = {

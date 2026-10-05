@@ -103,6 +103,12 @@ def test_an_added_concept_with_no_stored_events_is_refused(tmp_path: Path) -> No
     c = _bundle(tmp_path / "c", [_event("Assets")], _all_added(_OLD_LEDGER))
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "c", c)
     assert "added concept Liabilities has no stored events" in failures
+    # Rows present but fewer than the ledger stored: multiplicities must account for every stored row.
+    short = _all_added(_OLD_LEDGER) | {"us-gaap/Liabilities/USD": {"raw": 2, "stored": 2}}
+    added = [_event(concept) for _, concept in sorted(ab.ADDED_CONCEPTS)]
+    d = _bundle(tmp_path / "d", [_event("Assets"), *added], short)
+    failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "d", d)
+    assert failures == ["added concept Liabilities: event multiplicities do not sum to the ledger's stored"]
 
 
 def test_a_new_form_variant_key_on_an_old_concept_is_refused(tmp_path: Path) -> None:
