@@ -11980,3 +11980,17 @@ neighbouring container and match it.**
 - Enforced in: `docs/research/2026-10-04-3609-step1-factor-panel.md` (Amendment 2b);
   `scripts/measure_3609_amendment_2b.py`. The `data-sources/sec-edgar.md` §7.19 text is parked on #2403, since a loop
   session cannot write `.claude/**`.
+
+### Porting a measurement into the panel inherits the blind spots of its comparison (#3609)
+
+- Failure: slice 3d-iv part 2 ported the Amendment 2b branches from `scripts/measure_3609_amendment_2b.py`, whose
+  oracle compares only (value, missing, period end, kind). Two defects passed that oracle: subtracted XI, DO and NCI
+  facts kept coefficient +1 in the row's provenance, against the `_negated` convention every other subtraction in
+  `factor_panel.py` follows; and a quarterly consolidated DO and NCI with different starts were combined, because
+  `companion` checks only the combined term's start (Codex checkpoint 2, PR for slice 3d-iv part 2).
+- Prevention: when moving measurement code into a production module, list the output fields the oracle does not
+  compare and review the port against the module's conventions for each (here the fact provenance). Check an
+  interval rule at every combine, not only at the outermost one.
+- Enforced in: `tests/test_3609_factor_panel.py::test_fallback_provenance_carries_each_facts_sign`,
+  `::test_quarterly_nci_over_a_different_interval_is_not_subtracted` (both revert-probed). The
+  `engineering/pre-flight-review.md` text is parked on #2403, since a loop session cannot write `.claude/**`.
