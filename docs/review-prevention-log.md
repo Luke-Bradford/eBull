@@ -11919,3 +11919,16 @@ neighbouring container and match it.**
   survivorship-free.
 - Enforced in: `docs/research/2026-10-04-3609-step1-factor-panel.md` premise 1 (three survivorship regimes) and
   step 0 Amendment 3. The skill text correction is posted on #2403 (loop worktree cannot write `.claude/**`).
+
+### A screen that flags both endpoints of a pair leaks the later bar into the earlier window (#3609)
+
+- Failure: the #3609 daily screen flags both bars of an extreme return or an unstamped `adj_close/close` jump. The
+  first build checked `rvol_21d`'s window ending at s(M) for any flagged bar, so a jump on the first session
+  after s(M) flagged the bar at s(M) and left the characteristic missing at M, using a price the formation could
+  not have seen (Codex checkpoint 2, PR for slice 3c). Every bar of the holding month was already in memory,
+  because the same per-series pass computes the holding return.
+- Prevention: a screen over a pair becomes known at the pair's later bar. Store that observation point
+  separately from the census flag, and let a window ending at t see only pairs whose later bar is at or before
+  t. Test it with a jump one session after the decision.
+- Enforced in: `app/services/factor_panel_prices.py::series_prices` (`screened_at`),
+  `tests/test_3609_factor_panel_prices.py::test_a_jump_after_s_m_does_not_screen_the_formation`.
