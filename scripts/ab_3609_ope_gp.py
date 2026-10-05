@@ -25,8 +25,9 @@ from scripts.ab_3609_ni_ocf import compare, index_oracle
 #: Canonical stage-A rows (``factor_panel_3609/2026-10-05-191d7b07-stageA/rows.jsonl.gz``; its manifest's
 #: ``rows.content_sha256``).
 A_CONTENT_SHA256: Final = "b9724baa8932d4fa70cf865a3b72ae4a91d3772c45240e9a7d5298eacb157805"
-#: The measurement re-run against bundle B (``var/research/3609_step1/a2c/m5B/rows.jsonl.gz`` in the loop worktree).
-ORACLE_CONTENT_SHA256: Final = "TBD"
+#: The measurement re-run against bundle B (``var/research/3609_step1/a2c/m5B/rows.jsonl.gz`` in the loop worktree),
+#: adopted variant only, from a clean ``origin/main`` worktree at ``eeec97b2``; equal to m4's rows.
+ORACLE_CONTENT_SHA256: Final = "9d7c05ec86a27c243ff9eb299efd6be80802704d3b518c5191148c7a4f460cba"
 CHANGED: Final = {"ope_be": "ope:adopted", "gp_at": "gp:r5"}
 
 
