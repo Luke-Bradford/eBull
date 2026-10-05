@@ -900,7 +900,8 @@ def _checked(
         recoverable = not agreeing and len({c.value for c in conflicts}) == 1
         if checks["scale"] is Check.FAIL and reference is not None and recoverable:
             if len({c.acceptance for c in conflicts}) != 1:
-                raise PanelError(f"{view.cik10}: co-filed comparators with different acceptances: {conflicts}")
+                cofiled = sorted((c.accns, str(c.acceptance)) for c in conflicts)
+                raise PanelError(f"{view.cik10}: co-filed comparators with different acceptances: {cofiled}")
             sheet = max(conflicts, key=lambda c: c.accns)
             filed_on = acceptance_ny_date(str(sheet.acceptance))
             sheet_shares = Decimal(str(sheet.value)) * split_product(splits, filed_on, decision)
