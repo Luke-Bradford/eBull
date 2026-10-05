@@ -13,8 +13,8 @@ read by the panel.
 
 ``measure`` replays the panel's own period choice (``factor_panel.characteristic``) on every admitted name-month of
 a panel rows file, for the current ``ni_me`` / ``ocf_me`` and for each variant below, and writes per-row outcomes, a
-summary and the rows file's sha256 (the slice 3d-iv oracle). The input rows and the scratch bundle are bound by
-sha256.
+summary and the sha256 of the decompressed rows (the slice 3d-iv oracle). The input rows and the scratch bundle are
+bound by sha256.
 
     PYTHONPATH=. uv run python scripts/measure_3609_amendment_2b.py tags --rows <rows.jsonl.gz>
     PYTHONPATH=. uv run python scripts/measure_3609_amendment_2b.py build --out <scratch bundle dir>
@@ -186,7 +186,9 @@ def companion(
     if term.status is not fp.TermStatus.ABSENT or not variant.zero:
         return term
     if start is None:
-        return fp.ZERO  # the base is not a value, so ``combine`` returns the base's status, never this zero
+        # No base interval to test the zero against: the base is blocked or absent (``combine`` returns its status
+        # either way), or an annual base with no single start, which stays missing.
+        return fp.ABSENT
     if variant.witnessed and witnessed(view, witnesses, start, end):
         EVALUATIONS[f"{variant.name}: zero refused by a witness ({name})"] += 1
         return fp.ABSENT
@@ -280,6 +282,7 @@ def _compute_ratio(name: str, view: fp.CikView, end: date, kind: fp.Kind) -> fp.
     variant = _BY_NAME.get(name)
     if variant is None:
         return _original_compute_ratio(name, view, end, kind)
+    EVALUATIONS[f"{variant.name}: periods evaluated"] += 1
     return fp.Ratio(variant_flow(view, end, kind, variant), None)
 
 
@@ -417,6 +420,7 @@ def measure(argv: list[str]) -> int:
     replay_mismatch: Counter[str] = Counter()
     panel: list[dict[str, Any]] = []
     rows_path = args.out / "rows.jsonl.gz"
+    rows_digest = hashlib.sha256()
     with gzip.open(rows_path, "wt") as out:
         for done, (cik10, rows) in enumerate(sorted(by_cik.items()), start=1):
             rows.sort(key=lambda r: r["s_M"])
@@ -438,7 +442,9 @@ def measure(argv: list[str]) -> int:
                     new = classify(view, fp.characteristic(variant.name, view, formation, me), variant)
                     record[variant.name] = new
                     tally(summary[variant.name], record[variant.characteristic], new)
-                out.write(json.dumps(record, sort_keys=True) + "\n")
+                line = json.dumps(record, sort_keys=True) + "\n"
+                rows_digest.update(line.encode())
+                out.write(line)
                 if row["M"] == DEFAULT_PANEL_M and row["symbol"] in DEFAULT_PANEL:
                     panel.append(record)
             bundle._cache.pop(cik10, None)  # type: ignore[attr-defined]
@@ -447,13 +453,19 @@ def measure(argv: list[str]) -> int:
     result = {
         "bundle_sha256": args.bundle_sha256,
         "input_rows_sha256": args.rows_sha256,
-        "output_rows_sha256": _sha(rows_path),
+        # Over the decompressed JSONL: the gzip header carries a timestamp, so the compressed file's digest is not
+        # reproducible across runs.
+        "output_rows_sha256": rows_digest.hexdigest(),
         "admitted_rows": sum(len(v) for v in by_cik.values()),
         "replay_mismatch_vs_stored": dict(replay_mismatch),
         "period_evaluations": dict(sorted(EVALUATIONS.items())),
         "counts": {k: dict(sorted(v.items())) for k, v in summary.items()},
         "default_panel": sorted(panel, key=lambda r: r["symbol"]),
     }
+    # ``characteristic`` resolves ``compute_ratio`` at call time; refuse if the patch never reached a variant.
+    unreached = [v.name for v in VARIANTS if not EVALUATIONS[f"{v.name}: periods evaluated"]]
+    if unreached:
+        raise SystemExit(f"compute_ratio patch never reached {unreached}")
     (args.out / "summary.json").write_text(json.dumps(result, indent=1, sort_keys=True) + "\n")
     print(json.dumps({k: v for k, v in result.items() if k != "default_panel"}, indent=1))
     return 1 if replay_mismatch else 0

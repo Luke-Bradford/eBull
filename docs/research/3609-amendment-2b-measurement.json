@@ -704,16 +704,22 @@
   }
  ],
  "input_rows_sha256": "c2b3eb69937545034c661cd0b47a56bbbb6db7af9719b020dd2517794f0b060d",
- "output_rows_sha256": "f7e665a018f0db7cd2804334dab3db083673ffcbd73eeaf29467439fd5adc309",
+ "output_rows_sha256": "068afe2cef29782f45456463488234a360fce05572c5a9ef95d8718a8992dbe3",
  "period_evaluations": {
   "ni_adopted: interval mismatch": 235,
+  "ni_adopted: periods evaluated": 950529,
   "ni_adopted: zero refused by a witness (do)": 30140,
   "ni_strict: interval mismatch": 1070,
+  "ni_strict: periods evaluated": 5545430,
   "ni_zero: interval mismatch": 255,
+  "ni_zero: periods evaluated": 921639,
   "ocf_adopted: interval mismatch": 12,
+  "ocf_adopted: periods evaluated": 622847,
   "ocf_adopted: zero refused by a witness (ocf_disc)": 29538,
   "ocf_strict: interval mismatch": 123,
-  "ocf_zero: interval mismatch": 12
+  "ocf_strict: periods evaluated": 1495685,
+  "ocf_zero: interval mismatch": 12,
+  "ocf_zero: periods evaluated": 594782
  },
  "replay_mismatch_vs_stored": {}
 }

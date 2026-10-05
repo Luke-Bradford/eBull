@@ -699,7 +699,8 @@ and ASC 230 require the presentation, not a tag, so neither justifies a zero by 
   concepts below added (manifest sha256 `9e643922…6928b`; never published).
 - **Replay check.** The replayed current `ni_me` and `ocf_me` equal the stored rows on value, missing reason, period
   end and kind for all 243,445 (0 mismatches). Facts and branches were not compared.
-- **The oracle.** Its per-row output (`output_rows_sha256` `f7e665a0…dc309`) is the oracle for slice 3d-iv.
+- **The oracle.** Its per-row output is the oracle for slice 3d-iv: `output_rows_sha256`, the sha256 of the decompressed JSONL, is
+  `068afe2c…92dbe3`.
 
 All counts are name-months:
 
@@ -1062,7 +1063,7 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
          move to the new artefacts. The linkage A/B makes every link identical. In each row, only `ni_me` and
          `ocf_me` may change, plus the manifest's provenance pins. Any other difference refuses.
        - **Oracle.** For every row, `ni_me` and `ocf_me` (value, missing reason, period end, kind) must equal
-         `ni_adopted` and `ocf_adopted` in the measurement's output rows (sha256 `f7e665a0…dc309`), exactly. Any
+         `ni_adopted` and `ocf_adopted` in the measurement's output rows (decompressed sha256 `068afe2c…92dbe3`), exactly. Any
          difference refuses. Adopting a different oracle needs a new measurement run, with its digest and the
          reason, recorded on the PR.
        - The branch, imputed-zero, DO-branch and veto counts go into the census.
