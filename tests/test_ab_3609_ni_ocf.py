@@ -53,3 +53,11 @@ def test_any_other_change_refuses() -> None:
 def test_an_admitted_row_without_an_oracle_row_refuses() -> None:
     failures, _ = ab.compare([_row()], [_row()], {})
     assert failures == ["('2017-04-30', '0000000001', 'AAA'): admitted row has no oracle row"]
+
+
+def test_an_adjudicated_departure_passes_and_a_stale_one_refuses() -> None:
+    listed = {("2017-04-30", "0000000001", "AAA", "ni_me"): "a witness the measurement could not see"}
+    departed = ab.compare([_row()], [_row(ni_me=_c(None, "no_period"))], _oracle(_c(0.1), _c(0.1)), listed)
+    assert departed[0] == [] and departed[1]["counts"]["adjudicated"] == 1
+    stale = ab.compare([_row()], [_row()], _oracle(_c(0.1), _c(0.1)), listed)
+    assert stale[0] == ["('2017-04-30', '0000000001', 'AAA', 'ni_me'): adjudicated but equal to the oracle"]
