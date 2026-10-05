@@ -187,6 +187,10 @@ def test_added_concepts_are_the_measurements_less_xopr() -> None:
     named = {("us-gaap", c) for c in (*m.RD_WITNESSES, *m.GA, *m.SELL_WITNESSES, *m.XINT_WITNESSES, *m.COGS_WITNESSES)}
     named |= {("us-gaap", c) for c in (*m.OPEX, *m.XOPR)}
     before = set(ab.CONCEPT_SET) - ab.ADDED_CONCEPTS
+    # Pinned independently of ADDED_CONCEPTS (arm A's ledger at 6993911f): the only measurement tags held before 2c.
+    # Without it, swapping an added concept for one of these would leave every assertion below true.
+    held = {"InterestExpense", "CostOfGoodsAndServicesSold", "CostOfGoodsSold", "CostOfRevenue"}
+    assert named & before == {("us-gaap", c) for c in held}
     # What the scratch bundle added on the pre-2c set, less the one concept only the rejected XOPR branch reads.
     assert ab.ADDED_CONCEPTS == named - before - {("us-gaap", "CostsAndExpenses")}
     assert len(ab.ADDED_CONCEPTS) == 23 and ab.ADDED_CONCEPTS <= set(ab.CONCEPT_SET)
