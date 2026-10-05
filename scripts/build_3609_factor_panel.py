@@ -371,8 +371,11 @@ def dump_inputs(
     """Every DB read and reference file the build uses, written into ``inputs`` (which must not exist)."""
     inputs.mkdir(parents=True)
     sessions = spy_sessions(conn)
-    first_session = next(s for s in sessions if s >= daily_start(formations))
-    decision_days = sorted({decision_session(m, sessions) for m in formations})
+    # Every session is frozen; the window and the decisions use ``read_inputs``'s filtered list, so both phases
+    # derive s(M) from the same sessions.
+    windowed = [s for s in sessions if s >= daily_start(formations)]
+    first_session = windowed[0]
+    decision_days = sorted({decision_session(m, windowed) for m in formations})
     selection = load_universe_selection(
         conn, universe="survivorship_free", validated_ids=frozenset(load_validated_universe(conn))
     )
