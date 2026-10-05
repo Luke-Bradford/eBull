@@ -1,4 +1,4 @@
-"""#3609 slice 2: the A/B comparator must catch the differences it exists to refuse."""
+"""#3609 step 1: the A/B comparator must catch the differences it exists to refuse."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def _bundle(root: Path, events: list[dict[str, Any]], ledger: dict[str, dict[str
 
 
 _OLD_LEDGER = {"us-gaap/Assets/USD": {"raw": 1, "stored": 1}}
-_NEW_LEDGER = {**_OLD_LEDGER, "us-gaap/Liabilities/USD": {"raw": 1, "stored": 1}}
+_NEW_LEDGER = {**_OLD_LEDGER, "us-gaap/ExtraordinaryItemNetOfTax/USD": {"raw": 1, "stored": 1}}
 
 
 def _all_added(ledger: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
@@ -78,7 +78,7 @@ def test_identical_old_rows_plus_added_concepts_pass(tmp_path: Path) -> None:
     b = _bundle(tmp_path / "b", [_event("Assets"), *added], _all_added(_OLD_LEDGER))
     failures, summary = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
     assert failures == []
-    assert summary["added_rows"]["events:Liabilities"] == 1
+    assert summary["added_rows"]["events:ExtraordinaryItemNetOfTax"] == 1
 
 
 def test_a_changed_old_value_and_an_unlisted_concept_are_refused(tmp_path: Path) -> None:
@@ -95,20 +95,22 @@ def test_a_changed_old_value_and_an_unlisted_concept_are_refused(tmp_path: Path)
 
 def test_an_added_concept_with_no_stored_events_is_refused(tmp_path: Path) -> None:
     a = _bundle(tmp_path / "a", [_event("Assets")], _OLD_LEDGER)
-    b = _bundle(tmp_path / "b", [_event("Assets"), _event("Liabilities")], _NEW_LEDGER)
+    b = _bundle(tmp_path / "b", [_event("Assets"), _event("ExtraordinaryItemNetOfTax")], _NEW_LEDGER)
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
-    assert "added concept InterestExpense has no stored events" in failures
-    assert not any("Liabilities has no stored" in f for f in failures)
+    assert "added concept IncomeLossFromDiscontinuedOperationsNetOfTax has no stored events" in failures
+    assert not any("ExtraordinaryItemNetOfTax has no stored" in f for f in failures)
     # The ledger claiming stored rows is not enough: the shards must hold them.
     c = _bundle(tmp_path / "c", [_event("Assets")], _all_added(_OLD_LEDGER))
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "c", c)
-    assert "added concept Liabilities has no stored events" in failures
+    assert "added concept ExtraordinaryItemNetOfTax has no stored events" in failures
     # Rows present but fewer than the ledger stored: multiplicities must account for every stored row.
-    short = _all_added(_OLD_LEDGER) | {"us-gaap/Liabilities/USD": {"raw": 2, "stored": 2}}
+    short = _all_added(_OLD_LEDGER) | {"us-gaap/ExtraordinaryItemNetOfTax/USD": {"raw": 2, "stored": 2}}
     added = [_event(concept) for _, concept in sorted(ab.ADDED_CONCEPTS)]
     d = _bundle(tmp_path / "d", [_event("Assets"), *added], short)
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "d", d)
-    assert failures == ["added concept Liabilities: event multiplicities do not sum to the ledger's stored"]
+    assert failures == [
+        "added concept ExtraordinaryItemNetOfTax: event multiplicities do not sum to the ledger's stored"
+    ]
 
 
 def test_a_new_form_variant_key_on_an_old_concept_is_refused(tmp_path: Path) -> None:
@@ -117,7 +119,7 @@ def test_a_new_form_variant_key_on_an_old_concept_is_refused(tmp_path: Path) -> 
     b = _bundle(tmp_path / "b", [_event("Assets"), *added], _all_added(_OLD_LEDGER))
     manifest_path = tmp_path / "b/manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
-    manifest["ledger"]["form_label_variants"] = {"us-gaap/Assets/USD": 1, "us-gaap/Liabilities/USD": 1}
+    manifest["ledger"]["form_label_variants"] = {"us-gaap/Assets/USD": 1, "us-gaap/ExtraordinaryItemNetOfTax/USD": 1}
     b = _write(manifest_path, manifest)
     failures, _ = ab.compare_bundles(tmp_path / "a", a, tmp_path / "b", b)
     assert failures == ["ledger form_label_variants us-gaap/Assets/USD differs"]
@@ -178,3 +180,15 @@ def test_replay_reads_the_prior_inputs_and_refuses_tampering(tmp_path: Path) -> 
     (tmp_path / "inputs/form345/insider_2006q1.zip").write_bytes(b"other")
     with pytest.raises(RuntimeError, match="insider_2006q1.zip does not match"):
         replay_inputs(tmp_path, digest)
+
+
+def test_scratch_manifest_may_differ_only_in_policy(tmp_path: Path) -> None:
+    added = [_event(concept) for _, concept in sorted(ab.ADDED_CONCEPTS)]
+    b = _bundle(tmp_path / "b", [_event("Assets"), *added], _all_added(_OLD_LEDGER))
+    manifest = json.loads((tmp_path / "b/manifest.json").read_bytes())
+    scratch = _write(tmp_path / "scratch/manifest.json", {**manifest, "policy": "scratch"})
+    assert ab.compare_scratch(tmp_path / "scratch", scratch, tmp_path / "b", b) == []
+    # A different shard digest is a different shard byte.
+    manifest["shards"][0]["sha256"] = "0" * 64
+    scratch = _write(tmp_path / "scratch/manifest.json", {**manifest, "policy": "scratch"})
+    assert ab.compare_scratch(tmp_path / "scratch", scratch, tmp_path / "b", b) == ["scratch manifest shards differs"]

@@ -51,21 +51,32 @@ MANIFEST_FILENAME: Final = "manifest.json"
 SHARDS_DIRNAME: Final = "shards"
 
 #: Rule 1. Storing a concept asserts nothing about its economic scope. #3609 step 1 added the nine
-#: concepts its JKP mapping needs (``Liabilities`` through the three preferred-stock values).
+#: concepts its JKP mapping needs (``Liabilities`` through the three preferred-stock values), then
+#: Amendment 2b's ten (the ``ni*`` and ``ocf*`` fallback terms and their discontinued-operations witnesses).
 CONCEPT_SET: Final[tuple[tuple[str, str], ...]] = (
     ("dei", "EntityCommonStockSharesOutstanding"),
     ("us-gaap", "Assets"),
+    ("us-gaap", "CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations"),
     ("us-gaap", "CommonStockSharesOutstanding"),
     ("us-gaap", "CostOfGoodsAndServicesSold"),
     ("us-gaap", "CostOfGoodsSold"),
     ("us-gaap", "CostOfRevenue"),
     ("us-gaap", "DeferredIncomeTaxLiabilitiesNet"),
     ("us-gaap", "DeferredTaxLiabilitiesNoncurrent"),
+    ("us-gaap", "DiscontinuedOperationGainLossOnDisposalOfDiscontinuedOperationNetOfTax"),
+    ("us-gaap", "DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax"),
+    ("us-gaap", "DiscontinuedOperationIncomeLossFromDiscontinuedOperationDuringPhaseOutPeriodNetOfTax"),
+    ("us-gaap", "ExtraordinaryItemNetOfTax"),
     ("us-gaap", "GrossProfit"),
     ("us-gaap", "IncomeLossFromContinuingOperations"),
+    ("us-gaap", "IncomeLossFromDiscontinuedOperationsNetOfTax"),
+    ("us-gaap", "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToNoncontrollingInterest"),
+    ("us-gaap", "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity"),
     ("us-gaap", "InterestExpense"),
     ("us-gaap", "Liabilities"),
+    ("us-gaap", "NetCashProvidedByUsedInDiscontinuedOperations"),
     ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
+    ("us-gaap", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"),
     ("us-gaap", "NetIncomeLoss"),
     ("us-gaap", "PreferredStockLiquidationPreferenceValue"),
     ("us-gaap", "PreferredStockRedemptionAmount"),
