@@ -8,9 +8,9 @@ from typing import Any
 
 from scripts.build_3609_factor_panel import (
     Candidate,
+    Census,
     Step,
     build_cik_rows,
-    census,
     holding_month,
     multiple_security_ciks,
 )
@@ -74,9 +74,21 @@ def test_multiple_securities_and_holding_month() -> None:
     assert holding_month(date(2020, 12, 31)) == "2021-01"
 
 
-def test_census_counts_reasons_and_me_shares() -> None:
+def test_census_is_per_formation_and_weights_exclusions_with_known_me() -> None:
     (row,) = _rows(_filer())
-    summary = census([row, {**row, "exclusion": Step.REIT}])
-    assert summary["funnel_total"] == {"admitted": 1, "reit": 1}
-    assert summary["characteristics"]["be_me"]["value"] == {"count": 1, "me_share": 1.0}
-    assert summary["characteristics"]["gp_at"]["no_period"]["count"] == 1
+    (reit,) = _rows(_filer(), sic=6798)
+    tally = Census()
+    for r in (row, reit, {**row, "M": "2017-05-31"}, {"M": "2017-04-30", "exclusion": Step.NOT_PRICED}):
+        tally.add(r)
+    summary = tally.to_json()
+    april = summary["funnel_by_formation"]["2017-04-30"]
+    assert april["admitted"] == {"count": 1, "me_share": 0.5}
+    assert april["reit"] == {"count": 1, "me_share": 0.5}
+    assert april["not_priced"] == {"count": 1, "me_share": None}
+    assert summary["characteristics_by_formation"]["2017-05-31"]["be_me"]["value"] == {"count": 1, "me_share": 1.0}
+    assert summary["characteristics_total_counts"]["be_me"] == {"value": 2}
+
+
+def test_excluded_names_past_the_bundle_gate_carry_their_me() -> None:
+    (reit,) = _rows(_filer(), sic=6798)
+    assert (reit["exclusion"], reit["me"]["value"]) == (Step.REIT, "100")
