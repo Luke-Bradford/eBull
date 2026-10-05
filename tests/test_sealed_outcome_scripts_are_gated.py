@@ -498,6 +498,11 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # (SPY, two published static ETF mixes, a random-basket control) fixed before the first run — no hypothesis,
     # nothing selected or ranked, so they add zero to the programme's trial count.
     "report_3609_baselines.py": "#3609 step 0 baselines (benchmarks fixed in advance; nothing selected)",
+    # #3609 step 1 spec (2026-10-04-3609-step1-factor-panel.md) §"Registration": the panel builder is listed "only
+    # for the gate test's import check". It computes per-name characteristics and holding returns and prints no
+    # return statistic; every fidelity result read from its artefact is the counted, non-claiming DeclaredTrial
+    # "#3609 step 1 fidelity" that slice 4 adds before the first fidelity run.
+    "build_3609_factor_panel.py": "#3609 step 1 panel builder (DeclaredTrial '#3609 step 1 fidelity', slice 4)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"
