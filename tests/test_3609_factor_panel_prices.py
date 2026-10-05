@@ -5,11 +5,12 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from datetime import date, timedelta
+from decimal import Decimal
 
 import numpy as np
 import pytest
 
-from app.services.factor_panel import PanelError
+from app.services.factor_panel import PanelError, SplitStamp
 from app.services.factor_panel_prices import (
     DailyBar,
     DailyMonthly,
@@ -212,3 +213,28 @@ def test_me_discontinuity_band() -> None:
     assert me_discontinuity(1.1, 1.0) is None
     assert me_discontinuity(2.0, 1.0) == 2.0
     assert me_discontinuity(1.0, 1.3) == pytest.approx(1 / 1.3)
+
+
+def test_an_excused_ratio_move_is_counted_unless_a_split_factor_explains_it() -> None:
+    j = SESSIONS.index(M) - 40
+    bars = [
+        DailyBar(b.bar_date, 20.0 if i >= j else 10.0, b.adj_close, b.volume, stamped=i == j, usable=True)
+        for i, b in enumerate(_bars(_growing))
+    ]
+    grid = _grid()
+    unexplained = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None)
+    assert unexplained.excused_unexplained_by_year == {2019: 1}
+    assert unexplained.flags_by_year == {}  # excused: not screened
+    split = [SplitStamp(SESSIONS[j], Decimal("0.5"))]
+    explained = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None, split_stamps=split)
+    assert explained.excused_unexplained_by_year == {}
+    wrong_way = [SplitStamp(SESSIONS[j], Decimal(2))]  # predicts the ratio doubling, not halving
+    reversed_ = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None, split_stamps=wrong_way)
+    assert reversed_.excused_unexplained_by_year == {2019: 1}
+
+
+def test_the_liquidity_window_reports_a_screened_bar() -> None:
+    k = SESSIONS.index(M)
+    assert _run(_bars(_growing)).by_formation[M].liquidity_screened is False
+    got = _run(_bars(lambda i, d: _growing(i, d) * (5.0 if i >= k - 100 else 1.0)))
+    assert got.by_formation[M].liquidity_screened is True

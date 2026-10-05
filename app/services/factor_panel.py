@@ -42,6 +42,10 @@ MAX_ACCOUNTING_AGE_MONTHS: Final = 18
 FILER_WINDOW_MONTHS: Final = 18
 #: A share count's context date must be within this many months of s(M).
 MAX_SHARES_AGE_MONTHS: Final = 15
+#: Amendment 2: XBRL US DQC_0095 (v30.0.4) -- two share counts may differ by at most 100 times. Checks 1, 2 and 4.
+SCALE_TOLERANCE: Final = Decimal(100)
+#: Amendment 2 check 3: trailing dollar volume / ME, calibrated on the 2026-10-05 proof artefact and frozen.
+DOLLAR_VOLUME_ME_CEILING: Final = 10.0
 ANNUAL_DAYS: Final = (350, 380)
 QUARTER_DAYS: Final = (80, 100)
 #: TTM chain: each quarter starts within this many days after the prior one's end.
@@ -124,6 +128,20 @@ class MeMissing(StrEnum):
     SHARES_FORM_MISMATCH = "shares_form_mismatch"
     NONPOSITIVE_SHARES = "nonpositive_shares"
     NONPOSITIVE_PRICE = "nonpositive_price"
+    # Amendment 2 share checks, in evaluation order.
+    SHARES_BASIS_AMBIGUOUS = "shares_basis_ambiguous"
+    SHARES_SCALE_CONFLICT = "shares_scale_conflict"
+    SHARES_TURNOVER_IMPLAUSIBLE = "shares_turnover_implausible"
+    SHARES_DISCONTINUITY = "shares_discontinuity"
+
+
+class Check(StrEnum):
+    """One Amendment 2 check's own outcome, stored on the row whatever the first failure was."""
+
+    PASS = "pass"
+    FAIL = "fail"
+    UNTESTED = "untested"
+    RECOVERED = "recovered"  # check 2 only: the side consistent with the reference was used
 
 
 # --------------------------------------------------------------------------- calendar
@@ -691,11 +709,26 @@ class SplitStamp:
 class MarketEquity:
     value: Decimal | None
     missing: MeMissing | None
-    shares_scope: str | None = None  # "cover" | "balance_sheet"
+    shares_scope: str | None = None  # "cover" | "balance_sheet" | "dqc_recovered:<side>"
     shares: Decimal | None = None
     basis: date | None = None
     split_product: Decimal | None = None
     facts: tuple[FactUse, ...] = ()
+    #: Amendment 2: ME before the checks (contaminated when a check removed it), each check's own outcome, and
+    #: whether this count may become a check-4 reference (checks 2 and 3 tested and passed).
+    raw_value: Decimal | None = None
+    checks: Mapping[str, Check] = field(default_factory=dict)
+    verified: bool = False
+
+
+@dataclass(frozen=True)
+class ShareReference:
+    """Check 4's reference: a verified ME's split-adjusted share count at an earlier formation of the series."""
+
+    formation: date
+    session: date
+    shares: Decimal
+    cik10: str
 
 
 def _share_candidates(
@@ -716,8 +749,58 @@ def _share_candidates(
     return out
 
 
-def market_equity(view: CikView, close: Decimal | None, splits: Sequence[SplitStamp]) -> MarketEquity:
-    """§"Market equity": the filing's own cover count, else the balance-sheet count; never a fallback when blocked."""
+def _within_tolerance(ratio: Decimal) -> bool:
+    return 1 / SCALE_TOLERANCE <= ratio <= SCALE_TOLERANCE
+
+
+def _accession_balance_sheet(view: CikView, accn: str) -> FactUse | None:
+    """The accession's own ``CommonStockSharesOutstanding`` at its period anchor, if it reported one positive value.
+    Read from that accession's rows, not by key: a later filing's comparative for the same date is not this filing.
+    A public rejection of that key blocks the comparator, as it blocks ``CikView.read``."""
+    anchor = view.anchors.get(accn)
+    if anchor is None:
+        return None
+    iso = anchor.isoformat()
+    read = view.prefix(*BALANCE_SHEET_SHARES)
+
+    def at_anchor(row: Mapping[str, Any]) -> bool:
+        return row["unit"] == SHARES and row["start"] is None and row["end"] == iso
+
+    if any(at_anchor(row) for row in read.rejections):
+        return None
+    values = {row["value"] for row in read.events if at_anchor(row) and row["accn"] == accn}
+    if len(values) != 1:
+        return None
+    (value,) = values
+    if Decimal(value) <= 0:
+        return None
+    key = FactKey(*BALANCE_SHEET_SHARES, SHARES, None, iso)
+    return FactUse(key, 1, TermStatus.VALUE, (accn,), view.filings[accn][0], "dqc_comparator", value)
+
+
+def usable_reference(reference: ShareReference | None, formation: date, cik10: str) -> ShareReference | None:
+    """Check 4's reference applies within the share-age bound and on the same linked CIK."""
+    if reference is None or reference.cik10 != cik10:
+        return None
+    return None if add_months(reference.formation, MAX_SHARES_AGE_MONTHS) < formation else reference
+
+
+def _consistent(shares: Decimal, reference: ShareReference, splits: Sequence[SplitStamp], decision: date) -> bool:
+    expected = reference.shares * split_product(splits, reference.session, decision)
+    return expected > 0 and _within_tolerance(shares / expected)
+
+
+def market_equity(
+    view: CikView,
+    close: Decimal | None,
+    splits: Sequence[SplitStamp],
+    *,
+    dollar_volume: float | None = None,
+    reference: ShareReference | None = None,
+) -> MarketEquity:
+    """§"Market equity": the filing's own cover count, else the balance-sheet count; never a fallback when blocked.
+    Then Amendment 2's four checks, in order; the first failure is the missing reason. ``reference`` must already
+    be ``usable_reference``-filtered by the caller."""
     decision = view.decision
     for taxonomy, concept, scope in (
         ("dei", DEI_SHARES[1], "cover"),
@@ -739,7 +822,8 @@ def market_equity(view: CikView, close: Decimal | None, splits: Sequence[SplitSt
             return MarketEquity(None, reason, scope, facts=term.facts)
         assert term.value is not None
         use = term.facts[0]
-        basis = context if scope == "cover" else acceptance_ny_date(str(use.acceptance))
+        acceptance = acceptance_ny_date(str(use.acceptance))
+        basis = context if scope == "cover" else acceptance
         product = split_product(splits, basis, decision)
         shares = term.value * product
         common = {
@@ -753,8 +837,83 @@ def market_equity(view: CikView, close: Decimal | None, splits: Sequence[SplitSt
             return MarketEquity(None, MeMissing.NONPOSITIVE_SHARES, **common)
         if close is None or not close.is_finite() or close <= 0:
             return MarketEquity(None, MeMissing.NONPOSITIVE_PRICE, **common)
-        return MarketEquity(shares * close, None, **common)
+        return _checked(view, close, splits, common, term.value, use.accns, acceptance, dollar_volume, reference)
     return MarketEquity(None, MeMissing.NO_SHARES)
+
+
+def _checked(
+    view: CikView,
+    close: Decimal,
+    splits: Sequence[SplitStamp],
+    common: dict[str, Any],
+    filed: Decimal,
+    accns: Sequence[str],
+    acceptance: date,
+    dollar_volume: float | None,
+    reference: ShareReference | None,
+) -> MarketEquity:
+    """Amendment 2 checks 1-4 on a computable ME. Every check is evaluated; the first failure is the reason."""
+    decision = view.decision
+    scope: str = common["shares_scope"]
+    basis: date = common["basis"]
+    shares: Decimal = common["shares"]
+    raw = shares * close
+    checks: dict[str, Check] = {}
+
+    # 1. A split between the cover count's date and its filing, or an applied product beyond tolerance.
+    straddles = scope == "cover" and any(basis < s.day <= acceptance for s in splits)
+    checks["basis"] = Check.FAIL if straddles or not _within_tolerance(common["split_product"]) else Check.PASS
+
+    # 2. DQC_0095: the cover count against each returned accession's own anchor balance-sheet count.
+    checks["scale"] = Check.UNTESTED
+    if scope == "cover":
+        conflicts: list[FactUse] = []
+        for accn in accns:
+            sheet = _accession_balance_sheet(view, accn)
+            if sheet is None:
+                continue
+            anchor, count = date.fromisoformat(str(sheet.key.end)), Decimal(str(sheet.value))
+            checks["scale"] = Check.PASS if checks["scale"] is Check.UNTESTED else checks["scale"]
+            if not _within_tolerance(filed / (count * split_product(splits, anchor, basis))):
+                checks["scale"] = Check.FAIL
+                conflicts.append(sheet)
+        if checks["scale"] is Check.FAIL and reference is not None and len(conflicts) == 1:
+            sheet_shares = Decimal(str(conflicts[0].value)) * split_product(splits, acceptance, decision)
+            cover_ok = _consistent(shares, reference, splits, decision)
+            sheet_ok = _consistent(sheet_shares, reference, splits, decision)
+            if cover_ok != sheet_ok:
+                checks["scale"] = Check.RECOVERED
+                if sheet_ok:
+                    common = {**common, "shares": sheet_shares, "basis": acceptance}
+                    common["split_product"] = split_product(splits, acceptance, decision)
+                    # The count used comes first; the rejected cover fact stays for the audit.
+                    common["facts"] = (conflicts[0], *common["facts"])
+                    shares = sheet_shares
+                common["shares_scope"] = f"dqc_recovered:{'balance_sheet' if sheet_ok else 'cover'}"
+
+    # 3. Trailing dollar volume against ME.
+    value = shares * close
+    if dollar_volume is None:
+        checks["turnover"] = Check.UNTESTED
+    else:
+        checks["turnover"] = Check.FAIL if dollar_volume / float(value) > DOLLAR_VOLUME_ME_CEILING else Check.PASS
+
+    # 4. Consistency with the last verified count of the series.
+    if reference is None:
+        checks["discontinuity"] = Check.UNTESTED
+    else:
+        checks["discontinuity"] = Check.PASS if _consistent(shares, reference, splits, decision) else Check.FAIL
+
+    verified = checks["scale"] is Check.PASS and checks["turnover"] is Check.PASS
+    for name, reason in (
+        ("basis", MeMissing.SHARES_BASIS_AMBIGUOUS),
+        ("scale", MeMissing.SHARES_SCALE_CONFLICT),
+        ("turnover", MeMissing.SHARES_TURNOVER_IMPLAUSIBLE),
+        ("discontinuity", MeMissing.SHARES_DISCONTINUITY),
+    ):
+        if checks[name] is Check.FAIL:
+            return MarketEquity(None, reason, **common, raw_value=raw, checks=checks)
+    return MarketEquity(value, None, **common, raw_value=raw, checks=checks, verified=verified)
 
 
 def split_product(splits: Sequence[SplitStamp], basis: date, decision: date) -> Decimal:

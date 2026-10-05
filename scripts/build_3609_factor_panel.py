@@ -46,6 +46,7 @@ from app.services.factor_panel import (
     MarketEquity,
     PanelError,
     PrefixCache,
+    ShareReference,
     SicStatus,
     SplitStamp,
     add_months,
@@ -56,6 +57,7 @@ from app.services.factor_panel import (
     market_equity,
     month_end,
     sic_as_of,
+    usable_reference,
 )
 from app.services.factor_panel_artefact import (
     GzLines,
@@ -466,12 +468,17 @@ def read_rf(inputs: Path, first: date) -> dict[date, float]:
 
 
 def price_series(
-    inputs: Path, admitted: Sequence[AdmittedSeries], grid: SessionGrid, holding_last: Mapping[date, date]
-) -> tuple[dict[int, Mapping[date, FormationPrices]], Counter[int]]:
+    inputs: Path,
+    admitted: Sequence[AdmittedSeries],
+    grid: SessionGrid,
+    holding_last: Mapping[date, date],
+    splits: Mapping[int, Sequence[SplitStamp]],
+) -> tuple[dict[int, Mapping[date, FormationPrices]], Counter[int], Counter[int]]:
     """Stream the frozen daily window series by series into each series' formation prices."""
     by_id = {a.series_id: a for a in admitted}
     prices: dict[int, Mapping[date, FormationPrices]] = {}
     flags: Counter[int] = Counter()
+    excused: Counter[int] = Counter()
     for sid, rows in read_gz_lines(inputs / Frozen.DAILY):
         series = by_id[sid]
         termination = None
@@ -483,10 +490,13 @@ def price_series(
             DailyBar(date.fromisoformat(day), close, adj, volume, stamped, usable)
             for day, close, adj, volume, stamped, usable in rows
         ]
-        got = series_prices(bars, grid, holding_last_session=holding_last, termination=termination)
+        got = series_prices(
+            bars, grid, holding_last_session=holding_last, termination=termination, split_stamps=splits.get(sid, ())
+        )
         prices[sid] = got.by_formation
         flags.update(got.flags_by_year)
-    return prices, flags
+        excused.update(got.excused_unexplained_by_year)
+    return prices, flags, excused
 
 
 # --------------------------------------------------------------------------- the walk
@@ -527,6 +537,10 @@ def _me_json(me: MarketEquity, close: Decimal | None) -> dict[str, Any]:
         "basis": None if me.basis is None else me.basis.isoformat(),
         "split_product": None if me.split_product is None else str(me.split_product),
         "facts": [f.to_json() for f in me.facts],
+        # Amendment 2: the unchecked ME of a row a check removed (contaminated), and each check's own outcome.
+        "raw": None if me.raw_value is None or me.raw_value == me.value else str(me.raw_value),
+        "checks": {name: outcome.value for name, outcome in me.checks.items()},
+        "verified": me.verified,
     }
 
 
@@ -542,6 +556,7 @@ def _prices_json(got: FormationPrices, tercile: int | None) -> dict[str, Any]:
         "rvol_21d": char(got.rvol_21d),
         "dollar_volume": got.dollar_volume,
         "dollar_volume_bars": got.dollar_volume_bars,
+        "liquidity_screened": got.liquidity_screened,
         "liquidity_tercile": tercile,
         "holding": {
             "status": holding.status.value,
@@ -561,19 +576,37 @@ def build_cik_rows(
     multi: Mapping[date, frozenset[str]],
     sub_sic: Mapping[str, int | None],
     splits: Mapping[int, Sequence[SplitStamp]],
+    link_runs: Mapping[tuple[int, date], date] | None = None,
 ) -> Iterable[dict[str, Any]]:
     """Steps 3-6 and the characteristics for every linked candidate of one CIK.
+
+    ``link_runs`` maps (series, formation) to the first formation of the series' current unbroken link to this CIK:
+    check 4's reference must come from the same run, so a series that left the CIK and came back starts afresh.
 
     ME is computed for every name past the bundle gate, before the filer / REIT / one-security steps, so the
     census can weight those exclusions too; the funnel order is unchanged.
     """
     cache = PrefixCache(bundle, cik10, max(c.session for c, _ in candidates))
+    #: Amendment 2 check 4: series -> its latest verified count. ``candidates`` are in formation order.
+    references: dict[int, ShareReference] = {}
     for candidate, row in candidates:
         view = CikView(bundle, cik10, candidate.session, prefixes=cache)
         if view.exclusion is not None:
             yield {**row, "exclusion": view.exclusion.value}
             continue
-        me = market_equity(view, candidate.close, splits.get(candidate.series_id, ()))
+        sid = candidate.series_id
+        me = market_equity(
+            view,
+            candidate.close,
+            splits.get(sid, ()),
+            dollar_volume=row["prices"]["dollar_volume"],
+            reference=usable_reference(
+                _same_run(references.get(sid), link_runs, sid, candidate.formation), candidate.formation, cik10
+            ),
+        )
+        if me.verified:
+            assert me.shares is not None
+            references[sid] = ShareReference(candidate.formation, candidate.session, me.shares, cik10)
         sic = sic_as_of(view.filings, sub_sic, candidate.session)
         row = {
             **row,
@@ -607,6 +640,14 @@ def build_cik_rows(
             yield {**row, "exclusion": None, "characteristics": chars}
 
 
+def _same_run(
+    reference: ShareReference | None, link_runs: Mapping[tuple[int, date], date] | None, sid: int, formation: date
+) -> ShareReference | None:
+    if reference is None or link_runs is None:
+        return reference
+    return reference if reference.formation >= link_runs.get((sid, formation), formation) else None
+
+
 def _known_me(row: Mapping[str, Any]) -> float | None:
     me = row.get("me")
     return None if me is None or me["value"] is None else float(me["value"])
@@ -635,6 +676,15 @@ class Census:
         self.unexplained_daily_monthly: list[dict[str, Any]] = []
         #: series -> M -> (ME, adj_close at s(M), admitted, label), for every row with a known ME.
         self.me_points: dict[int, dict[str, tuple[float, float, bool, str]]] = defaultdict(dict)
+        #: The same on unchecked ME (Amendment 2: ``me.raw`` where a check removed the value), and which check did.
+        self.me_points_raw: dict[int, dict[str, tuple[float, float, bool, str]]] = defaultdict(dict)
+        self.me_removed_by: dict[int, dict[str, str]] = defaultdict(dict)
+        self.check_outcomes: dict[str, Counter[str]] = defaultdict(Counter)
+        self.removed_rows: Counter[str] = Counter()
+        self.removed_names: dict[str, set[int]] = defaultdict(set)
+        self.removed_raw_me: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self.raw_me_total: dict[str, float] = defaultdict(float)
+        self.turnover_failures_screened = 0
 
     def add(self, row: Mapping[str, Any]) -> None:
         m, reason = row["M"], row["exclusion"] or "admitted"
@@ -648,6 +698,7 @@ class Census:
         admitted = row["exclusion"] is None
         if me is not None:
             self.me_points[row["series_id"]][m] = (me, row["prices"]["adj_close"], admitted, label)
+        self._add_checks(row, m, me, admitted, label)
         if not admitted:
             return
         if me is None:
@@ -679,6 +730,45 @@ class Census:
             self.diagnostics_me[m][kind][outcome] += me
         if prices["daily_monthly"] == DailyMonthly.UNEXPLAINED:
             self.unexplained_daily_monthly.append({"M": m, "series_id": row["series_id"], "symbol": label})
+
+    def _add_checks(self, row: Mapping[str, Any], m: str, me: float | None, admitted: bool, label: str) -> None:
+        """Amendment 2 census: per-check outcomes, and per removal reason its rows, names and raw-ME share."""
+        got = row.get("me")
+        if got is None:
+            return
+        for name, outcome in got.get("checks", {}).items():
+            self.check_outcomes[name][outcome] += 1
+        raw = me if got.get("raw") is None else float(got["raw"])
+        if raw is None:
+            return
+        sid = row["series_id"]
+        self.raw_me_total[m] += raw
+        unchecked_admitted = admitted or (me is None and row["exclusion"] == got["missing"])
+        self.me_points_raw[sid][m] = (raw, row["prices"]["adj_close"], unchecked_admitted, label)
+        if me is None:
+            reason = got["missing"]
+            self.me_removed_by[sid][m] = reason
+            self.removed_rows[reason] += 1
+            self.removed_names[reason].add(sid)
+            self.removed_raw_me[reason][m] += raw
+            if reason == "shares_turnover_implausible" and row["prices"].get("liquidity_screened"):
+                self.turnover_failures_screened += 1
+
+    def checks_json(self) -> dict[str, Any]:
+        return {
+            "outcomes": {name: dict(sorted(c.items())) for name, c in sorted(self.check_outcomes.items())},
+            "removed": {
+                reason: {
+                    "rows": n,
+                    "names": len(self.removed_names[reason]),
+                    "raw_me_share_contaminated_by_formation": {
+                        m: v / self.raw_me_total[m] for m, v in sorted(self.removed_raw_me[reason].items())
+                    },
+                }
+                for reason, n in sorted(self.removed_rows.items())
+            },
+            "turnover_failures_with_a_screened_liquidity_bar": self.turnover_failures_screened,
+        }
 
     def to_json(self) -> dict[str, Any]:
         def shares(counts: Counter[str], weights: Mapping[str, float]) -> dict[str, Any]:
@@ -770,6 +860,25 @@ def me_reconciliation(
     }
 
 
+def split_failure_dispositions(
+    raw_failures: Sequence[Mapping[str, Any]],
+    final: Mapping[str, Any],
+    removed_by: Mapping[int, Mapping[str, str]],
+    decisions: Mapping[date, date],
+) -> list[dict[str, Any]]:
+    """Amendment 2: every split-reconciliation failure on unchecked ME, with its status on final ME."""
+    still = {(e["series_id"], e["M"]) for e in final["split_reconciliation"]["failures"]}
+    previous = {cur.isoformat(): prev.isoformat() for prev, cur in itertools.pairwise(sorted(decisions))}
+    out: list[dict[str, Any]] = []
+    for entry in raw_failures:
+        sid, m = entry["series_id"], entry["M"]
+        sides = [k for k in (previous.get(m), m) if k is not None]
+        reasons = sorted({r for k in sides if (r := removed_by.get(sid, {}).get(k)) is not None})
+        status = "still_failing" if (sid, m) in still else "unavailable" if reasons else "reconciled"
+        out.append({**entry, "status": status, "removed_by": reasons})
+    return out
+
+
 @dataclass(frozen=True)
 class Inputs:
     """Everything read from the DB, so the connection closes before the CPU-bound walk."""
@@ -784,6 +893,7 @@ class Inputs:
     #: formation -> series -> liquidity tercile, among the loaded names classified at that formation.
     terciles: Mapping[date, Mapping[int, int]]
     flags_by_year: Counter[int]
+    excused_unexplained_by_year: Counter[int]
 
 
 def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
@@ -802,7 +912,7 @@ def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
     for sid, day, factor in read_gz_lines(inputs / Frozen.SPLITS):
         splits[sid].append(SplitStamp(date.fromisoformat(day), Decimal(factor)))
     grid = SessionGrid.build(sessions, read_rf(inputs, first_day), decisions)
-    prices, flags = price_series(inputs, admitted, grid, holding_last_sessions(formations, sessions))
+    prices, flags, excused = price_series(inputs, admitted, grid, holding_last_sessions(formations, sessions), splits)
     # The two reads share their admission predicates: a decision bar the stream does not price is a drift.
     priced = {(sid, decisions[m]) for sid, per in prices.items() for m in per}
     if priced != set(bars):
@@ -812,7 +922,7 @@ def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
         m: liquidity_terciles({sid: per[m].dollar_volume for sid, per in prices.items() if m in per}, name_key)
         for m in formations
     }
-    return Inputs(decisions, admitted, symbol_of, bars, splits, prices, terciles, flags)
+    return Inputs(decisions, admitted, symbol_of, bars, splits, prices, terciles, flags, excused)
 
 
 def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
@@ -836,6 +946,9 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
     )
     by_cik: dict[str, list[tuple[Candidate, dict[str, Any]]]] = defaultdict(list)
     multi: dict[date, frozenset[str]] = {}
+    # Amendment 2 check 4: per series, the CIK of its current priced-link run and the run's first formation.
+    run: dict[int, tuple[str | None, date]] = {}
+    link_runs: dict[tuple[int, date], date] = {}
     for formation, session in sorted(inputs.decisions.items()):
         links: dict[int, str] = {}
         for series in inputs.admitted:
@@ -851,6 +964,11 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
             row["prices"] = _prices_json(inputs.prices[series.series_id][formation], tercile)
             link = linkage.link_as_of(series.series_id, session)
             row = {**row, "link_reason": link.reason.value, "link_basis": link.basis, "cik": link.cik}
+            linked = link.cik if link.reason is Reason.LINKED else None
+            current = run.get(series.series_id)
+            if current is None or current[0] != linked:
+                run[series.series_id] = current = (linked, formation)
+            link_runs[(series.series_id, formation)] = current[1]
             if link.reason is not Reason.LINKED:
                 yield {**row, "exclusion": link.label}
                 continue
@@ -861,7 +979,7 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
     print(f"linked candidates {sum(len(v) for v in by_cik.values())} over {len(by_cik)} CIKs", flush=True)
     for done, (cik10, candidates) in enumerate(sorted(by_cik.items()), start=1):
         candidates.sort(key=lambda item: item[0].formation)
-        yield from build_cik_rows(bundle, cik10, candidates, multi, sub_sic, inputs.splits)
+        yield from build_cik_rows(bundle, cik10, candidates, multi, sub_sic, inputs.splits, link_runs)
         shard_cache.pop(cik10, None)  # bound memory: each CIK's shard is read once, by this loop only
         if done % 500 == 0:
             print(f"  {done}/{len(by_cik)} CIKs", flush=True)
@@ -878,7 +996,16 @@ def build(inputs: Path, formations: Sequence[date], rows_path: Path, census_path
         count = handle.count
     summary = tally.to_json()
     summary["me_reconciliation"] = me_reconciliation(tally.me_points, loaded.decisions, loaded.splits)
+    raw = me_reconciliation(tally.me_points_raw, loaded.decisions, loaded.splits)
+    summary["me_reconciliation_raw_contaminated"] = raw
+    summary["split_failure_dispositions"] = split_failure_dispositions(
+        raw["split_reconciliation"]["failures"], summary["me_reconciliation"], tally.me_removed_by, loaded.decisions
+    )
+    summary["me_checks"] = tally.checks_json()
+    # Check 4's chain runs over the run's formations only: a subset run's rows are diagnostics (Amendment 2).
+    summary["chain_complete"] = tuple(formations) == formation_months()
     summary["daily_screen_flags_by_year"] = dict(sorted(loaded.flags_by_year.items()))
+    summary["daily_screen_excused_unexplained_by_year"] = dict(sorted(loaded.excused_unexplained_by_year.items()))
     write_json_once(census_path, summary)
     return {"summary": summary, "rows": count}
 
