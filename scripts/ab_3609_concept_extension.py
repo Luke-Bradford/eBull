@@ -1,21 +1,25 @@
-"""#3609 step 1 slice 2: the full-population A/B for the ``CONCEPT_SET`` extension (spec Amendment 1).
+"""#3609 step 1: the full-population A/B for a ``CONCEPT_SET`` extension (spec Amendment 1).
 
-Spec: ``docs/research/2026-10-04-3609-step1-factor-panel.md`` §"Concept-set extension", Amendment 1.
+Spec: ``docs/research/2026-10-04-3609-step1-factor-panel.md`` §"Concept-set extension", Amendment 1; reused by
+slice 3d-iv for Amendment 2b's ten concepts.
 
-* **#3360 bundle.** Arm A is the 2026-09-24 bundle, arm B the new build from arm A's own ``inputs/``.
+* **#3360 bundle.** Arm A is the pinned bundle, arm B the new build from arm A's own ``inputs/``.
   Compared per CIK, row for row with payload and multiplicity: B's rows for the pre-existing concepts must
   equal A's, and its only extra rows must be for the added concepts. Manifest integrity failures,
   ``supported_through``, inputs and every pre-existing ledger key must be equal. Each added concept must
   have stored events.
-* **#3361 linkage.** The replay rebuild against the 2026-09-24 build: every series document and the ledger
+* **#3361 linkage.** The replay rebuild against the pinned build: every series document and the ledger
   byte-identical; the manifest equal except ``policy`` and ``input_sha256.pit_manifest``.
+* **Scratch bundle** (slice 3d-iv): arm B's manifest must equal the measurement's scratch bundle's in
+  every field except ``policy``. The manifest lists every shard's digest, so this covers every shard byte.
 
 Both arms are read as raw JSON with every file checked against its manifest digest: arm A's policy no
 longer matches this code, so its loader would refuse it. Any difference exits non-zero. Usage::
 
     PYTHONPATH=. uv run python scripts/ab_3609_concept_extension.py \\
         --bundle-a <dir> --bundle-a-sha256 <digest> --bundle-b <dir> --bundle-b-sha256 <digest> \\
-        --linkage-a <dir> --linkage-a-sha256 <digest> --linkage-b <dir> --linkage-b-sha256 <digest>
+        --linkage-a <dir> --linkage-a-sha256 <digest> --linkage-b <dir> --linkage-b-sha256 <digest> \\
+        --bundle-scratch <dir> --bundle-scratch-sha256 <digest>
 """
 
 from __future__ import annotations
@@ -31,19 +35,22 @@ from typing import Any
 from app.services.pit_fundamentals import CONCEPT_SET, load_pit_fundamentals
 from app.services.security_linkage import load_security_linkage
 
-#: Spec §"Concept-set extension": exactly these nine are added.
+#: Amendment 2b (slice 3d-iv): exactly the measurement's ten (``measure_3609_amendment_2b.EXTRA_CONCEPTS``, held
+#: equal by a test) are added. Slice 2's nine ran at ``dd6628f0``.
 ADDED_CONCEPTS = frozenset(
-    {
-        ("us-gaap", "Liabilities"),
-        ("us-gaap", "SellingGeneralAndAdministrativeExpense"),
-        ("us-gaap", "InterestExpense"),
-        ("us-gaap", "IncomeLossFromContinuingOperations"),
-        ("us-gaap", "DeferredTaxLiabilitiesNoncurrent"),
-        ("us-gaap", "DeferredIncomeTaxLiabilitiesNet"),
-        ("us-gaap", "PreferredStockRedemptionAmount"),
-        ("us-gaap", "PreferredStockLiquidationPreferenceValue"),
-        ("us-gaap", "PreferredStockValue"),
-    }
+    ("us-gaap", concept)
+    for concept in (
+        "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity",
+        "IncomeLossFromDiscontinuedOperationsNetOfTax",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+        "CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations",
+        "ExtraordinaryItemNetOfTax",
+        "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToNoncontrollingInterest",
+        "DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax",
+        "DiscontinuedOperationGainLossOnDisposalOfDiscontinuedOperationNetOfTax",
+        "DiscontinuedOperationIncomeLossFromDiscontinuedOperationDuringPhaseOutPeriodNetOfTax",
+        "NetCashProvidedByUsedInDiscontinuedOperations",
+    )
 )
 STORED = "stored"
 
@@ -166,9 +173,25 @@ def compare_linkage(a_root: Path, a_sha: str, b_root: Path, b_sha: str) -> tuple
     }
 
 
+def compare_scratch(scratch_root: Path, scratch_sha: str, b_root: Path, b_sha: str) -> list[str]:
+    _, scratch = _read(scratch_root / "manifest.json", scratch_sha)
+    _, b = _read(b_root / "manifest.json", b_sha)
+    failures = [
+        f"scratch manifest {field} differs"
+        for field in sorted(set(scratch) | set(b))
+        if field != "policy" and scratch.get(field) != b.get(field)
+    ]
+    # The digest list stands for the shards only while the files beside it still match it.
+    for entry in scratch["shards"]:
+        path = scratch_root / entry["path"]
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+            failures.append(f"scratch shard {entry['path']} is missing or does not match its digest")
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for arm in ("bundle-a", "bundle-b", "linkage-a", "linkage-b"):
+    for arm in ("bundle-a", "bundle-b", "linkage-a", "linkage-b", "bundle-scratch"):
         parser.add_argument(f"--{arm}", type=Path, required=True)
         parser.add_argument(f"--{arm}-sha256", required=True)
     args = parser.parse_args()
@@ -178,7 +201,11 @@ def main() -> int:
     linkage_failures, linkage = compare_linkage(
         args.linkage_a, args.linkage_a_sha256, args.linkage_b, args.linkage_b_sha256
     )
-    failures = bundle_failures + linkage_failures
+    failures = (
+        bundle_failures
+        + linkage_failures
+        + compare_scratch(args.bundle_scratch, args.bundle_scratch_sha256, args.bundle_b, args.bundle_b_sha256)
+    )
     json.dump(
         {"bundle": bundle, "linkage": linkage, "failures": failures[:200], "failure_count": len(failures)},
         sys.stdout,

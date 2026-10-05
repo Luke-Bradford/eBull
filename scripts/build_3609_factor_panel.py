@@ -97,14 +97,15 @@ from app.services.universe_selection import (
 from app.system.git_identity import head_commit, is_dirty
 
 RESEARCH_ROOT: Final = Path.home() / "Library/Application Support/eBull/research"
-#: Pins from the slice 1 and slice 2 close-outs on #3609 (2026-10-04, 2026-10-05).
+#: Pins from the slice 1 close-out on #3609 (2026-10-04) and slice 3d-iv part 1 (2026-10-05), which added
+#: Amendment 2b's ten concepts and rebuilt the linkage by replay.
 BUNDLE: Final = (
-    RESEARCH_ROOT / "pit_fundamentals_3360/2026-10-04-805bc9e6",
-    "29e6249e504826f69c243087c03e7ba713b26e26ec4afa7c90222e7a11032545",
+    RESEARCH_ROOT / "pit_fundamentals_3360/2026-10-05-6993911f",
+    "9349052416a302f26ebf695577311c6269daf9f5e096f69e9e98350737ebc2f6",
 )
 LINKAGE: Final = (
-    RESEARCH_ROOT / "security_linkage_3361/2026-10-05-805bc9e6",
-    "5bf20cfa5fed538e197c4ec0db8be0cdab8eca8f5e4b87b98865c73a7437058e",
+    RESEARCH_ROOT / "security_linkage_3361/2026-10-05-6993911f",
+    "8c5383c8a14048619cb2b1dec4a7b4da8f41c9019cdaafda614fd3ca92b778a5",
 )
 REFERENCE: Final = (
     RESEARCH_ROOT / "factor_panel_3609_reference/2026-10-04-f59b9578",
