@@ -252,7 +252,8 @@ Under value weighting, one such name can carry most of a leg. These are examples
 PR records the full adjudication (below).
 
 **Checks.** They are evaluated in order, and the first failure is the row's ME-missing reason. Every check's own
-outcome (`pass`, `fail` or `untested`) is also stored on the row as `me.checks`, so overlaps are counted. None of
+outcome (`pass`, `fail` or `untested`, and `recovered` for check 2) is also stored on the row as `me.checks`, so
+overlaps are counted. None of
 the checks repairs a count, except the recovery in check 2.
 
 1. **The applied stamp product is ambiguous or beyond tolerance → `shares_basis_ambiguous`.** Either condition
@@ -303,8 +304,8 @@ the checks repairs a count, except the recovery in check 2.
      below 1/100 fails, which applies DQC_0095's tolerance by analogy across time. It is a heuristic, not an
      inherited validation.
    - **The reference M′.** It is the series' latest earlier formation whose ME was admitted and **verified**, which
-     means checks 2 and 3 were both tested and passed. It must also be within 15 months of M (the share-age bound) and
-     have the same linked CIK.
+     means checks 2 and 3 were both tested and passed (widened by Amendment 2.1, below). It must also be within 15
+     months of M (the share-age bound) and have the same linked CIK.
      - A count admitted while untested is used but never becomes a reference. This stops an unverified seed from
        rejecting later counts.
      - A linkage change resets identity: MRK was linked to another CIK from 2016-05 to 2018-04.
@@ -365,6 +366,80 @@ earlier counts had no same-filing balance-sheet comparator, so check 2 was `unte
 verified and never became a reference.
 
 Reference eligibility needs an Amendment 2.1 before the canonical publish. The handoff is on #3609.
+
+**Amendment 2.1 (2026-10-05): reference eligibility by two-filing consensus.** Requiring check 2 to pass starves
+check 4: a count whose filing has no usable undimensioned balance-sheet count at its anchor can never be a reference.
+- **The rule.** An admitted count (ME present after all four checks) becomes check 4's reference when check 3
+  passed and either:
+  - check 2 passed (Amendment 2, unchanged); or
+  - check 2 was `untested`, and the count agrees within 100× with its **consensus partner**, split-adjusted by the
+    stamps in (s(M″), s(M)].
+- **The consensus partner** is the count at M″, the series' latest earlier formation whose ME was admitted with
+  check 3 `pass` and check 2 `pass` or `untested`. It must be within 15 months of M, on the same linked CIK and in
+  the same link run (the same filters as the reference), and it need not itself be a reference. It must come from
+  another filing: its accession set (`FactUse.accns` of the count used) is disjoint from the current count's, and
+  its count date (the fact's context date) differs.
+- **What stays ineligible.** A DQC-recovered count; a count with check 3 `untested`; and, with check 2 `untested`,
+  a count with no partner, such as the first admitted count of a run.
+- **Why these conditions.**
+  - Consecutive formations usually read the same filing's cover count, and an amendment can repeat it with the same
+    date. Without disjoint accessions and a different date, one mis-scaled fact would agree with itself.
+  - A partner must have passed check 3 and not been recovered, so a count Amendment 2 already treats as
+    insufficiently checked cannot vouch for another. A count first read with check 3 `untested` therefore does not
+    displace an earlier qualifying partner.
+  - `untested` covers every check-2 state without a usable comparator: none reported, a rejected or conflicting
+    comparator, and the balance-sheet fallback (which has no cover count to compare). Consensus is a separate test of
+    the count used, so all of them are admitted to it deliberately.
+- **The 15-month window** is measured between formations, as for the reference. A count admitted at M″ can itself be
+  up to 15 months old (the share-age bound), so the evidence behind a partner or reference can be older than 15
+  months.
+- **What it does not close.**
+  - **A shared mis-scaling.** A filer that repeats one mis-scaling in two filings, with check 2 `untested` and
+    dollar volume within the bound, forms a consensus. Its later clean counts then fail check 4, including a count
+    whose own check 2 passed: a reference, once held, outranks the current filing's own agreement. The failure lasts
+    until no erroneous count has refreshed the reference within 15 months.
+  - **Drift.** Each consensus step allows 100×, so a sequence of filings can walk the reference by more than 100×.
+  - **Real changes beyond 100×** that no split stamp records (an issuance or reorganisation) fail check 4, as under
+    Amendment 2. More references expose more of them.
+
+  The slice's A/B lists every newly rejected count, and the rule is adopted only if none of them is a clean count.
+- **No published rule is cited.** DQC_0095 compares two counts within one filing. We know of no published rule that
+  compares counts across filings, so this is a project heuristic, fixed by construction as check 4 is.
+- **Choosing the rule.** Two candidates were first simulated on the slice-3d rows
+  (`var/research/3609_step1/ab3d/rows.jsonl.gz`). The simulation froze checks 1–3 and the recovered side, and ignored
+  link runs, so its counts were only a guide:
+  - **consensus with the immediately previous admitted count** removed 27 more name-months: WTW (9), YUM (4), WWD (3),
+    CCL (3), SGU (3), ARW (3) and EGY (2);
+  - **the median of up to three previous admitted counts, read once per formation** removed 160, including 14-month
+    runs of plausible counts (QRVO 148,468,717; ADSW 87,720,437). It was rejected on that.
+
+  After checkpoint 1 tightened the partner, the exact rebuild measured the adopted rule (slice 3d-ii, below).
+- **PTP** stays the stated known gap: its ×1,000 run starts before stage A, so no clean count precedes it.
+
+**Slice 3d-ii result (2026-10-05).** The rebuild uses the proof artefact's frozen inputs and is compared with the
+slice-3d rows by `PYTHONPATH=. uv run python -m scripts.ab_3609_share_checks --a <slice-3d rows> --b <3d-ii rows>
+--out <changes.json> --csv docs/research/3609-slice3d-ii-reference-changes.csv`, which holds the per-row evidence.
+- 1,381,216 rows are unchanged; none is unexplained.
+- **27 lose ME to `shares_discontinuity`, all filer errors:**
+
+  | name | months | count filed | evidence |
+  |---|---|---|---|
+  | WTW | 9 | 64,391,084,000 .. 64,702,012,000 | implies ME of $9.6T .. $10.4T |
+  | YUM | 4 | 367,005,511,000,000 | ×10⁶ |
+  | WWD | 3 | 62,383,699,000 | ×1,000 |
+  | CCL | 3 | 932,485,510,000 | ×1,000 |
+  | SGU | 3 | 55,887,832,000 | ×1,000 |
+  | ARW | 3 | 87,973 | in thousands; dollar volume ÷ ME 4.8–5.0, under check 3's bound |
+  | EGY | 2 | 58,554 | in thousands; dollar volume ÷ ME 7.6–8.2 |
+
+  No clean count was rejected, so the rule is adopted. Every rejected count has check 2 `untested`.
+- **37 are restored** from `shares_scale_conflict`: the newly eligible references let DQC recovery choose the cover
+  count (BWS, CNNE, EYES, JOB, MASI, NG, PEG, ROP). Each cover count is within 100× of its reference and the
+  balance-sheet count is not, for example ROP's cover count of 100,356,523 and PEG's of 504,999,536.
+- **Admitted rows** go from 243,406 to 243,416.
+- **Check 4 coverage:** `untested` falls from 57,644 to 11,021 rows (census `me_checks.outcomes`).
+- **The residual is cleared.** Admitted ME above $1T is now AAPL, MSFT, AMZN and GOOG, which are real, and PTP's 5
+  months, the stated gap.
 
 ## Accounting
 
@@ -740,6 +815,23 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
        - each of the 34 original split-reconciliation failures with its final status;
        - the census counts per reason;
        - the `factor_panel_prices` module docstring, updated to cite the adopted readings.
+   - **3d-ii (Amendment 2.1): reference eligibility.**
+     - **Pure tests:**
+       - an untested count agreeing with a partner from another filing becomes a reference, then rejects a ×1,000
+         count;
+       - it does not when the partner shares its accession or its count date, disagrees beyond 100×, or is absent,
+         or when its own check 3 is untested;
+       - a recovered count never becomes one;
+       - a count first read with check 3 untested does not displace an earlier qualifying partner.
+     - **Full-population A/B against the slice-3d rows,** same frozen inputs:
+       - `me.checks`, `me.verified` and `me.raw` are diagnostics: a change confined to them (for example check 4
+         going from `untested` to `pass`) leaves the row `unchanged`;
+       - every other change is ME newly missing with an Amendment 2 reason, ME restored because the check that
+         removed it no longer fails, or a changed DQC recovery. Each has its admission and ME-denominated
+         characteristics following. Any other difference refuses;
+       - every newly rejected count is listed and adjudicated as a filer error or a clean count. **One clean count
+         rejected blocks adoption.**
+     - `scripts/ab_3609_share_checks.py` gains a `--csv` writer, and the slice-3d evidence CSV is regenerated with it.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
    - the `DeclaredTrial` row;
    - the declared run;
@@ -869,3 +961,25 @@ None rebutted.
 - **Deferred to Amendment 2b on #3609:** 1–14 (the IB = NI − XIDO and OANCF continuing + discontinued branches,
   their concept-set extension and the tag measurement). The period-level measurement and the zero-imputation rules
   they need are not built yet.
+
+**Amendment 2.1, checkpoint 1 (27 findings).**
+- **Applied to the rule:**
+  - 5, 12: the partner is the last admitted count that passed check 3 and was not recovered;
+  - 10, 11: disjoint accession sets and a different count date.
+- **Applied to the text:**
+  - 1–4, 21–23: the simulation is labelled a guide, and the adopted figures come from the exact rebuild;
+  - 6–9: the shared mis-scaling, a reference outranking current agreement, refresh, drift and real >100× changes;
+  - 13: every `untested` state is admitted to consensus, deliberately;
+  - 14: the formation window is separated from the share-age bound;
+  - 20: the rule is a project heuristic, with no published rule cited;
+  - 24, 25: the A/B treats `me.checks`/`me.verified`/`me.raw` as diagnostics, and one clean rejection blocks
+    adoption;
+  - 26: check 2's `recovered` outcome is in the vocabulary.
+- **15, answered:** `link_runs=None` is test-only. The build's only caller, `walk`, always passes it.
+- **Deferred to Amendment 2.2 on #3609:** 16–19 and 27. They concern Amendment 2's existing check 2 and census, not
+  reference eligibility:
+  - 16: the comparator's split adjustment against SAB Topic 4C;
+  - 17: the single-conflict condition on recovery;
+  - 18: a recovered balance-sheet count takes the cover read's acceptance;
+  - 19: partial comparator coverage;
+  - 27: a removed row's share of final ME is zero by construction.

@@ -201,3 +201,48 @@ def test_a_reference_from_before_the_series_left_the_cik_is_not_used() -> None:
     assert _same_run(reference, {(7, may): M}, 7, may) is reference
     assert _same_run(reference, {(7, may): may}, 7, may) is None
     assert _same_run(reference, None, 7, may) is reference
+
+
+def _consensus_rows(
+    *filings: tuple[str, str, str, str, int], dollar_volumes: tuple[float | None, ...] = (10.0, 10.0, 10.0)
+) -> list[dict[str, Any]]:
+    """One formation per month from April 2017, read against a shard holding ``filings`` (accn, accepted, period
+    end, cover date, cover count), none with a balance-sheet count, so check 2 is untested throughout."""
+    shard = _filer()
+    for accn, accepted, end, context, count in filings:
+        _balance(shard.filing(accn, accepted, "10-Q"), accn, end)
+        _cover(shard, accn, context, count)
+    months = [(M, S), (date(2017, 5, 31), date(2017, 5, 31)), (date(2017, 6, 30), date(2017, 6, 30))]
+    candidates = [
+        (
+            Candidate(m, s, 7, 7, False, Decimal(2)),
+            {"M": m.isoformat(), "series_id": 7, "prices": {**PRICES, "dollar_volume": volume}},
+        )
+        for (m, s), volume in zip(months, dollar_volumes, strict=True)
+    ]
+    sics = {"k": 3571, **{f[0]: 3571 for f in filings}}
+    return list(build_cik_rows(shard.bundle(), CIK, candidates, {m: frozenset[str]() for m, _ in months}, sics, {}))
+
+
+def test_a_two_filing_consensus_becomes_the_reference_that_rejects_a_x1000_count() -> None:
+    april, may, june = _consensus_rows(
+        ("q", "2017-05-10", "2017-03-31", "2017-05-05", 51),
+        ("q3", "2017-06-10", "2017-03-31", "2017-06-05", 51_000),
+    )
+    assert (april["exclusion"], april["me"]["verified"]) == (None, False)  # first of the run
+    assert (may["exclusion"], may["me"]["verified"]) == (None, True)  # agrees with k's count
+    assert (june["exclusion"], june["me"]["checks"]["discontinuity"]) == ("shares_discontinuity", "fail")
+
+
+def test_one_filings_count_read_in_consecutive_months_never_agrees_with_itself() -> None:
+    april, may, june = _consensus_rows(("q3", "2017-06-10", "2017-03-31", "2017-06-05", 51_000))
+    assert [row["me"]["verified"] for row in (april, may)] == [False, False]
+    assert (june["exclusion"], june["me"]["checks"]["discontinuity"]) == (None, "untested")
+
+
+def test_the_partner_is_the_last_count_that_passed_check_3_not_the_last_admitted() -> None:
+    # q's count is first read with check 3 untested: admitted, but not a partner. In June it agrees with k's.
+    april, may, june = _consensus_rows(
+        ("q", "2017-05-10", "2017-03-31", "2017-05-05", 51), dollar_volumes=(10.0, None, 10.0)
+    )
+    assert [row["me"]["verified"] for row in (april, may, june)] == [False, False, True]
