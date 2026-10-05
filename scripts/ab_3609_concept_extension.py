@@ -1,7 +1,7 @@
 """#3609 step 1: the full-population A/B for a ``CONCEPT_SET`` extension (spec Amendment 1).
 
 Spec: ``docs/research/2026-10-04-3609-step1-factor-panel.md`` §"Concept-set extension", Amendment 1; reused by
-slice 3d-iv for Amendment 2b's ten concepts.
+slice 3d-iv for Amendment 2b's ten concepts and slice 3d-v for Amendment 2c's 23.
 
 * **#3360 bundle.** Arm A is the pinned bundle, arm B the new build from arm A's own ``inputs/``.
   Compared per CIK, row for row with payload and multiplicity: B's rows for the pre-existing concepts must
@@ -10,7 +10,7 @@ slice 3d-iv for Amendment 2b's ten concepts.
   have stored events.
 * **#3361 linkage.** The replay rebuild against the pinned build: every series document and the ledger
   byte-identical; the manifest equal except ``policy`` and ``input_sha256.pit_manifest``.
-* **Scratch bundle** (slice 3d-iv): arm B's manifest must equal the measurement's scratch bundle's in
+* **Scratch bundle** (slices 3d-iv and 3d-v): arm B's manifest must equal the measurement's scratch bundle's in
   every field except ``policy``. The manifest lists every shard's digest, so this covers every shard byte.
 
 Both arms are read as raw JSON with every file checked against its manifest digest: arm A's policy no
@@ -35,21 +35,35 @@ from typing import Any
 from app.services.pit_fundamentals import CONCEPT_SET, load_pit_fundamentals
 from app.services.security_linkage import load_security_linkage
 
-#: Amendment 2b (slice 3d-iv): exactly the measurement's ten (``measure_3609_amendment_2b.EXTRA_CONCEPTS``, held
-#: equal by a test) are added. Slice 2's nine ran at ``dd6628f0``.
+#: Amendment 2c (slice 3d-v): the measurement's scratch concepts less ``CostsAndExpenses`` (the rejected XOPR
+#: branch reads it; nothing adopted does), held equal by a test. Slice 2's nine ran at ``dd6628f0``, Amendment 2b's
+#: ten at ``6993911f``.
 ADDED_CONCEPTS = frozenset(
     ("us-gaap", concept)
     for concept in (
-        "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToReportingEntity",
-        "IncomeLossFromDiscontinuedOperationsNetOfTax",
-        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
-        "CashProvidedByUsedInOperatingActivitiesDiscontinuedOperations",
-        "ExtraordinaryItemNetOfTax",
-        "IncomeLossFromDiscontinuedOperationsNetOfTaxAttributableToNoncontrollingInterest",
-        "DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax",
-        "DiscontinuedOperationGainLossOnDisposalOfDiscontinuedOperationNetOfTax",
-        "DiscontinuedOperationIncomeLossFromDiscontinuedOperationDuringPhaseOutPeriodNetOfTax",
-        "NetCashProvidedByUsedInDiscontinuedOperations",
+        "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
+        "CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization",
+        "CostOfServices",
+        "CostOfServicesExcludingDepreciationDepletionAndAmortization",
+        "GeneralAndAdministrativeExpense",
+        "InterestAndDebtExpense",
+        "InterestCostsIncurred",
+        "InterestExpenseBorrowings",
+        "InterestExpenseDebt",
+        "InterestExpenseDeposits",
+        "InterestExpenseLongTermDebt",
+        "InterestExpenseOther",
+        "InterestExpenseRelatedParty",
+        "InterestPaid",
+        "InterestPaidNet",
+        "MarketingAndAdvertisingExpense",
+        "MarketingExpense",
+        "OperatingExpenses",
+        "ResearchAndDevelopmentExpense",
+        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+        "ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost",
+        "SellingAndMarketingExpense",
+        "SellingExpense",
     )
 )
 STORED = "stored"
