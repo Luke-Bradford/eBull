@@ -25,6 +25,8 @@ PRICES: dict[str, Any] = {
     "adj_close": 2.0,
     "ret_12_1": {"value": 0.1, "observations": 11, "missing": None},
     "rvol_21d": {"value": None, "observations": 9, "missing": "insufficient_returns"},
+    "dollar_volume": None,
+    "liquidity_screened": False,
     "liquidity_tercile": None,
     "holding": {"status": "terminal"},
     "daily_monthly": "unexplained",
@@ -75,7 +77,14 @@ def test_null_and_unloaded_sic_stay_in() -> None:
     assert _rows(_filer(), sic=None)[0]["sic_status"] == "sic_null"
     shard = _filer()
     (row,) = list(
-        build_cik_rows(shard.bundle(), CIK, [(Candidate(M, S, 7, 7, False, Decimal(2)), {})], {M: frozenset()}, {}, {})
+        build_cik_rows(
+            shard.bundle(),
+            CIK,
+            [(Candidate(M, S, 7, 7, False, Decimal(2)), {"prices": PRICES})],
+            {M: frozenset()},
+            {},
+            {},
+        )
     )
     assert (row["sic_status"], row["exclusion"]) == ("sic_unloaded", None)
 
@@ -152,3 +161,33 @@ def test_me_reconciliation_skips_calendar_gaps_in_a_formation_subset() -> None:
     points = {1: {"2017-04-30": _point(100, 10), "2017-06-30": _point(500, 10)}}
     got = me_reconciliation(points, {april: S, june: date(2017, 6, 30)}, {})
     assert got["discontinuity"]["admitted_pairs"] == 0
+
+
+# --------------------------------------------------------------------------- Amendment 2 chain
+
+
+def _chain_rows(*, through_may: bool) -> list[dict[str, Any]]:
+    shard = _filer().fact("CommonStockSharesOutstanding", 50, "k", "2016-12-31", unit="shares")
+    _balance(shard.filing("q", "2017-05-10", "10-Q"), "q", "2017-03-31")
+    _cover(shard, "q", "2017-05-05", 50_000)  # x1,000, no comparator in its own filing
+    may = date(2017, 5, 31)
+    prices = {**PRICES, "dollar_volume": 10.0}
+    candidates = [(Candidate(M, S, 7, 7, False, Decimal(2)), {"M": M.isoformat(), "series_id": 7, "prices": prices})]
+    if through_may:
+        candidates.append(
+            (Candidate(may, may, 7, 7, False, Decimal(2)), {"M": may.isoformat(), "series_id": 7, "prices": prices})
+        )
+    multi = {M: frozenset[str](), may: frozenset[str]()}
+    return list(build_cik_rows(shard.bundle(), CIK, candidates, multi, {"k": 3571, "q": 3571}, {}))
+
+
+def test_a_verified_count_becomes_the_reference_that_rejects_the_next_x1000_count() -> None:
+    april, may = _chain_rows(through_may=True)
+    assert (april["exclusion"], april["me"]["verified"]) == (None, True)
+    assert (may["exclusion"], may["me"]["checks"]["discontinuity"]) == ("shares_discontinuity", "fail")
+    assert may["me"]["raw"] == str(Decimal(50_000) * 2)
+
+
+def test_later_formations_never_change_an_earlier_row() -> None:
+    (alone,) = _chain_rows(through_may=False)
+    assert _chain_rows(through_may=True)[0] == alone

@@ -17,6 +17,7 @@ import pytest
 
 from app.services import pit_fundamentals as pf
 from app.services.factor_panel import (
+    Check,
     CikView,
     Exclusion,
     Group,
@@ -25,6 +26,7 @@ from app.services.factor_panel import (
     Missing,
     PanelError,
     PrefixCache,
+    ShareReference,
     SicStatus,
     SortInput,
     SplitStamp,
@@ -40,6 +42,7 @@ from app.services.factor_panel import (
     sic_as_of,
     split_product,
     tercile_groups,
+    usable_reference,
 )
 from app.services.pit_fundamentals import PitFundamentalsBundle, ReadStatus
 
@@ -418,6 +421,100 @@ def test_stale_cover_count_falls_back_and_missing_price_is_its_own_reason() -> N
     assert market_equity(shard.view(date(2016, 7, 29)), Decimal(2), []).missing is MeMissing.NO_SHARES
     fresh = market_equity(shard.view(date(2015, 3, 31)), None, [])
     assert fresh.missing is MeMissing.NONPOSITIVE_PRICE
+
+
+# --------------------------------------------------------------------------- Amendment 2 share checks
+
+
+def _q(
+    shard: Shard, accn: str, accepted: str, end: str, *, cover: tuple[str, object] | None, sheet: object = None
+) -> Shard:
+    _balance(shard.filing(accn, accepted, "10-Q"), accn, end)
+    if cover is not None:
+        _cover(shard, accn, cover[0], cover[1])
+    if sheet is not None:
+        shard.fact("CommonStockSharesOutstanding", sheet, accn, end, unit="shares")
+    return shard
+
+
+def _ref(shares: object, *, formation: date = date(2017, 3, 31), cik: str = CIK) -> ShareReference:
+    return ShareReference(formation, formation, Decimal(str(shares)), cik)
+
+
+def test_a_split_between_the_cover_date_and_the_filing_is_ambiguous() -> None:
+    # NFLX 2015-07: cover dated 2015-06-30, the 7:1 split on 2015-07-15, filed 2015-07-17.
+    shard = _q(Shard(), "q", "2015-07-17", "2015-06-30", cover=("2015-06-30", 425_889_000))
+    me = market_equity(shard.view(date(2015, 7, 31)), Decimal(114), [SplitStamp(date(2015, 7, 15), Decimal(7))])
+    assert (me.missing, me.value, me.checks["basis"]) == (MeMissing.SHARES_BASIS_AMBIGUOUS, None, Check.FAIL)
+    assert me.raw_value == Decimal(425_889_000) * 7 * 114
+
+
+def test_a_stamp_product_beyond_tolerance_is_ambiguous_for_either_scope() -> None:
+    # A bankruptcy re-issue stamped as a split (BAS 2016-12, 0.0018): the pre-event count is not the new equity.
+    shard = _q(Shard(), "q", "2016-11-09", "2016-09-30", cover=("2016-11-01", 42_000_000))
+    me = market_equity(shard.view(date(2016, 12, 30)), Decimal(35), [SplitStamp(date(2016, 12, 23), Decimal("0.0018"))])
+    assert me.missing is MeMissing.SHARES_BASIS_AMBIGUOUS
+
+
+def test_dqc_0095_conflict_without_a_reference_is_missing() -> None:
+    # GRMN: the cover count tagged x1,000, the same filing's balance sheet right.
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [])
+    assert (me.missing, me.checks["scale"], me.verified) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL, False)
+
+
+def test_dqc_0095_conflict_recovers_the_side_the_reference_supports() -> None:
+    grmn = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    me = market_equity(grmn.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert (me.missing, me.shares_scope, me.shares) == (None, "dqc_recovered:balance_sheet", Decimal(188_000_000))
+    assert (me.checks["scale"], me.verified) == (Check.RECOVERED, False)
+    # AMTX: the cover count right, the balance sheet in thousands.
+    amtx = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 20_432_827), sheet=20_428)
+    me = market_equity(amtx.view(date(2017, 5, 31)), Decimal(5), [], reference=_ref(20_400_000))
+    assert (me.shares_scope, me.shares) == ("dqc_recovered:cover", Decimal(20_432_827))
+
+
+def test_counts_that_agree_pass_and_a_count_without_a_comparator_is_untested() -> None:
+    agree = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 101), sheet=100)
+    me = market_equity(agree.view(date(2017, 5, 31)), Decimal(2), [], dollar_volume=20.0)
+    assert (me.checks["scale"], me.checks["turnover"], me.checks["discontinuity"], me.verified) == (
+        Check.PASS,
+        Check.PASS,
+        Check.UNTESTED,
+        True,
+    )
+    alone = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 101))
+    me = market_equity(alone.view(date(2017, 5, 31)), Decimal(2), [], dollar_volume=20.0)
+    assert (me.missing, me.checks["scale"], me.verified) == (None, Check.UNTESTED, False)
+
+
+def test_dollar_volume_above_ten_times_me_is_implausible() -> None:
+    shell = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 100), sheet=100)
+    me = market_equity(shell.view(date(2017, 5, 31)), Decimal(20), [], dollar_volume=20_001.0)  # ME 2,000
+    assert (me.missing, me.checks["turnover"]) == (MeMissing.SHARES_TURNOVER_IMPLAUSIBLE, Check.FAIL)
+    assert market_equity(shell.view(date(2017, 5, 31)), Decimal(20), [], dollar_volume=20_000.0).missing is None
+
+
+def test_the_chain_rejects_a_x1000_count_then_accepts_the_next_clean_one() -> None:
+    shard = _q(Shard(), "q1", "2017-05-01", "2017-03-31", cover=("2017-04-25", 30_000_000_000))
+    _q(shard, "q2", "2017-08-01", "2017-06-30", cover=("2017-07-25", 29_900_000))
+    reference = _ref(30_000_000)
+    bad = market_equity(shard.view(date(2017, 5, 31)), Decimal(60), [], reference=reference)
+    assert (bad.missing, bad.checks["discontinuity"]) == (MeMissing.SHARES_DISCONTINUITY, Check.FAIL)
+    clean = market_equity(shard.view(date(2017, 8, 31)), Decimal(60), [], reference=reference)
+    assert (clean.missing, clean.checks["discontinuity"]) == (None, Check.PASS)
+    # The reference moves through a real split: 30M x 4 against 120M passes.
+    split = [SplitStamp(date(2017, 8, 15), Decimal(4))]
+    moved = market_equity(shard.view(date(2017, 8, 31)), Decimal(15), split, reference=reference)
+    assert moved.checks["discontinuity"] is Check.PASS
+
+
+def test_a_reference_applies_only_within_15_months_on_the_same_cik() -> None:
+    reference = _ref(1, formation=date(2017, 3, 31))
+    assert usable_reference(reference, date(2018, 6, 30), CIK) is reference
+    assert usable_reference(reference, date(2018, 7, 31), CIK) is None
+    assert usable_reference(reference, date(2017, 4, 30), "0000000002") is None
+    assert usable_reference(None, date(2017, 4, 30), CIK) is None
 
 
 # --------------------------------------------------------------------------- universe helpers

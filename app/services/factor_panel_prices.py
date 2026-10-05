@@ -9,14 +9,15 @@ bar of each calendar month). Every stage-A month is before ``SWITCH_MONTH``, so 
 the Intrader row anyway; calling the pure rule on a bounded read keeps the hold-out bound the reader's own
 unbounded load does not have.
 
-Readings that are ours, not the spec's text:
+Spec readings adopted by Amendment 2 (§"Daily screen"), first implemented here by slice 3c:
 - the ``adj_close/close`` ratio "moves more than 50%" when ``|ln(ratio_q / ratio_p)| > ln 1.5``, between
   consecutive admitted session bars, excused by a ``split_factor`` or ``dividend`` stamp dated in ``(p, q]``.
-  Symmetric in the log, so an unadjusted 1:2 reverse split (the ratio halves) is caught like a 2:1 split;
-  ``|ratio_q / ratio_p - 1| > 0.5`` would miss it;
-- the liquidity and volatility windows end at s(M) inclusive;
+  An excused move the stamps' split factors do not explain within the same tolerance is counted, not screened;
 - "a window containing a flagged bar" means a window containing a flagged pair's LATER bar: a pair whose later bar
-  is after s(M) is not observable at s(M), so it flags s(M) in the census but does not screen the formation;
+  is after s(M) is not observable at s(M), so it flags s(M) in the census but does not screen the formation.
+
+Readings that are ours, not the spec's text:
+- the liquidity and volatility windows end at s(M) inclusive;
 - a holding is ``observed`` when the holding month's last usable bar is on or after its last SPY session.
 """
 
@@ -26,7 +27,7 @@ import math
 from bisect import bisect_left
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 from typing import Final
@@ -34,7 +35,7 @@ from typing import Final
 import numpy as np
 
 from app.services import total_return_reader as trr
-from app.services.factor_panel import PanelError
+from app.services.factor_panel import PanelError, SplitStamp
 from app.services.series_termination import TerminationClass, terminal_value_fraction
 from app.services.strategy_result import AmbiguityArm
 
@@ -115,6 +116,8 @@ class FormationPrices:
     #: Mean ``close x volume``; ``None`` when unclassified.
     dollar_volume: float | None
     dollar_volume_bars: int
+    #: The liquidity window holds a screened pair's later bar (Amendment 2 counts check-3 failures with one).
+    liquidity_screened: bool
     holding: Holding
     #: Month t's last usable bar is after s(M), so the reader's month t+1 row starts later than the holding.
     month_end_after_decision: bool
@@ -126,6 +129,8 @@ class SeriesPrices:
     by_formation: Mapping[date, FormationPrices]
     #: Flagged bars per calendar year (§"Daily screen": printed per year, nothing deleted).
     flags_by_year: Counter[int]
+    #: Stamp-excused ratio moves the stamps' split factors do not explain, per calendar year (Amendment 2).
+    excused_unexplained_by_year: Counter[int] = field(default_factory=Counter)
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,7 @@ def series_prices(
     *,
     holding_last_session: Mapping[date, date],
     termination: tuple[TerminationClass, date] | None,
+    split_stamps: Sequence[SplitStamp] = (),
 ) -> SeriesPrices:
     """Every price quantity for one series at each formation where it has a usable bar on s(M).
 
@@ -207,6 +213,10 @@ def series_prices(
             if bar.volume is not None:
                 dollar[i] = bar.close * bar.volume
     stamps_through = np.cumsum(stamps)
+    log_split = np.zeros(n + 1)
+    for stamp in split_stamps:
+        log_split[bisect_left(sessions, stamp.day)] += math.log(float(stamp.factor))
+    log_split_through = np.cumsum(log_split)
 
     # Daily returns exist only between admitted bars on adjacent sessions (NaN propagates otherwise).
     daily = np.full(n, math.nan)
@@ -230,6 +240,11 @@ def series_prices(
         flagged[admitted[1:][jump]] = True
         flagged[admitted[:-1][jump]] = True
         screened_at[admitted[1:][jump]] = True
+        factor = np.abs(log_split_through[admitted[1:]] - log_split_through[admitted[:-1]])
+        unexplained = np.abs(np.abs(np.log(ratio[1:] / ratio[:-1])) - factor) > math.log(1.0 + SCREEN_RATIO_MOVE)
+        excused_unexplained = Counter(sessions[int(i)].year for i in admitted[1:][moved & ~unstamped & unexplained])
+    else:
+        excused_unexplained = Counter()
     flags_by_year = Counter(sessions[int(i)].year for i in np.flatnonzero(flagged))
 
     monthly = trr.monthly_returns(month_ends, field="adj_close", through=trr.month_of(sessions[-1]))
@@ -259,6 +274,7 @@ def series_prices(
         else:
             volatility = PriceCharacteristic(float(np.std(returns, ddof=1)), len(returns), None)
 
+        liquidity_window = slice(max(k - LIQUIDITY_SESSIONS + 1, 0), k + 1)
         traded = dollar[k - LIQUIDITY_SESSIONS + 1 : k + 1]
         traded = traded[~np.isnan(traded)]
         dollar_volume = float(traded.mean()) if len(traded) >= LIQUIDITY_MIN_BARS else None
@@ -284,11 +300,12 @@ def series_prices(
             rvol_21d=volatility,
             dollar_volume=dollar_volume,
             dollar_volume_bars=len(traded),
+            liquidity_screened=bool(screened_at[liquidity_window].any()),
             holding=_holding(formation, float(adj[k]), month_ends, holding_last_session[formation], termination),
             month_end_after_decision=end_of_month.bar_date > sessions[k],
             daily_monthly=reconciled,
         )
-    return SeriesPrices(out, flags_by_year)
+    return SeriesPrices(out, flags_by_year, excused_unexplained)
 
 
 def liquidity_terciles(dollar_volume: Mapping[int, float | None], name_key: Mapping[int, int]) -> dict[int, int]:
