@@ -274,16 +274,15 @@ the checks repairs a count, except the recovery in check 2.
    - **What is compared:**
      - for every accession the cover read returned (`FactUse.accns`), that accession's `CommonStockSharesOutstanding`
        at its own period anchor, read through the value state machine;
-     - the anchor count multiplied by the stamps in (anchor, cover context date], since a split between the two
-       dates is a real difference;
-     - only positive `VALUE` reads. Anything else leaves the check `untested`.
+     - the anchor count on its SAB Topic 4C basis, the comparator accession's acceptance (Amendment 2.2, below);
+     - only positive `VALUE` reads. Anything else leaves the check `untested`. The check passes when at least one
+       comparator was read and none conflicts; an accession without a usable comparator adds nothing.
    - **What differs from the rule as published:**
-     - companyfacts drops dimensional facts, so only undimensioned facts are compared;
-     - the published rule states no date condition, and the split adjustment is ours.
+     - companyfacts drops dimensional facts, so only undimensioned facts are compared.
    - **Recovery.** DQC_0095 does not say which side is wrong, and the data errs in both directions: AMTX's cover
      count is right and its balance-sheet count is in thousands, while GRMN is the reverse. If check 4 holds a
-     reference (below), the side within its 100× tolerance is used, unless both or neither are within it. A
-     recovered row is flagged `shares_scope=dqc_recovered:<side>`; it is not verified, so it never becomes a
+     reference (below), the side within its 100× tolerance is used, unless both or neither are within it. All
+     conflicting comparators must carry one count (Amendment 2.2). A recovered row is flagged `shares_scope=dqc_recovered:<side>`; it is not verified, so it never becomes a
      reference. If there is no reference, ME is missing.
 3. **Trailing dollar volume above 10 × ME → `shares_turnover_implausible`.**
    - **The metric:** the census liquidity measure (mean `close × volume` over admitted bars in the 126 sessions
@@ -335,8 +334,8 @@ the checks repairs a count, except the recovery in check 2.
   and a re-issue (BCEI 2017-05). It is listed and classified in slice 3d's PR, and nothing is excluded on it.
 - Per reason, the census prints:
   - row and name counts;
-  - the share of the formation's total final ME held by the rows the reason removed. Rows removed contribute zero.
-    The share computed on raw ME is printed too, and labelled contaminated.
+  - per formation, the share of the formation's total raw ME held by the rows the reason removed, labelled
+    contaminated. A share of final ME would be zero by construction, since removed rows have none (Amendment 2.2).
 
 **Slice 3d result (2026-10-05)** on the proof artefact's frozen inputs, built by
 `PYTHONPATH=. uv run python -m scripts.ab_3609_share_checks`. Per-row evidence is in
@@ -440,6 +439,29 @@ slice-3d rows by `PYTHONPATH=. uv run python -m scripts.ab_3609_share_checks --a
 - **Check 4 coverage:** `untested` falls from 57,644 to 11,021 rows (census `me_checks.outcomes`).
 - **The residual is cleared.** Admitted ME above $1T is now AAPL, MSFT, AMZN and GOOG, which are real, and PTP's 5
   months, the stated gap.
+
+**Amendment 2.2 (2026-10-05): check 2's comparator basis and recovery.** Codex checkpoint 1 on Amendment 2.1 found
+these in Amendment 2's existing check 2 (findings 16–19 and 27).
+- **Comparator basis (16).** SAB Topic 4C requires a split effective before the financial statements are issued to
+  be reflected retroactively. A balance-sheet count therefore stands on its accession's acceptance date, as the
+  fallback's already does. Amendment 2 multiplied it by the stamps in (anchor, cover date] instead, which counted a
+  split before the filing twice. A 10:1 split then shrank a ×1,000 cover error to exactly 100× and passed it.
+  - The anchor count is now multiplied by the stamps in (acceptance, cover date]. That set is empty whenever the
+    cover date precedes the filing, so the comparison is of raw counts, as DQC_0095 publishes it with no date
+    condition.
+  - A split between the cover date and the filing already fails check 1.
+- **Recovery with several comparators (17).** Amendment 2 recovered only with exactly one conflicting comparator.
+  It now recovers when every conflicting comparator carries the same count, and uses the latest-filed of them.
+  Comparators that disagree with each other leave the conflict unresolved.
+  - One read returns several accessions only when they share an acceptance timestamp (`value_as_of` keeps the
+    events at the latest acceptance), so this case is a co-filed pair.
+- **Recovered basis (18).** A recovered balance-sheet count takes its own accession's acceptance as its basis. That
+  equals the cover read's acceptance by the same invariant, so this changes no row; the code no longer relies on it.
+- **Partial coverage (19)** is settled in check 2's text above. The check passes when at least one comparator was
+  read and none conflicts. A filing without a usable comparator is no evidence either way, and checks 3 and 4 still
+  apply.
+- **Census (27).** The per-reason "share of final ME" was zero by construction. The census already printed only
+  the raw-ME share, and the text above now says so.
 
 ## Accounting
 
@@ -832,6 +854,13 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
        - every newly rejected count is listed and adjudicated as a filer error or a clean count. **One clean count
          rejected blocks adoption.**
      - `scripts/ab_3609_share_checks.py` gains a `--csv` writer, and the slice-3d evidence CSV is regenerated with it.
+   - **3d-iii (Amendment 2.2): check 2's comparator basis and recovery.**
+     - **Pure tests:**
+       - a ×1,000 cover count against a post-split balance-sheet count fails check 2;
+       - co-filed comparators carrying one count recover, and comparators that disagree do not;
+       - each is revert-probed.
+     - **Full-population A/B against the 3d-ii rows,** same frozen inputs and the same classes and refusal as 3d-ii.
+       Every changed row is listed in an evidence CSV and adjudicated.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
    - the `DeclaredTrial` row;
    - the declared run;

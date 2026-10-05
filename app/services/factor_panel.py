@@ -875,24 +875,31 @@ def _checked(
     checks["basis"] = Check.FAIL if straddles or not _within_tolerance(common["split_product"]) else Check.PASS
 
     # 2. DQC_0095: the cover count against each returned accession's own anchor balance-sheet count. SAB Topic 4C
-    # restates a balance-sheet count for splits effective before its filing, so its basis is that accession's
-    # acceptance, as for the fallback (Amendment 2.2); a split after the cover date and before filing fails check 1.
+    # restates a balance-sheet count for splits effective before the statements are issued; the acceptance date
+    # stands in for issuance, as for the fallback (Amendment 2.2). A split after the cover date and before filing
+    # already fails check 1.
     checks["scale"] = Check.UNTESTED
     if scope == "cover":
         conflicts: list[FactUse] = []
+        agreeing = False
         for accn in accns:
             sheet = _accession_balance_sheet(view, accn)
             if sheet is None:
                 continue
             count, filed_on = Decimal(str(sheet.value)), acceptance_ny_date(str(sheet.acceptance))
-            checks["scale"] = Check.PASS if checks["scale"] is Check.UNTESTED else checks["scale"]
-            if not _within_tolerance(filed / (count * split_product(splits, filed_on, basis))):
-                checks["scale"] = Check.FAIL
+            if _within_tolerance(filed / (count * split_product(splits, filed_on, basis))):
+                agreeing = True
+            else:
                 conflicts.append(sheet)
-        # Recovery needs the conflicting comparators to agree on one count; the latest-filed one is used, on its own
-        # acceptance basis.
-        if checks["scale"] is Check.FAIL and reference is not None and len({c.value for c in conflicts}) == 1:
-            sheet = max(conflicts, key=lambda c: str(c.acceptance))
+        if conflicts:
+            checks["scale"] = Check.FAIL
+        elif agreeing:
+            checks["scale"] = Check.PASS
+        # Recovery needs every comparator to conflict and to carry one count. The co-filed accessions share an
+        # acceptance (``value_as_of``), so the highest accession number is taken, for a deterministic provenance.
+        recoverable = not agreeing and len({c.value for c in conflicts}) == 1
+        if checks["scale"] is Check.FAIL and reference is not None and recoverable:
+            sheet = max(conflicts, key=lambda c: c.accns)
             filed_on = acceptance_ny_date(str(sheet.acceptance))
             sheet_shares = Decimal(str(sheet.value)) * split_product(splits, filed_on, decision)
             cover_ok = _consistent(shares, reference, splits, decision)

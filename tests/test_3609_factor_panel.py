@@ -484,6 +484,11 @@ def test_a_split_before_filing_is_already_in_the_balance_sheet_count() -> None:
     assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
     agree = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 4_000), sheet=4_000)
     assert market_equity(agree.view(date(2017, 5, 31)), Decimal(5), split).checks["scale"] is Check.PASS
+    # A 1:10 reverse split the other way: a cover count in thousands against the restated sheet was 100x before.
+    reverse = [SplitStamp(date(2017, 4, 10), Decimal("0.1"))]
+    thousands = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 4_000), sheet=4_000_000)
+    me = market_equity(thousands.view(date(2017, 5, 31)), Decimal(5), reverse)
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
 
 
 def test_recovery_takes_comparators_that_agree_with_each_other() -> None:
@@ -498,8 +503,17 @@ def test_recovery_takes_comparators_that_agree_with_each_other() -> None:
         date(2017, 5, 1),
         Decimal(188_000_000),
     )
+    assert me.facts[0].accns == ("qa",)  # the highest accession number of the co-filed set
     # Comparators that disagree with each other leave nothing to recover.
     _q(shard, "qb", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
+
+
+def test_a_comparator_agreeing_with_the_cover_blocks_recovery_to_another() -> None:
+    # Cover 188B; one co-filed comparator agrees with it, the other conflicts and matches the reference.
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    _q(shard, "qa", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=187_000_000_000)
     me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
     assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
 
