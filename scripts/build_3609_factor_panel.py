@@ -1,13 +1,13 @@
-"""#3609 step 1 slice 3b: the stage-A panel's universe, market equity and accounting characteristics.
+"""#3609 step 1 slices 3b-3c: the stage-A panel's universe, market equity, characteristics and holding returns.
 
 Spec: ``docs/research/2026-10-04-3609-step1-factor-panel.md`` (§"Universe at M", §"Market equity",
-§"Accounting", §"Census"). The accounting and ME rules live in ``app/services/factor_panel.py``; this script
-supplies the DB reads and the pinned #3360 / #3361 / slice-1 artefacts, walks the 80 stage-A formations and
-writes one row per (M, series) examined, admitted or excluded, plus the census.
+§"Accounting", §"Price characteristics and daily data", §"Returns and holdings", §"Census"). The accounting and
+ME rules live in ``app/services/factor_panel.py`` and the price rules in ``app/services/factor_panel_prices.py``;
+this script supplies the DB reads and the pinned #3360 / #3361 / slice-1 artefacts, walks the 80 stage-A
+formations and writes one row per (M, series) examined, admitted or excluded, plus the census.
 
-Not here yet (slice 3c): ``ret_12_1`` / ``rvol_21d`` and the daily screen, holdings and returns per arm, the
-liquidity tercile, the split and discontinuity reconciliations, and the published artefact with frozen inputs.
-Until then the output is a scratch file under ``var/research/3609_step1/``, not a step-2 input.
+Not here yet (slice 3c-ii): the published artefact with frozen inputs. Until then the output is a scratch file
+under ``var/research/3609_step1/``, not a step-2 input.
 
 Hold-out: every price read is bounded at ``PRICE_BOUND`` (2021-05-31); bundle and SUB reads are bounded by
 s(M) <= 2021-04-30.
@@ -22,12 +22,14 @@ import argparse
 import gzip
 import hashlib
 import heapq
+import itertools
 import json
 import sys
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -51,12 +53,24 @@ from app.services.factor_panel import (
     formation_months,
     is_filer,
     market_equity,
+    month_end,
     sic_as_of,
+)
+from app.services.factor_panel_prices import (
+    DailyBar,
+    DailyMonthly,
+    FormationPrices,
+    PriceCharacteristic,
+    SessionGrid,
+    liquidity_terciles,
+    me_discontinuity,
+    series_prices,
 )
 from app.services.factor_panel_reference import parse_fsds_sub
 from app.services.pit_fundamentals import PitFundamentalsBundle, load_pit_fundamentals
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.security_linkage import Reason, load_security_linkage
+from app.services.series_termination import classify_termination
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.universe_selection import SURVIVORSHIP_FREE_VENDOR, AdmittedSeries, load_universe_selection
 
@@ -80,7 +94,13 @@ PRICE_BOUND: Final = date(2021, 5, 31)
 #: Per formation, the census lists this many largest-ME admitted rows: a threshold-free flag for scale errors
 #: in filed share counts (EEFT's cover count is ~10^9 too large), which dominate any ME-weighted share.
 LARGEST_ME_LISTED: Final = 5
+#: Months before the first formation the daily read starts: ``ret_12_1`` at t needs month t-12's month-end.
+#: The 126-session liquidity window reaches about six months back, so this covers every lookback.
+DAILY_LOOKBACK_MONTHS: Final = 12
+RF_DATASET: Final = "french_three_factor_daily"
+RF_UNIT: Final = "decimal_return"
 SPY_SYMBOL: Final = "SPY"
+PRICE_CHARACTERISTICS: Final = ("ret_12_1", "rvol_21d")
 OUT_DIR: Final = Path("var/research/3609_step1")
 
 
@@ -194,12 +214,121 @@ def series_symbols(conn: psycopg.Connection[Any], series_ids: Sequence[int]) -> 
     return {int(sid): symbol for sid, symbol in rows}
 
 
-def load_sub_sic(root: Path, expected_manifest_sha256: str) -> dict[str, int | None]:
-    """accession -> SUB ``sic`` over every pinned quarter, each file checked against the slice 1 manifest."""
+#: Every bar in the daily window with its admission verdict, under ``_DECISION_BARS_SQL``'s predicates; stamps
+#: are read on every bar, usable or not.
+_DAILY_SQL = """
+SELECT d.series_id, d.bar_date, d.close::float8, d.adj_close::float8, d.volume,
+       (d.split_factor IS NOT NULL AND d.split_factor <> 1) OR COALESCE(d.dividend, 0) > 0 AS stamped,
+       cov.series_id IS NOT NULL
+         AND COALESCE(q.return_usable, TRUE)
+         AND d.adj_close > 0 AND d.adj_close < 'Infinity'::numeric
+         AND d.close > 0 AND d.close < 'Infinity'::numeric AS usable
+FROM research_price_daily d
+LEFT JOIN research_price_quarantine_coverage cov
+  ON cov.series_id = d.series_id
+ AND cov.rule_set_version = %(quarantine_version)s
+ AND d.bar_date BETWEEN cov.first_bar AND cov.last_bar
+LEFT JOIN research_bar_quarantine q
+  ON q.series_id = d.series_id
+ AND q.bar_date = d.bar_date
+ AND q.rule_set_version = %(quarantine_version)s
+WHERE d.series_id = ANY(%(series_ids)s::bigint[])
+  AND d.bar_date BETWEEN %(first)s AND %(bound)s
+ORDER BY d.series_id, d.bar_date
+"""
+
+_RF_SQL = """
+SELECT o.observation_date, o.value::float8, o.unit
+FROM reference_data_observations o
+JOIN reference_data_snapshots s USING (snapshot_id)
+WHERE o.snapshot_id = %(snapshot_id)s
+  AND s.dataset_key = %(dataset_key)s
+  AND s.response_sha256 = %(response_sha256)s
+  AND o.series_key = 'RF'
+  AND o.observation_date BETWEEN %(first)s AND %(bound)s
+"""
+
+
+def load_rf(conn: psycopg.Connection[Any], manifest: Mapping[str, Any], first: date) -> dict[date, float]:
+    """French daily RF from the snapshot the slice 1 manifest pins, checked by its response digest."""
+    pinned = manifest["reference_snapshots"][RF_DATASET]
+    params = {
+        "snapshot_id": pinned["snapshot_id"],
+        "dataset_key": RF_DATASET,
+        "response_sha256": pinned["response_sha256"],
+        "first": first,
+        "bound": PRICE_BOUND,
+    }
+    out: dict[date, float] = {}
+    for day, value, unit in conn.execute(_RF_SQL, params).fetchall():
+        if unit != RF_UNIT:
+            raise PanelError(f"RF unit {unit!r} on {day}, expected {RF_UNIT!r}")
+        out[day] = value
+    if not out:
+        raise PanelError(f"pinned RF snapshot {pinned['snapshot_id']} returned nothing (digest or dataset moved?)")
+    return out
+
+
+def holding_last_sessions(formations: Iterable[date], sessions: Sequence[date]) -> dict[date, date]:
+    """Each formation's holding month (t+1) mapped to its last SPY session."""
+    out: dict[date, date] = {}
+    for formation in formations:
+        following = add_months(date(formation.year, formation.month, 1), 1)
+        last_day = add_months(following, 1) - timedelta(days=1)
+        i = bisect_right(sessions, last_day) - 1
+        if i < 0 or sessions[i] < following:
+            raise PanelError(f"no SPY session in the holding month after {formation}")
+        out[formation] = sessions[i]
+    return out
+
+
+def load_prices(
+    conn: psycopg.Connection[Any],
+    admitted: Sequence[AdmittedSeries],
+    grid: SessionGrid,
+    holding_last: Mapping[date, date],
+) -> tuple[dict[int, Mapping[date, FormationPrices]], Counter[int]]:
+    """Stream the daily window series by series (server-side cursor) into each series' formation prices."""
+    by_id = {a.series_id: a for a in admitted}
+    params = {
+        "series_ids": list(by_id),
+        "first": grid.sessions[0],
+        "bound": PRICE_BOUND,
+        "quarantine_version": QUARANTINE_RULE_SET_VERSION,
+    }
+    prices: dict[int, Mapping[date, FormationPrices]] = {}
+    flags: Counter[int] = Counter()
+    # A named cursor needs a transaction; the connection is autocommit.
+    with conn.transaction(), conn.cursor(name="factor_panel_daily") as cur:
+        cur.itersize = 100_000
+        cur.execute(_DAILY_SQL, params)
+        for sid, rows in itertools.groupby(cur, key=lambda row: row[0]):
+            series = by_id[int(sid)]
+            termination = None
+            if series.termination is not None:
+                if series.last_bar is None:
+                    raise PanelError(f"terminating series {sid} has no stored last_bar")
+                termination = (classify_termination(series.termination), series.last_bar)
+            bars = [
+                DailyBar(day, close, adj, volume, stamped, usable)
+                for _, day, close, adj, volume, stamped, usable in rows
+            ]
+            got = series_prices(bars, grid, holding_last_session=holding_last, termination=termination)
+            prices[int(sid)] = got.by_formation
+            flags.update(got.flags_by_year)
+    return prices, flags
+
+
+def reference_manifest(root: Path, expected_manifest_sha256: str) -> dict[str, Any]:
     manifest_path = root / "manifest.json"
     if sha256_file(manifest_path) != expected_manifest_sha256:
         raise PanelError(f"reference manifest digest moved: {manifest_path}")
-    manifest = json.loads(manifest_path.read_bytes())
+    return json.loads(manifest_path.read_bytes())
+
+
+def load_sub_sic(root: Path, expected_manifest_sha256: str) -> dict[str, int | None]:
+    """accession -> SUB ``sic`` over every pinned quarter, each file checked against the slice 1 manifest."""
+    manifest = reference_manifest(root, expected_manifest_sha256)
     out: dict[str, int | None] = {}
     for entry in manifest["fsds_sub"]:
         path = root / entry["path"]
@@ -251,6 +380,30 @@ def _me_json(me: MarketEquity, close: Decimal | None) -> dict[str, Any]:
         "basis": None if me.basis is None else me.basis.isoformat(),
         "split_product": None if me.split_product is None else str(me.split_product),
         "facts": [f.to_json() for f in me.facts],
+    }
+
+
+def _prices_json(got: FormationPrices, tercile: int | None) -> dict[str, Any]:
+    def char(c: PriceCharacteristic) -> dict[str, Any]:
+        missing = None if c.missing is None else c.missing.value
+        return {"value": c.value, "observations": c.observations, "missing": missing}
+
+    holding = got.holding
+    return {
+        "adj_close": got.adj_close,
+        "ret_12_1": char(got.ret_12_1),
+        "rvol_21d": char(got.rvol_21d),
+        "dollar_volume": got.dollar_volume,
+        "dollar_volume_bars": got.dollar_volume_bars,
+        "liquidity_tercile": tercile,
+        "holding": {
+            "status": holding.status.value,
+            "period_return": holding.period_return,
+            "end_bar": None if holding.end_bar is None else holding.end_bar.isoformat(),
+            "by_arm": dict(holding.by_arm),
+        },
+        "month_end_after_decision": got.month_end_after_decision,
+        "daily_monthly": got.daily_monthly.value,
     }
 
 
@@ -327,6 +480,14 @@ class Census:
         self.sic_status: Counter[str] = Counter()
         self.shares_scope: Counter[str] = Counter()
         self.largest_me: dict[str, list[tuple[float, str]]] = defaultdict(list)
+        #: Admitted-row price diagnostics per formation: holding status, liquidity tercile, daily-monthly check.
+        self.diagnostics: dict[str, dict[str, Counter[str]]] = defaultdict(lambda: defaultdict(Counter))
+        self.diagnostics_me: dict[str, dict[str, dict[str, float]]] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(float))
+        )
+        self.unexplained_daily_monthly: list[dict[str, Any]] = []
+        #: series -> M -> (ME, adj_close at s(M), admitted, label), for every row with a known ME.
+        self.me_points: dict[int, dict[str, tuple[float, float, bool, str]]] = defaultdict(dict)
 
     def add(self, row: Mapping[str, Any]) -> None:
         m, reason = row["M"], row["exclusion"] or "admitted"
@@ -336,12 +497,16 @@ class Census:
             self.funnel_me[m][reason] += me
         if "sic_status" in row:
             self.sic_status[row["sic_status"]] += 1
-        if row["exclusion"] is not None:
+        label = row.get("symbol") or f"series:{row['series_id']}"
+        admitted = row["exclusion"] is None
+        if me is not None:
+            self.me_points[row["series_id"]][m] = (me, row["prices"]["adj_close"], admitted, label)
+        if not admitted:
             return
         if me is None:
             raise PanelError(f"admitted row without ME: {row['M']} series {row.get('series_id')}")
         self.shares_scope[row["me"]["shares_scope"]] += 1
-        heapq.heappush(self.largest_me[m], (me, str(row.get("symbol"))))
+        heapq.heappush(self.largest_me[m], (me, label))
         if len(self.largest_me[m]) > LARGEST_ME_LISTED:
             heapq.heappop(self.largest_me[m])
         for name, got in row["characteristics"].items():
@@ -351,6 +516,22 @@ class Census:
             self.branches[name].update(set(got["branches"]))
             if got["missing"] is None:
                 self.kinds[name][got["kind"]] += 1
+        prices = row["prices"]
+        for name in PRICE_CHARACTERISTICS:
+            outcome = prices[name]["missing"] or "value"
+            self.chars[m][name][outcome] += 1
+            self.chars_me[m][name][outcome] += me
+        tercile = prices["liquidity_tercile"]
+        for kind, outcome in (
+            ("holding_status", prices["holding"]["status"]),
+            ("liquidity_tercile", "unclassified" if tercile is None else str(tercile)),
+            ("daily_monthly", prices["daily_monthly"]),
+            ("month_end_after_decision", str(prices["month_end_after_decision"]).lower()),
+        ):
+            self.diagnostics[m][kind][outcome] += 1
+            self.diagnostics_me[m][kind][outcome] += me
+        if prices["daily_monthly"] == DailyMonthly.UNEXPLAINED:
+            self.unexplained_daily_monthly.append({"M": m, "series_id": row["series_id"], "symbol": label})
 
     def to_json(self) -> dict[str, Any]:
         def shares(counts: Counter[str], weights: Mapping[str, float]) -> dict[str, Any]:
@@ -380,7 +561,66 @@ class Census:
                 m: [{"symbol": symbol, "me": me} for me, symbol in sorted(rows, reverse=True)]
                 for m, rows in sorted(self.largest_me.items())
             },
+            "diagnostics_by_formation": {
+                m: {kind: shares(c, self.diagnostics_me[m][kind]) for kind, c in sorted(per.items())}
+                for m, per in sorted(self.diagnostics.items())
+            },
+            "diagnostics_total_counts": {
+                kind: dict(sorted(sum((per[kind] for per in self.diagnostics.values()), Counter()).items()))
+                for kind in sorted({k for per in self.diagnostics.values() for k in per})
+            },
+            "daily_monthly_unexplained": self.unexplained_daily_monthly,
         }
+
+
+def me_reconciliation(
+    points: Mapping[int, Mapping[str, tuple[float, float, bool, str]]],
+    decisions: Mapping[date, date],
+    splits: Mapping[int, Sequence[SplitStamp]],
+) -> dict[str, Any]:
+    """§"Market equity": the discontinuity census and the split reconciliation, over consecutive formations.
+
+    A pair is two consecutive formations at which the series has a known ME. Its relative move is the ME ratio
+    over the ``adj_close`` ratio between the two decision sessions. Every pair whose later row is admitted is a
+    panel name-month for the discontinuity census; a pair with a split stamp in ``(s(prev), s(cur)]`` and either
+    side admitted is in the split reconciliation.
+    """
+    formations = sorted(decisions)
+    pairs = flagged_pairs = split_pairs = 0
+    flagged: list[dict[str, Any]] = []
+    split_failures: list[dict[str, Any]] = []
+    flagged_by_year: Counter[str] = Counter()
+    for sid, per in points.items():
+        stamp_dates = [s.day for s in splits.get(sid, ())]
+        for prev, cur in itertools.pairwise(formations):
+            before, after = per.get(prev.isoformat()), per.get(cur.isoformat())
+            if before is None or after is None or month_end(add_months(prev, 1)) != cur:
+                continue  # a --formations subset can skip months; only calendar-consecutive pairs are monthly
+            relative = me_discontinuity(after[0] / before[0], after[1] / before[1])
+            split = bisect_right(stamp_dates, decisions[cur]) > bisect_right(stamp_dates, decisions[prev])
+            entry = {"M": cur.isoformat(), "series_id": sid, "symbol": after[3], "relative": relative}
+            if after[2]:
+                pairs += 1
+                if relative is not None:
+                    flagged_pairs += 1
+                    flagged_by_year[cur.isoformat()[:4]] += 1
+                    flagged.append(entry)
+            if split and (before[2] or after[2]):
+                split_pairs += 1
+                if relative is not None:
+                    split_failures.append(entry)
+    return {
+        "discontinuity": {
+            "admitted_pairs": pairs,
+            "flagged": flagged_pairs,
+            "flagged_by_year": dict(sorted(flagged_by_year.items())),
+            "flagged_name_months": sorted(flagged, key=lambda e: (e["M"], e["series_id"])),
+        },
+        "split_reconciliation": {
+            "pairs_with_a_stamp": split_pairs,
+            "failures": sorted(split_failures, key=lambda e: (e["M"], e["series_id"])),
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -392,10 +632,17 @@ class Inputs:
     symbols: Mapping[int, str]
     bars: Mapping[tuple[int, date], Decimal]
     splits: Mapping[int, Sequence[SplitStamp]]
+    #: series -> formation -> its price quantities, for every formation the series is priced at.
+    prices: Mapping[int, Mapping[date, FormationPrices]]
+    #: formation -> series -> liquidity tercile, among the loaded names classified at that formation.
+    terciles: Mapping[date, Mapping[int, int]]
+    flags_by_year: Counter[int]
 
 
 def load_inputs(conn: psycopg.Connection[Any], *, symbols: frozenset[str] | None, formations: Sequence[date]) -> Inputs:
-    sessions = spy_sessions(conn)
+    first_formation = min(formations)
+    first_day = add_months(date(first_formation.year, first_formation.month, 1), -DAILY_LOOKBACK_MONTHS)
+    sessions = [s for s in spy_sessions(conn) if s >= first_day]
     decisions = {m: decision_session(m, sessions) for m in formations}
     selection = load_universe_selection(
         conn, universe="survivorship_free", validated_ids=frozenset(load_validated_universe(conn))
@@ -406,7 +653,19 @@ def load_inputs(conn: psycopg.Connection[Any], *, symbols: frozenset[str] | None
         admitted = [a for a in admitted if symbol_of.get(a.series_id) in symbols]
     ids = [a.series_id for a in admitted]
     bars = decision_bars(conn, ids, sorted(set(decisions.values())))
-    return Inputs(decisions, admitted, symbol_of, bars, split_stamps(conn, ids))
+    rf = load_rf(conn, reference_manifest(*REFERENCE), first_day)
+    grid = SessionGrid.build(sessions, rf, decisions)
+    prices, flags = load_prices(conn, admitted, grid, holding_last_sessions(formations, sessions))
+    # The two reads share their admission predicates: a decision bar the stream does not price is a drift.
+    priced = {(sid, decisions[m]) for sid, per in prices.items() for m in per}
+    if priced != set(bars):
+        raise PanelError(f"daily stream and decision bars disagree on {len(priced ^ set(bars))} (series, s(M)) pairs")
+    name_key = {a.series_id: a.name_key for a in admitted}
+    terciles = {
+        m: liquidity_terciles({sid: per[m].dollar_volume for sid, per in prices.items() if m in per}, name_key)
+        for m in formations
+    }
+    return Inputs(decisions, admitted, symbol_of, bars, split_stamps(conn, ids), prices, terciles, flags)
 
 
 def walk(inputs: Inputs) -> Iterator[dict[str, Any]]:
@@ -437,6 +696,8 @@ def walk(inputs: Inputs) -> Iterator[dict[str, Any]]:
             if close is None:
                 yield {**row, "exclusion": Step.NOT_PRICED}
                 continue
+            tercile = inputs.terciles[formation].get(series.series_id)
+            row["prices"] = _prices_json(inputs.prices[series.series_id][formation], tercile)
             link = linkage.link_as_of(series.series_id, session)
             row = {**row, "link_reason": link.reason.value, "link_basis": link.basis, "cik": link.cik}
             if link.reason is not Reason.LINKED:
@@ -479,8 +740,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             tally.add(row)
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     summary = tally.to_json()
+    summary["me_reconciliation"] = me_reconciliation(tally.me_points, inputs.decisions, inputs.splits)
+    summary["daily_screen_flags_by_year"] = dict(sorted(inputs.flags_by_year.items()))
     stem.with_suffix(".census.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({k: summary[k] for k in ("funnel_total_counts", "characteristics_total_counts")}, indent=1))
+    reconciliation = summary["me_reconciliation"]
+    printed = {
+        **{k: summary[k] for k in ("funnel_total_counts", "characteristics_total_counts", "diagnostics_total_counts")},
+        "daily_screen_flags_by_year": summary["daily_screen_flags_by_year"],
+        "daily_monthly_unexplained": len(summary["daily_monthly_unexplained"]),
+        "discontinuity": {k: v for k, v in reconciliation["discontinuity"].items() if k != "flagged_name_months"},
+        "split_reconciliation": {
+            "pairs_with_a_stamp": reconciliation["split_reconciliation"]["pairs_with_a_stamp"],
+            "failures": len(reconciliation["split_reconciliation"]["failures"]),
+        },
+    }
+    print(json.dumps(printed, indent=1))
     return 0
 
 
