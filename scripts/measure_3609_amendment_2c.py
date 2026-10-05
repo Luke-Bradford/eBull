@@ -49,46 +49,32 @@ TAG_PATTERN: Final = re.compile(
     r"|InterestAndDebtExpense|InterestCosts|^OperatingExpenses|^CostsAndExpenses|^OperatingCostsAndExpenses"
     r"|^GrossProfit|^OperatingIncomeLoss"
 )
+#: The pre-2c reads the r0..r3 variants and ``components`` measure from; the panel no longer holds them.
+PRE_2C_COGS: Final = ("CostOfGoodsAndServicesSold", "CostOfRevenue", "CostOfGoodsSold")
+PRE_2C_XINT: Final = ("InterestExpense",)
 COMPONENTS: Final = {
     "sale": fp.SALE,
-    "cogs": fp.COGS,
+    "cogs": PRE_2C_COGS,
     "gp": fp.GP,
     "xsga": fp.XSGA,
-    "xint": fp.XINT,
+    "xint": PRE_2C_XINT,
 }
 
-#: Compustat ``xsga`` includes R&D net of in-process R&D (``rdip``). The excluding-IPR&D tag excludes software R&D,
-#: which has its own concept, so software is added to it; the inclusive tag is the fallback (a proxy: it may hold
-#: expensed acquired IPR&D).
-RD_EXCL_IPR: Final = "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"
-RD_SOFTWARE: Final = "ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost"
-RD_INCL_IPR: Final = "ResearchAndDevelopmentExpense"
-RD_WITNESSES: Final = (RD_EXCL_IPR, RD_INCL_IPR, RD_SOFTWARE)
-GA: Final = ("GeneralAndAdministrativeExpense",)
-SELL: Final = ("SellingAndMarketingExpense", "SellingExpense")
-SELL_WITNESSES: Final = (*SELL, "MarketingExpense", "MarketingAndAdvertisingExpense")
-XINT_TAGS: Final = ("InterestExpense", "InterestAndDebtExpense", "InterestExpenseDebt")
-XINT_WITNESSES: Final = (
-    *XINT_TAGS,
-    "InterestExpenseBorrowings",
-    "InterestExpenseLongTermDebt",
-    "InterestExpenseRelatedParty",
-    "InterestExpenseOther",
-    "InterestExpenseDeposits",
-    "InterestCostsIncurred",
-    "InterestPaidNet",
-    "InterestPaid",
-)
-#: Compustat COGS excludes depreciation, so each excluding-DDA tag is read before its inclusive counterpart.
-COGS_TOTAL: Final = (
-    "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
-    "CostOfGoodsAndServicesSold",
-    "CostOfRevenue",
-)
-COGS_GOODS: Final = ("CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization", "CostOfGoodsSold")
-COGS_SERVICES: Final = ("CostOfServicesExcludingDepreciationDepletionAndAmortization", "CostOfServices")
+#: The adopted rule's tags live in ``factor_panel`` (slice 3d-v part 2); only the rejected XOPR branch's is here.
+RD_EXCL_IPR: Final = fp.RD_EXCL_IPR
+RD_SOFTWARE: Final = fp.RD_SOFTWARE
+RD_INCL_IPR: Final = fp.RD_INCL_IPR
+RD_WITNESSES: Final = fp.RD_WITNESSES
+GA: Final = fp.GA
+SELL: Final = fp.SELL
+SELL_WITNESSES: Final = fp.SELL_WITNESSES
+XINT_TAGS: Final = fp.XINT_TAGS
+XINT_WITNESSES: Final = fp.XINT_WITNESSES
+COGS_TOTAL: Final = fp.COGS_TOTAL
+COGS_GOODS: Final = fp.COGS_GOODS
+COGS_SERVICES: Final = fp.COGS_SERVICES
 COGS_WITNESSES: Final = (*COGS_TOTAL, *COGS_GOODS, *COGS_SERVICES)
-OPEX: Final = ("OperatingExpenses",)
+OPEX: Final = fp.OPEX
 XOPR: Final = ("CostsAndExpenses",)
 #: Exactly the concepts the scratch bundle adds; the canonical bundle already holds the rest.
 EXTRA_CONCEPTS: Final = tuple(
@@ -98,8 +84,7 @@ EXTRA_CONCEPTS: Final = tuple(
         - {c for _, c in pit_fundamentals.CONCEPT_SET}
     )
 )
-#: The summed ``xsga*`` bound (fixed by construction): above ``OperatingExpenses`` by more than this share of it.
-OPEX_TOLERANCE: Final = Decimal("0.005")
+OPEX_TOLERANCE: Final = fp.OPEX_TOLERANCE
 DEFAULT_PANEL: Final = ("AAPL", "GME", "HD", "JPM", "MSFT")
 DEFAULT_PANEL_M: Final = "2019-06-30"
 
@@ -238,7 +223,7 @@ def xsga_term(p: Period, v: Variant) -> fp.Term:
 
 def cogs_term(p: Period, v: Variant) -> fp.Term:
     if not v.cogs:
-        return p.aligned(p.read(fp.COGS))
+        return p.aligned(p.read(PRE_2C_COGS))
     total = p.aligned(p.read(COGS_TOTAL))
     if total.status is not fp.TermStatus.ABSENT:
         return total
@@ -256,7 +241,7 @@ def cogs_term(p: Period, v: Variant) -> fp.Term:
 
 def xint_term(p: Period, v: Variant) -> fp.Term:
     if not v.xint:
-        return p.aligned(p.read(fp.XINT))
+        return p.aligned(p.read(PRE_2C_XINT))
     return p.companion(lambda: p.read(XINT_TAGS), "xint", XINT_WITNESSES)
 
 
