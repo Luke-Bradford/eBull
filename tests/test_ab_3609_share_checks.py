@@ -97,6 +97,8 @@ def test_a_lifted_reason_may_give_way_to_a_later_check() -> None:
     verdict = "reason_changed:shares_scale_conflict->shares_turnover_implausible"
     assert classify(before, after) == verdict
     assert csv_row(verdict, after)["cause"].startswith("shares_scale_conflict no longer applies")
-    assert classify(before, {**after, "exclusion": "shares_scale_conflict"}) == "other:reason_changed_admitted_differently"
+    assert (
+        classify(before, {**after, "exclusion": "shares_scale_conflict"}) == "other:reason_changed_admitted_differently"
+    )
     moved = {**after, "me": {**after["me"], "shares": "7"}}
     assert classify(before, moved) == "other:reason_changed_me_provenance_changed"
