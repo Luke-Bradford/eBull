@@ -238,6 +238,105 @@ listed and unlinked or unlisted, the dei total can overstate the security's ME. 
 securities only. The exposure is **not measurable** with our data (companyfacts drops dimensional facts); it is an
 alignment-matrix row.
 
+**Amendment 2 (2026-10-05): share-count checks.** The 2026-10-05 proof artefact admitted share counts that are
+filer errors, and ME then took them at face value:
+- **Mis-scaled cover counts:** 89 name-months had ME above $3T, from 20 names, with cover counts tagged ×1,000 to
+  ×10⁹. EEFT's count was 5.3×10¹⁶ shares; GRMN, WTW, AJG, YUM and AA are others.
+- **Subsidiary and shell counts:** counts of 100 or 1,000 shares (DD, VTRS, WBA, FTI, DXC, ONEW).
+- **Splits counted twice:** cover counts dated before a split but reported after it. NFLX's 2015-06-30 count is
+  already the post-7:1 figure.
+
+The census lists 34 split reconciliations that failed.
+
+Under value weighting, one such name can carry most of a leg. These are examples, not an adjudication; slice 3d's
+PR records the full adjudication (below).
+
+**Checks.** They are evaluated in order, and the first failure is the row's ME-missing reason. Every check's own
+outcome (`pass`, `fail` or `untested`) is also stored on the row as `me.checks`, so overlaps are counted. None of
+the checks repairs a count, except the recovery in check 2.
+
+1. **The applied stamp product is ambiguous or beyond tolerance → `shares_basis_ambiguous`.** Either condition
+   fails the check:
+   - **A split stamp in (context date, acceptance NY date] of a cover count.** Filers tag the cover count with a
+     date before the split and report the post-split figure anyway (NFLX 2015-07, RAD 2019-04, SHW 2021-04). The
+     context date then cannot say whether the split is already in the count.
+   - **Any count whose applied split product lies outside [1/100, 100].** Intrader stamps a bankruptcy cancellation
+     and re-issue as a split (BAS 2016-12, factor 0.0018), and a pre-event count multiplied through it is not the new
+     equity.
+
+   The balance-sheet fallback keeps its acceptance-date basis. That basis is an approximation of SAB Topic 4C's
+   "financial statements issued" date by the SEC acceptance date, and this amendment labels it as one.
+2. **Cover and balance-sheet counts differ more than 100× → `shares_scale_conflict`, unless recovered.** This is an
+   adaptation of XBRL US **DQC_0095** ("Scale – Common Stock Outstanding", v30.0.4; effective 2020-09-01). That rule
+   errors when `dei:EntityCommonStockSharesOutstanding` and `us-gaap:CommonStockSharesOutstanding` in one filing
+   differ by more than 100 times.
+   - **What is compared:**
+     - for every accession the cover read returned (`FactUse.accns`), that accession's `CommonStockSharesOutstanding`
+       at its own period anchor, read through the value state machine;
+     - the anchor count multiplied by the stamps in (anchor, cover context date], since a split between the two
+       dates is a real difference;
+     - only positive `VALUE` reads. Anything else leaves the check `untested`.
+   - **What differs from the rule as published:**
+     - companyfacts drops dimensional facts, so only undimensioned facts are compared;
+     - the published rule states no date condition, and the split adjustment is ours.
+   - **Recovery.** DQC_0095 does not say which side is wrong, and the data errs in both directions: AMTX's cover
+     count is right and its balance-sheet count is in thousands, while GRMN is the reverse. If check 4 holds a
+     reference (below), the side within its 100× tolerance is used, unless both or neither are within it. A
+     recovered row is flagged `shares_scope=dqc_recovered:<side>`; it is not verified, so it never becomes a
+     reference. If there is no reference, ME is missing.
+3. **Trailing dollar volume above 10 × ME → `shares_turnover_implausible`.**
+   - **The metric:** the census liquidity measure (mean `close × volume` over admitted bars in the 126 sessions
+     ending at s(M), at least 63 bars) divided by ME at s(M). It is a ratio of dollar volume to current ME, not a
+     literal share turnover.
+   - **Sensitivities:** a price collapse inside the window raises it, and screened bars stay in the numerator. The
+     census counts how many rejections had a screened bar in the window.
+   - **The bound is calibrated** on the proof artefact's admitted rows that pass checks 1–2, and frozen here.
+     Calibration and the effect shown are the same data, so slice 3d reproduces the effect but does not validate it
+     independently. The calibration:
+     - Every row between 10 and 100 was inspected. ONEW is a 1,000-share balance-sheet count. ZNGA's balance-sheet
+       count is in thousands. DCTH's count is dated before a reverse split, and the split's basis is unclear.
+     - Above 100 there are 26 names, including DD, VTRS, WBA, FTI and DXC at 100 shares.
+     - Between 1 and 10 there are real high-turnover names (NAKD, RIOT, MARA), so the bound sits at 10.
+   - Names without the liquidity measure are `untested`.
+4. **Count inconsistent with a verified reference → `shares_discontinuity`.**
+   - **What is compared:** `shares_s(M)` against `shares_s(M′) × Π stamps in (s(M′), s(M)]`. A ratio above 100 or
+     below 1/100 fails, which applies DQC_0095's tolerance by analogy across time. It is a heuristic, not an
+     inherited validation.
+   - **The reference M′.** It is the series' latest earlier formation whose ME was admitted and **verified**, which
+     means checks 2 and 3 were both tested and passed. It must also be within 15 months of M (the share-age bound) and
+     have the same linked CIK.
+     - A count admitted while untested is used but never becomes a reference. This stops an unverified seed from
+       rejecting later counts.
+     - A linkage change resets identity: MRK was linked to another CIK from 2016-05 to 2018-04.
+   - **Order and full grid.** The chain runs in formation order over every formation of the run. A publish and a
+     replay always run the full grid. A `--formations` subset run stamps `chain_complete=false` in its census, and its
+     rows are diagnostics only.
+   - **Known gap.** A filer that mis-scales both counts identically, has dollar volume within the bound and has no
+     verified reference within 15 months passes all four checks. PTP filed both counts ×1,000 from 2013-07 to
+     2014-10, so its 2014-09 .. 2015-01 stage-A months are a known example. The total of such cases is not
+     measurable.
+
+**Discriminators tested and rejected** on the proof artefact:
+- **A chain over raw filings, without verified references.** It rejected real counts that followed a 100-share shell,
+  and it re-accepted a mis-scaled level after its 15-month reset. #2232 recorded the same failure for a history-only
+  test.
+- **A cross-sectional floor on dollar volume ÷ ME.** Large-cap ×1,000 errors land near 10⁻⁵ a day (WTW, PTP),
+  alongside real illiquid names and SPAC units.
+
+**Census and reconciliation.**
+- A row whose ME a check removed keeps its unchecked value as `me.raw`, flagged as contaminated: it may be wrong by
+  orders of magnitude.
+- The split reconciliation and the discontinuity census are printed twice, on raw and on final ME. For every
+  originally failing pair, they print its final status: reconciled, still failing, or unavailable, with the check
+  that removed an endpoint.
+- These are diagnostics, not invariants. A failure on final ME is expected for corporate events the `adj_close`
+  ratio does not track, such as a spin-off (WIN 2015-04), a merger issuance after a stale count (JCI/Tyco 2016-09)
+  and a re-issue (BCEI 2017-05). It is listed and classified in slice 3d's PR, and nothing is excluded on it.
+- Per reason, the census prints:
+  - row and name counts;
+  - the share of the formation's total final ME held by the rows the reason removed. Rows removed contribute zero.
+    The share computed on raw ME is printed too, and labelled contaminated.
+
 ## Accounting
 
 **Period anchors.** A 10-K/10-Q-family accession's period end is the latest instant date among its `Assets` facts.
@@ -380,7 +479,13 @@ entry). It is applied here by analogy, as our choice.
 **Daily screen.**
 - A daily return outside [−0.9, +3.0], or an `adj_close/close` ratio that moves more than 50% between adjacent bars
   with no `split_factor` or `dividend` stamp, flags both endpoint bars.
-- A window containing a flagged bar leaves `rvol_21d` missing, counted.
+  - "Moves more than 50%" means `|ln(ratio_q / ratio_p)| > ln 1.5` between consecutive admitted bars. Measured in
+    the log, the test is symmetric: an unadjusted 1:2 reverse split (the ratio halves) is caught like a 2:1 split.
+  - Any stamp dated in (p, q] excuses the move, whatever its size. The exemption is broad, so slice 3d's census
+    counts the excused moves whose stamp does not explain the ratio change within the same tolerance (Amendment 2).
+- A window containing a flagged pair's **later** bar leaves `rvol_21d` missing, counted. A pair whose later bar falls
+  after s(M) is not observable at s(M): it is flagged in the census but does not screen the formation. Amendment 2
+  records this reading, which slice 3c implemented.
 - Flags are printed per year. Nothing is deleted.
 
 **Daily–monthly reconciliation.** For every panel name-month, compounded admitted daily returns are compared with the
@@ -472,6 +577,7 @@ independent accounting data. Every bar must hold under **both** arms:
 | XBRL as filed vs Compustat; dropped branches (mapping table); the `ope*` and TXDITC proxies; COGS goods-only flag | branch-use counts per characteristic |
 | Acceptance required on top of the 4-month lag; 18-month maximum age | count of name-months delayed or aged out |
 | Issuer-level shares for a security; unresolved class scope; 15-month share age; balance-sheet fallback | fallback count; discontinuity census; scope not measurable |
+| Amendment 2 share checks (ME missing or DQC-recovered); identical mis-scaling of both counts passes undetected | per reason: row and name counts, final-ME share, raw-ME share labelled contaminated; recovered count; the undetected residual is not measurable |
 | Quarterly items reconstructed (YTD differences, Q4 residuals) | branch counts |
 | `ret_12_1` needs 11 of 11; `rvol_21d` minimum by analogy; daily screen | missing counts by reason |
 | Tercile tie and quantile convention is ours | — |
@@ -584,6 +690,27 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
      - FY end 2017-01-31 is first lag-eligible at M = 2017-05-31;
    - split fixtures, quarterly precedence and tercile ties;
    - ME, `gp_at` and `be_me` checked by hand for AAPL, GME, MSFT, JPM and HD at M = 2019-06-30.
+   - **3d (Amendment 2): the share checks.**
+     - **Pure tests:**
+       - each check's `pass`, `fail` and `untested` outcomes;
+       - NFLX 2015-07 and a stamp factor outside [1/100, 100];
+       - GRMN and AMTX DQC recovery, both with and without a reference;
+       - a chain that rejects a ×1,000 count and accepts the next clean one;
+       - an untested count that never becomes a reference;
+       - a reset on a CIK change;
+       - prefix invariance: appending later formations leaves earlier rows unchanged.
+     - **Full-population A/B against `prev3c-all`:**
+       - The inputs are the same frozen inputs. Every row whose ME is unchanged is identical. The census aggregates are
+         the only exception.
+       - Every row whose ME changed is one of two kinds:
+         - ME is now missing with an Amendment 2 reason; its admission and ME-denominated characteristics follow;
+         - ME is DQC-recovered; its ME-denominated characteristics are recomputed and nothing else changes.
+       - Any other difference refuses.
+     - **The PR also records:**
+       - the adjudication of every rejected and recovered name, with a cause per name;
+       - each of the 34 original split-reconciliation failures with its final status;
+       - the census counts per reason;
+       - the `factor_panel_prices` module docstring, updated to cite the adopted readings.
 4. **Fidelity report,** `scripts/report_3609_fidelity.py` (with `--census-form25`):
    - the `DeclaredTrial` row;
    - the declared run;
@@ -689,3 +816,27 @@ the first push.
 - **56:** Form 25 table population and denominators.
 
 None rebutted.
+
+**Amendment 2, checkpoint 1 (39 findings).**
+- **Applied in this amendment (findings 15–39):**
+  - 15: the acceptance-date basis is labelled an approximation of SAB 4C issuance;
+  - 16: DQC_0095 is pinned to v30.0.4, with the adaptations listed;
+  - 17: the comparison uses the accession(s) the cover read returned;
+  - 18: anchor counts are split-adjusted to the cover date;
+  - 19: DQC recovery against a verified reference;
+  - 20, 22: the metric is renamed, and its bound labelled calibrated and frozen;
+  - 21: the whole 10–100 band is adjudicated;
+  - 23, 25, 26: only verified counts become references;
+  - 24: a subset run is stamped `chain_complete=false`;
+  - 27: a CIK change resets the chain, and stamps beyond [1/100, 100] fail check 1;
+  - 28: inspected examples are no longer presented as complete, and the full adjudication moves to 3d's PR;
+  - 29: the known gap is restated with its conditions;
+  - 30–32: raw and final reconciliation, per-pair status, and the exposure denominators;
+  - 33–34: the A/B criteria, check order and per-check outcomes;
+  - 36: prefix-invariance test, and the window endpoint stated;
+  - 37–38: screened-bar and stamp-excuse sensitivities counted;
+  - 39: the docstring update is in 3d.
+- **Not applicable:** 35 (the 3f criterion) left with the IB and OANCF branches.
+- **Deferred to Amendment 2b on #3609:** 1–14 (the IB = NI − XIDO and OANCF continuing + discontinued branches,
+  their concept-set extension and the tag measurement). The period-level measurement and the zero-imputation rules
+  they need are not built yet.
