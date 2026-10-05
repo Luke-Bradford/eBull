@@ -132,6 +132,13 @@ VARIANTS: Final = {
 }
 
 
+#: Period evaluations (not name-months), per variant: imputed zeros, veto refusals and the bound's outcomes. A
+#: refusal inside a period whose every ``ebitda*`` branch is absent leaves no label on the characteristic, so it is
+#: counted here.
+EVALUATIONS: Counter[str] = Counter()
+_CURRENT: list[str] = [""]
+
+
 def extend_concept_set() -> None:
     """Patch the module globals the builder and the loader read at call time (scratch bundles only)."""
     extended = tuple(sorted(set(pit_fundamentals.CONCEPT_SET) | set(EXTRA_CONCEPTS)))
@@ -161,7 +168,11 @@ class Period:
         return term
 
     def companion(self, read: Callable[[], fp.Term], name: str, witnesses: tuple[str, ...]) -> fp.Term:
-        return fp.companion(self.view, read, self.end, self.kind, self.start, name=name, witnesses=witnesses)
+        term = fp.companion(self.view, read, self.end, self.kind, self.start, name=name, witnesses=witnesses)
+        for b in term.branches:
+            if b.startswith((fp.VETO, f"zero_{name}:")):
+                EVALUATIONS[f"{_CURRENT[0]}: {b.split(':')[0]}"] += 1
+        return term
 
 
 def _labelled(term: fp.Term, *labels: str) -> fp.Term:
@@ -190,12 +201,16 @@ def bounded(p: Period, total: fp.Term, *, refuse: fp.Term) -> fp.Term:
         return total
     opex = p.aligned(p.read(OPEX))
     if opex.status in fp._BLOCKING:
+        EVALUATIONS[f"{_CURRENT[0]}: opex bound blocked"] += 1
         return fp.Term(opex.status, facts=opex.facts, branches=("opex_bound_blocked",))
     if opex.status is not fp.TermStatus.VALUE:
+        EVALUATIONS[f"{_CURRENT[0]}: opex bound unchecked"] += 1
         return _labelled(total, "opex_unchecked")
     assert total.value is not None and opex.value is not None
     if total.value > opex.value + abs(opex.value) * OPEX_TOLERANCE:
+        EVALUATIONS[f"{_CURRENT[0]}: opex bound refused ({refuse.status.value})"] += 1
         return refuse
+    EVALUATIONS[f"{_CURRENT[0]}: opex bound passed"] += 1
     return _labelled(total, "opex_checked")
 
 
@@ -301,6 +316,7 @@ _original_compute_ratio = fp.compute_ratio
 
 
 def _compute_ratio(name: str, view: fp.CikView, end: date, kind: fp.Kind) -> fp.Ratio:
+    _CURRENT[0] = name
     if name.startswith("ope:"):
         return fp.Ratio(per_period(ope_unit, VARIANTS[name[4:]])(view, end, kind), fp.be(view, end))
     if name.startswith("gp:"):
@@ -517,6 +533,7 @@ def measure(argv: list[str]) -> int:
     bundle = pit_fundamentals.load_pit_fundamentals(args.bundle, expected_manifest_sha256=args.bundle_sha256)
     fp.compute_ratio = _compute_ratio  # type: ignore[assignment]
     DELTAS.clear()
+    EVALUATIONS.clear()
     by_cik = _admitted(args.rows)
     args.out.mkdir(parents=True, exist_ok=False)
     summary: dict[str, Counter[str]] = defaultdict(Counter)
@@ -549,6 +566,7 @@ def measure(argv: list[str]) -> int:
                 out.write(line)
                 if row["M"] == DEFAULT_PANEL_M and row["symbol"] in DEFAULT_PANEL:
                     panel.append(record)
+            _CURRENT[0] = "decompositions"
             decompositions(
                 fp.CikView(bundle, cik10, date.fromisoformat(rows[-1]["s_M"]), prefixes=cache),
                 summary["decompositions (annual anchors, descriptive)"],
@@ -563,6 +581,7 @@ def measure(argv: list[str]) -> int:
         "admitted_rows": sum(len(v) for v in by_cik.values()),
         "replay_mismatch_vs_stored": dict(replay_mismatch),
         "counts": {k: dict(sorted(v.items())) for k, v in summary.items()},
+        "period_evaluations": dict(sorted(EVALUATIONS.items())),
         "same_period_change_quantiles": {k: _quantiles(v) for k, v in sorted(DELTAS.items())},
         "default_panel": sorted(panel, key=lambda r: r["symbol"]),
     }

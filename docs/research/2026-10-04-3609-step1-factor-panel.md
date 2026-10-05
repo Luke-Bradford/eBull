@@ -806,8 +806,8 @@ right: MSFT's gap is XSGA (it tags R&D, sales and marketing, and G&A separately)
     debt"; `CostsAndExpenses`: "Total costs of sales and operating expenses for the period".
 - EBITDA, OIBDP and XOPR have no US-GAAP tag of matching scope (unchanged from the mapping table).
 
-**Rule.** Every term is read per period: for the annual period, or for each quarter before the TTM chain, as
-Amendment 2b reads `ni*`. Within a period every part must cover the interval of the chosen `ebitda*` branch's base
+**Rule.** Every term of `ope*` and `gp*` is read per period: for the annual period, or for each quarter before the TTM
+chain, as Amendment 2b reads `ni*`. So `gp*` = GP, else `sale*` − COGS*, is chosen per quarter too. Within a period every part must cover the interval of the chosen `ebitda*` branch's base
 (`sale*`, or GP): a value over another interval is `absent`, as `factor_panel.companion` already treats companions.
 `combine`'s blocking precedence holds for every part, and only `absent` falls through.
 - **`ope*`** = `ebitda*` − XINT*.
@@ -866,22 +866,58 @@ Amendment 2b reads `ni*`. Within a period every part must cover the interval of 
     (depreciation, impairment, restructuring); JKP's fallback COGS + XSGA does not, and the tag carries no scope
     detail to separate them.
 
-**Measurement** (`scripts/measure_3609_amendment_2c.py measure`; summary `docs/research/3609-amendment-2c-m3.json`).
+**Measurement** (`scripts/measure_3609_amendment_2c.py measure`; summaries `docs/research/3609-amendment-2c-m3.json`, every
+variant, and `-m4.json`, the adopted variant with period-evaluation counts; m3 ran before the counters were
+added, which change no reading: m4's adopted and `gp_at` rows equal m3's, 0 differences). m4's decompressed
+output rows sha256 is `9d7c05ec…0cba`.
 It replays `factor_panel.characteristic` on every admitted name-month of the canonical rows against a scratch #3360
 bundle built from the pinned bundle's own `inputs/` with exactly the 24 concepts below added (manifest sha256
 `f178b1e4…db53`; never published). The replayed current `ope_be` and `gp_at` equal the stored rows on value, missing
-reason, period end and kind for all 243,445 (M3_MISMATCH mismatches). Rows r0–r5 each add one change to the one
+reason, period end and kind for all 243,445 (0 mismatches). Rows r0–r5 each add one change to the one
 before; the rejected rows each add one branch to the adopted rule.
 
-M3_TABLE
+| `ope_be` | values | `no_period` | same-period value changes | period changes |
+|---|---|---|---|---|
+| stored | 46,086 | 179,808 | — | — |
+| r0 per-period read of today's rule | 46,082 | 180,037 | 0 | 158 |
+| r1 + GP − XSGA | 53,478 | 172,248 | 5 | 1,732 |
+| r2 + RD* | 52,982 | 172,461 | 20,594 | 6,969 |
+| r3 + G&A + selling + RD* | 77,964 | 139,474 | 20,449 | 7,218 |
+| r4 + XINT* | 99,331 | 118,536 | 19,963 | 8,012 |
+| r5 + COGS* | 102,071 | 115,365 | 20,711 | 8,251 |
+| **adopted: r5 + the bound** | **101,328** | **115,873** | **20,458** | **8,247** |
+| rejected: adopted + COGS zero | 124,461 | 89,509 | 20,183 | 8,692 |
+| rejected: adopted + `CostsAndExpenses` as XOPR | 117,011 | 98,606 | 23,328 | 8,209 |
 
-- **Same-period value changes, adopted versus stored** (`ope_be` units): M3_DELTAS.
-- **Adopted branch and refusal counts** (name-months; a TTM can use several): M3_BRANCHES.
-- **`gp_at`:** the per-period read of today's rule, M3_GP0; with COGS*, M3_GP5.
+Changes are against the stored row, counted where both readings have a value.
+
+- **Same-period value changes, adopted versus stored** (`ope_be` units): 20,458, of which 20,344 lower; p10 −0.630,
+  median −0.108, p90 −0.018. Lower is the direction R&D and the XINT* fallbacks move it (more cost deducted). AAPL at
+  2019-06-30 goes from 0.6727 to 0.5477.
+- **Adopted branch counts** (name-months with a value; a TTM can use several): G&A + selling + RD* 34,494; GP −
+  XSGA* 16,183; RD* filed 60,838 (inclusive tag 58,374, excluding-IPR&D 2,763), imputed RD* zero 40,000; R&D excluded
+  by the bound 1,315; bound tested and passed 38,032, unchecked 34,799; selling zero 8,861; XINT* zero 14,821,
+  `InterestAndDebtExpense` 3,428, `InterestExpenseDebt` 5,453; goods + services 22,715, with a services zero 17,478
+  and a goods zero 2,508.
+- **Refusals, as period evaluations** (m4, adopted only; a refused period leaves no label on a missing row):
+  - the bound: passed 1,113,249; refused 65,018 (R&D excluded 21,497, a sum of parts made `absent` 43,521);
+    unchecked 837,875; never blocked;
+  - imputed zero and veto refusal, per companion: RD* 2,279,800 and 896,542; selling 734,681 and 120,689; XINT*
+    348,666 and 1,384,332; services 438,314 and 2,850; goods 63,119 and 2,052; software R&D 65,917 and 5;
+  - the XINT* witnesses refuse about four zeros for each one they admit. Those periods stay missing, which is the
+    conservative direction; no cause is claimed here.
+- **`gp_at`** (stored 140,668 values): today's rule read per period, 140,680, with 2,563 same-period changes
+  (median −0.012) and 382 period changes, from quarters mixing GP and `sale*` − COGS; with COGS*, 145,283, with 4,903
+  same-period changes (median −0.055, 4,220 lower) and 1,514 period changes. Goods + services in 15,253 values, a
+  services zero in 9,247 and a goods zero in 3,141.
 - **Descriptive only:** at each CIK's annual anchors read at its last formation, with every term a value over
-  `OperatingExpenses`' interval, M3_DECOMP. These motivated the bound; they do not validate it, which is the job of
+  `OperatingExpenses`' interval, `OperatingExpenses` was within 0.5% of SG&A + RD* at 1,197 anchors, above
+  it at 1,647 and below at 230; with SG&A absent, within 0.5% of G&A + selling + RD* at 2,880, above at 2,000 and below
+  at 207. These motivated the bound; they do not validate it, which is the job of
   the slice's hand-computed tests and the per-name-month refusal counts above.
-- **Default panel at 2019-06-30** (adopted): M3_PANEL.
+- **Default panel at 2019-06-30** (adopted): AAPL 0.5477 (was 0.6727); GME 0.2714 (unchanged); MSFT 0.3841 (was
+  missing: G&A + sales and marketing + R&D); HD `nonpositive_denominator` and JPM `no_period` (unchanged). `gp_at` is
+  unchanged for all five.
 
 **Concept-set extension: 24 concepts.** `CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization`,
 `CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization`, `CostOfServices`,
