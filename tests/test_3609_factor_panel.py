@@ -486,17 +486,22 @@ def test_a_split_before_filing_is_already_in_the_balance_sheet_count() -> None:
     assert market_equity(agree.view(date(2017, 5, 31)), Decimal(5), split).checks["scale"] is Check.PASS
 
 
-def test_recovery_takes_agreeing_comparators_and_the_latest_filings_acceptance_basis() -> None:
-    # The cover fact filed twice (a 10-Q and its amendment), both with the same balance-sheet count.
+def test_recovery_takes_comparators_that_agree_with_each_other() -> None:
+    # One read returns several accessions only when they share an acceptance timestamp (``value_as_of``): here a
+    # filing and a co-filed amendment, each with the same balance-sheet count against the x1,000 cover count.
     shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
-    _q(shard, "qa", "2017-05-08", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    _q(shard, "qa", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
     me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert me.facts[-1].accns == ("q", "qa")
     assert (me.shares_scope, me.basis, me.shares) == (
         "dqc_recovered:balance_sheet",
-        date(2017, 5, 8),
+        date(2017, 5, 1),
         Decimal(188_000_000),
     )
-    assert me.facts[0].accns == ("qa",)
+    # Comparators that disagree with each other leave nothing to recover.
+    _q(shard, "qb", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
 
 
 def test_a_rejected_comparator_leaves_check_2_untested_and_recovery_records_the_count_used() -> None:
