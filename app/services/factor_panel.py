@@ -245,26 +245,71 @@ class BundleReader(Protocol):
     def public_events(self, cik10: str, taxonomy: str, concept: str, decision: date) -> PrefixRead: ...
 
 
+class PrefixCache:
+    """One CIK's prefix reads taken once at its latest decision, re-filtered per earlier decision.
+
+    Exact, not an approximation: ``public_events`` keeps the rows whose acceptance NY date is strictly before the
+    decision, so the rows public at an earlier decision are the rows public at the latest one passing the same
+    test. It exists because ``public_events`` scans the whole shard on every call, which made 80 formations × 24
+    concepts per CIK cost hours on the full population.
+    """
+
+    def __init__(self, bundle: BundleReader, cik10: str, last_decision: date) -> None:
+        self.bundle = bundle
+        self.cik10 = cik10
+        self.last_decision = last_decision
+        self._reads: dict[tuple[str, str], PrefixRead] = {}
+        self._ny_dates: dict[str, date] = {}
+
+    def at(self, taxonomy: str, concept: str, decision: date) -> PrefixRead:
+        if decision > self.last_decision:
+            raise PanelError(f"{self.cik10}: decision {decision} after the cached {self.last_decision}")
+        full = self._reads.get((taxonomy, concept))
+        if full is None:
+            full = self._reads[(taxonomy, concept)] = self.bundle.public_events(
+                self.cik10, taxonomy, concept, self.last_decision
+            )
+        if full.status is not ReadStatus.OK:
+            return full
+
+        def public(row: Mapping[str, Any]) -> bool:
+            acceptance = row["acceptance"]
+            ny = self._ny_dates.get(acceptance)
+            if ny is None:
+                ny = self._ny_dates[acceptance] = acceptance_ny_date(acceptance)
+            return ny < decision
+
+        return PrefixRead(
+            ReadStatus.OK,
+            tuple(filter(public, full.events)),
+            tuple(filter(public, full.rejections)),
+            tuple(filter(public, full.accessions)),
+        )
+
+
 class CikView:
     """One CIK's bundle at decision session s(M). Every read uses acceptance NY date strictly before s(M)."""
 
-    def __init__(self, bundle: BundleReader, cik10: str, decision: date) -> None:
+    def __init__(
+        self, bundle: BundleReader, cik10: str, decision: date, *, prefixes: PrefixCache | None = None
+    ) -> None:
         self.bundle = bundle
         self.cik10 = cik10
         self.decision = decision
+        self._prefixes = prefixes
         self._prefix: dict[tuple[str, str], PrefixRead] = {}
+        self._keys: dict[tuple[str, str, str], dict[tuple[str | None, str], str]] = {}
         assets = self.prefix("us-gaap", "Assets")
         self.exclusion = prefix_exclusion(assets.status)
-        self.forms: dict[str, str] = {a["accn"]: a["form"] for a in assets.accessions}
-        #: accn -> (acceptance, form): one map, so a lookup can never find one half without the other.
+        #: accn -> (acceptance, form) for every public admitted accession.
         self.filings: dict[str, tuple[str, str]] = {a["accn"]: (a["acceptance"], a["form"]) for a in assets.accessions}
-        self.anchors = period_anchors(assets.events, self.forms)
+        self.anchors = period_anchors(assets.events, {accn: form for accn, (_, form) in self.filings.items()})
         self.unanchored = sorted(
             accn
-            for accn, form in self.forms.items()
+            for accn, (_, form) in self.filings.items()
             if form_family(form) in _ROLE_FAMILIES and accn not in self.anchors
         )
-        annual = {end for accn, end in self.anchors.items() if form_family(self.forms[accn]) == ANNUAL_FAMILY}
+        annual = {end for accn, end in self.anchors.items() if form_family(self.filings[accn][1]) == ANNUAL_FAMILY}
         self.periods: dict[Kind, tuple[date, ...]] = {
             Kind.ANNUAL: tuple(sorted(annual, reverse=True)),
             Kind.QUARTERLY: tuple(sorted(set(self.anchors.values()), reverse=True)),
@@ -273,20 +318,26 @@ class CikView:
     def prefix(self, taxonomy: str, concept: str) -> PrefixRead:
         cached = self._prefix.get((taxonomy, concept))
         if cached is None:
-            cached = self._prefix[(taxonomy, concept)] = self.bundle.public_events(
-                self.cik10, taxonomy, concept, self.decision
-            )
+            if self._prefixes is None:
+                cached = self.bundle.public_events(self.cik10, taxonomy, concept, self.decision)
+            else:
+                cached = self._prefixes.at(taxonomy, concept, self.decision)
+            self._prefix[(taxonomy, concept)] = cached
             prefix_exclusion(cached.status)  # refuses AFTER_CAPTURE / CONCEPT_NOT_IN_POLICY on every concept
         return cached
 
     def keys(self, concept: str, *, taxonomy: str = "us-gaap", unit: str = USD) -> dict[tuple[str | None, str], str]:
         """Every public key of the concept -> its latest public acceptance (events and rejections alike)."""
+        cached = self._keys.get((taxonomy, concept, unit))
+        if cached is not None:
+            return cached
         read = self.prefix(taxonomy, concept)
         latest: dict[tuple[str | None, str], str] = {}
         for row in (*read.events, *read.rejections):
             if row["unit"] == unit:
                 key = (row["start"], row["end"])
                 latest[key] = max(latest.get(key, ""), row["acceptance"])
+        self._keys[(taxonomy, concept, unit)] = latest
         return latest
 
     def read(self, key: FactKey, *, coefficient: int = 1, branch: str = "") -> Term:
@@ -306,8 +357,8 @@ class CikView:
 
     def role_accession(self, accn: str) -> bool:
         """A 10-K/10-Q-family accession with a period anchor (unanchored accessions' facts are not used)."""
-        form = self.forms.get(accn)
-        return form is not None and form_family(form) in _ROLE_FAMILIES and accn in self.anchors
+        filing = self.filings.get(accn)
+        return filing is not None and form_family(filing[1]) in _ROLE_FAMILIES and accn in self.anchors
 
 
 def prefix_exclusion(status: ReadStatus) -> Exclusion | None:
