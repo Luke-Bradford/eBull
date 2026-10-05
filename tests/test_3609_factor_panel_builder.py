@@ -120,6 +120,36 @@ def test_census_is_per_formation_and_weights_exclusions_with_known_me() -> None:
     assert tally.me_points[7]["2017-04-30"] == (100.0, 2.0, True, "series:7")
 
 
+def test_census_counts_fallback_branches_imputed_zeros_and_vetoes() -> None:
+    (row,) = _rows(_filer())
+    assert all(c["vetoes"] == [] for c in row["characteristics"].values())
+    veto = "veto_do:2016-01-01:2016-12-31:DiscontinuedOperationIncomeLossFromDiscontinuedOperationBeforeIncomeTax"
+    ni = {
+        **row["characteristics"]["ni_me"],
+        **{"value": 0.1, "missing": None, "kind": "quarterly", "vetoes": [veto, veto]},
+        "branches": ["ib", "ni_minus_xido", "zero_xi:2016-07-01:2016-09-30", "zero_xi:2016-10-01:2016-12-31"]
+        + ["do_consolidated_proxy", "do_filed"],
+    }
+    ocf = {**row["characteristics"]["ocf_me"], "value": None, "missing": "no_period", "branches": []}
+    ocf["vetoes"] = ["veto_ocf_disc:2016-01-01:2016-12-31:x"]
+    tally = Census()
+    tally.add({**row, "characteristics": {**row["characteristics"], "ni_me": ni, "ocf_me": ocf}})
+    summary = tally.to_json()
+    assert summary["fallback_use"] == {
+        "ni_me": {
+            "DO branch: do_consolidated_proxy": 1,
+            "TTM mixing primary and fallback quarters": 1,
+            "imputed zero: xi": 1,
+            "name-months with a veto: do": 1,
+            "values using the fallback": 1,
+            "veto evaluations: do": 2,
+        },
+        "ocf_me": {"name-months with a veto: ocf_disc": 1, "veto evaluations: ocf_disc": 1},
+    }
+    # A per-interval label is counted once per name-month under its prefix.
+    assert summary["branch_use"]["ni_me"]["zero_xi"] == 1
+
+
 def test_excluded_names_past_the_bundle_gate_carry_their_me() -> None:
     (reit,) = _rows(_filer(), sic=6798)
     assert (reit["exclusion"], reit["me"]["value"]) == (Step.REIT, "100")
