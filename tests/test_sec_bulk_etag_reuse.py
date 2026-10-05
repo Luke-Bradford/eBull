@@ -518,6 +518,8 @@ class TestFilteredCallerOwnsOnlyItsOwnArchives:
             user_agent="test",
             archives=[BulkArchive(name=name, url=url)],
             bandwidth_threshold_mbps=0,
+            # Like every other call here: the default 25 GiB floor reads the host's real free space.
+            min_free_bytes=1,
         )
         refused = [r for r in result.archives if r.error is not None]
         assert len(refused) == 1
