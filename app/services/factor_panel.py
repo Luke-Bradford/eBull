@@ -874,7 +874,9 @@ def _checked(
     straddles = scope == "cover" and any(basis < s.day <= acceptance for s in splits)
     checks["basis"] = Check.FAIL if straddles or not _within_tolerance(common["split_product"]) else Check.PASS
 
-    # 2. DQC_0095: the cover count against each returned accession's own anchor balance-sheet count.
+    # 2. DQC_0095: the cover count against each returned accession's own anchor balance-sheet count. SAB Topic 4C
+    # restates a balance-sheet count for splits effective before its filing, so its basis is that accession's
+    # acceptance, as for the fallback (Amendment 2.2); a split after the cover date and before filing fails check 1.
     checks["scale"] = Check.UNTESTED
     if scope == "cover":
         conflicts: list[FactUse] = []
@@ -882,22 +884,26 @@ def _checked(
             sheet = _accession_balance_sheet(view, accn)
             if sheet is None:
                 continue
-            anchor, count = date.fromisoformat(str(sheet.key.end)), Decimal(str(sheet.value))
+            count, filed_on = Decimal(str(sheet.value)), acceptance_ny_date(str(sheet.acceptance))
             checks["scale"] = Check.PASS if checks["scale"] is Check.UNTESTED else checks["scale"]
-            if not _within_tolerance(filed / (count * split_product(splits, anchor, basis))):
+            if not _within_tolerance(filed / (count * split_product(splits, filed_on, basis))):
                 checks["scale"] = Check.FAIL
                 conflicts.append(sheet)
-        if checks["scale"] is Check.FAIL and reference is not None and len(conflicts) == 1:
-            sheet_shares = Decimal(str(conflicts[0].value)) * split_product(splits, acceptance, decision)
+        # Recovery needs the conflicting comparators to agree on one count; the latest-filed one is used, on its own
+        # acceptance basis.
+        if checks["scale"] is Check.FAIL and reference is not None and len({c.value for c in conflicts}) == 1:
+            sheet = max(conflicts, key=lambda c: str(c.acceptance))
+            filed_on = acceptance_ny_date(str(sheet.acceptance))
+            sheet_shares = Decimal(str(sheet.value)) * split_product(splits, filed_on, decision)
             cover_ok = _consistent(shares, reference, splits, decision)
             sheet_ok = _consistent(sheet_shares, reference, splits, decision)
             if cover_ok != sheet_ok:
                 checks["scale"] = Check.RECOVERED
                 if sheet_ok:
-                    common = {**common, "shares": sheet_shares, "basis": acceptance}
-                    common["split_product"] = split_product(splits, acceptance, decision)
+                    common = {**common, "shares": sheet_shares, "basis": filed_on}
+                    common["split_product"] = split_product(splits, filed_on, decision)
                     # The count used comes first; the rejected cover fact stays for the audit.
-                    common["facts"] = (conflicts[0], *common["facts"])
+                    common["facts"] = (sheet, *common["facts"])
                     shares = sheet_shares
                 common["shares_scope"] = f"dqc_recovered:{'balance_sheet' if sheet_ok else 'cover'}"
 

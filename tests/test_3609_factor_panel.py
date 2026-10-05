@@ -474,6 +474,31 @@ def test_dqc_0095_conflict_recovers_the_side_the_reference_supports() -> None:
     assert (me.shares_scope, me.shares) == ("dqc_recovered:cover", Decimal(20_432_827))
 
 
+def test_a_split_before_filing_is_already_in_the_balance_sheet_count() -> None:
+    # Amendment 2.2, SAB Topic 4C: the 10:1 split on 2017-04-10 precedes the filing, so the 2017-03-31 balance-sheet
+    # count of 4,000 is post-split. The cover count is x1,000. Adjusting the sheet count by the split again would
+    # make the gap exactly 100x and pass it.
+    split = [SplitStamp(date(2017, 4, 10), Decimal(10))]
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 4_000_000), sheet=4_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(5), split)
+    assert (me.missing, me.checks["scale"]) == (MeMissing.SHARES_SCALE_CONFLICT, Check.FAIL)
+    agree = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 4_000), sheet=4_000)
+    assert market_equity(agree.view(date(2017, 5, 31)), Decimal(5), split).checks["scale"] is Check.PASS
+
+
+def test_recovery_takes_agreeing_comparators_and_the_latest_filings_acceptance_basis() -> None:
+    # The cover fact filed twice (a 10-Q and its amendment), both with the same balance-sheet count.
+    shard = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    _q(shard, "qa", "2017-05-08", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
+    me = market_equity(shard.view(date(2017, 5, 31)), Decimal(50), [], reference=_ref(189_000_000))
+    assert (me.shares_scope, me.basis, me.shares) == (
+        "dqc_recovered:balance_sheet",
+        date(2017, 5, 8),
+        Decimal(188_000_000),
+    )
+    assert me.facts[0].accns == ("qa",)
+
+
 def test_a_rejected_comparator_leaves_check_2_untested_and_recovery_records_the_count_used() -> None:
     blocked = _q(Shard(), "q", "2017-05-01", "2017-03-31", cover=("2017-04-25", 188_000_000_000), sheet=188_000_000)
     blocked.reject("CommonStockSharesOutstanding", "q", "2017-03-31", unit="shares")
