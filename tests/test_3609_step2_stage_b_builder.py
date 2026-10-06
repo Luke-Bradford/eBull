@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -75,8 +76,9 @@ def test_only_price_bound_names_a_stage_bound() -> None:
     assert naming == ["price_bound"]
 
 
-def test_a_full_stage_b_build_is_chain_complete() -> None:
-    assert builder.formation_months(STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION) == STAGE_B
+def test_a_full_stage_grid_is_chain_complete_and_a_subset_is_not() -> None:
+    assert builder.chain_complete(STAGE_B) and builder.chain_complete(list(formation_months()))
+    assert not builder.chain_complete(STAGE_B[:-1]) and not builder.chain_complete(formation_months()[1:])
 
 
 def test_read_rf_takes_the_stage_bound(tmp_path: Path) -> None:
@@ -358,6 +360,10 @@ def test_an_uncommitted_access_refuses_before_any_stage_b_read(tmp_path: Path, m
 
     def uncommitted(run_id: str, access_id: int) -> None:
         raise StageBAccessError("no committed evaluate access")
+
+    # Gate before read: with the ledger-named SUB artefact gone, any read of it before the access check would
+    # raise a file error instead of the refusal.
+    shutil.rmtree(sub[0])
 
     with pytest.raises(StageBAccessError, match="no committed"):
         run.publish(uncommitted)

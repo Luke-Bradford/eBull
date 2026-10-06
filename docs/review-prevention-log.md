@@ -12182,5 +12182,8 @@ neighbouring container and match it.**
   (`price_bound`) names the constant. Then a missed call site fails the test, whether or not a fixture exercises
   it. A new gate added to one step of a gated sequence is applied to every step that reads gated data, and the
   first step comes first.
-- Enforced in: `tests/test_3609_step2_stage_b_builder.py::test_only_price_bound_names_a_stage_bound` and
+- Also (review bot on #3685): a gate-before-read test deletes the ledger-named artefact before the refused call, so
+  a read ahead of the gate fails with a file error rather than passing silently.
+- Enforced in: `tests/test_3609_step2_stage_b_builder.py::test_only_price_bound_names_a_stage_bound`,
+  `::test_an_uncommitted_access_refuses_before_any_stage_b_read` and
   `tests/test_publish_3609_step2_sub.py::test_an_undeclared_trial_refuses_before_any_download`.

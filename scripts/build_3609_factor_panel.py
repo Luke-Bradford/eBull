@@ -186,6 +186,11 @@ def price_bound(formations: Sequence[date]) -> date:
     raise PanelError(f"formations {min(formations)} .. {max(formations)} are not within one stage")
 
 
+def chain_complete(formations: Sequence[date]) -> bool:
+    """Check 4's chain runs over the run's formations only: a full stage's grid is complete, a subset is not."""
+    return tuple(formations) in (formation_months(), formation_months(STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION))
+
+
 def stage_b_pins(step2_sub_sha256: str) -> dict[str, str]:
     return {**STAGE_A_PINS, STEP2_SUB_PIN: step2_sub_sha256}
 
@@ -511,7 +516,8 @@ def dump_inputs(
         "bound": bound,
         "quarantine_version": QUARANTINE_RULE_SET_VERSION,
     }
-    # A named cursor needs a transaction; the connection is autocommit.
+    # A named cursor needs a transaction: on a scratch run's autocommit connection this opens one; inside a
+    # publish's repeatable-read snapshot it is a savepoint, so the daily bars read the same snapshot.
     with GzLines(inputs / Frozen.DAILY) as out, conn.transaction(), conn.cursor(name="factor_panel_daily") as cur:
         cur.itersize = 100_000
         cur.execute(_DAILY_SQL, params)
@@ -1134,10 +1140,7 @@ def build(
     )
     summary["me_checks"] = tally.checks_json()
     # Check 4's chain runs over the run's formations only: a subset run's rows are diagnostics (Amendment 2).
-    summary["chain_complete"] = tuple(formations) in (
-        formation_months(),
-        formation_months(STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION),
-    )
+    summary["chain_complete"] = chain_complete(formations)
     summary["daily_screen_flags_by_year"] = dict(sorted(loaded.flags_by_year.items()))
     summary["daily_screen_excused_unexplained_by_year"] = dict(sorted(loaded.excused_unexplained_by_year.items()))
     write_json_once(census_path, summary)
@@ -1270,6 +1273,7 @@ def publish_stage_b(
     root.mkdir(parents=True, exist_ok=True)
     out.mkdir()  # exclusive: an existing artefact directory is refused, never resumed
     try:
+        # The first stage-B file read, after every gate above: a SUB artefact of another run ends this run.
         if reference_manifest(*step2_sub).get("run_id") != run_id:
             raise PanelError(f"the extended SUB artefact {step2_sub[0]} was not published by run {run_id}")
         _publish_artefact(
@@ -1283,6 +1287,8 @@ def publish_stage_b(
             provenance={"run_id": run_id, "access_id": access_id},
         )
         manifest_sha256 = sha256_file(out / MANIFEST_FILE)
+        # If this row cannot be written the build is unbound: the except below deletes it and ends the run, by
+        # design. An artefact the ledger does not name is never used; a retry is a new run with its own access.
         append_ledger(
             ledger,
             {
