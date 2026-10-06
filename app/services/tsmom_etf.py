@@ -116,11 +116,17 @@ def month_range(first: Month, last: Month) -> list[Month]:
 
 @dataclass(frozen=True)
 class FundCoverage:
+    """One fund's panel rows as read. Values and anchors are validated only through E (``validate_through``)."""
+
     symbol: str
     verdict: EtfVerdict
     first_month: Month
     last_month: Month
+    #: Raw values; ``_need`` and ``validate_through`` check them where they are consumed.
     returns: Mapping[Month, float]
+    #: Per month: the Intrader bars the return runs between (``None`` for N-PORT months).
+    anchors: Mapping[Month, tuple[date | None, date | None]] = field(default_factory=dict)
+    duplicates: frozenset[Month] = frozenset()
 
     @property
     def first_eligible(self) -> Month:
@@ -128,9 +134,10 @@ class FundCoverage:
 
 
 def fund_coverage(symbol: str, verdict: EtfVerdict, rows: Sequence[EtfMonthlyReturn]) -> FundCoverage:
-    """One fund's panel months, refusing a wrong verdict, a stale Intrader anchor or an invalid value.
+    """One fund's panel months, refusing no rows or a wrong verdict.
 
-    Missing months are not judged here: whether a gap matters depends on E (``check_contiguous``).
+    Nothing about individual rows is judged here: rows after E are untouched by the spec, and E is not known until
+    every fund is read (``build_census`` → ``validate_through``).
     """
     if not rows:
         raise TsmomRefusal("no_panel_rows", symbol)
@@ -138,18 +145,38 @@ def fund_coverage(symbol: str, verdict: EtfVerdict, rows: Sequence[EtfMonthlyRet
     if verdict not in expected:
         raise TsmomRefusal("verdict", f"{symbol}: {verdict.value}, expected one of {sorted(v.value for v in expected)}")
     returns: dict[Month, float] = {}
+    anchors: dict[Month, tuple[date | None, date | None]] = {}
+    duplicates: set[Month] = set()
     for row in rows:
         month = month_of(row.month)
         if month in returns:
-            raise TsmomRefusal("duplicate_month", f"{symbol} {month}")
-        if row.end_bar is not None:
-            month_end = add_months(month, 1)
-            days_short = (date_of(month_end) - row.end_bar).days - 1
-            if days_short > STALE_DAYS:
-                raise TsmomRefusal("stale_month_end", f"{symbol} {month}: last bar {row.end_bar}")
-        returns[month] = check_wealth_return(symbol, month, row.total_return)
+            duplicates.add(month)
+        returns[month] = row.total_return
+        anchors[month] = (row.start_bar, row.end_bar)
     months = sorted(returns)
-    return FundCoverage(symbol, verdict, months[0], months[-1], returns)
+    return FundCoverage(symbol, verdict, months[0], months[-1], returns, anchors, frozenset(duplicates))
+
+
+def _stale(anchor: date, month: Month) -> bool:
+    """An Intrader month-end bar more than ``STALE_DAYS`` before ``month``'s last calendar day."""
+    return (date_of(add_months(month, 1)) - anchor).days - 1 > STALE_DAYS
+
+
+def validate_through(coverage: FundCoverage, end: Month) -> None:
+    """Spec §Validity for every row up to ``end``: no duplicate, valid value, fresh closing AND opening anchors.
+
+    The opening anchor is the previous month's last bar; for a series' first row it is not any row's closing
+    anchor, so it is checked here against the preceding calendar month.
+    """
+    for month in sorted(m for m in coverage.returns if m <= end):
+        if month in coverage.duplicates:
+            raise TsmomRefusal("duplicate_month", f"{coverage.symbol} {month}")
+        check_wealth_return(coverage.symbol, month, coverage.returns[month])
+        opening, closing = coverage.anchors.get(month, (None, None))
+        if closing is not None and _stale(closing, month):
+            raise TsmomRefusal("stale_month_end", f"{coverage.symbol} {month}: closing bar {closing}")
+        if opening is not None and _stale(opening, add_months(month, -1)):
+            raise TsmomRefusal("stale_month_end", f"{coverage.symbol} {month}: opening bar {opening}")
 
 
 def date_of(month: Month) -> date:
@@ -197,10 +224,12 @@ def build_census(funds: Mapping[str, FundCoverage], comparators: Mapping[str, Fu
         if coverage.first_eligible > add_months(end, -2):
             raise TsmomRefusal("never_eligible", f"{symbol}: first eligible {coverage.first_eligible}, E {end}")
         check_contiguous(coverage, coverage.first_month, end)
+        validate_through(coverage, end)
     for symbol, coverage in comparators.items():
         if coverage.first_month > add_months(start, 1):
             raise TsmomRefusal("comparator_late", f"{symbol}: first month {coverage.first_month}, start {start}")
         check_contiguous(coverage, add_months(start, 1), end)
+        validate_through(coverage, end)
     constituents = {
         name: tuple(s for s in members if funds[s].first_eligible <= start) for name, members in CLASSES.items()
     }
@@ -617,5 +646,6 @@ __all__ = [
     "StampYear",
     "tsmom_signal",
     "tsmom_weights",
+    "validate_through",
     "volatility",
 ]

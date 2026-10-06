@@ -40,11 +40,14 @@ from app.services.tsmom_etf import (
     stamp_audit,
     tsmom_signal,
     tsmom_weights,
+    validate_through,
     volatility,
 )
 
 
-def _row(symbol: str, month: Month, value: float, *, end_bar: date | None = None) -> EtfMonthlyReturn:
+def _row(
+    symbol: str, month: Month, value: float, *, end_bar: date | None = None, start_bar: date | None = None
+) -> EtfMonthlyReturn:
     return EtfMonthlyReturn(
         symbol=symbol,
         month=date(month[0], month[1], 1),
@@ -52,7 +55,7 @@ def _row(symbol: str, month: Month, value: float, *, end_bar: date | None = None
         source="intrader",
         source_key="1",
         reference_symbol=None,
-        start_bar=None,
+        start_bar=start_bar,
         end_bar=end_bar,
         accession_number=None,
         price_return_only=False,
@@ -92,24 +95,48 @@ def test_a_pool_must_carry_the_intrader_only_verdict_and_a_fund_its_nport_verdic
 
 
 def test_a_month_end_bar_more_than_seven_days_before_the_month_end_refuses() -> None:
-    ok = [_row("TLT", (2010, 1), 0.01, end_bar=date(2010, 1, 24))]
-    assert fund_coverage("TLT", EtfVerdict.NPORT, ok).returns == {(2010, 1): 0.01}
-    stale = [_row("TLT", (2010, 1), 0.01, end_bar=date(2010, 1, 23))]
+    ok = fund_coverage("TLT", EtfVerdict.NPORT, [_row("TLT", (2010, 1), 0.01, end_bar=date(2010, 1, 24))])
+    validate_through(ok, (2010, 1))
+    stale = fund_coverage("TLT", EtfVerdict.NPORT, [_row("TLT", (2010, 1), 0.01, end_bar=date(2010, 1, 23))])
     with pytest.raises(TsmomRefusal, match="stale_month_end"):
-        fund_coverage("TLT", EtfVerdict.NPORT, stale)
+        validate_through(stale, (2010, 1))
+
+
+def test_a_stale_opening_anchor_on_the_first_row_refuses() -> None:
+    fresh = [_row("TLT", (2010, 1), 0.01, start_bar=date(2009, 12, 31), end_bar=date(2010, 1, 29))]
+    validate_through(fund_coverage("TLT", EtfVerdict.NPORT, fresh), (2010, 1))
+    stale = [_row("TLT", (2010, 1), 0.01, start_bar=date(2009, 12, 15), end_bar=date(2010, 1, 29))]
+    with pytest.raises(TsmomRefusal, match="opening bar"):
+        validate_through(fund_coverage("TLT", EtfVerdict.NPORT, stale), (2010, 1))
 
 
 @pytest.mark.parametrize("value", [-1.0, -1.5, math.nan, math.inf])
-def test_an_invalid_wealth_return_refuses(value: float) -> None:
+def test_an_invalid_wealth_return_refuses_through_e_only(value: float) -> None:
+    coverage = fund_coverage("TLT", EtfVerdict.NPORT, [_row("TLT", (2010, 1), 0.0), _row("TLT", (2010, 2), value)])
+    validate_through(coverage, (2010, 1))  # the bad row is after E: untouched
     with pytest.raises(TsmomRefusal, match="invalid_value"):
-        fund_coverage("TLT", EtfVerdict.NPORT, [_row("TLT", (2010, 1), value)])
+        validate_through(coverage, (2010, 2))
 
 
-def test_no_rows_and_duplicate_months_refuse() -> None:
+def test_no_rows_refuse_and_a_duplicate_month_refuses_through_e_only() -> None:
     with pytest.raises(TsmomRefusal, match="no_panel_rows"):
         fund_coverage("TLT", EtfVerdict.NPORT, [])
+    rows = [_row("TLT", (2010, 1), 0.0), _row("TLT", (2010, 2), 0.0), _row("TLT", (2010, 2), 0.0)]
+    coverage = fund_coverage("TLT", EtfVerdict.NPORT, rows)
+    validate_through(coverage, (2010, 1))
     with pytest.raises(TsmomRefusal, match="duplicate_month"):
-        fund_coverage("TLT", EtfVerdict.NPORT, [_row("TLT", (2010, 1), 0.0), _row("TLT", (2010, 1), 0.0)])
+        validate_through(coverage, (2010, 2))
+
+
+def test_the_census_ignores_an_invalid_row_after_e() -> None:
+    funds, comparators = _universe()
+    bad = dict(funds["TLT"].returns)
+    bad[(2025, 6)] = math.nan
+    funds["TLT"] = FundCoverage("TLT", EtfVerdict.NPORT, (2000, 1), (2026, 1), bad)
+    assert build_census(funds, comparators).end == COVERAGE_CAP
+    bad[(2024, 6)] = math.nan
+    with pytest.raises(TsmomRefusal, match="invalid_value"):
+        build_census(funds, comparators)
 
 
 def _universe(

@@ -105,7 +105,9 @@ def census(conn: psycopg.Connection[Any]) -> int:
         if symbol not in full_years:
             print(f"{symbol:<7} no Intrader series")
             continue
-        last_used = COVERAGE_CAP if symbol in POOLS else add_months(SWITCH_MONTH, -1)
+        # The last Intrader month the panel uses, never past E (pools stay on Intrader to E; the rest switch).
+        end = result.end if result is not None else COVERAGE_CAP
+        last_used = end if symbol in POOLS else min(end, add_months(SWITCH_MONTH, -1))
         audit = stamp_audit(symbol, stamps.get(symbol, []), full_years[symbol], last_used)
         flagged = ", ".join(str(y) for y in audit.flagged) or "none"
         years = " ".join(f"{y.year}:{y.count}{'' if y.full else 'p'}" for y in audit.years)

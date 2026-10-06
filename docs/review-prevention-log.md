@@ -12106,3 +12106,14 @@ neighbouring container and match it.**
 - Prevention: any connect that passes its own `options` merges the inherited value with
   `app.db.build_stamp.with_inherited_pgoptions`.
 - Enforced in: `tests/test_3614_build_stamp.py::test_connect_job_passes_the_stamp_with_its_timeout`.
+
+### A "this class of fund pays no distributions" premise must be checked per fund (#3620, #3676)
+
+- Failure (caught at #3620 checkpoint 1): `etf_total_return_reader.PRICE_RETURN_POOLS` reads commodity pools as
+  price-return-is-total-return because pools "have no distributions to lose". DBC distributes ($0.14467 in 2022,
+  $1.08926 in 2023, per its 2023 10-K), and Intrader carries no 2022 stamp for it. The same check found Intrader ETF
+  stamp gaps before 2022 too (SHY, IEF and TLT: 9 stamps in 2019 against 12 in every other full year).
+- Prevention: a premise about a whole fund class (no distributions, monthly cadence) is measured per fund on the
+  stored stamps and checked against the fund's own filing before a reader relies on it. A study reading ETF total
+  returns prints the per-fund, per-year stamp screen (`tsmom_etf.stamp_audit`).
+- Enforced in: `scripts/report_3620_tsmom.py --census` (stamp screen); the reader fix is #3676.
