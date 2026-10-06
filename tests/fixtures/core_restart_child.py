@@ -19,6 +19,7 @@ from typing import Any
 
 import psycopg
 
+from app.security import unattended_guard
 from tests.fixtures.core_restart import (
     API_CREDENTIAL_ID,
     CLOCK,
@@ -144,6 +145,8 @@ def _run_close(config: dict[str, Any], broker: FileBackedFakeBroker) -> dict[str
 
 def main(argv: list[str]) -> int:
     config: dict[str, Any] = json.loads(Path(argv[1]).read_text())
+    # tests/conftest.py's #3614 disarm does not reach a child process; a feature branch is unmerged code.
+    unattended_guard.unmerged_code_reason = lambda *_a, **_k: None
     select_core_instrument()
     _install_fault(config["fault"])
 

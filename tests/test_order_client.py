@@ -60,7 +60,7 @@ import pytest
 from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerOrderResult, BrokerOrderSubmissionUncertain, OrderParams
-from app.security.unattended_guard import UnattendedExecutionRefused
+from app.security.unattended_guard import BrokerRefusedBeforeIo, UnattendedExecutionRefused, UnmergedCodeRefused
 from app.services.order_client import (
     _OUTSTANDING_CLAIM_SQL,
     _RECOMMENDATION_STATUS_SQL,
@@ -2093,13 +2093,21 @@ class TestUncertainSubmission:
         assert "cash_ledger" not in joined
         assert conn.commit.called
 
+    @pytest.mark.parametrize(
+        "refusal",
+        [
+            UnattendedExecutionRefused("refusing 'place_order': this checkout is a linked git worktree"),
+            UnmergedCodeRefused("refusing 'place_order': HEAD abc is not on origin/main"),  # #3614
+        ],
+    )
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_a_pre_io_refusal_releases_the_claim(
         self,
         _mock_now: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
+        refusal: BrokerRefusedBeforeIo,
     ) -> None:
-        """The unattended guard raises BEFORE any request is built (#2942).
+        """Both broker guards raise BEFORE any request is built (#2942, #3614).
 
         No order can exist at the broker, so holding the claim would park the
         recommendation permanently — including after the operator does exactly
@@ -2110,9 +2118,7 @@ class TestUncertainSubmission:
             lambda _conn: _RUNTIME_LIVE,
         )
         broker = MagicMock()
-        broker.place_order.side_effect = UnattendedExecutionRefused(
-            "refusing 'place_order': this checkout is a linked git worktree"
-        )
+        broker.place_order.side_effect = refusal
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
@@ -2120,7 +2126,7 @@ class TestUncertainSubmission:
         ]
         conn = _make_conn(cursors)
 
-        with pytest.raises(UnattendedExecutionRefused):
+        with pytest.raises(type(refusal)):
             _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         joined = " ".join(str(call.args[0]) for call in conn.execute.call_args_list)

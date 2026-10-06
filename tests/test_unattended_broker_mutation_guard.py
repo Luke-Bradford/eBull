@@ -27,6 +27,9 @@ not a shell script. The prohibition in `.autonomy/hard_rules.md` stays first.
 from __future__ import annotations
 
 import ast
+import inspect
+import os
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
@@ -38,8 +41,10 @@ from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 from app.security import unattended_guard
 from app.security.unattended_guard import (
     UnattendedExecutionRefused,
+    UnmergedCodeRefused,
     is_linked_worktree,
     refuse_broker_mutation_if_unattended,
+    unmerged_code_reason,
 )
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
@@ -264,3 +269,155 @@ def test_every_broker_method_is_classified() -> None:
 
 def test_mutating_and_informational_are_disjoint() -> None:
     assert not (_MUTATING & _INFORMATIONAL)
+
+
+# --------------------------------------------------------------------------
+# #3614 — entries refuse unmerged or modified code; exits never do
+# --------------------------------------------------------------------------
+
+#: Methods that OPEN exposure. Every other `_MUTATING` method exits, closes or edits SL/TP, and
+#: "Exits and protective actions are never blocked" (`.claude/CLAUDE.md`).
+_ENTRIES: Final[frozenset[str]] = frozenset({"place_demo_core_order", "place_demo_strategy_order", "place_order"})
+_ENTRY_GUARD_CALL: Final[str] = "refuse_entry_if_unmerged_code"
+
+
+def _run_git(root: Path, *args: str) -> None:
+    """Scrubbed of GIT_*: the pre-push hook exports GIT_DIR, and `git -C` does not override it, so an
+    unscrubbed `init`/`config`/`commit` here rewrites the REAL repository (it did, once: core.bare,
+    user.*, and refs/remotes/origin/main — #2658's trap, re-learned in #3614)."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, env=env)
+
+
+def _repo(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    _run_git(root, "init", "-q", "-b", "main")
+    _run_git(root, "config", "user.email", "t@example.com")
+    _run_git(root, "config", "user.name", "t")
+    (root / "a.py").write_text("x = 1\n")
+    _run_git(root, "add", "a.py")
+    _run_git(root, "commit", "-q", "-m", "one")
+    _run_git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return root
+
+
+def _commit(root: Path, text: str) -> None:
+    (root / "a.py").write_text(text)
+    _run_git(root, "commit", "-qam", "next")
+
+
+def test_merged_clean_checkout_is_allowed(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    assert unmerged_code_reason(root) is None
+    (root / "notes.md").write_text("untracked\n")
+    assert unmerged_code_reason(root) is None
+
+
+def test_a_checkout_behind_origin_main_is_allowed(tmp_path: Path) -> None:
+    """A fetch advances origin/main before anyone re-detaches; older merged code is reviewed code."""
+    root = _repo(tmp_path)
+    _commit(root, "x = 2\n")
+    _run_git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _run_git(root, "checkout", "-q", "--detach", "HEAD~1")
+    assert unmerged_code_reason(root) is None
+
+
+def test_an_unmerged_commit_is_refused(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, "x = 2\n")
+    assert (reason := unmerged_code_reason(root)) is not None and "is not on origin/main" in reason
+
+
+def test_a_modified_tracked_file_is_refused(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "a.py").write_text("x = 3\n")
+    assert unmerged_code_reason(root) == "tracked files are modified: ['a.py']"
+
+
+def test_unreadable_git_state_refuses(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _run_git(root, "update-ref", "-d", "refs/remotes/origin/main")
+    assert (reason := unmerged_code_reason(root)) is not None and reason.startswith("git merge-base failed")
+
+
+def test_a_hook_exported_git_dir_does_not_redirect_the_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under a git hook GIT_DIR names the hook's repository; the guard must still read `root`."""
+    root = _repo(tmp_path / "checked")
+    _commit(root, "x = 2\n")
+    other = _repo(tmp_path / "hook")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    assert (reason := unmerged_code_reason(root)) is not None and "is not on origin/main" in reason
+
+
+@pytest.mark.parametrize("failing_call", [0, 1, 2])
+def test_a_hung_or_missing_git_refuses_at_every_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_call: int
+) -> None:
+    """Each of the three git reads (status, merge-base, rev-parse) fails closed, not with a raw exception."""
+    root = _repo(tmp_path)
+    _commit(root, "x = 2\n")  # unmerged, so all three calls are reached
+    real = unattended_guard._git
+    calls = iter(range(3))
+
+    def flaky(where: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        if next(calls) == failing_call:
+            raise subprocess.TimeoutExpired(["git", *args], 5)
+        return real(where, *args)
+
+    monkeypatch.setattr(unattended_guard, "_git", flaky)
+    assert (reason := unmerged_code_reason(root)) is not None and reason.startswith("git state unreadable")
+
+
+def test_no_git_checkout_is_not_checked(tmp_path: Path) -> None:
+    assert unmerged_code_reason(tmp_path) is None
+
+
+@pytest.mark.parametrize("operation", sorted(_ENTRIES))
+def test_entries_refuse_end_to_end_when_armed(monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
+    """Re-arm the conftest disarm and drive the shipped method; the refusal precedes all network I/O."""
+    monkeypatch.setattr(unattended_guard, "unmerged_code_reason", lambda *_a, **_k: "HEAD abc is not on origin/main")
+
+    class _NeverCalled:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"refusal must precede all network I/O, but _http_write.{name} was reached")
+
+    with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+        broker._http_write = _NeverCalled()  # type: ignore[assignment]
+        method = getattr(broker, operation)
+        with pytest.raises(UnmergedCodeRefused, match=operation):
+            method(**dict.fromkeys(inspect.signature(method).parameters))
+
+
+def test_only_entry_methods_call_the_entry_guard() -> None:
+    methods = _etoro_methods()
+    calling = {name for name, node in methods.items() if _ENTRY_GUARD_CALL in _called_names(ast.unparse(node))}
+    assert calling == _ENTRIES
+    assert _ENTRIES < _MUTATING
+
+
+@pytest.mark.parametrize(
+    ("path", "marker"),
+    [
+        ("app/services/strategy_core_executor.py", "mark_core_submission_entered"),
+        ("app/services/strategy_paper_executor.py", "mark_entry_verb_entered"),
+    ],
+)
+def test_executors_refuse_before_their_entered_marker(path: str, marker: str) -> None:
+    """A refusal after the marker reads as "may have reached the broker"; before it, provably unsent."""
+    tree = ast.parse((_REPO_ROOT / path).read_text())
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        calls = [
+            (n.lineno, n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", ""))
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call)
+        ]
+        marks = [line for line, name in calls if name == marker]
+        if not marks or not any(name in _ENTRIES for _, name in calls):
+            continue
+        guards = [line for line, name in calls if name == _ENTRY_GUARD_CALL]
+        assert guards and min(guards) < min(marks), f"{path}:{node.name} must refuse before {marker}"
+        checked += 1
+    assert checked, f"{path}: no entry function found — this scan is measuring nothing"

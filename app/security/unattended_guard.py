@@ -32,6 +32,17 @@ order path to break, in exactly the places this can never be exercised.
 loop can edit, so it constrains a confused run, not a determined one. The
 prohibition in `.autonomy/hard_rules.md` remains the first layer.
 
+#3614 — ENTRIES ALSO REFUSE UNMERGED CODE. The jobs daemon's `dev_reload` restarts its
+child on any `app/**` mtime from whatever the main checkout holds, so a branch checked out
+there runs unreviewed code against the broker. `refuse_entry_if_unmerged_code` refuses an
+order that OPENS exposure unless the checkout's tracked files are unmodified and HEAD is
+contained in `origin/main`. Containment, not equality: a fetch advances `origin/main` before
+anyone re-detaches the checkout, and merged-but-older code is reviewed code. Untracked files
+are ignored because tracked code cannot import one without a tracked edit, which is refused.
+Exits, closes and SL/TP edits never call it: "Exits and protective actions are never blocked"
+(`.claude/CLAUDE.md`). As above, only a positively detected git checkout is checked; one whose
+git state cannot be read refuses.
+
 ⚠⚠ WHAT THIS DELIBERATELY DOES NOT DO: distinguish the autonomy loop from any
 other linked worktree. There were 22 on this box on 2026-08-13, and an attended
 operator running a broker mutation from one of them is refused too. Raised as a
@@ -54,14 +65,24 @@ more specific AND cannot be absent when the loop runs.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 #: Repo root: this file is `<root>/app/security/unattended_guard.py`.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-class UnattendedExecutionRefused(RuntimeError):
+class BrokerRefusedBeforeIo(RuntimeError):
+    """A broker mutation refused before any network I/O: the request provably never left."""
+
+
+class UnattendedExecutionRefused(BrokerRefusedBeforeIo):
     """A broker state mutation was attempted from an unattended worktree."""
+
+
+class UnmergedCodeRefused(BrokerRefusedBeforeIo):
+    """A broker entry was attempted from a checkout running code not merged to origin/main (#3614)."""
 
 
 def is_linked_worktree(repo_root: Path | None = None) -> bool:
@@ -91,4 +112,52 @@ def refuse_broker_mutation_if_unattended(operation: str) -> None:
         "unattended autonomy loop runs, and unattended runs must never execute, close or amend "
         "a position — demo fills are still persisted writes (#2645). Run it from the operator's "
         "main checkout."
+    )
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # A git hook exports GIT_DIR (and friends) to everything it runs, and `-C` does not override it,
+    # so an unscrubbed call reads the hook's repository instead of `root` (#2658, as in git_identity).
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    return subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=5, env=env, check=False
+    )
+
+
+def unmerged_code_reason(repo_root: Path | None = None) -> str | None:
+    """Why the checkout is not running merged code, or None when it is (or is not a git checkout)."""
+    root = _REPO_ROOT if repo_root is None else repo_root
+    if not (root / ".git").exists():
+        return None
+    try:
+        status = _git(root, "status", "--porcelain", "--untracked-files=no")
+        if status.returncode != 0:
+            return f"git status failed: {status.stderr.strip()}"
+        if status.stdout.strip():
+            return f"tracked files are modified: {[line[3:] for line in status.stdout.splitlines()][:3]}"
+        contained = _git(root, "merge-base", "--is-ancestor", "HEAD", "origin/main")
+        if contained.returncode == 1:
+            head = _git(root, "rev-parse", "--short", "HEAD").stdout.strip()
+            return f"HEAD {head} is not on origin/main"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"git state unreadable: {exc}"
+    if contained.returncode != 0:
+        return f"git merge-base failed: {contained.stderr.strip()}"
+    return None
+
+
+def refuse_entry_if_unmerged_code(operation: str) -> None:
+    """Raise if an order that opens exposure would run from unmerged or modified code (#3614).
+
+    Called at the top of every `EtoroBrokerProvider` entry method, after
+    `refuse_broker_mutation_if_unattended`, and by the strategy executors BEFORE they commit
+    their entered-marker, so a refusal there is the provably-pre-broker case rather than an
+    authority that "may have reached the broker". Never from an exit, close or SL/TP edit.
+    """
+    reason = unmerged_code_reason()
+    if reason is None:
+        return
+    raise UnmergedCodeRefused(
+        f"refusing {operation!r}: {reason}. Entries run only from reviewed code — detach the checkout "
+        "at origin/main with a clean tracked tree (#3614). Exits and SL/TP edits are not affected."
     )

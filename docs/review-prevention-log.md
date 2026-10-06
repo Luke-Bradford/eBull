@@ -12061,3 +12061,26 @@ neighbouring container and match it.**
   context lines around the `+` block in `git diff` to confirm each belongs to the step above it.
 - Enforced in: `tests/test_review_verdict.py::test_the_review_job_gates_on_this_script_for_every_reviewed_pr`
   (the truncation step still ends with its echo; the gate step has no `STOP_REASON`).
+
+### A test that builds a temp git repo must scrub `GIT_*`, or under the pre-push hook it rewrites the real repo (#3614)
+
+- Failure: #3614's guard tests built temp repos with `git -C <tmp> init/config/commit/update-ref`. The pre-push hook
+  exports `GIT_DIR`, and `-C` does not override it, so under the hook those calls hit the real repository: shared
+  `.git/config` got `core.bare = true` and `user.name/email = t`, the branch gained a commit, and
+  `refs/remotes/origin/main` moved to it. Locally (no hook) every test passed. Restored by hand from the
+  pre-incident commit authorship and `git fetch`. The trap was already solved in code (#2658:
+  `app/system/git_identity.py`, `app/jobs/dev_reload.py::running_commit`) but recorded nowhere a test author reads.
+- Prevention: every `subprocess` git call in a test or in runtime code passes
+  `env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")}`. To prove it, run the test with
+  `GIT_DIR=<scratch repo>/.git` set and diff the scratch repo's config and refs before and after.
+- Enforced in: `tests/test_unattended_broker_mutation_guard.py::_run_git` and
+  `::test_a_hook_exported_git_dir_does_not_redirect_the_read`.
+
+### In a fail-closed check, every call that can raise sits inside the handler (#3614)
+
+- Failure: `unmerged_code_reason` wrapped its `git status` and `git merge-base` calls in `try/except`, then made the
+  `git rev-parse` call for the refusal message after the `except`. A hung git at that point escaped as a raw
+  `TimeoutExpired` instead of a refusal. The review bot caught it.
+- Prevention: when a check fails closed, put every fallible call inside the handler, including the ones that only
+  format the message. Test each call failing in turn.
+- Enforced in: `tests/test_unattended_broker_mutation_guard.py::test_a_hung_or_missing_git_refuses_at_every_call`.
