@@ -62,3 +62,7 @@ def test_the_review_job_gates_on_this_script_for_every_reviewed_pr() -> None:
     post = steps[names.index("Post review comment")]
     assert gate["if"] == post["if"]
     assert names.index("Fail unless the review approves") > names.index("Post review comment")
+    # Inserted after the truncation step without taking its trailing stop_reason echo (PR #3669 review).
+    truncated = steps[names.index("Fail workflow on truncated review")]
+    assert truncated["run"].rstrip().endswith('echo "stop_reason=$STOP_REASON"')
+    assert "STOP_REASON" not in gate["run"]

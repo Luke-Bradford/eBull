@@ -522,6 +522,7 @@ jobs:
             echo "::error::Claude review hit max_tokens cap — review may be truncated. Raise max_tokens or split the PR."
             exit 1
           fi
+          echo "stop_reason=$STOP_REASON"
 
       # #3613 item 1: the required check fails unless the review approves, so the
       # verdict is enforced server-side and not only by the client-side safe_merge.
@@ -534,4 +535,3 @@ jobs:
             exit 1
           fi
           echo "Review verdict: $VERDICT"
-          echo "stop_reason=$STOP_REASON"
