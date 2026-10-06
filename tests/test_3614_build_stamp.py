@@ -31,6 +31,13 @@ def test_an_escaped_inherited_value_is_kept_verbatim() -> None:
     assert with_build_stamp(inherited, {CODE_COMMIT_SETTING: SHA}) == f"{inherited} -c ebull.code_commit={SHA}"
 
 
+def test_an_unrelated_ebull_setting_is_not_treated_as_stamp() -> None:
+    assert (
+        with_build_stamp("-c ebull.other=1", {CODE_COMMIT_SETTING: SHA})
+        == f"-c ebull.other=1 -c ebull.code_commit={SHA}"
+    )
+
+
 def test_settings_read_from_the_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
     answers = {("rev-parse", "HEAD"): SHA, ("status", "--porcelain", "--untracked-files=no"): ""}
     monkeypatch.setattr(build_stamp, "_git", lambda *args: answers[args])

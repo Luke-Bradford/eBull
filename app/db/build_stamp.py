@@ -76,8 +76,9 @@ def build_stamp_settings() -> dict[str, str]:
     return stamp
 
 
-#: One pair as ``with_build_stamp`` writes it: lowercase name, unescaped hex or boolean value.
-_STAMP_PAIR = re.compile(r"(?<!\S)-c ebull\.\w+=\S+")
+#: One pair as ``with_build_stamp`` writes it: one of the three names, unescaped hex or boolean value.
+_STAMP_NAMES = "|".join(map(re.escape, (CODE_COMMIT_SETTING, CODE_DIRTY_SETTING, UV_LOCK_SHA256_SETTING)))
+_STAMP_PAIR = re.compile(rf"(?<!\S)-c (?:{_STAMP_NAMES})=\S+")
 
 
 def _split_stamp(pgoptions: str) -> tuple[str, list[str]]:
