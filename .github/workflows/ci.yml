@@ -17,7 +17,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # The money-path size cap diffs the PR merge commit against its
-          # first parent, so both trees must be present.
+          # first parent, so both trees must be present. The default is
+          # depth 1, so this only adds the parents. No other step in this
+          # job reads git history: every check_*.sh above and below, and
+          # what each calls, reads only current files (Codex checkpoint 3
+          # on #3673), and this job ran green at depth 2 there.
           fetch-depth: 2
 
       - name: Set up Python
