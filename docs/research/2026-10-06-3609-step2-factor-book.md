@@ -338,7 +338,7 @@ draws.
 
 **Trade categories,** for the book and per draw and arm, each with order notional and charged cost: initial
 purchase (2014-09-30); forced exits; discretionary exits (the control's step-2 sales); count-adjustment sales (the
-control's step-3 sales); entries (every purchase of a name not held, book or control); rebalance adds and trims;
+control's step-3 sales); entries (every purchase of a name not held after 2014-09-30, book or control); rebalance adds and trims;
 final liquidation (2024-08). Imputed terminal realisations are listed separately; they have no order and no cost.
 Order notional and cost each reconcile to their totals across the categories. Turnover follows step 0 (initial
 purchase, final liquidation and terminal realisations excluded) and is printed with that exclusion stated.
@@ -385,9 +385,11 @@ Two annotations go on a `PASS` verdict line only, by frozen tests:
   (2021 from June, 2022, 2023, 2024 to August) from the book, B1 and every control draw alike, annualising the
   remaining months. The failing arm and comparison are printed.
 
-**Comparators must be complete.** B1 needs exactly one finite monthly return for each of the 119 months, and every
-control draw and both references a complete finite path; otherwise `COMPARATOR_INVALID`. A stress-cost or
-year-deletion calculation whose inputs are not finite prints its annotation as `unavailable`, never as absent.
+**Every compared series must be complete and its statistics defined,** at base and stress cost alike: the book,
+B1, every control draw and both references each need exactly one finite monthly return for each of the 119 months,
+and every annualised return used by G2 or an annotation, (Π(1 + r))^(12/n) − 1 over its months, needs every
+1 + r > 0. Any failure refuses the run as `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that
+code too). Given complete series, every median and year-deletion statistic is defined.
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
 1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
@@ -398,7 +400,9 @@ year-deletion calculation whose inputs are not finite prints its annotation as `
 3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
 4. `PASS` or `FAIL`, by the conjunction above, with the annotations on a `PASS`.
 
-The turnover note (§"Diagnostics", turnover above 50%) goes on every verdict line from step 2 on.
+**Turnover.** If any month's one-way turnover exceeds 50% at base cost in either arm (§"Diagnostics"), a `PASS`
+becomes `FAIL` with reason `TURNOVER_BENEFIT_UNSHOWN`: `research-process.md` requires the net expected benefit to
+be shown above that level, and this run has no model that shows it.
 
 **After a pass:** step 3 specifies the forward construction: this book plus the sector cap, #3621's frozen MAX filter,
 an effective-dated listing-age exclusion with a stated missing-history policy, a security-type exclusion whose
@@ -462,11 +466,12 @@ differs from the one recorded. The register version is recorded for audit, not c
 register row (it is called with `require_declaration=False`, so a trial without a frozen #2599 declaration passes),
 so the check is the run's own. Before writing `started`, it recomputes the spec sha256, the construction hash and the
 register-policy hash, and refuses unless each equals the value in the row's `evidence`. The `started` row
-records the three values it checked.
+records the three values it checked. It also refuses unless the running Python's major and minor version equal the
+declared one, which fixes `random.Random` string seeding and `json` serialisation.
 
 **Ledger: one parent run record from the first stage-B step.** Written to `var/research/3609_step2/ledger.jsonl` and
 committed to `docs/research/3609-ledger.jsonl`, in this order:
-1. `started`: run id, spec hash, construction hash, register version, payload hash, command. Written before
+1. `started`: run id (a fresh `uuid4` hex for every attempt, so a retry is a new run), spec hash, construction hash, register version, payload hash, command. Written before
    anything below.
 2. `access_recorded`: one `record_holdout_access` row with `strategy_id="3609-step2-book"`, `strategy_version="v1"`,
    `access_kind="evaluate"`, `result_version` = the run id, `accessed_by` = the operator or loop identity running it,
@@ -477,7 +482,8 @@ committed to `docs/research/3609-ledger.jsonl`, in this order:
 5. `completed` or `failed`, written before any result is printed.
 
 **Abandoned runs.** A run with no terminal row is committed with the rest and classified by the database, not by
-the JSONL: if the hold-out access log holds a row with `result_version` = its run id, it is an **access** (stage-B
+the JSONL: if the hold-out access log holds a row with the declared `strategy_id`, `strategy_version` and
+`result_version` = its run id, it is an **access** (stage-B
 exposure possible), whether or not `access_recorded` reached the JSONL; otherwise it is an **attempt** with no
 exposure. The ledger PR states each abandoned run's class and the query that set it.
 
@@ -500,10 +506,14 @@ start of a holding month, grouped by the status that month ends in.
 window's defined-month count for that metric.
 
 - **Universe:** premise 3's table recomputed on all 119 formations, stage B included, with no retuning, plus the
-  book's weight and traded notional at or below JKP's NYSE-median cutoff. Cutoff-dependent columns print
-  `unavailable` for a formation with no published cutoff, and the cutoff coverage count is printed; a missing cutoff
-  never refuses. Traded notional is classed by the name's ME at s(M); a name with no ME at s(M) (it left the admitted
-  population) goes to a "no current ME" class. The classes reconcile to the book's order notional.
+  book's weight and traded notional at or below JKP's NYSE-median cutoff.
+  - **Cutoffs:** every published stage-B cutoff passes the script's checks (one per month, finite and positive
+    after normalisation); a duplicate or invalid one refuses the run (`CUTOFF_INVALID`). An unpublished month prints
+    `unavailable` in its cutoff-dependent columns, and the coverage count is printed. A month with no admitted name
+    above its cutoff prints its share column as `unavailable`.
+  - **Notional classes,** by precedence: no ME at s(M) (the name left the admitted population); cutoff
+    unavailable; above; at or below. The 2024-08 final liquidation is its own class, not size-classified. The
+    classes reconcile to the book's total order notional.
 - **Signals: one-month horizon, for the three retained families and the composite.** These are
   selection-conditioned: the families were chosen on stage A, and the label says so. The three dropped families
   have no step-2 construction and are not printed.
@@ -529,12 +539,17 @@ window's defined-month count for that metric.
 - **Segments (primary partition: cost band at s(M) × the two size cells).** A name's cell is set at each M, so a
   name that migrates counts in its cell at that M.
   - **Each cell:** the signal block above, on its own names.
-  - **The book, per cost band:** each month, the band's start-of-month weight, its gross contribution Σ (weight ×
-    holding-month return) over its holdings, its cost (charged on its positions' trades, over pre-trade NAV) and net
-    contribution, and its order notional. Per window: mean and standard deviation of the monthly net contribution,
-    and turnover. These are contributions to one book, not stand-alone portfolios. The book lives in one size cell,
-    so the size axis has no book split.
-  - **Minimum effective sample, per (signal, arm, metric, window):** 24 effective months, with n_eff = n × (iid
+  - **Per-band sub-books.** At each formation, sub-book b holds the book's post-trade holdings whose raw close at
+    s(M) puts them in cost band b (the current band, which sets cell membership), at their book weights renormalised
+    to sum to 1. Its month: gross return g_b = Σ weight × holding-month return; cost fraction c_b = the costs charged
+    at this formation on its names' trades, each at the position's entry band, over the sub-book's pre-trade value;
+    net return (1 − c_b)(1 + g_b) − 1, step 0's one-pass compounding. Step 0's book metrics (net and gross return,
+    volatility, maximum drawdown, active return, tracking error, IR, beta and maximum relative drawdown against B1)
+    are printed on each sub-book's monthly series, with its turnover and order notional. Sub-books are not tradable
+    portfolios and do not sum to the book; the label says so. The book lives in one size cell, so the size axis has
+    no book split. The minimum-effective-sample rule below applies to each sub-book's net series too.
+  - **Minimum effective sample, per (series, arm, metric, window)**, where a series is a signal's IC or spread or a
+    sub-book's net return: 24 effective months, with n_eff = n × (iid
     variance of the mean) / (Newey–West variance of the mean), capped at n, using the same Newey–West rule as the t.
     It is an estimate that captures dependence only up to the Newey–West bandwidth, and is labelled so. It is
     `undefined` when the t is undefined (fewer than 12 defined months, any undefined calendar month in the window,
@@ -543,9 +558,11 @@ window's defined-month count for that metric.
     `insufficient`, not omitted.
   - **FF-12 industry:** a marginal partition of the book universe, not crossed with the cells; IC block only.
 - **Other `market-segments.md` axes, stated exceptions:**
-  - **ADR flag:** none needed; the panel admits 10-K/10-Q filers only, which excludes 20-F ADR issuers (step 1).
-  - **Share-class flag:** step 1 admits only issuers with a single linked security (its one-security rule), so no
-    issuer has two share-class lines.
+  - **ADR and share-class flags:** unavailable. The panel holds no effective-dated security-class field. Step 1's
+    10-K/10-Q restriction removes 20-F and 40-F issuers and its one-security rule removes issuers with two linked
+    lines, but neither classifies the admitted security, so no flag is claimed.
+  - **Institutional-ownership terciles:** unavailable. `market-segments.md` makes them forward-only from 2024, and
+    no flag is backfilled from later ownership data.
   - **Liquidity terciles within size:** deferred. Each printed axis counts as searched for any later declaration
     (§"Registration"), and the cost band already carries the trading-cost axis.
   - **Short-interest deciles:** deferred to #3621, which owns that filter; FINRA data start in 2021.
@@ -558,8 +575,8 @@ window's defined-month count for that metric.
   2016). For each such month: its traded notional, its cost, and the book's gross and net return minus the
   control's median in the same arm, labelled realised, from one history. Tested at base cost, per arm; N is the
   number of calendar months exceeding 50% in either arm, with the per-arm counts beside it. **Exception:** no
-  expected-benefit model exists here. If N > 0, the verdict line says "turnover above 50% in N months; net expected
-  benefit not shown", and step 3 must show it for the forward construction.
+  expected-benefit model exists here, so the requirement cannot be met by this run. It is applied fail-closed: N > 0
+  turns a `PASS` into `FAIL` with reason `TURNOVER_BENEFIT_UNSHOWN` (§"Decision rule").
 - **Attribution** (`portfolio-construction-and-risk.md` §Attribution): SPY beta; universe effect (equal-weight
   universe minus B1); the full FF5+momentum loadings; selection (book minus equal-weight universe); FF-12 weights,
   monthly and averaged, against the reconstituted cap-weighted universe, with the 2× and "no reference weight" flags.
@@ -719,3 +736,14 @@ window's defined-month count for that metric.
 - **90–91:** comparator completeness refuses as `COMPARATOR_INVALID`; the refusal payload is enumerated.
 - **92–93:** abandoned runs are classed by the database access log; canonical JSON is specified.
 - **94–95:** the script validates normalised cutoffs, sums and an empty reference set; the table row is moved.
+
+**Round 5 (14 of 21 resolved; 7 open plus 11 new, 96–106; `ckpt1_round5_final.txt`), all applied:**
+- **39:** the unshown turnover benefit is now fail-closed: it turns a `PASS` into `FAIL` (`TURNOVER_BENEFIT_UNSHOWN`).
+- **45–46, 83, 99–100:** per-band sub-books, defined by current band with entry-band costs, are scored by step 0's
+  metrics and the effective-sample rule; contributions are dropped, so no additive reconciliation is claimed.
+- **84:** entries exclude the initial purchase.
+- **89, 96–98:** ADR, share-class and institutional-ownership flags are declared unavailable, with reasons.
+- **90, 104:** every compared series must be complete with defined annualised returns, at base and stress cost.
+- **101–103:** notional classes have a precedence and a liquidation class; stage-B cutoffs are validated.
+- **105–106:** the Python version is enforced; abandoned runs are matched on the full access identity, and run ids
+  are fresh per attempt.
