@@ -359,9 +359,12 @@ def run(*, status_file: Path = _DEFAULT_STATUS_FILE, dry_run: bool = False) -> i
     for n in notices:
         message = n.message + note
         pushed = send_push(title=n.title, message=message, priority=n.priority, tags=(n.tag,))
+        # Both channels on purpose, as ``jobs_dead_man.notify``: the banner is the record on
+        # this machine either way. A pass holds at most the last hour's kill-switch toggles,
+        # three blocks and one refusal notice, each ``osascript`` bounded at 5 s.
         shown = local_notify(n.title, message)
         ok = pushed or (not push_on and shown)
-        print(f"[operator-alert-watch] {n.title}: {message} (push sent: {ok and push_on})", file=sys.stderr, flush=True)
+        print(f"[operator-alert-watch] {n.title}: {message} (push sent: {pushed})", file=sys.stderr, flush=True)
         if ok:
             delivered.append(n)
     save_state(status_file, settle(prior, delivered, now=now))
