@@ -13,6 +13,7 @@ from app.services.factor_book_ledger import (
     require_committed_access,
 )
 from app.services.result_ledger import HoldoutAccess, record_holdout_access
+from tests.fixtures.ebull_test_db import test_database_url
 
 pytestmark = pytest.mark.usefixtures("assume_trial_registered")
 
@@ -60,3 +61,23 @@ def test_an_unknown_access_id_does_not_pass(ebull_test_conn: psycopg.Connection[
     access_id = _record(ebull_test_conn)
     with pytest.raises(StageBAccessError):
         require_committed_access(ebull_test_conn, RUN, access_id + 1)
+
+
+def test_an_uncommitted_access_is_invisible_to_the_gates_connection(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """The publisher checks on its own connection, so the row counts only once the run has committed it."""
+    with psycopg.connect(test_database_url()) as other:
+        with ebull_test_conn.transaction():
+            access_id = record_holdout_access(
+                ebull_test_conn,
+                HoldoutAccess(
+                    strategy_id=STRATEGY_ID,
+                    strategy_version=STRATEGY_VERSION,
+                    access_kind="evaluate",
+                    accessed_by="test",
+                    purpose=access_purpose(RUN),
+                    result_version=RUN,
+                ),
+            )
+            with pytest.raises(StageBAccessError):
+                require_committed_access(other, RUN, access_id)
+        require_committed_access(other, RUN, access_id)

@@ -123,10 +123,15 @@ def publish(
     ledger: Path,
     client: httpx.Client,
     confirm_access: Callable[[str, int], None],
+    committed_ledger: Path = COMMITTED_LEDGER_PATH,
 ) -> str:
-    """Gate, fetch, write the artefact and its ``sub_published`` row; returns the manifest's sha256."""
+    """Gate, fetch, write the artefact and its ``sub_published`` row; returns the manifest's sha256.
+
+    Nothing before the ``try`` reads stage-B data (the gate, the access check, the exclusive ``mkdir``), so a
+    refusal there leaves the run open; any failure inside it ends the run.
+    """
     git_sha = _clean_head()
-    access_id = recorded_access_id(read_ledger(COMMITTED_LEDGER_PATH, ledger), run_id, before=EVENT)
+    access_id = recorded_access_id(read_ledger(committed_ledger, ledger), run_id, before=EVENT)
     confirm_access(run_id, access_id)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.mkdir()  # exclusive: an existing directory is refused, never resumed
@@ -161,17 +166,20 @@ def publish(
     except BaseException as exc:
         shutil.rmtree(out, ignore_errors=True)
         # Stage-B files may already have been read, so the run ends here: a retry needs a fresh run id and its own
-        # access row, never a second look under this one.
-        append_ledger(
-            ledger,
-            {
-                "run_id": run_id,
-                "event": "failed",
-                "at": datetime.now(UTC).isoformat(),
-                "step": EVENT,
-                "error": repr(exc),
-            },
-        )
+        # access row, never a second look under this one. A failure to write that row must not replace the error.
+        try:
+            append_ledger(
+                ledger,
+                {
+                    "run_id": run_id,
+                    "event": "failed",
+                    "at": datetime.now(UTC).isoformat(),
+                    "step": EVENT,
+                    "error": repr(exc),
+                },
+            )
+        except Exception as ledger_error:
+            exc.add_note(f"the 'failed' ledger row was not written ({ledger_error!r}); end run {run_id} by hand")
         raise
 
 

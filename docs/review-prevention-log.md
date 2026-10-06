@@ -12156,3 +12156,16 @@ neighbouring container and match it.**
   the value it would hold does not prove the INSERT names it.
 - Enforced in: `tests/test_3614_kill_switch_drill_db.py::test_drill_evidence_refuses_update_and_delete` and
   `::test_sandbox_passes_and_commits_nothing_to_the_kill_row` (selects `positions_without_target`).
+
+### A "committed rows only" gate needs a second-connection test; an audit write in `except` must not mask the error (#3609)
+
+- Failure (caught by the review bot on #3684): the step 2 SUB publisher's access gate claimed it saw only committed
+  hold-out access rows because it reads on its own connection. The DB test, though, wrote and checked on the same
+  connection, so it could not show that an uncommitted row is invisible. The publisher's `except BaseException`
+  also wrote the run's `failed` ledger row unguarded, so a failing ledger write would have replaced the original error.
+- Prevention: a gate whose safety rests on transaction visibility gets a DB test that writes inside an open
+  transaction on one connection, asserts refusal from a second connection, then commits and asserts it passes.
+  Revert-probe it by checking on the writing connection. Audit or cleanup writes inside an `except` that re-raises
+  are wrapped so their own failure becomes a note (`exc.add_note`) on the original exception, never a replacement.
+- Enforced in: `tests/test_factor_book_ledger_db.py::test_an_uncommitted_access_is_invisible_to_the_gates_connection`
+  and `tests/test_publish_3609_step2_sub.py::test_an_unwritable_failed_row_does_not_mask_the_original_error`.

@@ -98,10 +98,12 @@ class _Sec:
         return httpx.Response(200, content=_sub_zip(quarter))
 
 
+NO_COMMITTED_LEDGER = Path("/nonexistent/3609-ledger.jsonl")
+
+
 @pytest.fixture
 def clean(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(publisher, "_clean_head", lambda: "f" * 40)
-    monkeypatch.setattr(publisher, "COMMITTED_LEDGER_PATH", Path("/nonexistent/3609-ledger.jsonl"))
 
 
 def _ledger(tmp_path: Path, *rows: dict[str, Any]) -> Path:
@@ -118,7 +120,14 @@ def _publish(tmp_path: Path, ledger: Path, sec: _Sec, confirmed: list[tuple[str,
         confirmed.append((run_id, access_id))
 
     with httpx.Client(transport=httpx.MockTransport(sec)) as client:
-        return publisher.publish(tmp_path / "sub", RUN, ledger=ledger, client=client, confirm_access=confirm)
+        return publisher.publish(
+            tmp_path / "sub",
+            RUN,
+            ledger=ledger,
+            client=client,
+            confirm_access=confirm,
+            committed_ledger=NO_COMMITTED_LEDGER,
+        )
 
 
 @pytest.mark.usefixtures("clean")
@@ -175,7 +184,14 @@ def test_a_run_publishes_once(tmp_path: Path) -> None:
     _publish(tmp_path, ledger, _Sec(), [])
     sec = _Sec()
     with httpx.Client(transport=httpx.MockTransport(sec)) as client, pytest.raises(StageBAccessError, match="already"):
-        publisher.publish(tmp_path / "again", RUN, ledger=ledger, client=client, confirm_access=lambda r, a: None)
+        publisher.publish(
+            tmp_path / "again",
+            RUN,
+            ledger=ledger,
+            client=client,
+            confirm_access=lambda r, a: None,
+            committed_ledger=NO_COMMITTED_LEDGER,
+        )
     assert sec.requests == []
 
 
@@ -191,7 +207,14 @@ def test_a_failed_download_removes_the_directory_and_ends_the_run(tmp_path: Path
     # Earlier quarters were read, so the run is over: a retry under the same run id is refused unread.
     sec = _Sec()
     with httpx.Client(transport=httpx.MockTransport(sec)) as client, pytest.raises(StageBAccessError, match="ended"):
-        publisher.publish(tmp_path / "retry", RUN, ledger=ledger, client=client, confirm_access=lambda r, a: None)
+        publisher.publish(
+            tmp_path / "retry",
+            RUN,
+            ledger=ledger,
+            client=client,
+            confirm_access=lambda r, a: None,
+            committed_ledger=NO_COMMITTED_LEDGER,
+        )
     assert sec.requests == []
 
 
@@ -211,3 +234,19 @@ def test_a_dirty_checkout_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(publisher, "is_dirty", lambda: None)
     with pytest.raises(RuntimeError, match="dirty"):
         publisher._clean_head()
+
+
+@pytest.mark.usefixtures("clean")
+def test_an_unwritable_failed_row_does_not_mask_the_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = _ledger(tmp_path, _started(), _recorded())
+
+    def refuse(path: Path, row: dict[str, Any]) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(publisher, "append_ledger", refuse)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        _publish(tmp_path, ledger, _Sec(missing="2021q3"), [])
+    assert any("'failed' ledger row was not written" in note for note in caught.value.__notes__)
+    assert not (tmp_path / "sub").exists()
