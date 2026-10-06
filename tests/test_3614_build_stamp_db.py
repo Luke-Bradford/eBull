@@ -59,3 +59,13 @@ def test_stamped_connection_writes_its_build_identity(
 def test_unstamped_connection_writes_null(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     # The fixture connection carries no stamp: NULL means "not recorded", never a guess.
     assert _insert_decision(ebull_test_conn) == (None, None, None)
+
+
+def test_a_malformed_dirty_setting_never_blocks_the_write(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # sql/475: an audit stamp must not abort the order or decision it rides on.
+    monkeypatch.setenv("PGOPTIONS", "-c ebull.code_dirty=maybe")
+    with psycopg.connect(test_database_url()) as stamped:
+        assert _insert_decision(stamped) == (None, None, None)
+        stamped.rollback()

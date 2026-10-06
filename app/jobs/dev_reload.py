@@ -657,6 +657,7 @@ def main() -> None:
             settings.app_env,
         )
         jobs_main()
+        return
     sys.exit(_supervise())
 
 

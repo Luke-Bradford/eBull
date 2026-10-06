@@ -39,7 +39,8 @@ CODE_COMMIT_SETTING = "ebull.code_commit"
 CODE_DIRTY_SETTING = "ebull.code_dirty"
 UV_LOCK_SHA256_SETTING = "ebull.uv_lock_sha256"
 
-_HEX = re.compile(r"[0-9a-f]{40,64}")
+#: A SHA-1 commit, or a SHA-256 one in a ``--object-format=sha256`` repository.
+_HEX = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def _tracked_dirty() -> bool | None:
@@ -100,9 +101,10 @@ def with_inherited_pgoptions(options: str) -> str:
 
     libpq uses ``PGOPTIONS`` only when ``options`` is not given, so a caller that
     passes its own (``connect_job``'s ``statement_timeout``) would otherwise
-    connect unstamped. The explicit value comes last and wins on a repeated name.
+    connect unstamped. The explicit value comes last and wins on a repeated name,
+    except that any ``ebull.*`` setting in it is dropped: a caller cannot override the stamp.
     """
-    return f"{os.environ.get('PGOPTIONS', '')} {options}".strip()
+    return f"{os.environ.get('PGOPTIONS', '')} {with_build_stamp(options, {})}".strip()
 
 
 def install_build_stamp() -> None:

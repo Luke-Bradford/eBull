@@ -82,3 +82,10 @@ def test_non_dev_pass_through_installs_the_stamp(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(SystemExit):
         dev_reload.main()
     assert calls == ["stamp", "serve"]
+
+
+def test_a_caller_cannot_override_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGOPTIONS", f"-c ebull.code_commit={SHA}")
+    assert build_stamp.with_inherited_pgoptions("-c ebull.code_commit=forged -c lock_timeout=5") == (
+        f"-c ebull.code_commit={SHA} -c lock_timeout=5"
+    )
