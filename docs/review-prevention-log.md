@@ -12027,3 +12027,16 @@ neighbouring container and match it.**
   any evidence computed without the base interval the rule tests against.
 - Enforced in: `tests/test_3609_factor_panel.py::test_the_opex_bound_on_a_sum_of_parts_vetoes_and_a_blocked_bound_blocks`,
   `::test_guards_are_kept_from_every_tested_period_as_vetoes_are` (both revert-probed); `factor_panel.ope_unit`.
+
+### A register that records code hashes cannot sit inside the hashed code (#3609)
+
+- Failure: the spec froze the fidelity trial's inputs as the construction-version hashes, which cover "every module
+  they import from `app/`". The panel builder already reached `app/services/trial_register.py` through
+  `strategy_result.py`, so writing the trial entry would have changed the hashes it records. No entry could ever have
+  matched. Found while planning slice 4, before any code.
+- Prevention: when a record pins code by hash, check whether the record's own file is in the hashed closure. If it
+  is, exclude that one file's content while still traversing its imports, and record the file's hash beside the run
+  instead. Keep each pin (artefact path, digest) out of hashed source; pass it as an argument and log it.
+- Enforced in: `app/services/factor_panel_artefact.py::import_closure` (`unhashed`);
+  `tests/test_3609_fidelity.py::test_the_unhashed_file_keeps_its_imports_in_the_closure`,
+  `::test_the_real_construction_sources_hash_the_report_and_not_the_register`.

@@ -501,8 +501,8 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # #3609 step 1 spec (2026-10-04-3609-step1-factor-panel.md) §"Registration": the panel builder is listed "only
     # for the gate test's import check". It computes per-name characteristics and holding returns and prints no
     # return statistic; every fidelity result read from its artefact is the counted, non-claiming DeclaredTrial
-    # "#3609 step 1 fidelity" that slice 4 adds before the first fidelity run.
-    "build_3609_factor_panel.py": "#3609 step 1 panel builder (DeclaredTrial '#3609 step 1 fidelity', slice 4)",
+    # `3609-step1-fidelity-v1` (trial register r24), which `scripts/report_3609_fidelity.py` refuses to run without.
+    "build_3609_factor_panel.py": "#3609 step 1 panel builder (DeclaredTrial 3609-step1-fidelity-v1, slice 4)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"

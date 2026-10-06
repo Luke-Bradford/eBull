@@ -309,9 +309,12 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
 
         r23 (2026-10-03, #3592) added ``ranking-pot-v2`` (one search); the same
         command returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r24 (2026-10-06, #3609) added ``3609-step1-fidelity-v1`` (16 searches); the
+        same command returned the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 505
-        assert len(TRIAL_REGISTER.trials) == 51
+        assert TRIAL_REGISTER.declared_count == 521
+        assert len(TRIAL_REGISTER.trials) == 52
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

@@ -1108,7 +1108,9 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
   - every input hash;
   - `TOTAL_RETURN_SPLICE_VERSION`, `UNIVERSE_SELECTION_RULE_VERSION`, `TERMINATION_RULE_VERSION`;
   - a **construction-version hash per characteristic**, covering the spec hash plus the source hashes of the builder,
-    the report and every module they import from `app/`.
+    the report and every module they import from `app/` or `scripts/`, except `app/services/trial_register.py`. The
+    register records these hashes, so hashing it into them would be a fixed point. Its imports are still followed,
+    and the ledger records its sha256 on every run (slice 4).
 
 ## Registration, ledger and what step 2 inherits
 
@@ -1306,6 +1308,136 @@ census diagnostic only. Step 2's spec declares the partition for outcomes.
    - the `DeclaredTrial` row;
    - the declared run;
    - results and ledger posted on #3609.
+
+   **Slice 4 plan (2026-10-06), revised after Codex checkpoint 1 (23 findings; §"Checkpoint log").**
+   - **Construction versions without a fixed point.** The builder reaches `app/services/trial_register.py` through
+     `strategy_result.py`, so a `DeclaredTrial` recording the construction versions would change them.
+     - `import_closure` gains an exclusion set holding that one file. Its content is not hashed, but its imports are
+       still traversed, so nothing reached only through it drops out.
+     - The `DeclaredTrial` records frozen inputs; it builds nothing in the panel. The ledger records the register
+       file's own sha256 on every run, so its content at run time is still pinned. This amends §"Panel artefact":
+       "every module they import from `app/`" reads "except `trial_register.py`".
+     - The closure also follows `scripts.` imports, so a report helper imported from a script is hashed.
+     - `construction_sources()` becomes the closure of the builder **and** the report.
+     - The artefact path and manifest digest are CLI arguments recorded in the ledger, never constants in hashed
+       source, which would be a second fixed point.
+     - After merge the artefact is re-published from clean `main`. Its rows and census must equal `99c9319b`'s by
+       content digest (rows `7147af42…`, census `80e18276…`). This is a regression check on that population only.
+       The structural guarantee is the closure tests.
+   - **Pure logic** in `app/services/factor_panel_fidelity.py`; the script reads files and prints.
+     - **Month:** the admitted rows at M with a value for the characteristic. Accounting values come from
+       `characteristics[c].value`, price values from `prices[c].value`.
+       - The sort is `tercile_groups` from `factor_panel.py`, with micro cutoff `nyse_p20[M]` × 10⁶ and weight cap
+         `nyse_p80[M]` × 10⁶. Both come from the frozen `jkp_nyse_cutoffs` snapshot (USD millions; ME is USD), dated
+         at the formation month-end M.
+       - Leg return per arm = Σ min(ME, cap) × r_arm / Σ min(ME, cap) over the leg's names, with r from
+         `prices.holding.by_arm`.
+       - Factor = Table 9 sign × (high − low), with the sign from the frozen
+         `inputs/reference/inputs/3609-jkp-table9-signs.csv`.
+       - Fewer than 5 names in either leg leaves the month missing and counts as undersized.
+       - A missing cutoff, or a missing or non-finite arm return, refuses: membership never depends on it.
+     - **Published:** the frozen `jkp_usa_monthly_vw_cap` snapshot. The characteristic's row is the one dated on the
+       holding month's last calendar day. A unit other than `decimal_return` refuses.
+     - **Comparison:**
+       - the masks are §"Fidelity"'s, keyed by calendar month on the 80-month grid. Lag needs m−1 in the grid;
+         lead needs m ≤ 2021-04;
+       - Pearson correlations;
+       - beta = cov(ours, published) / var(published);
+       - TE ratio = sd(ours − published) / sd(published), sample (n − 1), on the contemporaneous mask;
+       - offset = |12 × mean(ours − published)| ≤ 0.03. Only the boolean leaves the function.
+     - **Verdict per arm:** `INSUFFICIENT` when any mask has fewer than 60 pairs, or either side of any mask has
+       zero variance. Otherwise it lists the failed bars by name: `correlation`, `lead_lag`, `beta`, `offset`,
+       `undersized`. Bars are inclusive at their limits.
+     - **Verdict per characteristic:** `INSUFFICIENT` if either arm is; else `FAIL` with each arm's bars if either
+       arm failed a bar; else `PASS`.
+   - **What the report emits.** The results file and printout carry the statistics listed in §"Fidelity", the leg
+     counts, the missing months and the verdicts. They never carry a monthly factor value, a mean, a cumulative
+     return or the offset's magnitude. This bounds the report only: the artefact's own rows let anyone rebuild the
+     series, by design (§"Panel artefact").
+     - Error messages from the fidelity code interpolate no return value.
+     - A failure writes its exception class and a stable code to the ledger, never the message.
+   - **Gates, in order:**
+     1. A clean checkout (`is_dirty() is False`), with HEAD recorded.
+     2. A `started` ledger row is appended (run id, UTC time, git SHA, argv, and every field known so far) **before**
+        the gates that follow. A gate failure appends `failed` with the gate's code and `evaluation_began: false`.
+     3. `verify_artefact` on the given artefact and digest. Then the manifest's `stage` is `A` and its formations are
+        exactly `formation_months()`. Every row's `holding_month` equals `holding_month(M)`, and (M, series_id) is
+        unique, checked while streaming.
+     4. The manifest's `spec_sha256` and `construction_versions` equal the current spec's and code's.
+     5. `TRIAL_REGISTER` holds an entry for this run. Its evidence names the spec sha256 and the versions digest
+        (sha256 of the canonical JSON of the eight construction versions), and it has `declared_for=None`,
+        `searches=16` and `EXACT`.
+        - Every trial id in a previous ledger row (committed `docs/research/3609-ledger.jsonl` plus the local
+          ledger) must still exist with the evidence recorded then.
+        - A versions digest already run under one trial id cannot pass under another.
+     6. Version history: per characteristic, the completed runs before this one. A characteristic with 3 completed
+        non-PASS versions is reported `REJECTED` and not evaluated. A run with any history needs
+        `--revision-reason`, which is recorded.
+
+     Then an `evaluation_began` row is appended. Every row carries the run id and is appended under `flock`, then
+     fsynced. A `completed` row (results file sha256 and verdicts) or `failed` row is durable before anything is
+     printed. Unmatched `started` rows stay as abandoned attempts.
+   - **Register entry:** `3609-step1-fidelity-v1`, with `declared_for=None`, `searches=16` (8 characteristics × 2
+     arms, enumerated in the description) and `EXACT`. Its evidence cites this section, the spec sha256 and the
+     versions digest.
+     - `DeclaredTrial`'s docstring gains a fourth grouped case: a preregistered enumeration fixed by a spec before any
+       evaluation.
+     - Register r24 moves `M_inh` from 502 to 518. The r8 stranding command is re-run and recorded beside the bump.
+     - The builder's `_NON_TRIAL_RESEARCH_READERS` reason names the trial id.
+     - The report imports no research price reader, so the gate test's live-importer check (it asserts every listed
+       script is one) keeps it off that list.
+   - **Alignment matrix:** one table in code, row by row, each row naming its source fields and denominators, or
+     "not measurable", printed with the population labels (restricted population, retrospectively filtered, the
+     three survivorship regimes).
+     - **Sources:** census funnel totals with per-formation ME shares, `sic_status`, `branch_use`, `fallback_use`,
+       `veto_use`, `period_kind`, `shares_scope`, `me_checks`, `characteristics_total_counts`, the liquidity
+       tercile, holding status, the split and daily–monthly reconciliations, and the daily-screen flags.
+     - **Holding-status exposure:** per characteristic and leg, the mean over present months of each status's share
+       of the leg's normalised weight. It is the same for both arms, and labelled so.
+     - **Delayed by acceptance:** a name-month whose characteristic used period end E (or none), where a later row of
+       the same series uses E′ > E with E′ + 4 months ≤ M. That period was lag-eligible at M but not yet usable. It
+       is inferred from later use, so it is a lower bound (names that leave the panel are not seen).
+     - **Linked but not quoted:** `not_priced` candidates with no bar on s(M), a first frozen daily bar on or before
+       s(M) and `last_bar` on or after it, whose pinned linkage gives `LINKED` at s(M). Filer status is not
+       evaluated for them.
+   - **`--census-form25`** reproduces premise 1's table and freezes its constituents.
+     - **Extract**, read-only: one row per distinct (`issuer_cik`, `resolved_symbol`) in
+       `sec_form25_common_equity_delistings` with `filed_date` < 2024-09-01, taken from the earliest filing, plus
+       every Intrader series whose `vendor_symbol` could match.
+     - **Freezing:** the extract is written beside the results and its sha256 goes into the ledger.
+     - **Matching** is pure Python: the symbol itself, or the symbol with its trailing run of `Q` removed.
+       Distance = min |`last_bar` − coalesce(`suspension_date`, `filed_date`)|; year = the filing's year.
+     - **Measured 2026-10-06** in SQL, it reproduces every cell. A single-`Q` strip gives 2020 134, not 135 (`CRCQQ`).
+     - It is labelled a selected reference set, never verification of the archive.
+   - **Order of work:**
+     1. This PR: code, tests and the register row. Merge.
+     2. Re-publish from clean `main` and confirm the digests.
+     3. The declared run with `--census-form25`.
+     4. A ledger PR copying **every** local ledger row (failed and abandoned included) into
+        `docs/research/3609-ledger.jsonl`, with the results posted on #3609. Step 4 happens whatever the run's outcome.
+
+     This spec is not edited after the run.
+   - **Tests** (pure, each revert-probed):
+     - hand-computed capped weights and leg returns; the sign;
+     - leg size: 4 names undersized, 5 not; ties, n < 15 and all-micro months through the integrated path;
+     - a cutoff from the wrong month cannot be used;
+     - a missing cutoff and a missing arm return refuse;
+     - pairing: published at the holding month's end; lag and lead across missing months; out-of-grid neighbours
+       excluded;
+     - mask size and variance: 59 pairs `INSUFFICIENT`, 60 not; zero variance `INSUFFICIENT`;
+     - bars: each bar failing alone names only itself; values exactly at each bar pass; 2 undersized months pass,
+       3 fail;
+     - a constant shift of ours leaves correlation, beta and TE ratio unchanged and moves only the offset boolean;
+     - the offset's magnitude is absent from the result;
+     - arms: mixed `FAIL` and `INSUFFICIENT` across arms;
+     - the register gate refuses a wrong spec or versions digest, a wrong count, a changed past entry and a reused
+       digest;
+     - the ledger: `started` precedes the gates, `evaluation_began` precedes evaluation, and the terminal row
+       precedes printing; a failure row carries no message text;
+     - the closure: the exclusion drops only the excluded file's hash, keeps a module reached only through it, and
+       follows `scripts.` imports;
+     - Form 25 matching: a repeated `Q`, an exact match beside a stripped one, no match, and the year bucket.
+
 5. **Step-0 Amendment 3:** the W1 split in `scripts/report_3609_baselines.py`, and a re-run (W2 stays reused
    validation, as before).
 
@@ -1527,3 +1659,29 @@ None rebutted.
 - **Spec text:** 13, the adopted results filled from m3; 19, the bound's evidence recorded in slice 3d-v; 23, the
   mapping table; 25, every read or witness tag's definition in the taxonomy file; 26, hand-computed acceptance cases
   in slice 3d-v.
+
+**Slice 4 plan, checkpoint 1 (23 findings).** Transcript: `var/research/3609_step1/ckpt1_s4.txt` (not committed).
+- **Applied:**
+  - 1, 2, 5: the register's content leaves the hash, its imports stay traversed, and its sha256 goes into the ledger.
+    §"Panel artefact" is amended, and the re-publish digest match is labelled a regression check;
+  - 3: `scripts.` imports are followed. The closure already resolves only static absolute imports, and none of
+    today's closure modules imports dynamically (`importlib` appears only as `importlib.metadata` and
+    `importlib.resources`);
+  - 4: the artefact pin is a CLI argument recorded in the ledger;
+  - 6: a clean checkout is required;
+  - 7: `DeclaredTrial`'s docstring gains the preregistered-enumeration case;
+  - 8, 9: the gate checks the whole entry, past entries and reused digests, plus the version history and the
+    three-version rejection;
+  - 11–13: the `started` row comes before the gates; run ids on every row; `flock` and fsync; abandoned starts kept;
+    the ledger PR runs whatever the outcome;
+  - 14, 15: no message text in the ledger, and the emission guarantee narrowed to the report;
+  - 16, 17: delayed-by-acceptance and linked-but-not-quoted are measured, the first as a stated lower bound;
+  - 18, 19: holding-status exposure per leg on normalised weights; a row-by-row alignment table with the population
+    labels;
+  - 20, 21: the Form 25 extract is frozen and matched in Python, and labelled a selected set;
+  - 22: stage, formation grid, holding-month mapping and row uniqueness are checked;
+  - 23: the boundary tests.
+- **Rebutted in part:**
+  - 10: the report is not added to `_NON_TRIAL_RESEARCH_READERS`. It imports no research price reader, and
+    `test_the_pre_hunt_reader_list_only_names_live_importers` asserts every listed script is one. The builder's reason
+    string names the trial id.

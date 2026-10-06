@@ -230,7 +230,12 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: Not a `hunt-` entry, so it counts in M_inh: 501 -> 502. Measured the same way before the bump:
 #: the SAME five groups, 488 rows, every one `harness_validation`. It strands nothing that could
 #: have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-03-r23"
+#:
+#: r24 (2026-10-06, #3609 slice 4) adds `3609-step1-fidelity-v1`, the step 1 construction-fidelity study: 8
+#: characteristics x 2 arms = 16 searches, enumerated by its spec before any evaluation and non-claiming. Not a
+#: `hunt-` entry, so it counts in M_inh: 502 -> 518. Measured the same way before the bump: the SAME five
+#: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-06-r24"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -405,7 +410,7 @@ def power_check(design: TrialDesign, *, trials: int) -> PowerCheck:
 class DeclaredTrial:
     """One traceable declaration of variants evaluated against price data.
 
-    ``searches`` is normally one.  It may be greater than one in exactly three
+    ``searches`` is normally one.  It may be greater than one in exactly four
     cases:
 
     - **legacy grouped** — a historical research session recorded the size and
@@ -423,6 +428,11 @@ class DeclaredTrial:
       searches are the specs pinned by one frozen declaration.  ``evidence`` is
       built by ``declaration_backed_evidence``: the declaration doc's sha256 and
       its pinned count, which IS ``searches``; ``declared_for`` names it.
+    - **preregistered enumeration** (#3609 slice 4) — a spec fixes, before any
+      evaluation, the exact set of evaluations one study runs (8 characteristics
+      x 2 arms), and the entry is registered before its first run.  ``evidence``
+      names the spec's sha256 and the code versions the run is gated on, so a
+      changed construction cannot run under it.
 
     ⚠ A ``hunt-`` trial id is reserved for the last two, and only in the form
     ``hunt-<n>-<split>``; ``__post_init__`` refuses anything else.  The
@@ -1528,6 +1538,26 @@ TRIAL_REGISTER: Final = TrialRegister(
             exactness=TrialExactness.EXACT,
             searches=1,
             declared_for=("ranking-pot-v2", "v1"),
+        ),
+        # #3609 step 1 slice 4: `scripts/report_3609_fidelity.py` refuses to run unless exactly one entry's
+        # evidence names the current spec sha256 and construction-versions digest. Regenerate the evidence with
+        # `fidelity_evidence(*current)` (spec §"Slices" item 4) before the first run, never after it.
+        DeclaredTrial(
+            trial_id="3609-step1-fidelity-v1",
+            description=(
+                "#3609 step 1 construction fidelity, version 1: our JKP-rule rebuilds of gp_at, be_me, ope_be, ni_me, "
+                "ocf_me, at_gr1, ret_12_1 and rvol_21d, each compared with JKP's published capped-value-weight "
+                "US factor under the best-case and worst-case termination arms (8 x 2 = 16), on stage-A holding "
+                "months 2014-10..2021-05. Non-claiming: its verdicts select which characteristics step 2 may use."
+            ),
+            evidence=(
+                'docs/research/2026-10-04-3609-step1-factor-panel.md §"Registration" and §"Slices" item 4; '
+                "spec_sha256=2043c8d62b01b664c60f92d19fa476926f47ea64be9d81dc3d01ef4186d13a73; "
+                "construction_versions_sha256=fa0ad4578a0c5577fafbca1028ce67c9f34fa3534e0fed2fb4e7188b1950a9d1; "
+                "ledger var/research/3609_step1/ledger.jsonl, committed to docs/research/3609-ledger.jsonl"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=16,
         ),
         DeclaredTrial(
             trial_id="recent-evidence-refresh-cost-v4-2026-09-26",
