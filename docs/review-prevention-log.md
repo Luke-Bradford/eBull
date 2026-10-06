@@ -12117,3 +12117,12 @@ neighbouring container and match it.**
   stored stamps and checked against the fund's own filing before a reader relies on it. A study reading ETF total
   returns prints the per-fund, per-year stamp screen (`tsmom_etf.stamp_audit`).
 - Enforced in: `scripts/report_3620_tsmom.py --census` (stamp screen); the reader fix is #3676.
+
+### An alert de-duplicated by a state file must record "notified" only after delivery (#3614)
+
+- Failure (caught in review on #3678): the jobs dead-man saved `alerting=true, last_notified_at=now` before sending
+  the push, so a failed first push stayed silent until the 2 h re-alert, and a failed recovery notice was lost.
+- Prevention: decide the action, attempt delivery, then persist; an undelivered notice keeps the prior notified
+  state so the next run retries (`scripts/jobs_dead_man.py::settle`). A state file that cannot be written means no
+  de-duplication, so the alert says so.
+- Enforced in: `tests/test_jobs_dead_man.py::test_main_persists_dedup_only_after_delivery`.

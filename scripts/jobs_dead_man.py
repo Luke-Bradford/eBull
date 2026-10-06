@@ -47,7 +47,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from app.system.push_channel import send_push
+from app.system.push_channel import Priority, config_from_env, send_push
 
 _DEFAULT_STATUS_FILE = Path.home() / ".cache" / "ebull" / "jobs_dead_man_status.json"
 _STALE_AFTER_S = 1800.0
@@ -126,22 +126,34 @@ def step(
 def read_last_start() -> tuple[float | None, str | None]:
     """``(max(job_runs.started_at) as epoch s, None)`` or ``(None, error)``.
 
-    The error is the exception's class name only: it is pushed off-machine,
-    and a driver message can carry a host, port or role name.
+    The error is ``<phase>: <exception class>``, so a broken install or config
+    is not mistaken for a database outage. Only the class name is used because
+    the text is pushed off-machine and a driver message can carry a host, port
+    or role name; the full exception goes to the local log.
+
+    A row stamped more than 5 min in the future (clock skew) is not liveness
+    evidence: counting it would hold the dead-man healthy until wall time
+    caught up with the bad stamp.
     """
+    phase = "import"
     try:
         import psycopg
 
         from app.config import Settings
 
-        with psycopg.connect(Settings().database_url, connect_timeout=5) as conn:
-            row = conn.execute("SELECT max(started_at) FROM job_runs").fetchone()
+        phase = "config"
+        url = Settings().database_url
+        phase = "db"
+        with psycopg.connect(url, connect_timeout=5) as conn:
+            row = conn.execute(
+                "SELECT max(started_at) FROM job_runs WHERE started_at <= now() + interval '5 minutes'"
+            ).fetchone()
     except Exception as exc:  # noqa: BLE001 — any failure to read IS the signal
-        print(f"[jobs-dead-man] job_runs read failed: {exc!r}", file=sys.stderr, flush=True)
-        return None, type(exc).__name__
+        print(f"[jobs-dead-man] job_runs read failed ({phase}): {exc!r}", file=sys.stderr, flush=True)
+        return None, f"{phase}: {type(exc).__name__}"
     if row is None or row[0] is None:
         return None, None
-    return row[0].timestamp(), None
+    return min(row[0].timestamp(), time.time()), None
 
 
 def load_state(path: Path) -> State:
@@ -152,12 +164,26 @@ def load_state(path: Path) -> State:
         return State()
 
 
-def save_state(path: Path, state: State) -> None:
+def save_state(path: Path, state: State) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({**asdict(state), "written_at": time.time()}))
     except OSError as exc:
         print(f"[jobs-dead-man] status file write failed: {exc!r}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+def settle(prior: State, state: State, *, delivered: bool) -> State:
+    """The state to persist after a notification attempt.
+
+    An undelivered alert, re-alert or recovery notice keeps the prior
+    ``alerting`` / ``last_notified_at``, so the next run tries again instead of
+    waiting out ``--renotify-s`` (or losing the recovery notice for good).
+    """
+    if delivered:
+        return state
+    return replace(state, alerting=prior.alerting, last_notified_at=prior.last_notified_at)
 
 
 def _macos_notify(title: str, message: str) -> None:
@@ -172,16 +198,23 @@ def _macos_notify(title: str, message: str) -> None:
         pass
 
 
-def notify(action: Action, state: State) -> None:
+def notify(action: Action, state: State, *, note: str = "") -> bool:
+    """Send the notification; ``True`` when it reached its channel.
+
+    With push configured the channel is ntfy, so delivery means a 2xx. Without
+    it the macOS notification is the only channel and counts as delivered.
+    """
+    priority: Priority
     if action == "recover":
-        title, message = "eBull jobs recovered", "Job starts are flowing again."
-        pushed = send_push(title=title, message=message, priority=3, tags=("white_check_mark",))
+        title, message, priority, tag = "eBull jobs recovered", "Job starts are flowing again.", 3, "white_check_mark"
     else:
         title = "eBull jobs daemon DARK" if action == "alert" else "eBull jobs daemon still DARK"
-        message = state.reason or ""
-        pushed = send_push(title=title, message=message, priority=5, tags=("rotating_light",))
+        message, priority, tag = state.reason or "", 5, "rotating_light"
+    message += note
+    pushed = send_push(title=title, message=message, priority=priority, tags=(tag,))
     _macos_notify(title, message)
     print(f"[jobs-dead-man] {action.upper()}: {message} (push sent: {pushed})", file=sys.stderr, flush=True)
+    return pushed or config_from_env() is None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -201,17 +234,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[jobs-dead-man] test push sent: {ok}", file=sys.stderr, flush=True)
         return 0 if ok else 1
     observed, error = read_last_start()
+    prior = load_state(args.status_file)
     state, action = step(
-        load_state(args.status_file),
+        prior,
         observed_start=observed,
         read_error=error,
         now=time.time(),
         stale_after_s=args.stale_after_s,
         renotify_s=args.renotify_s,
     )
-    save_state(args.status_file, state)
     if action is not None:
-        notify(action, state)
+        # Probe the status file before sending: if it cannot be written, the
+        # de-duplication cannot work and every run will re-page, so say why.
+        note = "" if save_state(args.status_file, prior) else " [dead-man status file unwritable: not de-duplicated]"
+        state = settle(prior, state, delivered=notify(action, state, note=note))
+    save_state(args.status_file, state)
     return 2 if state.alerting else 0
 
 

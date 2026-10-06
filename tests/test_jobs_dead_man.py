@@ -1,14 +1,17 @@
 """Pure-policy tests for the jobs dead-man (#3614 item 3).
 
-Only ``step`` and the state-file round trip are exercised; no database, no
-network, no osascript.
+``step``/``settle`` are pure; ``main`` runs with the DB read, the push and
+osascript stubbed. No database, no network.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.jobs_dead_man import State, load_state, save_state, step
+import pytest
+
+from scripts import jobs_dead_man
+from scripts.jobs_dead_man import State, load_state, save_state, settle, step
 
 _NOW = 1_000_000.0
 _STALE = 1800.0
@@ -99,3 +102,56 @@ def test_state_round_trips_and_a_corrupt_file_resets(tmp_path: Path) -> None:
     path.write_text("{not json")
     assert load_state(path) == State()
     assert load_state(tmp_path / "missing.json") == State()
+
+
+def test_an_undelivered_alert_is_retried_next_run() -> None:
+    prior = State(last_seen_start=_NOW - 5000)
+    intended, action = _step(prior, observed=_NOW - 5000)
+    assert action == "alert"
+    kept = settle(prior, intended, delivered=False)
+    assert not kept.alerting
+    assert kept.last_notified_at is None
+    _, action = _step(kept, observed=_NOW - 5000, now=_NOW + 300)
+    assert action == "alert"  # not deferred to the 2 h re-alert
+
+
+def test_an_undelivered_recovery_is_retried_next_run() -> None:
+    alerting, _ = _step(State(), observed=_NOW - 5000)
+    intended, action = _step(alerting, observed=_NOW + 60, now=_NOW + 120)
+    assert action == "recover"
+    kept = settle(alerting, intended, delivered=False)
+    assert kept.alerting
+    _, action = _step(kept, observed=_NOW + 360, now=_NOW + 420)
+    assert action == "recover"
+
+
+def test_main_persists_dedup_only_after_delivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    status = tmp_path / "status.json"
+    monkeypatch.setenv("EBULL_NTFY_TOPIC", "t")
+    monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
+    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda *_a: None)
+    sent: list[str] = []
+
+    def _push(**kw: object) -> bool:
+        sent.append(str(kw["title"]))
+        return len(sent) > 1  # first attempt fails, second succeeds
+
+    monkeypatch.setattr(jobs_dead_man, "send_push", _push)
+    assert jobs_dead_man.main(["--status-file", str(status)]) == 0
+    assert not load_state(status).alerting
+    assert jobs_dead_man.main(["--status-file", str(status)]) == 2
+    assert load_state(status).alerting
+    assert sent == ["eBull jobs daemon DARK", "eBull jobs daemon DARK"]
+    assert jobs_dead_man.main(["--status-file", str(status)]) == 2
+    assert len(sent) == 2  # delivered once: de-duplicated now
+
+
+def test_an_unwritable_status_file_is_named_in_the_alert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.delenv("EBULL_NTFY_TOPIC", raising=False)
+    monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
+    messages: list[str] = []
+    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda _t, m: messages.append(m))
+    assert jobs_dead_man.main(["--status-file", str(blocker / "status.json")]) == 2
+    assert messages and "status file unwritable" in messages[0]

@@ -107,5 +107,6 @@ def send_push(
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:  # noqa: S310 — https URL from operator config
             return 200 <= resp.status < 300
+    # A 4xx/5xx raises ``HTTPError``, a ``URLError`` subclass, so it lands here too.
     except urllib.error.URLError, OSError, ValueError:
         return False
