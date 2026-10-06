@@ -12045,7 +12045,8 @@ neighbouring container and match it.**
 
 - Failure: #3668 told the review bot to post findings it could not settle as "unverified". The same prompt still said
   "DELETE" for out-of-scope findings and "one sentence" for every finding, and named no winner. The first review
-  under the new text found all three conflicts.
+  under the new text found both collisions. It also found that the rule did not say how an unverified finding is
+  resolved. A second round found that "DELETE" still needed naming as a scope rule.
 - Prevention: before adding or loosening a rule in a prompt, grep the prompt for the rules it can collide with
   (`grep -n 'DELETE\|omit\|only\|one sentence'`). State which rule applies first in the new rule's own text.
 - Enforced in: `.github/workflows/claude-review.yml` system prompt (scope rules apply first; the unverified tail
