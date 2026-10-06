@@ -164,7 +164,10 @@ def publish(
         )
         return manifest_sha256
     except BaseException as exc:
-        shutil.rmtree(out, ignore_errors=True)
+        try:
+            shutil.rmtree(out)
+        except OSError as cleanup_error:
+            exc.add_note(f"{out} was not fully removed ({cleanup_error!r}); delete it, it holds stage-B files")
         # Stage-B files may already have been read, so the run ends here: a retry needs a fresh run id and its own
         # access row, never a second look under this one. A failure to write that row must not replace the error.
         try:

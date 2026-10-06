@@ -250,3 +250,17 @@ def test_an_unwritable_failed_row_does_not_mask_the_original_error(
         _publish(tmp_path, ledger, _Sec(missing="2021q3"), [])
     assert any("'failed' ledger row was not written" in note for note in caught.value.__notes__)
     assert not (tmp_path / "sub").exists()
+
+
+@pytest.mark.usefixtures("clean")
+def test_a_failed_cleanup_is_reported_and_still_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ledger = _ledger(tmp_path, _started(), _recorded())
+
+    def refuse(path: Path) -> None:
+        raise PermissionError("read-only volume")
+
+    monkeypatch.setattr(publisher.shutil, "rmtree", refuse)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        _publish(tmp_path, ledger, _Sec(missing="2022q2"), [])
+    assert any("was not fully removed" in note for note in caught.value.__notes__)
+    assert [row["event"] for row in read_ledger(ledger)] == ["started", "access_recorded", "failed"]
