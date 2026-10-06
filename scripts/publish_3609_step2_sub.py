@@ -5,7 +5,8 @@ Spec: ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"Slices" items 1 
 ``parse_fsds_sub``. Each quarter ZIP's sha256 is recorded and the ZIP discarded; only ``sub.txt`` is kept.
 
 These are stage-B data. Before any download the script requires the run's ``started`` and ``access_recorded``
-ledger rows and the committed access-log row they name, and it writes the run's ``sub_published`` row last. The
+ledger rows and the committed access-log row they name, and it writes the run's ``sub_published`` row last (or
+``failed``, which ends the run, if anything after the gate fails). The
 manifest names the run; the spec and construction hashes are on that run's ``started`` row.
 
 Publish protocol (as step 1's ``publish_3609_reference_data.py``): exclusive ``mkdir``, a dirty checkout refused,
@@ -157,8 +158,20 @@ def publish(
             },
         )
         return manifest_sha256
-    except BaseException:
+    except BaseException as exc:
         shutil.rmtree(out, ignore_errors=True)
+        # Stage-B files may already have been read, so the run ends here: a retry needs a fresh run id and its own
+        # access row, never a second look under this one.
+        append_ledger(
+            ledger,
+            {
+                "run_id": run_id,
+                "event": "failed",
+                "at": datetime.now(UTC).isoformat(),
+                "step": EVENT,
+                "error": repr(exc),
+            },
+        )
         raise
 
 

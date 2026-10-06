@@ -180,12 +180,19 @@ def test_a_run_publishes_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("clean")
-def test_a_failed_download_removes_the_directory_and_writes_no_row(tmp_path: Path) -> None:
+def test_a_failed_download_removes_the_directory_and_ends_the_run(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path, _started(), _recorded())
     with pytest.raises(httpx.HTTPStatusError):
         _publish(tmp_path, ledger, _Sec(missing="2023q1"), [])
     assert not (tmp_path / "sub").exists()
-    assert [row["event"] for row in read_ledger(ledger)] == ["started", "access_recorded"]
+    rows = read_ledger(ledger)
+    assert [row["event"] for row in rows] == ["started", "access_recorded", "failed"]
+    assert rows[-1]["step"] == "sub_published" and "404" in rows[-1]["error"]
+    # Earlier quarters were read, so the run is over: a retry under the same run id is refused unread.
+    sec = _Sec()
+    with httpx.Client(transport=httpx.MockTransport(sec)) as client, pytest.raises(StageBAccessError, match="ended"):
+        publisher.publish(tmp_path / "retry", RUN, ledger=ledger, client=client, confirm_access=lambda r, a: None)
+    assert sec.requests == []
 
 
 @pytest.mark.usefixtures("clean")

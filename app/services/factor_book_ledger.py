@@ -23,6 +23,12 @@ COMMITTED_LEDGER_PATH: Final = _REPO_ROOT / "docs" / "research" / "3609-ledger.j
 
 _TERMINAL_EVENTS: Final = frozenset({"completed", "failed"})
 
+
+def access_purpose(run_id: str) -> str:
+    """The ``purpose`` the run's ``access_recorded`` row is declared with (spec §"Registration", ledger step 2)."""
+    return f"#3609 step 2 declared run {run_id}"
+
+
 _COMMITTED_ACCESS: Final = """
     SELECT 1 FROM strategy_holdout_accesses
     WHERE access_id = %(access_id)s
@@ -30,6 +36,7 @@ _COMMITTED_ACCESS: Final = """
       AND strategy_version = %(strategy_version)s
       AND result_version = %(run_id)s
       AND access_kind = 'evaluate'
+      AND purpose = %(purpose)s
 """
 
 
@@ -69,6 +76,7 @@ def require_committed_access(conn: psycopg.Connection[Any], run_id: str, access_
             "strategy_id": STRATEGY_ID,
             "strategy_version": STRATEGY_VERSION,
             "run_id": run_id,
+            "purpose": access_purpose(run_id),
         },
     ).fetchone()
     if row is None:
@@ -83,6 +91,7 @@ __all__ = [
     "STRATEGY_ID",
     "STRATEGY_VERSION",
     "StageBAccessError",
+    "access_purpose",
     "recorded_access_id",
     "require_committed_access",
 ]

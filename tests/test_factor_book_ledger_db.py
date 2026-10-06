@@ -9,6 +9,7 @@ from app.services.factor_book_ledger import (
     STRATEGY_ID,
     STRATEGY_VERSION,
     StageBAccessError,
+    access_purpose,
     require_committed_access,
 )
 from app.services.result_ledger import HoldoutAccess, record_holdout_access
@@ -24,7 +25,7 @@ def _record(conn: psycopg.Connection[tuple], **overrides: str) -> int:
         "strategy_version": STRATEGY_VERSION,
         "access_kind": "evaluate",
         "accessed_by": "test",
-        "purpose": f"#3609 step 2 declared run {RUN}",
+        "purpose": access_purpose(RUN),
         "result_version": RUN,
         **overrides,
     }
@@ -44,6 +45,7 @@ def test_the_runs_evaluate_access_passes(ebull_test_conn: psycopg.Connection[tup
         {"strategy_version": "v2"},
         {"result_version": "d" * 32},
         {"access_kind": "read"},
+        {"purpose": "#3609 step 2 exploratory look"},
     ],
 )
 def test_an_access_for_anything_else_does_not_pass(
