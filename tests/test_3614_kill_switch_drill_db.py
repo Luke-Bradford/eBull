@@ -19,6 +19,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -245,7 +246,7 @@ def test_each_loader_stays_inside_the_drill_transaction(ebull_test_conn: Conn) -
                 lambda: get_runtime_config(sandbox),
                 lambda: load_trading_enabled_state(sandbox),
                 lambda: preflight_core_submission(
-                    sandbox, core_instrument_id=CORE_INSTRUMENT_ID, action="buy_core", now=drill.datetime.now(drill.UTC)
+                    sandbox, core_instrument_id=CORE_INSTRUMENT_ID, action="buy_core", now=datetime.now(UTC)
                 ),
             ]
             for load in loaders:

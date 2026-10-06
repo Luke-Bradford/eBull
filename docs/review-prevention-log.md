@@ -12139,3 +12139,13 @@ neighbouring container and match it.**
   another connection, that nothing it wrote is visible.
 - Enforced in: `docs/specs/ops/2026-10-06-3614-kill-drill-time-to-flat.md` § Sandbox mode; slice 1's test that an
   autocommit connection is refused before any write.
+
+### An "append-only" table needs BEFORE UPDATE OR DELETE, and a test of both (#3614)
+
+- Failure (caught by Codex checkpoint 2 and the review bot on #3681): sql/476 called five drill-evidence tables
+  append-only but copied a `BEFORE UPDATE` trigger, so the evidence could still be deleted. The fix was staged after
+  the push, and the pre-push smoke had already applied 476 to dev, so it had to land as a fix-forward (sql/477).
+- Prevention: a migration that calls a table append-only (or immutable) uses `BEFORE UPDATE OR DELETE`, and a DB
+  test asserts that both statements raise. The test harness deletes under `session_replication_role = replica`, so
+  the trigger does not break cleanup. Stage every fix before the push that runs the smoke: `git status` must be clean.
+- Enforced in: `tests/test_3614_kill_switch_drill_db.py::test_drill_evidence_refuses_update_and_delete`.

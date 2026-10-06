@@ -609,7 +609,11 @@ def run_kill_switch_drill(
             run.event_id = record_drill(lock_conn, run)
             return run
         finally:
-            lock_conn.execute("SELECT pg_advisory_unlock(%s, %s)", DRILL_ADVISORY_LOCK)
+            # Never raised over a recording failure; closing the session releases the lock anyway.
+            try:
+                lock_conn.execute("SELECT pg_advisory_unlock(%s, %s)", DRILL_ADVISORY_LOCK)
+            except Exception:  # noqa: BLE001
+                logger.exception("kill drill: unlock failed; the lock is released when the session closes")
     finally:
         lock_conn.close()
 
@@ -628,6 +632,7 @@ def _book_fields(run: DrillRun) -> dict[str, Any]:
             "unmapped": None,
             "multi": None,
             "no_stop": None,
+            "no_target": None,
             "estimate": None,
             "null_reason": "snapshot_unavailable",
             "samples_n": None,
@@ -636,17 +641,19 @@ def _book_fields(run: DrillRun) -> dict[str, Any]:
         }
     unmapped, multi = mapping_defects(snap.positions)
     no_stop = sum(1 for p in snap.positions if p.broker_position_id is not None and not p.stop_present)
+    no_target = sum(1 for p in snap.positions if p.broker_position_id is not None and not p.target_present)
     r_max = snap.applied_close_max_s
     estimate = estimate_time_to_flat(
         snap.snapshot_at, snap.positions, outstanding_authority=len(snap.authority), close_resolution_max_s=r_max
     )
     applied = sum(1 for s in snap.close_samples if s.status == "applied" and s.resolved_at is not None)
     return {
-        "book_verdict": "ok" if (unmapped, multi, no_stop) == (0, 0, 0) else "defects",
+        "book_verdict": "ok" if (unmapped, multi, no_stop, no_target) == (0, 0, 0, 0) else "defects",
         "snapshot_at": snap.snapshot_at,
         "unmapped": unmapped,
         "multi": multi,
         "no_stop": no_stop,
+        "no_target": no_target,
         "estimate": estimate.seconds,
         "null_reason": estimate.null_reason,
         "samples_n": applied,
@@ -668,7 +675,7 @@ def record_drill(lock_conn: psycopg.Connection[Any], run: DrillRun) -> int:
                 kill_active_at_start, kill_active_at_verify, observed_activated_by, observed_activated_at,
                 observe_outcome, core_mandate_event_id, core_mandate_revision, core_instrument_id,
                 entry_verdict, book_verdict, run_failure, failure_detail, snapshot_at,
-                unmapped_ownerships, multiply_mapped_ownerships, positions_without_stop,
+                unmapped_ownerships, multiply_mapped_ownerships, positions_without_stop, positions_without_target,
                 estimated_time_to_flat_s, estimate_null_reason, close_samples_n,
                 close_samples_not_applied, close_resolution_max_s, operator_surface
             ) VALUES (
@@ -676,7 +683,7 @@ def record_drill(lock_conn: psycopg.Connection[Any], run: DrillRun) -> int:
                 %(run_token)s, %(mode)s, %(kill_start)s, %(kill_verify)s, %(obs_by)s, %(obs_at)s,
                 %(obs_outcome)s, %(mandate_id)s, %(mandate_rev)s, %(core_instrument_id)s,
                 %(entry_verdict)s, %(book_verdict)s, %(run_failure)s, %(failure_detail)s, %(snapshot_at)s,
-                %(unmapped)s, %(multi)s, %(no_stop)s, %(estimate)s, %(null_reason)s, %(samples_n)s,
+                %(unmapped)s, %(multi)s, %(no_stop)s, %(no_target)s, %(estimate)s, %(null_reason)s, %(samples_n)s,
                 %(not_applied)s, %(r_max)s, %(surface)s
             )
             RETURNING kill_switch_drill_event_id

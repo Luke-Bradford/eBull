@@ -8,14 +8,18 @@ concurrent activation) are in ``test_3614_kill_switch_drill_db.py``.
 from __future__ import annotations
 
 import ast
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import app.services.kill_switch_drill as drill
 from app.services.kill_switch_drill import (
     BookPosition,
+    BookSnapshot,
     ChokepointResult,
+    DrillRun,
     classify_c1,
     classify_c2,
     classify_c3,
@@ -204,6 +208,21 @@ def test_an_unrecorded_environment_is_not_a_real_route() -> None:
     positions = [_pos(1, broker_environment=None)]
     est = estimate_time_to_flat(T, positions, outstanding_authority=0, close_resolution_max_s=1)
     assert est.null_reason is None
+
+
+@pytest.mark.parametrize(
+    ("position", "verdict"),
+    [
+        (_pos(1), "ok"),
+        (BookPosition(1, 11, 1, T, False, True, "demo", True), "defects"),
+        (BookPosition(1, 11, 1, T, True, False, "demo", True), "defects"),  # SL AND TP on every position
+        (_unmapped(1), "defects"),
+    ],
+)
+def test_book_verdict(position: BookPosition, verdict: str) -> None:
+    run = DrillRun(uuid.uuid4(), "manual", "test", T)
+    run.snapshot = BookSnapshot(T, (position,), (), ())
+    assert drill._book_fields(run)["book_verdict"] == verdict  # pyright: ignore[reportPrivateUsage]
 
 
 def test_mapping_defects() -> None:

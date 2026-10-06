@@ -386,3 +386,13 @@ Precedent (2026-08-05, #2218): five SQL literals across four modules plus two
 `Literal`s. Three of the five were latest-terminal-run queries, so a `degraded` row
 would have been written and then skipped in favour of an older, greener run —
 shipping the ticket and changing nothing. Caught by Codex at checkpoint 2.
+
+## "Append-only" means UPDATE and DELETE both refused
+
+A table a migration calls append-only or immutable gets a `BEFORE UPDATE OR DELETE`
+row trigger (precedent: sql/299, sql/327, sql/477), plus a DB test that both statements
+raise. An UPDATE-only trigger leaves the evidence deletable. The test harness empties
+tables under `session_replication_role = replica`, so the trigger does not break cleanup.
+
+Precedent (2026-10-06, #3614): sql/476 shipped UPDATE-only; the fix arrived after the
+pre-push smoke had applied 476 to dev, so it had to fix forward as sql/477.

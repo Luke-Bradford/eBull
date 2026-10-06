@@ -3,8 +3,16 @@
 -- #3614 item 4 slice 1 — sql/476's append-only triggers fired on UPDATE only, so the
 -- drill evidence could still be deleted. Recreate all five as BEFORE UPDATE OR DELETE
 -- (precedent: sql/299, sql/327). A fix-forward: 476 is already applied and hash-locked.
+-- The test harness empties tables under `session_replication_role = replica`, which
+-- skips these triggers (docs/review-prevention-log.md, #3323).
+--
+-- Also adds `positions_without_target`: the operator's rule is broker-side SL AND TP on
+-- every engine position, so a missing target is a book defect as a missing stop is.
 
 BEGIN;
+
+ALTER TABLE kill_switch_drill_events
+    ADD COLUMN IF NOT EXISTS positions_without_target INTEGER CHECK (positions_without_target >= 0);
 
 DROP TRIGGER IF EXISTS kill_switch_drill_events_append_only ON kill_switch_drill_events;
 CREATE TRIGGER kill_switch_drill_events_append_only
