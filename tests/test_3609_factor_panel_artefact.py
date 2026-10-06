@@ -114,13 +114,13 @@ def test_read_rf_takes_only_rf_in_the_window_and_checks_its_unit(tmp_path: Path)
         ["RF", "2021-06-01", "0.5", "decimal_return"],
     ]
     write_gz_lines(tmp_path / Frozen.snapshot("french_three_factor_daily"), rows)
-    assert read_rf(tmp_path, date(2014, 1, 1)) == {date(2019, 1, 2): 0.0001}
+    assert read_rf(tmp_path, date(2014, 1, 1), date(2021, 5, 31)) == {date(2019, 1, 2): 0.0001}
     (tmp_path / Frozen.snapshot("french_three_factor_daily")).unlink()
     write_gz_lines(
         tmp_path / Frozen.snapshot("french_three_factor_daily"), [["RF", "2019-01-02", "1", "percent_per_annum"]]
     )
     with pytest.raises(PanelError, match="unit"):
-        read_rf(tmp_path, date(2014, 1, 1))
+        read_rf(tmp_path, date(2014, 1, 1), date(2021, 5, 31))
 
 
 def test_every_value_read_in_the_builder_carries_the_hold_out_bound() -> None:

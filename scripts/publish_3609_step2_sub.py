@@ -4,8 +4,9 @@ Spec: ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"Slices" items 1 
 #3666). SEC DERA FSDS ``sub.txt`` for every quarter 2021q3 .. 2024q3, each parsed and validated by step 1's
 ``parse_fsds_sub``. Each quarter ZIP's sha256 is recorded and the ZIP discarded; only ``sub.txt`` is kept.
 
-These are stage-B data. Before any download the script requires the run's ``started`` and ``access_recorded``
-ledger rows and the committed access-log row they name, and it writes the run's ``sub_published`` row last (or
+These are stage-B data. Before any download the script requires the step 2 declaration to match this checkout
+(``check_declaration``), the run's ``started`` and ``access_recorded`` ledger rows and the committed access-log row
+they name, and it writes the run's ``sub_published`` row last (or
 ``failed``, which ends the run, if anything after the gate fails). The
 manifest names the run; the spec and construction hashes are on that run's ``started`` row.
 
@@ -33,15 +34,18 @@ import httpx
 import psycopg
 
 from app.config import settings
+from app.services.factor_book_declaration import CodeHashes, check_declaration
 from app.services.factor_book_ledger import (
     COMMITTED_LEDGER_PATH,
     LEDGER_PATH,
+    end_run_failed,
     recorded_access_id,
     require_committed_access,
 )
 from app.services.factor_book_reference import step2_sub_quarters
 from app.services.factor_panel_fidelity import append_ledger, read_ledger
 from app.services.factor_panel_reference import FSDS_SUB_URL, parse_fsds_sub, read_sub_member
+from app.services.trial_register import TRIAL_REGISTER
 from app.system.git_identity import head_commit, is_dirty
 
 MANIFEST_SCHEMA: Final = "factor-book-3609-step2-sub-v1"
@@ -69,6 +73,11 @@ def _clean_head() -> str:
     if is_dirty() is not False or commit is None:
         raise RuntimeError("refusing to publish from a dirty or unreadable checkout")
     return commit
+
+
+def _check_declared(rows: list[dict[str, Any]]) -> None:
+    """The step 2 declaration matches this checkout (spec §"Registration"), before the first stage-B read."""
+    check_declaration(TRIAL_REGISTER, rows, CodeHashes.current())
 
 
 def _download(client: httpx.Client, url: str, destination: Path) -> tuple[str, int]:
@@ -131,7 +140,9 @@ def publish(
     refusal there leaves the run open; any failure inside it ends the run.
     """
     git_sha = _clean_head()
-    access_id = recorded_access_id(read_ledger(committed_ledger, ledger), run_id, before=EVENT)
+    rows = read_ledger(committed_ledger, ledger)
+    _check_declared(rows)
+    access_id = recorded_access_id(rows, run_id, before=EVENT)
     confirm_access(run_id, access_id)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.mkdir()  # exclusive: an existing directory is refused, never resumed
@@ -170,22 +181,7 @@ def publish(
             except OSError as cleanup_error:
                 exc.add_note(f"{out} was not fully removed ({cleanup_error!r}); delete it, it holds stage-B files")
         finally:
-            # Stage-B files may already have been read, so the run ends here, whatever the cleanup raised: a retry
-            # needs a fresh run id and its own access row, never a second look under this one. A failure to write
-            # that row must not replace the error.
-            try:
-                append_ledger(
-                    ledger,
-                    {
-                        "run_id": run_id,
-                        "event": "failed",
-                        "at": datetime.now(UTC).isoformat(),
-                        "step": EVENT,
-                        "error": repr(exc),
-                    },
-                )
-            except Exception as ledger_error:
-                exc.add_note(f"the 'failed' ledger row was not written ({ledger_error!r}); end run {run_id} by hand")
+            end_run_failed(ledger, run_id, EVENT, exc)  # whatever the cleanup raised
         raise
 
 

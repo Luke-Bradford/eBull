@@ -24,6 +24,7 @@ import io
 import re
 import zipfile
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Final
 
@@ -42,6 +43,11 @@ QMJ_PDF_SHA256: Final = "761c42f91d5f00fa75c8fb2b3722530562096de9491c80badf9e5b4
 
 STEP2_SUB_FIRST_QUARTER: Final = (2021, 3)
 STEP2_SUB_LAST_QUARTER: Final = (2024, 3)
+#: Stage B (spec §"Dates, samples and the hold-out"): formations 2021-05 .. 2024-07, holding months 2021-06 ..
+#: 2024-08, so no price after 2024-08-31 is read.
+STAGE_B_FIRST_FORMATION: Final = date(2021, 5, 31)
+STAGE_B_LAST_FORMATION: Final = date(2024, 7, 31)
+STAGE_B_PRICE_BOUND: Final = date(2024, 8, 31)
 
 _HEADER: Final = re.compile(r" ?(\d{1,2}) (\S+) +(\S.*)")
 _RANGE: Final = re.compile(r" +(\d{4})-(\d{4})")
@@ -131,6 +137,9 @@ __all__ = [
     "SICCODES12_PATH",
     "SICCODES12_SHA256",
     "SICCODES12_URL",
+    "STAGE_B_FIRST_FORMATION",
+    "STAGE_B_LAST_FORMATION",
+    "STAGE_B_PRICE_BOUND",
     "STEP2_SUB_FIRST_QUARTER",
     "STEP2_SUB_LAST_QUARTER",
     "Ff12Industry",

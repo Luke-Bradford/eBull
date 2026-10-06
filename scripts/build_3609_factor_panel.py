@@ -6,11 +6,14 @@ ME rules live in ``app/services/factor_panel.py`` and the price rules in ``app/s
 this script supplies the DB reads and the pinned #3360 / #3361 / slice-1 artefacts, walks the 80 stage-A
 formations and writes one row per (M, series) examined, admitted or excluded, plus the census.
 
-Not here yet (slice 3c-ii): the published artefact with frozen inputs. Until then the output is a scratch file
-under ``var/research/3609_step1/``, not a step-2 input.
+Hold-out: every stage-A price read is bounded at ``PRICE_BOUND`` (2021-05-31); bundle and SUB reads are bounded
+by s(M) <= 2021-04-30.
 
-Hold-out: every price read is bounded at ``PRICE_BOUND`` (2021-05-31); bundle and SUB reads are bounded by
-s(M) <= 2021-04-30.
+Stage B (#3609 step 2 slice 2, ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"Slices" item 2) runs the
+same walk over formations 2021-05 .. 2024-07 with prices bounded at 2024-08-31, and adds the extended SUB artefact
+to the SIC reads. It is a stage-B read, so ``publish_stage_b`` refuses unless the step 2 declaration matches this
+checkout and the run's hold-out access is in its ledger and committed in the access log; it runs only through
+``--publish-stage-b``, never as a scratch run. Each stage's artefact verifies under its own pin map.
 
 Run: ``PYTHONPATH=. uv run python -m scripts.build_3609_factor_panel [--symbols AAPL,MSFT] [--formations
 2019-06-30]``.
@@ -28,7 +31,7 @@ import shutil
 import sys
 from bisect import bisect_right
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -38,6 +41,16 @@ from typing import Any, Final
 import psycopg
 
 from app.config import settings
+from app.services.factor_book_declaration import CodeHashes, check_declaration
+from app.services.factor_book_ledger import (
+    COMMITTED_LEDGER_PATH,
+    LEDGER_PATH,
+    end_run_failed,
+    recorded_access_id,
+    require_committed_access,
+    run_event,
+)
+from app.services.factor_book_reference import STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION, STAGE_B_PRICE_BOUND
 from app.services.factor_panel import (
     ACCOUNTING_CHARACTERISTICS,
     DO_BRANCHES,
@@ -74,7 +87,7 @@ from app.services.factor_panel_artefact import (
     write_gz_lines,
     write_json_once,
 )
-from app.services.factor_panel_fidelity import PRICE_CHARACTERISTICS
+from app.services.factor_panel_fidelity import PRICE_CHARACTERISTICS, append_ledger, read_ledger
 from app.services.factor_panel_prices import (
     DailyBar,
     DailyMonthly,
@@ -92,6 +105,7 @@ from app.services.security_linkage import Reason, load_security_linkage
 from app.services.series_termination import TERMINATION_RULE_VERSION, TerminationEvidence, classify_termination
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.total_return_reader import TOTAL_RETURN_SPLICE_VERSION
+from app.services.trial_register import TRIAL_REGISTER
 from app.services.universe_selection import (
     SURVIVORSHIP_FREE_VENDOR,
     UNIVERSE_SELECTION_RULE_VERSION,
@@ -138,6 +152,14 @@ MANIFEST_SCHEMA: Final = "factor-panel-3609-v1"
 MANIFEST_FILE: Final = "manifest.json"
 ROWS_FILE: Final = "rows.jsonl.gz"
 CENSUS_FILE: Final = "census.json"
+#: Stage A's pin map, the three manifests ``verify_artefact`` has always checked; stage B adds the extended SUB's.
+STAGE_A_PINS: Final = {
+    "pit_fundamentals_3360": BUNDLE[1],
+    "security_linkage_3361": LINKAGE[1],
+    "reference_3609": REFERENCE[1],
+}
+STEP2_SUB_PIN: Final = "reference_3609_step2_sub"
+STAGE_B_EVENT: Final = "stage_b_published"
 
 
 class Step:
@@ -153,6 +175,19 @@ class Step:
 
 
 # --------------------------------------------------------------------------- pure
+
+
+def price_bound(formations: Sequence[date]) -> date:
+    """The stage's price bound: 2021-05-31 for stage-A formations, 2024-08-31 for stage-B ones; a mix refuses."""
+    if max(formations) <= STAGE_A_LAST_FORMATION:
+        return PRICE_BOUND
+    if STAGE_B_FIRST_FORMATION <= min(formations) and max(formations) <= STAGE_B_LAST_FORMATION:
+        return STAGE_B_PRICE_BOUND
+    raise PanelError(f"formations {min(formations)} .. {max(formations)} are not within one stage")
+
+
+def stage_b_pins(step2_sub_sha256: str) -> dict[str, str]:
+    return {**STAGE_A_PINS, STEP2_SUB_PIN: step2_sub_sha256}
 
 
 def multiple_security_ciks(links: Mapping[int, str]) -> frozenset[str]:
@@ -211,28 +246,28 @@ ORDER BY d.bar_date
 """
 
 
-def spy_sessions(conn: psycopg.Connection[Any]) -> list[date]:
+def spy_sessions(conn: psycopg.Connection[Any], bound: date) -> list[date]:
     rows = conn.execute(
-        _SPY_SESSIONS_SQL, {"vendor": SURVIVORSHIP_FREE_VENDOR, "symbol": SPY_SYMBOL, "bound": PRICE_BOUND}
+        _SPY_SESSIONS_SQL, {"vendor": SURVIVORSHIP_FREE_VENDOR, "symbol": SPY_SYMBOL, "bound": bound}
     ).fetchall()
     return [row[0] for row in rows]
 
 
 def decision_bars(
-    conn: psycopg.Connection[Any], series_ids: Sequence[int], sessions: Sequence[date]
+    conn: psycopg.Connection[Any], series_ids: Sequence[int], sessions: Sequence[date], bound: date
 ) -> dict[tuple[int, date], Decimal]:
     params = {
         "series_ids": list(series_ids),
         "sessions": list(sessions),
-        "bound": PRICE_BOUND,
+        "bound": bound,
         "quarantine_version": QUARANTINE_RULE_SET_VERSION,
     }
     return {(int(sid), day): close for sid, day, close in conn.execute(_DECISION_BARS_SQL, params).fetchall()}
 
 
-def split_stamps(conn: psycopg.Connection[Any], series_ids: Sequence[int]) -> dict[int, list[SplitStamp]]:
+def split_stamps(conn: psycopg.Connection[Any], series_ids: Sequence[int], bound: date) -> dict[int, list[SplitStamp]]:
     out: dict[int, list[SplitStamp]] = defaultdict(list)
-    for sid, day, factor in conn.execute(_SPLITS_SQL, {"series_ids": list(series_ids), "bound": PRICE_BOUND}):
+    for sid, day, factor in conn.execute(_SPLITS_SQL, {"series_ids": list(series_ids), "bound": bound}):
         out[int(sid)].append(SplitStamp(day, Decimal(factor)))
     return out
 
@@ -276,7 +311,7 @@ WHERE o.snapshot_id = %(snapshot_id)s
   AND s.response_sha256 = %(response_sha256)s
 """
 #: The whole snapshot is counted against the slice 1 manifest (integrity, no values read); only observations up to
-#: ``PRICE_BOUND`` are read and frozen, so no hold-out value is accessed (§"Dates and stages", Stage A).
+#: the stage's price bound are read and frozen, so a stage-A build reads no hold-out value (§"Dates and stages").
 _SNAPSHOT_COUNT_SQL = "SELECT count(*)" + _SNAPSHOT_FROM
 _SNAPSHOT_SQL = (
     "SELECT o.series_key, o.observation_date, o.value::text, o.unit"
@@ -312,10 +347,15 @@ def reference_files(manifest: Mapping[str, Any]) -> list[tuple[str, str]]:
     return files
 
 
-def load_sub_sic(root: Path, expected_manifest_sha256: str) -> dict[str, int | None]:
-    """accession -> SUB ``sic`` over every pinned quarter, each file checked against the slice 1 manifest."""
+def load_sub_sic(
+    root: Path, expected_manifest_sha256: str, into: dict[str, int | None] | None = None
+) -> dict[str, int | None]:
+    """accession -> SUB ``sic`` over every pinned quarter, each file checked against its artefact's manifest.
+
+    ``into`` merges a second artefact's quarters (stage B's extended SUB) into the first's, under the same refusal
+    of an accession carrying two SIC codes."""
     manifest = reference_manifest(root, expected_manifest_sha256)
-    out: dict[str, int | None] = {}
+    out: dict[str, int | None] = {} if into is None else into
     for entry in manifest["fsds_sub"]:
         path = root / entry["path"]
         payload = path.read_bytes()
@@ -341,6 +381,7 @@ class Frozen:
     SPLITS = "split_stamps.jsonl.gz"
     DAILY = "daily.jsonl.gz"
     REFERENCE = "reference"
+    STEP2_SUB = "reference_step2_sub"
 
     @staticmethod
     def snapshot(dataset: str) -> str:
@@ -375,12 +416,29 @@ def _admitted_from(line: Mapping[str, Any]) -> AdmittedSeries:
     )
 
 
+def _copy_pinned(source: Path, target: Path, files: Iterable[tuple[str, str]]) -> None:
+    for relative, digest in files:
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / relative, destination)
+        if sha256_file(destination) != digest:
+            raise PanelError(f"reference file digest moved: {relative}")
+
+
 def dump_inputs(
-    conn: psycopg.Connection[Any], inputs: Path, *, symbols: frozenset[str] | None, formations: Sequence[date]
+    conn: psycopg.Connection[Any],
+    inputs: Path,
+    *,
+    symbols: frozenset[str] | None,
+    formations: Sequence[date],
+    step2_sub: tuple[Path, str] | None = None,
 ) -> None:
-    """Every DB read and reference file the build uses, written into ``inputs`` (which must not exist)."""
+    """Every DB read and reference file the build uses, written into ``inputs`` (which must not exist).
+
+    ``step2_sub`` is stage B's extended SUB artefact (root, manifest sha256), frozen beside step 1's reference."""
     inputs.mkdir(parents=True)
-    sessions = spy_sessions(conn)
+    bound = price_bound(formations)
+    sessions = spy_sessions(conn, bound)
     # Every session is frozen; the window and the decisions use ``read_inputs``'s filtered list, so both phases
     # derive s(M) from the same sessions.
     windowed = [s for s in sessions if s >= daily_start(formations)]
@@ -412,7 +470,7 @@ def dump_inputs(
         },
     )
     write_gz_lines(inputs / Frozen.ADMITTED, (_admitted_json(a, symbol_of.get(a.series_id)) for a in admitted))
-    bars = decision_bars(conn, ids, decision_days)
+    bars = decision_bars(conn, ids, decision_days, bound)
     write_gz_lines(
         inputs / Frozen.DECISION_BARS, ([sid, day.isoformat(), str(bars[sid, day])] for sid, day in sorted(bars))
     )
@@ -420,7 +478,7 @@ def dump_inputs(
         inputs / Frozen.SPLITS,
         (
             [sid, s.day.isoformat(), str(s.factor)]
-            for sid, stamps in sorted(split_stamps(conn, ids).items())
+            for sid, stamps in sorted(split_stamps(conn, ids, bound).items())
             for s in stamps
         ),
     )
@@ -436,20 +494,21 @@ def dump_inputs(
         total = 0 if row is None else row[0]
         if total != pinned["row_count"]:
             raise PanelError(f"pinned snapshot {dataset} holds {total} rows, manifest says {pinned['row_count']}")
-        rows = conn.execute(_SNAPSHOT_SQL, {**params, "bound": PRICE_BOUND}).fetchall()
+        rows = conn.execute(_SNAPSHOT_SQL, {**params, "bound": bound}).fetchall()
         write_gz_lines(inputs / Frozen.snapshot(dataset), ([k, d.isoformat(), v, u] for k, d, v, u in rows))
-    reference = inputs / Frozen.REFERENCE
-    for relative, digest in [("manifest.json", REFERENCE[1]), *reference_files(manifest)]:
-        target = reference / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(REFERENCE[0] / relative, target)
-        if sha256_file(target) != digest:
-            raise PanelError(f"reference file digest moved: {relative}")
+    _copy_pinned(REFERENCE[0], inputs / Frozen.REFERENCE, [("manifest.json", REFERENCE[1]), *reference_files(manifest)])
+    if step2_sub is not None:
+        sub_manifest = reference_manifest(*step2_sub)
+        _copy_pinned(
+            step2_sub[0],
+            inputs / Frozen.STEP2_SUB,
+            [("manifest.json", step2_sub[1]), *((e["path"], e["sha256"]) for e in sub_manifest["fsds_sub"])],
+        )
 
     params = {
         "series_ids": ids,
         "first": first_session,
-        "bound": PRICE_BOUND,
+        "bound": bound,
         "quarantine_version": QUARANTINE_RULE_SET_VERSION,
     }
     # A named cursor needs a transaction; the connection is autocommit.
@@ -460,12 +519,12 @@ def dump_inputs(
             out.write([int(sid), [[day.isoformat(), *rest] for _, day, *rest in rows]])
 
 
-def read_rf(inputs: Path, first: date) -> dict[date, float]:
-    """French daily RF from the frozen pinned snapshot, ``first`` .. ``PRICE_BOUND``."""
+def read_rf(inputs: Path, first: date, bound: date) -> dict[date, float]:
+    """French daily RF from the frozen pinned snapshot, ``first`` .. ``bound``."""
     out: dict[date, float] = {}
     for key, day, value, unit in read_gz_lines(inputs / Frozen.snapshot(RF_DATASET)):
         observed = date.fromisoformat(day)
-        if key != "RF" or not first <= observed <= PRICE_BOUND:
+        if key != "RF" or not first <= observed <= bound:
             continue
         if unit != RF_UNIT:
             raise PanelError(f"RF unit {unit!r} on {day}, expected {RF_UNIT!r}")
@@ -971,7 +1030,7 @@ def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
     splits: dict[int, list[SplitStamp]] = defaultdict(list)
     for sid, day, factor in read_gz_lines(inputs / Frozen.SPLITS):
         splits[sid].append(SplitStamp(date.fromisoformat(day), Decimal(factor)))
-    grid = SessionGrid.build(sessions, read_rf(inputs, first_day), decisions)
+    grid = SessionGrid.build(sessions, read_rf(inputs, first_day, price_bound(formations)), decisions)
     prices, flags, excused = price_series(inputs, admitted, grid, holding_last_sessions(formations, sessions), splits)
     # The two reads share their admission predicates: a decision bar the stream does not price is a drift.
     priced = {(sid, decisions[m]) for sid, per in prices.items() for m in per}
@@ -985,11 +1044,12 @@ def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
     return Inputs(decisions, admitted, symbol_of, bars, splits, prices, terciles, flags, excused)
 
 
-def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
+def walk(inputs: Inputs, reference: Path, step2_sub: tuple[Path, str] | None = None) -> Iterator[dict[str, Any]]:
     """Every (M, admitted series) row, in formation order for steps 1-2 and then CIK by CIK.
 
-    ``reference`` is the frozen copy of the slice 1 artefact; the #3360 bundle and #3361 linkage are published
-    artefacts read in place, pinned by manifest digest.
+    ``reference`` is the frozen copy of the slice 1 artefact, and ``step2_sub`` the frozen copy of stage B's
+    extended SUB with its manifest sha256; the #3360 bundle and #3361 linkage are published artefacts read in
+    place, pinned by manifest digest.
     """
     bundle = load_pit_fundamentals(BUNDLE[0], expected_manifest_sha256=BUNDLE[1])
     # The shard cache is private to ``pit_fundamentals``, a hashed policy file (#3360 and #3361 manifests), so it
@@ -1000,6 +1060,8 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
         raise PanelError("PitFundamentalsBundle._cache moved: per-CIK shard eviction would silently stop")
     linkage = load_security_linkage(LINKAGE[0], expected_manifest_sha256=LINKAGE[1])
     sub_sic = load_sub_sic(reference, REFERENCE[1])
+    if step2_sub is not None:
+        load_sub_sic(*step2_sub, into=sub_sic)
     print(
         f"admitted series {len(inputs.admitted)}; decision bars {len(inputs.bars)}; SUB accessions {len(sub_sic)}",
         flush=True,
@@ -1045,12 +1107,21 @@ def walk(inputs: Inputs, reference: Path) -> Iterator[dict[str, Any]]:
             print(f"  {done}/{len(by_cik)} CIKs", flush=True)
 
 
-def build(inputs: Path, formations: Sequence[date], rows_path: Path, census_path: Path) -> dict[str, Any]:
-    """Rows and census from a frozen ``inputs/``; returns the census summary plus the rows count."""
+def build(
+    inputs: Path,
+    formations: Sequence[date],
+    rows_path: Path,
+    census_path: Path,
+    step2_sub_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Rows and census from a frozen ``inputs/``; returns the census summary plus the rows count.
+
+    ``step2_sub_sha256`` is stage B's: the extended SUB is read from ``inputs/`` under that manifest digest."""
     loaded = read_inputs(inputs, formations)
+    step2_sub = None if step2_sub_sha256 is None else (inputs / Frozen.STEP2_SUB, step2_sub_sha256)
     tally = Census()
     with GzLines(rows_path) as handle:
-        for row in walk(loaded, inputs / Frozen.REFERENCE):
+        for row in walk(loaded, inputs / Frozen.REFERENCE, step2_sub):
             tally.add(row)
             handle.write(row)
         count = handle.count
@@ -1063,7 +1134,10 @@ def build(inputs: Path, formations: Sequence[date], rows_path: Path, census_path
     )
     summary["me_checks"] = tally.checks_json()
     # Check 4's chain runs over the run's formations only: a subset run's rows are diagnostics (Amendment 2).
-    summary["chain_complete"] = tuple(formations) == formation_months()
+    summary["chain_complete"] = tuple(formations) in (
+        formation_months(),
+        formation_months(STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION),
+    )
     summary["daily_screen_flags_by_year"] = dict(sorted(loaded.flags_by_year.items()))
     summary["daily_screen_excused_unexplained_by_year"] = dict(sorted(loaded.excused_unexplained_by_year.items()))
     write_json_once(census_path, summary)
@@ -1077,61 +1151,92 @@ def construction_sources() -> dict[str, str]:
     return import_closure([Path(__file__), REPORT_PATH], REPO_ROOT, unhashed=UNHASHED_SOURCES)
 
 
-def publish(root: Path, formations: Sequence[date]) -> Path:
-    """§"Panel artefact": exclusive directory, inputs frozen first, manifest last; a dirty checkout is refused."""
+def _clean_head() -> str:
     if is_dirty() is not False:
         raise PanelError("refusing to publish from a dirty (or unreadable) checkout")
     head = head_commit()
     if head is None:
         raise PanelError("refusing to publish without a readable HEAD")
+    return head
+
+
+def _publish_artefact(
+    out: Path,
+    formations: Sequence[date],
+    *,
+    head: str,
+    stage: str,
+    pins: Mapping[str, str],
+    versions: Callable[[], dict[str, Any]],
+    step2_sub: tuple[Path, str] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+) -> None:
+    """Inputs frozen first under one repeatable-read snapshot, then the build, the manifest last.
+
+    ``versions`` returns the spec and construction hashes the manifest records; it runs before and after the build
+    and a change refuses. ``out`` must already exist and be empty; the caller removes it on failure.
+    """
+    before = versions()  # before the run: what is hashed is what ran
+    with psycopg.connect(settings.database_url) as conn:
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+        conn.read_only = True
+        with conn.transaction():
+            dump_inputs(conn, out / "inputs", symbols=None, formations=formations, step2_sub=step2_sub)
+    result = build(
+        out / "inputs", formations, out / ROWS_FILE, out / CENSUS_FILE, None if step2_sub is None else step2_sub[1]
+    )
+    if versions() != before:
+        raise PanelError("construction sources or the spec changed during the run")
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "stage": stage,
+        "git_sha": head,
+        "published_at": datetime.now(UTC).isoformat(),
+        **dict(provenance or {}),
+        "pinned_manifests": dict(pins),
+        "formations": [m.isoformat() for m in formations],
+        "inputs": {
+            p.relative_to(out).as_posix(): sha256_file(p) for p in sorted((out / "inputs").rglob("*")) if p.is_file()
+        },
+        "rule_versions": {
+            "TOTAL_RETURN_SPLICE_VERSION": TOTAL_RETURN_SPLICE_VERSION,
+            "UNIVERSE_SELECTION_RULE_VERSION": UNIVERSE_SELECTION_RULE_VERSION,
+            "TERMINATION_RULE_VERSION": TERMINATION_RULE_VERSION,
+            "QUARANTINE_RULE_SET_VERSION": QUARANTINE_RULE_SET_VERSION,
+        },
+        **before,
+        "rows": {
+            "path": ROWS_FILE,
+            "count": result["rows"],
+            "sha256": sha256_file(out / ROWS_FILE),
+            "content_sha256": gz_content_sha256(out / ROWS_FILE),
+        },
+        "census": {"path": CENSUS_FILE, "sha256": sha256_file(out / CENSUS_FILE)},
+    }
+    write_json_once(out / MANIFEST_FILE, manifest)
+    fsync_dir(out)
+
+
+def _stage_a_versions() -> dict[str, Any]:
+    sources = construction_sources()
+    spec_sha256 = sha256_file(SPEC_PATH)
+    return {
+        "spec_sha256": spec_sha256,
+        "construction_sources": sources,
+        "construction_versions": construction_versions(
+            [*ACCOUNTING_CHARACTERISTICS, *PRICE_CHARACTERISTICS], spec_sha256, sources
+        ),
+    }
+
+
+def publish(root: Path, formations: Sequence[date]) -> Path:
+    """§"Panel artefact": exclusive directory, inputs frozen first, manifest last; a dirty checkout is refused."""
+    head = _clean_head()
     out = root / f"{datetime.now(UTC).date().isoformat()}-{head[:8]}-stageA"
     root.mkdir(parents=True, exist_ok=True)
     out.mkdir()  # exclusive: an existing artefact directory is refused, never resumed
     try:
-        sources = construction_sources()  # before the run: what is hashed is what ran
-        spec_sha256 = sha256_file(SPEC_PATH)
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
-            dump_inputs(conn, out / "inputs", symbols=None, formations=formations)
-        result = build(out / "inputs", formations, out / ROWS_FILE, out / CENSUS_FILE)
-        if construction_sources() != sources or sha256_file(SPEC_PATH) != spec_sha256:
-            raise PanelError("construction sources or the spec changed during the run")
-        manifest = {
-            "schema": MANIFEST_SCHEMA,
-            "stage": "A",
-            "git_sha": head,
-            "published_at": datetime.now(UTC).isoformat(),
-            "spec_sha256": spec_sha256,
-            "pinned_manifests": {
-                "pit_fundamentals_3360": BUNDLE[1],
-                "security_linkage_3361": LINKAGE[1],
-                "reference_3609": REFERENCE[1],
-            },
-            "formations": [m.isoformat() for m in formations],
-            "inputs": {
-                p.relative_to(out).as_posix(): sha256_file(p)
-                for p in sorted((out / "inputs").rglob("*"))
-                if p.is_file()
-            },
-            "rule_versions": {
-                "TOTAL_RETURN_SPLICE_VERSION": TOTAL_RETURN_SPLICE_VERSION,
-                "UNIVERSE_SELECTION_RULE_VERSION": UNIVERSE_SELECTION_RULE_VERSION,
-                "TERMINATION_RULE_VERSION": TERMINATION_RULE_VERSION,
-                "QUARANTINE_RULE_SET_VERSION": QUARANTINE_RULE_SET_VERSION,
-            },
-            "construction_sources": sources,
-            "construction_versions": construction_versions(
-                [*ACCOUNTING_CHARACTERISTICS, *PRICE_CHARACTERISTICS], spec_sha256, sources
-            ),
-            "rows": {
-                "path": ROWS_FILE,
-                "count": result["rows"],
-                "sha256": sha256_file(out / ROWS_FILE),
-                "content_sha256": gz_content_sha256(out / ROWS_FILE),
-            },
-            "census": {"path": CENSUS_FILE, "sha256": sha256_file(out / CENSUS_FILE)},
-        }
-        write_json_once(out / MANIFEST_FILE, manifest)
-        fsync_dir(out)
+        _publish_artefact(out, formations, head=head, stage="A", pins=STAGE_A_PINS, versions=_stage_a_versions)
     except BaseException:
         # ``out`` was created by the exclusive mkdir above, so it holds only this build's output.
         shutil.rmtree(out, ignore_errors=True)
@@ -1139,16 +1244,76 @@ def publish(root: Path, formations: Sequence[date]) -> Path:
     return out
 
 
-def verify_artefact(artefact: Path, manifest_sha256: str) -> dict[str, Any]:
-    """The artefact's manifest, after checking its digest, schema, pins, inputs and published outputs."""
+def publish_stage_b(
+    root: Path,
+    run_id: str,
+    *,
+    confirm_access: Callable[[str, int], None],
+    ledger: Path = LEDGER_PATH,
+    committed_ledger: Path = COMMITTED_LEDGER_PATH,
+) -> tuple[Path, str]:
+    """Step 2 slice 2: the stage-B artefact, built only inside the declared run; returns it and its manifest sha256.
+
+    Refuses before any stage-B read unless the step 2 declaration matches this checkout, the run's ledger holds
+    ``started``, ``access_recorded`` and ``sub_published`` with no ``stage_b_published`` or terminal row, and the
+    access row is committed. The extended SUB is the run's own ``sub_published`` artefact. Any failure after the
+    gate ends the run with a ``failed`` row.
+    """
+    head = _clean_head()
+    rows = read_ledger(committed_ledger, ledger)
+    check_declaration(TRIAL_REGISTER, rows, CodeHashes.current())
+    access_id = recorded_access_id(rows, run_id, before=STAGE_B_EVENT)
+    published_sub = run_event(rows, run_id, "sub_published")
+    step2_sub = (Path(published_sub["artefact"]), str(published_sub["manifest_sha256"]))
+    confirm_access(run_id, access_id)
+    out = root / f"{datetime.now(UTC).date().isoformat()}-{head[:8]}-stageB-{run_id}"
+    root.mkdir(parents=True, exist_ok=True)
+    out.mkdir()  # exclusive: an existing artefact directory is refused, never resumed
+    try:
+        if reference_manifest(*step2_sub).get("run_id") != run_id:
+            raise PanelError(f"the extended SUB artefact {step2_sub[0]} was not published by run {run_id}")
+        _publish_artefact(
+            out,
+            formation_months(STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION),
+            head=head,
+            stage="B",
+            pins=stage_b_pins(step2_sub[1]),
+            versions=lambda: dataclasses.asdict(CodeHashes.current()),
+            step2_sub=step2_sub,
+            provenance={"run_id": run_id, "access_id": access_id},
+        )
+        manifest_sha256 = sha256_file(out / MANIFEST_FILE)
+        append_ledger(
+            ledger,
+            {
+                "run_id": run_id,
+                "event": STAGE_B_EVENT,
+                "at": datetime.now(UTC).isoformat(),
+                "artefact": str(out),
+                "manifest_sha256": manifest_sha256,
+            },
+        )
+        return out, manifest_sha256
+    except BaseException as exc:
+        try:
+            shutil.rmtree(out, ignore_errors=True)
+        finally:
+            end_run_failed(ledger, run_id, STAGE_B_EVENT, exc)
+        raise
+
+
+def verify_artefact(artefact: Path, manifest_sha256: str, pins: Mapping[str, str] = STAGE_A_PINS) -> dict[str, Any]:
+    """The artefact's manifest, after checking its digest, schema, pins, inputs and published outputs.
+
+    ``pins`` is the stage's expected pin map: ``STAGE_A_PINS``, or ``stage_b_pins`` of the run's extended SUB
+    manifest digest. An artefact of the other stage, or with another SUB, refuses."""
     if sha256_file(artefact / MANIFEST_FILE) != manifest_sha256:
         raise PanelError(f"artefact manifest digest moved: {artefact}")
     manifest = json.loads((artefact / MANIFEST_FILE).read_bytes())
     if manifest.get("schema") != MANIFEST_SCHEMA:
         raise PanelError(f"artefact schema {manifest.get('schema')!r}, expected {MANIFEST_SCHEMA!r}")
-    pinned = {"pit_fundamentals_3360": BUNDLE[1], "security_linkage_3361": LINKAGE[1], "reference_3609": REFERENCE[1]}
-    if manifest["pinned_manifests"] != pinned:
-        raise PanelError("the artefact's pinned bundle, linkage or reference differs from this code's pins")
+    if manifest["pinned_manifests"] != dict(pins):
+        raise PanelError("the artefact's pinned bundle, linkage or reference differs from this stage's pins")
     listed = {p.relative_to(artefact).as_posix() for p in (artefact / "inputs").rglob("*") if p.is_file()}
     if listed != set(manifest["inputs"]):
         raise PanelError("the artefact's inputs/ does not match its manifest's file list")
@@ -1165,7 +1330,9 @@ def verify_artefact(artefact: Path, manifest_sha256: str) -> dict[str, Any]:
 
 
 def replay(artefact: Path, manifest_sha256: str, stem: Path) -> bool:
-    """Rebuild a published artefact from its own ``inputs/`` under the current code; True when rows and census match."""
+    """Rebuild a published stage-A artefact from its own ``inputs/`` under the current code; True when rows and
+    census match. Stage A only: a stage-B artefact fails ``verify_artefact`` under stage A's pins, so no stage-B
+    data is read outside the declared run."""
     manifest = verify_artefact(artefact, manifest_sha256)
     rows_path, census_path = stem.with_suffix(".jsonl.gz"), stem.with_suffix(".census.json")
     rows_path.unlink(missing_ok=True)
@@ -1201,15 +1368,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--publish", action="store_true", help="publish the full stage-A artefact (clean checkout)")
     parser.add_argument("--publish-root", type=Path, default=PUBLISH_ROOT)
-    parser.add_argument("--replay", type=Path, help="a published artefact to rebuild from its own inputs/")
+    parser.add_argument(
+        "--publish-stage-b", metavar="RUN_ID", help="step 2's declared run: publish the stage-B artefact (gated)"
+    )
+    parser.add_argument("--replay", type=Path, help="a published stage-A artefact to rebuild from its own inputs/")
     parser.add_argument("--replay-manifest-sha256", help="the replayed artefact's pinned manifest digest")
     args = parser.parse_args(argv)
     if (args.replay is None) != (args.replay_manifest_sha256 is None):
         parser.error("--replay and --replay-manifest-sha256 go together")
-    if (args.publish or args.replay) and (args.symbols or args.formations):
-        parser.error("--publish and --replay cover the full stage-A scope; --symbols/--formations are scratch-only")
-    if args.publish and args.replay:
-        parser.error("--publish and --replay are separate runs")
+    modes = [args.publish, args.replay is not None, args.publish_stage_b is not None]
+    if any(modes) and (args.symbols or args.formations):
+        parser.error(
+            "--publish, --publish-stage-b and --replay cover a full stage; --symbols/--formations are scratch-only"
+        )
+    if sum(modes) > 1:
+        parser.error("--publish, --publish-stage-b and --replay are separate runs")
+    if args.publish_stage_b is not None:
+
+        def confirm(run_id: str, access_id: int) -> None:
+            # A fresh connection: it sees the access row only if the run committed it.
+            with psycopg.connect(settings.database_url) as conn:
+                require_committed_access(conn, run_id, access_id)
+
+        out, digest = publish_stage_b(args.publish_root, args.publish_stage_b, confirm_access=confirm)
+        print(json.dumps({"published": str(out), "manifest_sha256": digest}, indent=1))
+        return 0
     if args.replay:
         stem = args.out or OUT_DIR / f"replay-{args.replay.name}"
         stem.parent.mkdir(parents=True, exist_ok=True)
@@ -1219,7 +1402,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         tuple(date.fromisoformat(m) for m in args.formations.split(",")) if args.formations else formation_months()
     )
     if max(formations) > STAGE_A_LAST_FORMATION:
-        raise PanelError("stage A ends at 2021-04-30; later formations are step 2's, under its declaration")
+        raise PanelError("stage A ends at 2021-04-30; later formations are step 2's, only via --publish-stage-b")
     if args.publish:
         out = publish(args.publish_root, formations)
         print(json.dumps({"published": str(out), "manifest_sha256": sha256_file(out / MANIFEST_FILE)}, indent=1))

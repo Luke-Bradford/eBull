@@ -9,10 +9,13 @@ row. ``record_holdout_access`` does not enforce a declaration for this trial (it
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
 import psycopg
+
+from app.services.factor_panel_fidelity import append_ledger
 
 STRATEGY_ID: Final = "3609-step2-book"
 STRATEGY_VERSION: Final = "v1"
@@ -85,6 +88,36 @@ def require_committed_access(conn: psycopg.Connection[Any], run_id: str, access_
         )
 
 
+def run_event(rows: Sequence[Mapping[str, Any]], run_id: str, event: str) -> Mapping[str, Any]:
+    """The run's single ``event`` row; refuses on none or several."""
+    found = [row for row in rows if row.get("run_id") == run_id and row.get("event") == event]
+    if len(found) != 1:
+        raise StageBAccessError(f"run {run_id}: {len(found)} {event!r} rows; exactly one is required")
+    return found[0]
+
+
+def end_run_failed(ledger: Path, run_id: str, step: str, exc: BaseException) -> None:
+    """Write the run's ``failed`` row after a stage-B step failed past its gate.
+
+    Stage-B data may already have been read, so the run ends whatever went wrong: a retry needs a fresh run id and
+    its own access row, never a second look under this one. A failure to write the row is attached to ``exc``
+    rather than replacing it.
+    """
+    try:
+        append_ledger(
+            ledger,
+            {
+                "run_id": run_id,
+                "event": "failed",
+                "at": datetime.now(UTC).isoformat(),
+                "step": step,
+                "error": repr(exc),
+            },
+        )
+    except Exception as ledger_error:
+        exc.add_note(f"the 'failed' ledger row was not written ({ledger_error!r}); end run {run_id} by hand")
+
+
 __all__ = [
     "COMMITTED_LEDGER_PATH",
     "LEDGER_PATH",
@@ -92,6 +125,8 @@ __all__ = [
     "STRATEGY_VERSION",
     "StageBAccessError",
     "access_purpose",
+    "end_run_failed",
     "recorded_access_id",
     "require_committed_access",
+    "run_event",
 ]
