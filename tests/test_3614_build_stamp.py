@@ -56,6 +56,14 @@ def test_explicit_options_keep_the_inherited_stamp(monkeypatch: pytest.MonkeyPat
     )
 
 
+def test_an_inherited_non_stamp_option_never_beats_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An exported statement_timeout must not override connect_job's per-job bound.
+    monkeypatch.setenv("PGOPTIONS", f"-c statement_timeout=0 -c ebull.code_commit={SHA}")
+    assert build_stamp.with_inherited_pgoptions("-c statement_timeout=5") == (
+        f"-c statement_timeout=0 -c statement_timeout=5 -c ebull.code_commit={SHA}"
+    )
+
+
 def test_connect_job_passes_the_stamp_with_its_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.jobs import job_connection
 

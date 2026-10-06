@@ -76,39 +76,48 @@ def build_stamp_settings() -> dict[str, str]:
     return stamp
 
 
+def _split_stamp(pgoptions: str) -> tuple[list[str], list[str]]:
+    """``pgoptions`` as (everything else, the ``-c ebull.*`` pairs ``with_build_stamp`` wrote)."""
+    tokens = pgoptions.split()
+    rest: list[str] = []
+    stamp: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("ebull."):
+            stamp += tokens[i : i + 2]
+            i += 2
+            continue
+        rest.append(tokens[i])
+        i += 1
+    return rest, stamp
+
+
 def with_build_stamp(pgoptions: str, stamp: dict[str, str]) -> str:
     """``pgoptions`` with any earlier stamp removed and ``stamp`` appended.
 
     A respawned child inherits its parent's environment, so a stamp already
     present is replaced rather than appended to.
     """
-    tokens = pgoptions.split()
-    kept: list[str] = []
-    i = 0
-    while i < len(tokens):
-        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("ebull."):
-            i += 2
-            continue
-        kept.append(tokens[i])
-        i += 1
+    kept, _ = _split_stamp(pgoptions)
     for name, value in stamp.items():
         kept += ["-c", f"{name}={value}"]
     return " ".join(kept)
 
 
 def with_inherited_pgoptions(options: str) -> str:
-    """An explicit libpq ``options`` value with this process's ``PGOPTIONS`` appended after it.
+    """An explicit libpq ``options`` value merged with this process's ``PGOPTIONS``.
 
     libpq uses ``PGOPTIONS`` only when ``options`` is not given, so a caller that
     passes its own (``connect_job``'s ``statement_timeout``) would otherwise
-    connect unstamped. The inherited value goes LAST because the server applies
-    a repeated setting last-wins, whatever its spelling (``-c``, ``-c<name>``,
-    ``--<name>``, any case), so a caller cannot override the stamp. Parsing the
-    caller's string for stamp names instead was a losing game against those
-    spellings. ``PGOPTIONS`` holds only the stamp in every launcher here, so
-    nothing else of the caller's is overridden.
+    connect unstamped. The server applies a repeated setting last-wins, whatever
+    its spelling (``-c``, ``-c<name>``, ``--<name>``, any case), so the order is
+    the whole rule: any other inherited option first, so the caller's own value
+    beats it; then the caller's; then the stamp, so nothing the caller writes can
+    override it. Only the stamp's own canonical pairs are parsed out; the
+    caller's string is never parsed.
     """
-    return f"{options} {os.environ.get('PGOPTIONS', '')}".strip()
+    rest, stamp = _split_stamp(os.environ.get("PGOPTIONS", ""))
+    return " ".join([*rest, options, *stamp]).strip()
 
 
 def install_build_stamp() -> None:
