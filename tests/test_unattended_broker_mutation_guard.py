@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -280,23 +281,29 @@ _ENTRIES: Final[frozenset[str]] = frozenset({"place_demo_core_order", "place_dem
 _ENTRY_GUARD_CALL: Final[str] = "refuse_entry_if_unmerged_code"
 
 
-def _repo(root: Path) -> Path:
-    def git(*args: str) -> None:
-        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+def _run_git(root: Path, *args: str) -> None:
+    """Scrubbed of GIT_*: the pre-push hook exports GIT_DIR, and `git -C` does not override it, so an
+    unscrubbed `init`/`config`/`commit` here rewrites the REAL repository (it did, once: core.bare,
+    user.*, and refs/remotes/origin/main — #2658's trap, re-learned in #3614)."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, env=env)
 
-    git("init", "-q", "-b", "main")
-    git("config", "user.email", "t@example.com")
-    git("config", "user.name", "t")
+
+def _repo(root: Path) -> Path:
+    root.mkdir(exist_ok=True)
+    _run_git(root, "init", "-q", "-b", "main")
+    _run_git(root, "config", "user.email", "t@example.com")
+    _run_git(root, "config", "user.name", "t")
     (root / "a.py").write_text("x = 1\n")
-    git("add", "a.py")
-    git("commit", "-q", "-m", "one")
-    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    _run_git(root, "add", "a.py")
+    _run_git(root, "commit", "-q", "-m", "one")
+    _run_git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
     return root
 
 
 def _commit(root: Path, text: str) -> None:
     (root / "a.py").write_text(text)
-    subprocess.run(["git", "-C", str(root), "commit", "-qam", "next"], check=True, capture_output=True)
+    _run_git(root, "commit", "-qam", "next")
 
 
 def test_merged_clean_checkout_is_allowed(tmp_path: Path) -> None:
@@ -310,8 +317,8 @@ def test_a_checkout_behind_origin_main_is_allowed(tmp_path: Path) -> None:
     """A fetch advances origin/main before anyone re-detaches; older merged code is reviewed code."""
     root = _repo(tmp_path)
     _commit(root, "x = 2\n")
-    subprocess.run(["git", "-C", str(root), "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
-    subprocess.run(["git", "-C", str(root), "checkout", "-q", "--detach", "HEAD~1"], check=True)
+    _run_git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _run_git(root, "checkout", "-q", "--detach", "HEAD~1")
     assert unmerged_code_reason(root) is None
 
 
@@ -329,8 +336,17 @@ def test_a_modified_tracked_file_is_refused(tmp_path: Path) -> None:
 
 def test_unreadable_git_state_refuses(tmp_path: Path) -> None:
     root = _repo(tmp_path)
-    subprocess.run(["git", "-C", str(root), "update-ref", "-d", "refs/remotes/origin/main"], check=True)
+    _run_git(root, "update-ref", "-d", "refs/remotes/origin/main")
     assert (reason := unmerged_code_reason(root)) is not None and reason.startswith("git merge-base failed")
+
+
+def test_a_hook_exported_git_dir_does_not_redirect_the_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under a git hook GIT_DIR names the hook's repository; the guard must still read `root`."""
+    root = _repo(tmp_path / "checked")
+    _commit(root, "x = 2\n")
+    other = _repo(tmp_path / "hook")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    assert (reason := unmerged_code_reason(root)) is not None and "is not on origin/main" in reason
 
 
 def test_no_git_checkout_is_not_checked(tmp_path: Path) -> None:
