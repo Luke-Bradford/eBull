@@ -84,17 +84,21 @@ class FileChurn:
     deleted: int | None
 
 
-def _git(args: list[str], cwd: Path) -> str:
+def _git(args: list[str], cwd: Path, stdin: str | None = None) -> str:
     # A pre-push hook exports GIT_DIR; scrub it so ``cwd`` decides the repo.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    proc = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+    proc = subprocess.run(["git", *args], cwd=cwd, env=env, input=stdin, capture_output=True, text=True)
     if proc.returncode != 0:
         raise CheckError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
     return proc.stdout
 
 
 def resolve_commit(ref: str, cwd: Path) -> str:
-    return _git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd).strip()
+    try:
+        return _git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd).strip()
+    except CheckError:
+        # ``--quiet`` leaves stderr empty, so name the ref ourselves.
+        raise CheckError(f"{ref!r} does not resolve to a commit") from None
 
 
 def parse_numstat_z(raw: str) -> list[FileChurn]:
@@ -113,7 +117,7 @@ def parse_numstat_z(raw: str) -> list[FileChurn]:
         added, deleted, path = parts
         if added == "-" and deleted == "-":
             rows.append(FileChurn(path, None, None))
-        elif added.isdigit() and deleted.isdigit():
+        elif added.isascii() and added.isdigit() and deleted.isascii() and deleted.isdigit():
             rows.append(FileChurn(path, int(added), int(deleted)))
         else:
             raise CheckError(f"unparseable numstat counts: {record!r}")
@@ -122,7 +126,8 @@ def parse_numstat_z(raw: str) -> list[FileChurn]:
 
 def unmatched_patterns(head: str, cwd: Path) -> list[str]:
     """Patterns that match no file at ``head``, using git's own pathspec engine."""
-    empty_tree = _git(["hash-object", "-t", "tree", "/dev/null"], cwd).strip()
+    # Empty stdin rather than /dev/null, which native Windows git cannot open.
+    empty_tree = _git(["hash-object", "-t", "tree", "--stdin"], cwd, stdin="").strip()
     return [
         p
         for p in MONEY_PATH

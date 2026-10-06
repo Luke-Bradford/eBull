@@ -121,11 +121,11 @@ def test_every_pattern_matches_in_the_fixture(repo: Path) -> None:
 
 
 def test_unknown_base_is_an_error_not_zero(repo: Path) -> None:
-    with pytest.raises(cap.CheckError):
+    with pytest.raises(cap.CheckError, match="'no-such-ref' does not resolve to a commit"):
         cap.resolve_commit("no-such-ref", repo)
 
 
-@pytest.mark.parametrize("record", ["12\t3", "a\t3\tf.py", "-\t3\tf.py"])
+@pytest.mark.parametrize("record", ["12\t3", "a\t3\tf.py", "-\t3\tf.py", "\u0663\t3\tf.py"])
 def test_malformed_numstat_is_an_error(record: str) -> None:
     with pytest.raises(cap.CheckError):
         cap.parse_numstat_z(record + "\0")
