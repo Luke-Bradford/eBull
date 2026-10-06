@@ -38,7 +38,10 @@ def test_stamped_connection_writes_its_build_identity(
         assert _insert_decision(stamped) == (SHA, False, LOCK)
         instrument_id = 993_614
         stamped.execute(
-            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, 'STMP', 'Stamp', TRUE)",
+            """
+            INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable)
+            VALUES (%s, 'STMP', 'Stamp', TRUE)
+            """,
             (instrument_id,),
         )
         order = stamped.execute(

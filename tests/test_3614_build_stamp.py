@@ -68,3 +68,17 @@ def test_connect_job_passes_the_stamp_with_its_timeout(monkeypatch: pytest.Monke
     finally:
         job_connection.job_statement_timeout_ms.reset(token)
     assert seen["options"] == f"-c ebull.code_commit={SHA} -c statement_timeout=7"
+
+
+def test_non_dev_pass_through_installs_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # dev_reload runs the daemon in-process outside dev; that path must stamp too (Codex ckpt-2).
+    from app.jobs import __main__ as jobs_entry
+    from app.jobs import dev_reload
+
+    calls: list[str] = []
+    monkeypatch.setattr(dev_reload.settings, "app_env", "production")
+    monkeypatch.setattr(jobs_entry, "install_build_stamp", lambda: calls.append("stamp"))
+    monkeypatch.setattr(jobs_entry, "serve", lambda: calls.append("serve") or 0)
+    with pytest.raises(SystemExit):
+        dev_reload.main()
+    assert calls == ["stamp", "serve"]

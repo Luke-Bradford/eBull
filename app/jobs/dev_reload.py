@@ -648,14 +648,15 @@ def main() -> None:
     if settings.app_env not in DEV_LIKE_ENVS:
         # Pass-through: identical to `python -m app.jobs`, no watcher and
         # no supervising process. Keeps this module safe to wire into any
-        # launcher without branching per environment.
-        from app.jobs.__main__ import serve
+        # launcher without branching per environment. ``main`` and not ``serve``,
+        # so the #3614 build stamp is installed on this path too.
+        from app.jobs.__main__ import main as jobs_main
 
         logger.info(
             "jobs dev-reload: app_env=%s is not dev-like — auto-reload OFF, running daemon in-process",
             settings.app_env,
         )
-        sys.exit(serve())
+        jobs_main()
     sys.exit(_supervise())
 
 
