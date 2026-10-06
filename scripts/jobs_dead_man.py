@@ -31,6 +31,11 @@ a macOS notification, a JSON status file and a stderr line. It re-alerts every
 ``--renotify-s`` while still stale and sends one recovery notice. State lives
 in the status file, which is what lets a one-shot run de-duplicate.
 
+Each pass then runs the refusal-surface watch (``scripts/operator_alert_watch.py``:
+kill-switch changes, held execution blocks, sandbox and loss-limit entry
+refusals) on the same schedule, unless ``job_runs`` was unreadable. Its failure
+is logged and never changes this script's verdict or exit code.
+
 ``--test-push`` sends one test notification and exits, to check the phone
 subscription. Runbook: ``docs/operator/runbooks/jobs-dead-man.md``.
 """
@@ -218,6 +223,19 @@ def notify(action: Action, state: State, *, note: str = "") -> bool:
     return pushed or (config_from_env() is None and shown)
 
 
+def run_alert_watch() -> None:
+    """One refusal-surface pass (#3614 item 3, slice B), contained."""
+    try:
+        from scripts import operator_alert_watch
+
+        undelivered = operator_alert_watch.run()
+    except Exception as exc:  # noqa: BLE001 — the dead-man's own verdict must stand
+        print(f"[jobs-dead-man] operator alert watch failed: {exc!r}", file=sys.stderr, flush=True)
+        return
+    if undelivered:
+        print(f"[jobs-dead-man] operator alert watch: {undelivered} notice(s) undelivered", file=sys.stderr, flush=True)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stale-after-s", type=float, default=_STALE_AFTER_S)
@@ -258,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
         delivered = notify(action, state, note=note)
         state = settle(prior, state, delivered=delivered)
     save_state(args.status_file, state)
+    if error is None:
+        run_alert_watch()
     if not dark:
         return 0
     return 2 if delivered else 3
