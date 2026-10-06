@@ -117,11 +117,13 @@ def test_sandbox_passes_and_commits_nothing_to_the_kill_row(ebull_test_conn: Con
     assert _audit_count(ebull_test_conn) == audits
 
     event = ebull_test_conn.execute(
-        "SELECT entry_verdict, book_verdict, estimated_time_to_flat_s, estimate_null_reason, mode, run_token "
+        "SELECT entry_verdict, book_verdict, estimated_time_to_flat_s, estimate_null_reason, mode, run_token, "
+        "positions_without_stop, positions_without_target "
         "FROM kill_switch_drill_events WHERE kill_switch_drill_event_id = %s",
         (run.event_id,),
     ).fetchone()
-    assert event == ("passed", "ok", Decimal("0"), None, "sandbox", run.run_token)
+    # The defect counts are written, not left at their NULL default (sql/477's column included).
+    assert event == ("passed", "ok", Decimal("0"), None, "sandbox", run.run_token, 0, 0)
     rows = ebull_test_conn.execute(
         "SELECT chokepoint, outcome FROM kill_switch_drill_chokepoints WHERE event_id = %s ORDER BY 1",
         (run.event_id,),

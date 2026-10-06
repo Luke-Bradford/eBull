@@ -638,6 +638,7 @@ def _book_fields(run: DrillRun) -> dict[str, Any]:
             "samples_n": None,
             "not_applied": None,
             "r_max": None,
+            "opportunity_at": None,
         }
     unmapped, multi = mapping_defects(snap.positions)
     no_stop = sum(1 for p in snap.positions if p.broker_position_id is not None and not p.stop_present)
@@ -666,7 +667,7 @@ def _book_fields(run: DrillRun) -> dict[str, Any]:
 def record_drill(lock_conn: psycopg.Connection[Any], run: DrillRun) -> int:
     """Write the event and its children in one transaction; returns the event id."""
     book = _book_fields(run)
-    opportunity_at = book.pop("opportunity_at", None)
+    opportunity_at = book.pop("opportunity_at")
     with lock_conn.transaction():
         row = lock_conn.execute(
             """

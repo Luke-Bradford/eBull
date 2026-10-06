@@ -12152,4 +12152,7 @@ neighbouring container and match it.**
   the trigger does not break cleanup. Before any push that touches `sql/`, `git status --short` must be empty: the
   smoke migrates dev from the files on disk, not from the commit. To recover, make the branch file byte-identical
   to what dev applied: compare `shasum -a 256` with `schema_migrations.content_sha256`.
-- Enforced in: `tests/test_3614_kill_switch_drill_db.py::test_drill_evidence_refuses_update_and_delete`.
+- Also: a column added for a recorder to write gets a DB test that SELECTs it after a real write; a pure test of
+  the value it would hold does not prove the INSERT names it.
+- Enforced in: `tests/test_3614_kill_switch_drill_db.py::test_drill_evidence_refuses_update_and_delete` and
+  `::test_sandbox_passes_and_commits_nothing_to_the_kill_row` (selects `positions_without_target`).
