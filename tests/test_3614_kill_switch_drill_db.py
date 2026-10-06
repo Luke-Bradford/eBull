@@ -365,3 +365,15 @@ def test_a_second_run_while_one_holds_the_drill_lock_records_nothing(ebull_test_
         holder.execute("SELECT pg_advisory_lock(%s, %s)", drill.DRILL_ADVISORY_LOCK)
         assert drill.run_kill_switch_drill(_connect, trigger="manual", actor="test") is None
     assert ebull_test_conn.execute("SELECT count(*) FROM kill_switch_drill_events").fetchone() == (0,)
+
+
+def test_drill_evidence_refuses_update_and_delete(ebull_test_conn: Conn) -> None:
+    _set_state(ebull_test_conn)
+    run = _run()
+    for stmt in (
+        "UPDATE kill_switch_drill_events SET actor = 'x' WHERE kill_switch_drill_event_id = %s",
+        "DELETE FROM kill_switch_drill_chokepoints WHERE event_id = %s",
+    ):
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            ebull_test_conn.execute(stmt, (run.event_id,))
+        ebull_test_conn.rollback()
