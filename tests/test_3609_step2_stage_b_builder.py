@@ -5,14 +5,16 @@ Fixtures only: nothing here reads stage-B data or the database.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 
 import scripts.build_3609_factor_panel as builder
@@ -143,6 +145,60 @@ def test_replay_is_stage_a_only(tmp_path: Path) -> None:
     with pytest.raises(PanelError, match="this stage's pins"):
         builder.replay(out, digest, tmp_path / "replay")
     assert not (tmp_path / "replay.jsonl.gz").exists()
+
+
+class _Conn:
+    """A stand-in connection recording the mode the dump runs under."""
+
+    def __init__(self) -> None:
+        self.isolation_level: Any = None
+        self.read_only = False
+        self.in_transaction = False
+
+    def __enter__(self) -> _Conn:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        self.in_transaction = True
+        yield
+        self.in_transaction = False
+
+
+def test_a_publish_dumps_inside_one_read_only_repeatable_read_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _Conn()
+    connects: list[dict[str, Any]] = []
+    seen: list[tuple[Any, bool, bool]] = []
+
+    def connect(*args: Any, **kwargs: Any) -> _Conn:
+        connects.append(kwargs)
+        return conn
+
+    def dump(c: _Conn, inputs: Path, **kwargs: Any) -> None:
+        seen.append((c.isolation_level, c.read_only, c.in_transaction))
+        inputs.mkdir(parents=True)
+
+    def build(inputs: Path, formations: Any, rows: Path, census: Path, sub: str | None) -> dict[str, Any]:
+        write_gz_lines(rows, [{"M": "2019-01-31"}])
+        census.write_text("{}\n")
+        return {"rows": 1}
+
+    monkeypatch.setattr(builder.psycopg, "connect", connect)
+    monkeypatch.setattr(builder, "dump_inputs", dump)
+    monkeypatch.setattr(builder, "build", build)
+    out = tmp_path / "artefact"
+    out.mkdir()
+    builder._publish_artefact(
+        out, formation_months(), head="f" * 40, stage="A", pins=builder.STAGE_A_PINS, versions=lambda: {}
+    )
+    assert connects == [{}]  # not autocommit
+    assert seen == [(psycopg.IsolationLevel.REPEATABLE_READ, True, True)]
+    assert json.loads((out / builder.MANIFEST_FILE).read_text())["pinned_manifests"] == builder.STAGE_A_PINS
 
 
 # --------------------------------------------------------------------------- the extended SUB

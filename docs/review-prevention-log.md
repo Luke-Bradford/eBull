@@ -12184,6 +12184,10 @@ neighbouring container and match it.**
   first step comes first.
 - Also (review bot on #3685): a gate-before-read test deletes the ledger-named artefact before the refused call, so
   a read ahead of the gate fails with a file error rather than passing silently.
+- Also (review bot on #3685): a changed connection mode (autocommit to a repeatable-read read-only snapshot) gets a
+  test that stubs `psycopg.connect` and asserts the mode the reads run under; a one-off run is evidence for one
+  commit only.
 - Enforced in: `tests/test_3609_step2_stage_b_builder.py::test_only_price_bound_names_a_stage_bound`,
-  `::test_an_uncommitted_access_refuses_before_any_stage_b_read` and
+  `::test_an_uncommitted_access_refuses_before_any_stage_b_read`,
+  `::test_a_publish_dumps_inside_one_read_only_repeatable_read_transaction` and
   `tests/test_publish_3609_step2_sub.py::test_an_undeclared_trial_refuses_before_any_download`.
