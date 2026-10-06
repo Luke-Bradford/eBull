@@ -74,6 +74,7 @@ from app.services.factor_panel_artefact import (
     write_gz_lines,
     write_json_once,
 )
+from app.services.factor_panel_fidelity import PRICE_CHARACTERISTICS
 from app.services.factor_panel_prices import (
     DailyBar,
     DailyMonthly,
@@ -126,10 +127,12 @@ DAILY_LOOKBACK_MONTHS: Final = 12
 RF_DATASET: Final = "french_three_factor_daily"
 RF_UNIT: Final = "decimal_return"
 SPY_SYMBOL: Final = "SPY"
-PRICE_CHARACTERISTICS: Final = ("ret_12_1", "rvol_21d")
 OUT_DIR: Final = Path("var/research/3609_step1")
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 SPEC_PATH: Final = REPO_ROOT / "docs/research/2026-10-04-3609-step1-factor-panel.md"
+REPORT_PATH: Final = REPO_ROOT / "scripts/report_3609_fidelity.py"
+TRIAL_REGISTER_PATH: Final = "app/services/trial_register.py"
+UNHASHED_SOURCES: Final = frozenset({TRIAL_REGISTER_PATH})
 PUBLISH_ROOT: Final = RESEARCH_ROOT / "factor_panel_3609"
 MANIFEST_SCHEMA: Final = "factor-panel-3609-v1"
 MANIFEST_FILE: Final = "manifest.json"
@@ -1068,8 +1071,10 @@ def build(inputs: Path, formations: Sequence[date], rows_path: Path, census_path
 
 
 def construction_sources() -> dict[str, str]:
-    """The builder and every ``app`` module it imports, transitively. Slice 4 adds the fidelity report's root."""
-    return import_closure([Path(__file__)], REPO_ROOT)
+    """The builder, the fidelity report and every ``app``/``scripts`` module they import, transitively, except the
+    trial register: it records these versions, so hashing it into them would be a fixed point (slice 4 plan).
+    Its imports are still followed, and the report's ledger records its sha256 on every run."""
+    return import_closure([Path(__file__), REPORT_PATH], REPO_ROOT, unhashed=UNHASHED_SOURCES)
 
 
 def publish(root: Path, formations: Sequence[date]) -> Path:

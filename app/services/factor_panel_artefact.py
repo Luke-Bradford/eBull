@@ -23,7 +23,8 @@ from typing import IO, Any, Final
 from app.services.factor_panel import PanelError
 
 GZIP_LEVEL: Final = 6
-APP_PACKAGE: Final = "app"
+#: Packages whose imports the closure follows: the app, and the scripts a report imports helpers from.
+FOLLOWED_PACKAGES: Final = ("app", "scripts")
 
 
 def sha256_file(path: Path) -> str:
@@ -113,22 +114,30 @@ def _module_files(name: str, repo: Path) -> list[Path]:
     return out
 
 
-def import_closure(roots: Sequence[Path], repo: Path) -> dict[str, str]:
-    """Repo-relative path -> sha256 for each root and every ``app`` module it reaches by import, transitively.
+def import_closure(roots: Sequence[Path], repo: Path, *, unhashed: frozenset[str] = frozenset()) -> dict[str, str]:
+    """Repo-relative path -> sha256 for each root and every ``app`` or ``scripts`` module it reaches by import,
+    transitively.
 
     Static (every ``import`` statement anywhere in a file, function-level and ``TYPE_CHECKING`` included), so the
     set does not depend on which code path a run took.
+
+    ``unhashed`` names repo-relative files whose content stays out of the result while their imports are still
+    followed, so nothing reached only through them drops out. The #3609 trial register is the one use: it records
+    these hashes, so hashing it into them would be a fixed point.
     """
     seen: dict[str, str] = {}
+    visited: set[str] = set()
     stack = [path.resolve() for path in roots]
     repo = repo.resolve()
     while stack:
         path = stack.pop()
         relative = path.relative_to(repo).as_posix()
-        if relative in seen:
+        if relative in visited:
             continue
+        visited.add(relative)
         data = path.read_bytes()
-        seen[relative] = hashlib.sha256(data).hexdigest()
+        if relative not in unhashed:
+            seen[relative] = hashlib.sha256(data).hexdigest()
         for node in ast.walk(ast.parse(data, filename=relative)):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
@@ -140,7 +149,7 @@ def import_closure(roots: Sequence[Path], repo: Path) -> dict[str, str]:
             else:
                 continue
             for name in names:
-                if name == APP_PACKAGE or name.startswith(f"{APP_PACKAGE}."):
+                if any(name == package or name.startswith(f"{package}.") for package in FOLLOWED_PACKAGES):
                     stack.extend(_module_files(name, repo))
     return dict(sorted(seen.items()))
 
