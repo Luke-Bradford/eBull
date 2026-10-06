@@ -76,20 +76,17 @@ def build_stamp_settings() -> dict[str, str]:
     return stamp
 
 
-def _split_stamp(pgoptions: str) -> tuple[list[str], list[str]]:
-    """``pgoptions`` as (everything else, the ``-c ebull.*`` pairs ``with_build_stamp`` wrote)."""
-    tokens = pgoptions.split()
-    rest: list[str] = []
-    stamp: list[str] = []
-    i = 0
-    while i < len(tokens):
-        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("ebull."):
-            stamp += tokens[i : i + 2]
-            i += 2
-            continue
-        rest.append(tokens[i])
-        i += 1
-    return rest, stamp
+#: One pair as ``with_build_stamp`` writes it: lowercase name, unescaped hex or boolean value.
+_STAMP_PAIR = re.compile(r"(?<!\S)-c ebull\.\w+=\S+")
+
+
+def _split_stamp(pgoptions: str) -> tuple[str, list[str]]:
+    """``pgoptions`` as (everything else, verbatim; the ``-c ebull.*`` pairs ``with_build_stamp`` wrote).
+
+    The rest is never re-tokenised: ``PGOPTIONS`` escapes spaces with a backslash,
+    and a split-and-rejoin could rewrite an escaped value.
+    """
+    return _STAMP_PAIR.sub("", pgoptions).strip(), _STAMP_PAIR.findall(pgoptions)
 
 
 def with_build_stamp(pgoptions: str, stamp: dict[str, str]) -> str:
@@ -98,10 +95,8 @@ def with_build_stamp(pgoptions: str, stamp: dict[str, str]) -> str:
     A respawned child inherits its parent's environment, so a stamp already
     present is replaced rather than appended to.
     """
-    kept, _ = _split_stamp(pgoptions)
-    for name, value in stamp.items():
-        kept += ["-c", f"{name}={value}"]
-    return " ".join(kept)
+    rest, _ = _split_stamp(pgoptions)
+    return " ".join([rest, *(f"-c {name}={value}" for name, value in stamp.items())]).strip()
 
 
 def with_inherited_pgoptions(options: str) -> str:
@@ -117,7 +112,7 @@ def with_inherited_pgoptions(options: str) -> str:
     caller's string is never parsed.
     """
     rest, stamp = _split_stamp(os.environ.get("PGOPTIONS", ""))
-    return " ".join([*rest, options, *stamp]).strip()
+    return " ".join([rest, options, *stamp]).strip()
 
 
 def install_build_stamp() -> None:
