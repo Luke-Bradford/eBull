@@ -1,0 +1,60 @@
+"""#3609 step 2: the committed-access check reads the real access log."""
+
+from __future__ import annotations
+
+import psycopg
+import pytest
+
+from app.services.factor_book_ledger import (
+    STRATEGY_ID,
+    STRATEGY_VERSION,
+    StageBAccessError,
+    require_committed_access,
+)
+from app.services.result_ledger import HoldoutAccess, record_holdout_access
+
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
+
+RUN = "c" * 32
+
+
+def _record(conn: psycopg.Connection[tuple], **overrides: str) -> int:
+    fields = {
+        "strategy_id": STRATEGY_ID,
+        "strategy_version": STRATEGY_VERSION,
+        "access_kind": "evaluate",
+        "accessed_by": "test",
+        "purpose": f"#3609 step 2 declared run {RUN}",
+        "result_version": RUN,
+        **overrides,
+    }
+    with conn.transaction():
+        return record_holdout_access(conn, HoldoutAccess(**fields))  # type: ignore[arg-type]
+
+
+def test_the_runs_evaluate_access_passes(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    access_id = _record(ebull_test_conn)
+    require_committed_access(ebull_test_conn, RUN, access_id)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"strategy_id": "3609-step1-fidelity"},
+        {"strategy_version": "v2"},
+        {"result_version": "d" * 32},
+        {"access_kind": "read"},
+    ],
+)
+def test_an_access_for_anything_else_does_not_pass(
+    ebull_test_conn: psycopg.Connection[tuple], overrides: dict[str, str]
+) -> None:
+    access_id = _record(ebull_test_conn, **overrides)
+    with pytest.raises(StageBAccessError):
+        require_committed_access(ebull_test_conn, RUN, access_id)
+
+
+def test_an_unknown_access_id_does_not_pass(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    access_id = _record(ebull_test_conn)
+    with pytest.raises(StageBAccessError):
+        require_committed_access(ebull_test_conn, RUN, access_id + 1)
