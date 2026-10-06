@@ -278,6 +278,7 @@ def read_observation() -> Observation:
                 SELECT audit_id, changed_at, changed_by, reason, new_value
                 FROM runtime_config_audit
                 WHERE field = 'kill_switch' AND changed_at > now() - make_interval(secs => %s)
+                ORDER BY audit_id
                 """,
                 (_LOOKBACK_S,),
             ).fetchall()
