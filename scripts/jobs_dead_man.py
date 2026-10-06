@@ -186,23 +186,24 @@ def settle(prior: State, state: State, *, delivered: bool) -> State:
     return replace(state, alerting=prior.alerting, last_notified_at=prior.last_notified_at)
 
 
-def _macos_notify(title: str, message: str) -> None:
+def _macos_notify(title: str, message: str) -> bool:
     try:
-        subprocess.run(  # noqa: S603 — fixed argv, no shell
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
             ["osascript", "-e", f"display notification {json.dumps(message)} with title {json.dumps(title)}"],
             capture_output=True,
             timeout=5.0,
             check=False,
         )
     except OSError, subprocess.SubprocessError:
-        pass
+        return False
+    return proc.returncode == 0
 
 
 def notify(action: Action, state: State, *, note: str = "") -> bool:
     """Send the notification; ``True`` when it reached its channel.
 
     With push configured the channel is ntfy, so delivery means a 2xx. Without
-    it the macOS notification is the only channel and counts as delivered.
+    it the macOS notification is the only channel, and its exit status decides.
     """
     priority: Priority
     if action == "recover":
@@ -212,9 +213,9 @@ def notify(action: Action, state: State, *, note: str = "") -> bool:
         message, priority, tag = state.reason or "", 5, "rotating_light"
     message += note
     pushed = send_push(title=title, message=message, priority=priority, tags=(tag,))
-    _macos_notify(title, message)
+    shown = _macos_notify(title, message)
     print(f"[jobs-dead-man] {action.upper()}: {message} (push sent: {pushed})", file=sys.stderr, flush=True)
-    return pushed or config_from_env() is None
+    return pushed or (config_from_env() is None and shown)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -227,7 +228,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """One check. Exit 0 healthy, 2 alerting, 1 test push not delivered."""
+    """One check. Exit 0 healthy, 2 alerting, 3 alerting with the page undelivered.
+
+    ``--test-push`` exits 0 when delivered, 1 when not.
+    """
     args = _build_parser().parse_args(argv)
     if args.test_push:
         ok = send_push(title="eBull push test", message="The jobs dead-man can reach this device.", tags=("bell",))
@@ -243,13 +247,20 @@ def main(argv: list[str] | None = None) -> int:
         stale_after_s=args.stale_after_s,
         renotify_s=args.renotify_s,
     )
+    # The exit code reports the decision, not the delivery bookkeeping that
+    # settle() may roll back for the retry.
+    dark = state.alerting
+    delivered = True
     if action is not None:
         # Probe the status file before sending: if it cannot be written, the
         # de-duplication cannot work and every run will re-page, so say why.
         note = "" if save_state(args.status_file, prior) else " [dead-man status file unwritable: not de-duplicated]"
-        state = settle(prior, state, delivered=notify(action, state, note=note))
+        delivered = notify(action, state, note=note)
+        state = settle(prior, state, delivered=delivered)
     save_state(args.status_file, state)
-    return 2 if state.alerting else 0
+    if not dark:
+        return 0
+    return 2 if delivered else 3
 
 
 if __name__ == "__main__":

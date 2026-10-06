@@ -29,7 +29,7 @@ Read the topic back later with `plutil -extract EnvironmentVariables.EBULL_NTFY_
 
 ## Manual probe
 ```bash
-uv run python -m scripts.jobs_dead_man --status-file /tmp/dm.json   # exit 0 healthy, 2 alerting
+uv run python -m scripts.jobs_dead_man --status-file /tmp/dm.json   # exit 0 healthy, 2 alerting, 3 alerting but undelivered
 ```
 
 ## When it fires

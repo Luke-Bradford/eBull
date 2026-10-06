@@ -129,7 +129,7 @@ def test_main_persists_dedup_only_after_delivery(tmp_path: Path, monkeypatch: py
     status = tmp_path / "status.json"
     monkeypatch.setenv("EBULL_NTFY_TOPIC", "t")
     monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
-    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda *_a: None)
+    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda *_a: True)
     sent: list[str] = []
 
     def _push(**kw: object) -> bool:
@@ -137,7 +137,7 @@ def test_main_persists_dedup_only_after_delivery(tmp_path: Path, monkeypatch: py
         return len(sent) > 1  # first attempt fails, second succeeds
 
     monkeypatch.setattr(jobs_dead_man, "send_push", _push)
-    assert jobs_dead_man.main(["--status-file", str(status)]) == 0
+    assert jobs_dead_man.main(["--status-file", str(status)]) == 3  # dark, page undelivered
     assert not load_state(status).alerting
     assert jobs_dead_man.main(["--status-file", str(status)]) == 2
     assert load_state(status).alerting
@@ -152,6 +152,15 @@ def test_an_unwritable_status_file_is_named_in_the_alert(tmp_path: Path, monkeyp
     monkeypatch.delenv("EBULL_NTFY_TOPIC", raising=False)
     monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
     messages: list[str] = []
-    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda _t, m: messages.append(m))
+    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda _t, m: messages.append(m) is None)
     assert jobs_dead_man.main(["--status-file", str(blocker / "status.json")]) == 2
     assert messages and "status file unwritable" in messages[0]
+
+
+def test_without_push_a_failed_local_notification_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    status = tmp_path / "status.json"
+    monkeypatch.delenv("EBULL_NTFY_TOPIC", raising=False)
+    monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
+    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda *_a: False)
+    assert jobs_dead_man.main(["--status-file", str(status)]) == 3
+    assert not load_state(status).alerting
