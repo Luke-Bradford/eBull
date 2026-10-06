@@ -6,6 +6,7 @@ The v6 schema, guard and control pre-filter are ``test_ai_trial_guard.py``.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
@@ -38,11 +39,18 @@ class TestStrictJson:
         with pytest.raises(StrictJSONError):
             strict_json_loads(f'{{"stop_pct": {constant}}}')
 
-    def test_decoder_limits_are_strict_json_errors(self) -> None:
+    def test_decoder_limit_errors_become_strict_json_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(StrictJSONError):
             strict_json_loads('{"n": ' + "1" * 5000 + "}")
-        with pytest.raises(StrictJSONError):
-            strict_json_loads("[" * 100_000 + "]" * 100_000)
+
+        # Whether real deep nesting raises depends on the C stack (3.14 measures it): 100,000
+        # levels raise on macOS and parse on a Linux runner. Raise it directly instead.
+        def _too_deep(*_args: object, **_kwargs: object) -> object:
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(json, "loads", _too_deep)
+        with pytest.raises(StrictJSONError, match="RecursionError"):
+            strict_json_loads("[[]]")
 
     def test_plain_json_parses(self) -> None:
         assert strict_json_loads('{"a": [1, 2.5, null]}') == {"a": [1, 2.5, None]}

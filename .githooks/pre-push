@@ -2,8 +2,9 @@
 #
 # Pre-push gate. Runs lint + format-check + typecheck + scoped pytest
 # before any push leaves the machine. We OWN the heavy testing
-# locally; CI runs only the cheap sanity checks (lint, format,
-# pyright, supply-chain) + the review bot. Operator decision
+# locally; CI runs the cheap sanity checks (lint, format, pyright,
+# supply-chain), the fast pytest tier (#3613) and the review bot; the
+# DB tier and smoke run only here. Operator decision
 # 2026-05-04 after the #840 sub-PR cycle showed each PR's CI pytest
 # costing 13-20 min and stacking with bot-review iterations
 # (PR + follow-up = 30-60 min wall-clock).

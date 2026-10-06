@@ -186,6 +186,9 @@ def test_each_job_calls_only_its_own_ingester(
         patch.object(jobs, "_bulk_dir", return_value=bulk_dir),
         patch.object(jobs, "_current_running_bootstrap_run_id", return_value=None),
         patch.object(jobs, expected_ingester, side_effect=_make_recorder(expected_calls)),
+        # The ingesters are recorders, so the job's per-archive connection is
+        # never used; without this it silently opened one to the dev DB.
+        patch.object(jobs.psycopg, "connect"),
     ]
     for name in other_ingesters:
         patches.append(patch.object(jobs, name, side_effect=_make_recorder(foreign_calls[name])))
