@@ -503,6 +503,11 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # return statistic; every fidelity result read from its artefact is the counted, non-claiming DeclaredTrial
     # `3609-step1-fidelity-v1` (trial register r24), which `scripts/report_3609_fidelity.py` refuses to run without.
     "build_3609_factor_panel.py": "#3609 step 1 panel builder (DeclaredTrial 3609-step1-fidelity-v1, slice 4)",
+    # #3620 spec (2026-10-06-3620-cross-asset-tsmom.md) §"Universe and eligibility" and §"Hold-out inspection,
+    # stated": slice 1's census reads coverage, verdicts and distribution stamps and prints no return value, signal,
+    # slot or statistic. ⚠ Slice 3 adds the outcome-reading run path to this script behind its own register gate;
+    # this entry must then be replaced by that gate, not kept.
+    "report_3620_tsmom.py": "#3620 slice 1 census (coverage, verdicts, stamps; no signal or return statistic)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"
