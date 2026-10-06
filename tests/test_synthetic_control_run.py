@@ -628,7 +628,11 @@ class TestTheMatchIsExact:
 
     def test_the_worker_canary_measures_every_declared_pool_and_stops(self) -> None:
         collector = _collector(exits_on_spike=True)
-        report = run_worker_canary(collector, axis=AXIS)
+        # The parent term is this pytest worker's lifetime ru_maxrss, which depends on every test it ran
+        # before, so the production 8 GiB ceiling refused 8 workers on a CI runner at 8,620,758,816 bytes.
+        # This test is about the pools; the refusal itself is held by the 1-byte budget test below.
+        config = replace(WorkerCanaryConfig(), max_aggregate_peak_rss_bytes=64 * 1024**3)
+        report = run_worker_canary(collector, axis=AXIS, config=config)
 
         assert report.member_indices == tuple(range(8))
         assert report.stopped_before_full_cohort is True
