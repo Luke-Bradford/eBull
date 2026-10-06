@@ -27,6 +27,8 @@ statements is safe under the cap. See
 ``PGOPTIONS`` (would kill legitimate long ETL) — the bound is scoped
 per-connection only, per
 ``docs/proposals/infra/2026-06-04-db-connection-discipline.md`` GAP-A/GAP-B.
+(``PGOPTIONS`` does carry the #3614 build stamp, which is inert session
+settings only, and is merged into the explicit ``options`` here.)
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.db.build_stamp import with_inherited_pgoptions
 
 # Per-job statement_timeout (ms) for the active job body. ``None`` (the
 # default, and the value outside a tracked job) means "no bound" — so
@@ -69,6 +72,10 @@ def connect_job(*, autocommit: bool = False, **kwargs: Any) -> psycopg.Connectio
         opt = f"-c statement_timeout={ms}"
         existing = kwargs.get("options")
         kwargs["options"] = f"{existing} {opt}" if existing else opt
+    if "options" in kwargs:
+        # An explicit ``options`` REPLACES libpq's ``PGOPTIONS`` default instead of
+        # adding to it, which would drop the #3614 build stamp from every bounded job body.
+        kwargs["options"] = with_inherited_pgoptions(kwargs["options"])
     job_name = job_application_name.get()
     if job_name is not None and "application_name" not in kwargs:
         kwargs["application_name"] = f"ebull-job-body:{job_name}"

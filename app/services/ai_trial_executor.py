@@ -327,12 +327,13 @@ def _commit_authority(
         reason_code=TRIAL_ALLOCATED_REASON,
     )
     trade_id = create_strategy_trade(conn, decision_id)
+    # 'demo' is recorded, not assumed: `place_demo_strategy_order` refuses any other environment (#3614).
     order_row = conn.execute(
         """
         INSERT INTO orders (
             instrument_id, action, order_type, requested_amount, status,
-            raw_payload_json, execution_origin
-        ) VALUES (%s, 'BUY', 'MARKET', %s, 'submitted', NULL, 'strategy')
+            raw_payload_json, execution_origin, broker_environment
+        ) VALUES (%s, 'BUY', 'MARKET', %s, 'submitted', NULL, 'strategy', 'demo')
         RETURNING order_id
         """,
         (intent.instrument_id, amount),

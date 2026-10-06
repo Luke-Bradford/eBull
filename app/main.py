@@ -66,6 +66,7 @@ from app.api.theses import router as theses_router
 from app.api.watchlist import router as watchlist_router
 from app.config import DEV_LIKE_ENVS, settings
 from app.db import get_conn
+from app.db.build_stamp import install_build_stamp
 from app.db.migrations import migration_status, run_migrations
 from app.db.pg_settings import API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
 from app.db.pool import AUDIT_POOL_MAX_SIZE, DB_POOL_MAX_SIZE, open_pool
@@ -132,6 +133,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.served_build_task = asyncio.create_task(
             asyncio.to_thread(served_build.publish_identity, faulthandler_ready=dump_handler_ready)
         )
+        # #3614: awaited, unlike the sidecar, because it must land before the first
+        # connection (migrations, next) for that connection's rows to carry it.
+        await asyncio.to_thread(install_build_stamp)
 
     logger.info("Running pending migrations...")
     applied = await asyncio.to_thread(run_migrations)

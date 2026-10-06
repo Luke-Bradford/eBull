@@ -1338,11 +1338,11 @@ def execute_core_rebalance(
                     """
                     INSERT INTO orders (
                         instrument_id, action, order_type, requested_amount, status,
-                        raw_payload_json, execution_origin, strategy_request_id
-                    ) VALUES (%s, %s, 'MARKET', %s, 'submitted', NULL, 'strategy', %s)
+                        raw_payload_json, execution_origin, strategy_request_id, broker_environment
+                    ) VALUES (%s, %s, 'MARKET', %s, 'submitted', NULL, 'strategy', %s, %s)
                     RETURNING order_id
                     """,
-                    (current.core_instrument_id, order_action, amount, request_id),
+                    (current.core_instrument_id, order_action, amount, request_id, environment),
                 ).fetchone()
                 if order_row is None:
                     raise StrategyCoreExecutionError("core order INSERT did not return an id")

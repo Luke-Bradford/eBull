@@ -1144,12 +1144,13 @@ def _submit_close(
 ) -> PositionManagerResult:
     request_id = uuid4()
     with conn.transaction():
+        # 'demo' is recorded, not assumed: `close_demo_strategy_position` refuses any other environment (#3614).
         order = conn.execute(
             """
             INSERT INTO orders (
                 instrument_id, action, order_type, status, raw_payload_json,
-                execution_origin, strategy_request_id
-            ) VALUES (%s,'EXIT','MARKET','submitted',NULL,'strategy',%s)
+                execution_origin, strategy_request_id, broker_environment
+            ) VALUES (%s,'EXIT','MARKET','submitted',NULL,'strategy',%s,'demo')
             RETURNING order_id
             """,
             (owned.instrument_id, request_id),

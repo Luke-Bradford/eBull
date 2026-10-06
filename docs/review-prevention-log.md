@@ -12084,3 +12084,25 @@ neighbouring container and match it.**
 - Prevention: when a check fails closed, put every fallible call inside the handler, including the ones that only
   format the message. Test each call failing in turn.
 - Enforced in: `tests/test_unattended_broker_mutation_guard.py::test_a_hung_or_missing_git_refuses_at_every_call`.
+
+### A non-volatile default given in `ADD COLUMN` is stamped onto every existing row (#3614)
+
+- Failure (caught before commit): sql/474's stamp columns default to `current_setting('ebull.code_commit', true)`,
+  which is STABLE. Postgres evaluates a non-volatile `ADD COLUMN … DEFAULT` once and records it as the value of every
+  existing row, so a one-statement migration would have credited the migrating process's commit with every order and
+  decision written before it. Checked on a temp table: the one-step column filled the old row, the split one left it
+  NULL.
+- Prevention: when a default describes the WRITER of a row (session settings, `current_user`, `now()`-like
+  provenance), add the column with no default and `ALTER COLUMN … SET DEFAULT` in a second statement.
+- Enforced in: `tests/test_3614_build_stamp_db.py::test_unstamped_connection_writes_null` covers the NULL contract;
+  the split itself is reviewed in the migration.
+
+### Passing `options=` to a libpq connect drops `PGOPTIONS` entirely (#3614)
+
+- Failure (caught before commit): the build stamp rides `PGOPTIONS`, and `connect_job` passes
+  `options="-c statement_timeout=N"` for every bounded job body. libpq uses `PGOPTIONS` only when `options` is absent,
+  so every job-body row, the strategy executors' orders among them, would have been written unstamped. Measured: with
+  both set, the session saw the timeout and no stamp.
+- Prevention: any connect that passes its own `options` merges the inherited value with
+  `app.db.build_stamp.with_inherited_pgoptions`.
+- Enforced in: `tests/test_3614_build_stamp.py::test_connect_job_passes_the_stamp_with_its_timeout`.
