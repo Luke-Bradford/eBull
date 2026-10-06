@@ -387,9 +387,10 @@ Two annotations go on a `PASS` verdict line only, by frozen tests:
 
 **Every compared series must be complete and its statistics defined,** at base and stress cost alike: the book,
 B1, every control draw and both references each need exactly one finite monthly return for each of the 119 months,
-and every annualised return used by G2 or an annotation, (Π(1 + r))^(12/n) − 1 over its months, needs every
-1 + r > 0. Any failure refuses the run as `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that
-code too). Given complete series, every median and year-deletion statistic is defined.
+and every monthly 1 + r must be ≥ 0. A month with 1 + r = 0 is a total loss: the path's wealth is 0 from then on
+and its annualised return is −100%, a valid outcome. Annualised return is exp((12/n) Σ ln(1 + r)) − 1, with any
+zero factor giving −100%. A negative factor, or a non-finite annualised return, median or year-deletion statistic,
+refuses the run as `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
 1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
@@ -398,17 +399,18 @@ code too). Given complete series, every median and year-deletion statistic is de
    needed); the run id and its hashes; and the labels. No path, gate or diagnostic is printed.
 2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
 3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
-4. `PASS` or `FAIL`, by the conjunction above, with the annotations on a `PASS`.
-
-**Turnover.** If any month's one-way turnover exceeds 50% at base cost in either arm (§"Diagnostics"), a `PASS`
-becomes `FAIL` with reason `TURNOVER_BENEFIT_UNSHOWN`: `research-process.md` requires the net expected benefit to
-be shown above that level, and this run has no model that shows it.
+4. G1 and G2 by the conjunction above. If either fails: `FAIL`, with the failing gate and arm.
+5. **Turnover veto:** if any stage-B month (2021-06..2024-08) has one-way turnover above 50% at base cost in either
+   arm: `FAIL`, reason `TURNOVER_BENEFIT_UNSHOWN`. `research-process.md` requires the net expected benefit to be shown
+   above that level, and this run has no model that shows it. Stage-A exceedances are printed, not gating.
+6. Otherwise `PASS`, with its annotations. Annotations are computed only for a final `PASS`.
 
 **After a pass:** step 3 specifies the forward construction: this book plus the sector cap, #3621's frozen MAX filter,
 an effective-dated listing-age exclusion with a stated missing-history policy, a security-type exclusion whose
 classifier (field, accepted values, unknown-type treatment) is specified and validated over every candidate
 instrument, and the eToro-tradable intersection. Before any position, that construction gets its own declared implementation
-backtest on this path, which must pass G1 and G2 as frozen here (step 3 must also state how it treats the absence of
+backtest on this path, which must reach `PASS` under this verdict order, turnover veto included, unless step 3
+declares a method that shows the net expected benefit, reviewed at its own checkpoint 1 (step 3 must also state how it treats the absence of
 historical eToro eligibility). Only then is the forward demo test declared, as a
 claiming #2599 declaration with its own `TrialDesign` and power check. Its prediction interval and the #2500
 sequential stop rule are specified there from the implementation backtest's monthly series.
@@ -510,7 +512,8 @@ window's defined-month count for that metric.
   - **Cutoffs:** every published stage-B cutoff passes the script's checks (one per month, finite and positive
     after normalisation); a duplicate or invalid one refuses the run (`CUTOFF_INVALID`). An unpublished month prints
     `unavailable` in its cutoff-dependent columns, and the coverage count is printed. A month with no admitted name
-    above its cutoff prints its share column as `unavailable`.
+    above its cutoff prints its share column as `unavailable`. An ME sum used in a share that is not finite and
+    positive refuses the run (`ME_INVALID`).
   - **Notional classes,** by precedence: no ME at s(M) (the name left the admitted population); cutoff
     unavailable; above; at or below. The 2024-08 final liquidation is its own class, not size-classified. The
     classes reconcile to the book's total order notional.
@@ -534,20 +537,29 @@ window's defined-month count for that metric.
   defines only a one-month holding contract (returns, statuses, terminal handling); a multi-month cohort return is
   a further construction with its own treatment of names that leave the panel, and horizons past the 2024-08-31
   read bound would be partial. It is not printed here; step 3 must supply it before a forward declaration.
-- **Two size cells:** the book universe, and admitted names outside it. Scores are standardised within each cell
+- **Two size cells:** the book universe, and admitted names outside it. An outside name whose raw close at s(M) is
+  missing, non-finite or non-positive goes to a "price unavailable" cell, counted per formation; it never refuses. Scores are standardised within each cell
   separately, by §"Source rules". Labelled a proxy for `market-segments.md`'s NYSE cells.
 - **Segments (primary partition: cost band at s(M) × the two size cells).** A name's cell is set at each M, so a
   name that migrates counts in its cell at that M.
   - **Each cell:** the signal block above, on its own names.
-  - **Per-band sub-books.** At each formation, sub-book b holds the book's post-trade holdings whose raw close at
-    s(M) puts them in cost band b (the current band, which sets cell membership), at their book weights renormalised
-    to sum to 1. Its month: gross return g_b = Σ weight × holding-month return; cost fraction c_b = the costs charged
-    at this formation on its names' trades, each at the position's entry band, over the sub-book's pre-trade value;
-    net return (1 − c_b)(1 + g_b) − 1, step 0's one-pass compounding. Step 0's book metrics (net and gross return,
-    volatility, maximum drawdown, active return, tracking error, IR, beta and maximum relative drawdown against B1)
-    are printed on each sub-book's monthly series, with its turnover and order notional. Sub-books are not tradable
-    portfolios and do not sum to the book; the label says so. The book lives in one size cell, so the size axis has
-    no book split. The minimum-effective-sample rule below applies to each sub-book's net series too.
+  - **Per-band sub-books** (attribution series: not tradable portfolios, no cash, and they do not sum to the book;
+    the label says so). A name's band at M is the cost band of its raw close at s(M); that sets cell membership.
+    For band b at formation M:
+    - V_b = the book's post-trade value in names of band b, and g_b = their value-weighted holding-month return;
+    - C_b = every cost charged at this formation on trades in names of band b (sales of names leaving the book
+      included), each at the position's entry band;
+    - L_b = the 2024-08 final-liquidation cost on band-b holdings, charged in that month only (bands by s(2024-07));
+    - net return = (V_b(1 + g_b) − L_b) / (V_b + C_b) − 1. This is step 0's one-pass rule applied to the band's
+      capital before its costs.
+    - A month with V_b = 0 is undefined for that sub-book. A month with fewer than 5 band-b names is marked thin;
+      the 5 is fixed by construction and monthly counts are printed.
+    - Per window, step 0's metrics (net and gross return, volatility, maximum drawdown, active return, tracking
+      error, IR, beta and maximum relative drawdown against B1) and the G1 FF5+momentum regression (printed, with
+      G1's refusal states mapped to `undefined`) are printed only when every month of the window is defined and
+      none is thin; otherwise the window is `insufficient`. The minimum-effective-sample rule below also applies.
+    - A sub-book's undefined or insufficient output affects only that output, never the verdict.
+    - The book lives in one size cell, so the size axis has no book split.
   - **Minimum effective sample, per (series, arm, metric, window)**, where a series is a signal's IC or spread or a
     sub-book's net return: 24 effective months, with n_eff = n × (iid
     variance of the mean) / (Newey–West variance of the mean), capped at n, using the same Newey–West rule as the t.
@@ -575,8 +587,9 @@ window's defined-month count for that metric.
   2016). For each such month: its traded notional, its cost, and the book's gross and net return minus the
   control's median in the same arm, labelled realised, from one history. Tested at base cost, per arm; N is the
   number of calendar months exceeding 50% in either arm, with the per-arm counts beside it. **Exception:** no
-  expected-benefit model exists here, so the requirement cannot be met by this run. It is applied fail-closed: N > 0
-  turns a `PASS` into `FAIL` with reason `TURNOVER_BENEFIT_UNSHOWN` (§"Decision rule").
+  expected-benefit model exists here, so the requirement cannot be met by this run. It is applied fail-closed through
+  the verdict order's turnover veto (§"Decision rule", step 5), over stage-B months. **This veto is the one gating
+  input in this section;** everything else here is printed only.
 - **Attribution** (`portfolio-construction-and-risk.md` §Attribution): SPY beta; universe effect (equal-weight
   universe minus B1); the full FF5+momentum loadings; selection (book minus equal-weight universe); FF-12 weights,
   monthly and averaged, against the reconstituted cap-weighted universe, with the 2× and "no reference weight" flags.
@@ -747,3 +760,14 @@ window's defined-month count for that metric.
 - **101–103:** notional classes have a precedence and a liquidation class; stage-B cutoffs are validated.
 - **105–106:** the Python version is enforced; abandoned runs are matched on the full access identity, and run ids
   are fresh per attempt.
+
+**Round 6 (14 of 18 resolved; 4 open plus 9 new, 107–115; `ckpt1_round6_final.txt`), all applied:**
+- **46, 99, 107–110:** sub-books get an explicit capital and cost basis (band capital before its costs, sold names'
+  costs included, final liquidation in August), undefined empty months, a 5-name thin rule, and the FF5+momentum
+  regression; their gaps never touch the verdict.
+- **90, 114:** total loss is a valid −100% outcome; annualisation is log-based; negative factors and non-finite
+  statistics refuse.
+- **103:** ME sums in coverage shares refuse as `ME_INVALID`.
+- **111–113:** the turnover veto is step 5 of the verdict order, stage-B months only, named as the one gating
+  diagnostic, and binds step 3 unless step 3 declares a reviewed benefit method.
+- **115:** outside-universe names with no valid raw close go to a "price unavailable" cell.
