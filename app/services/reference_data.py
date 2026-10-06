@@ -23,7 +23,7 @@ import psycopg
 from openpyxl import load_workbook
 from psycopg.rows import dict_row
 
-ReferenceSource = Literal["kenneth_french", "aqr", "fred", "global_q", "jkp", "federal_reserve"]
+ReferenceSource = Literal["kenneth_french", "aqr", "fred", "global_q", "jkp", "federal_reserve", "osap"]
 ReferenceUnit = Literal[
     "decimal_return", "percent_per_annum", "binary_indicator", "probability", "usd_millions", "count"
 ]
@@ -45,6 +45,12 @@ JKP_USA_MONTHLY_VW_CAP_URL: Final = (
 )
 #: #3609 step 1: the NYSE size breakpoints JKP's factors are built on (``me`` percentiles, USD millions).
 JKP_NYSE_CUTOFFS_URL: Final = "https://jkpfactors-data.s3.amazonaws.com/public/other/nyse_cutoffs.csv"
+#: Chen & Zimmermann's Open Source Asset Pricing data page. Each release is a new Google Drive folder, so
+#: the wide long-short file is resolved from this page's link at fetch time rather than pinned.
+OSAP_DATA_PAGE_URL: Final = "https://www.openassetpricing.com/data/"
+#: The OSAP site answers 403 to httpx's default ``python-httpx/<version>`` User-Agent (checked 2026-10-06;
+#: curl's and this one get 200), so the page fetch names itself.
+OSAP_USER_AGENT: Final = "eBull/1.0 reference-data"
 
 FRENCH_PARSER_VERSION: Final = "kenneth-french-monthly-csv-v2"
 FRENCH_DAILY_PARSER_VERSION: Final = "kenneth-french-daily-csv-v1"
@@ -55,6 +61,7 @@ GLOBAL_Q_PARSER_VERSION: Final = "global-q-monthly-csv-v1"
 JKP_PARSER_VERSION: Final = "jkp-monthly-csv-zip-v1"
 JKP_CUTOFFS_PARSER_VERSION: Final = "jkp-nyse-cutoffs-csv-v1"
 FED_EBP_PARSER_VERSION: Final = "fed-ebp-monthly-csv-v1"
+OSAP_PARSER_VERSION: Final = "osap-predictor-ls-wide-csv-v1"
 
 _FRENCH_MISSING: Final = frozenset({Decimal("-99.99"), Decimal("-999")})
 _AQR_HEADER: Final = (
@@ -214,6 +221,11 @@ _FED_EBP_UNITS: Final[Mapping[str, ReferenceUnit]] = {
 }
 _JKP_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_stocks", "n_stocks_min", "date", "ret")
 _JKP_CUTOFFS_HEADER: Final = ("eom", "n", "nyse_p1", "nyse_p20", "nyse_p50", "nyse_p80")
+_OSAP_LS_WIDE_LINK: Final = re.compile(
+    r'<a href="https://drive\.google\.com/file/d/([-\w]+)/[^"]*"[^>]*>'
+    r"Monthly long-short returns of \d+ predictors following OPs \(wide csv\)</a>"
+)
+_HTML_TITLE: Final = re.compile(rb"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 
 class ReferenceDataSourceError(ValueError):
@@ -577,6 +589,70 @@ def parse_jkp_monthly_zip(
     return _validated(ParsedReferenceData(tuple(observations), missing_count))
 
 
+def resolve_osap_ls_wide_url(client: httpx.Client, data_page_url: str) -> str:
+    """The direct-download URL of the wide long-short CSV linked from the OSAP data page."""
+    response = client.get(data_page_url, headers={"User-Agent": OSAP_USER_AGENT})
+    response.raise_for_status()
+    file_ids = set(_OSAP_LS_WIDE_LINK.findall(response.text))
+    if len(file_ids) != 1:
+        raise ReferenceDataSourceError(
+            f"OSAP data page links {len(file_ids)} wide long-short files; expected exactly one"
+        )
+    return f"https://drive.usercontent.google.com/download?id={file_ids.pop()}&export=download&confirm=t"
+
+
+def parse_osap_ls_wide_csv(payload: bytes) -> ParsedReferenceData:
+    """Parse OSAP ``PredictorLSretWide.csv``: ``date`` then one long-short return column per predictor.
+
+    The layout, unit and sign are fixed by the producing code (OpenSourceAP/CrossSection v2.0.0):
+    ``Portfolios/Code/20_PredictorPorts.R`` pivots each predictor's ``port == "LS"`` row wide by
+    ``signalname``; ``01_PortfolioFunction.R`` builds LS as the long portfolio's return minus the short
+    one's, following the original paper's sort; ``11_ProcessCRSP.R`` sets ``ret = 100*ret``, so values
+    are percent and are normalised to decimal here. ``date`` is the CRSP monthly date (last trading day),
+    stored as published: the validator aligns series on calendar month. R writes missing as ``NA``.
+
+    Google Drive answers a refused download (its quota page) with HTTP 200 and HTML, which is refused
+    by name rather than as a header mismatch.
+    """
+    if payload.lstrip()[:5].lower() in (b"<!doc", b"<html"):
+        title = _HTML_TITLE.search(payload)
+        label = title.group(1).decode("utf-8", "replace").strip() if title else "untitled"
+        raise ReferenceDataSourceError(f"OSAP download returned an HTML page ({label!r}), not the CSV")
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ReferenceDataSourceError("OSAP response is not UTF-8 CSV") from exc
+    reader = csv.reader(io.StringIO(text))
+    header = tuple(cell.strip() for cell in next(reader, ()))
+    if len(header) < 2 or header[0] != "date":
+        raise ReferenceDataSourceError(f"OSAP header starts {header[:3]!r}; expected 'date' then predictors")
+    signals = header[1:]
+    if any(not name for name in signals) or len(set(signals)) != len(signals):
+        raise ReferenceDataSourceError("OSAP header has an empty or duplicated predictor name")
+    observations: list[ReferenceObservation] = []
+    missing_count = 0
+    previous: date | None = None
+    for row_number, row in enumerate(reader, start=2):
+        if not row or all(not cell.strip() for cell in row):
+            continue
+        if len(row) != len(header):
+            raise ReferenceDataSourceError(f"OSAP row {row_number}: ragged row")
+        try:
+            when = date.fromisoformat(row[0].strip())
+        except ValueError as exc:
+            raise ReferenceDataSourceError(f"OSAP row {row_number}: invalid date {row[0]!r}") from exc
+        if previous is not None and (when.year, when.month) <= (previous.year, previous.month):
+            raise ReferenceDataSourceError(f"OSAP row {row_number}: {when} does not follow {previous}'s month")
+        previous = when
+        for series_key, raw in zip(signals, row[1:], strict=True):
+            if not raw.strip() or raw.strip().upper() == "NA":
+                missing_count += 1
+                continue
+            value = _decimal(raw, context=f"OSAP row {row_number}/{series_key}")
+            observations.append(ReferenceObservation(series_key, when, value / Decimal(100), "decimal_return"))
+    return _validated(ParsedReferenceData(tuple(observations), missing_count))
+
+
 def parse_jkp_nyse_cutoffs_csv(payload: bytes) -> ParsedReferenceData:
     """Parse JKP ``nyse_cutoffs.csv``: NYSE market-equity percentiles at each month end (#3609).
 
@@ -760,6 +836,14 @@ _FACTOR_LIBRARY: Final = (
         JKP_NYSE_CUTOFFS_URL,
         JKP_CUTOFFS_PARSER_VERSION,
         parse_jkp_nyse_cutoffs_csv,
+    ),
+    ReferenceDatasetSpec(
+        "osap",
+        "osap_predictor_ls_monthly",
+        OSAP_DATA_PAGE_URL,
+        OSAP_PARSER_VERSION,
+        parse_osap_ls_wide_csv,
+        resolve_url=resolve_osap_ls_wide_url,
     ),
 )
 
@@ -1060,6 +1144,8 @@ __all__ = [
     "GLOBAL_Q_PARSER_VERSION",
     "JKP_CUTOFFS_PARSER_VERSION",
     "JKP_PARSER_VERSION",
+    "OSAP_PARSER_VERSION",
+    "OSAP_USER_AGENT",
     "REFERENCE_DATASETS",
     "ParsedReferenceData",
     "ReferenceDataSourceError",
@@ -1075,7 +1161,9 @@ __all__ = [
     "parse_global_q_monthly_csv",
     "parse_jkp_monthly_zip",
     "parse_jkp_nyse_cutoffs_csv",
+    "parse_osap_ls_wide_csv",
     "refresh_reference_dataset",
     "refresh_reference_group",
     "resolve_global_q_monthly_url",
+    "resolve_osap_ls_wide_url",
 ]

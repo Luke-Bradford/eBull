@@ -18,6 +18,8 @@ from app.services.reference_data import (
     FRED_DATASET_KEYS,
     FRENCH_DATASET_KEYS,
     GLOBAL_Q_INDEX_URL,
+    OSAP_DATA_PAGE_URL,
+    OSAP_USER_AGENT,
     REFERENCE_DATASETS,
     ReferenceDataSourceError,
     parse_aqr_monthly_sheet,
@@ -26,7 +28,9 @@ from app.services.reference_data import (
     parse_global_q_monthly_csv,
     parse_jkp_monthly_zip,
     parse_jkp_nyse_cutoffs_csv,
+    parse_osap_ls_wide_csv,
     resolve_global_q_monthly_url,
+    resolve_osap_ls_wide_url,
 )
 
 
@@ -54,7 +58,7 @@ def test_every_dataset_belongs_to_exactly_one_scheduled_group() -> None:
     groups = (*FRENCH_DATASET_KEYS, *AQR_DATASET_KEYS, *FRED_DATASET_KEYS, *FACTOR_LIBRARY_DATASET_KEYS)
     assert len(groups) == len(set(groups))
     assert set(groups) == set(REFERENCE_DATASETS)
-    assert {REFERENCE_DATASETS[key].source for key in FACTOR_LIBRARY_DATASET_KEYS} == {"global_q", "jkp"}
+    assert {REFERENCE_DATASETS[key].source for key in FACTOR_LIBRARY_DATASET_KEYS} == {"global_q", "jkp", "osap"}
 
 
 def test_global_q_parser_normalises_percent_to_decimal_month_end() -> None:
@@ -240,3 +244,60 @@ def test_jkp_cutoffs_parser_refuses_drift(body: bytes, match: str) -> None:
         parse_jkp_nyse_cutoffs_csv(_CUTOFFS_HEADER + body)
     with pytest.raises(ReferenceDataSourceError, match="header"):
         parse_jkp_nyse_cutoffs_csv(b"eom,n,nyse_p20\n2014-08-31,1,2\n")
+
+
+def test_osap_parser_normalises_percent_to_decimal_as_published() -> None:
+    parsed = parse_osap_ls_wide_csv(
+        b"date,MaxRet,ShortInterest\n1926-01-30,NA,NA\n1980-02-29,1.25,NA\n1980-03-31,-0.5,2\n"
+    )
+    assert parsed.missing_count == 3
+    assert [(o.series_key, o.observation_date, o.value, o.unit) for o in parsed.observations] == [
+        ("MaxRet", date(1980, 2, 29), Decimal("0.0125"), "decimal_return"),
+        ("MaxRet", date(1980, 3, 31), Decimal("-0.005"), "decimal_return"),
+        ("ShortInterest", date(1980, 3, 31), Decimal("0.02"), "decimal_return"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        (
+            b"<!DOCTYPE html><html><head><title>Google Drive - Quota exceeded</title></head></html>",
+            "HTML page \\('Google Drive - Quota exceeded'\\)",
+        ),
+        (b"yyyymm,MaxRet\n198002,1\n", "expected 'date'"),
+        (b"date,MaxRet,MaxRet\n1980-02-29,1,1\n", "duplicated"),
+        (b"date,MaxRet\n1980-02-29\n", "ragged"),
+        (b"date,MaxRet\n1980-02,1\n", "invalid date"),
+        (b"date,MaxRet\n1980-03-31,1\n1980-03-01,1\n", "does not follow"),
+        (b"date,MaxRet\n1980-02-29,x\n", "not decimal"),
+    ],
+)
+def test_osap_parser_refuses_a_refusal_page_or_a_changed_shape(payload: bytes, match: str) -> None:
+    with pytest.raises(ReferenceDataSourceError, match=match):
+        parse_osap_ls_wide_csv(payload)
+
+
+def test_osap_resolver_follows_the_data_page_link_to_a_direct_download() -> None:
+    link = (
+        '<a href="https://drive.google.com/file/d/{id}/view?usp=drive_link" target="_blank" '
+        'rel="noreferrer noopener">Monthly long-short returns of {n} predictors following OPs (wide csv)</a>'
+    )
+
+    def serving(*links: str) -> httpx.MockTransport:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == OSAP_DATA_PAGE_URL
+            assert request.headers["User-Agent"] == OSAP_USER_AGENT
+            return httpx.Response(200, text="<li>" + "</li><li>".join(links) + "</li>", request=request)
+
+        return httpx.MockTransport(handler)
+
+    with httpx.Client(transport=serving(link.format(id="10sOryk_dd-jk", n=212))) as client:
+        assert (
+            resolve_osap_ls_wide_url(client, OSAP_DATA_PAGE_URL)
+            == "https://drive.usercontent.google.com/download?id=10sOryk_dd-jk&export=download&confirm=t"
+        )
+    for links in ((), (link.format(id="a", n=212), link.format(id="b", n=213))):
+        with httpx.Client(transport=serving(*links)) as client:
+            with pytest.raises(ReferenceDataSourceError, match="expected exactly one"):
+                resolve_osap_ls_wide_url(client, OSAP_DATA_PAGE_URL)
