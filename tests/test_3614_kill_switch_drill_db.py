@@ -389,15 +389,21 @@ def test_drill_evidence_refuses_update_and_delete(ebull_test_conn: Conn) -> None
         "kill_switch_drill_authority",
         "kill_switch_drill_close_samples",
     )
+    # pg_trigger, not information_schema: the view keeps disabled, WHEN-conditioned and
+    # UPDATE OF column triggers, and renders the function call as version-dependent text.
+    # tgtype bits (catalog/pg_trigger.h): ROW 1, BEFORE 2, DELETE 8, UPDATE 16.
     rows = ebull_test_conn.execute(
         """
-        SELECT event_object_table, event_manipulation
-          FROM information_schema.triggers
-         WHERE event_object_table = ANY(%s)
-           AND action_timing = 'BEFORE'
-           AND action_orientation = 'ROW'
-           AND action_statement = 'EXECUTE FUNCTION kill_switch_drill_append_only()'
+        SELECT c.relname, t.tgtype & 27
+          FROM pg_trigger t
+          JOIN pg_class c ON c.oid = t.tgrelid
+         WHERE c.relnamespace = current_schema()::regnamespace
+           AND c.relname = ANY(%s)
+           AND t.tgfoid = 'kill_switch_drill_append_only'::regproc
+           AND t.tgenabled IN ('O', 'A')
+           AND t.tgqual IS NULL
+           AND cardinality(t.tgattr::int2[]) = 0
         """,
         (list(tables),),
     ).fetchall()
-    assert set(rows) == {(t, op) for t in tables for op in ("UPDATE", "DELETE")}
+    assert sorted(rows) == sorted((t, 27) for t in tables)
