@@ -12051,3 +12051,13 @@ neighbouring container and match it.**
   (`grep -n 'DELETE\|omit\|only\|one sentence'`). State which rule applies first in the new rule's own text.
 - Enforced in: `.github/workflows/claude-review.yml` system prompt (scope rules apply first; the unverified tail
   falls outside the one-sentence limit).
+
+### A step inserted into a YAML workflow can capture the previous step's last line (#3613)
+
+- Failure: #3669 inserted a step after "Fail workflow on truncated review" by anchoring on that step's `fi`. The
+  step's real last line, `echo "stop_reason=$STOP_REASON"`, came after the anchor, so it moved into the new step and
+  printed an undefined variable there. The review bot caught it from the context line below the `+` block.
+- Prevention: anchor an insertion on the next step's `- name:` line, not on the previous step's body. Then read the
+  context lines around the `+` block in `git diff` to confirm each belongs to the step above it.
+- Enforced in: `tests/test_review_verdict.py::test_the_review_job_gates_on_this_script_for_every_reviewed_pr`
+  (the truncation step still ends with its echo; the gate step has no `STOP_REASON`).

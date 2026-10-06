@@ -523,3 +523,15 @@ jobs:
             exit 1
           fi
           echo "stop_reason=$STOP_REASON"
+
+      # #3613 item 1: the required check fails unless the review approves, so the
+      # verdict is enforced server-side and not only by the client-side safe_merge.
+      # scripts/review_verdict.py is safe_merge's own parse, copied.
+      - name: Fail unless the review approves
+        if: steps.docs_only.outputs.docs_only != 'true'
+        run: |
+          if ! VERDICT=$(python3 scripts/review_verdict.py < review.txt); then
+            echo "::error::Review verdict is '$VERDICT', not APPROVE (a [BLOCKING] section, REQUEST CHANGES, or no verdict). Resolve the findings and push."
+            exit 1
+          fi
+          echo "Review verdict: $VERDICT"
