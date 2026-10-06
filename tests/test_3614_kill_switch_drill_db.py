@@ -380,3 +380,24 @@ def test_drill_evidence_refuses_update_and_delete(ebull_test_conn: Conn) -> None
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             ebull_test_conn.execute(stmt, (run.event_id,))
         ebull_test_conn.rollback()
+    # A sandbox run leaves some tables empty, and a row trigger never fires on zero
+    # rows, so the other tables are held by the catalog: every table, both statements.
+    tables = (
+        "kill_switch_drill_events",
+        "kill_switch_drill_chokepoints",
+        "kill_switch_drill_positions",
+        "kill_switch_drill_authority",
+        "kill_switch_drill_close_samples",
+    )
+    rows = ebull_test_conn.execute(
+        """
+        SELECT event_object_table, event_manipulation
+          FROM information_schema.triggers
+         WHERE event_object_table = ANY(%s)
+           AND action_timing = 'BEFORE'
+           AND action_orientation = 'ROW'
+           AND action_statement = 'EXECUTE FUNCTION kill_switch_drill_append_only()'
+        """,
+        (list(tables),),
+    ).fetchall()
+    assert set(rows) == {(t, op) for t in tables for op in ("UPDATE", "DELETE")}
