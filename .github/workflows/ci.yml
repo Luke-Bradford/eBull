@@ -16,13 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The money-path size cap diffs the PR merge commit against its
-          # first parent, so both trees must be present. The default is
-          # depth 1, so this only adds the parents. No other step in this
-          # job reads git history: every check_*.sh above and below, and
-          # what each calls, reads only current files (Codex checkpoint 3
-          # on #3673), and this job ran green at depth 2 there.
-          fetch-depth: 2
+          # Full history. The money-path size cap diffs the PR merge commit
+          # against its first parent, and the fast pytest tier includes
+          # provenance tests that resolve recorded commits and check they are
+          # ancestors of HEAD (tests/test_2834_transcribed_arm_a_verdict.py).
+          # No other step in this job reads git history (Codex checkpoint 3
+          # on #3673), so a deeper clone changes nothing else.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -229,8 +229,8 @@ jobs:
 
       - name: Fast-tier pytest (#3613)
         # The pure-logic tier only (`-m "not db"`), on the PR merge commit,
-        # so a green required check proves the head SHA's tests ran, which
-        # a local hook cannot (it can be skipped with --no-verify). The DB
+        # so a green required check proves the PR's tests ran on the code
+        # being merged, which a local hook cannot (--no-verify skips it). The DB
         # tier and smoke stay on the pre-push hook: they need the 5433
         # cluster and the dev DB. Same command as the hook's fast tier;
         # exit 5 (nothing collected) fails the step.
@@ -242,7 +242,7 @@ jobs:
   # consecutive failures, 16-17 min each, produced email noise without
   # catching real bugs. #3613 item 4 restored only the fast tier (the
   # last lint step above): it opens no database, so that race cannot
-  # occur, and it runs in about a minute.
+  # occur.
 
   supply-chain:
     # #598: catch yanked / phantom / advisory-laden lockfile entries

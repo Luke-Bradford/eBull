@@ -19,6 +19,7 @@ import os
 import pathlib
 import signal
 import socket
+import sys
 import time
 
 import anyio
@@ -188,7 +189,10 @@ def test_dump_threads_declines_rather_than_killing(sidecar, fragment) -> None:
     assert "SIGUSR1 sent" not in outcome
 
 
-@pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="POSIX only")
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="identity check compares `ps -o comm=` with sys.executable; only macOS ps prints the full path",
+)
 def test_dump_threads_signals_a_registered_live_worker(tmp_path) -> None:
     record = served_build.activate(tmp_path)
     assert record is not None
