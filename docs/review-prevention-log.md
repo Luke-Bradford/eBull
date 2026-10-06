@@ -12040,3 +12040,14 @@ neighbouring container and match it.**
 - Enforced in: `app/services/factor_panel_artefact.py::import_closure` (`unhashed`);
   `tests/test_3609_fidelity.py::test_the_unhashed_file_keeps_its_imports_in_the_closure`,
   `::test_the_real_construction_sources_hash_the_report_and_not_the_register`.
+
+### A rule added to a prompt must say how it ranks against the prompt's existing rules (#3613)
+
+- Failure: #3668 told the review bot to post findings it could not settle as "unverified". The same prompt still said
+  "DELETE" for out-of-scope findings and "one sentence" for every finding, and named no winner. The first review
+  under the new text found both collisions. It also found that the rule did not say how an unverified finding is
+  resolved. A second round found that "DELETE" still needed naming as a scope rule.
+- Prevention: before adding or loosening a rule in a prompt, grep the prompt for the rules it can collide with
+  (`grep -n 'DELETE\|omit\|only\|one sentence'`). State which rule applies first in the new rule's own text.
+- Enforced in: `.github/workflows/claude-review.yml` system prompt (scope rules apply first; the unverified tail
+  falls outside the one-sentence limit).
