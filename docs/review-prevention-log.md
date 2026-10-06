@@ -12126,3 +12126,16 @@ neighbouring container and match it.**
   state so the next run retries (`scripts/jobs_dead_man.py::settle`). A state file that cannot be written means no
   de-duplication, so the alert says so.
 - Enforced in: `tests/test_jobs_dead_man.py::test_main_persists_dedup_only_after_delivery`.
+
+### A rolled-back "sandbox" write must assert its connection is not autocommit (#3614)
+
+- Failure (caught at #3614 item 4 checkpoint 1): the kill-switch drill spec calls the real `activate_kill_switch`
+  inside a transaction it always rolls back. That holds only because psycopg turns the helper's `conn.transaction()`
+  into a savepoint when a transaction is already open (measured, psycopg 3.3.3). On an autocommit connection the
+  same block is a top-level transaction and commits, and the closing `ROLLBACK` undoes nothing. `TransactionStatus.IDLE`
+  is true on both, so an idle-connection precondition does not catch it.
+- Prevention: code that runs a committing helper inside a transaction it intends to discard asserts
+  `conn.autocommit is False` and `transaction_status == INTRANS` after its own `BEGIN`, and verifies afterwards, from
+  another connection, that nothing it wrote is visible.
+- Enforced in: `docs/specs/ops/2026-10-06-3614-kill-drill-time-to-flat.md` § Sandbox mode; slice 1's test that an
+  autocommit connection is refused before any write.
