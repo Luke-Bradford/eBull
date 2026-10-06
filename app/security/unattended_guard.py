@@ -120,7 +120,7 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     # so an unscrubbed call reads the hook's repository instead of `root` (#2658, as in git_identity).
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     return subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=10, env=env, check=False
+        ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=5, env=env, check=False
     )
 
 
@@ -136,11 +136,11 @@ def unmerged_code_reason(repo_root: Path | None = None) -> str | None:
         if status.stdout.strip():
             return f"tracked files are modified: {[line[3:] for line in status.stdout.splitlines()][:3]}"
         contained = _git(root, "merge-base", "--is-ancestor", "HEAD", "origin/main")
+        if contained.returncode == 1:
+            head = _git(root, "rev-parse", "--short", "HEAD").stdout.strip()
+            return f"HEAD {head} is not on origin/main"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"git state unreadable: {exc}"
-    if contained.returncode == 1:
-        head = _git(root, "rev-parse", "--short", "HEAD").stdout.strip()
-        return f"HEAD {head} is not on origin/main"
     if contained.returncode != 0:
         return f"git merge-base failed: {contained.stderr.strip()}"
     return None

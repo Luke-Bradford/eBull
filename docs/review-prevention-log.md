@@ -12075,3 +12075,12 @@ neighbouring container and match it.**
   `GIT_DIR=<scratch repo>/.git` set and diff the scratch repo's config and refs before and after.
 - Enforced in: `tests/test_unattended_broker_mutation_guard.py::_run_git` and
   `::test_a_hook_exported_git_dir_does_not_redirect_the_read`.
+
+### In a fail-closed check, every call that can raise sits inside the handler (#3614)
+
+- Failure: `unmerged_code_reason` wrapped its `git status` and `git merge-base` calls in `try/except`, then made the
+  `git rev-parse` call for the refusal message after the `except`. A hung git at that point escaped as a raw
+  `TimeoutExpired` instead of a refusal. The review bot caught it.
+- Prevention: when a check fails closed, put every fallible call inside the handler, including the ones that only
+  format the message. Test each call failing in turn.
+- Enforced in: `tests/test_unattended_broker_mutation_guard.py::test_a_hung_or_missing_git_refuses_at_every_call`.

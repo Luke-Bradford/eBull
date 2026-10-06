@@ -290,7 +290,7 @@ def _run_git(root: Path, *args: str) -> None:
 
 
 def _repo(root: Path) -> Path:
-    root.mkdir(exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
     _run_git(root, "init", "-q", "-b", "main")
     _run_git(root, "config", "user.email", "t@example.com")
     _run_git(root, "config", "user.name", "t")
@@ -347,6 +347,25 @@ def test_a_hook_exported_git_dir_does_not_redirect_the_read(tmp_path: Path, monk
     other = _repo(tmp_path / "hook")
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     assert (reason := unmerged_code_reason(root)) is not None and "is not on origin/main" in reason
+
+
+@pytest.mark.parametrize("failing_call", [0, 1, 2])
+def test_a_hung_or_missing_git_refuses_at_every_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_call: int
+) -> None:
+    """Each of the three git reads (status, merge-base, rev-parse) fails closed, not with a raw exception."""
+    root = _repo(tmp_path)
+    _commit(root, "x = 2\n")  # unmerged, so all three calls are reached
+    real = unattended_guard._git
+    calls = iter(range(3))
+
+    def flaky(where: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        if next(calls) == failing_call:
+            raise subprocess.TimeoutExpired(["git", *args], 5)
+        return real(where, *args)
+
+    monkeypatch.setattr(unattended_guard, "_git", flaky)
+    assert (reason := unmerged_code_reason(root)) is not None and reason.startswith("git state unreadable")
 
 
 def test_no_git_checkout_is_not_checked(tmp_path: Path) -> None:
