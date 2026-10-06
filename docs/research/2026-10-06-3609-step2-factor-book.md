@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–11 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 11 is
-applied; round 11's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–12 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 12 is
+applied; round 12's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -392,7 +392,9 @@ B1, every control draw and both references each need exactly one finite monthly 
 and every monthly wealth factor 1 + r, as computed, must be finite and strictly positive. **Comparisons use
 annualised log growth** G = (12/n) Σ ln(1 + r): G2, the control's median and ordering, the stress-cost and
 year-deletion annotations, and the book's percentile all compare G values, never rounded returns, so two different
-valid paths cannot tie at a displayed −100%. The annualised return exp(G) − 1 is for display only.
+valid paths cannot tie at a displayed −100%. The annualised return exp(G) − 1 is for display only, here and in
+every diagnostic that prints one: where it is not finite (`exp` overflows on a short window), the percentage prints
+"outside representable range" beside the finite G, and nothing computed from G changes.
 
 **Non-positive wealth stops the run** (declared policy, by construction). The run does **not** try to tell an
 economic total loss from numerical failure: a factor that computes to ≤ 0, or an r that computes to exactly −1, in
@@ -415,7 +417,7 @@ A negative factor, or a non-finite G, median or year-deletion statistic, refuses
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
 1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
-   `COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
+   `COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`, `CAPTURE_AMBIGUOUS`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
    formation, `name_key` and draw; the counts that triggered it (for `CONTROL_SHORT`, the pool and the purchases
    needed); the run id and its hashes; and the labels. No path, gate or diagnostic is printed.
 2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
@@ -535,7 +537,8 @@ committed to `docs/research/3609-ledger.jsonl`, in this order:
    `access_kind="evaluate"`, `result_version` = the run id, `accessed_by` = the operator or loop identity running it,
    and `purpose="#3609 step 2 declared run <run id>"`. It commits in its own transaction before step 3, and the
    ledger row records the returned `access_id`.
-3. `sub_published`, then `stage_b_published`: each artefact's manifest sha256.
+3. `sub_published`, then `stage_b_published`: each artefact's manifest sha256. A reusing attempt writes
+   `capture_reused` instead of rows 3 and 4 (§"Slices", capture lifecycle).
 4. `data_frozen`: the data-capture manifest's sha256. The report refuses without it, or if any file differs from it.
 5. `completed` or `failed`, written before any result is printed.
 
@@ -710,11 +713,19 @@ window's defined-month count for that metric.
    - run the report, refusing any pin mismatch;
    - post the verdict and ledger on #3609.
 
-   **Capture lifecycle.** The first run to write `data_frozen` binds the capture to the trial. Every later attempt
-   under this declaration reuses it: it verifies the SUB and stage-B artefacts against that `data_frozen` row and
-   never publishes or rebuilds them. A run that recorded its access but wrote no `data_frozen` is abandoned and
-   classified by §"Registration" (an access); its partial outputs are never reused, and the next attempt captures
-   afresh under its own run id. Replacing a bound capture needs a new declaration.
+   **Capture lifecycle.** The authority is the committed ledger on `main`, never a local JSONL.
+   - **Binding.** After `data_frozen`, the run stops. Its ledger rows through `data_frozen` are merged on `main`
+     before any report runs. The report then requires exactly one `data_frozen` row for this trial in the committed
+     ledger at HEAD, and that it is its own run's or the one it reuses. Zero or more than one refuses
+     (`CAPTURE_AMBIGUOUS`). So two captures that race both fail closed, and declared runs are staked on #3609 one at
+     a time.
+   - **Reuse.** A later attempt under this declaration writes `capture_reused` (the capturing run id and its
+     `data_frozen` sha256) in place of `sub_published`, `stage_b_published` and `data_frozen`. It verifies both
+     artefacts against that row and never publishes or rebuilds them.
+   - **Abandoned captures.** A run that recorded its access but has no committed `data_frozen` is abandoned and
+     classified by §"Registration" (an access). Its outputs are never reused, and the next attempt may capture
+     afresh under its own run id.
+   - Replacing a bound capture needs a new declaration.
 
 ## Known limits
 
@@ -907,3 +918,9 @@ window's defined-month count for that metric.
 - **142:** the first `data_frozen` binds the capture to the trial; later attempts verify and reuse it, abandoned
   captures are never reused, and replacement needs a new declaration.
 - **143:** the diagnostics heading and text name both exceptions: the turnover veto and input refusals.
+
+**Round 12 (all 3 carried findings resolved; 2 new, 144–145; `ckpt1_round12_final.txt`), all applied:**
+- **144:** a display exp(G) − 1 that overflows prints "outside representable range" beside the finite G.
+- **145:** the committed ledger on `main` binds the capture: `data_frozen` rows are merged before any report, the
+  report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
+  in place of the three publication rows.
