@@ -465,12 +465,18 @@ def _config_conn(
 
 
 class TestMakeLLMClients:
+    @respx.mock
     def test_local_endpoint_resolves_to_the_native_provider(self) -> None:
         """#2431 — a LOCAL endpoint is Ollama, and only its native route honours
         ``num_ctx``. The default config points at localhost, so the default path
         must be the native provider; picking the OpenAI one here is the bug that
         truncated every thesis for two prompt revisions.
         """
+        # Without the mock and a clear cache this read the live probe: it passed only where
+        # Ollama was running or an earlier test in the same worker had cached the answer.
+        from app.services import llm_client
+
+        llm_client._OLLAMA_PROBE_CACHE.clear()
         _mock_ollama_probe()
         clients = make_llm_clients(_config_conn(provider="openai_compatible"))
         assert isinstance(clients.writer, OllamaNativeProvider)
