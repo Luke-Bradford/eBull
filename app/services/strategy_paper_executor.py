@@ -1527,19 +1527,42 @@ def _resume_uncertain_submission_locked(
     )
 
 
+@dataclass(frozen=True)
+class TradingEnabledState:
+    """What :func:`decide_trading_enabled` reads. ``kill_row_active`` is None when the row is missing."""
+
+    enable_auto_trading: bool
+    kill_row_active: bool | None
+
+
+def load_trading_enabled_state(conn: psycopg.Connection[Any]) -> TradingEnabledState:
+    """Read the runtime switch and the kill row. Raises ``RuntimeConfigCorrupt`` before the kill read.
+
+    ⚠ Never commits, rolls back or opens a transaction block: the kill-switch drill
+    (#3614) calls it inside a transaction it always rolls back.
+    """
+    runtime = get_runtime_config(conn)
+    kill_row = conn.execute("SELECT is_active FROM kill_switch WHERE id = true").fetchone()
+    return TradingEnabledState(runtime.enable_auto_trading, None if kill_row is None else bool(kill_row[0]))
+
+
+def decide_trading_enabled(state: TradingEnabledState) -> str | None:
+    """The refusal code, or None. Auto-trading is checked before the kill switch."""
+    if not state.enable_auto_trading:
+        return "auto_trading_disabled"
+    if state.kill_row_active is None or state.kill_row_active:
+        return "kill_switch_active_or_missing"
+    return None
+
+
 def _trading_enabled_refusal(conn: psycopg.Connection[Any]) -> str | None:
     """The runtime switch and kill switch, read in their own committed transaction."""
     try:
-        runtime = get_runtime_config(conn)
-        kill_row = conn.execute("SELECT is_active FROM kill_switch WHERE id = true").fetchone()
+        state = load_trading_enabled_state(conn)
         conn.commit()
     except RuntimeConfigCorrupt:
         return "runtime_config_corrupt"
-    if not runtime.enable_auto_trading:
-        return "auto_trading_disabled"
-    if kill_row is None or bool(kill_row[0]):
-        return "kill_switch_active_or_missing"
-    return None
+    return decide_trading_enabled(state)
 
 
 def _reconciliation_overdue(conn: psycopg.Connection[Any], signal_id: int) -> bool:

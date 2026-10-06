@@ -12139,3 +12139,20 @@ neighbouring container and match it.**
   another connection, that nothing it wrote is visible.
 - Enforced in: `docs/specs/ops/2026-10-06-3614-kill-drill-time-to-flat.md` § Sandbox mode; slice 1's test that an
   autocommit connection is refused before any write.
+
+### An "append-only" table needs BEFORE UPDATE OR DELETE; the pre-push smoke applies the WORKING TREE (#3614)
+
+- Failure (caught by Codex checkpoint 2 and the review bot on #3681): sql/476 called five drill-evidence tables
+  append-only but copied a `BEFORE UPDATE` trigger, so the evidence could still be deleted. The fix was edited
+  but left unstaged, and the commit was pushed without it. The pre-push smoke applied the WORKING-TREE 476, with the
+  fix, to dev. Dev therefore recorded a hash no commit had, and the next push's DB tier failed with "content
+  changed since applied".
+- Prevention: a migration that calls a table append-only (or immutable) uses `BEFORE UPDATE OR DELETE`, and a DB
+  test asserts that both statements raise. The test harness deletes under `session_replication_role = replica`, so
+  the trigger does not break cleanup. Before any push that touches `sql/`, `git status --short` must be empty: the
+  smoke migrates dev from the files on disk, not from the commit. To recover, make the branch file byte-identical
+  to what dev applied: compare `shasum -a 256` with `schema_migrations.content_sha256`.
+- Also: a column added for a recorder to write gets a DB test that SELECTs it after a real write; a pure test of
+  the value it would hold does not prove the INSERT names it.
+- Enforced in: `tests/test_3614_kill_switch_drill_db.py::test_drill_evidence_refuses_update_and_delete` and
+  `::test_sandbox_passes_and_commits_nothing_to_the_kill_row` (selects `positions_without_target`).
