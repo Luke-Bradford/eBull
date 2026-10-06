@@ -102,6 +102,8 @@ class EntryRefusal:
     signal_id: int
     evaluated_at: float
     reason_code: str
+    # The row's own risk evidence, pre-formatted ("deployment 7, account equity ...").
+    evidence: str = ""
 
 
 @dataclass(frozen=True)
@@ -208,15 +210,22 @@ def plan(prior: WatchState, obs: Observation, *, now: float) -> list[Notice]:
     ]
     if fresh:
         counts = Counter(r.reason_code for r in fresh)
-        summary = ", ".join(f"{code} x{n}" for code, n in sorted(counts.items()))
+        latest = {r.reason_code: r for r in sorted(fresh, key=lambda r: r.evaluated_at)}
+        summary = "; ".join(
+            f"{code} x{n}" + (f" (latest: {latest[code].evidence})" if latest[code].evidence else "")
+            for code, n in sorted(counts.items())
+        )
         notices.append(
             Notice(
                 title="eBull entries refused at a limit",
                 message=(
                     f"{len(fresh)} engine entr{'y was' if len(fresh) == 1 else 'ies were'} refused at the sandbox "
-                    f"boundary or a mandate loss limit: {summary} (latest {_iso(max(r.evaluated_at for r in fresh))}). "
-                    "Check the pot and its assigned capital on /strategies. "
-                    "Safe default: refused entries are not retried; exits still run."
+                    f"boundary or a mandate loss limit, last at {_iso(max(r.evaluated_at for r in fresh))}: "
+                    f"{summary}. "
+                    # The limit is not on the refusal row, and recomputing it here would be a
+                    # second copy of the executor's rule that could disagree with it.
+                    "The limit is the deployment's mandate; check the pot and its assigned capital on /strategies. "
+                    "Safe default: the refusal stands; exits still run."
                 ),
                 priority=4,
                 tag="no_entry",
@@ -251,6 +260,8 @@ def read_observation() -> Observation:
     from app.config import Settings
 
     with psycopg.connect(Settings().database_url, connect_timeout=5) as conn:
+        # A one-shot under launchd: a query parked behind a lock would hold every later pass.
+        conn.execute("SET statement_timeout = '10s'")
         blocks = [
             Block(str(r[0]), bool(r[1]), r[2].timestamp() if r[2] is not None else None, str(r[3] or ""))
             for r in conn.execute(
@@ -270,10 +281,11 @@ def read_observation() -> Observation:
             ).fetchall()
         ]
         refusals = [
-            EntryRefusal(int(r[0]), r[1].timestamp(), str(r[2]))
+            EntryRefusal(int(r[0]), r[1].timestamp(), str(r[2]), _refusal_evidence(*r[3:]))
             for r in conn.execute(
                 """
-                SELECT signal_id, evaluated_at, reason_code
+                SELECT signal_id, evaluated_at, reason_code, deployment_id, account_equity,
+                       account_invested, broker_available_cash, account_drawdown_pct
                 FROM strategy_entry_preflights
                 WHERE verdict = 'rejected' AND reason_code = ANY(%s)
                   AND evaluated_at > now() - make_interval(secs => %s)
@@ -282,6 +294,24 @@ def read_observation() -> Observation:
             ).fetchall()
         ]
     return Observation(blocks=blocks, kill_switch=kill_switch, refusals=refusals)
+
+
+def _refusal_evidence(*figures: object) -> str:
+    """The risk figures the refusal row persisted, in SELECT order; a NULL is left out."""
+    deployment_id, equity, invested, cash, drawdown_pct = figures
+    parts = [
+        f"{label} {value}"
+        for label, value in (
+            ("deployment", deployment_id),
+            ("account equity", equity),
+            ("invested", invested),
+            ("available cash", cash),
+        )
+        if value is not None
+    ]
+    if drawdown_pct is not None:
+        parts.append(f"drawdown {drawdown_pct}%")
+    return ", ".join(parts)
 
 
 def load_state(path: Path) -> WatchState:
@@ -317,15 +347,16 @@ def run(*, status_file: Path = _DEFAULT_STATUS_FILE, dry_run: bool = False) -> i
         for n in notices:
             print(f"[operator-alert-watch] would send: {n.title}: {n.message}", file=sys.stderr, flush=True)
         return 0
+    # Probe the status file before sending: unwritable means every pass re-sends, so say so.
+    note = "" if save_state(status_file, prior) else " [alert watch status file unwritable: not de-duplicated]"
     # Push off: the rows stay the record and the log line is the only channel,
     # so a notice counts as handled once logged rather than re-logged every run.
     push_on = config_from_env() is not None
     delivered: list[Notice] = []
     for n in notices:
-        ok = send_push(title=n.title, message=n.message, priority=n.priority, tags=(n.tag,)) if push_on else True
-        print(
-            f"[operator-alert-watch] {n.title}: {n.message} (push sent: {ok and push_on})", file=sys.stderr, flush=True
-        )
+        message = n.message + note
+        ok = send_push(title=n.title, message=message, priority=n.priority, tags=(n.tag,)) if push_on else True
+        print(f"[operator-alert-watch] {n.title}: {message} (push sent: {ok and push_on})", file=sys.stderr, flush=True)
         if ok:
             delivered.append(n)
     save_state(status_file, settle(prior, delivered, now=now))

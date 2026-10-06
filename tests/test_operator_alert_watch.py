@@ -99,8 +99,8 @@ def test_each_kill_switch_change_pages_once_in_audit_order() -> None:
 def test_entry_refusals_aggregate_into_one_notice_and_only_paged_codes_count() -> None:
     obs = Observation(
         refusals=[
-            EntryRefusal(1, _NOW - 10, "sandbox_exceeded"),
-            EntryRefusal(2, _NOW - 5, "sandbox_exceeded"),
+            EntryRefusal(1, _NOW - 10, "sandbox_exceeded", "deployment 7, account equity 900.00"),
+            EntryRefusal(2, _NOW - 5, "sandbox_exceeded", "deployment 7, account equity 1000.00"),
             EntryRefusal(3, _NOW - 5, "portfolio_daily_loss_limit"),
             EntryRefusal(4, _NOW - 5, "quote_spread_flagged"),
         ]
@@ -108,7 +108,10 @@ def test_entry_refusals_aggregate_into_one_notice_and_only_paged_codes_count() -
     notices = plan(WatchState(), obs, now=_NOW)
     assert len(notices) == 1
     assert "3 engine entries were refused" in notices[0].message
-    assert "portfolio_daily_loss_limit x1, sandbox_exceeded x2" in notices[0].message
+    assert (
+        "portfolio_daily_loss_limit x1; sandbox_exceeded x2 (latest: deployment 7, account equity 1000.00)"
+        in notices[0].message
+    )
     assert set(notices[0].seen) == {"entry_refusal:1", "entry_refusal:2", "entry_refusal:3"}
 
     state = _all_delivered(WatchState(), obs)
@@ -186,3 +189,21 @@ def test_paged_codes_and_sources_are_ones_the_engine_writes() -> None:
     runtime = (_REPO / "app/services/strategy_paper_runtime.py").read_text()
     for source in _PAGED_BLOCKS:
         assert f'"{source}"' in runtime
+
+
+def test_refusal_evidence_names_each_persisted_figure_and_skips_nulls() -> None:
+    assert operator_alert_watch._refusal_evidence(7, "1000.00", None, "50.00", "3.5") == (
+        "deployment 7, account equity 1000.00, available cash 50.00, drawdown 3.5%"
+    )
+    assert operator_alert_watch._refusal_evidence(None, None, None, None, None) == ""
+
+
+def test_an_unwritable_status_file_is_named_in_the_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.setenv("EBULL_NTFY_TOPIC", "t")
+    monkeypatch.setattr(operator_alert_watch, "read_observation", lambda: Observation(blocks=[_block(age=86_400)]))
+    messages: list[str] = []
+    monkeypatch.setattr(operator_alert_watch, "send_push", lambda **kw: messages.append(str(kw["message"])) is None)
+    assert operator_alert_watch.run(status_file=blocker / "s.json") == 0
+    assert messages and messages[0].endswith("[alert watch status file unwritable: not de-duplicated]")

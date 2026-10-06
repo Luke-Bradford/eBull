@@ -150,6 +150,9 @@ def read_last_start() -> tuple[float | None, str | None]:
         url = Settings().database_url
         phase = "db"
         with psycopg.connect(url, connect_timeout=5) as conn:
+            # connect_timeout bounds the connect only; a read parked behind a lock
+            # would hold this one-shot, and launchd starts no later pass meanwhile.
+            conn.execute("SET statement_timeout = '10s'")
             row = conn.execute(
                 "SELECT max(started_at) FROM job_runs WHERE started_at <= now() + interval '5 minutes'"
             ).fetchone()
