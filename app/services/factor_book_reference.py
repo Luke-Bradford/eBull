@@ -8,6 +8,9 @@ Spec: ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"Slices" item 1 (
   not "Other": the step 2 report buckets it as unclassified, so :meth:`Ff12Map.industry` takes an ``int`` only.
 * **QMJ.** The z-score and composite rules cite Asness, Frazzini & Pedersen's AQR working paper (the draft of
   2013-10-09 that AQR serves), pinned here by hash.
+* **Extended FSDS SUB.** Stage B's SIC reads need the quarters after step 1's pin (2012q1..2021q2) through 2024q3,
+  which holds the last formation's (2024-07) evidence cutoff. They are stage-B data, so
+  ``scripts/publish_3609_step2_sub.py`` fetches them only after the run's hold-out access is committed.
 
 Kept apart from ``factor_panel_reference``: that module is inside step 1's hashed construction closure, so an edit
 there would change stage A's construction versions.
@@ -36,6 +39,9 @@ FF12_OTHER: Final = "Other"
 QMJ_PDF_URL: Final = "https://www.aqr.com/-/media/AQR/Documents/Insights/Working-Papers/Quality-Minus-Junk.pdf"
 #: Downloaded 2026-10-06 (``Last-Modified: Thu, 21 Feb 2019 22:26:48 GMT``); title page "This draft: October 9, 2013".
 QMJ_PDF_SHA256: Final = "761c42f91d5f00fa75c8fb2b3722530562096de9491c80badf9e5b4091fbb2a9"
+
+STEP2_SUB_FIRST_QUARTER: Final = (2021, 3)
+STEP2_SUB_LAST_QUARTER: Final = (2024, 3)
 
 _HEADER: Final = re.compile(r" ?(\d{1,2}) (\S+) +(\S.*)")
 _RANGE: Final = re.compile(r" +(\d{4})-(\d{4})")
@@ -108,6 +114,16 @@ def load_ff12(path: Path = SICCODES12_PATH) -> Ff12Map:
     return parse_siccodes12(payload)
 
 
+def step2_sub_quarters() -> tuple[str, ...]:
+    """The extended SUB quarters, ``2021q3`` .. ``2024q3``, in order."""
+    year, quarter = STEP2_SUB_FIRST_QUARTER
+    quarters: list[str] = []
+    while (year, quarter) <= STEP2_SUB_LAST_QUARTER:
+        quarters.append(f"{year}q{quarter}")
+        year, quarter = (year + 1, 1) if quarter == 4 else (year, quarter + 1)
+    return tuple(quarters)
+
+
 __all__ = [
     "FF12_OTHER",
     "QMJ_PDF_SHA256",
@@ -115,8 +131,11 @@ __all__ = [
     "SICCODES12_PATH",
     "SICCODES12_SHA256",
     "SICCODES12_URL",
+    "STEP2_SUB_FIRST_QUARTER",
+    "STEP2_SUB_LAST_QUARTER",
     "Ff12Industry",
     "Ff12Map",
     "load_ff12",
     "parse_siccodes12",
+    "step2_sub_quarters",
 ]
