@@ -6,7 +6,6 @@ stubbed. No database, no network.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -181,14 +180,19 @@ def test_dry_run_neither_sends_nor_saves(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_paged_codes_and_sources_are_ones_the_engine_writes() -> None:
-    """A renamed refusal code or block source would silently never page."""
+    """A renamed refusal code or block source would silently never page.
+
+    Matched in the form the engine writes them, not as any string literal: a loss-limit
+    code is a ``return`` from the executor's risk check, the sandbox code its imported
+    constant, and a block source the ``source=`` keyword of the runtime's ``_set_block``.
+    """
     executor = (_REPO / "app/services/strategy_paper_executor.py").read_text()
-    assert "SANDBOX_EXCEEDED" in executor
-    written = set(re.findall(r'"([a-z_]+)"', executor)) | {SANDBOX_EXCEEDED}
-    assert _PAGED_ENTRY_REFUSALS <= written
+    assert "return SANDBOX_EXCEEDED" in executor
+    for code in _PAGED_ENTRY_REFUSALS - {SANDBOX_EXCEEDED}:
+        assert f'return "{code}"' in executor, code
     runtime = (_REPO / "app/services/strategy_paper_runtime.py").read_text()
     for source in _PAGED_BLOCKS:
-        assert f'"{source}"' in runtime
+        assert f'source="{source}"' in runtime, source
 
 
 def test_refusal_evidence_names_each_persisted_figure_and_skips_nulls() -> None:

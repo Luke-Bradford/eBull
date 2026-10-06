@@ -203,6 +203,8 @@ def plan(prior: WatchState, obs: Observation, *, now: float) -> list[Notice]:
             )
         )
 
+    # ``signal_id`` alone is the whole key: it is ``strategy_entry_preflights``' PRIMARY KEY
+    # (sql/287), so a signal has one preflight row, in one deployment, ever.
     fresh = [
         r
         for r in obs.refusals
