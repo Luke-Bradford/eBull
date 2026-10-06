@@ -165,24 +165,27 @@ def publish(
         return manifest_sha256
     except BaseException as exc:
         try:
-            shutil.rmtree(out)
-        except OSError as cleanup_error:
-            exc.add_note(f"{out} was not fully removed ({cleanup_error!r}); delete it, it holds stage-B files")
-        # Stage-B files may already have been read, so the run ends here: a retry needs a fresh run id and its own
-        # access row, never a second look under this one. A failure to write that row must not replace the error.
-        try:
-            append_ledger(
-                ledger,
-                {
-                    "run_id": run_id,
-                    "event": "failed",
-                    "at": datetime.now(UTC).isoformat(),
-                    "step": EVENT,
-                    "error": repr(exc),
-                },
-            )
-        except Exception as ledger_error:
-            exc.add_note(f"the 'failed' ledger row was not written ({ledger_error!r}); end run {run_id} by hand")
+            try:
+                shutil.rmtree(out)
+            except OSError as cleanup_error:
+                exc.add_note(f"{out} was not fully removed ({cleanup_error!r}); delete it, it holds stage-B files")
+        finally:
+            # Stage-B files may already have been read, so the run ends here, whatever the cleanup raised: a retry
+            # needs a fresh run id and its own access row, never a second look under this one. A failure to write
+            # that row must not replace the error.
+            try:
+                append_ledger(
+                    ledger,
+                    {
+                        "run_id": run_id,
+                        "event": "failed",
+                        "at": datetime.now(UTC).isoformat(),
+                        "step": EVENT,
+                        "error": repr(exc),
+                    },
+                )
+            except Exception as ledger_error:
+                exc.add_note(f"the 'failed' ledger row was not written ({ledger_error!r}); end run {run_id} by hand")
         raise
 
 

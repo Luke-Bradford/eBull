@@ -264,3 +264,17 @@ def test_a_failed_cleanup_is_reported_and_still_ends_the_run(tmp_path: Path, mon
         _publish(tmp_path, ledger, _Sec(missing="2022q2"), [])
     assert any("was not fully removed" in note for note in caught.value.__notes__)
     assert [row["event"] for row in read_ledger(ledger)] == ["started", "access_recorded", "failed"]
+
+
+@pytest.mark.usefixtures("clean")
+def test_a_non_os_cleanup_error_still_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ledger = _ledger(tmp_path, _started(), _recorded())
+
+    def audit_hook_refuses(path: Path) -> None:
+        raise RuntimeError("audit hook refused shutil.rmtree")
+
+    monkeypatch.setattr(publisher.shutil, "rmtree", audit_hook_refuses)
+    with pytest.raises(RuntimeError, match="audit hook") as caught:
+        _publish(tmp_path, ledger, _Sec(missing="2022q2"), [])
+    assert isinstance(caught.value.__context__, httpx.HTTPStatusError)
+    assert [row["event"] for row in read_ledger(ledger)] == ["started", "access_recorded", "failed"]
