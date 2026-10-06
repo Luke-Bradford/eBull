@@ -95,11 +95,10 @@ def test_glob_pattern_covers_a_new_executor(repo: Path) -> None:
 def test_a_rename_is_charged_as_delete_plus_add(repo: Path) -> None:
     _write(repo, _LISTED, 250)
     base = _commit(repo)
+    # A pure move, which git's default rename detection would report as 0/0.
     _run(repo, "mv", _LISTED, "app/services/order_client_x_executor.py")
-    _write(repo, _LISTED, 1)  # keep the pattern matched
     head = _commit(repo)
-    # 249 net deleted from order_client.py, 250 added to the new executor.
-    assert _churn(repo, base, head)[0] == 499
+    assert _churn(repo, base, head)[0] == 500
 
 
 def test_binary_change_fails_closed(repo: Path) -> None:
