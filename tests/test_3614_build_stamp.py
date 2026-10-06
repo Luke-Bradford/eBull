@@ -52,7 +52,7 @@ def test_explicit_options_keep_the_inherited_stamp(monkeypatch: pytest.MonkeyPat
     # libpq ignores PGOPTIONS when ``options`` is passed, so connect_job must merge it.
     monkeypatch.setenv("PGOPTIONS", f"-c ebull.code_commit={SHA}")
     assert build_stamp.with_inherited_pgoptions("-c statement_timeout=5") == (
-        f"-c ebull.code_commit={SHA} -c statement_timeout=5"
+        f"-c statement_timeout=5 -c ebull.code_commit={SHA}"
     )
 
 
@@ -67,7 +67,7 @@ def test_connect_job_passes_the_stamp_with_its_timeout(monkeypatch: pytest.Monke
         job_connection.connect_job()
     finally:
         job_connection.job_statement_timeout_ms.reset(token)
-    assert seen["options"] == f"-c ebull.code_commit={SHA} -c statement_timeout=7"
+    assert seen["options"] == f"-c statement_timeout=7 -c ebull.code_commit={SHA}"
 
 
 def test_non_dev_pass_through_installs_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,9 +82,3 @@ def test_non_dev_pass_through_installs_the_stamp(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(SystemExit):
         dev_reload.main()
     assert calls == ["stamp", "serve"]
-
-
-def test_a_caller_cannot_override_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PGOPTIONS", f"-c ebull.code_commit={SHA}")
-    forged = "-c EBULL.code_commit=forged -cebull.code_dirty=x --Ebull.uv_lock_sha256=y -c lock_timeout=5"
-    assert build_stamp.with_inherited_pgoptions(forged) == (f"-c ebull.code_commit={SHA} -c lock_timeout=5")

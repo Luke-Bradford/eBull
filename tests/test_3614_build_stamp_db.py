@@ -9,7 +9,13 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-from app.db.build_stamp import CODE_COMMIT_SETTING, CODE_DIRTY_SETTING, UV_LOCK_SHA256_SETTING, with_build_stamp
+from app.db.build_stamp import (
+    CODE_COMMIT_SETTING,
+    CODE_DIRTY_SETTING,
+    UV_LOCK_SHA256_SETTING,
+    with_build_stamp,
+    with_inherited_pgoptions,
+)
 from tests.fixtures.ebull_test_db import test_database_url
 
 SHA = "c" * 40
@@ -69,3 +75,23 @@ def test_a_malformed_dirty_setting_never_blocks_the_write(
     with psycopg.connect(test_database_url()) as stamped:
         assert _insert_decision(stamped) == (None, None, None)
         stamped.rollback()
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        "-c ebull.code_commit=forged",
+        "-c EBULL.CODE_COMMIT=forged",
+        "-cebull.code_commit=forged",
+        "--Ebull.code_commit=forged",
+    ],
+)
+def test_a_caller_cannot_override_the_stamp(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch, forged: str
+) -> None:
+    # The stamp goes last, and the server applies a repeated setting last-wins in every spelling.
+    stamp = {CODE_COMMIT_SETTING: SHA, CODE_DIRTY_SETTING: "false", UV_LOCK_SHA256_SETTING: LOCK}
+    monkeypatch.setenv("PGOPTIONS", with_build_stamp("", stamp))
+    with psycopg.connect(test_database_url(), options=with_inherited_pgoptions(forged)) as conn:
+        assert _insert_decision(conn) == (SHA, False, LOCK)
+        conn.rollback()

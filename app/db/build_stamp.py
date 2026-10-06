@@ -86,13 +86,8 @@ def with_build_stamp(pgoptions: str, stamp: dict[str, str]) -> str:
     kept: list[str] = []
     i = 0
     while i < len(tokens):
-        # Setting names are case-insensitive to the server, so ``EBULL.x`` is the same setting.
-        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].lower().startswith("ebull."):
+        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("ebull."):
             i += 2
-            continue
-        # The joined forms the server accepts too: ``-cebull.x=v`` and ``--ebull.x=v``.
-        if tokens[i].lower().startswith(("-cebull.", "--ebull.")):
-            i += 1
             continue
         kept.append(tokens[i])
         i += 1
@@ -102,14 +97,18 @@ def with_build_stamp(pgoptions: str, stamp: dict[str, str]) -> str:
 
 
 def with_inherited_pgoptions(options: str) -> str:
-    """An explicit libpq ``options`` value with this process's ``PGOPTIONS`` kept in front of it.
+    """An explicit libpq ``options`` value with this process's ``PGOPTIONS`` appended after it.
 
     libpq uses ``PGOPTIONS`` only when ``options`` is not given, so a caller that
     passes its own (``connect_job``'s ``statement_timeout``) would otherwise
-    connect unstamped. The explicit value comes last and wins on a repeated name,
-    except that any ``ebull.*`` setting in it is dropped: a caller cannot override the stamp.
+    connect unstamped. The inherited value goes LAST because the server applies
+    a repeated setting last-wins, whatever its spelling (``-c``, ``-c<name>``,
+    ``--<name>``, any case), so a caller cannot override the stamp. Parsing the
+    caller's string for stamp names instead was a losing game against those
+    spellings. ``PGOPTIONS`` holds only the stamp in every launcher here, so
+    nothing else of the caller's is overridden.
     """
-    return f"{os.environ.get('PGOPTIONS', '')} {with_build_stamp(options, {})}".strip()
+    return f"{options} {os.environ.get('PGOPTIONS', '')}".strip()
 
 
 def install_build_stamp() -> None:
