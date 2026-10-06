@@ -6,7 +6,7 @@
 -- One event per drill run, with its per-chokepoint outcomes, the engine book it
 -- snapshotted, the outstanding authority it found and the close samples behind its
 -- time-to-flat ESTIMATE. The event and its children commit in one transaction.
--- Append-only: rows are never updated.
+-- Append-only: rows are never updated or deleted.
 --
 -- The build-stamp columns default from the session settings sql/474 reads
 -- (`app/db/build_stamp.py`); the table is new, so the default stamps no old row.
@@ -131,27 +131,27 @@ END $$;
 
 DROP TRIGGER IF EXISTS kill_switch_drill_events_append_only ON kill_switch_drill_events;
 CREATE TRIGGER kill_switch_drill_events_append_only
-    BEFORE UPDATE ON kill_switch_drill_events
+    BEFORE UPDATE OR DELETE ON kill_switch_drill_events
     FOR EACH ROW EXECUTE FUNCTION kill_switch_drill_append_only();
 
 DROP TRIGGER IF EXISTS kill_switch_drill_chokepoints_append_only ON kill_switch_drill_chokepoints;
 CREATE TRIGGER kill_switch_drill_chokepoints_append_only
-    BEFORE UPDATE ON kill_switch_drill_chokepoints
+    BEFORE UPDATE OR DELETE ON kill_switch_drill_chokepoints
     FOR EACH ROW EXECUTE FUNCTION kill_switch_drill_append_only();
 
 DROP TRIGGER IF EXISTS kill_switch_drill_positions_append_only ON kill_switch_drill_positions;
 CREATE TRIGGER kill_switch_drill_positions_append_only
-    BEFORE UPDATE ON kill_switch_drill_positions
+    BEFORE UPDATE OR DELETE ON kill_switch_drill_positions
     FOR EACH ROW EXECUTE FUNCTION kill_switch_drill_append_only();
 
 DROP TRIGGER IF EXISTS kill_switch_drill_authority_append_only ON kill_switch_drill_authority;
 CREATE TRIGGER kill_switch_drill_authority_append_only
-    BEFORE UPDATE ON kill_switch_drill_authority
+    BEFORE UPDATE OR DELETE ON kill_switch_drill_authority
     FOR EACH ROW EXECUTE FUNCTION kill_switch_drill_append_only();
 
 DROP TRIGGER IF EXISTS kill_switch_drill_close_samples_append_only ON kill_switch_drill_close_samples;
 CREATE TRIGGER kill_switch_drill_close_samples_append_only
-    BEFORE UPDATE ON kill_switch_drill_close_samples
+    BEFORE UPDATE OR DELETE ON kill_switch_drill_close_samples
     FOR EACH ROW EXECUTE FUNCTION kill_switch_drill_append_only();
 
 COMMENT ON TABLE kill_switch_drill_events IS

@@ -394,5 +394,6 @@ row trigger (precedent: sql/299, sql/327, sql/477), plus a DB test that both sta
 raise. An UPDATE-only trigger leaves the evidence deletable. The test harness empties
 tables under `session_replication_role = replica`, so the trigger does not break cleanup.
 
-Precedent (2026-10-06, #3614): sql/476 shipped UPDATE-only; the fix arrived after the
-pre-push smoke had applied 476 to dev, so it had to fix forward as sql/477.
+Precedent (2026-10-06, #3614): sql/476 was committed UPDATE-only, with the fix still
+unstaged. The pre-push smoke migrates dev from the files ON DISK, so dev recorded the
+unstaged version's hash. Keep `git status` clean before any push that touches `sql/`.
