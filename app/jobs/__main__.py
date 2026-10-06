@@ -63,6 +63,7 @@ import psycopg
 import app.services.manifest_parsers  # noqa: F401, E402
 from app.config import settings
 from app.db.background_write import set_background_pool
+from app.db.build_stamp import install_build_stamp
 from app.db.dev_test_db_reaper import run_orphan_test_db_reap
 from app.db.pg_settings import JOBS_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
 from app.db.pool import JOBS_POOL_MAX_SIZE, open_pool
@@ -1408,6 +1409,9 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # #3614: before the first connection. Here and not in ``serve()``, which the
+    # smoke test drives in-process and must not rewrite the test runner's env.
+    install_build_stamp()
     sys.exit(serve())
 
 

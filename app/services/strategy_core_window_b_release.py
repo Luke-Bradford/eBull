@@ -593,8 +593,8 @@ def _check_detail(detail: tuple[Any, ...], evidence: dict[str, Any]) -> None:
             "sender": {"pid": entered_pid, "host": entered_host, "entered_at": entered_at},
         }
     )
-    # Step 3's per-order half. A core order never records `broker_environment` (only
-    # `order_client` writes it), so NULL is its normal shape; `'real'` refuses. The
+    # Step 3's per-order half. Core orders record `broker_environment = 'demo'` since #3614;
+    # NULL is the shape of every earlier one, so both pass and `'real'` refuses. The
     # credential rows are what bind the account, and both must be demo and resolvable.
     if order_environment not in (None, "demo"):
         raise WindowBRefused("window_b_environment_not_demo", f"order environment is {order_environment!r}")
