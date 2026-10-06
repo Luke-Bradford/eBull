@@ -391,10 +391,12 @@ def test_drill_evidence_refuses_update_and_delete(ebull_test_conn: Conn) -> None
     )
     # pg_trigger, not information_schema: the view keeps disabled, WHEN-conditioned and
     # UPDATE OF column triggers, and renders the function call as version-dependent text.
-    # tgtype bits (catalog/pg_trigger.h): ROW 1, BEFORE 2, DELETE 8, UPDATE 16.
+    # tgtype bits (catalog/pg_trigger.h): ROW 1, BEFORE 2, DELETE 8, UPDATE 16. Exact, not
+    # masked: a trigger that also fired on INSERT would refuse the evidence writes, and a
+    # table no test populates would never show it.
     rows = ebull_test_conn.execute(
         """
-        SELECT c.relname, t.tgtype & 27
+        SELECT c.relname, t.tgtype
           FROM pg_trigger t
           JOIN pg_class c ON c.oid = t.tgrelid
          WHERE c.relnamespace = current_schema()::regnamespace
