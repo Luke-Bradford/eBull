@@ -86,11 +86,12 @@ def with_build_stamp(pgoptions: str, stamp: dict[str, str]) -> str:
     kept: list[str] = []
     i = 0
     while i < len(tokens):
-        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("ebull."):
+        # Setting names are case-insensitive to the server, so ``EBULL.x`` is the same setting.
+        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].lower().startswith("ebull."):
             i += 2
             continue
         # The joined forms the server accepts too: ``-cebull.x=v`` and ``--ebull.x=v``.
-        if tokens[i].startswith(("-cebull.", "--ebull.")):
+        if tokens[i].lower().startswith(("-cebull.", "--ebull.")):
             i += 1
             continue
         kept.append(tokens[i])
