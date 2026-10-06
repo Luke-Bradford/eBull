@@ -1178,6 +1178,11 @@ def _publish_artefact(
 
     ``versions`` returns the spec and construction hashes the manifest records; it runs before and after the build
     and a change refuses. ``out`` must already exist and be empty; the caller removes it on failure.
+
+    Stage A's earlier publish used autocommit reads. That this snapshot reproduces it is checked by publishing to a
+    scratch root (``--publish --publish-root /tmp/x``) and comparing its manifest with the pinned stage-A artefact:
+    ``inputs``, ``rows.content_sha256`` and ``census.sha256`` must be equal; only ``construction_versions`` move
+    (#3685).
     """
     before = versions()  # before the run: what is hashed is what ran
     with psycopg.connect(settings.database_url) as conn:
