@@ -2821,7 +2821,8 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         description=(
             "Monthly day 10 at 03:35 UTC — conditionally fetches the global-q q5 "
             "monthly factors (newest year-stamped file) and the JKP USA monthly "
-            "capped-value-weight factor returns, retaining exact raw responses and "
+            "capped-value-weight factor returns and the OSAP predictor long-short "
+            "returns (file resolved from the OSAP data page), retaining exact raw responses and "
             "typed decimal returns, for construction validation."
         ),
         cadence=Cadence.monthly(day=10, hour=3, minute=35),
@@ -7095,7 +7096,7 @@ def ibkr_borrow_archive() -> None:
 
 
 def factor_library_reference_refresh() -> None:
-    """Refresh the global-q and JKP published factor libraries (#3623)."""
+    """Refresh the global-q, JKP and OSAP published factor libraries (#3623)."""
     from app.services.reference_data import FACTOR_LIBRARY_DATASET_KEYS
 
     with _tracked_job(JOB_FACTOR_LIBRARY_REFERENCE_REFRESH) as tracker:
