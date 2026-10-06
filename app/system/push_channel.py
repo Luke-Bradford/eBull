@@ -26,7 +26,9 @@ a status file) stays the source of truth.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -110,3 +112,20 @@ def send_push(
     # A 4xx/5xx raises ``HTTPError``, a ``URLError`` subclass, so it lands here too.
     except urllib.error.URLError, OSError, ValueError:
         return False
+
+
+def local_notify(title: str, message: str) -> bool:
+    """A macOS notification on this machine: the fallback channel when push is off.
+
+    ``True`` when ``osascript`` exited 0. Never raises.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["osascript", "-e", f"display notification {json.dumps(message)} with title {json.dumps(title)}"],
+            capture_output=True,
+            timeout=5.0,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    return proc.returncode == 0

@@ -31,6 +31,11 @@ a macOS notification, a JSON status file and a stderr line. It re-alerts every
 ``--renotify-s`` while still stale and sends one recovery notice. State lives
 in the status file, which is what lets a one-shot run de-duplicate.
 
+Each pass then runs the refusal-surface watch (``scripts/operator_alert_watch.py``:
+kill-switch changes, held execution blocks, sandbox and loss-limit entry
+refusals) on the same schedule, unless ``job_runs`` was unreadable. Its failure
+is logged and never changes this script's verdict or exit code.
+
 ``--test-push`` sends one test notification and exits, to check the phone
 subscription. Runbook: ``docs/operator/runbooks/jobs-dead-man.md``.
 """
@@ -39,7 +44,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
@@ -47,7 +51,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from app.system.push_channel import Priority, config_from_env, send_push
+from app.system.push_channel import Priority, config_from_env, local_notify, send_push
 
 _DEFAULT_STATUS_FILE = Path.home() / ".cache" / "ebull" / "jobs_dead_man_status.json"
 _STALE_AFTER_S = 1800.0
@@ -145,6 +149,9 @@ def read_last_start() -> tuple[float | None, str | None]:
         url = Settings().database_url
         phase = "db"
         with psycopg.connect(url, connect_timeout=5) as conn:
+            # connect_timeout bounds the connect only; a read parked behind a lock
+            # would hold this one-shot, and launchd starts no later pass meanwhile.
+            conn.execute("SET statement_timeout = '10s'")
             row = conn.execute(
                 "SELECT max(started_at) FROM job_runs WHERE started_at <= now() + interval '5 minutes'"
             ).fetchone()
@@ -186,19 +193,6 @@ def settle(prior: State, state: State, *, delivered: bool) -> State:
     return replace(state, alerting=prior.alerting, last_notified_at=prior.last_notified_at)
 
 
-def _macos_notify(title: str, message: str) -> bool:
-    try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["osascript", "-e", f"display notification {json.dumps(message)} with title {json.dumps(title)}"],
-            capture_output=True,
-            timeout=5.0,
-            check=False,
-        )
-    except OSError, subprocess.SubprocessError:
-        return False
-    return proc.returncode == 0
-
-
 def notify(action: Action, state: State, *, note: str = "") -> bool:
     """Send the notification; ``True`` when it reached its channel.
 
@@ -213,9 +207,22 @@ def notify(action: Action, state: State, *, note: str = "") -> bool:
         message, priority, tag = state.reason or "", 5, "rotating_light"
     message += note
     pushed = send_push(title=title, message=message, priority=priority, tags=(tag,))
-    shown = _macos_notify(title, message)
+    shown = local_notify(title, message)
     print(f"[jobs-dead-man] {action.upper()}: {message} (push sent: {pushed})", file=sys.stderr, flush=True)
     return pushed or (config_from_env() is None and shown)
+
+
+def run_alert_watch() -> None:
+    """One refusal-surface pass (#3614 item 3, slice B), contained."""
+    try:
+        from scripts import operator_alert_watch
+
+        undelivered = operator_alert_watch.run()
+    except Exception as exc:  # noqa: BLE001 — the dead-man's own verdict must stand
+        print(f"[jobs-dead-man] operator alert watch failed: {exc!r}", file=sys.stderr, flush=True)
+        return
+    if undelivered:
+        print(f"[jobs-dead-man] operator alert watch: {undelivered} notice(s) undelivered", file=sys.stderr, flush=True)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -258,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         delivered = notify(action, state, note=note)
         state = settle(prior, state, delivered=delivered)
     save_state(args.status_file, state)
+    if error is None:
+        run_alert_watch()
     if not dark:
         return 0
     return 2 if delivered else 3

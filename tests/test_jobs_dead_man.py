@@ -14,6 +14,18 @@ from scripts import jobs_dead_man
 from scripts.jobs_dead_man import State, load_state, save_state, settle, step
 
 _NOW = 1_000_000.0
+# Captured at import, before the autouse stub below replaces it per test.
+_REAL_RUN_ALERT_WATCH = jobs_dead_man.run_alert_watch
+
+
+@pytest.fixture(autouse=True)
+def _no_alert_watch(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """``main`` runs the refusal-surface watch, which reads the real DB; stub it."""
+    calls: list[str] = []
+    monkeypatch.setattr(jobs_dead_man, "run_alert_watch", lambda: calls.append("watch"))
+    return calls
+
+
 _STALE = 1800.0
 _RENOTIFY = 7200.0
 
@@ -129,7 +141,7 @@ def test_main_persists_dedup_only_after_delivery(tmp_path: Path, monkeypatch: py
     status = tmp_path / "status.json"
     monkeypatch.setenv("EBULL_NTFY_TOPIC", "t")
     monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
-    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda *_a: True)
+    monkeypatch.setattr(jobs_dead_man, "local_notify", lambda *_a: True)
     sent: list[str] = []
 
     def _push(**kw: object) -> bool:
@@ -152,7 +164,7 @@ def test_an_unwritable_status_file_is_named_in_the_alert(tmp_path: Path, monkeyp
     monkeypatch.delenv("EBULL_NTFY_TOPIC", raising=False)
     monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
     messages: list[str] = []
-    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda _t, m: messages.append(m) is None)
+    monkeypatch.setattr(jobs_dead_man, "local_notify", lambda _t, m: messages.append(m) is None)
     assert jobs_dead_man.main(["--status-file", str(blocker / "status.json")]) == 2
     assert messages and "status file unwritable" in messages[0]
 
@@ -161,6 +173,32 @@ def test_without_push_a_failed_local_notification_is_retried(tmp_path: Path, mon
     status = tmp_path / "status.json"
     monkeypatch.delenv("EBULL_NTFY_TOPIC", raising=False)
     monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (1.0, None))
-    monkeypatch.setattr(jobs_dead_man, "_macos_notify", lambda *_a: False)
+    monkeypatch.setattr(jobs_dead_man, "local_notify", lambda *_a: False)
     assert jobs_dead_man.main(["--status-file", str(status)]) == 3
     assert not load_state(status).alerting
+
+
+def test_main_runs_the_alert_watch_only_when_job_runs_was_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _no_alert_watch: list[str]
+) -> None:
+    monkeypatch.delenv("EBULL_NTFY_TOPIC", raising=False)
+    monkeypatch.setattr(jobs_dead_man, "local_notify", lambda *_a: True)
+    monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (jobs_dead_man.time.time(), None))
+    assert jobs_dead_man.main(["--status-file", str(tmp_path / "a.json")]) == 0
+    assert _no_alert_watch == ["watch"]
+    monkeypatch.setattr(jobs_dead_man, "read_last_start", lambda: (None, "db: OperationalError"))
+    jobs_dead_man.main(["--status-file", str(tmp_path / "a.json")])
+    assert _no_alert_watch == ["watch"]
+
+
+def test_a_failing_alert_watch_is_contained(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import operator_alert_watch
+
+    def _boom(**_kw: object) -> int:
+        raise RuntimeError("schema drift")
+
+    monkeypatch.setattr(operator_alert_watch, "run", _boom)
+    _REAL_RUN_ALERT_WATCH()
+    assert "operator alert watch failed: RuntimeError('schema drift')" in capsys.readouterr().err

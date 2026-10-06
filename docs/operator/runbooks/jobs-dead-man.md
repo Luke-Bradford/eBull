@@ -10,6 +10,14 @@ On 2026-09-27 the jobs child was SIGKILLed and stayed dark for ~14 h. launchd st
 
 Each alert goes to ntfy (priority 5, when `EBULL_NTFY_TOPIC` is set), a macOS notification, `~/.cache/ebull/jobs_dead_man_status.json` and `var/log/jobs-dead-man.log`.
 
+## Refusal surfaces (same LaunchAgent pass)
+Each pass also runs `scripts/operator_alert_watch.py`, unless `job_runs` was unreadable. It pushes one notice per:
+- **Kill-switch change** (`runtime_config_audit`, `field = 'kill_switch'`): on at priority 5, off at priority 4.
+- **Execution block held for 10 min** (`strategy_execution_blocks`): `drawdown`, `order_reconciliation` or `broker_availability`, plus one notice when the block clears. `quote_freshness` and `scan_freshness` block every night by design and never page.
+- **Entry refusals at a limit** (rejected `strategy_entry_preflights`): `sandbox_exceeded` and the mandate loss limits. One run's refusals arrive as one notice.
+
+Its de-duplication state is `~/.cache/ebull/operator_alert_watch_status.json`. A notice is recorded only once it is delivered (ntfy 2xx, or the macOS notification when push is off), and events are read back 1 h. Preview with `uv run python -m scripts.operator_alert_watch --dry-run --status-file /tmp/oaw.json`. A failure of the watch is logged to the dead-man log and never changes the dead-man's own verdict.
+
 ## Push channel
 `app/system/push_channel.py` publishes to one ntfy topic ([publish API](https://docs.ntfy.sh/publish/)). On the public `ntfy.sh` server the topic name is the only thing that grants read access: use a long random one and never commit it. Optional: `EBULL_NTFY_SERVER` (self-hosted server), `EBULL_NTFY_TOKEN` (bearer token for a protected topic).
 
