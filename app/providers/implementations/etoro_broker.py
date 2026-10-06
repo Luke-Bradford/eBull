@@ -67,7 +67,7 @@ from app.providers.broker import (
 from app.providers.implementations.etoro_quota_lanes import CALL_SITES, LANES, min_interval_for_stamps
 from app.providers.implementations.etoro_request_log import attempt_observer
 from app.providers.resilient_client import ResilientClient
-from app.security.unattended_guard import refuse_broker_mutation_if_unattended
+from app.security.unattended_guard import refuse_broker_mutation_if_unattended, refuse_entry_if_unmerged_code
 
 logger = logging.getLogger(__name__)
 
@@ -504,6 +504,7 @@ class EtoroBrokerProvider(BrokerProvider):
         request_id: UUID | None = None,
     ) -> BrokerOrderResult:
         refuse_broker_mutation_if_unattended("place_order")
+        refuse_entry_if_unmerged_code("place_order")
         # Reject unrecognised actions before any HTTP call.
         if action not in _ALLOWED_PLACE_ORDER_ACTIONS:
             logger.error(
@@ -594,6 +595,7 @@ class EtoroBrokerProvider(BrokerProvider):
         path by mistake.
         """
         refuse_broker_mutation_if_unattended("place_demo_strategy_order")
+        refuse_entry_if_unmerged_code("place_demo_strategy_order")
         if self._env != "demo":
             raise BrokerOrderSubmissionError("strategy paper orders require demo credentials")
         body: dict[str, Any] = {
@@ -663,6 +665,7 @@ class EtoroBrokerProvider(BrokerProvider):
         does not trail.
         """
         refuse_broker_mutation_if_unattended("place_demo_core_order")
+        refuse_entry_if_unmerged_code("place_demo_core_order")
         if self._env != "demo":
             raise BrokerOrderSubmissionError("core orders require demo credentials")
         body: dict[str, Any] = {

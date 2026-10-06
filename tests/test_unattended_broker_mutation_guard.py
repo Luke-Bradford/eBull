@@ -27,6 +27,8 @@ not a shell script. The prohibition in `.autonomy/hard_rules.md` stays first.
 from __future__ import annotations
 
 import ast
+import inspect
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
@@ -38,8 +40,10 @@ from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 from app.security import unattended_guard
 from app.security.unattended_guard import (
     UnattendedExecutionRefused,
+    UnmergedCodeRefused,
     is_linked_worktree,
     refuse_broker_mutation_if_unattended,
+    unmerged_code_reason,
 )
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
@@ -264,3 +268,93 @@ def test_every_broker_method_is_classified() -> None:
 
 def test_mutating_and_informational_are_disjoint() -> None:
     assert not (_MUTATING & _INFORMATIONAL)
+
+
+# --------------------------------------------------------------------------
+# #3614 — entries refuse unmerged or modified code; exits never do
+# --------------------------------------------------------------------------
+
+#: Methods that OPEN exposure. Every other `_MUTATING` method exits, closes or edits SL/TP, and
+#: "Exits and protective actions are never blocked" (`.claude/CLAUDE.md`).
+_ENTRIES: Final[frozenset[str]] = frozenset({"place_demo_core_order", "place_demo_strategy_order", "place_order"})
+_ENTRY_GUARD_CALL: Final[str] = "refuse_entry_if_unmerged_code"
+
+
+def _repo(root: Path) -> Path:
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (root / "a.py").write_text("x = 1\n")
+    git("add", "a.py")
+    git("commit", "-q", "-m", "one")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    return root
+
+
+def _commit(root: Path, text: str) -> None:
+    (root / "a.py").write_text(text)
+    subprocess.run(["git", "-C", str(root), "commit", "-qam", "next"], check=True, capture_output=True)
+
+
+def test_merged_clean_checkout_is_allowed(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    assert unmerged_code_reason(root) is None
+    (root / "notes.md").write_text("untracked\n")
+    assert unmerged_code_reason(root) is None
+
+
+def test_a_checkout_behind_origin_main_is_allowed(tmp_path: Path) -> None:
+    """A fetch advances origin/main before anyone re-detaches; older merged code is reviewed code."""
+    root = _repo(tmp_path)
+    _commit(root, "x = 2\n")
+    subprocess.run(["git", "-C", str(root), "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+    subprocess.run(["git", "-C", str(root), "checkout", "-q", "--detach", "HEAD~1"], check=True)
+    assert unmerged_code_reason(root) is None
+
+
+def test_an_unmerged_commit_is_refused(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, "x = 2\n")
+    assert (reason := unmerged_code_reason(root)) is not None and "is not on origin/main" in reason
+
+
+def test_a_modified_tracked_file_is_refused(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "a.py").write_text("x = 3\n")
+    assert unmerged_code_reason(root) == "tracked files are modified: ['a.py']"
+
+
+def test_unreadable_git_state_refuses(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "update-ref", "-d", "refs/remotes/origin/main"], check=True)
+    assert (reason := unmerged_code_reason(root)) is not None and reason.startswith("git merge-base failed")
+
+
+def test_no_git_checkout_is_not_checked(tmp_path: Path) -> None:
+    assert unmerged_code_reason(tmp_path) is None
+
+
+@pytest.mark.parametrize("operation", sorted(_ENTRIES))
+def test_entries_refuse_end_to_end_when_armed(monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
+    """Re-arm the conftest disarm and drive the shipped method; the refusal precedes all network I/O."""
+    monkeypatch.setattr(unattended_guard, "unmerged_code_reason", lambda *_a, **_k: "HEAD abc is not on origin/main")
+
+    class _NeverCalled:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"refusal must precede all network I/O, but _http_write.{name} was reached")
+
+    with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+        broker._http_write = _NeverCalled()  # type: ignore[assignment]
+        method = getattr(broker, operation)
+        with pytest.raises(UnmergedCodeRefused, match=operation):
+            method(**dict.fromkeys(inspect.signature(method).parameters))
+
+
+def test_only_entry_methods_call_the_entry_guard() -> None:
+    methods = _etoro_methods()
+    calling = {name for name, node in methods.items() if _ENTRY_GUARD_CALL in _called_names(ast.unparse(node))}
+    assert calling == _ENTRIES
+    assert _ENTRIES < _MUTATING

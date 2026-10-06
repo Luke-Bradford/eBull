@@ -240,6 +240,9 @@ def _disarm_unattended_broker_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     absence-asserting test (#2647).
     """
     monkeypatch.setattr(unattended_guard, "is_linked_worktree", lambda *_a, **_k: False)
+    # #3614: entries also refuse unmerged or modified code, which every feature branch is.
+    # Re-armed and driven through the shipped methods in tests/test_unattended_broker_mutation_guard.py.
+    monkeypatch.setattr(unattended_guard, "unmerged_code_reason", lambda *_a, **_k: None)
 
 
 @pytest.fixture(autouse=True)
