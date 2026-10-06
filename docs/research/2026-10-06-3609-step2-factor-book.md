@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–9 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 9 is
-applied; round 9's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–10 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 10 is
+applied; round 10's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -213,7 +213,8 @@ must include the cap and the MAX filter and pass its own implementation backtest
 - **Stage B:** formations 2021-05..2024-07, holding months 2021-06..2024-08 (39), equal to step 0's W2. **Reused
   validation** (`research-process.md` §Hold-out).
 - **The access is logged before any stage-B read.** That covers the extended SUB files, the stage-B builder run and
-  every price read after 2021-05-31 (§"Registration", ledger steps 1–2).
+  every price read after 2021-05-31 (§"Registration", ledger steps 1–2). The one exception is the declaration's
+  integrity-only read of the two factor snapshots, which has its own `read` access record (§"Registration").
 - **One continuous path, 2014-09-30 to 2024-08, with a retrospective warm start.** The characteristic set was chosen
   on all of stage A, so stage A's holdings could not have been produced in real time. They are a declared
   development-path warm start: the path starts all-cash at 2014-09-30. The **stage boundary state** is taken at the
@@ -388,46 +389,43 @@ Two annotations go on a `PASS` verdict line only, by frozen tests:
 
 **Every compared series must be complete and its statistics defined,** at base and stress cost alike: the book,
 B1, every control draw and both references each need exactly one finite monthly return for each of the 119 months,
-and every monthly 1 + r must be ≥ 0. Annualised return is exp((12/n) Σ ln(1 + r)) − 1.
-**A total loss** is an economic outcome, not invalid data, and has its own codes. It is recognised from the
-holdings, never from rounding: a series suffers one in a month when its month-end NAV is exactly zero because every
-position it held realised a value of exactly 0 and it held no cash. A computed factor 1 + r that is ≤ 0, or that
-rounds r to −1, without that holding-level condition is numerical failure and refuses as `COMPARATOR_INVALID`.
+and every monthly wealth factor 1 + r, as computed, must be finite and strictly positive. Annualised return is
+exp((12/n) Σ ln(1 + r)) − 1.
 
-**A total loss in any series stops the run** (declared policy, by construction). Every series is valued month by
-month in calendar order. At the first month in which any series (the book, B1, a reference or a control draw, either
-arm, base or stress cost) suffers a total loss, valuation stops for every series. Refusals arising in earlier months
-or formations take precedence through the verdict order; checks belonging to later months are not run. The paths
-up to and including that month are complete for this purpose (the one exception to the 119-return rule); no
-statistic, gate or diagnostic is computed over them.
-- **The book at base cost** (either arm): `FAIL`, reason `TOTAL_LOSS`, at its place in the verdict order. The path
-  to the loss is printed.
-- **Any other series, or the book at stress cost:** `REFUSED`, reason `TOTAL_LOSS_STOP`, with the series, draw, arm,
-  cost scenario and month. This is a declared exception to stress cost being non-gating.
-
-The policy is conservative, not forced by the arithmetic: a window that ends at zero wealth has a defined −100%
-return. It is chosen because every series here is long-only, holds cash at a zero return, and pays costs of a few
-percent of traded notional at most (step 0's bands), so a total loss needs every position it holds to be worth
-nothing at once. The run stops for that to be investigated rather than scored, and a refusal can never become a
-`PASS`.
+**Non-positive wealth stops the run** (declared policy, by construction). The run does **not** try to tell an
+economic total loss from numerical failure: a factor that computes to ≤ 0, or an r that computes to exactly −1, in
+any series (the book, B1, a reference or a control draw, either arm, base or stress cost) is `REFUSED`, reason
+`WEALTH_NONPOSITIVE`, whatever its cause. This is a declared exception to stress cost being non-gating.
+- **Precedence.** Series are valued month by month in calendar order. The first month in which any series meets
+  this is the stopping month. Every series is valued and validated through that whole month, and every refusal
+  arising in it or earlier is collected and printed with its series, draw, arm, cost scenario and month. The status
+  is `REFUSED` with all the reason codes found. No later month is valued and no statistic, gate or diagnostic is
+  computed.
+- **Why a refusal, not a score.** A window ending at zero wealth has a defined −100% return, so this is a chosen
+  conservative policy, not forced by the arithmetic. Every series here is long-only, holds cash at a zero return,
+  and pays costs of a few percent of traded notional at most (step 0's bands), so its wealth reaches zero only if
+  every position it holds is worth nothing at once, and a value near zero is indistinguishable from a precision
+  failure without holding-level evidence that B1's inherited returns do not carry. The run stops for it to be
+  investigated, and a refusal can never become a `PASS`.
 
 A negative factor, or a non-finite annualised return, median or year-deletion statistic, refuses the run as
 `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
 1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
-   `COMPARATOR_INVALID`, `TOTAL_LOSS_STOP`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
+   `COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
    formation, `name_key` and draw; the counts that triggered it (for `CONTROL_SHORT`, the pool and the purchases
    needed); the run id and its hashes; and the labels. No path, gate or diagnostic is printed.
 2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
-   Then `FAIL`, reason `TOTAL_LOSS`, if the run stopped on the book's base-cost total loss (above); the path is
-   printed.
 3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
 4. G1 and G2 by the conjunction above. If either fails: `FAIL`, with the failing gate and arm.
 5. **Turnover veto:** if any stage-B month (2021-06..2024-08) has one-way turnover above 50% at base cost in either
    arm: `FAIL`, reason `TURNOVER_BENEFIT_UNSHOWN`. `research-process.md` requires the net expected benefit to be shown
    above that level, and this run has no model that shows it. Stage-A exceedances are printed, not gating.
-6. Otherwise `PASS`, with its annotations. Annotations are computed only for a final `PASS`.
+6. Otherwise the run is a **pass candidate**. Its annotation statistics (stress-cost G2, year deletions) are
+   computed and validated; a refusal among them (`COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`) makes the status
+   `REFUSED`. Only then is the terminal ledger row written and `PASS` printed with its annotations. Annotations are
+   never computed for a run that stopped at an earlier step.
 
 **After a pass:** step 3 specifies the forward construction: this book plus the sector cap, #3621's frozen MAX filter,
 an effective-dated listing-age exclusion with a stated missing-history policy, a security-type exclusion whose
@@ -509,10 +507,15 @@ the run, so an unchanged manifest beside an altered file fails.
   declaration pins. It then reads that snapshot's `reference_data_observations` and requires the sha256 of their
   canonical JSON (a list of `[series_key, observation_date, str(value), unit]`, sorted by series key then date) to
   equal the observation digest the declaration pins. Both digests are computed when the declaration is written, by
-  an **integrity-only read**: the slice-4 script hashes the stored bytes and rows and prints only the two digests,
-  no value. These are the snapshots step 0 already evaluated over stage B's months (§"Design-history inventory"), so
-  the read adds no exposure; the declaration PR records it as the access history `research-process.md` §Hold-out
-  asks for.
+  an **integrity-only read**. Before it, the slice-4 script commits a `record_holdout_access` row with
+  `strategy_id="3609-step2-book"`, `strategy_version="v1"`, `access_kind="read"`, no `result_version`,
+  `accessed_by` = the identity running it, and `purpose="#3609 step 2 declaration: integrity digests of factor
+  snapshots 39 and 40, no values read out"`. It then hashes the stored bytes and rows and prints only the two
+  digests. The declaration PR cites the `access_id`. This is the access history `research-process.md` §Hold-out
+  requires in `strategy_holdout_accesses`; step 0 already evaluated these snapshot ids over stage B's months.
+  **The digests capture content at slice 4.** Step 0 pinned row ids only, so equality with the content step 0
+  read is unverified, and the observation digest does not prove the rows still match the payload (no re-parse is
+  done). Both are known limits.
 - **Each reference artefact** (FF-12 map, QMJ PDF, Table 9 CSV) against its pinned sha256.
 
 **The run checks its own code against the row before any stage-B step.** `record_holdout_access` does not enforce a
@@ -578,8 +581,9 @@ window's defined-month count for that metric.
     k = 1..4. Spread = Q1 (highest scores) minus Q5, equal-weighted, gross. Undefined when any quintile has fewer
     than 5 names. No value-weighted spread is printed.
   - **Monthly series** of IC and spread are written to the output file.
-  - **Summaries per window,** each metric on its own defined months: mean; standard deviation (ddof 1); IC-IR = mean
-    / standard deviation, monthly, not annualised; a Newey–West t on the mean with step 0's lag rule. One-month
+  - **Summaries per window,** each metric on its own defined months. For IC and spread alike: mean; standard
+    deviation (ddof 1); a Newey–West t on the mean with step 0's lag rule. For IC only: IC-IR = mean / standard
+    deviation, monthly, not annualised. No mean-to-deviation ratio is printed for the spread. One-month
     outcomes remove mechanical overlap; Newey–West is used because the series may still be serially dependent. All
     summaries are `undefined` with fewer than 12 defined months; IC-IR is `undefined` at zero standard deviation;
     the t is `undefined` if any calendar month in the window is undefined (it is never computed over compressed
@@ -606,8 +610,9 @@ window's defined-month count for that metric.
       the numerator and the denominator required finite. This is step 0's
       one-pass rule applied to the band's capital before its costs. V_b = 0 is checked first (undefined, below).
       Otherwise the inputs are validated before evaluation: V_b, g_b, C_b and L_b finite, V_b > 0, C_b ≥ 0,
-      L_b ≥ 0 and g_b ≥ −1. An input failing any of these, or a non-finite result or one below −1, marks the month
-      `invalid` (diagnostic only).
+      L_b ≥ 0 and g_b ≥ −1. An input failing any of these, a factor ((1 + g_b) − L_b/V_b) / (1 + C_b/V_b) that is
+      not finite and strictly positive, or a net return that computes to exactly −1, marks the month `invalid`
+      (diagnostic only).
     - **Trades by band:** every order (sales of complete exits included) is assigned to the traded name's band at
       s(M). The 2024-08 final liquidation, which has no formation, is assigned to the name's band at s(2024-07), the
       membership L_b uses. That reporting band is separate from the entry band that sets each sale's charged
@@ -716,6 +721,7 @@ window's defined-month count for that metric.
   construction can claim one (§"Decision rule").
 - Archive seasoning is not the IPO rule; no volatility-conditioned result exists.
 - Costs: nine summer calibration dates, no stressed regime, stock bands (step 0).
+- Factor and RF content is pinned at slice 4, not at step 0; equality with what step 0 read is unverified.
 - The market-on-close fill is an assumption.
 
 ## Checkpoint log
@@ -873,3 +879,15 @@ window's defined-month count for that metric.
   snapshots step 0 already evaluated over stage B; the declaration PR records it.
 - **135:** slice 4 commits a `declared` ledger row with the payload hash; every attempt compares against it and
   requires exactly one matching register row.
+
+**Round 10 (5 of 7 resolved; 2 open plus 5 new, 136–140; `ckpt1_round10_final.txt`), all applied:**
+- **133, 136, 137:** the economic-versus-numerical distinction is dropped. Any factor ≤ 0, or r computing to −1, in
+  any series, arm or cost refuses (`WEALTH_NONPOSITIVE`), with the whole stopping month valued and every refusal in
+  it collected. No `FAIL`/`TOTAL_LOSS` branch remains, so no precedence between base and stress book losses is
+  needed, and B1 needs no holding-level inputs. Sub-books apply the same factor test.
+- **134:** the integrity-only read is preceded by a committed `read` access record; the stage-B access rule names
+  it as the one exception.
+- **138:** the digests are stated as content captured at slice 4; equality with step 0's content and
+  payload-to-observation correspondence are listed as unverified.
+- **139:** a pass candidate computes and validates its annotation statistics before the terminal row and `PASS`.
+- **140:** IC-IR is for IC only; the spread gets mean, deviation and t.
