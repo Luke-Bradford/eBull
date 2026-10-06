@@ -387,9 +387,12 @@ Two annotations go on a `PASS` verdict line only, by frozen tests:
 
 **Every compared series must be complete and its statistics defined,** at base and stress cost alike: the book,
 B1, every control draw and both references each need exactly one finite monthly return for each of the 119 months,
-and every monthly 1 + r must be ≥ 0. A month with 1 + r = 0 is a total loss: the path's wealth is 0 from then on
-and its annualised return is −100%, a valid outcome. Annualised return is exp((12/n) Σ ln(1 + r)) − 1, with any
-zero factor giving −100%. A negative factor, or a non-finite annualised return, median or year-deletion statistic,
+and every monthly 1 + r must be ≥ 0. Annualised return is exp((12/n) Σ ln(1 + r)) − 1.
+**A total loss** (a month with 1 + r = 0) is an economic outcome, not invalid data, and ends that path: no later
+trade, return or cost exists for it. Then: for the book, the verdict is `FAIL`, reason `TOTAL_LOSS` (after the
+refusal and `INSUFFICIENT` steps of the verdict order); for B1 or a reference, the run refuses as
+`COMPARATOR_INVALID`, since no comparison is defined against a series with no wealth; for a control draw, its
+stage-B annualised return is −100% whether the loss fell in stage A or B, and so is every year-deletion value. A negative factor, or a non-finite annualised return, median or year-deletion statistic,
 refuses the run as `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
@@ -398,6 +401,7 @@ refuses the run as `COMPARATOR_INVALID` (the book's own failure as `REFUSED` wit
    formation, `name_key` and draw; the counts that triggered it (for `CONTROL_SHORT`, the pool and the purchases
    needed); the run id and its hashes; and the labels. No path, gate or diagnostic is printed.
 2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
+   Then `FAIL`, reason `TOTAL_LOSS`, if the book's path suffered a total loss (below); the path is printed.
 3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
 4. G1 and G2 by the conjunction above. If either fails: `FAIL`, with the failing gate and arm.
 5. **Turnover veto:** if any stage-B month (2021-06..2024-08) has one-way turnover above 50% at base cost in either
@@ -409,8 +413,9 @@ refuses the run as `COMPARATOR_INVALID` (the book's own failure as `REFUSED` wit
 an effective-dated listing-age exclusion with a stated missing-history policy, a security-type exclusion whose
 classifier (field, accepted values, unknown-type treatment) is specified and validated over every candidate
 instrument, and the eToro-tradable intersection. Before any position, that construction gets its own declared implementation
-backtest on this path, which must reach `PASS` under this verdict order, turnover veto included, unless step 3
-declares a method that shows the net expected benefit, reviewed at its own checkpoint 1 (step 3 must also state how it treats the absence of
+backtest on this path, which must reach `PASS` under this verdict order. Every requirement of that order is
+mandatory; the only one step 3 may replace is the turnover veto, and only by a declared method that shows the net
+expected benefit, reviewed at its own checkpoint 1 and itself passed (step 3 must also state how it treats the absence of
 historical eToro eligibility). Only then is the forward demo test declared, as a
 claiming #2599 declaration with its own `TrialDesign` and power check. Its prediction interval and the #2500
 sequential stop rule are specified there from the implementation backtest's monthly series.
@@ -463,6 +468,11 @@ strings; enums are their values; tuples become lists.
 **The declaration payload is pinned separately.** The run's `started` row records `TRIAL_REGISTER_VERSION` and the
 sha256 of the row's canonical JSON (`dataclasses.asdict`, then the conversions above). The report refuses if the row's payload hash
 differs from the one recorded. The register version is recorded for audit, not compared: any later trial bumps it.
+
+**Every consumed file is verified immediately before use** against the manifest that pins it: stage A and stage B
+through `verify_artefact` (manifest digest, every input and every published output); `paths.json` against step 0's run
+manifest `sha256` map, and the factor and RF data against its `factor_snapshots` ids; and each reference artefact against
+its pinned sha256. A mismatch refuses the run. An unchanged manifest beside an altered file therefore fails.
 
 **The run checks its own code against the row before any stage-B step.** `record_holdout_access` does not enforce a
 register row (it is called with `require_declaration=False`, so a trial without a frozen #2599 declaration passes),
@@ -537,9 +547,10 @@ window's defined-month count for that metric.
   defines only a one-month holding contract (returns, statuses, terminal handling); a multi-month cohort return is
   a further construction with its own treatment of names that leave the panel, and horizons past the 2024-08-31
   read bound would be partial. It is not printed here; step 3 must supply it before a forward declaration.
-- **Two size cells:** the book universe, and admitted names outside it. An outside name whose raw close at s(M) is
-  missing, non-finite or non-positive goes to a "price unavailable" cell, counted per formation; it never refuses. Scores are standardised within each cell
-  separately, by §"Source rules". Labelled a proxy for `market-segments.md`'s NYSE cells.
+- **Two size cells:** the book universe, and admitted names outside it. Scores are standardised within (size cell,
+  FF-12 industry, M), by §"Source rules", among names with the inputs, whatever their price. Cost-band reporting
+  cells are assigned afterwards; an outside name whose raw close at s(M) is missing, non-finite or non-positive goes
+  to a "price unavailable" reporting cell, counted per formation, and never refuses. Labelled a proxy for `market-segments.md`'s NYSE cells.
 - **Segments (primary partition: cost band at s(M) × the two size cells).** A name's cell is set at each M, so a
   name that migrates counts in its cell at that M.
   - **Each cell:** the signal block above, on its own names.
@@ -550,14 +561,22 @@ window's defined-month count for that metric.
     - C_b = every cost charged at this formation on trades in names of band b (sales of names leaving the book
       included), each at the position's entry band;
     - L_b = the 2024-08 final-liquidation cost on band-b holdings, charged in that month only (bands by s(2024-07));
-    - net return = (V_b(1 + g_b) − L_b) / (V_b + C_b) − 1. This is step 0's one-pass rule applied to the band's
-      capital before its costs.
+    - net return = ((1 + g_b) − L_b/V_b) / (1 + C_b/V_b) − 1, evaluated in that ratio form. This is step 0's
+      one-pass rule applied to the band's capital before its costs. A non-finite result, or one below −1, marks the
+      month `invalid` (diagnostic only).
+    - **Trades by band:** every order (sales of complete exits included) is assigned to the traded name's band at
+      s(M). Per band and window: order notional, cost, and turnover as (buys + sells) / 2 over the **book's**
+      pre-trade NAV, so band turnovers sum to the book's. Initial purchase, final liquidation and terminal
+      realisations are excluded from turnover as in step 0, and printed separately.
     - A month with V_b = 0 is undefined for that sub-book. A month with fewer than 5 band-b names is marked thin;
       the 5 is fixed by construction and monthly counts are printed.
-    - Per window, step 0's metrics (net and gross return, volatility, maximum drawdown, active return, tracking
-      error, IR, beta and maximum relative drawdown against B1) and the G1 FF5+momentum regression (printed, with
-      G1's refusal states mapped to `undefined`) are printed only when every month of the window is defined and
-      none is thin; otherwise the window is `insufficient`. The minimum-effective-sample rule below also applies.
+    - **Per window:** step 0's metrics (net and gross return, volatility, maximum drawdown, active return, tracking
+      error, IR, beta and maximum relative drawdown against B1) and an FF5+momentum regression. The regression is
+      G1's, with that window's exact months in place of the 119 and its Newey–West lag from that window's count,
+      and G1's numerical refusals mapped to `undefined`.
+    - **Uncomputable windows:** if any month in the window is undefined, invalid or thin, every metric is printed
+      as `undefined` with the reason and nothing is computed. **Computable windows** whose n_eff (below) is under
+      the minimum are computed and marked `insufficient`.
     - A sub-book's undefined or insufficient output affects only that output, never the verdict.
     - The book lives in one size cell, so the size axis has no book split.
   - **Minimum effective sample, per (series, arm, metric, window)**, where a series is a signal's IC or spread or a
@@ -771,3 +790,14 @@ window's defined-month count for that metric.
 - **111–113:** the turnover veto is step 5 of the verdict order, stage-B months only, named as the one gating
   diagnostic, and binds step 3 unless step 3 declares a reviewed benefit method.
 - **115:** outside-universe names with no valid raw close go to a "price unavailable" cell.
+
+**Round 7 (12 of 13 resolved; 1 open plus 8 new, 116–123; `ckpt1_round7_final.txt`), all applied:**
+- **99:** per-band order notional, cost and turnover over the book's pre-trade NAV.
+- **116:** sub-book regressions use their window's months and lag, not G1's 119.
+- **117–118:** a total loss ends the path; the book fails (`TOTAL_LOSS`), B1 or a reference refuses, a control draw
+  scores −100%.
+- **119:** step 3 may replace only the turnover veto, and only by a reviewed, passing benefit method.
+- **120:** scores are standardised within (size cell, industry, M) before reporting cells are assigned.
+- **121–122:** the sub-book return is evaluated in ratio form with an `invalid` state; uncomputable windows print
+  `undefined`, computable ones below the minimum print `insufficient`.
+- **123:** every consumed file is verified against its pinned manifest immediately before use.
