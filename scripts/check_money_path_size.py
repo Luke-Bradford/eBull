@@ -27,7 +27,8 @@ by construction:
       done | sort -n
 
 Diff policy, pinned rather than inherited from local git config:
-``--no-renames`` (a move is charged as delete plus add), no external diff or
+``--no-renames`` (a move is charged as delete plus add), the myers algorithm
+(``diff.algorithm`` can change counts), no external diff or
 textconv, ``-z`` numstat. A binary row has no line count and fails closed.
 Each pattern must match at least one file at ``head``, so a typo or a deleted
 file cannot silently drop coverage.
@@ -69,7 +70,7 @@ MONEY_PATH: tuple[str, ...] = tuple(
     )
 )
 
-_DIFF_POLICY = ("--no-renames", "--no-ext-diff", "--no-textconv", "--numstat", "-z")
+_DIFF_POLICY = ("--no-renames", "--diff-algorithm=myers", "--no-ext-diff", "--no-textconv", "--numstat", "-z")
 
 
 class CheckError(Exception):
