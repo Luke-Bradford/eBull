@@ -17,8 +17,8 @@ Per formation month, and as min/max over the stage-A grid, it prints:
 
 Refuses an artefact whose manifest digest is not the pinned stage-A artefact, whose frozen inputs or published
 rows fail ``verify_artefact``, whose months are not the 80-month grid, which repeats a (M, name_key) pair or a
-cutoff month, whose cutoff grid is incomplete, which carries a non-finite or non-positive ME or cutoff, or which
-admits fewer than 1,000 names in a month.
+cutoff month, whose cutoff grid is incomplete, which carries a non-finite or non-positive ME, cutoff or ME sum,
+which has no name above the cutoff in a month, or which admits fewer than 1,000 names in a month.
 
 Usage: ``uv run python -m scripts.measure_3609_step2_universe [artefact_dir]``
 """
@@ -72,7 +72,9 @@ def main(artefact: Path) -> None:
             if key == "nyse_p50":
                 if month in cutoffs:
                     raise MeasureError(f"duplicate nyse_p50 cutoff for {month}")
-                cutoffs[month] = _finite_positive(value, f"nyse_p50 {month}") * 1e6
+                cutoffs[month] = _finite_positive(
+                    _finite_positive(value, f"nyse_p50 {month}") * 1e6, f"nyse_p50 {month}"
+                )
     missing = [m for m in grid if m not in cutoffs]
     if missing:
         raise MeasureError(f"nyse_p50 cutoff missing for {len(missing)} grid months, first {missing[0]}")
@@ -113,6 +115,8 @@ def main(artefact: Path) -> None:
         p50 = cutoffs[month]
         above = [r for r in rows if r[0] > p50]
         above_keys = {r[1] for r in above}
+        if not above:
+            raise MeasureError(f"{month}: no admitted name above the NYSE median cutoff")
         stats = {
             "admitted": len(rows),
             "above_p50": len(above),
@@ -120,7 +124,8 @@ def main(artefact: Path) -> None:
             "shared": len(top_keys & above_keys),
             "top_below_p50": len(top_keys - above_keys),
             "p50_outside_top": len(above_keys - top_keys),
-            "p50_me_share_in_top": sum(r[0] for r in above if r[1] in top_keys) / sum(r[0] for r in above),
+            "p50_me_share_in_top": _finite_positive(sum(r[0] for r in above if r[1] in top_keys), f"{month} ME in top")
+            / _finite_positive(sum(r[0] for r in above), f"{month} ME above cutoff"),
             "top_fam3": sum(1 for r in top if r[2] == 3),
             "top_fam2": sum(1 for r in top if r[2] >= 2),
             "top_sic6221": sum(1 for r in top if r[3] == COMMODITY_SIC),
