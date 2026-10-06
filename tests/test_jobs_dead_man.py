@@ -14,6 +14,8 @@ from scripts import jobs_dead_man
 from scripts.jobs_dead_man import State, load_state, save_state, settle, step
 
 _NOW = 1_000_000.0
+# Captured at import, before the autouse stub below replaces it per test.
+_REAL_RUN_ALERT_WATCH = jobs_dead_man.run_alert_watch
 
 
 @pytest.fixture(autouse=True)
@@ -198,7 +200,5 @@ def test_a_failing_alert_watch_is_contained(
         raise RuntimeError("schema drift")
 
     monkeypatch.setattr(operator_alert_watch, "run", _boom)
-    monkeypatch.undo()  # drop the autouse stub so the real wrapper runs...
-    monkeypatch.setattr(operator_alert_watch, "run", _boom)  # ...over the failing watch
-    jobs_dead_man.run_alert_watch()
+    _REAL_RUN_ALERT_WATCH()
     assert "operator alert watch failed: RuntimeError('schema drift')" in capsys.readouterr().err
