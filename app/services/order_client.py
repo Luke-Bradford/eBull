@@ -53,7 +53,7 @@ from app.providers.broker import (
     BrokerProvider,
     OrderParams,
 )
-from app.security.unattended_guard import UnattendedExecutionRefused
+from app.security.unattended_guard import BrokerRefusedBeforeIo
 from app.services.execution_guard import decide_submission_controls, load_kill_switch
 from app.services.late_exit_booking import (
     NUMERIC_18_6_BOUND,
@@ -2539,7 +2539,7 @@ def _execute_under_key(
                         instrument_id=instrument_id,
                         request_id=request_id,
                     )
-                except UnattendedExecutionRefused as exc:
+                except BrokerRefusedBeforeIo as exc:
                     _release_claim_after_pre_io_refusal(
                         conn,
                         order_id=submitted_order_id,
@@ -2606,7 +2606,7 @@ def _execute_under_key(
                     params=order_params,
                     request_id=request_id,
                 )
-            except UnattendedExecutionRefused as exc:
+            except BrokerRefusedBeforeIo as exc:
                 _release_claim_after_pre_io_refusal(
                     conn,
                     order_id=submitted_order_id,

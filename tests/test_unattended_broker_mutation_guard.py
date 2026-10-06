@@ -358,3 +358,31 @@ def test_only_entry_methods_call_the_entry_guard() -> None:
     calling = {name for name, node in methods.items() if _ENTRY_GUARD_CALL in _called_names(ast.unparse(node))}
     assert calling == _ENTRIES
     assert _ENTRIES < _MUTATING
+
+
+@pytest.mark.parametrize(
+    ("path", "marker"),
+    [
+        ("app/services/strategy_core_executor.py", "mark_core_submission_entered"),
+        ("app/services/strategy_paper_executor.py", "mark_entry_verb_entered"),
+    ],
+)
+def test_executors_refuse_before_their_entered_marker(path: str, marker: str) -> None:
+    """A refusal after the marker reads as "may have reached the broker"; before it, provably unsent."""
+    tree = ast.parse((_REPO_ROOT / path).read_text())
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        calls = [
+            (n.lineno, n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", ""))
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call)
+        ]
+        marks = [line for line, name in calls if name == marker]
+        if not marks or not any(name in _ENTRIES for _, name in calls):
+            continue
+        guards = [line for line, name in calls if name == _ENTRY_GUARD_CALL]
+        assert guards and min(guards) < min(marks), f"{path}:{node.name} must refuse before {marker}"
+        checked += 1
+    assert checked, f"{path}: no entry function found — this scan is measuring nothing"

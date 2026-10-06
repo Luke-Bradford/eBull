@@ -72,11 +72,15 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-class UnattendedExecutionRefused(RuntimeError):
+class BrokerRefusedBeforeIo(RuntimeError):
+    """A broker mutation refused before any network I/O: the request provably never left."""
+
+
+class UnattendedExecutionRefused(BrokerRefusedBeforeIo):
     """A broker state mutation was attempted from an unattended worktree."""
 
 
-class UnmergedCodeRefused(RuntimeError):
+class UnmergedCodeRefused(BrokerRefusedBeforeIo):
     """A broker entry was attempted from a checkout running code not merged to origin/main (#3614)."""
 
 
@@ -140,7 +144,9 @@ def refuse_entry_if_unmerged_code(operation: str) -> None:
     """Raise if an order that opens exposure would run from unmerged or modified code (#3614).
 
     Called at the top of every `EtoroBrokerProvider` entry method, after
-    `refuse_broker_mutation_if_unattended`. Never from an exit, close or SL/TP edit.
+    `refuse_broker_mutation_if_unattended`, and by the strategy executors BEFORE they commit
+    their entered-marker, so a refusal there is the provably-pre-broker case rather than an
+    authority that "may have reached the broker". Never from an exit, close or SL/TP edit.
     """
     reason = unmerged_code_reason()
     if reason is None:

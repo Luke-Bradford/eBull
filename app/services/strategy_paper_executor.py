@@ -33,6 +33,7 @@ from app.providers.broker import (
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
 )
+from app.security.unattended_guard import refuse_entry_if_unmerged_code
 from app.services.broker_settlement_arms import effective_open_minimum, select_underlying_long_arms
 from app.services.cost_model import COST_MODEL_ID
 from app.services.engine_pot_risk import advance_pot_drawdown, observe_pot_nav
@@ -1462,6 +1463,8 @@ def _resume_uncertain_submission_locked(
     if row is None or row["strategy_request_id"] is None:
         raise StrategyPaperExecutionError("uncertain strategy submission identity is incomplete")
     request_id = row["strategy_request_id"]
+    # #3614: before the marker, so a refusal leaves the authority provably unsent.
+    refuse_entry_if_unmerged_code("place_demo_strategy_order")
     mark_entry_verb_entered(conn, order_id=existing.order_id)
     try:
         submission = broker.place_demo_strategy_order(
@@ -1814,6 +1817,8 @@ def _submit_recorded_order(
     with reconciliation_order_lock(conn, order_id):
         # The transaction context commits before this broker call. The marker commits
         # last of all: a crash before it is provably pre-broker (#3546 slice 3).
+        # #3614: before the marker, so a refusal leaves the authority provably unsent.
+        refuse_entry_if_unmerged_code("place_demo_strategy_order")
         mark_entry_verb_entered(conn, order_id=order_id)
         try:
             submission = broker.place_demo_strategy_order(

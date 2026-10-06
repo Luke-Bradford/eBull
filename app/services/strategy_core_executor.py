@@ -23,6 +23,7 @@ from app.providers.broker import (
     BrokerProvider,
     BrokerWhatIfOrder,
 )
+from app.security.unattended_guard import refuse_entry_if_unmerged_code
 from app.services.broker_closed_release import RELEASE_REASON, UNCERTAIN_CLOSE_RELEASE_REASON
 from app.services.broker_settlement_arms import (
     UNDERLYING_SETTLEMENT_TYPE,
@@ -522,6 +523,8 @@ def _submit_core_authority_locked(
         raise StrategyCoreExecutionError(
             f"core authority {authority.order_id} has no committed exit levels and must not be submitted"
         )
+    # #3614: before the marker, so a refusal leaves the authority provably unsent.
+    refuse_entry_if_unmerged_code("place_demo_core_order")
     mark_core_submission_entered(conn, order_id=authority.order_id)
     try:
         submission = broker.place_demo_core_order(
