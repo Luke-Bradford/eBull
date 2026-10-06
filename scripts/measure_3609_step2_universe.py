@@ -1,16 +1,16 @@
 """#3609 step 2 spec premise 3: the book universe's size rule, measured on the stage-A panel.
 
-Reads only the published stage-A artefact's admitted rows (ME, ``name_key``, characteristic presence, SIC) and
-its frozen JKP ``nyse_cutoffs`` snapshot. It reads no return, holding status or characteristic value, so it
-computes no outcome.
+Uses only the published stage-A artefact's admitted rows (ME, ``name_key``, characteristic presence, SIC) and its
+frozen JKP ``nyse_cutoffs`` snapshot, and computes no outcome. It deserialises whole rows and the integrity check
+hashes whole files, but no return, holding status or characteristic value enters any figure.
 
 The top 1,000 is the step-2 book universe's own rule: ME at s(M) descending, ties by ``name_key`` ascending.
 Per formation month, and as min/max over the stage-A grid, it prints:
 
 - admitted names;
-- names above JKP's NYSE 50th percentile cutoff (USD millions, normalised to USD);
+- names above JKP's NYSE 50th percentile cutoff (ME > cutoff; USD millions, normalised to USD);
 - the ME of the 1,000th name;
-- overlap of the top 1,000 with the above-NYSE-median set: shared names, top-1,000 names below the cutoff,
+- overlap of the top 1,000 with the above-NYSE-median set: shared names, top-1,000 names at or below the cutoff,
   above-cutoff names outside the top 1,000, and the top 1,000's share of the above-cutoff ME;
 - among the top 1,000: names with all three step-2 families and with at least two (a family is present when any
   member has a value), and names with SIC 6221 (commodity contracts, the SIC commodity pools file under).

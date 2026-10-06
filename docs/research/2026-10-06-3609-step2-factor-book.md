@@ -74,7 +74,8 @@ is feasible. Nominal years are also an upper bound on effective years. Consequen
 computed at s(M). The book universe is a by-construction proxy: the top 1,000 by ME at s(M) (ties by `name_key`).
 
 Measured over stage A's 80 formations (`PYTHONPATH=. uv run python -m scripts.measure_3609_step2_universe`, which
-reads ME, `name_key`, characteristic presence and SIC only, never a return). It first checks the stage-A manifest's
+uses only ME, `name_key`, characteristic presence and SIC, and computes no outcome; it deserialises whole rows, and
+the integrity check hashes whole files). It first checks the stage-A manifest's
 sha256 against its pin and every frozen input and published file through `verify_artefact`
 (`scripts/build_3609_factor_panel.py`), and refuses a duplicate or missing cutoff month and any non-finite or
 non-positive ME or cutoff:
@@ -84,17 +85,21 @@ non-positive ME or cutoff:
 | admitted names | 2,975 | 3,156 |
 | names above JKP's NYSE-median cutoff | 862 | 1,094 |
 | ME of the 1,000th name ($B) | 1.74 | 3.72 |
-| top-1,000 names below the NYSE median | 0 | 138 |
-| above-median names outside the top 1,000 | 0 | 94 |
+| top-1,000 names at or below the NYSE median | 0 | 138 |
+| names above the median outside the top 1,000 | 0 | 94 |
 | above-median ME held inside the top 1,000 | 99.14% | 100% |
-| top-1,000 names with ≥ 2 of the three families | 964 | 991 |
-| top-1,000 names with all three | 613 | 683 |
+| top-1,000 names with a raw value in ≥ 2 of the three families | 964 | 991 |
+| top-1,000 names with a raw value in all three | 613 | 683 |
+
+"Above the median" is ME > cutoff and "at or below" is its complement, here and in every diagnostic. The family
+counts are raw-input availability: they apply no group minimum, zero-variance rule, seasoning or price screen.
 | top-1,000 names with SIC 6221 (commodity pools' SIC) | 0 | 1 |
 
 The proxy is close to the large-plus-mega tranche that `market-segments.md` makes the default for books traded more
-than quarterly **in one dimension only: value coverage**. By count it is not: up to 138 of the 1,000 names sit below
-the NYSE median, and an equal-weight book can overweight them. The declared run prints, per formation, the count
-and the book's weight below JKP's NYSE-median cutoff where JKP publishes one for M (§"Diagnostics"). The proxy
+than quarterly **in one dimension only: value coverage**. By count it is not: up to 138 of the 1,000 names sit at or
+below the NYSE median, and an equal-weight book can overweight them. The declared run prints, per formation, the
+count, the book's weight and the book's traded notional at or below JKP's NYSE-median cutoff where JKP publishes one
+for M (§"Diagnostics"). The proxy
 matches the Russell 1000's count, not its float or reconstitution rules. Stage B is measured in the declared run and
 the rule is not retuned.
 
@@ -159,8 +164,9 @@ at 58%. That transfer is exactly what gates G1 and G2 test.
   NULL-sector names as their own bucket", `portfolio-construction-and-risk.md`); the census keeps the two reasons
   apart.
 - **Missing members (a custom rule).** QMJ does not state its treatment of a missing member. A family is present
-  when at least one member has a score, and its input is the **mean** of the members present, so a name is not
-  ranked down for missing a member, as a sum would rank it. A composite needs at least 2 of the 3 families and takes
+  when at least one member has a score, and its input is the **mean** of the members present: normalisation by
+  the count of members present, so the input stays on one member's scale. It does not make ranks neutral to
+  missingness; no rule does. A composite needs at least 2 of the 3 families and takes
   the mean of those present. The declared run prints, per formation, the count and book weight of each membership
   pattern (which members and families were present).
 - **Identifier-decided selections.** Where tied composites straddle a decile or tercile boundary, `name_key`
@@ -190,10 +196,12 @@ must include the cap and the MAX filter and pass its own implementation backtest
   the panel does not hold, and `rvol_21d` failed step 1. No volatility-conditioned result is printed; this is a known
   limit.
 - **SIC across the stage boundary.** Stage A keeps its frozen classifications. Stage-B formations classify with the
-  extended SUB. A name's FF-12 group can change at 2021-05 because a new accession was filed, or because an accession
-  in a newly loaded quarter replaced a `sic_unloaded` or `sic_null` result. The run prints transitions between the
-  2021-04 and 2021-05 formations by those reasons, with their count and book weight. Frozen stage-A rows are never
-  rewritten.
+  extended SUB. Population: names in the universe at both the 2021-04 and 2021-05 formations. For each, the run
+  compares the two formations' SIC rows and sets two flags, which can both be set: **accession changed** (the
+  accession used differs, whether newly filed or newly past the evidence cutoff) and **reference changed** (the same
+  or a different accession, where the 2021-04 result was `sic_unloaded` and the 2021-05 one is not). It prints the
+  count and post-trade book weight at 2021-05 for each flag combination among names whose FF-12 group changed.
+  Entrants and departures are counted separately. Frozen stage-A rows are never rewritten.
 
 ## Dates, samples and the hold-out
 
@@ -207,9 +215,11 @@ must include the cap and the MAX filter and pass its own implementation backtest
   every price read after 2021-05-31 (§"Registration", ledger steps 1–2).
 - **One continuous path, 2014-09-30 to 2024-08, with a retrospective warm start.** The characteristic set was chosen
   on all of stage A, so stage A's holdings could not have been produced in real time. They are a declared
-  development-path warm start: the path starts all-cash at 2014-09-30, and the holdings, bands and NAV after the
-  2021-04 formation's month (the stage boundary state) are printed and hashed in the run output. Stage-B statistics
-  are slices of the path after that state.
+  development-path warm start: the path starts all-cash at 2014-09-30. The **stage boundary state** is taken at the
+  end of the 2021-05 holding month, before the 2021-05 formation's trades: for each termination arm and cost
+  scenario, every open position (`name_key`, value, entry formation, entry band), the cash and the NAV, and the same
+  for each control draw and the equal-weight and cap-weighted references. It is written as canonical JSON (sorted
+  keys) and its sha256 is printed. Stage-B statistics are slices of the path after that state.
 - **Nothing is computed before the declaration freezes.** No book return, IC, spread, loading or factor mean is
   computed on any month first. Code is tested on synthetic fixtures only.
 
@@ -243,8 +253,9 @@ claims on stage A need a nested replay or a separately governed validation sampl
 ## The book
 
 At each formation M, in order:
-1. **Universe:** step 1's admitted names at M; the top 1,000 by ME at s(M), ties by `name_key` ascending. Fewer than
-   1,000 admitted names with a finite positive ME at s(M) refuses the run (`UNIVERSE_SHORT`), in either stage.
+1. **Universe:** step 1's admitted names at M; the top 1,000 by ME at s(M), ties by `name_key` ascending. Any
+   admitted row with a non-finite or non-positive ME refuses the run (`ME_INVALID`), as in premise 3's script; fewer
+   than 1,000 admitted names refuses it (`UNIVERSE_SHORT`); both in either stage.
 2. **Scores:** each characteristic's JKP-signed value, then each family, then the composite, by §"Source rules"'
    one-population-per-operation rule. Exclusions in step 3 do not change any ranking population.
 3. **Eligible to enter:** in the universe, with a composite, raw close at s(M) ≥ $5 and archive seasoning ≥ 36
@@ -255,8 +266,9 @@ At each formation M, in order:
 5. **Holdings:**
    - A held name stays while it is in the universe, has a composite, ranks in the top tercile and has a raw close at
      s(M) ≥ $5.
-   - Otherwise it is sold at s(M). A sale for the $5 rule, for leaving the universe or for losing a composite is a
-     **forced** exit; a sale for leaving the top tercile is a **discretionary** exit. Both are counted.
+   - Otherwise it is sold at s(M). Each sale has one primary reason, tested in this order: left the universe;
+     lost a composite; raw close below $5 (each a **forced** exit); left the top tercile (a **discretionary** exit).
+     Further reasons that also hold are printed as flags and do not count. k_M is the number of discretionary exits.
    - An eligible name not held enters if it ranks in the top decile.
 6. **Weights:** equal across holdings on post-cost NAV, by step 0's one-pass self-financing rule. Weights drift within
    the month.
@@ -291,11 +303,15 @@ concerned. The 10 is fixed by construction: an equal-weight book of fewer names 
   2014-09-30. Under step 0's band rule, one band applies to both the 2014-09 purchase and the 2024-08 sale. Both are
   charged.
 - Stage-B slices take the continuing returns for 2021-06..2024-08, with the 2024-08 sale charged, as the book's are.
+- **ETF cost exception, inherited from step 0** (§"Costs"): `research-process.md` wants ETF costs calibrated
+  separately, and none exists, so B1 is charged the stock band of SPY's raw price, provisionally. B1 trades twice on
+  the path, so the assumption enters through those two trades only; the report prints both charges.
 - After 2021, B1 is a synthetic IVV NAV history (step 0).
 
-**Matched random control,** draws d = 0..999. **Estimand:** random selection from the book's own opportunity set,
-holding the book's count and making the book's number of discretionary replacements. It does not match total
-turnover, traded notional or cost, because its forced exits are its own; those are printed beside the book's.
+**Matched random control,** draws d = 0..999. **Estimand:** random selection from the book's own opportunity set
+under a target-count rule: after each formation it holds the book's count, and its random replacements are capped at
+the book's discretionary exit count. It does not match total turnover, traded notional or cost, because its forced
+exits and count adjustments are its own; those are printed beside the book's.
 
 At each formation M, with n_M the book's holding count after its trades and k_M its discretionary exit count:
 1. **Forced exits:** the control sells its own holdings that left the universe, lost a composite or closed below $5
@@ -312,12 +328,14 @@ population is sorted by `name_key` ascending, and the calls run in the order abo
 Selections are computed once and used for both termination arms, since no status depends on the arm.
 
 **Shortage refuses.** If the eligible set cannot fill step 4 in any draw at any formation, the run is refused
-(`CONTROL_SHORT`) with the draw and formation. Premise 3 counts at least 964 universe names with two or more families
-in every stage-A month, against a book of at most ⌈n/3⌉, so this is expected to be a guard, not a state; no
-percentile is ever computed on a subset of draws.
+(`CONTROL_SHORT`) with the draw and formation. No feasibility is assumed in advance; the run prints, per formation,
+the smallest purchase pool any draw met and the purchases it needed. No percentile is ever computed on a subset of
+draws.
 
-**Everything else matches the book:** weights, costs, bands, statuses and arms. Realised forced and discretionary
-turnover, and cost, are printed per draw and arm beside the book's.
+**Everything else matches the book:** weights, costs, bands, statuses and arms. Traded notional and cost are
+reported in four categories, for the book and per draw and arm: forced exits, discretionary exits (the control's
+sampled replacements), count adjustments (the control's down-sizing sales and any purchases beyond its
+replacements), and the self-financing rebalance adds and trims. The four reconcile to the total, which is printed.
 
 **Percentiles.** Control quantiles are nearest-rank on the sorted 1,000 (step 0). The book's percentile is the
 mid-rank empirical CDF: (number of draws below the book + half the number equal) / 1,000. These describe random
@@ -343,7 +361,8 @@ The book **passes** only if G1 and G2 both hold, at base cost, under **both** te
   - RMW for GP/A. RMW is operating profitability, the nearest FF factor and not the same variable;
   - CMA for investment.
 - **Refusals, checked before any coefficient is printed** (verdict `G1_REFUSED`, with the reason): a missing factor
-  month; a non-finite value in the return or factor matrix; fewer than 119 rows; a design matrix whose rank is below
+  month; a non-finite value in the return or factor matrix; anything other than exactly one aligned book, RF and
+  factor observation for each of the 119 declared months (no duplicates, no extras); a design matrix whose rank is below
   its column count (numpy `matrix_rank` at its default tolerance); zero residual variance; or any Newey–West standard
   error that is not finite and positive.
 
@@ -354,13 +373,25 @@ The book **passes** only if G1 and G2 both hold, at base cost, under **both** te
 The two arms are a conjunction: both must pass.
 
 **Printed beside the verdict, never gating:** stress cost, stage A, each calendar year, segments and attribution.
-Two annotations go on the verdict line, by frozen tests:
+Two annotations go on a `PASS` verdict line only, by frozen tests:
 - **"fails at stress cost"** when G2 fails under step 0's stress cost in either arm;
-- **"depends on <year>"** when G2 fails after removing one calendar year of stage B (2021 from June, 2022, 2023,
-  2024 to August) from the book, B1 and every control draw alike, annualising the remaining months.
+- **"depends on <year>"**, for every year that qualifies, when G2 fails after removing that calendar year of stage B
+  (2021 from June, 2022, 2023, 2024 to August) from the book, B1 and every control draw alike, annualising the
+  remaining months. The failing arm and comparison are printed.
 
-**After a pass:** step 3 specifies the forward construction: this book plus the sector cap, #3621's frozen MAX filter
-and the eToro-tradable intersection. Before any position, that construction gets its own declared implementation
+**Verdict order.** The run stops at the first that applies, and prints the status with its reason:
+1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, a raw-price refusal, `CONTROL_SHORT`, any
+   pin or ledger mismatch). Nothing else is printed.
+2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
+3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
+4. `PASS` or `FAIL`, by the conjunction above, with the annotations on a `PASS`.
+
+The turnover note (§"Diagnostics", turnover above 50%) goes on every verdict line from step 2 on.
+
+**After a pass:** step 3 specifies the forward construction: this book plus the sector cap, #3621's frozen MAX filter,
+an effective-dated listing-age exclusion with a stated missing-history policy, a security-type exclusion whose
+classifier (field, accepted values, unknown-type treatment) is specified and validated over every candidate
+instrument, and the eToro-tradable intersection. Before any position, that construction gets its own declared implementation
 backtest on this path, which must pass G1 and G2 as frozen here (step 3 must also state how it treats the absence of
 historical eToro eligibility). Only then is the forward demo test declared, as a
 claiming #2599 declaration with its own `TrialDesign` and power check. Its prediction interval and the #2500
@@ -396,6 +427,9 @@ moves to step 3's claiming forward declaration, whose planned data include the f
    - the stage-A artefact manifest sha256, `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`;
    - step 0's run manifest sha256;
    - the FF-12 map, QMJ PDF and Table 9 CSV sha256s;
+   - the sha256 of `inspect.getsource(DeclaredTrial)`, which pins the register policy that `trial_register.py`'s
+     exclusion from the construction hash would otherwise leave unpinned;
+   - the hold-out access identity: `strategy_id="3609-step2-book"`, `strategy_version="v1"`;
    - the Python version, because `random.Random` string seeding is version 2 (step 0).
 2. **The data-capture manifest** (slice 5), written after the access row and before evaluation. It holds the
    sha256s of the extended SUB reference artefact and the stage-B artefact manifest, with their input hashes. These
@@ -405,12 +439,20 @@ moves to step 3's claiming forward declaration, whose planned data include the f
 sha256 of the row's canonical JSON (`dataclasses.asdict`, sorted keys). The report refuses if the row's payload hash
 differs from the one recorded. The register version is recorded for audit, not compared: any later trial bumps it.
 
+**The run checks its own code against the row before any stage-B step.** `record_holdout_access` does not enforce a
+register row (it is called with `require_declaration=False`, so a trial without a frozen #2599 declaration passes),
+so the check is the run's own. Before writing `started`, it recomputes the spec sha256, the construction hash and the
+`DeclaredTrial` source hash, and refuses unless each equals the value in the row's `evidence`. The `started` row
+records the three values it checked.
+
 **Ledger: one parent run record from the first stage-B step.** Written to `var/research/3609_step2/ledger.jsonl` and
 committed to `docs/research/3609-ledger.jsonl`, in this order:
 1. `started`: run id, spec hash, construction hash, register version, payload hash, command. Written before
    anything below.
-2. `access_recorded`: the committed `record_holdout_access` row, `access_kind="evaluate"`, `result_version` = the run
-   id, under this declaration's identity. It commits in its own transaction before step 3.
+2. `access_recorded`: one `record_holdout_access` row with `strategy_id="3609-step2-book"`, `strategy_version="v1"`,
+   `access_kind="evaluate"`, `result_version` = the run id, `accessed_by` = the operator or loop identity running it,
+   and `purpose="#3609 step 2 declared run <run id>"`. It commits in its own transaction before step 3, and the
+   ledger row records the returned `access_id`.
 3. `sub_published`, then `stage_b_published`: each artefact's manifest sha256.
 4. `data_frozen`: the data-capture manifest's sha256. The report refuses without it, or if any file differs from it.
 5. `completed` or `failed`, written before any result is printed.
@@ -428,49 +470,72 @@ counts every alternative printed in that dimension as searched.
 
 ## Diagnostics (printed, never gated)
 
+**Weights.** Unless stated, a weight is post-trade at s(M), on post-cost NAV including cash. A sold name's
+"affected" weight is its pre-trade weight at s(M) on pre-trade NAV. Status weights are the post-trade weights at the
+start of a holding month, grouped by the status that month ends in.
+
+**Windows.** Every summary is printed for stage A (development), stage B (reused validation) and pooled, with the
+window's defined-month count for that metric.
+
 - **Universe:** premise 3's table recomputed on all 119 formations, stage B included, with no retuning, plus the
-  book's weight below JKP's NYSE-median cutoff where JKP publishes one for M.
-- **Signals: one-month horizon only, for the three retained families and the composite.** These are
+  book's weight and traded notional at or below JKP's NYSE-median cutoff where JKP publishes one for M.
+- **Signals: one-month horizon, for the three retained families and the composite.** These are
   selection-conditioned: the families were chosen on stage A, and the label says so. The three dropped families
-  have no step-2 construction and are not printed. Longer horizons are not printed: a 12-month outcome for late
-  formations would need prices after the 2024-08-31 read bound, and no partial horizon is used.
-  - **Population:** universe names at M with the score and a step-1 holding-month return (either arm, printed per
-    arm).
+  have no step-2 construction and are not printed.
+  - **Population:** universe names at M with the score and a step-1 holding-month return, per arm.
   - **IC_M:** Spearman correlation (average ranks for ties) between the score and the holding-month return.
-    Undefined when fewer than 30 names, or either vector has zero variance; undefined months are counted.
-  - **Summary over defined months:** mean IC; IC standard deviation (ddof 1); IC-IR = mean / standard deviation,
-    monthly, not annualised; a Newey–West t on the mean with step 0's lag rule, valid here because one-month
-    outcomes do not overlap.
-  - **Quintiles:** names ordered by score descending, ties by `name_key`; boundaries at ranks ⌈kn/5⌉ for k = 1..4.
-    Spread = Q1 (highest scores) minus Q5, equal-weighted, gross. Undefined when any quintile has fewer than 5 names.
-    No value-weighted spread is printed.
+    Undefined when fewer than 30 names, or either vector has zero variance.
+  - **Quintile spread_M:** names ordered by score descending, ties by `name_key`; boundaries at ranks ⌈kn/5⌉ for
+    k = 1..4. Spread = Q1 (highest scores) minus Q5, equal-weighted, gross. Undefined when any quintile has fewer
+    than 5 names. No value-weighted spread is printed.
+  - **Monthly series** of IC and spread are written to the output file.
+  - **Summaries per window,** each metric on its own defined months: mean; standard deviation (ddof 1); IC-IR = mean
+    / standard deviation, monthly, not annualised; a Newey–West t on the mean with step 0's lag rule. One-month
+    outcomes remove mechanical overlap; Newey–West is used because the series may still be serially dependent. All
+    summaries are `undefined` with fewer than 12 defined months; IC-IR is `undefined` at zero standard deviation;
+    the t is `undefined` if any calendar month in the window is undefined (it is never computed over compressed
+    months) or its standard error is not finite and positive.
+- **Exception: no decay by horizon.** `research-process.md` lists decay by horizon among signal metrics. Step 1
+  defines only a one-month holding contract (returns, statuses, terminal handling); a multi-month cohort return is
+  a further construction with its own treatment of names that leave the panel, and horizons past the 2024-08-31
+  read bound would be partial. It is not printed here; step 3 must supply it before a forward declaration.
 - **Two size cells:** the book universe, and admitted names outside it. Scores are standardised within each cell
   separately, by §"Source rules". Labelled a proxy for `market-segments.md`'s NYSE cells.
-- **Segments:** the primary partition is cost band at s(M) × the two size cells; a name's cell is set at each M, so
-  a name that migrates is counted in its cell at that M. Each cell prints the signal block above (IC summary and
-  quintile spread) on its own names. Book returns are not split by cell, since the book lives in one size cell; the
-  book's weight by cost band is printed instead. Every cell is printed, with its nominal count of defined months; a
-  cell with fewer than 24 defined months is marked `insufficient` rather than omitted. Nominal months are not
-  independent observations, and the label says so. FF-12 industry is printed for IC only.
-- **Book, per stage, per calendar year and pooled:** step 0's formulas for these figures. No Sharpe is printed.
+- **Segments (primary partition: cost band at s(M) × the two size cells).** A name's cell is set at each M, so a
+  name that migrates counts in its cell at that M.
+  - **Each cell:** the signal block above, on its own names.
+  - **The book, per cost band:** each month, the contribution Σ (start-of-month weight × holding-month return) of
+    the holdings in that band, and the band's weight. The book lives in one size cell, so the size axis has no book
+    split.
+  - **Minimum effective sample:** 24 effective months, n_eff = n(1 − ρ)/(1 + ρ), with n the cell's defined months
+    and ρ the lag-1 autocorrelation of its IC series, floored at 0 (the AR(1) effective-sample approximation, Wilks,
+    *Statistical Methods in the Atmospheric Sciences*). The 24 is fixed by construction. Every cell is printed,
+    with n and n_eff; a cell below the minimum is marked `insufficient`, not omitted.
+  - **FF-12 industry:** a marginal partition of the book universe, not crossed with the cells; IC block only.
+- **Book, per window and per calendar year:** step 0's formulas for these figures. No Sharpe is printed.
   - net and gross annualised return, volatility and maximum drawdown;
   - active return, tracking error, IR, beta and maximum relative drawdown against B1;
-  - turnover, cost drag and book size;
+  - turnover (traded notional), cost drag and book size;
   - weight held in each return status.
-- **Turnover months** (`research-process.md`: turnover above roughly 50% a month must show net benefit): for each
-  month with one-way turnover above 50%, its cost, the book's gross return minus the control's median gross return
-  that month, and the same net of cost. These are realised figures from one history, labelled so, not an expected
-  benefit.
+- **Turnover above 50% a month** (`research-process.md`: net expected benefit must be shown, Novy-Marx & Velikov
+  2016). For each such month: its traded notional, its cost, and the book's gross and net return minus the
+  control's median, labelled realised, from one history. **Exception:** no expected-benefit model exists here. If
+  any month exceeds 50%, the verdict line says "turnover above 50% in N months; net expected benefit not shown",
+  and step 3 must show it for the forward construction.
 - **Attribution** (`portfolio-construction-and-risk.md` §Attribution): SPY beta; universe effect (equal-weight
   universe minus B1); the full FF5+momentum loadings; selection (book minus equal-weight universe); FF-12 weights,
   monthly and averaged, against the reconstituted cap-weighted universe, with the 2× and "no reference weight" flags.
-- **Information:** first-order autocorrelation of monthly active returns, and the ratio of the Newey–West standard
-  error of the mean active return to its iid standard error. No effective-years figure is printed.
+- **Information, per window:** the lag-1 autocorrelation of monthly active returns, and the ratio of the
+  Newey–West standard error of the mean active return to its iid standard error. Each is `undefined` with fewer
+  than 24 months, a zero iid standard error, or a Newey–West standard error that is not finite and positive. No
+  effective-years figure is printed.
 - **Operations:**
-  - the minimum ticket ($10): at each formation, the smallest non-zero trade weight (entries, exits, and the
-    rebalance adds and trims of the self-financing rule), and the capital at which that trade falls below $10; the
-    maximum of that capital over the path is printed. No trade is exempted;
-  - assumptions carried from step 0: real settlement, fractional holdings, zero slippage, gaps and fees, and
+  - **Minimum ticket ($10).** Every trade on the path counts, including the 2024-08 liquidation and the
+    self-financing adds and trims. A trade's weight is its notional over pre-trade NAV at that date. For each
+    trade, the contemporaneous NAV at which it falls below $10 is $10 / weight, and the initial capital at which
+    it does is that figure × NAV_0 / NAV_t. Per arm at base cost, the maximum of each over the path is printed,
+    with the trade that sets it.
+  - Assumptions carried from step 0: real settlement, fractional holdings, zero slippage, gaps and fees, and
     pre-withholding returns for the book and B1 alike.
 - **Control:** 5th/50th/95th percentiles of the control's net and gross returns, turnover and cost per arm, and the
   book's percentile.
@@ -482,7 +547,8 @@ counts every alternative printed in that dimension as searched.
    - The QMJ PDF, pinned by hash.
    - Code for SUB quarters through 2024q3, tested on fixtures only; the files are not fetched yet.
 2. **Stage-B builder path.** Formations 2021-05..2024-07 and a 2024-08-31 price bound. The builder refuses unless:
-   - the `DeclaredTrial` row is in the imported register;
+   - the `DeclaredTrial` row is in the imported register, and the run's spec, construction and `DeclaredTrial`
+     source hashes equal the row's (§"Registration");
    - the run's `started` and `access_recorded` ledger rows exist and the access row is committed;
    - a reference artefact carries the extended SUB.
 
@@ -509,8 +575,8 @@ counts every alternative printed in that dimension as searched.
 - Historical eToro eligibility is unchecked.
 - **Security type is unverified.** Step 1 states that commodity pools and other funds are not separable in the
   panel, and premise 3's SIC 6221 count is sometimes 1, so leveraged, inverse or pooled products may enter this
-  reference book. No exclusion is claimed. Step 3's forward construction excludes them by eToro's instrument type
-  at trade time.
+  reference book. No exclusion is claimed. Step 3 must specify and validate a classifier before its forward
+  construction can claim one (§"Decision rule").
 - Archive seasoning is not the IPO rule; no volatility-conditioned result exists.
 - Costs: nine summer calibration dates, no stressed regime, stock bands (step 0).
 - The market-on-close fill is an assumption.
@@ -573,3 +639,25 @@ counts every alternative printed in that dimension as searched.
 - **51–52:** the one-year annotation is a leave-one-year-out test; G1's refusal states are enumerated.
 - **53–56:** the freeze is two immutable stages (register row, then data-capture manifest); the declaration payload
   is hashed separately; a parent ledger record starts before the first stage-B step.
+
+**Round 3 (40 of findings 9–56 resolved; 8 open plus 24 new, numbered 57–80; `ckpt1_round3.txt`), all applied:**
+- **15:** traded notional at or below the NYSE-median cutoff is printed.
+- **33, 62:** the control is a target-count rule with capped replacements; notional and cost reconcile across
+  forced, discretionary, count-adjustment and rebalance categories.
+- **39:** the missing expected-benefit model is a stated exception with a verdict-line note; step 3 must show it.
+- **45–47, 71–73:** cells use a 24-effective-month minimum (AR(1) approximation); per-cost-band book contributions
+  are printed; every summary has its undefined states; the IC t is never computed over compressed months; outputs,
+  axes and windows are enumerated.
+- **54–55, 64–65:** the run checks the spec, construction and `DeclaredTrial` source hashes against the register
+  row before any stage-B step; the access identity and fields are fixed; `access_id` is ledgered.
+- **57–59, 80:** premise-3 counts are labelled raw availability, the shortage assurance is removed, the script's
+  wording and the median boundary are fixed, and invalid ME refuses in both script and run.
+- **60–61, 63:** the mean rule's rationale is corrected; exits carry one primary reason by precedence; SIC
+  transitions use two flags on a stated population.
+- **66–69:** the boundary state schema, the exact 119-month G1 sample, the verdict order and `PASS`-only
+  annotations are frozen.
+- **70:** decay by horizon is a stated exception; step 3 supplies it.
+- **74–76:** weight timestamps and denominators are defined; the ticket check covers every trade, with contemporaneous
+  and initial-capital bases.
+- **77–79:** listing age and a validated security-type classifier are step-3 prerequisites; B1's ETF cost exception
+  is inherited from step 0 and stated.
