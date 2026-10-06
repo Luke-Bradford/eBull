@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–8 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 8 is
-applied; round 8's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–9 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 9 is
+applied; round 9's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -389,31 +389,38 @@ Two annotations go on a `PASS` verdict line only, by frozen tests:
 **Every compared series must be complete and its statistics defined,** at base and stress cost alike: the book,
 B1, every control draw and both references each need exactly one finite monthly return for each of the 119 months,
 and every monthly 1 + r must be ≥ 0. Annualised return is exp((12/n) Σ ln(1 + r)) − 1.
-**A total loss** (a month with 1 + r = 0) is an economic outcome, not invalid data, and has its own codes. It ends
-that path: no later trade, return or cost exists, and the path is **complete** up to and including that month (the
-one exception to the 119-return rule). No statistic is computed over a stopped path; the cases below decide the
-run first.
-- **The book at base cost** (either arm): `FAIL`, reason `TOTAL_LOSS`, at its place in the verdict order. G1 and
-  G2 are not evaluated; the path to the loss is printed.
-- **The book at stress cost only:** the base verdict stands, and a `PASS` carries "fails at stress cost". Stress cost
-  stays non-gating.
-- **B1, a reference or any control draw, at either cost:** `REFUSED`, reason `COMPARATOR_TOTAL_LOSS`, with the
-  series, draw, arm and month. No comparison or percentile is defined against a series with no wealth, and none is
-  computed over the surviving draws. Every compared series is long-only, holds cash at a zero return, and costs
-  are a few percent of traded notional at most (step 0's bands), so its factor reaches 0 only if every position it
-  holds returns −100% in one month. The run stops for that to be investigated rather than scoring it, and since a
-  refusal can never become a `PASS`, the treatment is fail-closed.
+**A total loss** is an economic outcome, not invalid data, and has its own codes. It is recognised from the
+holdings, never from rounding: a series suffers one in a month when its month-end NAV is exactly zero because every
+position it held realised a value of exactly 0 and it held no cash. A computed factor 1 + r that is ≤ 0, or that
+rounds r to −1, without that holding-level condition is numerical failure and refuses as `COMPARATOR_INVALID`.
+
+**A total loss in any series stops the run** (declared policy, by construction). Every series is valued month by
+month in calendar order. At the first month in which any series (the book, B1, a reference or a control draw, either
+arm, base or stress cost) suffers a total loss, valuation stops for every series. Refusals arising in earlier months
+or formations take precedence through the verdict order; checks belonging to later months are not run. The paths
+up to and including that month are complete for this purpose (the one exception to the 119-return rule); no
+statistic, gate or diagnostic is computed over them.
+- **The book at base cost** (either arm): `FAIL`, reason `TOTAL_LOSS`, at its place in the verdict order. The path
+  to the loss is printed.
+- **Any other series, or the book at stress cost:** `REFUSED`, reason `TOTAL_LOSS_STOP`, with the series, draw, arm,
+  cost scenario and month. This is a declared exception to stress cost being non-gating.
+
+The policy is conservative, not forced by the arithmetic: a window that ends at zero wealth has a defined −100%
+return. It is chosen because every series here is long-only, holds cash at a zero return, and pays costs of a few
+percent of traded notional at most (step 0's bands), so a total loss needs every position it holds to be worth
+nothing at once. The run stops for that to be investigated rather than scored, and a refusal can never become a
+`PASS`.
 
 A negative factor, or a non-finite annualised return, median or year-deletion statistic, refuses the run as
 `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
 1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
-   `COMPARATOR_INVALID`, `COMPARATOR_TOTAL_LOSS`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
+   `COMPARATOR_INVALID`, `TOTAL_LOSS_STOP`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
    formation, `name_key` and draw; the counts that triggered it (for `CONTROL_SHORT`, the pool and the purchases
    needed); the run id and its hashes; and the labels. No path, gate or diagnostic is printed.
 2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
-   Then `FAIL`, reason `TOTAL_LOSS`, if the book's base-cost path suffered a total loss (above); the path is
+   Then `FAIL`, reason `TOTAL_LOSS`, if the run stopped on the book's base-cost total loss (above); the path is
    printed.
 3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
 4. G1 and G2 by the conjunction above. If either fails: `FAIL`, with the failing gate and arm.
@@ -479,9 +486,13 @@ separators=(",", ":"), ensure_ascii=True, allow_nan=False)`, encoded UTF-8. Coll
 lists sorted by (`name_key`) or (draw, `name_key`); floats use Python's shortest round-trip `repr`; dates are ISO
 strings; enums are their values; tuples become lists.
 
-**The declaration payload is pinned separately.** The run's `started` row records `TRIAL_REGISTER_VERSION` and the
-sha256 of the row's canonical JSON (`dataclasses.asdict`, then the conversions above). The report refuses if the row's payload hash
-differs from the one recorded. The register version is recorded for audit, not compared: any later trial bumps it.
+**The declaration payload is pinned separately, once.** Slice 4 commits a `declared` row to
+`docs/research/3609-ledger.jsonl` in the same PR as the register row: the trial id and the sha256 of the row's
+canonical JSON (`dataclasses.asdict`, then the conversions above). Every attempt requires exactly one `declared` row
+for `3609-step2-book-v1` and exactly one register row with that id, `declared_for=None`, `exactness=EXACT` and
+`searches=1`, and refuses unless the row's payload hash equals the `declared` row's. Its `started` row records the hash
+it checked and `TRIAL_REGISTER_VERSION`; the version is recorded for audit, not compared, since any later trial bumps
+it. An edited payload therefore refuses on every later attempt, not only within one.
 
 **Every consumed file is verified immediately before use** against the manifest that pins it. A mismatch refuses
 the run, so an unchanged manifest beside an altered file fails.
@@ -497,7 +508,11 @@ the run, so an unchanged manifest beside an altered file fails.
   recomputes sha256 of the stored `payload` and requires it to equal the row's `response_sha256` and the value the
   declaration pins. It then reads that snapshot's `reference_data_observations` and requires the sha256 of their
   canonical JSON (a list of `[series_key, observation_date, str(value), unit]`, sorted by series key then date) to
-  equal the observation digest the declaration pins. Both digests are computed when the declaration is written.
+  equal the observation digest the declaration pins. Both digests are computed when the declaration is written, by
+  an **integrity-only read**: the slice-4 script hashes the stored bytes and rows and prints only the two digests,
+  no value. These are the snapshots step 0 already evaluated over stage B's months (§"Design-history inventory"), so
+  the read adds no exposure; the declaration PR records it as the access history `research-process.md` §Hold-out
+  asks for.
 - **Each reference artefact** (FF-12 map, QMJ PDF, Table 9 CSV) against its pinned sha256.
 
 **The run checks its own code against the row before any stage-B step.** `record_holdout_access` does not enforce a
@@ -587,7 +602,8 @@ window's defined-month count for that metric.
     - C_b = every cost charged at this formation on trades in names of band b (sales of names leaving the book
       included), each at the position's entry band;
     - L_b = the 2024-08 final-liquidation cost on band-b holdings, charged in that month only (bands by s(2024-07));
-    - net return = ((1 + g_b) − L_b/V_b) / (1 + C_b/V_b) − 1, evaluated in that ratio form. This is step 0's
+    - net return = ((1 + g_b) − L_b/V_b) / (1 + C_b/V_b) − 1, evaluated in that ratio form, with each quotient,
+      the numerator and the denominator required finite. This is step 0's
       one-pass rule applied to the band's capital before its costs. V_b = 0 is checked first (undefined, below).
       Otherwise the inputs are validated before evaluation: V_b, g_b, C_b and L_b finite, V_b > 0, C_b ≥ 0,
       L_b ≥ 0 and g_b ≥ −1. An input failing any of these, or a non-finite result or one below −1, marks the month
@@ -676,7 +692,8 @@ window's defined-month count for that metric.
    refusal tests §"Registration" lists. Tests use fixtures.
 3. **The report** (`scripts/report_3609_step2.py`): scores, book, control, references, gates, diagnostics and the
    ledger. Fixture tests only, each revert-probed. Codex checkpoint 2.
-4. **Declaration:** the `DeclaredTrial` row and register bump, merged on `main`.
+4. **Declaration:** the `DeclaredTrial` row and register bump, the committed `declared` ledger row, and the two
+   factor-snapshot digests from the integrity-only read, merged on `main`.
 5. **Declared run,** from clean `main`, in the ledger's order:
    - write `started`, then record and commit the access;
    - publish the extended SUB reference artefact;
@@ -844,3 +861,15 @@ window's defined-month count for that metric.
   both pinned in the declaration. Snapshot ids 39 and 40 are row ids, not hashes.
 - **128:** stage A and stage B verify against stage-specific pin maps; slice 2 tests the cross-stage refusals.
 - **129:** final-liquidation notional and cost report under the s(2024-07) band, separate from the charged entry band.
+
+**Round 9 (8 of 9 resolved; 1 open plus 6 new, 130–135; `ckpt1_round9_final.txt`), all applied:**
+- **117, 130–132:** one stop rule. A total loss in any series, arm or cost stops valuation of every series at that
+  month; earlier refusals take precedence and later checks are not run. The book at base cost fails
+  (`TOTAL_LOSS`); anything else refuses (`TOTAL_LOSS_STOP`), a declared exception to non-gating stress cost. The
+  justification is restated as a conservative policy: a window ending at zero has a defined −100% return.
+- **133:** a total loss is recognised from the holdings (every position worth exactly 0, no cash); a factor ≤ 0 or
+  r rounded to −1 otherwise is numerical failure (`COMPARATOR_INVALID`). Sub-book quotients must be finite.
+- **134:** the two factor-snapshot digests are computed by an integrity-only read that prints no value, on
+  snapshots step 0 already evaluated over stage B; the declaration PR records it.
+- **135:** slice 4 commits a `declared` ledger row with the payload hash; every attempt compares against it and
+  requires exactly one matching register row.
