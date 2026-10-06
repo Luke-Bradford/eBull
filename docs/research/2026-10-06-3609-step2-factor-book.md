@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–7 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 7 is
-applied; round 7's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–8 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 8 is
+applied; round 8's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -389,20 +389,32 @@ Two annotations go on a `PASS` verdict line only, by frozen tests:
 **Every compared series must be complete and its statistics defined,** at base and stress cost alike: the book,
 B1, every control draw and both references each need exactly one finite monthly return for each of the 119 months,
 and every monthly 1 + r must be ≥ 0. Annualised return is exp((12/n) Σ ln(1 + r)) − 1.
-**A total loss** (a month with 1 + r = 0) is an economic outcome, not invalid data, and ends that path: no later
-trade, return or cost exists for it. Then: for the book, the verdict is `FAIL`, reason `TOTAL_LOSS` (after the
-refusal and `INSUFFICIENT` steps of the verdict order); for B1 or a reference, the run refuses as
-`COMPARATOR_INVALID`, since no comparison is defined against a series with no wealth; for a control draw, its
-stage-B annualised return is −100% whether the loss fell in stage A or B, and so is every year-deletion value. A negative factor, or a non-finite annualised return, median or year-deletion statistic,
-refuses the run as `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
+**A total loss** (a month with 1 + r = 0) is an economic outcome, not invalid data, and has its own codes. It ends
+that path: no later trade, return or cost exists, and the path is **complete** up to and including that month (the
+one exception to the 119-return rule). No statistic is computed over a stopped path; the cases below decide the
+run first.
+- **The book at base cost** (either arm): `FAIL`, reason `TOTAL_LOSS`, at its place in the verdict order. G1 and
+  G2 are not evaluated; the path to the loss is printed.
+- **The book at stress cost only:** the base verdict stands, and a `PASS` carries "fails at stress cost". Stress cost
+  stays non-gating.
+- **B1, a reference or any control draw, at either cost:** `REFUSED`, reason `COMPARATOR_TOTAL_LOSS`, with the
+  series, draw, arm and month. No comparison or percentile is defined against a series with no wealth, and none is
+  computed over the surviving draws. Every compared series is long-only, holds cash at a zero return, and costs
+  are a few percent of traded notional at most (step 0's bands), so its factor reaches 0 only if every position it
+  holds returns −100% in one month. The run stops for that to be investigated rather than scoring it, and since a
+  refusal can never become a `PASS`, the treatment is fail-closed.
+
+A negative factor, or a non-finite annualised return, median or year-deletion statistic, refuses the run as
+`COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
 1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
-   `COMPARATOR_INVALID`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
+   `COMPARATOR_INVALID`, `COMPARATOR_TOTAL_LOSS`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
    formation, `name_key` and draw; the counts that triggered it (for `CONTROL_SHORT`, the pool and the purchases
    needed); the run id and its hashes; and the labels. No path, gate or diagnostic is printed.
 2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
-   Then `FAIL`, reason `TOTAL_LOSS`, if the book's path suffered a total loss (below); the path is printed.
+   Then `FAIL`, reason `TOTAL_LOSS`, if the book's base-cost path suffered a total loss (above); the path is
+   printed.
 3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
 4. G1 and G2 by the conjunction above. If either fails: `FAIL`, with the failing gate and arm.
 5. **Turnover veto:** if any stage-B month (2021-06..2024-08) has one-way turnover above 50% at base cost in either
@@ -451,6 +463,7 @@ moves to step 3's claiming forward declaration, whose planned data include the f
    - the stage-A artefact manifest sha256, `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`;
    - step 0's run manifest sha256;
    - the FF-12 map, QMJ PDF and Table 9 CSV sha256s;
+   - for each of step 0's two factor snapshots, its `response_sha256` and its observation digest (below);
    - the **register-policy hash**: sha256 of `ast.unparse` of `trial_register.py`'s module AST with its two
      top-level assignments `TRIAL_REGISTER_VERSION` and `TRIAL_REGISTER` removed. It pins every class, constant and
      function the register's validation uses, which the construction hash leaves out to avoid hashing the row that
@@ -470,10 +483,22 @@ strings; enums are their values; tuples become lists.
 sha256 of the row's canonical JSON (`dataclasses.asdict`, then the conversions above). The report refuses if the row's payload hash
 differs from the one recorded. The register version is recorded for audit, not compared: any later trial bumps it.
 
-**Every consumed file is verified immediately before use** against the manifest that pins it: stage A and stage B
-through `verify_artefact` (manifest digest, every input and every published output); `paths.json` against step 0's run
-manifest `sha256` map, and the factor and RF data against its `factor_snapshots` ids; and each reference artefact against
-its pinned sha256. A mismatch refuses the run. An unchanged manifest beside an altered file therefore fails.
+**Every consumed file is verified immediately before use** against the manifest that pins it. A mismatch refuses
+the run, so an unchanged manifest beside an altered file fails.
+- **Stage A and stage B** through `verify_artefact` (manifest digest, every input and every published output), each
+  against **its own expected pin map**. Stage A's is the three pins `verify_artefact` checks today
+  (`scripts/build_3609_factor_panel.py:1149`), unchanged. Stage B's is those three plus `reference_3609_step2_sub`,
+  the extended SUB artefact's manifest sha256 from the data-capture manifest. Slice 2's tests show each stage
+  verifies under its own map, and that a stage-A artefact under stage B's map, a stage-B artefact under stage A's,
+  and a substituted SUB artefact each refuse.
+- **Step 0's `paths.json`** against step 0's run manifest `sha256` map.
+- **Factor and RF data.** Step 0's manifest pins `reference_data_snapshots` ids (`factor_snapshots`: five-factor 39,
+  momentum 40), which are row ids, not content hashes. For each id the run requires `parse_status = 'accepted'`,
+  recomputes sha256 of the stored `payload` and requires it to equal the row's `response_sha256` and the value the
+  declaration pins. It then reads that snapshot's `reference_data_observations` and requires the sha256 of their
+  canonical JSON (a list of `[series_key, observation_date, str(value), unit]`, sorted by series key then date) to
+  equal the observation digest the declaration pins. Both digests are computed when the declaration is written.
+- **Each reference artefact** (FF-12 map, QMJ PDF, Table 9 CSV) against its pinned sha256.
 
 **The run checks its own code against the row before any stage-B step.** `record_holdout_access` does not enforce a
 register row (it is called with `require_declaration=False`, so a trial without a frozen #2599 declaration passes),
@@ -563,10 +588,14 @@ window's defined-month count for that metric.
       included), each at the position's entry band;
     - L_b = the 2024-08 final-liquidation cost on band-b holdings, charged in that month only (bands by s(2024-07));
     - net return = ((1 + g_b) − L_b/V_b) / (1 + C_b/V_b) − 1, evaluated in that ratio form. This is step 0's
-      one-pass rule applied to the band's capital before its costs. A non-finite result, or one below −1, marks the
-      month `invalid` (diagnostic only).
+      one-pass rule applied to the band's capital before its costs. V_b = 0 is checked first (undefined, below).
+      Otherwise the inputs are validated before evaluation: V_b, g_b, C_b and L_b finite, V_b > 0, C_b ≥ 0,
+      L_b ≥ 0 and g_b ≥ −1. An input failing any of these, or a non-finite result or one below −1, marks the month
+      `invalid` (diagnostic only).
     - **Trades by band:** every order (sales of complete exits included) is assigned to the traded name's band at
-      s(M). Per band and window: order notional, cost, and turnover as (buys + sells) / 2 over the **book's**
+      s(M). The 2024-08 final liquidation, which has no formation, is assigned to the name's band at s(2024-07), the
+      membership L_b uses. That reporting band is separate from the entry band that sets each sale's charged
+      half-spread. Per band and window: order notional, cost, and turnover as (buys + sells) / 2 over the **book's**
       pre-trade NAV, so band turnovers sum to the book's. Initial purchase, final liquidation and terminal
       realisations are excluded from turnover as in step 0, and printed separately.
     - A month with V_b = 0 is undefined for that sub-book. A month with fewer than 5 band-b names is marked thin;
@@ -643,7 +672,8 @@ window's defined-month count for that metric.
    - a reference artefact carries the extended SUB.
 
    Stage A must replay with rows, census and every frozen input byte-identical. The manifest's provenance fields may
-   differ, and stage A keeps its original pins. Tests use fixtures.
+   differ, and stage A keeps its original pins. Each stage verifies under its own pin map, with the cross-stage
+   refusal tests §"Registration" lists. Tests use fixtures.
 3. **The report** (`scripts/report_3609_step2.py`): scores, book, control, references, gates, diagnostics and the
    ledger. Fixture tests only, each revert-probed. Codex checkpoint 2.
 4. **Declaration:** the `DeclaredTrial` row and register bump, merged on `main`.
@@ -802,3 +832,15 @@ window's defined-month count for that metric.
 - **121–122:** the sub-book return is evaluated in ratio form with an `invalid` state; uncomputable windows print
   `undefined`, computable ones below the minimum print `insufficient`.
 - **123:** every consumed file is verified against its pinned manifest immediately before use.
+
+**Round 8 (6 of 9 resolved; 3 open plus 6 new, 124–129; `ckpt1_round8_final.txt`), all applied:**
+- **117, 124–126:** the stopped-path accounting for comparators is removed. A total loss is still its own outcome,
+  not invalid data, and a path ending in one is complete. The book at base cost fails (`TOTAL_LOSS`); at stress cost
+  only it gets the stress annotation. B1, a reference or a control draw refuses the run (`COMPARATOR_TOTAL_LOSS`):
+  a long-only series reaches a zero factor only if every holding returns −100% in one month, and a refusal cannot
+  pass, so no −100% control convention, stopped-draw percentile or count-matching exception is needed.
+- **121:** sub-book inputs are validated (finite, V_b > 0, costs ≥ 0, g_b ≥ −1) before the ratio is evaluated.
+- **123, 127:** factor and RF snapshots are verified by content: payload sha256 and a canonical observation digest,
+  both pinned in the declaration. Snapshot ids 39 and 40 are row ids, not hashes.
+- **128:** stage A and stage B verify against stage-specific pin maps; slice 2 tests the cross-stage refusals.
+- **129:** final-liquidation notional and cost report under the s(2024-07) band, separate from the charged entry band.
