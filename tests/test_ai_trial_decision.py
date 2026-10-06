@@ -39,7 +39,7 @@ class TestStrictJson:
         with pytest.raises(StrictJSONError):
             strict_json_loads(f'{{"stop_pct": {constant}}}')
 
-    def test_decoder_limits_are_strict_json_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_decoder_limit_errors_become_strict_json_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(StrictJSONError):
             strict_json_loads('{"n": ' + "1" * 5000 + "}")
 

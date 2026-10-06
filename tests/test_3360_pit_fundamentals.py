@@ -68,7 +68,9 @@ def _zip(path: Path, members: dict[str, Any]) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         for name, body in members.items():
             text = body if isinstance(body, str) else json.dumps(body)
-            archive.writestr(name, text)
+            # A fixed timestamp: a bare name stamps the current time, so two builds either
+            # side of a 2-second boundary hashed differently (flaked on CI, #3613).
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), text)
     return path
 
 
