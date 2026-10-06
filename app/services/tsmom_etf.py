@@ -448,6 +448,43 @@ def c3_baskets(
 
 
 # ---------------------------------------------------------------------------
+# Percentiles over draws and the n/a convention (spec §"Controls and baselines", "Percentiles")
+# ---------------------------------------------------------------------------
+
+
+def valid_values(values: Iterable[float | None]) -> list[float]:
+    """The draws whose statistic is defined: ``None`` (n/a) and non-finite values are excluded."""
+    return [v for v in values if v is not None and math.isfinite(v)]
+
+
+def nearest_rank(values: Iterable[float | None], percentile: float) -> float | None:
+    """Nearest-rank percentile over the valid draws (step 0's formula); ``None`` when no draw is valid."""
+    ordered = sorted(valid_values(values))
+    if not ordered:
+        return None
+    return ordered[max(0, math.ceil(percentile / 100.0 * len(ordered)) - 1)]
+
+
+def position_within(value: float | None, draws: Iterable[float | None]) -> float | None:
+    """``(count below + ½ · count equal) / valid draws`` — a numerical rank; the caller names the favourable side."""
+    valid = valid_values(draws)
+    if value is None or not math.isfinite(value) or not valid:
+        return None
+    below = sum(1 for v in valid if v < value)
+    equal = sum(1 for v in valid if v == value)
+    return (below + 0.5 * equal) / len(valid)
+
+
+def risky_concentration(weights: Mapping[str, float]) -> tuple[float, float] | None:
+    """Largest risky weight and top-3 share of the risky sleeve; ``None`` (n/a) for an all-cash book."""
+    risky = sorted((w for w in weights.values() if w > 0.0), reverse=True)
+    total = sum(risky)
+    if not risky:
+        return None
+    return risky[0], sum(risky[:3]) / total
+
+
+# ---------------------------------------------------------------------------
 # Timing (spec §Path)
 # ---------------------------------------------------------------------------
 
@@ -638,6 +675,9 @@ __all__ = [
     "fund_coverage",
     "lookback",
     "month_range",
+    "nearest_rank",
+    "position_within",
+    "risky_concentration",
     "simulate",
     "slots",
     "solve_cost",
@@ -646,6 +686,7 @@ __all__ = [
     "StampYear",
     "tsmom_signal",
     "tsmom_weights",
+    "valid_values",
     "validate_through",
     "volatility",
 ]

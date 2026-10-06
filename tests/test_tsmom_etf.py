@@ -34,6 +34,9 @@ from app.services.tsmom_etf import (
     form,
     fund_coverage,
     month_range,
+    nearest_rank,
+    position_within,
+    risky_concentration,
     simulate,
     slots,
     solve_cost,
@@ -480,3 +483,22 @@ def test_the_stamp_screen_counts_only_months_the_panel_uses_and_reports_thin_or_
 
 def test_add_months_round_trip_used_by_the_eligibility_rule() -> None:
     assert add_months((2004, 12), 11) == (2005, 11)
+
+
+# --- percentiles and n/a -----------------------------------------------------------------------------------------
+
+
+def test_nearest_rank_and_position_use_valid_draws_only() -> None:
+    draws = [0.3, None, 0.1, math.nan, 0.2, 0.2]
+    assert nearest_rank(draws, 50) == 0.2
+    assert nearest_rank(draws, 5) == 0.1 and nearest_rank(draws, 95) == 0.3
+    assert nearest_rank([None, math.nan], 50) is None
+    assert position_within(0.2, draws) == pytest.approx((1 + 0.5 * 2) / 4)
+    assert position_within(None, draws) is None and position_within(0.2, [None]) is None
+
+
+def test_concentration_is_na_for_an_all_cash_book() -> None:
+    assert risky_concentration({}) is None
+    assert risky_concentration({"A": 0.0}) is None
+    largest, top3 = risky_concentration({"A": 0.4, "B": 0.2, "C": 0.1, "D": 0.1})  # type: ignore[misc]
+    assert largest == 0.4 and top3 == pytest.approx(0.7 / 0.8)
