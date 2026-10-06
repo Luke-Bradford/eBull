@@ -1463,7 +1463,9 @@ def _resume_uncertain_submission_locked(
     if row is None or row["strategy_request_id"] is None:
         raise StrategyPaperExecutionError("uncertain strategy submission identity is incomplete")
     request_id = row["strategy_request_id"]
-    # #3614: before the marker, so a refusal leaves the authority provably unsent.
+    # #3614: before the marker, so a refused retry adds nothing: the order keeps the uncertain state an
+    # earlier attempt left, and reconciliation resolves it exactly as before. The cycle contains the raise
+    # per item after position management has run (strategy_paper_runtime.run_strategy_paper_cycle).
     refuse_entry_if_unmerged_code("place_demo_strategy_order")
     mark_entry_verb_entered(conn, order_id=existing.order_id)
     try:
@@ -1817,7 +1819,9 @@ def _submit_recorded_order(
     with reconciliation_order_lock(conn, order_id):
         # The transaction context commits before this broker call. The marker commits
         # last of all: a crash before it is provably pre-broker (#3546 slice 3).
-        # #3614: before the marker, so a refusal leaves the authority provably unsent.
+        # #3614: before the marker, so a refusal leaves the row `authority_committed`, which
+        # strategy_order_reconciliation.terminalise_unsubmitted_entry (#3546) terminalises as provably
+        # never entered, releasing its capital. The cycle contains the raise per item, after exits.
         refuse_entry_if_unmerged_code("place_demo_strategy_order")
         mark_entry_verb_entered(conn, order_id=order_id)
         try:

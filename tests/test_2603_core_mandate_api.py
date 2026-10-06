@@ -850,3 +850,40 @@ class TestTheResponseMapping:
         disabled mandate as a contradiction to be normalised away."""
         response = _core_mandate_response(_mandate(enabled=False, core_instrument_id=42))
         assert (response.enabled, response.core_instrument_id) == (False, 42)
+
+
+def test_rebalance_maps_a_checkout_refusal_to_409_not_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3614: an entry refused for unmerged code surfaces its own message, like the other refusals."""
+    from uuid import UUID
+
+    from app.security.unattended_guard import UnmergedCodeRefused
+
+    monkeypatch.setattr("app.api.strategies.ensure_broker_key_loaded", lambda _conn: True)
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr(
+        "app.api.strategies.load_credential_with_id_for_provider_use",
+        MagicMock(side_effect=[LoadedCredential(UUID(int=1), "a"), LoadedCredential(UUID(int=2), "u")]),
+    )
+    monkeypatch.setattr(
+        "app.api.strategies.execute_core_rebalance",
+        MagicMock(side_effect=UnmergedCodeRefused("refusing 'place_demo_core_order': HEAD abc is not on origin/main")),
+    )
+
+    class BrokerContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr("app.api.strategies.EtoroBrokerProvider", lambda **_kwargs: BrokerContext())
+    conn = MagicMock()
+    conn.transaction.return_value = nullcontext()
+    request = MagicMock()
+    request.app.state.audit_pool = None
+    session = MagicMock(operator_id=UUID(int=3), username="operator")
+
+    with pytest.raises(HTTPException) as raised:
+        rebalance_core_sleeve(request=request, session=session, conn=cast(Any, conn))
+    assert raised.value.status_code == 409
+    assert "not on origin/main" in str(raised.value.detail)

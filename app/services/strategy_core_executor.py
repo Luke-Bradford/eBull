@@ -523,7 +523,8 @@ def _submit_core_authority_locked(
         raise StrategyCoreExecutionError(
             f"core authority {authority.order_id} has no committed exit levels and must not be submitted"
         )
-    # #3614: before the marker, so a refusal leaves the authority provably unsent.
+    # #3614: before the marker, so a refusal leaves the authority provably unsent; reconciliation's
+    # terminalise_unsubmitted_core_entry (#2961) resolves it. The API maps the refusal to a 409.
     refuse_entry_if_unmerged_code("place_demo_core_order")
     mark_core_submission_entered(conn, order_id=authority.order_id)
     try:

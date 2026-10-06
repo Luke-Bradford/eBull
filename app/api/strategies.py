@@ -24,6 +24,7 @@ from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 from app.security.master_key import MasterKeyError, ensure_broker_key_loaded
 from app.security.secrets_crypto import CredentialCryptoConfigError
 from app.security.sessions import SessionRow
+from app.security.unattended_guard import BrokerRefusedBeforeIo
 from app.services.account_equity_evidence import load_account_equity_evidence
 from app.services.account_reconciliation_ledger import (
     COUNTDOWN_RULE_VERSION,
@@ -4374,7 +4375,9 @@ def rebalance_core_sleeve(
                 f"in a moment. ({exc})"
             ),
         ) from exc
-    except (CoreEligibilityError, CoreSelectionError, StrategyCoreExecutionError) as exc:
+    except (CoreEligibilityError, CoreSelectionError, StrategyCoreExecutionError, BrokerRefusedBeforeIo) as exc:
+        # BrokerRefusedBeforeIo: a checkout guard (#2645, #3614) refused before any request left; its
+        # message names the fix, so it is a 409 like the other refusals here, not a 500.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _core_rebalance_response(result)
 
