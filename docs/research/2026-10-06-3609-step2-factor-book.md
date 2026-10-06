@@ -2,8 +2,9 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1 and 2 (§"Checkpoint log"). Round 2's findings 9–56 are applied. Findings 1–8, and the gate-design parts of
-3–5, are the decision above and stay open until the operator answers; §"Decision rule" is provisional until then.
+rounds 1–7 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding is applied; round 7 left
+none open. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
 inherits" (amended below), and reports against `docs/research/2026-10-04-3609-step0-baselines.md`.
