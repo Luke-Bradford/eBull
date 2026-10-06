@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–10 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 10 is
-applied; round 10's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–11 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 11 is
+applied; round 11's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -375,8 +375,8 @@ The book **passes** only if G1 and G2 both hold, at base cost, under **both** te
   error that is not finite and positive.
 
 **G2, realised net return (stage B, 2021-06..2024-08).**
-1. The book's annualised net return exceeds B1's.
-2. It exceeds the median (nearest-rank) of the control's 1,000 annualised net returns.
+1. The book's annualised net log growth G exceeds B1's.
+2. It exceeds the median (nearest-rank) of the control's 1,000 net G values.
 
 The two arms are a conjunction: both must pass.
 
@@ -389,8 +389,10 @@ Two annotations go on a `PASS` verdict line only, by frozen tests:
 
 **Every compared series must be complete and its statistics defined,** at base and stress cost alike: the book,
 B1, every control draw and both references each need exactly one finite monthly return for each of the 119 months,
-and every monthly wealth factor 1 + r, as computed, must be finite and strictly positive. Annualised return is
-exp((12/n) Σ ln(1 + r)) − 1.
+and every monthly wealth factor 1 + r, as computed, must be finite and strictly positive. **Comparisons use
+annualised log growth** G = (12/n) Σ ln(1 + r): G2, the control's median and ordering, the stress-cost and
+year-deletion annotations, and the book's percentile all compare G values, never rounded returns, so two different
+valid paths cannot tie at a displayed −100%. The annualised return exp(G) − 1 is for display only.
 
 **Non-positive wealth stops the run** (declared policy, by construction). The run does **not** try to tell an
 economic total loss from numerical failure: a factor that computes to ≤ 0, or an r that computes to exactly −1, in
@@ -408,7 +410,7 @@ any series (the book, B1, a reference or a control draw, either arm, base or str
   failure without holding-level evidence that B1's inherited returns do not carry. The run stops for it to be
   investigated, and a refusal can never become a `PASS`.
 
-A negative factor, or a non-finite annualised return, median or year-deletion statistic, refuses the run as
+A negative factor, or a non-finite G, median or year-deletion statistic, refuses the run as
 `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
@@ -552,7 +554,7 @@ counts every alternative printed in that dimension as searched.
 - "reused validation; integrity masks retrospective, not strictly point-in-time" on stage B;
 - "development" on stage A.
 
-## Diagnostics (printed, never gated)
+## Diagnostics (printed, never gated, except the turnover veto and input refusals)
 
 **Weights.** Unless stated, a weight is post-trade at s(M), on post-cost NAV including cash. A sold name's
 "affected" weight is its pre-trade weight at s(M) on pre-trade NAV. Status weights are the post-trade weights at the
@@ -658,8 +660,9 @@ window's defined-month count for that metric.
   control's median in the same arm, labelled realised, from one history. Tested at base cost, per arm; N is the
   number of calendar months exceeding 50% in either arm, with the per-arm counts beside it. **Exception:** no
   expected-benefit model exists here, so the requirement cannot be met by this run. It is applied fail-closed through
-  the verdict order's turnover veto (§"Decision rule", step 5), over stage-B months. **This veto is the one gating
-  input in this section;** everything else here is printed only.
+  the verdict order's turnover veto (§"Decision rule", step 5), over stage-B months. **This veto is the one
+  performance gate in this section.** The other exception is input validation: the refusals this section names
+  (`CUTOFF_INVALID`, `ME_INVALID`) stop the run like any data refusal. Everything else here is printed only.
 - **Attribution** (`portfolio-construction-and-risk.md` §Attribution): SPY beta; universe effect (equal-weight
   universe minus B1); the full FF5+momentum loadings; selection (book minus equal-weight universe); FF-12 weights,
   monthly and averaged, against the reconstituted cap-weighted universe, with the 2× and "no reference weight" flags.
@@ -706,6 +709,12 @@ window's defined-month count for that metric.
    - write `data_frozen`;
    - run the report, refusing any pin mismatch;
    - post the verdict and ledger on #3609.
+
+   **Capture lifecycle.** The first run to write `data_frozen` binds the capture to the trial. Every later attempt
+   under this declaration reuses it: it verifies the SUB and stage-B artefacts against that `data_frozen` row and
+   never publishes or rebuilds them. A run that recorded its access but wrote no `data_frozen` is abandoned and
+   classified by §"Registration" (an access); its partial outputs are never reused, and the next attempt captures
+   afresh under its own run id. Replacing a bound capture needs a new declaration.
 
 ## Known limits
 
@@ -891,3 +900,10 @@ window's defined-month count for that metric.
   payload-to-observation correspondence are listed as unverified.
 - **139:** a pass candidate computes and validates its annotation statistics before the terminal row and `PASS`.
 - **140:** IC-IR is for IC only; the spread gets mean, deviation and t.
+
+**Round 11 (all 7 carried findings resolved; 3 new, 141–143; `ckpt1_round11_final.txt`), all applied:**
+- **141:** every comparison (G2, control median and ordering, annotations, percentile) uses annualised log growth;
+  exp(G) − 1 is display only, so valid paths cannot tie at a rounded −100%.
+- **142:** the first `data_frozen` binds the capture to the trial; later attempts verify and reuse it, abandoned
+  captures are never reused, and replacement needs a new declaration.
+- **143:** the diagnostics heading and text name both exceptions: the turnover veto and input refusals.
