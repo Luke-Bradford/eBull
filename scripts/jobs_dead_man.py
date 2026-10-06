@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
@@ -52,7 +51,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from app.system.push_channel import Priority, config_from_env, send_push
+from app.system.push_channel import Priority, config_from_env, local_notify, send_push
 
 _DEFAULT_STATUS_FILE = Path.home() / ".cache" / "ebull" / "jobs_dead_man_status.json"
 _STALE_AFTER_S = 1800.0
@@ -194,19 +193,6 @@ def settle(prior: State, state: State, *, delivered: bool) -> State:
     return replace(state, alerting=prior.alerting, last_notified_at=prior.last_notified_at)
 
 
-def _macos_notify(title: str, message: str) -> bool:
-    try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["osascript", "-e", f"display notification {json.dumps(message)} with title {json.dumps(title)}"],
-            capture_output=True,
-            timeout=5.0,
-            check=False,
-        )
-    except OSError, subprocess.SubprocessError:
-        return False
-    return proc.returncode == 0
-
-
 def notify(action: Action, state: State, *, note: str = "") -> bool:
     """Send the notification; ``True`` when it reached its channel.
 
@@ -221,7 +207,7 @@ def notify(action: Action, state: State, *, note: str = "") -> bool:
         message, priority, tag = state.reason or "", 5, "rotating_light"
     message += note
     pushed = send_push(title=title, message=message, priority=priority, tags=(tag,))
-    shown = _macos_notify(title, message)
+    shown = local_notify(title, message)
     print(f"[jobs-dead-man] {action.upper()}: {message} (push sent: {pushed})", file=sys.stderr, flush=True)
     return pushed or (config_from_env() is None and shown)
 

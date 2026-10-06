@@ -145,6 +145,7 @@ def test_run_records_only_delivered_notices(tmp_path: Path, monkeypatch: pytest.
     status = tmp_path / "s.json"
     obs = Observation(blocks=[_block(age=86_400)])
     monkeypatch.setenv("EBULL_NTFY_TOPIC", "t")
+    monkeypatch.setattr(operator_alert_watch, "local_notify", lambda *_a: True)
     monkeypatch.setattr(operator_alert_watch, "read_observation", lambda: obs)
     sent: list[str] = []
 
@@ -161,11 +162,14 @@ def test_run_records_only_delivered_notices(tmp_path: Path, monkeypatch: pytest.
     assert len(sent) == 2
 
 
-def test_with_push_off_a_notice_is_logged_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_with_push_off_the_local_notification_decides_delivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     status = tmp_path / "s.json"
     monkeypatch.delenv("EBULL_NTFY_TOPIC", raising=False)
     monkeypatch.setattr(operator_alert_watch, "read_observation", lambda: Observation(blocks=[_block(age=86_400)]))
-    monkeypatch.setattr(operator_alert_watch, "send_push", lambda **_kw: pytest.fail("push is off"))
+    shown = [False, True]
+    monkeypatch.setattr(operator_alert_watch, "local_notify", lambda *_a: shown.pop(0))
+    assert operator_alert_watch.run(status_file=status) == 1  # not shown: retried next pass
+    assert load_state(status).paged_blocks == ()
     assert operator_alert_watch.run(status_file=status) == 0
     assert load_state(status).paged_blocks == ("drawdown",)
 
@@ -173,6 +177,7 @@ def test_with_push_off_a_notice_is_logged_once(tmp_path: Path, monkeypatch: pyte
 def test_dry_run_neither_sends_nor_saves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     status = tmp_path / "s.json"
     monkeypatch.setenv("EBULL_NTFY_TOPIC", "t")
+    monkeypatch.setattr(operator_alert_watch, "local_notify", lambda *_a: True)
     monkeypatch.setattr(operator_alert_watch, "read_observation", lambda: Observation(blocks=[_block(age=86_400)]))
     monkeypatch.setattr(operator_alert_watch, "send_push", lambda **_kw: pytest.fail("dry run sent"))
     assert operator_alert_watch.run(status_file=status, dry_run=True) == 0
@@ -206,6 +211,7 @@ def test_an_unwritable_status_file_is_named_in_the_notice(tmp_path: Path, monkey
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("")
     monkeypatch.setenv("EBULL_NTFY_TOPIC", "t")
+    monkeypatch.setattr(operator_alert_watch, "local_notify", lambda *_a: True)
     monkeypatch.setattr(operator_alert_watch, "read_observation", lambda: Observation(blocks=[_block(age=86_400)]))
     messages: list[str] = []
     monkeypatch.setattr(operator_alert_watch, "send_push", lambda **kw: messages.append(str(kw["message"])) is None)

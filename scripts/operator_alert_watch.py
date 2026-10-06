@@ -49,7 +49,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.services.strategy_capital_sandbox import SANDBOX_EXCEEDED
-from app.system.push_channel import Priority, config_from_env, send_push
+from app.system.push_channel import Priority, config_from_env, local_notify, send_push
 
 _DEFAULT_STATUS_FILE = Path.home() / ".cache" / "ebull" / "operator_alert_watch_status.json"
 _BLOCK_PERSIST_S = 600.0
@@ -350,14 +350,17 @@ def run(*, status_file: Path = _DEFAULT_STATUS_FILE, dry_run: bool = False) -> i
             print(f"[operator-alert-watch] would send: {n.title}: {n.message}", file=sys.stderr, flush=True)
         return 0
     # Probe the status file before sending: unwritable means every pass re-sends, so say so.
-    note = "" if save_state(status_file, prior) else " [alert watch status file unwritable: not de-duplicated]"
-    # Push off: the rows stay the record and the log line is the only channel,
-    # so a notice counts as handled once logged rather than re-logged every run.
+    writable = not notices or save_state(status_file, prior)
+    note = "" if writable else " [alert watch status file unwritable: not de-duplicated]"
+    # As in the dead-man: with push configured, delivery means a 2xx; without it the
+    # macOS notification is the only channel, and a notice it failed to show is retried.
     push_on = config_from_env() is not None
     delivered: list[Notice] = []
     for n in notices:
         message = n.message + note
-        ok = send_push(title=n.title, message=message, priority=n.priority, tags=(n.tag,)) if push_on else True
+        pushed = send_push(title=n.title, message=message, priority=n.priority, tags=(n.tag,))
+        shown = local_notify(n.title, message)
+        ok = pushed or (not push_on and shown)
         print(f"[operator-alert-watch] {n.title}: {message} (push sent: {ok and push_on})", file=sys.stderr, flush=True)
         if ok:
             delivered.append(n)
