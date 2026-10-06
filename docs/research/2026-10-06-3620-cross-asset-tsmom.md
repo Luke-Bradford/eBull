@@ -185,6 +185,8 @@ cash to within 1e-12. No cap or floor is applied to any slot.
 
 Valuation and return attribution are monthly. Daily bars supply only the month-end execution anchors and the census
 metadata. Each arm runs one continuous self-financing path with fractional units, no leverage and no negative cash.
+The path is written in `app/services/tsmom_etf.py` rather than reusing step 0's `simulate`, which charges costs at
+pre-cost targets, has no cash slot, and is part of step 0's recorded construction.
 
 - **Initialisation and reported months.** Capital is 1.0, in cash, at S's close **before** any trade. The reported
   months are S+1..E for every arm and both timings (225 on the current panel).
@@ -193,9 +195,7 @@ metadata. Each arm runs one continuous self-financing path with fractional units
   - So a fill's cost at m's close sits in month m's return. The same-close arm's opening cost at S's close is carried
     into R_{S+1}.
   - The lagged arm holds cash through S+1, buys at S+1's close, and first earns risky returns in S+2.
-  - Asserted: `Π(1 + R_m) = V_E` (post-liquidation) to within 1e-12. The path is written in
-`app/services/tsmom_etf.py` rather than reusing step 0's `simulate`, which charges costs at pre-cost targets, has no
-cash slot, and is part of step 0's recorded construction.
+  - Asserted: `Π(1 + R_m) = V_E` (post-liquidation) to within 1e-12.
 
 - **Timing, primary ("lagged").** Decisions use data through month-end t−1 and fill at month-end t's close. The old
   book earns month t; the new book starts earning in month t+1. The first decision uses the start month's data and
