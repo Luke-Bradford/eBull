@@ -1,0 +1,1395 @@
+{
+  "alignment_matrix": [
+    {
+      "difference": "universe: linked 10-K/10-Q filers, one linked security, quoted on s(M); not CRSP 10/11/12",
+      "measured": {
+        "funnel_counts": {
+          "admitted": 243445,
+          "conflicting_evidence": 3508,
+          "integrity_excluded": 80,
+          "multiple_securities": 2625,
+          "no_fundamentals": 10638,
+          "no_recent_evidence": 21099,
+          "no_recent_evidence:never_seen": 167094,
+          "no_shares": 25848,
+          "non_common_symbol_form:CL": 100,
+          "non_common_symbol_form:P": 26831,
+          "non_common_symbol_form:R": 640,
+          "non_common_symbol_form:U": 1962,
+          "non_common_symbol_form:W": 585,
+          "non_common_symbol_form:WD": 3,
+          "non_common_symbol_form:WS": 3842,
+          "nonpositive_shares": 658,
+          "not_filer": 6580,
+          "not_priced": 822992,
+          "reit": 14788,
+          "shares_basis_ambiguous": 84,
+          "shares_blocked_by_rejection": 439,
+          "shares_discontinuity": 108,
+          "shares_form_mismatch": 241,
+          "shares_scale_conflict": 283,
+          "shares_turnover_implausible": 185,
+          "unparsed_symbol_form": 9947,
+          "vendor_symbol_collision": 16172,
+          "vendor_test_symbol": 503
+        },
+        "funnel_mean_me_share_by_formation": {
+          "admitted": 0.9480195943512412,
+          "conflicting_evidence": null,
+          "integrity_excluded": null,
+          "multiple_securities": 0.017555244995058616,
+          "no_fundamentals": null,
+          "no_recent_evidence": null,
+          "no_recent_evidence:never_seen": null,
+          "no_shares": null,
+          "non_common_symbol_form:CL": null,
+          "non_common_symbol_form:P": null,
+          "non_common_symbol_form:R": null,
+          "non_common_symbol_form:U": null,
+          "non_common_symbol_form:W": null,
+          "non_common_symbol_form:WD": null,
+          "non_common_symbol_form:WS": null,
+          "nonpositive_shares": null,
+          "not_filer": null,
+          "not_priced": null,
+          "reit": 0.03442516065370024,
+          "shares_basis_ambiguous": null,
+          "shares_blocked_by_rejection": null,
+          "shares_discontinuity": null,
+          "shares_form_mismatch": null,
+          "shares_scale_conflict": null,
+          "shares_turnover_implausible": null,
+          "unparsed_symbol_form": null,
+          "vendor_symbol_collision": null,
+          "vendor_test_symbol": null
+        }
+      }
+    },
+    {
+      "difference": "survivorship: unverified 2014-09..2018; selected Form 25 set from 2019",
+      "measured": {
+        "extract": "b6378c7ca3894655ad80cb3ebe795679-form25.jsonl.gz",
+        "extract_sha256": "3f35b233dbc91d5bcadabc6a97223aadcff19ca91b6a630b9c22a41be1ad9a9a",
+        "label": "selected reference set (Form 25 records with a cover-page symbol), not verification of the archive",
+        "table": [
+          {
+            "records": 1,
+            "with_series": 1,
+            "within_window": 1,
+            "year": 2017
+          },
+          {
+            "records": 1,
+            "with_series": 1,
+            "within_window": 0,
+            "year": 2018
+          },
+          {
+            "records": 52,
+            "with_series": 52,
+            "within_window": 39,
+            "year": 2019
+          },
+          {
+            "records": 138,
+            "with_series": 135,
+            "within_window": 101,
+            "year": 2020
+          },
+          {
+            "records": 183,
+            "with_series": 180,
+            "within_window": 151,
+            "year": 2021
+          },
+          {
+            "records": 207,
+            "with_series": 205,
+            "within_window": 153,
+            "year": 2022
+          },
+          {
+            "records": 259,
+            "with_series": 258,
+            "within_window": 205,
+            "year": 2023
+          },
+          {
+            "records": 165,
+            "with_series": 164,
+            "within_window": 123,
+            "year": 2024
+          }
+        ]
+      }
+    },
+    {
+      "difference": "retrospective integrity masks",
+      "measured": {
+        "bundle_integrity_excluded": 80,
+        "linkage_effect": "not measurable"
+      }
+    },
+    {
+      "difference": "commodity pools, other funds and OTC-quoted filers not separable",
+      "measured": "not measurable"
+    },
+    {
+      "difference": "REIT exclusion by SIC 6798, not share code",
+      "measured": {
+        "reit": 14788,
+        "sic_status": {
+          "no_accession": 6019,
+          "sic": 281197,
+          "sic_null": 3,
+          "sic_unloaded": 8065
+        }
+      }
+    },
+    {
+      "difference": "XBRL as filed vs Compustat; dropped branches; ope* and TXDITC proxies; COGS goods-only flag",
+      "measured": {
+        "branch_use": {
+          "at_gr1": {
+            "Assets": 230316
+          },
+          "be_me": {
+            "AT-LT": 11059,
+            "Assets": 11059,
+            "DeferredIncomeTaxLiabilitiesNet": 27542,
+            "DeferredTaxLiabilitiesNoncurrent": 72522,
+            "Liabilities": 11059,
+            "PSTK": 80344,
+            "PreferredStockLiquidationPreferenceValue": 3333,
+            "PreferredStockRedemptionAmount": 553,
+            "PreferredStockValue": 76458,
+            "SEQ": 228396,
+            "StockholdersEquity": 228396,
+            "TXDITC": 100064,
+            "zero": 204622,
+            "zero_if_missing": 204622
+          },
+          "gp_at": {
+            "Assets": 152450,
+            "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": 1222,
+            "CostOfGoodsAndServicesSold": 15631,
+            "CostOfGoodsSold": 12160,
+            "CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization": 1993,
+            "CostOfRevenue": 11562,
+            "CostOfServices": 5857,
+            "CostOfServicesExcludingDepreciationDepletionAndAmortization": 1331,
+            "GP": 113814,
+            "GrossProfit": 113814,
+            "RevenueFromContractWithCustomerExcludingAssessedTax": 8360,
+            "Revenues": 28074,
+            "SalesRevenueNet": 10860,
+            "cogs_goods_filed": 13877,
+            "cogs_goods_filed_zero": 317,
+            "cogs_goods_plus_services": 17762,
+            "cogs_services_filed": 7176,
+            "cogs_services_filed_zero": 82,
+            "direct": 109080,
+            "q4_residual": 40,
+            "sale-cogs": 44658,
+            "ytd_difference": 45434,
+            "zero_cogs_goods": 3824,
+            "zero_cogs_services": 10708
+          },
+          "ni_me": {
+            "direct": 161657,
+            "do_consolidated_minus_nci": 253,
+            "do_consolidated_proxy": 5681,
+            "do_filed": 5382,
+            "do_filed_zero": 3243,
+            "do_parent": 1854,
+            "ib": 38230,
+            "ni_minus_xido": 196385,
+            "q4_residual": 155,
+            "ytd_difference": 62365,
+            "zero_do": 190149,
+            "zero_xi": 195887
+          },
+          "ocf_me": {
+            "continuing_plus_discontinued": 69242,
+            "direct": 166300,
+            "oancf": 176108,
+            "ocf_disc_filed": 3379,
+            "ocf_disc_filed_zero": 1719,
+            "q4_residual": 41,
+            "ytd_difference": 166760,
+            "zero_ocf_disc": 65046
+          },
+          "ope_be": {
+            "AT-LT": 5028,
+            "Assets": 5028,
+            "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": 1220,
+            "CostOfGoodsAndServicesSold": 46216,
+            "CostOfGoodsSold": 24739,
+            "CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization": 1720,
+            "CostOfRevenue": 35983,
+            "CostOfServices": 6371,
+            "CostOfServicesExcludingDepreciationDepletionAndAmortization": 1174,
+            "DeferredIncomeTaxLiabilitiesNet": 14244,
+            "DeferredTaxLiabilitiesNoncurrent": 53362,
+            "GeneralAndAdministrativeExpense": 45819,
+            "GrossProfit": 19764,
+            "InterestAndDebtExpense": 4253,
+            "InterestExpense": 99197,
+            "InterestExpenseDebt": 7338,
+            "Liabilities": 5028,
+            "PSTK": 47168,
+            "PreferredStockLiquidationPreferenceValue": 1261,
+            "PreferredStockRedemptionAmount": 330,
+            "PreferredStockValue": 45577,
+            "ResearchAndDevelopmentExpense": 72384,
+            "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost": 3366,
+            "ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost": 81,
+            "RevenueFromContractWithCustomerExcludingAssessedTax": 20588,
+            "Revenues": 56566,
+            "SEQ": 122520,
+            "SalesRevenueNet": 39557,
+            "SellingAndMarketingExpense": 27127,
+            "SellingExpense": 4614,
+            "SellingGeneralAndAdministrativeExpense": 81799,
+            "StockholdersEquity": 122520,
+            "TXDITC": 67606,
+            "cogs_goods_filed": 25953,
+            "cogs_goods_filed_zero": 556,
+            "cogs_goods_plus_services": 30260,
+            "cogs_plus_xsga": 110798,
+            "cogs_services_filed": 7506,
+            "cogs_services_filed_zero": 70,
+            "direct": 66888,
+            "gp_minus_xsga": 19764,
+            "opex_checked": 47873,
+            "opex_unchecked": 42861,
+            "q4_residual": 84,
+            "rd_excl_ipr": 3280,
+            "rd_excluded_opex_bound": 1823,
+            "rd_filed": 75073,
+            "rd_filed_zero": 363,
+            "rd_incl_ipr": 72384,
+            "rd_software_filed": 81,
+            "sale_minus_opex": 110798,
+            "sell_filed": 31616,
+            "sell_filed_zero": 147,
+            "veto_rd": 50,
+            "veto_sell": 14,
+            "veto_xint": 150,
+            "xint_filed": 107704,
+            "xint_filed_zero": 3213,
+            "xsga_parts": 45819,
+            "ytd_difference": 63993,
+            "zero": 101803,
+            "zero_cogs_goods": 3870,
+            "zero_cogs_services": 22628,
+            "zero_if_missing": 101803,
+            "zero_rd": 50364,
+            "zero_rd_software": 3199,
+            "zero_sell": 13318,
+            "zero_xint": 18471
+          }
+        },
+        "period_kind": {
+          "at_gr1": {
+            "annual": 54937,
+            "quarterly": 175150
+          },
+          "be_me": {
+            "annual": 57863,
+            "quarterly": 180488
+          },
+          "gp_at": {
+            "annual": 40070,
+            "quarterly": 105213
+          },
+          "ni_me": {
+            "annual": 60972,
+            "quarterly": 157606
+          },
+          "ocf_me": {
+            "annual": 67597,
+            "quarterly": 165655
+          },
+          "ope_be": {
+            "annual": 44775,
+            "quarterly": 56553
+          }
+        }
+      }
+    },
+    {
+      "difference": "acceptance required on top of the 4-month lag; 18-month maximum age",
+      "measured": {
+        "aged_out": {
+          "at_gr1": 207,
+          "be_me": 1087,
+          "gp_at": 6923,
+          "ni_me": 7553,
+          "ocf_me": 1802,
+          "ope_be": 19820
+        },
+        "delayed_lower_bound": {
+          "at_gr1": 391,
+          "be_me": 614,
+          "gp_at": 3039,
+          "ni_me": 2617,
+          "ocf_me": 2733,
+          "ope_be": 3640
+        }
+      }
+    },
+    {
+      "difference": "issuer-level shares; unresolved class scope; 15-month share age; balance-sheet fallback",
+      "measured": {
+        "class_scope": "not measurable",
+        "discontinuity_flagged": 2015,
+        "shares_scope": {
+          "balance_sheet": 2331,
+          "cover": 240145,
+          "dqc_recovered:balance_sheet": 104,
+          "dqc_recovered:cover": 865
+        }
+      }
+    },
+    {
+      "difference": "Amendment 2 share checks; identical mis-scaling of both counts undetected",
+      "measured": {
+        "outcomes": {
+          "basis": {
+            "fail": 84,
+            "pass": 259383
+          },
+          "discontinuity": {
+            "fail": 119,
+            "pass": 248329,
+            "untested": 11019
+          },
+          "scale": {
+            "fail": 305,
+            "pass": 192428,
+            "recovered": 996,
+            "untested": 65738
+          },
+          "turnover": {
+            "fail": 196,
+            "pass": 257398,
+            "untested": 1873
+          }
+        },
+        "removed_names": {
+          "shares_basis_ambiguous": 29,
+          "shares_discontinuity": 19,
+          "shares_scale_conflict": 45,
+          "shares_turnover_implausible": 30
+        },
+        "undetected_residual": "not measurable"
+      }
+    },
+    {
+      "difference": "quarterly items reconstructed (YTD differences, Q4 residuals)",
+      "measured": {
+        "at_gr1": {
+          "Assets": 230316
+        },
+        "be_me": {
+          "AT-LT": 11059,
+          "Assets": 11059,
+          "DeferredIncomeTaxLiabilitiesNet": 27542,
+          "DeferredTaxLiabilitiesNoncurrent": 72522,
+          "Liabilities": 11059,
+          "PSTK": 80344,
+          "PreferredStockLiquidationPreferenceValue": 3333,
+          "PreferredStockRedemptionAmount": 553,
+          "PreferredStockValue": 76458,
+          "SEQ": 228396,
+          "StockholdersEquity": 228396,
+          "TXDITC": 100064,
+          "zero": 204622,
+          "zero_if_missing": 204622
+        },
+        "gp_at": {
+          "Assets": 152450,
+          "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": 1222,
+          "CostOfGoodsAndServicesSold": 15631,
+          "CostOfGoodsSold": 12160,
+          "CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization": 1993,
+          "CostOfRevenue": 11562,
+          "CostOfServices": 5857,
+          "CostOfServicesExcludingDepreciationDepletionAndAmortization": 1331,
+          "GP": 113814,
+          "GrossProfit": 113814,
+          "RevenueFromContractWithCustomerExcludingAssessedTax": 8360,
+          "Revenues": 28074,
+          "SalesRevenueNet": 10860,
+          "cogs_goods_filed": 13877,
+          "cogs_goods_filed_zero": 317,
+          "cogs_goods_plus_services": 17762,
+          "cogs_services_filed": 7176,
+          "cogs_services_filed_zero": 82,
+          "direct": 109080,
+          "q4_residual": 40,
+          "sale-cogs": 44658,
+          "ytd_difference": 45434,
+          "zero_cogs_goods": 3824,
+          "zero_cogs_services": 10708
+        },
+        "ni_me": {
+          "direct": 161657,
+          "do_consolidated_minus_nci": 253,
+          "do_consolidated_proxy": 5681,
+          "do_filed": 5382,
+          "do_filed_zero": 3243,
+          "do_parent": 1854,
+          "ib": 38230,
+          "ni_minus_xido": 196385,
+          "q4_residual": 155,
+          "ytd_difference": 62365,
+          "zero_do": 190149,
+          "zero_xi": 195887
+        },
+        "ocf_me": {
+          "continuing_plus_discontinued": 69242,
+          "direct": 166300,
+          "oancf": 176108,
+          "ocf_disc_filed": 3379,
+          "ocf_disc_filed_zero": 1719,
+          "q4_residual": 41,
+          "ytd_difference": 166760,
+          "zero_ocf_disc": 65046
+        },
+        "ope_be": {
+          "AT-LT": 5028,
+          "Assets": 5028,
+          "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": 1220,
+          "CostOfGoodsAndServicesSold": 46216,
+          "CostOfGoodsSold": 24739,
+          "CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization": 1720,
+          "CostOfRevenue": 35983,
+          "CostOfServices": 6371,
+          "CostOfServicesExcludingDepreciationDepletionAndAmortization": 1174,
+          "DeferredIncomeTaxLiabilitiesNet": 14244,
+          "DeferredTaxLiabilitiesNoncurrent": 53362,
+          "GeneralAndAdministrativeExpense": 45819,
+          "GrossProfit": 19764,
+          "InterestAndDebtExpense": 4253,
+          "InterestExpense": 99197,
+          "InterestExpenseDebt": 7338,
+          "Liabilities": 5028,
+          "PSTK": 47168,
+          "PreferredStockLiquidationPreferenceValue": 1261,
+          "PreferredStockRedemptionAmount": 330,
+          "PreferredStockValue": 45577,
+          "ResearchAndDevelopmentExpense": 72384,
+          "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost": 3366,
+          "ResearchAndDevelopmentExpenseSoftwareExcludingAcquiredInProcessCost": 81,
+          "RevenueFromContractWithCustomerExcludingAssessedTax": 20588,
+          "Revenues": 56566,
+          "SEQ": 122520,
+          "SalesRevenueNet": 39557,
+          "SellingAndMarketingExpense": 27127,
+          "SellingExpense": 4614,
+          "SellingGeneralAndAdministrativeExpense": 81799,
+          "StockholdersEquity": 122520,
+          "TXDITC": 67606,
+          "cogs_goods_filed": 25953,
+          "cogs_goods_filed_zero": 556,
+          "cogs_goods_plus_services": 30260,
+          "cogs_plus_xsga": 110798,
+          "cogs_services_filed": 7506,
+          "cogs_services_filed_zero": 70,
+          "direct": 66888,
+          "gp_minus_xsga": 19764,
+          "opex_checked": 47873,
+          "opex_unchecked": 42861,
+          "q4_residual": 84,
+          "rd_excl_ipr": 3280,
+          "rd_excluded_opex_bound": 1823,
+          "rd_filed": 75073,
+          "rd_filed_zero": 363,
+          "rd_incl_ipr": 72384,
+          "rd_software_filed": 81,
+          "sale_minus_opex": 110798,
+          "sell_filed": 31616,
+          "sell_filed_zero": 147,
+          "veto_rd": 50,
+          "veto_sell": 14,
+          "veto_xint": 150,
+          "xint_filed": 107704,
+          "xint_filed_zero": 3213,
+          "xsga_parts": 45819,
+          "ytd_difference": 63993,
+          "zero": 101803,
+          "zero_cogs_goods": 3870,
+          "zero_cogs_services": 22628,
+          "zero_if_missing": 101803,
+          "zero_rd": 50364,
+          "zero_rd_software": 3199,
+          "zero_sell": 13318,
+          "zero_xint": 18471
+        }
+      }
+    },
+    {
+      "difference": "Amendment 2b ni*/ocf* branches and imputed zeros",
+      "measured": {
+        "fallback_use": {
+          "ni_me": {
+            "DO branch: do_consolidated_minus_nci": 246,
+            "DO branch: do_consolidated_proxy": 5513,
+            "DO branch: do_parent": 1738,
+            "TTM mixing primary and fallback quarters": 7871,
+            "imputed zero: do": 184380,
+            "imputed zero: xi": 189884,
+            "name-months with a veto: do": 5474,
+            "values using the fallback": 189884,
+            "veto evaluations: do": 30159
+          },
+          "ocf_me": {
+            "TTM mixing primary and fallback quarters": 9792,
+            "imputed zero: ocf_disc": 64423,
+            "name-months with a veto: ocf_disc": 3960,
+            "values using the fallback": 68244,
+            "veto evaluations: ocf_disc": 29538
+          }
+        },
+        "undetected_residual": "not measurable"
+      }
+    },
+    {
+      "difference": "Amendment 2c ope*/gp* reads, bound and vetoes",
+      "measured": {
+        "residuals": "not measurable",
+        "veto_use": {
+          "gp_at": {
+            "name-months with a veto: cogs_goods": 273,
+            "name-months with a veto: cogs_services": 264,
+            "veto evaluations: cogs_goods": 1368,
+            "veto evaluations: cogs_services": 1213
+          },
+          "ope_be": {
+            "name-months with a veto: cogs_goods": 485,
+            "name-months with a veto: cogs_services": 519,
+            "name-months with a veto: opex_bound": 6335,
+            "name-months with a veto: rd": 24820,
+            "name-months with a veto: sell": 5578,
+            "name-months with a veto: xint": 57946,
+            "veto evaluations: cogs_goods": 1991,
+            "veto evaluations: cogs_services": 2415,
+            "veto evaluations: opex_bound": 41366,
+            "veto evaluations: rd": 896542,
+            "veto evaluations: sell": 120689,
+            "veto evaluations: xint": 1384332
+          }
+        }
+      }
+    },
+    {
+      "difference": "ret_12_1 needs 11 of 11; rvol_21d minimum by analogy; daily screen",
+      "measured": {
+        "daily_screen_flags_by_year": {
+          "2013": 7,
+          "2014": 31,
+          "2015": 65,
+          "2016": 52,
+          "2017": 84,
+          "2018": 150,
+          "2019": 157,
+          "2020": 248,
+          "2021": 52
+        },
+        "ret_12_1": {
+          "insufficient_months": 11709,
+          "value": 231736
+        },
+        "rvol_21d": {
+          "insufficient_returns": 233,
+          "screen_flagged": 73,
+          "value": 243139
+        }
+      }
+    },
+    {
+      "difference": "tercile tie and quantile convention is ours",
+      "measured": "-"
+    },
+    {
+      "difference": "holdings need a quote on s(M)",
+      "measured": {
+        "alive_unquoted": 3693,
+        "alive_unquoted_linked": 624,
+        "not_priced": 822992
+      }
+    },
+    {
+      "difference": "coverage exits and terminations imputed, not CRSP delisting returns",
+      "measured": {
+        "holding_status_counts": {
+          "coverage_exit": 49,
+          "observed": 241884,
+          "terminal": 1512
+        },
+        "leg_weight_share_both_arms": {
+          "at_gr1": {
+            "high": {
+              "coverage_exit": 3.827430256770435e-05,
+              "observed": 0.9966310228755102,
+              "terminal": 0.0033307028219220123
+            },
+            "low": {
+              "coverage_exit": 0.00020879763759497949,
+              "observed": 0.9957728377521511,
+              "terminal": 0.00401836461025393
+            }
+          },
+          "be_me": {
+            "high": {
+              "coverage_exit": 0.00021822558089183564,
+              "observed": 0.9970605947831828,
+              "terminal": 0.0027211796359253486
+            },
+            "low": {
+              "coverage_exit": 6.914463581693511e-05,
+              "observed": 0.9958797500385114,
+              "terminal": 0.00405110532567163
+            }
+          },
+          "gp_at": {
+            "high": {
+              "coverage_exit": 5.37982932336323e-05,
+              "observed": 0.9966221184524973,
+              "terminal": 0.003324083254269218
+            },
+            "low": {
+              "coverage_exit": 0.00013644777390261822,
+              "observed": 0.9960063772465778,
+              "terminal": 0.0038571749795194912
+            }
+          },
+          "ni_me": {
+            "high": {
+              "coverage_exit": 2.0275855503469004e-06,
+              "observed": 0.9981329131859175,
+              "terminal": 0.0018650592285321646
+            },
+            "low": {
+              "coverage_exit": 0.0001911819594099803,
+              "observed": 0.9938054405021468,
+              "terminal": 0.006003377538443182
+            }
+          },
+          "ocf_me": {
+            "high": {
+              "coverage_exit": 0.00013518213252758645,
+              "observed": 0.9971368522844614,
+              "terminal": 0.0027279655830111105
+            },
+            "low": {
+              "coverage_exit": 0.00015030547007411398,
+              "observed": 0.9947118928240594,
+              "terminal": 0.005137801705866496
+            }
+          },
+          "ope_be": {
+            "high": {
+              "coverage_exit": 0.00012144660290720975,
+              "observed": 0.9972493075683857,
+              "terminal": 0.0026292458287070484
+            },
+            "low": {
+              "coverage_exit": 7.26292509057921e-05,
+              "observed": 0.9942774483397564,
+              "terminal": 0.005649922409337881
+            }
+          },
+          "ret_12_1": {
+            "high": {
+              "coverage_exit": 0.00015629519011538484,
+              "observed": 0.9942680969794819,
+              "terminal": 0.005575607830402642
+            },
+            "low": {
+              "coverage_exit": 2.709083183103519e-05,
+              "observed": 0.9980563951483615,
+              "terminal": 0.0019165140198073257
+            }
+          },
+          "rvol_21d": {
+            "high": {
+              "coverage_exit": 8.859563120182807e-05,
+              "observed": 0.997015538097321,
+              "terminal": 0.0028958662714770626
+            },
+            "low": {
+              "coverage_exit": 0.00015581524338519732,
+              "observed": 0.9948621071498156,
+              "terminal": 0.0049820776067991505
+            }
+          }
+        }
+      }
+    }
+  ],
+  "census_summary": {
+    "daily_monthly": {
+      "agree": 242986,
+      "gap": 237,
+      "no_monthly": 222
+    },
+    "daily_monthly_unexplained": 0,
+    "discontinuity_flagged": 2015,
+    "linkage_reasons": {
+      "conflicting_evidence": 3508,
+      "integrity_excluded": 80,
+      "multiple_securities": 2625,
+      "no_fundamentals": 10638,
+      "no_recent_evidence": 21099,
+      "no_recent_evidence:never_seen": 167094,
+      "no_shares": 25848,
+      "non_common_symbol_form:CL": 100,
+      "non_common_symbol_form:P": 26831,
+      "non_common_symbol_form:R": 640,
+      "non_common_symbol_form:U": 1962,
+      "non_common_symbol_form:W": 585,
+      "non_common_symbol_form:WD": 3,
+      "non_common_symbol_form:WS": 3842,
+      "nonpositive_shares": 658,
+      "not_filer": 6580,
+      "not_priced": 822992,
+      "reit": 14788,
+      "shares_basis_ambiguous": 84,
+      "shares_blocked_by_rejection": 439,
+      "shares_discontinuity": 108,
+      "shares_form_mismatch": 241,
+      "shares_scale_conflict": 283,
+      "shares_turnover_implausible": 185,
+      "unparsed_symbol_form": 9947,
+      "vendor_symbol_collision": 16172,
+      "vendor_test_symbol": 503
+    },
+    "liquidity_tercile": {
+      "1": 49284,
+      "2": 79698,
+      "3": 112731,
+      "unclassified": 1732
+    },
+    "split_reconciliation": {
+      "dispositions": {
+        "still_failing": 25,
+        "unavailable": 9
+      },
+      "failures": 25,
+      "pairs_with_a_stamp": 566
+    }
+  },
+  "characteristics": {
+    "at_gr1": {
+      "arms": {
+        "best_case": {
+          "beta": 0.8447450476405213,
+          "correlation": {
+            "contemporaneous": 0.9637325927970939,
+            "lag": 0.10206356719330525,
+            "lead": 0.21714586086801893
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.2807542771961206,
+          "undersized": 0,
+          "verdict": "PASS"
+        },
+        "worst_case": {
+          "beta": 0.856079468046695,
+          "correlation": {
+            "contemporaneous": 0.9619006310271736,
+            "lag": 0.1066288684627538,
+            "lead": 0.22157505616790524
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.28269892975001265,
+          "undersized": 0,
+          "verdict": "PASS"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 3.827430256770435e-05,
+          "observed": 0.9966310228755102,
+          "terminal": 0.0033307028219220123
+        },
+        "low": {
+          "coverage_exit": 0.00020879763759497949,
+          "observed": 0.9957728377521511,
+          "terminal": 0.00401836461025393
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 919.5,
+          "min": 867
+        },
+        "low": {
+          "median": 1133.5,
+          "min": 1047
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "PASS"
+    },
+    "be_me": {
+      "arms": {
+        "best_case": {
+          "beta": 0.9534430121861136,
+          "correlation": {
+            "contemporaneous": 0.987536468290861,
+            "lag": 0.05864440888038138,
+            "lead": 0.07337280032865387
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.1589288418025354,
+          "undersized": 0,
+          "verdict": "PASS"
+        },
+        "worst_case": {
+          "beta": 0.9524862293721817,
+          "correlation": {
+            "contemporaneous": 0.9852742578008412,
+            "lag": 0.06516878987643793,
+            "lead": 0.07902084862790627
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.1719849583068996,
+          "undersized": 0,
+          "verdict": "PASS"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 0.00021822558089183564,
+          "observed": 0.9970605947831828,
+          "terminal": 0.0027211796359253486
+        },
+        "low": {
+          "coverage_exit": 6.914463581693511e-05,
+          "observed": 0.9958797500385114,
+          "terminal": 0.00405110532567163
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 1278.0,
+          "min": 1172
+        },
+        "low": {
+          "median": 846.0,
+          "min": 799
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "PASS"
+    },
+    "gp_at": {
+      "arms": {
+        "best_case": {
+          "beta": 0.7361720123262587,
+          "correlation": {
+            "contemporaneous": 0.8204199668709514,
+            "lag": 0.23611975530091253,
+            "lead": 0.20814653714267353
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.5769084306198731,
+          "undersized": 0,
+          "verdict": "PASS"
+        },
+        "worst_case": {
+          "beta": 0.7536195438942195,
+          "correlation": {
+            "contemporaneous": 0.8240452748065296,
+            "lag": 0.24835875776721256,
+            "lead": 0.20729383043366506
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.5737055521934581,
+          "undersized": 0,
+          "verdict": "PASS"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 5.37982932336323e-05,
+          "observed": 0.9966221184524973,
+          "terminal": 0.003324083254269218
+        },
+        "low": {
+          "coverage_exit": 0.00013644777390261822,
+          "observed": 0.9960063772465778,
+          "terminal": 0.0038571749795194912
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 637.0,
+          "min": 604
+        },
+        "low": {
+          "median": 644.0,
+          "min": 590
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "PASS"
+    },
+    "ni_me": {
+      "arms": {
+        "best_case": {
+          "beta": 0.8905405375693557,
+          "correlation": {
+            "contemporaneous": 0.960922186621542,
+            "lag": 0.1451268502793826,
+            "lead": 0.1562462344667139
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.27891911000351666,
+          "undersized": 0,
+          "verdict": "PASS"
+        },
+        "worst_case": {
+          "beta": 0.8778994301911986,
+          "correlation": {
+            "contemporaneous": 0.9561553128246181,
+            "lag": 0.15018334579544174,
+            "lead": 0.1632388455871289
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.295315068952965,
+          "undersized": 0,
+          "verdict": "PASS"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 2.0275855503469004e-06,
+          "observed": 0.9981329131859175,
+          "terminal": 0.0018650592285321646
+        },
+        "low": {
+          "coverage_exit": 0.0001911819594099803,
+          "observed": 0.9938054405021468,
+          "terminal": 0.006003377538443182
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 808.0,
+          "min": 740
+        },
+        "low": {
+          "median": 1259.0,
+          "min": 1177
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "PASS"
+    },
+    "ocf_me": {
+      "arms": {
+        "best_case": {
+          "beta": 0.9438990102722963,
+          "correlation": {
+            "contemporaneous": 0.9826766601153126,
+            "lag": 0.08820351051177093,
+            "lead": 0.12176629932562505
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.18664583775407953,
+          "undersized": 0,
+          "verdict": "PASS"
+        },
+        "worst_case": {
+          "beta": 0.9521469060688778,
+          "correlation": {
+            "contemporaneous": 0.980147125887384,
+            "lag": 0.0953659897660297,
+            "lead": 0.12068076110156686
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.19846297879068386,
+          "undersized": 0,
+          "verdict": "PASS"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 0.00013518213252758645,
+          "observed": 0.9971368522844614,
+          "terminal": 0.0027279655830111105
+        },
+        "low": {
+          "coverage_exit": 0.00015030547007411398,
+          "observed": 0.9947118928240594,
+          "terminal": 0.005137801705866496
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 923.5,
+          "min": 837
+        },
+        "low": {
+          "median": 1242.5,
+          "min": 1148
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "PASS"
+    },
+    "ope_be": {
+      "arms": {
+        "best_case": {
+          "beta": 0.8261137071048364,
+          "correlation": {
+            "contemporaneous": 0.8248827845067387,
+            "lag": 0.24950595658504604,
+            "lead": 0.17201015723291224
+          },
+          "failed_bars": [
+            "offset"
+          ],
+          "insufficient": [],
+          "offset_ok": false,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.5922493489949674,
+          "undersized": 0,
+          "verdict": "FAIL"
+        },
+        "worst_case": {
+          "beta": 0.8241959423194796,
+          "correlation": {
+            "contemporaneous": 0.8088033880394407,
+            "lag": 0.24387164176971093,
+            "lead": 0.17515842801589399
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.6245260932378499,
+          "undersized": 0,
+          "verdict": "PASS"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 0.00012144660290720975,
+          "observed": 0.9972493075683857,
+          "terminal": 0.0026292458287070484
+        },
+        "low": {
+          "coverage_exit": 7.26292509057921e-05,
+          "observed": 0.9942774483397564,
+          "terminal": 0.005649922409337881
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 317.5,
+          "min": 299
+        },
+        "low": {
+          "median": 604.0,
+          "min": 540
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "FAIL"
+    },
+    "ret_12_1": {
+      "arms": {
+        "best_case": {
+          "beta": 0.9754100252113692,
+          "correlation": {
+            "contemporaneous": 0.9886009329263716,
+            "lag": -0.1441098480139341,
+            "lead": -0.1545758297740559
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.1505721565025553,
+          "undersized": 0,
+          "verdict": "PASS"
+        },
+        "worst_case": {
+          "beta": 0.9666852935095969,
+          "correlation": {
+            "contemporaneous": 0.9857431555727132,
+            "lag": -0.13251707524157644,
+            "lead": -0.15722802148502057
+          },
+          "failed_bars": [
+            "offset"
+          ],
+          "insufficient": [],
+          "offset_ok": false,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.16833360817148565,
+          "undersized": 0,
+          "verdict": "FAIL"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 0.00015629519011538484,
+          "observed": 0.9942680969794819,
+          "terminal": 0.005575607830402642
+        },
+        "low": {
+          "coverage_exit": 2.709083183103519e-05,
+          "observed": 0.9980563951483615,
+          "terminal": 0.0019165140198073257
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 831.0,
+          "min": 716
+        },
+        "low": {
+          "median": 1248.5,
+          "min": 1063
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "FAIL"
+    },
+    "rvol_21d": {
+      "arms": {
+        "best_case": {
+          "beta": 0.9668888701489523,
+          "correlation": {
+            "contemporaneous": 0.9894319363974787,
+            "lag": 0.032288136409152936,
+            "lead": 0.03401548703700306
+          },
+          "failed_bars": [],
+          "insufficient": [],
+          "offset_ok": true,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.14551174732799782,
+          "undersized": 0,
+          "verdict": "PASS"
+        },
+        "worst_case": {
+          "beta": 0.9593562457548199,
+          "correlation": {
+            "contemporaneous": 0.9869355993345605,
+            "lag": 0.029489937535912617,
+            "lead": 0.039798326079685246
+          },
+          "failed_bars": [
+            "offset"
+          ],
+          "insufficient": [],
+          "offset_ok": false,
+          "pairs": {
+            "contemporaneous": 80,
+            "lag": 79,
+            "lead": 79
+          },
+          "te_ratio": 0.16180092108372718,
+          "undersized": 0,
+          "verdict": "FAIL"
+        }
+      },
+      "holding_status_weight_both_arms": {
+        "high": {
+          "coverage_exit": 8.859563120182807e-05,
+          "observed": 0.997015538097321,
+          "terminal": 0.0028958662714770626
+        },
+        "low": {
+          "coverage_exit": 0.00015581524338519732,
+          "observed": 0.9948621071498156,
+          "terminal": 0.0049820776067991505
+        }
+      },
+      "leg_counts": {
+        "high": {
+          "median": 1473.0,
+          "min": 1226
+        },
+        "low": {
+          "median": 754.0,
+          "min": 624
+        }
+      },
+      "missing_ours": [],
+      "missing_published": [],
+      "months_used": 80,
+      "published_months": 80,
+      "undersized": 0,
+      "verdict": "FAIL"
+    }
+  },
+  "population_labels": [
+    "restricted population: 10-K/10-Q filers our archive prices and our linkage identifies, not CRSP",
+    "retrospectively filtered: undated integrity masks (premise 4)",
+    "survivorship: survivor-conditioned before 2014-09; terminations recorded, coverage unverified 2014-09..2018; checked against a selected Form 25 set from 2019 (premise 1)"
+  ],
+  "run_id": "b6378c7ca3894655ad80cb3ebe795679",
+  "schema": "fidelity-3609-v1",
+  "trial_id": "3609-step1-fidelity-v1",
+  "version_history_before_run": {
+    "at_gr1": {
+      "rejected": false,
+      "versions": 0
+    },
+    "be_me": {
+      "rejected": false,
+      "versions": 0
+    },
+    "gp_at": {
+      "rejected": false,
+      "versions": 0
+    },
+    "ni_me": {
+      "rejected": false,
+      "versions": 0
+    },
+    "ocf_me": {
+      "rejected": false,
+      "versions": 0
+    },
+    "ope_be": {
+      "rejected": false,
+      "versions": 0
+    },
+    "ret_12_1": {
+      "rejected": false,
+      "versions": 0
+    },
+    "rvol_21d": {
+      "rejected": false,
+      "versions": 0
+    }
+  }
+}
