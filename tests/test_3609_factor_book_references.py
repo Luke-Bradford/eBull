@@ -9,8 +9,9 @@ from datetime import date
 import pytest
 
 from app.services.factor_book import BookRefusal, Exact, bands
+from app.services.factor_book_declaration import canonical_json
 from app.services.factor_book_path import ExitReason, Formation, HoldingReturn, TradeCategory, value_path
-from app.services.factor_book_references import reference_decisions
+from app.services.factor_book_references import b1_path, reference_decisions
 from app.services.factor_panel_prices import HoldingStatus
 
 
@@ -85,3 +86,51 @@ def test_an_empty_universe_holds_cash_under_cap_weights_too() -> None:
     empty = replace(_formation(1, []), universe=frozenset())
     (decision,) = reference_decisions([empty], [{}])
     assert decision.targets == () and decision.weights is None
+
+
+# --------------------------------------------------------------------------- B1
+
+
+def _saved(months: Sequence[str], returns: Sequence[float], costs: Sequence[float] | None = None) -> dict:
+    return {"months": list(months), "continuing": list(returns), "rebalance_cost": list(costs or [0.0] * len(months))}
+
+
+def test_b1_takes_the_window_and_charges_entry_and_exit_at_the_start_band() -> None:
+    saved = _saved(["2014-09", "2014-10", "2014-11", "2014-12"], [0.5, 0.02, -0.01, 0.03])
+    got = b1_path(saved, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=1.0)
+    h = 0.00161  # >=$100
+    assert got.band == ">=$100"
+    assert got.returns == {
+        (2014, 10): (1.0 - h) * 1.02 - 1.0,
+        (2014, 11): -0.01,
+        (2014, 12): 1.03 * (1.0 - h) - 1.0,
+    }
+    assert got.entry_cost == h
+    assert got.exit_cost == pytest.approx((1.0 - h) * 1.02 * 0.99 * 1.03 * h, rel=1e-15)
+    stress = b1_path(saved, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=2.0)
+    assert stress.entry_cost == 2 * h
+
+
+def test_b1_refuses_a_gap_or_a_step_0_rebalance_cost_inside_the_window() -> None:
+    with pytest.raises(ValueError, match="no saved return"):
+        gap = _saved(["2014-10", "2014-12"], [0.0, 0.0])
+        b1_path(gap, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=1.0)
+    costly = _saved(["2014-10", "2014-11"], [0.0, 0.0], [0.0, 0.001])
+    with pytest.raises(ValueError, match="rebalance costs"):
+        b1_path(costly, first=(2014, 10), last=(2014, 11), close=197.0, cost_multiplier=1.0)
+
+
+# --------------------------------------------------------------------------- boundary record
+
+
+def test_the_boundary_record_carries_the_specs_fields_sorted_by_name_key() -> None:
+    formations = [_formation(1, [30, 4, 200], {30: 0.1}), _formation(2, [30, 4, 200])]
+    path = value_path(
+        reference_decisions(formations), arm="worst_case", cost_multiplier=0.0, boundary=date(2015, 2, 28)
+    )
+    assert path.boundary is not None
+    record = path.boundary.record()
+    assert [p["name_key"] for p in record["positions"]] == [4, 30, 200]
+    assert record["positions"][1] == {"name_key": 30, "value": 1.0 / 3 * 1.1, "entry": "2015-01-28", "band": "<$5"}
+    assert set(record) == {"formation", "positions", "cash", "nav"}
+    canonical_json(record)  # serialises under the spec's canonical rules (no NaN, ASCII)

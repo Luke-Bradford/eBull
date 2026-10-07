@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 
 from app.services import cost_model
 from app.services.factor_book import Bands, BookRefusal
@@ -282,6 +282,19 @@ class BoundaryState:
     cash: float
     nav: float
 
+    def record(self) -> dict[str, Any]:
+        """The spec's fields for canonical JSON: positions sorted by ``name_key``, each (name_key, value, entry
+        formation, entry band); then the cash and the NAV."""
+        return {
+            "formation": self.formation.isoformat(),
+            "positions": [
+                {"name_key": p.name, "value": p.value, "entry": p.entry.isoformat(), "band": p.band}
+                for p in sorted(self.positions, key=lambda p: p.name)
+            ],
+            "cash": self.cash,
+            "nav": self.nav,
+        }
+
 
 @dataclass
 class PathResult:
@@ -301,7 +314,8 @@ class PathResult:
     nonpositive: Month | None = None
 
 
-def _half_spread(close: float) -> tuple[str, float]:
+def entry_band(close: float) -> tuple[str, float]:
+    """Step 0's band for a position entered at raw close ``close`` (as traded): its label and half-spread."""
     band = cost_model.cost_band_for(Decimal(repr(close)), price_basis="as_traded")
     return band.label, float(band.half_spread)
 
@@ -374,7 +388,7 @@ def value_path(
                 trades.append((name, category, abs(delta), position.half_spread))
         for name in decision.targets:
             if name not in positions:
-                bands[name] = _half_spread(decision.close[name])
+                bands[name] = entry_band(decision.close[name])
                 category = TradeCategory.INITIAL_PURCHASE if index == 0 else TradeCategory.ENTRY
                 trades.append((name, category, decision.share(pre, name), bands[name][1]))
         cost = 0.0
@@ -451,6 +465,7 @@ __all__ = [
     "book_decisions",
     "check_closes",
     "eligible_to_enter",
+    "entry_band",
     "exit_reasons",
     "month_of",
     "next_month",

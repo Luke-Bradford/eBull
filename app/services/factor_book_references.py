@@ -4,6 +4,9 @@ Spec: ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"References and t
 
 * **Equal-weight universe:** all 1,000 names, rebalanced monthly to equal weight, costed the same way as the book.
   Used for attribution.
+* **B1:** step 0's SPY total-return path (``paths.json``, ``"B1 SPY"``), its continuing returns over the window,
+  with entry and exit re-costed at the band of SPY's raw close at the path's start (step 0's saved costs carry its
+  2009-12 band). One band applies to both trades, and both are charged.
 * **Reconstituted cap-weighted universe:** the top 1,000 at each formation, cap-weighted by ME at s(M) and rebalanced
   to those weights monthly, costed on its own turnover at step 0's bands. A reconstituted index, not a buy-and-hold
   portfolio.
@@ -18,14 +21,18 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from app.services.factor_book import BookRefusal
 from app.services.factor_book_path import (
     Decision,
     ExitReason,
     Formation,
+    Month,
     TradeCategory,
     check_closes,
+    entry_band,
+    next_month,
     still_held,
 )
 
@@ -65,4 +72,49 @@ def reference_decisions(
     return tuple(out)
 
 
-__all__ = ["reference_decisions"]
+@dataclass(frozen=True)
+class B1Path:
+    returns: dict[Month, float]
+    band: str
+    #: The two charges in NAV units: the purchase on the starting 1.0, the sale on the wealth just before it.
+    entry_cost: float
+    exit_cost: float
+
+
+def b1_path(
+    saved: Mapping[str, Sequence[object]],
+    *,
+    first: Month,
+    last: Month,
+    close: float,
+    cost_multiplier: float,
+) -> B1Path:
+    """B1 over ``first..last`` from step 0's saved path (``months``, ``continuing``, ``rebalance_cost``).
+
+    ``continuing`` is step 0's net path, so a month inside the window that carries a rebalance cost would bring step
+    0's 2009-12 band with it; that refuses. Buy-and-hold carries none."""
+    by_month: dict[Month, tuple[float, float]] = {}
+    for m, r, c in zip(saved["months"], saved["continuing"], saved["rebalance_cost"], strict=True):
+        year, month_number = str(m).split("-")
+        by_month[(int(year), int(month_number))] = (float(str(r)), float(str(c)))
+    window: list[Month] = []
+    month = first
+    while month <= last:
+        window.append(month)
+        month = next_month(month)
+    missing = [m for m in window if m not in by_month]
+    if missing:
+        raise ValueError(f"B1 has no saved return for {len(missing)} window months: {missing[:5]}")
+    charged = [m for m in window if by_month[m][1] != 0.0]
+    if charged:
+        raise ValueError(f"B1 carries step 0 rebalance costs inside the window: {charged[:5]}")
+    band, half = entry_band(close)
+    charge = half * cost_multiplier
+    returns = {m: by_month[m][0] for m in window}
+    before_sale = (1.0 - charge) * math.prod(1.0 + r for r in returns.values())
+    returns[first] = (1.0 - charge) * (1.0 + returns[first]) - 1.0
+    returns[last] = (1.0 + returns[last]) * (1.0 - charge) - 1.0
+    return B1Path(returns, band, charge, before_sale * charge)
+
+
+__all__ = ["B1Path", "b1_path", "reference_decisions"]
