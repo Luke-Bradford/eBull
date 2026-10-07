@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 
 from app.services import cost_model
 from app.services.factor_book import Bands, BookRefusal
@@ -282,6 +282,19 @@ class BoundaryState:
     cash: float
     nav: float
 
+    def record(self) -> dict[str, Any]:
+        """The spec's fields for canonical JSON: positions sorted by ``name_key``, each (name_key, value, entry
+        formation, entry band); then the cash and the NAV."""
+        return {
+            "formation": self.formation.isoformat(),
+            "positions": [
+                {"name_key": p.name, "value": p.value, "entry": p.entry.isoformat(), "band": p.band}
+                for p in sorted(self.positions, key=lambda p: p.name)
+            ],
+            "cash": self.cash,
+            "nav": self.nav,
+        }
+
 
 @dataclass
 class PathResult:
@@ -301,9 +314,20 @@ class PathResult:
     nonpositive: Month | None = None
 
 
-def _half_spread(close: float) -> tuple[str, float]:
+def entry_band(close: float) -> tuple[str, float]:
+    """Step 0's band for a position entered at raw close ``close`` (as traded): its label and half-spread.
+
+    A non-finite or non-positive close refuses (``PRICE_INVALID``): +inf would otherwise band as the cheapest."""
+    if not (math.isfinite(close) and close > 0):
+        raise BookRefusal("PRICE_INVALID", f"no cost band for raw close {close!r}")
     band = cost_model.cost_band_for(Decimal(repr(close)), price_basis="as_traded")
     return band.label, float(band.half_spread)
+
+
+def check_cost_multiplier(cost_multiplier: float) -> None:
+    """Step 0's scenarios are 0 (gross), 1 (net) and 2 (stress); a negative or non-finite one is a caller error."""
+    if not (math.isfinite(cost_multiplier) and cost_multiplier >= 0):
+        raise ValueError(f"cost multiplier must be finite and non-negative, got {cost_multiplier!r}")
 
 
 #: Float weights such as ME / ΣME sum to 1 only to rounding; this bound catches an unnormalised map, nothing finer.
@@ -332,6 +356,7 @@ def value_path(
     and positive stops the path: it is recorded in ``nonpositive`` with its return, and nothing later is valued."""
     if not decisions:
         raise ValueError("a path needs at least one decision")
+    check_cost_multiplier(cost_multiplier)
     if boundary is not None and boundary not in {decision.formation for decision in decisions}:
         raise ValueError(f"boundary {boundary} is not one of the decisions' formations")
     result = PathResult()
@@ -374,7 +399,7 @@ def value_path(
                 trades.append((name, category, abs(delta), position.half_spread))
         for name in decision.targets:
             if name not in positions:
-                bands[name] = _half_spread(decision.close[name])
+                bands[name] = entry_band(decision.close[name])
                 category = TradeCategory.INITIAL_PURCHASE if index == 0 else TradeCategory.ENTRY
                 trades.append((name, category, decision.share(pre, name), bands[name][1]))
         cost = 0.0
@@ -450,7 +475,9 @@ __all__ = [
     "archive_seasoned",
     "book_decisions",
     "check_closes",
+    "check_cost_multiplier",
     "eligible_to_enter",
+    "entry_band",
     "exit_reasons",
     "month_of",
     "next_month",

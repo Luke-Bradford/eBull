@@ -9,8 +9,9 @@ from datetime import date
 import pytest
 
 from app.services.factor_book import BookRefusal, Exact, bands
+from app.services.factor_book_declaration import canonical_json
 from app.services.factor_book_path import ExitReason, Formation, HoldingReturn, TradeCategory, value_path
-from app.services.factor_book_references import reference_decisions
+from app.services.factor_book_references import b1_path, reference_decisions
 from app.services.factor_panel_prices import HoldingStatus
 
 
@@ -85,3 +86,95 @@ def test_an_empty_universe_holds_cash_under_cap_weights_too() -> None:
     empty = replace(_formation(1, []), universe=frozenset())
     (decision,) = reference_decisions([empty], [{}])
     assert decision.targets == () and decision.weights is None
+
+
+# --------------------------------------------------------------------------- B1
+
+
+def _saved(months: Sequence[str], returns: Sequence[float], costs: Sequence[float] | None = None) -> dict:
+    return {"months": list(months), "continuing": list(returns), "rebalance_cost": list(costs or [0.0] * len(months))}
+
+
+def test_b1_takes_the_window_and_charges_entry_and_exit_at_the_start_band() -> None:
+    saved = _saved(["2014-09", "2014-10", "2014-11", "2014-12"], [0.5, 0.02, -0.01, 0.03])
+    got = b1_path(saved, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=1.0)
+    h = 0.00161  # >=$100
+    assert got.band == ">=$100"
+    assert got.returns == {
+        (2014, 10): (1.0 - h) * 1.02 - 1.0,
+        (2014, 11): -0.01,
+        (2014, 12): 1.03 * (1.0 - h) - 1.0,
+    }
+    assert got.entry_cost == h
+    assert got.exit_cost == pytest.approx((1.0 - h) * 1.02 * 0.99 * 1.03 * h, rel=1e-15)
+    stress = b1_path(saved, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=2.0)
+    assert stress.entry_cost == 2 * h
+
+
+def test_b1_refuses_a_gap_or_a_step_0_rebalance_cost_inside_the_window() -> None:
+    gap = _saved(["2014-10", "2014-12"], [0.0, 0.0])
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID.*finite return"):
+        b1_path(gap, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=1.0)
+    costly = _saved(["2014-10", "2014-11"], [0.0, 0.0], [0.0, 0.001])
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID.*rebalance costs"):
+        b1_path(costly, first=(2014, 10), last=(2014, 11), close=197.0, cost_multiplier=1.0)
+
+
+# --------------------------------------------------------------------------- boundary record
+
+
+def test_the_boundary_record_carries_the_specs_fields_sorted_by_name_key() -> None:
+    formations = [_formation(1, [30, 4, 200], {30: 0.1}), _formation(2, [30, 4, 200])]
+    path = value_path(
+        reference_decisions(formations), arm="worst_case", cost_multiplier=0.0, boundary=date(2015, 2, 28)
+    )
+    assert path.boundary is not None
+    record = path.boundary.record()
+    assert [p["name_key"] for p in record["positions"]] == [4, 30, 200]
+    # Exact by design: value_path's own operations in its own order (docs/review-prevention-log.md, #3609 3c-ii).
+    assert record["positions"][1] == {"name_key": 30, "value": 1.0 / 3 * 1.1, "entry": "2015-01-28", "band": "<$5"}
+    assert set(record) == {"formation", "positions", "cash", "nav"}
+    canonical_json(record)  # serialises under the spec's canonical rules (no NaN, ASCII)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), 0.0, -197.0])
+def test_b1_refuses_an_invalid_start_close(bad: float) -> None:
+    saved = _saved(["2014-10"], [0.0])
+    with pytest.raises(BookRefusal, match="PRICE_INVALID"):
+        b1_path(saved, first=(2014, 10), last=(2014, 10), close=bad, cost_multiplier=1.0)
+
+
+def test_b1_refuses_a_non_finite_saved_return() -> None:
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID"):
+        b1_path(
+            _saved(["2014-10"], [float("nan")]), first=(2014, 10), last=(2014, 10), close=197.0, cost_multiplier=1.0
+        )
+
+
+@pytest.mark.parametrize("multiplier", [-1.0, float("nan"), float("inf")])
+def test_an_inverted_window_or_an_invalid_cost_multiplier_is_a_contract_error(multiplier: float) -> None:
+    saved = _saved(["2014-10", "2014-11"], [0.0, 0.0])
+    with pytest.raises(ValueError, match="inverted"):
+        b1_path(saved, first=(2014, 11), last=(2014, 10), close=197.0, cost_multiplier=1.0)
+    with pytest.raises(ValueError, match="cost multiplier"):
+        b1_path(saved, first=(2014, 10), last=(2014, 11), close=197.0, cost_multiplier=multiplier)
+    (decision,) = reference_decisions([_formation(1, [1, 2])])
+    with pytest.raises(ValueError, match="cost multiplier"):
+        value_path([decision], arm="best_case", cost_multiplier=multiplier)
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        {"months": ["2014/10"], "continuing": [0.0], "rebalance_cost": [0.0]},
+        {"months": ["2014-10"], "continuing": ["x"], "rebalance_cost": [0.0]},
+        {"months": ["2014-10"], "continuing": [0.0], "rebalance_cost": [""]},
+        {"months": ["2014-10"], "continuing": [0.0], "rebalance_cost": [float("nan")]},
+        {"months": ["2014-10"], "continuing": [0.0, 0.1], "rebalance_cost": [0.0]},
+        {"months": ["2014-10"], "continuing": [0.0]},
+        {"months": ["2014-10"], "continuing": None, "rebalance_cost": [0.0]},
+    ],
+)
+def test_b1_refuses_a_saved_path_that_does_not_parse(saved: dict) -> None:
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID"):
+        b1_path(saved, first=(2014, 10), last=(2014, 10), close=197.0, cost_multiplier=1.0)
