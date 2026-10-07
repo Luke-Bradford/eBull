@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–13 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 13 is
-applied; round 13's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–14 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 14 is
+applied; round 14's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -498,6 +498,11 @@ it. An edited payload therefore refuses on every later attempt, not only within 
 
 **Every consumed file is verified immediately before use** against the manifest that pins it. A mismatch refuses
 the run, so an unchanged manifest beside an altered file fails.
+- **The bytes checked are the bytes used.** Each consumed file (manifests included) is read once into memory,
+  hashed, and parsed from those same bytes; no path is reopened after its check. A file too large to hold is first
+  copied into a directory the run creates for itself (mode 0700); the copy is hashed and only the copy is read.
+  Slice 3 brings `verify_artefact` and `scripts/measure_3609_step2_universe.py` under this contract, and premise 3's
+  table must reproduce under it.
 - **Stage A and stage B** through `verify_artefact` (manifest digest, every input and every published output), each
   against **its own expected pin map**. Stage A's is the three pins `verify_artefact` checks today
   (`scripts/build_3609_factor_panel.py:1149`), unchanged. Stage B's is those three plus `reference_3609_step2_sub`,
@@ -542,7 +547,10 @@ committed to `docs/research/3609-ledger.jsonl`, in this order:
 3. `sub_published`, then `stage_b_published`: each artefact's manifest sha256. A reusing attempt writes
    `capture_reused` instead of rows 3 and 4 (§"Slices", capture lifecycle).
 4. `data_frozen`: the data-capture manifest's sha256. The report refuses without it, or if any file differs from it.
-5. `completed` or `failed`, written before any result is printed.
+5. `report_started`: written by the report, after the capture's ledger rows are merged and fetched, for capturing
+   and reusing attempts alike: the report's HEAD commit, the binding's capturing run id and its `data_frozen`
+   sha256. `started` keeps the HEAD the attempt began at; neither row is edited.
+6. `completed` or `failed`, written before any result is printed.
 
 **Abandoned runs.** A run with no terminal row is committed with the rest and classified by the database, not by
 the JSONL: if the hold-out access log holds a row with the declared `strategy_id`, `strategy_version` and
@@ -717,14 +725,18 @@ window's defined-month count for that metric.
 
    **Capture lifecycle.** The authority is the committed ledger on `main`, never a local JSONL.
    - **Binding.** After `data_frozen`, the run stops. Its ledger rows through `data_frozen` are merged on `main`
-     before any report runs. Merges to `main` are serialised, and a fast-tier test (run by the pre-push hook and by
-     CI's `lint` job on every PR) refuses a committed ledger holding more than one `data_frozen` row for this trial.
-     So the first capture to merge is the only one that can ever merge: a second capture's ledger PR fails that test
-     once it is rebased on the first, and its run must be ended and a later attempt must reuse the first capture.
+     before any report runs. The trial's binding is the **earliest** `data_frozen` row for it in `main`'s
+     first-parent history. Git orders `main`'s commits totally, so a later row can never displace it. `main`'s branch
+     protection does not require an up-to-date base (measured 2026-10-07: `strict: false`), so the rule does not rely
+     on merge ordering or PR checks. A fast-tier test refusing a committed ledger with more than one `data_frozen` row
+     catches a second capture at its own push or CI, and the procedure rebases a capture's ledger PR on current `main`
+     before merging it. If a second row lands anyway, it is invalid by the earliest-row rule, and every later report
+     refuses (`CAPTURE_AMBIGUOUS`) until the trial is re-declared.
    - **The report's ledger revision.** The report runs from a clean checkout whose HEAD equals `origin/main` after a
      fetch, and requires exactly one `data_frozen` row for this trial in the committed ledger at HEAD, its own run's
-     or the one it reuses (`CAPTURE_AMBIGUOUS` otherwise). Because no second binding can merge after it, the one row
-     it sees is the trial's binding. Its `started` row records the HEAD commit.
+     or the one it reuses (`CAPTURE_AMBIGUOUS` otherwise). That row is then the earliest, so it is the binding, and a
+     row merged after the report cannot change which capture the report used. The report writes `report_started`
+     (ledger step 5) with that HEAD.
    - **Reuse.** A later attempt under this declaration writes `capture_reused` (the capturing run id and its
      `data_frozen` sha256) in place of `sub_published`, `stage_b_published` and `data_frozen`. It verifies both
      artefacts against that row and never publishes or rebuilds them.
@@ -930,6 +942,14 @@ window's defined-month count for that metric.
 - **145:** the committed ledger on `main` binds the capture: `data_frozen` rows are merged before any report, the
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
+
+**Round 14 (146 and 147 resolved; 145 carried; 2 new, 148–149; `ckpt1_round14_final.txt`), all applied:**
+- **145:** PR checks can be stale (branch protection is not strict), so the binding no longer relies on merge
+  order. It is the earliest `data_frozen` in `main`'s first-parent history; a later row cannot displace it and
+  makes later reports refuse.
+- **148:** the report's HEAD goes in a new `report_started` row; `started` keeps the attempt's own HEAD.
+- **149:** each consumed file is read once, hashed and parsed from the same bytes (or from a checked private copy),
+  with no reopen after the check. Slice 3 brings `verify_artefact` and the measurement script under this rule.
 
 **Round 13 (144 resolved; 145 carried; 2 new, 146–147; `ckpt1_round13_final.txt`), all applied:**
 - **145:** a uniqueness check at the report's HEAD did not stop a second capture merging later. Uniqueness is now
