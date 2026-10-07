@@ -386,3 +386,13 @@ def test_a_republish_that_only_adds_first_bars_passes() -> None:
 def test_a_republish_outside_the_replay_identity_refuses(change: dict[str, Any], match: str) -> None:
     with pytest.raises(PanelError, match=match):
         builder.check_republished(_manifest(), _republished(**change))
+
+
+def test_a_scored_name_without_a_first_bar_refuses_rather_than_dropping_out(tmp_path: Path, ff12: Ff12Map) -> None:
+    # A truncated first_bars file must not quietly make names ineligible: eligible_to_enter refuses.
+    rows = [_row(M1, name) for name in range(1, UNIVERSE_SIZE + 1)]
+    firsts = [[r["series_id"], FIRST_BAR] for r in rows][1:]
+    [month] = _load(tmp_path, ff12, rows, firsts=firsts)
+    built = report.formation_inputs(month, report.score(month))
+    with pytest.raises(ValueError, match="no first admitted bar"):
+        _ = built.eligible

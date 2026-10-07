@@ -140,6 +140,15 @@ def test_every_value_read_in_the_builder_carries_the_hold_out_bound() -> None:
     assert unbounded == []
 
 
+def test_the_composed_admitted_bar_queries_keep_their_clause_boundaries() -> None:
+    import scripts.build_3609_factor_panel as builder
+
+    # Both queries append to the shared predicates; each appended clause must start on its own line.
+    assert builder._ADMITTED_BARS.endswith("::numeric\n")
+    assert builder._DECISION_BARS_SQL.endswith("::numeric\n  AND d.bar_date = ANY(%(sessions)s::date[])\n")
+    assert builder._FIRST_BARS_SQL.endswith("::numeric\nGROUP BY d.series_id\nORDER BY d.series_id\n")
+
+
 def _fake_artefact(tmp_path: Path) -> tuple[Path, str]:
     import json
 
