@@ -315,7 +315,11 @@ class PathResult:
 
 
 def entry_band(close: float) -> tuple[str, float]:
-    """Step 0's band for a position entered at raw close ``close`` (as traded): its label and half-spread."""
+    """Step 0's band for a position entered at raw close ``close`` (as traded): its label and half-spread.
+
+    A non-finite or non-positive close refuses (``PRICE_INVALID``): +inf would otherwise band as the cheapest."""
+    if not (math.isfinite(close) and close > 0):
+        raise BookRefusal("PRICE_INVALID", f"no cost band for raw close {close!r}")
     band = cost_model.cost_band_for(Decimal(repr(close)), price_basis="as_traded")
     return band.label, float(band.half_spread)
 

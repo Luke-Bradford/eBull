@@ -134,3 +134,10 @@ def test_the_boundary_record_carries_the_specs_fields_sorted_by_name_key() -> No
     assert record["positions"][1] == {"name_key": 30, "value": 1.0 / 3 * 1.1, "entry": "2015-01-28", "band": "<$5"}
     assert set(record) == {"formation", "positions", "cash", "nav"}
     canonical_json(record)  # serialises under the spec's canonical rules (no NaN, ASCII)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), 0.0, -197.0])
+def test_b1_refuses_an_invalid_start_close(bad: float) -> None:
+    saved = _saved(["2014-10"], [0.0])
+    with pytest.raises(BookRefusal, match="PRICE_INVALID"):
+        b1_path(saved, first=(2014, 10), last=(2014, 10), close=bad, cost_multiplier=1.0)
