@@ -24,7 +24,7 @@ population is sorted by ``name_key`` ascending, and the three calls run in the o
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Final
@@ -46,6 +46,11 @@ DRAWS: Final = 1000
 
 def control_seed(draw: int, formation: date) -> str:
     return f"3609-step2:{draw}:{formation.isoformat()}"
+
+
+def _sample(rng: random.Random, population: Collection[int], count: int) -> list[int]:
+    """``rng.sample`` over the population sorted by ``name_key`` ascending (set order is not reproducible)."""
+    return rng.sample(sorted(population), count)
 
 
 @dataclass(frozen=True)
@@ -80,14 +85,14 @@ def control_decisions(formations: Sequence[Formation], book: BookDecisions, draw
             reasons = exit_reasons(formation, name)
             if reasons and reasons[0] in FORCED_REASONS:
                 sales[name] = TradeCategory.FORCED_EXIT
-        remaining = sorted(held - sales.keys())
-        for name in rng.sample(remaining, min(k, len(remaining))):
+        remaining = held - sales.keys()
+        for name in _sample(rng, remaining, min(k, len(remaining))):
             sales[name] = TradeCategory.DISCRETIONARY_EXIT
-        remaining = sorted(held - sales.keys())
-        for name in rng.sample(remaining, max(len(remaining) - n, 0)):
+        remaining = held - sales.keys()
+        for name in _sample(rng, remaining, max(len(remaining) - n, 0)):
             sales[name] = TradeCategory.COUNT_ADJUSTMENT
         kept = held - sales.keys()
-        pool = sorted(formation.eligible - held)  # every name sold at M was held, so this excludes them too
+        pool = formation.eligible - held  # every name sold at M was held, so this excludes them too
         needed = n - len(kept)
         pools.append(Pool(formation.formation, len(pool), needed))
         if needed > len(pool):
@@ -95,7 +100,7 @@ def control_decisions(formations: Sequence[Formation], book: BookDecisions, draw
                 "CONTROL_SHORT",
                 f"draw {draw} at {formation.formation}: {needed} purchases needed from {len(pool)} eligible names",
             )
-        targets = tuple(sorted(kept | set(rng.sample(pool, needed))))
+        targets = tuple(sorted(kept | set(_sample(rng, pool, needed))))
         decisions.append(Decision(formation.formation, targets, sales, formation.close, formation.returns))
         held = still_held(formation, targets)
     return ControlDraw(draw, tuple(decisions), tuple(pools))

@@ -56,7 +56,8 @@ def _run(formations: Sequence[Formation], draw: int = 0) -> tuple[BookDecisions,
 
 
 def test_the_first_formation_buys_n_names_with_the_declared_seed_and_sorted_population() -> None:
-    order = [*range(100, 0, -1)]  # the composite order is not name order
+    order = [i * 7919 for i in range(100, 0, -1)]  # the composite order is not name order
+    assert list(frozenset(order)) != sorted(order)  # nor is a set's iteration order, so sorting is tested
     formation = _formation(1, order)
     book, targets = _run([formation], draw=7)
     expected = random.Random(control_seed(7, formation.formation))
