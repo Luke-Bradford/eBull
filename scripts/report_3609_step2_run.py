@@ -123,7 +123,12 @@ def run_report(
     """Ledger steps 5 and 6 around one evaluation of the bound capture; see the module docstring for the order.
 
     ``head`` is the report's HEAD, from a clean checkout equal to ``origin/main`` after a fetch (the caller's
-    check); the committed ledger is read from that checkout."""
+    check); the committed ledger is read from that checkout.
+
+    Raises :class:`BookRefusal` only from the gate: the caller prints ``REFUSED``, and no row was written. Any
+    exception after ``report_started`` (a :class:`DeclarationError` for code that moved during the run, an I/O
+    error, a defect) means the run has ended ``failed``. A ``REFUSED`` verdict from the evaluation is returned as
+    the outcome, never raised."""
     hashes = current()
     with _report_claim(ledger):
         committed = read_ledger(committed_ledger)
