@@ -145,6 +145,7 @@ def test_the_minimum_ticket_takes_each_maximum_over_every_trade_separately() -> 
     # NAV thresholds 100, 400, 250; initial-capital thresholds 100, 200, 500.
     trades = (_trade(0.1, 1.0), _trade(0.05, 2.0, (2016, 3)), _trade(0.02, 0.5, (2024, 8)))
     ticket = minimum_ticket(_path(0.0, trades=trades))
+    assert ticket is not None
     assert (ticket.nav, ticket.nav_trade) == (pytest.approx(400.0), trades[1])
     assert (ticket.capital, ticket.capital_trade) == (pytest.approx(500.0), trades[2])
 
@@ -152,7 +153,15 @@ def test_the_minimum_ticket_takes_each_maximum_over_every_trade_separately() -> 
 def test_a_zero_notional_trade_falls_below_the_ticket_at_any_nav() -> None:
     trades = (_trade(0.1, 1.0), _trade(0.0, 1.0, (2016, 3)))
     ticket = minimum_ticket(_path(0.0, trades=trades))
+    assert ticket is not None
     assert ticket.nav == math.inf and ticket.nav_trade == trades[1] and ticket.capital == math.inf
+
+
+def test_a_path_with_no_trades_has_no_minimum_ticket() -> None:
+    """An all-cash ``INSUFFICIENT`` run trades nothing; it still reports."""
+    path = _path(0.0)
+    path.trades.clear()
+    assert minimum_ticket(path) is None
 
 
 # --------------------------------------------------------------------------- the book

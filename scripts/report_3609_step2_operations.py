@@ -112,13 +112,14 @@ class MinimumTicket:
     capital_trade: Trade
 
 
-def minimum_ticket(path: PathResult) -> MinimumTicket:
+def minimum_ticket(path: PathResult) -> MinimumTicket | None:
     """Every trade counts, the final liquidation and the rebalance adds and trims included. A trade's weight is its
     notional over its pre-trade NAV; it falls below the ticket at a NAV of ``MIN_TICKET / weight``, and at an
     initial capital of that × NAV_0 / NAV_t. A zero-notional trade falls below it at any NAV (``inf``). The first
-    trade in path order wins a tie."""
+    trade in path order wins a tie. ``None`` for a path with no trades, which an all-cash ``INSUFFICIENT`` run can
+    be (§"Insufficient book")."""
     if not path.trades:
-        raise ValueError("the minimum ticket needs at least one trade")
+        return None
 
     def at(trade: Trade, nav: float) -> float:
         return math.inf if trade.notional <= 0 else MIN_TICKET * nav / trade.notional
@@ -260,7 +261,7 @@ def control_distributions(run: SeriesRun, arm: AmbiguityArm, window: Window) -> 
 @dataclass(frozen=True)
 class Operations:
     #: Per arm, at base cost.
-    minimum_ticket: Mapping[str, MinimumTicket]
+    minimum_ticket: Mapping[str, MinimumTicket | None]
     #: Per arm, then per window label (stage windows, then calendar years).
     book: Mapping[str, Mapping[str, Mapping[str, object]]]
     #: Per arm, then per stage window label, then per metric.

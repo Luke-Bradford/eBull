@@ -17,6 +17,8 @@ the segment and universe modules import its ``PanelMonth``.
 * **The boundary** is the stage-B boundary formation (2021-05), whose pre-trade state every path captures.
 * **Windows** for the signal and segment blocks are the run's stage windows, as the operations and attribution
   blocks' are.
+* **Not yet here:** §"Source rules"' construction counts (uninformative groups, membership patterns and
+  identifier-decided selections, each with its book weight) are the next slice's block.
 """
 
 from __future__ import annotations
@@ -32,9 +34,9 @@ from typing import Any, Final
 import numpy as np
 
 from app.services.factor_book_control import DRAWS
-from app.services.factor_book_path import Month, book_decisions, month_of
+from app.services.factor_book_path import BoundaryState, Month, PathResult, book_decisions, month_of
 from app.services.factor_book_references import reference_decisions
-from app.services.factor_book_series import Scenario, SeriesRun, run_series
+from app.services.factor_book_series import Scenario, SeriesRun, run_series, summarise
 from app.services.strategy_result import AmbiguityArm
 from scripts.report_3609_step2 import PanelMonth, formation_inputs, score
 from scripts.report_3609_step2_attribution import Diagnostics as AttributionDiagnostics
@@ -217,15 +219,33 @@ def jsonable(value: object) -> Any:
     raise TypeError(f"no output form for {type(value).__name__}")
 
 
+def _record(boundary: BoundaryState | None) -> dict[str, Any] | None:
+    return None if boundary is None else boundary.record()
+
+
 def payload(report: Report) -> dict[str, Any]:
     """The output file: the verdict line and its fields, the labels, the path, and every diagnostic block with the
     notes §"Diagnostics" requires. The monthly series (IC and spread per signal and cell, sub-book months) are in
-    their blocks."""
+    their blocks. Each path carries its trades, its imputed realisations (listed apart: no order, no cost) and its
+    order notional and cost per trade category; each control draw carries its summary, categories included
+    (§"References and the control", trade categories). Boundary states print as their canonical record."""
     run = report.run
 
-    def path(paths: Mapping[Scenario, Any]) -> dict[str, Any]:
+    def path(paths: Mapping[Scenario, PathResult]) -> dict[str, Any]:
         return {
-            _key(s): jsonable({"returns": p.returns, "nav": p.nav, "turnover": p.turnover, "holdings": p.holdings})
+            _key(s): jsonable(
+                {
+                    "returns": p.returns,
+                    "nav": p.nav,
+                    "turnover": p.turnover,
+                    "holdings": p.holdings,
+                    "nonpositive": p.nonpositive,
+                    "boundary": _record(p.boundary),
+                    "categories": summarise(p).categories,
+                    "trades": p.trades,
+                    "realisations": p.realisations,
+                }
+            )
             for s, p in paths.items()
         }
 
@@ -238,6 +258,13 @@ def payload(report: Report) -> dict[str, Any]:
             "book": path(run.book),
             "equal_weight": path(run.equal_weight),
             "cap_weighted": path(run.cap_weighted),
+            "control": {
+                _key(s): [
+                    jsonable({f.name: getattr(d, f.name) for f in fields(d)} | {"boundary": _record(d.boundary)})
+                    for d in draws
+                ]
+                for s, draws in run.control.items()
+            },
             "b1": jsonable(run.b1),
             "pools": jsonable(run.pools),
             "insufficient": jsonable(run.insufficient),

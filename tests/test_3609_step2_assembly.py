@@ -263,3 +263,31 @@ def test_the_payload_covers_every_report_field(report: assembly.Report) -> None:
     names = {f.name for f in fields(assembly.Report)}
     assert names - {"run", "sub_books", "sub_book_windows"} <= out.keys()
     assert set(out["sub_books"]) == {"monthly", "windows"}
+
+
+def test_each_path_carries_its_trades_realisations_and_reconciled_categories(report: assembly.Report) -> None:
+    out = payload(report)
+    for scenario, result in report.run.book.items():
+        printed = out["path"]["book"][assembly._key(scenario)]
+        assert len(printed["trades"]) == len(result.trades) > 0
+        assert len(printed["realisations"]) == len(result.realisations)
+        notional = math.fsum(n for n, _ in printed["categories"].values())
+        cost = math.fsum(c for _, c in printed["categories"].values())
+        assert notional == pytest.approx(math.fsum(t.notional for t in result.trades), rel=1e-12)
+        assert cost == pytest.approx(math.fsum(t.cost for t in result.trades), rel=1e-12)
+        assert printed["boundary"]["formation"] == "2021-05-31"
+    for scenario, draws in report.run.control.items():
+        printed = out["path"]["control"][assembly._key(scenario)]
+        assert len(printed) == len(draws) == 3
+        assert printed[0]["categories"].keys() == {c.value for c in draws[0].categories}
+
+
+def test_a_run_that_never_trades_still_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§"Insufficient book": an all-cash run is INSUFFICIENT and still prints its path and diagnostics."""
+    monkeypatch.setattr(factor_book, "UNIVERSE_SIZE", UNIVERSE)
+    panel = [replace(m, admitted={n: replace(v, signed={}) for n, v in m.admitted.items()}) for m in _panel()]
+    report = _evaluate(panel)
+    assert report.verdict.status == "INSUFFICIENT"
+    assert all(not p.trades for p in report.run.book.values())
+    assert all(t is None for t in report.operations.minimum_ticket.values())
+    json.dumps(payload(report), allow_nan=False)
