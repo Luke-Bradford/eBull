@@ -112,11 +112,11 @@ def test_b1_takes_the_window_and_charges_entry_and_exit_at_the_start_band() -> N
 
 
 def test_b1_refuses_a_gap_or_a_step_0_rebalance_cost_inside_the_window() -> None:
-    with pytest.raises(ValueError, match="no saved return"):
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID.*finite return"):
         gap = _saved(["2014-10", "2014-12"], [0.0, 0.0])
         b1_path(gap, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=1.0)
     costly = _saved(["2014-10", "2014-11"], [0.0, 0.0], [0.0, 0.001])
-    with pytest.raises(ValueError, match="rebalance costs"):
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID.*rebalance costs"):
         b1_path(costly, first=(2014, 10), last=(2014, 11), close=197.0, cost_multiplier=1.0)
 
 
@@ -131,6 +131,7 @@ def test_the_boundary_record_carries_the_specs_fields_sorted_by_name_key() -> No
     assert path.boundary is not None
     record = path.boundary.record()
     assert [p["name_key"] for p in record["positions"]] == [4, 30, 200]
+    # Exact by design: value_path's own operations in its own order (docs/review-prevention-log.md, #3609 3c-ii).
     assert record["positions"][1] == {"name_key": 30, "value": 1.0 / 3 * 1.1, "entry": "2015-01-28", "band": "<$5"}
     assert set(record) == {"formation", "positions", "cash", "nav"}
     canonical_json(record)  # serialises under the spec's canonical rules (no NaN, ASCII)
@@ -141,3 +142,22 @@ def test_b1_refuses_an_invalid_start_close(bad: float) -> None:
     saved = _saved(["2014-10"], [0.0])
     with pytest.raises(BookRefusal, match="PRICE_INVALID"):
         b1_path(saved, first=(2014, 10), last=(2014, 10), close=bad, cost_multiplier=1.0)
+
+
+def test_b1_refuses_a_non_finite_saved_return() -> None:
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID"):
+        b1_path(
+            _saved(["2014-10"], [float("nan")]), first=(2014, 10), last=(2014, 10), close=197.0, cost_multiplier=1.0
+        )
+
+
+@pytest.mark.parametrize("multiplier", [-1.0, float("nan"), float("inf")])
+def test_an_inverted_window_or_an_invalid_cost_multiplier_is_a_contract_error(multiplier: float) -> None:
+    saved = _saved(["2014-10", "2014-11"], [0.0, 0.0])
+    with pytest.raises(ValueError, match="inverted"):
+        b1_path(saved, first=(2014, 11), last=(2014, 10), close=197.0, cost_multiplier=1.0)
+    with pytest.raises(ValueError, match="cost multiplier"):
+        b1_path(saved, first=(2014, 10), last=(2014, 11), close=197.0, cost_multiplier=multiplier)
+    (decision,) = reference_decisions([_formation(1, [1, 2])])
+    with pytest.raises(ValueError, match="cost multiplier"):
+        value_path([decision], arm="best_case", cost_multiplier=multiplier)

@@ -324,6 +324,12 @@ def entry_band(close: float) -> tuple[str, float]:
     return band.label, float(band.half_spread)
 
 
+def check_cost_multiplier(cost_multiplier: float) -> None:
+    """Step 0's scenarios are 0 (gross), 1 (net) and 2 (stress); a negative or non-finite one is a caller error."""
+    if not (math.isfinite(cost_multiplier) and cost_multiplier >= 0):
+        raise ValueError(f"cost multiplier must be finite and non-negative, got {cost_multiplier!r}")
+
+
 #: Float weights such as ME / ΣME sum to 1 only to rounding; this bound catches an unnormalised map, nothing finer.
 _WEIGHT_SUM_TOLERANCE: Final = 1e-9
 
@@ -350,6 +356,7 @@ def value_path(
     and positive stops the path: it is recorded in ``nonpositive`` with its return, and nothing later is valued."""
     if not decisions:
         raise ValueError("a path needs at least one decision")
+    check_cost_multiplier(cost_multiplier)
     if boundary is not None and boundary not in {decision.formation for decision in decisions}:
         raise ValueError(f"boundary {boundary} is not one of the decisions' formations")
     result = PathResult()
@@ -468,6 +475,7 @@ __all__ = [
     "archive_seasoned",
     "book_decisions",
     "check_closes",
+    "check_cost_multiplier",
     "eligible_to_enter",
     "entry_band",
     "exit_reasons",

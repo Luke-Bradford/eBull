@@ -31,6 +31,7 @@ from app.services.factor_book_path import (
     Month,
     TradeCategory,
     check_closes,
+    check_cost_multiplier,
     entry_band,
     next_month,
     still_held,
@@ -92,7 +93,11 @@ def b1_path(
     """B1 over ``first..last`` from step 0's saved path (``months``, ``continuing``, ``rebalance_cost``).
 
     ``continuing`` is step 0's net path, so a month inside the window that carries a rebalance cost would bring step
-    0's 2009-12 band with it; that refuses. Buy-and-hold carries none."""
+    0's 2009-12 band with it; that refuses. Buy-and-hold carries none. An incomplete or non-finite window is
+    comparator incompleteness (§"Decision rule": ``COMPARATOR_INVALID``)."""
+    if first > last:
+        raise ValueError(f"B1 window {first}..{last} is inverted")
+    check_cost_multiplier(cost_multiplier)
     by_month: dict[Month, tuple[float, float]] = {}
     for m, r, c in zip(saved["months"], saved["continuing"], saved["rebalance_cost"], strict=True):
         year, month_number = str(m).split("-")
@@ -102,12 +107,12 @@ def b1_path(
     while month <= last:
         window.append(month)
         month = next_month(month)
-    missing = [m for m in window if m not in by_month]
+    missing = [m for m in window if m not in by_month or not math.isfinite(by_month[m][0])]
     if missing:
-        raise ValueError(f"B1 has no saved return for {len(missing)} window months: {missing[:5]}")
+        raise BookRefusal("COMPARATOR_INVALID", f"B1 lacks a finite return for {len(missing)} months: {missing[:5]}")
     charged = [m for m in window if by_month[m][1] != 0.0]
     if charged:
-        raise ValueError(f"B1 carries step 0 rebalance costs inside the window: {charged[:5]}")
+        raise BookRefusal("COMPARATOR_INVALID", f"B1 carries step 0 rebalance costs in the window: {charged[:5]}")
     band, half = entry_band(close)
     charge = half * cost_multiplier
     returns = {m: by_month[m][0] for m in window}
