@@ -318,3 +318,10 @@ def test_a_constant_active_return_has_no_information() -> None:
     assert iid > 0 and se > 0
     out = information(_flat_b1(dict.fromkeys(months, 0.1)), ARMS[0], Window("w", months, months))
     assert out.autocorrelation is None and out.se_ratio is None
+
+
+def test_finite_but_huge_active_returns_leave_information_undefined_rather_than_nan() -> None:
+    months = MONTHS[:40]
+    huge = {m: (1e154 if i % 2 else -1e154) for i, m in enumerate(months)}
+    out = information(_flat_b1(huge), ARMS[0], Window("w", months, months))
+    assert out.autocorrelation is None and out.se_ratio is None
