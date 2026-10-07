@@ -5,8 +5,9 @@ non-claiming ``DeclaredTrial`` ``3609-step2-book-v1`` (slice 4). ``record_holdou
 register row for it, so the run checks its own code against the row: the spec sha256, the construction hash (the
 builder, the report and every module they import except ``trial_register.py``), the register-policy hash and the
 Python version, each named once in the row's ``evidence``. The construction hash is rooted at the builder, the
-report's loader and its assembly (``CONSTRUCTION_ROOTS``), so it reaches the verdict and every diagnostic. The row's
-payload is pinned by a committed ``declared`` ledger row, so an edited row refuses on every later attempt.
+report's loader, its assembly and its entry point (``CONSTRUCTION_ROOTS``), so it reaches the verdict and every
+diagnostic. The row's payload is pinned by a committed ``declared`` ledger row, so an edited row refuses on every
+later attempt.
 
 Until slice 4 merges there is no such row and no report, so every stage-B step refuses here.
 """
@@ -37,9 +38,11 @@ SPEC_PATH: Final = _REPO_ROOT / "docs" / "research" / "2026-10-06-3609-step2-fac
 BUILDER_PATH: Final = _REPO_ROOT / "scripts" / "build_3609_factor_panel.py"
 REPORT_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2.py"
 ASSEMBLY_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2_assembly.py"
+RUN_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2_run.py"
 #: The construction hash's roots. The loader (``REPORT_PATH``) imports none of the verdict, series or diagnostics
-#: modules (they import it), so the assembly, which imports them all, is a root of its own.
-CONSTRUCTION_ROOTS: Final = (BUILDER_PATH, REPORT_PATH, ASSEMBLY_PATH)
+#: modules (they import it), so the assembly, which imports them all, is a root of its own, and so is the report's
+#: entry point (``RUN_PATH``), which imports the assembly.
+CONSTRUCTION_ROOTS: Final = (BUILDER_PATH, REPORT_PATH, ASSEMBLY_PATH, RUN_PATH)
 TRIAL_REGISTER_PATH: Final = "app/services/trial_register.py"
 #: The two top-level assignments the register-policy hash leaves out: they hold the row that holds the hash.
 _REGISTER_DATA: Final = frozenset({"TRIAL_REGISTER_VERSION", "TRIAL_REGISTER"})

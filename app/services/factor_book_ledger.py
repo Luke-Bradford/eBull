@@ -9,13 +9,17 @@ row. ``record_holdout_access`` does not enforce a declaration for this trial (it
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
 import psycopg
 
+from app.services.factor_book import BookRefusal
+from app.services.factor_book_declaration import TRIAL_ID, CodeHashes, DeclarationError, check_declaration
 from app.services.factor_panel_fidelity import append_ledger
+from app.services.trial_register import DeclaredTrial, TrialRegister
 
 STRATEGY_ID: Final = "3609-step2-book"
 STRATEGY_VERSION: Final = "v1"
@@ -25,6 +29,18 @@ LEDGER_PATH: Final = _REPO_ROOT / "var" / "research" / "3609_step2" / "ledger.js
 COMMITTED_LEDGER_PATH: Final = _REPO_ROOT / "docs" / "research" / "3609-ledger.jsonl"
 
 _TERMINAL_EVENTS: Final = frozenset({"completed", "failed"})
+
+#: Ledger steps 4 and 5 and the reuse row (§"Slices", capture lifecycle). Slice 5 writes the first two:
+#: ``data_frozen`` carries ``trial_id`` and the data-capture manifest's ``manifest_sha256``; ``capture_reused``
+#: carries ``capturing_run_id`` and that capture's ``manifest_sha256``.
+DATA_FROZEN_EVENT: Final = "data_frozen"
+CAPTURE_REUSED_EVENT: Final = "capture_reused"
+REPORT_STARTED_EVENT: Final = "report_started"
+#: The capture rows a reusing attempt writes ``capture_reused`` in place of.
+_CAPTURE_EVENTS: Final = ("sub_published", "stage_b_published", DATA_FROZEN_EVENT)
+CAPTURE_AMBIGUOUS: Final = "CAPTURE_AMBIGUOUS"
+LEDGER_MISMATCH: Final = "LEDGER_MISMATCH"
+DECLARATION_MISMATCH: Final = "DECLARATION_MISMATCH"
 
 
 def access_purpose(run_id: str) -> str:
@@ -118,15 +134,120 @@ def end_run_failed(ledger: Path, run_id: str, step: str, exc: BaseException) -> 
         exc.add_note(f"the 'failed' ledger row was not written ({ledger_error!r}); end run {run_id} by hand")
 
 
+# --------------------------------------------------------------------------- the report's gate
+
+
+@dataclass(frozen=True)
+class Binding:
+    """The trial's one committed capture: the run that wrote ``data_frozen`` and the data-capture manifest's sha256."""
+
+    capturing_run_id: str
+    manifest_sha256: str
+
+
+def capture_binding(committed: Sequence[Mapping[str, Any]]) -> Binding:
+    """The single ``data_frozen`` row for the trial in the committed ledger at HEAD; ``CAPTURE_AMBIGUOUS`` otherwise.
+
+    A ``data_frozen`` row that names no trial could belong to this one, so it refuses too."""
+    frozen = [row for row in committed if row.get("event") == DATA_FROZEN_EVENT]
+    unnamed = [row for row in frozen if "trial_id" not in row]
+    ours = [row for row in frozen if row.get("trial_id") == TRIAL_ID]
+    if unnamed or len(ours) != 1:
+        raise BookRefusal(
+            CAPTURE_AMBIGUOUS,
+            f"{len(ours)} committed {DATA_FROZEN_EVENT!r} rows for {TRIAL_ID} and {len(unnamed)} naming no trial; "
+            "exactly one for the trial is required",
+        )
+    run_id, digest = ours[0].get("run_id"), ours[0].get("manifest_sha256")
+    if not isinstance(run_id, str) or not run_id or not isinstance(digest, str) or not digest:
+        raise BookRefusal(CAPTURE_AMBIGUOUS, f"the committed {DATA_FROZEN_EVENT!r} row lacks its run id or sha256")
+    return Binding(capturing_run_id=run_id, manifest_sha256=digest)
+
+
+def check_report_gate(
+    register: TrialRegister,
+    committed: Sequence[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
+    run_id: str,
+    current: CodeHashes,
+) -> tuple[DeclaredTrial, Binding]:
+    """§"Slices", "The report's ledger revision": every check the report makes before it reads an evaluation input.
+
+    ``committed`` is the committed ledger at HEAD; ``rows`` are those plus the local ledger. Refuses (a
+    :class:`BookRefusal`, so the run prints ``REFUSED``) unless:
+
+    * the trial has exactly one committed ``data_frozen`` row (``CAPTURE_AMBIGUOUS``);
+    * the attempt holds a single leading ``started`` row, one ``access_recorded`` row, and no ``report_started`` or
+      terminal row; it is the binding's capturing run with no ``capture_reused`` row, or it holds one
+      ``capture_reused`` row naming the binding and no capture rows of its own (``LEDGER_MISMATCH``);
+    * the freeze holds at HEAD: the ``declared`` payload pin and this checkout's four hashes against the row's
+      ``evidence`` (:func:`check_declaration`, on the committed ledger), and the same four against the values the
+      attempt's ``started`` row recorded under the same labels (``CodeHashes.by_label``), so code changed between
+      the capture and the report cannot evaluate under the capture's run id (``DECLARATION_MISMATCH``).
+    """
+    binding = capture_binding(committed)
+    try:
+        recorded_access_id(rows, run_id, before=REPORT_STARTED_EVENT)
+    except StageBAccessError as exc:
+        raise BookRefusal(LEDGER_MISMATCH, str(exc)) from exc
+    events = [row.get("event") for row in rows if row.get("run_id") == run_id]
+    reused = [row for row in rows if row.get("run_id") == run_id and row.get("event") == CAPTURE_REUSED_EVENT]
+    if binding.capturing_run_id == run_id:
+        if reused:
+            raise BookRefusal(LEDGER_MISMATCH, f"run {run_id} captured the binding and also wrote {reused!r}")
+    else:
+        own = [event for event in events if event in _CAPTURE_EVENTS]
+        if own or len(reused) != 1:
+            raise BookRefusal(
+                LEDGER_MISMATCH,
+                f"run {run_id} is not the binding's capture ({binding.capturing_run_id}): it needs exactly one "
+                f"{CAPTURE_REUSED_EVENT!r} row and no capture rows, found {len(reused)} and {own}",
+            )
+        named = (reused[0].get("capturing_run_id"), reused[0].get("manifest_sha256"))
+        if named != (binding.capturing_run_id, binding.manifest_sha256):
+            raise BookRefusal(LEDGER_MISMATCH, f"run {run_id} reused {named}, not the binding {binding}")
+    try:
+        trial = check_declaration(register, committed, current)
+    except DeclarationError as exc:
+        raise BookRefusal(DECLARATION_MISMATCH, str(exc)) from exc
+    started = run_event(rows, run_id, "started")
+    moved = sorted(label for label, value in current.by_label().items() if started.get(label) != value)
+    if moved:
+        raise BookRefusal(DECLARATION_MISMATCH, f"run {run_id}: this checkout's {moved} differ from its 'started' row")
+    return trial, binding
+
+
+def report_started_row(run_id: str, head: str, binding: Binding) -> dict[str, Any]:
+    """Ledger step 5: the report's HEAD and the capture it evaluates; ``started`` keeps the attempt's own HEAD."""
+    return {
+        "run_id": run_id,
+        "event": REPORT_STARTED_EVENT,
+        "at": datetime.now(UTC).isoformat(),
+        "git_sha": head,
+        "capturing_run_id": binding.capturing_run_id,
+        "manifest_sha256": binding.manifest_sha256,
+    }
+
+
 __all__ = [
+    "CAPTURE_AMBIGUOUS",
+    "CAPTURE_REUSED_EVENT",
     "COMMITTED_LEDGER_PATH",
+    "DATA_FROZEN_EVENT",
+    "DECLARATION_MISMATCH",
+    "LEDGER_MISMATCH",
     "LEDGER_PATH",
+    "REPORT_STARTED_EVENT",
     "STRATEGY_ID",
     "STRATEGY_VERSION",
+    "Binding",
     "StageBAccessError",
     "access_purpose",
+    "capture_binding",
+    "check_report_gate",
     "end_run_failed",
     "recorded_access_id",
+    "report_started_row",
     "require_committed_access",
     "run_event",
 ]
