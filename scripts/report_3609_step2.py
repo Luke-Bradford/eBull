@@ -13,6 +13,8 @@ is reopened after its check. The FF-12 map is the committed, pinned ``Siccodes12
   every name with a row at M, admitted or not, so a holding that left the admitted population keeps its close.
   The builder priced each admitted row's ME from that same bar, so an admitted row whose ME close differs from it,
   or which has no bar, refuses.
+* **First admitted bar** (archive seasoning) is the frozen ``inputs/first_bars.jsonl.gz`` entry of the name's
+  series; the 12-month daily window cannot supply it (spec finding 156).
 * **Industry**: the row's FF-12 group from its SUB ``sic``; ``sic_null`` and ``sic_unloaded`` rows are
   ``UNCLASSIFIED`` (§"Source rules").
 * **Signed characteristics**: Table 9's sign times the row's value, for the five book characteristics; a ``None``
@@ -33,12 +35,12 @@ from typing import Any, Final, get_args
 from app.services.factor_book import CHARACTERISTICS, UNCLASSIFIED, Bands, BookRefusal, Scores, composite_scores
 from app.services.factor_book import bands as book_bands
 from app.services.factor_book import universe as book_universe
-from app.services.factor_book_path import HoldingReturn
+from app.services.factor_book_path import Formation, HoldingReturn
 from app.services.factor_book_reference import Ff12Map
 from app.services.factor_panel_prices import HoldingStatus
 from app.services.factor_panel_reference import parse_table9_signs
 from app.services.strategy_result import AmbiguityArm
-from scripts.build_3609_factor_panel import RESEARCH_ROOT, Frozen, VerifiedArtefact, holding_month
+from scripts.build_3609_factor_panel import RESEARCH_ROOT, Frozen, VerifiedArtefact, holding_month, price_bound
 
 #: The stage-A artefact the spec's freeze evidence pins (§"Registration").
 STAGE_A_ARTEFACT: Final = RESEARCH_ROOT / "factor_panel_3609" / "2026-10-06-483ac6ae-stageA"
@@ -46,7 +48,9 @@ STAGE_A_MANIFEST_SHA256: Final = "ee1e8abc241f26596529509cd38f4692de4de8ff8700c0
 #: The inputs the report consumes, relative to the artefact; passed as ``keep`` to ``read_verified_artefact``.
 DECISION_BARS: Final = f"inputs/{Frozen.DECISION_BARS}"
 TABLE9_SIGNS: Final = f"inputs/{Frozen.REFERENCE}/inputs/3609-jkp-table9-signs.csv"
-CONSUMED_INPUTS: Final = (DECISION_BARS, TABLE9_SIGNS)
+FIRST_BARS: Final = f"inputs/{Frozen.FIRST_BARS}"
+ADMITTED: Final = f"inputs/{Frozen.ADMITTED}"
+CONSUMED_INPUTS: Final = (DECISION_BARS, FIRST_BARS, ADMITTED, TABLE9_SIGNS)
 #: SUB classifications with no SIC (§"Source rules", missing classifications).
 UNCLASSIFIED_STATUSES: Final = frozenset({"sic_null", "sic_unloaded"})
 _ARMS: Final = frozenset(get_args(AmbiguityArm))
@@ -76,6 +80,8 @@ class PanelMonth:
     admitted: Mapping[int, PanelName]
     #: Raw close at s(M) of every name with a row and a decision bar at M.
     close: Mapping[int, float]
+    #: The first admitted bar of the series of every name with a row at M, where it has one.
+    first_bar: Mapping[int, date]
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,25 @@ def decision_closes(payload: bytes) -> dict[tuple[int, date], float]:
         if key in out:
             raise ReportError(f"decision bar {key} is repeated")
         out[key] = float(close)
+    return out
+
+
+def read_first_bars(payload: bytes, admitted: bytes, bound: date) -> dict[int, date]:
+    """``series_id -> first admitted bar`` (spec §"Source rules", archive seasoning, Shape).
+
+    Refuses a repeated or unadmitted ``series_id``, a malformed date, or a date after the stage's price bound."""
+    series = {int(line["series_id"]) for line in _lines(admitted)}
+    out: dict[int, date] = {}
+    for series_id, day in _lines(payload):
+        if series_id in out or series_id not in series:
+            raise ReportError(f"first bar of series {series_id!r} is repeated or the series is not admitted")
+        try:
+            first = date.fromisoformat(day)
+        except (TypeError, ValueError) as exc:
+            raise ReportError(f"first bar of series {series_id} is not an ISO date: {day!r}") from exc
+        if first > bound:
+            raise ReportError(f"first bar of series {series_id} ({first}) is after the price bound {bound}")
+        out[series_id] = first
     return out
 
 
@@ -146,9 +171,11 @@ def read_panel(verified: VerifiedArtefact, ff12: Ff12Map) -> list[PanelMonth]:
         raise ReportError(f"Table 9 holds no sign for {missing}")
     bars = decision_closes(verified.files[DECISION_BARS])
     formations = [date.fromisoformat(m) for m in verified.manifest["formations"]]
+    firsts = read_first_bars(verified.files[FIRST_BARS], verified.files[ADMITTED], price_bound(formations))
     sessions: dict[date, date] = {}
     admitted: dict[date, dict[int, PanelName]] = {m: {} for m in formations}
     close: dict[date, dict[int, float]] = {m: {} for m in formations}
+    first_bar: dict[date, dict[int, date]] = {m: {} for m in formations}
     series_seen: set[tuple[date, int]] = set()
     names_seen: set[tuple[date, int]] = set()
     count = 0
@@ -170,6 +197,8 @@ def read_panel(verified: VerifiedArtefact, ff12: Ff12Map) -> list[PanelMonth]:
         bar = bars.get((row["series_id"], session))
         if bar is not None:
             close[formation][name] = bar
+        if row["series_id"] in firsts:
+            first_bar[formation][name] = firsts[row["series_id"]]
         if row["exclusion"] is None:
             me_close = row["me"]["close"]
             if bar is None or me_close is None or float(me_close) != bar:
@@ -180,7 +209,7 @@ def read_panel(verified: VerifiedArtefact, ff12: Ff12Map) -> list[PanelMonth]:
     absent = [m for m in formations if m not in sessions]
     if absent:
         raise ReportError(f"no rows for formations {absent[:3]}")
-    return [PanelMonth(m, sessions[m], admitted[m], close[m]) for m in formations]
+    return [PanelMonth(m, sessions[m], admitted[m], close[m], first_bar[m]) for m in formations]
 
 
 def score(month: PanelMonth) -> ScoredMonth:
@@ -193,3 +222,16 @@ def score(month: PanelMonth) -> ScoredMonth:
             signed[c][name] = value
     scores = composite_scores(names, industry, signed)
     return ScoredMonth(tuple(names), scores, book_bands(scores.composite))
+
+
+def formation_inputs(month: PanelMonth, scored: ScoredMonth) -> Formation:
+    """The path's inputs for one formation: the universe, its bands, closes, first bars and holding returns."""
+    return Formation(
+        formation=month.formation,
+        session=month.session,
+        universe=frozenset(scored.universe),
+        bands=scored.bands,
+        close=month.close,
+        first_bar=month.first_bar,
+        returns={name: month.admitted[name].holding for name in scored.universe},
+    )

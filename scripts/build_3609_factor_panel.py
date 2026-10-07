@@ -211,10 +211,9 @@ def holding_month(formation: date) -> str:
 # --------------------------------------------------------------------------- loads
 
 
-#: An admitted bar on a session: the ``total_return_reader`` month-end semantics (coverage row, quarantine
-#: verdict ``return_usable``, finite positive close and adj_close), restricted to the decision sessions.
-_DECISION_BARS_SQL = """
-SELECT d.series_id, d.bar_date, d.close
+#: An admitted bar: the ``total_return_reader`` month-end semantics (coverage row, quarantine verdict
+#: ``return_usable``, finite positive close and adj_close), up to the stage's price bound.
+_ADMITTED_BARS = """
 FROM research_price_daily d
 JOIN research_price_quarantine_coverage cov
   ON cov.series_id = d.series_id
@@ -225,12 +224,20 @@ LEFT JOIN research_bar_quarantine q
  AND q.bar_date = d.bar_date
  AND q.rule_set_version = %(quarantine_version)s
 WHERE d.series_id = ANY(%(series_ids)s::bigint[])
-  AND d.bar_date = ANY(%(sessions)s::date[])
   AND d.bar_date <= %(bound)s
   AND COALESCE(q.return_usable, TRUE)
   AND d.adj_close > 0 AND d.adj_close < 'Infinity'::numeric
   AND d.close > 0 AND d.close < 'Infinity'::numeric
 """
+#: Admitted bars on the decision sessions.
+_DECISION_BARS_SQL = (
+    "SELECT d.series_id, d.bar_date, d.close" + _ADMITTED_BARS + "  AND d.bar_date = ANY(%(sessions)s::date[])\n"
+)
+#: Each series' first admitted bar, with no lower bound (step 2 spec §"Source rules", archive seasoning): the
+#: 12-month daily window cannot supply it. A date only; a series with no admitted bar has no row.
+_FIRST_BARS_SQL = (
+    "SELECT d.series_id, min(d.bar_date)" + _ADMITTED_BARS + "GROUP BY d.series_id\nORDER BY d.series_id\n"
+)
 
 #: Every split stamp, quarantined bar or not (a split moves the raw close regardless), as
 #: ``total_return_reader.load_split_dates`` reads them, plus the factor.
@@ -270,6 +277,11 @@ def decision_bars(
         "quarantine_version": QUARANTINE_RULE_SET_VERSION,
     }
     return {(int(sid), day): close for sid, day, close in conn.execute(_DECISION_BARS_SQL, params).fetchall()}
+
+
+def first_bars(conn: psycopg.Connection[Any], series_ids: Sequence[int], bound: date) -> list[tuple[int, date]]:
+    params = {"series_ids": list(series_ids), "bound": bound, "quarantine_version": QUARANTINE_RULE_SET_VERSION}
+    return [(int(sid), day) for sid, day in conn.execute(_FIRST_BARS_SQL, params).fetchall()]
 
 
 def split_stamps(conn: psycopg.Connection[Any], series_ids: Sequence[int], bound: date) -> dict[int, list[SplitStamp]]:
@@ -385,6 +397,7 @@ class Frozen:
     SELECTION = "universe_selection.json"
     ADMITTED = "admitted.jsonl.gz"
     DECISION_BARS = "decision_bars.jsonl.gz"
+    FIRST_BARS = "first_bars.jsonl.gz"
     SPLITS = "split_stamps.jsonl.gz"
     DAILY = "daily.jsonl.gz"
     REFERENCE = "reference"
@@ -481,6 +494,7 @@ def dump_inputs(
     write_gz_lines(
         inputs / Frozen.DECISION_BARS, ([sid, day.isoformat(), str(bars[sid, day])] for sid, day in sorted(bars))
     )
+    write_gz_lines(inputs / Frozen.FIRST_BARS, ([sid, day.isoformat()] for sid, day in first_bars(conn, ids, bound)))
     write_gz_lines(
         inputs / Frozen.SPLITS,
         (
@@ -1386,6 +1400,34 @@ def verify_artefact(artefact: Path, manifest_sha256: str, pins: Mapping[str, str
     return read_verified_artefact(artefact, manifest_sha256, pins).manifest
 
 
+#: Step 2 spec §"Registration": the manifest fields a republished stage A may change; every other field is equal.
+REPUBLISH_MAY_DIFFER: Final = frozenset(
+    {"git_sha", "published_at", "spec_sha256", "construction_sources", "construction_versions"}
+)
+
+
+def check_republished(original: Mapping[str, Any], republished: Mapping[str, Any]) -> None:
+    """Step 2 spec §"Registration", replay identity: ``inputs`` gains exactly ``inputs/first_bars.jsonl.gz`` with
+    every other input unchanged; ``rows`` may differ only in ``sha256`` (the compressed bytes); every field outside
+    :data:`REPUBLISH_MAY_DIFFER` is equal. Both manifests must already have passed :func:`read_verified_artefact`."""
+    added = f"inputs/{Frozen.FIRST_BARS}"
+    if (
+        added in original["inputs"]
+        or {k: v for k, v in republished["inputs"].items() if k != added} != original["inputs"]
+    ):
+        raise PanelError(f"the republished inputs are not the original's plus {added}")
+    if added not in republished["inputs"]:
+        raise PanelError(f"the republished artefact has no {added}")
+    if {k: v for k, v in republished["rows"].items() if k != "sha256"} != {
+        k: v for k, v in original["rows"].items() if k != "sha256"
+    }:
+        raise PanelError("the republished rows differ in path, count or content")
+    fixed = (set(original) | set(republished)) - REPUBLISH_MAY_DIFFER - {"inputs", "rows"}
+    moved = sorted(k for k in fixed if original.get(k) != republished.get(k))
+    if moved:
+        raise PanelError(f"the republished manifest moved fields that must be equal: {moved}")
+
+
 def replay(artefact: Path, manifest_sha256: str, stem: Path) -> bool:
     """Rebuild a published stage-A artefact from its own ``inputs/`` under the current code; True when rows and
     census match. Stage A only: a stage-B artefact fails ``verify_artefact`` under stage A's pins, so no stage-B
@@ -1430,7 +1472,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--replay", type=Path, help="a published stage-A artefact to rebuild from its own inputs/")
     parser.add_argument("--replay-manifest-sha256", help="the replayed artefact's pinned manifest digest")
+    parser.add_argument(
+        "--check-republish",
+        nargs=4,
+        metavar=("ORIGINAL", "ORIGINAL_SHA256", "REPUBLISHED", "REPUBLISHED_SHA256"),
+        help="verify both stage-A artefacts and the step 2 replay identity between them",
+    )
     args = parser.parse_args(argv)
+    if args.check_republish is not None:
+        original, original_sha, republished, republished_sha = args.check_republish
+        check_republished(
+            verify_artefact(Path(original), original_sha), verify_artefact(Path(republished), republished_sha)
+        )
+        print(json.dumps({"republished": republished, "replay_identity": "pass"}, indent=1))
+        return 0
     if (args.replay is None) != (args.replay_manifest_sha256 is None):
         parser.error("--replay and --replay-manifest-sha256 go together")
     modes = [args.publish, args.replay is not None, args.publish_stage_b is not None]
