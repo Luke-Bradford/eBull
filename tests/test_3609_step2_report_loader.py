@@ -396,3 +396,25 @@ def test_a_scored_name_without_a_first_bar_refuses_rather_than_dropping_out(tmp_
     built = report.formation_inputs(month, report.score(month))
     with pytest.raises(ValueError, match="no first admitted bar"):
         _ = built.eligible
+
+
+@pytest.mark.parametrize("missing", ["inputs", "rows"])
+def test_a_republish_check_refuses_a_manifest_without_its_maps(missing: str) -> None:
+    broken = _manifest()
+    del broken[missing]
+    with pytest.raises(PanelError, match="without an inputs or rows map"):
+        builder.check_republished(broken, _republished())
+    with pytest.raises(PanelError, match="without an inputs or rows map"):
+        builder.check_republished(_manifest(), {k: v for k, v in _republished().items() if k != missing})
+
+
+def test_a_null_first_bar_date_reaches_the_date_parse(tmp_path: Path) -> None:
+    # ``[101, null]`` decodes to ``[101, None]``; ``date.fromisoformat(None)`` raises TypeError, re-raised as the
+    # loader's own refusal, so the "ISO date" match is this check and not an earlier failure.
+    write_gz_lines(tmp_path / "first.gz", [[101, None]])
+    write_gz_lines(tmp_path / "admitted.gz", [{"series_id": 101}])
+    with pytest.raises(report.ReportError, match="is not an ISO date: None") as caught:
+        report.read_first_bars(
+            (tmp_path / "first.gz").read_bytes(), (tmp_path / "admitted.gz").read_bytes(), date(2021, 5, 31)
+        )
+    assert isinstance(caught.value.__cause__, TypeError)

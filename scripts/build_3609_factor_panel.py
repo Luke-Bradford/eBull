@@ -1411,6 +1411,9 @@ def check_republished(original: Mapping[str, Any], republished: Mapping[str, Any
     every other input unchanged; ``rows`` may differ only in ``sha256`` (the compressed bytes); every field outside
     :data:`REPUBLISH_MAY_DIFFER` is equal. Both manifests must already have passed :func:`read_verified_artefact`."""
     added = f"inputs/{Frozen.FIRST_BARS}"
+    for manifest in (original, republished):
+        if not isinstance(manifest.get("inputs"), dict) or not isinstance(manifest.get("rows"), dict):
+            raise PanelError("a manifest without an inputs or rows map cannot be compared")
     if (
         added in original["inputs"]
         or {k: v for k, v in republished["inputs"].items() if k != added} != original["inputs"]
