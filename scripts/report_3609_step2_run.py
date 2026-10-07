@@ -21,11 +21,8 @@ This module is the report's entry point, so it is a construction-hash root
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import hashlib
-import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +40,7 @@ from app.services.factor_book_ledger import (
 )
 from app.services.factor_panel_fidelity import append_ledger, read_ledger
 from app.services.trial_register import TrialRegister
+from scripts.capture_3609_step2 import ledger_claim, write_exclusive
 from scripts.report_3609_step2_assembly import LABELS, SURVIVORSHIP, Report, payload
 
 REFUSED: Final = "REFUSED"
@@ -74,41 +72,6 @@ def refused_payload(refusal: BookRefusal) -> dict[str, Any]:
     }
 
 
-def _write_exclusive(path: Path, document: bytes) -> None:
-    """Create ``path`` (an existing file is refused, never overwritten), write and fsync it and its directory entry,
-    so a durable ``completed`` row never names a missing file. A file this call created is removed if any later
-    step fails."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("xb")  # one report per run id
-    try:
-        with handle:
-            handle.write(document)
-            handle.flush()
-            os.fsync(handle.fileno())
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-
-
-@contextlib.contextmanager
-def _report_claim(ledger: Path) -> Iterator[None]:
-    """An exclusive lock beside the run ledger, held from the ledger read through the ``report_started`` append, so
-    two concurrent reports of one run cannot both pass the gate. ``append_ledger`` locks the ledger file itself, so
-    this lock is a separate file."""
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    with (ledger.parent / f"{ledger.name}.report.lock").open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-
-
 def run_report(
     run_id: str,
     *,
@@ -130,7 +93,7 @@ def run_report(
     error, a defect) means the run has ended ``failed``. A ``REFUSED`` verdict from the evaluation is returned as
     the outcome, never raised."""
     hashes = current()
-    with _report_claim(ledger):
+    with ledger_claim(ledger, REPORT_STEP):
         committed = read_ledger(committed_ledger)
         rows = read_ledger(committed_ledger, ledger)
         _, binding = check_report_gate(register, committed, rows, run_id, hashes)
@@ -160,7 +123,7 @@ def run_report(
             raise DeclarationError(f"run {run_id}: the checkout's code hashes moved during the run")
         document = canonical_json({**body, "run": run_block})
         digest = hashlib.sha256(document).hexdigest()
-        _write_exclusive(out, document)
+        write_exclusive(out, document)
         written = True
         append_ledger(
             ledger,
