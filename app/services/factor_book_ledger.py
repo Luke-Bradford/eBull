@@ -145,18 +145,26 @@ class Binding:
     manifest_sha256: str
 
 
+def may_bind_trial(row: Mapping[str, Any]) -> bool:
+    """A ``data_frozen`` row that names this trial, or names none (missing, null, empty or not a string), which
+    could be this trial's: :func:`capture_binding` and a fresh capture both count it."""
+    trial = row.get("trial_id")
+    return not isinstance(trial, str) or trial in ("", TRIAL_ID)
+
+
 def capture_binding(committed: Sequence[Mapping[str, Any]]) -> Binding:
     """The single ``data_frozen`` row for the trial in the committed ledger at HEAD; ``CAPTURE_AMBIGUOUS`` otherwise.
 
     A ``data_frozen`` row that names no trial (none, null, empty or not a string) could belong to this one, so it
     refuses too."""
     frozen = [row for row in committed if row.get("event") == DATA_FROZEN_EVENT]
-    unnamed = [row for row in frozen if not isinstance(row.get("trial_id"), str) or not row["trial_id"]]
-    ours = [row for row in frozen if row.get("trial_id") == TRIAL_ID]
+    candidates = [row for row in frozen if may_bind_trial(row)]
+    ours = [row for row in candidates if row.get("trial_id") == TRIAL_ID]
+    unnamed = len(candidates) - len(ours)
     if unnamed or len(ours) != 1:
         raise BookRefusal(
             CAPTURE_AMBIGUOUS,
-            f"{len(ours)} committed {DATA_FROZEN_EVENT!r} rows for {TRIAL_ID} and {len(unnamed)} naming no trial; "
+            f"{len(ours)} committed {DATA_FROZEN_EVENT!r} rows for {TRIAL_ID} and {unnamed} naming no trial; "
             "exactly one for the trial is required",
         )
     run_id, digest = ours[0].get("run_id"), ours[0].get("manifest_sha256")
@@ -247,6 +255,7 @@ __all__ = [
     "capture_binding",
     "check_report_gate",
     "end_run_failed",
+    "may_bind_trial",
     "recorded_access_id",
     "report_started_row",
     "require_committed_access",

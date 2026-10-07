@@ -55,6 +55,7 @@ from app.services.factor_book_ledger import (
     StageBAccessError,
     capture_binding,
     end_run_failed,
+    may_bind_trial,
     recorded_access_id,
     require_committed_access,
     run_event,
@@ -236,7 +237,7 @@ def freeze_capture(
         bound = [row for row in read_ledger(committed_ledger) if row.get("event") == DATA_FROZEN_EVENT]
         # A row naming no trial counts as this trial's, as ``capture_binding`` counts it: it makes every report
         # refuse ``CAPTURE_AMBIGUOUS``, so a second capture beside it could never be bound either.
-        if any(not isinstance(row.get("trial_id"), str) or row["trial_id"] in ("", TRIAL_ID) for row in bound):
+        if any(may_bind_trial(row) for row in bound):
             raise StageBAccessError(f"the committed ledger already holds a {DATA_FROZEN_EVENT!r} row; reuse it")
         path = capture_path(run_id, root)
         if path.exists():
