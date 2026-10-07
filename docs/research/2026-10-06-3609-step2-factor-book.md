@@ -976,6 +976,8 @@ window's defined-month count for that metric.
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
 
+**Round 21 (156 resolved; no new finding; `ckpt1_round21_final.txt`).**
+
 **Amendment after round 19 (156, found while building slice 3c-iv; reviewed in round 20):**
 - **156:** archive seasoning named no frozen source, and neither artefact holds one (the daily window starts 12
   months before the first formation). The builder now freezes each admitted series' first admitted bar, and stage A
