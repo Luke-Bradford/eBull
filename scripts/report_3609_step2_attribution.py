@@ -245,9 +245,9 @@ def information(run: SeriesRun, arm: AmbiguityArm, window: Window) -> Informatio
         autocorrelation = value if math.isfinite(value) else None
     se_ratio = None
     if len(active) >= MIN_INFORMATION and not _constant(active):
-        iid, se = mean_errors(active)
-        if math.isfinite(se) and se > 0 and math.isfinite(iid):
-            se_ratio = se / math.sqrt(iid)
+        iid_var, se = mean_errors(active)
+        if math.isfinite(se) and se > 0 and math.isfinite(iid_var):
+            se_ratio = se / math.sqrt(iid_var)
     return Information(autocorrelation, se_ratio)
 
 
@@ -289,13 +289,13 @@ def diagnostics(
 __all__ = [
     "FLAG_NO_REFERENCE",
     "FLAG_OVERWEIGHT",
+    "MIN_INFORMATION",
     "OVERWEIGHT",
     "Attribution",
     "Diagnostics",
     "HighTurnover",
     "IndustryWeight",
     "Information",
-    "MIN_INFORMATION",
     "TurnoverMonths",
     "attribution",
     "average_weights",
