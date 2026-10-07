@@ -5,7 +5,7 @@ by a Track B screen when no realistic edge is powered on our data? See premise 2
 rounds 1–18 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 18 is
 applied; round 18's three wording fixes (153–155) have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
-Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
+Slices 1–2 and the scoring core of slice 3 are merged, tested on fixtures only. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
 inherits" (amended below), and reports against `docs/research/2026-10-04-3609-step0-baselines.md`.
 
