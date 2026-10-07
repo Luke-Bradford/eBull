@@ -32,10 +32,9 @@ from pathlib import Path
 from typing import Any, Final
 
 from app.services.factor_book import BookRefusal
-from app.services.factor_book_declaration import TRIAL_ID, CodeHashes, canonical_json
+from app.services.factor_book_declaration import TRIAL_ID, CodeHashes, DeclarationError, canonical_json
 from app.services.factor_book_ledger import (
     COMMITTED_LEDGER_PATH,
-    DECLARATION_MISMATCH,
     LEDGER_PATH,
     Binding,
     check_report_gate,
@@ -150,9 +149,10 @@ def run_report(
         }
         if "run" in body:
             raise ValueError("the report payload already holds a 'run' block")
-        # The gate checked the hashes before evaluation; code edited on disk during it ends the run.
+        # The gate checked the hashes before evaluation; code edited on disk during it ends the run ``failed``. Not
+        # a ``BookRefusal``, which a caller reads as a ``REFUSED`` verdict.
         if current() != hashes:
-            raise BookRefusal(DECLARATION_MISMATCH, f"run {run_id}: the checkout's code hashes moved during the run")
+            raise DeclarationError(f"run {run_id}: the checkout's code hashes moved during the run")
         document = canonical_json({**body, "run": run_block})
         digest = hashlib.sha256(document).hexdigest()
         _write_exclusive(out, document)

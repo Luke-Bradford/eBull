@@ -19,7 +19,7 @@ import pytest
 import scripts.report_3609_step2_run as run_module
 from app.services import factor_book
 from app.services.factor_book import BookRefusal
-from app.services.factor_book_declaration import TRIAL_ID, CodeHashes, payload_sha256
+from app.services.factor_book_declaration import TRIAL_ID, CodeHashes, DeclarationError, payload_sha256
 from app.services.factor_book_ledger import (
     CAPTURE_AMBIGUOUS,
     COMMITTED_LEDGER_PATH,
@@ -329,7 +329,7 @@ def test_a_payload_holding_its_own_run_block_fails_rather_than_being_overwritten
 def test_code_that_moves_during_the_evaluation_ends_the_run_failed(tmp_path: Path) -> None:
     ledgers = _Ledgers(tmp_path, COMMITTED)
     taken = iter([HASHES, dataclasses.replace(HASHES, construction_sha256="9" * 64)])
-    with pytest.raises(BookRefusal, match=f"{DECLARATION_MISMATCH}.*moved during the run"):
+    with pytest.raises(DeclarationError, match="moved during the run"):
         ledgers.run(lambda _: _Report(_Verdict("PASS", None)), current=lambda: next(taken))
     assert [row["event"] for row in ledgers.events()] == ["report_started", "failed"]
     assert not ledgers.out.exists()
