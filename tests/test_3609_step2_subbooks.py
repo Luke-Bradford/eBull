@@ -4,6 +4,7 @@ by the real ``value_path`` (no corpus, no stage B)."""
 from __future__ import annotations
 
 import math
+import random
 from collections.abc import Mapping, Sequence
 from datetime import date
 
@@ -12,23 +13,31 @@ import pytest
 from app.services.factor_book_path import (
     Decision,
     HoldingReturn,
+    Month,
     PathResult,
     TradeCategory,
     month_of,
+    next_month,
     value_path,
 )
-from app.services.factor_book_series import SeriesRun
+from app.services.factor_book_references import B1Path
+from app.services.factor_book_series import ARMS, Scenario, SeriesRun
 from app.services.factor_panel_prices import HoldingStatus
 from app.services.strategy_result import AmbiguityArm
+from scripts.report_3609_baselines import FACTOR_REGRESSORS, newey_west_lag
 from scripts.report_3609_step2_subbooks import (
     THIN_NAMES,
     MonthStatus,
     all_sub_books,
+    all_window_metrics,
     band_at,
     net_return,
     sub_book_month,
     sub_books,
+    window_trades,
+    windows_of,
 )
+from scripts.report_3609_step2_verdict import BASE, GROSS
 
 ARM: AmbiguityArm = "worst_case"
 LOW, MID = "$5-20", "$20-100"
@@ -222,3 +231,118 @@ def test_every_scenario_of_the_books_path_gets_its_arms_sub_books() -> None:
     books = all_sub_books(decisions, run)
     assert list(books) == [(ARM, "gross"), (ARM, "net")]
     assert books[(ARM, "net")] == sub_books(decisions, net, ARM)
+
+
+# --------------------------------------------------------------------------- per window
+
+
+def _months(first: Month, last: Month) -> list[Month]:
+    out = [first]
+    while out[-1] < last:
+        out.append(next_month(out[-1]))
+    return out
+
+
+HELD = _months((2014, 10), (2024, 8))
+FORMATIONS = [date(y, m, 28) for y, m in [(2014, 9), *HELD[:-1]]]
+#: Six $50 names (1..6), five $10 names (7..11), two $150 names (12, 13): the last band is thin every month.
+CLOSE = {n: 50.0 for n in range(1, 7)} | {n: 10.0 for n in range(7, 12)} | {12: 150.0, 13: 150.0}
+
+
+def _long_decisions() -> list[Decision]:
+    rng = random.Random(3609)
+    return [
+        Decision(
+            formation,
+            tuple(CLOSE),
+            {},
+            CLOSE,
+            {n: HoldingReturn(HoldingStatus.OBSERVED, dict.fromkeys(ARMS, rng.gauss(0.01, 0.05))) for n in CLOSE},
+        )
+        for formation in FORMATIONS
+    ]
+
+
+def _factors(months: Sequence[Month]) -> dict[str, dict[Month, float]]:
+    rng = random.Random(7)
+    return {name: {m: rng.gauss(0.0, 0.03) for m in months} for name in (*FACTOR_REGRESSORS, "RF")}
+
+
+def _long_run(decisions: Sequence[Decision]) -> SeriesRun:
+    book: dict[Scenario, PathResult] = {
+        (arm, cost): value_path(decisions, arm=arm, cost_multiplier=multiplier)
+        for arm in ARMS
+        for cost, multiplier in ((GROSS, 0.0), (BASE, 1.0))
+    }
+    b1 = B1Path({m: 0.008 for m in HELD}, MID, 0.0, 0.0)
+    return SeriesRun(tuple(HELD), book, {}, {}, {}, {BASE: b1}, (), ())
+
+
+def test_windows_are_stage_a_stage_b_and_pooled_over_holding_months() -> None:
+    windows = windows_of(_long_run(_long_decisions()))
+    assert [(w.label, w.months[0], w.months[-1]) for w in windows] == [
+        ("stage A", (2014, 10), (2021, 5)),
+        ("stage B", (2021, 6), (2024, 8)),
+        ("pooled", (2014, 10), (2024, 8)),
+    ]
+
+
+def test_window_trades_split_the_formations_so_the_stages_sum_to_pooled() -> None:
+    decisions = _long_decisions()
+    run = _long_run(decisions)
+    books = all_sub_books(decisions, run)
+    a, b, pooled = (window_trades(books[(ARMS[0], BASE)][MID].trades, w, HELD[-1]) for w in windows_of(run))
+    for field in ("notional", "cost", "excluded"):
+        assert getattr(a, field) + getattr(b, field) == pytest.approx(getattr(pooled, field))
+    # Stage B holds the liquidation and not the initial purchase; stage A the reverse.
+    path = run.book[(ARMS[0], BASE)]
+    first = math.fsum(t.notional for t in path.trades if t.month == (2014, 9) and t.name <= 6)
+    last = math.fsum(t.notional for t in path.trades if t.category is TradeCategory.FINAL_LIQUIDATION and t.name <= 6)
+    assert a.excluded == pytest.approx(first) and b.excluded == pytest.approx(last)
+    # Annual turnover: the band's turnover summed over the window's formations, per year of months.
+    band = books[(ARMS[0], BASE)][MID].trades.turnover
+    assert b.turnover_per_yr == pytest.approx(
+        math.fsum(v for m, v in band.items() if (2021, 5) <= m <= (2024, 7)) / (39 / 12)
+    )
+
+
+def test_a_thin_band_is_undefined_in_every_window_and_its_trades_still_print() -> None:
+    decisions = _long_decisions()
+    run = _long_run(decisions)
+    metrics = all_window_metrics(decisions, run, _factors(HELD))
+    thin = metrics[ARMS[0]][">=$100"]["stage B"]
+    assert thin.undefined == "(2021, 6): thin (2 names)"
+    assert (thin.stats, thin.regression, thin.summary, thin.insufficient) == ({}, None, None, False)
+    assert thin.trades.cost > 0
+
+
+def test_a_computable_window_prints_step_0s_metrics_g1_and_n_eff() -> None:
+    decisions = _long_decisions()
+    run = _long_run(decisions)
+    books = all_sub_books(decisions, run)
+    metrics = all_window_metrics(decisions, run, _factors(HELD))
+    arm = ARMS[0]
+    window = metrics[arm][MID]["pooled"]
+    net = [books[(arm, BASE)][MID].months[m].net for m in HELD]
+    assert window.undefined is None
+    g = 12 / len(HELD) * math.fsum(math.log1p(r) for r in net if r is not None)
+    assert window.stats["ann_net_g"] == pytest.approx(g) and window.stats["ann_net"] == pytest.approx(math.expm1(g))
+    assert window.stats["active_vs_b1"] == pytest.approx(
+        12 * (math.fsum(r for r in net if r is not None) / 119 - 0.008)
+    )
+    assert window.stats["cost_drag"] is not None and window.stats["cost_drag"] > 0
+    assert window.regression is not None and window.regression.refusal is None and window.regression.lag == 4
+    assert window.summary is not None and window.summary.defined == 119 and window.summary.n_eff is not None
+    assert window.insufficient == (window.summary.n_eff < 24)
+    stage_b = metrics[arm][MID]["stage B"]
+    assert stage_b.regression is not None and stage_b.regression.lag == newey_west_lag(39)
+
+
+def test_a_g1_refusal_leaves_the_window_computed_with_its_regression_undefined() -> None:
+    decisions = _long_decisions()
+    run = _long_run(decisions)
+    factors = _factors(HELD[:-1])  # 2024-08 missing
+    window = all_window_metrics(decisions, run, factors)[ARMS[0]][LOW]["stage B"]
+    assert window.undefined is None and window.stats["ann_net"] is not None
+    assert window.regression is not None and window.regression.refusal is not None
+    assert window.regression.refusal.startswith("missing_factor_month")
