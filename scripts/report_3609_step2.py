@@ -72,6 +72,8 @@ class PanelName:
     #: JKP-signed values of the book characteristics present.
     signed: Mapping[str, float]
     holding: HoldingReturn
+    #: The SUB SIC behind ``industry``; ``None`` for an ``UNCLASSIFIED`` name (premise 3's SIC 6221 count).
+    sic: int | None
 
 
 @dataclass(frozen=True)
@@ -158,7 +160,9 @@ def admitted_name(row: Mapping[str, Any], ff12: Ff12Map, signs: Mapping[str, int
         for c in CHARACTERISTICS
         if characteristics[c]["value"] is not None
     }
-    return PanelName(row["series_id"], me, industry_of(row, ff12), signed, holding_of(row))
+    industry = industry_of(row, ff12)
+    sic = None if row["sic_status"] in UNCLASSIFIED_STATUSES else row["sic"]
+    return PanelName(row["series_id"], me, industry, signed, holding_of(row), sic)
 
 
 def read_panel(verified: VerifiedArtefact, ff12: Ff12Map) -> list[PanelMonth]:
