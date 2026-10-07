@@ -151,6 +151,11 @@ def test_the_industry_block_partitions_the_universe_and_ignores_outside_names() 
     assert mixed is not None and abs(mixed) < 1.0
 
 
+def test_a_segment_month_whose_maps_disagree_is_a_contract_error() -> None:
+    with pytest.raises(ValueError, match="same names"):
+        SegmentMonth(M1, {}, {1: (HIGH, UNIVERSE_CELL)}, {1: "Manuf"}, {})
+
+
 def test_segments_cover_every_cell_industry_arm_and_signal() -> None:
     months = [_segment(M1, CELLS, INDUSTRY, SIGN), _segment(M2, CELLS, INDUSTRY, SIGN)]
     held: tuple[Month, ...] = ((2020, 2), (2020, 3))

@@ -61,6 +61,10 @@ class SegmentMonth:
     industry: Mapping[int, str]
     returns: Mapping[int, HoldingReturn]
 
+    def __post_init__(self) -> None:
+        if not (self.cells.keys() == self.industry.keys() == self.returns.keys()):
+            raise ValueError(f"{self.formation}: cells, industries and returns must cover the same names")
+
     @property
     def price_unavailable(self) -> int:
         return sum(1 for band, _ in self.cells.values() if band == PRICE_UNAVAILABLE)
@@ -76,7 +80,10 @@ def segment_month(month: PanelMonth, universe: Sequence[int], book_scores: Score
         c: {n: month.admitted[n].signed[c] for n in outside if c in month.admitted[n].signed} for c in CHARACTERISTICS
     }
     industry = {name: panel.industry for name, panel in month.admitted.items()}
-    scores = {UNIVERSE_CELL: book_scores, OUTSIDE_CELL: composite_scores(outside, industry, signed)}
+    scores = {
+        UNIVERSE_CELL: book_scores,
+        OUTSIDE_CELL: composite_scores(outside, {n: industry[n] for n in outside}, signed),
+    }
     cells = {
         name: (band_of(month.close.get(name)), UNIVERSE_CELL if name in inside else OUTSIDE_CELL)
         for name in month.admitted
@@ -108,7 +115,7 @@ def cell_monthly(months: Sequence[SegmentMonth], cell: Cell, signal: str, arm: A
 @dataclass(frozen=True)
 class IndustryIc:
     #: Per holding month: the IC (``None`` where undefined) and the population size.
-    ic: Mapping[Month, float | None]
+    monthly: Mapping[Month, float | None]
     names: Mapping[Month, int]
     #: Per window label.
     summaries: Mapping[str, SeriesSummary]
