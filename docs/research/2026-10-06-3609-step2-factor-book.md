@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–16 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 16 is
-applied; round 16's one fix (151, a field list) has not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–18 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 18 is
+applied; round 18's three wording fixes (153–155) have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -542,8 +542,9 @@ committed to `docs/research/3609-ledger.jsonl`, in this order:
    construction hash, register-policy hash, Python version as `"major.minor"` (the `evidence` form, e.g. `"3.14"`),
    payload hash, register version and command. The three hashes and the Python version are the values compared at
    `report_started`. The other fields are provenance and are not compared with `started`: the report re-checks the
-   payload hash against the `declared` row directly, and its own HEAD necessarily differs from this one, since the
-   capture's ledger merges first. Written before anything below.
+   payload hash against the `declared` row directly, and neither equality nor inequality of the two HEADs is
+   required (a capturing attempt's differ, since its ledger merges first; a reusing attempt's may coincide).
+   Written before anything below.
 2. `access_recorded`: one `record_holdout_access` row with `strategy_id="3609-step2-book"`, `strategy_version="v1"`,
    `access_kind="evaluate"`, `result_version` = the run id, `accessed_by` = the operator or loop identity running it,
    and `purpose="#3609 step 2 declared run <run id>"`. It commits in its own transaction before step 3, and the
@@ -741,8 +742,9 @@ window's defined-month count for that metric.
      or the one it reuses (`CAPTURE_AMBIGUOUS` otherwise). That row is then the earliest, so it is the binding, and a
      row merged after the report cannot change which capture the report used. Before reading any evaluation input,
      the report repeats every freeze check at that HEAD: the `declared` payload hash, and the spec, construction and
-     register-policy hashes and Python version against the row's `evidence`. It also requires each to equal the
-     value the attempt's own `started` row recorded, and refuses any mismatch. So code changed between the capture
+     register-policy hashes and Python version against the row's `evidence`. It also requires the spec,
+     construction and register-policy hashes and the Python version to equal the values the attempt's own `started`
+     row recorded, and refuses any mismatch. So code changed between the capture
      and the report cannot evaluate under the same run id. Only then does it write `report_started` (ledger step 5)
      with that HEAD.
    - **Reuse.** A later attempt under this declaration writes `capture_reused` (the capturing run id and its
@@ -950,6 +952,12 @@ window's defined-month count for that metric.
 - **145:** the committed ledger on `main` binds the capture: `data_frozen` rows are merged before any report, the
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
+
+**Round 18 (152 resolved; 3 new, 153–155; `ckpt1_round18_final.txt`), all applied:**
+- **153:** the two HEADs are provenance either way: a capturing attempt's differ, a reusing attempt's may coincide.
+- **154:** the report's comparison with `started` names its four values explicitly; the payload hash is checked
+  against `declared` only.
+- **155:** the opening status matches this log.
 
 **Round 17 (151 resolved; 1 new, 152; `ckpt1_round17_final.txt`), applied:**
 - **152:** HEAD is provenance, never re-compared. The capture's ledger merges before the report, so a capturing
