@@ -432,8 +432,8 @@ __all__ = [
     "check_closes",
     "eligible_to_enter",
     "exit_reasons",
-    "still_held",
     "month_of",
     "next_month",
+    "still_held",
     "value_path",
 ]

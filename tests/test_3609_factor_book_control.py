@@ -100,7 +100,7 @@ def test_the_control_force_sells_its_own_holdings_below_five_dollars() -> None:
     second = _formation(2, order, close=dict.fromkeys(held, 4.0))
     both = [first, second]
     control = control_decisions(both, book_decisions(both), 0).decisions[1]
-    assert {n: c for n, c in control.sales.items()} == dict.fromkeys(held, TradeCategory.FORCED_EXIT)
+    assert control.sales == dict.fromkeys(held, TradeCategory.FORCED_EXIT)
     assert not set(held) & set(control.targets)  # sold names are not re-bought at the same formation
 
 
