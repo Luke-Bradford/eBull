@@ -45,7 +45,8 @@ from scripts.report_3609_baselines import FACTOR_REGRESSORS, nearest_rank, ols_n
 #: §"Dates, samples and the hold-out": stage B's holding months, and its formations (the path's turnover keys).
 STAGE_B: Final[tuple[Month, Month]] = ((2021, 6), (2024, 8))
 STAGE_B_FORMATIONS: Final[tuple[Month, Month]] = ((2021, 5), (2024, 7))
-#: Step 0's cost scenario names (``COSTS``): the base case and the stress.
+#: Step 0's cost scenario names (``COSTS``): zero cost, the base case and the stress.
+GROSS: Final = "gross"
 BASE: Final = "net"
 STRESS: Final = "stress_2x"
 #: G1's intended loadings: HML for value, RMW for GP/A, CMA for investment.
@@ -258,6 +259,7 @@ __all__ = [
     "BASE",
     "G1_CRITICAL",
     "G1_LOADINGS",
+    "GROSS",
     "STAGE_B",
     "STAGE_B_FORMATIONS",
     "STRESS",
