@@ -177,6 +177,14 @@ at 58%. That transfer is exactly what gates G1 and G2 test.
   months listed" exclusion (Loughran & Ritter 1995): no effective-dated listing history exists here, archive
   coverage need not start at listing, and a ticker change that starts a new series reads as young. It applies at
   entry only; a held series' age only grows.
+  - **Source.** The series' first admitted bar is the earliest bar of that series admitted under the builder's
+    decision-bar predicates (`_DECISION_BARS_SQL`: a quarantine-coverage row, `return_usable`, finite positive close
+    and adj_close), with no lower date bound and at or before the stage's price bound. The builder freezes it per
+    admitted series as `inputs/first_bars.jsonl.gz`, read in the same repeatable-read snapshot as the other inputs.
+    It is a date only; no price is frozen with it. Neither the 12-month daily window (`daily_start`) nor the
+    decision bars can supply it: seasoning at 2014-09-30 needs a bar on or before 2011-09-30.
+  - Every admitted name at M has a decision bar at s(M), so it has a first admitted bar. A universe name with a
+    composite and no entry in the file refuses the run (`eligible_to_enter`).
 
 **Exceptions to the skills, stated:**
 Each exception below makes this a **reference construction**, not the forward one. Step 3's forward construction
@@ -469,7 +477,10 @@ moves to step 3's claiming forward declaration, whose planned data include the f
    - this spec's sha256;
    - the construction-version hash (step 1's mechanism: the report, the builder and every imported module except
      `trial_register.py`, which is left out to avoid hashing the row that holds the hash);
-   - the stage-A artefact manifest sha256, `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`;
+   - the stage-A artefact manifest sha256: that of stage A republished with `inputs/first_bars.jsonl.gz` (slice 3),
+     replacing `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`. The republished artefact's
+     `rows.content_sha256` and `census.sha256` must equal that artefact's, and its `inputs` must equal that
+     artefact's plus the one new file; otherwise slice 3 stops;
    - step 0's run manifest sha256;
    - the FF-12 map, QMJ PDF and Table 9 CSV sha256s;
    - for each of step 0's two factor snapshots, its `response_sha256` and its observation digest (below);
@@ -718,6 +729,9 @@ window's defined-month count for that metric.
    refusal tests §"Registration" lists. Tests use fixtures.
 3. **The report** (`scripts/report_3609_step2.py`): scores, book, control, references, gates, diagnostics and the
    ledger. Fixture tests only, each revert-probed. Codex checkpoint 2.
+   - **The first-bar input** (§"Source rules", archive seasoning): the builder freezes `inputs/first_bars.jsonl.gz`
+     for both stages, and stage A is republished with it under the replay identity in §"Registration". Premise 3's
+     table is re-run on the republished artefact and must reproduce.
 4. **Declaration:** the `DeclaredTrial` row and register bump, the committed `declared` ledger row, and the two
    factor-snapshot digests from the integrity-only read, merged on `main`.
 5. **Declared run,** from clean `main`, in the ledger's order:
@@ -952,6 +966,12 @@ window's defined-month count for that metric.
 - **145:** the committed ledger on `main` binds the capture: `data_frozen` rows are merged before any report, the
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
+
+**Amendment after round 19 (156, found while building slice 3c-iv; reviewed in round 20):**
+- **156:** archive seasoning named no frozen source, and neither artefact holds one (the daily window starts 12
+  months before the first formation). The builder now freezes each admitted series' first admitted bar, and stage A
+  is republished with it under a replay identity (rows, census and existing inputs unchanged); the declaration pins
+  the republished manifest.
 
 **Round 19 (153–155 resolved; no new finding; `ckpt1_round19_final.txt`).** Only the evidence-bar findings remain open.
 
