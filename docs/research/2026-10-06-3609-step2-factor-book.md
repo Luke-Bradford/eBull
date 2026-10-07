@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–18 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 18 is
-applied; round 18's three wording fixes (153–155) have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–19 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding is applied, and round
+19 resolved the last three with no new finding. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Slices 1–2 and the scoring core of slice 3 are merged, tested on fixtures only. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -952,6 +952,8 @@ window's defined-month count for that metric.
 - **145:** the committed ledger on `main` binds the capture: `data_frozen` rows are merged before any report, the
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
+
+**Round 19 (153–155 resolved; no new finding; `ckpt1_round19_final.txt`).** Only the evidence-bar findings remain open.
 
 **Round 18 (152 resolved; 3 new, 153–155; `ckpt1_round18_final.txt`), all applied:**
 - **153:** the two HEADs are provenance either way: a capturing attempt's differ, a reusing attempt's may coincide.
