@@ -142,6 +142,13 @@ class Decision:
     #: Every reason that held for each sale, primary first (the rest are printed flags); empty for the control's
     #: count adjustments.
     reasons: Mapping[int, tuple[ExitReason, ...]] = field(default_factory=dict)
+    #: Target weight per target name; ``None`` is equal weight (the book and the control).
+    weights: Mapping[int, float] | None = None
+
+    def share(self, amount: float, name: int) -> float:
+        """``name``'s target slice of ``amount``. Equal weight divides (``amount / n``, the book's arithmetic since
+        slice 3b); ``amount * (1 / n)`` can differ by an ulp."""
+        return amount / len(self.targets) if self.weights is None else amount * self.weights[name]
 
     @property
     def discretionary(self) -> int:
@@ -299,6 +306,19 @@ def _half_spread(close: float) -> tuple[str, float]:
     return band.label, float(band.half_spread)
 
 
+#: Float weights such as ME / ΣME sum to 1 only to rounding; this bound catches an unnormalised map, nothing finer.
+_WEIGHT_SUM_TOLERANCE: Final = 1e-9
+
+
+def _valid_weights(decision: Decision) -> bool:
+    weights = decision.weights or {}
+    return (
+        weights.keys() == set(decision.targets)
+        and all(math.isfinite(w) and w > 0 for w in weights.values())
+        and abs(math.fsum(weights.values()) - 1.0) <= _WEIGHT_SUM_TOLERANCE
+    )
+
+
 def value_path(
     decisions: Sequence[Decision],
     *,
@@ -322,6 +342,8 @@ def value_path(
         month = month_of(decision.formation)
         if index and month != next_month(month_of(decisions[index - 1].formation)):
             raise ValueError(f"formations must be consecutive months: {decisions[index - 1].formation} → {month}")
+        if decision.weights is not None and not _valid_weights(decision):
+            raise ValueError(f"{decision.formation}: weights must be finite, positive, cover the targets and sum to 1")
         unvalued = [n for n in decision.targets if n not in decision.returns or arm not in decision.returns[n].by_arm]
         if unvalued:
             raise ValueError(f"{decision.formation}: {len(unvalued)} targets have no {arm} return: {unvalued[:5]}")
@@ -342,20 +364,19 @@ def value_path(
         stray = sorted((positions.keys() - set(decision.targets)) ^ decision.sales.keys())
         if stray:
             raise ValueError(f"{decision.formation}: sales must be exactly the holdings not kept: {stray[:5]}")
-        target = pre / len(decision.targets) if decision.targets else 0.0
         trades: list[tuple[int, TradeCategory, float, float]] = []  # (name, category, notional, half-spread)
         bands: dict[int, tuple[str, float]] = {}
         for name, position in sorted(positions.items()):
             if name in decision.sales:
                 trades.append((name, decision.sales[name], position.value, position.half_spread))
-            elif delta := target - position.value:
+            elif delta := decision.share(pre, name) - position.value:
                 category = TradeCategory.REBALANCE_ADD if delta > 0 else TradeCategory.REBALANCE_TRIM
                 trades.append((name, category, abs(delta), position.half_spread))
         for name in decision.targets:
             if name not in positions:
                 bands[name] = _half_spread(decision.close[name])
                 category = TradeCategory.INITIAL_PURCHASE if index == 0 else TradeCategory.ENTRY
-                trades.append((name, category, target, bands[name][1]))
+                trades.append((name, category, decision.share(pre, name), bands[name][1]))
         cost = 0.0
         for name, category, notional, half in trades:
             charged = notional * half * cost_multiplier
@@ -373,11 +394,10 @@ def value_path(
         if index:  # the initial purchase is charged in the first return month, over the pre-cost 1.0
             previous = post
         result.holdings[month] = len(decision.targets)
-        weight = post / len(decision.targets) if decision.targets else 0.0
         positions = {
-            name: replace(positions[name], value=weight)
+            name: replace(positions[name], value=decision.share(post, name))
             if name in positions
-            else Position(name, weight, decision.formation, *bands[name])
+            else Position(name, decision.share(post, name), decision.formation, *bands[name])
             for name in decision.targets
         }
         cash = 0.0 if decision.targets else post
