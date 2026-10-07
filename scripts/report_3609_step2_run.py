@@ -7,8 +7,9 @@ canonical JSON, labels) and §"Slices" (capture lifecycle, "The report's ledger 
    the binding, the attempt's own rows and every freeze re-check. A refusal here writes no row, as the builder's and
    the SUB publisher's gates write none: nothing has been read.
 2. **``report_started``**, with the report's HEAD and the binding.
-3. **The evaluation** of the bound capture. Loading and pin-checking its inputs against the data-capture manifest is
-   slice 5's, which defines that manifest's format, so the caller passes it as ``evaluate_run``.
+3. **The evaluation** of the bound capture under the gate's declared trial (:func:`evaluate_run`, passed in so
+   tests can stand in for it): every input verified against the declaration's pins and the binding, then
+   :func:`~scripts.report_3609_step2_assembly.evaluate`.
 4. **The output file** (canonical JSON, created exclusively), then the terminal row naming its sha256, and only then
    is anything printed. A ``REFUSED`` verdict (a :class:`~app.services.factor_book.BookRefusal` from the
    evaluation) is a decision-rule outcome, so it ends ``completed`` with its reason code and the refusal payload.
@@ -22,12 +23,16 @@ This module is the report's entry point, so it is a construction-hash root
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+import itertools
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Final
 
+import psycopg
+
+from app.config import settings
 from app.services.factor_book import BookRefusal
 from app.services.factor_book_declaration import TRIAL_ID, CodeHashes, DeclarationError, canonical_json
 from app.services.factor_book_ledger import (
@@ -38,10 +43,24 @@ from app.services.factor_book_ledger import (
     end_run_failed,
     report_started_row,
 )
+from app.services.factor_book_reference import load_ff12
 from app.services.factor_panel_fidelity import append_ledger, read_ledger
-from app.services.trial_register import TrialRegister
-from scripts.capture_3609_step2 import ledger_claim, write_exclusive
-from scripts.report_3609_step2_assembly import LABELS, SURVIVORSHIP, Report, payload
+from app.services.trial_register import DeclaredTrial, TrialRegister
+from scripts.build_3609_factor_panel import read_verified_artefact
+from scripts.capture_3609_step2 import CAPTURE_ROOT, capture_path, ledger_claim, verify_capture, write_exclusive
+from scripts.report_3609_baselines import COSTS
+from scripts.report_3609_step2 import CONSUMED_INPUTS, STAGE_A_ARTEFACT, PanelMonth, ReportError, read_panel
+from scripts.report_3609_step2_assembly import LABELS, SURVIVORSHIP, Report, evaluate, payload
+from scripts.report_3609_step2_inputs import (
+    B1_CLOSE_SESSION,
+    STEP0_RUN,
+    declared_b1_close,
+    declared_pins,
+    read_factors,
+    read_step0,
+    require_table9,
+)
+from scripts.report_3609_step2_universe import NYSE_CUTOFFS, read_cutoffs
 
 REFUSED: Final = "REFUSED"
 OUTPUT_ROOT: Final = LEDGER_PATH.parent
@@ -72,12 +91,72 @@ def refused_payload(refusal: BookRefusal) -> dict[str, Any]:
     }
 
 
+def stage_cutoffs(stages: Sequence[tuple[Sequence[PanelMonth], Mapping[date, float]]]) -> dict[date, float]:
+    """Each formation's NYSE cutoff from its own stage's frozen snapshot (#3666 item 21), keyed by formation as
+    :func:`evaluate` reads it. A date both snapshots publish must agree (``CUTOFF_INVALID``)."""
+    for (_, first), (_, second) in itertools.combinations(stages, 2):
+        differ = sorted(day for day in first.keys() & second.keys() if first[day] != second[day])
+        if differ:
+            raise BookRefusal("CUTOFF_INVALID", f"the stages' frozen cutoffs differ at {differ[:3]}")
+    return {m.formation: cutoffs[m.formation] for panel, cutoffs in stages for m in panel if m.formation in cutoffs}
+
+
+def _connect() -> psycopg.Connection[Any]:
+    return psycopg.connect(settings.database_url)
+
+
+def evaluate_run(
+    trial: DeclaredTrial,
+    binding: Binding,
+    *,
+    connect: Callable[[], psycopg.Connection[Any]] = _connect,
+    stage_a: Path = STAGE_A_ARTEFACT,
+    capture_root: Path = CAPTURE_ROOT,
+    step0_run: Path = STEP0_RUN,
+) -> Report:
+    """Step 3 of the module docstring: every evaluation input, verified against the declaration's pins and the
+    binding immediately before use and parsed from the bytes hashed, then :func:`evaluate`.
+
+    Stage A is the pinned artefact, stage B the bound capture's (each panel artefact's Table 9 the declared one);
+    step 0's B1 path and factor snapshot ids come from its declared manifest, and the factor and RF data from those
+    snapshots against their declared digests. A pin mismatch raises (a ``PanelError`` or ``ReportError``), so the run
+    ends ``failed``; a data refusal is a :class:`BookRefusal`."""
+    pins = declared_pins(trial.evidence)
+    b1_close = declared_b1_close(trial.evidence)
+    keep = (*CONSUMED_INPUTS, NYSE_CUTOFFS)
+    stages = (
+        read_verified_artefact(stage_a, pins.stage_a_manifest_sha256, keep=keep),
+        verify_capture(capture_path(binding.capturing_run_id, capture_root), binding.manifest_sha256, keep).stage_b,
+    )
+    for verified in stages:
+        require_table9(verified, pins.table9_sha256)
+    ff12 = load_ff12()
+    panels = [read_panel(verified, ff12) for verified in stages]
+    first = panels[0][0].session if panels[0] else None
+    if first != B1_CLOSE_SESSION:
+        raise ReportError(f"stage A's first session is {first}, B1's declared close is at {B1_CLOSE_SESSION}")
+    cutoffs = stage_cutoffs(
+        [(panel, read_cutoffs(v.files[NYSE_CUTOFFS])) for panel, v in zip(panels, stages, strict=True)]
+    )
+    step0 = read_step0(pins.step0_manifest_sha256, step0_run)
+    with connect() as conn:
+        factors = read_factors(conn, step0.factor_snapshots, pins.snapshots)
+    return evaluate(
+        [month for panel in panels for month in panel],
+        factors=factors,
+        cutoffs=cutoffs,
+        b1_saved=step0.b1_saved,
+        b1_close=b1_close,
+        costs=COSTS,
+    )
+
+
 def run_report(
     run_id: str,
     *,
     head: str,
     register: TrialRegister,
-    evaluate_run: Callable[[Binding], Report],
+    evaluate_run: Callable[[DeclaredTrial, Binding], Report],
     out_dir: Path = OUTPUT_ROOT,
     ledger: Path = LEDGER_PATH,
     committed_ledger: Path = COMMITTED_LEDGER_PATH,
@@ -96,13 +175,13 @@ def run_report(
     with ledger_claim(ledger, REPORT_STEP):
         committed = read_ledger(committed_ledger)
         rows = read_ledger(committed_ledger, ledger)
-        _, binding = check_report_gate(register, committed, rows, run_id, hashes)
+        trial, binding = check_report_gate(register, committed, rows, run_id, hashes)
         append_ledger(ledger, report_started_row(run_id, head, binding))
     out = out_dir / f"{run_id}-report.json"
     written = False
     try:
         try:
-            report = evaluate_run(binding)
+            report = evaluate_run(trial, binding)
         except BookRefusal as refusal:
             body, status, reason = refused_payload(refusal), REFUSED, refusal.code
         else:
@@ -148,4 +227,13 @@ def run_report(
     return ReportOutcome(status=status, reason=reason, path=out, sha256=digest)
 
 
-__all__ = ["OUTPUT_ROOT", "REFUSED", "REPORT_STEP", "ReportOutcome", "refused_payload", "run_report"]
+__all__ = [
+    "OUTPUT_ROOT",
+    "REFUSED",
+    "REPORT_STEP",
+    "ReportOutcome",
+    "evaluate_run",
+    "refused_payload",
+    "run_report",
+    "stage_cutoffs",
+]
