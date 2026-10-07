@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–14 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 14 is
-applied; round 14's fixes have not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–15 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 15 is
+applied; round 15's one fix has not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -735,8 +735,12 @@ window's defined-month count for that metric.
    - **The report's ledger revision.** The report runs from a clean checkout whose HEAD equals `origin/main` after a
      fetch, and requires exactly one `data_frozen` row for this trial in the committed ledger at HEAD, its own run's
      or the one it reuses (`CAPTURE_AMBIGUOUS` otherwise). That row is then the earliest, so it is the binding, and a
-     row merged after the report cannot change which capture the report used. The report writes `report_started`
-     (ledger step 5) with that HEAD.
+     row merged after the report cannot change which capture the report used. Before reading any evaluation input,
+     the report repeats every freeze check at that HEAD: the `declared` payload hash, and the spec, construction and
+     register-policy hashes and Python version against the row's `evidence`. It also requires each to equal the
+     value the attempt's own `started` row recorded, and refuses any mismatch. So code changed between the capture
+     and the report cannot evaluate under the same run id. Only then does it write `report_started` (ledger step 5)
+     with that HEAD.
    - **Reuse.** A later attempt under this declaration writes `capture_reused` (the capturing run id and its
      `data_frozen` sha256) in place of `sub_published`, `stage_b_published` and `data_frozen`. It verifies both
      artefacts against that row and never publishes or rebuilds them.
@@ -942,6 +946,10 @@ window's defined-month count for that metric.
 - **145:** the committed ledger on `main` binds the capture: `data_frozen` rows are merged before any report, the
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
+
+**Round 15 (145, 148 and 149 resolved; 1 new, 150; `ckpt1_round15_final.txt`), applied:**
+- **150:** the report repeats every freeze check at its own HEAD and requires agreement with both the declaration
+  and the attempt's `started` row before reading evaluation inputs.
 
 **Round 14 (146 and 147 resolved; 145 carried; 2 new, 148–149; `ckpt1_round14_final.txt`), all applied:**
 - **145:** PR checks can be stale (branch protection is not strict), so the binding no longer relies on merge
