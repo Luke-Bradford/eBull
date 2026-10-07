@@ -2,8 +2,8 @@
 
 Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
 by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–15 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 15 is
-applied; round 15's one fix has not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
+rounds 1–16 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding through round 16 is
+applied; round 16's one fix (151, a field list) has not yet been re-reviewed. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
 operator answers; §"Decision rule" is provisional until then.
 Nothing is built. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -538,7 +538,9 @@ declared one, which fixes `random.Random` string seeding and `json` serialisatio
 
 **Ledger: one parent run record from the first stage-B step.** Written to `var/research/3609_step2/ledger.jsonl` and
 committed to `docs/research/3609-ledger.jsonl`, in this order:
-1. `started`: run id (a fresh `uuid4` hex for every attempt, so a retry is a new run), spec hash, construction hash, register version, payload hash, command. Written before
+1. `started`: run id (a fresh `uuid4` hex for every attempt, so a retry is a new run), HEAD commit, spec hash,
+   construction hash, register-policy hash, Python version as `"major.minor"` (the `evidence` form, e.g. `"3.14"`),
+   payload hash, register version and command. Each checked value is the one compared at `report_started`. Written before
    anything below.
 2. `access_recorded`: one `record_holdout_access` row with `strategy_id="3609-step2-book"`, `strategy_version="v1"`,
    `access_kind="evaluate"`, `result_version` = the run id, `accessed_by` = the operator or loop identity running it,
@@ -946,6 +948,10 @@ window's defined-month count for that metric.
 - **145:** the committed ledger on `main` binds the capture: `data_frozen` rows are merged before any report, the
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
+
+**Round 16 (150 resolved; 1 new, 151; `ckpt1_round16_final.txt`), applied:**
+- **151:** `started`'s field list now names every value the report re-compares: HEAD, the spec, construction and
+  register-policy hashes, and the Python version as `"major.minor"`.
 
 **Round 15 (145, 148 and 149 resolved; 1 new, 150; `ckpt1_round15_final.txt`), applied:**
 - **150:** the report repeats every freeze check at its own HEAD and requires agreement with both the declaration
