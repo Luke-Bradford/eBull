@@ -40,14 +40,15 @@ def test_the_equal_weight_reference_holds_the_whole_universe_and_force_sells_lea
 
 
 def test_the_cap_weighted_reference_weights_by_me_and_rebalances_on_its_own_turnover() -> None:
-    formations = [_formation(1, [1, 2], {1: 0.10, 2: -0.10}), _formation(2, [1, 2])]
-    me = [{1: 3.0, 2: 1.0}, {1: 1.0, 2: 1.0}]
+    formations = [_formation(1, [1, 2], {1: 0.10, 2: -0.10}), _formation(2, [1, 2], {1: 0.20, 2: 0.0})]
+    me = [{1: 3.0, 2: 1.0}, {1: 1.0, 2: 3.0}]
     decisions = reference_decisions(formations, me)
     assert decisions[0].weights == {1: 0.75, 2: 0.25}
     path = value_path(decisions, arm="best_case", cost_multiplier=0.0)
     assert path.returns[(2015, 2)] == pytest.approx(0.75 * 0.10 + 0.25 * -0.10, abs=1e-15)
-    # Month-2 NAV 1.05 holds 0.825 / 0.225; the 50/50 targets are 0.525 each.
-    assert path.turnover[(2015, 2)] == pytest.approx((0.3 + 0.3) / 2 / 1.05, abs=1e-15)
+    # Month-2 NAV 1.05 holds 0.825 / 0.225; the 25/75 targets are 0.2625 / 0.7875.
+    assert path.turnover[(2015, 2)] == pytest.approx((0.5625 + 0.5625) / 2 / 1.05, abs=1e-15)
+    assert path.returns[(2015, 3)] == pytest.approx(0.25 * 0.20, abs=1e-15)
 
 
 @pytest.mark.parametrize("bad", [None, 0.0, float("nan")])
