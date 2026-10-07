@@ -145,13 +145,19 @@ class Step0:
 
 def read_step0(manifest_sha256: str, run: Path = STEP0_RUN) -> Step0:
     """Step 0's manifest against the declared sha256, then its ``paths.json`` against the manifest; each read once.
-    A file that verifies but lacks a field the report reads refuses as a mismatch does."""
-    manifest = json.loads(_read_once(run / STEP0_MANIFEST, manifest_sha256, "step 0 manifest"))
+    A file that verifies but does not parse, or lacks a field the report reads, refuses as a mismatch does."""
+    manifest_bytes = _read_once(run / STEP0_MANIFEST, manifest_sha256, "step 0 manifest")
     try:
-        paths = json.loads(_read_once(run / STEP0_PATHS, manifest["sha256"]["paths"], "step 0 paths.json"))
+        manifest = json.loads(manifest_bytes)
+        paths_sha256 = manifest["sha256"]["paths"]
+        if not isinstance(paths_sha256, str):
+            raise TypeError(f"sha256.paths is a {type(paths_sha256).__name__}")
+        paths = json.loads(_read_once(run / STEP0_PATHS, paths_sha256, "step 0 paths.json"))
         snapshots, b1 = dict(manifest["factor_snapshots"]), paths[B1_KEY]
     except (KeyError, TypeError, ValueError) as exc:
-        raise ReportError(f"step 0's manifest or paths.json lacks a field the report reads: {exc!r}") from exc
+        raise ReportError(
+            f"step 0's manifest or paths.json does not parse into the fields the report reads: {exc!r}"
+        ) from exc
     if sorted(snapshots) != list(_DATASETS):
         raise ReportError(f"step 0 pins factor snapshots for {sorted(snapshots)}, expected {list(_DATASETS)}")
     if any(type(i) is not int or i <= 0 for i in snapshots.values()):

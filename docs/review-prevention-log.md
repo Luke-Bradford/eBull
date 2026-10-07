@@ -12287,8 +12287,9 @@ neighbouring container and match it.**
     and never restored them, so a later transaction on that connection would silently run repeatable-read and
     read-only.
 - Prevention:
-  - A matching hash proves the bytes, not their shape: wrap each field read from a verified external file so a
-    missing or mistyped field raises the domain error.
+  - A matching hash proves the bytes, not their shape: wrap the parse (`json.loads`) and each field read from a
+    verified external file in one `try`, so a file that does not parse, or a missing or mistyped field, raises the
+    domain error (round 2 caught the manifest's own `json.loads` left outside it).
   - A function that sets a passed-in connection's isolation or read-only flag saves both, and restores them in a
     `finally` after its transaction.
 - Enforced in: `tests/test_3609_step2_report_inputs.py::test_a_verified_manifest_missing_a_field_refuses_as_a_report_error`

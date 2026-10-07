@@ -118,8 +118,15 @@ def test_read_step0_refuses_other_factor_snapshots(tmp_path: Path, snapshots: ob
 
 @pytest.mark.parametrize("drop", ["sha256", "factor_snapshots"])
 def test_a_verified_manifest_missing_a_field_refuses_as_a_report_error(tmp_path: Path, drop: str) -> None:
-    with pytest.raises(ReportError, match="lacks a field"):
+    with pytest.raises(ReportError, match="does not parse"):
         inputs.read_step0(_step0(tmp_path, drop=drop), tmp_path)
+
+
+@pytest.mark.parametrize("document", [b"not json", b"[1, 2]", b'{"sha256": {"paths": 7}, "factor_snapshots": {}}'])
+def test_a_verified_manifest_that_does_not_parse_refuses_as_a_report_error(tmp_path: Path, document: bytes) -> None:
+    (tmp_path / inputs.STEP0_MANIFEST).write_bytes(document)
+    with pytest.raises(ReportError, match="does not parse"):
+        inputs.read_step0(hashlib.sha256(document).hexdigest(), tmp_path)
 
 
 def test_a_paths_file_without_an_object_b1_refuses(tmp_path: Path) -> None:
