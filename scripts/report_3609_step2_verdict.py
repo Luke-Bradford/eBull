@@ -178,11 +178,14 @@ def g2(
 
 
 def stage_b_months(months: Sequence[Month]) -> list[Month]:
-    """Stage B's months of the run, which must hold all of them."""
+    """Stage B's months of the run, which must hold each of them exactly once."""
     first, last = STAGE_B
+    expected: list[Month] = [first]
+    while expected[-1] < last:
+        expected.append(next_month(expected[-1]))
     window = [m for m in months if first <= m <= last]
-    if not window or window[0] != first or window[-1] != last:
-        raise ValueError(f"the run's months do not cover stage B {first}..{last}")
+    if window != expected:
+        raise ValueError(f"the run's months do not cover stage B {first}..{last} once each, in order")
     return window
 
 
@@ -230,6 +233,9 @@ class Verdict:
 def verdict(run: SeriesRun, factors: Mapping[str, Mapping[Month, float]]) -> Verdict:
     """§"Decision rule", verdict order steps 2-6; step 1 (``REFUSED``) was raised by ``run_series`` or is raised
     here (``COMPARATOR_INVALID`` from a G)."""
+    # A caller-contract precondition, not a gate: a run that does not span the declared path (stage B included) is
+    # not the declared run, so it gets no verdict at all. Checking it after the INSUFFICIENT return would label such
+    # a run (say, stage A alone) INSUFFICIENT, a verdict on a run that was never the declared one.
     window = stage_b_months(run.months)
     if run.insufficient:
         return Verdict("INSUFFICIENT", insufficient=run.insufficient)
@@ -259,10 +265,10 @@ __all__ = [
     "G1Result",
     "G2Result",
     "Verdict",
-    "pass_annotations",
     "g1",
     "g2",
     "log_growth",
+    "pass_annotations",
     "stage_b_months",
     "stage_b_returns",
     "turnover_exceedances",

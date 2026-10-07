@@ -179,6 +179,10 @@ def test_stage_b_is_2021_06_to_2024_08() -> None:
     assert stage_b_months(MONTHS) == STAGE_B and len(STAGE_B) == 39
     with pytest.raises(ValueError, match="do not cover stage B"):
         stage_b_months(MONTHS[:-1])
+    with pytest.raises(ValueError, match="do not cover stage B"):
+        stage_b_months([m for m in MONTHS if m != (2022, 3)])  # an interior gap
+    with pytest.raises(ValueError, match="do not cover stage B"):
+        stage_b_months([*MONTHS, (2022, 3)])  # a repeat
 
 
 def test_a_strong_book_passes_with_no_annotation() -> None:
@@ -191,6 +195,15 @@ def test_insufficient_comes_before_g1() -> None:
     bad = {c: {**_loaded(GOOD), (2019, 1): math.nan} for c in COSTS}
     result = verdict(_run(bad, insufficient=(date(2016, 3, 31),)), FACTORS)
     assert result.status == "INSUFFICIENT" and result.insufficient == (date(2016, 3, 31),)
+
+
+def test_a_run_short_of_the_declared_window_gets_no_verdict_even_if_insufficient() -> None:
+    run = _run(insufficient=(date(2016, 3, 31),))
+    short = SeriesRun(
+        run.months[:80], run.book, run.equal_weight, run.cap_weighted, run.control, run.b1, run.pools, run.insufficient
+    )
+    with pytest.raises(ValueError, match="do not cover stage B"):
+        verdict(short, FACTORS)
 
 
 def test_g1_refused_stops_before_g2() -> None:
