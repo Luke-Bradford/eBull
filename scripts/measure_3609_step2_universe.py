@@ -16,7 +16,7 @@ Per formation month, and as min/max over the stage-A grid, it prints:
   member has a value), and names with SIC 6221 (commodity contracts, the SIC commodity pools file under).
 
 Refuses an artefact whose manifest digest is not the pinned stage-A artefact, whose frozen inputs or published
-rows fail ``verify_artefact``, whose months are not the 80-month grid, which repeats a (M, name_key) pair or a
+rows fail ``read_verified_artefact``, whose months are not the 80-month grid, which repeats a (M, name_key) pair or a
 cutoff month, whose cutoff grid is incomplete, which carries a non-finite or non-positive ME, cutoff or ME sum,
 which has no name above the cutoff in a month, or which admits fewer than 1,000 names in a month.
 
@@ -26,6 +26,7 @@ Usage: ``uv run python -m scripts.measure_3609_step2_universe [artefact_dir]``
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import math
 import sys
@@ -33,13 +34,14 @@ from collections import defaultdict
 from pathlib import Path
 
 from app.services.factor_panel import formation_months
-from scripts.build_3609_factor_panel import verify_artefact
+from scripts.build_3609_factor_panel import read_verified_artefact
 
 DEFAULT_ARTEFACT = (
-    Path.home() / "Library/Application Support/eBull/research/factor_panel_3609/2026-10-06-483ac6ae-stageA"
+    Path.home() / "Library/Application Support/eBull/research/factor_panel_3609/2026-10-07-0e8dba6e-stageA"
 )
+CUTOFFS = "inputs/reference_snapshot_jkp_nyse_cutoffs.jsonl.gz"
 # sha256 of the stage-A artefact's manifest.json, as the step-2 spec's freeze evidence lists it.
-STAGE_A_MANIFEST_SHA256 = "ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e"
+STAGE_A_MANIFEST_SHA256 = "e50872104f77d4db4d16a41dd9b953bf064fa92704516c9813940b60ae8ec115"
 BOOK_UNIVERSE_SIZE = 1000
 FAMILIES = (("gp_at",), ("be_me", "ni_me", "ocf_me"), ("at_gr1",))
 COMMODITY_SIC = 6221
@@ -61,12 +63,14 @@ def _finite_positive(value: float | str, what: str) -> float:
 
 
 def main(artefact: Path) -> None:
-    manifest = verify_artefact(artefact, STAGE_A_MANIFEST_SHA256)
+    # Read once (spec finding 149): the cutoffs and rows are parsed from the bytes the check hashed.
+    verified = read_verified_artefact(artefact, STAGE_A_MANIFEST_SHA256, keep=[CUTOFFS])
+    manifest = verified.manifest
     if manifest.get("stage") != "A":
         raise MeasureError(f"{artefact} is not a stage-A artefact")
     grid = [m.isoformat() for m in formation_months()]
     cutoffs: dict[str, float] = {}
-    with gzip.open(artefact / "inputs/reference_snapshot_jkp_nyse_cutoffs.jsonl.gz", "rt") as f:
+    with gzip.open(io.BytesIO(verified.files[CUTOFFS]), "rt") as f:
         for line in f:
             key, month, value = json.loads(line)[:3]
             if key == "nyse_p50":
@@ -80,7 +84,7 @@ def main(artefact: Path) -> None:
         raise MeasureError(f"nyse_p50 cutoff missing for {len(missing)} grid months, first {missing[0]}")
     by_month: dict[str, list[tuple[float, int, int, int | None]]] = defaultdict(list)
     seen: set[tuple[str, int]] = set()
-    with gzip.open(artefact / "rows.jsonl.gz", "rt") as f:
+    with gzip.open(io.BytesIO(verified.rows), "rt") as f:
         for line in f:
             row = json.loads(line)
             pair = (row["M"], row["name_key"])

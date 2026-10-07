@@ -483,8 +483,10 @@ moves to step 3's claiming forward declaration, whose planned data include the f
    - this spec's sha256;
    - the construction-version hash (step 1's mechanism: the report, the builder and every imported module except
      `trial_register.py`, which is left out to avoid hashing the row that holds the hash);
-   - the stage-A artefact manifest sha256: that of stage A republished with `inputs/first_bars.jsonl.gz` (slice 3),
-     replacing `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`. **Replay identity:** the
+   - the stage-A artefact manifest sha256, `e50872104f77d4db4d16a41dd9b953bf064fa92704516c9813940b60ae8ec115`
+     (`2026-10-07-0e8dba6e-stageA`): stage A republished from `main` at `0e8dba6e` with
+     `inputs/first_bars.jsonl.gz` (slice 3), replacing `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`.
+     `--check-republish` passed, and premise 3's table reproduced unchanged under `read_verified_artefact`. **Replay identity:** the
      republished manifest's `inputs` must equal that artefact's plus the one key `inputs/first_bars.jsonl.gz`;
      `schema`, `stage`, `pinned_manifests`, `formations`, `rule_versions`, `rows.path`, `rows.count`,
      `rows.content_sha256` and `census` must be equal. Only `git_sha`, `published_at`, `spec_sha256`,
