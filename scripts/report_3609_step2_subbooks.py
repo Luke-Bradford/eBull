@@ -277,7 +277,9 @@ class WindowTrades:
 
 def window_trades(trades: BandTrades, window: Window, liquidation: Month) -> WindowTrades:
     """``liquidation`` is the final liquidation's month (the path's last holding month); it counts only in a window
-    that holds it. Realisations count by their holding month."""
+    that holds it. Realisations count by their holding month. A window with no months is a caller error."""
+    if not window.months:
+        raise ValueError(f"window {window.label!r} has no months")
     held = set(window.months)
     keys = {_previous(m) for m in window.months} | ({liquidation} & held)
 
@@ -380,8 +382,9 @@ def window_metrics(
 
 
 def windows_of(run: SeriesRun) -> tuple[Window, ...]:
-    """Stage A, stage B and pooled over the sub-books' holding months (the run's return months)."""
-    return tuple(Window(w.label, w.months, w.months) for w in stage_windows(run))
+    """Stage A, stage B and pooled over the sub-books' holding months (the run's return months). A run that starts
+    at stage B has no stage-A months, and an empty window has nothing to print, so it is left out."""
+    return tuple(Window(w.label, w.months, w.months) for w in stage_windows(run) if w.months)
 
 
 def all_window_metrics(

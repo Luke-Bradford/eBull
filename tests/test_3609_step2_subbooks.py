@@ -25,6 +25,7 @@ from app.services.factor_book_series import ARMS, Scenario, SeriesRun
 from app.services.factor_panel_prices import HoldingStatus
 from app.services.strategy_result import AmbiguityArm
 from scripts.report_3609_baselines import FACTOR_REGRESSORS, newey_west_lag
+from scripts.report_3609_step2_operations import Window
 from scripts.report_3609_step2_subbooks import (
     THIN_NAMES,
     MonthStatus,
@@ -346,3 +347,19 @@ def test_a_g1_refusal_leaves_the_window_computed_with_its_regression_undefined()
     assert window.undefined is None and window.stats["ann_net"] is not None
     assert window.regression is not None and window.regression.refusal is not None
     assert window.regression.refusal.startswith("missing_factor_month")
+
+
+def test_a_run_starting_at_stage_b_has_no_stage_a_window_and_an_empty_window_refuses() -> None:
+    decisions = [d for d in _long_decisions() if d.formation >= date(2021, 5, 1)]
+    book: dict[Scenario, PathResult] = {
+        (arm, cost): value_path(decisions, arm=arm, cost_multiplier=multiplier)
+        for arm in ARMS
+        for cost, multiplier in ((GROSS, 0.0), (BASE, 1.0))
+    }
+    months = tuple(m for m in HELD if m >= (2021, 6))
+    run = SeriesRun(months, book, {}, {}, {}, {BASE: B1Path(dict.fromkeys(months, 0.008), MID, 0.0, 0.0)}, (), ())
+    assert [w.label for w in windows_of(run)] == ["stage B", "pooled"]
+    metrics = all_window_metrics(decisions, run, _factors(months))
+    assert list(metrics[ARMS[0]][MID]) == ["stage B", "pooled"]
+    with pytest.raises(ValueError, match="no months"):
+        window_trades(all_sub_books(decisions, run)[(ARMS[0], BASE)][MID].trades, Window("stage A", (), ()), months[-1])
