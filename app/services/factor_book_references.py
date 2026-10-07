@@ -119,7 +119,9 @@ def b1_path(
     band, half = entry_band(close)
     charge = half * cost_multiplier
     returns = {m: by_month[m][0] for m in window}
+    # Wealth just before the sale: the entry charge, then every month's uncharged return.
     before_sale = (1.0 - charge) * math.prod(1.0 + r for r in returns.values())
+    # Two trades, two charges. When first == last, that one month carries both: entry, then sale.
     returns[first] = (1.0 - charge) * (1.0 + returns[first]) - 1.0
     returns[last] = (1.0 + returns[last]) * (1.0 - charge) - 1.0
     return B1Path(returns, band, charge, before_sale * charge)
