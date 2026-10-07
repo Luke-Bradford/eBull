@@ -15,7 +15,7 @@ the families were chosen on stage A. The Newey–West rule is step 0's (``report
 * **Summaries per window,** on the defined months: mean, standard deviation (ddof 1) and a Newey–West t on the mean;
   IC-IR (mean / deviation, monthly) for IC only. All undefined below 12 defined months; IC-IR undefined at zero
   deviation; the t undefined when any month in the window is undefined or its standard error is not finite and
-  positive, which a zero deviation implies.
+  positive, which a constant series (every value equal) implies.
 * **n_eff** = n × (iid variance of the mean) / (Newey–West variance of the mean), capped at n. The iid variance is
   the same estimator at lag 0 (Σe² / n²), so a series with no autocovariance has n_eff = n. It is undefined when the
   t is, and a summary whose n_eff is below ``MIN_EFFECTIVE`` or undefined is marked insufficient. It captures
@@ -157,11 +157,14 @@ def summarise(series: Mapping[Month, float | None], window: Window, *, ic_ir: bo
     n = len(defined)
     if n < MIN_MONTHS:
         return SeriesSummary(n)
-    mean = float(defined.mean())
-    std = float(defined.std(ddof=1))
+    # A constant series is tested by equality, never by a float deviation: the float mean of equal values can miss
+    # them by an ulp and leave a ~1e-17 deviation (docs/review-prevention-log.md, the #2394 ``ptp`` entry).
+    constant = bool(np.ptp(defined) == 0.0)
+    mean = float(defined[0]) if constant else float(defined.mean())
+    std = 0.0 if constant else float(defined.std(ddof=1))
     ratio = mean / std if ic_ir and std > 0 else None
     t = n_eff = None
-    if n == len(values) and std > 0:  # at zero deviation the error is zero; float residuals would not say so
+    if n == len(values) and std > 0:
         fit = ols_newey_west(defined, np.empty((n, 0)))
         se = float(fit.standard_errors[0])
         if math.isfinite(se) and se > 0:

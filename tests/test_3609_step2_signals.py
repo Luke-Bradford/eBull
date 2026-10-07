@@ -13,7 +13,7 @@ from app.services.factor_book import COMPOSITE, Bands, Exact, Scores, compare
 from app.services.factor_book_path import Formation, HoldingReturn, Month, next_month
 from app.services.factor_book_series import ARMS
 from app.services.factor_panel_prices import HoldingStatus
-from scripts.report_3609_baselines import ols_newey_west
+from scripts.report_3609_baselines import newey_west_lag
 from scripts.report_3609_step2_operations import Window
 from scripts.report_3609_step2_signals import (
     MIN_EFFECTIVE,
@@ -139,8 +139,14 @@ def test_the_t_is_step_0s_newey_west_and_n_eff_is_capped_at_n() -> None:
     w = _window(40)
     alternating = {m: (0.02 if i % 2 else -0.01) for i, m in enumerate(w.months)}
     out = summarise(alternating, w, ic_ir=False)
-    y = np.array(list(alternating.values()))
-    assert out.t == pytest.approx(float(ols_newey_west(y, np.empty((40, 0))).t_stats[0]))
+    # By hand: Bartlett-weighted autocovariances of the demeaned series at step 0's lag, over n².
+    y = list(alternating.values())
+    e = [v - sum(y) / 40 for v in y]
+    lag = newey_west_lag(40)
+    meat = sum(x * x for x in e) + 2 * sum(
+        (1 - k / (lag + 1)) * sum(e[i] * e[i - k] for i in range(k, 40)) for k in range(1, lag + 1)
+    )
+    assert out.t == pytest.approx((sum(y) / 40) / math.sqrt(meat / 40**2))
     assert out.ic_ir is None  # the spread prints no ratio
     assert out.n_eff == 40.0  # negative autocovariance would push it above n
     assert not out.insufficient
@@ -154,10 +160,13 @@ def test_n_eff_shrinks_under_positive_autocorrelation_and_marks_insufficient() -
     assert out.insufficient
 
 
-def test_a_constant_series_has_no_ratio_t_or_n_eff() -> None:
-    w = _window(24)
-    out = summarise(dict.fromkeys(w.months, 0.03), w, ic_ir=True)
-    assert out.mean == pytest.approx(0.03) and out.std == 0.0
+@pytest.mark.parametrize(("value", "n"), [(0.1, 12), (0.1, 15), (0.1, 37)])
+def test_a_constant_series_has_no_ratio_t_or_n_eff(value: float, n: int) -> None:
+    # The fixture's float deviation is not zero, so a std-based guard would print a t of ~1e16 here.
+    assert float(np.std(np.full(n, value), ddof=1)) != 0.0
+    w = _window(n)
+    out = summarise(dict.fromkeys(w.months, value), w, ic_ir=True)
+    assert out.mean == value and out.std == 0.0
     assert out.ic_ir is None and out.t is None and out.n_eff is None
 
 
