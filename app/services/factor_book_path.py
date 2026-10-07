@@ -22,6 +22,7 @@ last holding month carries the final liquidation, which is charged but excluded 
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -119,6 +120,15 @@ class Formation:
     #: The holding-month return of every universe name.
     returns: Mapping[int, HoldingReturn]
 
+    @functools.cached_property
+    def scored(self) -> frozenset[int]:
+        """The names with a composite."""
+        return frozenset(self.bands.order)
+
+    @functools.cached_property
+    def eligible(self) -> frozenset[int]:
+        return eligible_to_enter(self)
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -146,7 +156,7 @@ class BookDecisions:
     insufficient: tuple[date, ...]
 
 
-def _check_closes(formation: Formation, held: frozenset[int]) -> None:
+def check_closes(formation: Formation, held: frozenset[int]) -> None:
     """§"The book" step 3: every universe name and every holding needs a finite, positive raw close at s(M)."""
     bad = sorted(
         name
@@ -159,6 +169,44 @@ def _check_closes(formation: Formation, held: frozenset[int]) -> None:
         )
 
 
+def exit_reasons(formation: Formation, name: int) -> tuple[ExitReason, ...]:
+    """Every §"The book" step 5 reason that holds for a holding at ``formation``, in test order."""
+    return tuple(
+        reason
+        for reason, holds in (
+            (ExitReason.LEFT_UNIVERSE, name not in formation.universe),
+            (ExitReason.LOST_COMPOSITE, name not in formation.scored),
+            (ExitReason.BELOW_PRICE_FLOOR, formation.close[name] < PRICE_FLOOR),
+            (ExitReason.LEFT_TERCILE, name not in formation.bands.tercile),
+        )
+        if holds
+    )
+
+
+def eligible_to_enter(formation: Formation) -> frozenset[int]:
+    """§"The book" step 3: universe names with a composite, raw close >= $5 and archive seasoning."""
+    missing = sorted(name for name in formation.bands.order if name not in formation.first_bar)
+    if missing:
+        raise ValueError(
+            f"{formation.formation}: {len(missing)} scored names have no first admitted bar: {missing[:5]}"
+        )
+    return frozenset(
+        name
+        for name in formation.bands.order
+        if name in formation.universe
+        and formation.close[name] >= PRICE_FLOOR
+        and archive_seasoned(formation.first_bar[name], formation.session)
+    )
+
+
+def still_held(formation: Formation, targets: Sequence[int]) -> frozenset[int]:
+    """The targets that are holdings at the next formation: those whose holding month ended ``observed``."""
+    missing = [name for name in targets if name not in formation.returns]
+    if missing:
+        raise ValueError(f"{formation.formation}: {len(missing)} holdings have no holding-month return: {missing[:5]}")
+    return frozenset(name for name in targets if formation.returns[name].status is HoldingStatus.OBSERVED)
+
+
 def book_decisions(formations: Sequence[Formation]) -> BookDecisions:
     """§"The book" step 5 at each formation, from an all-cash start.
 
@@ -168,34 +216,10 @@ def book_decisions(formations: Sequence[Formation]) -> BookDecisions:
     decisions: list[Decision] = []
     insufficient: list[date] = []
     for formation in formations:
-        _check_closes(formation, held)
-        composite = frozenset(formation.bands.order)
-        reasons: dict[int, tuple[ExitReason, ...]] = {}
-        for name in sorted(held):
-            found = [
-                reason
-                for reason, holds in (
-                    (ExitReason.LEFT_UNIVERSE, name not in formation.universe),
-                    (ExitReason.LOST_COMPOSITE, name not in composite),
-                    (ExitReason.BELOW_PRICE_FLOOR, formation.close[name] < PRICE_FLOOR),
-                    (ExitReason.LEFT_TERCILE, name not in formation.bands.tercile),
-                )
-                if holds
-            ]
-            if found:
-                reasons[name] = tuple(found)
-        entrants = set()
-        for name in formation.bands.decile - held:
-            if name not in formation.first_bar:
-                raise ValueError(f"{formation.formation}: decile name {name} has no first admitted bar")
-            if formation.close[name] >= PRICE_FLOOR and archive_seasoned(formation.first_bar[name], formation.session):
-                entrants.add(name)
+        check_closes(formation, held)
+        reasons = {name: found for name in sorted(held) if (found := exit_reasons(formation, name))}
+        entrants = (formation.bands.decile & formation.eligible) - held
         targets = tuple(sorted((held - reasons.keys()) | entrants))
-        missing = [name for name in targets if name not in formation.returns]
-        if missing:
-            raise ValueError(
-                f"{formation.formation}: {len(missing)} holdings have no holding-month return: {missing[:5]}"
-            )
         if len(targets) < MIN_HOLDINGS:
             insufficient.append(formation.formation)
         sales = {
@@ -203,7 +227,7 @@ def book_decisions(formations: Sequence[Formation]) -> BookDecisions:
             for name, found in reasons.items()
         }
         decisions.append(Decision(formation.formation, targets, sales, formation.close, formation.returns, reasons))
-        held = frozenset(name for name in targets if formation.returns[name].status is HoldingStatus.OBSERVED)
+        held = still_held(formation, targets)
     return BookDecisions(tuple(decisions), tuple(insufficient))
 
 
@@ -405,7 +429,11 @@ __all__ = [
     "TradeCategory",
     "archive_seasoned",
     "book_decisions",
+    "check_closes",
+    "eligible_to_enter",
+    "exit_reasons",
     "month_of",
     "next_month",
+    "still_held",
     "value_path",
 ]
