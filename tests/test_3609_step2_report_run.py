@@ -6,8 +6,10 @@ Fixtures only: nothing here reads stage-B data or the database.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import json
+import os
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -106,6 +108,8 @@ def test_the_capturing_attempt_and_a_reusing_attempt_bind_the_one_committed_capt
         pytest.param([DECLARED, *_capture()[:-1]], [_frozen()], id="capture-only-in-the-local-ledger"),
         pytest.param([*COMMITTED, _frozen("d" * 32, "e" * 64)], [], id="a-second-committed-capture"),
         pytest.param([*COMMITTED, {k: v for k, v in _frozen().items() if k != "trial_id"}], [], id="an-unnamed-row"),
+        pytest.param([*COMMITTED, _frozen("d" * 32, trial_id=None)], [], id="a-null-trial"),
+        pytest.param([*COMMITTED, _frozen("d" * 32, trial_id="")], [], id="an-empty-trial"),
         pytest.param([DECLARED, *_capture()[:-1], _frozen(digest="")], [], id="a-row-without-its-sha256"),
     ],
 )
@@ -324,3 +328,45 @@ def test_a_real_report_round_trips_through_the_output_file(tmp_path: Path, monke
     body = json.loads(outcome.path.read_bytes())
     assert (outcome.status, body["verdict"]["status"]) == (report.verdict.status, report.verdict.status)
     assert {"path", "operations", "construction", "labels"} <= set(body)
+
+
+@pytest.mark.usefixtures("stub_payload")
+def test_the_gate_and_report_started_run_under_one_exclusive_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two concurrent reports of one run cannot both pass the gate: the claim is held from the read to the append."""
+    ledgers = _Ledgers(tmp_path, COMMITTED)
+    held: list[bool] = []
+    real_gate = run_module.check_report_gate
+
+    def gate(*args: Any) -> Any:
+        with (tmp_path / "local.jsonl.report.lock").open("a") as other:
+            try:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(True)
+            else:
+                fcntl.flock(other, fcntl.LOCK_UN)
+                held.append(False)
+        return real_gate(*args)
+
+    monkeypatch.setattr(run_module, "check_report_gate", gate)
+    ledgers.run(lambda _: _Report(_Verdict("PASS", None)))
+    assert held == [True]
+
+
+@pytest.mark.usefixtures("stub_payload")
+def test_an_output_whose_write_fails_after_creation_is_removed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ledgers = _Ledgers(tmp_path, COMMITTED)
+    real_open = os.open
+
+    def open_(path: Any, flags: int, *args: Any) -> int:
+        if Path(path) == ledgers.out:  # the directory fsync, after the file was created and written
+            raise OSError("directory fsync failed")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(run_module.os, "open", open_)
+    with pytest.raises(OSError, match="directory fsync"):
+        ledgers.run(lambda _: _Report(_Verdict("PASS", None)))
+    assert list(ledgers.out.iterdir()) == []
+    assert [row["event"] for row in ledgers.events()] == ["report_started", "failed"]

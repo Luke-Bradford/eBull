@@ -20,9 +20,11 @@ This module is the report's entry point, so it is a construction-hash root
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,11 +74,38 @@ def refused_payload(refusal: BookRefusal) -> dict[str, Any]:
 
 
 def _write_exclusive(path: Path, document: bytes) -> None:
+    """Create ``path`` (an existing file is refused, never overwritten), write and fsync it and its directory entry,
+    so a durable ``completed`` row never names a missing file. A file this call created is removed if any later
+    step fails."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("xb") as handle:  # one report per run id; an existing file is refused, never overwritten
-        handle.write(document)
-        handle.flush()
-        os.fsync(handle.fileno())
+    handle = path.open("xb")  # one report per run id
+    try:
+        with handle:
+            handle.write(document)
+            handle.flush()
+            os.fsync(handle.fileno())
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def _report_claim(ledger: Path) -> Iterator[None]:
+    """An exclusive lock beside the run ledger, held from the ledger read through the ``report_started`` append, so
+    two concurrent reports of one run cannot both pass the gate. ``append_ledger`` locks the ledger file itself, so
+    this lock is a separate file."""
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with (ledger.parent / f"{ledger.name}.report.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def run_report(
@@ -94,11 +123,12 @@ def run_report(
 
     ``head`` is the report's HEAD, from a clean checkout equal to ``origin/main`` after a fetch (the caller's
     check); the committed ledger is read from that checkout."""
-    committed = read_ledger(committed_ledger)
-    rows = read_ledger(committed_ledger, ledger)
     hashes = current()
-    _, binding = check_report_gate(register, committed, rows, run_id, hashes)
-    append_ledger(ledger, report_started_row(run_id, head, binding))
+    with _report_claim(ledger):
+        committed = read_ledger(committed_ledger)
+        rows = read_ledger(committed_ledger, ledger)
+        _, binding = check_report_gate(register, committed, rows, run_id, hashes)
+        append_ledger(ledger, report_started_row(run_id, head, binding))
     out = out_dir / f"{run_id}-report.json"
     written = False
     try:

@@ -148,9 +148,10 @@ class Binding:
 def capture_binding(committed: Sequence[Mapping[str, Any]]) -> Binding:
     """The single ``data_frozen`` row for the trial in the committed ledger at HEAD; ``CAPTURE_AMBIGUOUS`` otherwise.
 
-    A ``data_frozen`` row that names no trial could belong to this one, so it refuses too."""
+    A ``data_frozen`` row that names no trial (none, null, empty or not a string) could belong to this one, so it
+    refuses too."""
     frozen = [row for row in committed if row.get("event") == DATA_FROZEN_EVENT]
-    unnamed = [row for row in frozen if "trial_id" not in row]
+    unnamed = [row for row in frozen if not isinstance(row.get("trial_id"), str) or not row["trial_id"]]
     ours = [row for row in frozen if row.get("trial_id") == TRIAL_ID]
     if unnamed or len(ours) != 1:
         raise BookRefusal(
