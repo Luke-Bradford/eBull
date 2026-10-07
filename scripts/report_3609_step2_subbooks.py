@@ -27,6 +27,21 @@ For band b at formation M, under one scenario (arm, cost multiplier) of the book
 order notional and cost; turnover as band-b (buys + sells) / 2 over the **book's** pre-trade NAV, so band turnovers
 sum to the book's; the initial purchase and the final liquidation excluded from turnover as in step 0 and printed
 separately. Terminal and coverage-exit realisations (no order, no cost) are printed by band at their holding month.
+
+**Per window** (:func:`window_metrics`; stage A, stage B and pooled over the sub-book's holding months):
+
+* A window with any undefined, invalid or thin month, in either the base or the gross series, is uncomputable: every
+  metric is ``undefined`` with the first month's reason, and nothing is computed.
+* Otherwise, step 0's metrics against B1 at base cost, computed as :func:`report_3609_step2_operations.book_stats`
+  computes the book's: net and gross annualised return as exp(G) − 1 with G beside it, volatility, maximum drawdown
+  on log wealth, active return, tracking error, IR, beta and maximum relative drawdown, any non-finite figure
+  ``None``. Then G1's FF5+momentum regression (:func:`report_3609_step2_verdict.g1`) on the window's exact months,
+  with its Newey–West lag from their count; a G1 refusal is ``undefined`` with its reason, never a stop.
+* The window's n_eff is the signal block's (:func:`report_3609_step2_signals.summarise`) on the base net return
+  series; below ``MIN_EFFECTIVE``, or undefined, every metric is still printed and marked ``insufficient``.
+* Sub-book month m carries formation m − 1, so its windows hold the formations before their months: stage B is
+  formations 2021-05..2024-07 plus the 2024-08 liquidation and needs no boundary folding, and stage A is formations
+  through 2021-04. Trades by band per window sum over those formations, so stage A plus stage B is pooled.
 """
 
 from __future__ import annotations
@@ -37,6 +52,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+import numpy as np
+
+from app.services.factor_book import BookRefusal
 from app.services.factor_book_path import (
     Decision,
     Month,
@@ -46,8 +64,12 @@ from app.services.factor_book_path import (
     month_of,
     next_month,
 )
-from app.services.factor_book_series import Scenario, SeriesRun
+from app.services.factor_book_series import ARMS, Scenario, SeriesRun
 from app.services.strategy_result import AmbiguityArm
+from scripts.report_3609_baselines import window_stats
+from scripts.report_3609_step2_operations import Window, annualised, drawdown, stage_windows
+from scripts.report_3609_step2_signals import SeriesSummary, summarise
+from scripts.report_3609_step2_verdict import BASE, GROSS, G1Result, g1, log_growth
 
 #: §"Diagnostics", per-band sub-books: a month with fewer band-b names is thin. Fixed by construction.
 THIN_NAMES: Final = 5
@@ -238,6 +260,151 @@ def all_sub_books(decisions: Sequence[Decision], run: SeriesRun) -> dict[Scenari
     return {scenario: sub_books(decisions, path, scenario[0]) for scenario, path in sorted(run.book.items())}
 
 
+# --------------------------------------------------------------------------- per window
+
+
+@dataclass(frozen=True)
+class WindowTrades:
+    """One band's trades over a window's formations (and the 2024-08 liquidation if the window holds it)."""
+
+    notional: float
+    cost: float
+    #: Step 0's annual turnover: the band's one-way turnover summed, over the window's years of months.
+    turnover_per_yr: float
+    excluded: float
+    realised: float
+
+
+def window_trades(trades: BandTrades, window: Window, liquidation: Month) -> WindowTrades:
+    """``liquidation`` is the final liquidation's month (the path's last holding month); it counts only in a window
+    that holds it. Realisations count by their holding month. A window with no months is a caller error."""
+    if not window.months:
+        raise ValueError(f"window {window.label!r} has no months")
+    held = set(window.months)
+    keys = {_previous(m) for m in window.months} | ({liquidation} & held)
+
+    def total(values: Mapping[Month, float], chosen: set[Month]) -> float:
+        return _finite_sum([v for m, v in values.items() if m in chosen])
+
+    return WindowTrades(
+        total(trades.notional, keys),
+        total(trades.cost, keys),
+        total(trades.turnover, keys) / (len(window.months) / 12.0),
+        total(trades.excluded, keys),
+        total(trades.realised, held),
+    )
+
+
+@dataclass(frozen=True)
+class WindowMetrics:
+    label: str
+    #: Why the window is uncomputable (an undefined, invalid or thin month); then no metric is set.
+    undefined: str | None
+    stats: Mapping[str, float | None]
+    regression: G1Result | None
+    summary: SeriesSummary | None
+    trades: WindowTrades
+
+    @property
+    def insufficient(self) -> bool:
+        """A computable window's metrics are all marked ``insufficient`` below the minimum effective sample; an
+        uncomputable window is ``undefined`` instead."""
+        return self.summary is not None and self.summary.insufficient
+
+
+def _blocker(series: Sequence[SubBook], window: Window) -> str | None:
+    for month in window.months:
+        for book in series:
+            row = book.months.get(month)
+            if row is None:
+                return f"{month}: no sub-book month"
+            if row.status is not MonthStatus.OK:
+                return f"{month}: {row.status}" + (f" ({row.reason})" if row.reason else "")
+            if row.thin:
+                return f"{month}: thin ({row.names} names)"
+    return None
+
+
+def window_metrics(
+    base: SubBook,
+    gross: SubBook,
+    b1: Mapping[Month, float],
+    factors: Mapping[str, Mapping[Month, float]],
+    window: Window,
+    liquidation: Month,
+) -> WindowMetrics:
+    """One band's figures over ``window``. ``b1`` is B1's base-cost returns; ``factors`` are G1's; ``liquidation``
+    is the path's last holding month."""
+    trades = window_trades(base.trades, window, liquidation)
+    blocker = _blocker((base, gross), window)
+    if blocker is not None:
+        return WindowMetrics(window.label, blocker, {}, None, None, trades)
+    months = list(window.months)
+    # Every month is ``ok`` here, so every net is set.
+    values: dict[str, dict[Month, float]] = {
+        cost: {m: v for m in months if (v := book.months[m].net) is not None}
+        for cost, book in ((BASE, base), (GROSS, gross))
+    }
+    bench = {m: b1[m] for m in months}
+    with np.errstate(all="ignore"):
+        # No stress series, turnover or regression here: stress and turnover are dropped below, G1 runs after.
+        raw = window_stats(
+            months,
+            net=values[BASE],
+            gross=values[GROSS],
+            stress=values[BASE],
+            benchmark=bench,
+            turnover={},
+            factors={},
+            regression=None,
+        )
+    stats: dict[str, float | None] = {
+        k: v if v is not None and math.isfinite(v) else None
+        for k, v in raw.items()
+        if k not in {"ann_stress_2x", "turnover_per_yr"}
+    }
+    for cost, key in ((BASE, "ann_net"), (GROSS, "ann_gross")):
+        try:
+            g = log_growth(values[cost], months, f"sub-book {window.label} {cost}")
+        except BookRefusal:
+            g = None
+        stats[f"{key}_g"] = g
+        stats[key] = None if g is None else annualised(g)
+    net_ann, gross_ann = stats["ann_net"], stats["ann_gross"]
+    drag = None if net_ann is None or gross_ann is None else gross_ann - net_ann
+    stats["cost_drag"] = drag if drag is not None and math.isfinite(drag) else None
+    logs = [math.log1p(values[BASE][m]) for m in months]
+    stats["max_dd_monthly"] = drawdown(logs)
+    stats["max_rel_dd_vs_b1"] = drawdown([x - math.log1p(bench[m]) for x, m in zip(logs, months, strict=True)])
+    regression = g1(values[BASE], factors, months)
+    summary = summarise(dict(values[BASE]), window, ic_ir=False)
+    return WindowMetrics(window.label, None, stats, regression, summary, trades)
+
+
+def windows_of(run: SeriesRun) -> tuple[Window, ...]:
+    """Stage A, stage B and pooled over the sub-books' holding months (the run's return months). A run that starts
+    at stage B has no stage-A months, and an empty window has nothing to print, so it is left out."""
+    return tuple(Window(w.label, w.months, w.months) for w in stage_windows(run) if w.months)
+
+
+def all_window_metrics(
+    decisions: Sequence[Decision], run: SeriesRun, factors: Mapping[str, Mapping[Month, float]]
+) -> dict[AmbiguityArm, dict[str, dict[str, WindowMetrics]]]:
+    """Per arm, band and window: :func:`window_metrics` against B1 at base cost."""
+    books = all_sub_books(decisions, run)
+    out: dict[AmbiguityArm, dict[str, dict[str, WindowMetrics]]] = {}
+    for arm in ARMS:
+        base, gross = books[(arm, BASE)], books[(arm, GROSS)]
+        out[arm] = {
+            band: {
+                w.label: window_metrics(base[band], gross[band], run.b1[BASE].returns, factors, w, run.months[-1])
+                for w in windows_of(run)
+            }
+            for band in base
+        }
+    return out
+
+
 __all__ = [
     "NO_TURNOVER",
     "THIN_NAMES",
@@ -245,9 +412,15 @@ __all__ = [
     "MonthStatus",
     "SubBook",
     "SubBookMonth",
+    "WindowMetrics",
+    "WindowTrades",
     "all_sub_books",
+    "all_window_metrics",
     "band_at",
     "net_return",
     "sub_book_month",
     "sub_books",
+    "window_metrics",
+    "window_trades",
+    "windows_of",
 ]
