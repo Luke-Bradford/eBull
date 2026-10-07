@@ -34,6 +34,8 @@ from scripts.report_3609_step2_operations import (
     window_returns,
 )
 
+#: The smallest representable return above −1: 1 + r is 1.1e-16.
+TINY = math.nextafter(-1.0, 0.0)
 COSTS = {"gross": 0.0, "net": 0.01, "stress_2x": 0.02}
 BOUNDARY: Month = (2021, 5)
 STATE = BoundaryState(date(2021, 5, 31), (), 1.0, 1.0)
@@ -177,6 +179,24 @@ def test_book_stats_use_the_net_series_against_b1_and_the_windows_turnover() -> 
     assert stats["active_vs_b1"] == pytest.approx(12 * sum(active) / len(active))
     assert stats["turnover_per_yr"] == pytest.approx(0.1 * 39 / (39 / 12))
     assert stats["book_size"] == pytest.approx(sum(20 + FORMATIONS.index(f) % 3 for f in b.formations) / 39)
+
+
+def test_book_stats_stay_defined_where_the_wealth_product_would_overflow() -> None:
+    # 2014-15 take NAV to ~5e-239 (15 factors of 1.1e-16, the smallest 1 + r above 0); 2016 then gains 1e400 in two
+    # months, to a finite ~5e161 that a raw product over the year overflows.
+    run = _run()
+    path = run.book[(ARMS[0], "net")]
+    for m in MONTHS:
+        path.returns[m] = {2014: TINY, 2015: TINY, 2016: 1e200 - 1.0 if m[1] <= 2 else 0.0}.get(m[0], 0.0)
+    year = {w.label: w for w in calendar_years(run)}["2016"]
+    stats = book_stats(run, _decisions(), ARMS[0], year)
+    assert stats["ann_net_g"] == pytest.approx(2 * math.log(1e200))
+    assert stats["ann_net"] == math.inf  # printed "outside representable range" beside the finite G
+    assert stats["max_dd_monthly"] == 0.0
+    assert stats["ann_vol"] is None and stats["cost_drag"] is None
+    assert book_stats(run, _decisions(), ARMS[0], {w.label: w for w in calendar_years(run)}["2015"])[
+        "max_dd_monthly"
+    ] == pytest.approx(-1.0)
 
 
 # --------------------------------------------------------------------------- the control

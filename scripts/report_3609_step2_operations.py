@@ -26,6 +26,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+import numpy as np
+
 from app.services.factor_book_path import BoundaryState, Decision, Month, PathResult, Trade, month_of, next_month
 from app.services.factor_book_series import ARMS, SeriesRun, Summary
 from app.services.factor_panel_prices import HoldingStatus
@@ -147,19 +149,50 @@ def book_size(path: PathResult, window: Window) -> float:
     return math.fsum(held[m] for m in window.months) / len(window.months)
 
 
+def annualised(g: float) -> float:
+    """§"Decision rule": the display return exp(G) − 1, ``inf`` where it overflows (printed "outside representable
+    range" beside the finite G). Nothing is computed from it."""
+    try:
+        return math.expm1(g)
+    except OverflowError:
+        return math.inf
+
+
+def drawdown(logs: Sequence[float]) -> float:
+    """Step 0's maximum drawdown (the wealth index's largest fall from its running peak, starting at 1), taken on log
+    wealth so a path with finite factors never overflows the product."""
+    wealth = np.concatenate(([0.0], np.cumsum(logs)))
+    return float(np.expm1((wealth - np.maximum.accumulate(wealth)).min()))
+
+
 def book_stats(run: SeriesRun, decisions: Sequence[Decision], arm: AmbiguityArm, window: Window) -> dict[str, object]:
     """§"Diagnostics", "Book, per window and per calendar year": step 0's figures against B1 (base cost), without its
-    regression (Attribution prints that). No Sharpe."""
+    regression (Attribution prints that). No Sharpe.
+
+    Step 0's ``window_stats`` multiplies wealth factors directly, which can overflow on a short window with finite
+    factors. So the annualised returns are exp(G) − 1 (:func:`annualised`, with G beside them), the drawdowns are
+    taken on log wealth, and any other figure that is not finite is ``None`` (undefined)."""
 
     def returns(cost: str) -> dict[Month, float]:
         path = run.book[(arm, cost)]
         return window_returns(path.returns, path.nav, path.boundary, window)
 
     base = run.book[(arm, BASE)]
-    b1 = {m: run.b1[BASE].returns[m] for m in window.months}
-    stats: dict[str, object] = dict(
-        window_stats(list(window.months), returns(BASE), returns(GROSS), returns(STRESS), b1, {}, {}, None)
-    )
+    months = list(window.months)
+    series = {cost: returns(cost) for cost in (GROSS, BASE, STRESS)}
+    b1 = {m: run.b1[BASE].returns[m] for m in months}
+    with np.errstate(all="ignore"):
+        raw = window_stats(months, series[BASE], series[GROSS], series[STRESS], b1, {}, {}, None)
+    stats: dict[str, object] = {k: v if v is not None and math.isfinite(v) else None for k, v in raw.items()}
+    g = {cost: log_growth(r, months, f"book {arm} {cost}") for cost, r in series.items()}
+    for cost, key in ((BASE, "ann_net"), (GROSS, "ann_gross"), (STRESS, "ann_stress_2x")):
+        stats[f"{key}_g"] = g[cost]
+        stats[key] = annualised(g[cost])
+    drag = annualised(g[GROSS]) - annualised(g[BASE])
+    stats["cost_drag"] = drag if math.isfinite(drag) else None
+    logs = [math.log1p(series[BASE][m]) for m in months]
+    stats["max_dd_monthly"] = drawdown(logs)
+    stats["max_rel_dd_vs_b1"] = drawdown([x - math.log1p(b1[m]) for x, m in zip(logs, months, strict=True)])
     stats["turnover_per_yr"] = turnover_per_year(base.turnover, window)
     stats["book_size"] = book_size(base, window)
     stats["status_weights"] = status_weights(decisions, window)
@@ -205,7 +238,8 @@ def _metrics(net: Summary | PathResult, gross: Summary | PathResult, window: Win
         "net_g": g[BASE],
         "gross_g": g[GROSS],
         "turnover_per_yr": turnover_per_year(net.turnover, window),
-        "cost_drag": math.exp(g[GROSS]) - math.exp(g[BASE]),
+        # A stage window is at least 39 months from a finite NAV, so |G| stays far below exp's overflow point.
+        "cost_drag": annualised(g[GROSS]) - annualised(g[BASE]),
     }
 
 
@@ -253,11 +287,13 @@ __all__ = [
     "MinimumTicket",
     "Operations",
     "Window",
+    "annualised",
     "book_size",
     "book_stats",
     "calendar_years",
     "control_distributions",
     "distribution",
+    "drawdown",
     "mid_rank",
     "minimum_ticket",
     "operations",
