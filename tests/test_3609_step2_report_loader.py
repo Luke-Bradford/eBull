@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from scripts import report_3609_step2 as report
 
 M1, M2 = "2019-01-31", "2019-02-28"
 HOLDING = {M1: "2019-02", M2: "2019-03"}
+FIRST_BAR = "2010-01-04"
 SIGNS = {"gp_at": 1, "be_me": 1, "ni_me": 1, "ocf_me": 1, "at_gr1": -1}
 
 
@@ -59,6 +61,8 @@ def _artefact(
     *,
     formations: tuple[str, ...] = (M1,),
     count: int | None = None,
+    firsts: list[list[Any]] | None = None,
+    admitted: list[int] | None = None,
 ) -> tuple[Path, str]:
     out = tmp_path / "artefact"
     signs_path = out / report.TABLE9_SIGNS
@@ -69,6 +73,11 @@ def _artefact(
         first = {(r["series_id"], r["s_M"]): r.get("me", {}).get("close", "10.5") for r in reversed(rows)}
         bars = [[sid, day, close] for (sid, day), close in sorted(first.items())]
     write_gz_lines(out / report.DECISION_BARS, bars)
+    series = sorted({r["series_id"] for r in rows})
+    if firsts is None:
+        firsts = [[sid, FIRST_BAR] for sid in series]
+    write_gz_lines(out / report.FIRST_BARS, firsts)
+    write_gz_lines(out / report.ADMITTED, ({"series_id": sid} for sid in (series if admitted is None else admitted)))
     write_gz_lines(out / builder.ROWS_FILE, rows)
     (out / builder.CENSUS_FILE).write_text("{}\n")
     inputs = sorted(p for p in (out / "inputs").rglob("*") if p.is_file())
@@ -273,3 +282,139 @@ def test_score_takes_the_top_universe_by_me_and_bands_its_composite(tmp_path: Pa
     n = len(scored.bands.order)
     assert n == UNIVERSE_SIZE  # one industry, every name with all five values
     assert len(scored.bands.decile) == -(-n // 10) and len(scored.bands.tercile) == -(-n // 3)
+
+
+# --------------------------------------------------------------------------- first admitted bars (finding 156)
+
+
+def test_first_bars_map_to_each_rows_name_through_its_series(tmp_path: Path, ff12: Ff12Map) -> None:
+    rows = [_row(M1, 1), _row(M1, 2), _row(M1, 3, admitted=False)]
+    [month] = _load(tmp_path, ff12, rows, firsts=[[101, "2005-03-01"], [103, "2018-06-29"]])
+    assert month.first_bar == {1: date(2005, 3, 1), 3: date(2018, 6, 29)}
+
+
+@pytest.mark.parametrize(
+    ("firsts", "admitted", "match"),
+    [
+        pytest.param([[101, FIRST_BAR], [101, FIRST_BAR]], None, "repeated", id="repeated series"),
+        pytest.param([[999, FIRST_BAR]], None, "not admitted", id="unadmitted series"),
+        pytest.param([[101, "2010-13-01"]], None, "ISO date", id="malformed date"),
+        pytest.param([[101, None]], None, "ISO date", id="null date"),
+        # Stage A's price bound is 2021-05-31 (``price_bound``).
+        pytest.param([[101, "2021-06-01"]], None, "after the price bound", id="after the bound"),
+    ],
+)
+def test_the_first_bars_refuse(
+    tmp_path: Path, ff12: Ff12Map, firsts: list[list[Any]], admitted: list[int] | None, match: str
+) -> None:
+    with pytest.raises(report.ReportError, match=match):
+        _load(tmp_path, ff12, [_row(M1, 1)], firsts=firsts, admitted=admitted)
+
+
+def test_a_formation_carries_the_universe_bands_closes_first_bars_and_returns(tmp_path: Path, ff12: Ff12Map) -> None:
+    rows = [_row(M1, name) for name in range(1, UNIVERSE_SIZE + 3)] + [_row(M1, 5000, admitted=False)]
+    firsts = [[r["series_id"], FIRST_BAR] for r in rows]
+    firsts[-2] = [100 + UNIVERSE_SIZE + 2, "2016-02-01"]  # 35 months before s(M): not seasoned
+    [month] = _load(tmp_path, ff12, rows, firsts=sorted(firsts))
+    scored = report.score(month)
+    built = report.formation_inputs(month, scored)
+    assert built.universe == frozenset(scored.universe) and built.bands is scored.bands
+    assert set(built.returns) == built.universe and built.returns[3] is month.admitted[3].holding
+    assert built.close is month.close and 5000 in built.close  # a non-universe holding keeps its close
+    assert built.first_bar[3] == date.fromisoformat(FIRST_BAR) and built.session == date.fromisoformat(M1)
+    # Every name is above $5; only the one with a 35-month archive is not seasoned.
+    assert built.eligible == built.scored - {UNIVERSE_SIZE + 2} and UNIVERSE_SIZE + 2 in built.scored
+
+
+# --------------------------------------------------------------------------- stage A's republish (finding 156)
+
+
+def _manifest() -> dict[str, Any]:
+    return {
+        "schema": builder.MANIFEST_SCHEMA,
+        "stage": "A",
+        "git_sha": "a" * 40,
+        "published_at": "2026-10-06T01:27:30+00:00",
+        "spec_sha256": "s" * 64,
+        "construction_sources": {"x.py": "1"},
+        "construction_versions": {"v": "1"},
+        "pinned_manifests": dict(builder.STAGE_A_PINS),
+        "formations": [M1],
+        "rule_versions": {"R": "1"},
+        "inputs": {"inputs/admitted.jsonl.gz": "i" * 64},
+        "rows": {"path": builder.ROWS_FILE, "count": 3, "sha256": "r" * 64, "content_sha256": "c" * 64},
+        "census": {"path": builder.CENSUS_FILE, "sha256": "e" * 64},
+    }
+
+
+def _republished(**change: Any) -> dict[str, Any]:
+    out = _manifest()
+    out["inputs"] = {**out["inputs"], f"inputs/{builder.Frozen.FIRST_BARS}": "f" * 64}
+    out |= {"git_sha": "b" * 40, "published_at": "2026-10-07T07:00:00+00:00", "spec_sha256": "t" * 64}
+    out |= {"construction_sources": {"x.py": "2"}, "construction_versions": {"v": "2"}}
+    out["rows"] = {**out["rows"], "sha256": "q" * 64}
+    for key, value in change.items():
+        out[key] = value
+    return out
+
+
+def test_a_republish_that_only_adds_first_bars_passes() -> None:
+    builder.check_republished(_manifest(), _republished())
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        pytest.param({"inputs": _manifest()["inputs"]}, "no inputs/first_bars", id="no first bars"),
+        pytest.param(
+            {"inputs": {"inputs/admitted.jsonl.gz": "j" * 64, "inputs/first_bars.jsonl.gz": "f" * 64}},
+            "plus",
+            id="an existing input moved",
+        ),
+        pytest.param(
+            {"inputs": {**_republished()["inputs"], "inputs/extra.gz": "x" * 64}}, "plus", id="another input added"
+        ),
+        pytest.param({"rows": {**_republished()["rows"], "content_sha256": "d" * 64}}, "rows", id="rows content"),
+        pytest.param({"rows": {**_republished()["rows"], "count": 4}}, "rows", id="row count"),
+        pytest.param({"census": {"path": builder.CENSUS_FILE, "sha256": "z" * 64}}, "census", id="census"),
+        pytest.param({"formations": [M1, M2]}, "formations", id="formations"),
+        pytest.param({"pinned_manifests": {}}, "pinned_manifests", id="pins"),
+        pytest.param({"rule_versions": {"R": "2"}}, "rule_versions", id="rule versions"),
+        pytest.param({"stage": "B"}, "stage", id="stage"),
+    ],
+)
+def test_a_republish_outside_the_replay_identity_refuses(change: dict[str, Any], match: str) -> None:
+    with pytest.raises(PanelError, match=match):
+        builder.check_republished(_manifest(), _republished(**change))
+
+
+def test_a_scored_name_without_a_first_bar_refuses_rather_than_dropping_out(tmp_path: Path, ff12: Ff12Map) -> None:
+    # A truncated first_bars file must not quietly make names ineligible: eligible_to_enter refuses.
+    rows = [_row(M1, name) for name in range(1, UNIVERSE_SIZE + 1)]
+    firsts = [[r["series_id"], FIRST_BAR] for r in rows][1:]
+    [month] = _load(tmp_path, ff12, rows, firsts=firsts)
+    built = report.formation_inputs(month, report.score(month))
+    with pytest.raises(ValueError, match="no first admitted bar"):
+        _ = built.eligible
+
+
+@pytest.mark.parametrize("missing", ["inputs", "rows"])
+def test_a_republish_check_refuses_a_manifest_without_its_maps(missing: str) -> None:
+    broken = _manifest()
+    del broken[missing]
+    with pytest.raises(PanelError, match="without an inputs or rows map"):
+        builder.check_republished(broken, _republished())
+    with pytest.raises(PanelError, match="without an inputs or rows map"):
+        builder.check_republished(_manifest(), {k: v for k, v in _republished().items() if k != missing})
+
+
+def test_a_null_first_bar_date_reaches_the_date_parse(tmp_path: Path) -> None:
+    # ``[101, null]`` decodes to ``[101, None]``; ``date.fromisoformat(None)`` raises TypeError, re-raised as the
+    # loader's own refusal, so the "ISO date" match is this check and not an earlier failure.
+    write_gz_lines(tmp_path / "first.gz", [[101, None]])
+    write_gz_lines(tmp_path / "admitted.gz", [{"series_id": 101}])
+    with pytest.raises(report.ReportError, match="is not an ISO date: None") as caught:
+        report.read_first_bars(
+            (tmp_path / "first.gz").read_bytes(), (tmp_path / "admitted.gz").read_bytes(), date(2021, 5, 31)
+        )
+    assert isinstance(caught.value.__cause__, TypeError)
