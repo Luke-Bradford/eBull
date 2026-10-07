@@ -42,7 +42,7 @@ def reference_decisions(
         check_closes(formation, held)
         targets = tuple(sorted(formation.universe))
         weights: dict[int, float] | None = None
-        if me is not None:
+        if me is not None and targets:  # an empty universe holds cash, as the equal-weight path does
             caps = me[index]
             bad = sorted(n for n in targets if not ((v := caps.get(n)) is not None and math.isfinite(v) and v > 0))
             if bad:

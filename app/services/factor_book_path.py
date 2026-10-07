@@ -145,8 +145,10 @@ class Decision:
     #: Target weight per target name; ``None`` is equal weight (the book and the control).
     weights: Mapping[int, float] | None = None
 
-    def weight(self, name: int) -> float:
-        return 1.0 / len(self.targets) if self.weights is None else self.weights[name]
+    def share(self, amount: float, name: int) -> float:
+        """``name``'s target slice of ``amount``. Equal weight divides (``amount / n``, the book's arithmetic since
+        slice 3b); ``amount * (1 / n)`` can differ by an ulp."""
+        return amount / len(self.targets) if self.weights is None else amount * self.weights[name]
 
     @property
     def discretionary(self) -> int:
@@ -367,14 +369,14 @@ def value_path(
         for name, position in sorted(positions.items()):
             if name in decision.sales:
                 trades.append((name, decision.sales[name], position.value, position.half_spread))
-            elif delta := pre * decision.weight(name) - position.value:
+            elif delta := decision.share(pre, name) - position.value:
                 category = TradeCategory.REBALANCE_ADD if delta > 0 else TradeCategory.REBALANCE_TRIM
                 trades.append((name, category, abs(delta), position.half_spread))
         for name in decision.targets:
             if name not in positions:
                 bands[name] = _half_spread(decision.close[name])
                 category = TradeCategory.INITIAL_PURCHASE if index == 0 else TradeCategory.ENTRY
-                trades.append((name, category, pre * decision.weight(name), bands[name][1]))
+                trades.append((name, category, decision.share(pre, name), bands[name][1]))
         cost = 0.0
         for name, category, notional, half in trades:
             charged = notional * half * cost_multiplier
@@ -393,9 +395,9 @@ def value_path(
             previous = post
         result.holdings[month] = len(decision.targets)
         positions = {
-            name: replace(positions[name], value=post * decision.weight(name))
+            name: replace(positions[name], value=decision.share(post, name))
             if name in positions
-            else Position(name, post * decision.weight(name), decision.formation, *bands[name])
+            else Position(name, decision.share(post, name), decision.formation, *bands[name])
             for name in decision.targets
         }
         cash = 0.0 if decision.targets else post

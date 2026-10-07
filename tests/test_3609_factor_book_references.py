@@ -68,3 +68,20 @@ def test_weights_that_do_not_cover_the_targets_or_sum_to_one_are_a_contract_erro
 def test_one_me_map_per_formation() -> None:
     with pytest.raises(ValueError, match="ME maps"):
         reference_decisions([_formation(1, [1])], [])
+
+
+def test_equal_weight_divides_exactly_as_before_weights_existed() -> None:
+    """The book and control keep slice 3b's ``amount / n``; ``amount * (1 / n)`` can differ by an ulp."""
+    formations = [_formation(1, [1, 2, 3], dict.fromkeys([1, 2, 3], 0.13)), _formation(2, [1, 2, 3], {1: 0.1})]
+    path = value_path(reference_decisions(formations), arm="best_case", cost_multiplier=0.0)
+    # Slice 3b's arithmetic, replayed: cost 0, so NAV is the position sum plus 0.0 cash.
+    pre = sum([1.0 / 3 * 1.13] * 3) + 0.0
+    assert pre / 3 != pre * (1 / 3)  # the fixture distinguishes the two
+    end = sum([pre / 3 * 1.1, pre / 3, pre / 3]) + 0.0
+    assert path.returns == {(2015, 2): pre / 1.0 - 1.0, (2015, 3): end / pre - 1.0}
+
+
+def test_an_empty_universe_holds_cash_under_cap_weights_too() -> None:
+    empty = replace(_formation(1, []), universe=frozenset())
+    (decision,) = reference_decisions([empty], [{}])
+    assert decision.targets == () and decision.weights is None

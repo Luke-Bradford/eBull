@@ -12205,3 +12205,14 @@ neighbouring container and match it.**
 - Enforced in: `tests/test_3609_factor_book_scores.py::test_the_universe_is_the_top_1000_by_me_with_ties_by_name_key`,
   `::test_a_tie_straddling_a_boundary_is_decided_by_name_key_and_reported` and
   `::test_mathematically_equal_family_inputs_tie_exactly`.
+
+### An "unchanged" refactor of float arithmetic is proven bit for bit, not with `approx` (#3609)
+
+- Failure (review bot on #3689, step 2 slice 3c-ii): adding optional weights to `value_path` routed equal weight
+  through `amount * (1 / n)` in place of slice 3b's `amount / n`. The two differ by an ulp for some inputs (1.13 / 3,
+  for one), so "the book and control are unchanged" was false bitwise. Every existing test compared with
+  `pytest.approx`, so none noticed. Paths that later feed a byte-checked artefact must not drift silently.
+- Prevention: when a refactor claims unchanged numeric output, add one test that replays the pre-change formula
+  and compares with `==`. Its fixture must assert that it distinguishes the old arithmetic from the new, so the test
+  cannot pass vacuously. Keep the original operation for the default branch rather than an algebraically equal one.
+- Enforced in: `tests/test_3609_factor_book_references.py::test_equal_weight_divides_exactly_as_before_weights_existed`.
