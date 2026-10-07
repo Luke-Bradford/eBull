@@ -371,8 +371,25 @@ def test_a_committed_row_naming_no_trial_also_refuses_a_fresh_freeze(
     run = _Run(tmp_path, monkeypatch)
     append_ledger(run.committed, {"run_id": "d" * 32, "event": "data_frozen", "trial_id": "other-v1"})
     run.open()
-    append_ledger(run.committed, {"run_id": "e" * 32, "event": "data_frozen", "manifest_sha256": "0" * 64})
-    with pytest.raises(StageBAccessError, match="reuse it"):
+    for trial in (None, "", 123):  # what ``capture_binding`` counts as naming no trial
+        committed = run.committed.read_bytes()
+        append_ledger(run.committed, {"run_id": "e" * 32, "event": "data_frozen", "trial_id": trial})
+        with pytest.raises(StageBAccessError, match="reuse it"):
+            run.freeze()
+        run.committed.write_bytes(committed)
+    assert run.confirmed == [] and "failed" not in run.events()
+
+
+def test_a_retry_under_an_id_whose_manifest_exists_without_its_row_refuses_before_any_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex checkpoint 3: a crash between the manifest and both rows leaves the run open with the file on disk."""
+    run = _Run(tmp_path, monkeypatch)
+    run.open()
+    capture.capture_path(RUN, run.root).parent.mkdir(parents=True)
+    capture.capture_path(RUN, run.root).write_bytes(b"{}")
+    shutil.rmtree(run.sub[0])  # any artefact read would raise a file error instead of the refusal
+    with pytest.raises(StageBAccessError, match="abandoned"):
         run.freeze()
     assert run.confirmed == [] and "failed" not in run.events()
 

@@ -236,11 +236,16 @@ def freeze_capture(
         bound = [row for row in read_ledger(committed_ledger) if row.get("event") == DATA_FROZEN_EVENT]
         # A row naming no trial counts as this trial's, as ``capture_binding`` counts it: it makes every report
         # refuse ``CAPTURE_AMBIGUOUS``, so a second capture beside it could never be bound either.
-        if any(row.get("trial_id") == TRIAL_ID or not row.get("trial_id") for row in bound):
+        if any(not isinstance(row.get("trial_id"), str) or row["trial_id"] in ("", TRIAL_ID) for row in bound):
             raise StageBAccessError(f"the committed ledger already holds a {DATA_FROZEN_EVENT!r} row; reuse it")
+        path = capture_path(run_id, root)
+        if path.exists():
+            # An earlier attempt under this id stopped between the manifest and its rows (a crash, or neither row
+            # durable): the run is abandoned and the file binds nothing. A retry is a new run id.
+            raise StageBAccessError(f"run {run_id} already wrote {path} without a 'data_frozen' row; it is abandoned")
         sub, stage_b = _artefact(rows, run_id, _SUB_EVENT), _artefact(rows, run_id, STAGE_B_EVENT)
         confirm_access(run_id, access_id)
-        return _freeze(run_id, access_id, sub, stage_b, ledger=ledger, path=capture_path(run_id, root))
+        return _freeze(run_id, access_id, sub, stage_b, ledger=ledger, path=path)
 
 
 def _freeze(
