@@ -29,7 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date
 from enum import Enum
-from typing import Any, Final
+from typing import Any, Final, TypeGuard
 
 import numpy as np
 
@@ -112,7 +112,8 @@ def evaluate(
 ) -> Report:
     """The run, its verdict and every diagnostic. ``factors`` are G1's (FF5, momentum and RF), ``cutoffs`` are
     ``report_3609_step2_universe.read_cutoffs``'s, and ``b1_saved``, ``b1_close`` and ``costs`` are
-    :func:`run_series`'s."""
+    :func:`run_series`'s. A non-finite or non-positive ME never reaches ``me``: the loader and
+    :func:`~app.services.factor_book.book_universe` (inside :func:`score`) refuse it ``ME_INVALID``."""
     boundary = boundary_formation(panel)
     scored = [score(month) for month in panel]
     formations = [formation_inputs(month, s) for month, s in zip(panel, scored, strict=True)]
@@ -154,7 +155,7 @@ def verdict_line(outcome: Verdict) -> str:
     return f"{line}. {SURVIVORSHIP}."
 
 
-def _is_month(value: object) -> bool:
+def _is_month(value: object) -> TypeGuard[Month]:
     return (
         isinstance(value, tuple)
         and len(value) == 2
@@ -170,12 +171,14 @@ def _key(key: object) -> str:
     if isinstance(key, date):
         return key.isoformat()
     if _is_month(key):
-        year, month = key  # type: ignore[misc]
+        year, month = key
         return f"{year:04d}-{month:02d}"
     if isinstance(key, tuple):
         return "|".join(_key(part) for part in key)
     if isinstance(key, str | int):
         return str(key)
+    # No block keys by float (the strict-JSON payload test walks every block of a real run); a new key type must
+    # choose its printed form here rather than fall through to ``str``.
     raise TypeError(f"no output key for {type(key).__name__}")
 
 
