@@ -404,6 +404,8 @@ class Regression:
     t_stats: np.ndarray
     observations: int
     lag: int
+    #: The Newey-West standard errors the t-stats divide by (#3609 step 2's G1 refuses one not finite and positive).
+    standard_errors: np.ndarray
 
 
 def ols_newey_west(y: np.ndarray, x: np.ndarray) -> Regression:
@@ -418,7 +420,8 @@ def ols_newey_west(y: np.ndarray, x: np.ndarray) -> Regression:
         gamma = scores[k:].T @ scores[:-k]
         meat += (1.0 - k / (lag + 1.0)) * (gamma + gamma.T)
     covariance = inverse @ meat @ inverse
-    return Regression(beta, beta / np.sqrt(np.diag(covariance)), len(y), lag)
+    errors = np.sqrt(np.diag(covariance))
+    return Regression(beta, beta / errors, len(y), lag, errors)
 
 
 STAT_NAMES: Final = (
