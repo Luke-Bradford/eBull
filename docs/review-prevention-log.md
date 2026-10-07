@@ -12261,3 +12261,18 @@ neighbouring container and match it.**
 - Enforced in: `tests/test_3609_step2_construction_hash.py::test_the_construction_closure_reaches_every_step2_report_module_and_book_service`
   and `::test_every_repo_module_the_roots_load_at_import_is_in_the_construction_closure` (both revert-probed: with
   the old roots the first lists the 12 missing modules, and the second finds the verdict never loaded).
+
+### A single-use file-ledger gate holds a claim from its read to its append, and an exclusive create cleans up its own partial file (#3609)
+
+- Failure (Codex checkpoint 2 on step 2's report run, 2026-10-07): the report read the JSONL ledger, checked that
+  the run had no `report_started` row, and appended one. `append_ledger` locks each append, not the read before it,
+  so two concurrent reports of one run could both pass and both evaluate. Separately, the output file's cleanup flag
+  was set only after `write`/`fsync` returned, so a write that failed after the exclusive create left a partial file
+  the ledger never named; and only the file was fsynced, not its directory entry, so a durable `completed` row could
+  outlive the file after a crash.
+- Prevention: a gate that makes a ledger step single-use takes an exclusive lock on a separate file (the ledger's own
+  lock is taken again inside `append_ledger`) from the ledger read through the append that consumes the step. A
+  function that creates a file exclusively removes that file on any failure after the create, and fsyncs the parent
+  directory before a ledger row names the file.
+- Enforced in: `tests/test_3609_step2_report_run.py::test_the_gate_and_report_started_run_under_one_exclusive_claim`
+  and `::test_an_output_whose_write_fails_after_creation_is_removed` (both revert-probed).
