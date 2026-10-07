@@ -157,6 +157,9 @@ def test_every_block_covers_the_run(report: assembly.Report) -> None:
     assert sum(r.cutoff is not None for r in report.universe.rows) == len(CUTOFFS)
     assert list(report.segments.price_unavailable) == formations
     assert set(report.sub_books) == {(arm, cost) for arm in ARMS for cost in COSTS}
+    assert [month_of(r.formation) for r in report.construction] == formations
+    for row in report.construction:
+        assert sum(p.names for p in row.patterns.values()) == UNIVERSE
 
 
 def test_a_diagnostic_refusal_leaves_no_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
