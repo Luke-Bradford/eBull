@@ -153,6 +153,7 @@ def test_rows_become_admitted_names_with_closes_industries_and_signed_values(tmp
     one = first.admitted[1]
     assert one.series_id == 101 and one.me == 1e9 + 1
     assert one.industry == ff12.industry(3720) and first.admitted[2].industry == UNCLASSIFIED
+    assert (one.sic, first.admitted[2].sic) == (3720, None)
     assert set(one.signed) == set(CHARACTERISTICS) - {"ni_me"}
     assert one.signed["at_gr1"] == -rows[0]["characteristics"]["at_gr1"]["value"]  # Table 9 sign -1
     assert one.signed["gp_at"] == rows[0]["characteristics"]["gp_at"]["value"]
