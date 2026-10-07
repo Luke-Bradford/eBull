@@ -298,6 +298,9 @@ def value_path(
         month = month_of(decision.formation)
         if index and month != next_month(month_of(decisions[index - 1].formation)):
             raise ValueError(f"formations must be consecutive months: {decisions[index - 1].formation} → {month}")
+        unvalued = [n for n in decision.targets if n not in decision.returns or arm not in decision.returns[n].by_arm]
+        if unvalued:
+            raise ValueError(f"{decision.formation}: {len(unvalued)} targets have no {arm} return: {unvalued[:5]}")
         pre = sum(p.value for p in positions.values()) + cash
         if decision.formation == boundary:
             result.boundary = BoundaryState(

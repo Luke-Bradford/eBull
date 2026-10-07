@@ -300,6 +300,15 @@ def test_an_empty_path_or_an_unknown_boundary_is_a_contract_error() -> None:
         value_path([_decision(1, [1])], arm="best_case", cost_multiplier=1.0, boundary=date(2015, 2, 28))
 
 
+def test_a_target_without_a_return_for_the_arm_is_a_contract_error() -> None:
+    missing = replace(_decision(1, [1, 2]), returns={1: _observed(0.0)})
+    with pytest.raises(ValueError, match="no best_case return"):
+        value_path([missing], arm="best_case", cost_multiplier=1.0)
+    one_arm = _decision(1, [1], returns={1: HoldingReturn(OBSERVED, {"worst_case": 0.0})})
+    with pytest.raises(ValueError, match="no best_case return"):
+        value_path([one_arm], arm="best_case", cost_multiplier=1.0)
+
+
 def test_decisions_must_be_consecutive_and_sales_exactly_the_dropped_holdings() -> None:
     with pytest.raises(ValueError, match="consecutive"):
         value_path([_decision(1, [1]), _decision(3, [1])], arm="best_case", cost_multiplier=1.0)
