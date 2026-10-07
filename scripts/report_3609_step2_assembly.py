@@ -17,8 +17,8 @@ the segment and universe modules import its ``PanelMonth``.
 * **The boundary** is the stage-B boundary formation (2021-05), whose pre-trade state every path captures.
 * **Windows** for the signal and segment blocks are the run's stage windows, as the operations and attribution
   blocks' are.
-* **Not yet here:** §"Source rules"' construction counts (uninformative groups, membership patterns and
-  identifier-decided selections, each with its book weight) are the next slice's block.
+* **Construction counts** (§"Source rules": uninformative groups, membership patterns, identifier-decided
+  selections) are per formation, from the same scores and bands the path ran on.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from app.services.strategy_result import AmbiguityArm
 from scripts.report_3609_step2 import PanelMonth, formation_inputs, score
 from scripts.report_3609_step2_attribution import Diagnostics as AttributionDiagnostics
 from scripts.report_3609_step2_attribution import diagnostics as attribution_diagnostics
+from scripts.report_3609_step2_construction import ConstructionMonth, construction
 from scripts.report_3609_step2_operations import Operations, operations, stage_windows
 from scripts.report_3609_step2_segments import Segments, segment_month, segments
 from scripts.report_3609_step2_signals import SignalSummary, signals
@@ -90,6 +91,8 @@ class Report:
     sub_books: Mapping[Scenario, Mapping[str, SubBook]]
     #: Per arm, band and window.
     sub_book_windows: Mapping[AmbiguityArm, Mapping[str, Mapping[str, WindowMetrics]]]
+    #: Per formation.
+    construction: Sequence[ConstructionMonth]
 
 
 def boundary_formation(panel: Sequence[PanelMonth]) -> date:
@@ -139,6 +142,7 @@ def evaluate(
         ),
         sub_books=all_sub_books(book, run),
         sub_book_windows=all_window_metrics(book, run, factors),
+        construction=construction(universes, [s.scores for s in scored], [s.bands for s in scored], book, run.book),
     )
 
 
@@ -278,6 +282,7 @@ def payload(report: Report) -> dict[str, Any]:
         "universe": jsonable(report.universe),
         "segments": jsonable(report.segments),
         "sub_books": {"monthly": jsonable(report.sub_books), "windows": jsonable(report.sub_book_windows)},
+        "construction": jsonable(report.construction),
     }
 
 
