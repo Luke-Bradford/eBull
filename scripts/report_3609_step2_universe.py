@@ -126,6 +126,8 @@ def _me_sum(values: Sequence[float], what: str, *, empty_ok: bool = False) -> fl
         total = math.fsum(values)
     except OverflowError:  # fsum raises on an intermediate overflow rather than returning inf
         total = math.inf
+    except ValueError:  # and on inf + -inf rather than returning nan
+        total = math.nan
     if not (math.isfinite(total) and (total > 0 or (empty_ok and not values))):
         raise BookRefusal("ME_INVALID", f"{what} sums to {total!r}, not finite and positive")
     return total

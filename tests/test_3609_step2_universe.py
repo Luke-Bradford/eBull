@@ -21,6 +21,7 @@ from scripts.report_3609_step2_universe import (
     STAGE_A,
     STAGE_B,
     NotionalClass,
+    _me_sum,  # pyright: ignore[reportPrivateUsage]
     diagnostics,
     notional_by_class,
     notional_class,
@@ -162,6 +163,13 @@ def test_an_me_sum_that_overflows_refuses() -> None:
     names = {1: _name(1.5e308), 2: _name(1.5e308), 3: _name(1.0)}
     with pytest.raises(BookRefusal) as raised:
         universe_month(_month(A, names), (1, 2), _decision(A, ()), 1.0)
+    assert raised.value.code == "ME_INVALID"
+
+
+@pytest.mark.parametrize("values", [[1.5e308, 1.5e308], [math.inf, -math.inf]], ids=["overflow", "inf-inf"])
+def test_a_sum_fsum_raises_on_refuses_as_me_invalid(values: list[float]) -> None:
+    with pytest.raises(BookRefusal) as raised:
+        _me_sum(values, "fixture", empty_ok=True)
     assert raised.value.code == "ME_INVALID"
 
 
