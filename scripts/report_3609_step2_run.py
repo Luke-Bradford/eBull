@@ -146,7 +146,9 @@ def run_report(
             "data_frozen_sha256": binding.manifest_sha256,
             **hashes.by_label(),
         }
-        document = canonical_json({"run": run_block, **body})
+        if "run" in body:
+            raise ValueError("the report payload already holds a 'run' block")
+        document = canonical_json({**body, "run": run_block})
         digest = hashlib.sha256(document).hexdigest()
         _write_exclusive(out, document)
         written = True

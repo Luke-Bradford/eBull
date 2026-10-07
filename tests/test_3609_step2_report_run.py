@@ -310,6 +310,16 @@ def test_an_output_the_ledger_cannot_name_is_deleted_and_the_run_fails(
     assert list(ledgers.out.iterdir()) == []
 
 
+def test_a_payload_holding_its_own_run_block_fails_rather_than_being_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledgers = _Ledgers(tmp_path, COMMITTED)
+    monkeypatch.setattr(run_module, "payload", lambda _: {"run": {"run_id": "forged"}})
+    with pytest.raises(ValueError, match="'run' block"):
+        ledgers.run(lambda _: _Report(_Verdict("PASS", None)))
+    assert ledgers.events()[-1]["event"] == "failed" and not ledgers.out.exists()
+
+
 @pytest.mark.usefixtures("stub_payload")
 def test_an_existing_output_file_is_never_overwritten(tmp_path: Path) -> None:
     ledgers = _Ledgers(tmp_path, COMMITTED)
