@@ -182,3 +182,16 @@ def test_signals_covers_every_arm_signal_and_window() -> None:
     assert all(set(per) == set(SIGNALS) for per in out.values())
     summary = out[ARMS[0]][COMPOSITE]
     assert summary.ic["all"].defined == 15 and summary.spread["all"].defined == 15
+
+
+def test_n_eff_replays_the_pre_extraction_formula_bit_for_bit() -> None:
+    """``mean_errors`` was extracted from ``summarise`` (slice 3c-v(d)); its n_eff must not move by an ulp."""
+    from scripts.report_3609_baselines import ols_newey_west
+
+    w = _window(40)
+    smooth = {m: math.sin(i / 6.0) + 0.001 * i for i, m in enumerate(w.months)}
+    y = np.array(list(smooth.values()))
+    mean = float(y.mean())
+    se = float(ols_newey_west(y, np.empty((40, 0))).standard_errors[0])
+    old = min(40.0, 40 * (float(np.sum((y - mean) ** 2)) / 40**2) / se**2)
+    assert summarise(smooth, w, ic_ir=True).n_eff == old

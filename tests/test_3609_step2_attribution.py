@@ -8,6 +8,7 @@ import random
 from collections.abc import Mapping
 from datetime import date
 
+import numpy as np
 import pytest
 
 from app.services.factor_book import UNCLASSIFIED
@@ -26,16 +27,19 @@ from scripts.report_3609_baselines import FACTOR_REGRESSORS
 from scripts.report_3609_step2_attribution import (
     FLAG_NO_REFERENCE,
     FLAG_OVERWEIGHT,
+    MIN_INFORMATION,
     IndustryWeight,
     attribution,
     average_weights,
     diagnostics,
     high_turnover,
     industry_weights,
+    information,
     turnover_months,
 )
-from scripts.report_3609_step2_operations import stage_windows
-from scripts.report_3609_step2_verdict import g1, log_growth
+from scripts.report_3609_step2_operations import Window, stage_windows
+from scripts.report_3609_step2_signals import mean_errors, summarise
+from scripts.report_3609_step2_verdict import g1, log_growth, stage_b_returns
 
 COSTS = {"gross": 0.0, "net": 0.01, "stress_2x": 0.02}
 BOUNDARY: Month = (2021, 5)
@@ -252,3 +256,72 @@ def test_diagnostics_assembles_every_arm_and_stage_window() -> None:
     assert all(set(w) == {"stage A", "stage B", "pooled"} for w in out.attribution.values())
     assert out.industry_average["pooled"]["Hlth"] == IndustryWeight(1.0, 0.5)
     assert len(out.industry_monthly) == len(FORMATIONS)
+
+
+# --------------------------------------------------------------------------- information
+
+
+def _active(run: SeriesRun, window: Window) -> list[float]:
+    path = run.book[(ARMS[0], "net")]
+    if window.from_boundary:
+        book = stage_b_returns(path.returns, path.nav, path.boundary, window.months)
+    else:
+        book = {m: path.returns[m] for m in window.months}
+    return [book[m] - B1[m] for m in window.months]
+
+
+def test_information_is_the_lag_1_autocorrelation_and_the_error_ratio_of_the_active_return() -> None:
+    run = _run()
+    for window in stage_windows(run):
+        active = _active(run, window)
+        out = information(run, ARMS[0], window)
+        assert out.autocorrelation == pytest.approx(float(np.corrcoef(active[:-1], active[1:])[0, 1]))
+        # n_eff is n / ratio² on the same series, capped at n.
+        summary = summarise(dict(zip(window.months, active, strict=True)), window, ic_ir=False)
+        assert summary.n_eff is not None and out.se_ratio is not None
+        n = len(active)
+        assert min(n, n / out.se_ratio**2) == pytest.approx(summary.n_eff)
+
+
+def test_information_needs_24_pairs_and_24_months() -> None:
+    run = _run()
+    months = MONTHS[:MIN_INFORMATION]
+    short = information(run, ARMS[0], Window("w", months, months))
+    assert short.autocorrelation is None and short.se_ratio is not None  # 23 pairs, 24 months
+    months = MONTHS[: MIN_INFORMATION - 1]
+    assert information(run, ARMS[0], Window("w", months, months)).se_ratio is None
+
+
+def _flat_b1(book: Mapping[Month, float]) -> SeriesRun:
+    """B1 earns exactly zero, so the active return is the book's own series bit for bit."""
+    run = _run()
+    for path in run.b1.values():
+        path.returns.update(dict.fromkeys(MONTHS, 0.0))
+    run.book[(ARMS[0], "net")].returns.update(book)
+    return run
+
+
+def test_the_error_ratio_uses_the_same_iid_error_as_n_eff_when_uncapped() -> None:
+    months = MONTHS[:40]
+    smooth = {m: math.sin(i / 6.0) + 0.001 * i for i, m in enumerate(months)}
+    out = information(_flat_b1(smooth), ARMS[0], Window("w", months, months))
+    n_eff = summarise(smooth, Window("w", months, months), ic_ir=False).n_eff
+    assert n_eff is not None and n_eff < 40 and out.se_ratio is not None
+    assert 40 / out.se_ratio**2 == pytest.approx(n_eff)
+
+
+def test_a_constant_active_return_has_no_information() -> None:
+    months = MONTHS[:38]
+    # 38 equal 0.1s: both float errors come out positive (~1e-18), so without the equality test a ratio of ~2
+    # would print for a series with no variation at all.
+    iid, se = mean_errors(np.full(38, 0.1))
+    assert iid > 0 and se > 0
+    out = information(_flat_b1(dict.fromkeys(months, 0.1)), ARMS[0], Window("w", months, months))
+    assert out.autocorrelation is None and out.se_ratio is None
+
+
+def test_finite_but_huge_active_returns_leave_information_undefined_rather_than_nan() -> None:
+    months = MONTHS[:40]
+    huge = {m: (1e154 if i % 2 else -1e154) for i, m in enumerate(months)}
+    out = information(_flat_b1(huge), ARMS[0], Window("w", months, months))
+    assert out.autocorrelation is None and out.se_ratio is None
