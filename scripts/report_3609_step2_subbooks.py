@@ -345,7 +345,17 @@ def window_metrics(
     }
     bench = {m: b1[m] for m in months}
     with np.errstate(all="ignore"):
-        raw = window_stats(months, values[BASE], values[GROSS], values[BASE], bench, {}, {}, None)
+        # No stress series, turnover or regression here: stress and turnover are dropped below, G1 runs after.
+        raw = window_stats(
+            months,
+            net=values[BASE],
+            gross=values[GROSS],
+            stress=values[BASE],
+            benchmark=bench,
+            turnover={},
+            factors={},
+            regression=None,
+        )
     stats: dict[str, float | None] = {
         k: v if v is not None and math.isfinite(v) else None
         for k, v in raw.items()
