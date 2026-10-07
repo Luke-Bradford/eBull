@@ -46,15 +46,18 @@ class ReferenceInputError(ValueError):
 
 
 def load_table9_signs(path: Path = TABLE9_SIGNS_PATH) -> dict[str, int]:
-    with path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        if tuple(reader.fieldnames or ()) != ("name", "sign"):
-            raise ReferenceInputError(f"Table 9 CSV header {reader.fieldnames!r}; expected ('name', 'sign')")
-        signs: dict[str, int] = {}
-        for row in reader:
-            if row["sign"] not in ("1", "-1") or not row["name"] or row["name"] in signs:
-                raise ReferenceInputError(f"Table 9 CSV row is invalid or repeated: {row!r}")
-            signs[row["name"]] = int(row["sign"])
+    return parse_table9_signs(path.read_bytes())
+
+
+def parse_table9_signs(payload: bytes) -> dict[str, int]:
+    reader = csv.DictReader(io.StringIO(payload.decode("utf-8"), newline=""))
+    if tuple(reader.fieldnames or ()) != ("name", "sign"):
+        raise ReferenceInputError(f"Table 9 CSV header {reader.fieldnames!r}; expected ('name', 'sign')")
+    signs: dict[str, int] = {}
+    for row in reader:
+        if row["sign"] not in ("1", "-1") or not row["name"] or row["name"] in signs:
+            raise ReferenceInputError(f"Table 9 CSV row is invalid or repeated: {row!r}")
+        signs[row["name"]] = int(row["sign"])
     return signs
 
 
