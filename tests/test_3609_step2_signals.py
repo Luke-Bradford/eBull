@@ -79,8 +79,8 @@ def test_ic_is_spearman_and_undefined_below_30_names_or_without_variance() -> No
 def test_quintile_spread_is_q1_minus_q5_at_the_specs_boundaries() -> None:
     n = 26  # boundaries at 6, 11, 16, 21: Q1 holds 6 names, Q5 holds 5
     scores = _exact({k: float(k) for k in range(n)})
-    returns = {k: float(k) for k in range(n)}
-    q1, q5 = (25 + 24 + 23 + 22 + 21 + 20) / 6, (4 + 3 + 2 + 1 + 0) / 5
+    returns = {k: float(k * k) for k in range(n)}  # convex, so a boundary moved by one name changes the spread
+    q1, q5 = sum(k * k for k in range(20, 26)) / 6, sum(k * k for k in range(5)) / 5
     assert quintile_spread(scores, returns) == pytest.approx(q1 - q5)
     # 24 names: Q5 gets 4 (boundaries 5, 10, 15, 20).
     assert quintile_spread(_exact({k: float(k) for k in range(24)}), {k: 0.0 for k in range(24)}) is None
