@@ -95,9 +95,10 @@ def test_archive_seasoning_is_36_calendar_months_inclusive_with_the_day_clamped(
 
 def test_entry_needs_the_top_decile_five_dollars_and_seasoning() -> None:
     order = list(range(30))  # decile = ranks 1..3, tercile = 1..10
-    formation = _formation(1, order, close={1: 4.99}, first_bar={2: date(2014, 1, 29)})
+    formation = _formation(1, order, close={1: 4.99}, first_bar={2: date(2012, 1, 29)})
     got = book_decisions([formation])
-    # 0 enters; 1 is below $5 at s(M); 2 is seasoned only 35 months; 3..9 are in the tercile but not the decile.
+    # 0 enters; 1 is below $5 at s(M); 2's first bar is one day short of 36 months before s(M) = 2015-01-28;
+    # 3..9 are in the tercile but not the decile.
     assert got.decisions[0].targets == (0,)
 
 
@@ -290,6 +291,13 @@ def test_an_empty_book_holds_cash_at_zero_and_re_enters_later() -> None:
     path = value_path([one, two, three], arm="best_case", cost_multiplier=0.0)
     assert path.returns[(2015, 3)] == 0.0
     assert path.holdings == {(2015, 1): 1, (2015, 2): 0, (2015, 3): 1}
+
+
+def test_an_empty_path_or_an_unknown_boundary_is_a_contract_error() -> None:
+    with pytest.raises(ValueError, match="at least one decision"):
+        value_path([], arm="best_case", cost_multiplier=1.0)
+    with pytest.raises(ValueError, match="boundary"):
+        value_path([_decision(1, [1])], arm="best_case", cost_multiplier=1.0, boundary=date(2015, 2, 28))
 
 
 def test_decisions_must_be_consecutive_and_sales_exactly_the_dropped_holdings() -> None:

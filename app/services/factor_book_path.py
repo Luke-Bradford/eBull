@@ -286,6 +286,10 @@ def value_path(
 
     ``boundary`` names the formation whose pre-trade state is captured. A month whose wealth factor is not finite
     and positive stops the path: it is recorded in ``nonpositive`` with its return, and nothing later is valued."""
+    if not decisions:
+        raise ValueError("a path needs at least one decision")
+    if boundary is not None and boundary not in {decision.formation for decision in decisions}:
+        raise ValueError(f"boundary {boundary} is not one of the decisions' formations")
     result = PathResult()
     positions: dict[int, Position] = {}
     cash = 1.0
