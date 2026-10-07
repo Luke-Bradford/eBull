@@ -62,7 +62,7 @@ def _market(conn: Conn, now: datetime, closes: dict[date, Decimal]) -> None:
     conn.commit()
 
 
-def _deploy_pot(conn: Conn, decl_id: int) -> None:
+def _deploy_pot(conn: Conn, decl_id: int, *, max_drawdown_pct: Decimal = Decimal("10")) -> None:
     from app.services.strategy_control_plane import configure_paper_pool
 
     configure_paper_pool(
@@ -101,7 +101,7 @@ def _deploy_pot(conn: Conn, decl_id: int) -> None:
         max_reconciliation_age_seconds=60,
         max_instrument_exposure_pct=Decimal("30"),
         max_portfolio_exposure_pct=Decimal("80"),
-        max_drawdown_pct=Decimal("10"),
+        max_drawdown_pct=max_drawdown_pct,
         min_net_expectancy_pct=Decimal("0"),
         cost_stress_multiplier=Decimal("2"),
         changed_by="test",
@@ -394,7 +394,10 @@ def test_the_loss_check_defers_on_a_defect_halts_an_entry_and_runs_without_one(
     conn = ebull_test_conn
     decl_id = _frozen(conn)
     _move(conn, decl_id, "shadow_only", "executing", "supervisor")
-    _deploy_pot(conn, decl_id)  # POT_CAPITAL 1000 → the limit is −200
+    # POT_CAPITAL 1000 → the limit is −200. The account drawdown limit sits above what −200 on the 2000 pool reaches
+    # (10%): whether the mark is priced into that drawdown depends on whether the first window, fixed by the real
+    # freeze time, lies before or after the position's real claim time, and this test is about the pot's own check.
+    _deploy_pot(conn, decl_id, max_drawdown_pct=Decimal("50"))
     _enable_trading(conn)
     conn.autocommit = True
     d, _ = _first_window(conn)
