@@ -56,7 +56,12 @@ def test_every_repo_module_the_roots_load_at_import_is_in_the_construction_closu
     closure = import_closure(list(CONSTRUCTION_ROOTS), REPO, unhashed=frozenset({TRIAL_REGISTER_PATH}))
     roots = [root.relative_to(REPO).with_suffix("").as_posix().replace("/", ".") for root in CONSTRUCTION_ROOTS]
     out = subprocess.run(
-        [sys.executable, "-c", _LOADED, str(REPO), *roots], cwd=REPO, capture_output=True, text=True, check=True
+        [sys.executable, "-c", _LOADED, str(REPO), *roots],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
     )
     loaded = json.loads(out.stdout.strip().splitlines()[-1])
     assert "scripts/report_3609_step2_verdict.py" in loaded
@@ -68,5 +73,11 @@ def test_every_repo_module_the_roots_load_at_import_is_in_the_construction_closu
 
 
 def _docstring_only(path: Path) -> bool:
+    """Empty, or one module docstring and nothing else."""
     body = ast.parse(path.read_bytes()).body
-    return all(isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) for node in body)
+    return not body or (
+        len(body) == 1
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    )
