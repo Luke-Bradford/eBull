@@ -183,8 +183,14 @@ at 58%. That transfer is exactly what gates G1 and G2 test.
     admitted series as `inputs/first_bars.jsonl.gz`, read in the same repeatable-read snapshot as the other inputs.
     It is a date only; no price is frozen with it. Neither the 12-month daily window (`daily_start`) nor the
     decision bars can supply it: seasoning at 2014-09-30 needs a bar on or before 2011-09-30.
-  - Every admitted name at M has a decision bar at s(M), so it has a first admitted bar. A universe name with a
-    composite and no entry in the file refuses the run (`eligible_to_enter`).
+  - **Shape.** One JSON line `[series_id, "YYYY-MM-DD"]` per admitted series (`inputs/admitted.jsonl.gz`) that has
+    at least one qualifying bar, sorted by `series_id`. A series with none is omitted, never written as null. The
+    report refuses the file on a repeated `series_id`, a series not in `admitted.jsonl.gz`, a malformed date, or a
+    date after the stage's price bound, and maps each date to the row's `name_key` at M through the row's
+    `series_id`.
+  - The report requires every admitted name at M to have a decision bar at s(M) (its ME close must equal it), so
+    every admitted name has a qualifying bar. A universe name with a composite and no first bar still refuses the
+    run (`eligible_to_enter`), as a defect.
 
 **Exceptions to the skills, stated:**
 Each exception below makes this a **reference construction**, not the forward one. Step 3's forward construction
@@ -478,9 +484,12 @@ moves to step 3's claiming forward declaration, whose planned data include the f
    - the construction-version hash (step 1's mechanism: the report, the builder and every imported module except
      `trial_register.py`, which is left out to avoid hashing the row that holds the hash);
    - the stage-A artefact manifest sha256: that of stage A republished with `inputs/first_bars.jsonl.gz` (slice 3),
-     replacing `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`. The republished artefact's
-     `rows.content_sha256` and `census.sha256` must equal that artefact's, and its `inputs` must equal that
-     artefact's plus the one new file; otherwise slice 3 stops;
+     replacing `ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e`. **Replay identity:** the
+     republished manifest's `inputs` must equal that artefact's plus the one key `inputs/first_bars.jsonl.gz`;
+     `schema`, `stage`, `pinned_manifests`, `formations`, `rule_versions`, `rows.path`, `rows.count`,
+     `rows.content_sha256` and `census` must be equal. Only `git_sha`, `published_at`, `spec_sha256`,
+     `construction_sources`, `construction_versions` and `rows.sha256` (the compressed bytes) may differ.
+     Otherwise slice 3 stops;
    - step 0's run manifest sha256;
    - the FF-12 map, QMJ PDF and Table 9 CSV sha256s;
    - for each of step 0's two factor snapshots, its `response_sha256` and its observation digest (below);
@@ -724,7 +733,7 @@ window's defined-month count for that metric.
    - the run's `started` and `access_recorded` ledger rows exist and the access row is committed;
    - a reference artefact carries the extended SUB.
 
-   Stage A must replay with rows, census and every frozen input byte-identical. The manifest's provenance fields may
+   Stage A must replay with rows content (`rows.content_sha256`), census and every frozen input byte-identical. The manifest's provenance fields may
    differ, and stage A keeps its original pins. Each stage verifies under its own pin map, with the cross-stage
    refusal tests §"Registration" lists. Tests use fixtures.
 3. **The report** (`scripts/report_3609_step2.py`): scores, book, control, references, gates, diagnostics and the
@@ -972,6 +981,11 @@ window's defined-month count for that metric.
   months before the first formation). The builder now freezes each admitted series' first admitted bar, and stage A
   is republished with it under a replay identity (rows, census and existing inputs unchanged); the declaration pins
   the republished manifest.
+- **Round 20 on 156 (`ckpt1_round20_final.txt`, run before the spec branch was rebased onto `main`, so it read an
+  older builder):** its snapshot finding cited the pre-slice-2 autocommit path; `_publish_artefact` on `main` reads
+  every input in one repeatable-read snapshot. Applied: the file's shape, omission and refusal rules; replay
+  identity as rows content (`rows.content_sha256`), here and in slice 2; the manifest fields that may and may not
+  differ.
 
 **Round 19 (153–155 resolved; no new finding; `ckpt1_round19_final.txt`).** Only the evidence-bar findings remain open.
 
