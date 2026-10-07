@@ -231,7 +231,8 @@ def _constant(values: np.ndarray) -> bool:
 def information(run: SeriesRun, arm: AmbiguityArm, window: Window) -> Information:
     """The autocorrelation is undefined below ``MIN_INFORMATION`` pairs or when the lagged or leading vector is
     constant; the ratio below ``MIN_INFORMATION`` months, at a constant series (zero iid error) or when the
-    Newey–West error is not finite and positive. The iid error is :func:`mean_errors`'s, so the ratio is
+    Newey–West error is not finite and positive; either is undefined where finite but huge returns overflow it. The
+    iid error is :func:`mean_errors`'s, so the ratio is
     sqrt(n / n_eff) before the cap. No effective-years figure is printed."""
     book = _returns(run.book[(arm, BASE)], window)
     b1 = run.b1[BASE].returns
@@ -239,11 +240,13 @@ def information(run: SeriesRun, arm: AmbiguityArm, window: Window) -> Informatio
     lagged, leading = active[:-1], active[1:]
     autocorrelation = None
     if len(lagged) >= MIN_INFORMATION and not (_constant(lagged) or _constant(leading)):
-        autocorrelation = float(np.corrcoef(lagged, leading)[0, 1])
+        with np.errstate(all="ignore"):  # huge finite returns can overflow the products: undefined, not NaN
+            value = float(np.corrcoef(lagged, leading)[0, 1])
+        autocorrelation = value if math.isfinite(value) else None
     se_ratio = None
     if len(active) >= MIN_INFORMATION and not _constant(active):
         iid, se = mean_errors(active)
-        if math.isfinite(se) and se > 0:
+        if math.isfinite(se) and se > 0 and math.isfinite(iid):
             se_ratio = se / math.sqrt(iid)
     return Information(autocorrelation, se_ratio)
 
