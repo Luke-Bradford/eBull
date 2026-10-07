@@ -12169,3 +12169,25 @@ neighbouring container and match it.**
   are wrapped so their own failure becomes a note (`exc.add_note`) on the original exception, never a replacement.
 - Enforced in: `tests/test_factor_book_ledger_db.py::test_an_uncommitted_access_is_invisible_to_the_gates_connection`
   and `tests/test_publish_3609_step2_sub.py::test_an_unwritable_failed_row_does_not_mask_the_original_error`.
+
+### Parametrising a hashed builder by stage: a structural test that no read names a stage constant (#3609)
+
+- Failure (caught by Codex checkpoint 2 before the first push of step 2 slice 2): the stage-A builder gained a
+  stage-B path by threading a `bound` argument through its bounded reads. `split_stamps` kept its hard-coded
+  `PRICE_BOUND`, so a stage-B build would have frozen no split after 2021-05-31. The existing test only checked that
+  every read's SQL *has* a `%(bound)s` placeholder, not which value fills it. The same review found two more gaps.
+  The census `chain_complete` still compared against the stage-A grid only. The SUB publisher, the first stage-B
+  read, ran without the new declaration check that the builder applied.
+- Prevention: when a module constant becomes a parameter, add an AST test that only the one resolver function
+  (`price_bound`) names the constant. Then a missed call site fails the test, whether or not a fixture exercises
+  it. A new gate added to one step of a gated sequence is applied to every step that reads gated data, and the
+  first step comes first.
+- Also (review bot on #3685): a gate-before-read test deletes the ledger-named artefact before the refused call, so
+  a read ahead of the gate fails with a file error rather than passing silently.
+- Also (review bot on #3685): a changed connection mode (autocommit to a repeatable-read read-only snapshot) gets a
+  test that stubs `psycopg.connect` and asserts the mode the reads run under; a one-off run is evidence for one
+  commit only.
+- Enforced in: `tests/test_3609_step2_stage_b_builder.py::test_only_price_bound_names_a_stage_bound`,
+  `::test_an_uncommitted_access_refuses_before_any_stage_b_read`,
+  `::test_a_publish_dumps_inside_one_read_only_repeatable_read_transaction` and
+  `tests/test_publish_3609_step2_sub.py::test_an_undeclared_trial_refuses_before_any_download`.

@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.services import factor_book_ledger
 from app.services.factor_book_ledger import StageBAccessError, recorded_access_id
 from app.services.factor_book_reference import step2_sub_quarters
 from app.services.factor_panel_fidelity import append_ledger, read_ledger
@@ -104,6 +105,21 @@ NO_COMMITTED_LEDGER = Path("/nonexistent/3609-ledger.jsonl")
 @pytest.fixture
 def clean(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(publisher, "_clean_head", lambda: "f" * 40)
+    monkeypatch.setattr(publisher, "_check_declared", lambda rows: None)
+
+
+def test_an_undeclared_trial_refuses_before_any_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.factor_book_declaration import DeclarationError
+    from app.services.trial_register import TrialRegister
+
+    monkeypatch.setattr(publisher, "_clean_head", lambda: "f" * 40)
+    monkeypatch.setattr(publisher, "TRIAL_REGISTER", TrialRegister("r", ()))
+    ledger = _ledger(tmp_path, _started(), _recorded())
+    sec = _Sec()
+    with pytest.raises(DeclarationError):
+        _publish(tmp_path, ledger, sec, [])
+    assert sec.requests == [] and not (tmp_path / "sub").exists()
+    assert [row["event"] for row in read_ledger(ledger)] == ["started", "access_recorded"]
 
 
 def _ledger(tmp_path: Path, *rows: dict[str, Any]) -> Path:
@@ -246,6 +262,7 @@ def test_an_unwritable_failed_row_does_not_mask_the_original_error(
         raise OSError("disk full")
 
     monkeypatch.setattr(publisher, "append_ledger", refuse)
+    monkeypatch.setattr(factor_book_ledger, "append_ledger", refuse)  # the shared 'failed' writer
     with pytest.raises(httpx.HTTPStatusError) as caught:
         _publish(tmp_path, ledger, _Sec(missing="2021q3"), [])
     assert any("'failed' ledger row was not written" in note for note in caught.value.__notes__)

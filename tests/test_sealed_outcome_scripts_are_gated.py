@@ -502,7 +502,9 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # for the gate test's import check". It computes per-name characteristics and holding returns and prints no
     # return statistic; every fidelity result read from its artefact is the counted, non-claiming DeclaredTrial
     # `3609-step1-fidelity-v1` (trial register r24), which `scripts/report_3609_fidelity.py` refuses to run without.
-    "build_3609_factor_panel.py": "#3609 step 1 panel builder (DeclaredTrial 3609-step1-fidelity-v1, slice 4)",
+    # Its stage-B path (#3609 step 2 slice 2, `publish_stage_b`) is gated in code: it refuses unless the step 2
+    # `DeclaredTrial` `3609-step2-book-v1` matches the checkout and the run's hold-out access is committed.
+    "build_3609_factor_panel.py": "#3609 panel builder (stage A: 3609-step1-fidelity-v1; stage B: 3609-step2-book-v1)",
     # #3620 spec (2026-10-06-3620-cross-asset-tsmom.md) §"Universe and eligibility" and §"Hold-out inspection,
     # stated": slice 1's census reads coverage, verdicts and distribution stamps and prints no return value, signal,
     # slot or statistic. ⚠ Slice 3 adds the outcome-reading run path to this script behind its own register gate;
