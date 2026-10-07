@@ -19,6 +19,8 @@ this module prints the months behind it over the whole path. Windows are ``repor
   averaged over the formations held into a window's months. They do not depend on the arm. An industry is flagged
   ``2x`` when the book's weight is above twice the reference's, and ``no reference weight`` when the reference holds
   none of it and the book does. A same-universe diagnostic, not the skill's benchmark cap (§"The book").
+* **Information, per window:** the lag-1 autocorrelation of the book's monthly active return over B1, and the ratio
+  of its mean's Newey–West standard error to its iid one.
 """
 
 from __future__ import annotations
@@ -35,12 +37,15 @@ from app.services.factor_book_series import ARMS, SeriesRun
 from app.services.strategy_result import AmbiguityArm
 from scripts.report_3609_baselines import nearest_rank
 from scripts.report_3609_step2_operations import Window, stage_windows, window_returns
+from scripts.report_3609_step2_signals import mean_errors
 from scripts.report_3609_step2_verdict import BASE, GROSS, TURNOVER_VETO, G1Result, g1, log_growth
 
 #: §"The book", "The 2× flag": a book industry weight above this multiple of the reference's is flagged.
 OVERWEIGHT: Final = 2.0
 FLAG_OVERWEIGHT: Final = "2x"
 FLAG_NO_REFERENCE: Final = "no reference weight"
+#: §"Diagnostics", Information: the fewest adjacent pairs, and months, either figure is computed on.
+MIN_INFORMATION: Final = 24
 
 
 # --------------------------------------------------------------------------- turnover above 50%
@@ -205,6 +210,44 @@ def average_weights(monthly: Mapping[Month, Mapping[str, IndustryWeight]], windo
     }
 
 
+# --------------------------------------------------------------------------- information
+
+
+@dataclass(frozen=True)
+class Information:
+    """§"Diagnostics", "Information, per window", on the book's monthly active return over B1 at base cost."""
+
+    #: Lag-1 Pearson autocorrelation over calendar-adjacent pairs.
+    autocorrelation: float | None
+    #: The Newey–West standard error of the mean active return over its iid standard error.
+    se_ratio: float | None
+
+
+def _constant(values: np.ndarray) -> bool:
+    """Every value equal: tested by equality, never by a float deviation (the #2394 ``ptp`` prevention entry)."""
+    return bool(np.ptp(values) == 0.0)
+
+
+def information(run: SeriesRun, arm: AmbiguityArm, window: Window) -> Information:
+    """The autocorrelation is undefined below ``MIN_INFORMATION`` pairs or when the lagged or leading vector is
+    constant; the ratio below ``MIN_INFORMATION`` months, at a constant series (zero iid error) or when the
+    Newey–West error is not finite and positive. The iid error is :func:`mean_errors`'s, so the ratio is
+    sqrt(n / n_eff) before the cap. No effective-years figure is printed."""
+    book = _returns(run.book[(arm, BASE)], window)
+    b1 = run.b1[BASE].returns
+    active = np.array([book[m] - b1[m] for m in window.months])
+    lagged, leading = active[:-1], active[1:]
+    autocorrelation = None
+    if len(lagged) >= MIN_INFORMATION and not (_constant(lagged) or _constant(leading)):
+        autocorrelation = float(np.corrcoef(lagged, leading)[0, 1])
+    se_ratio = None
+    if len(active) >= MIN_INFORMATION and not _constant(active):
+        iid, se = mean_errors(active)
+        if math.isfinite(se) and se > 0:
+            se_ratio = se / math.sqrt(iid)
+    return Information(autocorrelation, se_ratio)
+
+
 # --------------------------------------------------------------------------- assembly
 
 
@@ -216,6 +259,8 @@ class Diagnostics:
     #: Per formation; and per stage window label, averaged.
     industry_monthly: Mapping[Month, Mapping[str, IndustryWeight]]
     industry_average: Mapping[str, Mapping[str, IndustryWeight]]
+    #: Per arm, then per stage window label.
+    information: Mapping[str, Mapping[str, Information]]
 
 
 def diagnostics(
@@ -234,6 +279,7 @@ def diagnostics(
         {arm: {w.label: attribution(run, arm, w, factors) for w in windows} for arm in ARMS},
         monthly,
         {w.label: average_weights(monthly, w) for w in windows},
+        {arm: {w.label: information(run, arm, w) for w in windows} for arm in ARMS},
     )
 
 
@@ -245,11 +291,14 @@ __all__ = [
     "Diagnostics",
     "HighTurnover",
     "IndustryWeight",
+    "Information",
+    "MIN_INFORMATION",
     "TurnoverMonths",
     "attribution",
     "average_weights",
     "diagnostics",
     "high_turnover",
     "industry_weights",
+    "information",
     "turnover_months",
 ]

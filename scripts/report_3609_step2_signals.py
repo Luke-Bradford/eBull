@@ -150,6 +150,14 @@ class SeriesSummary:
         return self.n_eff is None or self.n_eff < MIN_EFFECTIVE
 
 
+def mean_errors(values: np.ndarray) -> tuple[float, float]:
+    """The iid variance of the mean, Σe² / n² (the Newey–West estimator at lag 0), and the Newey–West standard
+    error of the mean at step 0's lag. For a series whose values are not all equal."""
+    n = len(values)
+    se = float(ols_newey_west(values, np.empty((n, 0))).standard_errors[0])
+    return float(np.sum((values - float(values.mean())) ** 2)) / n**2, se
+
+
 def summarise(series: Mapping[Month, float | None], window: Window, *, ic_ir: bool) -> SeriesSummary:
     """The window's summary of one monthly series (§"Summaries per window")."""
     values = [series.get(m) for m in window.months]
@@ -165,11 +173,9 @@ def summarise(series: Mapping[Month, float | None], window: Window, *, ic_ir: bo
     ratio = mean / std if ic_ir and std > 0 else None
     t = n_eff = None
     if n == len(values) and std > 0:
-        fit = ols_newey_west(defined, np.empty((n, 0)))
-        se = float(fit.standard_errors[0])
+        iid, se = mean_errors(defined)
         if math.isfinite(se) and se > 0:
             t = mean / se
-            iid = float(np.sum((defined - mean) ** 2)) / n**2
             n_eff = min(float(n), n * iid / se**2)
     return SeriesSummary(n, mean, std, t, ratio, n_eff)
 
@@ -210,6 +216,7 @@ __all__ = [
     "SeriesSummary",
     "SignalSummary",
     "average_ranks",
+    "mean_errors",
     "ic",
     "monthly",
     "population",
