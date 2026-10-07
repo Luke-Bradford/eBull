@@ -12230,3 +12230,17 @@ neighbouring container and match it.**
   failure gets the same reason code as a gap (round 2 of the same review).
 - Enforced in: `tests/test_3609_factor_book_references.py::test_an_inverted_window_or_an_invalid_cost_multiplier_is_a_contract_error`,
   `::test_b1_refuses_a_non_finite_saved_return` and `::test_b1_refuses_a_saved_path_that_does_not_parse`.
+
+### A sum's positivity check must not refuse a legitimately empty sum; `math.fsum` raises on overflow (#3609)
+
+- Failure (review bot on #3700, step 2 slice 3c-v(e)): the universe diagnostic refused `ME_INVALID` whenever an
+  ME sum was not finite and positive. It applied that rule to the numerator of the top 1,000's share of above-cutoff
+  ME, too. That numerator is empty when the universe holds no above-cutoff name, which is a share of 0, not invalid
+  input. The book's own top-by-ME rule never produces that case, but the function takes any universe. The same
+  slice found that `math.fsum` raises `OverflowError` on an intermediate overflow rather than returning `inf`, so a
+  "not finite" refusal written as `isfinite(fsum(...))` crashes before it can refuse.
+- Prevention: for each validated sum, ask whether its input can legitimately be empty. If it can, accept the empty
+  sum (0) explicitly and test it; keep the positivity refusal for the denominator. Wrap `math.fsum` in
+  `try/except OverflowError` wherever an overflow must become the spec's reason code.
+- Enforced in: `tests/test_3609_step2_universe.py::test_a_universe_holding_no_above_cutoff_name_has_a_share_of_zero`
+  and `::test_an_me_sum_that_overflows_refuses`.
