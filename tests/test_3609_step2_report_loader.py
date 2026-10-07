@@ -152,6 +152,13 @@ def test_rows_become_admitted_names_with_closes_industries_and_signed_values(tmp
     assert second.close == {1: 11.0}
 
 
+def test_a_name_repeated_after_an_unpriced_excluded_row_refuses(tmp_path: Path, ff12: Ff12Map) -> None:
+    # The excluded row has no bar, so it leaves no close and no admitted entry; the repeat must still refuse.
+    rows = [_row(M1, 3, admitted=False), _row(M1, 3, series_id=900)]
+    with pytest.raises(report.ReportError, match="name_key"):
+        _load(tmp_path, ff12, rows, bars=[[900, M1, "10.5"]])
+
+
 def test_an_unadmitted_name_without_a_bar_has_no_close(tmp_path: Path, ff12: Ff12Map) -> None:
     rows = [_row(M1, 1), _row(M1, 2, admitted=False)]
     [month] = _load(tmp_path, ff12, rows, bars=[[101, M1, "10.5"]])

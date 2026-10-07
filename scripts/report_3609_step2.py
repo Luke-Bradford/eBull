@@ -150,6 +150,7 @@ def read_panel(verified: VerifiedArtefact, ff12: Ff12Map) -> list[PanelMonth]:
     admitted: dict[date, dict[int, PanelName]] = {m: {} for m in formations}
     close: dict[date, dict[int, float]] = {m: {} for m in formations}
     series_seen: set[tuple[date, int]] = set()
+    names_seen: set[tuple[date, int]] = set()
     count = 0
     for row in _lines(verified.rows):
         count += 1
@@ -163,8 +164,9 @@ def read_panel(verified: VerifiedArtefact, ff12: Ff12Map) -> list[PanelMonth]:
         if (formation, row["series_id"]) in series_seen:
             raise ReportError(f"(M, series_id) {(row['M'], row['series_id'])} is repeated")
         series_seen.add((formation, row["series_id"]))
-        if name in close[formation] or name in admitted[formation]:
+        if (formation, name) in names_seen:
             raise ReportError(f"(M, name_key) {(row['M'], name)} is repeated")
+        names_seen.add((formation, name))
         bar = bars.get((row["series_id"], session))
         if bar is not None:
             close[formation][name] = bar
