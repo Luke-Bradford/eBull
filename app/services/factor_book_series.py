@@ -64,6 +64,8 @@ class Summary:
 
     returns: Mapping[Month, float]
     turnover: Mapping[Month, float]
+    #: NAV after each month's trades (the stage-B slice starts from the boundary's pre-trade NAV).
+    nav: Mapping[Month, float]
     #: Order notional and charged cost per trade category.
     categories: Mapping[TradeCategory, tuple[float, float]]
     nonpositive: Month | None
@@ -77,7 +79,7 @@ def summarise(path: PathResult) -> Summary:
         notional.setdefault(trade.category, []).append(trade.notional)
         cost.setdefault(trade.category, []).append(trade.cost)
     categories = {c: (math.fsum(notional[c]), math.fsum(cost[c])) for c in notional}
-    return Summary(dict(path.returns), dict(path.turnover), categories, path.nonpositive, path.boundary)
+    return Summary(dict(path.returns), dict(path.turnover), dict(path.nav), categories, path.nonpositive, path.boundary)
 
 
 @dataclass(frozen=True)
