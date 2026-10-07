@@ -301,6 +301,15 @@ def value_path(
         unvalued = [n for n in decision.targets if n not in decision.returns or arm not in decision.returns[n].by_arm]
         if unvalued:
             raise ValueError(f"{decision.formation}: {len(unvalued)} targets have no {arm} return: {unvalued[:5]}")
+        unpriced = [
+            n
+            for n in decision.targets
+            if n not in positions and not ((c := decision.close.get(n)) is not None and math.isfinite(c) and c > 0)
+        ]
+        if unpriced:
+            raise BookRefusal(
+                "PRICE_INVALID", f"{decision.formation}: entries without a valid raw close: {unpriced[:5]}"
+            )
         pre = sum(p.value for p in positions.values()) + cash
         if decision.formation == boundary:
             result.boundary = BoundaryState(

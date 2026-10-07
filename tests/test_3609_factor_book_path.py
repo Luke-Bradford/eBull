@@ -309,6 +309,14 @@ def test_a_target_without_a_return_for_the_arm_is_a_contract_error() -> None:
         value_path([one_arm], arm="best_case", cost_multiplier=1.0)
 
 
+@pytest.mark.parametrize("bad", [None, 0.0, math.nan])
+def test_an_entry_without_a_valid_raw_close_refuses_in_the_valuation_too(bad: float | None) -> None:
+    close = {} if bad is None else {2: bad}
+    decision = replace(_decision(1, [1, 2]), close={1: 50.0, **close})
+    with pytest.raises(BookRefusal, match="PRICE_INVALID"):
+        value_path([decision], arm="best_case", cost_multiplier=1.0)
+
+
 def test_decisions_must_be_consecutive_and_sales_exactly_the_dropped_holdings() -> None:
     with pytest.raises(ValueError, match="consecutive"):
         value_path([_decision(1, [1]), _decision(3, [1])], arm="best_case", cost_multiplier=1.0)
