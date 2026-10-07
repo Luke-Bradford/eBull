@@ -42,7 +42,9 @@ from app.services.factor_panel_reference import parse_table9_signs
 from app.services.strategy_result import AmbiguityArm
 from scripts.build_3609_factor_panel import RESEARCH_ROOT, Frozen, VerifiedArtefact, holding_month, price_bound
 
-#: The stage-A artefact the spec's freeze evidence pins (§"Registration").
+#: The stage-A artefact the spec's freeze evidence pinned before finding 156. It has no ``first_bars`` input, so
+#: loading it refuses (``kept inputs not in the manifest``) by design until stage A is republished from ``main``
+#: under ``check_republished`` and these two constants move to the republished artefact (§"Registration").
 STAGE_A_ARTEFACT: Final = RESEARCH_ROOT / "factor_panel_3609" / "2026-10-06-483ac6ae-stageA"
 STAGE_A_MANIFEST_SHA256: Final = "ee1e8abc241f26596529509cd38f4692de4de8ff8700c0ac8ca19c2a412f3c1e"
 #: The inputs the report consumes, relative to the artefact; passed as ``keep`` to ``read_verified_artefact``.
