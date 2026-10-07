@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import gzip
 import hashlib
 import heapq
+import io
 import itertools
 import json
 import shutil
@@ -1313,14 +1315,48 @@ def publish_stage_b(
         raise
 
 
-def verify_artefact(artefact: Path, manifest_sha256: str, pins: Mapping[str, str] = STAGE_A_PINS) -> dict[str, Any]:
-    """The artefact's manifest, after checking its digest, schema, pins, inputs and published outputs.
+@dataclass(frozen=True)
+class VerifiedArtefact:
+    """A verified artefact's manifest and the bytes of every file the caller kept, as hashed.
+
+    Step 2 spec §"Registration" (finding 149): each consumed file is read once, hashed, and parsed from those same
+    bytes, so a file replaced after its check is never read. ``files`` is keyed by the path relative to the
+    artefact; ``rows`` and ``census`` are always kept."""
+
+    manifest: dict[str, Any]
+    files: Mapping[str, bytes]
+
+    @property
+    def rows(self) -> bytes:
+        return self.files[self.manifest["rows"]["path"]]
+
+    @property
+    def census(self) -> bytes:
+        return self.files[self.manifest["census"]["path"]]
+
+
+def _read_checked(path: Path, digest: str, what: str) -> bytes:
+    payload = path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise PanelError(f"{what} digest moved: {path.name}")
+    return payload
+
+
+def read_verified_artefact(
+    artefact: Path,
+    manifest_sha256: str,
+    pins: Mapping[str, str] = STAGE_A_PINS,
+    keep: Iterable[str] = (),
+) -> VerifiedArtefact:
+    """Verify the artefact's manifest digest, schema, pins, inputs and published outputs, reading each file once.
 
     ``pins`` is the stage's expected pin map: ``STAGE_A_PINS``, or ``stage_b_pins`` of the run's extended SUB
-    manifest digest. An artefact of the other stage, or with another SUB, refuses."""
-    if sha256_file(artefact / MANIFEST_FILE) != manifest_sha256:
-        raise PanelError(f"artefact manifest digest moved: {artefact}")
-    manifest = json.loads((artefact / MANIFEST_FILE).read_bytes())
+    manifest digest. An artefact of the other stage, or with another SUB, refuses. ``keep`` names the inputs (paths
+    relative to the artefact, as the manifest lists them) whose verified bytes are returned; the rest are hashed and
+    dropped."""
+    kept = set(keep)
+    manifest_bytes = _read_checked(artefact / MANIFEST_FILE, manifest_sha256, "artefact manifest")
+    manifest = json.loads(manifest_bytes)
     if manifest.get("schema") != MANIFEST_SCHEMA:
         raise PanelError(f"artefact schema {manifest.get('schema')!r}, expected {MANIFEST_SCHEMA!r}")
     if manifest["pinned_manifests"] != dict(pins):
@@ -1328,16 +1364,26 @@ def verify_artefact(artefact: Path, manifest_sha256: str, pins: Mapping[str, str
     listed = {p.relative_to(artefact).as_posix() for p in (artefact / "inputs").rglob("*") if p.is_file()}
     if listed != set(manifest["inputs"]):
         raise PanelError("the artefact's inputs/ does not match its manifest's file list")
+    if not kept <= listed:
+        raise PanelError(f"kept inputs not in the manifest: {sorted(kept - listed)}")
+    files: dict[str, bytes] = {}
     for relative, digest in manifest["inputs"].items():
-        if sha256_file(artefact / relative) != digest:
-            raise PanelError(f"frozen input digest moved: {relative}")
+        payload = _read_checked(artefact / relative, digest, "frozen input")
+        if relative in kept:
+            files[relative] = payload
     # The published outputs too: a match against the manifest proves nothing if the files beside it were replaced.
     for key in ("rows", "census"):
-        if sha256_file(artefact / manifest[key]["path"]) != manifest[key]["sha256"]:
-            raise PanelError(f"published {key} file digest moved: {manifest[key]['path']}")
-    if gz_content_sha256(artefact / manifest["rows"]["path"]) != manifest["rows"]["content_sha256"]:
-        raise PanelError("published rows content digest moved")
-    return manifest
+        entry = manifest[key]
+        files[entry["path"]] = _read_checked(artefact / entry["path"], entry["sha256"], f"published {key} file")
+    with gzip.GzipFile(fileobj=io.BytesIO(files[manifest["rows"]["path"]])) as content:
+        if hashlib.file_digest(content, "sha256").hexdigest() != manifest["rows"]["content_sha256"]:
+            raise PanelError("published rows content digest moved")
+    return VerifiedArtefact(manifest, files)
+
+
+def verify_artefact(artefact: Path, manifest_sha256: str, pins: Mapping[str, str] = STAGE_A_PINS) -> dict[str, Any]:
+    """The artefact's manifest, after :func:`read_verified_artefact`'s checks."""
+    return read_verified_artefact(artefact, manifest_sha256, pins).manifest
 
 
 def replay(artefact: Path, manifest_sha256: str, stem: Path) -> bool:
