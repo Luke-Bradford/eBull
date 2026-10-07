@@ -38,7 +38,7 @@ from scripts.report_3609_step2_attribution import (
     turnover_months,
 )
 from scripts.report_3609_step2_operations import Window, stage_windows
-from scripts.report_3609_step2_signals import summarise
+from scripts.report_3609_step2_signals import mean_errors, summarise
 from scripts.report_3609_step2_verdict import g1, log_growth, stage_b_returns
 
 COSTS = {"gross": 0.0, "net": 0.01, "stress_2x": 0.02}
@@ -292,13 +292,29 @@ def test_information_needs_24_pairs_and_24_months() -> None:
     assert information(run, ARMS[0], Window("w", months, months)).se_ratio is None
 
 
-def test_a_constant_active_return_has_no_information() -> None:
+def _flat_b1(book: Mapping[Month, float]) -> SeriesRun:
+    """B1 earns exactly zero, so the active return is the book's own series bit for bit."""
     run = _run()
-    run.book[(ARMS[0], "net")].returns.update({m: B1[m] + 0.1 for m in MONTHS})
-    stage_a = stage_windows(run)[0]
-    # 0.1 above B1, in floats: the active return is constant only by equality of the float differences.
-    active = np.array(_active(run, stage_a))
-    if np.ptp(active) != 0.0:
-        pytest.skip("this fixture's float differences are not all equal")
-    out = information(run, ARMS[0], stage_a)
+    for path in run.b1.values():
+        path.returns.update(dict.fromkeys(MONTHS, 0.0))
+    run.book[(ARMS[0], "net")].returns.update(book)
+    return run
+
+
+def test_the_error_ratio_uses_the_same_iid_error_as_n_eff_when_uncapped() -> None:
+    months = MONTHS[:40]
+    smooth = {m: math.sin(i / 6.0) + 0.001 * i for i, m in enumerate(months)}
+    out = information(_flat_b1(smooth), ARMS[0], Window("w", months, months))
+    n_eff = summarise(smooth, Window("w", months, months), ic_ir=False).n_eff
+    assert n_eff is not None and n_eff < 40 and out.se_ratio is not None
+    assert 40 / out.se_ratio**2 == pytest.approx(n_eff)
+
+
+def test_a_constant_active_return_has_no_information() -> None:
+    months = MONTHS[:38]
+    # 38 equal 0.1s: both float errors come out positive (~1e-18), so without the equality test a ratio of ~2
+    # would print for a series with no variation at all.
+    iid, se = mean_errors(np.full(38, 0.1))
+    assert iid > 0 and se > 0
+    out = information(_flat_b1(dict.fromkeys(months, 0.1)), ARMS[0], Window("w", months, months))
     assert out.autocorrelation is None and out.se_ratio is None
