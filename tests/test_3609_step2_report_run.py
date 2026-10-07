@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+import scripts.capture_3609_step2 as capture_module
 import scripts.report_3609_step2_run as run_module
 from app.services import factor_book
 from app.services.factor_book import BookRefusal
@@ -390,7 +391,7 @@ def test_an_output_whose_write_fails_after_creation_is_removed(tmp_path: Path, m
             raise OSError("directory fsync failed")
         return real_open(path, flags, *args)
 
-    monkeypatch.setattr(run_module.os, "open", open_)
+    monkeypatch.setattr(capture_module.os, "open", open_)
     with pytest.raises(OSError, match="directory fsync"):
         ledgers.run(lambda _: _Report(_Verdict("PASS", None)))
     assert list(ledgers.out.iterdir()) == []
