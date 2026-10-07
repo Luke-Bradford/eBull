@@ -112,8 +112,8 @@ def test_b1_takes_the_window_and_charges_entry_and_exit_at_the_start_band() -> N
 
 
 def test_b1_refuses_a_gap_or_a_step_0_rebalance_cost_inside_the_window() -> None:
+    gap = _saved(["2014-10", "2014-12"], [0.0, 0.0])
     with pytest.raises(BookRefusal, match="COMPARATOR_INVALID.*finite return"):
-        gap = _saved(["2014-10", "2014-12"], [0.0, 0.0])
         b1_path(gap, first=(2014, 10), last=(2014, 12), close=197.0, cost_multiplier=1.0)
     costly = _saved(["2014-10", "2014-11"], [0.0, 0.0], [0.0, 0.001])
     with pytest.raises(BookRefusal, match="COMPARATOR_INVALID.*rebalance costs"):
@@ -161,3 +161,19 @@ def test_an_inverted_window_or_an_invalid_cost_multiplier_is_a_contract_error(mu
     (decision,) = reference_decisions([_formation(1, [1, 2])])
     with pytest.raises(ValueError, match="cost multiplier"):
         value_path([decision], arm="best_case", cost_multiplier=multiplier)
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        {"months": ["2014/10"], "continuing": [0.0], "rebalance_cost": [0.0]},
+        {"months": ["2014-10"], "continuing": ["x"], "rebalance_cost": [0.0]},
+        {"months": ["2014-10"], "continuing": [0.0], "rebalance_cost": [""]},
+        {"months": ["2014-10"], "continuing": [0.0], "rebalance_cost": [float("nan")]},
+        {"months": ["2014-10"], "continuing": [0.0, 0.1], "rebalance_cost": [0.0]},
+        {"months": ["2014-10"], "continuing": [0.0]},
+    ],
+)
+def test_b1_refuses_a_saved_path_that_does_not_parse(saved: dict) -> None:
+    with pytest.raises(BookRefusal, match="COMPARATOR_INVALID"):
+        b1_path(saved, first=(2014, 10), last=(2014, 10), close=197.0, cost_multiplier=1.0)

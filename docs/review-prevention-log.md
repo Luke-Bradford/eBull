@@ -12225,6 +12225,8 @@ neighbouring container and match it.**
   comparator incompleteness `COMPARATOR_INVALID`.
 - Prevention: a function that slices a window checks `first <= last` on entry. One that takes a cost scenario
   checks that the multiplier is finite and non-negative (`factor_book_path.check_cost_multiplier`, shared by every
-  path). A data gap in a compared series raises the spec's reason code, never a bare exception.
-- Enforced in: `tests/test_3609_factor_book_references.py::test_an_inverted_window_or_an_invalid_cost_multiplier_is_a_contract_error`
-  and `::test_b1_refuses_a_non_finite_saved_return`.
+  path). A data gap in a compared series raises the spec's reason code, never a bare exception. That guard also
+  covers parsing the saved rows (the month label, every numeric column, a missing column, a ragged row), so a parse
+  failure gets the same reason code as a gap (round 2 of the same review).
+- Enforced in: `tests/test_3609_factor_book_references.py::test_an_inverted_window_or_an_invalid_cost_multiplier_is_a_contract_error`,
+  `::test_b1_refuses_a_non_finite_saved_return` and `::test_b1_refuses_a_saved_path_that_does_not_parse`.

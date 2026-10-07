@@ -99,9 +99,12 @@ def b1_path(
         raise ValueError(f"B1 window {first}..{last} is inverted")
     check_cost_multiplier(cost_multiplier)
     by_month: dict[Month, tuple[float, float]] = {}
-    for m, r, c in zip(saved["months"], saved["continuing"], saved["rebalance_cost"], strict=True):
-        year, month_number = str(m).split("-")
-        by_month[(int(year), int(month_number))] = (float(str(r)), float(str(c)))
+    try:
+        for m, r, c in zip(saved["months"], saved["continuing"], saved["rebalance_cost"], strict=True):
+            year, month_number = str(m).split("-")
+            by_month[(int(year), int(month_number))] = (float(str(r)), float(str(c)))
+    except (KeyError, ValueError) as exc:  # a missing column, a ragged row, or an unparseable label or number
+        raise BookRefusal("COMPARATOR_INVALID", f"B1's saved path does not parse: {exc}") from exc
     window: list[Month] = []
     month = first
     while month <= last:
@@ -110,7 +113,7 @@ def b1_path(
     missing = [m for m in window if m not in by_month or not math.isfinite(by_month[m][0])]
     if missing:
         raise BookRefusal("COMPARATOR_INVALID", f"B1 lacks a finite return for {len(missing)} months: {missing[:5]}")
-    charged = [m for m in window if by_month[m][1] != 0.0]
+    charged = [m for m in window if by_month[m][1] != 0.0]  # NaN included: it is not 0.0
     if charged:
         raise BookRefusal("COMPARATOR_INVALID", f"B1 carries step 0 rebalance costs in the window: {charged[:5]}")
     band, half = entry_band(close)
