@@ -12191,3 +12191,17 @@ neighbouring container and match it.**
   `::test_an_uncommitted_access_refuses_before_any_stage_b_read`,
   `::test_a_publish_dumps_inside_one_read_only_repeatable_read_transaction` and
   `tests/test_publish_3609_step2_sub.py::test_an_undeclared_trial_refuses_before_any_download`.
+
+### Synthetic test keys must have the production key's type; averaged z-scores tie exactly (#3609)
+
+- Failure (caught by Codex checkpoint 2 on step 2 slice 3a): the scoring core typed names as `str` and its tests
+  used zero-padded strings. The panel's `name_key` is an `int`, so passing the real keys would have broken the typed
+  API, and stringifying them would have changed the frozen `name_key` tie-break (`"10"` sorts before `"2"`). The
+  same review found that family and composite inputs averaged as floats split mathematical ties by an ulp. That is
+  the 2026-09-22 #2834 failure in a new place.
+- Prevention: a test's synthetic identifiers use the type of the column they stand for, and at least one tie-break
+  test uses keys whose string order differs from their numeric order. Scores built by averaging rank z-scores are
+  held exactly (`app/services/factor_book.py::Exact`, rational coefficients over `sqrt(V)`), with no tolerance.
+- Enforced in: `tests/test_3609_factor_book_scores.py::test_the_universe_is_the_top_1000_by_me_with_ties_by_name_key`,
+  `::test_a_tie_straddling_a_boundary_is_decided_by_name_key_and_reported` and
+  `::test_mathematically_equal_family_inputs_tie_exactly`.
