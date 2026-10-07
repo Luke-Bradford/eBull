@@ -21,7 +21,7 @@ checkout and the run's ``started``, ``access_recorded``, ``sub_published`` and `
 ``data_frozen`` or terminal row. :func:`reuse_capture` is a later attempt's ``capture_reused`` row, in place of
 those three capture rows: it binds the one committed ``data_frozen`` row for the trial (``CAPTURE_AMBIGUOUS``
 otherwise) and never publishes or rebuilds. Both verify every file before writing their row. A gate refusal writes
-nothing; any failure past it ends the run ``failed`` and removes a manifest the ledger does not name.
+nothing; any failure past it ends the run ``failed``.
 
 **The verifier** (:func:`verify_capture`) reads the capture manifest once, checks its sha256 against the binding,
 then verifies the SUB artefact and the stage-B artefact (under stage B's own pin map, the SUB's sha256 included)
@@ -234,6 +234,8 @@ def freeze_capture(
         check_declaration(TRIAL_REGISTER, rows, CodeHashes.current())
         access_id = recorded_access_id(rows, run_id, before=DATA_FROZEN_EVENT)
         bound = [row for row in read_ledger(committed_ledger) if row.get("event") == DATA_FROZEN_EVENT]
+        # A row naming no trial counts as this trial's, as ``capture_binding`` counts it: it makes every report
+        # refuse ``CAPTURE_AMBIGUOUS``, so a second capture beside it could never be bound either.
         if any(row.get("trial_id") == TRIAL_ID or not row.get("trial_id") for row in bound):
             raise StageBAccessError(f"the committed ledger already holds a {DATA_FROZEN_EVENT!r} row; reuse it")
         sub, stage_b = _artefact(rows, run_id, _SUB_EVENT), _artefact(rows, run_id, STAGE_B_EVENT)
@@ -244,12 +246,13 @@ def freeze_capture(
 def _freeze(
     run_id: str, access_id: int, sub: tuple[Path, str], stage_b: tuple[Path, str], *, ledger: Path, path: Path
 ) -> str:
-    written = False
     try:
         document = canonical_json(capture_manifest(run_id, access_id, sub, stage_b))
-        write_exclusive(path, document)
-        written = True
         digest = hashlib.sha256(document).hexdigest()
+        # ``write_exclusive`` removes its own file on failure. Past it only the append can fail, and a failed append
+        # may still have made the row durable, so the manifest stays: a durable ``data_frozen`` row always names a
+        # file that verifies. Without a row, the file binds nothing.
+        write_exclusive(path, document)
         append_ledger(
             ledger,
             {
@@ -262,11 +265,7 @@ def _freeze(
         )
         return digest
     except BaseException as exc:
-        try:
-            if written:
-                path.unlink(missing_ok=True)
-        finally:
-            end_run_failed(ledger, run_id, DATA_FROZEN_EVENT, exc)
+        end_run_failed(ledger, run_id, DATA_FROZEN_EVENT, exc)
         raise
 
 

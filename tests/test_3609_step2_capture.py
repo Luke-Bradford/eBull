@@ -9,6 +9,7 @@ import fcntl
 import gzip
 import hashlib
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -188,6 +189,7 @@ def test_an_uncommitted_access_refuses_before_any_read(tmp_path: Path, monkeypat
         pytest.param("sub-file", "SUB file digest moved", id="an altered SUB file"),
         pytest.param("sub-extra", "does not match its manifest's file list", id="an unlisted SUB file"),
         pytest.param("stage-b-input", "frozen input digest moved", id="an altered stage-B input"),
+        pytest.param("sub-no-inputs", "does not match its manifest's file list", id="a SUB without inputs/"),
     ],
 )
 def test_a_failure_past_the_gate_ends_the_run_and_leaves_no_manifest(
@@ -198,6 +200,8 @@ def test_a_failure_past_the_gate_ends_the_run_and_leaves_no_manifest(
         run.stage_b = _stage_b(tmp_path / "other", run.sub[1], run_id=REUSE)
     elif tamper == "sub-file":
         next((run.sub[0] / "inputs").rglob("*.txt")).write_text("altered\n")
+    elif tamper == "sub-no-inputs":
+        shutil.rmtree(run.sub[0] / "inputs")
     elif tamper == "sub-extra":
         (run.sub[0] / "inputs" / "extra.txt").write_text("unlisted\n")
     else:
@@ -357,3 +361,37 @@ def test_each_capture_step_holds_its_claim_from_the_gate_through_its_row(
     monkeypatch.setattr(capture, "append_ledger", append)
     run.freeze() if step == "freeze" else run.reuse()
     assert held == [True]
+
+
+def test_a_committed_row_naming_no_trial_also_refuses_a_fresh_freeze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``capture_binding`` counts it as this trial's (every report refuses ``CAPTURE_AMBIGUOUS``), so does the
+    freeze; another trial's row does not."""
+    run = _Run(tmp_path, monkeypatch)
+    append_ledger(run.committed, {"run_id": "d" * 32, "event": "data_frozen", "trial_id": "other-v1"})
+    run.open()
+    append_ledger(run.committed, {"run_id": "e" * 32, "event": "data_frozen", "manifest_sha256": "0" * 64})
+    with pytest.raises(StageBAccessError, match="reuse it"):
+        run.freeze()
+    assert run.confirmed == [] and "failed" not in run.events()
+
+
+def test_a_failed_data_frozen_append_ends_the_run_and_keeps_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The append may have made the row durable before it raised, so the file it names stays and still verifies."""
+    run = _Run(tmp_path, monkeypatch)
+    run.open()
+    real_append = capture.append_ledger
+
+    def append(path: Path, row: Any) -> None:
+        real_append(path, row)
+        raise OSError("fsync failed after the write")
+
+    monkeypatch.setattr(capture, "append_ledger", append)
+    with pytest.raises(OSError, match="fsync failed"):
+        run.freeze()
+    frozen_row = read_ledger(run.ledger)[-2]
+    assert run.events()[-2:] == ["data_frozen", "failed"]
+    capture.verify_capture(capture.capture_path(RUN, run.root), frozen_row["manifest_sha256"])
