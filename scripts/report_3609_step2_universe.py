@@ -120,12 +120,13 @@ class UniverseMonth:
     book_weight_at_or_below: float | None
 
 
-def _me_sum(values: Sequence[float], what: str) -> float:
+def _me_sum(values: Sequence[float], what: str, *, empty_ok: bool = False) -> float:
+    """A finite ME sum; positive unless ``empty_ok``, where no names sum to a legitimate 0."""
     try:
         total = math.fsum(values)
     except OverflowError:  # fsum raises on an intermediate overflow rather than returning inf
         total = math.inf
-    if not (math.isfinite(total) and total > 0):
+    if not (math.isfinite(total) and (total > 0 or (empty_ok and not values))):
         raise BookRefusal("ME_INVALID", f"{what} sums to {total!r}, not finite and positive")
     return total
 
@@ -139,6 +140,8 @@ def universe_month(
         raise ValueError(f"decision {decision.formation} is not formation {month.formation}")
     me = {name: panel.me for name, panel in month.admitted.items()}
     top = set(universe)
+    if not top:
+        raise ValueError(f"{month.formation}: the universe is empty")
     if not top <= me.keys() or not set(decision.targets) <= top:
         raise ValueError(f"{month.formation}: the universe or the book holds a name outside the admitted population")
     families = {
@@ -161,7 +164,9 @@ def universe_month(
     above = {name for name, value in me.items() if value > cutoff}
     share = None
     if above:
-        held = _me_sum([me[n] for n in above & top], f"{month.formation} above-cutoff ME in the top")
+        # Under the book's rule the top 1,000 holds the largest name, so this overlap is never empty; for any other
+        # universe an empty overlap is a share of 0, not invalid input.
+        held = _me_sum([me[n] for n in above & top], f"{month.formation} above-cutoff ME in the top", empty_ok=True)
         share = held / _me_sum([me[n] for n in above], f"{month.formation} above-cutoff ME")
     below = [name for name in decision.targets if me[name] <= cutoff]
     return UniverseMonth(

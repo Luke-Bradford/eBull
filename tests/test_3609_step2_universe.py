@@ -148,6 +148,16 @@ def test_no_name_above_the_cutoff_has_no_share_and_a_book_in_cash_weighs_nothing
     assert (row.book_holdings, row.book_at_or_below, row.book_weight_at_or_below) == (0, 0, 0.0)
 
 
+def test_a_universe_holding_no_above_cutoff_name_has_a_share_of_zero() -> None:
+    row = universe_month(_month(A, NAMES), (4, 6), _decision(A, ()), CUTOFF)
+    assert (row.above, row.shared, row.above_outside_top, row.above_me_share_in_top) == (3, 0, 3, 0.0)
+
+
+def test_an_empty_universe_is_a_contract_error() -> None:
+    with pytest.raises(ValueError, match="universe is empty"):
+        universe_month(_month(A, NAMES), (), _decision(A, ()), CUTOFF)
+
+
 def test_an_me_sum_that_overflows_refuses() -> None:
     names = {1: _name(1.5e308), 2: _name(1.5e308), 3: _name(1.0)}
     with pytest.raises(BookRefusal) as raised:
