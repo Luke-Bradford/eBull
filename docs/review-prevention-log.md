@@ -12244,3 +12244,20 @@ neighbouring container and match it.**
   `try/except OverflowError` wherever an overflow must become the spec's reason code.
 - Enforced in: `tests/test_3609_step2_universe.py::test_a_universe_holding_no_above_cutoff_name_has_a_share_of_zero`
   and `::test_an_me_sum_that_overflows_refuses`.
+
+### A code-freeze hash rooted at a shared module misses the modules that import it (#3609)
+
+- Failure (found while scoping step 2's report CLI, 2026-10-07): the construction hash that the step 2 declaration
+  pins was rooted at the builder and `scripts/report_3609_step2.py`. That module is the report's loader. The verdict,
+  series, control, references, assembly and every diagnostics module import the loader, and the loader imports none
+  of them. So the import closure left 12 modules out, the verdict code among them. A declaration frozen on that hash
+  would let the gate logic change under the same trial with no refusal.
+- Prevention: root an import-closure hash at the entry point that runs the code, never at a module the rest imports.
+  Pin the coverage two ways. A test globs every module of the run and asserts each is in the closure, so a new
+  module the roots do not reach fails at push. A second test imports the roots in a clean interpreter and asserts
+  every repo module actually loaded is in the closure, or is a deliberately unhashed file. That catches what no
+  filename glob names (review bot PREVENTION on #3706). An unhashed package `__init__` is allowed only while it
+  holds no code.
+- Enforced in: `tests/test_3609_step2_construction_hash.py::test_the_construction_closure_reaches_every_step2_report_module_and_book_service`
+  and `::test_every_repo_module_the_roots_load_at_import_is_in_the_construction_closure` (both revert-probed: with
+  the old roots the first lists the 12 missing modules, and the second finds the verdict never loaded).

@@ -4,8 +4,9 @@ Spec: ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"Registration" (P
 non-claiming ``DeclaredTrial`` ``3609-step2-book-v1`` (slice 4). ``record_holdout_access`` does not enforce a
 register row for it, so the run checks its own code against the row: the spec sha256, the construction hash (the
 builder, the report and every module they import except ``trial_register.py``), the register-policy hash and the
-Python version, each named once in the row's ``evidence``. The row's payload is pinned by a committed ``declared``
-ledger row, so an edited row refuses on every later attempt.
+Python version, each named once in the row's ``evidence``. The construction hash is rooted at the builder, the
+report's loader and its assembly (``CONSTRUCTION_ROOTS``), so it reaches the verdict and every diagnostic. The row's
+payload is pinned by a committed ``declared`` ledger row, so an edited row refuses on every later attempt.
 
 Until slice 4 merges there is no such row and no report, so every stage-B step refuses here.
 """
@@ -35,6 +36,10 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 SPEC_PATH: Final = _REPO_ROOT / "docs" / "research" / "2026-10-06-3609-step2-factor-book.md"
 BUILDER_PATH: Final = _REPO_ROOT / "scripts" / "build_3609_factor_panel.py"
 REPORT_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2.py"
+ASSEMBLY_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2_assembly.py"
+#: The construction hash's roots. The loader (``REPORT_PATH``) imports none of the verdict, series or diagnostics
+#: modules (they import it), so the assembly, which imports them all, is a root of its own.
+CONSTRUCTION_ROOTS: Final = (BUILDER_PATH, REPORT_PATH, ASSEMBLY_PATH)
 TRIAL_REGISTER_PATH: Final = "app/services/trial_register.py"
 #: The two top-level assignments the register-policy hash leaves out: they hold the row that holds the hash.
 _REGISTER_DATA: Final = frozenset({"TRIAL_REGISTER_VERSION", "TRIAL_REGISTER"})
@@ -123,7 +128,7 @@ class CodeHashes:
             raise DeclarationError(f"the step 2 spec is not in this checkout: {SPEC_PATH}")
         return cls(
             spec_sha256=sha256_file(SPEC_PATH),
-            construction_sha256=construction_sha256((BUILDER_PATH, REPORT_PATH), _REPO_ROOT),
+            construction_sha256=construction_sha256(CONSTRUCTION_ROOTS, _REPO_ROOT),
             register_policy_sha256=register_policy_sha256((_REPO_ROOT / TRIAL_REGISTER_PATH).read_bytes()),
             python=f"{sys.version_info.major}.{sys.version_info.minor}",
         )
@@ -168,6 +173,7 @@ def check_declaration(
 
 __all__ = [
     "CONSTRUCTION_LABEL",
+    "CONSTRUCTION_ROOTS",
     "DECLARED_EVENT",
     "POLICY_LABEL",
     "PYTHON_LABEL",
