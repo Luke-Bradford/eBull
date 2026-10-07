@@ -61,6 +61,12 @@ def test_a_missing_or_repeated_label_refuses() -> None:
         inputs.declared_pins(_evidence() + f"; {inputs.TABLE9_LABEL}={'9' * 64}")
 
 
+@pytest.mark.parametrize("value", ["F" * 64, "f" * 63, "not-a-digest"])
+def test_a_pin_that_is_not_a_lowercase_hex_sha256_refuses(value: str) -> None:
+    with pytest.raises(ReportError, match="not a lowercase hex sha256"):
+        inputs.declared_pins(_evidence(**{inputs.STEP0_LABEL: value}))
+
+
 def test_require_table9_compares_the_artefact_manifest_entry() -> None:
     verified = VerifiedArtefact(manifest={"inputs": {TABLE9_SIGNS: "9" * 64}}, files={})
     inputs.require_table9(verified, "9" * 64)
@@ -75,13 +81,15 @@ def test_require_table9_compares_the_artefact_manifest_entry() -> None:
 B1 = {"months": ["2014-10"], "continuing": [0.01], "rebalance_cost": [0.0], "liquidation_by_month": [0.001]}
 
 
-def _step0(tmp_path: Path, snapshots: object = None) -> str:
-    paths = json.dumps({inputs.B1_KEY: B1, "B2a 60/40": {}}).encode()
+def _step0(tmp_path: Path, snapshots: object = None, b1: object = B1, drop: str | None = None) -> str:
+    paths = json.dumps({inputs.B1_KEY: b1, "B2a 60/40": {}}).encode()
     (tmp_path / inputs.STEP0_PATHS).write_bytes(paths)
     manifest = {
         "sha256": {"paths": hashlib.sha256(paths).hexdigest()},
         "factor_snapshots": {FIVE: 39, MOMENTUM: 40} if snapshots is None else snapshots,
     }
+    if drop is not None:
+        del manifest[drop]
     document = json.dumps(manifest).encode()
     (tmp_path / inputs.STEP0_MANIFEST).write_bytes(document)
     return hashlib.sha256(document).hexdigest()
@@ -106,6 +114,17 @@ def test_read_step0_refuses_a_moved_manifest_or_paths_file(tmp_path: Path) -> No
 def test_read_step0_refuses_other_factor_snapshots(tmp_path: Path, snapshots: object) -> None:
     with pytest.raises(ReportError, match="factor snapshot"):
         inputs.read_step0(_step0(tmp_path, snapshots), tmp_path)
+
+
+@pytest.mark.parametrize("drop", ["sha256", "factor_snapshots"])
+def test_a_verified_manifest_missing_a_field_refuses_as_a_report_error(tmp_path: Path, drop: str) -> None:
+    with pytest.raises(ReportError, match="lacks a field"):
+        inputs.read_step0(_step0(tmp_path, drop=drop), tmp_path)
+
+
+def test_a_paths_file_without_an_object_b1_refuses(tmp_path: Path) -> None:
+    with pytest.raises(ReportError, match="not an object"):
+        inputs.read_step0(_step0(tmp_path, b1=[1, 2]), tmp_path)
 
 
 # --------------------------------------------------------------------------- observation digest

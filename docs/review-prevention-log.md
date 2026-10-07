@@ -12276,3 +12276,21 @@ neighbouring container and match it.**
   directory before a ledger row names the file.
 - Enforced in: `tests/test_3609_step2_report_run.py::test_the_gate_and_report_started_run_under_one_exclusive_claim`
   and `::test_an_output_whose_write_fails_after_creation_is_removed` (both revert-probed).
+
+### A reader of a hash-verified file raises its domain error on a missing field, and a reader that changes a caller's connection isolation restores it (#3609)
+
+- Failure (review bot on PR #3709, step 2's report inputs, 2026-10-08), two parts:
+  - **Missing fields.** `read_step0` checked step 0's `manifest.json` and `paths.json` against their pins, then
+    subscripted them directly. A file that verified but lacked `sha256`, `factor_snapshots` or `"B1 SPY"` raised a
+    bare `KeyError` instead of the module's `ReportError`.
+  - **Connection state.** `_snapshot_transaction` set `isolation_level` and `read_only` on the caller's connection
+    and never restored them, so a later transaction on that connection would silently run repeatable-read and
+    read-only.
+- Prevention:
+  - A matching hash proves the bytes, not their shape: wrap each field read from a verified external file so a
+    missing or mistyped field raises the domain error.
+  - A function that sets a passed-in connection's isolation or read-only flag saves both, and restores them in a
+    `finally` after its transaction.
+- Enforced in: `tests/test_3609_step2_report_inputs.py::test_a_verified_manifest_missing_a_field_refuses_as_a_report_error`
+  and `tests/test_3609_step2_report_inputs_db.py::test_digests_then_factors_from_the_pinned_snapshots`. The DB test
+  asserts the isolation is held inside the read and restored after it.

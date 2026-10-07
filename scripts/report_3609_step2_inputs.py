@@ -25,9 +25,11 @@ run past ``report_started`` then ends ``failed``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -82,24 +84,35 @@ class DeclaredPins:
     snapshots: Mapping[str, SnapshotDigests]
 
 
+_SHA256: Final = re.compile(r"[0-9a-f]{64}")
+
+
+def _pin(evidence: str, label: str) -> str:
+    value = evidence_value(evidence, label)
+    if not _SHA256.fullmatch(value):
+        raise ReportError(f"the declaration's {label} {value!r} is not a lowercase hex sha256")
+    return value
+
+
 def declared_pins(evidence: str) -> DeclaredPins:
-    """The pins the declaration's ``evidence`` names; the three that are also code constants must equal them."""
+    """The pins the declaration's ``evidence`` names, each a lowercase hex sha256; the three that are also code
+    constants must equal them."""
     for label, constant in (
         (STAGE_A_LABEL, STAGE_A_MANIFEST_SHA256),
         (FF12_LABEL, SICCODES12_SHA256),
         (QMJ_LABEL, QMJ_PDF_SHA256),
     ):
-        if evidence_value(evidence, label) != constant:
+        if _pin(evidence, label) != constant:
             raise ReportError(f"the declaration's {label} is not this checkout's pinned {constant}")
     return DeclaredPins(
         stage_a_manifest_sha256=STAGE_A_MANIFEST_SHA256,
-        step0_manifest_sha256=evidence_value(evidence, STEP0_LABEL),
-        table9_sha256=evidence_value(evidence, TABLE9_LABEL),
+        step0_manifest_sha256=_pin(evidence, STEP0_LABEL),
+        table9_sha256=_pin(evidence, TABLE9_LABEL),
         snapshots={
             dataset: SnapshotDigests(
-                evidence_value(evidence, response_label(dataset)), evidence_value(evidence, observations_label(dataset))
+                _pin(evidence, response_label(dataset)), _pin(evidence, observations_label(dataset))
             )
-            for dataset, _ in FACTOR_DATASETS
+            for dataset in _DATASETS
         },
     )
 
@@ -131,21 +144,26 @@ class Step0:
 
 
 def read_step0(manifest_sha256: str, run: Path = STEP0_RUN) -> Step0:
-    """Step 0's manifest against the declared sha256, then its ``paths.json`` against the manifest; each read once."""
+    """Step 0's manifest against the declared sha256, then its ``paths.json`` against the manifest; each read once.
+    A file that verifies but lacks a field the report reads refuses as a mismatch does."""
     manifest = json.loads(_read_once(run / STEP0_MANIFEST, manifest_sha256, "step 0 manifest"))
-    paths = json.loads(_read_once(run / STEP0_PATHS, manifest["sha256"]["paths"], "step 0 paths.json"))
-    snapshots = manifest["factor_snapshots"]
-    wanted = sorted(dataset for dataset, _ in FACTOR_DATASETS)
-    if sorted(snapshots) != wanted:
-        raise ReportError(f"step 0 pins factor snapshots for {sorted(snapshots)}, expected {wanted}")
-    ids = {dataset: snapshots[dataset] for dataset in wanted}
-    if any(type(i) is not int or i <= 0 for i in ids.values()):
-        raise ReportError(f"step 0's factor snapshot ids {ids} are not positive integers")
-    return Step0(manifest=manifest, b1_saved=paths[B1_KEY], factor_snapshots=ids)
+    try:
+        paths = json.loads(_read_once(run / STEP0_PATHS, manifest["sha256"]["paths"], "step 0 paths.json"))
+        snapshots, b1 = dict(manifest["factor_snapshots"]), paths[B1_KEY]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReportError(f"step 0's manifest or paths.json lacks a field the report reads: {exc!r}") from exc
+    if sorted(snapshots) != list(_DATASETS):
+        raise ReportError(f"step 0 pins factor snapshots for {sorted(snapshots)}, expected {list(_DATASETS)}")
+    if any(type(i) is not int or i <= 0 for i in snapshots.values()):
+        raise ReportError(f"step 0's factor snapshot ids {snapshots} are not positive integers")
+    if not isinstance(b1, dict):
+        raise ReportError(f"step 0's {B1_KEY!r} path is a {type(b1).__name__}, not an object")
+    return Step0(manifest=manifest, b1_saved=b1, factor_snapshots=snapshots)
 
 
 # --------------------------------------------------------------------------- factor and RF data
 
+_DATASETS: Final = tuple(sorted(dataset for dataset, _ in FACTOR_DATASETS))
 _SNAPSHOT_SQL: Final = """
 SELECT dataset_key, parse_status, payload, response_sha256 FROM reference_data_snapshots
 WHERE snapshot_id = %(snapshot_id)s
@@ -182,39 +200,51 @@ def _read_snapshot(
     return SnapshotDigests(response, observations_sha256(observations)), observations
 
 
-def _snapshot_transaction(conn: psycopg.Connection[Any]) -> None:
-    """Make ``conn``'s next transaction read-only repeatable read, so every snapshot is read from one database state;
-    refused on a connection already in a transaction, whose isolation could not change."""
+@contextlib.contextmanager
+def _snapshot_transaction(conn: psycopg.Connection[Any], snapshot_ids: Mapping[str, int]) -> Iterator[None]:
+    """One read-only repeatable-read transaction on ``conn``, so every snapshot is read from one database state; the
+    connection's isolation level and read-only flag are restored after it. Refused on a connection already in a
+    transaction, whose isolation could not change, or for datasets other than step 0's two."""
+    if sorted(snapshot_ids) != list(_DATASETS):
+        raise ReportError(f"factor snapshots for {sorted(snapshot_ids)}, expected {list(_DATASETS)}")
     if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
         raise ReportError("the factor read needs a connection with no open transaction")
+    isolation, read_only = conn.isolation_level, conn.read_only
     conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
     conn.read_only = True
+    try:
+        with conn.transaction():
+            yield
+    finally:
+        conn.isolation_level, conn.read_only = isolation, read_only
 
 
 def snapshot_digests(conn: psycopg.Connection[Any], snapshot_ids: Mapping[str, int]) -> dict[str, SnapshotDigests]:
     """The integrity-only read (slice 4): each snapshot's two digests, after the row checks; no value is returned."""
-    _snapshot_transaction(conn)
-    with conn.transaction():
-        return {dataset: _read_snapshot(conn, dataset, i)[0] for dataset, i in sorted(snapshot_ids.items())}
+    with _snapshot_transaction(conn, snapshot_ids):
+        return {dataset: _read_snapshot(conn, dataset, snapshot_ids[dataset])[0] for dataset in _DATASETS}
 
 
 def read_factors(
     conn: psycopg.Connection[Any], snapshot_ids: Mapping[str, int], pins: Mapping[str, SnapshotDigests]
 ) -> dict[str, dict[Month, float]]:
     """G1's series (step 0's ``FACTOR_DATASETS``: FF5, RF and momentum), by series key then month, from snapshots
-    whose digests equal the declared ones. Every observation of a used series must be in ``FACTOR_UNIT`` and appear
-    once per calendar month."""
-    _snapshot_transaction(conn)
+    whose digests equal the declared ones. Every observation of a used series must be finite, in ``FACTOR_UNIT``, and
+    appear once per calendar month."""
+    if sorted(pins) != list(_DATASETS):
+        raise ReportError(f"factor pins for {sorted(pins)}, expected {list(_DATASETS)}")
     factors: dict[str, dict[Month, float]] = {}
-    with conn.transaction():
+    with _snapshot_transaction(conn, snapshot_ids):
         for dataset, series_keys in FACTOR_DATASETS:
             digests, observations = _read_snapshot(conn, dataset, snapshot_ids[dataset])
             if digests != pins[dataset]:
                 raise ReportError(f"factor snapshot {snapshot_ids[dataset]} ({dataset}) differs from its pins")
             for key in series_keys:
                 rows = [(day, value, unit) for k, day, value, unit in observations if k == key]
-                if not rows or any(unit != FACTOR_UNIT for _, _, unit in rows):
-                    raise ReportError(f"{dataset}/{key}: no rows, or a unit other than {FACTOR_UNIT}")
+                if not rows or any(unit != FACTOR_UNIT or not value.is_finite() for _, value, unit in rows):
+                    raise ReportError(
+                        f"{dataset}/{key}: no rows, a non-finite value or a unit other than {FACTOR_UNIT}"
+                    )
                 values = {(day.year, day.month): float(value) for day, value, _ in rows}
                 if len(values) != len(rows) or key in factors:
                     raise ReportError(f"{dataset}/{key} repeats a calendar month or another dataset's series")

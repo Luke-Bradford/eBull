@@ -69,8 +69,21 @@ def test_digests_then_factors_from_the_pinned_snapshots(snapshots: dict[str, int
         pins = inputs.snapshot_digests(conn, snapshots)
     assert pins[FIVE].response_sha256 == hashlib.sha256(b"five").hexdigest()
     with _fresh() as conn:
-        factors = inputs.read_factors(conn, snapshots, pins)
-        assert conn.isolation_level is psycopg.IsolationLevel.REPEATABLE_READ and conn.read_only
+        seen: list[tuple[object, object]] = []
+        real = inputs._read_snapshot
+
+        def spy(c: psycopg.Connection[tuple], dataset: str, snapshot_id: int) -> object:
+            seen.append(
+                (c.execute("SHOW transaction_isolation").fetchone(), c.execute("SHOW transaction_read_only").fetchone())
+            )
+            return real(c, dataset, snapshot_id)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(inputs, "_read_snapshot", spy)
+            factors = inputs.read_factors(conn, snapshots, pins)
+        # Held inside the read, restored after it.
+        assert seen == [(("repeatable read",), ("on",))] * 2
+        assert conn.isolation_level is None and conn.read_only is None
     assert sorted(factors) == sorted((*FIVE_SERIES, "Mom"))
     assert factors["SMB"] == {(2020, 1): 0.011, (2020, 2): -0.0021}
     assert factors["Mom"] == {(2020, 1): 0.01, (2020, 2): -0.002}
@@ -107,12 +120,34 @@ def test_another_dataset_or_a_wrong_unit_refuses(ebull_test_conn: psycopg.Connec
     percent = _snapshot(ebull_test_conn, MOMENTUM, ("Mom",), b"momentum", unit="percent_per_annum")
     ebull_test_conn.commit()
     with _fresh() as conn, pytest.raises(ReportError, match="not accepted"):
-        inputs.snapshot_digests(conn, {MOMENTUM: five})
+        inputs.snapshot_digests(conn, {FIVE: percent, MOMENTUM: five})
     ids = {FIVE: five, MOMENTUM: percent}
     with _fresh() as conn:
         pins = inputs.snapshot_digests(conn, ids)
     with _fresh() as conn, pytest.raises(ReportError, match="unit"):
         inputs.read_factors(conn, ids, pins)
+
+
+def test_a_non_finite_value_refuses(ebull_test_conn: psycopg.Connection[tuple], snapshots: dict[str, int]) -> None:  # noqa: F811
+    ebull_test_conn.execute(
+        "UPDATE reference_data_observations SET value = 'NaN' WHERE snapshot_id = %s AND series_key = 'RF'"
+        " AND observation_date = '2020-01-31'",
+        (snapshots[FIVE],),
+    )
+    ebull_test_conn.commit()
+    with _fresh() as conn:
+        pins = inputs.snapshot_digests(conn, snapshots)
+    with _fresh() as conn, pytest.raises(ReportError, match="non-finite"):
+        inputs.read_factors(conn, snapshots, pins)
+
+
+def test_a_missing_dataset_refuses_before_any_read(snapshots: dict[str, int]) -> None:
+    with _fresh() as conn, pytest.raises(ReportError, match="expected"):
+        inputs.snapshot_digests(conn, {FIVE: snapshots[FIVE]})
+    with _fresh() as conn:
+        pins = inputs.snapshot_digests(conn, snapshots)
+    with _fresh() as conn, pytest.raises(ReportError, match="factor pins"):
+        inputs.read_factors(conn, snapshots, {FIVE: pins[FIVE]})
 
 
 def test_a_connection_inside_a_transaction_refuses(snapshots: dict[str, int]) -> None:
