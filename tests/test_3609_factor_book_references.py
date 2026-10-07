@@ -172,6 +172,7 @@ def test_an_inverted_window_or_an_invalid_cost_multiplier_is_a_contract_error(mu
         {"months": ["2014-10"], "continuing": [0.0], "rebalance_cost": [float("nan")]},
         {"months": ["2014-10"], "continuing": [0.0, 0.1], "rebalance_cost": [0.0]},
         {"months": ["2014-10"], "continuing": [0.0]},
+        {"months": ["2014-10"], "continuing": None, "rebalance_cost": [0.0]},
     ],
 )
 def test_b1_refuses_a_saved_path_that_does_not_parse(saved: dict) -> None:

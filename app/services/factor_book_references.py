@@ -103,7 +103,7 @@ def b1_path(
         for m, r, c in zip(saved["months"], saved["continuing"], saved["rebalance_cost"], strict=True):
             year, month_number = str(m).split("-")
             by_month[(int(year), int(month_number))] = (float(str(r)), float(str(c)))
-    except (KeyError, ValueError) as exc:  # a missing column, a ragged row, or an unparseable label or number
+    except (KeyError, TypeError, ValueError) as exc:  # a missing or non-iterable column, a ragged row, a bad cell
         raise BookRefusal("COMPARATOR_INVALID", f"B1's saved path does not parse: {exc}") from exc
     window: list[Month] = []
     month = first
