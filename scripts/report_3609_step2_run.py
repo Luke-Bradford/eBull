@@ -13,6 +13,7 @@ canonical JSON, labels) and §"Slices" (capture lifecycle, "The report's ledger 
    is anything printed. A ``REFUSED`` verdict (a :class:`~app.services.factor_book.BookRefusal` from the
    evaluation) is a decision-rule outcome, so it ends ``completed`` with its reason code and the refusal payload.
    Any other failure past step 2 ends the run ``failed``, and an output file the ledger does not name is deleted.
+   The code hashes are taken again after the evaluation; a checkout that moved during it ends the run ``failed``.
 
 This module is the report's entry point, so it is a construction-hash root
 (:data:`~app.services.factor_book_declaration.CONSTRUCTION_ROOTS`).
@@ -34,6 +35,7 @@ from app.services.factor_book import BookRefusal
 from app.services.factor_book_declaration import TRIAL_ID, CodeHashes, canonical_json
 from app.services.factor_book_ledger import (
     COMMITTED_LEDGER_PATH,
+    DECLARATION_MISMATCH,
     LEDGER_PATH,
     Binding,
     check_report_gate,
@@ -148,6 +150,9 @@ def run_report(
         }
         if "run" in body:
             raise ValueError("the report payload already holds a 'run' block")
+        # The gate checked the hashes before evaluation; code edited on disk during it ends the run.
+        if current() != hashes:
+            raise BookRefusal(DECLARATION_MISMATCH, f"run {run_id}: the checkout's code hashes moved during the run")
         document = canonical_json({**body, "run": run_block})
         digest = hashlib.sha256(document).hexdigest()
         _write_exclusive(out, document)

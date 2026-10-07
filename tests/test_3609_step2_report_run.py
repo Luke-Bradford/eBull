@@ -192,7 +192,12 @@ class _Ledgers:
         for row in local:
             append_ledger(self.local, row)
 
-    def run(self, evaluate_run: Callable[[Binding], Any], run: str = CAPTURE) -> run_module.ReportOutcome:
+    def run(
+        self,
+        evaluate_run: Callable[[Binding], Any],
+        run: str = CAPTURE,
+        current: Callable[[], CodeHashes] = lambda: HASHES,
+    ) -> run_module.ReportOutcome:
         return run_report(
             run,
             head=HEAD,
@@ -201,7 +206,7 @@ class _Ledgers:
             out_dir=self.out,
             ledger=self.local,
             committed_ledger=self.committed,
-            current=lambda: HASHES,
+            current=current,
         )
 
     def events(self, run: str = CAPTURE) -> list[Mapping[str, Any]]:
@@ -318,6 +323,16 @@ def test_a_payload_holding_its_own_run_block_fails_rather_than_being_overwritten
     with pytest.raises(ValueError, match="'run' block"):
         ledgers.run(lambda _: _Report(_Verdict("PASS", None)))
     assert ledgers.events()[-1]["event"] == "failed" and not ledgers.out.exists()
+
+
+@pytest.mark.usefixtures("stub_payload")
+def test_code_that_moves_during_the_evaluation_ends_the_run_failed(tmp_path: Path) -> None:
+    ledgers = _Ledgers(tmp_path, COMMITTED)
+    taken = iter([HASHES, dataclasses.replace(HASHES, construction_sha256="9" * 64)])
+    with pytest.raises(BookRefusal, match=f"{DECLARATION_MISMATCH}.*moved during the run"):
+        ledgers.run(lambda _: _Report(_Verdict("PASS", None)), current=lambda: next(taken))
+    assert [row["event"] for row in ledgers.events()] == ["report_started", "failed"]
+    assert not ledgers.out.exists()
 
 
 @pytest.mark.usefixtures("stub_payload")
