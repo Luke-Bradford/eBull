@@ -166,6 +166,8 @@ def test_a_path_stopped_before_the_formation_has_no_sold_weight_and_a_mismatch_r
     assert row.decile.affected.sold_weight == {GROSS: None}
     with pytest.raises(ValueError, match="sold"):
         sold_weights(decision, {GROSS: PathResult()})
+    with pytest.raises(ValueError, match="do not cover exactly"):
+        construction_month(UNIVERSE, SCORES, BANDS, decision, {GROSS: {}})
 
 
 def test_construction_refuses_unequal_inputs() -> None:

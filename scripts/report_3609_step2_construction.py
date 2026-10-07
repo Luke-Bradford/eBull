@@ -57,6 +57,9 @@ class Affected:
 
 @dataclass(frozen=True)
 class Uninformative:
+    """One operation's uninformative groups at one formation."""
+
+    #: The (operation, industry) groups that gave no score.
     groups: int
     affected: Affected
 
@@ -127,9 +130,11 @@ def construction_month(
         raise ValueError(f"{decision.formation}: the book holds a name outside the universe")
     if not {name for names in scores.uninformative.values() for name in names} <= population:
         raise ValueError(f"{decision.formation}: an uninformative group holds a name outside the universe")
-    by_operation: dict[str, list[tuple[int, ...]]] = defaultdict(list)
+    if any(w is not None and w.keys() != decision.sales.keys() for w in sold.values()):
+        raise ValueError(f"{decision.formation}: a path's sold weights do not cover exactly the book's sales")
+    by_operation: dict[str, list[tuple[int, ...]]] = {op: [] for op in OPERATIONS}
     for (operation, _group), names in scores.uninformative.items():
-        if operation not in OPERATIONS:
+        if operation not in by_operation:
             raise ValueError(f"{decision.formation}: unknown operation {operation!r}")
         by_operation[operation].append(names)
     uninformative = {
