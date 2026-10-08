@@ -1574,8 +1574,11 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "family as step 2's book (spec premise 6). Non-claiming; stage B was not read."
             ),
             evidence=(
-                "docs/research/2026-10-06-3609-step2-factor-book.md premise 6; reproduce with "
-                "PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure (#3609, 2026-10-08)"
+                "docs/research/2026-10-06-3609-step2-factor-book.md premise 6; "
+                "plan docs/research/3609-step2-exposure-plan.json "
+                "sha256=e1c78dd48a91a30ab50d7655bce0fdcb4215fd826d7a9bebeeed2e7bebe8714a "
+                "(script, stage-A pin and input-row digests inside); "
+                "reproduce with PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure (#3609, 2026-10-08)"
             ),
             exactness=TrialExactness.EXACT,
             searches=3,

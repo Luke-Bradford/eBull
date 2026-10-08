@@ -33,8 +33,9 @@ from fractions import Fraction
 from typing import Final
 
 #: Premises 1 and 6: step 1's value family, the one family whose intended loading (HML) condition 3 can test with
-#: power on stage B. GP/A and investment passed step 1 but are not in the book: on stage A their loadings were not
-#: separately identifiable (``scripts/plan_3609_step2_exposure.py``).
+#: power on stage B. GP/A and investment passed step 1 but are not in the book: on stage A their RMW and CMA
+#: coefficients in the three-family book were too weak for a powered stage-B test, and value with GP/A cancelled
+#: HML (``scripts/plan_3609_step2_exposure.py``).
 FAMILIES: Final[Mapping[str, tuple[str, ...]]] = {
     "value": ("be_me", "ni_me", "ocf_me"),
 }

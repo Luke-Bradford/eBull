@@ -243,9 +243,11 @@ class Verdict:
 def verdict(run: SeriesRun, factors: Mapping[str, Mapping[Month, float]]) -> Verdict:
     """§"Decision rule", verdict order steps 2-6; step 1 (``REFUSED``) was raised by ``run_series`` or is raised
     here (``COMPARATOR_INVALID`` from a G)."""
-    # A caller-contract precondition, not a gate: a run that does not span the declared path (stage B included) is
-    # not the declared run, so it gets no verdict at all. Checking it after the INSUFFICIENT return would label such
-    # a run (say, stage A alone) INSUFFICIENT, a verdict on a run that was never the declared one.
+    # A caller-contract precondition, not a gate: a run whose months do not cover stage B is not the declared run, so
+    # it gets no verdict at all. Checking it after the INSUFFICIENT return would label such a run (say, stage A
+    # alone) INSUFFICIENT, a verdict on a run that was never the declared one. This checks stage B only; the whole
+    # declared path (each stage's formations equal to its declared grid) is enforced before evaluation by
+    # ``report_3609_step2_run.evaluate_run`` (``STAGE_GRIDS``), whose mismatch ends the run ``failed``.
     window = stage_b_months(run.months)
     if run.insufficient:
         return Verdict("INSUFFICIENT", insufficient=run.insufficient)

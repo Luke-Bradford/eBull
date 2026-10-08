@@ -12351,8 +12351,8 @@ neighbouring container and match it.**
   value cancelled HML (0.03). On stage B's 39 months the gate would have failed for want of data, spending the one
   confirmatory sample. Reproduce: `PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure`.
 - Prevention: before a declaration freezes, compute the gate's power from planning inputs of the construction itself
-  (development data or sourced series, never the confirmation sample), per intended loading and for the conjunction,
-  with a lower-bound sensitivity. A composite of correlated families needs each family's partial loading checked
+  (development data or sourced series, never the confirmation sample), per intended loading and for the conjunction
+  the verdict actually requires (every loading, every arm), against a declared target, with a sensitivity. A composite of correlated families needs each family's partial loading checked
   separately; an integrated composite can cancel one exposure with another.
 - Enforced in: the step 2 spec, premise 6; `scripts/report_3609_step2_verdict.py` `G1_LOADINGS`, tested by
   `tests/test_3609_step2_verdict.py::test_g1_reads_stage_b_only`.
