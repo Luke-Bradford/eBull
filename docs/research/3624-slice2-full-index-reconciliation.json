@@ -5,455 +5,637 @@
   "2004Q3": {
    "sha256": "d53e651280c4ded5223209eb0354eb1e81334b07130e625fadd1d46cd2efe732",
    "last_data_received": "September 30, 2004",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 217724
+   }
   },
   "2004Q4": {
    "sha256": "b73e7bec0d749d80152454a444f3b76427673b8afe81c78d8f0ea470e5149aaf",
    "last_data_received": "December 31, 2004",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 241435
+   }
   },
   "2005Q1": {
    "sha256": "4c9b12eba291e65070b0a6cf517f619d51e597fee2809b388eccf9d70a29ed9f",
    "last_data_received": "March 31, 2005",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 317763
+   }
   },
   "2005Q2": {
    "sha256": "82886e4b9e8215684d9156ebe52f013f5ad48e9ac9d254a629ee34454d041b93",
    "last_data_received": "June 30, 2005",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 271631
+   }
   },
   "2005Q3": {
    "sha256": "88fa93f1dc54b697abbc8a9640b3c9d24c9acf92ac5dc6e6de2dfbb8507c57a1",
    "last_data_received": "September 30, 2005",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 242170
+   }
   },
   "2005Q4": {
    "sha256": "fdec4352f3f1ab468b6eca1709b703f9f3c9f6a5e01c3aef22f6df244e1ac4b9",
    "last_data_received": "December 31, 2005",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 240725
+   }
   },
   "2006Q1": {
    "sha256": "cad7a503449cf8f1f144588ba524494d3b6cc9860ea990916ae73fd9d51fa198",
    "last_data_received": "March 31, 2006",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 335578
+   }
   },
   "2006Q2": {
    "sha256": "c6ef345dea051b1b41a4238e69482e39bea7193064e9882cb503fb2bf19c3b83",
    "last_data_received": "June 30, 2006",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 278959
+   }
   },
   "2006Q3": {
    "sha256": "767aee4306cfce6bf7967c249a830df7a45576876cf9a1764d2e7afc7bc64b4f",
    "last_data_received": "September 30, 2006",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 232128
+   }
   },
   "2006Q4": {
    "sha256": "607beadedb14f272f3c814c21fa3c3832dde4b618c85c7d2afeeb6b8038b92ed",
    "last_data_received": "December 31, 2006",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 249960
+   }
   },
   "2007Q1": {
    "sha256": "2787a7b7330d792f58e1e26a5392b432b53cd19ed640c82a9df11bae5f183aad",
    "last_data_received": "March 31, 2007",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 339880
+   }
   },
   "2007Q2": {
    "sha256": "73d8107f85fb80d5dcd10655c314b1d8796fa294f430af54fcba400cf65305a6",
    "last_data_received": "June 30, 2007",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 289083
+   }
   },
   "2007Q3": {
    "sha256": "d88cdfbd21b1aa6a31d91157b4a1560009bf97b032fd154b87da6bdfcb48602d",
    "last_data_received": "September 30, 2007",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 252073
+   }
   },
   "2007Q4": {
    "sha256": "50a6a5a7312b49301500d7f97cced1664b2b3b76cef698410b7155d30624ab30",
    "last_data_received": "December 31, 2007",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 256468
+   }
   },
   "2008Q1": {
    "sha256": "1648bf97fd0f4e65f7e5da1956942aaf61e115a425f8143055913f9918e1c80f",
    "last_data_received": "March 31, 2008",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 328710
+   }
   },
   "2008Q2": {
    "sha256": "4de952344fc1f3547d6710c3cfd2029cb33284a0d2b337851b4414670beceed4",
    "last_data_received": "June 30, 2008",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 267722
+   }
   },
   "2008Q3": {
    "sha256": "72c6a03a030890dc4488bad4147be4c563fd30738e570b6f70cc9eeae6fc68a5",
    "last_data_received": "September 30, 2008",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 220734
+   }
   },
   "2008Q4": {
    "sha256": "392fe74b22ab23b3572f4a9782a5c71246b10c32e021037e5775525fd61b7b8a",
    "last_data_received": "December 31, 2008",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 219670
+   }
   },
   "2009Q1": {
    "sha256": "9bb918adfcce54faea8b6dda50894702d7a09748e9e5c34c0164045a1e08118d",
    "last_data_received": "March 31, 2009",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 300076
+   }
   },
   "2009Q2": {
    "sha256": "a3798d55aecfc1448e87bab6677ae025ac2829e018ccb922eb810c3c93d33085",
    "last_data_received": "June 30, 2009",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 229347
+   }
   },
   "2009Q3": {
    "sha256": "b28b4d7f7bb1032db9e085da2d51c27c543545f9d9b94a92c5b42b1c52cb6f6e",
    "last_data_received": "September 30, 2009",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 200689
+   }
   },
   "2009Q4": {
    "sha256": "7491acabcc377d1f16f9c5817e3cddbc99726d2ce34a077aee0823aad68ca022",
    "last_data_received": "December 31, 2009",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 208398
+   }
   },
   "2010Q1": {
    "sha256": "cd791e9e4cfdb31536abf30354279e10a4927405377f6ade4eeb8df6e38d733f",
    "last_data_received": "March 31, 2010",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 300561
+   }
   },
   "2010Q2": {
    "sha256": "18afce8a251ee4f0876f0a970c563a58b27cf90c17f64b165224f08f5c85196b",
    "last_data_received": "June 30, 2010",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 255202
+   }
   },
   "2010Q3": {
    "sha256": "869b0f2d009eed72adb501b29b0403ea71612ec5d2a113d4ea25f054191be7b0",
    "last_data_received": "September 30, 2010",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 203929
+   }
   },
   "2010Q4": {
    "sha256": "b559c98ce3c8938943cb6b2fc29c513ace38a14be5371f719fd26bd2ec2176da",
    "last_data_received": "December 31, 2010",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 220072
+   }
   },
   "2011Q1": {
    "sha256": "62f89af6d131201d6074b57699e71705badc35b3e1cf5b549e431f67518925e2",
    "last_data_received": "March 31, 2011",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 307651
+   }
   },
   "2011Q2": {
    "sha256": "5a3c3ffa3b79593ab1105908a2e669f38fbcaa13f97295000fce81f1f5bd14a4",
    "last_data_received": "June 30, 2011",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 262224
+   }
   },
   "2011Q3": {
    "sha256": "6532b3a665dcc82174c08cb36ce4e8da21db747e0085cb6555c5cf5f69d3c914",
    "last_data_received": "September 30, 2011",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 207149
+   }
   },
   "2011Q4": {
    "sha256": "3874f45f0ee496d4a42d285554012cf097fa33e96a41a392dda0180400f97c19",
    "last_data_received": "December 31, 2011",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 202629
+   }
   },
   "2012Q1": {
    "sha256": "74b281acb34c220a160737773cf6f3e8d2ebc14dd7257d6d339e10b381472831",
    "last_data_received": "March 31, 2012",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 309510
+   }
   },
   "2012Q2": {
    "sha256": "fca4fe6f052272045753bffb55c1b7f51e1748c013b91f860a09de21de34cb37",
    "last_data_received": "June 30, 2012",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 246870
+   }
   },
   "2012Q3": {
    "sha256": "886b8326b210edd29ba436478f6cc2f55dd3200619ae2915f01976a6e6557f9d",
    "last_data_received": "September 30, 2012",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 203729
+   }
   },
   "2012Q4": {
    "sha256": "260ace15bec0aaaca68ef814d2f1c89383fd56fab2de90e934b02cbf22c368ff",
    "last_data_received": "December 31, 2012",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 215002
+   }
   },
   "2013Q1": {
    "sha256": "2d17e222f087d1509b2fdf198b62da910651d70587a4957b790e8b57d2809483",
    "last_data_received": "March 31, 2013",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 303618
+   }
   },
   "2013Q2": {
    "sha256": "ab1658458c21afec18d8c06cf8b75442a1ecb6718f1fd1a92774a8d696df24a4",
    "last_data_received": "June 30, 2013",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 257663
+   }
   },
   "2013Q3": {
    "sha256": "a1ad30a02ac240fc5f3c182ddc6a40296c468edab0a6549381d7bf5c77202f87",
    "last_data_received": "September 30, 2013",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 213039
+   }
   },
   "2013Q4": {
    "sha256": "ba02d013fac5deb82c67130e11908787f450ecfc56336ccd78ee7d77999145ac",
    "last_data_received": "December 31, 2013",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 216286
+   }
   },
   "2014Q1": {
    "sha256": "084d11979803a0ee3ab83416cc21f73348abaf89a056fd1c8690f0b1dbadb21e",
    "last_data_received": "March 31, 2014",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 311705
+   }
   },
   "2014Q2": {
    "sha256": "3ad20a7108292ba885b5e21985a0e8db2624c591c10e8d73da9ac95c85ee7c01",
    "last_data_received": "June 30, 2014",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 252374
+   }
   },
   "2014Q3": {
    "sha256": "6f33bfe4a21a427699d5c2c79ef0ffea12de16ba3d943803d8ad68946680bb06",
    "last_data_received": "September 30, 2014",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 212397
+   }
   },
   "2014Q4": {
    "sha256": "13cf1581d2a99b60657dfd9b851adbb81e5672c1f4c30771fabf03e876b3ac98",
    "last_data_received": "December 31, 2014",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 220417
+   }
   },
   "2015Q1": {
    "sha256": "037b345230850d9d5f13c9394a21797fa1ea6a3ce48d8ca92f2ade6d63de7e9f",
    "last_data_received": "March 31, 2015",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 318647
+   }
   },
   "2015Q2": {
    "sha256": "bbf84130a1c3ebeb24eec90a29bcc6ee44ae11b94d1536271e3c237027c80455",
    "last_data_received": "June 30, 2015",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 260019
+   }
   },
   "2015Q3": {
    "sha256": "8845d6e878336487f48731610dde60bce1e74e0de12c7cf70bb9d44f49da838b",
    "last_data_received": "September 30, 2015",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 206985
+   }
   },
   "2015Q4": {
    "sha256": "8d3cc7b30bfa2e072ad23334f8b70333ce97918a2b07ed88c9301ff6ce8fe2aa",
    "last_data_received": "December 31, 2015",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 209840
+   }
   },
   "2016Q1": {
    "sha256": "851d6be53df0431f69d7ec97a8b63e40dcf2b858fb15b7795c36abbe112aab12",
    "last_data_received": "March 31, 2016",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 308901
+   }
   },
   "2016Q2": {
    "sha256": "c6923d09e0db36e8840fb6a1e635b3debbbce47946e48e4e8425035a3143ebc8",
    "last_data_received": "June 30, 2016",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 243896
+   }
   },
   "2016Q3": {
    "sha256": "4e4f2d1af4a6cad8887883bfbf4e99c101ca63521b91835c05614875e6d38b5e",
    "last_data_received": "September 30, 2016",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 201643
+   }
   },
   "2016Q4": {
    "sha256": "d60418e2c2b01b5201d29c4b1e5c0f42233d3e08140589a0f8b23afbf87bd96a",
    "last_data_received": "December 31, 2016",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 198630
+   }
   },
   "2017Q1": {
    "sha256": "7a3760a62998add1313636d644c9d5cce7391844f164bb19b2f2f039f392ec28",
    "last_data_received": "March 31, 2017",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 311816
+   }
   },
   "2017Q2": {
    "sha256": "3ec273ac3c882a1d51e133fb5fba049d014069a3ed7bce7c163596160c456c16",
    "last_data_received": "June 30, 2017",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 256486
+   }
   },
   "2017Q3": {
    "sha256": "df1a9d8b9a2d72d7eae6d4880ebeab1a3f3fbd65e5ad121d3f7be25af1f6ccbb",
    "last_data_received": "September 30, 2017",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 199182
+   }
   },
   "2017Q4": {
    "sha256": "3104f5a4521f627645af53425ce65a2cf92491ccf4d5751583d787fa1ef05416",
    "last_data_received": "December 31, 2017",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 203885
+   }
   },
   "2018Q1": {
    "sha256": "d008bef551a135fb6b937460218c2686a11d031fa732e1b70d5c7f7ff87420d8",
    "last_data_received": "March 31, 2018",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 304883
+   }
   },
   "2018Q2": {
    "sha256": "8d5f8e02e0506f1d4865c1ac4649f8a592ef8947084b0ed4b5a56095e2073ec2",
    "last_data_received": "June 30, 2018",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 249261
+   }
   },
   "2018Q3": {
    "sha256": "a1038e823478befc936209fff83b72c968c71a574d3695d0411a5b1f943ac049",
    "last_data_received": "September 30, 2018",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 195646
+   }
   },
   "2018Q4": {
    "sha256": "ad5b48855e1cd9fd1168d1ebd1ef43db6929f24f903447c90c0f3b8198f84ed5",
    "last_data_received": "December 31, 2018",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 200186
+   }
   },
   "2019Q1": {
    "sha256": "4636237e0c0f244b0bca2d367fec22799af32c4e491438b525453a55d3f108b2",
    "last_data_received": "March 31, 2019",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 297106
+   }
   },
   "2019Q2": {
    "sha256": "cb17350bfac474715c1724819efa08bcfea34ba1971d65f516d3ed7061df614e",
    "last_data_received": "June 30, 2019",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 249599
+   }
   },
   "2019Q3": {
    "sha256": "89749cade69f44678126fa42398e7125228cde007e9dd7f8ab97e3369d26d664",
    "last_data_received": "September 30, 2019",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 198462
+   }
   },
   "2019Q4": {
    "sha256": "263c6d55ac7579a1da023a6f1c05f5d418019ab8ad592fe0876a690467820ff4",
    "last_data_received": "December 31, 2019",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 206600
+   }
   },
   "2020Q1": {
    "sha256": "013829f35afd53fac29105d0b6c5e8207d9b52f310dfe6646608e48c69ac023f",
    "last_data_received": "March 31, 2020",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 324904
+   }
   },
   "2020Q2": {
    "sha256": "727bef740a72077c8e570835d14cce2699bc769dd615a55d1f7c1a0599d61f3f",
    "last_data_received": "June 30, 2020",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 265509
+   }
   },
   "2020Q3": {
    "sha256": "58433ce05e91315db79f5e321e244b12938c2bf395fdab438cfd08951c7c06b9",
    "last_data_received": "September 30, 2020",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 221732
+   }
   },
   "2020Q4": {
    "sha256": "60cf42056334a85780db44ad850842b28e07581c94d8e370c04fd3c48cf24acc",
    "last_data_received": "December 31, 2020",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 233422
+   }
   },
   "2021Q1": {
    "sha256": "762dfe47595a8b87a1b63549ba4c1d38b61cfebafe22acbedf804626679b5b31",
    "last_data_received": "March 31, 2021",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 361314
+   }
   },
   "2021Q2": {
    "sha256": "ba37cb995423a9e4eec9a5b88968ea5ded3ccd5b79870f63bc5384481f78a658",
    "last_data_received": "June 30, 2021",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 300158
+   }
   },
   "2021Q3": {
    "sha256": "1125ca04a0a4b1ecdb44791195edcd6b86627caeff376e1eeda4dc454847f049",
    "last_data_received": "September 30, 2021",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 252235
+   }
   },
   "2021Q4": {
    "sha256": "d1eda23606529b21d2ec0e94a0004313726de387d64026fabf821eb8d8abef33",
    "last_data_received": "December 31, 2021",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 258318
+   }
   },
   "2022Q1": {
    "sha256": "79168adeeffdb518773b93365c519424054ed62dfb7a1de73fb3e020509b65ee",
    "last_data_received": "March 31, 2022",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 356534
+   }
   },
   "2022Q2": {
    "sha256": "86bc7a62ef7c8e267af0d6a695d38b0f855a5e6d0e8c192c43d29d5180055281",
    "last_data_received": "June 30, 2022",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 291654
+   }
   },
   "2022Q3": {
    "sha256": "0a60edc84e733e083bc32d6f842e3f3230fe7147cced4e1c5a61ef4275d01a41",
    "last_data_received": "September 30, 2022",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 237784
+   }
   },
   "2022Q4": {
    "sha256": "d0ec1aabad570f5848169dc746f16e2361f7b1cc48b686004567c76d64b78414",
    "last_data_received": "December 31, 2022",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 230687
+   }
   },
   "2023Q1": {
    "sha256": "9261e793c8075cb0f0f6262d7eb8323fcaf59b54468ee08e6f77ab6ea8ad04d8",
    "last_data_received": "March 31, 2023",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 348472
+   }
   },
   "2023Q2": {
    "sha256": "5805ab0306905075dcd38f00556f0224953845d4a90a057d20ea17214157b10b",
    "last_data_received": "June 30, 2023",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 307804
+   }
   },
   "2023Q3": {
    "sha256": "1aa5bfcbf110fadad63710d397e249b7096cae0b65b7cff9636ace0417bb8ffa",
    "last_data_received": "September 30, 2023",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 252633
+   }
   },
   "2023Q4": {
    "sha256": "88658c0f488d404d0d7f337ec02c7047c870386170ed52ebe2986466f096eff7",
    "last_data_received": "December 31, 2023",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 251351
+   }
   },
   "2024Q1": {
    "sha256": "ec508ebd5ed01550b3eb250d9abe3322875b113cfabfaf0a1e951b8d6d12c7a2",
    "last_data_received": "March 31, 2024",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 370321
+   }
   },
   "2024Q2": {
    "sha256": "410194b30a0e78ae9262c529ed515b7249bab2bd721125bc43892c8fcc5e7603",
    "last_data_received": "June 30, 2024",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 316037
+   }
   },
   "2024Q3": {
    "sha256": "f3bc4fa8d74cf6b0b733639668c9110ebd7036bfdafc2bad1ad194b15b9a3fcf",
    "last_data_received": "September 30, 2024",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 270954
+   }
   },
   "2024Q4": {
    "sha256": "c4e0bde33cd972f5c05d970de6ba0a0ff66bb00bfa3a1ab191e1f142d5ef63fa",
    "last_data_received": "December 31, 2024",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 284203
+   }
   },
   "2025Q1": {
    "sha256": "f8032493302d8d6b5a0826321e24678de7f8703a558baee95fe84ddfee223dea",
    "last_data_received": "March 31, 2025",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 340119
+   }
   },
   "2025Q2": {
    "sha256": "af15ef37b38cd94651161474b35a60203e2e54870ad87bcdd4e6f06c9dd6cf2d",
    "last_data_received": "June 30, 2025",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 331786
+   }
   },
   "2025Q3": {
    "sha256": "d658fb56170131afadfdf2de2e4473daf522581ea25625a563684930b53e1508",
    "last_data_received": "September 30, 2025",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 287878
+   }
   },
   "2025Q4": {
    "sha256": "11e85eea6ab9a8115659fa222cafcb823e183aa51d773a30963d35d660126fd8",
    "last_data_received": "December 31, 2025",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 276622
+   }
   },
   "2026Q1": {
    "sha256": "39f67ed47daff78bf4c7c4a16556331086c82f71efab2582cfd6de57d3caae7d",
    "last_data_received": "March 31, 2026",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 370242
+   }
   },
   "2026Q2": {
    "sha256": "1394ffbcc05aedf09826bb1e96ff327980c1b6227863e6f4fe205349634d42d2",
    "last_data_received": "June 30, 2026",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 353334
+   }
   },
   "2026Q3": {
    "sha256": "341071baa4d7458b5ab18e12bd6c0ecffca6fe70e7a728b9ebbc53d4ed701dca",
    "last_data_received": "September 30, 2026",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 302315
+   }
   },
   "2026Q4": {
    "sha256": "1a6f043386650df2befcc69629897dc0897f6529d04063726c818e740afdc43b",
    "last_data_received": "October 7, 2026",
-   "parse": {}
+   "parse": {
+    "date_format_iso": 23900
+   }
   }
  },
- "index_parse": {},
+ "index_parse": {
+  "date_format_iso": 23506845
+ },
  "row_placement_by_date_filed": {
   "family_rows_dated_before_first": 14100,
   "in": 23506845
@@ -783,6 +965,7 @@
      "0001193125-26-399416"
     ],
     "markers": [],
+    "correction_tags": [],
     "acceptance_et": "20260923161357",
     "type": "8-K",
     "filing_date": "20260923",
@@ -851,6 +1034,7 @@
      "0001193125-26-394511"
     ],
     "markers": [],
+    "correction_tags": [],
     "acceptance_et": "20260917171143",
     "type": "8-K",
     "filing_date": "20260917",
@@ -870,8 +1054,8 @@
   }
  ],
  "provenance": {
-  "script_sha256": "1cc665edd7b71fa0e7a191a0e56b398be9d6d37ec9e8ccbd08381a2fb9168bdd",
-  "head": "44ac5fdcd1a89d2be06bc14a4749d1ee004457d6",
+  "script_sha256": "80b04f9733c6dc40a761f4b0930da59cd63d2035a3ce81eec7b6be8d9821dbd8",
+  "head": "22876703ce79d9ec71c4e04536deef80dd97d1a1",
   "script_clean_at_head": true
  }
 }

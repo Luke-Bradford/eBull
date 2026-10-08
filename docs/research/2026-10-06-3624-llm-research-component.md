@@ -184,6 +184,17 @@ eligible after reconciliation; as-of label construction keyed to each accession'
 for when an amendment or a metadata correction changes the effective label and how an earlier state is kept from
 being rewritten; de-duplication.
 
+**Estimand and guarantee** (added 2026-10-08 with the slice-2 build spec,
+`docs/research/2026-10-08-3624-slice2-filing-item-labels.md`). No source the slice pins records when a historical
+filing became public, so "keyed to each accession's acceptance time" means:
+- every label belongs to one accession and is never available on or before that accession's acceptance date;
+- its availability is a declared rule over the pinned sources (the documented filing-date and index rules plus a
+  stated construction choice), which may be later than the real public time but never earlier than acceptance;
+- a negative means no label among the rows the pinned sources hold, under that rule. Rows absent from every pinned
+  source, filers named only in headers the inventory never reaches, and same-day corrections are known limits,
+  stated with what is measured about them and restated by every consumer, not turned into `unknown`. The record
+  that might remove them, the EDGAR Feed archive, is out of proportion for two labels.
+
 ### Slice 3: LLM extraction, sequenced last
 
 **Step 3a, extraction pilot.** Outcome-blind: it reads no returns. It has its own registration in the ledger, a
