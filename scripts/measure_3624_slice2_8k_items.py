@@ -416,7 +416,7 @@ def cross_source(arch: dict[str, list[Appearance]], typed: dict[str, list[str]])
 #: The SGML header file in the filing's folder.
 _HEADER_URL: Final = "https://www.sec.gov/Archives/edgar/data/{cik}/{bare}/{accession}.hdr.sgml"
 _SGML: Final = re.compile(r"<SEC-HEADER>(.*?)</SEC-HEADER>", re.S)
-_CIK: Final = re.compile(r"^<CIK>(.*)$", re.M)
+_CIK: Final = re.compile(r"^[ \t]*<CIK>(.*)$", re.M)
 #: Header tags that must occur at most once.
 _SCALAR_TAGS: Final = ("ACCESSION-NUMBER", "ACCEPTANCE-DATETIME", "TYPE", "FILING-DATE", "DATE-OF-FILING-DATE-CHANGE")
 #: PDS markers of a non-ordinary submission: paper, private-to-public release, confirming copy of a paper filing.
@@ -427,28 +427,41 @@ MARKERS: Final = ("PAPER", "PRIVATE-TO-PUBLIC", "CONFIRMING-COPY")
 CORRECTION_TAGS: Final = ("CORRECTION", "DELETION", "TIMESTAMP")
 
 
+#: An opening tag anywhere, and one that starts its line after optional blanks (the layout the grammar accepts).
+_ANY_TAG: Final = re.compile(r"<([A-Z][A-Z0-9-]*)>")
+_LINE_TAG: Final = re.compile(r"^[ \t]*<([A-Z][A-Z0-9-]*)>", re.M)
+
+
 def parse_header(text: str) -> dict[str, Any]:
-    """The SGML header's acceptance (Eastern wall clock), type, filing date, filing-date change, items, filer CIKs."""
+    """The SGML header's acceptance (Eastern wall clock), type, filing date, filing-date change, items, filer CIKs.
+
+    Tags are counted wherever they occur in the retrieved body, inside the header block or not; a value is read only
+    from a tag that starts its line (after blanks). ``misplaced_tags`` counts opening tags that do not, and any makes
+    the parse ``malformed``, so an unexpected layout fails closed instead of hiding a tag."""
     found = _SGML.search(text)
     body = found.group(1) if found else text
 
     def one(tag: str) -> str | None:
-        match = re.search(rf"^<{tag}>(.*)$", body, re.M)
+        match = re.search(rf"^[ \t]*<{tag}>(.*)$", body, re.M)
         return match.group(1).strip() if match else None
+
+    def anywhere(tag: str) -> int:
+        return len(re.findall(rf"<{tag}>", text))
 
     return {
         "header_blocks": len(_SGML.findall(text)),
-        # Every tag name in the raw body (opening tags only), for the tag-presence census.
-        "raw_tags": sorted(set(re.findall(r"^<([A-Z][A-Z0-9-]*)>", text, re.M))),
-        "repeated_tags": sorted(t for t in _SCALAR_TAGS if len(re.findall(rf"^<{t}>", body, re.M)) > 1),
-        "accession_numbers": [m.strip() for m in re.findall(r"^<ACCESSION-NUMBER>(.*)$", body, re.M)],
-        "markers": sorted(t for t in MARKERS if re.search(rf"^<{t}>", body, re.M)),
-        "correction_tags": sorted(t for t in CORRECTION_TAGS if re.search(rf"^<{t}>", text, re.M)),
+        "misplaced_tags": len(_ANY_TAG.findall(text)) - len(_LINE_TAG.findall(text)),
+        # Every opening tag name anywhere in the raw body, for the tag-presence census.
+        "raw_tags": sorted(set(_ANY_TAG.findall(text))),
+        "repeated_tags": sorted(t for t in _SCALAR_TAGS if anywhere(t) > 1),
+        "accession_numbers": [m.strip() for m in re.findall(r"^[ \t]*<ACCESSION-NUMBER>(.*)$", body, re.M)],
+        "markers": sorted(t for t in MARKERS if anywhere(t)),
+        "correction_tags": sorted(t for t in CORRECTION_TAGS if anywhere(t)),
         "acceptance_et": one("ACCEPTANCE-DATETIME"),
         "type": one("TYPE"),
         "filing_date": one("FILING-DATE"),
         "filing_date_change": one("DATE-OF-FILING-DATE-CHANGE"),
-        "items": sorted(m.strip() for m in re.findall(r"^<ITEMS>(.*)$", body, re.M)),
+        "items": sorted(m.strip() for m in re.findall(r"^[ \t]*<ITEMS>(.*)$", body, re.M)),
         "filer_ciks": sorted(
             {m.strip() for block in re.findall(r"<FILER>(.*?)</FILER>", body, re.S) for m in _CIK.findall(block)}
         ),
@@ -534,7 +547,9 @@ def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> d
     numbers, items = header["accession_numbers"], header["items"]
     out = {
         "retrieval": "ok",
-        "parse": "ok" if header["header_blocks"] == 1 and not header["repeated_tags"] else "malformed",
+        "parse": "ok"
+        if header["header_blocks"] == 1 and not header["repeated_tags"] and not header["misplaced_tags"]
+        else "malformed",
         "accession": "ok" if numbers == [accession] else "no_accession" if not numbers else "accession_mismatch",
         **{
             m.lower().replace("-", "_"): m.lower().replace("-", "_") if m in header["markers"] else "ok"
@@ -909,7 +924,8 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
 
 
 _DAILY_URL: Final = "https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{quarter}/{name}"
-_DAILY_NAME: Final = re.compile(r"master\.(\d{8})\.idx(\.gz)?")  # 2011 Q3 to 2014 publish only ``.idx.gz``
+#: Some quarters (2011 Q3-Q4, 2013 Q1, Q3-Q4, 2014 Q2) publish only ``.idx.gz``.
+_DAILY_NAME: Final = re.compile(r"master\.(\d{8})\.idx(\.gz)?")
 
 
 def _fetch_cached(client: httpx.Client, url: str, path: Path) -> bytes:
@@ -1120,7 +1136,11 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
         "files_written_over_7_days_late": [f for f in files if f["lag_days"] > 7],
         "rows": dict(shape),
         "reconciliation": dict(sorted(recon.items())),
-        "daily_in_neither_by_year": {k: dict(sorted(v.items())) for k, v in neither.items()},
+        # Zero-filled from FIRST's year to the last file's year, so a year with none is shown.
+        "daily_in_neither_by_year": {
+            k: {str(y): v.get(str(y), 0) for y in range(FIRST.year, int(max(f["day"] for f in files)[:4]) + 1)}
+            for k, v in neither.items()
+        },
         "headers_against_daily": dict(sorted(against.items())),
         "examples": {k: v[:20] for k, v in sorted(examples.items())},
         "file_list": files,
