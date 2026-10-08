@@ -271,14 +271,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     exit 1), or the terminal ``completed`` row, after which the output file is read back against the sha256 that row
     names and its verdict line printed (exit 0, ``REFUSED`` verdicts included)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # No ledger flag: the gate reads this checkout's run ledger and committed ledger, which ``report_head`` vouches
+    # for; a path elsewhere could hold rows the checkout never had.
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--ledger", type=Path, default=LEDGER_PATH)
     args = parser.parse_args(argv)
     head = report_head()
     try:
-        outcome = run_report(
-            args.run_id, head=head, register=TRIAL_REGISTER, evaluate_run=evaluate_run, ledger=args.ledger
-        )
+        outcome = run_report(args.run_id, head=head, register=TRIAL_REGISTER, evaluate_run=evaluate_run)
     except BookRefusal as refusal:
         print(json.dumps({"run_id": args.run_id, "status": REFUSED, "reason": refusal.code, "detail": str(refusal)}))
         return 1

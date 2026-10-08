@@ -632,10 +632,11 @@ def test_main_prints_only_after_the_run_has_ended(
 
     monkeypatch.setattr(run_module, "report_head", lambda: HEAD)
     monkeypatch.setattr(run_module, "run_report", run_report_)
-    assert run_module.main(["--run-id", REUSE, "--ledger", str(tmp_path / "l.jsonl")]) == 0
+    assert run_module.main(["--run-id", REUSE]) == 0
     assert seen["printed"] == ""
     assert (seen["run_id"], seen["head"], seen["evaluate_run"]) == (REUSE, HEAD, run_module.evaluate_run)
-    assert seen["ledger"] == tmp_path / "l.jsonl"
+    # The gate reads the run ledger and committed ledger at their defaults only.
+    assert not {"ledger", "committed_ledger"} & set(seen)
     line, summary = capsys.readouterr().out.splitlines()
     assert line == "FAIL: G1. survivorship"
     assert json.loads(summary) == {
@@ -678,3 +679,10 @@ def test_main_reads_no_ledger_from_a_checkout_that_is_not_origin_main(monkeypatc
     monkeypatch.setattr(run_module, "run_report", lambda *_, **__: pytest.fail("ran from a stale checkout"))
     with pytest.raises(ReportError):
         run_module.main(["--run-id", REUSE])
+
+
+def test_main_offers_no_flag_that_redirects_a_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ledger path outside the checkout ``report_head`` vouched for could hold rows the checkout never had."""
+    monkeypatch.setattr(run_module, "report_head", lambda: pytest.fail("parsed past an unknown flag"))
+    with pytest.raises(SystemExit):
+        run_module.main(["--run-id", REUSE, "--ledger", "/tmp/other.jsonl"])
