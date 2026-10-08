@@ -12295,3 +12295,15 @@ neighbouring container and match it.**
 - Enforced in: `tests/test_3609_step2_report_inputs.py::test_a_verified_manifest_missing_a_field_refuses_as_a_report_error`
   and `tests/test_3609_step2_report_inputs_db.py::test_digests_then_factors_from_the_pinned_snapshots`. The DB test
   asserts the isolation is held inside the read and restored after it.
+
+### An entry point that checks provenance offers no flag that moves a checked input outside the check (#3609)
+
+- Failure (review bot on PR #3711, step 2's report CLI, 2026-10-08): `main` checked for a clean checkout at
+  `origin/main` (`report_head`), then accepted `--ledger`. That flag moved the run ledger the gate reads to any path.
+  A ledger outside the checkout could hold rows the checkout never had, for example a copy of an ended attempt with
+  its terminal row dropped, and the provenance check would not see it.
+- Prevention: for every flag on an entry point that runs a provenance check, ask whether the flag can point a checked
+  input somewhere the check does not cover. If it can, remove the flag, or route its value through the check and
+  test that.
+- Enforced in: `tests/test_3609_step2_report_run.py::test_main_offers_no_flag_that_redirects_a_ledger` and
+  `::test_main_prints_only_after_the_run_has_ended`, which asserts `run_report` gets no ledger override.

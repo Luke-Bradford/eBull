@@ -16,14 +16,21 @@ canonical JSON, labels) and §"Slices" (capture lifecycle, "The report's ledger 
    Any other failure past step 2 ends the run ``failed``, and an output file the ledger does not name is deleted.
    The code hashes are taken again after the evaluation; a checkout that moved during it ends the run ``failed``.
 
+The command line (:func:`main`) first requires a clean checkout at ``origin/main`` after a fetch
+(:func:`report_head`).
+
 This module is the report's entry point, so it is a construction-hash root
 (:data:`~app.services.factor_book_declaration.CONSTRUCTION_ROOTS`).
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import itertools
+import json
+import os
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -46,7 +53,7 @@ from app.services.factor_book_ledger import (
 from app.services.factor_book_reference import STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION, load_ff12
 from app.services.factor_panel import formation_months
 from app.services.factor_panel_fidelity import append_ledger, read_ledger
-from app.services.trial_register import DeclaredTrial, TrialRegister
+from app.services.trial_register import TRIAL_REGISTER, DeclaredTrial, TrialRegister
 from scripts.build_3609_factor_panel import read_verified_artefact
 from scripts.capture_3609_step2 import CAPTURE_ROOT, capture_path, ledger_claim, verify_capture, write_exclusive
 from scripts.report_3609_baselines import COSTS
@@ -64,6 +71,7 @@ from scripts.report_3609_step2_inputs import (
 from scripts.report_3609_step2_universe import NYSE_CUTOFFS, read_cutoffs
 
 REFUSED: Final = "REFUSED"
+_REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT: Final = LEDGER_PATH.parent
 REPORT_STEP: Final = "report"
 #: Each stage's formations (§"The book"): stage A 2014-09 .. 2021-04, stage B 2021-05 .. 2024-07.
@@ -234,6 +242,67 @@ def run_report(
     return ReportOutcome(status=status, reason=reason, path=out, sha256=digest)
 
 
+# --------------------------------------------------------------------------- the command line
+
+
+def _git(*args: str) -> str:
+    """``git`` in this checkout, ``GIT_*`` scrubbed: a hook's ``GIT_DIR`` would point it at another repository."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    done = subprocess.run(
+        ["git", *args], cwd=_REPO_ROOT, env=env, check=True, capture_output=True, text=True, timeout=300
+    )
+    return done.stdout.strip()
+
+
+def report_head(git: Callable[..., str] = _git) -> str:
+    """§"Slices", "The report's ledger revision": the HEAD of a clean checkout equal to ``origin/main`` after a
+    fetch, so the committed ledger it reads is the merged one. Refuses before the gate, writing no row."""
+    git("fetch", "--quiet", "origin", "main")
+    if git("status", "--porcelain"):
+        raise ReportError("refusing to report from a checkout with uncommitted or untracked files")
+    head, merged = git("rev-parse", "HEAD"), git("rev-parse", "origin/main")
+    if head != merged:
+        raise ReportError(f"HEAD {head} is not origin/main {merged} after a fetch")
+    return head
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Ledger steps 5 and 6 for one attempt. Prints nothing until the run has ended: a gate refusal (no row written,
+    exit 1), or the terminal ``completed`` row, after which the output file is read back against the sha256 that row
+    names and its verdict line printed (exit 0, ``REFUSED`` verdicts included)."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # No ledger flag: the gate reads this checkout's run ledger and committed ledger, which ``report_head`` vouches
+    # for; a path elsewhere could hold rows the checkout never had.
+    parser.add_argument("--run-id", required=True)
+    args = parser.parse_args(argv)
+    head = report_head()
+    try:
+        outcome = run_report(args.run_id, head=head, register=TRIAL_REGISTER, evaluate_run=evaluate_run)
+    except BookRefusal as refusal:
+        print(json.dumps({"run_id": args.run_id, "status": REFUSED, "reason": refusal.code, "detail": str(refusal)}))
+        return 1
+    document = outcome.path.read_bytes()
+    if hashlib.sha256(document).hexdigest() != outcome.sha256:
+        raise ReportError(f"{outcome.path} is not the file the ledger's completed row names")
+    try:
+        line = json.loads(document)["verdict"]["line"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReportError(f"{outcome.path} holds no verdict line: {exc!r}") from exc
+    print(line)
+    print(
+        json.dumps(
+            {
+                "run_id": args.run_id,
+                "status": outcome.status,
+                "reason": outcome.reason,
+                "output": str(outcome.path),
+                "output_sha256": outcome.sha256,
+            }
+        )
+    )
+    return 0
+
+
 __all__ = [
     "OUTPUT_ROOT",
     "REFUSED",
@@ -241,7 +310,13 @@ __all__ = [
     "STAGE_GRIDS",
     "ReportOutcome",
     "evaluate_run",
+    "main",
     "refused_payload",
+    "report_head",
     "run_report",
     "stage_cutoffs",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
