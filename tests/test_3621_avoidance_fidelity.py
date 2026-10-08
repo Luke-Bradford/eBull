@@ -142,5 +142,5 @@ def test_undersized_equals_step_1s_own_accumulator_count() -> None:
         got = factor_month(f.holdings, P20, P80, -1) if f.holdings else FactorMonth(0, 0, None, None)
         accumulator.add(shift_month(month_key(f.formation), 1), got)
     expected = accumulator.result(ours, PRICE_CHARACTERISTICS[0])["undersized"]
-    assert expected == 1 + 1 + 10
+    assert expected == 1 + 1 + (len(STAGE_A_GRID) - 70)  # the empty and the thin formation, then the absent months
     assert max_fidelity(formations, ours, -1).undersized == expected
