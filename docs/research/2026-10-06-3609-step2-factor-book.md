@@ -116,14 +116,23 @@ No SIC-to-industry map exists in `app/`, `scripts/`, `sql/` or `tests/`.
 - 2014-09..2018: terminations recorded, coverage unverified;
 - 2019 on: checked against a selected Form 25 set.
 
-Stage B lies wholly in the second regime. That regime is not full-population survivorship-free: step 1 calls the
-Form 25 set a selected, symbol-bearing population, and ticker reuse and mismatched endpoint dates remain unresolved.
-**How this meets the 2026-10-08 entry's data requirement.** The entry keeps "survivorship-free data" unchanged and
-names the corpus it means: "the survivorship-free corpus runs 2014-10..2024-08" (`docs/settled-decisions.md`,
-2026-10-08, Finding). That is this path. The gaps above are the known limits of that corpus, not a different data
-set: no fuller population exists in our data for these months. So the requirement is met as the entry defines it,
-and the gaps are disclosed on the verdict line (§"Registration", Labels). They are why a pass authorises nothing
-beyond §"Question"'s limits, and why live capital keeps the full bar.
+Stage B lies wholly in the second regime.
+
+**What the requirement is, and what of it is met.** `research-process.md` defines the requirement operationally:
+"a survivorship-free universe from `research_price_daily`, with delisting returns handled", and "one archive does
+not certify the table". The 2026-10-08 entry keeps that requirement and names this corpus as the survivorship-free
+one ("the survivorship-free corpus runs 2014-10..2024-08").
+- **Met:** the universe is drawn from the archive at each formation, delisted names included, and terminations
+  are recorded with step 1's terminal-return handling from 2014-09 on (step 1 premise 1).
+- **Partly met: certification.** From 2019 the archive is checked against a second source, the symbol-bearing Form
+  25 records. In stage B's years (2021 to 2024-08), 807 of 814 records have a series, and 16% to 25% of matched
+  series a year end more than 30 days from the suspension or filing date (step 1 premise 1's table). That reference is a selected population, not every exit; ticker reuse and those
+  endpoint mismatches are unresolved. For 2014-09..2018 no independent exit list exists.
+
+So this spec does not claim a certified full-population survivorship-free stage B, and it does not read the entry
+as waiving anything. It reads the entry's requirement as the skill states it, with the certification gap disclosed
+on the verdict line (§"Registration", Labels). That gap is why a pass authorises nothing beyond §"Question"'s limits
+and why live capital keeps the full bar.
 
 **6. Condition 3 is powered for the value family alone (development data).** Checkpoint 1 round 2, finding 4,
 asked for the exposure test's power. Its planning inputs come from stage A, the development sample. For each of three
@@ -134,19 +143,19 @@ holding counts were printed; no mean return, alpha, growth or comparison was pri
 sets count as searches (§"Registration"). The plan, with the script's sha256, stage A's pin and digests of every
 factor and prior row read, is `docs/research/3609-step2-exposure-plan.json`, pinned by register r25.
 
-Loading (t), best-case / worst-case arm, formations 2014-09..2021-04, 80 months:
+Loading (t), best-case / worst-case arm, formations 2014-09..2021-04, 80 months, rounded from the plan file:
 
 | family set | HML | RMW | CMA | residual sd | median holdings |
 |---|---|---|---|---|---|
-| GP/A + value + investment (first draft) | 0.279 (5.33) / 0.285 (5.95) | 0.143 (1.72) / 0.149 (1.84) | 0.018 (0.27) / 0.028 (0.43) | 0.81% / 0.83% | 164 |
-| value | 0.488 (5.70) / 0.486 (5.80) | 0.114 (1.22) / 0.112 (1.24) | −0.206 (−2.03) / −0.197 (−1.89) | 1.06% / 1.10% | 153 |
-| value + GP/A | 0.030 (0.50) / 0.045 (0.82) | 0.396 (2.84) / 0.376 (2.71) | 0.032 (0.30) / 0.020 (0.19) | 1.15% / 1.14% | 108 |
+| GP/A + value + investment (first draft) | 0.279 (5.33) / 0.285 (5.95) | 0.143 (1.72) / 0.149 (1.84) | 0.018 (0.27) / 0.027 (0.43) | 0.81% / 0.83% | 164 |
+| value | 0.488 (5.70) / 0.486 (5.80) | 0.114 (1.22) / 0.112 (1.24) | −0.206 (−2.02) / −0.197 (−1.89) | 1.06% / 1.10% | 153 |
+| value + GP/A | 0.029 (0.50) / 0.045 (0.82) | 0.396 (2.84) / 0.376 (2.71) | 0.032 (0.30) / 0.020 (0.19) | 1.15% / 1.14% | 108 |
 
 Reproduce: `PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure` (reads stage A's pinned artefact and
 factor rows to 2021-05-31 only).
 
-- **The first draft cannot be tested with power.** Its CMA coefficient, conditional on the other factors, is 0.02
-  to 0.03 (t below 0.5), and its RMW t is 1.72 to 1.84 on 80 months. Stage B has 39, so neither intended loading
+- **The first draft cannot be tested with power.** Its CMA coefficient, conditional on the other factors, is 0.018
+  to 0.027 (t below 0.5), and its RMW t is 1.72 to 1.84 on 80 months. Stage B has 39, so neither intended loading
   could be tested with useful power there.
 - **Value + GP/A cancels value.** HML falls to 0.03: GP/A and value are negatively related (Novy-Marx 2013).
 - **The value book carries HML.** Its condition 3 tests one intended loading, so the Bonferroni bar is
@@ -457,6 +466,9 @@ must both hold at base cost under **both** termination arms.
   3 at T = 39.
 - HML, the value family's intended loading, must be positive with a one-sided t above z(1 − 0.05/1) = 1.645
   (Bonferroni over the one intended loading). Its power is premise 6's. The other loadings are printed, not gated.
+- **Two kinds of input failure.** A factor snapshot that fails `read_factors` (digest, unit, a non-finite value
+  or float, a repeated month) is an integrity failure: the run ends `failed` before evaluation (item 22). The
+  refusals below are about the evaluation window inside a verified collection.
 - **Refusals, checked before any coefficient is printed** (verdict `G1_REFUSED`, with the reason): a missing factor
   month; a non-finite value in the return or factor matrix; anything other than exactly one aligned book, RF and
   factor observation for each of the 39 declared months (no duplicates, no extras: `read_factors` refuses a
@@ -1242,8 +1254,7 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
 
 **Round 22 (15 findings; `ckpt1_round22_final.txt`), all applied; checkpoint 2 on the code raised one, the same as
 4:**
-- **1:** premise 5 shows the entry's survivorship requirement is met as the entry defines it (it names this corpus),
-  with the gaps disclosed.
+- **1:** first answered by the entry naming this corpus; round 23 held that insufficient (below).
 - **2:** the configuration reading is stated, and step 3's construction on the same stage B joins the rule.
 - **3–5:** premise 6 declares the power criterion (conjunction bound ≥ 0.80 at the point estimates), labels the
   lower bound an unadjusted sensitivity, adds the break-even t, and lists the approximation's assumptions.
@@ -1256,3 +1267,14 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
 - **13:** the turnover veto is formation-keyed and excludes the final liquidation, with the reason.
 - **14:** weak coefficients are described as such, not as unidentified.
 - **15:** the significance convention is stated.
+
+**Round 23 (`ckpt1_round23_final.txt`): 13 of round 22's findings resolved; 1, 8 and five new findings applied:**
+- **22.1:** premise 5 now separates the skill's operational requirement (universe from the archive with delisting
+  returns handled: met) from certification against a second source (partly met from 2019, absent before). The spec
+  claims no certified full-population stage B and no waiver; the gap is labelled.
+- **22.8:** the plan manifest adds the script's import-closure hash, the FF12 pin and the Python and numpy versions.
+- **New 1–2:** the planner requires each prior series to be one observation a month, consecutive, through 2014-09,
+  checks every unit against `FACTOR_UNIT`, and digests the units.
+- **New 3:** factor-snapshot failures are integrity failures (`failed`); `G1_REFUSED` covers the evaluation window.
+- **New 4:** `read_factors` refuses a value that overflows its float.
+- **New 5:** premise 6's table is generated from the plan file.
