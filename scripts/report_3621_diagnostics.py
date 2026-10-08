@@ -9,7 +9,8 @@ rule" (PR #3724). Pure functions over slice 2a's paths and target sets (:mod:`sc
   the holding month it starts (M + 1).
 * **Per book:** G = (12/n) Σ ln(1 + r); arithmetic annualised 12 × mean; volatility sd(ddof 1) × √12; the maximum
   drawdown from the window's opening wealth; step 0's turnover per year (Σ one-way turnover / years); cost per year,
-  Σ(charged cost / pre-trade NAV) / years, so costs on different NAV scales add as fractions of NAV.
+  Σ(charged cost / pre-trade NAV) / years over the trades charged in the window (:func:`charged_month`), so costs
+  on different NAV scales add as fractions of NAV.
 * **The differential** D_t = r(U_F) − r(U): mean, sd, IR 12 × mean / (sd × √12) (``None`` when sd is 0, tested by
   equality), a Newey–West t on the mean with the Bartlett kernel at the spec's frozen lag 3 and null zero (step 0's
   HAC form, :func:`~scripts.report_3609_baselines.ols_newey_west`, which instead picks its lag from n), and the
@@ -33,7 +34,7 @@ from typing import Final
 import numpy as np
 
 from app.services.avoidance_filters import Filter, MaxMissing, NameFlags
-from app.services.factor_book_path import Month, PathResult, month_of, next_month
+from app.services.factor_book_path import Month, PathResult, Trade, TradeCategory, month_of, next_month
 from scripts.report_3609_baselines import max_drawdown
 from scripts.report_3609_step2 import PanelMonth
 from scripts.report_3609_step2_segments import band_of
@@ -81,6 +82,12 @@ def _exhausted(paths: Iterable[PathResult], window: Window) -> Undefined | None:
     return Undefined(min(hits)) if hits else None
 
 
+def charged_month(trade: Trade) -> Month:
+    """The return month a trade's cost falls in: its own, except the initial purchase, which ``value_path`` keys to
+    the first formation and charges in the first return month (§"The books")."""
+    return next_month(trade.month) if trade.category is TradeCategory.INITIAL_PURCHASE else trade.month
+
+
 @dataclass(frozen=True)
 class BookStats:
     g: float
@@ -103,7 +110,7 @@ def book_stats(path: PathResult, window: Window) -> BookStats | Undefined:
         volatility=statistics.stdev(r) * math.sqrt(12.0) if len(r) > 1 else None,
         max_drawdown=max_drawdown(r),
         turnover_per_year=math.fsum(path.turnover.get(m, 0.0) for m in window.months) / years,
-        cost_per_year=math.fsum(t.cost / t.pre_nav for t in path.trades if t.month in inside) / years,
+        cost_per_year=math.fsum(t.cost / t.pre_nav for t in path.trades if charged_month(t) in inside) / years,
     )
 
 

@@ -70,6 +70,7 @@ def _path(r: list[float], nonpositive: Month | None = None) -> PathResult:
             Trade((2020, 2), 1, TradeCategory.ENTRY, 10.0, 0.5, 100.0),
             Trade((2020, 2), 2, TradeCategory.ENTRY, 10.0, 0.2, 50.0),
             Trade((2019, 12), 3, TradeCategory.ENTRY, 10.0, 9.0, 1.0),
+            Trade((2019, 12), 4, TradeCategory.INITIAL_PURCHASE, 10.0, 0.01, 1.0),  # charged in 2020-01
         ]
     )
     return path
@@ -84,7 +85,7 @@ def test_book_stats_on_known_returns() -> None:
     assert got.volatility == pytest.approx(float(np.std(r, ddof=1)) * math.sqrt(12))
     assert got.max_drawdown == pytest.approx(-0.20)  # from the 1.10 peak
     assert got.turnover_per_year == pytest.approx(0.3 * 3)  # months outside the window are not read
-    assert got.cost_per_year == pytest.approx((0.005 + 0.004) * 3)
+    assert got.cost_per_year == pytest.approx((0.01 + 0.005 + 0.004) * 3)
 
 
 def test_exhaustion_undefines_windows_that_reach_it_only() -> None:
