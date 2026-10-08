@@ -20,7 +20,8 @@ variant, detected over the whole archive and then reported for our CIKs. It repo
   archive also holds;
 * ``headers``: with ``--headers``, the EDGAR header of every candidate accession of our CIKs, plus a seeded sample of
   non-candidate accessions, each parsed for acceptance, type, filing date, filing-date change, items and filer CIKs
-  and compared with the archive (body sha256 kept);
+  and compared with the archive (body sha256 kept), and each of our ``(cik, accession)`` rows classed under the
+  spec's production field contract (:func:`field_outcomes`, :func:`row_class`);
 * ``previous_snapshot``: with ``--previous``, membership and per-field changes against an earlier archive.
 
 The CIK list itself is written out, so a re-run can reproduce "our CIKs". Usage::
@@ -30,6 +31,8 @@ The CIK list itself is written out, so a re-run can reproduce "our CIKs". Usage:
 
 With ``--index-cache DIR`` it instead reconciles the archive against every 8-K-family row of EDGAR's quarterly
 ``full-index/master.gz`` files from :data:`FIRST` (:func:`index_reconciliation`).
+With ``--daily-index-cache DIR`` it measures EDGAR's daily index files against both (:func:`daily_index`). Every
+index file is read under one parse contract (:func:`index_rows`), which counts what it rejects.
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ import time
 import zipfile
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -410,12 +413,15 @@ def cross_source(arch: dict[str, list[Appearance]], typed: dict[str, list[str]])
     return out
 
 
-#: The SGML header file; ``-index-headers.html`` is absent for older filings (404 on 2006 accessions).
+#: The SGML header file in the filing's folder.
 _HEADER_URL: Final = "https://www.sec.gov/Archives/edgar/data/{cik}/{bare}/{accession}.hdr.sgml"
 _SGML: Final = re.compile(r"<SEC-HEADER>(.*?)</SEC-HEADER>", re.S)
 _CIK: Final = re.compile(r"^<CIK>(.*)$", re.M)
 #: Header tags that must occur at most once.
-_SCALAR_TAGS: Final = ("ACCEPTANCE-DATETIME", "TYPE", "FILING-DATE", "DATE-OF-FILING-DATE-CHANGE")
+_SCALAR_TAGS: Final = ("ACCESSION-NUMBER", "ACCEPTANCE-DATETIME", "TYPE", "FILING-DATE", "DATE-OF-FILING-DATE-CHANGE")
+#: PDS markers of a non-ordinary submission: paper, private-to-public release, confirming copy of a paper filing.
+#: Each is its own field outcome, and any one makes the row ``items_unestablished``.
+MARKERS: Final = ("PAPER", "PRIVATE-TO-PUBLIC", "CONFIRMING-COPY")
 
 
 def parse_header(text: str) -> dict[str, Any]:
@@ -432,6 +438,8 @@ def parse_header(text: str) -> dict[str, Any]:
         # Every tag name in the raw body (opening tags only), for the tag-presence census.
         "raw_tags": sorted(set(re.findall(r"^<([A-Z][A-Z0-9-]*)>", text, re.M))),
         "repeated_tags": sorted(t for t in _SCALAR_TAGS if len(re.findall(rf"^<{t}>", body, re.M)) > 1),
+        "accession_numbers": [m.strip() for m in re.findall(r"^<ACCESSION-NUMBER>(.*)$", body, re.M)],
+        "markers": sorted(t for t in MARKERS if re.search(rf"^<{t}>", body, re.M)),
         "acceptance_et": one("ACCEPTANCE-DATETIME"),
         "type": one("TYPE"),
         "filing_date": one("FILING-DATE"),
@@ -482,22 +490,68 @@ def _ymd(value: str | None) -> str | None:
     return parsed.date().isoformat()
 
 
-#: Header tags under which the producer cannot fix a row's timing (its ``timing_uncertain`` class).
-TIMING_TAGS: Final = frozenset(
-    {
-        "repeated_tag",
-        "malformed",
-        "no_acceptance",
-        "acceptance_invalid",
-        "no_filing_date",
-        "filing_date_invalid",
-        "filing_date_before_acceptance",
-        "post_acceptance_change",
-        "no_filing_date_change",
-        "filing_date_change_invalid",
-        "correction_before_acceptance",
-    }
+#: The spec's class decision table, first match wins: a row is ``items_unestablished`` if any of these fields is not
+#: ok, else ``timing_in_doubt`` if any of the next, else ``label_in_doubt`` if any of the last, else ``ok``.
+CLASS_FIELDS: Final = (
+    (
+        "items_unestablished",
+        ("retrieval", "parse", "accession", "paper", "private_to_public", "confirming_copy", "correction"),
+    ),
+    ("timing_in_doubt", ("acceptance", "filing_date", "date_order")),
+    ("label_in_doubt", ("type", "items", "filer")),
 )
+_CORRECTION_OUTCOME: Final = {
+    "equal": "ok",
+    "later": "corrected",
+    "earlier": "correction_before_acceptance",
+    "missing": "no_correction_date",
+    "invalid": "correction_invalid",
+    "acceptance_unusable": "not_evaluated",
+}
+
+
+def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> dict[str, str]:
+    """The spec's field contract for one ``(cik, accession)`` row; a field whose inputs are not ok is
+    ``not_evaluated``. ``header`` is ``None`` when no body was retrieved."""
+    if header is None:
+        return {"retrieval": "no_header"}
+    raw_accepted, raw_filed = header["acceptance_et"], header["filing_date"]
+    accepted = _ymd(raw_accepted) if len(raw_accepted or "") == 14 else None
+    filed = _ymd(raw_filed) if len(raw_filed or "") == 8 else None
+    numbers, items = header["accession_numbers"], header["items"]
+    out = {
+        "retrieval": "ok",
+        "parse": "ok" if header["header_blocks"] == 1 and not header["repeated_tags"] else "malformed",
+        "accession": "ok" if numbers == [accession] else "no_accession" if not numbers else "accession_mismatch",
+        **{
+            m.lower().replace("-", "_"): m.lower().replace("-", "_") if m in header["markers"] else "ok"
+            for m in MARKERS
+        },
+        "acceptance": "ok" if accepted else "no_acceptance" if raw_accepted is None else "acceptance_invalid",
+        "filing_date": "ok" if filed else "no_filing_date" if raw_filed is None else "filing_date_invalid",
+        "type": "ok" if header["type"] in FORMS else "type_out_of_scope",
+        "items": "items_empty"
+        if not items
+        else "items_invalid"
+        if any(code not in VOCABULARY for code in items) or len(set(items)) != len(items)
+        else "ok",
+        "filer": "ok" if cik in header["filer_ciks"] else "not_a_filer",
+        "date_order": "not_evaluated"
+        if not (accepted and filed)
+        else "ok"
+        if filed >= accepted
+        else "date_before_acceptance",
+        "correction": _CORRECTION_OUTCOME[correction_category(header)],
+    }
+    return out
+
+
+def row_class(outcomes: dict[str, str]) -> str:
+    """First matching class of :data:`CLASS_FIELDS`; an absent field (not evaluated) is not ok."""
+    for name, fields in CLASS_FIELDS:
+        if any(outcomes.get(field, "not_evaluated") != "ok" for field in fields):
+            return name
+    return "ok"
 
 
 def correction_category(header: dict[str, Any]) -> str:
@@ -602,7 +656,20 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
         if accepted and filed:
             lag[str((date.fromisoformat(filed) - date.fromisoformat(accepted)).days)] += 1
         archive_rows = [[x[0], x[1], x[2], list(x[3]) if valid(x[3]) else x[3]] for x in arch[accession]]
-        rows.append({"kind": kind, "accession": accession, "tags": found, "archive": archive_rows, **header})
+        # Production predicates, per (cik, accession) row of our CIKs.
+        outcomes = {cik: field_outcomes(header, accession, cik) for cik in sorted({x[0] for x in arch[accession]})}
+        classes = {cik: row_class(o) for cik, o in outcomes.items() if cik in ours}
+        rows.append(
+            {
+                "kind": kind,
+                "accession": accession,
+                "tags": found,
+                "archive": archive_rows,
+                "classes": classes,
+                "field_outcomes": outcomes,
+                **header,
+            }
+        )
     later = sorted(r["acceptance_et"][8:] for r in rows if "filing_date_after_acceptance" in r["tags"])
     same_late = sum(
         1
@@ -613,17 +680,25 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
         and r["acceptance_et"][8:] > "173000"
     )
     corrections = Counter(f"{r['kind']}_{correction_category(r)}" for r in rows)
-    # Timing-uncertain candidates in both units: accessions, and (cik, accession) rows restricted to our CIKs.
-    units: Counter[str] = Counter()
+    # Class census under the production predicates, in both units: (cik, accession) rows of our CIKs, and
+    # accessions (counted once under each class any of its rows has). Field outcomes are per row.
+    class_rows: Counter[str] = Counter()
+    class_accessions: Counter[str] = Counter()
+    outcome_rows: Counter[str] = Counter()
     for r in rows:
-        if r["kind"] != "candidate":
-            continue
-        n_rows = len({x[0] for x in arch[r["accession"]] if x[0] in ours})
-        units["candidate_accessions"] += 1
-        units["candidate_rows"] += n_rows
-        if TIMING_TAGS & set(r["tags"]):
-            units["timing_uncertain_accessions"] += 1
-            units["timing_uncertain_rows"] += n_rows
+        class_rows[f"{r['kind']}_rows"] += len(r["classes"])
+        class_accessions[f"{r['kind']}_accessions"] += 1
+        class_rows.update(f"{r['kind']}_{c}" for c in r["classes"].values())
+        class_accessions.update(f"{r['kind']}_{c}" for c in set(r["classes"].values()))
+        for cik in r["classes"]:
+            outcome_rows.update(f"{field}={value}" for field, value in r["field_outcomes"][cik].items())
+    marker_presence = Counter(m for r in rows for m in r["markers"])
+    for kind, accession, _ in failures:
+        n_rows = len({x[0] for x in arch[accession] if x[0] in ours})
+        class_rows[f"{kind}_rows"] += n_rows
+        class_rows[f"{kind}_items_unestablished"] += n_rows
+        class_accessions[f"{kind}_accessions"] += 1
+        class_accessions[f"{kind}_items_unestablished"] += 1
     lengths = Counter(
         f"{len(next(x for x in r['archive'] if isinstance(x[3], list))[3])}_{'items' in r['tags']}"
         for r in rows
@@ -636,7 +711,10 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
             "correction_field": dict(sorted(corrections.items())),
             "raw_tag_presence": dict(sorted(presence.items())),
             "header_block_counts": dict(Counter(str(r["header_blocks"]) for r in rows)),
-            "timing_uncertain_units": dict(sorted(units.items())),
+            "class_rows": dict(sorted(class_rows.items())),
+            "class_accessions": dict(sorted(class_accessions.items())),
+            "field_outcome_rows": dict(sorted(outcome_rows.items())),
+            "marker_presence_in_header_block": dict(sorted(marker_presence.items())),
             "archive_item_count_by_disagreement": dict(sorted(lengths.items(), key=lambda kv: kv[0])),
             "tags": {k: dict(sorted(v.items())) for k, v in tags.items()},
             "filing_minus_acceptance_days": dict(sorted(lag.items(), key=lambda kv: int(kv[0]))),
@@ -673,6 +751,44 @@ def compare_snapshots(new: dict[str, list[Appearance]], old: dict[str, list[Appe
 
 
 _INDEX_URL: Final = "https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{quarter}/master.gz"
+_INDEX_FILE: Final = re.compile(r"edgar/data/\d+/[0-9A-Za-z-]+\.txt")
+
+
+def index_rows(text: str, audit: Counter[str]) -> list[tuple[str, str, str, str]]:
+    """Data rows ``(cik, form, date_filed, accession)`` of an EDGAR ``master`` index, date as ``YYYY-MM-DD``.
+
+    Data rows are the lines after the dashed separator under the ``CIK|…`` column header. A name holding ``|`` is
+    recovered from the four fixed fields around it (counted). Any other non-blank line that is not a valid row is
+    counted in ``audit`` as ``rejected_<reason>``, never skipped silently; a missing column header or separator
+    rejects the whole file."""
+    lines = text.splitlines()
+    head = next((i for i, line in enumerate(lines) if line.startswith("CIK|")), None)
+    if head is None or head + 1 >= len(lines) or not lines[head + 1].startswith("---"):
+        audit["rejected_file_without_column_header_or_separator"] += 1
+        return []
+    out: list[tuple[str, str, str, str]] = []
+    for line in lines[head + 2 :]:
+        if not line.strip():
+            audit["blank_lines"] += 1
+            continue
+        parts = line.split("|")
+        if len(parts) > 5:
+            audit["recovered_name_with_separator"] += 1
+            parts = [parts[0], "|".join(parts[1:-3]), *parts[-3:]]
+        if len(parts) != 5:
+            audit["rejected_field_count"] += 1
+            continue
+        cik, _, form, raw, path = parts
+        filed = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}" if re.fullmatch(r"\d{8}", raw) else raw
+        if not re.fullmatch(r"[0-9]{1,10}", cik):  # ASCII only: latin-1 superscripts pass ``isdigit``
+            audit["rejected_cik"] += 1
+        elif not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", filed) or _ymd(filed.replace("-", "")) is None:
+            audit["rejected_date"] += 1
+        elif not _INDEX_FILE.fullmatch(path):
+            audit["rejected_file_name"] += 1
+        else:
+            out.append((cik.zfill(10), form, filed, path.rsplit("/", 1)[-1].removesuffix(".txt")))
+    return out
 
 
 def quarters(first: date, last: date) -> list[tuple[int, int]]:
@@ -696,8 +812,9 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
         cik_files = {name[3:13] for name in archive.namelist() if name.startswith("CIK") and "-" not in name}
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "headers").mkdir(exist_ok=True)
-    files: dict[str, dict[str, str]] = {}
-    index_rows: dict[tuple[str, str], tuple[str, str]] = {}
+    files: dict[str, dict[str, Any]] = {}
+    quarterly: dict[tuple[str, str], tuple[str, str]] = {}
+    parse_total: Counter[str] = Counter()
     # Whether a quarter file is organised by date filed: every row, all forms, against its file's quarter.
     placement: Counter[str] = Counter()
     with httpx.Client(timeout=120, headers={"User-Agent": settings.sec_user_agent}) as client:
@@ -713,20 +830,19 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
             files[f"{year}Q{quarter}"] = {"sha256": sha256_file(path), "last_data_received": received[19:].strip()}
             start = date(year, 3 * quarter - 2, 1).isoformat()
             end = (date(year + 1, 1, 1) if quarter == 4 else date(year, 3 * quarter + 1, 1)).isoformat()
-            for line in text.splitlines():
-                parts = line.split("|")
-                if len(parts) != 5 or not re.fullmatch(r"\d{4}-\d\d-\d\d", parts[3]):
-                    continue
-                placement["before_quarter" if parts[3] < start else "after_quarter" if parts[3] >= end else "in"] += 1
-                if parts[2] in FORMS and parts[3] < FIRST.isoformat():
+            audit: Counter[str] = Counter()
+            for cik, form, filed, accession in index_rows(text, audit):
+                placement["before_quarter" if filed < start else "after_quarter" if filed >= end else "in"] += 1
+                if form in FORMS and filed < FIRST.isoformat():
                     placement["family_rows_dated_before_first"] += 1
-                if parts[2] not in FORMS or parts[3] < FIRST.isoformat():
+                if form not in FORMS or filed < FIRST.isoformat():
                     continue
-                accession = parts[4].rsplit("/", 1)[-1].removesuffix(".txt")
-                index_rows[(parts[0].zfill(10), accession)] = (parts[2], parts[3])
+                quarterly[(cik, accession)] = (form, filed)
+            files[f"{year}Q{quarter}"]["parse"] = dict(sorted(audit.items()))
+            parse_total.update(audit)
     by_quarter: dict[str, Counter[str]] = defaultdict(Counter)
     stale: list[tuple[str, str, str, str]] = []
-    for key, (form, filed) in index_rows.items():
+    for key, (form, filed) in quarterly.items():
         bucket = by_quarter[f"{filed[:4]}Q{(int(filed[5:7]) - 1) // 3 + 1}"]
         bucket["index_rows"] += 1
         if key in archive_rows:
@@ -735,7 +851,7 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
         bucket[f"index_only_{where}"] += 1
         if filed <= last:
             stale.append((*key, form, filed))
-    for cik, accession in archive_rows - index_rows.keys():
+    for cik, accession in archive_rows - quarterly.keys():
         filed = min(x[2] for x in arch[accession])
         by_quarter[f"{filed[:4]}Q{(int(filed[5:7]) - 1) // 3 + 1}"]["archive_only"] += 1
     reconciled: list[dict[str, Any]] = []
@@ -766,6 +882,7 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
         "archive_sha256": sha256_file(archive_path),
         "archive_last_filing_date": last,
         "index_files": files,
+        "index_parse": dict(sorted(parse_total.items())),
         "row_placement_by_date_filed": dict(sorted(placement.items())),
         "by_quarter": {q: dict(sorted(c.items())) for q, c in sorted(by_quarter.items())},
         "index_only_by_archive_last_date": reconciled,
@@ -806,11 +923,18 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
     archive_rows = {(cik, accession) for accession, apps in arch.items() for cik, *_ in apps}
     cache.mkdir(parents=True, exist_ok=True)
     files: list[dict[str, Any]] = []
+    listings: dict[str, dict[str, str]] = {}
     unmatched: list[str] = []
     with httpx.Client(timeout=120, headers={"User-Agent": settings.sec_user_agent}) as client:
         for year, quarter in quarters(FIRST, date.today()):
             listing_url = _DAILY_URL.format(year=year, quarter=quarter, name="index.json")
-            listing = json.loads(_fetch_cached(client, listing_url, cache / f"index_{year}_QTR{quarter}.json"))
+            listing_path = cache / f"index_{year}_QTR{quarter}.json"
+            raw_listing = _fetch_cached(client, listing_url, listing_path)
+            listings[listing_path.name] = {
+                "sha256": hashlib.sha256(raw_listing).hexdigest(),
+                "cached_at": _mtime(listing_path),
+            }
+            listing = json.loads(raw_listing)
             for item in listing["directory"]["item"]:
                 name = item["name"]
                 if not name.startswith("master."):
@@ -822,15 +946,18 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
                 day = datetime.strptime(found.group(1), "%Y%m%d").date()
                 if day < FIRST:
                     continue
-                stamp = item["last-modified"]  # some listings give a date only
-                modified = datetime.strptime(stamp, "%m/%d/%Y %I:%M:%S %p" if " " in stamp else "%m/%d/%Y")
+                stamp = item["last-modified"]  # some listings give a date only; no time zone is stated
+                precise = " " in stamp
+                modified = datetime.strptime(stamp, "%m/%d/%Y %I:%M:%S %p" if precise else "%m/%d/%Y")
                 files.append(
                     {
                         "day": day.isoformat(),
                         "year": year,
                         "quarter": quarter,
                         "name": name,
-                        "last_modified": modified.isoformat(),
+                        "listing": listing_path.name,
+                        "last_modified_raw": stamp,
+                        "last_modified_precision": "second" if precise else "date",
                         "lag_days": (modified.date() - day).days,
                     }
                 )
@@ -852,52 +979,82 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
     days: dict[tuple[str, str], list[str]] = defaultdict(list)
     dated: dict[tuple[str, str], str] = {}
     shape: Counter[str] = Counter()
+    parse_total: Counter[str] = Counter()
     for f in files:
         body = bodies[f["name"]]
         text = (gzip.decompress(body) if f["name"].endswith(".gz") else body).decode("latin-1")
         received = next((line for line in text.splitlines()[:5] if line.startswith("Last Data Received")), "")
         f["last_data_received"] = received[19:].strip()
-        f["sha256"] = hashlib.sha256(bodies[f["name"]]).hexdigest()
-        for line in text.splitlines():
-            parts = line.split("|")
-            if len(parts) != 5 or parts[2] not in FORMS:
+        # The listing and body are bound by their sha256s and cache times (the listing names the body).
+        f["sha256"] = hashlib.sha256(body).hexdigest()
+        f["listing_sha256"] = listings[f["listing"]]["sha256"]
+        f["cached_at"] = _mtime(cache / f["name"])
+        audit: Counter[str] = Counter()
+        for cik, form, filed, accession in index_rows(text, audit):
+            if form not in FORMS:
                 continue
-            accession = parts[4].rsplit("/", 1)[-1].removesuffix(".txt")
-            key = (parts[0].zfill(10), accession)
+            key = (cik, accession)
             days[key].append(f["day"])
-            raw = parts[3].strip()
-            filed = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}" if re.fullmatch(r"\d{8}", raw) else raw
             dated.setdefault(key, filed)
             shape["rows"] += 1
-    quarterly: set[tuple[str, str]] = set()
+        if audit:
+            f["parse"] = dict(sorted(audit.items()))
+        parse_total.update(audit)
+    # Quarterly rows of every date (8-K family), so pre-FIRST daily rows are reconciled against unfiltered sets.
+    quarterly: dict[tuple[str, str], str] = {}
+    quarterly_files: dict[str, str] = {}
+    quarterly_parse: Counter[str] = Counter()
     for path in sorted(index_cache.glob("master_*.gz")):
-        for line in gzip.decompress(path.read_bytes()).decode("latin-1").splitlines():
-            parts = line.split("|")
-            if len(parts) == 5 and parts[2] in FORMS and parts[3] >= FIRST.isoformat():
-                quarterly.add((parts[0].zfill(10), parts[4].rsplit("/", 1)[-1].removesuffix(".txt")))
+        quarterly_files[path.name] = sha256_file(path)
+        text = gzip.decompress(path.read_bytes()).decode("latin-1")
+        for cik, form, filed, accession in index_rows(text, quarterly_parse):
+            if form in FORMS:
+                quarterly[(cik, accession)] = filed
+    archive_all = archive_rows | _PRE_FIRST["rows"]
     first_day = {key: min(v) for key, v in days.items()}
     lag_of = {f["day"]: f["lag_days"] for f in files}
     recon: Counter[str] = Counter()
-    gone: Counter[str] = Counter()  # rows a daily file lists that no current source holds, by year
+    neither: dict[str, Counter[str]] = {"all": Counter(), "from_first": Counter()}  # by year of first listing
+    unexplained: list[tuple[str, str, str]] = []
     examples: dict[str, list[str]] = defaultdict(list)
     for key, day in first_day.items():
-        recon["daily_rows"] += 1
-        recon["daily_rows_on_several_days"] += len(set(days[key])) > 1
-        recon["daily_rows_dated_before_first"] += dated[key] < FIRST.isoformat()
+        scopes = ("all", "before_first" if dated[key] < FIRST.isoformat() else "from_first")
         offset = (date.fromisoformat(day) - date.fromisoformat(dated[key])).days
         recon[f"first_day_minus_date_filed_{offset if -3 <= offset <= 5 else 'other'}"] += 1
         lag = lag_of[day]
         recon[f"first_file_lag_{lag if lag <= 7 else 'over_7'}"] += 1
-        if dated[key] >= FIRST.isoformat():
-            recon["daily_in_quarterly" if key in quarterly else "daily_not_in_quarterly"] += 1
-            recon["daily_in_archive" if key in archive_rows else "daily_not_in_archive"] += 1
-            if key not in quarterly and key not in archive_rows:
-                recon["daily_in_neither"] += 1
-                gone[day[:4]] += 1
-                if len(examples["daily_in_neither"]) < 20:
-                    examples["daily_in_neither"].append(f"{key[0]} {key[1]} {day}")
-    for key in quarterly - first_day.keys():
-        recon["quarterly_not_in_daily"] += 1
+        for scope in scopes:
+            recon[f"{scope}_daily_rows"] += 1
+            recon[f"{scope}_daily_rows_on_several_days"] += len(set(days[key])) > 1
+            recon[f"{scope}_in_quarterly" if key in quarterly else f"{scope}_not_in_quarterly"] += 1
+            recon[f"{scope}_in_archive" if key in archive_all else f"{scope}_not_in_archive"] += 1
+            if key not in quarterly and key not in archive_all:
+                recon[f"{scope}_in_neither"] += 1
+                if scope in neither:
+                    neither[scope][day[:4]] += 1
+        if key not in quarterly and key not in archive_all:
+            unexplained.append((*key, day))
+            if len(examples["daily_in_neither"]) < 20:
+                examples["daily_in_neither"].append(f"{key[0]} {key[1]} {day}")
+    # The unexplained rows against the quarterly files unfiltered by form or CIK: is the accession listed at all?
+    wanted = {accession for _, accession, _ in unexplained}
+    elsewhere: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
+    for path in sorted(index_cache.glob("master_*.gz")):
+        text = gzip.decompress(path.read_bytes()).decode("latin-1")
+        for cik, form, filed, accession in index_rows(text, Counter()):
+            if accession in wanted:
+                elsewhere[accession].add((cik, form, filed))
+    for cik, accession, _ in unexplained:
+        listed = elsewhere.get(accession, set())
+        if not listed:
+            recon["in_neither_accession_absent_from_quarterly"] += 1
+        elif any(c == cik for c, _, _ in listed):
+            recon["in_neither_accession_in_quarterly_same_cik_other_form"] += 1
+        else:
+            recon["in_neither_accession_in_quarterly_other_cik"] += 1
+    for key, filed in quarterly.items():
+        if filed >= FIRST.isoformat() and key not in first_day:
+            recon["quarterly_not_in_daily"] += 1
     for key in archive_rows - first_day.keys():
         recon["archive_not_in_daily"] += 1
     rows = json.loads(measurement.read_text())["headers"]["rows"]
@@ -918,23 +1075,35 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
             against[f"day_minus_{field}_{offset if -3 <= offset <= 5 else 'other'}"] += 1
             if offset < 0 or offset > 5:
                 examples[f"day_minus_{field}_{offset}"].append(r["accession"])
-        if TIMING_TAGS & set(r["tags"]):
-            against["timing_uncertain_with_daily_day"] += 1
+        for name in sorted(set(r["classes"].values()) - {"ok"}):
             lag = lag_of[day]
-            against[f"timing_uncertain_first_file_lag_{lag if lag <= 7 else 'over_7'}"] += 1
+            against[f"{name}_first_file_lag_{lag if lag <= 7 else 'over_7'}"] += 1
     lags = Counter(f["lag_days"] if f["lag_days"] <= 7 else "over_7" for f in files)
     return {
+        "inputs": {
+            "archive_sha256": sha256_file(archive_path),
+            "measurement": str(measurement),
+            "measurement_sha256": sha256_file(measurement),
+            "quarterly_files": quarterly_files,
+            "listings": listings,
+        },
         "files": len(files),
         "unmatched_master_names": unmatched,
+        "index_parse": {"daily": dict(sorted(parse_total.items())), "quarterly": dict(sorted(quarterly_parse.items()))},
         "write_lag_days": dict(sorted(lags.items(), key=str)),
         "files_written_over_7_days_late": [f for f in files if f["lag_days"] > 7],
         "rows": dict(shape),
         "reconciliation": dict(sorted(recon.items())),
-        "daily_in_neither_by_year": dict(sorted(gone.items())),
+        "daily_in_neither_by_year": {k: dict(sorted(v.items())) for k, v in neither.items()},
         "headers_against_daily": dict(sorted(against.items())),
         "examples": {k: v[:20] for k, v in sorted(examples.items())},
         "file_list": files,
     }
+
+
+def _mtime(path: Path) -> str:
+    """A cached file's write time (UTC), the time this run's copy was captured."""
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(timespec="seconds")
 
 
 def provenance() -> dict[str, Any]:
