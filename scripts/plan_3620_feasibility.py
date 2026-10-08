@@ -349,11 +349,15 @@ def run(conn: psycopg.Connection[Any], head: str) -> dict[str, Any]:
             "input_sha256": hashlib.sha256(canonical_json(record)).hexdigest(),
             **evaluate_record(record),
         }
-        write_durably(output_path(run_id), canonical_json(output) + b"\n")
+        data = canonical_json(output) + b"\n"
+        write_durably(output_path(run_id), data)
     except BaseException as exc:
         append_ledger(LEDGER_PATH, _row("failed", run_id, error=repr(exc)))
         raise
     terminal = "refused" if output["verdict"] == REFUSED else "completed"
+    # Nothing fallible sits between the fsynced output and this row: its sha256 comes from the bytes in memory. If the
+    # append itself fails, nothing can record that; the attempt stays unterminated and `preflight` refuses every later
+    # one until it is reconciled by hand (`abandoned`), because the output may already hold a result.
     path = output_path(run_id)
     append_ledger(
         LEDGER_PATH,
@@ -362,7 +366,7 @@ def run(conn: psycopg.Connection[Any], head: str) -> dict[str, Any]:
             run_id,
             verdict=output["verdict"],
             output=str(path.relative_to(_REPO_ROOT)),
-            output_sha256=_sha256_file(path),
+            output_sha256=hashlib.sha256(data).hexdigest(),
         ),
     )
     return output
@@ -384,7 +388,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if "g_book" in out:
         print(f"G TSMOM {out['g_book']!r}; G B1 {out['g_b1']!r}")
     print(f"verdict {out['verdict']}" + (f" ({out['reason']})" if out["reason"] else ""))
-    print(f"output {output_path(out['run_id'])}; reproduces: {reproduce(output_path(out['run_id']))}")
+    path = output_path(out["run_id"])
+    try:
+        reproduced: object = reproduce(path)
+    except Exception as exc:  # the attempt is already recorded; a reproduce failure is reported, not raised
+        reproduced = f"error {exc!r}"
+    print(f"output {path}; reproduces: {reproduced}")
     return 0
 
 
