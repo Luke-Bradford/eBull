@@ -7,14 +7,30 @@ gate before it reads outcomes. The producer reads no prices and no returns.
 
 **Design rule: when in doubt, `unknown`.** No rule below links, infers or estimates anything a structured field
 does not state. Missing or unresolved item metadata and unresolved timing are `unknown`, never a negative. A window
-is `flagged` or `unflagged` only when the answer is the same under every possibility the sources leave open
+is `flagged` or `unflagged` only when the answer is the same under every possibility the construction leaves open
 (§"Label state").
+
+**Availability is a declared rule, not a proof of publication.** The programme asks for labels "keyed to each
+accession's acceptance time" (`docs/research/2026-10-06-3624-llm-research-component.md` §5, lines 180–184). No
+pinned source records when a historical filing became public; only the EDGAR Feed's `<TIMESTAMP>` would, and it is
+out of proportion (§"Not done"). The programme's data-treatment hierarchy (§4, lines 103–104) allows a declared
+construction choice where no source rule fixes a degree of freedom. So:
+- an `ok` row is available from the first session after the later of its Rule 13 filing date and its first daily
+  listing day `D`: the documented rule (Rule 13(a), and the guidance's "following business day's index") plus one
+  construction choice, the next session;
+- every non-`ok` row is in doubt from its earliest possible session to `capture`, so no bound depends on an index
+  file's write time.
+
+The checkpoint judges point-in-time safety against this standard and the documented rules, and reports any
+departure from them.
 
 **Four sources, four jobs.**
 - **Dissemination record:** EDGAR's daily `master.YYYYMMDD.idx` files. Each lists the filings of one dissemination
-  day, and its directory listing gives the time the file was last written.
-- **Authority:** each accession's EDGAR SGML header gives its items, form, filing date, acceptance time, last
-  post-acceptance correction date and filer CIKs. A header is fetched for **every** inventory row of a covered CIK.
+  day. A row's first listing gives its listing day `D`. The directory listing's write time is recorded as a
+  diagnostic (`listing_lag`) and bounds nothing.
+- **Authority:** each accession's EDGAR SGML header gives its accession number, items, form, filing date, acceptance
+  time, last post-acceptance correction date, filer CIKs and submission markers. Every build fetches a header afresh
+  for **every** inventory row of a covered CIK.
 - **Inventory cross-checks:** the quarterly full-index `master.gz` files and the bulk `submissions.zip` archive. Every
   row any of them holds is in the inventory.
 - **Coverage population:** our CIKs (below). Other CIKs have no coverage record and read `unknown`.
@@ -35,8 +51,11 @@ Three commands, outputs committed beside this spec. The third reads the first's 
         --daily-index-cache var/research/3624/daily-index --index-cache var/research/3624/full-index \
         --measurement "$M" --out docs/research/3624-slice2-daily-index.json
 
-Headers and index files are cached under `var/research/3624/`, one file per accession or index day. Each output
-row carries its body's sha256, and each daily file's sha256 and listing time are in the third output.
+Headers and index files are cached under `var/research/3624/`, one file per accession or index day. Each header row
+carries its body's sha256. The third output's `inputs` block holds the sha256 of the archive, of the first output,
+of every quarterly file and of every daily directory listing. Each daily file entry binds its body to its listing:
+the body's sha256, the listing's name and sha256, the body's cache time, and the listing's raw `last-modified`
+with its precision (`second` or `date`; no time zone is stated).
 
 **Pinned inputs:**
 - **Archive A:** `submissions.zip` sha256 `d6c42d55…`, captured 2026-10-07T08:05:08Z; last 8-K-family filing date
@@ -45,15 +64,15 @@ row carries its body's sha256, and each daily file's sha256 and listing time are
 - **Quarterly index:** 90 `master.gz` files, 2004 Q3 to 2026 Q4, each named by sha256 with its `Last Data Received`
   line in the reconciliation JSON.
 - **Daily index:** 5,516 `master.YYYYMMDD.idx[.gz]` files from 2004-08-23 to 2026-10-07, each with its sha256, its
-  `Last Data Received` line and its listing's `last-modified` time (`file_list`). From 2011 Q3 to 2014 only the
-  `.idx.gz` form is published.
+  `Last Data Received` line and its listing's `last-modified` (`file_list`). From 2011 Q3 to 2014 only the `.idx.gz`
+  form is published.
 - **Our CIKs:** the 5,310 CIKs in `external_identifiers` (`provider='sec'`, `identifier_type='cik'`), written out in
   full in the measurement JSON (`ciks`, sha256 `d1c01c68…`).
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`31df1e67…`), `HEAD`
-  (`77231ed1`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`1cc665ed…`), `HEAD`
+  (`44ac5fdc`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
 are as of 2026-10-08, read by the first command (queries in the script).
@@ -83,7 +102,10 @@ engagement of a new independent accountant".
 
 - **Form 8-K**, SEC 873 (02-25): Items 4.01 and 4.02, the Item 4.01 Instruction, Item 4.02(c)(3). Its 33 item
   headings (`grep -o 'Item [0-9]\.[0-9][0-9]'` on the pinned PDF) are the **item vocabulary**. A header item list is
-  a label source only when every code is in it.
+  a label source only when every code is in it. **General Instruction D** (p. 4): "The report shall contain the
+  number and caption of the applicable item"; items not required "may be omitted and no reference thereto need be
+  made". Only Item 1.01 may go without its number and caption, so a report under Item 4.01 or 4.02 carries both
+  (gate 7).
 - **Release 33-8400** (2004): the current item numbering applies from **2004-08-23** (`FIRST`). The producer does
   not argue from it about older rows: every row the sources hold from `FIRST` on is read, and a row with the earlier
   numbering is decided by its header like any other (its items are not valid, so its label is `unknown`).
@@ -100,10 +122,10 @@ engagement of a new independent accountant".
     index".
   - It gives no hour by which a filing is public.
 - **EDGAR daily index:** "Daily Index of EDGAR Dissemination Feed", one row per `(CIK, form, date filed, file)` for
-  one day, with a `Last Data Received` date. A file's directory listing (`index.json`) states its `last-modified`
-  time. **A row listed in a file was public no later than that time**: the file is a public SEC record that the
-  filing was disseminated. That is the only dissemination evidence the producer reads. It is used as a bound, not as
-  an event time, because files can be rewritten after their day (premise 8).
+  one day, with a `Last Data Received` date. Data rows follow the `CIK|…` column header and its dashed separator.
+  A file's directory listing (`index.json`) states its `last-modified`, to the second or to the day, with no time
+  zone. No source makes that a publication time, and files are rewritten after their day (premise 8), so it is
+  recorded and bounds nothing.
 - **EDGAR PDS specification:**
   - `<FILING-DATE>`: "EDGAR assigned official filing date, or post acceptance new filing date (Post Acceptance
     Correction)";
@@ -114,26 +136,39 @@ engagement of a new independent accountant".
     day, and its items are the items disseminated (the one undetectable case is a PAC on the acceptance day itself);
   - `<ITEMS>`: "Identifies 1 or more items declared in the filings", format `#.##`;
   - filer CIKs sit inside `<FILER>` blocks; other roles (`<SUBJECT-COMPANY>` and the like) are separate;
-  - a PAC's dissemination date-time is the Feed's `<TIMESTAMP>` (pp. 41–42, 46). The `.hdr.sgml` header does not
-    carry it (premise 6's raw tag census). The correction date is a processing date and is never used as a time;
-  - `<PAPER>` marks a paper submission, whose EDGAR document is a stub (pp. 6, 8, 42).
-- **EDGAR SGML header:** `<accession>.hdr.sgml` in the filing's folder (the `-index-headers.html` page is absent for
-  older filings: 404 on 2006 accessions).
+  - `<ACCESSION-NUMBER>`: "EDGAR assigned identifier unique to each submission. Required." (p. 42);
+  - a PAC's dissemination date-time is the Feed's `<TIMESTAMP>` (pp. 41–42, 46). None of the 9,041 inspected
+    `.hdr.sgml` headers carries it (premise 6's raw tag census); the producer records the tag wherever it occurs and
+    never relies on its absence. The correction date is a processing date and is never used as a time;
+  - three markers say a submission is not an ordinary electronic filing, and each is a field outcome below:
+    - `<PAPER>` marks a paper submission, whose EDGAR document is a stub (pp. 6, 8, 42);
+    - `<PRIVATE-TO-PUBLIC>` "identifies an SEC-approved private-to-public document dissemination" and "is only
+      present in a *.pr dissemination" (p. 42), documents the SEC releases from private status later (p. 6);
+    - `<CONFIRMING-COPY>` "defines this submission as being a confirming copy to a paper submission" (p. 43).
+- **EDGAR SGML header:** `<accession>.hdr.sgml` in the filing's folder, the only header form the producer reads.
 - **Submissions JSON:** `items` aligned by index with `accessionNumber`
   (`.claude/skills/data-sources/sec-edgar.md` §"Submissions"). It is an inventory cross-check only. The JSON's
   `acceptanceDateTime` is never used (#3714).
 
 ## Premises (measured)
 
-1. **The sources nearly agree on membership, and removals are visible only in the daily files** (reconciliation and
-   daily-index JSONs; 8-K family from `FIRST`, rows `(cik, accession)`).
+1. **The sources nearly agree on membership; the daily files alone hold a few hundred unexplained rows**
+   (reconciliation and daily-index JSONs; 8-K family, rows `(cik, accession)`).
    - **Quarterly against archive:** quarterly 1,814,389 rows, archive 1,814,246. Quarterly-only rows filed by the
      archive's last date: **2**, both 2026 Q3, both under a CIK whose archive file ends before the accession's date
      (2026-09-08 against 2026-09-23; 2026-09-15 against 2026-09-17). Each has a header naming the CIK as a filer.
      Quarterly-only after the archive's last date: 141. Archive-only: **0**.
-   - **Daily against both:** the daily files hold 1,810,835 distinct rows. Of these, 1,810,263 are in the quarterly
-     index and 1,810,120 in the archive. **502 are in neither** (`daily_in_neither_by_year`, 1 to 70 a year), which
-     is what the guidance's removal rule predicts: rows the SEC removed after dissemination.
+   - **Daily against both** (`reconciliation`), against the quarterly and archive rows of every date, so both
+     denominators are reported:
+     - all 1,810,835 distinct daily rows: 1,810,284 in the quarterly index, 1,810,191 in the archive, **501 in
+       neither**;
+     - the 1,810,765 rows dated `FIRST` or later: 1,810,263, 1,810,121 and the same **501**
+       (`daily_in_neither_by_year`, 1 to 70 a year);
+     - the 70 rows dated before `FIRST`: all 70 in the archive, 21 in the quarterly index, 0 in neither.
+   - **The 501 are unexplained membership differences, not proven removals.** Rescanned against the quarterly files
+     with no form or CIK filter, 498 accessions appear nowhere in them and 3 appear under another CIK; 0 appear under
+     the same CIK with another form. The guidance's removal rule is one explanation; a correction of form, CIK or
+     date is another, and the sources do not say which.
    - **Both against daily:** 4,126 quarterly rows are in no daily file. 22 header rows are in none; all 20 listed
      in `examples.not_in_daily` fall on days with no daily file in the listing (for example 2010-07-13 to 07-16 and
      2023-07-06 to 07-14).
@@ -164,7 +199,7 @@ engagement of a new independent accountant".
      Eastern days after the filing date. 15,655 of them have item sets, and the current stored sets agree with
      archive A (15,638 no-NULL, 17 mixed); the other 6 are all NULL. `filing_events` keeps current values only, so
      this shows current agreement, not that nothing changed.
-4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,339
+4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,348
    non-tombstone `eight_k_filings` accessions, left-joined to `eight_k_items`; 72,241 are in the archive, all with
    valid items there. The parser stored no item rows for 52,353 of them. Within the overlap it never holds a target
    code the archive lacks (Item 4.01: 109 of 541 archive positives; Item 4.02: 25 of 94), and its misses are mostly
@@ -174,9 +209,11 @@ engagement of a new independent accountant".
 6. **Headers on a selected set: every archive candidate of our CIKs (7,041 accessions) and a seeded sample of 2,000
    of their other accessions** (`headers`; 9,041 fetched, 0 failures). The production rule fetches a header for
    every row, so these figures show the field outcomes' shape, not the population's rates.
-   - **Structure:** every header has exactly one `<SEC-HEADER>` block (`header_block_counts`). The raw tag census
-     (`raw_tag_presence`, headers carrying each tag) finds `<PRIVATE-TO-PUBLIC>` on 65, `<CONFIRMING-COPY>` on 3,
-     and **0** `<TIMESTAMP>` and **0** `<PAPER>`.
+   - **Structure:** every header has exactly one `<SEC-HEADER>` block (`header_block_counts`), and every one has
+     exactly one `<ACCESSION-NUMBER>`, equal to the accession requested (`field_outcome_rows`). On these 9,041 the
+     raw tag census (`raw_tag_presence`, headers carrying each tag) finds `<PRIVATE-TO-PUBLIC>` on 65 and
+     `<CONFIRMING-COPY>` on 3, all inside the header block (`marker_presence_in_header_block`), and **0**
+     `<TIMESTAMP>` and **0** `<PAPER>`. These are observations on the inspected set, not format rules.
    - **Items against the archive:** 5 archive lists are cut short of their header (13 archive codes, 14 or 15 in
      the header); no shorter archive list disagrees (`archive_item_count_by_disagreement`). 4 carry pre-2004 codes
      on both sides, all dated `FIRST` and accepted after 17:30 on Friday 2004-08-20; 1 is empty on both sides.
@@ -188,6 +225,13 @@ engagement of a new independent accountant".
    - **The correction field** (`correction_field`): later than acceptance on 69 (68 candidates, 1 sampled), by 1 to
      726 days; equal on 8,953; absent on 18 (17 and 1); not comparable on 1 (the empty acceptance); 0 earlier; 0
      invalid. None of the 69 later ones has a header item list that differs from the archive.
+   - **Classes under the production predicates** (`class_rows`, `class_accessions`; `field_outcomes` and
+     `row_class` in the script implement §"Headers" and §"Row classes"). Of our CIKs' 7,042 candidate rows, 6,949
+     are `ok`, 92 `items_unestablished`, 1 `timing_in_doubt` and 0 `label_in_doubt`. Of the 2,001 rows of the
+     sampled accessions, 1,999 are `ok` and 2 `items_unestablished`. The 94 `items_unestablished` rows: 62 corrected
+     and `<PRIVATE-TO-PUBLIC>`, 7 corrected only, 3 `<PRIVATE-TO-PUBLIC>` only, 3 `<CONFIRMING-COPY>`, 18 without a
+     correction date (4 of them with pre-2004 items and 1 with empty items), and the 1 with an empty acceptance tag.
+     The `timing_in_doubt` row is the earlier-dated `0001640334-22-000691`.
 7. **Snapshot drift, archive B to A, all CIKs** (`previous_snapshot`): of 1,759,461 accessions both hold, 0 changed
    CIK membership and 0 rows changed form, filing date or items. 0 accessions of B are absent from A, and 0 of A
    filed by B's last date are absent from B.
@@ -203,7 +247,9 @@ engagement of a new independent accountant".
      within 1 to 7 days, **587 more than 7 days later**. 250 of the 587 are the whole of 2012, rewritten on
      2014-07-30 (576 to 939 days). 1,486,301 rows first appear in a same-day file and 193,292 in a file written
      more than 7 days late.
-   - **Before `FIRST`:** 70 daily rows from `FIRST` on are dated before it. The archive holds 364,314 pre-`FIRST`
+   - **Index parsing** (`index_parse` in both JSONs): under the parse contract, 0 lines rejected and 0 names
+     holding `|` in all 5,516 daily and 90 quarterly files.
+   - **Before `FIRST`:** 70 rows in daily files from `FIRST` on are dated before it. The archive holds 364,314 pre-`FIRST`
      8-K-family appearances (364,314 distinct rows): 364,271 with non-vocabulary items, 42 empty, 1 valid, and
      **0 with a 4.01 or 4.02 token**, counted token by token whatever the rest of the list (`pre_first`).
 9. **Consumer audit** (`consumer_audit`, every hit listed with its command and revision; `severity`, with its
@@ -211,27 +257,45 @@ engagement of a new independent accountant".
    - **Readers of the item codes:**
      - `app/services/filings_risk.py` reads `sec_8k_item_codes`. 4.01 and 4.02 are both `critical` there.
      - `app/services/sec_filing_items.py` writes `filing_events.red_flag_score` from `filing_events.items` through
-       it, and `scripts/backfill_red_flag_score.py` recomputes it from the same column. The other
-       `score_filing_red_flag` call sites pass `items=None`.
+       it, and `scripts/backfill_red_flag_score.py` recomputes it from the same column. The other three
+       `score_filing_red_flag` call sites pass `None` for the items (`app/services/filings.py:865`, `:960`;
+       `app/services/fundamentals/__init__.py:3042`; `git grep -n score_filing_red_flag -- app scripts` at this
+       PR's head).
      - `app/services/eight_k_events.py` copies labels and severities onto `eight_k_items`.
      - `app/services/strategy_shock_mechanism.py` belongs to the shock-event family cut on 2026-08-22.
      - Two `scripts/*2900*` files audit the red-flag path.
    - **Readers of the score:** `red_flag_score` has 95 hits in 22 files, among them scoring, portfolio, the position
      monitor and the r6 research modules.
-   - So every live use of these codes reaches them through `filing_events.items`, and that is the layer gate 6
-     compares with.
+   - **Scope of the claim:** among the direct matches of these three patterns, every reader of the codes reaches
+     them through `filing_events.items`, the layer gate 6 compares with. The audit is a text search, not a call
+     graph, and it does not establish which matches are live. A reader that names neither the codes, the table nor
+     the score is outside it.
 
 ## Construction
 
 ### Inventory
 
-- **Rows.** Every 8-K-family `(cik, accession)` row in any source, with its sources recorded:
+- **Estimand.** Rows dated `FIRST` or later, in every source. A row dated before `FIRST` is outside the estimand by
+  declaration, whatever its later item history, and is counted in the census, not inventoried. This is a declared
+  restriction of what the labels describe (Release 33-8400's numbering starts at `FIRST`), not an argument that such
+  rows cannot matter; premise 8 records their measured shape.
+- **Rows.** Every 8-K-family `(cik, accession)` row dated `FIRST` or later in any source, with its sources recorded:
   - every daily file dated `FIRST` to `F`;
-  - every quarterly file from 2004 Q3 to the quarter holding `F`, rows dated `FIRST` or later;
-  - the archive, rows dated `FIRST` or later;
+  - every quarterly file from 2004 Q3 to the quarter holding `F`;
+  - the archive;
   - any header filer CIK not already a row (a **header-only** row).
-- **Listing.** A row's **listing day** `D` is the first daily file listing it. The **listing bound** `W` is that
-  file's `last-modified` date. A row in no daily file has neither.
+- **Listing.** A row's **listing day** `D` is the first daily file listing it; a row in no daily file has none. The
+  row records `listing_lag`, its first file's `last-modified` date minus `D`, or null, as a diagnostic.
+- **Index reading.** One parse contract for daily and quarterly files. A file must have the `CIK|…` column header
+  followed by a dashed separator. Every non-blank line after it must be a data row:
+  - five `|`-separated fields; a company name holding `|` is recovered from the four fixed fields around it and
+    counted;
+  - an ASCII CIK of 1 to 10 digits, a real date (`YYYY-MM-DD`, or `YYYYMMDD` in daily files) and an
+    `edgar/data/<digits>/<accession>.txt` file name.
+
+  Any other line refuses the build (`INDEX_UNREADABLE`), with every rejected line counted by reason. The build also
+  refuses (`INDEX_INCOMPLETE`) if a quarterly file from 2004 Q3 to `F`'s quarter, or a `master` file the pinned
+  listings name from `FIRST` to `F`, is missing or unreadable.
 - **Archive reading.** Every `CIK##########.json`, its history listing and exactly the pages it lists. Before any
   form filter, the producer checks:
   - that `filings.files` is a list of objects with a string `name`;
@@ -242,105 +306,112 @@ engagement of a new independent accountant".
   It refuses (`ARCHIVE_INCOMPLETE`) if any check fails. A block without an `items` array gives `missing` items.
   Unlisted page files are counted and not read.
 - **Covered CIKs** are our CIKs. Every inventory row of a covered CIK gets a header. A header is fetched once per
-  accession, from the first covered CIK that lists it. Rows of other CIKs are inventoried and counted, but not
-  fetched.
+  accession per build, from the first covered CIK that lists it. Rows of other CIKs are inventoried and counted, but
+  not fetched.
 
 ### Headers
 
-- **Fetch.** Stored under `headers/<accession>.sgml` with its sha256 and capture time, at the shared SEC rate limit
-  (four workers, at most 5 requests a second). Three attempts per accession per run, 2 s then 8 s apart. A fetch
-  that fails after three attempts is retried in the next run before publication; `no_header` is final only after
-  two runs on different days.
-- **Reuse and refresh.** The manifest names its `parent` artefact version, or none.
-  - **Reuse:** a parent header is copied, sha256 checked, when every field outcome was ok and the accession's
-    inventory record (sources, form, filing date, items, CIKs, `D`) is unchanged from the parent's.
-  - **Refresh:** every other header is fetched again, and `--refresh-all` re-fetches all of them.
-  - Each header row carries `fetched` or `reused_from <version>`. A header is never corrected in place, and the
-    version reconciliation reports every changed header field.
+- **Fetch.** Every build fetches every header itself, at the shared SEC rate limit (four workers, at most 5 requests
+  a second). Each body is stored under `headers/<accession>.sgml` with a sidecar holding its sha256, the URL and the
+  UTC capture time. Three attempts per accession per run, 2 s then 8 s apart. A fetch that fails after three
+  attempts is retried in the next run before publication; `no_header` is final only after two runs on different
+  days.
+- **No reuse across versions.** A header from an earlier artefact version is never used: a correction can change a
+  header without changing anything the inventory shows. Within one build the cache serves only resumability, and an
+  entry is used only when its sidecar's capture time is at most 7 days old. Entries without a sidecar, which
+  includes all 9,041 measured so far, are fetched again.
 - **Fields.** Each field has its own outcome, evaluated independently and recorded. A field whose inputs are not ok
   records `not_evaluated`, which counts as not ok.
 
   | field | ok when | otherwise |
   |---|---|---|
-  | retrieval | the body was fetched | `no_header`, last error stored |
-  | parse | exactly one `<SEC-HEADER>` block; `<ACCEPTANCE-DATETIME>`, `<TYPE>`, `<FILING-DATE>` and `<DATE-OF-FILING-DATE-CHANGE>` each at most once | `malformed`, with the cause |
+  | retrieval | the body was fetched | `no_header`, last error stored; every other field `not_evaluated` |
+  | parse | exactly one `<SEC-HEADER>` block; `<ACCESSION-NUMBER>`, `<ACCEPTANCE-DATETIME>`, `<TYPE>`, `<FILING-DATE>` and `<DATE-OF-FILING-DATE-CHANGE>` each at most once | `malformed`, with the cause |
+  | accession | exactly one `<ACCESSION-NUMBER>`, equal to the inventory key | `no_accession`, `accession_mismatch` |
   | `<PAPER>` | absent | `paper` |
+  | `<PRIVATE-TO-PUBLIC>` | absent | `private_to_public` |
+  | `<CONFIRMING-COPY>` | absent | `confirming_copy` |
   | `<ACCEPTANCE-DATETIME>` | 14 digits forming a real date and time | `no_acceptance`, `acceptance_invalid` |
   | `<FILING-DATE>` | 8 digits forming a real date | `no_filing_date`, `filing_date_invalid` |
   | `<TYPE>` | in the 8-K family | `type_out_of_scope` |
   | `<ITEMS>` | non-empty, every code in the vocabulary, no code twice | `items_empty`, `items_invalid` |
   | `<FILER>` CIKs | include the row's CIK | `not_a_filer` |
-  | date order | filing date on or after the acceptance date | `date_before_acceptance` |
-  | `<DATE-OF-FILING-DATE-CHANGE>` | 8 digits forming a real date, equal to the acceptance date | `no_correction_date`, `correction_invalid`, `corrected` (later), `correction_before_acceptance` (earlier) |
+  | date order | filing date on or after the acceptance date | `date_before_acceptance`; `not_evaluated` without both dates |
+  | `<DATE-OF-FILING-DATE-CHANGE>` | 8 digits forming a real date, equal to the acceptance date | `no_correction_date`, `correction_invalid`, `corrected` (later), `correction_before_acceptance` (earlier); `not_evaluated` without a valid acceptance date |
 
   An absent correction date is not read as "no correction": without it the header does not say whether a PAC
-  occurred. A paper submission's timing and document differ from an electronic one's, so it is never `ok`.
+  occurred. The measurement script implements this table (`field_outcomes`), and premise 6's class counts come from
+  it.
 
 ### Row classes, labels in doubt, and intervals
 
-Every inventory row of a covered CIK falls in exactly one class. Each non-`ok` class says which labels are in doubt
-(`may_carry`) and over which sessions (the **doubt interval**).
+Every inventory row of a covered CIK falls in exactly one class, decided by this table from the top; the first row
+that matches wins, and a row matching none is `ok`:
 
-| class | when | `may_carry` | doubt interval |
+| class | when any of these fields is not ok | `may_carry` | doubt interval |
 |---|---|---|---|
-| `ok` | every field ok | none | none |
-| `label_in_doubt` | the parse, acceptance, filing date, date order and correction fields are ok (the header fixes when it was public and that nothing changed after), but `<ITEMS>`, `<TYPE>`, `<FILER>` or `<PAPER>` is not | the header's target codes when `<ITEMS>` is ok, else both | the row's `available_session` only |
-| `items_unestablished` | `corrected`, `no_correction_date`, `correction_invalid` or `correction_before_acceptance`, or `no_header` or `malformed` | both | `[start, capture]` |
-| `timing_in_doubt` | the correction field is ok but acceptance, filing date or date order is not | the header's target codes when `<ITEMS>` is ok, else both | `[start, end]` |
+| `items_unestablished` | retrieval, parse, accession, `<PAPER>`, `<PRIVATE-TO-PUBLIC>`, `<CONFIRMING-COPY>`, correction | both labels | `[start, capture]` |
+| `timing_in_doubt` | acceptance, filing date, date order | the header's target codes when `<ITEMS>` is ok, else both | `[start, capture]` |
+| `label_in_doubt` | `<TYPE>`, `<ITEMS>`, `<FILER>` | the header's target codes when `<ITEMS>` is ok, else both | `[available_session, capture]` |
+| `ok` | none | none | none |
 
-A row in more than one class takes the first in the table's reverse order: `items_unestablished`, then
-`timing_in_doubt`, then `label_in_doubt`. A `timing_in_doubt` row whose `<ITEMS>`, `<TYPE>`, `<FILER>` or `<PAPER>`
-field is also not ok keeps its interval, but its label is in doubt too, so it never flags (§"Label state").
+The table is total: every combination of outcomes reaches exactly one class. A correction field is ok only with a
+valid acceptance date, so a row with an unusable acceptance (`0001104659-09-022130`) is `items_unestablished`, and a
+`timing_in_doubt` row always has a valid acceptance date. A `timing_in_doubt` row whose `<TYPE>`, `<ITEMS>` or
+`<FILER>` is also not ok keeps its class, but its label is in doubt too, so it never flags (§"Label state").
 
-- **`ok` rows are observations** for each target code in their header items, with
-  `available_session` = the first session strictly after the later of the header filing date and `D` (or the
-  filing date alone when the row has no `D`).
-  - **Why the filing date:** under Rule 13(a) it is the business day the filing counts as filed. The guidance puts
-    late submissions in that day's index, and premise 8 finds 1,810,056 of 1,810,835 rows first listed on their own
-    date filed.
-  - **Why also `D`:** a row first listed later than its filing date is not taken as public before its listing.
-  - **Why the next session:** the guidance gives no hour, so the whole day is skipped. This is fixed by
-    construction.
-  - The row records `listing_lag` (`W` − `D`, or null). That supports a consumer that wants only rows whose listing
-    file was written within a day; the producer applies no such filter.
+- **`available_session`**, for `ok` and `label_in_doubt` rows: the first session strictly after the later of the
+  header filing date and `D`, or after the filing date alone when the row has no `D`. Both classes have ok
+  acceptance, filing date, date order and correction fields, so the rule is defined for both. This is the declared
+  availability rule (top of this spec):
+  - **the filing date:** under Rule 13(a) it is the business day the filing counts as filed, and the guidance puts
+    late submissions in that day's index;
+  - **`D`:** a row first listed later than its filing date is not taken as available before its listing;
+  - **the next session:** the guidance gives no hour, so the whole day is skipped. This is fixed by construction.
+- **`ok` rows are observations** for each target code in their header items, available at `available_session`.
 - **`start`:** the first session strictly after the acceptance date when that field is ok, since dissemination
   follows acceptance.
-  - Without a usable acceptance date, no source dates the submission, so `start` must be a lower bound that holds.
-    It is the first session strictly after 1 January of the accession number's year. The dissemination guidance
-    says the accession number is "assigned automatically to an accepted submission by EDGAR", and that its middle
-    two digits "represent the year". So no accepted submission precedes its own year.
-  - A later start would make some `unflagged` answers wrong, which this rule avoids. The one measured case
+  - Without a usable acceptance date no source dates the submission. `start` is then the first session strictly
+    after 1 January of the accession number's year. The dissemination guidance says the accession number is
+    "assigned automatically to an accepted submission by EDGAR", and its middle two digits "represent the year".
+  - This deliberately covers sessions that may precede the real acceptance. The one measured case
     (`0001104659-09-022130`) starts in January 2009.
-- **`end`:** the first session strictly after `W` when the row has a listing, which is when the SEC's own file
-  shows it public; otherwise `capture`.
-- **`capture`:** the first session strictly after the header's capture date. The header's current content was
-  public then. For a row with no header, it is the archive A capture date.
-- **Why `items_unestablished` runs to capture:** a correction can change the item list at an undated time, and a
-  missing or unreadable header shows nothing. So the item list in force at any session before capture is unknown,
-  and so is any label it could carry, including one a correction removed.
+- **`capture`:** the first session strictly after the header's capture date in this build, the first time the
+  producer saw that content. For a `no_header` row it is the date of the last fetch attempt.
+- **Why every doubt runs to `capture`:** a non-`ok` row is one the construction cannot certify, so the producer
+  asserts no time for it. A correction can change items at an undated time, a missing or unreadable header shows
+  nothing, and a marked submission follows a release path the header does not date. The doubt therefore covers
+  every session from the earliest the construction allows to the first session the producer itself observed the
+  content. No bound depends on an index file's write time.
 
 ### Coverage
 
 - **Coverage end `F`:** the last day with a daily file in the pinned listing whose `Last Data Received` equals its
   day. The producer refuses if `F` is after the archive's last filing date plus one day.
 - **`s_max`:** the last session on or before `F`.
-- **`s_min`:** the first session strictly after `FIRST`. A row whose date filed and `D` are both before `FIRST` has
-  its `available_session` at or before `FIRST`, so it reaches no window. Every other row is in the inventory if any
-  source holds it.
+- **`s_min`:** the first session strictly after `FIRST`.
 - **Coverage record**, one per CIK seen in any source. A covered CIK is **complete** when:
   - its archive file and pages pass the checks;
   - every one of its inventory rows has a final header outcome;
   - no row has a `retrieval` outcome other than ok or `no_header`;
-  - and every `no_header` row is absent from both the archive and the quarterly index, the removal case.
+  - and every `no_header` row is listed only in daily files, absent from both the archive and the quarterly index:
+    an unexplained membership difference (premise 1).
 
   Other CIKs have a record with `covered = false`.
-- **Days without a daily file** between `FIRST` and `F` are listed in the manifest. Rows filed on them have no
-  `D`.
-- **Known limits.**
-  - A row that no pinned source holds is absent. Examples: removed before its day's file was rewritten, or
-    disseminated after capture but dated on or before `F`. The next version's inventory adds what it finds, and the
-    version reconciliation reports it.
-  - A PAC on the acceptance day itself is indistinguishable from none.
+- **Days without a daily file** between `FIRST` and `F`, and days whose file was written more than 7 days after
+  its day, are listed in the manifest and the census. Rows filed on a day without a file have no `D`.
+- **Known limits.** None of these is turned into `unknown`; each is stated with its measured size, and every
+  consumer registration restates them.
+  - **Availability** is the declared rule, not a recorded publication time.
+  - **Removals.** A row that no pinned source holds is absent, for example one removed before its day's file was
+    rewritten. The measured residual is premise 1's unexplained membership differences: 501 among 1,810,765
+    date-eligible daily rows. Making the affected days `unknown` would blank, for example, all of 2012, whose
+    daily files were all rewritten on 2014-07-30.
+  - **Hidden filers.** An accession indexed only under an uncovered CIK, whose header names a covered CIK as a
+    filer, is never fetched, so that covered row is never discovered. Of the 9,041 inspected headers, 0 name a
+    filer the archive lacks (premise 6). Full discovery would need the header of every accession of every CIK:
+    1,765,527 in archive A (premise 2).
+  - **Same-day corrections.** A PAC on the acceptance day itself is indistinguishable from none.
 
 The equity calendar is `app/services/market_calendar.py::us_market_status`. Every date whose status is not `closed`
 (`open` and `half_day` alike) from 2003-01-02 to `F` plus 30 calendar days is a session, written to the artefact as
@@ -354,11 +425,12 @@ the manifest written last, after every file below exists (build order).
 
 **The manifest names:**
 - the archive sha256 and capture time;
-- every quarterly and daily file's sha256, `Last Data Received` and (daily) `last-modified`;
-- the days without a daily file;
+- every quarterly and daily file's sha256 and `Last Data Received`; every daily listing's sha256, and each daily
+  file's raw `last-modified` with its precision;
+- the days without a daily file and the days whose file was written more than 7 days late;
 - `FIRST`, `F`, `s_min`, `s_max`, and the `parent` version;
 - the construction hash (the producer's import closure) and `sessions.json`'s sha256;
-- every header's sha256, capture time and `fetched`/`reused_from`;
+- every header's sha256 and capture time;
 - the stage-A manifest sha256 and the A/B baseline's sha256 (gates 5 and 6);
 - the census.
 
@@ -366,11 +438,11 @@ the manifest written last, after every file below exists (build order).
 1. **`observations.jsonl.gz`:** one row per `ok` row with a target code: `cik`, `accession`, `form`,
    `filing_date`, `acceptance_et`, `items`, `labels`, `D`, `listing_lag`, `available_session`.
 2. **`doubt.jsonl.gz`:** one row per non-`ok` row: class, every field outcome, every source's variant, the header
-   fields present, the stored error, `may_carry`, `start`, `end` or `capture`, and `available_session` where
-   defined.
+   fields present, the stored error, `may_carry`, the interval's ends (`start` or `available_session`, and
+   `capture`).
 3. **`coverage.jsonl.gz`:** one row per CIK: `covered`, `complete`, the failing condition if any, and inventory rows
    by year and class.
-4. **`sessions.json`**, **`headers/`**, **`ab_baseline.jsonl.gz`** (gate 6), **`census.json`**.
+4. **`sessions.json`**, **`headers/`** with their sidecars, **`ab_baseline.jsonl.gz`** (gate 6), **`census.json`**.
 
 No database table, migration or operator-visible surface changes.
 
@@ -392,27 +464,25 @@ The **window** is the `lookback` sessions ending at `session`, inclusive. The an
    - the CIK's coverage record is missing, not covered, or not complete.
 2. **`flagged`** if either holds:
    - an observation of the CIK with the label has `available_session` in the window;
-   - a `timing_in_doubt` row of the CIK whose `may_carry` holds the label, and whose `<ITEMS>`, `<TYPE>`,
-     `<FILER>` and `<PAPER>` fields are ok, has its whole interval `[start, end]` inside the window. Wherever in the interval the row became public, it did so inside the window.
+   - a `timing_in_doubt` row of the CIK whose `may_carry` holds the label, and whose `<TYPE>`, `<ITEMS>` and
+     `<FILER>` fields are ok, has its whole interval `[start, capture]` inside the window. Wherever in the interval
+     the row became available, it did so inside the window.
 3. **`unknown` (doubt)** if a non-`ok` row of the CIK whose `may_carry` holds the label has a doubt interval that
    meets the window:
    - for a `timing_in_doubt` row that could flag (step 2), without lying wholly inside it;
    - for every other non-`ok` row, at all, because its label is not known.
 4. **`unflagged`** otherwise.
 
-**Why this is exact.**
+**Why this is exact under the declared construction.**
 - A certain observation in the window flags the window, whatever else is in doubt.
-- A doubt that can change the answer gives `unknown`. A row whose label or time is uncertain could, under some
-  possibility the sources allow, put an event in the window or leave it out.
-- So `flagged` and `unflagged` are each the answer under every possibility, and `unknown` is returned exactly when
-  the possibilities disagree.
-- A filing made later never changes an earlier state, because every interval starts at or after the row's own
-  acceptance or listing.
+- A doubt that can change the answer gives `unknown`. A row whose label or time is uncertain could, within its
+  interval, put an event in the window or leave it out.
+- So `flagged` and `unflagged` are each the answer under every possibility the construction leaves open, and
+  `unknown` is returned exactly when those possibilities disagree.
 
-**`unflagged` means** no label in the window under every possibility the pinned sources leave open. It rests on
-three things:
-- the header of every row, read against the PDS correction rule;
-- the daily files' listing bound;
+**`unflagged` means** no label in the window under every such possibility. It rests on:
+- the header of every row, fetched in this build and read against the PDS correction rule;
+- the declared availability rule;
 - coverage being complete.
 
 The known limits under Coverage are what it does not cover.
@@ -420,45 +490,47 @@ The known limits under Coverage are what it does not cover.
 ### Corrections and earlier states
 
 - **One snapshot per artefact.** A later source set is a new artefact version with its `parent` named. Earlier
-  versions are never rewritten.
+  versions are never rewritten, so a consumer that registered a version keeps that version's answers.
+- **A later version can change an earlier answer.** It can add a row the pinned sources lacked, see a correction
+  that happened since, or reach a header that failed before. The missing-acceptance fallback also opens doubt
+  before acceptance on purpose. Immutable versions keep each answer reproducible; they do not make answers
+  unchangeable across versions.
 - **Version reconciliation**, printed between a version and its parent:
   - inventory rows added and removed, with sources;
-  - per-row changes in form, filing date, items, membership, `D`, `W`, every header field and capture, every field
-    outcome, class, `may_carry`, `available_session`, `start`, `end` and `capture`;
+  - per-row changes in form, filing date, items, membership, `D`, `listing_lag`, every header field and capture
+    time, every field outcome, class, `may_carry`, `available_session`, `start` and `capture`;
   - per-CIK coverage records;
   - `F`, `s_min`, `s_max`, the days without a daily file, and `sessions.json`;
   - `state()` changes over gate 6's grid.
 
   The grid is a fixed sample of states; the per-row diff is the complete change record.
-- **How an earlier state is kept from being rewritten:**
-  - an `ok` row's items are those disseminated (PDS rule above);
-  - a corrected or unreadable row is `unknown` over every session before capture;
-  - a removed row (in a daily file, absent from current sources) is `items_unestablished` from its listing on;
-  - an interval opens no earlier than the row's own acceptance or listing.
-
-  A later version can still add a row the pinned sources lacked; the reconciliation shows it, and every consumer
-  registration names the version it read.
+- **Within one version, an earlier state is protected by:**
+  - an `ok` row's items being those disseminated (PDS rule above);
+  - a corrected, marked or unreadable row being in doubt over every session up to capture;
+  - a row listed only in a daily file having no header, so it is `items_unestablished` over `[start, capture]`.
 
 ## Census (printed by every run, stored in the manifest)
 
-Per year, for all CIKs and for covered CIKs separately, with `(cik, accession)` rows and distinct accessions counted
-apart:
-- inventory rows by form and by source combination (daily, quarterly, archive, header-only);
-- rows per class and per field outcome;
-- observations per label and form;
-- `may_carry` rows per label and class, with their doubt intervals' lengths in sessions;
-- `listing_lag` of observations: same day, 1–7 days, more, none.
+Per year, with `(cik, accession)` rows and distinct accessions counted apart:
+- **all CIKs:** inventory rows by form and by source combination (daily, quarterly, archive, header-only), and rows
+  dated before `FIRST` by source;
+- **covered CIKs only**, because only their rows have headers: the same inventory counts, rows per class and per
+  field outcome, observations per label and form, `may_carry` rows per label and class with their doubt intervals'
+  lengths in sessions, and `listing_lag` of observations (same day, 1–7 days, more, none).
 
 Plus:
 - `F`, `s_min` and `s_max`;
-- the days without a daily file;
+- the index parse counts by reason, per file;
+- the days without a daily file and the days whose file was written more than 7 days late;
+- the unexplained membership differences (rows listed only in daily files), with how many of their accessions the
+  quarterly files list under another form or CIK;
 - the covered CIKs that are not complete, with their failing condition;
 - rows dated after `F`;
 - the maximum acceptance-to-filing-date gap.
 
 **The dry run** (build step 4) fetches no header. It prints only the header-free part: inventory rows by form and
-source, `D` and `W` coverage, days without a daily file, the archive checks, the coverage records' archive part and
-`F`. Every header-dependent field is printed as `pending`.
+source, `D` coverage, the index parse counts, days without a daily file, the archive checks, the coverage records'
+archive part and `F`. Every header-dependent field is printed as `pending`.
 
 ## Registration
 
@@ -474,22 +546,24 @@ definition, form scope, covered population, class rule, `may_carry` rule, interv
 
 **What acceptance means.** An accepted artefact may be *read by a registered consumer*. It does not say the labels
 cover enough of any universe. No consumer may read it without a registration that:
-- names a coverage requirement for its universe;
-- passes it against gate 5's census, recorded on #3624;
+- names a coverage requirement for its own registered universe, decision dates and lookbacks;
+- passes it with `state()` evaluated on exactly that universe, those dates and those lookbacks, recorded on #3624.
+  Gate 5's census may stand in only for a consumer whose universe, dates and lookback are gate 5's;
 - names the artefact version and states the known limits.
 
 **Progression.** Accepted when all eight hold:
-1. **Refusals:** `ARCHIVE_INCOMPLETE`, `CALENDAR_RANGE` and the coverage-end check did not fire.
+1. **Refusals:** `ARCHIVE_INCOMPLETE`, `INDEX_UNREADABLE`, `INDEX_INCOMPLETE`, `CALENDAR_RANGE` and the
+   coverage-end check did not fire.
 2. **Census reproduction:** for covered CIKs, the census reproduces premise 2's archive identity and validity
    counts. Its observations are reconciled with the archive's target-code rows, row by row: each archive positive
    is an observation or a non-`ok` row, and each observation is an archive positive or has a header that disagrees
    with the archive, with its cause. Any unexplained row fails.
-3. **Headers:** every covered CIK is complete. Every `no_header` row is a removal (absent from archive and
-   quarterly index).
+3. **Headers:** every covered CIK is complete. Every `no_header` row is an unexplained membership difference,
+   listed only in daily files and absent from the archive and the quarterly index.
 4. **Doubt ceiling:** `items_unestablished` and `timing_in_doubt` rows are together at most 2% of covered rows,
    reported in rows and accessions. The threshold is fixed by construction. References on the selected header set
-   (premise 6), our CIKs: 87 of 7,042 archive-candidate rows, and 2 of the 2,000 sampled other accessions. Both are
-   selected sets, not this gate's population.
+   under the production predicates (premise 6), our CIKs' rows: 93 of 7,042 archive-candidate rows, and 2 of the
+   2,001 rows of the 2,000 sampled other accessions. Both are selected sets, not this gate's population.
 5. **Survivorship census (the #3609 development universe only).** Over every `(series, formation month)` row of the
    stage-A artefact (`STAGE_A_ARTEFACT`, manifest sha256 `e5087210…` = `STAGE_A_MANIFEST_SHA256`, read through
    `read_verified_artefact`):
@@ -504,7 +578,7 @@ cover enough of any universe. No consumer may read it without a registration tha
    Distinct CIKs are counted beside rows. Series-to-CIK linking is #3609's rule, not re-decided here. Stage B is not
    read. **Pass:** it ran, the categories reconcile, and it is posted. It is the input to each consumer's coverage
    requirement, not a threshold here.
-6. **A/B against the operator layer** (premise 9: every live use of these codes reads `filing_events.items`).
+6. **A/B against the operator layer** (premise 9: every direct reader the audit found reads `filing_events.items`).
    - **Baseline constructor**, frozen into `ab_baseline.jsonl.gz`. Source rows are `filing_events` with
      `provider = 'sec'` and `filing_type` in the 8-K family, joined to our CIKs through `external_identifiers` (the
      measurement's `_EVENTS` query), with a filing date from `FIRST` to `F`. One row per `(cik, accession)` holds:
@@ -531,15 +605,26 @@ cover enough of any universe. No consumer may read it without a registration tha
 
      Any other difference fails.
 7. **Document check (a sample, not population evidence).** The frame per label is the sorted list of
-   `(accession, cik)` rows of covered CIKs, `FIRST` to `F`, excluding `paper` rows. `random.Random(3624).sample`
-   draws without replacement:
+   `(accession, cik)` rows of covered CIKs, `FIRST` to `F`; only `ok` rows can be drawn, so marked submissions are
+   excluded. `random.Random(3624).sample` draws without replacement:
    - 10 observations that are originals and 10 that are amendments;
    - 10 `ok` rows without the label that are originals and 10 that are amendments.
 
    A stratum smaller than 10 is taken whole. Each filing's primary document is read on EDGAR, with three attempts
    on each of two days.
-   - **Pass:** every observation's document contains the item's heading, and no sampled document without the label
-     does.
+   - **The heading predicate** follows General Instruction D, which requires "the number and caption of the
+     applicable item". The document is reduced to text lines. Its **item region** runs from the first line that
+     begins `Item <d>.<dd>` to the signature block (the first line that begins `SIGNATURE`). A **heading** for a
+     target item is a line in the item region that begins with its number (`Item 4.01` or `Item 4.02`, any case and
+     spacing) and goes on with the first three words of its caption in the pinned PDF ("Changes in Registrant's",
+     "Non-Reliance on Previously").
+   - **Each draw is classed:**
+     - `agree`: an observation with its heading, or a non-label document with none;
+     - `disagree`: an observation without its heading, or a non-label document with a target heading;
+     - `ambiguous`: the item region cannot be delimited, or the number appears in the item region only outside a
+       heading line, for example a reference to an earlier filing.
+   - **Pass:** no `disagree`. Every `ambiguous` draw is read in full, and the reading is posted with its outcome,
+     `agree` or `disagree`. Ambiguity is recorded apart from disagreement.
    - A document still unreadable after both days is a gate-7 failure, never replaced by another draw.
    - Every draw and result is posted.
 8. **Going-concern search:** completed with its result recorded, or recorded as `incomplete` with the failed inputs
@@ -553,8 +638,8 @@ stage-A development universe.
   configuration.
 - **Gate 5:** a failure from malformed or unverifiable stage-A input stops the gate until #3609 supplies a verified
   artefact. A failure from the producer's own counting is fixed like gates 1–4.
-- **Gate 7:** a failure is reported per accession, with its cause: metadata disagreeing with the document, or a
-  document unreadable after both days. The slice records the error rate within the draw and stops before
+- **Gate 7:** a failure is reported per accession, with its cause: metadata disagreeing with the document (a
+  `disagree` draw, including an ambiguous one read as such), or a document unreadable after both days. The slice records the error rate within the draw and stops before
   acceptance. A corrected treatment is a new registration.
 
 **No-go.** The slice ends without an accepted artefact if gate 7 fails for either cause, or if gate 1 cannot pass.
@@ -588,22 +673,27 @@ stage-A development universe.
      array, a CIK file without `filings.files`, a block without `items`, a repeat, a co-registrant pair, every item
      state and two different invalid strings;
    - synthetic daily and quarterly files, with a row listed late, a day without a daily file, a rewritten file, a
-     row in a daily file only (a removal), a row dated before `FIRST` listed after it, and `Last Data Received`
-     lines;
-   - headers for every field outcome in the table, including two `<SEC-HEADER>` blocks, a repeated tag, an
-     impossible acceptance datetime, `<PAPER>`, absent, later and earlier correction dates, a non-filer CIK and a
-     header-only filer;
-   - one row of each class, with its `may_carry` and interval;
+     row in a daily file only (an unexplained membership difference), a row dated before `FIRST` listed after it,
+     `Last Data Received` lines, a company name holding `|`, an unparseable data row (refused), a file without its
+     separator (refused) and a missing quarter (refused);
+   - headers for every field outcome in the table, including two `<SEC-HEADER>` blocks, a repeated tag, a
+     mismatched and a missing `<ACCESSION-NUMBER>`, an impossible acceptance datetime, an empty acceptance tag,
+     each of the three markers, absent, later and earlier correction dates, a non-filer CIK and a header-only
+     filer;
+   - one row of each class, with its `may_carry` and interval, and one of every outcome combination the decision
+     table's precedence orders;
+   - header cache entries with and without a sidecar, and one older than 7 days (re-fetched);
    - `state()` tests for every branch, bound and input refusal. They include lookback underflow at the start of
      `sessions.json`, a half-day session, a filing dated before a holiday and a weekend, and a `timing_in_doubt` row
      that flags when its interval lies inside the window and is `unknown` when the window cuts it. They also cover
      an `items_unestablished` row that leaves an `ok` observation in the same window `flagged`.
 2. Freeze the construction hash and register (above).
 3. The going-concern search.
-4. A dry run: inventory, `D`, `W`, the archive checks and the header-free census, no header fetch.
-5. The header fetch for every covered row. About 701,600 accessions are not yet cached, against 710,665 our-CIK
-   accessions in the archive less the 9,041 cached. At most 5 requests a second that is about 39 hours, run in the
-   background, resumable from the cache, with a second pass for failures on a later day.
+4. A dry run: inventory, `D`, the index and archive checks and the header-free census, no header fetch.
+5. The header fetch for every covered row: all 710,665 our-CIK accessions in the archive, plus any rows only the
+   index files hold. The 9,041 cached bodies have no sidecar and are fetched again. At most 5 requests a second
+   that is about 39.5 hours, run in the background, resumable within the build, with a second pass for failures on
+   a later day.
 6. Build the artefact's files, the A/B baseline and the complete census, then write the manifest last (publish).
 7. Gates 1–8, with the decision posted on #3624.
 
@@ -614,6 +704,9 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
 - **No change to `filing_events`** or its ingest horizon. That layer serves the operator; the producer reads the SEC
   sources.
 - **No fix to the acceptance-time defect.** That is #3714; the producer reads headers only.
+- **No EDGAR Feed.** The Feed's `<TIMESTAMP>` would date each dissemination, PACs included. Reading it for 2004 to
+  2026 means ingesting every day's full dissemination archive, out of proportion to two labels. Availability is
+  the declared rule instead (top of this spec).
 - **No event linking, feature, window, horizon or outcome read.** These belong to a consumer's registration (§4 of
   the programme).
 
@@ -725,3 +818,28 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
     - gate-5 remediation;
     - half-day sessions included;
     - A/B differences may have several causes and must replay.
+- **Round 6** (`var/research/3624/ckpt1_slice2_r6.txt`): 6 open (3, 40, 41, 91, 109, 110), 19 new (116–134), 13
+  resolved. The measurement was extended and re-run at `44ac5fdc`.
+  - **Framing** (3, 40, 91, 116, 117): the findings open since round 1 ask for proof of each filing's historical
+    public time, which only the EDGAR Feed could give (declined, §"Not done"). Availability is now the declared
+    rule the programme's acceptance-keyed standard and §4 hierarchy allow: the first session after the later of the
+    Rule 13 filing date and `D`. The listing's write time `W` is a diagnostic only. Every non-`ok` doubt runs to
+    `capture`, so no bound rests on `W`. Residual removal risk is a known limit with its measured rate, not
+    `unknown`. The checkpoint prompt now judges point-in-time safety against this standard.
+  - **Classes** (110, 119, 120, 121): a total decision table; an unusable acceptance makes the correction field
+    `not_evaluated` and the row `items_unestablished`; `label_in_doubt` uses the `ok` availability rule;
+    `<PAPER>`, `<PRIVATE-TO-PUBLIC>` and `<CONFIRMING-COPY>` are field outcomes that make a row
+    `items_unestablished`. Class counts now come from the production predicates in the script.
+  - **Headers** (118, 123, 124, 126): no reuse across versions; the cache serves one build's resumability, with a
+    capture-time sidecar per header and a 7-day limit, so the 9,041 cached bodies are fetched again;
+    `<ACCESSION-NUMBER>` must equal the key; each daily listing is bound to its body by sha256, and the third
+    output records every input hash.
+  - **Membership** (122): hidden filers under uncovered CIKs are a known limit, measured on the inspected set.
+  - **Index integrity** (133): one parse contract for daily and quarterly files, with rejected lines counted and
+    two new refusals, `INDEX_UNREADABLE` and `INDEX_INCOMPLETE`.
+  - **Text and measurement** (41, 109, 125, 127–132, 134): pre-`FIRST` is a declared estimand restriction; the
+    consumer-audit claim is limited to direct matches; the fallback is said to precede acceptance; 72,348 typed
+    accessions (the dev DB grew since 72,343); both daily denominators; "unexplained membership differences";
+    header-dependent census columns for covered CIKs only; gate 7's heading predicate on General Instruction D,
+    with ambiguity recorded apart; consumer coverage on the consumer's own universe and grid; tag claims limited
+    to the inspected headers.
