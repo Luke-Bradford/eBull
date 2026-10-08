@@ -23,6 +23,9 @@ In order, it
    ``declared`` row, ``declared_pins``, ``declared_b1_close``), appends the ``declared`` row to the committed ledger
    and prints the access id, the evidence and the payload sha256.
 
+A failure after step 4's access row leaves that row logged and no ``declared`` row; the access must precede the read,
+so this cannot be avoided. A rerun logs its own ``read`` access, which is the honest record of a second read.
+
 The declaration PR then adds :func:`declared_trial` of the printed evidence to ``TRIAL_REGISTER`` verbatim, with a
 ``TRIAL_REGISTER_VERSION`` bump, and cites the access id. A row that differs from the one hashed here refuses every
 attempt at ``check_declaration``.
