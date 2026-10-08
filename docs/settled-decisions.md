@@ -1334,6 +1334,11 @@ historical screen. All four conditions must hold:
 4. **Net beat on the sealed sample.** Net of our costs, the book beats net SPY total return and the matched
    random-trading control on the sealed confirmation sample.
    - These are point estimates. Report them as a screen, never as significance.
+   - The declaration freezes the required margin over each comparator, and its basis, before any outcome is read.
+     The margin is never below zero.
+   - Selection across configurations is controlled by the register's trial count and the PBO/CSCV check
+     (`research-process.md` §"Every study is registered"). A beat that only one of several configurations shows is
+     not a pass.
    - The turnover rule stays as declared.
 
 The screen is registered and counted in the trial register as usual.

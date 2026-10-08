@@ -111,14 +111,7 @@ A forward demo test checks more than code: implementation, decay, eligibility, l
 
 **No strategy opens positions forward without a passing backtest** (operator rule, 2026-10-04).
 
-**What "passing" means for a Track B demo admission** (`docs/settled-decisions.md`, 2026-10-08, with the operator's approval quoted there). Our data cannot power a beat of SPY: about 25 years at IR 0.5, against 9.92 held. So a zero-capital demo test is admitted on a preregistered screen. All four must hold:
-
-1. published post-publication support for every family;
-2. construction fidelity against the published series;
-3. a powered exposure test (intended loadings, one-sided 5%, Bonferroni-adjusted), which is the declaration's claim;
-4. a net beat of SPY and the matched random-trading control on the sealed sample, reported as a point-estimate screen.
-
-Live capital keeps the full bar plus forward non-inferiority (#2500) and the #2844 sandbox. Track A is unchanged.
+**What "passing" means for a Track B demo admission:** a zero-capital demo test is admitted on a four-part preregistered historical screen. Live capital keeps the full bar. The rule text and the operator's approval live only in `docs/settled-decisions.md`, entry 2026-10-08. Read it there; do not restate it here.
 
 ## LLM-derived signals
 

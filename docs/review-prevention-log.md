@@ -12331,3 +12331,13 @@ neighbouring container and match it.**
   raises.
 - Enforced in: `tests/test_3609_step2_declared_run.py::test_a_started_append_that_raises_after_its_row_is_durable_ends_the_run`
   and `::test_a_started_append_that_wrote_nothing_leaves_no_row`.
+
+### A settled policy is pointed to from a skill, never restated in it (#3609)
+
+- Failure (review bot on PR #3717, 2026-10-08): a settled-decisions entry carried a four-part admission rule, and
+  the `quant/research-process.md` skill restated its terms. Two copies of one rule drift, and an agent reading
+  only the skill would act on the stale copy.
+- Prevention: when a policy is decided in `docs/settled-decisions.md`, the skill gets a one-line summary and a
+  pointer to the dated entry, with no restated thresholds, conditions or figures. Before pushing, grep the skill
+  for each number and condition in the entry; any hit is a restatement.
+- Enforced in: this prevention log; `.claude/skills/quant/research-process.md` §"From backtest to forward test".
