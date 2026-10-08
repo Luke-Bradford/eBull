@@ -95,8 +95,8 @@ def _end_if_open(run_id: str, step: str, exc: BaseException, *, ledger: Path, co
     written regardless.
 
     Safe under :data:`START_CLAIM`: ``end_run_failed`` appends through ``append_ledger``, which locks the ledger file
-    itself, and the claim is a separate ``<ledger>.start.lock`` file. ``exc`` is never masked: a read error and
-    ``end_run_failed``'s own write error are each attached to it as a note."""
+    itself, and the claim is a separate ``<ledger>.start.lock`` file. ``exc`` is never masked: a read error is
+    attached to it as a note here, and ``end_run_failed`` catches its own write error and notes it on ``exc``."""
     try:
         events = {row.get("event") for row in read_ledger(committed_ledger, ledger) if row.get("run_id") == run_id}
     except Exception as read_error:

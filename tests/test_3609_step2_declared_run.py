@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+import app.services.factor_book_ledger as factor_book_ledger
 import scripts.run_3609_step2 as declared_run
 from app.services.factor_book import BookRefusal
 from app.services.factor_book_declaration import TRIAL_ID, DeclarationError, payload_sha256
@@ -219,6 +220,26 @@ def test_a_started_append_that_wrote_nothing_leaves_no_row(tmp_path: Path, monke
     with pytest.raises(OSError, match="disk full"):
         ledgers.start()
     assert read_ledger(ledgers.ledger) == [] and ledgers.accesses == []
+
+
+def test_a_failed_row_that_cannot_be_written_never_masks_the_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``end_run_failed`` catches its own append error and notes it on the original (``factor_book_ledger.py``), so
+    ``_end_if_open`` re-raises the failure that ended the run, not the ledger's."""
+    ledgers = _Ledgers(tmp_path)
+
+    def refuse(_access: HoldoutAccess) -> int:
+        raise RuntimeError("database down")
+
+    def ledger_gone(_path: Path, _row: Any) -> None:
+        raise OSError("ledger gone")
+
+    monkeypatch.setattr(factor_book_ledger, "append_ledger", ledger_gone)
+    with pytest.raises(RuntimeError, match="database down") as raised:
+        ledgers.start(record=refuse)
+    assert any("'failed' ledger row was not written" in note for note in raised.value.__notes__)
+    assert ledgers.events() == ["started"]
 
 
 # --------------------------------------------------------------------------- the steps
