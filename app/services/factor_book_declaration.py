@@ -39,10 +39,12 @@ BUILDER_PATH: Final = _REPO_ROOT / "scripts" / "build_3609_factor_panel.py"
 REPORT_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2.py"
 ASSEMBLY_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2_assembly.py"
 RUN_PATH: Final = _REPO_ROOT / "scripts" / "report_3609_step2_run.py"
+DECLARED_RUN_PATH: Final = _REPO_ROOT / "scripts" / "run_3609_step2.py"
 #: The construction hash's roots. The loader (``REPORT_PATH``) imports none of the verdict, series or diagnostics
 #: modules (they import it), so the assembly, which imports them all, is a root of its own, and so is the report's
-#: entry point (``RUN_PATH``), which imports the assembly and the input verifiers.
-CONSTRUCTION_ROOTS: Final = (BUILDER_PATH, REPORT_PATH, ASSEMBLY_PATH, RUN_PATH)
+#: entry point (``RUN_PATH``), which imports the assembly and the input verifiers. The declared run's entry point
+#: (``DECLARED_RUN_PATH``) writes ``started`` and the access, which nothing else imports.
+CONSTRUCTION_ROOTS: Final = (BUILDER_PATH, REPORT_PATH, ASSEMBLY_PATH, RUN_PATH, DECLARED_RUN_PATH)
 TRIAL_REGISTER_PATH: Final = "app/services/trial_register.py"
 #: The two top-level assignments the register-policy hash leaves out: they hold the row that holds the hash.
 _REGISTER_DATA: Final = frozenset({"TRIAL_REGISTER_VERSION", "TRIAL_REGISTER"})

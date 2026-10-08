@@ -23,7 +23,13 @@ def test_the_construction_closure_reaches_every_step2_report_module_and_book_ser
     closure = import_closure(list(CONSTRUCTION_ROOTS), REPO, unhashed=frozenset({TRIAL_REGISTER_PATH}))
     modules = sorted(
         path.relative_to(REPO).as_posix()
-        for pattern in ("scripts/report_3609_step2*.py", "app/services/factor_book*.py")
+        for pattern in (
+            "scripts/report_3609_step2*.py",
+            "scripts/run_3609_step2.py",
+            "scripts/capture_3609_step2.py",
+            "scripts/publish_3609_step2_sub.py",
+            "app/services/factor_book*.py",
+        )
         for path in REPO.glob(pattern)
     )
     # Non-vacuity: a glob that matched nothing would make the next assertion pass trivially.
