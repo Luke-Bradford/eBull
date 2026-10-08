@@ -284,7 +284,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     document = outcome.path.read_bytes()
     if hashlib.sha256(document).hexdigest() != outcome.sha256:
         raise ReportError(f"{outcome.path} is not the file the ledger's completed row names")
-    print(json.loads(document)["verdict"]["line"])
+    try:
+        line = json.loads(document)["verdict"]["line"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReportError(f"{outcome.path} holds no verdict line: {exc!r}") from exc
+    print(line)
     print(
         json.dumps(
             {

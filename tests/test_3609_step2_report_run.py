@@ -686,3 +686,15 @@ def test_main_offers_no_flag_that_redirects_a_ledger(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(run_module, "report_head", lambda: pytest.fail("parsed past an unknown flag"))
     with pytest.raises(SystemExit):
         run_module.main(["--run-id", REUSE, "--ledger", "/tmp/other.jsonl"])
+
+
+@pytest.mark.parametrize("document", [b"not json", b"[]", b'{"verdict": {}}'])
+def test_main_refuses_a_named_output_without_a_verdict_line_as_a_report_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], document: bytes
+) -> None:
+    outcome = _outcome(tmp_path, document)
+    monkeypatch.setattr(run_module, "report_head", lambda: HEAD)
+    monkeypatch.setattr(run_module, "run_report", lambda *_, **__: outcome)
+    with pytest.raises(ReportError, match="no verdict line"):
+        run_module.main(["--run-id", REUSE])
+    assert capsys.readouterr().out == ""
