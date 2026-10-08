@@ -581,3 +581,100 @@ def test_a_stage_whose_formations_are_not_its_grid_refuses(
     with pytest.raises(ReportError, match=f"stage {stage}'s formations"):
         fakes.run(tmp_path)
     assert "step0" not in dict(fakes.calls)
+
+
+# --------------------------------------------------------------------------- the command line
+
+
+class _Git:
+    def __init__(self, *, status: str = "", head: str = HEAD, merged: str = HEAD) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.answers = {"status": status, "HEAD": head, "origin/main": merged}
+
+    def __call__(self, *args: str) -> str:
+        self.calls.append(args)
+        return self.answers.get(args[-1], self.answers.get(args[0], ""))
+
+
+def test_report_head_fetches_then_requires_a_clean_checkout_at_origin_main() -> None:
+    git = _Git()
+    assert run_module.report_head(git) == HEAD
+    assert git.calls[0] == ("fetch", "--quiet", "origin", "main")
+
+
+@pytest.mark.parametrize(
+    ("git", "match"),
+    [
+        pytest.param(_Git(status="?? stray.txt"), "untracked", id="dirty"),
+        pytest.param(_Git(merged="d" * 40), "is not origin/main", id="behind-or-ahead"),
+    ],
+)
+def test_report_head_refuses_a_dirty_checkout_or_one_not_at_origin_main(git: _Git, match: str) -> None:
+    with pytest.raises(ReportError, match=match):
+        run_module.report_head(git)
+
+
+def _outcome(tmp_path: Path, document: bytes, digest: str | None = None) -> run_module.ReportOutcome:
+    path = tmp_path / "report.json"
+    path.write_bytes(document)
+    return run_module.ReportOutcome("FAIL", "G1", path, digest or hashlib.sha256(document).hexdigest())
+
+
+def test_main_prints_only_after_the_run_has_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outcome = _outcome(tmp_path, json.dumps({"verdict": {"line": "FAIL: G1. survivorship"}}).encode())
+    seen: dict[str, Any] = {}
+
+    def run_report_(run_id: str, **kw: Any) -> run_module.ReportOutcome:
+        seen.update(kw, run_id=run_id, printed=capsys.readouterr().out)
+        return outcome
+
+    monkeypatch.setattr(run_module, "report_head", lambda: HEAD)
+    monkeypatch.setattr(run_module, "run_report", run_report_)
+    assert run_module.main(["--run-id", REUSE, "--ledger", str(tmp_path / "l.jsonl")]) == 0
+    assert seen["printed"] == ""
+    assert (seen["run_id"], seen["head"], seen["evaluate_run"]) == (REUSE, HEAD, run_module.evaluate_run)
+    assert seen["ledger"] == tmp_path / "l.jsonl"
+    line, summary = capsys.readouterr().out.splitlines()
+    assert line == "FAIL: G1. survivorship"
+    assert json.loads(summary) == {
+        "run_id": REUSE,
+        "status": "FAIL",
+        "reason": "G1",
+        "output": str(outcome.path),
+        "output_sha256": outcome.sha256,
+    }
+
+
+def test_main_prints_a_gate_refusal_and_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refuse(*_: Any, **__: Any) -> Any:
+        raise BookRefusal(CAPTURE_AMBIGUOUS, "0 committed rows")
+
+    monkeypatch.setattr(run_module, "report_head", lambda: HEAD)
+    monkeypatch.setattr(run_module, "run_report", refuse)
+    assert run_module.main(["--run-id", REUSE]) == 1
+    assert json.loads(capsys.readouterr().out)["reason"] == CAPTURE_AMBIGUOUS
+
+
+def test_main_refuses_an_output_that_is_not_the_file_the_ledger_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outcome = _outcome(tmp_path, b'{"verdict":{"line":"PASS"}}', digest="0" * 64)
+    monkeypatch.setattr(run_module, "report_head", lambda: HEAD)
+    monkeypatch.setattr(run_module, "run_report", lambda *_, **__: outcome)
+    with pytest.raises(ReportError, match="completed row names"):
+        run_module.main(["--run-id", REUSE])
+    assert capsys.readouterr().out == ""
+
+
+def test_main_reads_no_ledger_from_a_checkout_that_is_not_origin_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse() -> str:
+        raise ReportError("HEAD is not origin/main")
+
+    monkeypatch.setattr(run_module, "report_head", refuse)
+    monkeypatch.setattr(run_module, "run_report", lambda *_, **__: pytest.fail("ran from a stale checkout"))
+    with pytest.raises(ReportError):
+        run_module.main(["--run-id", REUSE])
