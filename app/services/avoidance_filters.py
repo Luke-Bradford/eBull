@@ -36,6 +36,7 @@ from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
+from itertools import pairwise
 from typing import Final
 
 from app.services.factor_book_path import PRICE_FLOOR, archive_seasoned
@@ -90,7 +91,7 @@ class MaxSeries:
     def __init__(self, bars: Sequence[DailyBar], sessions: Sequence[date]) -> None:
         # The panel's contracts (``SessionGrid``, ``DailyBar.usable``), checked here because the bisects and the
         # ratio screen's log silently misread input that breaks them.
-        if any(a >= b for a, b in zip(sessions, sessions[1:], strict=False)):
+        if any(a >= b for a, b in pairwise(sessions)):
             raise AvoidanceError("sessions are not strictly ascending")
         self._sessions = sessions
         position = {day: i for i, day in enumerate(sessions)}
@@ -101,7 +102,7 @@ class MaxSeries:
             if not (0.0 < bar.close < math.inf and 0.0 < bar.adj_close < math.inf):
                 raise AvoidanceError(f"usable bar {bar.bar_date} has a non-positive or non-finite price")
         self._index = [i for i, _ in admitted]
-        if any(a >= b for a, b in zip(self._index, self._index[1:], strict=False)):
+        if any(a >= b for a, b in pairwise(self._index)):
             raise AvoidanceError("bars are not strictly ascending by date")
         self._close = [bar.close for _, bar in admitted]
         self._adj = [bar.adj_close for _, bar in admitted]
