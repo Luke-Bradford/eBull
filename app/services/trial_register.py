@@ -239,7 +239,10 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: r25 (2026-10-08, #3609 step 2) adds `3609-step2-exposure-planning-2026-10-08`: three family sets scored on stage A
 #: and regressed on FF5 + momentum for condition 3's power plan (exposures only, no return printed) = 3 searches. Not
 #: a `hunt-` entry, so it counts in M_inh: 518 -> 521. Measured the same way before the bump: the SAME five groups,
-#: 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
+#: 488 rows, every one `harness_validation`. It strands nothing that could have promoted. Its evidence pins the plan
+#: file; `tests/test_3609_step2_plan_pin.py` re-checks on every pre-push run that the file is that pin and that its
+#: recorded planner and import-closure hashes (72 modules, which `report_3609_step2_inputs.py` is not among) are the
+#: committed tree's. This file is outside the closure, so editing it never moves the hash.
 TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-08-r25"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
