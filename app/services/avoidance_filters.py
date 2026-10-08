@@ -125,7 +125,8 @@ class MaxSeries:
             if r < SCREEN_RETURN_LOW or r > SCREEN_RETURN_HIGH:
                 screened = True
             returns.append(r)
-            zeros += r == 0.0
+            if r == 0.0:
+                zeros += 1
         if screened:
             missing: MaxMissing | None = MaxMissing.SCREENED
         elif len(returns) < MAX_MIN_RETURNS:
@@ -134,7 +135,7 @@ class MaxSeries:
             missing = MaxMissing.ZERO_HEAVY
         else:
             missing = None
-        return MaxReading(None if missing else max(returns), len(returns), zeros, missing)
+        return MaxReading(max(returns) if missing is None else None, len(returns), zeros, missing)
 
 
 def max_cutoff(values: Sequence[float]) -> float:
