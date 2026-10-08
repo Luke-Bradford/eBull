@@ -1,6 +1,6 @@
 # #3621 — avoidance filters measured as exclusions on the #3609 panel
 
-Status: **draft, revised after Codex checkpoint 1 round 3 (§"Checkpoint log").** No filtered book (U_F), flagged
+Status: **Codex checkpoint 1 converged at round 5 (§"Checkpoint log"); ready to build slices 1–3.** No filtered book (U_F), flagged
 book (B_F), differential or MAX fidelity return has been computed on any month. One unfiltered book was seen
 before this spec: step 2's equal-weight top-1,000 universe is U(top 1,000) (§"Samples and design history"). Programme: `docs/research/2026-10-04-strategy-research-sweep.md` §4 item 5.
 Standards: `.claude/skills/quant/research-process.md`. Panel and book machinery: #3609 step 1 and step 2
@@ -219,9 +219,14 @@ Each book holds its target set at equal weight after the trades at s(M). A held 
 at s(M); a name that enters or re-enters the target is bought at the same s(M). The books are step 2's
 `factor_book_references.reference_decisions` with `Formation.universe` set to the target set, valued by
 `factor_book_path.value_path` (statuses, both termination arms, entry bands, path ends). When the target is empty, the
-book sells its holdings at s(M) and then holds cash earning 0. Trade costs follow `value_path`'s timing: the cost
-of formation M's trades falls in month M's return (NAV after the trades over the previous month-end NAV), as in
-step 2. A book empty before and after formation M has a return of 0 for month M + 1.
+book sells its holdings at s(M) and then holds cash earning 0. Trade costs follow `value_path`'s timing
+(`factor_book_path.py`'s module note), as in step 2:
+- the initial purchase at 2014-09-30 falls in the first return, October 2014 (denominator 1.0);
+- every later formation M's trades fall in month M's return (NAV after the trades over the previous month-end NAV);
+- the final liquidation falls in August 2024.
+
+A month's net return is therefore 0 only when the book holds cash all month and makes no trade at its closing
+formation. Window cost totals reconcile with these allocations.
 
 **Populations with verdicts:** micro, small, large and mega (the `market-segments.md` primary partition), plus top
 1,000 (step 2's book universe) and rest (every other admitted name). Six populations. **All admitted names** is
@@ -451,3 +456,10 @@ defensible.
 - **7:** cost timing follows `value_path`, with costs in month M as step 2 does. The finding's suggestion of M + 1
   contradicts `factor_book_path.py`'s timing note, so it was not taken.
 - **8:** the BCW page locator is corrected.
+
+**Round 5 (Codex, 2026-10-08): 3 findings, all applied; converged.** Codex judged round 4's resolutions sound and
+found no new source-rule, hold-out or adoption issue. Applied:
+- **1:** zero return is stated only for a month in cash with no closing trade.
+- **2:** the three cost-allocation cases (initial purchase, later formations, final liquidation) follow
+  `value_path`.
+- **3:** the status line is updated.
