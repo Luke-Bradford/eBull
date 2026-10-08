@@ -9,8 +9,9 @@ book universe ``top1000``, the top 1,000 by ME with ties by ``name_key``; and ``
 it counts admitted names and the names flagged by:
 
 - ``max``: ``rmax1_21d`` at or above the top-decile cutoff, or a screened window (below);
-- ``max_screened``: the window holds a return outside the extreme-return screen (below -90% or above +300%) or an
-  unstamped ``adj_close / close`` ratio move above 50%, the two screens of ``factor_panel_prices.series_prices``;
+- ``max_screened``: the window holds an adjacent-session return outside the extreme-return screen (below -90% or
+  above +300%), or an unstamped ``adj_close / close`` move with ``|ln(ratio1 / ratio0)| > ln 1.5`` between
+  consecutive usable bars (even across missing sessions): the two screens of ``factor_panel_prices.series_prices``;
 - ``max_short``: fewer than 15 daily returns in the window (not flagged);
 - ``max_zero_heavy``: 10 or more zero daily returns in the window (not flagged);
 - ``sub5``: raw close at s(M) below $5 (``factor_book_path.PRICE_FLOOR``);

@@ -147,17 +147,18 @@ fidelity study was, and its screen is a point-estimate screen, never significanc
 Details:
 - **MAX returns and screens: substitutions for JKP's availability rules, stated.** JKP keeps days with a market
   factor return (`mktrf` non-missing, its trading-day test) and counts returns with a non-missing excess return.
-  We use SPY sessions as trading days and count total returns between usable bars on adjacent SPY sessions; French
-  daily RF exists on every session the panel uses (the panel refuses a missing RF inside an `rvol_21d` window), so
-  an excess return would exist wherever ours does, but no day-level equivalence with JKP's sample is measured or
-  claimed. JKP's `zero_obs` counts zero local-currency returns over all the stock's trading days in the month,
+  We use SPY sessions as trading days and count total returns between usable bars on adjacent SPY sessions. That
+  replaces JKP's excess-return availability test with total-return availability, a house substitution; no RF
+  coverage or day-level equivalence with JKP's sample is claimed. JKP's `zero_obs` counts zero local-currency returns over all the stock's trading days in the month,
   before the excess-return filter; ours counts exact zeros among our counted returns, a substitution that can
   differ where a series has unusable bars. JKP takes `max(ret)` after a descending rank filter (`ret_rank <= 5`),
   which drops a stock-month whose highest return is tied across ten or more days; we take the plain maximum, which
   differs only in that case, and slice 1 has a fixture for it. Both of the panel's screens apply, as in
   `factor_panel_prices.series_prices`: a return below `SCREEN_RETURN_LOW` or above `SCREEN_RETURN_HIGH`, or an
-  `adj_close / close` move above `SCREEN_RATIO_MOVE` between consecutive usable session bars with no stamp
-  between them, screens the window when the pair's later bar is inside it.
+  `adj_close / close` move with |ln(ratio₁ / ratio₀)| > ln(1 + `SCREEN_RATIO_MOVE`) = ln 1.5 (a ratio change above
+  ×1.5 or below ×2/3) between consecutive usable session bars with no stamp between them, screens the window when
+  the pair's later bar is inside it. The ratio screen compares consecutive usable bars even across missing
+  sessions; the extreme-return screen applies only to adjacent-session returns.
 - **MAX missing values, in precedence order:**
   1. **Screened:** the name is flagged. Our name for this rule is "MAX plus screened-data exclusion". It is a house
      construction choice under evaluation here, not BCW's result: a screened window holds either an extreme move
@@ -165,12 +166,13 @@ Details:
      component measures (§"Diagnostics").
   2. **Fewer than 15 returns:** no value, and not flagged.
   3. **10 or more zero returns:** no value, and not flagged.
-- **MAX threshold, frozen.** Of the N valid values at M, the cutoff q is the ⌈0.9 N⌉-th smallest (1-based). A name
-  with a value ≥ q is flagged, so ties at q are flagged. N = 0 at any formation refuses the run (`MAX_EMPTY`).
+- **MAX threshold, frozen (a house empirical-percentile convention; BCW state none).** Of the N valid values at M,
+  the cutoff q is the ⌈0.9 N⌉-th smallest (1-based), and a name with a value ≥ q is flagged. With distinct values
+  that flags N − ⌈0.9 N⌉ + 1 names (101 of 1,000), and ties at q add more. N = 0 at any formation refuses the run (`MAX_EMPTY`).
 - **Breakpoint population.** BCW sort their whole sample (above), so the cutoff is taken over the whole admitted
   panel, not within each population: "high MAX" then means the same level in every population. BCW also report
   that excluding stocks priced below $5 leaves the value-weighted result essentially unchanged and strengthens the
-  equal-weighted one (p. 10). The departure is the sample: step 1's restricted population instead of CRSP's
+  equal-weighted one (printed pp. 9–10, the paragraph on measurement issues in low-priced stocks). The departure is the sample: step 1's restricted population instead of CRSP's
   NYSE/AMEX/NASDAQ stocks.
 - **Seasoning error direction.** When the archive's coverage of a series starts after the security began trading,
   its first archive bar is later than its listing. An old stock can then be flagged young: the proxy can
@@ -193,8 +195,9 @@ Details:
     annualised growth on stage B (#3609, 2026-10-08 16:50Z). Step 2's book applied the sub-$5 and seasoning entry
     rules inside its value selection;
   - step 1's fidelity results on stage A (run `b6378c7c`, `docs/research/3609-ledger.jsonl`), including the
-    `rvol_21d` failure, and step 2's premise-6 stage-A exposure plan. They informed this design only through the
-    inherited panel and screens; neither touches MAX, price or seasoning;
+    `rvol_21d` failure, and step 2's premise-6 stage-A exposure plan. The exposure plan ran step 2's value-book
+    construction, which applies the price and seasoning entry rules inside the book. Neither exercise measured a
+    standalone filter differential or any MAX quantity;
   - premise 1's stage-A counts and premise 2's published series.
 - **Access.** Two accesses, kept distinct:
   - **Prior, already done:** the premise measurement (2026-10-08) read the stage-A artefact's admitted rows, daily
@@ -216,8 +219,9 @@ Each book holds its target set at equal weight after the trades at s(M). A held 
 at s(M); a name that enters or re-enters the target is bought at the same s(M). The books are step 2's
 `factor_book_references.reference_decisions` with `Formation.universe` set to the target set, valued by
 `factor_book_path.value_path` (statuses, both termination arms, entry bands, path ends). When the target is empty, the
-book sells its holdings at s(M), paying their costs inside that month's return, and then holds cash earning 0. A
-book already empty at M has a return of 0 for the month.
+book sells its holdings at s(M) and then holds cash earning 0. Trade costs follow `value_path`'s timing: the cost
+of formation M's trades falls in month M's return (NAV after the trades over the previous month-end NAV), as in
+step 2. A book empty before and after formation M has a return of 0 for month M + 1.
 
 **Populations with verdicts:** micro, small, large and mega (the `market-segments.md` primary partition), plus top
 1,000 (step 2's book universe) and rest (every other admitted name). Six populations. **All admitted names** is
@@ -239,18 +243,22 @@ Annualised log growth G = (12/n) Σ ln(1 + r_t) over a window's monthly net retu
 
 **Effective-sample exception, declared.** `research-process.md` asks for a minimum effective sample per cell. This
 descriptive enumeration declares none: its verdicts are point-estimate screens that claim nothing about
-significance. Per cell it prints the months in which the filter changed the book (active months), by stage.
+significance. Per cell it prints the formations with exclusions (a formation at which the filter flagged a name in U), by stage.
 4. **For any set containing MAX:** the MAX fidelity check below passes.
 
 Otherwise **NOT ELIGIBLE**, with every failed condition named. A set that flags no name at any formation is
-`NO_EFFECT` and not eligible: there is nothing to adopt. A set with no active month in stage B meets condition 2 by
-equality; it stays eligible under this descriptive rule, and the verdict line labels it `ELIGIBLE (no stage-B
-effect)`, never as corroboration in the Form 25-checked regime.
+`NO_EFFECT` and not eligible: there is nothing to adopt. Condition 2 is always evaluated from the actual stage-B ΔG:
+U and U_F can enter stage B holding different names, so a set that excludes nothing there can still differ there.
+A set with no formation with exclusions in stage B carries the label `no stage-B exclusions` beside its verdict;
+an ELIGIBLE verdict with that label is never read as corroboration in the Form 25-checked regime.
 
 **Non-positive wealth, by book role.** If U or U_F of a pair reaches non-positive wealth in any arm or cost
-scenario, that pair is `REFUSED` with the book, arm, scenario and month. Other pairs are unaffected. If B_F does,
-it gates nothing: every B_F statistic over a window that contains or follows the exhaustion month is printed as
-`undefined (wealth exhausted at M)`. Windows that end before it are printed normally; no window is truncated.
+scenario, that pair is `REFUSED` with the book, arm, scenario and month. Other pairs are unaffected. Diagnostic-only
+books (B_F, the screened-only book, the pooled population's books) gate nothing. For any book that reaches
+non-positive wealth, whether diagnostic or one of a REFUSED pair's, every statistic of that book, and every
+differential or wealth ratio using it, over a window that contains or follows the exhaustion month is printed as
+`undefined (wealth exhausted at M)`. Windows that end before it, and statistics of books not involved, are printed
+normally. No window is truncated, and no other pair is stopped.
 
 The margin is zero. That is the floor the 2026-10-08 entry sets for its own point-estimate condition, because a
 filter whose measured net effect on our data is negative has no case for citation. These are point estimates; no
@@ -276,7 +284,7 @@ REFUSED, and the MAX fidelity verdict.
 
 **Windows.** Every window statistic is a slice of the one continuous path, with its actual returns and costs.
 Windows are labelled by holding month. A formation's diagnostics (flag counts, excluded weight) belong to the
-holding month it starts: stage A is formations 2014-09..2021-04 for holding months 2014-10..2021-05, stage B
+holding month it starts, except trade costs, which `value_path` books in month M (§"The books"): stage A is formations 2014-09..2021-04 for holding months 2014-10..2021-05, stage B
 formations 2021-05..2024-07 for 2021-06..2024-08, and calendar years follow the holding month. A
 window's drawdown starts from its opening wealth, which is its first high-water mark. The calendar years 2014
 (Oct–Dec) and 2024 (Jan–Aug) are labelled partial.
@@ -293,8 +301,8 @@ stage B and each calendar year:
   - annualised IR, 12 × mean / (sd × √12), printed `undefined` when sd is 0;
   - its Newey–West t: Bartlett kernel, lag 3, null zero, descriptive only, the step 2 estimator;
   - the maximum drawdown of the wealth ratio W(U_F) / W(U);
-- the number of months in the window, the number with a defined D_t, the active months (a formation at which the
-  filter flagged a name in U), and the first and last month;
+- the number of months in the window, the number with a defined D_t, the formations with exclusions, and the
+  first and last month;
 - names flagged per formation (min, median, max), split by filter and, for MAX, into above-cutoff and screened,
   with the short and zero-heavy counts;
 - excluded weight, the flagged count divided by |U(P, M)|: the target-weight share of U at formation M;
@@ -339,7 +347,8 @@ its sha256 in the report.
 ## Known limits
 
 - Archive seasoning over-flags old names whose archive coverage starts late (§"Source rules").
-- Condition 2 shows only that the filter did not lower growth on stage B; a filter inactive there is labelled.
+- Condition 2 shows only that the filter did not lower growth on stage B; a set with no stage-B exclusions is
+  labelled.
 - The panel is retrospectively filtered (step 1 premise 4). Survivorship is unverified for 2014-09..2018 (step 2
   §"Known limits"). Condition 2 checks stage B, which lies in the Form 25-checked regime.
 - **Costs are spread-only, a declared exception to `research-process.md` §"Costs".** Step 0's bands come from nine
@@ -431,3 +440,14 @@ defensible.
 - **16:** windows are aligned by holding month.
 - **17:** the attention wording is fixed.
 - **18:** the 36 months are attributed to `market-segments.md`.
+
+**Round 4 (Codex, 2026-10-08): 8 findings, all applied.** Codex judged the framing sound.
+- **1:** condition 2 always reads the actual stage-B ΔG, and the label becomes `no stage-B exclusions`.
+- **2:** the RF claim is removed, and total-return availability is a stated substitution.
+- **3:** the exposure plan's use of the price and seasoning rules is stated.
+- **4:** the exhaustion contract covers every book.
+- **5:** the percentile convention is labelled, with its cardinality.
+- **6:** the ratio screen's log inequality is written out.
+- **7:** cost timing follows `value_path`, with costs in month M as step 2 does. The finding's suggestion of M + 1
+  contradicts `factor_book_path.py`'s timing note, so it was not taken.
+- **8:** the BCW page locator is corrected.
