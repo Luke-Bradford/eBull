@@ -1,6 +1,6 @@
 # #3609 step 2 — the factor composite book, backtested net of our costs
 
-Status: **draft, gate open.** The evidence-bar question (#3609, 2026-10-06) is settled by `docs/settled-decisions.md`
+Status: **gate open; checkpoint 1 converged (round 25).** The evidence-bar question (#3609, 2026-10-06) is settled by `docs/settled-decisions.md`
 entry 2026-10-08: a Track B book may enter a zero-capital demo test on a preregistered four-part historical screen,
 and §"Decision rule" is that screen. Round 2's findings 1–8 are applied under it (§"Checkpoint log", "Gate opened").
 Applying finding 4, the power calculation for the exposure test, changed the book to the value family alone
@@ -1246,7 +1246,7 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
   statement (§"Decision rule").
 - **3:** G1 moved to stage B. Stage A is development only (§"Step 1's inheritance clause").
 - **4:** power computed from stage-A planning inputs. The first draft's composite could not be powered, so the book is
-  the value family alone (premise 6; code branch `feature/3609-step2-value-only`: `FAMILIES`, `G1_LOADINGS`, `G2_MARGINS`).
+  the value family alone (premise 6; code PR #3718: `FAMILIES`, `G1_LOADINGS`, `G2_MARGINS`).
 - **5:** members' fidelity is condition 2 (step 1 against JKP's series per characteristic). Condition 3 claims only the
   HML exposure.
 - **6:** §"Adoption rationale" gives each series' sample relation, effect, uncertainty and implementation differences,
@@ -1290,3 +1290,6 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
   written. It is regenerated from the final planner, and `tests/test_3609_step2_plan_pin.py` now requires the
   committed plan's sha256 to equal register r25's pin and its `script_sha256` to equal the committed planner's.
 - **23 new 1:** each prior series must equal its frozen monthly grid, from a first month frozen per series to 2014-09.
+
+**Round 25 (`ckpt1_round25_final.txt`): all four round-24 items resolved; no new findings.** Checkpoint 1 has
+converged on the 2026-10-08 revision.
