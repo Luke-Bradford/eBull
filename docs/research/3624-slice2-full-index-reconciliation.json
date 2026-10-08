@@ -924,6 +924,7 @@
    "archive_file_latest_filing_date": "2026-09-08",
    "header": {
     "header_blocks": 1,
+    "misplaced_tags": 0,
     "raw_tags": [
      "ACCEPTANCE-DATETIME",
      "ACCESSION-NUMBER",
@@ -990,6 +991,7 @@
    "archive_file_latest_filing_date": "2026-09-15",
    "header": {
     "header_blocks": 1,
+    "misplaced_tags": 0,
     "raw_tags": [
      "ABS-ASSET-CLASS",
      "ACCEPTANCE-DATETIME",
@@ -1054,8 +1056,8 @@
   }
  ],
  "provenance": {
-  "script_sha256": "80b04f9733c6dc40a761f4b0930da59cd63d2035a3ce81eec7b6be8d9821dbd8",
-  "head": "22876703ce79d9ec71c4e04536deef80dd97d1a1",
+  "script_sha256": "dd48f0b4b85d7f041c193e628d5e4a71b4ae6f86a2886dc30db0282b9e3030e9",
+  "head": "c7ea8ba9c271ef111155bec93faebca62b11bd47",
   "script_clean_at_head": true
  }
 }

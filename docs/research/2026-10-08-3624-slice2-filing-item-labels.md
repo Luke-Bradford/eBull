@@ -18,9 +18,11 @@ guarantees, because no pinned source records when a historical filing became pub
   acceptance date. `available_session` is used only for rows whose acceptance, filing date and date order are ok,
   and the filing date is then on or after the acceptance date, so `available_session` is always after it.
 - **The declared rule:** an `ok` row is available from the first session after the later of its Rule 13 filing date
-  and its first daily listing day `D`. That is the documented rule (Rule 13(a), and the guidance's "following
-  business day's index") plus one construction choice, the next session, as the programme's data-treatment
-  hierarchy (§4, lines 103–104) allows where no source rule fixes a degree of freedom. It may be later than the
+  and its first daily listing day `D`, or after the filing date alone when no daily file lists the row. The whole
+  formula, the maximum, the fallback and the next-session step, is the declared construction, as the programme's
+  data-treatment hierarchy (§4, lines 103–104) allows where no source rule fixes a degree of freedom. It is informed
+  by Rule 13(a), which fixes the legal filing date, and the guidance's "following business day's index"; neither
+  prescribes it. It may be later than the
   real public time, never earlier than acceptance; it is not a recorded publication time.
 - **Doubt:** every non-`ok` row is in doubt from its earliest possible session to `capture`, so no bound depends on
   an index file's write time.
@@ -40,7 +42,8 @@ departure from them.
   for **every** inventory row of a covered CIK.
 - **Inventory cross-checks:** the quarterly full-index `master.gz` files and the bulk `submissions.zip` archive. Every
   row any of them holds is in the inventory.
-- **Coverage population:** our CIKs (below). Other CIKs have no coverage record and read `unknown`.
+- **Coverage population:** our CIKs (below). A CIK seen in any source but not ours has a coverage record with
+  `covered = false`; a CIK seen nowhere has no record; both read `unknown`.
 
 ## Measurement and pinned inputs
 
@@ -73,15 +76,15 @@ which is acceptable only because `last-modified` bounds nothing.
 - **Quarterly index:** 90 `master.gz` files, 2004 Q3 to 2026 Q4, each named by sha256 with its `Last Data Received`
   line in the reconciliation JSON.
 - **Daily index:** 5,516 `master.YYYYMMDD.idx[.gz]` files from 2004-08-23 to 2026-10-07, each with its sha256, its
-  `Last Data Received` line and its listing's `last-modified` (`file_list`). From 2011 Q3 to 2014 only the `.idx.gz`
-  form is published.
+  `Last Data Received` line and its listing's `last-modified` (`file_list`). Six quarters publish only the `.idx.gz`
+  form (2011 Q3 and Q4, 2013 Q1, Q3 and Q4, 2014 Q2; `file_list`).
 - **Our CIKs:** the 5,310 CIKs in `external_identifiers` (`provider='sec'`, `identifier_type='cik'`), written out in
   full in the measurement JSON (`ciks`, sha256 `d1c01c68…`).
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`80b04f97…`), `HEAD`
-  (`22876703`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`dd48f0b4…`), `HEAD`
+  (`c7ea8ba9`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
 are as of 2026-10-08, read by the first command (queries in the script).
@@ -175,7 +178,7 @@ engagement of a new independent accountant".
      - all 1,810,835 distinct daily rows: 1,810,284 in the quarterly index, 1,810,191 in the archive, **501 in
        neither**;
      - the 1,810,765 rows dated `FIRST` or later: 1,810,263, 1,810,121 and the same **501**
-       (`daily_in_neither_by_year`, 1 to 70 a year);
+       (`daily_in_neither_by_year`, zero-filled: 0 to 70 a year, 0 only in 2025);
      - the 70 rows dated before `FIRST`: all 70 in the archive, 21 in the quarterly index, 0 in neither.
    - **The 501 are unexplained membership differences, not proven removals.** They are 490 distinct accessions.
      Rescanned against the quarterly files with no form or CIK filter, 498 rows (487 accessions) appear nowhere in
@@ -211,8 +214,9 @@ engagement of a new independent accountant".
      Eastern days after the filing date. 15,655 of them have item sets, and the current stored sets agree with
      archive A (15,638 no-NULL, 17 mixed); the other 6 are all NULL. `filing_events` keeps current values only, so
      this shows current agreement, not that nothing changed.
-4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,348
-   non-tombstone `eight_k_filings` accessions, left-joined to `eight_k_items`; 72,241 are in the archive, all with
+4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,364
+   non-tombstone `eight_k_filings` accessions at this run (live ingest grows the table between runs;
+   `cross_source.typed_accessions` is the figure of record), left-joined to `eight_k_items`; 72,241 are in the archive, all with
    valid items there. The parser stored no item rows for 52,353 of them. Within the overlap it never holds a target
    code the archive lacks (Item 4.01: 109 of 541 archive positives; Item 4.02: 25 of 94), and its misses are mostly
    accessions with no item rows (404 of 432; 66 of 69).
@@ -283,10 +287,11 @@ engagement of a new independent accountant".
      - Two `scripts/*2900*` files audit the red-flag path.
    - **Readers of the score:** `red_flag_score` has 95 hits in 22 files, among them scoring, portfolio, the position
      monitor and the r6 research modules.
-   - **Scope of the claim:** among the direct matches of these three patterns, every reader of the codes reaches
-     them through `filing_events.items`, the layer gate 6 compares with. The audit is a text search, not a call
-     graph, and it does not establish which matches are live. A reader that names neither the codes, the table nor
-     the score is outside it.
+   - **Scope:** these are the literal hits of three text searches, classified by reading them. They are not a call
+     graph or a data-flow analysis, they do not establish which hits are live, and a reader that names neither the
+     codes, the table nor the score is outside them. Two paths are visible: `filing_events.items` (through
+     `red_flag_score`) and the typed `eight_k_items`. Gate 6 compares with `filing_events.items` only and claims no
+     more.
 
 ## Construction
 
@@ -344,7 +349,7 @@ engagement of a new independent accountant".
   | field | ok when | otherwise |
   |---|---|---|
   | retrieval | the body was fetched | `no_header`, last error stored; every other field `not_evaluated` |
-  | parse | exactly one `<SEC-HEADER>` block; `<ACCESSION-NUMBER>`, `<ACCEPTANCE-DATETIME>`, `<TYPE>`, `<FILING-DATE>` and `<DATE-OF-FILING-DATE-CHANGE>` each at most once | `malformed`, with the cause |
+  | parse | exactly one `<SEC-HEADER>` block; `<ACCESSION-NUMBER>`, `<ACCEPTANCE-DATETIME>`, `<TYPE>`, `<FILING-DATE>` and `<DATE-OF-FILING-DATE-CHANGE>` each at most once anywhere in the body; every opening tag at the start of its line (after blanks) | `malformed`, with the cause |
   | accession | exactly one `<ACCESSION-NUMBER>`, equal to the inventory key | `no_accession`, `accession_mismatch` |
   | `<PAPER>` | absent | `paper` |
   | `<PRIVATE-TO-PUBLIC>` | absent | `private_to_public` |
@@ -359,8 +364,11 @@ engagement of a new independent accountant".
   | `<DATE-OF-FILING-DATE-CHANGE>` | 8 digits forming a real date, equal to the acceptance date | `no_correction_date`, `correction_invalid`, `corrected` (later), `correction_before_acceptance` (earlier); `not_evaluated` without a valid acceptance date |
 
   An absent correction date is not read as "no correction": without it the header does not say whether a PAC
-  occurred. The measurement script implements this table (`field_outcomes`), and premise 6's class counts come from
-  it.
+  occurred. **Header grammar:** every tag is counted wherever it occurs in the retrieved body, inside the header
+  block or not, and markers and correction evidence are detected anywhere; a value is read only from a tag that
+  starts its line, so a layout the grammar does not accept fails as `malformed` instead of hiding a tag. The
+  measurement script implements this table (`parse_header`, `field_outcomes`), and premise 6's class counts come
+  from it.
 
 ### Row classes, labels in doubt, and intervals
 
@@ -391,14 +399,15 @@ valid acceptance date, so a row with an unusable acceptance (`0001104659-09-0221
 - **`start`:** the first session strictly after the acceptance date, when the acceptance field is ok **and** the
   parse and accession fields are ok, since dissemination follows acceptance. A body that is malformed or belongs to
   another accession supplies no date at all.
-  - Otherwise no trusted source dates the submission. `start` is then the first session strictly after 1 January
-    of the accession number's year (the inventory key's middle two digits). The dissemination guidance says the
-    accession number is "assigned automatically to an accepted submission by EDGAR", and its middle two digits
-    "represent the year".
-  - This deliberately covers sessions that may precede the real acceptance. The one measured case
-    (`0001104659-09-022130`) starts in January 2009.
-  - **A `<PAPER>` or `<CONFIRMING-COPY>` row starts at `s_min`:** a paper filing can be public before, and in an
-    earlier year than, its EDGAR record, and no pinned source dates it.
+  - **`start` is `s_min` unless a trusted body excludes the paper path:** when retrieval, parse or accession is
+    not ok (no body, or one that cannot be trusted, says whether the submission was electronic), or when the body
+    carries `<PAPER>` or `<CONFIRMING-COPY>`. A paper filing can be public before, and in an earlier year than, its
+    EDGAR record, and no pinned source dates it.
+  - Otherwise, a trusted electronic body without a usable acceptance date: `start` is the first session strictly
+    after 1 January of the accession number's year (the inventory key's middle two digits). The dissemination
+    guidance says the accession number is "assigned automatically to an accepted submission by EDGAR", and its
+    middle two digits "represent the year". This deliberately covers sessions that may precede the real
+    acceptance. The one measured case (`0001104659-09-022130`) starts in January 2009.
 - **`capture`:** the first session strictly after the New York civil date of the capture instant. For a fetched
   header the instant is its sidecar's UTC capture time; for a `no_header` row, the UTC time of its last fetch
   attempt. Both are converted with `America/New_York` before the date is taken, so a weekend or holiday maps to the
@@ -548,8 +557,10 @@ The known limits under Coverage are what it does not cover.
 
 Per year, with `(cik, accession)` rows and distinct accessions counted apart:
 - **The year** of a covered row is the year of its header filing date when the parse, accession and filing-date
-  fields are ok, else the year of its earliest date filed in any source. An uncovered row uses the earliest date
-  filed in any source. Inventory-by-source tables also give each source's own year, so a row whose sources
+  fields are ok, else the year of its earliest date filed in any source under its own key, else (a header-only row
+  with an unusable header filing date) the accession's earliest date filed under any CIK in any source, else the
+  `unknown_year` bucket. An uncovered row uses the earliest date filed in any source. Coverage records use the same
+  allocation. Inventory-by-source tables also give each source's own year, so a row whose sources
   disagree is visible in both.
 - **all CIKs:** inventory rows by form and by source combination (daily, quarterly, archive, header-only), and rows
   dated before `FIRST` by source;
@@ -573,8 +584,15 @@ archive part and `F`. Every header-dependent field is printed as `pending`.
 
 ## Registration
 
-The producer and its fixtures are written first and read no data (build step 1). Then, before any data census
-including the dry run, the frozen configuration is registered as a non-claiming `DeclaredTrial` in
+**What has been run so far, and why it is outside the ledger.** The programme counts every configuration tried
+(§4). The measurement behind this spec read no price, return or outcome and evaluated no label configuration
+against anything: it counted source structure (membership, item validity, header fields) to fix the construction.
+No producer configuration has run. Every checkpoint round's variant of the construction exists only as spec text
+(this log), and none produced labels for a consumer. The registration below is therefore prospective: it counts
+the one production configuration before its first run.
+
+The producer and its fixtures are written first and read no data (build step 1). Then, before the production
+build's first data read, the dry run included, the frozen configuration is registered as a non-claiming `DeclaredTrial` in
 `app/services/trial_register.py` (`3624-slice2-labels-v1`, one configuration, `searches=1`). Its `evidence` names
 this spec's sha256, the construction hash, the archive sha256, and the quarterly and daily files' sha256s. Every
 configuration run is counted. A later change of any of these is a new configuration in the programme ledger: label
@@ -645,6 +663,9 @@ cover enough of any universe. No consumer may read it without a registration tha
      - a differing filing date, or a `D` later than the filing date;
      - an `ok` header whose items differ from the baseline's single item set, the header being the authority
        (premise 6's five archive lists cut at 13 codes are this case);
+     - a baseline row whose `(cik, accession)` no pinned producer source holds (checked against every daily file,
+       every quarterly file and the archive), recorded as an unexplained baseline-only row, not as a removal. The
+       replay drops it from the baseline; conversely, an artefact row the baseline lacks is replayed by adding it;
      - a CIK the artefact marks incomplete.
 
      Any other difference fails.
@@ -666,10 +687,11 @@ cover enough of any universe. No consumer may read it without a registration tha
    - **Candidate classes:** `agree` (an observation with a candidate heading, or a non-label document with none),
      `candidate_disagree` (an observation without one, or a non-label document with one), and `ambiguous` (the
      item region cannot be delimited, or the number appears in the item region only outside a candidate heading).
-   - **Review.** Every `candidate_disagree` and `ambiguous` draw is read in full by the same procedure: is the
-     matched or missing heading the report's own item section, or a quotation, a reference to another filing or a
-     layout artefact? The reading is posted with the document passage and its outcome, `agree` or `disagree`.
-     Ambiguity is recorded apart from disagreement.
+   - **Review of every draw.** Candidate classes are provisional, `agree` included. Every sampled document is read
+     in full by the same procedure: which items does the report itself declare as its own sections, and is each
+     matched or missing heading such a section, or a quotation, a reference to another filing or a layout artefact?
+     The reading is posted with the document passage and its outcome, `agree` or `disagree`, beside the candidate
+     class. Ambiguity is recorded apart from disagreement.
    - **Pass:** no `disagree` after review.
    - A document still unreadable after both days is a gate-7 failure, never replaced by another draw.
    - Every draw and result is posted.
@@ -913,3 +935,20 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
   - **Text** (118, 143–147): the listing pairing is described as unchecked; daily-only rows are classed by their
     own header outcome; "candidate" is defined; census year allocation is fixed; `D` absence is stated exactly;
     coverage-first `unknown` is called a deliberate refusal.
+- **Round 8** (`var/research/3624/ckpt1_slice2_r8.txt`): 7 open (40, 109, 110, 116, 131, 145, 149), 7 new
+  (150–156), 18 resolved, among them the estimand findings 3, 91 and 122 under the programme amendment. The
+  measurement was re-run at `c7ea8ba9`.
+  - **Bounds** (40, 110): `start` is `s_min` unless a trusted body excludes the paper path: no body, an untrusted
+    body (parse or accession not ok), `<PAPER>` or `<CONFIRMING-COPY>`. The accession-year fallback is left for a
+    trusted electronic body without a usable acceptance date.
+  - **Header grammar** (149, 150): tags are counted anywhere in the body, markers and correction evidence detected
+    anywhere, and an opening tag not at the start of its line makes the parse `malformed`. Re-measured on the 9,041:
+    0 misplaced, 0 repeated, the same marker counts.
+  - **Text** (109, 116, 145, 151–154): premise 9 is literal search hits, with the typed path named and no data-flow
+    claim; the whole availability formula is the declared construction, informed by Rule 13(a) and the guidance;
+    year allocation for header-only rows and an `unknown_year` bucket; the typed count is bound to the output; the
+    six gzip-only quarters are listed; zero-filled years (0 to 70); uncovered CIKs' records stated once.
+  - **Gates** (131, 155): every sampled document is read in full, `agree` included; a baseline-only row no
+    producer source holds is a gate-6 cause, with replay defined for added and dropped rows.
+  - **Registration** (156): the measurement read no outcome and ran no producer configuration; the registration is
+    prospective for the one production configuration.
