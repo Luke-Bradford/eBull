@@ -83,8 +83,8 @@ which is acceptable only because `last-modified` bounds nothing.
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`f5354a03…`), `HEAD`
-  (`847be55b`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`702e6db8…`), `HEAD`
+  (`f5007575`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
 are as of 2026-10-08, read by the first command (queries in the script).
@@ -214,7 +214,7 @@ engagement of a new independent accountant".
      Eastern days after the filing date. 15,655 of them have item sets, and the current stored sets agree with
      archive A (15,638 no-NULL, 17 mixed); the other 6 are all NULL. `filing_events` keeps current values only, so
      this shows current agreement, not that nothing changed.
-4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,369
+4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,375
    non-tombstone `eight_k_filings` accessions at this run (live ingest grows the table between runs;
    `cross_source.typed_accessions` is the figure of record), left-joined to `eight_k_items`; 72,241 are in the archive, all with
    valid items there. The parser stored no item rows for 52,353 of them. Within the overlap it never holds a target
@@ -230,8 +230,9 @@ engagement of a new independent accountant".
      target code, or 10 or more codes (`ITEM_CAP`, set after round 2 found 13-code lists truncated). It is wider
      than the target positives; `labels` counts those.
    - **Structure:** every header has exactly one `<SEC-HEADER>` block (`header_block_counts`); under the grammar
-     all 9,041 have a balanced envelope, no tag outside it, no misplaced tag and no non-upper-case name
-     (`structure`); and every one has
+     all 9,041 have a balanced envelope, no structural defect under the token-stream walk, no tag outside the
+     envelope, no misplaced tag and no non-upper-case name (`structure`); filer CIKs read by path equal those of the
+     earlier block extraction on every one; and every one has
      exactly one `<ACCESSION-NUMBER>`, equal to the accession requested (`field_outcome_rows`). On these 9,041 the
      raw tag census (`raw_tag_presence`, headers carrying each tag) finds `<PRIVATE-TO-PUBLIC>` on 65 and
      `<CONFIRMING-COPY>` on 3, all inside the header block (`marker_presence` whole-body,
@@ -290,7 +291,7 @@ engagement of a new independent accountant".
      - Two `scripts/*2900*` files audit the red-flag path.
    - **Readers of the score:** `red_flag_score` has 95 hits in 22 files, among them scoring, portfolio, the position
      monitor and the r6 research modules.
-   - **Scope:** these are the literal hits of three text searches, classified by reading them. They are not a call
+   - **Scope:** these are the literal hits of four text searches, classified by reading them. They are not a call
      graph or a data-flow analysis, they do not establish which hits are live, and a reader that names neither the
      codes, the table nor the score is outside them. Two paths are visible: `filing_events.items` (through
      `red_flag_score`) and the typed `eight_k_items`. Gate 6 compares with `filing_events.items` only and claims no
@@ -352,7 +353,7 @@ engagement of a new independent accountant".
   | field | ok when | otherwise |
   |---|---|---|
   | retrieval | the body was fetched | `no_header`, last error stored; every other field `not_evaluated` |
-  | parse | exactly one `<SEC-HEADER>` followed by exactly one `</SEC-HEADER>`, and no opening tag outside that envelope; every tag name in upper case; `<ACCESSION-NUMBER>`, `<ACCEPTANCE-DATETIME>`, `<TYPE>`, `<FILING-DATE>` and `<DATE-OF-FILING-DATE-CHANGE>` each at most once anywhere in the body; every opening tag at the start of its line (after blanks) | `malformed`, with the cause |
+  | parse | every `<` opens a strict tag (`<NAME>` or `</NAME>`, upper case, nothing else in the brackets); containers nest and close; a registrant role opens only directly in the envelope; exactly one `<SEC-HEADER>` followed by exactly one `</SEC-HEADER>`, and no opening tag outside that envelope; `<ACCESSION-NUMBER>`, `<ACCEPTANCE-DATETIME>`, `<TYPE>`, `<FILING-DATE>` and `<DATE-OF-FILING-DATE-CHANGE>` each at most once anywhere in the body; every opening tag at the start of its line (after blanks) | `malformed`, with the cause |
   | accession | exactly one `<ACCESSION-NUMBER>`, equal to the inventory key | `no_accession`, `accession_mismatch` |
   | `<PAPER>` | absent | `paper` |
   | `<PRIVATE-TO-PUBLIC>` | absent | `private_to_public` |
@@ -362,15 +363,21 @@ engagement of a new independent accountant".
   | `<FILING-DATE>` | 8 digits forming a real date | `no_filing_date`, `filing_date_invalid` |
   | `<TYPE>` | in the 8-K family | `type_out_of_scope` |
   | `<ITEMS>` | non-empty, every code in the vocabulary, no code twice | `items_empty`, `items_invalid` |
-  | `<FILER>` CIKs | include the row's CIK | `not_a_filer` |
+  | `<FILER>` CIKs | include the row's CIK, read only as a `<CIK>` under `SEC-HEADER/FILER/COMPANY-DATA` (or `OWNER-DATA`) | `not_a_filer` |
   | date order | filing date on or after the acceptance date | `date_before_acceptance`; `not_evaluated` without both dates |
   | `<DATE-OF-FILING-DATE-CHANGE>` | 8 digits forming a real date, equal to the acceptance date | `no_correction_date`, `correction_invalid`, `corrected` (later), `correction_before_acceptance` (earlier); `not_evaluated` without a valid acceptance date |
 
   An absent correction date is not read as "no correction": without it the header does not say whether a PAC
   occurred. **Header grammar:** every tag is counted wherever it occurs in the retrieved body, inside the header
-  block or not, and markers and correction evidence are detected anywhere. The PDS SGML declaration makes names
-  case-insensitive (`NAMECASE GENERAL YES`); the producer accepts only upper-case names, so any other casing is
-  `malformed` rather than an unrecognised tag; a value is read only from a tag that
+  block or not, and markers and correction evidence are detected anywhere. The body is read as a token stream:
+  any `<` that does not open a strict tag (a space before `>`, lower or mixed case, anything else) is
+  `unsupported_markup`. The PDS SGML declaration makes names case-insensitive (`NAMECASE GENERAL YES`); the
+  producer accepts only upper-case names, so other casing is `malformed`, never an unrecognised tag. **Containers**
+  are the elements whose end tag the PDS DTD requires (`- -`, pp. 77–80): the seven registrant roles (`FILER`,
+  `FILED-BY`, `SERIAL-COMPANY`, `SUBJECT-COMPANY`, `REPORTING-OWNER`, `ISSUER`, `FILED-FOR`), `COMPANY-DATA`,
+  `OWNER-DATA`, `FILING-VALUES`, the addresses, `FORMER-COMPANY`, `FORMER-NAME` and the series elements, plus the
+  envelope. A container must close in order; a role's content (`regist-data`) holds no role, so a role opens only
+  directly in the envelope; a leaf has no end tag; a value is read only from a tag that
   starts its line, so a layout the grammar does not accept fails as `malformed` instead of hiding a tag. The
   measurement script implements this table (`parse_header`, `field_outcomes`), and premise 6's class counts come
   from it.
@@ -597,11 +604,11 @@ of work preceded this spec's acceptance, and both read no price, return or outco
 - **Classification predicates applied to the 9,041 inspected headers**, as measurement only (class counts, no labels
   for a consumer, no full population). Each executed version is a configuration tried: the tag-based
   timing-uncertain rule at `a24131e1` and `77231ed1`, and the production predicates at `44ac5fdc`, `22876703`,
-  `c7ea8ba9` and `847be55b`. Each change was made for a source-rule or checkpoint finding, never by comparing
+  `c7ea8ba9`, `847be55b` and `f5007575`. Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
   outcomes.
 
 Build step 2 therefore registers two non-claiming entries: `3624-slice2-construction-measurement`, listing those
-six versions by commit (`searches=6`), and the production configuration below, registered prospectively before
+seven versions by commit (`searches=7`, plus any added by a later re-run), and the production configuration below, registered prospectively before
 the production build's first data read.
 
 The producer and its fixtures are written first and read no data (build step 1). Then, before the production
@@ -979,3 +986,13 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
     configurations by commit, registered with the production configuration in build step 2.
   - **Text** (159, 160): gate 6's absence cause uses the `(cik, accession)` key with its reason; the time zone
     sentence is scoped to session dates.
+- **Round 10** (`var/research/3624/ckpt1_slice2_r10.txt`): 2 open (150, 157, one root), 2 new (161, 162), 5
+  resolved. The measurement was re-run at `f5007575`.
+  - **Tokeniser** (150, 157): every `<` must open a strict upper-case tag, so `<ITEMS >`, `<SEC-HEADER >` and
+    `<paper >` are `unsupported_markup` and the row `items_unestablished`.
+  - **Role structure** (161): containers are the PDS DTD's end-tag-required elements and must nest and close; a
+    role nests only in the envelope; filer CIKs are read by path under `FILER/COMPANY-DATA` or `OWNER-DATA`. A
+    subject company nested in a filer and a missing `</FILER>` now fail closed. Codex's counterexamples and the
+    9,418 cached headers were run through the new walk: every counterexample fails, every cached header passes with
+    the same filer set.
+  - **Text** (162): four searches.

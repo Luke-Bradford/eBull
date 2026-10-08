@@ -926,6 +926,7 @@
     "header_blocks": 1,
     "misplaced_tags": 0,
     "envelope_ok": true,
+    "structure_defect": null,
     "outside_tags": 0,
     "noncanonical_tags": 0,
     "markers_in_block": [],
@@ -997,6 +998,7 @@
     "header_blocks": 1,
     "misplaced_tags": 0,
     "envelope_ok": true,
+    "structure_defect": null,
     "outside_tags": 0,
     "noncanonical_tags": 0,
     "markers_in_block": [],
@@ -1064,8 +1066,8 @@
   }
  ],
  "provenance": {
-  "script_sha256": "f5354a0360d637d4f4e652f0f0f49fad4792a704be61b580ce13332dc5bf7b98",
-  "head": "847be55b79306dcf1b79665df40512285448479d",
+  "script_sha256": "702e6db85f49f5f98b9078159a8101c90f4ce7b8cabc80a99fd6a4524dc204df",
+  "head": "f50075752e862f077a92303e00ceb84458df6a62",
   "script_clean_at_head": true
  }
 }
