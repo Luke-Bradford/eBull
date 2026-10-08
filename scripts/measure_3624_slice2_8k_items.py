@@ -432,6 +432,70 @@ _ANY_TAG: Final = re.compile(r"<([A-Z][A-Z0-9-]*)>")
 _LINE_TAG: Final = re.compile(r"^[ \t]*<([A-Z][A-Z0-9-]*)>", re.M)
 #: Every opening or closing tag name, any case.
 _ANY_NAME: Final = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)>")
+#: The only markup the grammar accepts: ``<NAME>`` or ``</NAME>``, upper case, nothing else between the brackets.
+_STRICT_TAG: Final = re.compile(r"<(/?)([A-Z][A-Z0-9-]*)>")
+#: PDS DTD registrant roles (pp. 77-78): each takes ``regist-data``, which holds no role, so a role nests only in the
+#: envelope.
+ROLES: Final = frozenset(
+    {"FILER", "FILED-BY", "SERIAL-COMPANY", "SUBJECT-COMPANY", "REPORTING-OWNER", "ISSUER", "FILED-FOR"}
+)
+#: Elements whose end tag the PDS DTD requires (``- -``, pp. 77-80), plus the ``.hdr.sgml`` envelope.
+CONTAINERS: Final = ROLES | {
+    "SEC-HEADER",
+    "COMPANY-DATA",
+    "OWNER-DATA",
+    "FILING-VALUES",
+    "BUSINESS-ADDRESS",
+    "MAIL-ADDRESS",
+    "FORMER-COMPANY",
+    "FORMER-NAME",
+    "ACQUIRING-DATA",
+    "CLASS-CONTRACT",
+    "DOCUMENT",
+    "EXISTING-SERIES-AND-CLASSES-CONTRACTS",
+    "MERGER",
+    "NEW-CLASSES-CONTRACTS",
+    "NEW-SERIES",
+    "NEW-SERIES-AND-CLASSES-CONTRACTS",
+    "SERIES",
+    "SERIES-AND-CLASSES-CONTRACTS-DATA",
+    "SUBMISSION",
+    "TABLE",
+    "TARGET-DATA",
+    "TEXT",
+}
+_FILER_CIK_PATHS: Final = (("SEC-HEADER", "FILER", "COMPANY-DATA"), ("SEC-HEADER", "FILER", "OWNER-DATA"))
+
+
+def header_structure(text: str) -> tuple[str | None, list[str]]:
+    """The first structural defect (``None`` if none) and the filer CIKs, read by walking the token stream.
+
+    Every ``<`` must open a strict tag; containers must nest and close; a role opens only directly in the envelope;
+    a leaf has no end tag. Filer CIKs are the ``<CIK>`` values under a filer's company or owner data."""
+    tokens = list(_STRICT_TAG.finditer(text))
+    if text.count("<") != len(tokens):
+        return "unsupported_markup", []
+    stack: list[str] = []
+    filers: set[str] = set()
+    for token in tokens:
+        close, name = token.groups()
+        if name not in CONTAINERS:
+            if close:
+                return "end_tag_of_leaf", []
+            if name == "CIK" and tuple(stack) in _FILER_CIK_PATHS:
+                end = text.find("\n", token.end())
+                filers.add(text[token.end() : end if end >= 0 else None].strip())
+        elif close:
+            if not stack or stack[-1] != name:
+                return "unbalanced", []
+            stack.pop()
+        elif name == "SEC-HEADER" and stack:
+            return "nested_envelope", []
+        elif name in ROLES and stack != ["SEC-HEADER"]:
+            return "role_nesting", []
+        else:
+            stack.append(name)
+    return ("unclosed" if stack else None), sorted(filers)
 
 
 def parse_header(text: str) -> dict[str, Any]:
@@ -448,6 +512,7 @@ def parse_header(text: str) -> dict[str, Any]:
     opens, closes = text.count("<SEC-HEADER>"), text.count("</SEC-HEADER>")
     envelope_ok = opens == 1 and closes == 1 and text.index("<SEC-HEADER>") < text.index("</SEC-HEADER>")
     outside = text[: found.start()] + text[found.end() :] if found else text
+    defect, filer_ciks = header_structure(text)
 
     def one(tag: str) -> str | None:
         match = re.search(rf"^[ \t]*<{tag}>(.*)$", body, re.M)
@@ -460,6 +525,7 @@ def parse_header(text: str) -> dict[str, Any]:
         "header_blocks": len(_SGML.findall(text)),
         "misplaced_tags": len(_ANY_TAG.findall(text)) - len(_LINE_TAG.findall(text)),
         "envelope_ok": envelope_ok,
+        "structure_defect": defect,
         "outside_tags": len(_ANY_TAG.findall(outside)) if envelope_ok else None,
         "noncanonical_tags": sum(1 for name in _ANY_NAME.findall(text) if name != name.upper()),
         "markers_in_block": sorted(t for t in MARKERS if f"<{t}>" in body) if found else [],
@@ -474,9 +540,7 @@ def parse_header(text: str) -> dict[str, Any]:
         "filing_date": one("FILING-DATE"),
         "filing_date_change": one("DATE-OF-FILING-DATE-CHANGE"),
         "items": sorted(m.strip() for m in re.findall(r"^[ \t]*<ITEMS>(.*)$", body, re.M)),
-        "filer_ciks": sorted(
-            {m.strip() for block in re.findall(r"<FILER>(.*?)</FILER>", body, re.S) for m in _CIK.findall(block)}
-        ),
+        "filer_ciks": filer_ciks,
         "other_ciks": sorted({m.strip() for m in _CIK.findall(re.sub(r"<FILER>.*?</FILER>", "", body, flags=re.S))}),
     }
 
@@ -562,6 +626,7 @@ def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> d
         "parse": "ok"
         if header["header_blocks"] == 1
         and header["envelope_ok"]
+        and header["structure_defect"] is None
         and header["outside_tags"] == 0
         and not header["noncanonical_tags"]
         and not header["repeated_tags"]
@@ -741,7 +806,9 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
     marker_presence = Counter(m for r in rows for m in r["markers"])
     marker_in_block = Counter(m for r in rows for m in r["markers_in_block"])
     structure = Counter(
-        f"{k}={r[k]}" for r in rows for k in ("envelope_ok", "outside_tags", "noncanonical_tags", "misplaced_tags")
+        f"{k}={r[k]}"
+        for r in rows
+        for k in ("envelope_ok", "structure_defect", "outside_tags", "noncanonical_tags", "misplaced_tags")
     )
     for kind, accession, _ in failures:
         n_rows = len({x[0] for x in arch[accession] if x[0] in ours})
