@@ -1,28 +1,31 @@
 # #3609 step 2 — the factor composite book, backtested net of our costs
 
-Status: **draft, blocked on an operator decision** (#3609, 2026-10-06: can a zero-capital demo test be authorised
-by a Track B screen when no realistic edge is powered on our data? See premise 2). Revised after Codex checkpoint 1
-rounds 1–19 (§"Checkpoint log"). Every construction, control, diagnostic and freeze finding is applied, and round
-19 resolved the last three with no new finding. Round 2's findings 1–8, and the gate-design parts of 3–5, are the decision above and stay open until the
-operator answers; §"Decision rule" is provisional until then.
-Slices 1–2 and the scoring core of slice 3 are merged, tested on fixtures only. No book, IC, spread or factor mean has been computed on any month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
+Status: **draft, gate open.** The evidence-bar question (#3609, 2026-10-06) is settled by `docs/settled-decisions.md`
+entry 2026-10-08: a Track B book may enter a zero-capital demo test on a preregistered four-part historical screen,
+and §"Decision rule" is that screen. Round 2's findings 1–8 are applied under it (§"Checkpoint log", "Gate opened").
+Applying finding 4, the power calculation for the exposure test, changed the book to the value family alone
+(premise 6). Revised after Codex checkpoint 1 rounds 1–21; the items queued while building are written into
+§"Build-time clarifications". Slices 1–5 are merged and tested on fixtures only. No step-2 code has read a stage-B
+month. On stage A, premise 6 measured exposures only; no book return, mean, alpha or growth has been printed for any
+month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
 inherits" (amended below), and reports against `docs/research/2026-10-04-3609-step0-baselines.md`.
 
 ## Question
 
-Does a long-only, equal-weight book of US large caps, chosen by an industry-relative composite of the characteristics
-step 1 rebuilt faithfully, (a) carry the published factor exposures it is built for, and (b) beat SPY total return
-and a matched random book net of our costs on a reused validation sample (stage B) that no step-1 selection read?
-Stage B has been seen before, through step 0's baselines (§"Design-history inventory").
+Does a long-only, equal-weight book of US large caps, chosen by the industry-relative composite of the three value
+characteristics step 1 rebuilt faithfully (B/M, E/P, CF/P), (a) load on HML, the factor it is built to carry, and
+(b) beat SPY total return and a matched random book net of our costs, on a reused validation sample (stage B) that
+no step-1 or step-2 selection read? Stage B has been seen before, through step 0's baselines (§"Design-history
+inventory").
 
 **What the answer can say.**
-- **Pass:** the book is eligible for a declared forward demo test (step 3, the ranking-pot successor). The case
-  for the premium rests on the published post-publication record (§"Adoption rationale"). This backtest shows that
-  our implementation carries the intended exposures, and that it did not lose to SPY or to random trading net of
-  our costs on the validation sample.
+- **Pass:** the book meets the 2026-10-08 screen and is eligible for a declared forward demo test (step 3, the
+  ranking-pot successor). The case for the premium rests on the published record (§"Adoption rationale"). This
+  backtest shows that our implementation carries the intended exposure, and that it did not lose to SPY or to random
+  trading net of our costs on the validation sample.
 - **It does not prove a premium.** About ten years cannot statistically certify a realistic edge over SPY
-  (premise 2), so no IR claim is made here.
+  (premise 2), so no IR claim is made here. The beats are point estimates, reported as a screen.
 - **What a pass can never authorise:** live capital, or a forward construction other than this one. Step 3's forward
   book adds the sector cap, the MAX filter and the eToro-tradable intersection, so it needs its own declared
   implementation backtest that passes the same gates before any position (§"Decision rule"). Stage B is not
@@ -39,21 +42,21 @@ mis-specified (#3609 body). This book uses only characteristics that passed step
 
 ## Premises (measured)
 
-**1. Five characteristics in three of step 1's frozen families are eligible.** Step 1's declared run (#3609
+**1. Five characteristics passed step 1; the book uses the three value ones.** Step 1's declared run (#3609
 comment of 2026-10-06 01:36Z; `docs/research/3609-ledger.jsonl`, run `b6378c7c`) passed `at_gr1`, `be_me`, `gp_at`,
 `ni_me` and `ocf_me`. `ope_be`, `ret_12_1` and `rvol_21d` failed the offset bar on one arm each, and no v2 is claimed.
-Using step 1's family identities unchanged:
-- **GP/A:** `gp_at`;
-- **value:** `be_me`, `ni_me`, `ocf_me`;
-- **investment:** `at_gr1`.
+Step 1's family identities, unchanged:
+- **value:** `be_me`, `ni_me`, `ocf_me` (the book);
+- **GP/A:** `gp_at`, and **investment:** `at_gr1` (passed, not in the book: premise 6).
 
-The profitability (`ope_be`), 12-1 momentum and low-volatility families have no eligible member, so they are absent.
-Step 1 lets step 2 drop non-PASS characteristics.
+The profitability (`ope_be`), 12-1 momentum and low-volatility families have no eligible member. Step 1 lets step 2
+drop non-PASS characteristics, and nothing requires it to use every PASS one.
 
-**2. About ten years cannot power an IR claim.** Holding months 2014-10..2024-08 are 119, or 9.92 nominal years.
-For a one-configuration Track B test, `power_check` needs a non-inferiority margin of at least 0.789 IR for 80% power:
+**2. About ten years cannot power an IR claim at the skill's prior.** Holding months 2014-10..2024-08 are 119, or
+9.92 nominal years. For a one-configuration Track B test, `power_check` needs a non-inferiority margin of at least
+0.7896 IR for 80% power over 9.92 years:
 - `critical_t` = 1.645 and `required_years` = 9.66 at δ = 0.80;
-- stage B alone (3.25 years) needs δ ≥ 1.38.
+- stage B alone (3.25 years) needs δ ≥ 1.3792.
 
 Reproduce:
 
@@ -63,13 +66,13 @@ c=power_check(TrialDesign(EvidenceTrack.ADOPTION,0.8,'x',9.92,'x'),trials=1); \
 print(c.critical_t, c.required_years, (c.critical_t+0.8416)/math.sqrt(9.92), (c.critical_t+0.8416)/math.sqrt(39/12))"
 ```
 
-The skill's realistic skilled IR is 0.3–0.5 (`portfolio-construction-and-risk.md`). A margin that keeps the book at
-or above SPY must not exceed the prior IR, and a margin of 0.79 or more does not. So no margin with that meaning
-is feasible. Nominal years are also an upper bound on effective years. Consequences:
+This is conditional on a prior. The skill's 0.3–0.5 is a generic range for a skilled manager's IR
+(`portfolio-construction-and-risk.md`), not a measured prior for this book, and it assumes independent months
+(nominal years bound effective years from above). §"Adoption rationale"'s published value series give no reason to
+expect more for a long-only large-cap value book net of costs. Under that prior, a margin that keeps the book at or
+above SPY cannot reach 80% power on our data. Consequences:
 - Step 2 makes no IR claim and carries no `TrialDesign` (§"Registration").
-- Its gate is an exposure test, which is powered because loadings are identified from co-movement, not from means,
-  plus the point-estimate comparisons that `research-process.md` §Track B "Net result" and the 2026-08-23 settled
-  decision require.
+- Its gate is the 2026-10-08 screen. Its claim is the exposure test (condition 3), whose power premise 6 computes.
 
 **3. The size rule.** No point-in-time exchange membership exists (step 1 premise 5), so NYSE breakpoints cannot be
 computed at s(M). The book universe is a by-construction proxy: the top 1,000 by ME at s(M) (ties by `name_key`).
@@ -93,8 +96,9 @@ non-positive ME or cutoff:
 | top-1,000 names with a raw value in all three | 613 | 683 |
 | top-1,000 names with SIC 6221 (commodity pools' SIC) | 0 | 1 |
 
-"Above the median" is ME > cutoff and "at or below" is its complement, here and in every diagnostic. The family
-counts are raw-input availability: they apply no group minimum, zero-variance rule, seasoning or price screen.
+"Above the median" is ME > cutoff and "at or below" is its complement, here and in every diagnostic. The two family
+rows count the first draft's three families (GP/A, value, investment); the declared run prints the count of the top
+1,000 with the value family present. Family counts are raw-input availability: they apply no group minimum, zero-variance rule, seasoning or price screen.
 
 The proxy is close to the large-plus-mega tranche that `market-segments.md` makes the default for books traded more
 than quarterly **in one dimension only: value coverage**. By count it is not: up to 138 of the 1,000 names sit at or
@@ -117,20 +121,63 @@ Form 25 set a selected, symbol-bearing population, and ticker reuse and mismatch
 The full-population survivorship requirement is therefore **unmet** for stage B too. This is why a pass authorises
 nothing beyond §"Question"'s limits.
 
-## Adoption rationale (Track B, per family)
+**6. Condition 3 is powered for the value family alone (development data).** Checkpoint 1 round 2, finding 4,
+asked for the exposure test's power. Its planning inputs come from stage A, the development sample. For each of three
+family sets, the book's scorer, decisions and base-cost path ran on stage A's pinned artefact, and the book's
+monthly return in excess of RF was regressed on FF5 plus momentum with step 0's Newey–West rule, in both arms. Only
+loadings, standard errors, residual standard deviation, R² and holding counts were printed. No mean return, alpha,
+growth or comparison was printed. All three sets count as searches (§"Registration").
 
-Each family is a published premium with support outside its original sample. These are the skill's citations
-(`strategy-menu.md`, `research-process.md`); no figure is quoted from them here.
+Loading (t), best-case / worst-case arm, formations 2014-09..2021-04, 80 months:
 
-| family | original | independent support after or outside the original sample |
-|---|---|---|
-| GP/A | Novy-Marx 2013 | survives in Hou, Xue & Zhang 2020; replicates in Jensen, Kelly & Pedersen 2023 |
-| value (B/M, E/P, CF/P) | Fama & French; within-industry form Asness, Porter & Stevens 2000 | across asset classes, Asness, Moskowitz & Pedersen 2013; Jensen, Kelly & Pedersen 2023; `strategy-menu.md` records the 2007–2020 drawdown |
-| investment (asset growth) | Cooper, Gulen & Schill 2008 | the q-factor I/A (Hou, Xue & Zhang); Jensen, Kelly & Pedersen 2023 |
+| family set | HML | RMW | CMA | residual sd | median holdings |
+|---|---|---|---|---|---|
+| GP/A + value + investment (first draft) | 0.279 (5.33) / 0.285 (5.95) | 0.143 (1.72) / 0.149 (1.84) | 0.018 (0.27) / 0.028 (0.43) | 0.81% / 0.83% | 164 |
+| value | 0.488 (5.70) / 0.486 (5.80) | 0.114 (1.22) / 0.112 (1.24) | −0.206 (−2.03) / −0.197 (−1.89) | 1.06% / 1.10% | 153 |
+| value + GP/A | 0.030 (0.50) / 0.045 (0.82) | 0.396 (2.84) / 0.376 (2.71) | 0.032 (0.30) / 0.020 (0.19) | 1.15% / 1.14% | 108 |
 
-**Transfer to this book is unmeasured by any source.** No cited source measures a long-only, industry-relative,
-equal-weight, banded large-cap composite at eToro costs; McLean & Pontiff 2016 put average post-publication decline
-at 58%. That transfer is exactly what gates G1 and G2 test.
+Reproduce: `PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure` (reads stage A's pinned artefact and
+factor rows to 2021-05-31 only).
+
+- **The first draft cannot be tested with power.** Its investment member adds no CMA loading the regression can
+  separate from value's HML, and GP/A's RMW t is below even a one-loading bar on 80 months. Stage B has 39.
+- **Value + GP/A cancels value.** HML falls to 0.03: GP/A and value are negatively related (Novy-Marx 2013).
+- **The value book carries HML.** Its condition 3 tests one intended loading, so the Bonferroni bar is
+  z(0.95) = 1.645. Stage B's planned standard error is stage A's scaled by √(80/39), which assumes stage B's residual
+  and factor variances equal stage A's. Planned t is 3.98 / 4.05 and power 0.990 / 0.992. At the one-sided 95%
+  lower bound of stage A's loading (b − 1.645 s), t is 2.83 / 2.90 and power 0.882 / 0.896. The lower bound is the
+  allowance for choosing the set with the largest stage-A loading.
+- **Both arms must pass.** Their returns differ only in terminal handling, so their failures move together. The
+  Bonferroni bound on the conjunction, which assumes nothing about that, is 0.982 at the point estimates and 0.778
+  at both lower bounds at once; the single-arm figures are the realistic ones.
+- **What this selection used.** It chose a family set by whether its intended loading can be tested, from exposures
+  only. It read no return, so it carries no information about condition 4, and condition 3 runs on stage B, which it
+  did not read. The book's other loadings (SMB 0.25, momentum −0.20, CMA −0.21 on stage A) are what a large-cap
+  value book carries; they are printed, not gated.
+
+## Adoption rationale (condition 1, Track B)
+
+The book holds one family, value. Condition 1 asks for independent post-publication support. The published
+long-short series, over months before our path starts (to 2014-09-30), from the premise-6 script:
+
+| series | relation to the original study | months | mean a year | Newey–West t |
+|---|---|---|---|---|
+| French HML, 1992-07..2014-09 | after Fama & French (1992) was published; same US market and construction | 267 | 3.58% | 1.36 |
+| AQR large-cap value, UK, 1981-07..2014-09 | outside the US sample; inside Asness, Moskowitz & Pedersen's (2013) to 2011 | 399 | 4.25% | 1.41 |
+| AQR large-cap value, Europe ex-UK, same months | as UK | 399 | 4.12% | 1.83 |
+| AQR large-cap value, Japan, same months | as UK | 399 | 9.31% | 2.97 |
+| AQR large-cap value, US, 1972-02..2014-09 (scale only) | overlaps the original sample | 512 | 4.10% | 1.57 |
+
+- **What it supports:** the premium stayed positive after its US publication and in each of three markets outside
+  the US. It is significant at 5% only in Japan.
+- **What differs from this book:** each series is gross, long-short and value-weighted on B/M. This book is
+  long-only, equal-weighted, industry-relative (Asness, Porter & Stevens 2000), a three-member composite, and net
+  of our costs.
+- **The prior, stated:** a small positive long-short premium with wide uncertainty. McLean & Pontiff (2016) put the
+  average post-publication decline across anomalies at 58% (cited, not measured here), and `strategy-menu.md` calls
+  value's edge small, regime-dependent and strongest in small caps, with a 2007–2020 drawdown. The long-only
+  large-cap book's net share of the premium is smaller and unmeasured. Conditions 3 and 4 screen that transfer; no
+  test here can measure the premium (premise 2).
 
 ## Source rules
 
@@ -138,7 +185,7 @@ at 58%. That transfer is exactly what gates G1 and G2 test.
 |---|---|---|
 | characteristic z-score | each month, rank the variable and standardise the ranks by their cross-sectional mean and standard deviation | Asness, Frazzini & Pedersen 2019 (QMJ), p. 9, eq. (2); AQR working-paper PDF, sha256 `761c42f9…fbb2a9`, pinned in slice 1 |
 | industry-relative form | rank and standardise within industry | QMJ p. 13 ("varying the standardization universe of our z-scores … by country-industry"); `portfolio-construction-and-risk.md` ("Rank accounting signals within industry") |
-| family and composite | family = z(mean of member z); composite = z(mean of family scores) | QMJ p. 4 ("average them") and eq. (2): a component is the z-score of its members' z-scores combined; with every member present, sum and mean rank identically |
+| family and composite | family = z(mean of member z); composite = z(mean of family scores), which with the value family alone ranks exactly as the family | QMJ p. 4 ("average them") and eq. (2): a component is the z-score of its members' z-scores combined; with every member present, sum and mean rank identically |
 | industry | Fama-French 12 from SIC; codes outside French's listed ranges are "Other" | `market-segments.md` §6; French's data library `Siccodes12.zip`, pinned in slice 1 |
 | SIC as of M | step 1's accession-specific SUB `sic`, under step 1's cutoff | step 1 §"Universe at M" step 4 |
 | direction | JKP Table 9 sign | `docs/research/3609-jkp-table9-signs.csv` |
@@ -167,8 +214,8 @@ at 58%. That transfer is exactly what gates G1 and G2 test.
 - **Missing members (a custom rule).** QMJ does not state its treatment of a missing member. A family is present
   when at least one member has a score, and its input is the **mean** of the members present: normalisation by
   the count of members present, so the input stays on one member's scale. It does not make ranks neutral to
-  missingness; no rule does. A composite needs at least 2 of the 3 families and takes
-  the mean of those present. The declared run prints, per formation, the count and book weight of each membership
+  missingness; no rule does. The composite needs the value family, the book's only
+  one. The declared run prints, per formation, the count and book weight of each membership
   pattern (which members and families were present).
 - **Identifier-decided selections.** Where tied composites straddle a decile or tercile boundary, `name_key`
   decides. Every such selection is counted and printed.
@@ -241,14 +288,12 @@ must include the cap and the MAX filter and pass its own implementation backtest
 
 ## Step 1's inheritance clause: the separately governed validation sample
 
-Step 1 selected characteristics with bars that read our long-short series against JKP's over all of stage A, so step-2
-claims on stage A need a nested replay or a separately governed validation sample. This spec takes the second option:
-- **G2, the realised-return gate, runs on stage B only.** Stage B's selection (the five characteristics) used only
-  earlier months.
-- **Stage-A realised returns are printed as development,** never gated.
-- **G1, the exposure gate, uses the whole path.** A loading is identified from how the book co-moves with published
-  factors, and the fidelity selection fitted no book quantity. (Round 2, findings 3–5, contests this; it is part of
-  the open operator question.)
+Step 1 selected characteristics with bars that read our long-short series against JKP's over all of stage A, and
+premise 6 chose the family set on stage-A exposures. Step-2 claims on stage A would need a nested replay or a
+separately governed validation sample; this spec takes the second:
+- **Conditions 3 and 4 (G1 and G2) run on stage B only.** Every selection (step 1's characteristics, premise 6's
+  family set, every construction choice) used earlier months.
+- **Stage A is development.** Its returns and loadings are printed, never gated.
 
 **Design-history inventory.** Everything the designers of this spec had seen, frozen with the spec:
 - **Stage A:** step 1's fidelity verdicts and its printed per-characteristic correlations, betas, tracking errors and
@@ -258,10 +303,13 @@ claims on stage A need a nested replay or a separately governed validation sampl
   ETF mixes and the random-basket draws. No characteristic-sorted book was ever computed on stage B.
 - **Earlier GP/A trial** #2901 (`r6-2901-quality-gpa-2026-09-25`, 2013–2024 June formations): it failed its
   construction gate (correlation +0.193 to +0.199 against +0.20), and no arm outcome was computed or published.
-- **Published results:** the adoption-rationale sources and McLean & Pontiff's 58% decline.
+- **Published results:** the adoption-rationale sources, premise 6's published value series (months to 2014-09)
+  and McLean & Pontiff's 58% decline.
+- **Stage-A exposures (premise 6):** the three family sets' loadings, standard errors, residual standard deviations,
+  R² and holding counts. No return, mean, alpha or growth of any book on any month has been printed.
 - **Choices fixed with that knowledge:** the 1,000 size rule (premise 3), the decile/tercile band and equal weight
-  (both from the skill's cited sources), and dropping the three non-PASS families (step 1's verdicts). None was
-  chosen by comparing book outcomes, because none has been computed.
+  (both from the skill's cited sources), dropping the three non-PASS families (step 1's verdicts), and the value
+  family alone (premise 6, on exposures). None was chosen by comparing book returns, because none has been printed.
 - **A nested K-fold replay was considered and rejected** (checkpoint 1, findings 8 and 12–14). A stitched
   cross-validated path is not executable, holdings carried across folds leak, and its estimand differs from the
   forward book.
@@ -373,26 +421,47 @@ in a universe that changes each month.
 
 ## Decision rule (frozen before any outcome)
 
-The book **passes** only if G1 and G2 both hold, at base cost, under **both** termination arms:
+The book **passes** the 2026-10-08 screen (`docs/settled-decisions.md`) only if all four of its conditions hold.
+Conditions 1 and 2 are met before the declaration and recorded in this spec, whose sha256 it pins. Conditions 3 and 4 are G1 and G2 below, which
+must both hold at base cost under **both** termination arms.
 
-**G1, exposures (whole path, 2014-10..2024-08).**
-- Regress the book's monthly return in excess of RF on FF5 plus momentum. Use step 0's data, unit checks and
-  Newey–West rule, `newey_west_lag` = ⌊4(T/100)^(2/9)⌋, on all 119 months.
-- The intended loadings must each be positive with a one-sided t above z(1 − 0.05/3) = 2.128 (Bonferroni over three):
-  - HML for value;
-  - RMW for GP/A. RMW is operating profitability, the nearest FF factor and not the same variable;
-  - CMA for investment.
+1. **Published support:** §"Adoption rationale".
+2. **Construction fidelity:** step 1's declared run `b6378c7c` passed `be_me`, `ni_me` and `ocf_me` against JKP's
+   published series (premise 1). This is where the members' fidelity is shown; condition 3 tests only the book's
+   exposure.
+3. **Powered exposure test:** G1.
+4. **Net beat on the sealed sample:** G2.
+
+**G1, condition 3: the HML exposure on stage B (2021-06..2024-08, 39 months).**
+- Regress the book's stage-B monthly return (the slice from the boundary state that G2 uses) in excess of RF on FF5
+  plus momentum. Use step 0's data, unit checks and Newey–West rule, `newey_west_lag` = ⌊4(T/100)^(2/9)⌋, which is
+  3 at T = 39.
+- HML, the value family's intended loading, must be positive with a one-sided t above z(1 − 0.05/1) = 1.645
+  (Bonferroni over the one intended loading). Its power is premise 6's. The other loadings are printed, not gated.
 - **Refusals, checked before any coefficient is printed** (verdict `G1_REFUSED`, with the reason): a missing factor
   month; a non-finite value in the return or factor matrix; anything other than exactly one aligned book, RF and
-  factor observation for each of the 119 declared months (no duplicates, no extras); a design matrix whose rank is below
+  factor observation for each of the 39 declared months (no duplicates, no extras); a design matrix whose rank is below
   its column count (numpy `matrix_rank` at its default tolerance); zero residual variance; or any Newey–West standard
   error that is not finite and positive.
 
-**G2, realised net return (stage B, 2021-06..2024-08).**
-1. The book's annualised net log growth G exceeds B1's.
-2. It exceeds the median (nearest-rank) of the control's 1,000 net G values.
+**G2, condition 4: realised net return (stage B, 2021-06..2024-08).**
+1. The book's annualised net log growth G exceeds B1's by more than the margin over B1.
+2. It exceeds the median (nearest-rank) of the control's 1,000 net G values by more than the margin over the control.
 
-The two arms are a conjunction: both must pass.
+**The margins are zero over both comparators, the entry's floor.** Basis:
+- A positive margin needs an expected net excess for this construction, and no source gives one. §"Adoption
+  rationale"'s series are gross and long-short, and `strategy-menu.md` calls value's edge small and regime-dependent.
+- Over 39 months, a margin the size of a realistic edge is far inside the sampling noise (premise 2), so it would add
+  a threshold without adding information.
+- The beats are point estimates, reported as a screen and never as significance. The stress-cost and year-deletion
+  annotations below show how thin a pass is.
+
+**Selection across configurations.** One configuration is evaluated on stage B. PBO/CSCV needs at least two, so it is
+not computed. Premise 6's three stage-A evaluations chose on exposures, read no return, and are counted in the
+register. A beat that only one of several configurations shows cannot arise, because no other configuration is
+evaluated on stage B.
+
+The two arms are a conjunction: both must pass. The turnover veto stays as declared (verdict order step 5).
 
 **Printed beside the verdict, never gating:** stress cost, stage A, each calendar year, segments and attribution.
 Two annotations go on a `PASS` verdict line only, by frozen tests:
@@ -429,6 +498,10 @@ any series (the book, B1, a reference or a control draw, either arm, base or str
 A non-finite G, median or year-deletion statistic refuses the run as
 `COMPARATOR_INVALID` (the book's own failure as `REFUSED` with that code too).
 
+**The declared path is a precondition.** Before step 1's status is assigned, the run must span the declared path,
+every holding month 2014-10..2024-08 once and in order; otherwise it is not the declared run and no verdict is
+printed.
+
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
 1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
    `COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`, `CAPTURE_AMBIGUOUS`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
@@ -461,18 +534,29 @@ families) is a new, counted declaration, and needs a reason other than this resu
 
 ## Registration
 
-**`DeclaredTrial` `3609-step2-book-v1`:** non-claiming (`declared_for=None`), `exactness=EXACT`, `searches=1`.
-- **One configuration is run:** the book above.
-- **Not counted, with reasons:**
-  - The arms are a conjunction, which cannot raise the false-pass rate.
-  - The control, the stress scenario and the diagnostics select nothing.
-  - No alternative configuration is run, and nothing was run before the freeze.
-- **Step 1's 16 searches stay counted** in M.
+**`DeclaredTrial` `3609-step2-book-v1`:** `declared_for=None`, `exactness=EXACT`, `searches=1`.
+- **Its claim is condition 3**, powered in premise 6. The register's claiming form (`declared_for` with a
+  `TrialDesign`) plans an IR margin against a benchmark through `power_check`. This screen claims no IR (premise 2),
+  so the row is non-claiming in the register's sense. Condition 3's power plan is frozen in this spec, whose sha256
+  the row's `evidence` pins.
+- **One configuration is evaluated on stage B:** the book above. Not counted, with reasons:
+  - the arms are a conjunction, which cannot raise the false-pass rate;
+  - the control, the stress scenario and the diagnostics select nothing;
+  - no alternative configuration is evaluated on stage B, and nothing was before the freeze.
+- **Counted in M elsewhere:** step 1's 16 searches (`3609-step1-fidelity-v1`) and premise 6's 3
+  (`3609-step2-exposure-planning-2026-10-08`, register r25).
+- **How the upstream selections meet this screen's tests.** `searches` deflates an IR test (`freeze_power_record`
+  uses a trial's own count), and this screen runs none, so those counts enter global M only. The screen's tests are
+  protected by separation instead. Condition 3 runs on stage B, which no selection read, at one intended loading.
+  Condition 4 runs on stage B for the one configuration and claims no significance. So step 1's selection on
+  fidelity and premise 6's on exposures are both tested on separate data, which is what step 1's inheritance clause
+  allows.
 
 **Amendment to step 1's inheritance text.** Step 1 says step 2's declaration "needs a `TrialDesign` that passes
-`power_check`". Premise 2 shows that no margin meaning "at or above SPY" is feasible for step 2. A `TrialDesign`
-belongs to a claiming #2599 declaration, and `DeclaredTrial` refuses a design without `declared_for`. So the design
-moves to step 3's claiming forward declaration, whose planned data include the forward months. Step 2 claims no IR.
+`power_check`". Premise 2 shows that no margin meaning "at or above SPY" can be powered here. Under the 2026-10-08
+entry the power requirement attaches to the screen's claim, condition 3 (premise 6). A `TrialDesign` belongs to a
+claiming #2599 declaration, and `DeclaredTrial` refuses a design without `declared_for`, so the IR design moves to
+step 3's claiming forward declaration, whose planned data include the forward months.
 
 **The freeze has two immutable stages; neither is edited after it is written.**
 
@@ -613,9 +697,10 @@ window's defined-month count for that metric.
   - **Notional classes,** by precedence: no ME at s(M) (the name left the admitted population); cutoff
     unavailable; above; at or below. The 2024-08 final liquidation is its own class, not size-classified. The
     classes reconcile to the book's total order notional.
-- **Signals: one-month horizon, for the three retained families and the composite.** These are
-  selection-conditioned: the families were chosen on stage A, and the label says so. The three dropped families
-  have no step-2 construction and are not printed.
+- **Signals: one-month horizon, for the value family and the composite.** With one family the two rank
+  identically; both are printed because the report lists every family and the composite. They are
+  selection-conditioned: the family was chosen on stage A, and the label says so. Families outside the book have no
+  step-2 construction and are not printed.
   - **Population:** universe names at M with the score and a step-1 holding-month return, per arm.
   - **IC_M:** Spearman correlation (average ranks for ties) between the score and the holding-month return.
     Undefined when fewer than 30 names, or either vector has zero variance.
@@ -665,7 +750,7 @@ window's defined-month count for that metric.
       the 5 is fixed by construction and monthly counts are printed.
     - **Per window:** step 0's metrics (net and gross return, volatility, maximum drawdown, active return, tracking
       error, IR, beta and maximum relative drawdown against B1) and an FF5+momentum regression. The regression is
-      G1's, with that window's exact months in place of the 119 and its Newey–West lag from that window's count,
+      G1's, with that window's exact months in place of stage B's 39 and its Newey–West lag from that window's count,
       and G1's numerical refusals mapped to `undefined`.
     - **Uncomputable windows:** if any month in the window is undefined, invalid or thin, every metric is printed
       as `undefined` with the reason and nothing is computed. **Computable windows** whose n_eff (below) is under
@@ -780,11 +865,85 @@ window's defined-month count for that metric.
      afresh under its own run id.
    - Replacing a bound capture needs a new declaration.
 
+## Build-time clarifications (normative)
+
+Interpretations fixed in code while slices 3–5 were built (#3609 handoffs, 2026-10-07 and 2026-10-08), written here
+so the spec states what the code does. Numbers are the handoffs' item numbers; item 16 was withdrawn, because
+§"Diagnostics", Weights, already answers it.
+
+**Paths, references and the verdict.**
+- **Stage B starts from the boundary's pre-trade NAV.** The path charges formation M's trades in return month M, so
+  the 2021-05 boundary formation's cost is folded into the first stage-B month, for the book, every draw and G1's
+  regression input. That cost also sits in the stage-A month 2021-05; the stage-A print says so. The turnover veto
+  reads stage B's formations, 2021-05..2024-07.
+- **B1's 2014-09-30 close (finding 157, item 20).** Slice 4's declaration script reads it with step 0's ETF raw-price
+  rule: the Intrader SPY series' last quarantine-usable bar of 2014-09 (`total_return_reader._MONTH_END_SQL`), with
+  a `bar_date BETWEEN 2014-09-01 AND 2014-09-30` bound added in SQL
+  (`declare_3609_step2.bounded_month_end_sql`), and the bar must fall on 2014-09-30. The close is pinned in the
+  declaration's `evidence` as `b1_close_2014_09_30=<decimal>`, finite and positive, and the report reads it from
+  there (`declared_b1_close`). It is a stage-A read, so no hold-out access is recorded. Measured read-only on
+  2026-10-08: series 7694, one row, close 197.020004.
+- **NYSE cutoffs (item 21).** Each stage freezes its own `reference_snapshot_jkp_nyse_cutoffs` to its own price
+  bound. Each formation takes its cutoff from its own stage's file. A date both files publish must agree, or the run
+  refuses `CUTOFF_INVALID`. A formation its stage's file lacks prints `unavailable` (§"Diagnostics", Universe).
+
+**Terminal ledger rows.**
+- **Item 18.** A `REFUSED` verdict raised during evaluation ends the run `completed`, with status `REFUSED` and its
+  code. A refusal at the report's gate, before `report_started`, writes no row.
+- **Items 22 and 24.** A pin mismatch in any report input (`read_verified_artefact` and `verify_capture` raise
+  `PanelError`), or a stage whose formations are not its declared grid (`ReportError`), ends the run `failed`, not
+  `REFUSED`. `failed` means a defect or an integrity failure, never a verdict.
+
+**Freeze mechanics.**
+- **Item 17.** The construction hash's roots are `factor_book_declaration.CONSTRUCTION_ROOTS`: the builder, the
+  report loader (`scripts/report_3609_step2.py`), the assembly (`report_3609_step2_assembly.py`), the report's entry
+  point (`report_3609_step2_run.py`) and the declared run's (`run_3609_step2.py`). §"Registration"'s "the report" means
+  these; a loader-rooted closure would miss the verdict.
+- **Item 19.** The data-capture manifest is canonical JSON at `<RESEARCH_ROOT>/factor_book_3609_step2_capture/<run
+  id>.json`, created exclusively (`scripts/capture_3609_step2.py`, `CAPTURE_SCHEMA`). It restates the run's `run_id`
+  and `access_id`, the SUB artefact's manifest sha256 and file hashes, and the stage-B artefact's manifest sha256,
+  pin map, input hashes and published rows. A fresh capture refuses while a committed `data_frozen` row may bind the
+  trial.
+- **Item 23.** The observation digest's `str(value)` is Python's `str` of psycopg's `Decimal`. On the dev DB it equals
+  `numeric::text` for all 5,744 rows of snapshots 39 and 40 (compared as strings, no value printed).
+
+**Diagnostics.**
+- **Item 1.** Turnover above 50%: the book's return minus the control median is read in month M + 1, which holds
+  formation M's result. Formation M's cost has its own column; M + 1's net return carries formation M + 1's cost.
+- **Item 2.** n_eff's "iid variance of the mean" is Σe²/n², the Newey–West estimator at lag 0, so a series with no
+  autocovariance has n_eff = n. The information ratio uses the same iid error, so n_eff = n / ratio² before the cap.
+- **Item 3.** A constant series is detected by equality (peak-to-peak 0); its t, IC-IR, n_eff and information figures
+  are then undefined.
+- **Item 4.** FF-12 weights are averaged over the formations held into a window's months, as the status weights are.
+  The `2x` flag needs the book's weight strictly above twice the reference's.
+- **Item 5.** Universe windows are keyed by formation: stage A is premise 3's 80 formations, stage B is 2021-05..
+  2024-07 plus the 2024-08 liquidation. The operations windows are keyed by return month.
+- **Item 6.** "The count" at or below the cutoff is printed for the top 1,000 and for the book's holdings.
+- **Item 7.** Notional by size class is per arm at base cost.
+- **Item 8.** A universe name with an unusable close also goes to the "price unavailable" cell.
+- **Item 9.** A cell or industry is reported if it appears at any formation. A month in which it is empty is
+  undefined, so that window's t and n_eff are undefined under the existing rules.
+- **Item 10.** A sale's reporting band when its name has no close at s(M) cannot occur: `check_closes` refuses
+  `PRICE_INVALID` first. The module raises `ValueError` if it ever does.
+- **Item 11.** A sub-book month is holding month M + 1 and carries formation M's costs; the book's path charges them in
+  month M. Sub-book windows therefore take the costs of the formations that opened their months.
+- **Item 12.** V_b is `Decision.share` of the path's post-cost NAV; g_b uses `Decision.returns` in the arm; C_b and L_b
+  come from `PathResult.trades`, banded at s(M) and s(2024-07).
+- **Item 13.** Sub-book windows are formation-keyed: stage B is formations 2021-05..2024-07 plus the liquidation, with
+  no boundary folding, and stage A is formations through 2021-04. The book's stage-A operations also charge the
+  2021-05 formation, so sub-book stage-A turnovers sum to the book's except for that formation.
+- **Item 14.** n_eff and the `insufficient` mark come from the base-cost net series and apply to all of that window's
+  metrics. A window is uncomputable if any month is undefined, invalid or thin in the base or the gross series.
+- **Item 15.** An empty window is left out (a run starting at stage B has no stage A); a window passed with no months
+  refuses `ValueError`.
+
 ## Known limits
 
 - No IR claim: ten years cannot certify a realistic edge (premise 2). A pass is a screen plus the published record.
 - G2 rests on 39 months, one regime, and point estimates.
-- RMW is not GP/A. HML stands for three value variables.
+- HML stands for three value variables. Condition 3 shows the book carries HML; each member's fidelity is condition
+  2's, from step 1.
+- Condition 3's power rests on stage-A planning inputs (premise 6).
 - Restricted estimand; the size proxy is not NYSE breakpoints; linkage under-covers dead and illiquid names.
 - Survivorship is unverified 2014-09..2018, and the panel is retrospectively filtered (step 1).
 - Historical eToro eligibility is unchecked.
@@ -823,8 +982,8 @@ window's defined-month count for that metric.
   readouts are specified. The prediction interval moves to step 3.
 
 **Round 2 (56 findings; `var/research/3609_step2/ckpt1_round2.txt` in the loop worktree):**
-- **1–8, and the gate-design parts of 3–5: open.** They are the operator's evidence-bar question on #3609 (power,
-  deflation, prior, search accounting, and whether G1 may use stage A). §"Decision rule" stays provisional.
+- **1–8, and the gate-design parts of 3–5:** held for the evidence-bar question until 2026-10-08, then applied under
+  the settled entry (below, "Gate opened").
 - **9:** a pass cannot authorise a different construction; step 3's forward construction (cap, MAX filter,
   intersection) needs its own passing implementation backtest.
 - **10–11:** a design-history inventory is frozen with the spec; stage A is a declared retrospective warm start
@@ -1029,3 +1188,19 @@ window's defined-month count for that metric.
   statistics.
 - **147:** each factor snapshot's row, payload and observations are read in one repeatable-read transaction, and the
   run evaluates only that verified collection, with no later factor or RF query.
+
+**Gate opened, 2026-10-08; round 2 findings 1–8 applied** under `docs/settled-decisions.md` 2026-10-08:
+- **1:** the claim is condition 3, powered in premise 6. The register row stays non-claiming in #2599's sense,
+  because its claiming form is an IR design (§"Registration").
+- **2:** G2 is condition 4: point estimates reported as a screen, zero margins with their basis, and the selection
+  statement (§"Decision rule").
+- **3:** G1 moved to stage B. Stage A is development only (§"Step 1's inheritance clause").
+- **4:** power computed from stage-A planning inputs. The first draft's composite could not be powered, so the book is
+  the value family alone (premise 6; code `fc14a3f1`, `FAMILIES`, `G1_LOADINGS`, `G2_MARGINS`).
+- **5:** members' fidelity is condition 2 (step 1 against JKP's series per characteristic). Condition 3 claims only the
+  HML exposure.
+- **6:** §"Adoption rationale" gives each series' sample relation, effect, uncertainty and implementation differences,
+  measured from the published series.
+- **7:** premise 2 is stated as conditional on the skill's generic prior.
+- **8:** the search accounting is connected to the tests (§"Registration").
+- The build-time items are in §"Build-time clarifications".
