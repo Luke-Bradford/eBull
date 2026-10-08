@@ -177,6 +177,8 @@ def test_b1_close_refuses_anything_but_one_valid_bar_on_the_session(
 def test_main_checks_the_file_pins_before_any_database_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A stage A manifest that does not verify refuses before the B1 read and the access row."""
     touched: list[str] = []
+    # An empty ledger: the committed one holds the real declaration once slice 4 has run.
+    monkeypatch.setattr(declare_mod, "COMMITTED_LEDGER_PATH", tmp_path / "3609-ledger.jsonl")
     monkeypatch.setattr(declare_mod, "STAGE_A_ARTEFACT", tmp_path)
     (tmp_path / "manifest.json").write_bytes(b"{}")
     monkeypatch.setattr(declare_mod, "TRIAL_REGISTER", TrialRegister("r", ()))
