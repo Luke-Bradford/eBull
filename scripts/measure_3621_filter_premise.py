@@ -9,16 +9,21 @@ book universe ``top1000``, the top 1,000 by ME with ties by ``name_key``; and ``
 it counts admitted names and the names flagged by:
 
 - ``max``: ``rmax1_21d`` at or above the top-decile cutoff, or a screened window (below);
-- ``max_screened``: the window holds a daily return outside the panel's extreme-return screen (below -90% or above
-  +300%). ⚠ Provisional: the build also applies ``rvol_21d``'s ratio-move screen, which this script does not;
+- ``max_screened``: the window holds a return outside the extreme-return screen (below -90% or above +300%) or an
+  unstamped ``adj_close / close`` ratio move above 50%, the two screens of ``factor_panel_prices.series_prices``;
 - ``max_short``: fewer than 15 daily returns in the window (not flagged);
+- ``max_zero_heavy``: 10 or more zero daily returns in the window (not flagged);
 - ``sub5``: raw close at s(M) below $5 (``factor_book_path.PRICE_FLOOR``);
 - ``young``: first admitted bar later than 36 months before s(M) (``factor_book_path.archive_seasoned``);
 - ``any``: any of ``max``, ``sub5``, ``young``.
 
-``rmax1_21d`` is the largest daily total return over the 21 SPY sessions ending at s(M), a return existing only
-between usable bars on adjacent sessions. The cutoff q is the ``ceil(0.9 N)``-th smallest of the N valid values at
-M over all admitted names (1-based); a name is flagged when its value is >= q.
+``rmax1_21d`` follows JKP (``bkelly-lab/ReplicationCrisis`` at ``67174c7f``: ``GlobalFactors/main.sas`` calls
+``roll_apply_daily`` with ``__n=1, __min=15`` for the ``_21d`` set; ``GlobalFactors/market_chars.sas``
+``roll_apply_daily`` takes ``max(ret)`` over the stock-month's daily returns and drops stock-months with
+``zero_obs >= 10``): the largest daily total return over the SPY sessions of s(M)'s calendar month up to s(M), at
+least 15 returns, fewer than 10 of them zero. A return exists only between usable bars on adjacent sessions. The
+cutoff q is the ``ceil(0.9 N)``-th smallest of the N valid values at M over all admitted names (1-based); a name is
+flagged when its value is >= q.
 
 Premise 2 reads the artefact's frozen JKP US monthly capped-value-weight factor returns for ``rmax1_21d``, ``age``
 and ``prc``. JKP publishes them already signed (a positive return is the direction JKP Table 9 expects), so no sign
@@ -36,13 +41,14 @@ import json
 import math
 import statistics
 import sys
+from bisect import bisect_left
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
 
 from app.services.factor_book_path import PRICE_FLOOR, archive_seasoned
 from app.services.factor_panel import formation_months
-from app.services.factor_panel_prices import RVOL_MIN_RETURNS, RVOL_SESSIONS, SCREEN_RETURN_HIGH, SCREEN_RETURN_LOW
+from app.services.factor_panel_prices import SCREEN_RATIO_MOVE, SCREEN_RETURN_HIGH, SCREEN_RETURN_LOW
 from scripts.build_3609_factor_panel import read_verified_artefact
 from scripts.measure_3609_step2_universe import BOOK_UNIVERSE_SIZE, DEFAULT_ARTEFACT, STAGE_A_MANIFEST_SHA256
 
@@ -52,8 +58,11 @@ FIRST_BARS = "inputs/first_bars.jsonl.gz"
 SESSIONS = "inputs/spy_sessions.jsonl.gz"
 JKP = "inputs/reference_snapshot_jkp_usa_monthly_vw_cap.jsonl.gz"
 POPULATIONS = ("micro", "small", "large", "mega", "top1000", "rest")
-FLAGS = ("admitted", "max", "max_screened", "max_short", "sub5", "young", "any")
+FLAGS = ("admitted", "max", "max_screened", "max_short", "max_zero_heavy", "sub5", "young", "any")
 MAX_DECILE = 0.9
+#: JKP ``main.sas`` ``roll_apply_daily(... __n=1, __min=15 ...)`` and ``market_chars.sas`` ``zero_obs < 10``.
+MAX_MIN_RETURNS = 15
+MAX_ZERO_RETURNS = 10
 JKP_WINDOWS = (
     ("rmax1_21d", "1926-01-01", "2014-09-30"),
     ("rmax1_21d", "2011-02-01", "2014-09-30"),
@@ -82,18 +91,61 @@ def _segment(me: float, p20: float, p50: float, p80: float) -> str:
     return "mega"
 
 
-def rmax(adj: dict[date, float], sessions: list[date], k: int) -> float | str:
-    """``rmax1_21d`` ending at ``sessions[k]``, or ``"screened"`` / ``"short"``."""
+def window_sessions(sessions: list[date], k: int) -> range:
+    """Indices of the SPY sessions in s(M)'s calendar month up to s(M) = ``sessions[k]`` (JKP ``__n=1``)."""
+    first = k
+    while first > 0 and (sessions[first - 1].year, sessions[first - 1].month) == (sessions[k].year, sessions[k].month):
+        first -= 1
+    return range(first, k + 1)
+
+
+class SeriesBars:
+    """One series' usable session bars and stamp positions, indexed by SPY session."""
+
+    def __init__(self, bars: list[tuple[date, float, float, bool, bool]], sessions: list[date]) -> None:
+        position = {d: i for i, d in enumerate(sessions)}
+        self.stamps = sorted(bisect_left(sessions, d) for d, _c, _a, stamped, _ok in bars if stamped)
+        admitted = [(position[d], c, a) for d, c, a, _st, ok in bars if ok and d in position]
+        self.index = [i for i, _c, _a in admitted]
+        self.close = [c for _i, c, _a in admitted]
+        self.adj = [a for _i, _c, a in admitted]
+
+    def stamped_between(self, i0: int, i1: int) -> bool:
+        """A stamp at a session index in (i0, i1]."""
+        j = bisect_left(self.stamps, i0 + 1)
+        return j < len(self.stamps) and self.stamps[j] <= i1
+
+
+def rmax(series: SeriesBars, sessions: list[date], k: int) -> float | str:
+    """``rmax1_21d`` at s(M) = ``sessions[k]``, or ``"screened"`` / ``"short"`` / ``"zero_heavy"``.
+
+    A daily return exists only between usable bars on adjacent SPY sessions. Screens, as
+    ``factor_panel_prices.series_prices``: a return below ``SCREEN_RETURN_LOW`` or above ``SCREEN_RETURN_HIGH``, or an
+    ``adj_close / close`` move above ``SCREEN_RATIO_MOVE`` between consecutive usable session bars with no stamp in
+    between, screens the window when the pair's later bar is inside it."""
+    window = window_sessions(sessions, k)
+    first = bisect_left(series.index, window.start)
+    last = bisect_left(series.index, k + 1)
     returns: list[float] = []
-    for i in range(k - RVOL_SESSIONS + 1, k + 1):
-        before, now = adj.get(sessions[i - 1]), adj.get(sessions[i])
-        if before is None or now is None:
+    zero = 0
+    for j in range(max(first, 1), last):
+        i0, i1 = series.index[j - 1], series.index[j]
+        ratio0 = series.adj[j - 1] / series.close[j - 1]
+        ratio1 = series.adj[j] / series.close[j]
+        if not series.stamped_between(i0, i1) and abs(math.log(ratio1 / ratio0)) > math.log(1.0 + SCREEN_RATIO_MOVE):
+            return "screened"
+        if i1 != i0 + 1:
             continue
-        r = now / before - 1.0
+        r = series.adj[j] / series.adj[j - 1] - 1.0
         if r < SCREEN_RETURN_LOW or r > SCREEN_RETURN_HIGH:
             return "screened"
         returns.append(r)
-    return max(returns) if len(returns) >= RVOL_MIN_RETURNS else "short"
+        zero += r == 0.0
+    if len(returns) < MAX_MIN_RETURNS:
+        return "short"
+    if zero >= MAX_ZERO_RETURNS:
+        return "zero_heavy"
+    return max(returns)
 
 
 def jkp_premise(data: bytes) -> None:
@@ -140,7 +192,7 @@ def main(artefact: Path) -> None:
     decision_days = {r[3] for month in rows.values() for r in month}
     position = {d: i for i, d in enumerate(sessions)}
     for day in decision_days:
-        if position.get(day, -1) < RVOL_SESSIONS:
+        if position.get(day, -1) < 31:
             raise MeasureError(f"s(M) {day} is not a loaded SPY session with a full window")
 
     # One pass over the daily bars: each series' raw close at every decision session and rmax1_21d there.
@@ -151,16 +203,13 @@ def main(artefact: Path) -> None:
             sid, bars = json.loads(line)
             if sid not in wanted:
                 continue
-            adj: dict[date, float] = {}
-            close: dict[date, float] = {}
-            for day, raw, adjusted, _volume, _stamped, usable in bars:
-                if usable:
-                    d = date.fromisoformat(day)
-                    adj[d], close[d] = adjusted, raw
+            parsed = [(date.fromisoformat(d), c, a, st, ok) for d, c, a, _volume, st, ok in bars]
+            close = {d: c for d, c, _a, _st, ok in parsed if ok}
+            series = SeriesBars(parsed, sessions)
             for day in decision_days:
                 if day in close:
                     close_at[(sid, day)] = close[day]
-                max_at[(sid, day)] = rmax(adj, sessions, position[day])
+                max_at[(sid, day)] = rmax(series, sessions, position[day])
 
     table: list[dict[str, dict[str, int]]] = []
     for month in grid:
@@ -185,6 +234,7 @@ def main(artefact: Path) -> None:
                 "max": value == "screened" or (isinstance(value, float) and value >= cutoff),
                 "max_screened": value == "screened",
                 "max_short": value == "short",
+                "max_zero_heavy": value == "zero_heavy",
                 "sub5": close_at[(sid, s)] < PRICE_FLOOR,
                 "young": not archive_seasoned(first_bar[sid], s),
             }
