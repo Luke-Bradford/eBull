@@ -20,8 +20,9 @@ no step-1 or step-2 selection read? Stage B has been seen before, through step 0
 inventory").
 
 **What the answer can say.**
-- **Pass:** the book meets the 2026-10-08 screen and is eligible for a declared forward demo test (step 3, the
-  ranking-pot successor). The case for the premium rests on the published record (§"Adoption rationale"). This
+- **Pass:** the book's computed result meets the 2026-10-08 screen's four conditions. That makes it a candidate for a
+  declared forward demo test (step 3, the ranking-pot successor), not eligible for one: step 3's declaration must
+  also show the entry's data requirements hold (premise 5). The case for the premium rests on the published record (§"Adoption rationale"). This
   backtest shows that our implementation carries the intended exposure, and that it did not lose to SPY or to random
   trading net of our costs on the validation sample.
 - **It does not prove a premium.** About ten years cannot statistically certify a realistic edge over SPY
@@ -129,10 +130,11 @@ one ("the survivorship-free corpus runs 2014-10..2024-08").
   series a year end more than 30 days from the suspension or filing date (step 1 premise 1's table). That reference is a selected population, not every exit; ticker reuse and those
   endpoint mismatches are unresolved. For 2014-09..2018 no independent exit list exists.
 
-So this spec does not claim a certified full-population survivorship-free stage B, and it does not read the entry
-as waiving anything. It reads the entry's requirement as the skill states it, with the certification gap disclosed
-on the verdict line (§"Registration", Labels). That gap is why a pass authorises nothing beyond §"Question"'s limits
-and why live capital keeps the full bar.
+So this spec does not claim a certified full-population survivorship-free stage B, and it does not decide whether
+the entry's data requirement is met. **A `PASS` here is the screen's computed result, not demo eligibility.**
+Eligibility is decided at step 3's declaration, which must show that the entry's data requirements hold, survivorship
+and full population included, or cite a recorded policy decision that settles them. This premise is the evidence it
+starts from, and the gap is labelled on the verdict line (§"Registration", Labels).
 
 **6. Condition 3 is powered for the value family alone (development data).** Checkpoint 1 round 2, finding 4,
 asked for the exposure test's power. Its planning inputs come from stage A, the development sample. For each of three
@@ -449,7 +451,8 @@ in a universe that changes each month.
 
 ## Decision rule (frozen before any outcome)
 
-The book **passes** the 2026-10-08 screen (`docs/settled-decisions.md`) only if all four of its conditions hold.
+The book's computed result **passes** the 2026-10-08 screen (`docs/settled-decisions.md`) only if all four of its
+conditions hold. A `PASS` is that computed result; demo eligibility is decided at step 3 (premise 5).
 Conditions 1 and 2 are met before the declaration and recorded in this spec, whose sha256 it pins. Conditions 3 and 4 are G1 and G2 below, which
 must both hold at base cost under **both** termination arms.
 
@@ -1278,3 +1281,12 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
 - **New 3:** factor-snapshot failures are integrity failures (`failed`); `G1_REFUSED` covers the evaluation window.
 - **New 4:** `read_factors` refuses a value that overflows its float.
 - **New 5:** premise 6's table is generated from the plan file.
+
+**Round 24 (`ckpt1_round24_final.txt`):** new 2–5 of round 23 resolved; three items and one new finding applied:
+- **22.1:** following Codex's fix, a `PASS` is the screen's computed result, not demo eligibility. Step 3's declaration
+  must show the entry's data requirements hold, survivorship and full population included, or cite a recorded policy
+  decision (premise 5, §"Question", §"Decision rule").
+- **22.8 and the new finding:** the plan manifest was stale because the planner was edited after the plan was
+  written. It is regenerated from the final planner, and `tests/test_3609_step2_plan_pin.py` now requires the
+  committed plan's sha256 to equal register r25's pin and its `script_sha256` to equal the committed planner's.
+- **23 new 1:** each prior series must equal its frozen monthly grid, from a first month frozen per series to 2014-09.
