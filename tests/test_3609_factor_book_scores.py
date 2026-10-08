@@ -136,8 +136,8 @@ def test_a_small_industry_gets_no_score_and_no_cross_industry_fallback() -> None
     scores = composite_scores(names, industry, signed)
     telcm = tuple(n for n in names if industry[n] == "Telcm")
     assert not set(telcm) & set(scores.composite)
-    assert scores.uninformative[("gp_at", "Telcm")] == telcm
-    assert ("gp_at", "Durbl") not in scores.uninformative
+    assert scores.uninformative[("be_me", "Telcm")] == telcm
+    assert ("be_me", "Durbl") not in scores.uninformative
 
 
 def test_unclassified_names_are_their_own_group() -> None:
@@ -154,19 +154,23 @@ def test_a_family_averages_the_members_present() -> None:
     assert 5 in scores.by_operation["value"] and 5 not in scores.by_operation["ni_me"]
 
 
-def test_a_composite_needs_two_of_the_three_families() -> None:
+def test_the_composite_is_the_value_family_alone() -> None:
     names, industry, signed = _formation({"Durbl": 12})
-    del signed["gp_at"][3], signed["at_gr1"][3]  # value only
-    del signed["gp_at"][4]  # value and investment
-    composite = composite_scores(names, industry, signed).composite
-    assert 3 not in composite and 4 in composite
+    for member in ("be_me", "ni_me", "ocf_me"):
+        del signed[member][3]  # no value member: no family, so no composite
+    del signed["be_me"][4], signed["ni_me"][4]  # one member left: the family, so the composite
+    scores = composite_scores(names, industry, signed)
+    assert 3 not in scores.composite and 4 in scores.composite
+    assert "gp_a" not in scores.by_operation and "investment" not in scores.by_operation
+    # One family: the composite orders names exactly as the value family does.
+    assert bands(scores.composite).order == bands(scores.by_operation["value"]).order
 
 
 def test_a_non_finite_value_is_no_input() -> None:
     names, industry, signed = _formation({"Durbl": 12})
-    signed["gp_at"][2] = math.nan
+    signed["be_me"][2] = math.nan
     scores = composite_scores(names, industry, signed)
-    assert 2 not in scores.by_operation["gp_at"] and 2 in scores.composite
+    assert 2 not in scores.by_operation["be_me"] and 2 in scores.composite
 
 
 def test_a_name_without_an_industry_is_a_caller_error() -> None:

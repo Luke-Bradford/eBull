@@ -5,10 +5,11 @@ Spec: ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"Diagnostics", "U
 functions over the loader's :class:`~scripts.report_3609_step2.PanelMonth`, each formation's book universe, the
 book's decisions and its base-cost trades.
 
-* **Premise 3's table, on every formation:** admitted names; the ME of the 1,000th name; the top 1,000's family
-  counts (a family is present when any member has a value) and SIC 6221 count; and, against JKP's NYSE-median
-  cutoff (``nyse_p50``, USD millions, normalised to USD): names above it, the overlap with the top 1,000, and the top
-  1,000's share of the above-cutoff ME. "Above" is ME > cutoff; "at or below" is its complement.
+* **Premise 3's table, on every formation:** admitted names; the ME of the 1,000th name; the count of the top
+  1,000 with every book family present (a family is present when any member has a value) and SIC 6221 count; and,
+  against JKP's NYSE-median cutoff (``nyse_p50``, USD millions, normalised to USD): names above it, the overlap
+  with the top 1,000, and the top 1,000's share of the above-cutoff ME. "Above" is ME > cutoff; "at or below" is
+  its complement.
 * **The book at or below the cutoff,** per formation: its post-trade holdings and weight there (weights as
   ``Decision.share``, so a formation holding nothing is all cash and weighs zero).
 * **Notional classes,** per arm at base cost, by precedence: no ME at s(M) (the name left the admitted population);
@@ -106,8 +107,7 @@ class UniverseMonth:
     formation: date
     admitted: int
     me_rank_last: float
-    top_fam3: int
-    top_fam2: int
+    top_all_families: int
     top_sic6221: int
     cutoff: float | None
     above: int | None
@@ -154,8 +154,7 @@ def universe_month(
         "formation": month.formation,
         "admitted": len(me),
         "me_rank_last": min(me[name] for name in top),
-        "top_fam3": sum(1 for n in families.values() if n == len(FAMILIES)),
-        "top_fam2": sum(1 for n in families.values() if n >= 2),
+        "top_all_families": sum(1 for n in families.values() if n == len(FAMILIES)),
         "top_sic6221": sum(1 for name in top if month.admitted[name].sic == COMMODITY_SIC),
         "book_holdings": len(decision.targets),
     }

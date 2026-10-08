@@ -7,11 +7,11 @@ non-positive-wealth condition (verdict-order step 1, ``REFUSED``), so every mont
 positive. The statistics are step 0's (``scripts/report_3609_baselines.py``): its Newey-West regression and lag
 rule, its factor names and its nearest-rank percentile.
 
-* **G1** (whole path, base cost, per arm): the book's monthly return in excess of RF on FF5 plus momentum; HML, RMW
-  and CMA must each load positively with a one-sided t above z(1 − 0.05/3). Its numerical refusals are checked before
-  any coefficient is read.
-* **G2** (stage B, base cost, per arm): the book's annualised log growth G = (12/n) Σ ln(1 + r) above B1's and above
-  the nearest-rank median of the control draws'.
+* **G1**, the 2026-10-08 settled entry's condition 3 (stage B, base cost, per arm): the book's stage-B monthly return
+  in excess of RF on FF5 plus momentum; HML, the value family's intended loading, must load positively with a
+  one-sided t above z(0.95). Its numerical refusals are checked before any coefficient is read.
+* **G2**, condition 4 (stage B, base cost, per arm): the book's annualised log growth G = (12/n) Σ ln(1 + r) above
+  B1's and above the nearest-rank median of the control draws', each by more than its frozen margin (zero).
 * **Turnover veto:** any stage-B month with the book's one-way turnover above 50% at base cost, in either arm.
 * **Annotations,** computed only for a pass candidate: "fails at stress cost" and "depends on <year>".
 
@@ -49,10 +49,12 @@ STAGE_B_FORMATIONS: Final[tuple[Month, Month]] = ((2021, 5), (2024, 7))
 GROSS: Final = "gross"
 BASE: Final = "net"
 STRESS: Final = "stress_2x"
-#: G1's intended loadings: HML for value, RMW for GP/A, CMA for investment.
-G1_LOADINGS: Final = ("HML", "RMW", "CMA")
-#: z(1 − 0.05/3), one-sided, Bonferroni over the three loadings (the spec prints 2.128).
+#: G1's intended loadings: HML for the value family, the book's only family.
+G1_LOADINGS: Final = ("HML",)
+#: z(1 − 0.05/k), one-sided, Bonferroni over the k intended loadings; k = 1 here (the spec prints 1.645).
 G1_CRITICAL: Final = NormalDist().inv_cdf(1.0 - 0.05 / len(G1_LOADINGS))
+#: Condition 4's frozen margins in G over B1 and over the control median, and their basis: §"Decision rule".
+G2_MARGINS: Final[Mapping[str, float]] = {"B1": 0.0, "control median": 0.0}
 #: ``research-process.md``: above this one-way monthly turnover the net expected benefit must be shown.
 TURNOVER_VETO: Final = 0.5
 
@@ -134,7 +136,9 @@ class G2Result:
     def failing(self) -> tuple[str, ...]:
         """The comparisons the book does not beat."""
         return tuple(
-            name for name, value in (("B1", self.b1), ("control median", self.control_median)) if self.book <= value
+            name
+            for name, value in (("B1", self.b1), ("control median", self.control_median))
+            if self.book - value <= G2_MARGINS[name]
         )
 
     @property
@@ -157,19 +161,24 @@ def stage_b_returns(
     return out
 
 
+def _stage_b(run: SeriesRun, arm: AmbiguityArm, cost: str, window: Sequence[Month]) -> dict[Month, float]:
+    """The book's stage-B slice in one arm and cost scenario."""
+    book = run.book[(arm, cost)]
+    return stage_b_returns(book.returns, book.nav, book.boundary, window)
+
+
 def g2(
     run: SeriesRun, arm: AmbiguityArm, cost: str, window: Sequence[Month], months: Sequence[Month] | None = None
 ) -> G2Result:
     """G2's three G values over ``months`` (default: all of ``window``, stage B) of the stage-B slices."""
     months = window if months is None else months
     label = f"{arm} {cost}"
-    book = run.book[(arm, cost)]
     draws = [
         log_growth(stage_b_returns(s.returns, s.nav, s.boundary, window), months, f"control draw {d} {label}")
         for d, s in enumerate(run.control[(arm, cost)])
     ]
     return G2Result(
-        log_growth(stage_b_returns(book.returns, book.nav, book.boundary, window), months, f"book {label}"),
+        log_growth(_stage_b(run, arm, cost, window), months, f"book {label}"),
         log_growth(run.b1[cost].returns, months, f"b1 {cost}"),
         nearest_rank(draws, 50),
     )
@@ -234,13 +243,15 @@ class Verdict:
 def verdict(run: SeriesRun, factors: Mapping[str, Mapping[Month, float]]) -> Verdict:
     """§"Decision rule", verdict order steps 2-6; step 1 (``REFUSED``) was raised by ``run_series`` or is raised
     here (``COMPARATOR_INVALID`` from a G)."""
-    # A caller-contract precondition, not a gate: a run that does not span the declared path (stage B included) is
-    # not the declared run, so it gets no verdict at all. Checking it after the INSUFFICIENT return would label such
-    # a run (say, stage A alone) INSUFFICIENT, a verdict on a run that was never the declared one.
+    # A caller-contract precondition, not a gate: a run whose months do not cover stage B is not the declared run, so
+    # it gets no verdict at all. Checking it after the INSUFFICIENT return would label such a run (say, stage A
+    # alone) INSUFFICIENT, a verdict on a run that was never the declared one. This checks stage B only; the whole
+    # declared path (each stage's formations equal to its declared grid) is enforced before evaluation by
+    # ``report_3609_step2_run.evaluate_run`` (``STAGE_GRIDS``), whose mismatch ends the run ``failed``.
     window = stage_b_months(run.months)
     if run.insufficient:
         return Verdict("INSUFFICIENT", insufficient=run.insufficient)
-    g1s = {arm: g1(run.book[(arm, BASE)].returns, factors, run.months) for arm in ARMS}
+    g1s = {arm: g1(_stage_b(run, arm, BASE, window), factors, window) for arm in ARMS}
     refused = [f"{arm}: {r.refusal}" for arm, r in g1s.items() if r.refusal is not None]
     if refused:
         return Verdict("G1_REFUSED", "; ".join(refused), g1=g1s)
@@ -259,6 +270,7 @@ __all__ = [
     "BASE",
     "G1_CRITICAL",
     "G1_LOADINGS",
+    "G2_MARGINS",
     "GROSS",
     "STAGE_B",
     "STAGE_B_FORMATIONS",

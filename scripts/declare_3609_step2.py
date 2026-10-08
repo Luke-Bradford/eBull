@@ -88,10 +88,12 @@ from scripts.report_3609_step2_inputs import (
 
 SPEC_REFERENCE: Final = 'docs/research/2026-10-06-3609-step2-factor-book.md §"Registration" and §"Slices" item 4'
 DESCRIPTION: Final = (
-    "#3609 step 2 factor composite book, version 1: one configuration (the spec's book, its matched random control, "
-    "references and diagnostics) on stage A (development, formations 2014-09..2021-04) and stage B (reused "
-    "validation, formations 2021-05..2024-07), net of step 0's costs. Non-claiming: no TrialDesign and no IR claim; "
-    "the forward design moves to step 3's claiming declaration. Step 1's 16 searches stay counted."
+    "#3609 step 2 value book, version 1: one configuration (the spec's value-family book, its matched random "
+    "control, references and diagnostics) on stage A (development, formations 2014-09..2021-04) and stage B (reused "
+    "validation, formations 2021-05..2024-07), net of step 0's costs, screened by the 2026-10-08 settled entry's "
+    "four conditions. Its claim is condition 3, the HML loading on stage B, powered in spec premise 6. No "
+    "TrialDesign: #2599's claiming design is an IR margin, which this screen does not claim. Step 1's 16 searches "
+    "and the 3 exposure-planning searches stay counted."
 )
 #: The hold-out access identity, named in ``evidence`` (spec §"Registration").
 HOLDOUT_STRATEGY_LABEL: Final = "holdout_strategy_id"

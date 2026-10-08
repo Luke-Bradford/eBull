@@ -12341,3 +12341,18 @@ neighbouring container and match it.**
   pointer to the dated entry, with no restated thresholds, conditions or figures. Before pushing, grep the skill
   for each number and condition in the entry; any hit is a restatement.
 - Enforced in: this prevention log; `.claude/skills/quant/research-process.md` §"From backtest to forward test".
+
+### A test called "powered" carries its power calculation, from the construction's own planning inputs (#3609)
+
+- Failure (Codex checkpoint 1 round 2 on PR #3666, applied 2026-10-08): the step 2 draft called its exposure gate
+  "powered because loadings are identified from co-movement" and gated three FF loadings (HML, RMW, CMA) for a
+  three-family composite. Identification is not power. Measured on stage A (development), the composite's CMA
+  loading was 0.02 (t 0.3) and RMW's t 1.7: investment's exposure was not separable from value's, and adding GP/A to
+  value cancelled HML (0.03). On stage B's 39 months the gate would have failed for want of data, spending the one
+  confirmatory sample. Reproduce: `PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure`.
+- Prevention: before a declaration freezes, compute the gate's power from planning inputs of the construction itself
+  (development data or sourced series, never the confirmation sample), per intended loading and for the conjunction
+  the verdict actually requires (every loading, every arm), against a declared target, with a sensitivity. A composite of correlated families needs each family's partial loading checked
+  separately; an integrated composite can cancel one exposure with another.
+- Enforced in: the step 2 spec, premise 6; `scripts/report_3609_step2_verdict.py` `G1_LOADINGS`, tested by
+  `tests/test_3609_step2_verdict.py::test_g1_reads_stage_b_only`.

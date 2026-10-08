@@ -235,7 +235,15 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: characteristics x 2 arms = 16 searches, enumerated by its spec before any evaluation and non-claiming. Not a
 #: `hunt-` entry, so it counts in M_inh: 502 -> 518. Measured the same way before the bump: the SAME five
 #: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-06-r24"
+#:
+#: r25 (2026-10-08, #3609 step 2) adds `3609-step2-exposure-planning-2026-10-08`: three family sets scored on stage A
+#: and regressed on FF5 + momentum for condition 3's power plan (exposures only, no return printed) = 3 searches. Not
+#: a `hunt-` entry, so it counts in M_inh: 518 -> 521. Measured the same way before the bump: the SAME five groups,
+#: 488 rows, every one `harness_validation`. It strands nothing that could have promoted. Its evidence pins the plan
+#: file; `tests/test_3609_step2_plan_pin.py` re-checks on every pre-push run that the file is that pin and that its
+#: recorded planner and import-closure hashes (72 modules, which `report_3609_step2_inputs.py` is not among) are the
+#: committed tree's. This file is outside the closure, so editing it never moves the hash.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-08-r25"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1558,6 +1566,25 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
             searches=16,
+        ),
+        DeclaredTrial(
+            trial_id="3609-step2-exposure-planning-2026-10-08",
+            description=(
+                "#3609 step 2 condition-3 power plan: the book's scorer, decisions and base-cost path on stage A "
+                "(development, formations 2014-09..2021-04) for three family sets (value + GP/A + investment, value, "
+                "value + GP/A), each regressed on FF5 + momentum in both termination arms. Exposures, standard "
+                "errors, residual sd and R^2 were printed; no mean return, alpha or growth was. It chose the value "
+                "family as step 2's book (spec premise 6). Non-claiming; stage B was not read."
+            ),
+            evidence=(
+                "docs/research/2026-10-06-3609-step2-factor-book.md premise 6; "
+                "plan docs/research/3609-step2-exposure-plan.json "
+                "sha256=f60cb64e402615556ba8a46204bf5381168372dc29e36872cd36bf00476c109d "
+                "(script, stage-A pin and input-row digests inside); "
+                "reproduce with PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure (#3609, 2026-10-08)"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=3,
         ),
         DeclaredTrial(
             trial_id="recent-evidence-refresh-cost-v4-2026-09-26",
