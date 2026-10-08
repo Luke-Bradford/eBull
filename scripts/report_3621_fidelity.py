@@ -23,6 +23,7 @@ from datetime import date
 from typing import Final
 
 from app.services.avoidance_filters import MaxReading
+from app.services.factor_panel import formation_months
 from app.services.factor_panel_fidelity import (
     ARMS,
     CORRELATION_BAR,
@@ -78,18 +79,25 @@ class MaxFidelity:
         return self.verdict is Verdict.PASS
 
 
+#: Stage A's holding months, fixed: step 1's formation grid shifted one month (2014-10..2021-05).
+STAGE_A_GRID: Final = tuple(shift_month(month_key(f), 1) for f in formation_months())
+
+
 def max_fidelity(formations: Sequence[FidelityFormation], published: Mapping[str, float], sign: int) -> MaxFidelity:
-    """The fidelity verdict over the formations' holding months; ``published`` is JKP's series by ``YYYY-MM``."""
-    grid = [shift_month(month_key(f.formation), 1) for f in formations]
-    accumulator = SeriesAccumulator(grid)
-    for f, month in zip(formations, grid, strict=True):
+    """The fidelity verdict over ``STAGE_A_GRID``; ``published`` is JKP's series by ``YYYY-MM``. A formation off the
+    grid or repeated refuses (``FidelityError``); a grid month with no formation is undersized, as in step 1."""
+    accumulator = SeriesAccumulator(STAGE_A_GRID)
+    for f in formations:
         got = (
             factor_month(f.holdings, f.micro_cutoff_usd, f.cap_usd, sign)
             if f.holdings
             else FactorMonth(0, 0, None, None)
         )
-        accumulator.add(month, got)
+        accumulator.add(shift_month(month_key(f.formation), 1), got)
     # As ``SeriesAccumulator.result``: a grid month never added is undersized too; one leg count is kept per add.
-    undersized = accumulator.undersized + len(grid) - len(accumulator.leg_counts["low"])
-    arms = {arm: compare_arm(accumulator.ours[arm], published, grid, undersized, MAX_CORRELATION_BAR) for arm in ARMS}
+    undersized = accumulator.undersized + len(STAGE_A_GRID) - len(accumulator.leg_counts["low"])
+    arms = {
+        arm: compare_arm(accumulator.ours[arm], published, STAGE_A_GRID, undersized, MAX_CORRELATION_BAR)
+        for arm in ARMS
+    }
     return MaxFidelity(characteristic_verdict(arms), arms, undersized)

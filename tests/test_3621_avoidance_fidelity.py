@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import random
-from datetime import date
 
 import pytest
 
 from app.services.avoidance_filters import MaxMissing, MaxReading
 from app.services.factor_book_path import HoldingReturn
-from app.services.factor_panel import add_months
-from app.services.factor_panel_fidelity import Bar, Holding, Verdict, factor_month, month_key, shift_month
+from app.services.factor_panel import add_months, formation_months
+from app.services.factor_panel_fidelity import (
+    Bar,
+    FidelityError,
+    Holding,
+    Verdict,
+    factor_month,
+    month_key,
+    shift_month,
+)
 from app.services.factor_panel_prices import HoldingStatus
 from app.services.factor_panel_reference import load_table9_signs
 from scripts.report_3609_step2 import PanelName
@@ -23,7 +30,7 @@ from scripts.report_3621_fidelity import (
 )
 
 P20, P80 = 100.0, 1000.0
-FORMATIONS = [add_months(date(2014, 9, 30), i) for i in range(80)]  # holding months 2014-10..2021-05
+FORMATIONS = list(formation_months())  # holding months 2014-10..2021-05
 
 
 def test_configuration_is_step_1s_price_bar_and_table_9s_sign() -> None:
@@ -100,3 +107,16 @@ def test_empty_formations_count_as_undersized_and_short_coverage_is_insufficient
     assert got.verdict is Verdict.FAIL and Bar.UNDERSIZED in got.arms["worst_case"].failed_bars
     short = max_fidelity(_formations(random.Random(7)), dict(list(ours.items())[:50]), -1)
     assert short.verdict is Verdict.INSUFFICIENT and not short.passed
+
+
+def test_the_grid_is_fixed_so_missing_formations_are_undersized_and_off_grid_ones_refuse() -> None:
+    formations = _formations(random.Random(11))
+    ours = _ours(formations)
+    got = max_fidelity(formations[:61], ours, -1)  # a contiguous subset still has 61 months of pairs
+    assert got.undersized == 19 and got.verdict is Verdict.FAIL
+    assert Bar.UNDERSIZED in got.arms["best_case"].failed_bars
+    stray = FidelityFormation(add_months(FORMATIONS[-1], 1), formations[0].holdings, P20, P80)
+    with pytest.raises(FidelityError, match="grid"):
+        max_fidelity([*formations, stray], ours, -1)
+    with pytest.raises(FidelityError, match="grid"):
+        max_fidelity([formations[0], formations[0]], ours, -1)
