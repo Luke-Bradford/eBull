@@ -211,3 +211,10 @@ def test_a_second_attempt_cannot_take_the_ledger_lock(ledgers: Path) -> None:
 def test_write_durably_writes_the_bytes(tmp_path: Path) -> None:
     plan.write_durably(tmp_path / "x.json", b"{}\n")
     assert (tmp_path / "x.json").read_bytes() == b"{}\n"
+
+
+def test_attempt_artefacts_live_under_the_gitignored_var_tree() -> None:
+    """Bot PREVENTION (retry-path-untested): an attempt's own artefacts never dirty the checkout."""
+    assert plan.LEDGER_PATH.relative_to(plan._REPO_ROOT).parts[0] == "var"
+    assert plan.output_path("x").parent == plan.LEDGER_PATH.parent
+    assert "/var/*" in (plan._REPO_ROOT / ".gitignore").read_text().splitlines()

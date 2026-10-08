@@ -67,7 +67,9 @@ CONTINUE: Final = "CONTINUE"
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 SPEC_PATH: Final = _REPO_ROOT / "docs/research/2026-10-06-3620-cross-asset-tsmom.md"
-OUTPUT_PATH: Final = _REPO_ROOT / "docs/research/3620-condition4-feasibility.json"
+#: Where the follow-up PR commits a completed attempt's output. The run itself writes only under ``var/`` (gitignored),
+#: so a refused or failed attempt leaves the checkout clean for its retry.
+COMMITTED_OUTPUT_PATH: Final = _REPO_ROOT / "docs/research/3620-condition4-feasibility.json"
 LEDGER_PATH: Final = _REPO_ROOT / "var/research/3620/feasibility-ledger.jsonl"
 COMMITTED_LEDGER_PATH: Final = _REPO_ROOT / "docs/research/3620-feasibility-ledger.jsonl"
 HASHED_CODE: Final = (
@@ -223,7 +225,11 @@ def evaluate_record(record: Mapping[str, Any]) -> dict[str, Any]:
 SUMMARY_KEYS: Final = ("verdict", "reason", "n", "g_book", "g_b1", "months")
 
 
-def reproduce(path: Path = OUTPUT_PATH) -> bool:
+def output_path(run_id: str) -> Path:
+    return LEDGER_PATH.parent / f"feasibility-{run_id}.json"
+
+
+def reproduce(path: Path) -> bool:
     """Re-evaluate the saved inputs; True iff the summary and verdict match the file's."""
     output = json.loads(path.read_text(encoding="utf-8"))
     if hashlib.sha256(canonical_json(output["inputs"])).hexdigest() != output["input_sha256"]:
@@ -343,13 +349,21 @@ def run(conn: psycopg.Connection[Any], head: str) -> dict[str, Any]:
             "input_sha256": hashlib.sha256(canonical_json(record)).hexdigest(),
             **evaluate_record(record),
         }
-        write_durably(OUTPUT_PATH, canonical_json(output) + b"\n")
+        write_durably(output_path(run_id), canonical_json(output) + b"\n")
     except BaseException as exc:
         append_ledger(LEDGER_PATH, _row("failed", run_id, error=repr(exc)))
         raise
     terminal = "refused" if output["verdict"] == REFUSED else "completed"
+    path = output_path(run_id)
     append_ledger(
-        LEDGER_PATH, _row(terminal, run_id, verdict=output["verdict"], output_sha256=_sha256_file(OUTPUT_PATH))
+        LEDGER_PATH,
+        _row(
+            terminal,
+            run_id,
+            verdict=output["verdict"],
+            output=str(path.relative_to(_REPO_ROOT)),
+            output_sha256=_sha256_file(path),
+        ),
     )
     return output
 
@@ -370,7 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if "g_book" in out:
         print(f"G TSMOM {out['g_book']!r}; G B1 {out['g_b1']!r}")
     print(f"verdict {out['verdict']}" + (f" ({out['reason']})" if out["reason"] else ""))
-    print(f"reproduces: {reproduce()}")
+    print(f"output {output_path(out['run_id'])}; reproduces: {reproduce(output_path(out['run_id']))}")
     return 0
 
 

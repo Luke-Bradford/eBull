@@ -440,7 +440,8 @@ rejections are accepted. It follows #3609 step 2's register-r25 planning look, w
 - **Before computing,** it fsyncs `evaluation_began`. The row carries HEAD, the spec's sha256, the code hashes (the
   script, `tsmom_etf.py`, `etf_total_return_reader.py`, `total_return_reader.py`, `cost_model.py`,
   `trial_register.py`), `COST_MODEL_ID`, the panel version, the factor snapshot ids and the census bounds.
-- **The output file** is `docs/research/3620-condition4-feasibility.json`, in canonical JSON (`canonical_json`). It
+- **The output file** is `var/research/3620/feasibility-<run_id>.json`, in canonical JSON (`canonical_json`).
+  It is written under the gitignored `var/` so a refused or failed attempt leaves the checkout clean for its retry. It
   holds:
   - the same fields;
   - the census metadata that decides membership: each fund's first and last panel month and first eligible month,
@@ -451,7 +452,8 @@ rejections are accepted. It follows #3609 step 2's register-r25 planning look, w
 
   `reproduce` re-evaluates the saved inputs and must return the same summary and verdict. The terminal row names the
   file's sha256.
-- **A follow-up PR commits the output and the ledger rows** (`docs/research/3620-feasibility-ledger.jsonl`). The
+- **A follow-up PR commits the completed output** as `docs/research/3620-condition4-feasibility.json` **and the
+  ledger rows** (`docs/research/3620-feasibility-ledger.jsonl`). The
   register entry is never edited.
 
 **The slice 3 gate must:**
