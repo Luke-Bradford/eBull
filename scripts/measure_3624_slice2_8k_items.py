@@ -76,7 +76,7 @@ ITEM_CAP: Final = 10
 #: Inventory fields every listed page must hold as arrays; ``items`` may be absent (its own ``missing`` policy).
 _REQUIRED: Final = ("accessionNumber", "filingDate", "form")
 #: Patterns of the consumer audit, run with ``git grep`` over ``app/`` and ``scripts/`` at the measured revision.
-_AUDIT_PATTERNS: Final = (r"4\.0[12]", "sec_8k_item_codes", "red_flag_score")
+_AUDIT_PATTERNS: Final = (r"4\.0[12]", "sec_8k_item_codes", "red_flag_score", "score_filing_red_flag")
 _SEVERITY: Final = "SELECT code, severity FROM sec_8k_item_codes WHERE code = ANY(%(codes)s) ORDER BY code"
 
 _CIKS: Final = """
@@ -430,16 +430,24 @@ CORRECTION_TAGS: Final = ("CORRECTION", "DELETION", "TIMESTAMP")
 #: An opening tag anywhere, and one that starts its line after optional blanks (the layout the grammar accepts).
 _ANY_TAG: Final = re.compile(r"<([A-Z][A-Z0-9-]*)>")
 _LINE_TAG: Final = re.compile(r"^[ \t]*<([A-Z][A-Z0-9-]*)>", re.M)
+#: Every opening or closing tag name, any case.
+_ANY_NAME: Final = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)>")
 
 
 def parse_header(text: str) -> dict[str, Any]:
     """The SGML header's acceptance (Eastern wall clock), type, filing date, filing-date change, items, filer CIKs.
 
     Tags are counted wherever they occur in the retrieved body, inside the header block or not; a value is read only
-    from a tag that starts its line (after blanks). ``misplaced_tags`` counts opening tags that do not, and any makes
-    the parse ``malformed``, so an unexpected layout fails closed instead of hiding a tag."""
+    from a tag that starts its line (after blanks). The parse is ``malformed`` (fail closed, never a hidden tag) on:
+    ``misplaced_tags``, opening tags that do not start their line; ``envelope_ok`` false, anything but exactly one
+    ``<SEC-HEADER>`` followed by exactly one ``</SEC-HEADER>``; ``outside_tags``, opening tags outside that envelope;
+    ``noncanonical_tags``, tag names not in upper case (SGML names are case-insensitive under the PDS declaration, so
+    a lower-case tag would otherwise escape every upper-case match)."""
     found = _SGML.search(text)
     body = found.group(1) if found else text
+    opens, closes = text.count("<SEC-HEADER>"), text.count("</SEC-HEADER>")
+    envelope_ok = opens == 1 and closes == 1 and text.index("<SEC-HEADER>") < text.index("</SEC-HEADER>")
+    outside = text[: found.start()] + text[found.end() :] if found else text
 
     def one(tag: str) -> str | None:
         match = re.search(rf"^[ \t]*<{tag}>(.*)$", body, re.M)
@@ -451,6 +459,10 @@ def parse_header(text: str) -> dict[str, Any]:
     return {
         "header_blocks": len(_SGML.findall(text)),
         "misplaced_tags": len(_ANY_TAG.findall(text)) - len(_LINE_TAG.findall(text)),
+        "envelope_ok": envelope_ok,
+        "outside_tags": len(_ANY_TAG.findall(outside)) if envelope_ok else None,
+        "noncanonical_tags": sum(1 for name in _ANY_NAME.findall(text) if name != name.upper()),
+        "markers_in_block": sorted(t for t in MARKERS if f"<{t}>" in body) if found else [],
         # Every opening tag name anywhere in the raw body, for the tag-presence census.
         "raw_tags": sorted(set(_ANY_TAG.findall(text))),
         "repeated_tags": sorted(t for t in _SCALAR_TAGS if anywhere(t) > 1),
@@ -548,7 +560,12 @@ def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> d
     out = {
         "retrieval": "ok",
         "parse": "ok"
-        if header["header_blocks"] == 1 and not header["repeated_tags"] and not header["misplaced_tags"]
+        if header["header_blocks"] == 1
+        and header["envelope_ok"]
+        and header["outside_tags"] == 0
+        and not header["noncanonical_tags"]
+        and not header["repeated_tags"]
+        and not header["misplaced_tags"]
         else "malformed",
         "accession": "ok" if numbers == [accession] else "no_accession" if not numbers else "accession_mismatch",
         **{
@@ -722,6 +739,10 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
         for cik in r["classes"]:
             outcome_rows.update(f"{field}={value}" for field, value in r["field_outcomes"][cik].items())
     marker_presence = Counter(m for r in rows for m in r["markers"])
+    marker_in_block = Counter(m for r in rows for m in r["markers_in_block"])
+    structure = Counter(
+        f"{k}={r[k]}" for r in rows for k in ("envelope_ok", "outside_tags", "noncanonical_tags", "misplaced_tags")
+    )
     for kind, accession, _ in failures:
         n_rows = len({x[0] for x in arch[accession] if x[0] in ours})
         class_rows[f"{kind}_rows"] += n_rows
@@ -743,7 +764,9 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
             "class_rows": dict(sorted(class_rows.items())),
             "class_accessions": dict(sorted(class_accessions.items())),
             "field_outcome_rows": dict(sorted(outcome_rows.items())),
-            "marker_presence_in_header_block": dict(sorted(marker_presence.items())),
+            "marker_presence": dict(sorted(marker_presence.items())),
+            "marker_presence_in_header_block": dict(sorted(marker_in_block.items())),
+            "structure": dict(sorted(structure.items())),
             "archive_item_count_by_disagreement": dict(sorted(lengths.items(), key=lambda kv: kv[0])),
             "tags": {k: dict(sorted(v.items())) for k, v in tags.items()},
             "filing_minus_acceptance_days": dict(sorted(lag.items(), key=lambda kv: int(kv[0]))),
