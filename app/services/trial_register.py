@@ -241,9 +241,14 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: a `hunt-` entry, so it counts in M_inh: 518 -> 521. Measured the same way before the bump: the SAME five groups,
 #: 488 rows, every one `harness_validation`. It strands nothing that could have promoted. Its evidence pins the plan
 #: file; `tests/test_3609_step2_plan_pin.py` re-checks on every pre-push run that the file is that pin and that its
-#: recorded planner and import-closure hashes (72 modules, which `report_3609_step2_inputs.py` is not among) are the
+#: recorded planner and import-closure hashes (`report_3609_step2_inputs.py` is not in that closure) are the
 #: committed tree's. This file is outside the closure, so editing it never moves the hash.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-08-r25"
+#:
+#: r26 (2026-10-08, #3609 step 2 slice 4) adds `3609-step2-book-v1`, step 2's declared value book: one configuration
+#: on stage B, non-claiming in #2599's sense (its claim is condition 3 of the 2026-10-08 screen). Not a `hunt-`
+#: entry, so it counts in M_inh: 521 -> 522. Measured the same way before the bump: the SAME five groups, 488 rows,
+#: every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-08-r26"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1585,6 +1590,44 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
             searches=3,
+        ),
+        # #3609 step 2 slice 4: pasted verbatim from `scripts.declare_3609_step2.declared_trial(<evidence>)`, whose
+        # payload the committed `declared` ledger row pins (payload_sha256 fb6f2ada73ab…). The
+        # declaration's integrity-only read is hold-out access 740. Never edit this row: any change
+        # refuses every later attempt; a changed trial needs a new declaration.
+        DeclaredTrial(
+            trial_id="3609-step2-book-v1",
+            description=(
+                "#3609 step 2 value book, version 1: one configuration (the spec's value-family book, its matched "
+                "random control, references and diagnostics) on stage A (development, formations 2014-09..2021-04) "
+                "and stage B (reused validation, formations 2021-05..2024-07), net of step 0's costs, screened by "
+                "the 2026-10-08 settled entry's four conditions. Its claim is condition 3, the HML loading on stage "
+                "B, powered in spec premise 6. No TrialDesign: #2599's claiming design is an IR margin, which this "
+                "screen does not claim. Step 1's 16 searches and the 3 exposure-planning searches stay counted."
+            ),
+            evidence=(
+                'docs/research/2026-10-06-3609-step2-factor-book.md §"Registration" and §"Slices" item 4; '
+                "spec_sha256=772a1ea2e76d060059c07c5b3e3dfd004a46a005c7bfd6e88b3df75d0b9a8ae6; "
+                "construction_sha256=d858baa1ff3756cf481cfd2fd414d1d00f0b9695510c8eb3fac2f9d347251f89; "
+                "register_policy_sha256=d5cd632246397252a33c04d6bbfddfc7d9b275ba902fdca19f2be99e78292651; "
+                "python=3.14; "
+                "stage_a_manifest_sha256=e50872104f77d4db4d16a41dd9b953bf064fa92704516c9813940b60ae8ec115; "
+                "step0_manifest_sha256=114efb16341df170012e856a31402938c784f54be8a950a26262af7db45e6a3b; "
+                "ff12_sha256=d801141acf039f2e06e6d4d9ba2b3992e9747a1d82fabd53ef21da4a3af79fff; "
+                "qmj_pdf_sha256=761c42f91d5f00fa75c8fb2b3722530562096de9491c80badf9e5b4091fbb2a9; "
+                "table9_sha256=2e55d05ca5770d3ad93867d56b51e9fe602a6e5aef5d469db4d5592337bcf6e2; "
+                "french_five_factor_monthly_response_sha256="
+                "36756c5c2559648519ac4b22913d860c6afd865cfebce920e3e8927f8e2d10b7; "
+                "french_five_factor_monthly_observations_sha256="
+                "06af2ed99758dcd94097000fea51db144905aa81b467547b23d4af6aec021f89; "
+                "french_momentum_monthly_response_sha256="
+                "c06d1c2e9a5e4f6985879722f23c6bb585f46b34eaf3fcb681d4de887e353f3e; "
+                "french_momentum_monthly_observations_sha256="
+                "07f3c1fbf5dfe48aec0edaaa793aff70c0f0c55e49073c86103278e324268f4e; "
+                "b1_close_2014_09_30=197.020004; holdout_strategy_id=3609-step2-book; holdout_strategy_version=v1"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=1,
         ),
         DeclaredTrial(
             trial_id="recent-evidence-refresh-cost-v4-2026-09-26",
