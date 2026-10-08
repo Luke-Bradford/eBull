@@ -38,6 +38,7 @@ import argparse
 import hashlib
 import json
 import math
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -50,14 +51,16 @@ import psycopg
 import app.services.factor_book as factor_book
 import scripts.report_3609_step2 as report
 from app.config import settings
+from app.services.factor_book_declaration import construction_sha256
 from app.services.factor_book_path import Month, book_decisions, next_month, value_path
-from app.services.factor_book_reference import load_ff12
+from app.services.factor_book_reference import SICCODES12_SHA256, load_ff12
 from app.services.factor_book_series import ARMS
 from scripts.build_3609_factor_panel import read_verified_artefact
-from scripts.report_3609_baselines import COSTS, FACTOR_REGRESSORS, ols_newey_west
+from scripts.report_3609_baselines import COSTS, FACTOR_REGRESSORS, FACTOR_UNIT, ols_newey_west
 from scripts.report_3609_step2 import CONSUMED_INPUTS, STAGE_A_ARTEFACT, STAGE_A_MANIFEST_SHA256
 
-PLAN_PATH: Final = Path(__file__).resolve().parents[1] / "docs" / "research" / "3609-step2-exposure-plan.json"
+REPO: Final = Path(__file__).resolve().parents[1]
+PLAN_PATH: Final = REPO / "docs" / "research" / "3609-step2-exposure-plan.json"
 VALUE: Final = ("be_me", "ni_me", "ocf_me")
 FAMILY_SETS: Final[Mapping[str, tuple[Mapping[str, tuple[str, ...]], int]]] = {
     "three families (first draft)": ({"gp_a": ("gp_at",), "value": VALUE, "investment": ("at_gr1",)}, 2),
@@ -70,6 +73,7 @@ STAGE_B_MONTHS: Final = 39
 #: The declared criterion: the two-arm conjunction bound at the planning point estimates.
 TARGET_POWER: Final = 0.80
 PRIOR_END: Final = "2014-09-30"
+PRIOR_LAST: Final[Month] = (2014, 9)
 #: (snapshot id, series key, first month, label): step 0's French five-factor snapshot and AQR's VME snapshot.
 PRIOR_SERIES: Final = (
     (39, "HML", "1992-07-01", "French HML after Fama-French 1992"),
@@ -110,7 +114,7 @@ def families(sets: Mapping[str, tuple[str, ...]], minimum: int) -> Iterator[None
 
 
 def digest(rows: Sequence[Sequence[object]]) -> str:
-    """sha256 of the rows' canonical JSON, each ``[snapshot, series, date, value]`` as strings, sorted."""
+    """sha256 of the rows' canonical JSON, each ``[snapshot, series, date, value, unit]`` as strings, sorted."""
     canonical = sorted([str(field) for field in row] for row in rows)
     return hashlib.sha256(json.dumps(canonical, separators=(",", ":")).encode()).hexdigest()
 
@@ -118,11 +122,13 @@ def digest(rows: Sequence[Sequence[object]]) -> str:
 def stage_a_factors(conn: psycopg.Connection[Any]) -> tuple[dict[str, dict[Month, float]], str]:
     """Every FF5, RF and momentum month of stage A exactly once, and the rows' digest."""
     rows = conn.execute(
-        "SELECT snapshot_id, series_key, observation_date, value FROM reference_data_observations "
+        "SELECT snapshot_id, series_key, observation_date, value, unit FROM reference_data_observations "
         "WHERE snapshot_id IN (39, 40) AND observation_date BETWEEN '2014-10-01' AND '2021-05-31'"
     ).fetchall()
     out: dict[str, dict[Month, float]] = {}
-    for _, key, day, value in rows:
+    for _, key, day, value, unit in rows:
+        if unit != FACTOR_UNIT:
+            raise PlanError(f"factor {key} {day} is in {unit!r}, not {FACTOR_UNIT}")
         month = (day.year, day.month)
         if month in out.setdefault(key, {}):
             raise PlanError(f"factor {key} repeats {month}")
@@ -213,15 +219,21 @@ def prior(conn: psycopg.Connection[Any]) -> tuple[list[dict[str, Any]], str]:
     read: list[Sequence[object]] = []
     for snapshot, key, first, label in PRIOR_SERIES:
         rows = conn.execute(
-            "SELECT observation_date, value FROM reference_data_observations WHERE snapshot_id = %s "
+            "SELECT observation_date, value, unit FROM reference_data_observations WHERE snapshot_id = %s "
             "AND series_key = %s AND observation_date BETWEEN %s AND %s ORDER BY observation_date",
             (snapshot, key, first, PRIOR_END),
         ).fetchall()
-        days = [d for d, _ in rows]
-        if len(set(days)) != len(days):
-            raise PlanError(f"{label} repeats a month")
-        read += [(snapshot, key, d, v) for d, v in rows]
-        y = np.array([float(v) for _, v in rows])
+        days = [d for d, _, _ in rows]
+        months = [(d.year, d.month) for d in days]
+        # One observation per calendar month, consecutive, ending at the last month before the path.
+        if not months or months[-1] != PRIOR_LAST or any(next_month(a) != b for a, b in zip(months, months[1:])):
+            raise PlanError(f"{label} is not one observation a month, consecutive, through {PRIOR_LAST}")
+        if any(unit != FACTOR_UNIT for _, _, unit in rows):
+            raise PlanError(f"{label} has a unit other than {FACTOR_UNIT}")
+        read += [(snapshot, key, d, v, u) for d, v, u in rows]
+        y = np.array([float(v) for _, v, _ in rows])
+        if not np.isfinite(y).all():
+            raise PlanError(f"{label} has a non-finite value")
         fit = ols_newey_west(y, np.empty((len(y), 0)))
         out.append(
             {
@@ -288,6 +300,11 @@ def main() -> None:
         prior_rows, prior_digest = prior(conn)
     plan = {
         "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        # The script's import closure (scorer, path, regression, loader, builder), as the construction hash takes it.
+        "code_closure_sha256": construction_sha256([Path(__file__).resolve()], REPO),
+        "siccodes12_sha256": SICCODES12_SHA256,
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "numpy": np.__version__,
         "stage_a_manifest_sha256": STAGE_A_MANIFEST_SHA256,
         "factor_rows_sha256": factor_digest,
         "prior_rows_sha256": prior_digest,
