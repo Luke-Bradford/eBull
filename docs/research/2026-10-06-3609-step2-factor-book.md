@@ -4,7 +4,7 @@ Status: **gate open; checkpoint 1 converged (round 25).** The evidence-bar quest
 entry 2026-10-08: a Track B book may enter a zero-capital demo test on a preregistered four-part historical screen,
 and §"Decision rule" is that screen. Round 2's findings 1–8 are applied under it (§"Checkpoint log", "Gate opened").
 Applying finding 4, the power calculation for the exposure test, changed the book to the value family alone
-(premise 6). Revised after Codex checkpoint 1 rounds 1–21; the items queued while building are written into
+(premise 6). Revised after Codex checkpoint 1 rounds 1–25; the items queued while building are written into
 §"Build-time clarifications". Slices 1–5 are merged and tested on fixtures only; the value-only change
 (premise 6) is code PR #3718, which merges before this spec. No declaration or declared run has happened yet. No step-2 code has read a stage-B
 month. On stage A, premise 6 measured exposures only; no book return, mean, alpha or growth has been printed for any
