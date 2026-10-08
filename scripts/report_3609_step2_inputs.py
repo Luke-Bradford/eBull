@@ -8,7 +8,8 @@ RF data, each reference artefact).
 * **Pins.** The declaration's ``evidence`` names each pin once as ``label=value`` (:func:`declared_pins`). The
   stage-A manifest, FF-12 map and QMJ PDF sha256s are also code constants inside the construction hash, so a
   declaration naming other values refuses. The Table 9 CSV is read from each panel artefact's frozen copy, so its
-  pin is checked against the artefact manifest's entry (:func:`require_table9`).
+  pin is checked against the artefact manifest's entry (:func:`require_table9`). B1's entry close is a declared
+  value, not a digest (:func:`declared_b1_close`).
 * **Step 0** (:func:`read_step0`): its ``manifest.json`` is read once and checked against the declared sha256, then
   ``paths.json`` once against that manifest's ``sha256`` map. B1 is the ``"B1 SPY"`` entry; the factor snapshot ids
   are the manifest's ``factor_snapshots``.
@@ -28,9 +29,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -57,6 +60,9 @@ STEP0_LABEL: Final = "step0_manifest_sha256"
 FF12_LABEL: Final = "ff12_sha256"
 QMJ_LABEL: Final = "qmj_pdf_sha256"
 TABLE9_LABEL: Final = "table9_sha256"
+#: B1's entry close is a decimal, not a sha256: SPY's raw close at stage A's first decision session.
+B1_CLOSE_SESSION: Final = date(2014, 9, 30)
+B1_CLOSE_LABEL: Final = f"b1_close_{B1_CLOSE_SESSION:%Y_%m_%d}"
 
 
 def response_label(dataset: str) -> str:
@@ -115,6 +121,19 @@ def declared_pins(evidence: str) -> DeclaredPins:
             for dataset in _DATASETS
         },
     )
+
+
+def declared_b1_close(evidence: str) -> float:
+    """SPY's raw close at the first formation's session (:data:`B1_CLOSE_SESSION`), which sets B1's entry band. No
+    frozen artefact carries it (step 0 read it live), so the declaration pins the value (#3666 item 20)."""
+    value = evidence_value(evidence, B1_CLOSE_LABEL)
+    try:
+        close = float(Decimal(value))
+    except ArithmeticError as exc:
+        raise ReportError(f"the declaration's {B1_CLOSE_LABEL} {value!r} is not a decimal") from exc
+    if not (math.isfinite(close) and close > 0):
+        raise ReportError(f"the declaration's {B1_CLOSE_LABEL} {value!r} is not finite and positive")
+    return close
 
 
 def require_table9(verified: VerifiedArtefact, pinned: str) -> None:
@@ -259,6 +278,8 @@ def read_factors(
 
 
 __all__ = [
+    "B1_CLOSE_LABEL",
+    "B1_CLOSE_SESSION",
     "B1_KEY",
     "FF12_LABEL",
     "QMJ_LABEL",
@@ -271,6 +292,7 @@ __all__ = [
     "DeclaredPins",
     "SnapshotDigests",
     "Step0",
+    "declared_b1_close",
     "declared_pins",
     "observations_label",
     "observations_sha256",

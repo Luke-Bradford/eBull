@@ -67,6 +67,19 @@ def test_a_pin_that_is_not_a_lowercase_hex_sha256_refuses(value: str) -> None:
         inputs.declared_pins(_evidence(**{inputs.STEP0_LABEL: value}))
 
 
+def test_the_declared_b1_close_is_a_decimal_named_for_stage_as_first_session() -> None:
+    assert inputs.B1_CLOSE_LABEL == "b1_close_2014_09_30"
+    assert inputs.declared_b1_close(_evidence(**{inputs.B1_CLOSE_LABEL: "197.02"})) == 197.02
+    with pytest.raises(DeclarationError, match="exactly once"):
+        inputs.declared_b1_close(_evidence())
+
+
+@pytest.mark.parametrize("value", ["abc", "NaN", "Infinity", "1e400", "0", "-197.02"])
+def test_a_b1_close_that_is_not_a_finite_positive_decimal_refuses(value: str) -> None:
+    with pytest.raises(ReportError, match=inputs.B1_CLOSE_LABEL):
+        inputs.declared_b1_close(_evidence(**{inputs.B1_CLOSE_LABEL: value}))
+
+
 def test_require_table9_compares_the_artefact_manifest_entry() -> None:
     verified = VerifiedArtefact(manifest={"inputs": {TABLE9_SIGNS: "9" * 64}}, files={})
     inputs.require_table9(verified, "9" * 64)
