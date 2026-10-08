@@ -1,22 +1,29 @@
-"""#3621 spec premises: how many names each avoidance filter would flag, measured on the stage-A panel.
+"""#3621 spec premises 1 and 2: where the avoidance filters bite on the stage-A panel, and JKP's published series.
 
-Counts only. It reads the published stage-A artefact's admitted rows (ME, ``name_key``, ``series_id``, s(M)), its
-frozen daily bars, first admitted bars and JKP NYSE size cutoffs. No holding return, holding status or month-(t+1)
-price enters any figure: the MAX window ends at s(M) and the price and seasoning tests read s(M) only.
+Premise 1 is counts only. It reads the published stage-A artefact's admitted rows (ME, ``name_key``, ``series_id``,
+s(M)), its frozen daily bars, first admitted bars and JKP NYSE size cutoffs. No holding return, holding status or
+month-(t+1) price enters any figure: the MAX window ends at s(M) and the price and seasoning tests read s(M) only.
 
-Per formation, per size segment (JKP NYSE breakpoints: micro < p20 <= small < p50 <= large < p80 <= mega) and for
-the step-2 book universe (top 1,000 by ME, ties by ``name_key``), it counts admitted names and the names flagged by:
+Per formation, per population (JKP NYSE size segments micro < p20 <= small < p50 <= large < p80 <= mega; step 2's
+book universe ``top1000``, the top 1,000 by ME with ties by ``name_key``; and ``rest``, every other admitted name),
+it counts admitted names and the names flagged by:
 
-- ``max``: ``rmax1_21d`` (the largest daily total return over the 21 SPY sessions ending at s(M), at least 15
-  returns, a return only between usable bars on adjacent sessions) at or above the top-decile breakpoint of all
-  admitted names with a value at M (Bali, Cakici & Whitelaw 2011 sort all stocks). A window holding a return
-  outside the panel's daily screen (below -90% or above +300%) has no value, as ``rvol_21d``. ``max_na`` counts
-  admitted names without a value;
+- ``max``: ``rmax1_21d`` at or above the top-decile cutoff, or a screened window (below);
+- ``max_screened``: the window holds a daily return outside the panel's extreme-return screen (below -90% or above
+  +300%). ⚠ Provisional: the build also applies ``rvol_21d``'s ratio-move screen, which this script does not;
+- ``max_short``: fewer than 15 daily returns in the window (not flagged);
 - ``sub5``: raw close at s(M) below $5 (``factor_book_path.PRICE_FLOOR``);
 - ``young``: first admitted bar later than 36 months before s(M) (``factor_book_path.archive_seasoned``);
-- ``any``: any of the three.
+- ``any``: any of ``max``, ``sub5``, ``young``.
 
-It prints min, median and max over the 80 stage-A formations, then the full per-formation table.
+``rmax1_21d`` is the largest daily total return over the 21 SPY sessions ending at s(M), a return existing only
+between usable bars on adjacent sessions. The cutoff q is the ``ceil(0.9 N)``-th smallest of the N valid values at
+M over all admitted names (1-based); a name is flagged when its value is >= q.
+
+Premise 2 reads the artefact's frozen JKP US monthly capped-value-weight factor returns for ``rmax1_21d``, ``age``
+and ``prc``. JKP publishes them already signed (a positive return is the direction JKP Table 9 expects), so no sign
+is applied here. For each stated window it prints months, mean, sample sd, annualised IR (mean / sd x sqrt 12) and
+the plain t (mean / (sd / sqrt n)).
 
 Usage: ``uv run python -m scripts.measure_3621_filter_premise [artefact_dir]``
 """
@@ -43,9 +50,17 @@ CUTOFFS = "inputs/reference_snapshot_jkp_nyse_cutoffs.jsonl.gz"
 DAILY = "inputs/daily.jsonl.gz"
 FIRST_BARS = "inputs/first_bars.jsonl.gz"
 SESSIONS = "inputs/spy_sessions.jsonl.gz"
-SEGMENTS = ("micro", "small", "large", "mega", "top1000")
-FLAGS = ("admitted", "max", "max_na", "sub5", "young", "any")
+JKP = "inputs/reference_snapshot_jkp_usa_monthly_vw_cap.jsonl.gz"
+POPULATIONS = ("micro", "small", "large", "mega", "top1000", "rest")
+FLAGS = ("admitted", "max", "max_screened", "max_short", "sub5", "young", "any")
 MAX_DECILE = 0.9
+JKP_WINDOWS = (
+    ("rmax1_21d", "1926-01-01", "2014-09-30"),
+    ("rmax1_21d", "2011-02-01", "2014-09-30"),
+    ("age", "1926-01-01", "2014-09-30"),
+    ("prc", "1926-01-01", "2014-09-30"),
+    ("prc", "1990-01-01", "2014-09-30"),
+)
 
 
 class MeasureError(RuntimeError):
@@ -67,9 +82,8 @@ def _segment(me: float, p20: float, p50: float, p80: float) -> str:
     return "mega"
 
 
-def rmax(adj: dict[date, float], sessions: list[date], k: int) -> float | None:
-    """Largest daily return over the ``RVOL_SESSIONS`` sessions ending at ``sessions[k]``; ``None`` when fewer than
-    ``RVOL_MIN_RETURNS`` returns exist or any return in the window is outside the daily screen."""
+def rmax(adj: dict[date, float], sessions: list[date], k: int) -> float | str:
+    """``rmax1_21d`` ending at ``sessions[k]``, or ``"screened"`` / ``"short"``."""
     returns: list[float] = []
     for i in range(k - RVOL_SESSIONS + 1, k + 1):
         before, now = adj.get(sessions[i - 1]), adj.get(sessions[i])
@@ -77,13 +91,29 @@ def rmax(adj: dict[date, float], sessions: list[date], k: int) -> float | None:
             continue
         r = now / before - 1.0
         if r < SCREEN_RETURN_LOW or r > SCREEN_RETURN_HIGH:
-            return None
+            return "screened"
         returns.append(r)
-    return max(returns) if len(returns) >= RVOL_MIN_RETURNS else None
+    return max(returns) if len(returns) >= RVOL_MIN_RETURNS else "short"
+
+
+def jkp_premise(data: bytes) -> None:
+    series: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for name, month, value, *_ in _lines(data):  # type: ignore[misc]
+        series[name].append((month, float(value)))
+    print("factor", "from", "to", "months", "mean", "sd", "ann_IR", "t", sep="\t")
+    for name, low, high in JKP_WINDOWS:
+        r = [v for m, v in series[name] if low <= m <= high]
+        mean, sd = statistics.mean(r), statistics.stdev(r)
+        ir, t = mean / sd * math.sqrt(12), mean / (sd / math.sqrt(len(r)))
+        print(name, low, high, len(r), f"{mean:.5f}", f"{sd:.5f}", f"{ir:.3f}", f"{t:.2f}", sep="\t")
+    for name in ("rmax1_21d", "age", "prc"):
+        print(f"{name}\tfirst {series[name][0][0]}\tlast {series[name][-1][0]}")
 
 
 def main(artefact: Path) -> None:
-    verified = read_verified_artefact(artefact, STAGE_A_MANIFEST_SHA256, keep=[CUTOFFS, DAILY, FIRST_BARS, SESSIONS])
+    verified = read_verified_artefact(
+        artefact, STAGE_A_MANIFEST_SHA256, keep=[CUTOFFS, DAILY, FIRST_BARS, SESSIONS, JKP]
+    )
     if verified.manifest.get("stage") != "A":
         raise MeasureError(f"{artefact} is not a stage-A artefact")
     grid = [m.isoformat() for m in formation_months()]
@@ -115,7 +145,7 @@ def main(artefact: Path) -> None:
 
     # One pass over the daily bars: each series' raw close at every decision session and rmax1_21d there.
     close_at: dict[tuple[int, date], float] = {}
-    max_at: dict[tuple[int, date], float] = {}
+    max_at: dict[tuple[int, date], float | str] = {}
     with gzip.open(io.BytesIO(verified.files[DAILY]), "rt") as f:
         for line in f:
             sid, bars = json.loads(line)
@@ -130,9 +160,7 @@ def main(artefact: Path) -> None:
             for day in decision_days:
                 if day in close:
                     close_at[(sid, day)] = close[day]
-                value = rmax(adj, sessions, position[day])
-                if value is not None:
-                    max_at[(sid, day)] = value
+                max_at[(sid, day)] = rmax(adj, sessions, position[day])
 
     table: list[dict[str, dict[str, int]]] = []
     for month in grid:
@@ -141,37 +169,44 @@ def main(artefact: Path) -> None:
             raise MeasureError(f"{month}: fewer than {BOOK_UNIVERSE_SIZE} admitted names")
         top = {r[1] for r in names[:BOOK_UNIVERSE_SIZE]}
         p20, p50, p80 = (cutoffs[(k, month)] for k in ("nyse_p20", "nyse_p50", "nyse_p80"))
-        values = sorted(max_at[(sid, s)] for _, _, sid, s in names if (sid, s) in max_at)
-        breakpoint = values[math.ceil(MAX_DECILE * len(values)) - 1]
-        counts: dict[str, dict[str, int]] = {seg: dict.fromkeys(FLAGS, 0) for seg in SEGMENTS}
+        values = sorted(v for _, _, sid, s in names if isinstance(v := max_at[(sid, s)], float))
+        if not values:
+            raise MeasureError(f"{month}: no admitted name has an rmax1_21d value")
+        cutoff = values[math.ceil(MAX_DECILE * len(values)) - 1]
+        counts: dict[str, dict[str, int]] = {p: dict.fromkeys(FLAGS, 0) for p in POPULATIONS}
         for me, key, sid, s in names:
             if (sid, s) not in close_at:
                 raise MeasureError(f"{month}: admitted series {sid} has no usable bar at s(M) {s}")
             if sid not in first_bar:
                 raise MeasureError(f"{month}: admitted series {sid} has no first admitted bar")
-            value = max_at.get((sid, s))
+            value = max_at[(sid, s)]
             flags = {
                 "admitted": True,
-                "max": value is not None and value >= breakpoint,
-                "max_na": value is None,
+                "max": value == "screened" or (isinstance(value, float) and value >= cutoff),
+                "max_screened": value == "screened",
+                "max_short": value == "short",
                 "sub5": close_at[(sid, s)] < PRICE_FLOOR,
                 "young": not archive_seasoned(first_bar[sid], s),
             }
             flags["any"] = flags["max"] or flags["sub5"] or flags["young"]
-            for seg in (_segment(me, p20, p50, p80), *(("top1000",) if key in top else ())):
+            for population in (_segment(me, p20, p50, p80), "top1000" if key in top else "rest"):
                 for flag, hit in flags.items():
-                    counts[seg][flag] += int(hit)
+                    counts[population][flag] += int(hit)
         table.append(counts)
 
-    print("segment", "flag", "min", "median", "max", sep="\t")
-    for seg in SEGMENTS:
+    print("population", "flag", "min", "median", "max", sep="\t")
+    for population in POPULATIONS:
         for flag in FLAGS:
-            series = [t[seg][flag] for t in table]
-            print(seg, flag, min(series), statistics.median(series), max(series), sep="\t")
+            series = [t[population][flag] for t in table]
+            print(population, flag, min(series), statistics.median(series), max(series), sep="\t")
+        share = [t[population]["any"] / t[population]["admitted"] for t in table]
+        print(population, "any_share", f"{min(share):.4f}", f"{statistics.median(share):.4f}", f"{max(share):.4f}")
     print()
-    print("M", *(f"{seg}:{flag}" for seg in SEGMENTS for flag in FLAGS), sep="\t")
+    jkp_premise(verified.files[JKP])
+    print()
+    print("M", *(f"{p}:{flag}" for p in POPULATIONS for flag in FLAGS), sep="\t")
     for month, counts in zip(grid, table, strict=True):
-        print(month, *(counts[seg][flag] for seg in SEGMENTS for flag in FLAGS), sep="\t")
+        print(month, *(counts[p][flag] for p in POPULATIONS for flag in FLAGS), sep="\t")
 
 
 if __name__ == "__main__":
