@@ -245,11 +245,12 @@ Annualised log growth G = (12/n) Σ ln(1 + r_t) over a window's monthly net retu
 2. **Stage B alone** (2021-06..2024-08, the Form 25-checked regime): ΔG ≥ 0 in both arms at base cost.
 3. **Holdings-count gate:** U_F(P, M) holds at least 10 names after the trades at every formation (step 2's
    floor). This is a cross-sectional floor, not an effective-sample measure.
+4. **For any set containing MAX:** the MAX fidelity check below passes.
 
 **Effective-sample exception, declared.** `research-process.md` asks for a minimum effective sample per cell. This
 descriptive enumeration declares none: its verdicts are point-estimate screens that claim nothing about
-significance. Per cell it prints the formations with exclusions (a formation at which the filter flagged a name in U), by stage.
-4. **For any set containing MAX:** the MAX fidelity check below passes.
+significance. Per cell it prints the formations with exclusions (a formation at which the filter flagged a name in U), by
+stage.
 
 Otherwise **NOT ELIGIBLE**, with every failed condition named. A set that flags no name at any formation is
 `NO_EFFECT` and not eligible: there is nothing to adopt. Condition 2 is always evaluated from the actual stage-B ΔG:
