@@ -118,15 +118,21 @@ No SIC-to-industry map exists in `app/`, `scripts/`, `sql/` or `tests/`.
 
 Stage B lies wholly in the second regime. That regime is not full-population survivorship-free: step 1 calls the
 Form 25 set a selected, symbol-bearing population, and ticker reuse and mismatched endpoint dates remain unresolved.
-The full-population survivorship requirement is therefore **unmet** for stage B too. This is why a pass authorises
-nothing beyond §"Question"'s limits.
+**How this meets the 2026-10-08 entry's data requirement.** The entry keeps "survivorship-free data" unchanged and
+names the corpus it means: "the survivorship-free corpus runs 2014-10..2024-08" (`docs/settled-decisions.md`,
+2026-10-08, Finding). That is this path. The gaps above are the known limits of that corpus, not a different data
+set: no fuller population exists in our data for these months. So the requirement is met as the entry defines it,
+and the gaps are disclosed on the verdict line (§"Registration", Labels). They are why a pass authorises nothing
+beyond §"Question"'s limits, and why live capital keeps the full bar.
 
 **6. Condition 3 is powered for the value family alone (development data).** Checkpoint 1 round 2, finding 4,
 asked for the exposure test's power. Its planning inputs come from stage A, the development sample. For each of three
 family sets, the book's scorer, decisions and base-cost path ran on stage A's pinned artefact, and the book's
-monthly return in excess of RF was regressed on FF5 plus momentum with step 0's Newey–West rule, in both arms. Only
-loadings, standard errors, residual standard deviation, R² and holding counts were printed. No mean return, alpha,
-growth or comparison was printed. All three sets count as searches (§"Registration").
+monthly return in excess of RF was regressed on FF5 plus momentum with step 0's Newey–West rule, in both arms. The
+regressions read the book's stage-A returns. Only loadings, standard errors, residual standard deviation, R² and
+holding counts were printed; no mean return, alpha, growth or comparison was printed or used to choose. All three
+sets count as searches (§"Registration"). The plan, with the script's sha256, stage A's pin and digests of every
+factor and prior row read, is `docs/research/3609-step2-exposure-plan.json`, pinned by register r25.
 
 Loading (t), best-case / worst-case arm, formations 2014-09..2021-04, 80 months:
 
@@ -139,21 +145,30 @@ Loading (t), best-case / worst-case arm, formations 2014-09..2021-04, 80 months:
 Reproduce: `PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure` (reads stage A's pinned artefact and
 factor rows to 2021-05-31 only).
 
-- **The first draft cannot be tested with power.** Its investment member adds no CMA loading the regression can
-  separate from value's HML, and GP/A's RMW t is below even a one-loading bar on 80 months. Stage B has 39.
+- **The first draft cannot be tested with power.** Its CMA coefficient, conditional on the other factors, is 0.02
+  to 0.03 (t below 0.5), and its RMW t is 1.72 to 1.84 on 80 months. Stage B has 39, so neither intended loading
+  could be tested with useful power there.
 - **Value + GP/A cancels value.** HML falls to 0.03: GP/A and value are negatively related (Novy-Marx 2013).
 - **The value book carries HML.** Its condition 3 tests one intended loading, so the Bonferroni bar is
-  z(0.95) = 1.645. Stage B's planned standard error is stage A's scaled by √(80/39), which assumes stage B's residual
-  and factor variances equal stage A's. Planned t is 3.98 / 4.05 and power 0.990 / 0.992. At the one-sided 95%
-  lower bound of stage A's loading (b − 1.645 s), t is 2.83 / 2.90 and power 0.882 / 0.896. The lower bound is the
-  allowance for choosing the set with the largest stage-A loading.
-- **Both arms must pass.** Their returns differ only in terminal handling, so their failures move together. The
-  Bonferroni bound on the conjunction, which assumes nothing about that, is 0.982 at the point estimates and 0.778
-  at both lower bounds at once; the single-arm figures are the realistic ones.
-- **What this selection used.** It chose a family set by whether its intended loading can be tested, from exposures
-  only. It read no return, so it carries no information about condition 4, and condition 3 runs on stage B, which it
-  did not read. The book's other loadings (SMB 0.25, momentum −0.20, CMA −0.21 on stage A) are what a large-cap
-  value book carries; they are printed, not gated.
+  z(0.95) = 1.645.
+- **The declared power criterion.** The gate needs HML in both arms, so its power is the conjunction's. The
+  criterion is the distribution-free (Bonferroni) bound on the conjunction, 1 − Σ (1 − arm power), at the planning
+  point estimates, and it must be at least 0.80. Per arm, planned t is 3.98 / 4.05 and power 0.990 / 0.992, so the
+  bound is 0.982: the criterion holds. The planner refuses if it does not.
+- **Sensitivities, not criteria.** At the unadjusted one-sided 95% lower bound of each arm's stage-A loading
+  (b − 1.645 s; pointwise, not adjusted for choosing among three sets or for two arms), per-arm power is 0.882 / 0.896
+  and the conjunction bound 0.778. The criterion holds while each arm's planned t is at least 2.926: stage B's
+  standard error may be about 1.36 times the planned one, or the loading about 26% smaller, before it fails.
+- **Assumptions; the powers are approximate.** Stage B's standard error is stage A's scaled by √(80/39). That
+  assumes stage B matches stage A in factor covariance, residual variance and dependence, and in the long-run
+  covariance of the regression scores. The power treats the estimated standard error as known and the HAC t as
+  normal; at T = 39 the 1.645 bar is asymptotic, not a demonstrated finite-sample 5% test.
+- **What this selection used.** It chose a family set by whether its intended loading can be tested, from
+  return-derived exposure statistics. No direct performance summary was printed or used, but exposures carry
+  information about performance alongside known factor returns, so the selection is not information-free. Its
+  validity rests on sample governance: condition 3 and condition 4 run on stage B, which no selection read (step 0's
+  earlier stage-B exposure is inventoried in §"Design-history inventory"). The value book's other stage-A loadings
+  (SMB 0.25, momentum −0.20, CMA −0.21) are what a large-cap value book carries; they are printed, not gated.
 
 ## Adoption rationale (condition 1, Track B)
 
@@ -169,7 +184,8 @@ long-short series, over months before our path starts (to 2014-09-30), from the 
 | AQR large-cap value, US, 1972-02..2014-09 (scale only) | overlaps the original sample | 512 | 4.10% | 1.57 |
 
 - **What it supports:** the premium stayed positive after its US publication and in each of three markets outside
-  the US. It is significant at 5% only in Japan.
+  the US. On a two-sided, unadjusted, asymptotic 5% test it is significant only in Japan; one-sided, Europe ex-UK
+  (t 1.83) also clears 1.645.
 - **What differs from this book:** each series is gross, long-short and value-weighted on B/M. This book is
   long-only, equal-weighted, industry-relative (Asness, Porter & Stevens 2000), a three-member composite, and net
   of our costs.
@@ -283,8 +299,11 @@ must include the cap and the MAX filter and pass its own implementation backtest
   scenario, every open position (`name_key`, value, entry formation, entry band), the cash and the NAV, and the same
   for each control draw and the equal-weight and cap-weighted references. It is written as canonical JSON (below) and
   its sha256 is printed. Stage-B statistics are slices of the path after that state.
-- **Nothing is computed before the declaration freezes.** No book return, IC, spread, loading or factor mean is
-  computed on any month first. Code is tested on synthetic fixtures only.
+- **Nothing else is computed before the declaration freezes.** Two registered exercises are the exceptions: premise
+  6's stage-A exposure plan (loadings, standard errors, residual standard deviation, R² and holding counts of three
+  family sets, from stage-A returns) and §"Adoption rationale"'s published series to 2014-09. No other book return,
+  IC, spread, loading or factor mean is computed on any month first, and nothing at all on stage B. Code is tested on
+  synthetic fixtures only.
 
 ## Step 1's inheritance clause: the separately governed validation sample
 
@@ -440,7 +459,9 @@ must both hold at base cost under **both** termination arms.
   (Bonferroni over the one intended loading). Its power is premise 6's. The other loadings are printed, not gated.
 - **Refusals, checked before any coefficient is printed** (verdict `G1_REFUSED`, with the reason): a missing factor
   month; a non-finite value in the return or factor matrix; anything other than exactly one aligned book, RF and
-  factor observation for each of the 39 declared months (no duplicates, no extras); a design matrix whose rank is below
+  factor observation for each of the 39 declared months (no duplicates, no extras: `read_factors` refuses a
+  repeated month in the verified snapshot rows, and G1 takes exactly the declared months from that collection, so
+  later or earlier months in the snapshot are not extras); a design matrix whose rank is below
   its column count (numpy `matrix_rank` at its default tolerance); zero residual variance; or any Newey–West standard
   error that is not finite and positive.
 
@@ -456,10 +477,17 @@ must both hold at base cost under **both** termination arms.
 - The beats are point estimates, reported as a screen and never as significance. The stress-cost and year-deletion
   annotations below show how thin a pass is.
 
-**Selection across configurations.** One configuration is evaluated on stage B. PBO/CSCV needs at least two, so it is
-not computed. Premise 6's three stage-A evaluations chose on exposures, read no return, and are counted in the
-register. A beat that only one of several configurations shows cannot arise, because no other configuration is
-evaluated on stage B.
+**Selection across configurations.** The governing reading: the entry's "configurations" are those evaluated on the
+sealed confirmation sample, here stage B. Configurations chosen on development data (step 1's characteristics,
+premise 6's family sets) are governed by separation instead: they are counted in the register, and the chosen one
+is tested on stage B, which none of them read. Validation counts as separate when the selection read no month of
+the confirmation sample.
+- One configuration is evaluated on stage B, so PBO/CSCV, which needs at least two, is not computed, and a beat shown
+  by only one of several configurations cannot arise.
+- **A later configuration on this path joins the rule.** Step 3's forward construction is evaluated on the same
+  stage B (§"After a pass"). That makes two, so step 3's declaration must state its PBO/CSCV treatment over both,
+  and step 3 may pass only if this book passed: a beat only one of them shows is not a pass. No configuration is
+  evaluated on stage B to build a PBO matrix.
 
 The two arms are a conjunction: both must pass. The turnover veto stays as declared (verdict order step 5).
 
@@ -500,18 +528,25 @@ A non-finite G, median or year-deletion statistic refuses the run as
 
 **The declared path is a precondition.** Before step 1's status is assigned, the run must span the declared path,
 every holding month 2014-10..2024-08 once and in order; otherwise it is not the declared run and no verdict is
-printed.
+printed. `report_3609_step2_run.evaluate_run` enforces it before evaluation (each stage's formations must equal its
+declared grid, `STAGE_GRIDS`; a mismatch ends the run `failed`, item 24), and the verdict re-checks that stage B's
+39 months are present once each, in order.
 
 **Verdict order.** The run stops at the first that applies, and prints the status with its reason:
-1. `REFUSED`: a data or pin refusal (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`, `CONTROL_SHORT`,
-   `COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`, `CAPTURE_AMBIGUOUS`, any pin or ledger mismatch). The payload is: the status and reason code; the offending
+1. `REFUSED`: a data refusal raised during evaluation (`ME_INVALID`, `UNIVERSE_SHORT`, `PRICE_INVALID`,
+   `CONTROL_SHORT`, `CUTOFF_INVALID`, `COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`). The run ends `completed` with this
+   status (item 18). Two other phases are not verdicts: a refusal at the report's gate, before `report_started`
+   (`CAPTURE_AMBIGUOUS`, a declaration or hash mismatch), prints `REFUSED` and writes no row; an integrity failure
+   after `report_started` (a pin mismatch, a stage off its grid) ends the run `failed` (items 22 and 24). The payload is: the status and reason code; the offending
    formation, `name_key` and draw; the counts that triggered it (for `CONTROL_SHORT`, the pool and the purchases
    needed); the run id and its hashes; and the labels. No path, gate or diagnostic is printed.
 2. `INSUFFICIENT`: the path, with the formations concerned; G1 and G2 are not evaluated.
 3. `G1_REFUSED`: the path and G2's inputs are printed; no gate verdict.
 4. G1 and G2 by the conjunction above. If either fails: `FAIL`, with the failing gate and arm.
-5. **Turnover veto:** if any stage-B month (2021-06..2024-08) has one-way turnover above 50% at base cost in either
-   arm: `FAIL`, reason `TURNOVER_BENEFIT_UNSHOWN`. `research-process.md` requires the net expected benefit to be shown
+5. **Turnover veto:** if any stage-B formation (2021-05..2024-07, the trades that set stage B's holdings) has
+   one-way turnover above 50% at base cost in either arm: `FAIL`, reason `TURNOVER_BENEFIT_UNSHOWN`. The 2024-08
+   final liquidation is not a formation and is excluded, as step 0 excludes it from turnover: it is the backtest's
+   end, not a trading decision. `research-process.md` requires the net expected benefit to be shown
    above that level, and this run has no model that shows it. Stage-A exceedances are printed, not gating.
 6. Otherwise the run is a **pass candidate**. Its annotation statistics (stress-cost G2, year deletions) are
    computed and validated; a refusal among them (`COMPARATOR_INVALID`, `WEALTH_NONPOSITIVE`) makes the status
@@ -1196,7 +1231,7 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
   statement (§"Decision rule").
 - **3:** G1 moved to stage B. Stage A is development only (§"Step 1's inheritance clause").
 - **4:** power computed from stage-A planning inputs. The first draft's composite could not be powered, so the book is
-  the value family alone (premise 6; code `fc14a3f1`, `FAMILIES`, `G1_LOADINGS`, `G2_MARGINS`).
+  the value family alone (premise 6; code branch `feature/3609-step2-value-only`: `FAMILIES`, `G1_LOADINGS`, `G2_MARGINS`).
 - **5:** members' fidelity is condition 2 (step 1 against JKP's series per characteristic). Condition 3 claims only the
   HML exposure.
 - **6:** §"Adoption rationale" gives each series' sample relation, effect, uncertainty and implementation differences,
@@ -1204,3 +1239,20 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
 - **7:** premise 2 is stated as conditional on the skill's generic prior.
 - **8:** the search accounting is connected to the tests (§"Registration").
 - The build-time items are in §"Build-time clarifications".
+
+**Round 22 (15 findings; `ckpt1_round22_final.txt`), all applied; checkpoint 2 on the code raised one, the same as
+4:**
+- **1:** premise 5 shows the entry's survivorship requirement is met as the entry defines it (it names this corpus),
+  with the gaps disclosed.
+- **2:** the configuration reading is stated, and step 3's construction on the same stage B joins the rule.
+- **3–5:** premise 6 declares the power criterion (conjunction bound ≥ 0.80 at the point estimates), labels the
+  lower bound an unadjusted sensitivity, adds the break-even t, and lists the approximation's assumptions.
+- **6:** the selection is described as using return-derived exposure statistics, justified by sample governance.
+- **7:** the freeze rule names the two registered pre-declaration exercises.
+- **8–9:** the plan is a pinned manifest with input digests, and the planner validates its inputs and refuses an
+  unpowered plan.
+- **10–11:** G1's factor alignment and the declared-path precondition name the upstream checks that enforce them.
+- **12:** verdict order step 1 maps each phase to its terminal row.
+- **13:** the turnover veto is formation-keyed and excludes the final liquidation, with the reason.
+- **14:** weak coefficients are described as such, not as unidentified.
+- **15:** the significance convention is stated.
