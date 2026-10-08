@@ -12307,3 +12307,15 @@ neighbouring container and match it.**
   test that.
 - Enforced in: `tests/test_3609_step2_report_run.py::test_main_offers_no_flag_that_redirects_a_ledger` and
   `::test_main_prints_only_after_the_run_has_ended`, which asserts `run_report` gets no ledger override.
+
+### A row filter applied in Python after a streamed query has still read every row it drops (#3609)
+
+- Failure (Codex checkpoint 2 on slice 4's declaration script, 2026-10-08): the script read SPY's 2014-09-30 close
+  before its hold-out access row, through step 0's `month_end_closes(conn, ids, wanted)`. That helper calls
+  `load_month_ends`, which streams every usable month of the series into Python, stage B's included, and only then
+  applies `wanted`. The script kept one value, but every post-2021-05 SPY bar had left the database without a logged
+  access.
+- Prevention: before an access row exists, bound a price read in SQL (a `bar_date` predicate in the query itself),
+  never by a Python predicate over a reader that loads the whole series. Reusing a shared query is fine if the bound
+  is added to its text, with a test that the bounded text differs from the shared one only by the bound.
+- Enforced in: `tests/test_3609_step2_declaration_script.py::test_the_b1_query_is_step_0s_month_end_query_bounded_before_distinct_on`.
