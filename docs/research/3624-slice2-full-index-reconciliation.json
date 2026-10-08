@@ -925,6 +925,10 @@
    "header": {
     "header_blocks": 1,
     "misplaced_tags": 0,
+    "envelope_ok": true,
+    "outside_tags": 0,
+    "noncanonical_tags": 0,
+    "markers_in_block": [],
     "raw_tags": [
      "ACCEPTANCE-DATETIME",
      "ACCESSION-NUMBER",
@@ -992,6 +996,10 @@
    "header": {
     "header_blocks": 1,
     "misplaced_tags": 0,
+    "envelope_ok": true,
+    "outside_tags": 0,
+    "noncanonical_tags": 0,
+    "markers_in_block": [],
     "raw_tags": [
      "ABS-ASSET-CLASS",
      "ACCEPTANCE-DATETIME",
@@ -1056,8 +1064,8 @@
   }
  ],
  "provenance": {
-  "script_sha256": "dd48f0b4b85d7f041c193e628d5e4a71b4ae6f86a2886dc30db0282b9e3030e9",
-  "head": "c7ea8ba9c271ef111155bec93faebca62b11bd47",
+  "script_sha256": "f5354a0360d637d4f4e652f0f0f49fad4792a704be61b580ce13332dc5bf7b98",
+  "head": "847be55b79306dcf1b79665df40512285448479d",
   "script_clean_at_head": true
  }
 }

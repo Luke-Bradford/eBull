@@ -2,7 +2,7 @@
  "inputs": {
   "archive_sha256": "d6c42d554a703832a3a477a0b04b0f8cc96ce868180b1bb58e9be99ad717de8b",
   "measurement": "docs/research/3624-slice2-8k-items-measurement.json",
-  "measurement_sha256": "0515df6543c519c80122fb68ad2de3be48a5a9491ae9e00ff05197f7f9c23af8",
+  "measurement_sha256": "c2d0a6f0a5aab886f6f0c17644338fd9afc049d6569a2d0e0819050d5722be25",
   "quarterly_files": {
    "master_2004_QTR3.gz": "d53e651280c4ded5223209eb0354eb1e81334b07130e625fadd1d46cd2efe732",
    "master_2004_QTR4.gz": "b73e7bec0d749d80152454a444f3b76427673b8afe81c78d8f0ea470e5149aaf",
@@ -104408,8 +104408,8 @@
   }
  ],
  "provenance": {
-  "script_sha256": "dd48f0b4b85d7f041c193e628d5e4a71b4ae6f86a2886dc30db0282b9e3030e9",
-  "head": "c7ea8ba9c271ef111155bec93faebca62b11bd47",
+  "script_sha256": "f5354a0360d637d4f4e652f0f0f49fad4792a704be61b580ce13332dc5bf7b98",
+  "head": "847be55b79306dcf1b79665df40512285448479d",
   "script_clean_at_head": true
  }
 }
