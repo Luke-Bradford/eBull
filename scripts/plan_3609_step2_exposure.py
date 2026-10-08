@@ -22,14 +22,16 @@ reading a month after 2021-05:
   stage A's HML standard error scaled to stage B's 39 months, s × sqrt(T_A / 39), and per arm Φ(b / s_B − z(0.95)).
   The declared criterion is the distribution-free conjunction bound over the two arms, 1 − Σ (1 − power), at the
   point estimates, which must be at least 0.80. Also printed: the same at the unadjusted one-sided 95% lower bound
-  b − z(0.95) × s_A (a sensitivity, not selection-adjusted), and the smallest planned t at which the criterion still
-  holds.
+  b − z(0.95) × s_A (a sensitivity, not selection-adjusted), and a per-arm t that is sufficient for the criterion
+  whatever the other arm's value.
 * **Condition 1's prior:** mean monthly return and Newey-West t of published value long-short series over months
   up to 2014-09-30, before the path starts: French's HML after Fama and French (1992, published June 1992), and
   AQR's large-cap stock value series for the US, UK, Europe ex-UK and Japan (Asness, Moskowitz & Pedersen 2013).
 
 The family sets are applied by swapping ``factor_book``'s module constants inside :func:`families`, which restores
-them afterwards; the scorer reads them at call time.
+them afterwards. On this script's path, ``factor_book.composite_scores`` reads them at call time and
+``report_3609_step2`` is the one module that binds ``CHARACTERISTICS`` by name, so it is swapped too. Modules that
+bind ``FAMILIES`` at import (construction, signals, universe) are not on this path.
 """
 
 from __future__ import annotations
@@ -74,13 +76,15 @@ STAGE_B_MONTHS: Final = 39
 TARGET_POWER: Final = 0.80
 PRIOR_END: Final = "2014-09-30"
 PRIOR_LAST: Final[Month] = (2014, 9)
-#: (snapshot id, series key, first month, label): step 0's French five-factor snapshot and AQR's VME snapshot.
-PRIOR_SERIES: Final = (
-    (39, "HML", "1992-07-01", "French HML after Fama-French 1992"),
-    (54, "VALLS_VME_US90", "1972-01-01", "AQR US large-cap value"),
-    (54, "VALLS_VME_UK90", "1972-01-01", "AQR UK large-cap value"),
-    (54, "VALLS_VME_ROE90", "1972-01-01", "AQR Europe ex-UK large-cap value"),
-    (54, "VALLS_VME_JP90", "1972-01-01", "AQR Japan large-cap value"),
+#: (snapshot id, series key, first month, label): step 0's French five-factor snapshot and AQR's VME snapshot. The
+#: first month is the series' expected first observation: HML's is fixed after Fama-French's June 1992 publication;
+#: the AQR series' are their first published months in the snapshot.
+PRIOR_SERIES: Final[tuple[tuple[int, str, Month, str], ...]] = (
+    (39, "HML", (1992, 7), "French HML after Fama-French 1992"),
+    (54, "VALLS_VME_US90", (1972, 2), "AQR US large-cap value"),
+    (54, "VALLS_VME_UK90", (1981, 7), "AQR UK large-cap value"),
+    (54, "VALLS_VME_ROE90", (1981, 7), "AQR Europe ex-UK large-cap value"),
+    (54, "VALLS_VME_JP90", (1981, 7), "AQR Japan large-cap value"),
 )
 Z_95: Final = NormalDist().inv_cdf(0.95)
 
@@ -192,14 +196,15 @@ def arm_power(b: float, s_a: float, months_a: int) -> dict[str, float]:
 
 
 def condition_3(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Per-arm power, the conjunction bounds and the break-even planned t; refuses if the criterion fails."""
+    """Per-arm power, the conjunction bounds and the sufficient per-arm t; refuses if the criterion fails."""
     arms = {
         arm: arm_power(value[arm]["loadings"]["HML"][0], value[arm]["loadings"]["HML"][1], value[arm]["months"])
         for arm in ARMS
     }
     joint = 1.0 - sum(1.0 - a["power"] for a in arms.values())
     joint_lower = 1.0 - sum(1.0 - a["power_at_lower_bound"] for a in arms.values())
-    # With equal arms, the bound is TARGET_POWER when each arm's power is 1 - (1 - TARGET_POWER) / 2.
+    # A sufficient condition: if every arm's t is at least this, every arm's power is at least
+    # 1 - (1 - TARGET_POWER) / k, so the bound is at least TARGET_POWER, whatever the arms' other values.
     break_even = Z_95 + NormalDist().inv_cdf(1.0 - (1.0 - TARGET_POWER) / len(arms))
     out = {
         "critical_t": Z_95,
@@ -221,13 +226,16 @@ def prior(conn: psycopg.Connection[Any]) -> tuple[list[dict[str, Any]], str]:
         rows = conn.execute(
             "SELECT observation_date, value, unit FROM reference_data_observations WHERE snapshot_id = %s "
             "AND series_key = %s AND observation_date BETWEEN %s AND %s ORDER BY observation_date",
-            (snapshot, key, first, PRIOR_END),
+            (snapshot, key, f"{first[0]}-{first[1]:02d}-01", PRIOR_END),
         ).fetchall()
         days = [d for d, _, _ in rows]
         months = [(d.year, d.month) for d in days]
-        # One observation per calendar month, consecutive, ending at the last month before the path.
-        if not months or months[-1] != PRIOR_LAST or any(next_month(a) != b for a, b in zip(months, months[1:])):
-            raise PlanError(f"{label} is not one observation a month, consecutive, through {PRIOR_LAST}")
+        # Exactly the expected grid: one observation a month from the series' first month to the last before the path.
+        expected: list[Month] = [first]
+        while expected[-1] < PRIOR_LAST:
+            expected.append(next_month(expected[-1]))
+        if months != expected:
+            raise PlanError(f"{label} is not one observation a month, {first}..{PRIOR_LAST}")
         if any(unit != FACTOR_UNIT for _, _, unit in rows):
             raise PlanError(f"{label} has a unit other than {FACTOR_UNIT}")
         read += [(snapshot, key, d, v, u) for d, v, u in rows]
@@ -273,7 +281,7 @@ def show(plan: Mapping[str, Any]) -> None:
         )
     print(
         f"  conjunction bound {c3['conjunction_bound']:.4f} (criterion >= {c3['target']}); at both lower bounds "
-        f"{c3['conjunction_bound_at_lower_bounds']:.4f}; criterion holds while each arm's planned t >= "
+        f"{c3['conjunction_bound_at_lower_bounds']:.4f}; sufficient for the criterion: every arm's planned t >= "
         f"{c3['break_even_t']:.3f}"
     )
     print(f"Condition 1, published value long-short series, months to {PRIOR_END}:")

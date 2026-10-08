@@ -1576,7 +1576,7 @@ TRIAL_REGISTER: Final = TrialRegister(
             evidence=(
                 "docs/research/2026-10-06-3609-step2-factor-book.md premise 6; "
                 "plan docs/research/3609-step2-exposure-plan.json "
-                "sha256=20b39a968abd1ac4efc0b1557a8141d24b5d02542484428ac47c68d5b94a2d4a "
+                "sha256=f60cb64e402615556ba8a46204bf5381168372dc29e36872cd36bf00476c109d "
                 "(script, stage-A pin and input-row digests inside); "
                 "reproduce with PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure (#3609, 2026-10-08)"
             ),
