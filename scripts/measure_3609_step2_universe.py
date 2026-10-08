@@ -12,8 +12,10 @@ Per formation month, and as min/max over the stage-A grid, it prints:
 - the ME of the 1,000th name;
 - overlap of the top 1,000 with the above-NYSE-median set: shared names, top-1,000 names at or below the cutoff,
   above-cutoff names outside the top 1,000, and the top 1,000's share of the above-cutoff ME;
-- among the top 1,000: names with all three step-2 families and with at least two (a family is present when any
-  member has a value), and names with SIC 6221 (commodity contracts, the SIC commodity pools file under).
+- among the top 1,000: names with all three of the first draft's families (GP/A, value, investment) and with at
+  least two (a family is present when any member has a value), and names with SIC 6221 (commodity contracts, the SIC
+  commodity pools file under). The family counts reproduce premise 3's historical table; the book is now the value
+  family alone, and the declared run prints its count (``report_3609_step2_universe``, ``top_all_families``).
 
 Refuses an artefact whose manifest digest is not the pinned stage-A artefact, whose frozen inputs or published
 rows fail ``read_verified_artefact``, whose months are not the 80-month grid, which repeats a (M, name_key) pair or a
@@ -135,11 +137,20 @@ def main(artefact: Path) -> None:
             "top_sic6221": sum(1 for r in top if r[3] == COMMODITY_SIC),
         }
         table.append(stats)
-        print(month, *(f"{stats[c]:.4g}" for c in columns), sep="\t")
+        print(month, *(_fmt(c, stats[c]) for c in columns), sep="\t")
     print(f"months\t{len(table)}")
     for column in columns:
         values = [s[column] for s in table]
-        print(f"{column}\tmin {min(values):.4g}\tmax {max(values):.4g}")
+        print(f"{column}\tmin {_fmt(column, min(values))}\tmax {_fmt(column, max(values))}")
+
+
+def _fmt(column: str, value: float) -> str:
+    """Counts in full, the ME share as a percentage to two places, the 1,000th ME in USD billions."""
+    if column == "p50_me_share_in_top":
+        return f"{100 * value:.2f}%"
+    if column == "me_rank_1000":
+        return f"{value / 1e9:.2f}B"
+    return str(int(value))
 
 
 if __name__ == "__main__":

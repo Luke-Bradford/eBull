@@ -5,7 +5,8 @@ entry 2026-10-08: a Track B book may enter a zero-capital demo test on a preregi
 and §"Decision rule" is that screen. Round 2's findings 1–8 are applied under it (§"Checkpoint log", "Gate opened").
 Applying finding 4, the power calculation for the exposure test, changed the book to the value family alone
 (premise 6). Revised after Codex checkpoint 1 rounds 1–21; the items queued while building are written into
-§"Build-time clarifications". Slices 1–5 are merged and tested on fixtures only. No step-2 code has read a stage-B
+§"Build-time clarifications". Slices 1–5 are merged and tested on fixtures only; the value-only change
+(premise 6) is code PR #3718, which merges before this spec. No declaration or declared run has happened yet. No step-2 code has read a stage-B
 month. On stage A, premise 6 measured exposures only; no book return, mean, alpha or growth has been printed for any
 month. Programme: `docs/research/2026-10-04-strategy-research-sweep.md`
 §4 item 2. Inherits from `docs/research/2026-10-04-3609-step1-factor-panel.md` §"Registration, ledger and what step 2
@@ -1187,7 +1188,44 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
   report requires exactly one for the trial (`CAPTURE_AMBIGUOUS` otherwise), and a reuse writes `capture_reused`
   in place of the three publication rows.
 
-**Round 21 (156 resolved; no new finding; `ckpt1_round21_final.txt`).**
+**Round 13 (144 resolved; 145 carried; 2 new, 146–147; `ckpt1_round13_final.txt`), all applied:**
+- **145:** a uniqueness check at the report's HEAD did not stop a second capture merging later. Uniqueness is now
+  enforced on acceptance: merges to `main` are serialised and a fast-tier test refuses a committed ledger with two
+  `data_frozen` rows for the trial, so a second binding can never merge. The report runs at HEAD = `origin/main`
+  and records it.
+- **146:** a negative factor is `WEALTH_NONPOSITIVE` only; `COMPARATOR_INVALID` is for non-finite comparison
+  statistics.
+- **147:** each factor snapshot's row, payload and observations are read in one repeatable-read transaction, and the
+  run evaluates only that verified collection, with no later factor or RF query.
+
+**Round 14 (146 and 147 resolved; 145 carried; 2 new, 148–149; `ckpt1_round14_final.txt`), all applied:**
+- **145:** PR checks can be stale (branch protection is not strict), so the binding no longer relies on merge
+  order. It is the earliest `data_frozen` in `main`'s first-parent history; a later row cannot displace it and
+  makes later reports refuse.
+- **148:** the report's HEAD goes in a new `report_started` row; `started` keeps the attempt's own HEAD.
+- **149:** each consumed file is read once, hashed and parsed from the same bytes (or from a checked private copy),
+  with no reopen after the check. Slice 3 brings `verify_artefact` and the measurement script under this rule.
+
+**Round 15 (145, 148 and 149 resolved; 1 new, 150; `ckpt1_round15_final.txt`), applied:**
+- **150:** the report repeats every freeze check at its own HEAD and requires agreement with both the declaration
+  and the attempt's `started` row before reading evaluation inputs.
+
+**Round 16 (150 resolved; 1 new, 151; `ckpt1_round16_final.txt`), applied:**
+- **151:** `started`'s field list now records the attempt's HEAD (provenance) and every value the report re-compares:
+  the spec, construction and register-policy hashes, and the Python version as `"major.minor"`.
+
+**Round 17 (151 resolved; 1 new, 152; `ckpt1_round17_final.txt`), applied:**
+- **152:** HEAD is provenance, never re-compared. The capture's ledger merges before the report, so a capturing
+  attempt's report HEAD always differs from its `started` HEAD. The report re-compares only the spec, construction
+  and register-policy hashes and the Python version.
+
+**Round 18 (152 resolved; 3 new, 153–155; `ckpt1_round18_final.txt`), all applied:**
+- **153:** the two HEADs are provenance either way: a capturing attempt's differ, a reusing attempt's may coincide.
+- **154:** the report's comparison with `started` names its four values explicitly; the payload hash is checked
+  against `declared` only.
+- **155:** the opening status matches this log.
+
+**Round 19 (153–155 resolved; no new finding; `ckpt1_round19_final.txt`).** Only the evidence-bar findings remain open.
 
 **Amendment after round 19 (156, found while building slice 3c-iv; reviewed in round 20):**
 - **156:** archive seasoning named no frozen source, and neither artefact holds one (the daily window starts 12
@@ -1200,44 +1238,7 @@ so the spec states what the code does. Numbers are the handoffs' item numbers; i
   identity as rows content (`rows.content_sha256`), here and in slice 2; the manifest fields that may and may not
   differ.
 
-**Round 19 (153–155 resolved; no new finding; `ckpt1_round19_final.txt`).** Only the evidence-bar findings remain open.
-
-**Round 18 (152 resolved; 3 new, 153–155; `ckpt1_round18_final.txt`), all applied:**
-- **153:** the two HEADs are provenance either way: a capturing attempt's differ, a reusing attempt's may coincide.
-- **154:** the report's comparison with `started` names its four values explicitly; the payload hash is checked
-  against `declared` only.
-- **155:** the opening status matches this log.
-
-**Round 17 (151 resolved; 1 new, 152; `ckpt1_round17_final.txt`), applied:**
-- **152:** HEAD is provenance, never re-compared. The capture's ledger merges before the report, so a capturing
-  attempt's report HEAD always differs from its `started` HEAD. The report re-compares only the spec, construction
-  and register-policy hashes and the Python version.
-
-**Round 16 (150 resolved; 1 new, 151; `ckpt1_round16_final.txt`), applied:**
-- **151:** `started`'s field list now records the attempt's HEAD (provenance) and every value the report re-compares:
-  the spec, construction and register-policy hashes, and the Python version as `"major.minor"`.
-
-**Round 15 (145, 148 and 149 resolved; 1 new, 150; `ckpt1_round15_final.txt`), applied:**
-- **150:** the report repeats every freeze check at its own HEAD and requires agreement with both the declaration
-  and the attempt's `started` row before reading evaluation inputs.
-
-**Round 14 (146 and 147 resolved; 145 carried; 2 new, 148–149; `ckpt1_round14_final.txt`), all applied:**
-- **145:** PR checks can be stale (branch protection is not strict), so the binding no longer relies on merge
-  order. It is the earliest `data_frozen` in `main`'s first-parent history; a later row cannot displace it and
-  makes later reports refuse.
-- **148:** the report's HEAD goes in a new `report_started` row; `started` keeps the attempt's own HEAD.
-- **149:** each consumed file is read once, hashed and parsed from the same bytes (or from a checked private copy),
-  with no reopen after the check. Slice 3 brings `verify_artefact` and the measurement script under this rule.
-
-**Round 13 (144 resolved; 145 carried; 2 new, 146–147; `ckpt1_round13_final.txt`), all applied:**
-- **145:** a uniqueness check at the report's HEAD did not stop a second capture merging later. Uniqueness is now
-  enforced on acceptance: merges to `main` are serialised and a fast-tier test refuses a committed ledger with two
-  `data_frozen` rows for the trial, so a second binding can never merge. The report runs at HEAD = `origin/main`
-  and records it.
-- **146:** a negative factor is `WEALTH_NONPOSITIVE` only; `COMPARATOR_INVALID` is for non-finite comparison
-  statistics.
-- **147:** each factor snapshot's row, payload and observations are read in one repeatable-read transaction, and the
-  run evaluates only that verified collection, with no later factor or RF query.
+**Round 21 (156 resolved; no new finding; `ckpt1_round21_final.txt`).**
 
 **Gate opened, 2026-10-08; round 2 findings 1–8 applied** under `docs/settled-decisions.md` 2026-10-08:
 - **1:** the claim is condition 3, powered in premise 6. The register row stays non-claiming in #2599's sense,
