@@ -45,7 +45,8 @@ from scripts.report_3609_step2 import PanelName
 MAX_CHARACTERISTIC: Final = "rmax1_21d"
 #: Step 1's price-characteristic correlation bar (one value for both of its price characteristics).
 MAX_CORRELATION_BAR: Final = CORRELATION_BAR[PRICE_CHARACTERISTICS[0]]
-assert all(CORRELATION_BAR[c] == MAX_CORRELATION_BAR for c in PRICE_CHARACTERISTICS)
+if any(CORRELATION_BAR[c] != MAX_CORRELATION_BAR for c in PRICE_CHARACTERISTICS):
+    raise RuntimeError("step 1's price characteristics no longer share one correlation bar")
 
 
 def max_holdings(readings: Mapping[int, MaxReading], admitted: Mapping[int, PanelName]) -> list[Holding]:
@@ -89,17 +90,24 @@ def max_fidelity(formations: Sequence[FidelityFormation], published: Mapping[str
     """The fidelity verdict over ``STAGE_A_GRID``; ``published`` is JKP's series by ``YYYY-MM``. A formation off the
     grid or repeated refuses (``FidelityError``); a grid month with no formation is undersized, as in step 1."""
     accumulator = SeriesAccumulator(STAGE_A_GRID)
+    seen: set[date] = set()
+    undersized = 0
     for f in formations:
         if f.formation not in STAGE_A_FORMATIONS:
             raise FidelityError("grid", f"formation {f.formation} is not a stage-A formation date")
+        if f.formation in seen:
+            raise FidelityError("grid", f"formation {f.formation} is repeated")
+        seen.add(f.formation)
         got = (
             factor_month(f.holdings, f.micro_cutoff_usd, f.cap_usd, sign)
             if f.holdings
             else FactorMonth(0, 0, None, None)
         )
+        if got.returns is None:
+            undersized += 1
         accumulator.add(shift_month(month_key(f.formation), 1), got)
-    # As ``SeriesAccumulator.result``: a grid month never added is undersized too; one leg count is kept per add.
-    undersized = accumulator.undersized + len(STAGE_A_GRID) - len(accumulator.leg_counts["low"])
+    # As ``SeriesAccumulator.result``: a grid month with no formation is undersized too.
+    undersized += len(STAGE_A_GRID) - len(seen)
     arms = {
         arm: compare_arm(accumulator.ours[arm], published, STAGE_A_GRID, undersized, MAX_CORRELATION_BAR)
         for arm in ARMS
