@@ -3,8 +3,9 @@
 Status: spec, revised after Codex checkpoint 1 rounds 1–3 (§"Checkpoint log"). Slice 1 builds the pure rules and
 a census on real data. The census inspects coverage, verdicts and distribution stamps only. It computes no signal,
 slot, holding, return statistic or cross-source comparison, and prints no return value. No signal, holding or return
-path is computed on real data until a declaration exists (§"Registration"). The declaration waits on the evidence-bar
-decision posted on #3609 on 2026-10-06 02:37Z, which governs every study whose result could reach demo.
+path is computed on real data until a declaration exists (§"Registration"), with one registered exception: slice 2a's
+development-only feasibility look (§"Condition-4 feasibility on W1"). The evidence bar is settled
+(`docs/settled-decisions.md`, 2026-10-08): a demo admission is the four-part historical screen.
 Programme: `docs/research/2026-10-04-strategy-research-sweep.md` §4 item 3. The baselines are defined in #3609 step 0
 (`docs/research/2026-10-04-3609-step0-baselines.md`); this study reuses their weights and cost rules.
 
@@ -287,7 +288,8 @@ Every control and baseline uses the same months, path engine, costs, timing arm 
   W2b's first eleven formations mix sources. W2 = W2a ∪ W2b is supplementary.
 - **Episodes:** calendar 2008, 2020-02 to 2020-04 and calendar 2022.
 - **Full window:** S+1..E, supplementary.
-- **Clipping.** Every window is intersected with the reported months S+1..E, and nothing is read outside them. The
+- **Clipping.** Every window is intersected with the reported months S+1..E, and no reported statistic reads outside
+  them; formation inputs also read each signal's lookback and C4's prefix, which can start before S+1. The
   report prints each window's actual bounds and month count. An empty intersection prints "empty". Length thresholds
   apply after clipping.
 - **Statistics by clipped length, the same for whole-book and class outputs:**
@@ -344,28 +346,115 @@ prints:
 **Nothing is declared or run in slice 1.** The gated run path is built in slice 3, against the declaration that
 slice 2 defines. The planning context:
 
-**Why it waits.** The result matters only if it can lead to demo, and the bar for that is the open question on
-#3609. Planning arithmetic, using `trial_register.power_check` with one configuration, Track B and 80% power, under an
+**Historical context (superseded claim).** Before the 2026-10-08 entry, the declaration would have claimed an IR margin
+over SPY. Planning arithmetic for that claim, using `trial_register.power_check` with one configuration, Track B and 80% power, under an
 **IID planning scenario** of 18.75 years (2005-12..2024-08, 225 months; no dependence model yet, and dependence can
 move effective information either way): the smallest detectable margin is ≈ 0.5742 IR, and a margin of 0.5 needs 24.7
 years. Reproduce:
 `PYTHONPATH=. uv run python -c "from app.services.trial_register import *; c=power_check(TrialDesign(EvidenceTrack.ADOPTION,0.575,'x',225/12,'x'),trials=1); print(c.required_years, c.power)"`.
-That figure is feasibility, not a margin.
+That figure is feasibility, not a margin. It says nothing about the exposure test the 2026-10-08 screen powers; that
+test's feasibility depends on the declared loadings, test, multiplicity and sample.
 
 **The declaration (slice 2) must:**
-- pick the estimand, the primary comparison and the primary window. The comparison can be against SPY, against
-  C1x/C3, or as a complement to the core. The last needs a frozen sleeve allocation, funding asset, combined rebalance
-  rule and required improvement;
-- pick the track:
-  - **Track B** needs a post-publication prior and a fidelity bridge for this unleveraged long-or-cash ETF adaptation;
-  - **Track A** needs a sealed, access-audited confirmation sample and its analysis rule. W2 is reused validation and
-    is not one, so without new data the exercise stays exploratory;
-- set the margin from an economic rationale, then test feasibility under a stated dependence treatment. Bind power to
-  the primary window, the reference's uncertainty and the forward-monitoring horizon, with a minimum information
-  requirement and the #2500 sequential boundary;
-- record the search history: this spec's one primary configuration, the programme-level family selection
-  (`research-process.md` PBO/CSCV or a nested hold-out where it applies), and a rule that no arm other than the
-  declared primary can be promoted.
+- **Adopt the 2026-10-08 screen** (`docs/settled-decisions.md`), which names #3620. The declaration's powered
+  claim is condition 3, the exposure test: the loadings the book is built to carry, one-sided 5% and
+  Bonferroni-adjusted across them, with the power check computed for that test. Condition 2 is the fidelity
+  requirement. Condition 4 freezes a margin, never below zero, over **both** net B1 and the matched random control
+  (C3), with its basis, and reports the beats as point estimates. The turnover rule stays as declared. The forward
+  non-inferiority rule (#2500) belongs to the later forward declaration, not to this screen.
+- **Name a sealed confirmation sample.** W2 is reused validation (§"Windows"; step 0 read its baselines' returns), so
+  it is not one, and condition 4 cannot be read on it. Candidate: months after E from a source that no study has read
+  as an outcome. The declaration must establish that candidate's access history and source fidelity, or the study stays
+  exploratory.
+- **Freeze condition 4's comparators as scalars:** for C3, the aggregate (for example the nearest-rank median of
+  the draws' net G), its units, a strict comparison and the invalid-draw rule; for B1, net G over the same months.
+- **Define the confirmation path:** its bounds, warm-up, initialisation and carry-over, and endpoint costs. If E is
+  extended to reach the sample, the development census endpoint is kept separately.
+- **Record the search history:** this spec's one primary configuration, slice 2a's look, the programme-level family
+  selection (`research-process.md` PBO/CSCV or a nested hold-out where it applies), and a rule that no arm other than
+  the declared primary can be promoted.
+
+### Condition-4 feasibility on W1 (slice 2a)
+
+**Why.** Condition 4 of the 2026-10-08 entry is a net **total-return** beat of B1 (SPY). Our prior is against this
+configuration meeting it:
+- `quant/strategy-menu.md` puts a long-or-cash book's gain in drawdown reduction and diversification, not return.
+- The inverse-volatility slots give low-volatility funds the larger weights.
+
+Slice 2 also has to solve the sealed-sample problem above. Before that work, one registered look on development data
+applies a **deliberately conservative abandonment policy**. It is a research-budget stop rule, not a proof: one
+historical window does not bound another, and a configuration that loses on W1 could win elsewhere. False
+rejections are accepted. It follows #3609 step 2's register-r25 planning look, which used development data only.
+
+**What is computed.** One configuration, the spec's primary one: every fund in §"Universe and eligibility", in the
+**primary scenario**, which is net cost, 0% cash and lagged timing. B1 runs in the same scenario.
+- **Bounds.** W1 is S+1..W1_end, where W1_end = min(2021-05, E). S and E come from the census.
+  - The look runs its own path from S to W1_end and liquidates at W1_end's close, charged.
+  - Before W1_end it agrees with the continuous path. At W1_end the liquidation replaces the continuous path's
+    scheduled fill, if any, and that fill's cost.
+  - The same path rules apply to B1.
+- **Outcome isolation.** Every fund's returns, RF and raw closes are truncated to months ≤ W1_end before any
+  formation, cost or path is computed.
+  - A formation at t reads each fund's months from its first panel month through t. `form()` also computes the C4
+    prefix, which the look does not use.
+  - No month after W1_end enters a signal, volatility, weight, cost or return.
+- **Metadata access, stated.** The census loads rows through E to decide coverage, eligibility, S and E, as slice 1
+  does. That is input inspection of W2 months, not outcome access. The output records S, E and W1_end.
+- **Costs.** A position's band comes from its fill-month Intrader raw close via `cost_model.cost_band_for(…,
+  price_basis="as_traded")`, as in step 0 and §"Month-end anchors". The run refuses on a missing, non-positive or
+  non-finite close, or on a bar more than 7 days before the month-end.
+- **Decision summary:** the annualised log growth G = (12/n) Σ ln(1 + R_m) of TSMOM and of B1 over W1's months, n,
+  the bounds and the verdict.
+  - No other control path, statistic, year split or sub-book is computed or printed.
+  - The output file also keeps audit artefacts: the consumed inputs and both monthly paths.
+  - Engine bookkeeping (C4 flags, annual turnover) is computed incidentally and never used or reported.
+
+**The rule, frozen before the look.**
+- **`REFUSED`:** any input refusal, the two paths' reported months differing, n < 12, or a non-finite G. No decision
+  is drawn; the refusal is posted and the look may run again only after the cause is fixed, as a new attempt.
+- **`NOT_DECLARED`:** TSMOM's G ≤ B1's G, compared unrounded. The configuration is not declared for the 2026-10-08
+  screen. The figures are posted on #3620 and the study stops.
+- **`CONTINUE`:** otherwise. Slice 2 proceeds as above, and the declaration's search record states this look.
+- Neither G is used to tune, select or promote anything else.
+
+**Registration and attempt record.**
+- **Before the run:** these merge to `main` together:
+  - register r27 entry `3620-condition4-feasibility-2026-10-08` (`searches=1`, `EXACT`). It is not a `hunt-`
+    entry, so M_inh moves 522 → 523.
+  - this rule and the script.
+
+  The r9 stranding query was measured before the bump: the same five (version, purpose) groups, 488 rows, every one
+  `harness_validation`. The register's literal-count test moves with it.
+- **Ledger states,** in `var/research/3620/feasibility-ledger.jsonl`. Each attempt is `evaluation_began` followed by
+  exactly one terminal row:
+  - `completed`, for verdict `NOT_DECLARED` or `CONTINUE`. This ends the look: no further attempt starts.
+  - `refused`, for verdict `REFUSED`. A repaired attempt may follow, and it is a new run id.
+  - `failed`, for an exception.
+  - `abandoned`, appended by hand after reconciling an attempt that has no terminal row.
+- **The script refuses to start:**
+  - without the register entry;
+  - unless the checkout is clean and HEAD equals `origin/main` after a fetch;
+  - if any attempt is `completed`;
+  - if any attempt lacks a terminal row;
+  - while another attempt holds the ledger's exclusive lock, which is held for the whole run.
+- **Before computing,** it fsyncs `evaluation_began`. The row carries HEAD, the spec's sha256, the code hashes (the
+  script, `tsmom_etf.py`, `etf_total_return_reader.py`, `total_return_reader.py`, `cost_model.py`,
+  `trial_register.py`), `COST_MODEL_ID`, the panel version, the factor snapshot ids and the census bounds.
+- **The output file** is `var/research/3620/feasibility-<run_id>.json`, in canonical JSON (`canonical_json`).
+  It is written under the gitignored `var/` so a refused or failed attempt leaves the checkout clean for its retry. It
+  holds:
+  - the same fields;
+  - the census metadata that decides membership: each fund's first and last panel month and first eligible month,
+    plus S, E and E's limiting funds;
+  - the consumed inputs: every fund's returns and RF through W1_end, and the raw closes with their bar dates;
+  - their sha256;
+  - both monthly paths, the summary and the verdict.
+
+  `reproduce` re-evaluates the saved inputs and must return the same summary and verdict. The terminal row names the
+  file's sha256.
+- **A follow-up PR commits the completed output** as `docs/research/3620-condition4-feasibility.json` **and the
+  ledger rows** (`docs/research/3620-feasibility-ledger.jsonl`). The
+  register entry is never edited.
 
 **The slice 3 gate must:**
 - refuse unless exactly one `TRIAL_REGISTER` entry matches. That entry must be frozen and feasible under
@@ -407,7 +496,9 @@ That figure is feasibility, not a margin.
      C1/C1x/C2/C3/C4, baseline and class-sub-book weight builders, samplers, percentile and n/a conventions.
    - `scripts/report_3620_tsmom.py` adds `--census` only: coverage, verdicts, refusals, start, E and the stamp audit.
    - Fixture tests cover every rule, each revert-probed. Codex checkpoint 2 runs on the diff.
-2. **Declaration,** after the #3609 answer: claim, track, margin, search record and register entry, with checkpoint 1
+2a. **Condition-4 feasibility on W1** (§"Condition-4 feasibility on W1"): `scripts/plan_3620_feasibility.py`, its
+   output file and register r27. If the rule says "not declared", the study stops here.
+2. **Declaration,** only if 2a allows it: claim, track, margin, search record and register entry, with checkpoint 1
    on them.
 3. **Gated run path, then the declared run** from clean `main`. This slice includes the proxy-fidelity diagnostic and the
    AQR comparison. The verdict, ledger and manifest are posted on #3620.

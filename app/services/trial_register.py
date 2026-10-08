@@ -248,7 +248,13 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: on stage B, non-claiming in #2599's sense (its claim is condition 3 of the 2026-10-08 screen). Not a `hunt-`
 #: entry, so it counts in M_inh: 521 -> 522. Measured the same way before the bump: the SAME five groups, 488 rows,
 #: every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-08-r26"
+#:
+#: r27 (2026-10-08, #3620 slice 2a) adds `3620-condition4-feasibility-2026-10-08`: one configuration (the spec's
+#: primary TSMOM book) run on W1 (development, S+1..2021-05) against B1 in the primary net scenario, under a rule
+#: frozen before the look: book G <= B1 G means the configuration is not declared. 1 search, registered before the
+#: run. Not a `hunt-` entry, so it counts in M_inh: 522 -> 523. Measured the same way before the bump: the SAME five
+#: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-08-r27"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1625,6 +1631,27 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "french_momentum_monthly_observations_sha256="
                 "07f3c1fbf5dfe48aec0edaaa793aff70c0f0c55e49073c86103278e324268f4e; "
                 "b1_close_2014_09_30=197.020004; holdout_strategy_id=3609-step2-book; holdout_strategy_version=v1"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=1,
+        ),
+        # #3620 slice 2a: registered BEFORE its run (spec §"Condition-4 feasibility on W1"); the script refuses without
+        # this row. Its output and ledger rows are committed after the run; this row is never edited.
+        DeclaredTrial(
+            trial_id="3620-condition4-feasibility-2026-10-08",
+            description=(
+                "#3620 slice 2a condition-4 feasibility look: the spec's one primary TSMOM configuration (every fund, "
+                "net cost, 0% cash, lagged timing) and B1 (SPY) in the same scenario, on W1 only (development, "
+                "S+1..min(2021-05, E)), each fund's returns, RF and raw closes truncated to W1 before any formation. "
+                "Prints the two annualised log growths, n, the bounds and the verdict. Frozen rule: book G <= B1 G "
+                "means NOT_DECLARED (the study stops); otherwise CONTINUE to slice 2. Outcome-based development "
+                "selection; non-claiming; W2 is not read as an outcome."
+            ),
+            evidence=(
+                'docs/research/2026-10-06-3620-cross-asset-tsmom.md §"Condition-4 feasibility on W1 (slice 2a)"; '
+                "output docs/research/3620-condition4-feasibility.json and ledger "
+                "docs/research/3620-feasibility-ledger.jsonl, committed after the run; "
+                "reproduce with PYTHONPATH=. uv run python -m scripts.plan_3620_feasibility (#3620, 2026-10-08)"
             ),
             exactness=TrialExactness.EXACT,
             searches=1,
