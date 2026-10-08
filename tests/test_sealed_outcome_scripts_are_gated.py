@@ -510,6 +510,10 @@ _NON_TRIAL_RESEARCH_READERS: Final[dict[str, str]] = {
     # slot or statistic. ⚠ Slice 3 adds the outcome-reading run path to this script behind its own register gate;
     # this entry must then be replaced by that gate, not kept.
     "report_3620_tsmom.py": "#3620 slice 1 census (coverage, verdicts, stamps; no signal or return statistic)",
+    # #3620 spec §"Condition-4 feasibility on W1 (slice 2a)": one registered development-only look, charged as trial
+    # register r27 `3620-condition4-feasibility-2026-10-08`. `preflight` refuses to run without that entry, on a dirty
+    # or moved checkout, or after a completed attempt; returns after W1 (2021-05) are truncated before any formation.
+    "plan_3620_feasibility.py": "#3620 slice 2a W1 feasibility look (register r27; refuses without it)",
 }
 
 _SERVICES = _SCRIPTS.parent / "app" / "services"
