@@ -1,5 +1,10 @@
 # #3620 — cross-asset trend (12-month TSMOM, long-or-cash, monthly) on the corpus ETF set
 
+**Outcome (2026-10-08): the study stops at slice 2a.** The registered W1 look (run `b122eba871e9fbf164fff367c6038e89`,
+`docs/research/3620-condition4-feasibility.json`) returned `NOT_DECLARED`. Over W1 (2005-12..2021-05, 186 months),
+the book's net annualised log growth was 3.18% against B1's 9.79%. The configuration is not declared for the
+2026-10-08 screen.
+
 Status: spec, revised after Codex checkpoint 1 rounds 1–3 (§"Checkpoint log"). Slice 1 builds the pure rules and
 a census on real data. The census inspects coverage, verdicts and distribution stamps only. It computes no signal,
 slot, holding, return statistic or cross-source comparison, and prints no return value. No signal, holding or return
@@ -410,7 +415,9 @@ rejections are accepted. It follows #3609 step 2's register-r25 planning look, w
   - Engine bookkeeping (C4 flags, annual turnover) is computed incidentally and never used or reported.
 
 **The rule, frozen before the look.**
-- **`REFUSED`:** any input refusal, the two paths' reported months differing, n < 12, or a non-finite G. No decision
+- **`REFUSED`:** an input refusal raised during evaluation (a `TsmomRefusal` from a formation, a raw close or the
+  path), the two paths' reported months differing, n < 12, or a non-finite G. A loader or census error outside the
+  evaluation ends the attempt `failed`. No decision
   is drawn; the refusal is posted and the look may run again only after the cause is fixed, as a new attempt.
 - **`NOT_DECLARED`:** TSMOM's G ≤ B1's G, compared unrounded. The configuration is not declared for the 2026-10-08
   screen. The figures are posted on #3620 and the study stops.
