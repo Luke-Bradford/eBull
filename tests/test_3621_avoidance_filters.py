@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable
 from datetime import date, timedelta
@@ -128,6 +129,24 @@ def test_highest_return_tied_on_ten_days_is_kept_where_jkp_rank_filter_drops_it(
     reading = _read(_bars(_steps(tied)))
     assert reading.missing is None
     assert reading.value == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize("close, adj", [(0.0, 10.0), (10.0, -1.0), (math.inf, 10.0), (10.0, math.nan)])
+def test_a_usable_bar_with_a_bad_price_refuses(close: float, adj: float) -> None:
+    bars = _bars(_steps({}))
+    bars[5] = DailyBar(bars[5].bar_date, close, adj, 1000, stamped=False, usable=True)
+    with pytest.raises(AvoidanceError, match="non-positive or non-finite"):
+        MaxSeries(bars, SESSIONS)
+    bars[5] = DailyBar(bars[5].bar_date, close, adj, 1000, stamped=False, usable=False)
+    assert MaxSeries(bars, SESSIONS).at(K).missing is None
+
+
+def test_unordered_sessions_or_bars_refuse() -> None:
+    bars = _bars(_steps({}))
+    with pytest.raises(AvoidanceError, match="sessions are not strictly ascending"):
+        MaxSeries(bars, [*SESSIONS, SESSIONS[-1]])
+    with pytest.raises(AvoidanceError, match="bars are not strictly ascending"):
+        MaxSeries([bars[1], bars[0], *bars[2:]], SESSIONS)
 
 
 def test_cutoff_is_the_ceil_0_9n_th_smallest_and_ties_at_it_all_flag() -> None:
