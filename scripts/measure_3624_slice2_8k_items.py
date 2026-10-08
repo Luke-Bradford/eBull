@@ -422,6 +422,9 @@ _SCALAR_TAGS: Final = ("ACCESSION-NUMBER", "ACCEPTANCE-DATETIME", "TYPE", "FILIN
 #: PDS markers of a non-ordinary submission: paper, private-to-public release, confirming copy of a paper filing.
 #: Each is its own field outcome, and any one makes the row ``items_unestablished``.
 MARKERS: Final = ("PAPER", "PRIVATE-TO-PUBLIC", "CONFIRMING-COPY")
+#: PDS post-acceptance correction evidence (pp. 41-42): any one present gives ``correction_evidence``, which also
+#: makes the row ``items_unestablished``.
+CORRECTION_TAGS: Final = ("CORRECTION", "DELETION", "TIMESTAMP")
 
 
 def parse_header(text: str) -> dict[str, Any]:
@@ -440,6 +443,7 @@ def parse_header(text: str) -> dict[str, Any]:
         "repeated_tags": sorted(t for t in _SCALAR_TAGS if len(re.findall(rf"^<{t}>", body, re.M)) > 1),
         "accession_numbers": [m.strip() for m in re.findall(r"^<ACCESSION-NUMBER>(.*)$", body, re.M)],
         "markers": sorted(t for t in MARKERS if re.search(rf"^<{t}>", body, re.M)),
+        "correction_tags": sorted(t for t in CORRECTION_TAGS if re.search(rf"^<{t}>", text, re.M)),
         "acceptance_et": one("ACCEPTANCE-DATETIME"),
         "type": one("TYPE"),
         "filing_date": one("FILING-DATE"),
@@ -495,7 +499,16 @@ def _ymd(value: str | None) -> str | None:
 CLASS_FIELDS: Final = (
     (
         "items_unestablished",
-        ("retrieval", "parse", "accession", "paper", "private_to_public", "confirming_copy", "correction"),
+        (
+            "retrieval",
+            "parse",
+            "accession",
+            "paper",
+            "private_to_public",
+            "confirming_copy",
+            "correction",
+            "correction_evidence",
+        ),
     ),
     ("timing_in_doubt", ("acceptance", "filing_date", "date_order")),
     ("label_in_doubt", ("type", "items", "filer")),
@@ -542,6 +555,7 @@ def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> d
         if filed >= accepted
         else "date_before_acceptance",
         "correction": _CORRECTION_OUTCOME[correction_category(header)],
+        "correction_evidence": "correction_evidence" if header["correction_tags"] else "ok",
     }
     return out
 
@@ -751,16 +765,19 @@ def compare_snapshots(new: dict[str, list[Appearance]], old: dict[str, list[Appe
 
 
 _INDEX_URL: Final = "https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{quarter}/master.gz"
-_INDEX_FILE: Final = re.compile(r"edgar/data/\d+/[0-9A-Za-z-]+\.txt")
+#: ``edgar/data/<cik>/<accession>.txt``, the accession in its PDS format (10-digit CIK, 2-digit year, 6-digit
+#: sequence).
+_INDEX_FILE: Final = re.compile(r"edgar/data/[0-9]{1,10}/[0-9]{10}-[0-9]{2}-[0-9]{6}\.txt")
 
 
-def index_rows(text: str, audit: Counter[str]) -> list[tuple[str, str, str, str]]:
+def index_rows(text: str, audit: Counter[str], daily: bool) -> list[tuple[str, str, str, str]]:
     """Data rows ``(cik, form, date_filed, accession)`` of an EDGAR ``master`` index, date as ``YYYY-MM-DD``.
 
-    Data rows are the lines after the dashed separator under the ``CIK|…`` column header. A name holding ``|`` is
-    recovered from the four fixed fields around it (counted). Any other non-blank line that is not a valid row is
-    counted in ``audit`` as ``rejected_<reason>``, never skipped silently; a missing column header or separator
-    rejects the whole file."""
+    Quarterly files must date rows ``YYYY-MM-DD``; daily files may use ``YYYYMMDD`` or ``YYYY-MM-DD`` (each format
+    counted). Data rows are the lines after the dashed separator under the ``CIK|…`` column header. A name holding
+    ``|`` is recovered from the four fixed fields around it (counted). Any other non-blank line that is not a valid
+    row is counted in ``audit`` as ``rejected_<reason>``, never skipped silently; a missing column header or
+    separator rejects the whole file."""
     lines = text.splitlines()
     head = next((i for i, line in enumerate(lines) if line.startswith("CIK|")), None)
     if head is None or head + 1 >= len(lines) or not lines[head + 1].startswith("---"):
@@ -779,7 +796,8 @@ def index_rows(text: str, audit: Counter[str]) -> list[tuple[str, str, str, str]
             audit["rejected_field_count"] += 1
             continue
         cik, _, form, raw, path = parts
-        filed = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}" if re.fullmatch(r"\d{8}", raw) else raw
+        compact = daily and re.fullmatch(r"[0-9]{8}", raw) is not None
+        filed = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}" if compact else raw
         if not re.fullmatch(r"[0-9]{1,10}", cik):  # ASCII only: latin-1 superscripts pass ``isdigit``
             audit["rejected_cik"] += 1
         elif not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", filed) or _ymd(filed.replace("-", "")) is None:
@@ -787,6 +805,7 @@ def index_rows(text: str, audit: Counter[str]) -> list[tuple[str, str, str, str]
         elif not _INDEX_FILE.fullmatch(path):
             audit["rejected_file_name"] += 1
         else:
+            audit[f"date_format_{'compact' if compact else 'iso'}"] += 1
             out.append((cik.zfill(10), form, filed, path.rsplit("/", 1)[-1].removesuffix(".txt")))
     return out
 
@@ -831,7 +850,7 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
             start = date(year, 3 * quarter - 2, 1).isoformat()
             end = (date(year + 1, 1, 1) if quarter == 4 else date(year, 3 * quarter + 1, 1)).isoformat()
             audit: Counter[str] = Counter()
-            for cik, form, filed, accession in index_rows(text, audit):
+            for cik, form, filed, accession in index_rows(text, audit, daily=False):
                 placement["before_quarter" if filed < start else "after_quarter" if filed >= end else "in"] += 1
                 if form in FORMS and filed < FIRST.isoformat():
                     placement["family_rows_dated_before_first"] += 1
@@ -990,7 +1009,7 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
         f["listing_sha256"] = listings[f["listing"]]["sha256"]
         f["cached_at"] = _mtime(cache / f["name"])
         audit: Counter[str] = Counter()
-        for cik, form, filed, accession in index_rows(text, audit):
+        for cik, form, filed, accession in index_rows(text, audit, daily=True):
             if form not in FORMS:
                 continue
             key = (cik, accession)
@@ -1007,7 +1026,7 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
     for path in sorted(index_cache.glob("master_*.gz")):
         quarterly_files[path.name] = sha256_file(path)
         text = gzip.decompress(path.read_bytes()).decode("latin-1")
-        for cik, form, filed, accession in index_rows(text, quarterly_parse):
+        for cik, form, filed, accession in index_rows(text, quarterly_parse, daily=False):
             if form in FORMS:
                 quarterly[(cik, accession)] = filed
     archive_all = archive_rows | _PRE_FIRST["rows"]
@@ -1041,17 +1060,24 @@ def daily_index(archive_path: Path, cache: Path, index_cache: Path, measurement:
     elsewhere: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
     for path in sorted(index_cache.glob("master_*.gz")):
         text = gzip.decompress(path.read_bytes()).decode("latin-1")
-        for cik, form, filed, accession in index_rows(text, Counter()):
+        for cik, form, filed, accession in index_rows(text, Counter(), daily=False):
             if accession in wanted:
                 elsewhere[accession].add((cik, form, filed))
+    # Rows and distinct accessions apart: an accession can be unexplained under several CIKs.
+    status: dict[str, set[str]] = defaultdict(set)
     for cik, accession, _ in unexplained:
         listed = elsewhere.get(accession, set())
         if not listed:
-            recon["in_neither_accession_absent_from_quarterly"] += 1
+            where = "absent_from_quarterly"
         elif any(c == cik for c, _, _ in listed):
-            recon["in_neither_accession_in_quarterly_same_cik_other_form"] += 1
+            where = "in_quarterly_same_cik_other_form"
         else:
-            recon["in_neither_accession_in_quarterly_other_cik"] += 1
+            where = "in_quarterly_other_cik"
+        recon[f"in_neither_rows_{where}"] += 1
+        status[where].add(accession)
+    recon["in_neither_accessions"] = len(wanted)
+    for where, accessions in status.items():
+        recon[f"in_neither_accessions_{where}"] = len(accessions)
     for key, filed in quarterly.items():
         if filed >= FIRST.isoformat() and key not in first_day:
             recon["quarterly_not_in_daily"] += 1
