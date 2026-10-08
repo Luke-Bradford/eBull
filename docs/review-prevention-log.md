@@ -12319,3 +12319,15 @@ neighbouring container and match it.**
   never by a Python predicate over a reader that loads the whole series. Reusing a shared query is fine if the bound
   is added to its text, with a test that the bounded text differs from the shared one only by the bound.
 - Enforced in: `tests/test_3609_step2_declaration_script.py::test_the_b1_query_is_step_0s_month_end_query_bounded_before_distinct_on`.
+
+### A side effect followed by a ledger row is tested for raising after it succeeded (#3609)
+
+- Failure (Codex checkpoint 2 on PR #3713, step 2's declared-run orchestrator, 2026-10-08): `start_run` appended
+  `started` outside its failure handling. An append that writes its row and then raises on fsync would have left a
+  durable `started` row with no terminal row, which is an open run nobody ends.
+- Prevention: for every external side effect that a ledger row or another write follows (a DB commit, a ledger
+  append, an artefact write), put the effect inside the failure handling. Decide what to clean up by re-reading the
+  durable state, never by assuming the effect did not happen, and write a test where the effect lands and then
+  raises.
+- Enforced in: `tests/test_3609_step2_declared_run.py::test_a_started_append_that_raises_after_its_row_is_durable_ends_the_run`
+  and `::test_a_started_append_that_wrote_nothing_leaves_no_row`.

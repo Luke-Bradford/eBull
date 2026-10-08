@@ -92,7 +92,11 @@ def started_row(run_id: str, *, head: str, hashes: CodeHashes, payload: str, com
 def _end_if_open(run_id: str, step: str, exc: BaseException, *, ledger: Path, committed_ledger: Path) -> None:
     """End the run ``failed`` unless its ledger shows no row for it (nothing durable to end) or a terminal row. A
     failed append may still have made its row durable, so the ledger is re-read; if it cannot be, the row is
-    written regardless."""
+    written regardless.
+
+    Safe under :data:`START_CLAIM`: ``end_run_failed`` appends through ``append_ledger``, which locks the ledger file
+    itself, and the claim is a separate ``<ledger>.start.lock`` file. ``exc`` is never masked: a read error and
+    ``end_run_failed``'s own write error are each attached to it as a note."""
     try:
         events = {row.get("event") for row in read_ledger(committed_ledger, ledger) if row.get("run_id") == run_id}
     except Exception as read_error:
@@ -128,14 +132,18 @@ def start_run(
     """Ledger steps 1 and 2; returns the access id. A refusal writes no row and records no access.
 
     ``record_access`` must commit before it returns, so the ``access_recorded`` row never names an uncommitted
-    access. A failure once ``started`` may be durable ends the run ``failed``."""
+    access. A failure once ``started`` may be durable ends the run ``failed``, including an access whose commit
+    may have landed before ``record_access`` raised: whether the run was an access is the database's to say (spec
+    §"Registration", abandoned runs), so ``failed`` beside a committed access row is accurate.
+    """
     hashes = current()
     with ledger_claim(ledger, START_CLAIM):
+        committed = read_ledger(committed_ledger)
         rows = read_ledger(committed_ledger, ledger)
         trial = check_declaration(register, rows, hashes)
         if any(row.get("run_id") == run_id for row in rows):
             raise StageBAccessError(f"run {run_id} already has ledger rows; a run id is used once")
-        require_capture_mode(read_ledger(committed_ledger), reuse=reuse)
+        require_capture_mode(committed, reuse=reuse)
         step = STARTED_EVENT
         try:
             append_ledger(
