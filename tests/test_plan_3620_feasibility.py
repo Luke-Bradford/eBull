@@ -218,3 +218,12 @@ def test_attempt_artefacts_live_under_the_gitignored_var_tree() -> None:
     assert plan.LEDGER_PATH.relative_to(plan._REPO_ROOT).parts[0] == "var"
     assert plan.output_path("x").parent == plan.LEDGER_PATH.parent
     assert "/var/*" in (plan._REPO_ROOT / ".gitignore").read_text().splitlines()
+
+
+def test_a_failure_after_the_output_exists_leaves_the_attempt_unterminated(ledgers: Path) -> None:
+    plan.record_failure("x", RuntimeError("before any output"))
+    assert [json.loads(line)["event"] for line in (ledgers / "local.jsonl").read_text().splitlines()] == ["failed"]
+    plan.output_path("y").write_bytes(b"{")
+    plan.record_failure("y", KeyboardInterrupt())
+    rows = [json.loads(line) for line in (ledgers / "local.jsonl").read_text().splitlines()]
+    assert [row["run_id"] for row in rows] == ["x"]

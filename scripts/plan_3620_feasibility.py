@@ -293,6 +293,13 @@ def write_durably(path: Path, data: bytes) -> None:
         os.close(directory)
 
 
+def record_failure(run_id: str, exc: BaseException) -> None:
+    """``failed`` permits a retry, so it is written only while no output exists. Once the output file exists, even
+    partly, it may hold a result: the attempt stays unterminated and is reconciled by hand (spec, ``abandoned``)."""
+    if not output_path(run_id).exists():
+        append_ledger(LEDGER_PATH, _row("failed", run_id, error=repr(exc)))
+
+
 def _row(event: str, run_id: str, **fields: Any) -> dict[str, Any]:
     return {"event": event, "run_id": run_id, "at": datetime.now(UTC).isoformat(), **fields}
 
@@ -352,7 +359,7 @@ def run(conn: psycopg.Connection[Any], head: str) -> dict[str, Any]:
         data = canonical_json(output) + b"\n"
         write_durably(output_path(run_id), data)
     except BaseException as exc:
-        append_ledger(LEDGER_PATH, _row("failed", run_id, error=repr(exc)))
+        record_failure(run_id, exc)
         raise
     terminal = "refused" if output["verdict"] == REFUSED else "completed"
     # Nothing fallible sits between the fsynced output and this row: its sha256 comes from the bytes in memory. If the
