@@ -363,6 +363,10 @@
    "last_data_received": "October 7, 2026"
   }
  },
+ "row_placement_by_date_filed": {
+  "family_rows_dated_before_first": 14100,
+  "in": 23506845
+ },
  "by_quarter": {
   "2004Q3": {
    "index_rows": 9767
@@ -646,6 +650,7 @@
    "ours": true,
    "archive_file_latest_filing_date": "2026-09-08",
    "header": {
+    "repeated_tags": [],
     "acceptance_et": "20260923161357",
     "type": "8-K",
     "filing_date": "20260923",
@@ -669,6 +674,7 @@
    "ours": false,
    "archive_file_latest_filing_date": "2026-09-15",
    "header": {
+    "repeated_tags": [],
     "acceptance_et": "20260917171143",
     "type": "8-K",
     "filing_date": "20260917",
