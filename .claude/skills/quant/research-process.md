@@ -111,6 +111,8 @@ A forward demo test checks more than code: implementation, decay, eligibility, l
 
 **No strategy opens positions forward without a passing backtest** (operator rule, 2026-10-04).
 
+**What "passing" means for a Track B demo admission:** a zero-capital demo test is admitted on a four-part preregistered historical screen. Live capital keeps the full bar. The rule text and the operator's approval live only in `docs/settled-decisions.md`, entry 2026-10-08. Read it there; do not restate it here.
+
 ## LLM-derived signals
 
 They follow `quant/llm-research.md`. Return-prediction claims from pre-cutoff dates are not evidence. Feature collection without trading is the forward path.

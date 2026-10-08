@@ -1305,6 +1305,63 @@ Source: the 2026-10-04 committee review (#2437). The rule text lives in `.claude
   years. Reproduce: `PYTHONPATH=. uv run python -c "from app.services.trial_register import *; print(power_check(TrialDesign(EvidenceTrack.DISCOVERY, 0.5, 'x', 60.0, 'x'), trials=TRIAL_REGISTER.declared_count))"`.
   Realistic edges belong on Track B or need more breadth.
 
+## 2026-10-08 — Demo admission on Track B is a historical screen, not a powered beat of SPY (supervisor decision, operator-approved 2026-10-08)
+
+Source: the evidence-bar question on #3609 (2026-10-06 02:37Z). The operator delegated it on 2026-10-08, verbatim:
+*"doesn't need me to decide if you know what goal I'm after, you should decide the optimal route forward to get us
+there"*. Because the entry relaxes the 2026-08-23 bar for the demo tier, it rests on the operator's explicit
+approval of 2026-10-08, verbatim: *"I approve committing and pushing the 2026-10-08 settled-decisions entry and the
+research-process.md skill edit in ~/Dev/eBull-wt-demo-screen, which admit Track B strategies to zero-capital demo on
+the four-part historical screen while live capital keeps the full bar."* The goal is to beat SPY net of costs,
+hands-off.
+
+**Finding.** No realistic factor edge can be powered on our point-in-time data:
+- the survivorship-free corpus runs 2014-10..2024-08 (9.92 years);
+- at 80% power, one Track B configuration needs about 24.7 years at IR 0.5 and about 68.7 years at IR 0.3;
+- a realistic skilled IR against SPY is 0.3–0.5 (`quant/portfolio-construction-and-risk.md`).
+
+Reproduce with `PYTHONPATH=. uv run python -c "from app.services.trial_register import *; print(power_check(TrialDesign(EvidenceTrack.ADOPTION, 0.5, 'x', 9.92, 'x'), trials=1))"`.
+
+Under the bar as it stood, no stock-selection strategy could ever reach demo.
+
+**Decision.** For a **zero-capital demo forward test only**, a Track B strategy is admitted on a preregistered
+historical screen. All four conditions must hold:
+1. **Published support.** Every family in the book has independent post-publication support (`quant/strategy-menu.md`).
+2. **Construction fidelity.** Our construction passes its fidelity bars against the published series (as #3609 step 1).
+3. **Powered exposure test.** The book loads on the factors it was built to carry, with a one-sided 5% test,
+   Bonferroni-adjusted across the intended loadings. This is the declaration's claim, and the one its power check
+   is computed for.
+4. **Net beat on the sealed sample.** Net of our costs, the book beats net SPY total return and the matched
+   random-trading control on the sealed confirmation sample.
+   - These are point estimates. Report them as a screen, never as significance.
+   - The declaration freezes the required margin over each comparator, and its basis, before any outcome is read.
+     The margin is never below zero.
+   - Selection across configurations is controlled by the register's trial count and the PBO/CSCV check
+     (`research-process.md` §"Every study is registered"). A beat that only one of several configurations shows is
+     not a pass.
+   - The turnover rule stays as declared.
+
+The screen is registered and counted in the trial register as usual.
+
+**Unchanged:**
+- Track A;
+- preregistration, survivorship-free data, costs, full population and declared falsification;
+- the forward test's declaration and stop rules (`research-process.md` §"From backtest to forward test");
+- **live capital.** It still needs the forward sequential non-inferiority rule (#2500), the #2844 sandbox and the
+  operator's funding.
+
+**Supersedes, for the demo tier only:** the 2026-08-23 "deflated significance" requirement. It also defines what
+"passing backtest" means in the 2026-10-04 research-first rule for a Track B demo admission. That rule still stands:
+nothing trades forward without a historical backtest that passes.
+
+**Why this route:**
+- The evidence that a premium exists comes from decades of data across many markets.
+- Our backtest can show that our construction reproduces it, carries it and is not eaten by our costs. It cannot
+  prove skill against SPY on ten years, and neither can anyone else's.
+- Demo risks no capital, and it is where implementation and decay evidence accrues.
+
+**Applies to** #3609 step 2 and #3620.
+
 ## 2026-09-13 — The #2844 reconciliation countdown counts DAYS OF EVIDENCE on the held-session calendar
 
 `account_reconciliation_days` stores one verdict per `(environment, reconciliation_rule_version,
