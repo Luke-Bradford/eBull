@@ -120,3 +120,6 @@ def test_the_grid_is_fixed_so_missing_formations_are_undersized_and_off_grid_one
         max_fidelity([*formations, stray], ours, -1)
     with pytest.raises(FidelityError, match="grid"):
         max_fidelity([formations[0], formations[0]], ours, -1)
+    early = FidelityFormation(FORMATIONS[0].replace(day=1), formations[0].holdings, P20, P80)
+    with pytest.raises(FidelityError, match="not a stage-A formation date"):
+        max_fidelity([early], ours, -1)

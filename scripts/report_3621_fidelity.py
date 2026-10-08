@@ -30,6 +30,7 @@ from app.services.factor_panel_fidelity import (
     PRICE_CHARACTERISTICS,
     ArmResult,
     FactorMonth,
+    FidelityError,
     Holding,
     SeriesAccumulator,
     Verdict,
@@ -79,8 +80,9 @@ class MaxFidelity:
         return self.verdict is Verdict.PASS
 
 
-#: Stage A's holding months, fixed: step 1's formation grid shifted one month (2014-10..2021-05).
-STAGE_A_GRID: Final = tuple(shift_month(month_key(f), 1) for f in formation_months())
+#: Stage A's formations (step 1's grid) and their holding months, fixed (2014-10..2021-05).
+STAGE_A_FORMATIONS: Final = frozenset(formation_months())
+STAGE_A_GRID: Final = tuple(shift_month(month_key(f), 1) for f in sorted(STAGE_A_FORMATIONS))
 
 
 def max_fidelity(formations: Sequence[FidelityFormation], published: Mapping[str, float], sign: int) -> MaxFidelity:
@@ -88,6 +90,8 @@ def max_fidelity(formations: Sequence[FidelityFormation], published: Mapping[str
     grid or repeated refuses (``FidelityError``); a grid month with no formation is undersized, as in step 1."""
     accumulator = SeriesAccumulator(STAGE_A_GRID)
     for f in formations:
+        if f.formation not in STAGE_A_FORMATIONS:
+            raise FidelityError("grid", f"formation {f.formation} is not a stage-A formation date")
         got = (
             factor_month(f.holdings, f.micro_cutoff_usd, f.cap_usd, sign)
             if f.holdings
