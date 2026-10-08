@@ -12,7 +12,8 @@ are step 1's integer ``name_key``.
   cross-industry fallback.
 * **Uninformative groups** give no score: fewer than ``MIN_GROUP`` inputs, or ranks with zero variance.
 * **Family** = z(mean of the member z-scores present), at least one member; **composite** = z(mean of the family
-  scores present), at least ``MIN_FAMILIES`` of the three.
+  scores present), at least ``MIN_FAMILIES``. With the value family alone (premise 6) the composite ranks exactly as
+  the family does.
 
 **Exact ties.** A z-score is ``(R - m) / sqrt(V)`` with the rank R, the mean m and the variance V all rational, so
 every score here is held exactly as a sum of ``c / sqrt(V)`` terms over rationals (:class:`Exact`). Mathematically
@@ -31,18 +32,18 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Final
 
-#: Premise 1: the five characteristics that passed step 1, in step 1's frozen families.
+#: Premises 1 and 6: step 1's value family, the one family whose intended loading (HML) condition 3 can test with
+#: power on stage B. GP/A and investment passed step 1 but are not in the book: on stage A their loadings were not
+#: separately identifiable (``scripts/plan_3609_step2_exposure.py``).
 FAMILIES: Final[Mapping[str, tuple[str, ...]]] = {
-    "gp_a": ("gp_at",),
     "value": ("be_me", "ni_me", "ocf_me"),
-    "investment": ("at_gr1",),
 }
 CHARACTERISTICS: Final = tuple(c for members in FAMILIES.values() for c in members)
 #: Premise 3: the book universe is the top 1,000 by ME at s(M).
 UNIVERSE_SIZE: Final = 1000
 #: §"Source rules", fixed by construction: a z-score over fewer peers is mostly rank noise.
 MIN_GROUP: Final = 10
-MIN_FAMILIES: Final = 2
+MIN_FAMILIES: Final = 1
 UNCLASSIFIED: Final = "unclassified"
 COMPOSITE: Final = "composite"
 

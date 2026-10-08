@@ -18,6 +18,8 @@ from app.services.factor_book_series import ARMS, Scenario, SeriesRun, Summary
 from scripts.report_3609_baselines import FACTOR_REGRESSORS, Regression
 from scripts.report_3609_step2_verdict import (
     G1_CRITICAL,
+    G1_LOADINGS,
+    G2_MARGINS,
     TURNOVER_VETO,
     g1,
     log_growth,
@@ -59,7 +61,7 @@ def _loaded(loadings: Mapping[str, float], bump: Callable[[Month], float] = lamb
     }
 
 
-GOOD = {"HML": 1.0, "RMW": 1.0, "CMA": 1.0}
+GOOD = {"HML": 1.0}
 BOUNDARY: Month = (2021, 5)
 STATE = BoundaryState(date(2021, 5, 31), (), 1.0, 1.0)
 
@@ -102,16 +104,16 @@ def _run(
 
 
 def test_the_g1_critical_value_is_the_specs() -> None:
-    assert round(G1_CRITICAL, 3) == 2.128
+    assert G1_LOADINGS == ("HML",) and round(G1_CRITICAL, 3) == 1.645
 
 
-def test_g1_passes_on_three_strong_positive_loadings_and_fails_on_a_negative_one() -> None:
+def test_g1_passes_on_a_strong_positive_hml_loading_whatever_the_others() -> None:
     result = g1(_loaded(GOOD), FACTORS, MONTHS)
     assert result.refusal is None and result.passed and result.lag == 4
     assert result.coefficients["HML"] == pytest.approx(1.0, abs=0.05)
-    assert all(result.t_stats[n] > G1_CRITICAL for n in ("HML", "RMW", "CMA"))
-    assert not g1(_loaded({**GOOD, "CMA": -1.0}), FACTORS, MONTHS).passed
-    assert not g1(_loaded({"HML": 1.0, "RMW": 1.0}), FACTORS, MONTHS).passed  # CMA unloaded: t below the bar
+    assert g1(_loaded({**GOOD, "RMW": -1.0, "CMA": -1.0}), FACTORS, MONTHS).passed  # not intended loadings
+    assert not g1(_loaded({"HML": -1.0}), FACTORS, MONTHS).passed
+    assert not g1(_loaded({"RMW": 1.0, "CMA": 1.0}), FACTORS, MONTHS).passed  # HML unloaded: t below the bar
 
 
 @pytest.mark.parametrize(
@@ -150,14 +152,13 @@ def test_g1_refuses_zero_residual_variance(monkeypatch: pytest.MonkeyPatch) -> N
     assert g1(dict(factors["HML"]), factors, MONTHS).refusal == "zero_residual_variance"
 
 
-@pytest.mark.parametrize(("t", "passed"), [(2.12, False), (2.13, True)])
-def test_g1_needs_each_t_above_the_bonferroni_bar(monkeypatch: pytest.MonkeyPatch, t: float, passed: bool) -> None:
+@pytest.mark.parametrize(("t", "passed"), [(1.64, False), (1.65, True)])
+def test_g1_needs_the_hml_t_above_the_one_sided_bar(monkeypatch: pytest.MonkeyPatch, t: float, passed: bool) -> None:
     errors = [1.0] * 7
-    errors[1 + FACTOR_REGRESSORS.index("CMA")] = 1.0 / t  # coefficient 1, so CMA's t is ``t``; the others are 1.0 / 1
-    errors[1 + FACTOR_REGRESSORS.index("HML")] = errors[1 + FACTOR_REGRESSORS.index("RMW")] = 0.1
-    _stub_fit(monkeypatch, errors, ("HML", "RMW", "CMA"))
+    errors[1 + FACTOR_REGRESSORS.index("HML")] = 1.0 / t  # coefficient 1, so HML's t is ``t``
+    _stub_fit(monkeypatch, errors)
     result = g1(_loaded(GOOD), FACTORS, MONTHS)
-    assert result.refusal is None and result.t_stats["CMA"] == pytest.approx(t) and result.passed is passed
+    assert result.refusal is None and result.t_stats["HML"] == pytest.approx(t) and result.passed is passed
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, math.nan, math.inf])
@@ -206,16 +207,29 @@ def test_a_run_short_of_the_declared_window_gets_no_verdict_even_if_insufficient
         verdict(short, FACTORS)
 
 
-def test_g1_refused_stops_before_g2() -> None:
+def test_g1_reads_stage_b_only() -> None:
+    """Condition 3 runs on stage B's 39 months: a stage-A factor gap cannot refuse it, and a loading carried only on
+    stage A cannot pass it."""
     factors = {n: dict(v) for n, v in FACTORS.items()}
     del factors["Mom"][(2015, 1)]
+    result = verdict(_run(), factors)
+    assert result.status == "PASS" and result.g1 is not None
+    assert all(r.lag == 3 for r in result.g1.values())  # floor(4 (39/100)^(2/9)), stage B's count
+    stage_a_only = _loaded({}, lambda m: 0.02 + FACTORS["HML"][m] * (1.0 if m < (2021, 6) else -1.0))
+    result = verdict(_run(dict.fromkeys(COSTS, stage_a_only)), FACTORS)
+    assert result.status == "FAIL" and result.reason == "G1 best_case; G1 worst_case"
+
+
+def test_g1_refused_stops_before_g2() -> None:
+    factors = {n: dict(v) for n, v in FACTORS.items()}
+    del factors["Mom"][(2022, 1)]
     result = verdict(_run(control=(math.inf,)), factors)  # G2 would refuse COMPARATOR_INVALID if computed
     assert result.status == "G1_REFUSED" and result.g2 is None
     assert result.reason is not None and result.reason.count("missing_factor_month") == len(ARMS)
 
 
 def test_fail_names_every_failing_gate_and_arm() -> None:
-    weak = dict.fromkeys(COSTS, _loaded({"HML": 1.0, "RMW": 1.0, "CMA": -1.0}))
+    weak = dict.fromkeys(COSTS, _loaded({"HML": -1.0}))
     result = verdict(_run(weak, b1=0.05, control=(0.5,)), FACTORS)
     assert result.status == "FAIL"
     assert result.reason == (
@@ -263,12 +277,12 @@ def test_the_boundary_formations_cost_counts_against_stage_b() -> None:
 
 def test_pass_annotations_name_the_stress_failure_and_each_year_the_pass_depends_on() -> None:
     base = _loaded(GOOD, lambda m: 0.002 + (0.05 if m[0] == 2022 else 0.0))
-    stress = {m: r - 0.01 for m, r in base.items()}
+    stress = {m: r - 0.03 for m, r in base.items()}
     result = verdict(_run({"gross": base, "net": base, "stress_2x": stress}, b1=0.01, control=(0.0,)), FACTORS)
     assert result.status == "PASS"
     assert result.annotations == (
-        "fails at stress cost (best_case vs B1; worst_case vs B1)",
-        "depends on 2022 (best_case vs B1, control median; worst_case vs B1, control median)",
+        "fails at stress cost (best_case vs B1, control median; worst_case vs B1, control median)",
+        "depends on 2022 (best_case vs B1; worst_case vs B1)",
     )
 
 
@@ -278,3 +292,10 @@ def test_a_non_finite_annotation_statistic_refuses() -> None:
     with pytest.raises(BookRefusal) as caught:
         verdict(run, FACTORS)
     assert caught.value.code == "COMPARATOR_INVALID"
+
+
+def test_condition_4s_margins_are_zero_and_a_tie_fails() -> None:
+    assert G2_MARGINS == {"B1": 0.0, "control median": 0.0}
+    tie = dict.fromkeys(COSTS, {m: 0.01 for m in MONTHS})
+    result = verdict(_run(tie, b1=0.01, control=(0.0,)), FACTORS)
+    assert result.g2 is not None and all(r.failing == ("B1",) for r in result.g2.values())
