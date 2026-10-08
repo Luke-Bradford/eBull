@@ -65,8 +65,9 @@ VOCABULARY: Final = frozenset(
     "5.06 5.07 5.08 6.01 6.02 6.03 6.04 6.05 6.06 7.01 8.01 9.01".split()
 )
 SEED: Final = 3624
-#: Archive item lists this long may be truncated: every header-checked list of 13 held more codes in the header.
-ITEM_CAP: Final = 13
+#: Archive item lists this long are header-checked: round 2 found 13-code lists truncated against the header, and
+#: checking from 10 measures whether shorter lists are.
+ITEM_CAP: Final = 10
 
 _CIKS: Final = """
     SELECT DISTINCT ei.identifier_value FROM external_identifiers ei
@@ -74,7 +75,8 @@ _CIKS: Final = """
 """
 #: ``filing_events`` rows for our CIKs: one row per (event row, CIK the instrument maps to).
 _EVENTS: Final = """
-    SELECT fe.provider_filing_id, fe.filing_type, fe.filing_date, fe.items, ei.identifier_value
+    SELECT fe.provider_filing_id, fe.filing_type, fe.filing_date, fe.items, ei.identifier_value,
+           (fe.created_at AT TIME ZONE 'America/New_York')::date - fe.filing_date
     FROM filing_events fe
     JOIN external_identifiers ei
       ON ei.instrument_id = fe.instrument_id AND ei.provider = 'sec' AND ei.identifier_type = 'cik'
@@ -88,6 +90,12 @@ _TYPED: Final = """
     GROUP BY 1
 """
 _AMENDMENT_LINKS: Final = "SELECT count(*), count(amends_accession) FROM sec_filing_manifest WHERE form = '8-K/A'"
+#: Stored XBRL concepts, and those naming going concern or substantial doubt.
+_FACT_CONCEPTS: Final = """
+    SELECT count(DISTINCT concept),
+           coalesce(array_agg(DISTINCT concept) FILTER (WHERE concept ~* 'going|substantial.?doubt'), '{}')
+    FROM financial_facts_raw
+"""
 
 Items = tuple[str, ...] | str
 #: One appearance: (cik, form, filing_date, items, page name).
@@ -96,19 +104,24 @@ _NON_VOCABULARY: Counter[str] = Counter()
 
 
 def parse_items(raw: Any) -> Items:
-    """Sorted vocabulary codes, or ``"missing"`` / ``"empty"`` / ``"invalid"``. Codes are matched exactly (ASCII)."""
+    """Sorted vocabulary codes, or ``"missing"`` / ``"empty"`` / ``"invalid:<raw>"`` (raw kept, so two invalid
+    lists stay distinguishable). Codes are matched exactly (ASCII); nothing is normalised."""
     if raw is None:
         return "missing"
     if not isinstance(raw, str):
-        return "invalid"
+        return f"invalid:{raw!r}"
     if raw == "":
         return "empty"
     codes = raw.split(",")
     unknown = [code for code in codes if code not in VOCABULARY]
     if unknown:
         _NON_VOCABULARY.update(unknown)
-        return "invalid"
+        return f"invalid:{raw}"
     return tuple(sorted(set(codes)))
+
+
+def item_state(items: Items) -> str:
+    return "valid" if isinstance(items, tuple) else items.split(":", 1)[0]
 
 
 def valid(items: Items) -> bool:
@@ -124,49 +137,49 @@ def sha256_file(path: Path) -> str:
 
 
 def read_archive(path: Path, quality: Counter[str]) -> tuple[dict[str, list[Appearance]], dict[str, bool]]:
-    """Accession -> every appearance (all CIKs), and CIK -> whether all its listed pages are present and aligned."""
+    """Accession -> every appearance (all CIKs), and CIK -> whether all its listed pages are present and aligned.
+
+    Reads each ``CIK##########.json`` and exactly the pages it lists; every listed page is checked for presence and
+    alignment before any form filter. A block without an ``items`` array gives ``"missing"`` on each row."""
     appearances: dict[str, list[Appearance]] = defaultdict(list)
     pages_complete: dict[str, bool] = {}
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
-        listed: dict[str, str] = {}
-        bad_pages: set[str] = set()
-        for name in sorted(names):
-            if not name.startswith("CIK"):
-                continue
-            data = archive.read(name)
-            primary = "-submissions-" not in name
-            if primary:
-                quality["ciks_read"] += 1
-            if b'"8-K' not in data and not primary:
-                continue
-            document = json.loads(data)
+        listed: set[str] = set()
+        for name in sorted(n for n in names if n.startswith("CIK") and "-submissions-" not in n):
+            quality["ciks_read"] += 1
+            document = json.loads(archive.read(name))
             cik = name[3:13]
-            block = document["filings"]["recent"] if primary else document
-            if primary:
-                pages_complete.setdefault(cik, True)
-                for entry in document["filings"].get("files", []):
-                    listed[entry["name"]] = cik
-                    quality["history_pages_listed"] += 1
-                    if entry["name"] not in names:
-                        quality["history_pages_missing"] += 1
-                        pages_complete[cik] = False
-            if len({len(value) for value in block.values() if isinstance(value, list)}) > 1:
-                quality["misaligned_pages"] += 1
-                bad_pages.add(name)
-                continue
-            for i, form in enumerate(block.get("form", [])):
-                if form not in FORMS:
+            recent = document["filings"]["recent"]
+            quality["recent_keys_naming_amend"] += sum(1 for key in recent if "amend" in key.lower())
+            blocks: list[tuple[str, dict[str, Any]]] = [("recent", recent)]
+            complete = True
+            for entry in document["filings"].get("files", []):
+                listed.add(entry["name"])
+                quality["history_pages_listed"] += 1
+                if entry["name"] not in names:
+                    quality["history_pages_missing"] += 1
+                    complete = False
                     continue
-                filed = block["filingDate"][i]
-                if date.fromisoformat(filed) < FIRST:
+                blocks.append((entry["name"], json.loads(archive.read(entry["name"]))))
+            for page, block in blocks:
+                if len({len(value) for value in block.values() if isinstance(value, list)}) > 1:
+                    quality["misaligned_pages"] += 1
+                    complete = False
                     continue
-                page = "recent" if primary else name
-                appearances[block["accessionNumber"][i]].append(
-                    (cik, form, filed, parse_items(block["items"][i]), page)
-                )
-        for page in bad_pages:
-            pages_complete[listed.get(page, page[3:13])] = False
+                items = block.get("items")
+                if items is None:
+                    quality["blocks_without_items"] += 1
+                for i, form in enumerate(block.get("form", [])):
+                    if form not in FORMS:
+                        continue
+                    filed = block["filingDate"][i]
+                    if date.fromisoformat(filed) < FIRST:
+                        continue
+                    parsed = "missing" if items is None else parse_items(items[i])
+                    appearances[block["accessionNumber"][i]].append((cik, form, filed, parsed, page))
+            pages_complete[cik] = complete
+        quality["unlisted_pages"] = sum(1 for n in names if "-submissions-" in n and n not in listed)
     return appearances, pages_complete
 
 
@@ -175,10 +188,10 @@ def variants(apps: list[Appearance]) -> set[tuple[str, str, Items]]:
 
 
 def candidate_reasons(apps: list[Appearance]) -> set[str]:
-    reasons: set[str] = set()
+    reasons: set[str] = {"conflict"} if len(variants(apps)) > 1 else set()
     for _, _, _, items, _ in apps:
         if not valid(items):
-            reasons.add(f"items_{items}")
+            reasons.add(f"items_{item_state(items)}")
         else:
             reasons.update(code for code in LABEL_ITEMS if code in items)
             if len(items) >= ITEM_CAP:
@@ -187,28 +200,30 @@ def candidate_reasons(apps: list[Appearance]) -> set[str]:
 
 
 def identity(arch: dict[str, list[Appearance]], ours: set[str]) -> dict[str, Any]:
+    """``all``: every appearance. ``ours``: appearances and rows restricted to our CIKs; accessions are those with
+    at least one of our rows. Conflicts are detected over every appearance of the accession."""
     out: Counter[str] = Counter()
     differing: Counter[str] = Counter()
     listed: dict[str, list[list[Any]]] = {}
     for accession, apps in arch.items():
-        rows = {cik for cik, *_ in apps}
-        mine = bool(rows & ours)
-        for scope, on in (("all", True), ("ours", mine)):
-            if not on:
+        mine = [x for x in apps if x[0] in ours]
+        vs = variants(apps)
+        for scope, scoped in (("all", apps), ("ours", mine)):
+            if not scoped:
                 continue
-            out[f"{scope}_appearances"] += len(apps)
+            rows = {x[0] for x in scoped}
+            out[f"{scope}_appearances"] += len(scoped)
             out[f"{scope}_rows"] += len(rows)
             out[f"{scope}_accessions"] += 1
-            out[f"{scope}_multi_cik_accessions"] += len(rows) > 1
-            out[f"{scope}_same_cik_repeats"] += len(apps) - len(rows)
-            vs = variants(apps)
+            out[f"{scope}_accessions_under_several_ciks"] += len({x[0] for x in apps}) > 1
+            out[f"{scope}_row_repeats"] += len(scoped) - len(rows)
             if len(vs) > 1:
                 out[f"{scope}_conflict_accessions"] += 1
                 for field, index in (("form", 0), ("filing_date", 1), ("items", 2)):
                     if len({v[index] for v in vs}) > 1:
                         differing[f"{scope}_{field}"] += 1
-                if mine:
-                    listed[accession] = [list(a) for a in sorted(apps, key=str)]
+        if mine and len(vs) > 1:
+            listed[accession] = [list(a) for a in sorted(apps, key=str)]
     return {"counts": dict(sorted(out.items())), "conflict_fields": dict(sorted(differing.items())), "ours": listed}
 
 
@@ -216,14 +231,14 @@ def by_year(arch: dict[str, list[Appearance]], ours: set[str]) -> dict[str, dict
     years: dict[str, Counter[str]] = defaultdict(Counter)
     for apps in arch.values():
         year = min(filed for _, _, filed, _, _ in apps)[:4]
-        mine = any(cik in ours for cik, *_ in apps)
+        mine = [x for x in apps if x[0] in ours]
         reasons = candidate_reasons(apps)
-        for scope, on in (("all", True), ("ours", mine)):
-            if not on:
+        for scope, scoped in (("all", apps), ("ours", mine)):
+            if not scoped:
                 continue
-            for form in {form for _, form, *_ in apps}:
+            for form in {x[1] for x in scoped}:
                 years[year][f"{scope}_accessions_{form}"] += 1
-            years[year][f"{scope}_rows"] += len({cik for cik, *_ in apps})
+            years[year][f"{scope}_rows"] += len({x[0] for x in scoped})
             if reasons:
                 years[year][f"{scope}_candidates"] += 1
                 for reason in reasons:
@@ -239,32 +254,39 @@ def labels(arch: dict[str, list[Appearance]], ours: set[str]) -> dict[str, Any]:
             holders = [a for a in apps if valid(a[3]) and code in a[3]]
             if not holders:
                 continue
-            mine = any(cik in ours for cik, *_ in holders)
-            for scope, on in (("all", True), ("ours", mine)):
-                if not on:
+            mine = [a for a in holders if a[0] in ours]
+            for scope, scoped in (("all", holders), ("ours", mine)):
+                if not scoped:
                     continue
-                for form in {a[1] for a in holders}:
+                for form in {a[1] for a in scoped}:
                     out[code][f"{scope}_{form}_accessions_{conflict}"] += 1
-                rows = {(a[0], a[1]) for a in holders if scope == "all" or a[0] in ours}
-                for _, form in rows:
+                for _, form in {(a[0], a[1]) for a in scoped}:
                     out[code][f"{scope}_{form}_rows_{conflict}"] += 1
     return {code: dict(sorted(counts.items())) for code, counts in out.items()}
 
 
 def filing_events(arch: dict[str, list[Appearance]], ours: set[str], events: list[tuple[Any, ...]]) -> dict[str, Any]:
-    """Our CIKs' archive accessions against ``filing_events``, from :data:`FIRST` to the archive's last date."""
+    """Our CIKs' archive accessions against ``filing_events``, from :data:`FIRST` to the archive's last date.
+
+    Items are compared per distinct non-NULL ``filing_events`` item set (a contributor), not as a union: ``equal``
+    means every contributor equals the archive's set. ``captured_within_3_days`` restricts to accessions whose
+    earliest ``filing_events`` row was written 0 to 3 days (Eastern dates) after its filing date."""
     last = max(filed for apps in arch.values() for _, _, filed, _, _ in apps)
     db: dict[str, dict[str, Any]] = {}
-    for accession, form, filed, items, cik in events:
-        entry = db.setdefault(accession, {"forms": set(), "dates": set(), "items": set(), "nulls": 0, "rows": 0})
+    for accession, form, filed, items, cik, lag in events:
+        entry = db.setdefault(
+            accession, {"forms": set(), "dates": set(), "sets": set(), "nulls": 0, "rows": 0, "ciks": set()}
+        )
         entry["forms"].add(form)
         entry["dates"].add(filed.isoformat())
         entry["rows"] += 1
-        entry["ciks"] = entry.get("ciks", set()) | {str(cik).zfill(10)}
+        entry["ciks"].add(str(cik).zfill(10))
+        if lag is not None:
+            entry["lag"] = min(entry.get("lag", lag), lag)
         if items is None:
             entry["nulls"] += 1
         else:
-            entry["items"].update(items)
+            entry["sets"].add(frozenset(items))
     mine = {a for a, apps in arch.items() if any(cik in ours for cik, *_ in apps)}
     years: dict[str, Counter[str]] = defaultdict(Counter)
     agreement: Counter[str] = Counter()
@@ -277,19 +299,26 @@ def filing_events(arch: dict[str, list[Appearance]], ours: set[str], events: lis
         if filed < FIRST.isoformat():
             continue
         year = filed[:4]
+        if o:
+            years[year]["event_rows"] += o["rows"]
+            years[year]["event_accessions"] += 1
         if filed > last:
             years[year]["events_after_archive"] += 1
             continue
         if a and o:
             years[year]["both"] += 1
-            archive_items = {code for x in a if valid(x[3]) for code in x[3]}
+            archive_items = frozenset(code for x in a if valid(x[3]) for code in x[3])
             if any(not valid(x[3]) for x in a):
-                agreement["archive_not_valid"] += 1
-            elif o["nulls"] == o["rows"]:
-                agreement["events_all_null"] += 1
+                category = "archive_not_valid"
+            elif not o["sets"]:
+                category = "events_all_null"
             else:
                 kind = "mixed_null" if o["nulls"] else "no_null"
-                agreement[f"{kind}_{'equal' if archive_items == o['items'] else 'differ'}"] += 1
+                category = f"{kind}_{'equal' if o['sets'] == {archive_items} else 'differ'}"
+            agreement[category] += 1
+            years[year][f"items_{category}"] += 1
+            if o.get("lag") is not None and 0 <= o["lag"] <= 3:
+                agreement[f"captured_within_3_days_{category}"] += 1
             fields["form_equal" if {x[1] for x in a} == o["forms"] else "form_differ"] += 1
             fields["date_equal" if {x[2] for x in a} == o["dates"] else "date_differ"] += 1
             fields["events_multi_form_or_date"] += len(o["forms"]) > 1 or len(o["dates"]) > 1
@@ -304,7 +333,7 @@ def filing_events(arch: dict[str, list[Appearance]], ours: set[str], events: lis
                     "accession": accession,
                     "forms": sorted(o["forms"]),
                     "dates": sorted(o["dates"]),
-                    "items": sorted(o["items"]),
+                    "items": sorted(sorted(x) for x in o["sets"]),
                     "nulls": o["nulls"],
                     "event_ciks": sorted(o["ciks"]),
                     "archive_appearances": [list(x) for x in elsewhere] if elsewhere else None,
@@ -320,9 +349,17 @@ def filing_events(arch: dict[str, list[Appearance]], ours: set[str], events: lis
 
 
 def cross_source(arch: dict[str, list[Appearance]], typed: dict[str, list[str]]) -> dict[str, Any]:
-    """Typed parser against the archive on non-tombstone ``eight_k_filings`` accessions the archive holds, valid."""
-    shared = [a for a in typed if a in arch and all(valid(x[3]) for x in arch[a])]
-    out: dict[str, Any] = {"shared": len(shared), "typed_with_no_item_rows": sum(1 for a in shared if not typed[a])}
+    """Typed parser against the archive on non-tombstone ``eight_k_filings`` accessions the archive holds, kept only
+    when every archive appearance has valid items (the excluded count is reported)."""
+    held = [a for a in typed if a in arch]
+    shared = [a for a in held if all(valid(x[3]) for x in arch[a])]
+    out: dict[str, Any] = {
+        "typed_accessions": len(typed),
+        "held_by_archive": len(held),
+        "excluded_not_valid": len(held) - len(shared),
+        "shared": len(shared),
+        "typed_with_no_item_rows": sum(1 for a in shared if not typed[a]),
+    }
     for code in LABEL_ITEMS:
         in_archive = {a for a in shared if any(code in x[3] for x in arch[a])}
         in_typed = {a for a in shared if code in typed[a]}
@@ -340,6 +377,7 @@ def cross_source(arch: dict[str, list[Appearance]], typed: dict[str, list[str]])
 #: The SGML header file; ``-index-headers.html`` is absent for older filings (404 on 2006 accessions).
 _HEADER_URL: Final = "https://www.sec.gov/Archives/edgar/data/{cik}/{bare}/{accession}.hdr.sgml"
 _SGML: Final = re.compile(r"<SEC-HEADER>(.*?)</SEC-HEADER>", re.S)
+_CIK: Final = re.compile(r"^<CIK>(.*)$", re.M)
 
 
 def parse_header(text: str) -> dict[str, Any]:
@@ -357,7 +395,10 @@ def parse_header(text: str) -> dict[str, Any]:
         "filing_date": one("FILING-DATE"),
         "filing_date_change": one("DATE-OF-FILING-DATE-CHANGE"),
         "items": sorted(m.strip() for m in re.findall(r"^<ITEMS>(.*)$", body, re.M)),
-        "ciks": sorted({m.strip() for m in re.findall(r"^<CIK>(.*)$", body, re.M)}),
+        "filer_ciks": sorted(
+            {m.strip() for block in re.findall(r"<FILER>(.*?)</FILER>", body, re.S) for m in _CIK.findall(block)}
+        ),
+        "other_ciks": sorted({m.strip() for m in _CIK.findall(re.sub(r"<FILER>.*?</FILER>", "", body, flags=re.S))}),
     }
 
 
@@ -393,20 +434,25 @@ def _ymd(value: str | None) -> str | None:
 
 
 def compare_header(apps: list[Appearance], header: dict[str, Any]) -> list[str]:
-    """Where the archive and the header disagree, as tags."""
+    """Where the archive and the header disagree, and header states the producer treats as uncertain, as tags."""
     tags: list[str] = []
     if any(not valid(x[3]) or list(x[3]) != header["items"] for x in apps):
         tags.append("items")
+    if not header["items"]:
+        tags.append("header_items_empty")
+    if any(code not in VOCABULARY for code in header["items"]):
+        tags.append("header_items_not_vocabulary")
     if any(x[1] != header["type"] for x in apps):
         tags.append("form")
     if any(x[2] != _ymd(header["filing_date"]) for x in apps):
         tags.append("filing_date")
-    if {x[0] for x in apps} - set(header["ciks"]):
-        tags.append("archive_cik_not_in_header")
+    archive_ciks = {x[0] for x in apps}
+    if archive_ciks - set(header["filer_ciks"]):
+        tags.append("archive_cik_not_filer")
+    if set(header["filer_ciks"]) - archive_ciks:
+        tags.append("filer_not_in_archive")
     if not header["acceptance_et"]:
         tags.append("no_acceptance")
-    if any(code not in VOCABULARY for code in header["items"]):
-        tags.append("header_items_not_vocabulary")
     accepted = _ymd(header["acceptance_et"])
     filed = _ymd(header["filing_date"])
     if accepted and filed:
@@ -415,8 +461,8 @@ def compare_header(apps: list[Appearance], header: dict[str, Any]) -> list[str]:
         elif filed > accepted:
             tags.append("filing_date_after_acceptance")
     change = _ymd(header["filing_date_change"])
-    if change and filed and change != filed:
-        tags.append("filing_date_change_differs")
+    if change and accepted and change != accepted:
+        tags.append("post_acceptance_change")  # PDS: "Date when the last Post Acceptance occurred"
     return tags
 
 
@@ -456,9 +502,27 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
         accepted, filed = _ymd(header["acceptance_et"]), _ymd(header["filing_date"])
         if accepted and filed:
             lag[str((date.fromisoformat(filed) - date.fromisoformat(accepted)).days)] += 1
-        rows.append({"kind": kind, "accession": accession, "tags": found, **header})
+        archive_rows = [[x[0], x[1], x[2], list(x[3]) if valid(x[3]) else x[3]] for x in arch[accession]]
+        rows.append({"kind": kind, "accession": accession, "tags": found, "archive": archive_rows, **header})
+    later = sorted(r["acceptance_et"][8:] for r in rows if "filing_date_after_acceptance" in r["tags"])
+    same_late = sum(
+        1
+        for r in rows
+        if r["acceptance_et"]
+        and not r["tags"].count("filing_date_after_acceptance")
+        and _ymd(r["acceptance_et"]) == _ymd(r["filing_date"])
+        and r["acceptance_et"][8:] > "173000"
+    )
+    lengths = Counter(
+        f"{len(next(x for x in r['archive'] if isinstance(x[3], list))[3])}_{'items' in r['tags']}"
+        for r in rows
+        if any(isinstance(x[3], list) for x in r["archive"])
+    )
     out.update(
         {
+            "later_dated_acceptance_range": [later[0], later[-1]] if later else None,
+            "same_day_dated_accepted_after_1730": same_late,
+            "archive_item_count_by_disagreement": dict(sorted(lengths.items(), key=lambda kv: kv[0])),
             "tags": {k: dict(sorted(v.items())) for k, v in tags.items()},
             "filing_minus_acceptance_days": dict(sorted(lag.items(), key=lambda kv: int(kv[0]))),
             "failures": failures,
@@ -516,6 +580,7 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
     with zipfile.ZipFile(archive_path) as archive:
         cik_files = {name[3:13] for name in archive.namelist() if name.startswith("CIK") and "-" not in name}
     cache.mkdir(parents=True, exist_ok=True)
+    (cache / "headers").mkdir(exist_ok=True)
     files: dict[str, dict[str, str]] = {}
     index_rows: dict[tuple[str, str], tuple[str, str]] = {}
     with httpx.Client(timeout=120, headers={"User-Agent": settings.sec_user_agent}) as client:
@@ -536,7 +601,7 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
                 accession = parts[4].rsplit("/", 1)[-1].removesuffix(".txt")
                 index_rows[(parts[0].zfill(10), accession)] = (parts[2], parts[3])
     by_quarter: dict[str, Counter[str]] = defaultdict(Counter)
-    index_only_ours: list[list[str]] = []
+    stale: list[tuple[str, str, str, str]] = []
     for key, (form, filed) in index_rows.items():
         bucket = by_quarter[f"{filed[:4]}Q{(int(filed[5:7]) - 1) // 3 + 1}"]
         bucket["index_rows"] += 1
@@ -544,17 +609,41 @@ def index_reconciliation(archive_path: Path, cache: Path, ours: set[str]) -> dic
             continue
         where = "after_archive" if filed > last else "cik_file_present" if key[0] in cik_files else "cik_file_absent"
         bucket[f"index_only_{where}"] += 1
-        if key[0] in ours and filed <= last:
-            index_only_ours.append([*key, form, filed])
+        if filed <= last:
+            stale.append((*key, form, filed))
     for cik, accession in archive_rows - index_rows.keys():
         filed = min(x[2] for x in arch[accession])
         by_quarter[f"{filed[:4]}Q{(int(filed[5:7]) - 1) // 3 + 1}"]["archive_only"] += 1
+    reconciled: list[dict[str, Any]] = []
+    with (
+        zipfile.ZipFile(archive_path) as archive,
+        httpx.Client(timeout=30, headers={"User-Agent": settings.sec_user_agent}) as client,
+    ):
+        for cik, accession, form, filed in sorted(stale):
+            name = f"CIK{cik}.json"
+            latest = None
+            if name in archive.namelist():
+                recent = json.loads(archive.read(name))["filings"]["recent"]
+                latest = max(recent["filingDate"], default=None)
+            error = fetch_header(client, cik, accession, cache / "headers")
+            reconciled.append(
+                {
+                    "cik": cik,
+                    "accession": accession,
+                    "index_form": form,
+                    "index_date": filed,
+                    "ours": cik in ours,
+                    "archive_file_latest_filing_date": latest,
+                    "header": read_header(cache / "headers", accession) if error is None else None,
+                    "header_error": error,
+                }
+            )
     return {
         "archive_sha256": sha256_file(archive_path),
         "archive_last_filing_date": last,
         "index_files": files,
         "by_quarter": {q: dict(sorted(c.items())) for q, c in sorted(by_quarter.items())},
-        "index_only_ours_by_archive_last_date": sorted(index_only_ours),
+        "index_only_by_archive_last_date": reconciled,
     }
 
 
@@ -567,6 +656,7 @@ def measure(
         events = conn.execute(_EVENTS, {"forms": sorted(FORMS)}).fetchall()
         typed = {accession: list(codes) for accession, codes in conn.execute(_TYPED).fetchall()}
         links = conn.execute(_AMENDMENT_LINKS).fetchone()
+        concepts = conn.execute(_FACT_CONCEPTS).fetchone()
     quality: Counter[str] = Counter()
     arch, complete = read_archive(archive_path, quality)
     tokens = dict(_NON_VOCABULARY.most_common(40))  # before the previous archive adds its own
@@ -588,11 +678,7 @@ def measure(
         "validity": {
             "non_vocabulary_tokens": tokens,
             "rows_by_state": dict(
-                Counter(
-                    ("valid" if valid(x[3]) else str(x[3])) + ("_ours" if x[0] in ours else "")
-                    for apps in arch.values()
-                    for x in apps
-                )
+                Counter(item_state(x[3]) + ("_ours" if x[0] in ours else "") for apps in arch.values() for x in apps)
             ),
         },
         "identity": identity(arch, ours),
@@ -601,6 +687,11 @@ def measure(
         "filing_events": filing_events(arch, ours, events),
         "cross_source": cross_source(arch, typed),
         "amendment_links": {"manifest_8ka_rows": links[0], "with_amends_accession": links[1]} if links else None,
+        "financial_facts_raw_concepts": (
+            {"query": " ".join(_FACT_CONCEPTS.split()), "distinct": concepts[0], "matching": concepts[1]}
+            if concepts
+            else None
+        ),
         "headers": headers(arch, ours, negatives, cache) if with_headers else None,
         "previous_snapshot": previous_result,
         "measured_at": datetime.now().astimezone().isoformat(timespec="seconds"),
