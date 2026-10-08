@@ -306,8 +306,9 @@ field is also not ok keeps its interval, but its label is in doubt too, so it ne
 - **`start`:** the first session strictly after the acceptance date when that field is ok, since dissemination
   follows acceptance.
   - Without a usable acceptance date, no source dates the submission, so `start` must be a lower bound that holds.
-    It is the first session strictly after 1 January of the accession number's year. EDGAR's accession format is
-    the submitter's 10-digit ID, the two-digit year and a sequence number, so no submission precedes its own year.
+    It is the first session strictly after 1 January of the accession number's year. The dissemination guidance
+    says the accession number is "assigned automatically to an accepted submission by EDGAR", and that its middle
+    two digits "represent the year". So no accepted submission precedes its own year.
   - A later start would make some `unflagged` answers wrong, which this rule avoids. The one measured case
     (`0001104659-09-022130`) starts in January 2009.
 - **`end`:** the first session strictly after `W` when the row has a listing, which is when the SEC's own file
