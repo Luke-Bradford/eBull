@@ -295,7 +295,11 @@ def write_durably(path: Path, data: bytes) -> None:
 
 def record_failure(run_id: str, exc: BaseException) -> None:
     """``failed`` permits a retry, so it is written only while no output exists. Once the output file exists, even
-    partly, it may hold a result: the attempt stays unterminated and is reconciled by hand (spec, ``abandoned``)."""
+    partly, it may hold a result: the attempt stays unterminated and is reconciled by hand (spec, ``abandoned``).
+
+    A partial file is not "no result": ``canonical_json`` sorts keys, so ``b1_returns``, ``book_returns``, ``g_b1``
+    and ``g_book`` are written before ``inputs`` and the bulk of the file. An empty or result-free partial file costs
+    a needless manual step; that is the accepted price of never permitting a second look (Codex ckpt-3, #3722)."""
     if not output_path(run_id).exists():
         append_ledger(LEDGER_PATH, _row("failed", run_id, error=repr(exc)))
 
