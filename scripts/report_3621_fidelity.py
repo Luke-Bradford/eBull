@@ -103,7 +103,7 @@ def max_fidelity(formations: Sequence[FidelityFormation], published: Mapping[str
             if f.holdings
             else FactorMonth(0, 0, None, None)
         )
-        if got.returns is None:
+        if got.returns is None:  # ``SeriesAccumulator.add``'s own undersized test (factor_panel_fidelity.py)
             undersized += 1
         accumulator.add(shift_month(month_key(f.formation), 1), got)
     # As ``SeriesAccumulator.result``: a grid month with no formation is undersized too.

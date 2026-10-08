@@ -10,9 +10,12 @@ from app.services.avoidance_filters import MaxMissing, MaxReading
 from app.services.factor_book_path import HoldingReturn
 from app.services.factor_panel import add_months, formation_months
 from app.services.factor_panel_fidelity import (
+    PRICE_CHARACTERISTICS,
     Bar,
+    FactorMonth,
     FidelityError,
     Holding,
+    SeriesAccumulator,
     Verdict,
     factor_month,
     month_key,
@@ -24,6 +27,7 @@ from scripts.report_3609_step2 import PanelName
 from scripts.report_3621_fidelity import (
     MAX_CHARACTERISTIC,
     MAX_CORRELATION_BAR,
+    STAGE_A_GRID,
     FidelityFormation,
     max_fidelity,
     max_holdings,
@@ -82,8 +86,8 @@ def _ours(formations: list[FidelityFormation]) -> dict[str, float]:
     for f in formations:
         if f.holdings:
             got = factor_month(f.holdings, P20, P80, -1).returns
-            assert got is not None
-            out[shift_month(month_key(f.formation), 1)] = got["best_case"]
+            if got is not None:
+                out[shift_month(month_key(f.formation), 1)] = got["best_case"]
     return out
 
 
@@ -123,3 +127,20 @@ def test_the_grid_is_fixed_so_missing_formations_are_undersized_and_off_grid_one
     early = FidelityFormation(FORMATIONS[0].replace(day=1), formations[0].holdings, P20, P80)
     with pytest.raises(FidelityError, match="not a stage-A formation date"):
         max_fidelity([early], ours, -1)
+
+
+def test_undersized_equals_step_1s_own_accumulator_count() -> None:
+    """The local tally matches ``SeriesAccumulator.result``'s ``undersized`` on the same inputs (a leg below
+    ``MIN_LEG``, an empty formation and a grid month with no formation all count)."""
+    formations = _formations(random.Random(5), empty=frozenset({2}))
+    thin = formations[4]
+    formations[4] = FidelityFormation(thin.formation, thin.holdings[:6], P20, P80)  # legs of 2: below MIN_LEG
+    formations = formations[:70]
+    ours = _ours(formations)
+    accumulator = SeriesAccumulator(STAGE_A_GRID)
+    for f in formations:
+        got = factor_month(f.holdings, P20, P80, -1) if f.holdings else FactorMonth(0, 0, None, None)
+        accumulator.add(shift_month(month_key(f.formation), 1), got)
+    expected = accumulator.result(ours, PRICE_CHARACTERISTICS[0])["undersized"]
+    assert expected == 1 + 1 + 10
+    assert max_fidelity(formations, ours, -1).undersized == expected
