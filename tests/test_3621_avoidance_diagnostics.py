@@ -177,3 +177,30 @@ def test_names_file_is_canonical_reproducible_and_hashed() -> None:
     lines = [json.loads(line) for line in gzip.decompress(payload).decode().splitlines()]
     assert lines[0] == {"M": "2019-12-31", "filters": ["sub5"], "name_key": 9, "population": "rest", "symbol": "AAA"}
     assert lines[1]["filters"] == ["max", "young"]
+
+
+def test_empty_windows_and_unflagged_names_refuse() -> None:
+    with pytest.raises(ValueError, match="holds no return month"):
+        windows([(2014, 10), (2014, 11)])  # no stage-B month
+    with pytest.raises(ValueError, match="at least one value"):
+        newey_west_t([])
+    day = date(2020, 1, 31)
+    segments = {p: frozenset() for p in Population}
+    segments[Population.MICRO] = frozenset({99})
+    for call in (
+        lambda: formation_counts(frozenset({99}), _flags(), MAX),
+        lambda: screened_targets(frozenset({99}), _flags()),
+        lambda: cell_counts(PanelMonth(day, day, {}, {}, {}), segments, _flags(), MAX),
+    ):
+        with pytest.raises(ValueError, match="no flags"):
+            call()
+
+
+def test_names_file_orders_by_formation_then_name_key_numerically() -> None:
+    rows = [
+        ExcludedName(date(2020, 1, 31), 10, "B", Population.MICRO, (Filter.MAX,)),
+        ExcludedName(date(2020, 1, 31), 9, "A", Population.MICRO, (Filter.MAX,)),
+    ]
+    payload, _ = names_file(rows)
+    keys = [json.loads(line)["name_key"] for line in gzip.decompress(payload).decode().splitlines()]
+    assert keys == [9, 10]  # a string sort would put "10" first

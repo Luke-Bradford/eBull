@@ -53,6 +53,10 @@ class Window:
     months: tuple[Month, ...]
     partial: bool = False
 
+    def __post_init__(self) -> None:
+        if not self.months:
+            raise ValueError(f"window {self.label!r} holds no return month")
+
 
 def windows(months: Sequence[Month]) -> tuple[Window, ...]:
     """Whole, stage A, stage B and each calendar year, over the path's return months."""
@@ -117,6 +121,8 @@ def book_stats(path: PathResult, window: Window) -> BookStats | Undefined:
 def newey_west_t(values: Sequence[float], lag: int = NW_LAG) -> float | None:
     """The mean over its Bartlett-kernel HAC standard error at ``lag``, null zero; ``None`` when that error is not
     finite and positive."""
+    if not values:
+        raise ValueError("a Newey-West t needs at least one value")
     x = np.asarray(values, dtype=float)
     n = len(x)
     e = x - x.mean()
@@ -161,6 +167,14 @@ def differential(unfiltered: PathResult, filtered: PathResult, window: Window) -
 # --------------------------------------------------------------------------- per-formation counts
 
 
+def _covered(names: frozenset[int], flags: Mapping[int, NameFlags]) -> frozenset[int]:
+    """``names``, refusing any without flags (as slice 2a's ``targets`` does)."""
+    missing = sorted(names - flags.keys())
+    if missing:
+        raise ValueError(f"{len(missing)} population names have no flags: {missing[:5]}")
+    return names
+
+
 @dataclass(frozen=True)
 class FormationCounts:
     admitted: int
@@ -177,7 +191,7 @@ class FormationCounts:
 def formation_counts(
     population: frozenset[int], flags: Mapping[int, NameFlags], filter_set: frozenset[Filter]
 ) -> FormationCounts:
-    readings = [flags[n] for n in population]
+    readings = [flags[n] for n in _covered(population, flags)]
     missing = [f.reading.missing for f in readings]
     flagged = sum(1 for f in readings if f.removed_by(filter_set))
     return FormationCounts(
@@ -205,7 +219,7 @@ def spread(values: Iterable[float | None]) -> tuple[float, float, float] | None:
 
 def screened_targets(population: frozenset[int], flags: Mapping[int, NameFlags]) -> Targets:
     """The screened-only component: U minus the names whose MAX window was screened."""
-    screened = frozenset(n for n in population if flags[n].reading.missing is MaxMissing.SCREENED)
+    screened = frozenset(n for n in _covered(population, flags) if flags[n].reading.missing is MaxMissing.SCREENED)
     return Targets(population, population - screened, screened)
 
 
@@ -218,7 +232,7 @@ def cell_counts(
     """(flagged, retained) per (size segment, step 0 cost band of the raw close at s(M)) cell."""
     out: dict[tuple[Population, str], list[int]] = {}
     for segment in SIZE_SEGMENTS:
-        for name in segments[segment]:
+        for name in _covered(segments[segment], flags):
             cell = out.setdefault((segment, band_of(month.close.get(name))), [0, 0])
             cell[0 if flags[name].removed_by(filter_set) else 1] += 1
     return {key: (flagged, retained) for key, (flagged, retained) in sorted(out.items())}
@@ -237,8 +251,10 @@ class ExcludedName:
 
 
 def names_file(rows: Iterable[ExcludedName]) -> tuple[bytes, str]:
-    """One canonical JSON line per excluded (M, ``name_key``, population), gzipped reproducibly, and its sha256."""
-    lines = sorted(
+    """One canonical JSON line per excluded (M, ``name_key``, population), in that order, gzipped reproducibly, and
+    its sha256."""
+    ordered = sorted(rows, key=lambda r: (r.formation, r.name_key, str(r.population)))
+    lines = [
         json.dumps(
             {
                 "M": r.formation.isoformat(),
@@ -250,7 +266,7 @@ def names_file(rows: Iterable[ExcludedName]) -> tuple[bytes, str]:
             sort_keys=True,
             separators=(",", ":"),
         )
-        for r in rows
-    )
+        for r in ordered
+    ]
     payload = gzip.compress("".join(f"{line}\n" for line in lines).encode(), mtime=0)
     return payload, hashlib.sha256(payload).hexdigest()
