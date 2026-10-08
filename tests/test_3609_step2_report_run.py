@@ -434,10 +434,7 @@ class _Inputs:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, stage_b_table9: str = "9" * 64) -> None:
         self.calls: list[tuple[str, Any]] = []
-        self.panels = {
-            "A": [_month(A_FIRST), _month(A_LAST)],
-            "B": [_month(B_FIRST)],
-        }
+        self.panels = {stage: [_month(m) for m in grid] for stage, grid in zip("AB", run_module.STAGE_GRIDS)}
         stage_a = _verified("A", {A_FIRST: 2000.0, A_LAST: 3000.0, B_FIRST: 3100.0})
         stage_b = _verified("B", {A_LAST: 3000.0, B_FIRST: 3100.0}, stage_b_table9)
         self.step0 = Step0(manifest={}, b1_saved={"months": []}, factor_snapshots={"five": 39, "mom": 40})
@@ -550,7 +547,7 @@ def test_a_stage_a_not_starting_at_the_b1_close_session_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fakes = _Inputs(monkeypatch)
-    fakes.panels["A"] = [_month(A_FIRST, session=date(2014, 9, 29)), _month(A_LAST)]
+    fakes.panels["A"][0] = _month(A_FIRST, session=date(2014, 9, 29))
     with pytest.raises(ReportError, match="B1's declared close"):
         fakes.run(tmp_path)
     assert "step0" not in dict(fakes.calls)
@@ -566,3 +563,21 @@ def test_stage_cutoffs_that_disagree_on_a_shared_date_refuse() -> None:
     a, b = [_month(A_LAST)], [_month(B_FIRST)]
     with pytest.raises(BookRefusal, match="CUTOFF_INVALID"):
         stage_cutoffs([(a, {A_LAST: 3.0, B_FIRST: 4.0}), (b, {B_FIRST: 4.5})])
+
+
+@pytest.mark.parametrize(
+    ("stage", "change"),
+    [
+        pytest.param("B", lambda panel: panel.clear(), id="an-empty-stage-b"),
+        pytest.param("B", lambda panel: panel.pop(), id="a-stage-b-short-of-2024-07"),
+        pytest.param("A", lambda panel: panel.pop(3), id="a-stage-a-missing-a-month"),
+    ],
+)
+def test_a_stage_whose_formations_are_not_its_grid_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, change: Callable[[list[PanelMonth]], object]
+) -> None:
+    fakes = _Inputs(monkeypatch)
+    change(fakes.panels[stage])
+    with pytest.raises(ReportError, match=f"stage {stage}'s formations"):
+        fakes.run(tmp_path)
+    assert "step0" not in dict(fakes.calls)

@@ -43,7 +43,8 @@ from app.services.factor_book_ledger import (
     end_run_failed,
     report_started_row,
 )
-from app.services.factor_book_reference import load_ff12
+from app.services.factor_book_reference import STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION, load_ff12
+from app.services.factor_panel import formation_months
 from app.services.factor_panel_fidelity import append_ledger, read_ledger
 from app.services.trial_register import DeclaredTrial, TrialRegister
 from scripts.build_3609_factor_panel import read_verified_artefact
@@ -65,6 +66,8 @@ from scripts.report_3609_step2_universe import NYSE_CUTOFFS, read_cutoffs
 REFUSED: Final = "REFUSED"
 OUTPUT_ROOT: Final = LEDGER_PATH.parent
 REPORT_STEP: Final = "report"
+#: Each stage's formations (§"The book"): stage A 2014-09 .. 2021-04, stage B 2021-05 .. 2024-07.
+STAGE_GRIDS: Final = (formation_months(), formation_months(STAGE_B_FIRST_FORMATION, STAGE_B_LAST_FORMATION))
 
 
 @dataclass(frozen=True)
@@ -93,7 +96,8 @@ def refused_payload(refusal: BookRefusal) -> dict[str, Any]:
 
 def stage_cutoffs(stages: Sequence[tuple[Sequence[PanelMonth], Mapping[date, float]]]) -> dict[date, float]:
     """Each formation's NYSE cutoff from its own stage's frozen snapshot (#3666 item 21), keyed by formation as
-    :func:`evaluate` reads it. A date both snapshots publish must agree (``CUTOFF_INVALID``)."""
+    :func:`evaluate` reads it. A date both snapshots publish must agree (``CUTOFF_INVALID``). A formation its stage's
+    snapshot does not publish is left out: §"Diagnostics", Universe, prints an unpublished month ``unavailable``."""
     for (_, first), (_, second) in itertools.combinations(stages, 2):
         differ = sorted(day for day in first.keys() & second.keys() if first[day] != second[day])
         if differ:
@@ -132,7 +136,10 @@ def evaluate_run(
         require_table9(verified, pins.table9_sha256)
     ff12 = load_ff12()
     panels = [read_panel(verified, ff12) for verified in stages]
-    first = panels[0][0].session if panels[0] else None
+    for stage, panel, grid in zip("AB", panels, STAGE_GRIDS, strict=True):
+        if tuple(month.formation for month in panel) != grid:
+            raise ReportError(f"stage {stage}'s formations are not its declared {grid[0]} .. {grid[-1]} grid")
+    first = panels[0][0].session
     if first != B1_CLOSE_SESSION:
         raise ReportError(f"stage A's first session is {first}, B1's declared close is at {B1_CLOSE_SESSION}")
     cutoffs = stage_cutoffs(
@@ -231,6 +238,7 @@ __all__ = [
     "OUTPUT_ROOT",
     "REFUSED",
     "REPORT_STEP",
+    "STAGE_GRIDS",
     "ReportOutcome",
     "evaluate_run",
     "refused_payload",
