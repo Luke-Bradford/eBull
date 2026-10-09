@@ -231,8 +231,9 @@ _JKP_RETURN_CUTOFFS_HEADER: Final = (
     "n",
     *(f"{family}_{p}" for family in ("ret", "ret_local", "ret_exc") for p in _JKP_RETURN_PERCENTILES),
 )
-#: The columns Amendment 3's rule reads; a row missing one of them cannot be checked and is refused.
-_JKP_RETURN_RULE_COLUMNS: Final = ("ret_0_1", "ret_99_9", "ret_exc_0_1", "ret_exc_99_9")
+#: The columns a row must carry: Amendment 3's rule reads the four bounds, and ``n`` is JKP's own row count, whose
+#: absence would mean the file's shape drifted. A row missing one is refused.
+_JKP_RETURN_REQUIRED_COLUMNS: Final = ("n", "ret_0_1", "ret_99_9", "ret_exc_0_1", "ret_exc_99_9")
 #: The total and excess pairs are one monthly rate apart; the CSV's binary-float noise is far below any rate.
 _JKP_RETURN_SHIFT_TOLERANCE: Final = Decimal("1e-9")
 _OSAP_LS_WIDE_LINK: Final = re.compile(
@@ -728,7 +729,7 @@ def parse_jkp_return_cutoffs_csv(payload: bytes) -> ParsedReferenceData:
     non-decreasing. Amendment 3 of the #3609 step 1 spec clips a USD total return to ``ret_0_1`` / ``ret_99_9``
     because JKP's ``ret_exc`` is ``ret`` minus one monthly rate shared by the month: each row must therefore show
     the same shift at both ends (``ret_99_9 - ret_exc_99_9 == ret_0_1 - ret_exc_0_1``), and a row that does not, or
-    lacks one of those four values, is refused.
+    lacks one of those four values or ``n``, is refused.
     """
     try:
         text = payload.decode("utf-8-sig")
@@ -762,7 +763,7 @@ def parse_jkp_return_cutoffs_csv(payload: bytes) -> ParsedReferenceData:
                 missing_count += 1
                 continue
             values[series_key] = _decimal(raw, context=f"{context}/{series_key}")
-        absent = [key for key in _JKP_RETURN_RULE_COLUMNS if key not in values]
+        absent = [key for key in _JKP_RETURN_REQUIRED_COLUMNS if key not in values]
         if absent:
             raise ReferenceDataSourceError(f"{context}: missing {', '.join(absent)}")
         for family in ("ret", "ret_local", "ret_exc"):
@@ -773,7 +774,7 @@ def parse_jkp_return_cutoffs_csv(payload: bytes) -> ParsedReferenceData:
         shift_low = values["ret_0_1"] - values["ret_exc_0_1"]
         if abs(shift_high - shift_low) > _JKP_RETURN_SHIFT_TOLERANCE:
             raise ReferenceDataSourceError(f"{context}: total and excess bounds differ by unequal shifts")
-        if "n" in values and (values["n"] <= 0 or values["n"] != values["n"].to_integral_value()):
+        if values["n"] <= 0 or values["n"] != values["n"].to_integral_value():
             raise ReferenceDataSourceError(f"{context}/n: not a positive integer count")
         for series_key, value in values.items():
             unit: ReferenceUnit = "count" if series_key == "n" else "decimal_return"

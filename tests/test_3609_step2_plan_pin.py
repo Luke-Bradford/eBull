@@ -41,6 +41,11 @@ def _git(*args: str) -> bytes:
 
 
 def test_the_plan_was_written_by_the_committed_planner(tmp_path: Path) -> None:
+    """The last commit that changed the plan's bytes is the commit that wrote it: any later edit to the file changes
+    its sha256, which the register pins (the test above), so a reformat or regeneration cannot move this point
+    without failing there first. A rename moves ``PLAN_PATH`` and its history with it. Needs full history: the
+    pre-push hook runs pytest in a full clone, and CI does not run pytest. A shallow clone without the commit fails
+    loudly here, which is correct, because the pin then cannot be verified."""
     plan = json.loads(PLAN_PATH.read_bytes())
     commit = _git("log", "-1", "--format=%H", "--", PLAN_PATH.relative_to(REPO).as_posix()).decode().strip()
     assert commit, "the plan file has no commit"

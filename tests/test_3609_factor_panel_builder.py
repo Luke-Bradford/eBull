@@ -342,6 +342,7 @@ def test_return_bounds_read_the_usd_total_return_pair_per_holding_month(tmp_path
         ([["ret_0_1", "2019-11-29", "-0.7", "decimal_return"]], "not a month end"),
         ([["ret_0_1", "2019-11-30", "-0.7", "percent_per_annum"]], "unit"),
         ([["ret_0_1", "2019-11-30", "-0.7", "decimal_return"]] * 2, "twice"),
+        ([["ret_0_1", "2019-11-30", "n/a", "decimal_return"]], "not a number"),
         (
             [["ret_0_1", "2019-11-30", "0.9", "decimal_return"], ["ret_99_9", "2019-11-30", "0.5", "decimal_return"]],
             "bounds",

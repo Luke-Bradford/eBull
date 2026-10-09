@@ -250,7 +250,11 @@ def ab(artefact: Path, cutoffs_csv: Path | None) -> None:
         if formation not in nyse:
             raise ValueError(f"no complete NYSE p20/p50/p80 cutoffs for formation {formation}")
         if clipped_by:
-            month_bounds = clipped_by[formation, next(iter(names))][1]
+            # Every admitted row of the formation, not one population's: one holding month, one pair.
+            recorded = {clipped_by[formation, sid][1] for sid in names}
+            if len(recorded) != 1:
+                raise ValueError(f"formation {formation} rows carry different bounds: {sorted(recorded)}")
+            (month_bounds,) = recorded
         elif csv_bounds is not None and month in csv_bounds:
             month_bounds = csv_bounds[month]
         else:
@@ -263,8 +267,6 @@ def ab(artefact: Path, cutoffs_csv: Path | None) -> None:
                 if not before:
                     continue
                 if clipped_by:
-                    if any(clipped_by[formation, sid][1] != month_bounds for sid in members):
-                        raise ValueError(f"formation {formation} rows carry different bounds")
                     after = [clipped_by[formation, sid][0][arm] for sid in members]
                 else:
                     after = [winsorise(r, month_bounds) for r in before]

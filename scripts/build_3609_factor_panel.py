@@ -586,7 +586,10 @@ def read_return_bounds(inputs: Path) -> dict[Month, ReturnBounds]:
         month = month_of(eom)
         if key in found[month]:
             raise PanelError(f"return cutoff {key} twice for {day}")
-        found[month][key] = float(value)
+        try:
+            found[month][key] = float(value)
+        except (TypeError, ValueError) as exc:
+            raise PanelError(f"return cutoff {key} on {day}: {value!r} is not a number") from exc
     out: dict[Month, ReturnBounds] = {}
     for month, pair in found.items():
         if set(pair) != {RETURN_CUTOFF_LOW, RETURN_CUTOFF_HIGH}:
