@@ -513,12 +513,13 @@ def parse_global_q_monthly_csv(payload: bytes) -> ParsedReferenceData:
 
 
 def _fed_ebp_date(raw: str, *, row_number: int) -> date:
+    last_error: ValueError | None = None
     for fmt in _FED_EBP_DATE_FORMATS:
         try:
             return datetime.strptime(raw.strip(), fmt).date()
-        except ValueError:
-            continue
-    raise ReferenceDataSourceError(f"EBP row {row_number}: invalid date {raw!r}")
+        except ValueError as exc:
+            last_error = exc
+    raise ReferenceDataSourceError(f"EBP row {row_number}: invalid date {raw!r}") from last_error
 
 
 def parse_fed_ebp_csv(payload: bytes) -> ParsedReferenceData:
