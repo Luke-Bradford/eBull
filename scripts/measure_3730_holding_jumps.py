@@ -152,7 +152,7 @@ def read_return_cutoffs(path: Path) -> dict[str, tuple[float, float]]:
             shift = (high - float(row["ret_exc_99_9"])) - (low - float(row["ret_exc_0_1"]))
             if abs(shift) > SHIFT_TOLERANCE:
                 raise ValueError(f"{path}: {eom} total and excess bounds differ by unequal shifts ({shift})")
-            month = row["eom"][:7]
+            month = eom.strftime("%Y-%m")
             if month in out:
                 raise ValueError(f"{path}: duplicate month {month}")
             out[month] = (low, high)
@@ -213,15 +213,20 @@ def ab(artefact: Path, cutoffs_csv: Path) -> None:
     peaks: dict[tuple[Population, str], list[float]] = defaultdict(lambda: [-math.inf, -math.inf])
     for formation in sorted(by_formation):
         names = by_formation[formation]
-        month_bounds = bounds[holding_month[formation]]
+        month = holding_month[formation]
+        if month not in bounds:
+            raise ValueError(f"no JKP return cutoff row for holding month {month} (formation {formation})")
+        if formation not in nyse:
+            raise ValueError(f"no complete NYSE p20/p50/p80 cutoffs for formation {formation}")
+        month_bounds = bounds[month]
         pops = populations({sid: me for sid, (me, _) in names.items()}, nyse[formation])
         for population, members in pops.items():
             for arm in ARMS:
                 key = (population, arm)
                 before = [names[sid][1][arm] for sid in members]
-                after = [winsorise(r, month_bounds) for r in before]
                 if not before:
                     continue
+                after = [winsorise(r, month_bounds) for r in before]
                 tally = counts[key]
                 tally["name_months"] += len(before)
                 tally["capped"] += sum(r > month_bounds[1] for r in before)

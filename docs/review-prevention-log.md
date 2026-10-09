@@ -12383,3 +12383,11 @@ neighbouring container and match it.**
   (characteristics) says nothing about another (holdings): list every window a return crosses and name what bounds
   each.
 - Enforced in: the #3609 step 1 spec, Amendment 3 (§"Returns and holdings"); `scripts/measure_3730_holding_jumps.py`.
+
+### A reference lookup in a research script refuses by name, never by `KeyError` (#3730)
+
+- Failure (review bot on PR #3732, 2026-10-09): the A/B indexed the JKP cutoff and NYSE cutoff maps directly, so a
+  missing month would have surfaced as a bare `KeyError` instead of the "no cutoff row" refusal the spec promises.
+- Prevention: before indexing a reference map with a key from another input, check membership and raise a named
+  refusal that says which key and which input. Grep a new research script for `\[[a-z_]+\[` before pushing.
+- Enforced in: `scripts/measure_3730_holding_jumps.py` (`ab`).
