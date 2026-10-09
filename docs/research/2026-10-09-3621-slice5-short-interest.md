@@ -27,7 +27,7 @@ interest ratio) and **all four** (MAX + sub-$5 + young + SI).
 ## Premises (measured)
 
 **Provenance.** Run at `af7889cc` plus this branch's scripts:
-- `PYTHONPATH=. uv run python -m scripts.measure_3621_short_interest_premise` (23 s): premises 2–5. It reads the
+- `PYTHONPATH=. uv run python -m scripts.measure_3621_short_interest_premise` (about 25 s): premises 2–5. It reads the
   stage-B artefact bound by step 2's capture (`2026-10-08-7b3169b6-stageB-2039b95f…`, the one v1 read): admitted rows'
   identity and ME fields, the retrospective `terminating` field (a printed coverage diagnostic only; it enters no
   state, flag, calibration or verdict), the frozen daily volume, split stamps, SPY sessions and NYSE cutoffs. It reads

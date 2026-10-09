@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 
 PAGE = "https://www.finra.org/filing-reporting/regulatory-filing-systems/short-interest"
-SNAPSHOTS = ("20211214074614", "20220811220216", "20230315011536", "20240320044607", "20241215000000")
+SNAPSHOTS = ("20211214074614", "20220811220216", "20230315011536", "20240320044607")
 FIRST = date(2021, 5, 28)
 LAST = date(2024, 8, 31)
 OUT = Path(__file__).resolve().parents[1] / "docs" / "research" / "3621-finra-si-calendar.csv"
