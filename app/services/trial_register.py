@@ -1603,7 +1603,7 @@ TRIAL_REGISTER: Final = TrialRegister(
             searches=3,
         ),
         # #3609 step 2 slice 4: pasted verbatim from `scripts.declare_3609_step2.declared_trial(<evidence>)`, whose
-        # payload the committed `declared` ledger row pins (payload_sha256 d4b7713ff575…). The
+        # payload the committed `declared` ledger row pins (payload_sha256 fb6f2ada73ab…). The
         # declaration's integrity-only read is hold-out access 740. Never edit this row: any change
         # refuses every later attempt; a changed trial needs a new declaration.
         DeclaredTrial(
@@ -1662,7 +1662,7 @@ TRIAL_REGISTER: Final = TrialRegister(
             searches=1,
         ),
         # #3621 slice 4: pasted verbatim from `scripts.run_3621_avoidance --declare`, whose payload the committed
-        # `declared` row in docs/research/3621-ledger.jsonl pins (payload_sha256 ada6b160600f…). The run refuses unless
+        # `declared` row in docs/research/3621-ledger.jsonl pins (payload_sha256 d4b7713ff575…). The run refuses unless
         # this row, that pin and the checkout agree. Never edit this row: a changed study needs a new trial id.
         DeclaredTrial(
             trial_id="3621-avoidance-filters-v1",

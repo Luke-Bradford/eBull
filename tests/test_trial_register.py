@@ -486,3 +486,22 @@ def test_the_2026_09_26_refresh_is_charged_per_window_and_inside_m_inh() -> None
     assert entry.searches == 24
     assert entry.exactness is TrialExactness.EXACT
     assert not entry.trial_id.startswith(HUNT_TRIAL_PREFIX)
+
+
+def test_every_payload_comment_names_its_own_rows_payload() -> None:
+    """A ``payload_sha256 <12 hex>…`` comment above a register row must be that row's pinned payload prefix: a
+    regenerated declaration once rewrote the first such comment in the file, step 2's, instead of its own (#3621)."""
+    import re
+    from pathlib import Path
+
+    from app.services.factor_book_declaration import payload_sha256
+
+    source = (Path(__file__).resolve().parents[1] / "app/services/trial_register.py").read_text()
+    by_id = {trial.trial_id: trial for trial in TRIAL_REGISTER.trials}
+    found = 0
+    for match in re.finditer(r"payload_sha256 ([0-9a-f]{12})…", source):
+        trial_id = re.compile(r'trial_id="([^"]+)"').search(source, match.end())
+        assert trial_id is not None
+        assert payload_sha256(by_id[trial_id.group(1)]).startswith(match.group(1)), trial_id.group(1)
+        found += 1
+    assert found >= 2

@@ -12356,3 +12356,14 @@ neighbouring container and match it.**
   separately; an integrated composite can cancel one exposure with another.
 - Enforced in: the step 2 spec, premise 6; `scripts/report_3609_step2_verdict.py` `G1_LOADINGS`, tested by
   `tests/test_3609_step2_verdict.py::test_g1_reads_stage_b_only`.
+
+### A regenerated pin is rewritten at its own row, never by first match (#3621)
+
+- Failure (review bot on PR #3729, 2026-10-09): a review fix moved the run script's construction hash, so the
+  declaration was regenerated before merge. The script that rewrote the register comment's `payload_sha256 <prefix>…`
+  replaced the first such comment in `trial_register.py`, which was step 2's (`3609-step2-book-v1`), and left the new
+  row's comment on the stale prefix.
+- Prevention: rewrite a pin inside the slice of the file that belongs to its own trial id. After regenerating, grep
+  for both the old and the new prefix and confirm each hit sits on the right row.
+- Enforced in: `tests/test_trial_register.py::test_every_payload_comment_names_its_own_rows_payload`, which checks
+  every payload comment against the payload of the row that follows it.
