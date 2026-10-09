@@ -48,7 +48,7 @@ from app.services.short_interest_flag import (
     usable_volume,
 )
 from scripts.report_3621_books import Population
-from scripts.report_3621_si import counts_rows, si_counts, si_name_lines
+from scripts.report_3621_si import COUNTED, counts_rows, si_counts, si_name_lines
 
 _ROOT: Final = Path(__file__).resolve().parents[1]
 CALENDAR_PATH: Final = _ROOT / "docs" / "research" / "3621-finra-si-calendar.csv"
@@ -180,7 +180,8 @@ def reproduce_si(
         got.extend(counts_rows(f.formation, si_counts(f.pops, f.si.readings, f.si.flagged)))
         names.extend(si_name_lines(f.formation, f.me, f.si.readings, f.si.flagged))
     reader = csv.reader(io.StringIO(reference_csv))
-    next(reader)  # the header: ``test_counts_columns_and_population_order_are_premise_twos`` pins it
+    if (header := next(reader, None)) != ["M", "population", *COUNTED]:
+        raise SiLoadError(f"REPRODUCTION: premise 2's header is {header}, not M, population and {list(COUNTED)}")
     expected = list(reader)
     if got != expected:
         differ = [g[:2] for g, e in zip(got, expected, strict=False) if g != e]

@@ -203,6 +203,8 @@ def test_reproduction_refuses_a_count_or_a_name_difference() -> None:
         reproduce_si([f], counts.replace("2021-06-30,micro,4", "2021-06-30,micro,5"), names_sha)
     with pytest.raises(SiLoadError, match="per-name sha256"):
         reproduce_si([f], counts, "0" * 64)
+    with pytest.raises(SiLoadError, match="header"):
+        reproduce_si([f], counts.replace("split_carried", "carried", 1), names_sha)
     # A window session without a usable bar before the window (2021-05-28 is not in it) leaves DDD valid: the
     # reading, so the counts, differ.
     with pytest.raises(SiLoadError, match="count rows"):
