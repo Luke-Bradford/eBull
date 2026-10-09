@@ -192,8 +192,17 @@ def nyse_cutoffs_usd(path: Path) -> dict[str, tuple[float, float, float]]:
 def clipped_pair(
     holding: Mapping[str, Any], csv_bounds: Mapping[str, tuple[float, float]] | None
 ) -> tuple[Mapping[str, float], Mapping[str, float], tuple[float, float]]:
-    """An Amendment 3 holding's (raw, clipped, bounds), refused unless ``by_arm`` is ``raw_by_arm`` clipped."""
+    """An Amendment 3 holding's (raw, clipped, bounds), refused unless ``by_arm`` is ``raw_by_arm`` clipped.
+
+    A holding without one of the Amendment 3 fields, or an arm, is refused by name before any of them is read."""
+    absent = [key for key in ("by_arm", "raw_by_arm", "bounds") if not isinstance(holding.get(key), Mapping)]
+    if absent:
+        raise ValueError(f"Amendment 3 holding without {', '.join(absent)}: {holding}")
     recorded = holding["bounds"]
+    if not {"month", "low", "high"} <= set(recorded):
+        raise ValueError(f"holding bounds {recorded} lack month, low or high")
+    if any(arm not in holding[key] for key in ("by_arm", "raw_by_arm") for arm in ARMS):
+        raise ValueError(f"holding arms {holding['by_arm']} / {holding['raw_by_arm']} are not {ARMS}")
     pair = (float(recorded["low"]), float(recorded["high"]))
     if csv_bounds is not None and csv_bounds.get(recorded["month"]) != pair:
         raise ValueError(f"holding bounds {recorded} are not the CSV's for {recorded['month']}")
