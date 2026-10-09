@@ -43,14 +43,17 @@ adjudication effort, and an issuer with no split candidate costs nothing to adju
 
 **Inputs.** `submissions.zip` downloaded 2026-10-09 (`Last-Modified` 2026-10-09 04:40 GMT, sha256 in the manifest),
 main files and the 5,394 overflow pages. EDGAR rebuilds it nightly, so the zip cannot be re-fetched; the extract in
-`inputs/` is the pinned input. Acceptance dates are `acceptanceDateTime` (UTC) converted to New York dates, as step 1's
+`inputs/` is the pinned input. The register is read from `inputs/form25-register-through-2026-10-08.csv`, written
+from the live view with the slice-1 harvest date as its cutoff, so a later harvest cannot move U. Acceptance dates are `acceptanceDateTime` (UTC) converted to New York dates, as step 1's
 `acceptance_ny_date`.
 
 ```bash
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py calibrate --out calibration-k-g.json
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py extract --zip submissions.zip --out extract.jsonl.gz
+PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through 2026-10-08 --out register.csv
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py universe --calibration calibration-k-g.json \
-    --calibration-sha256 347f2fa1… --extract extract.jsonl.gz --extract-sha256 1bd3989b… --out u-pass1.csv
+    --calibration-sha256 347f2fa1… --extract extract.jsonl.gz --extract-sha256 1bd3989b… \
+    --register register.csv --register-sha256 68bc4062… --out u-pass1.csv
 ```
 
 ## Slice 2b (next): the candidate screens

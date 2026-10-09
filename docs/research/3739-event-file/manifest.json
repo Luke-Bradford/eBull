@@ -25,13 +25,23 @@
   },
   {
    "slice": "2a",
+   "path": "inputs/form25-register-through-2026-10-08.csv",
+   "sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489",
+   "what": "Form 25 register events (sec_form25_common_equity_delistings) filed 2024-08-01 .. 2026-10-08, the slice-1 harvest",
+   "inputs": {
+    "harvest_through": "2026-10-08"
+   }
+  },
+  {
+   "slice": "2a",
    "path": "u-pass1.csv",
    "sha256": "ddfce690c3a4b015f6e08db2a54ee099dcdea313092ec6576fcd2d45d53307e4",
    "what": "U pass 1 (section 2 items 1-3), K = 1500, base formation 2024-07-31",
    "inputs": {
     "calibration_sha256": "347f2fa155432c1ae104fc71adeccb4d48353d362ff02ffc8afaa8c65ac8732d",
     "extract_sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
-    "register": "sec_form25_common_equity_delistings filed 2024-08-01 .. 2026-10-08 (685 events, listed in the file's register_accessions column)"
+    "register": "inputs/form25-register-through-2026-10-08.csv",
+    "register_sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489"
    }
   }
  ]

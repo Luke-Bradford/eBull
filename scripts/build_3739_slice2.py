@@ -10,13 +10,17 @@ digest before a row is read.
 ``extract`` reads EDGAR's ``submissions.zip`` (every filer's filing index, main file and overflow pages) and writes the
 filings §2 and §3.2 read: the entrant forms and every 8-K and 8-K/A, accepted on or after ``EXTRACT_FROM``.
 
+``register`` writes the Form 25 register events filed from 2024-08-01 through the harvest date.
+
 ``universe`` writes U pass 1 (§2 items 1-3) from the stage-B artefact's base formation, the calibrated K, the
-extract and the Form 25 register.
+extract and the register extract.
 
     PYTHONPATH=. uv run python scripts/build_3739_slice2.py calibrate --out <calibration.json>
     PYTHONPATH=. uv run python scripts/build_3739_slice2.py extract --zip <submissions.zip> --out <extract.jsonl.gz>
+    PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through <harvest date> --out <register.csv>
     PYTHONPATH=. uv run python scripts/build_3739_slice2.py universe --calibration <calibration.json> \\
-        --calibration-sha256 <d> --extract <extract.jsonl.gz> --extract-sha256 <d> --out <u-pass1.csv>
+        --calibration-sha256 <d> --extract <extract.jsonl.gz> --extract-sha256 <d> \\
+        --register <register.csv> --register-sha256 <d> --out <u-pass1.csv>
 """
 
 from __future__ import annotations
@@ -264,12 +268,13 @@ def pass1(
 #: §9: register events are the common-equity delistings filed from the stage start (the view applies the register's
 #: cohort rules, including the issuer-filed paragraph (c) exclusion).
 REGISTER_SQL: Final = """
-SELECT issuer_cik, accession_number
+SELECT issuer_cik, accession_number, form, filed_date, rule_provision
   FROM sec_form25_common_equity_delistings
- WHERE filed_date >= %(start)s
+ WHERE filed_date BETWEEN %(start)s AND %(through)s
  ORDER BY issuer_cik, accession_number
 """
 REGISTER_START: Final = date(2024, 8, 1)
+REGISTER_COLUMNS: Final = ("issuer_cik", "accession_number", "form", "filed_date", "rule_provision")
 
 
 # --------------------------------------------------------------------------- io
@@ -350,14 +355,28 @@ def read_extract(path: Path) -> Iterator[Filing]:
         yield Filing(**{**row, "items": tuple(row["items"])})
 
 
-def universe(calibration: Path, extract_path: Path, out: Path) -> None:
+def register_extract(through: date, out: Path) -> None:
+    """The register events filed from the stage start through ``through`` (the harvest date), as a CSV that U
+    reads instead of the live view, so a later harvest cannot move a frozen U."""
+    with psycopg.connect(settings.database_url) as conn:
+        rows = conn.execute(REGISTER_SQL, {"start": REGISTER_START, "through": through}).fetchall()
+    with out.open("x", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(REGISTER_COLUMNS)
+        for cik, accession, form, filed, provision in rows:
+            writer.writerow([normalise_cik(cik) or cik, accession, form, filed.isoformat(), provision])
+    print(json.dumps({"events": len(rows), "through": through.isoformat(), "register_sha256": sha256_of(out)}))
+
+
+def read_register(path: Path) -> list[tuple[str, str]]:
+    with path.open(newline="") as handle:
+        return [(row["issuer_cik"], row["accession_number"]) for row in csv.DictReader(handle)]
+
+
+def universe(calibration: Path, extract_path: Path, register_path: Path, out: Path) -> None:
     k = json.loads(calibration.read_text())["K"]["chosen"]
     stage_b, _ = read_panel(STAGE_B)
-    with psycopg.connect(settings.database_url) as conn:
-        register = [
-            (normalise_cik(cik) or cik, accession)
-            for cik, accession in conn.execute(REGISTER_SQL, {"start": REGISTER_START}).fetchall()
-        ]
+    register = read_register(register_path)
     u = pass1(stage_b[BASE_FORMATION], BASE_FORMATION, k, read_extract(extract_path), register)
     with out.open("x", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
@@ -393,20 +412,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     ext = sub.add_parser("extract")
     ext.add_argument("--zip", type=Path, required=True)
     ext.add_argument("--out", type=Path, required=True)
+    reg = sub.add_parser("register")
+    reg.add_argument("--through", type=date.fromisoformat, required=True)
+    reg.add_argument("--out", type=Path, required=True)
     uni = sub.add_parser("universe")
     uni.add_argument("--calibration", type=Path, required=True)
     uni.add_argument("--calibration-sha256", required=True)
     uni.add_argument("--extract", type=Path, required=True)
     uni.add_argument("--extract-sha256", required=True)
+    uni.add_argument("--register", type=Path, required=True)
+    uni.add_argument("--register-sha256", required=True)
     uni.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "calibrate":
         calibrate(args.out)
     elif args.command == "extract":
         extract(args.zip, args.out)
+    elif args.command == "register":
+        register_extract(args.through, args.out)
     else:
         universe(
-            checked(args.calibration, args.calibration_sha256), checked(args.extract, args.extract_sha256), args.out
+            checked(args.calibration, args.calibration_sha256),
+            checked(args.extract, args.extract_sha256),
+            checked(args.register, args.register_sha256),
+            args.out,
         )
     return 0
 

@@ -6,6 +6,7 @@ import io
 import json
 import zipfile
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -154,3 +155,9 @@ def test_pass1_bases() -> None:
     assert u["A"] == {"incumbent": ["1"]}
     assert u["C"] == {"terminated": ["r1"]}
     assert set(u["D"]) == {"entrant"}
+
+
+def test_register_reader_returns_cik_and_accession(tmp_path: Path) -> None:
+    path = tmp_path / "register.csv"
+    path.write_text(",".join(s2.REGISTER_COLUMNS) + "\n0000000002,0000000002-24-000001,25-NSE,2024-08-01,(b)\n")
+    assert s2.read_register(path) == [("0000000002", "0000000002-24-000001")]
