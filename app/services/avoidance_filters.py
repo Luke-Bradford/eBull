@@ -64,6 +64,8 @@ class Filter(StrEnum):
     MAX = "max"
     SUB5 = "sub5"
     YOUNG = "young"
+    #: Slice 5 (v2): set from ``short_interest_flag``, never by :func:`flag_formation`.
+    SI = "si"
 
 
 #: §"The books": the five filter sets, in the spec's order. No other combination is eligible.
@@ -73,6 +75,12 @@ FILTER_SETS: Final[tuple[frozenset[Filter], ...]] = (
     frozenset({Filter.YOUNG}),
     frozenset({Filter.SUB5, Filter.YOUNG}),
     frozenset({Filter.MAX, Filter.SUB5, Filter.YOUNG}),
+)
+#: Slice 5 addendum §"The study": v2's seven sets, in its order. No other combination is eligible from v2.
+FILTER_SETS_V2: Final[tuple[frozenset[Filter], ...]] = (
+    *FILTER_SETS,
+    frozenset({Filter.SI}),
+    frozenset({Filter.MAX, Filter.SUB5, Filter.YOUNG, Filter.SI}),
 )
 
 
@@ -189,6 +197,7 @@ def flag_formation[K: Hashable](names: Mapping[K, NameInputs], session: date) ->
 
 __all__ = [
     "FILTER_SETS",
+    "FILTER_SETS_V2",
     "JKP_CODE_COMMIT",
     "MAX_DECILE",
     "MAX_MIN_RETURNS",
