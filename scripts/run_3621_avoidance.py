@@ -654,7 +654,11 @@ def _run_claimed(
     except BaseException as exc:
         # A failed append may still have made its row durable, so the run's state is re-read, not inferred from
         # ``step``: end it only if it has a row and no terminal one, and remove outputs no durable row names.
-        events = {r.get("event") for r in read_ledger(ledger) if r.get("run_id") == run_id}
+        try:
+            events = {r.get("event") for r in read_ledger(ledger) if r.get("run_id") == run_id}
+        except Exception as read_error:  # as step 2's ``_end_if_open``: never mask ``exc``, end the run regardless
+            exc.add_note(f"the ledger was not re-read ({read_error!r}); a 'failed' row is written regardless")
+            events = {"started"}
         if events and not events & _TERMINAL:
             end_run_failed(ledger, run_id, step, exc)
         if "report_written" not in events:
