@@ -254,7 +254,12 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: frozen before the look: book G <= B1 G means the configuration is not declared. 1 search, registered before the
 #: run. Not a `hunt-` entry, so it counts in M_inh: 522 -> 523. Measured the same way before the bump: the SAME five
 #: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-08-r27"
+#:
+#: r28 (2026-10-09, #3621 slice 4) adds `3621-avoidance-filters-v1`, the avoidance-filter enumeration: 5 filter sets x
+#: 6 populations x 2 arms + the MAX fidelity check's 2 arms = 62 searches, non-claiming, declared before any slice
+#: reads an outcome. Not a `hunt-` entry, so it counts in M_inh: 523 -> 585. Measured the same way before the bump:
+#: the SAME five groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-09-r28"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1655,6 +1660,39 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
             searches=1,
+        ),
+        # #3621 slice 4: pasted verbatim from `scripts.run_3621_avoidance --declare`, whose payload the committed
+        # `declared` row in docs/research/3621-ledger.jsonl pins (payload_sha256 ada6b160600f…). The run refuses unless
+        # this row, that pin and the checkout agree. Never edit this row: a changed study needs a new trial id.
+        DeclaredTrial(
+            trial_id="3621-avoidance-filters-v1",
+            description=(
+                "#3621 avoidance filters, version 1: a preregistered, non-claiming enumeration on the #3609 panel "
+                "(step 1's restricted population, formations 2014-09..2024-07 over stages A and B, net of step 0's "
+                "costs). Five filter sets (MAX, sub-$5, young, sub-$5 + young, all three) x six populations (micro, "
+                "small, large, mega, top 1,000, rest) x two termination arms = 60, plus the MAX fidelity check's "
+                "two arms against JKP's rmax1_21d = 62. A pair's verdict (ELIGIBLE, NOT ELIGIBLE, NO_EFFECT or "
+                "REFUSED, zero margin, point estimates) only decides whether a later long-book spec may cite the "
+                "set. No premium or non-inferiority is claimed, so no TrialDesign. Retrospective: both stages had "
+                "been read before this declaration."
+            ),
+            evidence=(
+                'docs/research/2026-10-08-3621-avoidance-filters.md §"Registration" and §"Slices" item 4; '
+                "spec_sha256=4c3744b784c661a8a5a24b93528c653860fa37324b1beee3c02c3d9c1036b236; "
+                "construction_sha256=e792dadfcd90c2eb1dfc2b5ec20ee5373fe5e4695f37b353a76928c29a8b7d36; "
+                "register_policy_sha256=d5cd632246397252a33c04d6bbfddfc7d9b275ba902fdca19f2be99e78292651; "
+                "python=3.14; "
+                "stage_a_manifest_sha256=e50872104f77d4db4d16a41dd9b953bf064fa92704516c9813940b60ae8ec115; "
+                "stage_b_capture_sha256=932c2f94f7a0b45539d00faa4afef34520b9bef18ceb56fb389c3bdb0e7ea228; "
+                "stage_b_manifest_sha256=3eee10059e817724c3951496b6a25494398dedfd417a5f50b78034b1894c95bc; "
+                "step0_manifest_sha256=114efb16341df170012e856a31402938c784f54be8a950a26262af7db45e6a3b; "
+                "jkp_code_commit=67174c7f; "
+                "holdout_strategy_id=3621-avoidance-filters; "
+                "holdout_strategy_version=v1; "
+                "ledger docs/research/3621-ledger.jsonl"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=62,
         ),
         DeclaredTrial(
             trial_id="recent-evidence-refresh-cost-v4-2026-09-26",
