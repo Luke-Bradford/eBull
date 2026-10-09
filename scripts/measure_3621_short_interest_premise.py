@@ -19,8 +19,10 @@ Per formation M, the settlement used is the latest calendar settlement whose pub
 s(M). Unless it is on or after ``COVERAGE_START`` the formation is ``no_settlement``. A covered formation whose
 settlement is not the first calendar settlement of M's month refuses. ``revisionFlag`` is not read for a state: FINRA
 defines it as "the previous short interest position in the security was revised since the prior reporting cycle"
-(Regulatory Notice 21-19, note 10), so it marks a revision of the PRIOR settlement's figure, published after s(M);
-the revision check below measures whether the stored prior file holds the original or the revised figure. Per
+(Regulatory Notice 21-19, note 10). A flag in the selected file announces a revision of the settlement BEFORE it; a
+revision of the selected settlement's own figure is announced in the next file, published after s(M), and that
+file's ``previousShortPositionQuantity`` is never consumed. The revision check below measures whether the stored
+prior file holds the figure the next file announces as revised. Per
 admitted name, in precedence order:
 
 - ``ambiguous``: the normalised symbol (``normalise_symbol``) is empty, shared by two admitted names at M, or carried
@@ -109,7 +111,7 @@ class MeasureError(RuntimeError):
 @dataclass(frozen=True)
 class FinraRow:
     short: int
-    previous: int
+    previous: int | None
     adv: int
     revised: bool
     issue_name: str
@@ -217,10 +219,11 @@ def parse_file(payload: bytes, day: date) -> FinraFile:
             raise MeasureError(f"{day}: a body row carries settlementDate {row.get('settlementDate')!r}")
         try:
             short, adv = int(row["currentShortPositionQuantity"]), int(row["averageDailyVolumeQuantity"] or 0)
-            previous = int(row["previousShortPositionQuantity"] or 0)
+            blank = not (row["previousShortPositionQuantity"] or "").strip()
+            previous = None if blank else int(row["previousShortPositionQuantity"])
         except ValueError as exc:
             raise MeasureError(f"{day}: non-integer short count or ADV for {row['symbolCode']!r}") from exc
-        if short < 0 or adv < 0 or previous < 0:
+        if short < 0 or adv < 0 or (previous is not None and previous < 0):
             raise MeasureError(f"{day}: negative short count or ADV for {row['symbolCode']!r}")
         flagged = bool((row["revisionFlag"] or "").strip())
         physical += 1
@@ -324,6 +327,7 @@ def main(names_out: Path) -> None:
             )
         }
         absent = [d for d in needed if f"FINRA_SI_{d:%Y%m%d}" not in stored]
+        print(f"inventory: stored accessions {min(stored)} .. {max(stored)}")
         print(f"inventory: {len(stored)} stored payloads; in-coverage calendar settlements not stored: {absent}")
         known = conn.execute(
             "SELECT min(known_from), max(known_from) FROM finra_short_interest_observations"
@@ -347,11 +351,14 @@ def main(names_out: Path) -> None:
     # revised in place, a flagged row's previousShortPositionQuantity would equal that file's current figure.
     revision = Counter[tuple[bool, bool]]()
     uncompared = Counter[bool]()
-    residue: list[tuple[date, str, bool, int, int]] = []
+    blank_previous = Counter[bool]()
+    residue: list[tuple[date, str, bool, int | None, int]] = []
     for prior, day in zip(needed, needed[1:], strict=False):
         before, now = files[prior], files[day]
         for key, row in now.rows.items():
-            if key in before.rows and key not in now.twice and key not in before.twice:
+            if row.previous is None:
+                blank_previous[row.revised] += 1
+            elif key in before.rows and key not in now.twice and key not in before.twice:
                 agree = row.previous == before.rows[key].short
                 revision[(row.revised, agree)] += 1
                 if row.revised == agree:
@@ -459,6 +466,7 @@ def main(names_out: Path) -> None:
     print(f"payload manifest -> {PAYLOADS_OUT}, sha256={hashlib.sha256(PAYLOADS_OUT.read_bytes()).hexdigest()}")
     print("revision check (flagged, previous == prior file's current):", dict(sorted(revision.items())))
     print("  rows with no comparable prior row (flagged -> count):", dict(sorted(uncompared.items())))
+    print("  rows with a blank previousShortPositionQuantity (flagged -> count):", dict(sorted(blank_previous.items())))
     print("  residue (settlement, symbol, flagged, previous, prior file's current):")
     for record in residue:
         print("  ", *record, sep="\t")
@@ -508,7 +516,7 @@ def main(names_out: Path) -> None:
             first.setdefault(norm(name), (day, state, ratio))
         print(
             sid,
-            *(f"{d}:{n[:28]}:{s}:{'-' if r is None else f'{math.exp(r):.3f}'}" for n, (d, s, r) in first.items()),
+            *(f"{d}:{n}:{s}:{'-' if r is None else f'{math.exp(r):.3f}'}" for n, (d, s, r) in first.items()),
             sep="\t",
         )
     print()
