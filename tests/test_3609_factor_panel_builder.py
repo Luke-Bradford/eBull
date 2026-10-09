@@ -4,18 +4,26 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
-from app.services.factor_panel import ShareReference, SplitStamp
+import pytest
+
+from app.services.factor_panel import PanelError, ShareReference, SplitStamp
+from app.services.factor_panel_artefact import write_gz_lines
+from app.services.factor_panel_prices import ReturnBounds
 from scripts.build_3609_factor_panel import (
+    RETURN_CUTOFFS,
     Candidate,
     Census,
+    Frozen,
     Step,
     build_cik_rows,
     holding_last_sessions,
     holding_month,
     me_reconciliation,
     multiple_security_ciks,
+    read_return_bounds,
 )
 from tests.test_3609_factor_panel import CIK, Shard, _balance, _cover
 
@@ -310,3 +318,37 @@ def test_an_amendment_repeating_the_count_and_its_date_is_not_a_second_filing() 
     april, may, _ = _consensus_rows(("a", "2017-05-10", "2016-12-31", "2017-02-10", 50))
     assert may["me"]["facts"][0]["accns"] == ["a"]
     assert [row["me"]["verified"] for row in (april, may)] == [False, False]
+
+
+def _cutoffs(tmp_path: Path, lines: list[list[str]]) -> Path:
+    write_gz_lines(tmp_path / Frozen.snapshot(RETURN_CUTOFFS["dataset_key"]), lines)
+    return tmp_path
+
+
+def test_return_bounds_read_the_usd_total_return_pair_per_holding_month(tmp_path: Path) -> None:
+    lines = [
+        ["n", "2019-11-30", "40001", "count"],
+        ["ret_0_1", "2019-11-30", "-0.7", "decimal_return"],
+        ["ret_99_9", "2019-11-30", "1.8", "decimal_return"],
+        ["ret_exc_99_9", "2019-11-30", "1.798", "decimal_return"],
+    ]
+    assert read_return_bounds(_cutoffs(tmp_path, lines)) == {(2019, 11): ReturnBounds((2019, 11), -0.7, 1.8)}
+
+
+@pytest.mark.parametrize(
+    ("lines", "match"),
+    [
+        ([["ret_0_1", "2019-11-30", "-0.7", "decimal_return"]], "hold only"),
+        ([["ret_0_1", "2019-11-29", "-0.7", "decimal_return"]], "not a month end"),
+        ([["ret_0_1", "2019-11-30", "-0.7", "percent_per_annum"]], "unit"),
+        ([["ret_0_1", "2019-11-30", "-0.7", "decimal_return"]] * 2, "twice"),
+        ([["ret_0_1", "2019-11-30", "n/a", "decimal_return"]], "not a number"),
+        (
+            [["ret_0_1", "2019-11-30", "0.9", "decimal_return"], ["ret_99_9", "2019-11-30", "0.5", "decimal_return"]],
+            "bounds",
+        ),
+    ],
+)
+def test_return_bounds_refuse_drift(tmp_path: Path, lines: list[list[str]], match: str) -> None:
+    with pytest.raises(PanelError, match=match):
+        read_return_bounds(_cutoffs(tmp_path, lines))

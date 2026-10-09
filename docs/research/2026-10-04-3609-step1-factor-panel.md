@@ -1031,7 +1031,13 @@ with `adj_close`).
   error. `--ab <stage-A artefact> --cutoffs <csv>` prints, per population and arm over every admitted holding of a
   published pre-amendment stage-A artefact, the counts above +300%, capped and floored, the maximum before and after,
   and the mean over formations of the equal-weight monthly holding return before and after. These are diagnostics, not
-  factor or book results. It refuses an artefact whose rows already carry `raw_by_arm`.
+  factor or book results. On an artefact built under this amendment it reads `raw_by_arm` as before and `by_arm`
+  as after, refusing a row whose `by_arm` is not `raw_by_arm` clipped to its `bounds`; run on a pre-amendment
+  artefact and its republished successor, the two tables must agree.
+- **Pinning.** The builder pins the `jkp_return_cutoffs` reference snapshot itself (`RETURN_CUTOFFS` in
+  `scripts/build_3609_factor_panel.py`) and freezes it into `inputs/` beside the slice 1 reference snapshots. It is
+  not added to the slice 1 reference artefact: that would move the reference manifest pinned in every published
+  artefact's `pinned_manifests`, and the published artefacts would stop verifying.
 - **Effect.** Holding returns change, so an artefact built under this amendment carries a new manifest. Stage B is
   not rebuilt here: the builder is in step 2's hashed construction closure, so a stage-B rebuild belongs to whichever
   new trial declares it. Verdicts already recorded on the old artefacts stand as recorded, under the rule they used.

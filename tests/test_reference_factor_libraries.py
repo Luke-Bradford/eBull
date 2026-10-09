@@ -28,6 +28,7 @@ from app.services.reference_data import (
     parse_global_q_monthly_csv,
     parse_jkp_monthly_zip,
     parse_jkp_nyse_cutoffs_csv,
+    parse_jkp_return_cutoffs_csv,
     parse_osap_ls_wide_csv,
     resolve_global_q_monthly_url,
     resolve_osap_ls_wide_url,
@@ -244,6 +245,48 @@ def test_jkp_cutoffs_parser_refuses_drift(body: bytes, match: str) -> None:
         parse_jkp_nyse_cutoffs_csv(_CUTOFFS_HEADER + body)
     with pytest.raises(ReferenceDataSourceError, match="header"):
         parse_jkp_nyse_cutoffs_csv(b"eom,n,nyse_p20\n2014-08-31,1,2\n")
+
+
+_RETURN_CUTOFFS_HEADER = (
+    b"eom,n,ret_0_1,ret_1,ret_99,ret_99_9,ret_local_0_1,ret_local_1,ret_local_99,ret_local_99_9,"
+    b"ret_exc_0_1,ret_exc_1,ret_exc_99,ret_exc_99_9\n"
+)
+# Two rows in JKP's published shape: the excess family is the total family minus the month's one rate (0.003).
+_RETURN_CUTOFFS_ROWS = (
+    b"2019-10-31,40000,-0.6,-0.3,0.4,1.5,-0.61,-0.3,0.4,1.6,-0.603,-0.303,0.397,1.497\n"
+    b"2019-11-30,40001,-0.7,-0.35,0.5,1.8,-0.7,-0.35,NA,1.8,-0.702,-0.352,0.498,1.798\n"
+)
+
+
+def test_jkp_return_cutoffs_parser_keeps_every_family_as_decimal_returns() -> None:
+    parsed = parse_jkp_return_cutoffs_csv(_RETURN_CUTOFFS_HEADER + _RETURN_CUTOFFS_ROWS)
+    assert parsed.missing_count == 1
+    rows = {(o.series_key, o.observation_date): (o.value, o.unit) for o in parsed.observations}
+    assert rows[("ret_99_9", date(2019, 11, 30))] == (Decimal("1.8"), "decimal_return")
+    assert rows[("ret_exc_0_1", date(2019, 10, 31))] == (Decimal("-0.603"), "decimal_return")
+    assert rows[("n", date(2019, 10, 31))] == (Decimal("40000"), "count")
+    assert ("ret_local_99", date(2019, 11, 30)) not in rows
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        # The excess pair is shifted by 0.003 at the top and 0.004 at the bottom: not one rate.
+        (b"2019-10-31,40000,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.604,-0.303,0.397,1.497\n", "unequal shifts"),
+        (b"2019-10-31,40000,NA,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "missing ret_0_1"),
+        (b"2019-10-31,40000,0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,0.597,-0.303,0.397,1.497\n", "ret percentiles decrease"),
+        (b"2019-10-30,40000,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "not a month end"),
+        (_RETURN_CUTOFFS_ROWS.replace(b"2019-11-30", b"2019-12-31"), "does not follow"),
+        (b"2019-10-31,0.5,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "positive integer"),
+        (b"2019-10-31,NA,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "missing n"),
+        (b"2019-10-31,40000,-0.6,-0.3,0.4,1.5\n", "ragged"),
+    ],
+)
+def test_jkp_return_cutoffs_parser_refuses_drift(body: bytes, match: str) -> None:
+    with pytest.raises(ReferenceDataSourceError, match=match):
+        parse_jkp_return_cutoffs_csv(_RETURN_CUTOFFS_HEADER + body)
+    with pytest.raises(ReferenceDataSourceError, match="header"):
+        parse_jkp_return_cutoffs_csv(_CUTOFFS_HEADER + b"2014-08-31,1400,30,600,2500,15000\n")
 
 
 def test_osap_parser_normalises_percent_to_decimal_as_published() -> None:

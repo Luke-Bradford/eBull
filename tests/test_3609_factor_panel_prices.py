@@ -16,6 +16,7 @@ from app.services.factor_panel_prices import (
     DailyMonthly,
     HoldingStatus,
     PriceMissing,
+    ReturnBounds,
     SessionGrid,
     liquidity_terciles,
     me_discontinuity,
@@ -31,6 +32,8 @@ SESSIONS = [
 M = date(2019, 10, 31)  # a Thursday: s(M) = M
 HELD_LAST = date(2019, 11, 29)
 RF = 0.0001
+#: The holding month's JKP cutoffs, wide enough that no test below them is clipped.
+WIDE = {(2019, 11): ReturnBounds((2019, 11), -1.0, 10.0)}
 
 
 def _grid(rf: float | None = RF) -> SessionGrid:
@@ -47,8 +50,16 @@ def _bars(adj: Callable[[int, date], float | None], *, close: float = 10.0, volu
     return out
 
 
-def _run(bars: list[DailyBar], *, termination: tuple[TerminationClass, date] | None = None, rf: float | None = RF):
-    return series_prices(bars, _grid(rf), holding_last_session={M: HELD_LAST}, termination=termination)
+def _run(
+    bars: list[DailyBar],
+    *,
+    termination: tuple[TerminationClass, date] | None = None,
+    rf: float | None = RF,
+    bounds: dict[tuple[int, int], ReturnBounds] = WIDE,
+):
+    return series_prices(
+        bars, _grid(rf), holding_last_session={M: HELD_LAST}, termination=termination, return_bounds=bounds
+    )
 
 
 def _growing(i: int, _day: date) -> float:
@@ -173,6 +184,39 @@ def test_live_series_ending_early_is_a_coverage_exit_at_the_partial_return() -> 
     assert got.holding.by_arm["worst_case"] == got.holding.period_return > 0
 
 
+def test_amendment_3_caps_an_observed_holding_and_keeps_the_raw_value() -> None:
+    jump = _run(_bars(lambda i, d: _growing(i, d) * (250.0 if d > M else 1.0)))
+    holding = jump.by_formation[M].holding
+    cap = ReturnBounds((2019, 11), -0.75, 1.5)
+    capped = _run(_bars(lambda i, d: _growing(i, d) * (250.0 if d > M else 1.0)), bounds={(2019, 11): cap})
+    got = capped.by_formation[M].holding
+    assert holding.raw_by_arm == got.raw_by_arm  # the raw value does not depend on the bounds
+    assert got.raw_by_arm["best_case"] > 200
+    assert got.by_arm == {"best_case": 1.5, "worst_case": 1.5}
+    assert (got.bounds, got.period_return, got.status) == (cap, holding.period_return, HoldingStatus.OBSERVED)
+
+
+def test_amendment_3_clips_after_the_terminal_imputation_per_arm() -> None:
+    last = date(2019, 11, 15)
+    floor = ReturnBounds((2019, 11), -0.1, 1.5)
+    got = _run(_bars(_ends_on(last)), termination=(TerminationClass.UNKNOWN, last), bounds={(2019, 11): floor})
+    holding = got.by_formation[M].holding
+    partial = 1.001 ** (SESSIONS.index(last) - SESSIONS.index(M)) - 1.0
+    assert holding.raw_by_arm["worst_case"] == pytest.approx((1 + partial) * (1 - SHUMWAY_HAIRCUT) - 1)
+    assert holding.by_arm == {"best_case": pytest.approx(partial), "worst_case": -0.1}
+
+
+def test_amendment_3_refuses_a_holding_month_without_cutoffs() -> None:
+    with pytest.raises(PanelError, match="no JKP return cutoff row for holding month"):
+        _run(_bars(_growing), bounds={(2019, 10): ReturnBounds((2019, 10), -1.0, 10.0)})
+
+
+@pytest.mark.parametrize(("low", "high"), [(0.5, -0.5), (math.nan, 1.0), (-1.0, math.inf)])
+def test_return_bounds_refuse_an_inverted_or_non_finite_pair(low: float, high: float) -> None:
+    with pytest.raises(PanelError, match="JKP return cutoffs"):
+        ReturnBounds((2019, 11), low, high)
+
+
 def test_a_terminating_series_that_trades_through_the_month_is_observed() -> None:
     got = _run(_bars(_growing), termination=(TerminationClass.UNKNOWN, date(2019, 12, 31))).by_formation[M]
     assert got.holding.status is HoldingStatus.OBSERVED
@@ -222,14 +266,18 @@ def test_an_excused_ratio_move_is_counted_unless_a_split_factor_explains_it() ->
         for i, b in enumerate(_bars(_growing))
     ]
     grid = _grid()
-    unexplained = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None)
+    unexplained = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None, return_bounds=WIDE)
     assert unexplained.excused_unexplained_by_year == {2019: 1}
     assert unexplained.flags_by_year == {}  # excused: not screened
     split = [SplitStamp(SESSIONS[j], Decimal("0.5"))]
-    explained = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None, split_stamps=split)
+    explained = series_prices(
+        bars, grid, holding_last_session={M: HELD_LAST}, termination=None, return_bounds=WIDE, split_stamps=split
+    )
     assert explained.excused_unexplained_by_year == {}
     wrong_way = [SplitStamp(SESSIONS[j], Decimal(2))]  # predicts the ratio doubling, not halving
-    reversed_ = series_prices(bars, grid, holding_last_session={M: HELD_LAST}, termination=None, split_stamps=wrong_way)
+    reversed_ = series_prices(
+        bars, grid, holding_last_session={M: HELD_LAST}, termination=None, return_bounds=WIDE, split_stamps=wrong_way
+    )
     assert reversed_.excused_unexplained_by_year == {2019: 1}
 
 
