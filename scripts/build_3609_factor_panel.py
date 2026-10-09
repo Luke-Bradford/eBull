@@ -1324,6 +1324,27 @@ def publish(root: Path, formations: Sequence[date]) -> Path:
     return out
 
 
+@dataclass(frozen=True)
+class StageBGate:
+    """Whose declared run builds stage B: step 2's (``STEP2_GATE``), or #3621 v2's rebuild under Amendment 3."""
+
+    #: Refuses unless the trial's declaration matches this checkout; given the committed and run ledger rows.
+    check_declaration: Callable[[Sequence[Mapping[str, Any]]], object]
+    #: The spec and construction hashes the manifest records, checked before and after the build.
+    versions: Callable[[], dict[str, Any]]
+    #: A pinned extended SUB (artefact, manifest sha256) the trial binds, or ``None`` for the run's own
+    #: ``sub_published`` artefact. The SUB manifest names its publishing run and is frozen into ``inputs/``, so a
+    #: rebuild whose inputs must equal an earlier stage B's byte for byte binds that stage B's SUB.
+    sub: tuple[Path, str] | None = None
+
+
+def _step2_declaration(rows: Sequence[Mapping[str, Any]]) -> object:
+    return check_declaration(TRIAL_REGISTER, rows, CodeHashes.current())
+
+
+STEP2_GATE: Final = StageBGate(_step2_declaration, lambda: dataclasses.asdict(CodeHashes.current()))
+
+
 def publish_stage_b(
     root: Path,
     run_id: str,
@@ -1331,27 +1352,32 @@ def publish_stage_b(
     confirm_access: Callable[[str, int], None],
     ledger: Path = LEDGER_PATH,
     committed_ledger: Path = COMMITTED_LEDGER_PATH,
+    gate: StageBGate = STEP2_GATE,
 ) -> tuple[Path, str]:
     """Step 2 slice 2: the stage-B artefact, built only inside the declared run; returns it and its manifest sha256.
 
-    Refuses before any stage-B read unless the step 2 declaration matches this checkout, the run's ledger holds
-    ``started``, ``access_recorded`` and ``sub_published`` with no ``stage_b_published`` or terminal row, and the
-    access row is committed. The extended SUB is the run's own ``sub_published`` artefact. Any failure after the
-    gate ends the run with a ``failed`` row.
+    Refuses before any stage-B read unless the gate's declaration matches this checkout, the run's ledger holds
+    ``started`` and ``access_recorded`` (and ``sub_published`` unless the gate pins a SUB) with no
+    ``stage_b_published`` or terminal row, and the access row is committed. The extended SUB is the gate's pinned
+    one or the run's own ``sub_published`` artefact. Any failure after the gate ends the run with a ``failed`` row.
     """
     head = _clean_head()
     rows = read_ledger(committed_ledger, ledger)
-    check_declaration(TRIAL_REGISTER, rows, CodeHashes.current())
+    gate.check_declaration(rows)
     access_id = recorded_access_id(rows, run_id, before=STAGE_B_EVENT)
-    published_sub = run_event(rows, run_id, "sub_published")
-    step2_sub = (Path(published_sub["artefact"]), str(published_sub["manifest_sha256"]))
+    if gate.sub is None:
+        published_sub = run_event(rows, run_id, "sub_published")
+        step2_sub = (Path(published_sub["artefact"]), str(published_sub["manifest_sha256"]))
+    else:
+        step2_sub = gate.sub
     confirm_access(run_id, access_id)
     out = root / f"{datetime.now(UTC).date().isoformat()}-{head[:8]}-stageB-{run_id}"
     root.mkdir(parents=True, exist_ok=True)
     out.mkdir()  # exclusive: an existing artefact directory is refused, never resumed
     try:
-        # The first stage-B file read, after every gate above: a SUB artefact of another run ends this run.
-        if reference_manifest(*step2_sub).get("run_id") != run_id:
+        # The first stage-B file read, after every gate above: unless the gate pins it, a SUB artefact of another
+        # run ends this run.
+        if gate.sub is None and reference_manifest(*step2_sub).get("run_id") != run_id:
             raise PanelError(f"the extended SUB artefact {step2_sub[0]} was not published by run {run_id}")
         _publish_artefact(
             out,
@@ -1359,7 +1385,7 @@ def publish_stage_b(
             head=head,
             stage="B",
             pins=stage_b_pins(step2_sub[1]),
-            versions=lambda: dataclasses.asdict(CodeHashes.current()),
+            versions=gate.versions,
             step2_sub=step2_sub,
             provenance={"run_id": run_id, "access_id": access_id},
         )
