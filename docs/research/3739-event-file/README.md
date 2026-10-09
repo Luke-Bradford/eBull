@@ -50,11 +50,20 @@ from the live view with the slice-1 harvest date as its cutoff, so a later harve
 ```bash
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py calibrate --out calibration-k-g.json
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py extract --zip submissions.zip --out extract.jsonl.gz
-PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through 2026-10-08 --out register.csv --view-sha256 2667138e…
-PYTHONPATH=. uv run python scripts/build_3739_slice2.py universe --calibration calibration-k-g.json \
-    --calibration-sha256 347f2fa1… --extract extract.jsonl.gz --extract-sha256 1bd3989b… \
-    --register register.csv --register-sha256 68bc4062… --out u-pass1.csv
+PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through 2026-10-08 --out register.csv \
+    --view-sha256 2667138ea99a5304b9c74c517aaf1c968bebe7d921eed7338ea2278a0ec90a70
+PYTHONPATH=. uv run python scripts/build_3739_slice2.py universe \
+    --calibration calibration-k-g.json \
+    --calibration-sha256 347f2fa155432c1ae104fc71adeccb4d48353d362ff02ffc8afaa8c65ac8732d \
+    --extract inputs/submissions-2026-10-09-extract.jsonl.gz \
+    --extract-sha256 1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d \
+    --register inputs/form25-register-through-2026-10-08.csv \
+    --register-sha256 68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489 --out u-pass1.csv
 ```
+
+`extract` and `register` read sources that change: EDGAR rebuilds the zip nightly, and the register gains or corrects
+rows. Rerunning them reproduces the committed inputs only while those sources are unchanged. Replaying U means running
+`universe` on the committed `inputs/`.
 
 ## Slice 2b (next): the candidate screens
 
