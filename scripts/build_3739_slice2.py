@@ -368,23 +368,27 @@ def read_extract(path: Path) -> Iterator[Filing]:
 def register_extract(through: date, out: Path, expected_view_sha256: str) -> None:
     """The register events filed from the stage start through ``through`` (the harvest date), as a CSV that U
     reads instead of the live view, so a later harvest cannot move a frozen U. It refuses unless the view's
-    definition, as the database holds it, has the expected sha256 (``VIEW_DEFINITION_SQL``; sql/252)."""
+    definition, as the database holds it, has the expected sha256 (``VIEW_DEFINITION_SQL``; sql/252). Every check
+    runs before the file is opened, and both reads share one read-only transaction."""
     with psycopg.connect(settings.database_url) as conn:
-        rows = conn.execute(REGISTER_SQL, {"start": REGISTER_START, "through": through}).fetchall()
+        conn.read_only = True
         definition = conn.execute(VIEW_DEFINITION_SQL).fetchone()
-    if definition is None or not definition[0]:
-        raise ValueError("the register view has no definition")
-    view_sha256 = hashlib.sha256(definition[0].encode()).hexdigest()
-    if view_sha256 != expected_view_sha256:
-        raise ValueError(f"the register view's definition is {view_sha256}, not the pinned {expected_view_sha256}")
+        if definition is None or not definition[0]:
+            raise ValueError("the register view has no definition")
+        view_sha256 = hashlib.sha256(definition[0].encode()).hexdigest()
+        if view_sha256 != expected_view_sha256:
+            raise ValueError(f"the register view's definition is {view_sha256}, not the pinned {expected_view_sha256}")
+        rows = conn.execute(REGISTER_SQL, {"start": REGISTER_START, "through": through}).fetchall()
+    lines: list[list[str]] = []
+    for cik, accession, form, filed, provision in rows:
+        normalised = normalise_cik(cik)
+        if normalised is None:
+            raise ValueError(f"register event {accession} has an unusable issuer CIK {cik!r}")
+        lines.append([normalised, accession, form, filed.isoformat(), provision])
     with out.open("x", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(REGISTER_COLUMNS)
-        for cik, accession, form, filed, provision in rows:
-            normalised = normalise_cik(cik)
-            if normalised is None:
-                raise ValueError(f"register event {accession} has an unusable issuer CIK {cik!r}")
-            writer.writerow([normalised, accession, form, filed.isoformat(), provision])
+        writer.writerows(lines)
     print(
         json.dumps(
             {
