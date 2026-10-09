@@ -78,24 +78,27 @@ def test_searches_are_the_addendums_86_and_the_evidence_reads_back() -> None:
 def test_the_gate_reads_only_v2s_rows_and_refuses_every_mismatch() -> None:
     register, committed = _declared()
     # v1's completed run shares the committed ledger and does not end v2.
-    assert check_declaration(register, committed, LABELS).trial_id == TRIAL_ID
-    with pytest.raises(RunError, match="construction_sha256"):
-        check_declaration(register, committed, {**LABELS, "construction_sha256": "0" * 64})
+    assert check_declaration(register, committed, committed, LABELS).trial_id == TRIAL_ID
+    # A 'declared' row only in the local ledger is no declaration.
     with pytest.raises(RunError, match="'declared' row"):
-        check_declaration(register, V1_ROWS, LABELS)
+        check_declaration(register, V1_ROWS, committed, LABELS)
+    with pytest.raises(RunError, match="construction_sha256"):
+        check_declaration(register, committed, committed, {**LABELS, "construction_sha256": "0" * 64})
+    with pytest.raises(RunError, match="'declared' row"):
+        check_declaration(register, V1_ROWS, V1_ROWS, LABELS)
     edited = dataclasses.replace(register.trials[0], description="edited after the pin")
     with pytest.raises(RunError, match="'declared' row"):
-        check_declaration(TrialRegister("test", (edited,)), committed, LABELS)
+        check_declaration(TrialRegister("test", (edited,)), committed, committed, LABELS)
     wrong = dataclasses.replace(register.trials[0], searches=62)
     with pytest.raises(RunError, match="86-search"):
-        check_declaration(TrialRegister("test", (wrong,)), committed, LABELS)
+        check_declaration(TrialRegister("test", (wrong,)), committed, committed, LABELS)
     done = [
         *committed,
         {"run_id": "v2", "event": "started", "trial_id": TRIAL_ID},
         {"run_id": "v2", "event": "completed"},
     ]
     with pytest.raises(RunError, match="completed run"):
-        check_declaration(register, done, LABELS)
+        check_declaration(register, committed, done, LABELS)
 
 
 def test_a_second_declaration_refuses() -> None:
@@ -113,16 +116,19 @@ def test_open_runs_ignore_v1s_runs() -> None:
     assert open_runs([*rows, {"run_id": "v2", "event": "failed"}]) == []
 
 
-def test_the_stage_b_gate_binds_step_2s_sub_and_records_v2s_code_hashes() -> None:
+def test_the_stage_b_gate_binds_step_2s_sub_and_reads_the_pin_from_the_committed_ledger(tmp_path: Path) -> None:
     register, committed = _declared()
-    gate = stage_b_gate(register, lambda: dict(LABELS))
+    path = tmp_path / "committed.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in committed))
+    gate = stage_b_gate(register, path, lambda: dict(LABELS))
     assert gate.sub == STEP2_SUB
     assert gate.versions() == {
         k: LABELS[k] for k in ("spec_sha256", "construction_sha256", "register_policy_sha256", "python")
     }
     gate.check_declaration(committed)
-    with pytest.raises(RunError):
-        gate.check_declaration(V1_ROWS)
+    path.write_text("".join(json.dumps(row) + "\n" for row in V1_ROWS))
+    with pytest.raises(RunError, match="'declared' row"):
+        gate.check_declaration(committed)  # the local rows carry it; the committed ledger does not
 
 
 # --------------------------------------------------------------------------- the run's ledger

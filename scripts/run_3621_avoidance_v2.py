@@ -275,10 +275,14 @@ def own_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
 
 
 def check_declaration(
-    register: TrialRegister, rows: Sequence[Mapping[str, Any]], labels: Mapping[str, str]
+    register: TrialRegister,
+    committed: Sequence[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
+    labels: Mapping[str, str],
 ) -> DeclaredTrial:
-    """The declared trial, once its row, its committed payload pin and this checkout agree and no v2 run completed.
-    ``rows`` are the committed ledger plus the local one; only the committed ledger ever holds ``declared``."""
+    """The declared trial, once its row, its payload pin in the COMMITTED ledger and this checkout agree and no v2
+    run completed (``rows``: the committed ledger plus the local one). A ``declared`` row in the local ledger is
+    never a declaration."""
     matches = [t for t in register.trials if t.trial_id == TRIAL_ID]
     if len(matches) != 1:
         raise RunError(f"{len(matches)} register rows named {TRIAL_ID}; exactly one is required")
@@ -290,14 +294,13 @@ def check_declaration(
         or trial.searches != SEARCHES
     ):
         raise RunError(f"{TRIAL_ID} is not a non-claiming exact {SEARCHES}-search row")
-    mine = own_rows(rows)
-    declared = [r for r in mine if r.get("event") == DECLARED_EVENT]
+    declared = [r for r in committed if r.get("event") == DECLARED_EVENT and r.get("trial_id") == TRIAL_ID]
     if len(declared) != 1 or declared[0].get("payload_sha256") != payload_sha256(trial):
         raise RunError(f"{TRIAL_ID}: the committed ledger does not hold one 'declared' row pinning this register row")
     moved = sorted(label for label, value in labels.items() if evidence_value(trial.evidence, label) != value)
     if moved:
         raise RunError(f"this checkout's {moved} differ from {TRIAL_ID}'s declared values")
-    if any(r.get("event") == "completed" for r in mine):
+    if any(r.get("event") == "completed" for r in own_rows(rows)):
         raise RunError(f"{TRIAL_ID} already has a completed run; a changed study needs a new trial")
     return trial
 
@@ -639,14 +642,18 @@ def open_runs(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return [run_id for run_id in started if run_id not in ended]
 
 
-def stage_b_gate(register: TrialRegister, labels: Callable[[], dict[str, str]]) -> StageBGate:
-    """v2's gate on step 2's builder: v2's declaration, v2's code hashes in the manifest, step 2's SUB bound."""
+def stage_b_gate(register: TrialRegister, committed_ledger: Path, labels: Callable[[], dict[str, str]]) -> StageBGate:
+    """v2's gate on step 2's builder: v2's declaration (its pin read from ``committed_ledger`` alone), v2's code
+    hashes in the manifest, step 2's SUB bound."""
 
     def versions() -> dict[str, Any]:
         current = labels()
         return {label: current[label] for label in _CODE_LABELS}
 
-    return StageBGate(lambda rows: check_declaration(register, rows, labels()), versions, sub=STEP2_SUB)
+    def check(rows: Sequence[Mapping[str, Any]]) -> DeclaredTrial:
+        return check_declaration(register, read_ledger(committed_ledger), rows, labels())
+
+    return StageBGate(check, versions, sub=STEP2_SUB)
 
 
 def run(
@@ -671,7 +678,7 @@ def run(
         current = labels()
         committed = read_ledger(committed_ledger)
         rows = [*committed, *(row for row in read_ledger(ledger) if row not in committed)]
-        trial = check_declaration(register, rows, current)
+        trial = check_declaration(register, committed, rows, current)
         if stale := open_runs(rows):
             raise RunError(f"runs {stale} started and never ended; end each with a 'failed' row first")
         return _run_claimed(
@@ -798,7 +805,7 @@ def _build_stage_b(run_id: str) -> tuple[Path, str]:
         confirm_access=_confirm,
         ledger=LEDGER_PATH,
         committed_ledger=COMMITTED_LEDGER_PATH,
-        gate=stage_b_gate(TRIAL_REGISTER, current_labels),
+        gate=stage_b_gate(TRIAL_REGISTER, COMMITTED_LEDGER_PATH, current_labels),
     )
 
 
