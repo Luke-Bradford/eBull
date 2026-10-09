@@ -124,6 +124,7 @@ class FinraFile:
     physical_rows: int
     physical_revised: int
     zero_short: int
+    blank_previous: int
 
 
 @dataclass(frozen=True)
@@ -213,7 +214,7 @@ def parse_file(payload: bytes, day: date) -> FinraFile:
     """Every physical row is counted; the symbol map keeps the last row of a duplicated symbol, which is ambiguous."""
     rows: dict[str, FinraRow] = {}
     twice: set[str] = set()
-    physical = revised = zero = 0
+    physical = revised = zero = blanks = 0
     for row in csv.DictReader(io.StringIO(payload.decode("utf-8")), delimiter="|"):
         if parse_body_settlement_date(row.get("settlementDate")) != day:
             raise MeasureError(f"{day}: a body row carries settlementDate {row.get('settlementDate')!r}")
@@ -229,11 +230,12 @@ def parse_file(payload: bytes, day: date) -> FinraFile:
         physical += 1
         revised += flagged
         zero += short == 0
+        blanks += previous is None
         key = normalise_symbol(row["symbolCode"] or "")
         if key in rows:
             twice.add(key)
         rows[key] = FinraRow(short, previous, adv, flagged, row["issueName"] or "")
-    return FinraFile(rows, twice, physical, revised, zero)
+    return FinraFile(rows, twice, physical, revised, zero, blanks)
 
 
 def read_name(
@@ -369,7 +371,10 @@ def main(names_out: Path) -> None:
     counts: list[tuple[str, str, dict[str, int]]] = []
     log_ratios: list[float] = []
     tolerance_fail = Counter[float]()
-    shift_fail: dict[str, Counter[int]] = {}
+    # Cohort: names whose unshifted window is complete (state identity_fail or valid); per shift, the shifted
+    # window's outcome is "unverifiable" (a session without a usable bar) or "identity_fail".
+    shift_fail: dict[str, Counter[tuple[int, str]]] = {}
+    shift_cohort = 0
     by_link = Counter[tuple[str, str]]()
     audit: dict[int, list[tuple[date, str, str, float | None]]] = defaultdict(list)
     names_lines: list[str] = []
@@ -400,9 +405,13 @@ def main(names_out: Path) -> None:
                         log_ratios.append(reading.log_ratio)
                     for t in TOLERANCE_GRID:
                         tolerance_fail[t] += not identity_ok(hit, ours, t)
+                    shift_cohort += 1
                     for shift in WINDOW_SHIFTS:
                         moved = our_adv(volume.get(sid, {}), windows[(reading.used, shift)], splits[sid], reading.used)
-                        shift_fail[month][shift] += moved is None or not identity_ok(hit, moved, ADV_TOLERANCE)
+                        if moved is None:
+                            shift_fail[month][(shift, "unverifiable")] += 1
+                        elif not identity_ok(hit, moved, ADV_TOLERANCE):
+                            shift_fail[month][(shift, "identity_fail")] += 1
             values = sorted(r.sir for r in readings.values() if r.sir is not None)
             if not values:
                 raise MeasureError(f"{month}: covered formation with no valid SIR")
@@ -467,6 +476,8 @@ def main(names_out: Path) -> None:
     print("revision check (flagged, previous == prior file's current):", dict(sorted(revision.items())))
     print("  rows with no comparable prior row (flagged -> count):", dict(sorted(uncompared.items())))
     print("  rows with a blank previousShortPositionQuantity (flagged -> count):", dict(sorted(blank_previous.items())))
+    blanks = sum(f.blank_previous for f in files.values())
+    print(f"  physical rows with a blank previousShortPositionQuantity, all files: {blanks}")
     print("  residue (settlement, symbol, flagged, previous, prior file's current):")
     for record in residue:
         print("  ", *record, sep="\t")
@@ -489,12 +500,23 @@ def main(names_out: Path) -> None:
         print(f"  p{p}\t{qs[p - 1]:+.4f}\tratio {math.exp(qs[p - 1]):.4f}")
     for t in TOLERANCE_GRID:
         print(f"  identity_fail at tolerance {t}: {tolerance_fail[t]}")
-    print("window shift (days back) -> identity failures at the frozen tolerance, every covered formation")
-    total = Counter[int]()
+    print(
+        f"window shift (days back), cohort = the {shift_cohort} name-months with a "
+        "complete unshifted window: unverifiable / identity_fail at the frozen tolerance, every covered formation"
+    )
+    total = Counter[tuple[int, str]]()
     for month, fails in sorted(shift_fail.items()):
         total.update(fails)
-        print(f"  {month}", *(f"shift{s}={fails[s]}" for s in WINDOW_SHIFTS), sep="\t")
-    print("  total", *(f"shift{s}={total[s]}" for s in WINDOW_SHIFTS), sep="\t")
+        print(
+            f"  {month}",
+            *(f"shift{s}={fails[(s, 'unverifiable')]}/{fails[(s, 'identity_fail')]}" for s in WINDOW_SHIFTS),
+            sep="\t",
+        )
+    print(
+        "  total",
+        *(f"shift{s}={total[(s, 'unverifiable')]}/{total[(s, 'identity_fail')]}" for s in WINDOW_SHIFTS),
+        sep="\t",
+    )
     print()
     print("name-months by link status and state (all formations)")
     for (group, st), n in sorted(by_link.items()):

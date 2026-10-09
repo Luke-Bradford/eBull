@@ -1,6 +1,6 @@
 # #3621 slice 5 — short-interest filter, and the v2 re-run on the clipped panel (spec addendum)
 
-Status: **draft; Codex checkpoint 1 rounds 1–5 applied (§"Checkpoint log").** No book, differential or flag-conditioned
+Status: **draft; Codex checkpoint 1 rounds 1–6 applied (§"Checkpoint log").** No book, differential or flag-conditioned
 return involving short interest has been computed. Base spec: `docs/research/2026-10-08-3621-avoidance-filters.md`
 ("the base spec"); everything it fixes applies here unless this addendum amends it by name. v1 results: register
 r28, `docs/research/2026-10-09-3621-avoidance-filters-results.md`.
@@ -77,9 +77,9 @@ status: linked 109,467 of 110,288 (99.3%); unlinked 13,902 of 14,346 (96.9%); na
 **3. Identity calibration (identity data, full period).** Over the 124,077 checked matches with both volumes positive,
 ln(FINRA `averageDailyVolumeQuantity` / our ADV on FINRA's window, §"Source rules"): p1 −0.0270, p5 −0.0141, median
 0.0000, p95 +0.0331, p99 +0.1124 (ratios 0.973 to 1.119). Identity failures by tolerance: 1,911 at 1.1, 1,111 at 1.15,
-789 at 1.2, 621 at 1.25, 367 at 1.5, 262 at 2, 211 at 3. Shifting both ends of the window back one or two calendar
-days raises failures at 1.2, summed over the 38 covered formations, from 789 to 11,866 and 22,174; every formation
-rises. The glossary window is the one FINRA's figures agree with. The audit list (§"Source rules", identity) prints
+789 at 1.2, 621 at 1.25, 367 at 1.5, 262 at 2, 211 at 3. Over the 124,158 name-months whose unshifted window is
+complete, shifting both ends of the window back one or two calendar days leaves 13 and 20 of them `unverifiable` and
+raises identity failures at 1.2 from 789 to 11,853 and 22,154; failures rise with each shift at every formation. The glossary window is the one FINRA's figures agree with. The audit list (§"Source rules", identity) prints
 the first match under each FINRA `issueName` per series, with its state and ratio. Two series whose ticker belonged
 to another issuer earlier in the window are on it: RBC (our series RBC Bearings) matches "Regal Beloit" at
 2021-06-15 with ratio 2.774, `identity_fail`, and "RBC Bearings" from 2022-12-15 at 1.000; RDUS matches "Radius
@@ -95,9 +95,9 @@ therefore news about the PRIOR settlement's figure, published with S. Whether a 
 as first published is not documented; the script measures what it can. Over the 77 consecutive pairs of the 78
 files, for each symbol carried once in both, it compares `previousShortPositionQuantity` with the prior stored file's
 `currentShortPositionQuantity`: flagged rows disagree in 4,629 of 4,650; unflagged rows agree in 1,480,671 of
-1,480,698. 54,530 rows have no comparable prior row (a symbol new to the file; 26 of them flagged). No row in the 78
-files has a blank `previousShortPositionQuantity` (counted separately, never read as zero), so a `previous` of 0
-below is a reported zero. So the stored
+1,480,698. 54,530 rows have no comparable prior row (a symbol new to the file; 26 of them flagged). No physical row
+of the 78 files has a blank `previousShortPositionQuantity` (counted over every row, and never read as zero), so a
+`previous` of 0 below is a reported zero. So the stored
 prior file does not hold the revision that the next file announces. That is consistent with the stored files being
 first-published, and does not prove it: a later, unannounced change to either figure would not show here. The
 residue the script prints: 19 of the 21 flagged agreements are at the 2021-06-30 and 2021-07-15 settlements, the
@@ -381,3 +381,7 @@ searches. The base spec's verdict line (§"Decision rule") lists v2's 42 pairs.
 - **3:** the cross-source check passes only on equality; a failure needs a reviewed pre-declaration addendum.
 - **4:** the script prints the stored accession range.
 - **5:** the audit prints normalised names untruncated.
+
+**Round 6 (Codex, 2026-10-09): 2 findings, both applied.**
+- **1:** blank `previousShortPositionQuantity` is counted over every physical row of all 78 files (0).
+- **2:** the window-shift diagnostic separates `unverifiable` from `identity_fail` and names its cohort.
