@@ -576,8 +576,9 @@ def run(
     refuses every later run until it is ended by hand with a ``failed`` row."""
     with ledger_claim(ledger, RUN_CLAIM):
         current = labels()
-        rows = read_ledger(committed_ledger, ledger)
-        trial = check_declaration(register, read_ledger(committed_ledger), rows, current)
+        committed = read_ledger(committed_ledger)
+        rows = [*committed, *(row for row in read_ledger(ledger) if row not in committed)]
+        trial = check_declaration(register, committed, rows, current)
         if open_runs(rows):
             raise RunError(f"runs {open_runs(rows)} started and never ended; end each with a 'failed' row first")
         return _run_claimed(run_id, trial, current, head, command, accessed_by, record_access, evaluate_run, ledger)
@@ -612,6 +613,9 @@ def _run_claimed(
             },
         )
         step = "access_recorded"
+        # The access commits in the database before its ledger row: no transaction spans both. A failure between
+        # them ends the run ``failed`` at this step, and the access stays attributable by ``result_version`` (the
+        # run id) and its purpose, which is how step 2 classifies such a run too.
         access_id = record_access(
             HoldoutAccess(
                 strategy_id=STRATEGY_ID,
@@ -652,9 +656,11 @@ def _run_claimed(
         append_ledger(ledger, row)
         return row
     except BaseException as exc:
-        # A failed append may still have made its row durable, so the run's state is re-read, not inferred from
-        # ``step``: end it only if it has a row and no terminal one. Outputs are removed only when the re-read shows
-        # no durable row names them; an unknown state keeps them. No cleanup error masks ``exc``.
+        # BaseException on purpose: an interrupt after ``started`` must still end the run, or every later run refuses
+        # it as open (step 2's ``_end_if_open`` does the same). A failed append may still have made its row durable,
+        # so the run's state is re-read, not inferred from ``step``: end it only if it has a row and no terminal one.
+        # Outputs are removed only when the re-read shows no durable row names them; an unknown state keeps them.
+        # No cleanup error masks ``exc``.
         known = True
         try:
             events = {r.get("event") for r in read_ledger(ledger) if r.get("run_id") == run_id}

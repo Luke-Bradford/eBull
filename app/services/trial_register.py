@@ -1603,7 +1603,7 @@ TRIAL_REGISTER: Final = TrialRegister(
             searches=3,
         ),
         # #3609 step 2 slice 4: pasted verbatim from `scripts.declare_3609_step2.declared_trial(<evidence>)`, whose
-        # payload the committed `declared` ledger row pins (payload_sha256 fb6f2ada73ab…). The
+        # payload the committed `declared` ledger row pins (payload_sha256 d4b7713ff575…). The
         # declaration's integrity-only read is hold-out access 740. Never edit this row: any change
         # refuses every later attempt; a changed trial needs a new declaration.
         DeclaredTrial(
@@ -1679,7 +1679,7 @@ TRIAL_REGISTER: Final = TrialRegister(
             evidence=(
                 'docs/research/2026-10-08-3621-avoidance-filters.md §"Registration" and §"Slices" item 4; '
                 "spec_sha256=4c3744b784c661a8a5a24b93528c653860fa37324b1beee3c02c3d9c1036b236; "
-                "construction_sha256=e792dadfcd90c2eb1dfc2b5ec20ee5373fe5e4695f37b353a76928c29a8b7d36; "
+                "construction_sha256=3b6bd4154b3fc2a3b17da9c01fddfd2c42c47699ad9d3727153318bd9c2a0983; "
                 "register_policy_sha256=d5cd632246397252a33c04d6bbfddfc7d9b275ba902fdca19f2be99e78292651; "
                 "python=3.14; "
                 "stage_a_manifest_sha256=e50872104f77d4db4d16a41dd9b953bf064fa92704516c9813940b60ae8ec115; "
