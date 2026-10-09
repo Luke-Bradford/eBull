@@ -50,7 +50,7 @@ from pathlib import Path
 from app.services.factor_book_path import PRICE_FLOOR, archive_seasoned
 from app.services.factor_panel import formation_months
 from app.services.factor_panel_prices import SCREEN_RATIO_MOVE, SCREEN_RETURN_HIGH, SCREEN_RETURN_LOW
-from scripts.build_3609_factor_panel import read_verified_artefact
+from scripts.build_3609_factor_panel import VerifiedArtefact, read_verified_artefact
 from scripts.measure_3609_step2_universe import BOOK_UNIVERSE_SIZE, DEFAULT_ARTEFACT, STAGE_A_MANIFEST_SHA256
 
 CUTOFFS = "inputs/reference_snapshot_jkp_nyse_cutoffs.jsonl.gz"
@@ -163,12 +163,11 @@ def jkp_premise(data: bytes) -> None:
         print(f"{name}\tfirst {series[name][0][0]}\tlast {series[name][-1][0]}")
 
 
-def main(artefact: Path) -> None:
-    verified = read_verified_artefact(
-        artefact, STAGE_A_MANIFEST_SHA256, keep=[CUTOFFS, DAILY, FIRST_BARS, SESSIONS, JKP]
-    )
+def stage_a_counts(verified: VerifiedArtefact) -> tuple[list[str], list[dict[str, dict[str, int]]]]:
+    """Premise 1's per-formation table: the stage-A grid and, per formation, each population's flag counts. The
+    verified artefact must keep ``CUTOFFS``, ``DAILY``, ``FIRST_BARS`` and ``SESSIONS``."""
     if verified.manifest.get("stage") != "A":
-        raise MeasureError(f"{artefact} is not a stage-A artefact")
+        raise MeasureError("the artefact is not a stage-A artefact")
     grid = [m.isoformat() for m in formation_months()]
 
     cutoffs: dict[tuple[str, str], float] = {}
@@ -244,7 +243,14 @@ def main(artefact: Path) -> None:
                 for flag, hit in flags.items():
                     counts[population][flag] += int(hit)
         table.append(counts)
+    return grid, table
 
+
+def main(artefact: Path) -> None:
+    verified = read_verified_artefact(
+        artefact, STAGE_A_MANIFEST_SHA256, keep=[CUTOFFS, DAILY, FIRST_BARS, SESSIONS, JKP]
+    )
+    grid, table = stage_a_counts(verified)
     print("population", "flag", "min", "median", "max", sep="\t")
     for population in POPULATIONS:
         for flag in FLAGS:
