@@ -12391,3 +12391,25 @@ neighbouring container and match it.**
 - Prevention: before indexing a reference map with a key from another input, check membership and raise a named
   refusal that says which key and which input. Grep a new research script for `\[[a-z_]+\[` before pushing.
 - Enforced in: `scripts/measure_3730_holding_jumps.py` (`ab`).
+
+### A frozen code pin of a concluded study is checked at its own commit, not at HEAD (#3730)
+
+- Failure (#3730 slice 2, 2026-10-09): `tests/test_3609_step2_plan_pin.py` compared the step 2 exposure plan's
+  recorded `code_closure_sha256` with the planner's import closure at HEAD. The planner imports the panel builder, so
+  the first legitimate builder change after step 2 concluded (the holding-return clip) failed the pin, and the only
+  ways out the test offered were regenerating a registered plan or leaving the builder frozen for good.
+- Prevention: a pin that records "this artefact was written by this code" is a claim about history. Verify it against
+  the commit that wrote the artefact (`git log -1 -- <artefact>`, then `git archive` that tree), with `GIT_*`
+  scrubbed. Keep HEAD comparisons for gates that guard a run that has not happened yet, such as `check_declaration`.
+- Enforced in: `tests/test_3609_step2_plan_pin.py::test_the_plan_was_written_by_the_committed_planner`.
+
+### A new frozen input is pinned where it does not move a manifest that published artefacts already pin (#3730)
+
+- Failure (avoided, #3730 slice 2): the handoff put the JKP return cutoffs in the slice 1 reference artefact. Doing
+  that republishes its manifest, which changes `REFERENCE[1]` and so `STAGE_A_PINS`. Every published stage-A artefact
+  records the old value in `pinned_manifests`, so `read_verified_artefact` would refuse all of them, including the
+  ones the step 2 and #3621 records cite.
+- Prevention: before adding an input to a pinned manifest, grep for the verifiers that compare that manifest's
+  digest (`pinned_manifests`, `*_PINS`). If published artefacts carry it, pin the new input beside the manifest
+  instead.
+- Enforced in: `scripts/build_3609_factor_panel.py` (`RETURN_CUTOFFS`), and the step 1 spec Amendment 3, "Pinning".
