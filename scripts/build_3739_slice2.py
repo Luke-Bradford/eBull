@@ -34,6 +34,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 import zipfile
 from collections import defaultdict
@@ -385,10 +386,20 @@ def register_extract(through: date, out: Path, expected_view_sha256: str) -> Non
         if normalised is None:
             raise ValueError(f"register event {accession} has an unusable issuer CIK {cik!r}")
         lines.append([normalised, accession, form, filed.isoformat(), provision])
-    with out.open("x", newline="") as handle:
-        writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow(REGISTER_COLUMNS)
-        writer.writerows(lines)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(REGISTER_COLUMNS)
+    writer.writerows(lines)
+    payload = buffer.getvalue().encode()
+    handle = out.open("xb")  # refuses an existing file before anything is written
+    try:
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        out.unlink()  # a failed write leaves no partial file
+        raise
     print(
         json.dumps(
             {
