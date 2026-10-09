@@ -241,6 +241,33 @@ Details:
   Acceptance: both share counts are equal. An unequal count, or no source listing the settlement, fails the check and
   5c does not declare; only a reviewed addendum (checkpoint 1) that changes the source or registers the exception,
   made before the declaration, can replace this rule. An explanation alone does not pass it.
+- **Cross-source check, amended for GME (2026-10-09, before the declaration).** Nasdaq's short-interest page cannot
+  list GME: the endpoint the page loads its table from answers `{"data":null,"message":"Short interest is not
+  available. Short interest is only supported for Nasdaq Listed stocks"}` for GME (NYSE-listed), and for JPM, HD and
+  IBM alike (`curl -H 'Accept: application/json' 'https://api.nasdaq.com/api/quote/GME/short-interest?assetClass=stocks'`).
+  Wayback holds no capture of either GME URL after 2024-07-24 (CDX `from=20240724`, empty). So, by the rule above:
+  - **AAPL, as frozen.** The page's HTML is a client-side skeleton (the 2024-12-08 capture holds no figure); its table
+    is `api.nasdaq.com/api/quote/AAPL/short-interest?assetClass=stocks`, whose nearest capture after 2024-07-24 is
+    `web.archive.org/web/20250113110317id_/…`. It lists 07/15/2024 at 135,383,184; the stored payload
+    (`FINRA_SI_20240715`, sha256 `73417528…`, the manifest's) holds 135,383,184. Equal: pass. FINRA's ADV agrees too
+    (55,946,376 both).
+  - **GME, source changed, equality kept.** The live short-interest history at
+    `shortinteresthistory.com/symbol/gme/` lists July 15, 2024 at 40,344,382, prior 41,953,496; the stored payload
+    holds 40,344,382 and `previousShortPositionQuantity` 41,953,496. Equal: pass. The page had no Wayback capture after
+    2024-07-24, so one was requested on 2026-10-09 and is the retained evidence:
+    `web.archive.org/web/20261009110629id_/https://www.shortinteresthistory.com/symbol/gme/` (its row reads
+    `July 15, 2024 | 40,344,382 | 41,953,496`). Corroboration only: MarketBeat's history
+    (`web.archive.org/web/20241002182641id_/https://www.marketbeat.com/stocks/NYSE/GME/short-interest/`, the nearest
+    capture after 2024-07-24 listing the settlement) prints 40,340,000, rounded to 10,000 shares, which any stored
+    count in [40,335,000, 40,345,000) would match.
+  - **What this checks.** MarketBeat attributes its data to FINRA; shortinteresthistory.com names no source (the page
+    and its capture carry no "FINRA" or "source"). The result is numerical agreement of our stored figures with
+    another publisher's: it would catch a storage, parse or settlement-date error on our side, and it cannot show an
+    error shared with FINRA, whatever that publisher's upstream. The source was replaced after the frozen one was
+    found unable to list GME and before the declaration, under Codex checkpoint 1 (rounds 7 and 8 below); the
+    acceptance (equality) is unchanged.
+    ChartMill and The Online Investor show only the latest settlement live and have no capture after 2024-07-24;
+    GuruFocus's capture is premium-gated.
 - **SI diagnostics:** per formation and population, the counts of `docs/research/3621-si-premise-counts.csv`'s
   columns (each state, `flagged`; `split_carried`: valid names with any split stamp in (settlement, s(M)], whatever
   the net product), q, values above 1, q and the flag changes under the unreported-is-zero rule, the revision-check
@@ -388,3 +415,14 @@ searches. The base spec's verdict line (§"Decision rule") lists v2's 42 pairs.
 **Round 6 (Codex, 2026-10-09): 2 findings, both applied.**
 - **1:** blank `previousShortPositionQuantity` is counted over every physical row of all 78 files (0).
 - **2:** the window-shift diagnostic separates `unverifiable` from `identity_fail` and names its cohort.
+
+**Round 7 (Codex, 2026-10-09, the cross-source amendment): 2 findings, both applied.**
+- **1:** a rounding-tolerant MarketBeat acceptance gave up exactness without need; GME's source is now an exact
+  publisher (shortinteresthistory.com) under the unchanged equality rule, and MarketBeat is corroboration only.
+- **2:** MarketBeat's 10,000-share precision is stated as the interval it cannot distinguish, not as a ±5,000 bound.
+
+**Round 8 (Codex, 2026-10-09, the cross-source amendment): 3 findings, all applied.**
+- **1:** the exact source's page is retained as a Wayback capture requested for this check, and its row is quoted.
+- **2:** the text no longer claims shortinteresthistory.com re-publishes FINRA; it states what the agreement does and
+  does not show.
+- **3:** the replacement names the checkpoint-1 rounds that reviewed it.
