@@ -205,7 +205,10 @@ Details:
 ## The study (amendments to the base spec)
 
 - **Artefacts.** Stage A: `2026-10-09-af7889cc-stageA`. Stage B: built inside v2's declared run through step 2's
-  capture path under v2's trial id, with Amendment 3; its manifest digest goes in the run's ledger rows.
+  capture path under v2's trial id, with Amendment 3; its manifest digest goes in the run's ledger rows. The rebuild
+  binds step 2's extended SUB artefact (manifest `d0f3f9a9…`) and does not re-fetch it: stage B freezes the SUB
+  manifest into `inputs/reference_step2_sub/`, and that manifest names its publishing run, so the identity rule below
+  can hold only with step 2's own SUB.
 - **Identity of the rebuilt stage B (refuses otherwise).** Against v1's stage B (manifest `3eee1005…`): every row,
   admitted or not, keyed by (`M`, `name_key`), with the same key set; each row recursively equal to its v1 row after
   deleting the `prices.holding` subtree from both, so any other added, missing or changed field refuses. Every frozen
