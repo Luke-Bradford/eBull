@@ -17,6 +17,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date
+from fractions import Fraction
 from typing import Any, Final
 
 from app.services.avoidance_filters import Filter, NameFlags
@@ -30,8 +31,9 @@ COUNTED: Final = (
     "flagged",
     "split_carried",
 )
-#: Condition 5: at every covered formation, names with an SI value are at least this share of U(P, M).
-SI_COVERAGE_FLOOR: Final = 0.9
+#: Condition 5: at every covered formation, names with an SI value are at least this share of U(P, M). Exact, so the
+#: at-the-floor boundary never rests on float rounding.
+SI_COVERAGE_FLOOR: Final = Fraction(9, 10)
 CONDITION_5: Final = "5 SI coverage"
 #: Amendment 3's only input added to the rebuilt stage B.
 STAGE_B_ADDED_INPUT: Final = "inputs/reference_snapshot_jkp_return_cutoffs.jsonl.gz"
