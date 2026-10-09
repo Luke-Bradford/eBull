@@ -31,7 +31,7 @@ def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> D
 
 class TestTheShippedDeclaration:
     def test_the_register_is_stamped_with_its_version(self) -> None:
-        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-10-09-r28"
+        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-10-09-r29"
 
     def test_every_declared_trial_carries_its_evidence(self) -> None:
         """⚠ An entry nobody can trace is indistinguishable from one invented."""
@@ -94,12 +94,13 @@ class TestTheShippedDeclaration:
         # (r24, #3609), inside M_inh, + 3 3609-step2-exposure-planning-2026-10-08
         # (r25, #3609), inside M_inh, + 1 3609-step2-book-v1 (r26, #3609), inside M_inh, + 1
         # 3620-condition4-feasibility-2026-10-08 (r27, #3620), inside M_inh, + 62
-        # 3621-avoidance-filters-v1 (r28, #3621), inside M_inh. Moved
+        # 3621-avoidance-filters-v1 (r28, #3621), inside M_inh, + 86
+        # 3621-avoidance-filters-v2 (r29, #3621), inside M_inh. Moved
         # deliberately, not loosened: the pin exists to catch a
         # DROPPED entry, and an addition that raises M is the conservative
         # direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 588
-        assert TRIAL_REGISTER.inherited_floor().searches == 585
+        assert TRIAL_REGISTER.declared_count == 674
+        assert TRIAL_REGISTER.inherited_floor().searches == 671
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
     def test_the_two_mt1_controlled_pairs_are_charged_before_outcomes(self) -> None:
