@@ -84,6 +84,7 @@ from scripts.run_3621_avoidance import DAILY, SESSIONS, STAGE_B_CAPTURE_RUN, STA
 _ROOT = Path(__file__).resolve().parents[1]
 CALENDAR = _ROOT / "docs" / "research" / "3621-finra-si-calendar.csv"
 COUNTS_OUT = _ROOT / "docs" / "research" / "3621-si-premise-counts.csv"
+PAYLOADS_OUT = _ROOT / "docs" / "research" / "3621-si-premise-payloads.csv"
 NAMES_OUT = _ROOT / "var" / "research" / "3621" / "si-premise-names.jsonl.gz"
 POPULATIONS: tuple[str, ...] = ("micro", "small", "large", "mega", "top1000", "rest", "all")
 STATES: tuple[str, ...] = ("ambiguous", "unmatched", "unverifiable", "identity_fail", "valid")
@@ -313,12 +314,26 @@ def main(names_out: Path) -> None:
     provider = FinraShortInterestProvider()
     files: dict[date, FinraFile] = {}
     digests: dict[date, str] = {}
+    origins: dict[date, str] = {}
     with psycopg.connect(settings.database_url) as conn:
+        stored = {
+            r[0]
+            for r in conn.execute(
+                "SELECT accession_number FROM filing_raw_documents"
+                " WHERE document_kind = 'finra_short_interest_csv' AND payload IS NOT NULL"
+            )
+        }
+        absent = [d for d in needed if f"FINRA_SI_{d:%Y%m%d}" not in stored]
+        print(f"inventory: {len(stored)} stored payloads; in-coverage calendar settlements not stored: {absent}")
+        known = conn.execute(
+            "SELECT min(known_from), max(known_from) FROM finra_short_interest_observations"
+        ).fetchone()
+        print(f"finra_short_interest_observations known_from range: {known}")
         for day in needed:
             body = stored_body(
                 conn, accession_number=f"FINRA_SI_{day:%Y%m%d}", document_kind="finra_short_interest_csv"
             )
-            origin = "stored" if body is not None else "cdn"
+            origin = origins[day] = "stored" if body is not None else "cdn"
             payload = body.encode("utf-8") if body is not None else provider.fetch_settlement_file(day)
             files[day] = parse_file(payload, day)
             digests[day] = hashlib.sha256(payload).hexdigest()
@@ -331,11 +346,18 @@ def main(names_out: Path) -> None:
     # FINRA's revisionFlag marks a revision of the PRIOR settlement's figure. If the stored prior file had been
     # revised in place, a flagged row's previousShortPositionQuantity would equal that file's current figure.
     revision = Counter[tuple[bool, bool]]()
+    uncompared = Counter[bool]()
+    residue: list[tuple[date, str, bool, int, int]] = []
     for prior, day in zip(needed, needed[1:], strict=False):
         before, now = files[prior], files[day]
         for key, row in now.rows.items():
             if key in before.rows and key not in now.twice and key not in before.twice:
-                revision[(row.revised, row.previous == before.rows[key].short)] += 1
+                agree = row.previous == before.rows[key].short
+                revision[(row.revised, agree)] += 1
+                if row.revised == agree:
+                    residue.append((day, key, row.revised, row.previous, before.rows[key].short))
+            else:
+                uncompared[row.revised] += 1
 
     counts: list[tuple[str, str, dict[str, int]]] = []
     log_ratios: list[float] = []
@@ -429,7 +451,17 @@ def main(names_out: Path) -> None:
     )
     print(f"counts -> {COUNTS_OUT}, sha256={hashlib.sha256(COUNTS_OUT.read_bytes()).hexdigest()}")
     print(f"payloads: {len(covered)} used by covered formations, {len(digests)} read")
+    with PAYLOADS_OUT.open("w", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        writer.writerow(["settlement_date", "origin", "sha256", "physical_rows", "used_by_covered_formation"])
+        for day in needed:
+            writer.writerow([day, origins[day], digests[day], files[day].physical_rows, day in covered])
+    print(f"payload manifest -> {PAYLOADS_OUT}, sha256={hashlib.sha256(PAYLOADS_OUT.read_bytes()).hexdigest()}")
     print("revision check (flagged, previous == prior file's current):", dict(sorted(revision.items())))
+    print("  rows with no comparable prior row (flagged -> count):", dict(sorted(uncompared.items())))
+    print("  residue (settlement, symbol, flagged, previous, prior file's current):")
+    for record in residue:
+        print("  ", *record, sep="\t")
 
     print()
     print("formations", len(rows), "covered", len(cut_rows))

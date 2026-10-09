@@ -1,6 +1,6 @@
 # #3621 slice 5 — short-interest filter, and the v2 re-run on the clipped panel (spec addendum)
 
-Status: **draft; Codex checkpoint 1 rounds 1–3 applied (§"Checkpoint log").** No book, differential or flag-conditioned
+Status: **draft; Codex checkpoint 1 rounds 1–4 applied (§"Checkpoint log").** No book, differential or flag-conditioned
 return involving short interest has been computed. Base spec: `docs/research/2026-10-08-3621-avoidance-filters.md`
 ("the base spec"); everything it fixes applies here unless this addendum amends it by name. v1 results: register
 r28, `docs/research/2026-10-09-3621-avoidance-filters-results.md`.
@@ -33,25 +33,27 @@ interest ratio) and **all four** (MAX + sub-$5 + young + SI).
   state, flag, calibration or verdict), the frozen daily volume, split stamps, SPY sessions and NYSE cutoffs. It reads
   no holding return and no post-s(M) price. It reads all 78 in-coverage calendar files (2021-06-15..2024-08-30): 76
   stored, and `shrt20210615` and `shrt20210630` fetched from the CDN into memory; 38 are used by covered formations
-  and all 78 feed the revision check. It prints each payload's sha256 and writes the exact reproduction reference
+  and all 78 feed the revision check. It writes the payload manifest `docs/research/3621-si-premise-payloads.csv`
+  (each settlement's origin, sha256 and row count; sha256
+  `1a15dd98dbfe76c073f74eb9a714d56eb74e5300afeedaad5fd543648d96805c`) and the exact reproduction reference
   (§"Slices", 5c): `docs/research/3621-si-premise-counts.csv` (sha256
   `a12c79f09487cdee099280ce538f9339458860909c05cfcbd96de977c848727e`) and the per-name file (124,634 lines, uncompressed
   sha256 `c005ca8a83b3c8e2cb7c38afd17a7db55e778ced8711ef636b0fcc8af0d91b6d`).
 - `PYTHONPATH=. uv run python -m scripts.build_3621_finra_si_calendar`: the calendar (premise 1 and §"Source rules").
-- Premise 1's inventory query and premise 6's CDN probes, each quoted with its command.
+- Premise 6's CDN probes, quoted with their command. Premise 1's inventory is printed by the premise script.
 
 Admission, ME and the frozen inputs do not change under Amendment 3 (#3730 acceptance: 0 rows differ outside
 `prices.holding`), so these counts are what v2's run must reproduce on its own stage B (§"The study").
 
 **1. Where the data lives, and the survivorship trap.**
 - FINRA's bimonthly files are kept whole in `filing_raw_documents` (accession `FINRA_SI_<YYYYMMDD>`, kind
-  `finra_short_interest_csv`, a kept kind): `SELECT count(*), count(payload), min(accession_number),
-  max(accession_number) FROM filing_raw_documents WHERE document_kind = 'finra_short_interest_csv'` returns 125, 125,
-  `FINRA_SI_20210715`, `FINRA_SI_20260915`; comparing the stored accessions with the calendar's 76 settlements
-  2021-07-15..2024-08-30 finds none missing. The 2021-06 files are not stored; the CDN serves both (premise 6).
+  `finra_short_interest_csv`, a kept kind): 125 non-null payloads, `FINRA_SI_20210715` to `FINRA_SI_20260915`. The
+  premise script compares the stored accessions with the calendar's in-coverage settlements and prints the ones not
+  stored: 2021-06-15 and 2021-06-30 only. The CDN serves both (premise 6).
 - `finra_short_interest_observations` is **not usable for a backtest.** Its ingest resolves symbols against
   `instruments WHERE is_tradable = TRUE` at ingest time and drops the rest (`app/services/finra_short_interest_ingest.py:146`,
-  `:293-296`), and every stored row was ingested between 2026-06-04 and 2026-10-08 (`min/max(known_from)`). An unlinked
+  `:293-296`), and every stored row was ingested between 2026-06-04 and 2026-10-08 (the premise script prints
+  `min/max(known_from)`). An unlinked
   panel name has no `instrument_id` and so can never have a row there. The study re-parses the raw files, every row.
 
 **2. Coverage on stage B.** 38 of stage B's 39 formations carry a usable settlement, 2021-06..2024-07 (2021-05 does
@@ -81,19 +83,27 @@ rises. The glossary window is the one FINRA's figures agree with. The audit list
 the first match under each FINRA `issueName` per series, with its state and ratio. Two series whose ticker belonged
 to another issuer earlier in the window are on it: RBC (our series RBC Bearings) matches "Regal Beloit" at
 2021-06-15 with ratio 2.774, `identity_fail`, and "RBC Bearings" from 2022-12-15 at 1.000; RDUS matches "Radius
-Health" at 2021-06-15 with ratio 0.998, accepted, and "Schnitzer Steel" from 2023-09-15 at 1.004. RDUS's 0.998 means
-our series' 2021 volume is Radius Health's, so the mismatch there lies in the panel series, not in the FINRA match;
-this study does not resolve it (§"Known limits").
+Health" at 2021-06-15 with ratio 0.998, accepted, and "Schnitzer Steel" from 2023-09-15 at 1.004. RDUS's 0.998 is
+consistent with our series carrying Radius Health's 2021 volume, a historical-series identity question; volume
+agreement does not establish it, and this study does not resolve it (§"Known limits").
 
 **4. Revisions.** FINRA defines the flag: "The 'revision flag' indicates that the previous short interest position in
-the security was revised since the prior reporting cycle" (Regulatory Notice 21-19, note 10). A flag on settlement
-S's row is therefore news about the PRIOR settlement's figure, published with S. The script's revision check, over
-the 77 consecutive pairs of the 78 files, compares each row's `previousShortPositionQuantity` with the prior stored
-file's `currentShortPositionQuantity` for the same symbol: flagged rows disagree in 4,629 of 4,650; unflagged rows
-agree in 1,480,671 of 1,480,698. So the stored prior file holds the figure as first published, not the revision: the
-archive was not revised in place. Physical flagged rows in the 38 files covered formations use: 0 to 6 in 35, 19 in
-one, 1,663 in `shrt20231115`, and 7,600 of `shrt20210615`'s 20,251 (revisions to the 2021-05-28 figures, which no
-formation uses). No file carries a symbol twice.
+the security was revised since the prior reporting cycle" (Regulatory Notice 21-19, note 10). Its data catalog adds:
+"When those corrections are made, a Revision Flag will appear next to the revised item. Only the most recent data is
+made available" (finra.org/finra-data/browse-catalog/equity-short-interest). A flag on settlement S's row is
+therefore news about the PRIOR settlement's figure, published with S. Whether a stored file still holds its figures
+as first published is not documented; the script measures what it can. Over the 77 consecutive pairs of the 78
+files, for each symbol carried once in both, it compares `previousShortPositionQuantity` with the prior stored file's
+`currentShortPositionQuantity`: flagged rows disagree in 4,629 of 4,650; unflagged rows agree in 1,480,671 of
+1,480,698. 54,530 rows have no comparable prior row (a symbol new to the file; 26 of them flagged). So the stored
+prior file does not hold the revision that the next file announces. That is consistent with the stored files being
+first-published, and does not prove it: a later, unannounced change to either figure would not show here. The
+residue the script prints: 19 of the 21 flagged agreements are at the 2021-06-30 and 2021-07-15 settlements, the
+first two after FINRA's June 2021 change, and 2 at 2024-07-31 (AVGO and USLM); 20 of the 27 unflagged disagreements
+have `previous` = 0 at a corporate event (Liberty's 2023 tracking-stock recapitalisations, GSK's 2022 consolidation
+among them). Physical flagged rows in the 38 files covered formations use: 0 to 6 in 35, 19 in one, 1,663 in
+`shrt20231115`, and 7,600 of `shrt20210615`'s 20,251 (revisions to the 2021-05-28 figures, which no formation uses).
+No file carries a symbol twice.
 
 **5. The SIR distribution.** The decile cutoff q ran from 0.0795 (2021-11) to 0.1075 (2024-07). Values above 1 number
 0–5 per formation. Names whose short count was carried across a split between settlement and s(M): 0–9 per formation.
@@ -121,8 +131,8 @@ used them; whether earlier files exist is unknown (only the dates listed were pr
 | threshold | `market-segments.md` flag list: "short-interest decile (FINRA, 2021+)"; Hong et al. sort SR into deciles at each month-end | top decile | top decile over all admitted names with a value at M (⌈0.9 N⌉-th smallest; ties flagged), the base spec's MAX convention |
 | availability | FINRA Rule 4560: reports due "no later than the second business day after the reporting settlement date designated by FINRA"; FINRA's published schedule gives each settlement's publication date | a designated list, not a formula (`review-prevention-log.md`, #2234) | the latest settlement whose publication is strictly before s(M), from `docs/research/3621-finra-si-calendar.csv` |
 | coverage | FINRA file catalog (premise 6) | exchange-listed short interest is in FINRA's files from June 2021 | a formation is covered when its settlement is on or after 2021-06-15 |
-| revisions | Regulatory Notice 21-19, note 10 | the flag says the previous settlement's position was revised since the prior cycle | the settlement's row is used as stored, whatever its flag; the stored file is the first-published vintage (premise 4), and a revision of it is published after s(M) |
-| unreported | Asquith, Pathak & Ritter 2005, appendix: unreported short interest is set to zero | zero | departure, registered: an `unmatched` name has no value (below); premise 5 measures the difference |
+| revisions | Regulatory Notice 21-19, note 10 | the flag says the previous settlement's position was revised since the prior cycle | the settlement's row is used as stored, whatever its flag; that the stored file is first-published is a registered assumption premise 4 supports; a revision of it is published after s(M) |
+| unreported | Asquith, Pathak & Ritter 2005, appendix: missing short interest is set to zero, an imputation they make although their source omitted some stocks that had positions | zero | departure, registered: an `unmatched` name has no value (below); premise 5 measures the difference |
 | ADV | FINRA's short-interest glossary: "Avg Daily Volume: Total Volume or Adjusted Volume in case of splits / Total trade days between (previous settlement date + 1) to (current settlement date). The NULL values are translated as zero." | that window and split basis | the SPY sessions after the previous calendar settlement through the row's settlement; volumes carried to the settlement's split basis |
 | split basis | step 1 §"Split basis" (`factor_panel.split_product`) | shares_s = shares × Π split_factor over Intrader stamps after the basis date, on or before s(M) | the same product applied to the short count from its settlement to s(M), and to each session's volume from that session to the settlement |
 | denominator | step 1 §"Market equity" (Scope) and its alignment matrix | `me.shares` is an issuer-level `dei:EntityCommonStockSharesOutstanding` count, at most 15 months old; class scope "not measurable" | inherited unchanged: SIR's numerator is FINRA's per-issue count, so for an issuer with another class the ratio can understate; unmeasured, registered |
@@ -146,11 +156,11 @@ Details:
 - **Why coverage starts at formation 2021-06.** No calendar settlement on or after the catalog's June 2021 start is
   published before formation 2021-05's s(M), so it is `no_settlement` and the SI flag excludes nothing there.
   Formation 2021-06 uses `shrt20210615`; its ADV window starts after 2021-05-28, a calendar date only.
-- **Revisions and point in time.** Every payload was retrieved in 2026. Premise 4 measures, on all 77 consecutive file
-  pairs, that a stored file holds its figures as first published: the next file's flagged `previousShortPositionQuantity`
-  differs from it in 4,629 of 4,650 cases. The 21 flagged rows that agree, and the 27 unflagged rows that disagree, are
-  unexplained residue the report prints. The revised figure for settlement S appears only in the next file, published
-  after s(M), so it is never used.
+- **Revisions and point in time: a registered assumption.** Every payload was retrieved in 2026, and FINRA documents
+  no vintage policy for its files beyond "only the most recent data is made available". The study assumes a stored
+  file holds its figures as first published. Premise 4 supports this and cannot prove it; the report labels the
+  inputs a retrospectively retrieved archive and prints the revision check with its residue. The revised figure for
+  settlement S appears only in the next file, published after s(M), so it is never used.
 - **Identity: an unverified mapping exception, registered.** FINRA keys its file by symbol at the settlement date.
   The panel row's `symbol` is the series' vendor symbol, one per series and not point in time; `instrument_symbol_history`
   starts in 2026, and no effective-dated symbol or issuer mapping exists for the panel's full population (the linkage's
@@ -158,8 +168,10 @@ Details:
   agreeing with ours within a factor of 1.2 (|ln ratio| ≤ ln 1.2) on FINRA's own window. A wrong-issuer match can still
   pass when the two volumes agree, as RDUS's does (premise 3), and a ticker change leaves a name unmatched. The
   mapping accuracy is therefore not certified; the run prints the full-population audit list of series whose matched
-  FINRA `issueName` changes over the window (in the premise run: 163 of 4,223 matched series show more than one name,
-  150 of them among accepted matches, RDUS included), and the report states the exception.
+  FINRA `issueName` changes over the window, and the report states the exception. Names are compared after
+  uppercasing and deleting every character outside A–Z and 0–9; for each series the list shows the first settlement
+  at which each normalised name appears, with its state and ratio. In the premise run 163 of 4,223 matched series show
+  more than one normalised name, 150 of them among accepted matches, RDUS included.
 - **Calibration status.** The 1.2 tolerance and condition 5's 90% floor were chosen after seeing premises 2 and 3 over
   the full 2021–2024 period. Both read identity and coverage data only, never an outcome, but they are full-period
   exploratory calibrations, not chronologically held-out choices, and the report labels them so.
@@ -172,11 +184,11 @@ Details:
   session count. If exactly one of FINRA's ADV and ours is zero the identity fails; if both are zero it passes.
 - **Missing values, in precedence order:** `ambiguous` (an empty normalised symbol, one shared by two admitted names
   at M, or one carried by two rows of the file used); `unmatched`; `unverifiable`; `identity_fail`. None has a value
-  or a flag, and none enters N. For `unmatched` this departs from Asquith, Pathak & Ritter, who set unreported short
-  interest to zero: there a CUSIP-keyed security absent from the exchange's list had no reportable position, while
-  here an absent symbol is as likely a ticker the vendor series did not carry at the settlement, and no
-  effective-dated symbol history can tell the two apart. Either way the name is unflagged; the rules differ only in
-  N, and premise 5 measures that difference (38 flags over 38 formations). This is a deliberate policy
+  or a flag, and none enters N. For `unmatched` this departs from Asquith, Pathak & Ritter, who impute zero to missing
+  short interest. Here a name may be absent because its vendor symbol was not its ticker at the settlement, and no
+  effective-dated symbol history can tell that apart from a genuinely unreported position, so no value is imputed.
+  Either way the name is unflagged; the rules differ only in N, and premise 5 measures that difference (38 flags
+  over 38 formations). This is a deliberate policy
   difference from MAX: the base spec flags a screened MAX window, which holds an extreme move or a data defect, because
   excluding it is the construction under test; SI keeps a name whose ratio cannot be established, because a missing
   or unconfirmed FINRA row is no evidence of shorting. Each reason is counted separately.
@@ -200,8 +212,9 @@ Details:
   No other combination is eligible from this study.
 - **Populations, books, decision rule, diagnostics, windows and costs:** the base spec's, including the MAX fidelity
   check, which reruns on the clipped stage A against the unchanged JKP series.
-- **Condition 1 on SI sets.** U and U_F of the SI set are identical through formation 2021-05, so its whole-path ΔG is
-  its holding-month 2021-07..2024-08 ΔG times 38/119 (38 of the path's 119 monthly returns). Condition 1 adds the
+- **Condition 1 on SI sets.** U and U_F of the SI set are identical through formation 2021-05. The base spec books a
+  formation's trade costs in month M, so formation 2021-06's SI trades fall in month 2021-06: the SI set's whole-path
+  ΔG is its 2021-06..2024-08 ΔG times 39/119 (39 of the path's 119 monthly returns), per arm and cost scenario. Condition 1 adds the
   stress-cost and both-arm checks but no earlier-regime evidence, and the SI verdict rests on 38 formations. For "all four",
   condition 1 evaluates the combined set; it does not establish SI's increment over MAX + sub-$5 + young, which the
   report prints as a diagnostic without a verdict: G("all four") − G("all three") for each population, on every
@@ -213,9 +226,14 @@ Details:
   and SI-containing book, the weight of names without an SI value. A population below the floor is NOT ELIGIBLE with
   condition 5 named.
 - **No SI fidelity check.** JKP has no short-interest characteristic. OSAP publishes `ShortInterest`, but #3623's OSAP
-  load has not run, and its portfolios are quintiles on Compustat short interest, not our decile. The build PR records
-  a cross-source check of one FINRA figure against an independent source (`.claude/CLAUDE.md` §"Corpus changes"), and
-  the report states that no factor-level fidelity exists for SI.
+  load has not run, and its portfolios are quintiles on Compustat short interest, not our decile. The report states
+  that no factor-level fidelity exists for SI.
+- **Cross-source check (`.claude/CLAUDE.md` §"Corpus changes"), fixed now.** The figure: `currentShortPositionQuantity`
+  for AAPL and GME at settlement 2024-07-15, from the stored payload. The source: Nasdaq's short-interest history page
+  for each symbol (`nasdaq.com/market-activity/stocks/<symbol>/short-interest`); when the live page no longer lists
+  that settlement, the Wayback snapshot of it nearest after 2024-07-24 (the publication date) that lists it.
+  Acceptance: the share counts are equal. An unequal count, or no source listing the settlement, stops 5c before the
+  declaration until the difference is explained in the build PR.
 - **SI diagnostics:** per formation and population, the counts of `docs/research/3621-si-premise-counts.csv`'s
   columns (each state, `flagged`; `split_carried`: valid names with any split stamp in (settlement, s(M)], whatever
   the net product), q, values above 1, q and the flag changes under the unreported-is-zero rule, the revision-check
@@ -247,7 +265,7 @@ searches. The base spec's verdict line (§"Decision rule") lists v2's 42 pairs.
 - **Searches: 86** = 7 sets × 6 populations × 2 arms (84) + the MAX fidelity check's 2 arms. v1's 62 stay counted.
 - **Evidence pins:** this addendum's and the base spec's sha256; stage A's manifest digest; v1's stage-B manifest
   digest (the identity the rebuilt stage B must match); the step 0 manifest; the calendar CSV's sha256; the sha256 of
-  each FINRA payload the run reads (78 in the premise run); the construction hash; the JKP and OSAP code commits cited.
+  the payload manifest `docs/research/3621-si-premise-payloads.csv` (78 payloads); the construction hash; the JKP and OSAP code commits cited.
 - **Ledger:** `docs/research/3621-ledger.jsonl`, v2 rows beside v1's.
 
 ## Slices
@@ -257,11 +275,13 @@ searches. The base spec's verdict line (§"Decision rule") lists v2's 42 pairs.
   missing state; each refusal, including a calendar missing its first month; formation 2021-05 resolving to
   `no_settlement` and 2021-06 to `shrt20210615`; a flagged row used as stored; a split between settlement and s(M);
   a split inside the ADV window; a ticker-reuse case that fails and one that passes the volume check. Capture `shrt20210630` into
-  `filing_raw_documents` through the existing raw-store path (raw only, no observations row).
+  `filing_raw_documents` through the existing raw-store path (raw only, no observations row), and the same for
+  `shrt20210615`; both must hash to the manifest's sha256.
 - **5b. Fixture-only.** The v2 run script: the rebuilt-stage-B identity refusal, seven sets, condition 5, the SI
   diagnostics and the audit list.
 - **5c.** Declaration (r29), execution access, then the reproduction (the run stops on any difference): the slice 5a
-  implementation, run on v2's stage B with the same payloads (their sha256 pinned), must write a counts table equal to
+  implementation, run on v2's stage B, reads the 78 payloads of `docs/research/3621-si-premise-payloads.csv` and
+  refuses any missing or with a different sha256, revision-check-only files included; it must write a counts table equal to
   `docs/research/3621-si-premise-counts.csv` cell for cell and a per-name file (`M`, `name_key`, state, settlement
   used, SIR, flagged) whose uncompressed sha256 equals the premise run's (§"Premises"). Its serialisation and SIR
   arithmetic are those the premise script's docstring fixes (order, `json.dumps` with compact separators, a trailing
@@ -272,13 +292,13 @@ searches. The base spec's verdict line (§"Decision rule") lists v2's 42 pairs.
 ## Known limits
 
 - 38 formations of SI in one regime; a descriptive screen, never significance (base spec premise 3).
-- The identity mapping is an unverified exception (above). RDUS's accepted 2021 match follows a series whose early
-  volume is another issuer's (premise 3); that is a panel-series question this study records and does not resolve.
-- Point in time rests on premise 4's measurement that stored files are first-published; its residue is printed.
+- The identity mapping is an unverified exception (above). RDUS's accepted 2021 match is consistent with a series
+  whose early volume is another issuer's (premise 3); this study records it and does not resolve it.
+- Point in time rests on the registered assumption that stored files are first-published, which premise 4 supports.
 - SIR's denominator is step 1's issuer-level share count, up to 15 months old, class scope unmeasured (§"Source rules").
 - FINRA's pre-June-2021 exchange-listed rows are unused (premise 6). `data-sources/finra.md` §2.10 says the
   pre-June-2021 archive is OTC-only; the files hold exchange-listed rows, and the publisher's statement is about what
-  they reflect. The skill correction is posted on #2403.
+  they reflect. That correction, and one to its §5 on the revision flag, are posted on #2403.
 - Spread-only costs, as the base spec.
 
 ## Checkpoint log
@@ -335,3 +355,16 @@ searches. The base spec's verdict line (§"Decision rule") lists v2's 42 pairs.
 - **9:** the inventory query, its calendar comparison and the CDN probes are quoted with their commands and full date
   list.
 - **10:** the design history no longer predicts which v2 cells the clip moves.
+
+**Round 4 (Codex, 2026-10-09): 8 findings, all applied.**
+- **1:** first-published vintage is a registered assumption that premise 4 supports, not a measured fact; the check's
+  uncompared rows and residue are printed and summarised; FINRA's catalog wording is quoted.
+- **2:** condition 1's scaling is 39/119 from month 2021-06, where formation 2021-06's trade costs fall.
+- **3:** Asquith, Pathak & Ritter's zero is described as their imputation; the departure's reason is "may", not a
+  measured likelihood.
+- **4:** the premise run writes a payload manifest (78 sha256s); slice 5a captures both June 2021 files; 5c refuses
+  any payload missing from or differing with the manifest.
+- **5:** the cross-source check's figure, source, vintage rule, acceptance and consequence are fixed.
+- **6:** the inventory comparison and the `known_from` range are printed by the premise script.
+- **7:** RDUS is "consistent with", not a diagnosis.
+- **8:** the audit's name normalisation and first-occurrence rule are fixed in the spec.
