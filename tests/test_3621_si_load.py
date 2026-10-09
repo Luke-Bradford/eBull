@@ -175,7 +175,7 @@ def test_an_uncovered_formation_reads_no_settlement() -> None:
     assert (si.used, si.q, si.flagged, si.readings[1].state) == (None, None, frozenset(), SiState.NO_SETTLEMENT)
 
 
-def _reference(f: SiFormation) -> tuple[str, str]:
+def _reference() -> tuple[str, str]:
     """Premise 2's counts CSV and per-name sha256 for ``_formation``, written out by hand."""
     lines = ["M,population,admitted,ambiguous,unmatched,unverifiable,identity_fail,valid,flagged,split_carried"]
     full, empty = "4,0,1,1,0,2,1,0", "0,0,0,0,0,0,0,0"
@@ -187,19 +187,18 @@ def _reference(f: SiFormation) -> tuple[str, str]:
         '["2021-06-30",3,"unmatched",null,null,false]',
         '["2021-06-30",4,"unverifiable","2021-06-15",null,false]',
     ]
-    assert f.si.used is not None
     return "\n".join(lines) + "\n", hashlib.sha256(("\n".join(names) + "\n").encode()).hexdigest()
 
 
 def test_reproduction_passes_on_equal_counts_and_names() -> None:
     f = _formation(skip=date(2021, 6, 1))
-    counts, names_sha = _reference(f)
+    counts, names_sha = _reference()
     assert reproduce_si([f], counts, names_sha) == (1, names_sha)
 
 
 def test_reproduction_refuses_a_count_or_a_name_difference() -> None:
     f = _formation(skip=date(2021, 6, 1))
-    counts, names_sha = _reference(f)
+    counts, names_sha = _reference()
     with pytest.raises(SiLoadError, match="count rows"):
         reproduce_si([f], counts.replace("2021-06-30,micro,4", "2021-06-30,micro,5"), names_sha)
     with pytest.raises(SiLoadError, match="per-name sha256"):
