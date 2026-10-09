@@ -12367,3 +12367,19 @@ neighbouring container and match it.**
   for both the old and the new prefix and confirm each hit sits on the right row.
 - Enforced in: `tests/test_trial_register.py::test_every_payload_comment_names_its_own_rows_payload`, which checks
   every payload comment against the payload of the row that follows it.
+
+### A vendor holding return takes its source library's return bound; a screen elsewhere does not cover it (#3730)
+
+- Failure (#3621's declared run, 2026-10-09): the #3609 panel bounded daily returns only inside characteristic
+  windows, and its holding return was the month-end `adj_close` ratio with no bound. Unstamped reverse splits and
+  reorganisation splices in the Intrader series (EXXI ×250, GMBL ×658: `split_factor` 1, `close` jumping with
+  `adj_close`) entered the micro and rest books whole. The research quarantine did not contain them either: the panel
+  reads `research_bar_quarantine` only, and T3 admits a level break back when turnover spikes, which reverse-split
+  sessions often do. JKP's own code clips every non-CRSP holding return at the holding month's 0.1/99.9 percentiles
+  (`GlobalFactors/portfolios.R` at `67174c7f`, lines 138–142), and the panel spec had not adopted it.
+  Reproduce: `PYTHONPATH=. uv run python -m scripts.measure_3730_holding_jumps --precision`.
+- Prevention: when a spec adopts a published factor library, read the library's portfolio-return code, not only its
+  characteristic code, for any treatment of the holding return; adopt it or state why not. A guard on one window
+  (characteristics) says nothing about another (holdings): list every window a return crosses and name what bounds
+  each.
+- Enforced in: the #3609 step 1 spec, Amendment 3 (§"Returns and holdings"); `scripts/measure_3730_holding_jumps.py`.
