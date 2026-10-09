@@ -135,11 +135,18 @@ class Reading:
     split_carried: bool = False
     issue_name: str | None = None
     log_ratio: float | None = None
+    adv_finra: int | None = None
+    adv_ours: float | None = None
 
 
 def _lines(data: bytes) -> list[Any]:
     with gzip.open(io.BytesIO(data), "rt") as f:
         return [json.loads(line) for line in f]
+
+
+def _next_month(month: tuple[int, int]) -> tuple[int, int]:
+    """(year, month) of the following month; December rolls to January of the next year."""
+    return (month[0] + month[1] // 12, month[1] % 12 + 1)
 
 
 def read_calendar(path: Path = CALENDAR) -> list[tuple[date, date]]:
@@ -157,13 +164,13 @@ def read_calendar(path: Path = CALENDAR) -> list[tuple[date, date]]:
     if any(p <= s for s, p in rows):
         raise MeasureError("a publication date not after its settlement")
     per_month = Counter((s.year, s.month) for s in days[1:])
-    month = (CALENDAR_FIRST.year + CALENDAR_FIRST.month // 12, CALENDAR_FIRST.month % 12 + 1)
+    month = _next_month((CALENDAR_FIRST.year, CALENDAR_FIRST.month))
     required: set[tuple[int, int]] = set()
     while month <= CALENDAR_LAST_MONTH:
         required.add(month)
         if per_month[month] != 2:
             raise MeasureError(f"calendar month {month} holds {per_month[month]} settlements, not 2")
-        month = (month[0] + month[1] // 12, month[1] % 12 + 1)
+        month = _next_month(month)
     if set(per_month) != required:
         raise MeasureError(f"calendar settlements outside the fixed span: {sorted(set(per_month) - required)}")
     return rows
@@ -261,11 +268,13 @@ def read_name(
         return Reading("unverifiable", used, issue_name=hit.issue_name)
     ratio = math.log(hit.adv / ours) if hit.adv > 0 and ours > 0 else None
     if not identity_ok(hit.adv, ours, ADV_TOLERANCE):
-        return Reading("identity_fail", used, issue_name=hit.issue_name, log_ratio=ratio)
+        return Reading(
+            "identity_fail", used, issue_name=hit.issue_name, log_ratio=ratio, adv_finra=hit.adv, adv_ours=ours
+        )
     product = split_product(splits, used, s_m)
     carried = any(used < stamp.day <= s_m for stamp in splits)
     sir = float(hit.short * product) / shares
-    return Reading("valid", used, sir, carried, hit.issue_name, ratio)
+    return Reading("valid", used, sir, carried, hit.issue_name, ratio, hit.adv, ours)
 
 
 def main(names_out: Path) -> None:
@@ -397,20 +406,22 @@ def main(names_out: Path) -> None:
                 readings[key] = reading
                 if reading.issue_name is not None and reading.used is not None:
                     audit[sid].append((reading.used, reading.issue_name, reading.state, reading.log_ratio))
-                if reading.state in ("identity_fail", "valid") and reading.used is not None:
-                    hit = (files[reading.used].rows[k]).adv
-                    ours = our_adv(volume.get(sid, {}), windows[(reading.used, 0)], splits[sid], reading.used)
-                    assert ours is not None
+                if reading.state in ("identity_fail", "valid"):
+                    hit, ours = reading.adv_finra, reading.adv_ours
+                    if reading.used is None or hit is None or ours is None:
+                        raise MeasureError(f"{month} {symbol}: {reading.state} reading without both ADVs")
                     if reading.log_ratio is not None:
                         log_ratios.append(reading.log_ratio)
                     for t in TOLERANCE_GRID:
                         tolerance_fail[t] += not identity_ok(hit, ours, t)
                     shift_cohort += 1
                     for shift in WINDOW_SHIFTS:
-                        moved = our_adv(volume.get(sid, {}), windows[(reading.used, shift)], splits[sid], reading.used)
-                        if moved is None:
+                        shifted = our_adv(
+                            volume.get(sid, {}), windows[(reading.used, shift)], splits[sid], reading.used
+                        )
+                        if shifted is None:
                             shift_fail[month][(shift, "unverifiable")] += 1
-                        elif not identity_ok(hit, moved, ADV_TOLERANCE):
+                        elif not identity_ok(hit, shifted, ADV_TOLERANCE):
                             shift_fail[month][(shift, "identity_fail")] += 1
             values = sorted(r.sir for r in readings.values() if r.sir is not None)
             if not values:
