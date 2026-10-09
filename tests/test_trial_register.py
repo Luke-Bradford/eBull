@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
+from app.services.factor_book_declaration import payload_sha256
 from app.services.strategy_mt1_trial import NEGATIVE_CONTROL_TRIAL_ID, TRIAL_ID
 from app.services.trial_register import (
     HUNT_TRIAL_PREFIX,
@@ -491,11 +494,6 @@ def test_the_2026_09_26_refresh_is_charged_per_window_and_inside_m_inh() -> None
 def test_every_payload_comment_names_its_own_rows_payload() -> None:
     """A ``payload_sha256 <12 hex>…`` comment above a register row must be that row's pinned payload prefix: a
     regenerated declaration once rewrote the first such comment in the file, step 2's, instead of its own (#3621)."""
-    import re
-    from pathlib import Path
-
-    from app.services.factor_book_declaration import payload_sha256
-
     source = (Path(__file__).resolve().parents[1] / "app/services/trial_register.py").read_text()
     by_id = {trial.trial_id: trial for trial in TRIAL_REGISTER.trials}
     found = 0

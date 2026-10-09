@@ -1,0 +1,365 @@
+{
+ "delta_g": {
+  "max+sub5+young|all": {
+   "stage B|best_case|net": -0.17543703564516167,
+   "stage B|worst_case|net": -0.16068428559604678,
+   "whole|best_case|net": -0.08037308052857803,
+   "whole|best_case|stress_2x": -0.07993323528332037,
+   "whole|worst_case|net": -0.06953469445448023,
+   "whole|worst_case|stress_2x": -0.06909723112710081
+  },
+  "max+sub5+young|large": {
+   "stage B|best_case|net": 0.027968913327974763,
+   "stage B|worst_case|net": 0.02734539367669584,
+   "whole|best_case|net": 0.011017465345031674,
+   "whole|best_case|stress_2x": 0.010298443894169812,
+   "whole|worst_case|net": 0.012006552284463595,
+   "whole|worst_case|stress_2x": 0.011287045810839218
+  },
+  "max+sub5+young|mega": {
+   "stage B|best_case|net": 0.003373455285551538,
+   "stage B|worst_case|net": 0.003225589774957238,
+   "whole|best_case|net": 0.0005956095267887068,
+   "whole|best_case|stress_2x": 0.00026455226043405056,
+   "whole|worst_case|net": 0.0012946451065543596,
+   "whole|worst_case|stress_2x": 0.0009637251272483216
+  },
+  "max+sub5+young|micro": {
+   "stage B|best_case|net": -0.45063213367230714,
+   "stage B|worst_case|net": -0.41746465305840474,
+   "whole|best_case|net": -0.20079521868048272,
+   "whole|best_case|stress_2x": -0.19963803063231916,
+   "whole|worst_case|net": -0.18160520279897233,
+   "whole|worst_case|stress_2x": -0.18045567513690638
+  },
+  "max+sub5+young|rest": {
+   "stage B|best_case|net": -0.2627211490556737,
+   "stage B|worst_case|net": -0.24248175142894404,
+   "whole|best_case|net": -0.11926056740608088,
+   "whole|best_case|stress_2x": -0.119191108990006,
+   "whole|worst_case|net": -0.10619740471301042,
+   "whole|worst_case|stress_2x": -0.10613244132077791
+  },
+  "max+sub5+young|small": {
+   "stage B|best_case|net": 0.061009442610452345,
+   "stage B|worst_case|net": 0.06030749824080628,
+   "whole|best_case|net": 0.019136313259756038,
+   "whole|best_case|stress_2x": 0.017841472352524507,
+   "whole|worst_case|net": 0.0195165887925553,
+   "whole|worst_case|stress_2x": 0.01822379576460135
+  },
+  "max+sub5+young|top1000": {
+   "stage B|best_case|net": 0.017926945340396655,
+   "stage B|worst_case|net": 0.017391061483554515,
+   "whole|best_case|net": 0.006957240711469123,
+   "whole|best_case|stress_2x": 0.0063895982476969565,
+   "whole|worst_case|net": 0.007902821417936995,
+   "whole|worst_case|stress_2x": 0.007334977268780241
+  },
+  "max|all": {
+   "stage B|best_case|net": -0.07204830173238108,
+   "stage B|worst_case|net": -0.06968232519168006,
+   "whole|best_case|net": -0.029521623162054783,
+   "whole|best_case|stress_2x": -0.03706952814744116,
+   "whole|worst_case|net": -0.025279567090012514,
+   "whole|worst_case|stress_2x": -0.03283340656635726
+  },
+  "max|large": {
+   "stage B|best_case|net": 0.007954156718947369,
+   "stage B|worst_case|net": 0.007717560612487706,
+   "whole|best_case|net": 0.0018459380989516577,
+   "whole|best_case|stress_2x": 0.0007303713841747272,
+   "whole|worst_case|net": 0.002779318040670234,
+   "whole|worst_case|stress_2x": 0.0016638079449688495
+  },
+  "max|mega": {
+   "stage B|best_case|net": 0.0012130676108036004,
+   "stage B|worst_case|net": 0.0011640303826850051,
+   "whole|best_case|net": 0.0005707708871159761,
+   "whole|best_case|stress_2x": 0.0001386759393686432,
+   "whole|worst_case|net": 0.0006221904361111835,
+   "whole|worst_case|stress_2x": 0.0001896902586511623
+  },
+  "max|micro": {
+   "stage B|best_case|net": -0.14119499246534095,
+   "stage B|worst_case|net": -0.13904957436194476,
+   "whole|best_case|net": -0.052257314966823315,
+   "whole|best_case|stress_2x": -0.06860580135322072,
+   "whole|worst_case|net": -0.045828489586575205,
+   "whole|worst_case|stress_2x": -0.06219887589032466
+  },
+  "max|rest": {
+   "stage B|best_case|net": -0.0991515714832707,
+   "stage B|worst_case|net": -0.09666844949518003,
+   "whole|best_case|net": -0.039396847553016645,
+   "whole|best_case|stress_2x": -0.050623129416558554,
+   "whole|worst_case|net": -0.03425194445471122,
+   "whole|worst_case|stress_2x": -0.04548911130771843
+  },
+  "max|small": {
+   "stage B|best_case|net": 0.00801252077696741,
+   "stage B|worst_case|net": 0.0076885202093152985,
+   "whole|best_case|net": -0.002441314027657515,
+   "whole|best_case|stress_2x": -0.0054918660549039405,
+   "whole|worst_case|net": -0.0015318589855115514,
+   "whole|worst_case|stress_2x": -0.004581491396405679
+  },
+  "max|top1000": {
+   "stage B|best_case|net": 0.006395865548447059,
+   "stage B|worst_case|net": 0.006250469794531817,
+   "whole|best_case|net": 0.0015289436684267632,
+   "whole|best_case|stress_2x": 0.0006235827226442753,
+   "whole|worst_case|net": 0.0021290860467937517,
+   "whole|worst_case|stress_2x": 0.001223677632285619
+  },
+  "sub5+young|all": {
+   "stage B|best_case|net": -0.17992809071320787,
+   "stage B|worst_case|net": -0.165395041480347,
+   "whole|best_case|net": -0.08047819261334087,
+   "whole|best_case|stress_2x": -0.07800071124379615,
+   "whole|worst_case|net": -0.07044165916726895,
+   "whole|worst_case|stress_2x": -0.06796658128665059
+  },
+  "sub5+young|large": {
+   "stage B|best_case|net": 0.023130548799029996,
+   "stage B|worst_case|net": 0.022709644914588357,
+   "whole|best_case|net": 0.009825188018314987,
+   "whole|best_case|stress_2x": 0.010103142822813965,
+   "whole|worst_case|net": 0.009982413515891284,
+   "whole|worst_case|stress_2x": 0.010259933777535792
+  },
+  "sub5+young|mega": {
+   "stage B|best_case|net": 0.0015108274891154488,
+   "stage B|worst_case|net": 0.0013994081067510572,
+   "whole|best_case|net": 0.000268703365002676,
+   "whole|best_case|stress_2x": 0.00033082784532655063,
+   "whole|worst_case|net": 0.0008900306573571826,
+   "whole|worst_case|stress_2x": 0.0009525340220112727
+  },
+  "sub5+young|micro": {
+   "stage B|best_case|net": -0.45356743623919865,
+   "stage B|worst_case|net": -0.42116811057693804,
+   "whole|best_case|net": -0.20430444961877597,
+   "whole|best_case|stress_2x": -0.19992726954247447,
+   "whole|worst_case|net": -0.18570291298472047,
+   "whole|worst_case|stress_2x": -0.18133121877755856
+  },
+  "sub5+young|rest": {
+   "stage B|best_case|net": -0.26663950805862635,
+   "stage B|worst_case|net": -0.24676279519934638,
+   "whole|best_case|net": -0.11894956774470257,
+   "whole|best_case|stress_2x": -0.11594892164962599,
+   "whole|worst_case|net": -0.10665715131967737,
+   "whole|worst_case|stress_2x": -0.10366075200770777
+  },
+  "sub5+young|small": {
+   "stage B|best_case|net": 0.05588065503854989,
+   "stage B|worst_case|net": 0.05519055966800494,
+   "whole|best_case|net": 0.022507707343514344,
+   "whole|best_case|stress_2x": 0.0234830289399615,
+   "whole|worst_case|net": 0.022119283353803712,
+   "whole|worst_case|stress_2x": 0.023094702413180714
+  },
+  "sub5+young|top1000": {
+   "stage B|best_case|net": 0.013568749784597406,
+   "stage B|worst_case|net": 0.013154825780967369,
+   "whole|best_case|net": 0.006138713868912418,
+   "whole|best_case|stress_2x": 0.00637892282015827,
+   "whole|worst_case|net": 0.006597655613406889,
+   "whole|worst_case|stress_2x": 0.006837859901997728
+  },
+  "sub5|all": {
+   "stage B|best_case|net": -0.2182595770869349,
+   "stage B|worst_case|net": -0.2097883254665195,
+   "whole|best_case|net": -0.09657214096989632,
+   "whole|best_case|stress_2x": -0.09444849115425011,
+   "whole|worst_case|net": -0.08949148632948863,
+   "whole|worst_case|stress_2x": -0.08737123109180081
+  },
+  "sub5|large": {
+   "stage B|best_case|net": 0.0006989819996123803,
+   "stage B|worst_case|net": 0.0006724276664048113,
+   "whole|best_case|net": 0.0003263539295216833,
+   "whole|best_case|stress_2x": 0.00039572541776783376,
+   "whole|worst_case|net": 0.0002883265959610498,
+   "whole|worst_case|stress_2x": 0.00035774944245867135
+  },
+  "sub5|mega": {
+   "stage B|best_case|net": -0.0013009457768270866,
+   "stage B|worst_case|net": -0.0013056402313693788,
+   "whole|best_case|net": -0.0010362729742472987,
+   "whole|best_case|stress_2x": -0.0010235416823750065,
+   "whole|worst_case|net": -0.001052673969983653,
+   "whole|worst_case|stress_2x": -0.0010399840633979335
+  },
+  "sub5|micro": {
+   "stage B|best_case|net": -0.5024309515269924,
+   "stage B|worst_case|net": -0.4953966325224608,
+   "whole|best_case|net": -0.2251563746564952,
+   "whole|best_case|stress_2x": -0.22121214497563033,
+   "whole|worst_case|net": -0.21606884222394288,
+   "whole|worst_case|stress_2x": -0.2121357294959315
+  },
+  "sub5|rest": {
+   "stage B|best_case|net": -0.31791990565677,
+   "stage B|worst_case|net": -0.30798513319841714,
+   "whole|best_case|net": -0.14068317361781066,
+   "whole|best_case|stress_2x": -0.13805259875969167,
+   "whole|worst_case|net": -0.13220608503259312,
+   "whole|worst_case|stress_2x": -0.12958165507947286
+  },
+  "sub5|small": {
+   "stage B|best_case|net": 0.0026002552280387503,
+   "stage B|worst_case|net": 0.0029255769890711505,
+   "whole|best_case|net": 0.0004402441080539332,
+   "whole|best_case|stress_2x": 0.000987197007557894,
+   "whole|worst_case|net": 0.0004067576374891177,
+   "whole|worst_case|stress_2x": 0.0009541185523298246
+  },
+  "sub5|top1000": {
+   "stage B|best_case|net": -0.00046403479073221787,
+   "stage B|worst_case|net": -0.00047706519543663783,
+   "whole|best_case|net": -0.00014117746360098327,
+   "whole|best_case|stress_2x": -8.273001994188456e-05,
+   "whole|worst_case|net": -0.00018131138468419072,
+   "whole|worst_case|stress_2x": -0.00012280376633715118
+  },
+  "young|all": {
+   "stage B|best_case|net": -0.0984417613524603,
+   "stage B|worst_case|net": -0.09244650858769797,
+   "whole|best_case|net": -0.028846047333666164,
+   "whole|best_case|stress_2x": -0.0284495009870884,
+   "whole|worst_case|net": -0.026056958809256653,
+   "whole|worst_case|stress_2x": -0.02566123604198073
+  },
+  "young|large": {
+   "stage B|best_case|net": 0.022887020791833135,
+   "stage B|worst_case|net": 0.022476870293336962,
+   "whole|best_case|net": 0.009614290930599817,
+   "whole|best_case|stress_2x": 0.009825267175933405,
+   "whole|worst_case|net": 0.009805653487505075,
+   "whole|worst_case|stress_2x": 0.01001612388030846
+  },
+  "young|mega": {
+   "stage B|best_case|net": 0.002845584801753606,
+   "stage B|worst_case|net": 0.00273913253332915,
+   "whole|best_case|net": 0.0013299047601359887,
+   "whole|best_case|stress_2x": 0.0013789543068585819,
+   "whole|worst_case|net": 0.0019672339530745347,
+   "whole|worst_case|stress_2x": 0.002016737474748259
+  },
+  "young|micro": {
+   "stage B|best_case|net": -0.25054020998340915,
+   "stage B|worst_case|net": -0.23902198012336648,
+   "whole|best_case|net": -0.07394556537478822,
+   "whole|best_case|stress_2x": -0.07359591792977188,
+   "whole|worst_case|net": -0.07012481792542732,
+   "whole|worst_case|stress_2x": -0.06977605535021847
+  },
+  "young|rest": {
+   "stage B|best_case|net": -0.1409604359611694,
+   "stage B|worst_case|net": -0.13346801287833798,
+   "whole|best_case|net": -0.040052315167709046,
+   "whole|best_case|stress_2x": -0.03978991262730369,
+   "whole|worst_case|net": -0.03745755678407975,
+   "whole|worst_case|stress_2x": -0.03719586179023934
+  },
+  "young|small": {
+   "stage B|best_case|net": 0.06196394638021557,
+   "stage B|worst_case|net": 0.0611684936174616,
+   "whole|best_case|net": 0.025093245727706603,
+   "whole|best_case|stress_2x": 0.025512690063313914,
+   "whole|worst_case|net": 0.02487679794281014,
+   "whole|worst_case|stress_2x": 0.02529592773723962
+  },
+  "young|top1000": {
+   "stage B|best_case|net": 0.014370670146132483,
+   "stage B|worst_case|net": 0.013965246417522892,
+   "whole|best_case|net": 0.006375376079208156,
+   "whole|best_case|stress_2x": 0.006557079573303315,
+   "whole|worst_case|net": 0.0068728564767515515,
+   "whole|worst_case|stress_2x": 0.007054518234826931
+  }
+ },
+ "labels": [
+  "retrospective evidence: stage A is #3609's development sample and stage B reused validation; nothing is sealed",
+  "every verdict is eligible under the spread-only model (step 0's bands and stress multiplier; no gap, slippage, minimum-ticket or fixed-fee term)",
+  "MAX fidelity checks that the reconstructed factor-return series tracks JKP's rmax1_21d; it shows nothing about name-level ranking agreement, the top-decile threshold or micro caps",
+  "restricted population: 10-K/10-Q filers our archive prices and our linkage identifies, not CRSP; survivorship unverified 2014-09..2018"
+ ],
+ "max_fidelity": {
+  "arms": {
+   "best_case": {
+    "beta": 0.9713158818437624,
+    "correlation": {
+     "contemporaneous": 0.9851496651522177,
+     "lag": 0.08816822535365816,
+     "lead": 0.07769286648726705
+    },
+    "pairs": {
+     "contemporaneous": 80,
+     "lag": 79,
+     "lead": 79
+    },
+    "verdict": "PASS"
+   },
+   "worst_case": {
+    "beta": 0.9680188573859507,
+    "correlation": {
+     "contemporaneous": 0.9825486425533317,
+     "lag": 0.08447244899144617,
+     "lead": 0.08352517806011012
+    },
+    "pairs": {
+     "contemporaneous": 80,
+     "lag": 79,
+     "lead": 79
+    },
+    "verdict": "PASS"
+   }
+  },
+  "undersized": 0,
+  "verdict": "PASS"
+ },
+ "names_sha256": "9f2b1ec10a35b3511b74c9d69cd5215963ddd2411b074eff824076cb6d9fb15c",
+ "report_sha256": "b26d5bc99e3f0770228c8b772b88359c833c7bb6761ec09331b8c4ce5ae9966e",
+ "reproduction": {
+  "against": "scripts.measure_3621_filter_premise",
+  "stage_a_formations_matched": 80
+ },
+ "run_id": "2590008207b64e83baf019ad24ee93c6",
+ "trial_id": "3621-avoidance-filters-v1",
+ "verdict_lines": [
+  "max|micro: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "sub5|micro: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "young|micro: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "sub5+young|micro: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "max+sub5+young|micro: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "max|small: NOT ELIGIBLE (1 whole path)",
+  "sub5|small: ELIGIBLE",
+  "young|small: ELIGIBLE",
+  "sub5+young|small: ELIGIBLE",
+  "max+sub5+young|small: ELIGIBLE",
+  "max|large: ELIGIBLE",
+  "sub5|large: ELIGIBLE",
+  "young|large: ELIGIBLE",
+  "sub5+young|large: ELIGIBLE",
+  "max+sub5+young|large: ELIGIBLE",
+  "max|mega: ELIGIBLE",
+  "sub5|mega: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "young|mega: ELIGIBLE",
+  "sub5+young|mega: ELIGIBLE",
+  "max+sub5+young|mega: ELIGIBLE",
+  "max|top1000: ELIGIBLE",
+  "sub5|top1000: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "young|top1000: ELIGIBLE",
+  "sub5+young|top1000: ELIGIBLE",
+  "max+sub5+young|top1000: ELIGIBLE",
+  "max|rest: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "sub5|rest: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "young|rest: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "sub5+young|rest: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "max+sub5+young|rest: NOT ELIGIBLE (1 whole path, 2 stage B)",
+  "MAX fidelity: PASS"
+ ]
+}
