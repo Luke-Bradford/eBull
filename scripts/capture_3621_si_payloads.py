@@ -58,10 +58,11 @@ def main(apply: bool) -> None:
                     payload=payload.decode("utf-8"),
                     source_url=provider.settlement_file_url(day),
                 )
-                conn.commit()
                 body = stored_body(conn, accession_number=accession_for(day), document_kind=DOCUMENT_KIND)
                 if body is None or hashlib.sha256(body.encode("utf-8")).hexdigest() != pinned[day]:
+                    # Raised before commit: the connection block rolls the write back.
                     raise CaptureError(f"{day}: stored body does not read back to the manifest's sha256")
+                conn.commit()
                 print(f"{day}: stored as {accession_for(day)}, read back matches")
     if not apply:
         print("dry run: nothing written (pass --apply)")

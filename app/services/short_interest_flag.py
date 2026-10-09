@@ -54,6 +54,18 @@ SI_DECILE: Final = 0.9
 ADV_TOLERANCE: Final = 1.2
 #: The ``filing_raw_documents`` kind FINRA's bimonthly payloads are stored under.
 DOCUMENT_KIND: Final = "finra_short_interest_csv"
+#: The header columns ``parse_file`` reads.
+FINRA_COLUMNS: Final = frozenset(
+    {
+        "symbolCode",
+        "issueName",
+        "currentShortPositionQuantity",
+        "previousShortPositionQuantity",
+        "averageDailyVolumeQuantity",
+        "revisionFlag",
+        "settlementDate",
+    }
+)
 
 
 class ShortInterestError(RuntimeError):
@@ -97,14 +109,15 @@ def validate_calendar(rows: Sequence[tuple[date, date]]) -> list[tuple[date, dat
         raise ShortInterestError("a publication date not after its settlement")
     per_month = Counter((s.year, s.month) for s in days[1:])
     month = next_month((CALENDAR_FIRST.year, CALENDAR_FIRST.month))
-    required: set[tuple[int, int]] = set()
+    required: list[tuple[int, int]] = []
     while month <= CALENDAR_LAST_MONTH:
-        required.add(month)
+        required.append(month)
+        month = next_month(month)
+    if outside := sorted(set(per_month) - set(required)):
+        raise ShortInterestError(f"calendar settlements outside the fixed span: {outside}")
+    for month in required:
         if per_month[month] != 2:
             raise ShortInterestError(f"calendar month {month} holds {per_month[month]} settlements, not 2")
-        month = next_month(month)
-    if set(per_month) != required:
-        raise ShortInterestError(f"calendar settlements outside the fixed span: {sorted(set(per_month) - required)}")
     return list(rows)
 
 
@@ -194,7 +207,10 @@ def parse_file(payload: bytes, settlement: date) -> FinraFile:
     rows: dict[str, FinraRow] = {}
     twice: set[str] = set()
     physical = revised = zero = blanks = 0
-    for row in csv.DictReader(io.StringIO(payload.decode("utf-8")), delimiter="|"):
+    reader = csv.DictReader(io.StringIO(payload.decode("utf-8")), delimiter="|")
+    if absent := sorted(FINRA_COLUMNS - set(reader.fieldnames or ())):
+        raise ShortInterestError(f"{settlement}: header lacks {absent}")
+    for row in reader:
         if parse_body_settlement_date(row.get("settlementDate")) != settlement:
             raise ShortInterestError(f"{settlement}: a body row carries settlementDate {row.get('settlementDate')!r}")
         try:

@@ -202,6 +202,12 @@ def test_parse_file_refusals(row: tuple[str, int | str, int | str, int | str, st
         _file(row)
 
 
+def test_a_missing_header_column_refuses() -> None:
+    payload = _payload(JUNE_15, ("AAA", 1, 0, 1000, "")).replace(b"|revisionFlag|", b"|revisionFlagX|")
+    with pytest.raises(ShortInterestError, match="revisionFlag"):
+        parse_file(payload, JUNE_15)
+
+
 def test_body_settlement_date_must_equal_the_file_date() -> None:
     with pytest.raises(ShortInterestError, match="settlementDate"):
         parse_file(_payload(JUNE_15, ("AAA", 1, 0, 1000, "")), date(2021, 6, 30))
