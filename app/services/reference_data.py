@@ -63,7 +63,7 @@ GLOBAL_Q_PARSER_VERSION: Final = "global-q-monthly-csv-v1"
 JKP_PARSER_VERSION: Final = "jkp-monthly-csv-zip-v1"
 JKP_CUTOFFS_PARSER_VERSION: Final = "jkp-nyse-cutoffs-csv-v1"
 JKP_RETURN_CUTOFFS_PARSER_VERSION: Final = "jkp-return-cutoffs-csv-v1"
-FED_EBP_PARSER_VERSION: Final = "fed-ebp-monthly-csv-v1"
+FED_EBP_PARSER_VERSION: Final = "fed-ebp-monthly-csv-v2"
 OSAP_PARSER_VERSION: Final = "osap-predictor-ls-wide-csv-v1"
 
 _FRENCH_MISSING: Final = frozenset({Decimal("-99.99"), Decimal("-999")})
@@ -222,6 +222,7 @@ _FED_EBP_UNITS: Final[Mapping[str, ReferenceUnit]] = {
     "ebp": "percent_per_annum",
     "est_prob": "probability",
 }
+_FED_EBP_DATE_FORMATS: Final = ("%m/%d/%Y", "%Y-%m-%d")
 _JKP_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_stocks", "n_stocks_min", "date", "ret")
 _JKP_CUTOFFS_HEADER: Final = ("eom", "n", "nyse_p1", "nyse_p20", "nyse_p50", "nyse_p80")
 #: Three families of the same four percentiles: USD total return, local-currency total return, USD excess return.
@@ -511,8 +512,21 @@ def parse_global_q_monthly_csv(payload: bytes) -> ParsedReferenceData:
     return _validated(ParsedReferenceData(tuple(observations), missing_count))
 
 
+def _fed_ebp_date(raw: str, *, row_number: int) -> date:
+    for fmt in _FED_EBP_DATE_FORMATS:
+        try:
+            return datetime.strptime(raw.strip(), fmt).date()
+        except ValueError:
+            continue
+    raise ReferenceDataSourceError(f"EBP row {row_number}: invalid date {raw!r}")
+
+
 def parse_fed_ebp_csv(payload: bytes) -> ParsedReferenceData:
-    """Parse ``ebp_csv.csv``: ``date`` (M/D/YYYY, first of month) then GZ spread, EBP and recession probability."""
+    """Parse ``ebp_csv.csv``: ``date`` (first of month) then GZ spread, EBP and recession probability.
+
+    The 2026-08 release wrote dates as M/D/YYYY; the 2026-10 release switched to ISO
+    YYYY-MM-DD (#3716). Both forms are accepted so every archived vintage parses.
+    """
     try:
         text = payload.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -529,10 +543,7 @@ def parse_fed_ebp_csv(payload: bytes) -> ParsedReferenceData:
             continue
         if len(row) != len(header):
             raise ReferenceDataSourceError(f"EBP row {row_number}: ragged row")
-        try:
-            when = datetime.strptime(row[0].strip(), "%m/%d/%Y").date()
-        except ValueError as exc:
-            raise ReferenceDataSourceError(f"EBP row {row_number}: invalid date {row[0]!r}") from exc
+        when = _fed_ebp_date(row[0], row_number=row_number)
         for (series_key, unit), raw in zip(_FED_EBP_UNITS.items(), row[1:], strict=True):
             if not raw.strip() or raw.strip().upper() == "NA":
                 missing_count += 1

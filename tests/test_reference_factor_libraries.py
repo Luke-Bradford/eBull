@@ -169,11 +169,21 @@ def test_fed_ebp_parser_types_spreads_and_probability() -> None:
     ]
 
 
+def test_fed_ebp_parser_reads_the_2026_10_iso_dates() -> None:
+    """The 2026-10 release (snapshot 65) writes ISO dates with LF endings (#3716)."""
+    iso = parse_fed_ebp_csv(b"date,gz_spread,ebp,est_prob\n1973-01-01,1.13,-0.0475,0.18\n")
+    slash = parse_fed_ebp_csv(b"date,gz_spread,ebp,est_prob\r\n1/1/1973,1.13,-0.0475,0.18\r\n")
+    assert iso == slash
+    assert {o.observation_date for o in iso.observations} == {date(1973, 1, 1)}
+
+
 @pytest.mark.parametrize(
     ("text", "match"),
     [
         (b"date,gz_spread,ebp\n7/1/2026,1,1\n", "header"),
-        (b"date,gz_spread,ebp,est_prob\n2026-07-01,1,1,0.1\n", "invalid date"),
+        (b"date,gz_spread,ebp,est_prob\n2026-13-01,1,1,0.1\n", "invalid date"),
+        (b"date,gz_spread,ebp,est_prob\n20260701,1,1,0.1\n", "invalid date"),
+        (b"date,gz_spread,ebp,est_prob\nJul 2026,1,1,0.1\n", "invalid date"),
         (b"date,gz_spread,ebp,est_prob\n7/1/2026,1,1,1.5\n", r"outside \[0, 1\]"),
     ],
 )
