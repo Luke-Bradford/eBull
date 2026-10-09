@@ -1,8 +1,8 @@
-"""#3739 slice 2: K and G calibration on pre-stage data, U pass 1 and the candidate screens.
+"""#3739 slice 2a: K and G calibration on pre-stage data, and U pass 1. §3.2's candidate screens are slice 2b.
 
-Spec: ``docs/research/2026-10-09-3739-stage-c-panel.md`` §2 (U, K), §3.2 (screens), §9 (G). Nothing here decodes a
-stage-C price: the calibrations read the published stage-A and stage-B panel artefacts (formations to 2024-07-31),
-U and the screens read SEC structured data only.
+Spec: ``docs/research/2026-10-09-3739-stage-c-panel.md`` §2 (U, K), §9 (G). Nothing here decodes a stage-C price:
+the calibrations read the published stage-A and stage-B panel artefacts (formations to 2024-07-31), and U reads SEC
+structured data only.
 
 ``calibrate`` writes K's pair table and the G table from the two artefacts, each verified against its manifest
 digest before a row is read.
@@ -364,7 +364,10 @@ def register_extract(through: date, out: Path) -> None:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(REGISTER_COLUMNS)
         for cik, accession, form, filed, provision in rows:
-            writer.writerow([normalise_cik(cik) or cik, accession, form, filed.isoformat(), provision])
+            normalised = normalise_cik(cik)
+            if normalised is None:
+                raise ValueError(f"register event {accession} has an unusable issuer CIK {cik!r}")
+            writer.writerow([normalised, accession, form, filed.isoformat(), provision])
     print(json.dumps({"events": len(rows), "through": through.isoformat(), "register_sha256": sha256_of(out)}))
 
 
