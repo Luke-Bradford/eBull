@@ -398,7 +398,7 @@ def register_extract(through: date, out: Path, expected_view_sha256: str) -> Non
             handle.flush()
             os.fsync(handle.fileno())
     except BaseException:
-        out.unlink()  # a failed write leaves no partial file
+        out.unlink(missing_ok=True)  # a failed write leaves no partial file, and never masks the error
         raise
     print(
         json.dumps(
