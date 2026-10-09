@@ -1,0 +1,38 @@
+{
+ "spec": "docs/research/2026-10-09-3739-stage-c-panel.md",
+ "event_file_version": "stage-c-event-file-v1",
+ "entries": [
+  {
+   "slice": "2a",
+   "path": "calibration-k-g.json",
+   "sha256": "347f2fa155432c1ae104fc71adeccb4d48353d362ff02ffc8afaa8c65ac8732d",
+   "what": "K pair table (spec section 2) and G table (section 9) from the stage-A and stage-B panel artefacts",
+   "inputs": {
+    "stage_a_manifest_sha256": "e0924564ef1639f9473586523679894eb5d1741a75a3a3b8ddce5858917cae6e",
+    "stage_b_manifest_sha256": "83422f50c09d2c9c2b9613d12804a1f73187824cd5200e9ae2c75a439c288592"
+   }
+  },
+  {
+   "slice": "2a",
+   "path": "inputs/submissions-2026-10-09-extract.jsonl.gz",
+   "sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
+   "what": "8-A12B, 10-12B, 8-K12B, 8-K and 8-K/A filings accepted from 2024-04-01, every filer in EDGAR submissions.zip",
+   "inputs": {
+    "submissions_zip_sha256": "39945f2c3e79de58540be92ff7e5ad0ba4dcccf296ade2a3744030006719a332",
+    "submissions_zip_last_modified": "Fri, 09 Oct 2026 04:40:26 GMT",
+    "submissions_zip_bytes": 1568350871
+   }
+  },
+  {
+   "slice": "2a",
+   "path": "u-pass1.csv",
+   "sha256": "ddfce690c3a4b015f6e08db2a54ee099dcdea313092ec6576fcd2d45d53307e4",
+   "what": "U pass 1 (section 2 items 1-3), K = 1500, base formation 2024-07-31",
+   "inputs": {
+    "calibration_sha256": "347f2fa155432c1ae104fc71adeccb4d48353d362ff02ffc8afaa8c65ac8732d",
+    "extract_sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
+    "register": "sec_form25_common_equity_delistings filed 2024-08-01 .. 2026-10-08 (685 events, listed in the file's register_accessions column)"
+   }
+  }
+ ]
+}
