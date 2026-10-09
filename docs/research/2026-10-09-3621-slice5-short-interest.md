@@ -99,9 +99,8 @@ files, for each symbol carried once in both, it compares `previousShortPositionQ
 prior file does not hold the revision that the next file announces. That is consistent with the stored files being
 first-published, and does not prove it: a later, unannounced change to either figure would not show here. The
 residue the script prints: 19 of the 21 flagged agreements are at the 2021-06-30 and 2021-07-15 settlements, the
-first two after FINRA's June 2021 change, and 2 at 2024-07-31 (AVGO and USLM); 20 of the 27 unflagged disagreements
-have `previous` = 0 at a corporate event (Liberty's 2023 tracking-stock recapitalisations, GSK's 2022 consolidation
-among them). Physical flagged rows in the 38 files covered formations use: 0 to 6 in 35, 19 in one, 1,663 in
+first two after FINRA's June 2021 change, and 2 at 2024-07-31 (AVGO and USLM); 21 of the 27 unflagged disagreements
+have `previous` = 0, 9 of them the BATR, FWON and LSXM tracking-stock lines at 2023-07-31 and 2023-08-15. Physical flagged rows in the 38 files covered formations use: 0 to 6 in 35, 19 in one, 1,663 in
 `shrt20231115`, and 7,600 of `shrt20210615`'s 20,251 (revisions to the 2021-05-28 figures, which no formation uses).
 No file carries a symbol twice.
 
