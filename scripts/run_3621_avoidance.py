@@ -72,7 +72,7 @@ from app.services.trial_register import (
     TrialRegister,
 )
 from scripts.build_3609_factor_panel import Frozen, VerifiedArtefact, read_verified_artefact
-from scripts.capture_3609_step2 import capture_path, verify_capture, write_exclusive
+from scripts.capture_3609_step2 import capture_path, ledger_claim, verify_capture, write_exclusive
 from scripts.measure_3621_filter_premise import stage_a_counts
 from scripts.report_3609_step2 import (
     ADMITTED,
@@ -547,6 +547,17 @@ def verdict_lines(pairs: Mapping[str, Any], fid: MaxFidelity) -> list[str]:
 # --------------------------------------------------------------------------- the run
 
 
+RUN_CLAIM: Final = "run"
+_TERMINAL: Final = frozenset({"completed", "failed"})
+
+
+def open_runs(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Run ids with a ``started`` row and no terminal row."""
+    started = [r["run_id"] for r in rows if r.get("event") == "started"]
+    ended = {r.get("run_id") for r in rows if r.get("event") in _TERMINAL}
+    return [run_id for run_id in started if run_id not in ended]
+
+
 def run(
     run_id: str,
     *,
@@ -560,25 +571,47 @@ def run(
     committed_ledger: Path = COMMITTED_LEDGER_PATH,
     labels: Callable[[], dict[str, str]] = current_labels,
 ) -> dict[str, Any]:
-    """The gate, then ``started``, the access and the evaluation; returns the ``completed`` row."""
-    current = labels()
-    committed = read_ledger(committed_ledger)
-    trial = check_declaration(register, committed, read_ledger(committed_ledger, ledger), current)
-    append_ledger(
-        ledger,
-        {
-            "run_id": run_id,
-            "event": "started",
-            "at": datetime.now(UTC).isoformat(),
-            "git_sha": head,
-            **current,
-            "payload_sha256": payload_sha256(trial),
-            "register_version": TRIAL_REGISTER_VERSION,
-            "command": list(command),
-        },
-    )
-    step = "access_recorded"
+    """The gate, then ``started``, the access and the evaluation; returns the ``completed`` row.
+
+    The whole run holds the ledger's run claim, so a second invocation waits and then meets the first one's terminal
+    row: two runs can never both pass the gate. A run left open (killed between ``started`` and its terminal row)
+    refuses every later run until it is ended by hand with a ``failed`` row."""
+    with ledger_claim(ledger, RUN_CLAIM):
+        current = labels()
+        rows = read_ledger(committed_ledger, ledger)
+        trial = check_declaration(register, read_ledger(committed_ledger), rows, current)
+        if open_runs(rows):
+            raise RunError(f"runs {open_runs(rows)} started and never ended; end each with a 'failed' row first")
+        return _run_claimed(run_id, trial, current, head, command, accessed_by, record_access, evaluate_run, ledger)
+
+
+def _run_claimed(
+    run_id: str,
+    trial: DeclaredTrial,
+    current: Mapping[str, str],
+    head: str,
+    command: Sequence[str],
+    accessed_by: str,
+    record_access: Callable[[HoldoutAccess], int],
+    evaluate_run: Callable[[], tuple[dict[str, Any], bytes]],
+    ledger: Path,
+) -> dict[str, Any]:
+    step = "started"
     try:
+        append_ledger(
+            ledger,
+            {
+                "run_id": run_id,
+                "event": step,
+                "at": datetime.now(UTC).isoformat(),
+                "git_sha": head,
+                **current,
+                "payload_sha256": payload_sha256(trial),
+                "register_version": TRIAL_REGISTER_VERSION,
+                "command": list(command),
+            },
+        )
+        step = "access_recorded"
         access_id = record_access(
             HoldoutAccess(
                 strategy_id=STRATEGY_ID,
@@ -621,7 +654,9 @@ def run(
         append_ledger(ledger, row)
         return row
     except BaseException as exc:
-        end_run_failed(ledger, run_id, step, exc)
+        # A failed ``started`` append may still have made its row durable: end the run if any row of it is there.
+        if step != "started" or any(r.get("run_id") == run_id for r in read_ledger(ledger)):
+            end_run_failed(ledger, run_id, step, exc)
         raise
 
 

@@ -307,3 +307,29 @@ def test_evaluate_gives_30_verdicts_a_pooled_diagnostic_and_strict_json() -> Non
     assert len(lines) == 31 and lines[-1] == "MAX fidelity: PASS"
     assert {e.population for e in result["excluded"] if e.name_key == 0} == {"micro", "top1000", "all"}
     json.dumps(jsonable({k: v for k, v in result.items() if k != "excluded"}), allow_nan=False)
+
+
+def test_a_run_left_open_refuses_the_next_until_it_is_ended(tmp_path: Path) -> None:
+    ledger, committed, register = _ledgers(tmp_path)
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(json.dumps({"run_id": "dead", "event": "started"}) + "\n")
+
+    def attempt() -> dict[str, Any]:
+        return run(
+            "r3",
+            head="abc",
+            command=[],
+            accessed_by="loop",
+            record_access=lambda _: 8,
+            evaluate_run=lambda: ({"verdict_lines": []}, b""),
+            register=register,
+            ledger=ledger,
+            committed_ledger=committed,
+            labels=lambda: dict(LABELS),
+        )
+
+    with pytest.raises(RunError, match=r"\['dead'\] started and never ended"):
+        attempt()
+    with ledger.open("a") as handle:
+        handle.write(json.dumps({"run_id": "dead", "event": "failed"}) + "\n")
+    assert attempt()["event"] == "completed"
