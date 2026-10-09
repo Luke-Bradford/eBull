@@ -20,6 +20,12 @@ Spec: `docs/research/2026-10-08-3621-avoidance-filters.md`. Every verdict is ret
 
 ## Verdicts
 
+17 of the 30 pairs are ELIGIBLE and 13 are NOT ELIGIBLE. To reproduce the count:
+
+```bash
+python3 -c "import json; v=[l for l in json.load(open('docs/research/3621-avoidance-filters-v1-verdicts.json'))['verdict_lines'] if ': ' in l and not l.startswith('MAX')]; print(len(v), sum(': ELIGIBLE' in l for l in v), sum('NOT ELIGIBLE' in l for l in v))"
+```
+
 ΔG is G(U_F) − G(U), in percentage points a year, for the worst-case arm at base cost. The JSON file has both arms and both costs.
 
 | set | micro | small | large | mega | top 1,000 | rest |
