@@ -11,20 +11,21 @@ FINRA's bimonthly files are re-parsed from the stored raw payloads (``filing_raw
 resolved to a currently tradable instrument at ingest, so a delisted name has no row there. A selected file with no
 stored payload is fetched from the CDN into memory. Every body row's ``settlementDate`` must equal the file's date.
 The calendar is ``docs/research/3621-finra-si-calendar.csv`` (FINRA's designated settlement and publication dates,
-``scripts/build_3621_finra_si_calendar.py``); it must hold two settlements in every month it spans after its first,
-unique and with publication dates strictly increasing.
+``scripts/build_3621_finra_si_calendar.py``); it must start at ``CALENDAR_FIRST``, hold exactly two settlements in
+every month from the next month through ``CALENDAR_LAST_MONTH``, and none after, unique and with publication dates
+strictly increasing.
 
 Per formation M, the settlement used is the latest calendar settlement whose publication date is strictly before
-s(M), and the fallback is the calendar settlement before it (by calendar index). Unless both are on or after
-``COVERAGE_START`` the formation is ``no_settlement``. A covered formation whose settlement is not the first calendar
-settlement of M's month refuses. Per admitted name, in precedence order:
+s(M). Unless it is on or after ``COVERAGE_START`` the formation is ``no_settlement``. A covered formation whose
+settlement is not the first calendar settlement of M's month refuses. ``revisionFlag`` is not read for a state: FINRA
+defines it as "the previous short interest position in the security was revised since the prior reporting cycle"
+(Regulatory Notice 21-19, note 10), so it marks a revision of the PRIOR settlement's figure, published after s(M);
+the revision check below measures whether the stored prior file holds the original or the revised figure. Per
+admitted name, in precedence order:
 
 - ``ambiguous``: the normalised symbol (``normalise_symbol``) is empty, shared by two admitted names at M, or carried
   by two rows of the file used;
 - ``unmatched``: no row of the settlement's file carries the normalised symbol;
-- ``revised``: that row's ``revisionFlag`` is non-blank (FINRA changed it after first publication) and the fallback
-  file's row for the symbol is absent, carried twice or itself revised; when that row is clean it is used instead,
-  with its own settlement's ADV window and split product;
 - ``unverifiable``: a session of the row's ADV window has no usable bar (``usable`` true, volume finite and >= 0);
 - ``identity_fail``: |ln(FINRA ``averageDailyVolumeQuantity`` / our ADV)| > ln ``ADV_TOLERANCE``, or exactly one of
   the two is zero;
@@ -36,11 +37,15 @@ settlement through the row's settlement, the sum of each session's volume x ``sp
 settlement)`` (the Intrader series is unadjusted), divided by the number of those sessions.
 
 ``flagged``: SIR >= q, q the ``ceil(0.9 N)``-th smallest of the N valid values at M over all admitted names. A
-covered formation with N = 0 refuses.
+covered formation with N = 0, or q <= 0, refuses. Diagnostic only: the flags under Asquith, Pathak & Ritter's
+unreported-is-zero rule (``unmatched`` names enter N at 0).
 
 Outputs: the printed summary; ``docs/research/3621-si-premise-counts.csv`` (per covered formation and population,
-every state count, ``flagged``, ``fallback`` and ``split_carried``: the exact reproduction reference); and a per-name
-file (``M``, ``name_key``, state, settlement used, SIR, flagged), canonical JSON lines, whose sha256 is printed.
+every state count, ``flagged`` and ``split_carried``: the exact reproduction reference); and a per-name file, one
+line per admitted name at a covered formation, ordered by M ascending, then ME descending, then ``name_key``
+ascending: ``json.dumps([M, name_key, state, settlement ISO date or null, SIR or null, flagged], separators=(",",
+":"))`` plus a newline, SIR as ``float(short * split_product) / float(shares)`` with ``short`` an int and the product
+a ``Decimal``. Its uncompressed sha256 is printed.
 
 Usage: ``PYTHONPATH=. uv run python -m scripts.measure_3621_short_interest_premise [names_out.jsonl.gz]``
 """
@@ -81,13 +86,14 @@ CALENDAR = _ROOT / "docs" / "research" / "3621-finra-si-calendar.csv"
 COUNTS_OUT = _ROOT / "docs" / "research" / "3621-si-premise-counts.csv"
 NAMES_OUT = _ROOT / "var" / "research" / "3621" / "si-premise-names.jsonl.gz"
 POPULATIONS: tuple[str, ...] = ("micro", "small", "large", "mega", "top1000", "rest", "all")
-STATES: tuple[str, ...] = ("ambiguous", "unmatched", "revised", "unverifiable", "identity_fail", "valid")
-COUNTED: tuple[str, ...] = ("admitted", *STATES, "flagged", "fallback", "split_carried")
+STATES: tuple[str, ...] = ("ambiguous", "unmatched", "unverifiable", "identity_fail", "valid")
+COUNTED: tuple[str, ...] = ("admitted", *STATES, "flagged", "split_carried")
 SPLITS = f"inputs/{Frozen.SPLITS}"
 #: FINRA's file catalog: before June 2021 the files "do not reflect short interest data in exchange-listed securities".
 COVERAGE_START = date(2021, 6, 15)
-#: Read for its revision count only (the first in-coverage file; no covered formation uses it).
-CONTEXT_FILES = (date(2021, 6, 15),)
+#: The ADV-window predecessor of ``COVERAGE_START``; the calendar's fixed span.
+CALENDAR_FIRST = date(2021, 5, 28)
+CALENDAR_LAST_MONTH = (2024, 8)
 SI_DECILE = 0.9
 ADV_TOLERANCE = 1.2
 TOLERANCE_GRID = (1.1, 1.15, 1.2, 1.25, 1.5, 2.0, 3.0)
@@ -102,6 +108,7 @@ class MeasureError(RuntimeError):
 @dataclass(frozen=True)
 class FinraRow:
     short: int
+    previous: int
     adv: int
     revised: bool
     issue_name: str
@@ -113,6 +120,7 @@ class FinraFile:
     twice: set[str]
     physical_rows: int
     physical_revised: int
+    zero_short: int
 
 
 @dataclass(frozen=True)
@@ -120,7 +128,6 @@ class Reading:
     state: str
     used: date | None = None
     sir: float | None = None
-    fallback: bool = False
     split_carried: bool = False
     issue_name: str | None = None
     log_ratio: float | None = None
@@ -139,33 +146,36 @@ def read_calendar(path: Path = CALENDAR) -> list[tuple[date, date]]:
             for r in csv.DictReader(f)
         ]
     days = [s for s, _p in rows]
+    if not days or days[0] != CALENDAR_FIRST:
+        raise MeasureError(f"calendar must start at {CALENDAR_FIRST}")
     if days != sorted(set(days)) or any(p1 <= p0 for (_s0, p0), (_s1, p1) in zip(rows, rows[1:], strict=False)):
         raise MeasureError("calendar settlements not unique and ascending, or publications not strictly increasing")
     if any(p <= s for s, p in rows):
         raise MeasureError("a publication date not after its settlement")
     per_month = Counter((s.year, s.month) for s in days[1:])
-    first, last = days[1], days[-1]
-    month = (first.year, first.month)
-    while month <= (last.year, last.month):
+    month = (CALENDAR_FIRST.year + CALENDAR_FIRST.month // 12, CALENDAR_FIRST.month % 12 + 1)
+    required: set[tuple[int, int]] = set()
+    while month <= CALENDAR_LAST_MONTH:
+        required.add(month)
         if per_month[month] != 2:
             raise MeasureError(f"calendar month {month} holds {per_month[month]} settlements, not 2")
         month = (month[0] + month[1] // 12, month[1] % 12 + 1)
+    if set(per_month) != required:
+        raise MeasureError(f"calendar settlements outside the fixed span: {sorted(set(per_month) - required)}")
     return rows
 
 
-def settlement_for(calendar: Sequence[tuple[date, date]], s_m: date) -> tuple[date, date] | None:
-    """The latest settlement whose publication is strictly before s(M), and the calendar settlement before it (the
-    revision fallback). ``None`` unless both are on or after ``COVERAGE_START``."""
-    published = [i for i, (_s, p) in enumerate(calendar) if p < s_m]
-    if not published or published[-1] == 0:
+def settlement_for(calendar: Sequence[tuple[date, date]], s_m: date) -> date | None:
+    """The latest settlement whose publication is strictly before s(M); ``None`` unless it is on or after
+    ``COVERAGE_START``."""
+    published = [s for s, p in calendar if p < s_m]
+    if not published or published[-1] < COVERAGE_START:
         return None
-    used, fallback = calendar[published[-1]][0], calendar[published[-1] - 1][0]
-    if fallback < COVERAGE_START:
-        return None
+    used = published[-1]
     first_of_month = min(s for s, _p in calendar if (s.year, s.month) == (s_m.year, s_m.month))
     if used != first_of_month:
         raise MeasureError(f"s(M) {s_m}: settlement {used} is not the month's mid-month settlement {first_of_month}")
-    return used, fallback
+    return used
 
 
 def adv_window(
@@ -200,30 +210,32 @@ def parse_file(payload: bytes, day: date) -> FinraFile:
     """Every physical row is counted; the symbol map keeps the last row of a duplicated symbol, which is ambiguous."""
     rows: dict[str, FinraRow] = {}
     twice: set[str] = set()
-    physical = revised = 0
+    physical = revised = zero = 0
     for row in csv.DictReader(io.StringIO(payload.decode("utf-8")), delimiter="|"):
         if parse_body_settlement_date(row.get("settlementDate")) != day:
             raise MeasureError(f"{day}: a body row carries settlementDate {row.get('settlementDate')!r}")
         try:
             short, adv = int(row["currentShortPositionQuantity"]), int(row["averageDailyVolumeQuantity"] or 0)
+            previous = int(row["previousShortPositionQuantity"] or 0)
         except ValueError as exc:
             raise MeasureError(f"{day}: non-integer short count or ADV for {row['symbolCode']!r}") from exc
-        if short < 0 or adv < 0:
+        if short < 0 or adv < 0 or previous < 0:
             raise MeasureError(f"{day}: negative short count or ADV for {row['symbolCode']!r}")
         flagged = bool((row["revisionFlag"] or "").strip())
         physical += 1
         revised += flagged
+        zero += short == 0
         key = normalise_symbol(row["symbolCode"] or "")
         if key in rows:
             twice.add(key)
-        rows[key] = FinraRow(short, adv, flagged, row["issueName"] or "")
-    return FinraFile(rows, twice, physical, revised)
+        rows[key] = FinraRow(short, previous, adv, flagged, row["issueName"] or "")
+    return FinraFile(rows, twice, physical, revised, zero)
 
 
 def read_name(
     key: str,
     files: Mapping[date, FinraFile],
-    pair: tuple[date, date],
+    used: date,
     windows: Mapping[tuple[date, int], Sequence[date]],
     volume: Mapping[date, float],
     splits: Sequence[SplitStamp],
@@ -232,27 +244,22 @@ def read_name(
 ) -> Reading:
     """One admitted name's state at a covered formation (the docstring's precedence, after ``ambiguous`` among
     admitted names)."""
-    current = files[pair[0]]
+    current = files[used]
     if key in current.twice:
         return Reading("ambiguous")
     if key not in current.rows:
         return Reading("unmatched")
-    hit, used, fallback = current.rows[key], pair[0], False
-    if hit.revised:
-        earlier = files[pair[1]]
-        if key in earlier.twice or key not in earlier.rows or earlier.rows[key].revised:
-            return Reading("revised")
-        hit, used, fallback = earlier.rows[key], pair[1], True
+    hit = current.rows[key]
     ours = our_adv(volume, windows[(used, 0)], splits, used)
     if ours is None:
-        return Reading("unverifiable", used, fallback=fallback, issue_name=hit.issue_name)
+        return Reading("unverifiable", used, issue_name=hit.issue_name)
     ratio = math.log(hit.adv / ours) if hit.adv > 0 and ours > 0 else None
     if not identity_ok(hit.adv, ours, ADV_TOLERANCE):
-        return Reading("identity_fail", used, fallback=fallback, issue_name=hit.issue_name, log_ratio=ratio)
+        return Reading("identity_fail", used, issue_name=hit.issue_name, log_ratio=ratio)
     product = split_product(splits, used, s_m)
     carried = any(used < stamp.day <= s_m for stamp in splits)
     sir = float(hit.short * product) / shares
-    return Reading("valid", used, sir, fallback, carried, hit.issue_name, ratio)
+    return Reading("valid", used, sir, carried, hit.issue_name, ratio)
 
 
 def main(names_out: Path) -> None:
@@ -298,8 +305,10 @@ def main(names_out: Path) -> None:
                     if ok and v is not None and math.isfinite(float(v)) and float(v) >= 0
                 }
 
-    pairs = {month: settlement_for(calendar, rows[month][0][5]) for month in rows}
-    needed = sorted({d for pair in pairs.values() if pair for d in pair} | set(CONTEXT_FILES))
+    used_by = {month: settlement_for(calendar, rows[month][0][5]) for month in rows}
+    covered = {d for d in used_by.values() if d is not None}
+    # Every in-coverage calendar file is read: the covered formations use ``covered``; all feed the revision check.
+    needed = [s for s, _p in calendar if s >= COVERAGE_START]
     windows = {(d, shift): adv_window(calendar, d, sessions, shift) for d in needed for shift in WINDOW_SHIFTS}
     provider = FinraShortInterestProvider()
     files: dict[date, FinraFile] = {}
@@ -315,13 +324,18 @@ def main(names_out: Path) -> None:
             digests[day] = hashlib.sha256(payload).hexdigest()
             print(
                 f"file {day} {origin} sha256={digests[day]} rows={files[day].physical_rows} "
-                f"revised={files[day].physical_revised} duplicated_symbols={len(files[day].twice)}"
-                + (
-                    " (context only)"
-                    if day in CONTEXT_FILES and all(day not in (p or ()) for p in pairs.values())
-                    else ""
-                )
+                f"revised={files[day].physical_revised} zero_short={files[day].zero_short} "
+                f"duplicated_symbols={len(files[day].twice)}" + ("" if day in covered else " (revision check only)")
             )
+
+    # FINRA's revisionFlag marks a revision of the PRIOR settlement's figure. If the stored prior file had been
+    # revised in place, a flagged row's previousShortPositionQuantity would equal that file's current figure.
+    revision = Counter[tuple[bool, bool]]()
+    for prior, day in zip(needed, needed[1:], strict=False):
+        before, now = files[prior], files[day]
+        for key, row in now.rows.items():
+            if key in before.rows and key not in now.twice and key not in before.twice:
+                revision[(row.revised, row.previous == before.rows[key].short)] += 1
 
     counts: list[tuple[str, str, dict[str, int]]] = []
     log_ratios: list[float] = []
@@ -330,14 +344,14 @@ def main(names_out: Path) -> None:
     by_link = Counter[tuple[str, str]]()
     audit: dict[int, list[tuple[date, str, str, float | None]]] = defaultdict(list)
     names_lines: list[str] = []
-    cut_rows: list[tuple[str, date, float, int, int]] = []
+    cut_rows: list[tuple[str, date, float, int, int, float, int]] = []
     for month in sorted(rows):
         names = sorted(rows[month], key=lambda r: (-r[0], r[1]))
         s_m = names[0][5]
-        pair = pairs[month]
+        used = used_by[month]
         top = {r[1] for r in names[:TOP]}
         readings: dict[int, Reading] = {}
-        if pair is not None:
+        if used is not None:
             keys = Counter(normalise_symbol(r[3]) for r in names)
             shift_fail[month] = Counter()
             for _me, key, sid, symbol, shares, _s, _t in names:
@@ -345,7 +359,7 @@ def main(names_out: Path) -> None:
                 if not k or keys[k] > 1:
                     readings[key] = Reading("ambiguous")
                     continue
-                reading = read_name(k, files, pair, windows, volume.get(sid, {}), splits[sid], shares, s_m)
+                reading = read_name(k, files, used, windows, volume.get(sid, {}), splits[sid], shares, s_m)
                 readings[key] = reading
                 if reading.issue_name is not None and reading.used is not None:
                     audit[sid].append((reading.used, reading.issue_name, reading.state, reading.log_ratio))
@@ -364,7 +378,14 @@ def main(names_out: Path) -> None:
             if not values:
                 raise MeasureError(f"{month}: covered formation with no valid SIR")
             q = values[math.ceil(SI_DECILE * len(values)) - 1]
-            cut_rows.append((month, pair[0], q, sum(v > 1 for v in values), len(values)))
+            if q <= 0:
+                raise MeasureError(f"{month}: SIR decile cutoff {q} is not positive")
+            # Diagnostic: Asquith, Pathak & Ritter's unreported-is-zero rule puts unmatched names in N at 0.
+            zeros = sum(r.state == "unmatched" for r in readings.values())
+            padded = [0.0] * zeros + values
+            q_zero = padded[math.ceil(SI_DECILE * len(padded)) - 1]
+            moved = sum((v >= q) != (v >= q_zero) for v in values)
+            cut_rows.append((month, used, q, sum(v > 1 for v in values), len(values), q_zero, moved))
         else:
             q = math.inf
         p20, p50, p80 = (cutoffs[(k, month)] for k in ("nyse_p20", "nyse_p50", "nyse_p80"))
@@ -375,7 +396,7 @@ def main(names_out: Path) -> None:
             by_link[("linked" if key > 0 else "unlinked", reading.state)] += 1
             if terminating:
                 by_link[("terminating", reading.state)] += 1
-            if pair is None:
+            if used is None:
                 continue
             names_lines.append(
                 json.dumps(
@@ -389,9 +410,8 @@ def main(names_out: Path) -> None:
                 t["admitted"] += 1
                 t[reading.state] += 1
                 t["flagged"] += flagged
-                t["fallback"] += reading.fallback and reading.state == "valid"
                 t["split_carried"] += reading.split_carried
-        if pair is not None:
+        if used is not None:
             counts.extend((month, p, tallies[p]) for p in POPULATIONS)
 
     with COUNTS_OUT.open("w", newline="") as f:
@@ -408,10 +428,8 @@ def main(names_out: Path) -> None:
         f"sha256(uncompressed)={hashlib.sha256(names_bytes).hexdigest()}"
     )
     print(f"counts -> {COUNTS_OUT}, sha256={hashlib.sha256(COUNTS_OUT.read_bytes()).hexdigest()}")
-    print(
-        f"payloads used: {len(digests) - len(CONTEXT_FILES)} for covered formations, "
-        f"plus context {[str(d) for d in CONTEXT_FILES]}"
-    )
+    print(f"payloads: {len(covered)} used by covered formations, {len(digests)} read")
+    print("revision check (flagged, previous == prior file's current):", dict(sorted(revision.items())))
 
     print()
     print("formations", len(rows), "covered", len(cut_rows))
@@ -462,9 +480,9 @@ def main(names_out: Path) -> None:
             sep="\t",
         )
     print()
-    print("M", "settlement", "q (SIR decile cutoff)", "SIR > 1", "valid", sep="\t")
-    for month, day, q, over, n in cut_rows:
-        print(month, day, f"{q:.4f}", over, n, sep="\t")
+    print("M", "settlement", "q", "SIR > 1", "valid", "q unreported-as-zero", "flags moved", sep="\t")
+    for month, day, q, over, n, q_zero, moved in cut_rows:
+        print(month, day, f"{q:.4f}", over, n, f"{q_zero:.4f}", moved, sep="\t")
 
 
 if __name__ == "__main__":
