@@ -324,9 +324,12 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
 
         r28 (2026-10-09, #3621) added ``3621-avoidance-filters-v1`` (62 searches); the same command
         returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r29 (2026-10-09, #3621) added ``3621-avoidance-filters-v2`` (86 searches); the same command
+        returned the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 588
-        assert len(TRIAL_REGISTER.trials) == 56
+        assert TRIAL_REGISTER.declared_count == 674
+        assert len(TRIAL_REGISTER.trials) == 57
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

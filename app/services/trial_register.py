@@ -259,7 +259,13 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: 6 populations x 2 arms + the MAX fidelity check's 2 arms = 62 searches, non-claiming, declared before any slice
 #: reads an outcome. Not a `hunt-` entry, so it counts in M_inh: 523 -> 585. Measured the same way before the bump:
 #: the SAME five groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-09-r28"
+#:
+#: r29 (2026-10-09, #3621 slice 5c) adds `3621-avoidance-filters-v2`: v1's five sets re-run on the Amendment-3 panel
+#: plus the short-interest filter and "all four": 7 filter sets x 6 populations x 2 arms + the MAX fidelity check's 2
+#: arms = 86 searches, non-claiming, declared before v2 reads either artefact. Not a `hunt-` entry, so it counts in
+#: M_inh: 585 -> 671. Measured the same way before the bump: the SAME five groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-09-r29"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1693,6 +1699,47 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
             searches=62,
+        ),
+        # #3621 slice 5c: pasted verbatim from `scripts.run_3621_avoidance_v2 --declare`, whose payload the committed
+        # `declared` row in docs/research/3621-ledger.jsonl pins (payload_sha256 77d0d64b8e99…). The run refuses unless
+        # this row, that pin and the checkout agree. Never edit this row: a changed study needs a new trial id.
+        DeclaredTrial(
+            trial_id="3621-avoidance-filters-v2",
+            description=(
+                "#3621 avoidance filters, version 2: the base spec's preregistered, non-claiming enumeration "
+                "re-run on the Amendment-3 (clipped holding return) panel, formations 2014-09..2024-07 over "
+                "stages A and B, net of step 0's costs, with stage B rebuilt inside the run and refused unless "
+                "identical to v1's outside prices.holding. Seven filter sets (v1's five, SI = top decile of FINRA "
+                "short interest ratio from formation 2021-06, and MAX + sub-$5 + young + SI) x six populations x "
+                "two termination arms = 84, plus the MAX fidelity check's two arms = 86. Condition 5 (SI sets): "
+                "names with an SI value are at least 90% of U at every covered formation. A pair's verdict only "
+                "decides whether a later long-book spec may cite the set; no premium or non-inferiority is "
+                "claimed, so no TrialDesign. Retrospective: v1's sets were run on data whose outcomes are known."
+            ),
+            evidence=(
+                'docs/research/2026-10-09-3621-slice5-short-interest.md \u00a7"Registration" over '
+                "docs/research/2026-10-08-3621-avoidance-filters.md; "
+                "spec_sha256=69f247d169853478d3117123a0cc5fe9933ebbf221a1826fd8487b506856a27c; "
+                "construction_sha256=7c2da04e1813ee41185c5d0089e5c24f9d5b113acaff3979341db698b602fcbb; "
+                "register_policy_sha256=d5cd632246397252a33c04d6bbfddfc7d9b275ba902fdca19f2be99e78292651; "
+                "python=3.14; "
+                "base_spec_sha256=4c3744b784c661a8a5a24b93528c653860fa37324b1beee3c02c3d9c1036b236; "
+                "stage_a_manifest_sha256=e0924564ef1639f9473586523679894eb5d1741a75a3a3b8ddce5858917cae6e; "
+                "v1_stage_b_manifest_sha256=3eee10059e817724c3951496b6a25494398dedfd417a5f50b78034b1894c95bc; "
+                "step2_sub_manifest_sha256=d0f3f9a90f4c0fb49a51266ad55f9f7b3a8d7857338cb2661ad7e0545452f8dd; "
+                "step0_manifest_sha256=114efb16341df170012e856a31402938c784f54be8a950a26262af7db45e6a3b; "
+                "si_calendar_sha256=a3a98a592a4a6521fee8f41e12296d904a3010c82f1a1e3c96c4bc4e65dcda70; "
+                "si_payloads_sha256=1a15dd98dbfe76c073f74eb9a714d56eb74e5300afeedaad5fd543648d96805c; "
+                "si_counts_sha256=a12c79f09487cdee099280ce538f9339458860909c05cfcbd96de977c848727e; "
+                "si_names_sha256=c005ca8a83b3c8e2cb7c38afd17a7db55e778ced8711ef636b0fcc8af0d91b6d; "
+                "jkp_code_commit=67174c7f; "
+                "osap_code_commit=8db89244; "
+                "holdout_strategy_id=3621-avoidance-filters; "
+                "holdout_strategy_version=v2; "
+                "ledger docs/research/3621-ledger.jsonl"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=86,
         ),
         DeclaredTrial(
             trial_id="recent-evidence-refresh-cost-v4-2026-09-26",
