@@ -333,3 +333,22 @@ def test_a_run_left_open_refuses_the_next_until_it_is_ended(tmp_path: Path) -> N
     with ledger.open("a") as handle:
         handle.write(json.dumps({"run_id": "dead", "event": "failed"}) + "\n")
     assert attempt()["event"] == "completed"
+
+
+def test_a_failure_after_the_names_file_removes_unnamed_outputs(tmp_path: Path) -> None:
+    ledger, committed, register = _ledgers(tmp_path)
+    with pytest.raises(TypeError):
+        run(
+            "r4",
+            head="abc",
+            command=[],
+            accessed_by="loop",
+            record_access=lambda _: 9,
+            evaluate_run=lambda: ({"bad": object()}, b"names"),  # the report fails to serialise after the names write
+            register=register,
+            ledger=ledger,
+            committed_ledger=committed,
+            labels=lambda: dict(LABELS),
+        )
+    assert [r["event"] for r in read_ledger(ledger)] == ["started", "access_recorded", "failed"]
+    assert not list(ledger.parent.glob("r4*"))

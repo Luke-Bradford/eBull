@@ -536,9 +536,7 @@ def verdict_lines(pairs: Mapping[str, Any], fid: MaxFidelity) -> list[str]:
         if result is None:
             continue
         failed = f" ({', '.join(result.failed)})" if result.failed else ""
-        label = (
-            " [no stage-B exclusions]" if result.verdict.value == "ELIGIBLE" and result.no_stage_b_exclusions else ""
-        )
+        label = " [no stage-B exclusions]" if result.no_stage_b_exclusions else ""
         lines.append(f"{key}: {result.verdict.value}{failed}{label}")
     lines.append(f"MAX fidelity: {fid.verdict.value}")
     return lines
@@ -596,6 +594,8 @@ def _run_claimed(
     evaluate_run: Callable[[], tuple[dict[str, Any], bytes]],
     ledger: Path,
 ) -> dict[str, Any]:
+    out = ledger.parent / f"{run_id}.json"
+    names_path = ledger.parent / f"{run_id}-names.jsonl.gz"
     step = "started"
     try:
         append_ledger(
@@ -627,8 +627,6 @@ def _run_claimed(
         )
         step = "report_written"
         document, names = evaluate_run()
-        out = ledger.parent / f"{run_id}.json"
-        names_path = ledger.parent / f"{run_id}-names.jsonl.gz"
         write_exclusive(names_path, names)
         write_exclusive(out, json.dumps(document, indent=1, sort_keys=True, allow_nan=False).encode())
         append_ledger(
@@ -654,9 +652,14 @@ def _run_claimed(
         append_ledger(ledger, row)
         return row
     except BaseException as exc:
-        # A failed ``started`` append may still have made its row durable: end the run if any row of it is there.
-        if step != "started" or any(r.get("run_id") == run_id for r in read_ledger(ledger)):
+        # A failed append may still have made its row durable, so the run's state is re-read, not inferred from
+        # ``step``: end it only if it has a row and no terminal one, and remove outputs no durable row names.
+        events = {r.get("event") for r in read_ledger(ledger) if r.get("run_id") == run_id}
+        if events and not events & _TERMINAL:
             end_run_failed(ledger, run_id, step, exc)
+        if "report_written" not in events:
+            out.unlink(missing_ok=True)
+            names_path.unlink(missing_ok=True)
         raise
 
 
