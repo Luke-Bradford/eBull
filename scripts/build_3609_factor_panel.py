@@ -95,6 +95,7 @@ from app.services.factor_panel_prices import (
     DailyMonthly,
     FormationPrices,
     PriceCharacteristic,
+    ReturnBounds,
     SessionGrid,
     liquidity_terciles,
     me_discontinuity,
@@ -106,7 +107,7 @@ from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SE
 from app.services.security_linkage import Reason, load_security_linkage
 from app.services.series_termination import TERMINATION_RULE_VERSION, TerminationEvidence, classify_termination
 from app.services.strategies.validated_universe import load_validated_universe
-from app.services.total_return_reader import TOTAL_RETURN_SPLICE_VERSION
+from app.services.total_return_reader import TOTAL_RETURN_SPLICE_VERSION, Month, month_of
 from app.services.trial_register import TRIAL_REGISTER
 from app.services.universe_selection import (
     SURVIVORSHIP_FREE_VENDOR,
@@ -142,6 +143,17 @@ LARGEST_ME_LISTED: Final = 5
 DAILY_LOOKBACK_MONTHS: Final = 12
 RF_DATASET: Final = "french_three_factor_daily"
 RF_UNIT: Final = "decimal_return"
+#: Amendment 3 (#3730): JKP ``return_cutoffs.csv``, pinned here rather than in the slice 1 reference artefact so
+#: that artefact's manifest, and so ``STAGE_A_PINS``, still verify every published artefact. Loaded 2026-10-09 by
+#: ``scripts.refresh_2912_reference_data --source factor_library --dataset jkp_return_cutoffs``.
+RETURN_CUTOFFS: Final = {
+    "dataset_key": "jkp_return_cutoffs",
+    "snapshot_id": 91,
+    "response_sha256": "074e09d6ea2b2a74181888d09f395775aa60c4f4bc9992d290ad9598ed01566e",
+    "row_count": 15600,
+}
+RETURN_CUTOFF_LOW: Final = "ret_0_1"
+RETURN_CUTOFF_HIGH: Final = "ret_99_9"
 SPY_SYMBOL: Final = "SPY"
 OUT_DIR: Final = Path("var/research/3609_step1")
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
@@ -505,7 +517,8 @@ def dump_inputs(
     )
 
     manifest = reference_manifest(*REFERENCE)
-    for dataset, pinned in sorted(manifest["reference_snapshots"].items()):
+    pins = {**manifest["reference_snapshots"], RETURN_CUTOFFS["dataset_key"]: RETURN_CUTOFFS}
+    for dataset, pinned in sorted(pins.items()):
         params = {
             "snapshot_id": pinned["snapshot_id"],
             "dataset_key": dataset,
@@ -556,12 +569,39 @@ def read_rf(inputs: Path, first: date, bound: date) -> dict[date, float]:
     return out
 
 
+def read_return_bounds(inputs: Path) -> dict[Month, ReturnBounds]:
+    """Holding month -> JKP ``ret_0_1`` / ``ret_99_9`` from the frozen snapshot (Amendment 3).
+
+    A month end that is not one, a unit other than a decimal return, a duplicate, or a month with only one of the
+    two bounds refuses; ``ReturnBounds`` refuses a non-finite bound and ``low > high``."""
+    found: dict[Month, dict[str, float]] = defaultdict(dict)
+    for key, day, value, unit in read_gz_lines(inputs / Frozen.snapshot(RETURN_CUTOFFS["dataset_key"])):
+        if key not in (RETURN_CUTOFF_LOW, RETURN_CUTOFF_HIGH):
+            continue
+        eom = date.fromisoformat(day)
+        if (eom + timedelta(days=1)).day != 1:
+            raise PanelError(f"return cutoff {key} dated {day}, not a month end")
+        if unit != RF_UNIT:
+            raise PanelError(f"return cutoff {key} unit {unit!r} on {day}, expected {RF_UNIT!r}")
+        month = month_of(eom)
+        if key in found[month]:
+            raise PanelError(f"return cutoff {key} twice for {day}")
+        found[month][key] = float(value)
+    out: dict[Month, ReturnBounds] = {}
+    for month, pair in found.items():
+        if set(pair) != {RETURN_CUTOFF_LOW, RETURN_CUTOFF_HIGH}:
+            raise PanelError(f"return cutoffs for {month} hold only {sorted(pair)}")
+        out[month] = ReturnBounds(month, pair[RETURN_CUTOFF_LOW], pair[RETURN_CUTOFF_HIGH])
+    return out
+
+
 def price_series(
     inputs: Path,
     admitted: Sequence[AdmittedSeries],
     grid: SessionGrid,
     holding_last: Mapping[date, date],
     splits: Mapping[int, Sequence[SplitStamp]],
+    return_bounds: Mapping[Month, ReturnBounds],
 ) -> tuple[dict[int, Mapping[date, FormationPrices]], Counter[int], Counter[int]]:
     """Stream the frozen daily window series by series into each series' formation prices."""
     by_id = {a.series_id: a for a in admitted}
@@ -580,7 +620,12 @@ def price_series(
             for day, close, adj, volume, stamped, usable in rows
         ]
         got = series_prices(
-            bars, grid, holding_last_session=holding_last, termination=termination, split_stamps=splits.get(sid, ())
+            bars,
+            grid,
+            holding_last_session=holding_last,
+            termination=termination,
+            return_bounds=return_bounds,
+            split_stamps=splits.get(sid, ()),
         )
         prices[sid] = got.by_formation
         flags.update(got.flags_by_year)
@@ -652,6 +697,12 @@ def _prices_json(got: FormationPrices, tercile: int | None) -> dict[str, Any]:
             "period_return": holding.period_return,
             "end_bar": None if holding.end_bar is None else holding.end_bar.isoformat(),
             "by_arm": dict(holding.by_arm),
+            "raw_by_arm": dict(holding.raw_by_arm),
+            "bounds": {
+                "month": f"{holding.bounds.month[0]:04d}-{holding.bounds.month[1]:02d}",
+                "low": holding.bounds.low,
+                "high": holding.bounds.high,
+            },
         },
         "month_end_after_decision": got.month_end_after_decision,
         "daily_monthly": got.daily_monthly.value,
@@ -1053,7 +1104,9 @@ def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
     for sid, day, factor in read_gz_lines(inputs / Frozen.SPLITS):
         splits[sid].append(SplitStamp(date.fromisoformat(day), Decimal(factor)))
     grid = SessionGrid.build(sessions, read_rf(inputs, first_day, price_bound(formations)), decisions)
-    prices, flags, excused = price_series(inputs, admitted, grid, holding_last_sessions(formations, sessions), splits)
+    prices, flags, excused = price_series(
+        inputs, admitted, grid, holding_last_sessions(formations, sessions), splits, read_return_bounds(inputs)
+    )
     # The two reads share their admission predicates: a decision bar the stream does not price is a drift.
     priced = {(sid, decisions[m]) for sid, per in prices.items() for m in per}
     if priced != set(bars):

@@ -22,10 +22,16 @@ that rate, so the two pairs differ by it and the rule is the same. The CSV is JK
 ``https://jkpfactors-data.s3.amazonaws.com/public/other/return_cutoffs.csv``; its sha256 is printed. Each arm is
 winsorised. Populations are ``report_3621_books.populations`` at M over the artefact's frozen NYSE cutoffs.
 
+An artefact built under Amendment 3 carries ``raw_by_arm`` and ``bounds``: the table then reads ``raw_by_arm`` as
+before and ``by_arm`` as after, and refuses a row whose ``by_arm`` is not ``raw_by_arm`` clipped to its ``bounds``
+or, with ``--cutoffs``, whose ``bounds`` are not the CSV's for its holding month. Run on the pre-amendment artefact
+with the CSV and on its republished successor, the two tables must agree.
+
 Usage::
 
     PYTHONPATH=. uv run python -m scripts.measure_3730_holding_jumps --precision
     PYTHONPATH=. uv run python -m scripts.measure_3730_holding_jumps --ab <stage-A artefact dir> --cutoffs <csv>
+    PYTHONPATH=. uv run python -m scripts.measure_3730_holding_jumps --ab <Amendment 3 stage-A artefact dir>
 """
 
 from __future__ import annotations
@@ -183,12 +189,30 @@ def nyse_cutoffs_usd(path: Path) -> dict[str, tuple[float, float, float]]:
     return {m: (v["nyse_p20"], v["nyse_p50"], v["nyse_p80"]) for m, v in by_month.items() if len(v) == 3}
 
 
-def ab(artefact: Path, cutoffs_csv: Path) -> None:
-    print(f"cutoffs: {cutoffs_csv} sha256={hashlib.sha256(cutoffs_csv.read_bytes()).hexdigest()}")
-    bounds = read_return_cutoffs(cutoffs_csv)
+def clipped_pair(
+    holding: Mapping[str, Any], csv_bounds: Mapping[str, tuple[float, float]] | None
+) -> tuple[Mapping[str, float], Mapping[str, float], tuple[float, float]]:
+    """An Amendment 3 holding's (raw, clipped, bounds), refused unless ``by_arm`` is ``raw_by_arm`` clipped."""
+    recorded = holding["bounds"]
+    pair = (float(recorded["low"]), float(recorded["high"]))
+    if csv_bounds is not None and csv_bounds.get(recorded["month"]) != pair:
+        raise ValueError(f"holding bounds {recorded} are not the CSV's for {recorded['month']}")
+    raw, clipped = holding["raw_by_arm"], holding["by_arm"]
+    if any(clipped[arm] != winsorise(raw[arm], pair) for arm in ARMS):
+        raise ValueError(f"by_arm {clipped} is not raw_by_arm {raw} clipped to {pair}")
+    return raw, clipped, pair
+
+
+def ab(artefact: Path, cutoffs_csv: Path | None) -> None:
+    csv_bounds = None
+    if cutoffs_csv is not None:
+        print(f"cutoffs: {cutoffs_csv} sha256={hashlib.sha256(cutoffs_csv.read_bytes()).hexdigest()}")
+        csv_bounds = read_return_cutoffs(cutoffs_csv)
     nyse = nyse_cutoffs_usd(artefact / "inputs" / "reference_snapshot_jkp_nyse_cutoffs.jsonl.gz")
     by_formation: dict[str, dict[int, tuple[float, Mapping[str, float]]]] = defaultdict(dict)
+    clipped_by: dict[tuple[str, int], tuple[Mapping[str, float], tuple[float, float]]] = {}
     holding_month: dict[str, str] = {}
+    amended: set[bool] = set()
     for row in _jsonl(artefact / "rows.jsonl.gz"):
         if row["exclusion"] is not None:
             continue
@@ -196,17 +220,26 @@ def ab(artefact: Path, cutoffs_csv: Path) -> None:
         if me is None:
             raise ValueError(f"admitted row without ME: {row['M']} {row['series_id']}")
         holding = row["prices"]["holding"]
+        sid = int(row["series_id"])
+        amended.add("raw_by_arm" in holding)
         if "raw_by_arm" in holding:
-            raise ValueError("artefact built under Amendment 3: its by_arm is already winsorised; read raw_by_arm")
-        arms = holding["by_arm"]
+            arms, clipped, pair = clipped_pair(holding, csv_bounds)
+            if holding["bounds"]["month"] != row["holding_month"]:
+                raise ValueError(f"bounds {holding['bounds']} do not belong to holding month {row['holding_month']}")
+            clipped_by[row["M"], sid] = (clipped, pair)
+        else:
+            arms = holding["by_arm"]
         if not all(math.isfinite(arms[arm]) for arm in ARMS):
             raise ValueError(f"non-finite holding: {row['M']} {row['series_id']}")
-        sid = int(row["series_id"])
         if sid in by_formation[row["M"]]:
             raise ValueError(f"duplicate admitted row: {row['M']} {sid}")
         by_formation[row["M"]][sid] = (float(me), arms)
         if holding_month.setdefault(row["M"], row["holding_month"]) != row["holding_month"]:
             raise ValueError(f"formation {row['M']} has two holding months")
+    if len(amended) != 1:
+        raise ValueError("artefact mixes rows with and without raw_by_arm")
+    if amended == {False} and csv_bounds is None:
+        raise ValueError("a pre-amendment artefact needs --cutoffs")
 
     counts: dict[tuple[Population, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
     book: dict[tuple[Population, str], list[tuple[float, float]]] = defaultdict(list)
@@ -214,11 +247,14 @@ def ab(artefact: Path, cutoffs_csv: Path) -> None:
     for formation in sorted(by_formation):
         names = by_formation[formation]
         month = holding_month[formation]
-        if month not in bounds:
-            raise ValueError(f"no JKP return cutoff row for holding month {month} (formation {formation})")
         if formation not in nyse:
             raise ValueError(f"no complete NYSE p20/p50/p80 cutoffs for formation {formation}")
-        month_bounds = bounds[month]
+        if clipped_by:
+            month_bounds = clipped_by[formation, next(iter(names))][1]
+        elif csv_bounds is not None and month in csv_bounds:
+            month_bounds = csv_bounds[month]
+        else:
+            raise ValueError(f"no JKP return cutoff row for holding month {month} (formation {formation})")
         pops = populations({sid: me for sid, (me, _) in names.items()}, nyse[formation])
         for population, members in pops.items():
             for arm in ARMS:
@@ -226,7 +262,12 @@ def ab(artefact: Path, cutoffs_csv: Path) -> None:
                 before = [names[sid][1][arm] for sid in members]
                 if not before:
                     continue
-                after = [winsorise(r, month_bounds) for r in before]
+                if clipped_by:
+                    if any(clipped_by[formation, sid][1] != month_bounds for sid in members):
+                        raise ValueError(f"formation {formation} rows carry different bounds")
+                    after = [clipped_by[formation, sid][0][arm] for sid in members]
+                else:
+                    after = [winsorise(r, month_bounds) for r in before]
                 tally = counts[key]
                 tally["name_months"] += len(before)
                 tally["capped"] += sum(r > month_bounds[1] for r in before)
@@ -257,13 +298,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n", 1)[0])
     parser.add_argument("--precision", action="store_true")
     parser.add_argument("--ab", type=Path, metavar="ARTEFACT")
-    parser.add_argument("--cutoffs", type=Path, help="JKP return_cutoffs.csv")
+    parser.add_argument("--cutoffs", type=Path, help="JKP return_cutoffs.csv (required for a pre-amendment artefact)")
     args = parser.parse_args(argv)
     if args.precision:
         precision()
     if args.ab is not None:
-        if args.cutoffs is None:
-            parser.error("--ab needs --cutoffs")
         ab(args.ab, args.cutoffs)
     if not args.precision and args.ab is None:
         parser.error("choose --precision and/or --ab")

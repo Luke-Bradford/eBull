@@ -1,14 +1,19 @@
 """#3609 step 2's exposure plan is pinned: the committed plan file is the one register r25 cites, and it was written
 by the committed planner and its import closure (spec premise 6). File and source hashes only; the plan is not rerun.
 
-Like the declaration's construction hash, these freeze the step 2 code the plan ran: an edit to the planner or a
-module it imports fails here until the plan is regenerated and re-pinned."""
+The planner and its closure are hashed at the commit that last wrote the plan, not at HEAD: the plan is a record of
+the code that ran, and step 2 is concluded (#3609, 2026-10-08), so later edits to a module it imports (#3730's
+holding-return clip in the panel builder) do not falsify it. Regenerating the plan moves that commit with it."""
 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
 import re
+import subprocess
+import tarfile
 from pathlib import Path
 
 from app.services.factor_book_declaration import construction_sha256
@@ -29,10 +34,21 @@ def test_the_committed_plan_is_the_one_the_register_pins() -> None:
     assert hashlib.sha256(PLAN_PATH.read_bytes()).hexdigest() == _pinned_sha256()
 
 
-def test_the_plan_was_written_by_the_committed_planner() -> None:
+def _git(*args: str) -> bytes:
+    # Scrubbed of GIT_*: the pre-push hook exports GIT_DIR, which would otherwise redirect the read.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    return subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, check=True, env=env).stdout
+
+
+def test_the_plan_was_written_by_the_committed_planner(tmp_path: Path) -> None:
     plan = json.loads(PLAN_PATH.read_bytes())
-    assert plan["script_sha256"] == hashlib.sha256(PLANNER.read_bytes()).hexdigest()
-    assert plan["code_closure_sha256"] == construction_sha256([PLANNER], REPO)
+    commit = _git("log", "-1", "--format=%H", "--", PLAN_PATH.relative_to(REPO).as_posix()).decode().strip()
+    assert commit, "the plan file has no commit"
+    with tarfile.open(fileobj=io.BytesIO(_git("archive", commit, "app", "scripts"))) as archive:
+        archive.extractall(tmp_path, filter="data")
+    planner = tmp_path / PLANNER.relative_to(REPO)
+    assert plan["script_sha256"] == hashlib.sha256(planner.read_bytes()).hexdigest()
+    assert plan["code_closure_sha256"] == construction_sha256([planner], tmp_path)
 
 
 def test_the_plan_meets_its_declared_criterion() -> None:

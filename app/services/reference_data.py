@@ -45,6 +45,8 @@ JKP_USA_MONTHLY_VW_CAP_URL: Final = (
 )
 #: #3609 step 1: the NYSE size breakpoints JKP's factors are built on (``me`` percentiles, USD millions).
 JKP_NYSE_CUTOFFS_URL: Final = "https://jkpfactors-data.s3.amazonaws.com/public/other/nyse_cutoffs.csv"
+#: #3730: the monthly return percentiles JKP winsorise non-CRSP holding returns at (step 1 spec Amendment 3).
+JKP_RETURN_CUTOFFS_URL: Final = "https://jkpfactors-data.s3.amazonaws.com/public/other/return_cutoffs.csv"
 #: Chen & Zimmermann's Open Source Asset Pricing data page. Each release is a new Google Drive folder, so
 #: the wide long-short file is resolved from this page's link at fetch time rather than pinned.
 OSAP_DATA_PAGE_URL: Final = "https://www.openassetpricing.com/data/"
@@ -60,6 +62,7 @@ FRED_PARSER_VERSION: Final = "fred-csv-v1"
 GLOBAL_Q_PARSER_VERSION: Final = "global-q-monthly-csv-v1"
 JKP_PARSER_VERSION: Final = "jkp-monthly-csv-zip-v1"
 JKP_CUTOFFS_PARSER_VERSION: Final = "jkp-nyse-cutoffs-csv-v1"
+JKP_RETURN_CUTOFFS_PARSER_VERSION: Final = "jkp-return-cutoffs-csv-v1"
 FED_EBP_PARSER_VERSION: Final = "fed-ebp-monthly-csv-v1"
 OSAP_PARSER_VERSION: Final = "osap-predictor-ls-wide-csv-v1"
 
@@ -221,6 +224,17 @@ _FED_EBP_UNITS: Final[Mapping[str, ReferenceUnit]] = {
 }
 _JKP_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_stocks", "n_stocks_min", "date", "ret")
 _JKP_CUTOFFS_HEADER: Final = ("eom", "n", "nyse_p1", "nyse_p20", "nyse_p50", "nyse_p80")
+#: Three families of the same four percentiles: USD total return, local-currency total return, USD excess return.
+_JKP_RETURN_PERCENTILES: Final = ("0_1", "1", "99", "99_9")
+_JKP_RETURN_CUTOFFS_HEADER: Final = (
+    "eom",
+    "n",
+    *(f"{family}_{p}" for family in ("ret", "ret_local", "ret_exc") for p in _JKP_RETURN_PERCENTILES),
+)
+#: The columns Amendment 3's rule reads; a row missing one of them cannot be checked and is refused.
+_JKP_RETURN_RULE_COLUMNS: Final = ("ret_0_1", "ret_99_9", "ret_exc_0_1", "ret_exc_99_9")
+#: The total and excess pairs are one monthly rate apart; the CSV's binary-float noise is far below any rate.
+_JKP_RETURN_SHIFT_TOLERANCE: Final = Decimal("1e-9")
 _OSAP_LS_WIDE_LINK: Final = re.compile(
     r'<a href="https://drive\.google\.com/file/d/([-\w]+)/[^"]*"[^>]*>'
     r"Monthly long-short returns of \d+ predictors following OPs \(wide csv\)</a>"
@@ -705,6 +719,68 @@ def parse_jkp_nyse_cutoffs_csv(payload: bytes) -> ParsedReferenceData:
     return _validated(ParsedReferenceData(tuple(observations), missing_count))
 
 
+def parse_jkp_return_cutoffs_csv(payload: bytes) -> ParsedReferenceData:
+    """Parse JKP ``return_cutoffs.csv``: each month's return percentiles over JKP's global rows (#3730).
+
+    Produced by ``return_cutoffs`` (``GlobalFactors/project_macros.sas:78-92``, called with ``crsp_only=0``): the
+    0.1st, 1st, 99th and 99.9th percentiles of the month's ``ret``, ``ret_local`` and ``ret_exc``, and the row
+    count ``n``. Every month from the first to the last must be present and each family's percentiles must be
+    non-decreasing. Amendment 3 of the #3609 step 1 spec clips a USD total return to ``ret_0_1`` / ``ret_99_9``
+    because JKP's ``ret_exc`` is ``ret`` minus one monthly rate shared by the month: each row must therefore show
+    the same shift at both ends (``ret_99_9 - ret_exc_99_9 == ret_0_1 - ret_exc_0_1``), and a row that does not, or
+    lacks one of those four values, is refused.
+    """
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ReferenceDataSourceError("JKP return cutoffs response is not UTF-8 CSV") from exc
+    reader = csv.reader(io.StringIO(text))
+    header = tuple(cell.strip() for cell in next(reader, ()))
+    if header != _JKP_RETURN_CUTOFFS_HEADER:
+        raise ReferenceDataSourceError(f"JKP return cutoffs header {header!r}; expected {_JKP_RETURN_CUTOFFS_HEADER!r}")
+    observations: list[ReferenceObservation] = []
+    missing_count = 0
+    previous: date | None = None
+    for row_number, row in enumerate(reader, start=2):
+        if not row or all(not cell.strip() for cell in row):
+            continue
+        context = f"JKP return cutoffs row {row_number}"
+        if len(row) != len(header):
+            raise ReferenceDataSourceError(f"{context}: ragged row")
+        try:
+            when = date.fromisoformat(row[0].strip())
+        except ValueError as exc:
+            raise ReferenceDataSourceError(f"{context}: invalid eom") from exc
+        if when != _month_end(when.year, when.month):
+            raise ReferenceDataSourceError(f"{context}: {when} is not a month end")
+        if previous is not None and when != _month_end(*_next_month(previous)):
+            raise ReferenceDataSourceError(f"{context}: {when} does not follow {previous}")
+        previous = when
+        values: dict[str, Decimal] = {}
+        for series_key, raw in zip(header[1:], row[1:], strict=True):
+            if not raw.strip() or raw.strip().upper() in ("NA", "NAN"):
+                missing_count += 1
+                continue
+            values[series_key] = _decimal(raw, context=f"{context}/{series_key}")
+        absent = [key for key in _JKP_RETURN_RULE_COLUMNS if key not in values]
+        if absent:
+            raise ReferenceDataSourceError(f"{context}: missing {', '.join(absent)}")
+        for family in ("ret", "ret_local", "ret_exc"):
+            present = [values[k] for p in _JKP_RETURN_PERCENTILES if (k := f"{family}_{p}") in values]
+            if present != sorted(present):
+                raise ReferenceDataSourceError(f"{context}: {family} percentiles decrease")
+        shift_high = values["ret_99_9"] - values["ret_exc_99_9"]
+        shift_low = values["ret_0_1"] - values["ret_exc_0_1"]
+        if abs(shift_high - shift_low) > _JKP_RETURN_SHIFT_TOLERANCE:
+            raise ReferenceDataSourceError(f"{context}: total and excess bounds differ by unequal shifts")
+        if "n" in values and (values["n"] <= 0 or values["n"] != values["n"].to_integral_value()):
+            raise ReferenceDataSourceError(f"{context}/n: not a positive integer count")
+        for series_key, value in values.items():
+            unit: ReferenceUnit = "count" if series_key == "n" else "decimal_return"
+            observations.append(ReferenceObservation(series_key, when, value, unit))
+    return _validated(ParsedReferenceData(tuple(observations), missing_count))
+
+
 def _next_month(when: date) -> tuple[int, int]:
     return (when.year + 1, 1) if when.month == 12 else (when.year, when.month + 1)
 
@@ -836,6 +912,13 @@ _FACTOR_LIBRARY: Final = (
         JKP_NYSE_CUTOFFS_URL,
         JKP_CUTOFFS_PARSER_VERSION,
         parse_jkp_nyse_cutoffs_csv,
+    ),
+    ReferenceDatasetSpec(
+        "jkp",
+        "jkp_return_cutoffs",
+        JKP_RETURN_CUTOFFS_URL,
+        JKP_RETURN_CUTOFFS_PARSER_VERSION,
+        parse_jkp_return_cutoffs_csv,
     ),
     ReferenceDatasetSpec(
         "osap",
@@ -1144,6 +1227,7 @@ __all__ = [
     "GLOBAL_Q_PARSER_VERSION",
     "JKP_CUTOFFS_PARSER_VERSION",
     "JKP_PARSER_VERSION",
+    "JKP_RETURN_CUTOFFS_PARSER_VERSION",
     "OSAP_PARSER_VERSION",
     "OSAP_USER_AGENT",
     "REFERENCE_DATASETS",
@@ -1161,6 +1245,7 @@ __all__ = [
     "parse_global_q_monthly_csv",
     "parse_jkp_monthly_zip",
     "parse_jkp_nyse_cutoffs_csv",
+    "parse_jkp_return_cutoffs_csv",
     "parse_osap_ls_wide_csv",
     "refresh_reference_dataset",
     "refresh_reference_group",
