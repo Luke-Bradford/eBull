@@ -282,6 +282,7 @@ SELECT issuer_cik, accession_number, form, filed_date, rule_provision
  ORDER BY issuer_cik, accession_number
 """
 REGISTER_START: Final = date(2024, 8, 1)
+VIEW_DEFINITION_SQL: Final = "SELECT pg_get_viewdef('sec_form25_common_equity_delistings'::regclass, true)"
 REGISTER_COLUMNS: Final = ("issuer_cik", "accession_number", "form", "filed_date", "rule_provision")
 
 
@@ -365,9 +366,13 @@ def read_extract(path: Path) -> Iterator[Filing]:
 
 def register_extract(through: date, out: Path) -> None:
     """The register events filed from the stage start through ``through`` (the harvest date), as a CSV that U
-    reads instead of the live view, so a later harvest cannot move a frozen U."""
+    reads instead of the live view, so a later harvest cannot move a frozen U. The sha256 of the view's definition
+    as the database held it is printed for the manifest, so the CSV's provenance names the rule that selected it."""
     with psycopg.connect(settings.database_url) as conn:
         rows = conn.execute(REGISTER_SQL, {"start": REGISTER_START, "through": through}).fetchall()
+        definition = conn.execute(VIEW_DEFINITION_SQL).fetchone()
+    if definition is None or not definition[0]:
+        raise ValueError("the register view has no definition")
     with out.open("x", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(REGISTER_COLUMNS)
@@ -376,7 +381,17 @@ def register_extract(through: date, out: Path) -> None:
             if normalised is None:
                 raise ValueError(f"register event {accession} has an unusable issuer CIK {cik!r}")
             writer.writerow([normalised, accession, form, filed.isoformat(), provision])
-    print(json.dumps({"events": len(rows), "through": through.isoformat(), "register_sha256": sha256_of(out)}))
+    view_sha256 = hashlib.sha256(definition[0].encode()).hexdigest()
+    print(
+        json.dumps(
+            {
+                "events": len(rows),
+                "through": through.isoformat(),
+                "register_sha256": sha256_of(out),
+                "view_definition_sha256": view_sha256,
+            }
+        )
+    )
 
 
 def read_register(path: Path) -> list[tuple[str, str]]:
@@ -385,8 +400,9 @@ def read_register(path: Path) -> list[tuple[str, str]]:
 
 
 def calibrated_k(calibration: Mapping[str, Any]) -> int:
-    """K from a calibration file, after checking that it was computed from this script's pinned artefacts and that
-    its recorded choice is what ``choose_k`` gives on its own pairs."""
+    """K from a calibration file, after checking that the artefact digests it records are this script's pins and
+    that its recorded choice is what ``choose_k`` gives on its own pairs. This is a consistency check, not proof of
+    derivation: the file's content is guarded by its pinned sha256 (``checked``), and ``calibrate`` rebuilds it."""
     pinned = {"stage_a": STAGE_A[1], "stage_b": STAGE_B[1]}
     recorded = {stage: calibration["artefacts"][stage]["manifest_sha256"] for stage in pinned}
     if recorded != pinned:

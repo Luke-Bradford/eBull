@@ -29,7 +29,11 @@
    "sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489",
    "what": "Form 25 register events (sec_form25_common_equity_delistings) filed 2024-08-01 .. 2026-10-08, the slice-1 harvest",
    "inputs": {
-    "harvest_through": "2026-10-08"
+    "harvest_through": "2026-10-08",
+    "view": "sec_form25_common_equity_delistings",
+    "view_definition_sha256": "2667138ea99a5304b9c74c517aaf1c968bebe7d921eed7338ea2278a0ec90a70",
+    "view_definition_source": "sql/252_sec_form25_register.sql (last changed ad1d2ef3)",
+    "database": "dev ebull, generated 2026-10-09"
    }
   },
   {
