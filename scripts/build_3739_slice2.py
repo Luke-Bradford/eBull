@@ -17,7 +17,8 @@ extract and the register extract.
 
     PYTHONPATH=. uv run python scripts/build_3739_slice2.py calibrate --out <calibration.json>
     PYTHONPATH=. uv run python scripts/build_3739_slice2.py extract --zip <submissions.zip> --out <extract.jsonl.gz>
-    PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through <harvest date> --out <register.csv>
+    PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through <harvest date> --out <register.csv> \\
+        [--view-sha256 <d>]
     PYTHONPATH=. uv run python scripts/build_3739_slice2.py universe --calibration <calibration.json> \\
         --calibration-sha256 <d> --extract <extract.jsonl.gz> --extract-sha256 <d> \\
         --register <register.csv> --register-sha256 <d> --out <u-pass1.csv>
@@ -364,7 +365,7 @@ def read_extract(path: Path) -> Iterator[Filing]:
         yield Filing(**{**row, "items": tuple(row["items"])})
 
 
-def register_extract(through: date, out: Path) -> None:
+def register_extract(through: date, out: Path, expected_view_sha256: str | None = None) -> None:
     """The register events filed from the stage start through ``through`` (the harvest date), as a CSV that U
     reads instead of the live view, so a later harvest cannot move a frozen U. The sha256 of the view's definition
     as the database held it is printed for the manifest, so the CSV's provenance names the rule that selected it."""
@@ -373,6 +374,9 @@ def register_extract(through: date, out: Path) -> None:
         definition = conn.execute(VIEW_DEFINITION_SQL).fetchone()
     if definition is None or not definition[0]:
         raise ValueError("the register view has no definition")
+    view_sha256 = hashlib.sha256(definition[0].encode()).hexdigest()
+    if expected_view_sha256 is not None and view_sha256 != expected_view_sha256:
+        raise ValueError(f"the register view's definition is {view_sha256}, not the pinned {expected_view_sha256}")
     with out.open("x", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(REGISTER_COLUMNS)
@@ -381,7 +385,6 @@ def register_extract(through: date, out: Path) -> None:
             if normalised is None:
                 raise ValueError(f"register event {accession} has an unusable issuer CIK {cik!r}")
             writer.writerow([normalised, accession, form, filed.isoformat(), provision])
-    view_sha256 = hashlib.sha256(definition[0].encode()).hexdigest()
     print(
         json.dumps(
             {
@@ -455,6 +458,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     reg = sub.add_parser("register")
     reg.add_argument("--through", type=date.fromisoformat, required=True)
     reg.add_argument("--out", type=Path, required=True)
+    reg.add_argument("--view-sha256", help="refuse unless the live view's definition has this digest")
     uni = sub.add_parser("universe")
     uni.add_argument("--calibration", type=Path, required=True)
     uni.add_argument("--calibration-sha256", required=True)
@@ -469,7 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "extract":
         extract(args.zip, args.out)
     elif args.command == "register":
-        register_extract(args.through, args.out)
+        register_extract(args.through, args.out, args.view_sha256)
     else:
         universe(
             checked(args.calibration, args.calibration_sha256),

@@ -50,7 +50,7 @@ from the live view with the slice-1 harvest date as its cutoff, so a later harve
 ```bash
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py calibrate --out calibration-k-g.json
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py extract --zip submissions.zip --out extract.jsonl.gz
-PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through 2026-10-08 --out register.csv
+PYTHONPATH=. uv run python scripts/build_3739_slice2.py register --through 2026-10-08 --out register.csv --view-sha256 2667138e…
 PYTHONPATH=. uv run python scripts/build_3739_slice2.py universe --calibration calibration-k-g.json \
     --calibration-sha256 347f2fa1… --extract extract.jsonl.gz --extract-sha256 1bd3989b… \
     --register register.csv --register-sha256 68bc4062… --out u-pass1.csv
