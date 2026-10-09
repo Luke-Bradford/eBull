@@ -145,19 +145,39 @@ def test_entrant_filing_window_and_forms(form: str, accepted: str, items: tuple[
 
 
 def test_pass1_bases() -> None:
-    base = formation((1, "A", 30.0), (2, "B", 20.0), (3, "C", 10.0))
+    a, b, c, d, e = (f"000000000{i}" for i in range(1, 6))
+    base = formation((1, a, 30.0), (2, b, 20.0), (3, c, 10.0))
     filings = [
-        filing("8-A12B", "2025-01-02T14:00:00.000Z", cik="C"),  # admitted at F: not an entrant
-        filing("8-A12B", "2025-01-02T14:00:00.000Z", cik="D"),
+        filing("8-A12B", "2025-01-02T14:00:00.000Z", cik=c),  # admitted at F: not an entrant
+        filing("8-A12B", "2025-01-02T14:00:00.000Z", cik=d),
     ]
-    u = s2.pass1(base, F, 2, filings, [("C", "r1"), ("E", "r2")])
-    assert set(u) == {"A", "B", "C", "D", "E"}
-    assert u["A"] == {"incumbent": ["1"]}
-    assert u["C"] == {"terminated": ["r1"]}
-    assert set(u["D"]) == {"entrant"}
+    u = s2.pass1(base, F, 2, filings, [(c, "r1"), (e, "r2")])
+    assert set(u) == {a, b, c, d, e}
+    assert u[a] == {"incumbent": ["1"]}
+    assert u[c] == {"terminated": ["r1"]}
+    assert set(u[d]) == {"entrant"}
 
 
 def test_register_reader_returns_cik_and_accession(tmp_path: Path) -> None:
     path = tmp_path / "register.csv"
     path.write_text(",".join(s2.REGISTER_COLUMNS) + "\n0000000002,0000000002-24-000001,25-NSE,2024-08-01,(b)\n")
     assert s2.read_register(path) == [("0000000002", "0000000002-24-000001")]
+
+
+def test_pass1_refuses_a_cik_that_is_not_ten_digits() -> None:
+    base = formation((1, "0000000001", 30.0))
+    with pytest.raises(ValueError, match="not 10-digit"):
+        s2.pass1(base, F, 1, [], [("2", "r1")])
+
+
+def test_calibrated_k_checks_the_artefact_pins_and_the_choice() -> None:
+    pairs = [{"shares": {"1500": 0.001, "2000": 0.0, "2500": 0.0, "3000": 0.0}}]
+    good = {
+        "artefacts": {"stage_a": {"manifest_sha256": s2.STAGE_A[1]}, "stage_b": {"manifest_sha256": s2.STAGE_B[1]}},
+        "K": {"chosen": 1500, "pairs": pairs},
+    }
+    assert s2.calibrated_k(good) == 1500
+    with pytest.raises(ValueError, match="other artefacts"):
+        s2.calibrated_k({**good, "artefacts": {**good["artefacts"], "stage_b": {"manifest_sha256": "x"}}})
+    with pytest.raises(ValueError, match="not the one its pairs give"):
+        s2.calibrated_k({**good, "K": {"chosen": 2000, "pairs": pairs}})

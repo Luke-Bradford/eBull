@@ -191,6 +191,7 @@ ENTRANT_LAST: Final = date(2026, 7, 31)
 #: The extract keeps these forms; 8-K and 8-K/A also feed §3.2's Item 5.03 screen.
 EXTRACT_FORMS: Final = ENTRANT_FORMS | {"8-K", "8-K/A"}
 EXTRACT_FROM: Final = date(2024, 4, 1)
+_CIK: Final = re.compile(r"\d{10}")
 _SUBMISSION_NAME: Final = re.compile(r"CIK(\d{10})(?:-submissions-\d+)?\.json")
 
 
@@ -251,9 +252,16 @@ def pass1(
 ) -> dict[str, dict[str, list[str]]]:
     """U pass 1: CIK -> {basis: evidence}. ``incumbent`` evidence is the issuer's rank at F; ``entrant`` the
     qualifying accessions; ``terminated`` the register events' accessions. ``register`` is (issuer CIK, accession)
-    for every register event in §9's population."""
+    for every register event in §9's population. Every CIK must be EDGAR's 10-digit form, as the panel, the
+    extract and the register store it; another spelling would split one issuer into two entries, so it refuses."""
     u: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     ranks = issuer_ranks(base)
+    filings = list(filings)
+    register = list(register)
+    spellings = set(ranks) | {f.cik for f in filings} | {cik for cik, _ in register}
+    bad = sorted(cik for cik in spellings if not _CIK.fullmatch(cik))
+    if bad:
+        raise ValueError(f"{len(bad)} CIKs are not 10-digit: {bad[:5]}")
     for cik, rank in ranks.items():
         if rank <= k:
             u[cik]["incumbent"].append(str(rank))
@@ -376,8 +384,21 @@ def read_register(path: Path) -> list[tuple[str, str]]:
         return [(row["issuer_cik"], row["accession_number"]) for row in csv.DictReader(handle)]
 
 
+def calibrated_k(calibration: Mapping[str, Any]) -> int:
+    """K from a calibration file, after checking that it was computed from this script's pinned artefacts and that
+    its recorded choice is what ``choose_k`` gives on its own pairs."""
+    pinned = {"stage_a": STAGE_A[1], "stage_b": STAGE_B[1]}
+    recorded = {stage: calibration["artefacts"][stage]["manifest_sha256"] for stage in pinned}
+    if recorded != pinned:
+        raise ValueError(f"the calibration was computed from other artefacts: {recorded}")
+    k = calibration["K"]["chosen"]
+    if k != choose_k(calibration["K"]["pairs"])[0]:
+        raise ValueError(f"the calibration's K {k} is not the one its pairs give")
+    return k
+
+
 def universe(calibration: Path, extract_path: Path, register_path: Path, out: Path) -> None:
-    k = json.loads(calibration.read_text())["K"]["chosen"]
+    k = calibrated_k(json.loads(calibration.read_text()))
     stage_b, _ = read_panel(STAGE_B)
     register = read_register(register_path)
     u = pass1(stage_b[BASE_FORMATION], BASE_FORMATION, k, read_extract(extract_path), register)
