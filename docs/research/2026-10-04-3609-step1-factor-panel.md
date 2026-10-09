@@ -987,6 +987,55 @@ Weights are fixed at s(M). A holding's month-(t+1) return has one of three statu
 
 Membership never depends on a later return being available.
 
+**Amendment 3 (2026-10-09, #3730): holding returns are winsorised by JKP's rule.** A holding was the month-end
+`adj_close` ratio with no bound, so unstamped reverse splits and reorganisation splices in the vendor series entered
+the books whole (#3730: EXXI 2017-02-28 ×250, GMBL 2023-12-22 ×658, both with `split_factor` 1 and `close` jumping
+with `adj_close`).
+- **Source rule.** JKP's portfolio code clips every retained non-CRSP (`source_crsp == 0`) holding return:
+  `GlobalFactors/portfolios.R` (`bkelly-lab/ReplicationCrisis` at `67174c7f`, lines 102 and 138–142, with the default
+  `wins_ret = T`) caps `ret_exc_lead1m` at `ret_exc_99_9` and floors it at `ret_exc_0_1`. Line 140 joins the cutoff
+  row's `eom_lag1` to the formation's `eom`, so the bounds are the **holding month's**. The cutoffs come from
+  `return_cutoffs` (`GlobalFactors/project_macros.sas:78-92`, called with `crsp_only=0` at `main.sas:79`): the 0.1st
+  and 99.9th percentiles of the month's `ret_exc` over JKP's global rows with `common`, `obs_main`, `exch_main` and
+  `primary_sec` all 1, `excntry` not `ZWE` and `ret_exc` present, CRSP and Compustat alike. (The comment at
+  `portfolios.R:102` says "of CRSP returns"; the call says otherwise, and the call is what ran.) JKP publishes the
+  table as `https://jkpfactors-data.s3.amazonaws.com/public/other/return_cutoffs.csv`.
+- **Scope.** We adopt JKP's clipping operation only. Every Intrader series is non-CRSP vendor data, so every holding
+  is in its scope. JKP's own retention screen (it drops a row whose `ret_exc_lead1m` is missing, `portfolios.R:131`)
+  is not adopted: membership and the `terminal` / `coverage_exit` imputations stay as this section defines them.
+- **Rule.** After §"Returns and holdings" sets each arm's value (including a `terminal` imputation), that value is
+  clipped to [`ret_0_1`, `ret_99_9`] of the holding month's row: the USD total-return pair, not `ret_local_*` and not
+  `ret_exc_*`. Our holdings are USD total returns. JKP's `ret_exc` is `ret` minus one monthly risk-free rate shared by
+  every row in the month, so each excess percentile is the total-return percentile minus that rate, and
+  `clip(r, L, U) = clip(r − f, L − f, U − f) + f` makes the two bounds the same rule. The reader of the file
+  checks it per row (`ret_99_9 − ret_exc_99_9` equals `ret_0_1 − ret_exc_0_1`) and refuses a row where it fails.
+- **Fields.** `holding.by_arm` holds the clipped values, and every book reads it, as now. `holding.raw_by_arm` keeps
+  the unclipped arm values, and `holding.bounds` records the holding month and the two cutoffs applied. Status,
+  `end_bar` and `period_return` keep their raw meaning. Membership, weights and denominators are unchanged. The cutoff
+  file is frozen into the artefact's `inputs/` with its sha256 like the other reference snapshots. A holding month with
+  no cutoff row, a non-finite bound or `ret_0_1 > ret_99_9` refuses the build.
+- **Why not a corpus fix or a screen.** The corpus cannot supply the missing return: the split correction applies
+  vendor stamps only, and correcting from a second vendor was refused on bias grounds
+  (`app/services/research_split_adjustment.py`, `SPLIT_CORRECTION_POLICY`). The research quarantine does not contain
+  the class either: GMBL's and WETG's breaks were admitted back by T3's turnover corroboration, and the panel reads
+  `research_bar_quarantine` only, not transition verdicts. Ending a holding at a §"Daily screen" pair was considered
+  and dropped: it is not a published rule, it values the exit at a bar chosen with information from the later one,
+  and it needs its own precedence over `terminal`.
+- **What it does not do, stated.** A missed reverse split still contributes up to the month's cap, not zero. The
+  bound is a published containment, not a classification: it caps real gains and floors real losses in the same way.
+  For a long book, the cap is conservative and the floor is optimistic. Both counts are printed by the A/B, per
+  population and arm.
+- **Evidence.** `PYTHONPATH=. uv run python -m scripts.measure_3730_holding_jumps --precision` prints, from the dev
+  DB, the Intrader adjacent-bar pairs outside this spec's daily-screen bounds against the second vendor. That vendor is
+  a Yahoo scrape whose served set is survival-correlated, and "smooth" there means disagreement, not an adjudicated
+  error. `--ab <stage-A artefact> --cutoffs <csv>` prints, per population and arm over every admitted holding of a
+  published pre-amendment stage-A artefact, the counts above +300%, capped and floored, the maximum before and after,
+  and the mean over formations of the equal-weight monthly holding return before and after. These are diagnostics, not
+  factor or book results. It refuses an artefact whose rows already carry `raw_by_arm`.
+- **Effect.** Holding returns change, so an artefact built under this amendment carries a new manifest. Stage B is
+  not rebuilt here: the builder is in step 2's hashed construction closure, so a stage-B rebuild belongs to whichever
+  new trial declares it. Verdicts already recorded on the old artefacts stand as recorded, under the rule they used.
+
 **Arms.** `best_case` and `worst_case` are both computed and printed. A PASS needs both.
 
 ## Fidelity
