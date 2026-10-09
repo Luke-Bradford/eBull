@@ -208,6 +208,11 @@ def test_a_missing_header_column_refuses() -> None:
         parse_file(payload, JUNE_15)
 
 
+def test_a_header_only_payload_refuses() -> None:
+    with pytest.raises(ShortInterestError, match="no rows"):
+        parse_file(_payload(JUNE_15), JUNE_15)
+
+
 def test_body_settlement_date_must_equal_the_file_date() -> None:
     with pytest.raises(ShortInterestError, match="settlementDate"):
         parse_file(_payload(JUNE_15, ("AAA", 1, 0, 1000, "")), date(2021, 6, 30))

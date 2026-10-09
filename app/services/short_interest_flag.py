@@ -230,6 +230,8 @@ def parse_file(payload: bytes, settlement: date) -> FinraFile:
         if key in rows:
             twice.add(key)
         rows[key] = FinraRow(short, previous, adv, flagged, row["issueName"] or "")
+    if physical == 0:
+        raise ShortInterestError(f"{settlement}: payload has a header and no rows")
     return FinraFile(rows, frozenset(twice), physical, revised, zero, blanks)
 
 
