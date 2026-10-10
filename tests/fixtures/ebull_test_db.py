@@ -496,6 +496,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "etoro_session_rate_observations",
     "etoro_session_rate_requests",
     "etoro_session_rate_captures",
+    # #3740 slice F — no FK to instruments (sql/479).
+    "etoro_session_close_captures",
     # #3385 slice 2a, child-to-parent.
     "hunt_trial_retries",
     "hunt_trial_outcomes",
