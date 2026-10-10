@@ -195,10 +195,11 @@ collision 46, unparsed form 1.
 candidates (§3.2–3.3), and two comparison stamps have no split candidate on their CIK anywhere in the window:
 Commerce Bancshares (`CBSH`, 2022-12-01, factor 1.05) and Southern Copper (`SCCO`, 2024-05-07, factor 1.0104). Both
 factors lie inside the cover screen's [0.8, 1.25] band, and neither issuer has an XBRL ratio fact or an Item 5.03 8-K
-in the window. So count recall is at most 40 / 42 = 95.2%, below 97%. Three more stamps have candidates on their CIK
-but none whose interval covers the stamp date: `UHAL` 2022-11-10 (factor 10), `WRB` 2024-07-11 (1.5) and `AMC`
-2023-08-23 (1.133333; a covering candidate exists for its 2023-08-24 stamp). The per-stamp coverage table is
-reproduced by joining the two pinned files on CIK. What each of the five actions was is adjudication's question, not
+in the window. So count recall is at most 40 / 42 = 95.2%, below 97%. Two more stamps have candidates on their CIK
+but none whose interval covers the stamp date: `UHAL` 2022-11-10 (factor 10) and `WRB` 2024-07-11 (1.5).
+(Corrected in slice 3c: this sentence first also listed `AMC` 2023-08-23, which Item 5.03 candidate `S004986`,
+[2023-08-14, 2023-11-14], covers.) The per-stamp coverage table is
+reproduced by joining the two pinned files on CIK. What each of these actions was is adjudication's question, not
 this measurement's.
 
 **The checker** (§3.3), `check --type <record type>`, over an event-file record CSV:
@@ -222,7 +223,8 @@ this measurement's.
   - **split effective date:** quoted beside adjusted-basis or ex-date words (§1: the first session on the adjusted
     basis). Otherwise, the record date (beside "record") and the payable date (beside "payable", "paid",
     "distributed", "distribution date" or "issued") must be quoted, and the effective date must be FINRA 11140's date
-    from them: the NYSE session after payable for a distribution of 25% or more, else the record date. A reverse
+    from them: the NYSE session after payable for a distribution of 25% or more, else the record date (superseded by
+    Amendment 1: before 2024-05-28, the business day before the record date; slice 3d changes the code). A reverse
     split has no such fallback (§1 source rules).
   - **split class:** named by title or symbol in an action quote (one that also states the ratio or the effective
     date), or the issuer's own evidence document has a cover that tags exactly one 12(b) class (one
@@ -247,3 +249,34 @@ PYTHONPATH=. uv run python scripts/build_3739_slice3b.py check --type split --re
 ```
 
 Next: §3.4's one screen revision, then the replica with F = 2020-07-31 (the decision and its reasons are on #3739).
+
+## Slice 3c (2026-10-10): Amendment 1, the revision after the 2022 replica's fail
+
+The spec's §"Amendment 1" fixes the one revision §3.4 allows, before anything of the 2020 replica is produced: a
+stock-dividend fact screen; periodic-report screens read 203 days past the event window (stage C's split window
+ends 2026-10-01 and it builds no earlier than 2027-04-22); the cover band's ends raise; the checker reads percentage
+and additional-share ratios; the FINRA 11140(b)(1) fallback is versioned by date; unmatched comparison stamps are read
+and listed but stay in both denominators; the count bar's power is stated. The record taxonomy and the comparison set are
+unchanged; the split event window, unbounded before, now ends 2026-10-01. Its measurements read only the
+pinned replica-2022 inputs:
+
+| measurement | figure |
+|---|---:|
+| days between distinct acceptance dates of consecutive covers of a (CIK, class) series (69,841 gaps, 9,522 series): p50 / p90 / p99 / p99.9 | 91 / 126 / 197 / 431 |
+| comparison stamps with a covering candidate on their CIK (CIK-level interval coverage, not a class, ratio or date match), covers and ratio facts read through 2024-07-31 → 2024-09-30 | 38 → 39 of 42 (`WRB` gains a cover-count candidate, ratio 1.48849) |
+
+```bash
+R=docs/research/3739-event-file/replica-2022
+N=$R/inputs/fsnds-notes-2022q1-2024q3-extract.jsonl.gz
+PYTHONPATH=. uv run python scripts/build_3739_slice3c.py gaps --notes $N
+for through in 2024-07-31 2024-09-30; do
+  PYTHONPATH=. uv run python scripts/build_3739_slice3c.py coverage --evidence-through $through --notes $N \
+      --extract $R/inputs/submissions-2026-10-09-extract-from-2022-04-01.jsonl.gz \
+      --comparison $R/comparison-intrader-stamps.csv
+done
+```
+
+Each command prints its inputs' sha256 beside the figures; they equal the pins above. Next (slice 3d): the code
+changes (stock-dividend screen, evidence horizon, closed band, checker ratio forms and versioned fallback, the
+unmatched-stamp listing), then the 2020 replica's U and comparison size n with the power table,
+pinned before its adjudication.
