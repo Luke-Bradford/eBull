@@ -18,7 +18,10 @@ Two phases:
   record date by the Nasdaq/FINRA 11140 table, and compares with Intrader's (series, ex-date, amount) events in the
   window 2023-10-02..2024-08-30.
 
-Usage: ``PYTHONPATH=. uv run python -m scripts.pilot_3740_slice_f_dividend_extraction fetch|score``
+- ``split``: offline. Lists reference events with no year-bearing date string near their ex-date in any fetched
+  document of the issuer (an upper bound on what EDGAR content could date).
+
+Usage: ``PYTHONPATH=. uv run python -m scripts.pilot_3740_slice_f_dividend_extraction fetch|score|split``
 """
 
 from __future__ import annotations
@@ -294,8 +297,55 @@ def score() -> None:
     print(f"tally sha256 {digest}")
 
 
+def _date_strings(d: date) -> set[str]:
+    full, abbr = d.strftime("%B"), d.strftime("%b")
+    out = {
+        f"{full} {d.day}, {d.year}",
+        f"{full} {d.day} {d.year}",
+        f"{abbr}. {d.day}, {d.year}",
+        f"{abbr} {d.day}, {d.year}",
+        f"{d.month}/{d.day}/{d.year}",
+        f"{d.month:02d}/{d.day:02d}/{d.year}",
+        f"{d.month}/{d.day}/{d.year % 100:02d}",
+        f"{d.day} {full} {d.year}",
+        d.isoformat(),
+    }
+    if d.month == 9:
+        out.add(f"Sept. {d.day}, {d.year}")
+    return out
+
+
+def split() -> None:
+    """Reference events with no year-bearing date string for the ex-date or the three sessions after it in any
+    fetched document of the issuer (the bound in the spec's pilot paragraph)."""
+    cohort = json.loads((CACHE / "cohort.json").read_text())
+    reference = _reference(cohort)
+    absent: list[str] = []
+    total = 0
+    for member in cohort:
+        cik, series = str(member["cik"]), int(member["series_id"])
+        if not reference.get(series):
+            continue
+        docs = [p for p in (CACHE / cik).glob("*/*") if p.name != "index.json"]
+        blob = _SPACE.sub(" ", " ".join(_text(p.read_text(errors="replace")) for p in docs))
+        for ex, amount in sorted(reference[series].items()):
+            total += 1
+            days, d = {ex}, ex
+            for _ in range(3):
+                d += timedelta(days=1)
+                while us_market_status(d) == "closed":
+                    d += timedelta(days=1)
+                days.add(d)
+            if not any(text in blob for day in days for text in _date_strings(day)):
+                absent.append(f"{cik} {ex} {amount}")
+    print(f"reference events {total}; no date text {len(absent)}; names {len({a.split()[0] for a in absent})}")
+    print("\n".join(absent))
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "fetch":
         fetch(int(sys.argv[2]) if len(sys.argv) > 2 else None)
+    elif sys.argv[1] == "split":
+        split()
     else:
         score()
