@@ -1,571 +1,672 @@
 # #3740 slice F — the forward capture for step 3's paper accrual
 
-Status: **draft; Codex checkpoint 1 open after round 2, and the market-data route is changing (§"Route change after
-round 2").** Nothing here has been built or run beyond the read-only probe in §"Measured premises".
+Status: **draft v3; Codex checkpoint 1 open (rounds 1–2 ran on v1 and v2).** v3 moves market data to Massive (formerly
+Polygon.io) and applies round 2's protocol findings. Nothing has been built. v3's Massive premises are marked
+**[to measure]** and need the operator's `MASSIVE_API_KEY`; round 3 runs after they are measured. v2, the text round 2
+reviewed, is at commit `88c7248f`; raw findings are in `docs/research/3740-slice-f-ckpt1-findings.md`.
 
-## Route change after round 2 (2026-10-10)
-
-Round 2 (53 findings, 46 BLOCKING) confirmed that the protocol revisions moved forward, but it rejected the market-data
-route at its root. eToro's official close has no documented basis, and per-observation checks (roll, dated
-confirmation, in-session anchor) are diagnostics, not the nominal-price contract obligation 6 requires (round 2,
-findings 11, 27, 28). eToro serves no dated corporate actions, so F7's measured vendor factor cannot attribute or
-classify an action (29–31). PWB's monthly republish has no evidence cutoff or documented coverage contract (34–41).
-Each of those is a property of the sources, so further rule-writing on them will not close the checkpoint.
-
-**Massive (formerly Polygon.io) documents what is missing, on its free "Stocks Basic" plan** (5 calls per minute,
-2 years of history, end-of-day data, reference data and corporate actions; `massive.com/pricing`, 2026-10-10):
-- `GET /v2/aggs/grouped/locale/us/market/stocks/{date}`: OHLC for all US stocks on a date in one call, with
-  `adjusted=false` documented as "not adjusted for splits";
-- `GET /stocks/v1/splits`: each split's `execution_date`, `split_from`, `split_to` and `adjustment_type`
-  (`forward_split`, `reverse_split`, `stock_dividend`);
-- `GET /v3/reference/tickers/{ticker}?date=`: point-in-time `type`, `cik`, `composite_figi`, `share_class_figi`,
-  `list_date`, `delisted_utc`, `primary_exchange`, `active`;
-- a dividends endpoint under corporate actions (fields to be read from its documentation page).
-
-**Decision (supervisor, under the 2026-10-08 delegation): slice F's v3 takes forward raw closes, split events,
-dividends, security type, CIK link, listing date and identity from Massive**, captured daily by the pinned runtime
-(one grouped call per session plus corporate-action and reference calls fit inside 5 per minute). eToro stays the
-source of tradability and the anchor for parity; PWB and the eToro-factor machinery (F6–F9 below) are dropped. The
-protocol sections (state machine, registry, witness, windows, outcomes, superset, A1, A2) carry forward with round 2's
-protocol findings (1–10, 15–18, 47–51) still to apply. The two years of history also cover the 15-month share-basis
-lookback that X6 could not.
-
-**Blocked on one human action:** a Massive account and API key. Creating one accepts Massive's terms in the
-operator's name, so the loop cannot do it. Until the key exists, v3's premises (coverage of delisted names in grouped
-daily, the dividends contract, the call budget) cannot be measured, and the spec stays open. Raw round-2 findings:
-`docs/research/3740-slice-f-ckpt1-findings.md`.
-
-The v2 text below is kept as the record that round 2 reviewed. Parent: `docs/research/2026-10-10-3740-step3-vw-book.md` ("the
-parent"), §"Forward accrual", whose §"Sealing invariants" (1–8) and §"Slice F's obligations" (1–12) this spec must
-meet. The parent's rules stand unless a row of §"Declared exceptions" (X) or §"Amendments to the parent" (A) replaces
-one; each such row is a decision this checkpoint reviews.
+Parent: `docs/research/2026-10-10-3740-step3-vw-book.md` ("the parent"), §"Forward accrual", whose §"Sealing
+invariants" (1–8) and §"Slice F's obligations" (1–12) this spec must meet. The parent's rules stand unless a row of
+§"Declared exceptions" (X) or §"Amendments to the parent" (A) replaces one.
 
 ## What slice F is for
 
 The step-3 book is confirmed on 24 forward months (parent premise 3). Every input to a forward formation or holding
 month must be captured as it becomes available, bound so it cannot be replaced, and witnessed outside our control.
 Slice F fixes, per input: the source, the rule that turns it into the parent's input, when it is acquired, how it is
-bound and witnessed, how a failure ends, and what the dry run must show before the declaration.
+bound and witnessed, how each failure ends, and what the dry run must show before the declaration. It computes nothing
+about performance: no portfolio is formed, weighted or valued on any captured month before the 24th holding month's
+inputs are bound (invariant 7); instrument-level validation is allowed (§"Dry run").
 
-It computes nothing about performance. No portfolio is formed, weighted or valued on any captured month before the
-24th holding month's inputs are bound (invariant 7); instrument-level validation is allowed (§"Dry run").
+**Design in one paragraph.** Prices and corporate actions come from Massive: each session's unadjusted closes for all
+US stocks in one call, bound after that session's close and before the next open; dated split events with ratios;
+cash dividends with ex-dates and amounts; and a daily point-in-time ticker reference keyed by composite FIGI, with
+type and CIK. Daily total returns, MAX and holding-month returns are computed by us from those documented inputs.
+eToro supplies the population's listing and tradability only. SEC supplies accounting, shares, accession headers
+(SIC) and Form 25 terminations. N-PORT, Ken French and JKP files are fetched by the capture itself. Every acquisition
+is written once and receipted; receipts are hash-chained, logged in Sigstore's Rekor v2 transparency log and
+time-stamped by an RFC 3161 authority.
 
-**Design in one paragraph.** Decision prices come from eToro: each session's official closing print, verified per
-instrument against an in-session price and the next session's dated copy of the same field; adjustment factors and
-MAX's daily returns come from eToro daily candles fetched once at each formation. Filings data come from SEC bulk
-files captured before the formation's close. Holding-month total returns come from PWB's `adj_close`, a Yahoo-derived
-archive of the same family as step 1's Intrader `adj_close`, and termination and coverage come from our own daily
-closes, which are survivorship-free because they are recorded as they happen. B1 comes from N-PORT and factors from
-Ken French, each fetched by the capture itself. Every acquisition is written once, receipted, and logged in a public
-append-only transparency log.
+## Why the route changed after round 2
 
-## Measured premises (2026-10-10, read-only)
+Round 2 (53 findings, 46 BLOCKING) rejected the v2 market-data sources at their root:
+- eToro's official close has no documented price basis, and per-observation checks are diagnostics, not the
+  nominal-price contract obligation 6 requires (round 2, 11, 18, 19, 27, 28);
+- eToro serves no dated corporate actions, so a measured vendor factor can neither date nor classify an action
+  (20, 21, 29–31);
+- PWB's monthly republish has no evidence cutoff or coverage contract (33–40).
 
-`PYTHONPATH=. uv run python -m scripts.probe_3740_slice_f_sources` prints items marked **[probe]** with their
-populations. Items marked **[doc]** cite documentation; **[code]** cite code.
+These are properties of the sources, so v3 replaces them rather than adding rules. Massive's free "Stocks Basic" plan
+documents what was missing (`massive.com/pricing` and the endpoint pages below, read 2026-10-10). The plan is limited
+to 5 calls per minute, 2 years of history and end-of-day recency. **Decision (supervisor, under the 2026-10-08
+delegation):** Massive is the market-data source; the eToro close, candle and rate kinds, PWB and FINRA are removed.
 
-1. **[probe][doc] Official closes, one request.** `GET /api/v1/market-data/instruments/history/closing-price`
-   (`api-reference/market-data/get-historical-closing-prices.md`) returned 16,681 instruments. Each row has
-   `officialClosingPrice` ("Most recent official closing price", **undated**) and `closingPrices.daily` ("Official
-   closing price from the previous trading day", **dated**). The portal states no adjustment basis and no price basis.
-   On Saturday 2026-10-10 `daily.date` was 2026-10-08 for 11,621 rows.
-   - Against `price_daily.close` (Bid-built eToro candles, `etoro-api.md:322-324`) for 2026-10-09, over 10,972
-     instruments: median ratio − 1 = +0.0002, p1 −0.0147, p99 +0.0537, 573 beyond ±2%. The two are different prices,
-     and that comparison does not date or validate either (§F6 does).
-2. **[code][doc] Candles are back-adjusted at fetch and carry no dividends** (`app/services/market_data.py:783-790`,
-   `etoro-api.md:331-332`). The portal index lists no dividend or corporate-action endpoint.
-3. **[probe] PWB** (`paperswithbacktest/Stocks-Daily-Price`, Hugging Face) publishes each monthly update as a git
-   commit; the probe prints the commit list. Of the tradable type-5 instruments on eToro exchanges 4, 5 and 33, the
-   probe prints how many map to the stored `@2026-09-09` series (5,247 of 6,664 on 2026-10-10). `close` is
-   split-adjusted and `adj_close` adds dividends (`docs/proposals/etl/2026-10-04-3619-total-return-splice.md:27`); each
-   update re-bases history (`docs/review-prevention-log.md:11895`). The stored capture labelled `@2026-09-09` names HF
-   revision `c64377a3` (`…-total-return-splice.md:331`), which the commit list dates 2026-10-01, and its last bar is
-   2026-09-09: the relation between a commit's time and its data's last bar is not established, so F9 selects commits
-   by the data they contain, never by commit date alone, and the dry run measures the lag.
-4. **[probe][code] SEC bulk files are overwritten daily** with no history (`app/services/sec_bulk_refresh.py:47-63`);
-   the probe prints their sizes and mtimes.
-5. **[doc] EDGAR company record** (`submissions` JSON) carries `sic`, and its filing list carries `form`,
-   `acceptanceDateTime` (UTC) and `accessionNumber` (`sec-edgar.md:59, 74, 1072-1074`). Exchange certifications of a
-   listing are EDGAR form types (`CERTNYS`, `CERTNAS`, `CERTARCA`, `CERTAMEX`, `CERTBATS`).
-6. **[probe][code] Instrument type** is eToro `instrumentTypeID` (5 Stocks, 6 ETF; `etoro_instrument_types`); no
-   structured eToro field marks preferred, warrant, unit or ADR (the probe prints the name-marker count).
-7. **[code] Connections:** 27 usable, demand 24 + reserve 3 (`app/db/pg_settings.py:127-230`); a daemon lane adds 2.
-8. **[code] B1 and factors:** `sec_nport_monthly_returns` has no scheduled writer; `french_reference_refresh` appends
-   a snapshot per content change (`app/services/reference_data.py:1051-1176`).
-9. **[doc] Rekor** (Sigstore's public transparency log): append-only, no update or delete operation in its API, each
-   entry with a server-set `integratedTime` and an inclusion proof; search by public key is offered as
-   "EXPERIMENTAL … best effort only" (`openapi.yaml`, `/api/v1/index/retrieve`).
+## Premises
+
+Labels: **[doc]** cites documentation, **[code]** cites code, **[probe]** is printed by
+`PYTHONPATH=. uv run python -m scripts.probe_3740_slice_f_sources`, **[to measure]** needs the key and is measured by
+the plumbing test (§"Dry run") before round 3.
+
+1. **[doc] Grouped daily.** `GET /v2/aggs/grouped/locale/us/market/stocks/{date}` returns OHLC, volume and VWAP for
+   "all U.S. stocks" on a date in one request. `adjusted=false` returns results "NOT adjusted for splits"; the
+   response echoes `adjusted`. Each row has `T` (symbol), `c` (close) and `t` ("the end of the aggregate window").
+   `include_otc` defaults to false. Basic plan: end-of-day recency, 2 years of history
+   (`docs/rest/stocks/aggregates/daily-market-summary.md`).
+2. **[doc] Splits.** `GET /stocks/v1/splits` returns `ticker`, `execution_date`, `split_from` (old shares),
+   `split_to` (new shares), `adjustment_type` (`forward_split`, `reverse_split`, `stock_dividend`) and `id`. The
+   execution date is documented exactly: "On the prior trading day, the post-market session is the last session that
+   shows pre-split prices. On the execution date, all trading is already adjusted for the split." Filters on
+   `execution_date` ranges; up to 5,000 rows per page with `next_url`. Updated daily; 2 years on Basic
+   (`docs/rest/stocks/corporate-actions/splits.md`).
+3. **[doc] Dividends.** `GET /stocks/v1/dividends` returns `ticker`, `ex_dividend_date`, `cash_amount` ("original
+   dividend amount per share"), `currency`, `declaration_date`, `record_date`, `pay_date`, `distribution_type`
+   (recurring, special, supplemental, irregular, unknown) and `id`, filterable on `ex_dividend_date` ranges, 5,000 per
+   page. Updated daily; 2 years on Basic (`docs/rest/stocks/corporate-actions/dividends.md`). The deprecated
+   `/v3/reference/dividends` and `/v3/reference/splits` are not used.
+4. **[doc] Ticker reference.** `GET /v3/reference/tickers?date=&market=stocks&active=` lists tickers "available on
+   that date", 1,000 per page, each with `ticker`, `type`, `cik`, `composite_figi`, `share_class_figi`,
+   `primary_exchange`, `active`, `delisted_utc` and `last_updated_utc`
+   (`docs/rest/stocks/tickers/all-tickers.md`). `GET /v3/reference/tickers/{ticker}?date=` adds `list_date` ("the date
+   that the symbol was first publicly listed") and share counts (`ticker-overview.md`). `GET /v3/reference/tickers/types`
+   lists the type codes and descriptions (`ticker-types.md`). `GET /vX/reference/tickers/{id}/events` returns
+   `ticker_change` events for a ticker, CUSIP or composite FIGI (`ticker-events.md`).
+5. **[to measure] Massive premises v3 depends on.** Each is a plumbing-test item with a pass rule (§"Dry run",
+   plumbing test):
+   - (a) the time after a session's close at which `adjusted=false` grouped daily for that session first returns a
+     non-empty result on the Basic plan; the design needs it before 08:00 New York on the next session's date;
+   - (b) SPY and IVV appear in grouped daily under the stocks market;
+   - (c) the share of eToro type-5 US instruments whose symbol maps to a grouped-daily row on a recent session;
+   - (d) a ticker delisted inside the last 2 years appears in grouped daily for sessions before its delisting
+     (grouped daily is by date, so it should; the probe checks 20 names from `active=false`);
+   - (e) the splits and dividends endpoints' behaviour on `execution_date`/`ex_dividend_date` filters, whether
+     announced future events are listed before their date, and the share of rows with non-USD `currency`;
+   - (f) the class-share symbol format in `T` (for example `BRK.B`) and the type codes returned by the types endpoint;
+   - (g) the calls one daily cycle needs (§"Runtime"), against the 5-per-minute limit.
+6. **[probe][code] SEC bulk files are overwritten daily** with no history (`app/services/sec_bulk_refresh.py:47-63`).
+   v3 does not read the daemon's copies (§F4).
+7. **[doc] EDGAR.** Company records (`submissions`) carry `sic`; filing lists carry `form`, `acceptanceDateTime` (UTC)
+   and `accessionNumber` (`sec-edgar.md:59, 74, 1072-1074`). The daily form index lists each business day's accepted
+   filings. An accession's header carries `STANDARD INDUSTRIAL CLASSIFICATION` (parent obligation 3).
+8. **[code] Connections:** 27 usable, demand 24 plus reserve 3 (`app/db/pg_settings.py:127-230`).
+9. **[code] B1 and factors:** `sec_nport_monthly_returns` has no scheduled writer; `french_reference_refresh` appends a
+   snapshot per content change (`app/services/reference_data.py:1051-1176`). Neither is read by slice F.
+10. **[doc] Rekor v2** (Sigstore's transparency log, GA 2025; `blog.sigstore.dev/rekor-v2-ga/`): a tile-backed log in
+    the C2SP tlog-tiles layout, with one write endpoint, inclusion proofs and signed checkpoints. It has no search
+    index and returns no integrated time; time evidence comes from an RFC 3161 timestamp authority. Shards are yearly
+    and frozen when rotated, their URLs distributed through Sigstore's TUF `SigningConfig`. Monitoring reads tiles
+    (`rekor-monitor`).
+11. **[doc] JKP cutoffs.** `return_cutoffs.csv` was last modified 2026-04-16 with its last row 2025-12-31 (HTTP
+    `Last-Modified` and the file's tail, 2026-10-10). Publication is in arrears by months (§F14).
 
 ## Runtime
 
 - **One process outside the jobs daemon.** A launchd agent `com.ebull.forward-3740` runs
-  `scripts/forward_3740_capture.py tick` every 10 minutes from a dedicated worktree at a git tag. The daemon runs
-  `~/Dev/eBull` at `origin/main`, which changes with every merge, and a daemon lane would break the connection budget.
-- **Tick preflight, in order; any failure is an integrity failure (retryable, no acquisition):** the worktree HEAD
-  equals the pinned tag and is clean; `uv.lock`'s sha256 equals the pinned one; a read-only checkout of `origin/main`
-  is fetched (the ledger checkout) and its commit recorded; the `information_schema` hash over §"Schema interface"
-  equals the pinned one (`SCHEMA_DRIFT` otherwise); free disk under the capture root exceeds twice the largest
-  artefact of each due kind (10 GB before the first). Every receipt records the code tag commit, the construction
-  hash, the lock hash, the schema hash and the ledger commit.
-- **One tick at a time** (`flock`), idempotent; due work runs in the fixed order of §"Windows".
+  `scripts/forward_3740_capture.py tick` every 10 minutes from a dedicated worktree at the declaration's git tag. The
+  daemon runs `~/Dev/eBull` at `origin/main`, which changes with every merge, and a daemon lane would break the
+  connection budget.
+- **Tick preflight, in order.** Any failure is an integrity failure: retryable, no acquisition, recorded.
+  1. The worktree HEAD equals the pinned tag and is clean.
+  2. `uv.lock`'s sha256 equals the pinned one.
+  3. A read-only checkout of `origin/main` (the ledger checkout) is fetched; its commit is recorded. It must contain
+     the declaration file with the pinned sha256, and the trial's ledger file must hold no terminal entry for the
+     trial. A terminal entry stops all acquisition.
+  4. The `information_schema` hash over §"Schema interface" equals the pinned one (`SCHEMA_DRIFT` otherwise).
+  5. Free disk under the capture root exceeds the next 30 days of the §"Dry run" disk projection.
+  Every receipt records the code tag commit, the construction hash, the lock hash, the schema hash and the ledger
+  commit.
+- **Work queue.** A tick takes a `flock`, reads the due work in §"Windows" order, and runs each item with a request
+  timeout of 120 s and a per-tick wall budget of 8 minutes. Unfinished items stay queued for the next tick, so long
+  work cannot hold the lock past the next tick.
 - **Database:** at most one connection, opened per step, from the 3-connection reserve. A refused connection is a
   retryable failure inside the window.
-- **eToro quota:** 30 requests per minute by the capture's limiter. This does not reserve capacity under the shared
-  120/60 s quota, so the plumbing test measures completion time for a full formation's candle fetch while the daemon
-  runs, and the dry run must complete every formation fetch inside its window (§"Dry run").
-- **SEC:** at most 2 requests per second, with the SEC User-Agent, a partition of the shared 10/s as
+- **Massive:** one key used only by this process, so the 5-per-minute limit is not shared; the limiter allows 4 per
+  minute. The daily cycle is about 1 grouped call, 12–15 reference pages, 2–4 split and dividend pages, and one
+  ticker-overview call per newly seen composite FIGI; premise 5(g) measures it.
+- **eToro:** two listing requests per session, under the shared 120/60 s quota. A refusal retries inside the window.
+- **SEC:** at most 2 requests per second with the SEC User-Agent, a partition of the shared 10/s as
   `scripts/build_2282_form25_register.py` partitions it.
 
 ## Acquisition, binding and witness
 
-### Attempt state machine and the first-observation rule
+### Attempt state machine
 
-Every acquisition is an attempt with a fresh `attempt_id`:
-1. `started`: `record_holdout_access` (`strategy_id="3740-step3-book"`, or `"3740-slice-f-dryrun"` in the dry run,
-   `access_kind="read"`, `result_version=attempt_id`) is committed before the first source request (invariant 8).
-2. `persisted`: each response's raw bytes are written with exclusive create and fsynced under
-   `<RESEARCH_ROOT>/forward_3740/<trial>/<kind>/<period>/<attempt_id>/`, before any parsing.
-3. `receipted`: one row in `forward_capture_receipts` per attempt, with every component's sha256 and its
-   **validation class** from a frozen per-kind validator: `valid`, `transport_defect` (non-200, truncated or
-   unparseable body, empty body) or `row_defect` (a parseable response whose individual rows fail a rule).
-4. `witnessed`: the receipt is logged in Rekor (§"Witness").
+Every acquisition is an attempt with a fresh `attempt_id`. States and crash outcomes:
 
-**First observation binds.** For each binding identity, the first `persisted` response whose class is `valid` or
-`row_defect` is the observation; a `row_defect` row stays invalid and is never re-fetched. Only a
-`transport_defect`, or an attempt that ended before `persisted` (classified `abandoned` by step 2's abandoned-run
-rule), permits another fetch inside the window. Publication failure never permits re-acquisition: a receipted
-observation that misses its witness deadline is final and binds nothing (§"Outcomes").
+| state | entered when | a crash in this state means |
+|---|---|---|
+| `intent` | a `forward_capture_attempts` row (attempt id, kind, source id, period key, request) and the `record_holdout_access` row (`strategy_id="3740-step3-book"`, or `"3740-slice-f-dryrun"` in the dry run, `access_kind="read"`, `result_version=attempt_id`) commit in one transaction, before the first request (invariant 8) | `abandoned`: another attempt is allowed in the window |
+| `persisting` | the response streams to `<attempt dir>/<component>.part` | `abandoned`; the `.part` file is kept as provenance and never parsed |
+| `persisted` | each component's file is fsynced and renamed to its final name, and the attempt row is marked `persisted` with each file's sha256 | recovery: the next tick validates the persisted files; it never refetches |
+| `receipted` | the per-kind validator ran on the persisted bytes and one `forward_capture_receipts` row commits with every component's sha256 and validation class | recovery: the next tick publishes the receipt |
+| `witnessed` | the receipt's Rekor entry and RFC 3161 token are stored (§"Witness") | — |
+
+- **Nothing parses unpersisted bytes.** Parsing reads final files only, so a crash before `persisted` cannot have
+  shown the process any content, and the retry is not a choice between observations.
+- **Validation classes**, per component, from a frozen validator per kind: `valid`; `transport_defect` (non-200,
+  truncated, unparseable or empty body, or a response whose echo fields contradict the request, for example
+  `adjusted` true or a date other than requested); `row_defect` (a parseable response with individual rows failing a
+  rule; the rows are listed in the receipt).
+- **First observation binds.** For each acquisition identity, the first persisted component classed `valid` or
+  `row_defect` binds. Only `transport_defect` and `abandoned` permit another attempt in the window. A bound component
+  is never refetched, and publication failure never permits reacquisition (§"Outcomes").
+- **Abandoned attempts** are counted per kind; the dry run gates the count (§"Dry run").
 
 ### Binding registry
 
-Identity (invariant 3) = `(trial, kind, source_id, period_key, component)`; a partial unique index on it over receipts
-with a `valid` or `row_defect` component makes a second binding a database error, and the witness check
-(§"Witness") makes it a verdict refusal.
+Two kinds of identity, each with its own table and unique index:
+- **Acquisition identity** (invariant 3) = `(trial, kind, source_id, period_key, component)`, one row per component
+  in `forward_capture_components`, with a partial unique index over rows classed `valid` or `row_defect`.
+- **Selection identity** = `(trial, selection_kind, selection_key)`, one row in `forward_capture_selections` naming
+  the bound components it reads by sha256 and the rule version. A selection is written once, when its rule's decision
+  time passes, and never replaced.
 
-| kind | source_id | period_key | component (granularity) |
+| acquisition kind | source_id | period_key | component |
 |---|---|---|---|
-| `etoro_listing` | `etoro:/market-data/instruments` + `/instrument-types` + `/exchanges` | session date | one per endpoint (whole response) |
-| `etoro_rates` | `etoro:/market-data/instruments/rates` | session date | one per request batch of ≤ 100 ids, ids listed in the receipt |
-| `etoro_close` | `etoro:closing-price` | session date | the whole response |
-| `etoro_candles` | `etoro:candles/OneDay/1000` | formation month M | one per instrument |
-| `sec_bulk` | `sec:companyfacts.zip`, `sec:submissions.zip` | session date | one per CIK member (companyfacts JSON; every submissions page) |
-| `form25` | `sec:archives` | accession | the filing's complete submission text |
-| `pwb_vintage` | `hf:paperswithbacktest/Stocks-Daily-Price@<commit>` | commit SHA | one per data file, plus the commit metadata |
-| `nport_quarter` | `sec:nport-data-sets` | dataset quarter | the zip |
-| `french` | `french:<dataset>` | response sha256 | the file |
-| `jkp_cutoffs` | `jkp:return_cutoffs.csv` | response sha256 | the file |
-| `formation_manifest` | derived | formation month M | the manifest |
-| `month_manifest` | derived | holding month | the manifest |
+| `massive_grouped` | `massive:/v2/aggs/grouped/locale/us/market/stocks?adjusted=false` | session date | the response |
+| `massive_tickers` | `massive:/v3/reference/tickers?market=stocks&active={true,false}` | session date | each page, in `next_url` order, plus the page count |
+| `massive_overview` | `massive:/v3/reference/tickers/{ticker}` | composite FIGI | the response at its first observation |
+| `massive_splits` | `massive:/stocks/v1/splits` | session date | each page of `execution_date` in [d − 30 days, d + 30 days] |
+| `massive_dividends` | `massive:/stocks/v1/dividends` | session date | each page of `ex_dividend_date` in [d − 30 days, d + 30 days] |
+| `massive_types` | `massive:/v3/reference/tickers/types` | session date | the response |
+| `massive_events` | `massive:/vX/reference/tickers/{figi}/events` | (composite FIGI, session date) | the response |
+| `etoro_listing` | `etoro:/market-data/instruments`, `/instrument-types`, `/exchanges` | session date | one per endpoint |
+| `sec_daily_index` | `sec:/Archives/edgar/daily-index/form.{date}.idx` | index date | the file |
+| `sec_header` | `sec:/Archives/edgar/data/{cik}/{accession}.hdr.sgml` | accession | the file |
+| `sec_form25` | `sec:/Archives/edgar/data/{cik}/{accession}.txt` | accession | the complete submission |
+| `sec_bulk` | `sec:companyfacts.zip`, `sec:submissions.zip` | session date | the zip's member for each superset CIK (every submissions page) |
+| `sec_ticker_map` | `sec:company_tickers_exchange.json` | session date | the file |
+| `nport_inventory`, `french_poll`, `jkp_poll` | the source's listing page or file | poll date | the response |
+| `nport_dataset` | `sec:nport-data-sets/{quarter}` | (quarter, sha256) | the zip |
+| `french_file` | `french:<dataset>` | sha256 | the file |
+| `jkp_file` | `jkp:return_cutoffs.csv` | sha256 | the file |
 
-Derived bindings reference the receipts they read by `receipt_sha256`.
+| selection kind | key | decided when | rule |
+|---|---|---|---|
+| `b1_entry_close` | M_0 | end of s(M_0)'s `massive_grouped` window | §F11 |
+| `b1_exit_close` | M_0 + 24 | end of s(M_0 + 24)'s window | §F11 |
+| `b1_month` | holding month | first N-PORT dataset version containing the month is accepted | §F11 |
+| `factor` | dataset | first accepted French file covering all 24 months | §F12 |
+| `cutoff` | holding month | the month's returns cutoff | §F14 |
+| `formation_inputs` | formation M | the end of s(M)'s last window | §"Formation resolution" |
+| `month_status` | holding month | the month's returns cutoff | §F10 |
+| `month_returns` | (holding month, security) | the month's returns cutoff, or later completion inside the nine-month limit | §F9 |
+| `month_final` | holding month | every `month_returns` selection for the month exists | §F9 |
 
 ### Witness (invariant 5)
 
-- **Rekor.** Each receipt is logged as a `hashedrekord` entry over `receipt_sha256`, signed with an Ed25519 key
-  generated for this trial (a separate key for the dry run), whose public key is pinned in the declaration. Rekor's
-  `integratedTime` is the witnessed time; the entry's UUID and log index are stored in the next receipt.
-- **Chain.** Each receipt carries `prev_receipt_sha256` and the previous entry's log index, from a genesis receipt
-  pinned in the declaration.
-- **Verdict checks:** every receipt has a Rekor entry whose inclusion proof verifies and whose `integratedTime` is
-  before its witness deadline; the chain is unbroken; and the entries Rekor's key index returns for the trial key are
-  exactly the chain's entries. An entry with no matching receipt, two receipts for one identity, or a chain break
-  refuses (`CAPTURE_AMBIGUOUS`). Rekor cannot delete or edit an entry, so a deleted or discarded receipt is visible
-  as an unmatched entry.
-- **Limit.** The key index is experimental. If it is unavailable at the verdict, the run retries for 30 days and then
-  reports `WITNESS_ENUMERATION_UNAVAILABLE` as an annotation beside the verdict: the chain and inclusion checks still
-  hold, but a discarded branch would not be seen.
-- **Drills** (dry run, on the dry-run key): a publication failure past its deadline, a duplicate log of one receipt,
-  a second receipt for one identity, a receipt deleted locally after logging, and a broken chain; each must produce
-  the outcome in §"Outcomes".
+- **Chain.** Each receipt carries `prev_receipt_sha256`, the previous receipt's digest, from a genesis receipt pinned
+  in the declaration. The chain links receipts only, so a publication failure never stalls it.
+- **Log entry.** Each receipt's sha256 is signed with an Ed25519 key generated for the trial (a separate key for the
+  dry run), whose public key is pinned in the declaration, and submitted to the current Rekor v2 shard named by
+  Sigstore's TUF `SigningConfig`. Stored with the receipt: the signature, the returned entry and inclusion proof, the
+  signed checkpoint, and the shard's public key from TUF.
+- **Time.** The receipt digest is time-stamped by Sigstore's RFC 3161 authority (`timestamp.sigstore.dev`); the token
+  and the authority's certificate chain are stored. The token's time is the witnessed time.
+- **Pinned trust roots:** the TUF root used, each shard key and the timestamp authority's chain. Key rotation follows
+  TUF; a key not reachable from the pinned root is untrusted.
+- **Completeness.** Rekor v2 has no search index, so the verdict scans every tile of every shard from the genesis
+  entry's index to the final checkpoint and lists every entry whose signature verifies under the trial key. The tiles
+  are immutable and archived after a shard freezes. The listed set must equal the chain's logged receipts one to one.
+  The scan's cost is measured in the dry run (§"Dry run" item 7); the verdict does not run until the scan completes
+  over the whole range.
+- **Verdict checks, in order:**
+  1. **Chain integrity:** the hash chain is unbroken, every logged entry matches exactly one receipt, and no
+     acquisition or selection identity has two bindings. Failure → `CAPTURE_AMBIGUOUS`.
+  2. **Proof validity:** each inclusion proof verifies against a checkpoint signed by a trusted shard key, and the
+     checkpoints are consistent (consistency proofs between successive stored checkpoints). Failure of one entry →
+     that receipt is unwitnessed.
+  3. **Admissibility:** a receipt is admissible when its entry verifies and its RFC 3161 time is at or before its
+     witness deadline. An inadmissible receipt binds nothing for its input; its effect is scoped by §"Outcomes".
+- **Limit.** The witness shows tampering with logged receipts; it does not detect a fetch made outside the protocol.
 
-### Windows (America/New_York; sessions and early closes from `app/services/market_calendar.py` at its pinned `RULE_SET_VERSION`)
+### Windows
 
-Every window has an absolute start and end computed from the calendar; the witness deadline is the window end plus
-the stated lag. An acquisition not persisted by the window end is final for that window (invariant 4).
+All times America/New_York; sessions and early closes from `app/services/market_calendar.py` at its pinned
+`RULE_SET_VERSION`. Every window has an absolute start and end; the witness deadline is the window end plus the lag.
+An acquisition not persisted by the window end is final for that window (invariant 4).
 
 | kind | window, per occurrence | witness lag | retry |
 |---|---|---|---|
-| `etoro_listing`, `etoro_rates` | session d: 13:30 to close − 20 min (early close: 11:00 to close − 20 min) | 15 min | every tick until persisted |
-| `sec_bulk` | s(M) and the two sessions before it: 09:30 to close − 20 min | 15 min | every tick |
-| `etoro_close` | session d: close + 60 min to 08:00 on the next session's date | 60 min | every tick |
-| `etoro_candles` | s(M): close + 60 min to 08:00 on the next session's date; work order: superset ids ascending | 60 min | per instrument, every tick |
-| `form25` | daily at 06:00 for accessions accepted the previous calendar day, through the returns cutoff of the last holding month | 24 h | daily until persisted |
-| `pwb_vintage`, `french`, `jkp_cutoffs`, `nport_quarter` | polled daily at 06:00 from the dry run's start to the nine-month limit; a new upstream version is acquired by 23:59 of the day it is first seen | 24 h | every tick that day |
-| `formation_manifest`, `month_manifest` | from the close of the tenth session after the month's last session to the close of the fifteenth (statuses); returns components as their inputs bind, to the nine-month limit | 24 h | every tick |
+| `etoro_listing` | session d: 13:30 to close − 30 min (early close: 11:00 to close − 30 min) | 15 min | every tick |
+| `massive_tickers`, `massive_types`, `massive_events`, `massive_overview` (new FIGIs) | session d: 13:30 to close − 20 min, after that day's `etoro_listing` | 15 min | every tick |
+| `sec_ticker_map`, `sec_bulk`, `sec_header` (due accessions) | session d: 14:00 to close − 20 min; `sec_bulk` on s(M) and the two sessions before it only | 15 min | every tick |
+| `massive_grouped`, `massive_splits`, `massive_dividends` | session d: close + 30 min to 08:00 on the next session's date | 60 min | every tick |
+| `sec_daily_index` | for index date x: 06:00 on the calendar day after x to 06:00 seven calendar days later | 24 h | every tick |
+| `sec_form25` | for each Form 25 or 25-NSE in a bound daily index for a superset CIK: from the index's binding to 7 calendar days later | 24 h | every tick |
+| `nport_inventory`, `french_poll`, `jkp_poll` | daily, 06:00 to 23:59, from the dry run's start to the nine-month limit | 24 h | every tick that day |
+| `nport_dataset`, `french_file`, `jkp_file` | the day a bound poll first shows a version not yet bound, to 23:59 seven days later | 24 h | every tick |
 
-The **nine-month limit** is 23:59 on the last calendar day of the ninth month after the 24th holding month.
+- **Due SEC headers:** each 10-K- or 10-Q-family accession for a superset CIK in a bound daily index, fetched in the
+  first SEC window after that index binds; at the dry run's start, the latest such accession for every superset CIK
+  (the header bootstrap).
+- **Massive returns-window recovery.** A session whose `massive_grouped` window ended with no binding may be acquired
+  again under a separate kind, `massive_grouped_recovery`, from the session after it through the month's returns
+  cutoff. A recovery binding is admissible for holding returns, statuses and MAX lookback only, never as a formation's
+  decision price, and is counted.
+- **Discovery.** Every scheduled poll is a receipted, witnessed acquisition, failures included, so the order in which
+  versions were first seen is the poll chain's order and cannot move. A version that appears and is replaced between
+  two polls is never seen; that is stated, not ambiguous.
+- **The nine-month limit** is 23:59 on the last calendar day of the ninth month after the 24th holding month.
+- **Returns cutoff** of holding month m: the close of the tenth session after m's last session (the parent's).
 
-**Pre-close fallback.** A pre-close kind missed on s(M) uses the latest binding of that kind from the five sessions
-before s(M) (parent round 3, decision 2), recorded in the formation manifest with its age; none → the formation is
-missed with that kind's reason.
+**Pre-close fallback.** Only `etoro_listing`, `massive_tickers` and `sec_bulk` may fall back: one missed on s(M) uses
+the latest binding of that kind from the five sessions before s(M), recorded in the formation's selection with its
+age. Price and corporate-action kinds never fall back. None in range → the formation is missed with that kind's code.
 
 ### Outcomes
 
-| event | effect |
-|---|---|
-| a `transport_defect` or abandoned attempt | another attempt in the window |
-| a window ends with nothing persisted | that period has no binding from the window (final) |
-| a receipted observation misses its witness deadline | binds nothing; final; the chain continues through it |
-| a pre-close or `etoro_close`/`etoro_candles` binding missing for s(M), after fallback | `formation_missed` (reason: the kind), recoverable under the parent's `ACCRUAL_GAPS` count |
-| `b1_entry_close` unbound at the end of s(M_0)'s `etoro_close` window | terminal `REFUSED` (`B1_UNDEFINED`) written to the ledger at once; all trial captures stop |
-| a returns, B1, factor or cutoff input unbound or invalid at the nine-month limit | terminal `REFUSED` (`INPUT_UNAVAILABLE`) |
-| a formation input bound but failing its witness check at the verdict | that formation missed (counts toward `ACCRUAL_GAPS`) |
-| a returns, B1, factor or cutoff input failing its witness check at the verdict | `CAPTURE_AMBIGUOUS` |
-| a chain break, an unmatched Rekor entry, or two receipts for one identity | `CAPTURE_AMBIGUOUS` |
-| a preflight failure | retryable integrity failure; never a verdict |
+One table from validator result to state and code. A row's effect applies only within its scope.
 
-### Acquisition superset (the parent's required set)
+| event | scope | effect | code |
+|---|---|---|---|
+| `transport_defect` or `abandoned` attempt | identity | another attempt in the window | — |
+| window ends with nothing persisted | identity | no binding from that window (final) | — |
+| receipt not admissible (late, unverifiable or never published) | its input | binds nothing; chain continues | per the input's row below |
+| decision-time input missing after fallback (`etoro_listing`, `massive_tickers`, `sec_bulk`, `massive_grouped` for s(M), `massive_splits` or `massive_dividends` for s(M)) | formation | `formation_missed` | `INPUT_MISSING:<kind>` |
+| population refusals needing no holdings | formation | `formation_missed` | `SESSION_MISSING`, `ME_INVALID`, `UNIVERSE_SHORT`, `MAX_EMPTY` |
+| `b1_entry_close` not selected at its decision time | trial | terminal `REFUSED`, written to the ledger at once; all trial captures stop | `B1_UNDEFINED` |
+| a returns, status, B1, factor or cutoff selection not made by the nine-month limit | trial | terminal `REFUSED` | `INPUT_UNAVAILABLE` |
+| chain integrity failure (verdict check 1) | trial | refuses until re-declaration | `CAPTURE_AMBIGUOUS` |
+| preflight failure | tick | retryable integrity failure; never a verdict | `SCHEMA_DRIFT`, `PREFLIGHT:<step>` |
 
-Books are not formed before the verdict, so holdings are unknown during capture. The capture therefore covers a
-superset that contains every possible holding:
-- **Instruments:** every instrument in any bound `etoro_listing` since the dry run's start with `instrumentTypeID` 5
-  on exchanges 4, 5, 20 or 33, plus SPY and IVV; **once in, never out**, until the instrument's closes have been
-  absent from 20 consecutive `etoro_close` responses after a Form 25 or a delisting from the listing.
-- **CIKs:** every CIK named by F13's candidate map for a superset instrument.
-- `etoro_close` covers all instruments in one response; `etoro_rates`, `etoro_candles` and `sec_bulk` cover the
-  superset.
+Precedence at the verdict: chain integrity first, then admissibility, then the parent's verdict order. An input that
+is inadmissible is treated as unbound for its row; it is never both `INPUT_UNAVAILABLE` and `CAPTURE_AMBIGUOUS`.
+
+### Acquisition superset
+
+Books are not formed before the verdict, so the capture covers a superset of every possible holding, reference
+constituent and control holding:
+- **Securities,** keyed by composite FIGI: every FIGI that, in any bound `massive_tickers` since the dry run's start,
+  has a ticker matching (§F13) an instrument in any bound `etoro_listing` with `instrumentTypeID` 5 on exchanges 4, 5,
+  20 or 33; plus SPY and IVV. Once in, never out. A FIGI enters at the first binding that shows it, and its due SEC
+  work is scheduled in the same session's SEC window, which follows the listing and ticker windows.
+- **Market-wide kinds** (`massive_grouped`, splits, dividends, tickers) are not filtered by the superset, so every
+  security is covered from the dry run's start whether or not it is in the superset yet.
+- **CIKs:** every CIK linked (§F13) to a superset FIGI on any bound session.
 
 ### Lookback (amendment A2)
 
-A formation reads sessions before s(M_0): MAX's boundary month, the share-basis sessions of F5 and listing history.
-Dry-run bindings of `etoro_close`, `etoro_rates`, `etoro_listing` and `sec_bulk` for sessions before s(M_0) are
-**admissible lookback inputs**: they are pre-M_0 decision data, not outcome months, and are verified by the same
-witness checks on the dry-run key. The declaration pins the dry-run chain head. The parent's "never inputs to the
-trial" (round 1 of this spec) is replaced by this rule. Dry-run `etoro_candles` are never used (each formation
-fetches its own).
+A formation reads sessions before s(M_0): MAX's boundary month, the share-basis sessions of F5, and split and dividend
+history. **Admissible lookback objects:** dry-run bindings of `massive_grouped`, `massive_grouped_recovery`,
+`massive_tickers`, `massive_splits`, `massive_dividends`, `massive_overview`, `etoro_listing`, `sec_bulk`,
+`sec_header` and `sec_daily_index`, plus one **bootstrap** acquisition at the dry run's start of the splits and
+dividends with dates in the 24 months before it (Massive's Basic history). Conditions:
+- the trial tag's validators re-run on the dry-run bytes; a component whose class changes is not admissible;
+- coverage is continuous: every session from the dry run's start to s(M_0) has an admissible `massive_grouped` or
+  recovery binding, else the declaration waits;
+- the declaration pins the dry-run chain head and the bootstrap receipts.
+
+This replaces v1's rule that dry-run captures are never trial inputs; the parent states no rule on it.
 
 ## Input rules
 
-Each entry: source, rule, sealing category (parent invariant 1), refusals, and the dry-run test.
-
 ### F1. Security type (obligation 1)
 
-- **Structured fields first:** eToro `instrumentTypeID`; SEC's cover-page XBRL `dei:Security12bTitle`,
-  `dei:TradingSymbol` and `dei:SecurityExchangeName` per Section 12(b) class (Form 10-K and 10-Q cover requirements,
-  2019 onward). No eToro name text is used.
-- **Source:** the bound `etoro_listing` (pre-close metadata) and the cover facts of the CIK's latest 10-K- or
-  10-Q-family accession accepted before s(M), read from that accession's XBRL instance, fetched within the
-  `sec_bulk` window of the session after its acceptance and bound under `sec_bulk` (one component per accession), so
-  the bytes read are those available before s(M)'s close.
+- **Fields, structured only:** eToro `instrumentTypeID` (bound listing); Massive `type` for the FIGI on s(M) (bound
+  `massive_tickers`); the CIK's SIC (F3).
 - **Rule, in order:**
-  1. `instrumentTypeID` 5, else `type_not_stock`; exchange tag 19 (OTC) → `otc`.
-  2. A cover class whose `dei:TradingSymbol` equals the eToro symbol **exactly** (upper case; eToro's `.` and SEC's
-     `-` or `.` for class suffixes mapped by the frozen table in the code, collisions refused as `symbol_collision`)
-     and whose `dei:SecurityExchangeName` is NYSE, NASDAQ, NYSEAMER, NYSEArca or CboeBZX; else `type_unknown`.
-  3. The class's `dei:Security12bTitle` against a frozen keyword table, rejections first: preferred, depositary
-     (ADR/ADS), warrant, right, unit, note, debenture, bond, beneficial interest, partnership or LLC interest →
-     `type_rejected`; then common stock, common shares, ordinary shares or capital stock (any class letter or series)
-     → accepted; else `type_unknown`.
-  4. Funds and pools: the CIK's company-record SIC (F3) 6221, 6722 or 6726 → `type_fund`.
-- **ADRs** are rejected (JKP keeps CRSP share codes 10, 11, 12; ADRs are 31).
-- **Duplicates:** two superset instruments matching one (CIK, class) are one security; the one on exchange tag 4 or 5
-  is kept over 33, over 20; a remaining tie refuses both (`duplicate_instrument`). Every pair is listed in the dry run.
-- **Parser:** edgartools' XBRL cover reader if it reproduces a frozen fixture set (each keyword class, each exchange
-  code, inline and plain XBRL); otherwise a parser of the XBRL instance, citing what it was compared against.
-- **Dry run (pass/fail):** the class table over the whole superset at every dry-run formation, and a hand adjudication
-  of **every** `type_unknown`, `type_rejected`, `type_fund` and `duplicate_instrument` row against the filing's cover
-  page, recorded in a committed file before the declaration. Pass: no adjudicated row contradicts its class.
+  1. `instrumentTypeID` 5, else `type_not_stock`; eToro exchange 19 (OTC) → `otc`.
+  2. Massive `type` in the accepted set, else `type_rejected:<code>`. The accepted set is frozen from the first bound
+     `massive_types`: the codes whose description is common stock or ordinary shares. ADR codes are rejected (JKP keeps
+     CRSP share codes 10, 11 and 12; ADRs are 31). A `type` missing → `type_unknown`.
+  3. SIC 6221, 6722 or 6726 → `type_fund`.
+- **Primary listing and session:** Massive's grouped daily is the consolidated US close for the symbol; one FIGI is
+  one security, so two eToro instruments mapping to one FIGI are one security (`duplicate_instrument` refuses both
+  unless exactly one is on eToro exchange 4 or 5, which is kept). Every pair is listed in the dry run.
+- **Validation (dry run, pass/fail), every superset security,** accepted rows included: Massive's class beside the
+  cover-page `dei:Security12bTitle` keyword class of the CIK's latest 10-K or 10-Q (read from EDGAR at validation
+  time; validation only, never an input). Every disagreement and every security with no cover title is adjudicated by
+  hand against the filing in a committed file before the declaration. Pass: no adjudicated row where Massive's class
+  is accepted and the security is not common equity.
 
 ### F2. Listing age (obligation 2; exception X8)
 
-- **Source:** the bound `sec_bulk` submissions pages (filing list with `acceptanceDateTime`), and the certification
-  documents they name (immutable accessions).
-- **Rule:** listing start = the acceptance date of the earliest exchange certification (`CERT*`) for the CIK whose
-  certified class classifies as common under F1's keyword table and whose symbol matches; else the earliest Form
-  8-A12B for such a class. Eligible when listing start ≤ s(M) − 36 months.
-- **Missing history (X8):** listings older than EDGAR's certification filings have neither. For those, listing start
-  = the first bar of the identity-mapped PWB series (F9), a security-level trading history, accepted only when F13's
-  link holds over the whole interval (no other CIK linked to the symbol by any cover in it). Else
-  `listing_age_unknown`: not eligible to enter, counted.
-- **Dry run:** counts by branch at each formation; for every name where both EDGAR evidence and PWB's first bar exist,
-  the two dates side by side, with disagreements beyond 12 months listed and adjudicated. Pass: no adjudicated
-  disagreement in which the PWB date understates the listing age by more than 12 months.
+- **Source:** Massive `list_date` from `massive_overview` at the FIGI's first observation; first observation binds.
+- **Rule:** eligible when `list_date` ≤ s(M) − 36 months. Missing → `listing_age_unknown`, not eligible to enter.
+- **Exception (X8):** the parent names the Form 8-A 12(b) registration as candidate. Rounds 1–2 showed acceptance of
+  a certification or 8-A is not the documented effectiveness rule (Form 8-A General Instruction A(c)) and does not
+  show continuity. Massive's field is a documented first-listing date of the symbol. Ticker changes are the risk:
+  every FIGI with a `ticker_change` event in its bound `massive_events` is listed in the dry run.
+- **Validation (dry run, pass/fail):** for every superset security, `list_date` beside the EDGAR evidence (earliest
+  matching CERT* acceptance, the 8-A12B's effectiveness under Instruction A(c) where determinable) and, for names in
+  step 1's panel, the first Intrader bar. Every case where the sources disagree on eligibility at any dry-run
+  formation is adjudicated, in both directions. Pass: no adjudicated case where `list_date` admits a security listed
+  less than 36 months before that formation. False exclusions are counted, not gated.
 
-### F3. SIC (obligation 3; exception X1)
+### F3. SIC (obligation 3)
 
-- **Source:** `sic` in the CIK's company record, from the `sec_bulk` submissions binding used for s(M) (pre-close
-  metadata, bound before s(M)'s close).
-- **Rule:** step 1's codes: missing or empty `sic` → `sic_null`; CIK absent from the binding → `sic_unloaded`; else
-  the four digits, for the REIT exclusion (6798), F1's fund rule and the FF-12 map.
-- **Exception:** step 1 read SUB `sic` on the latest 10-K/10-Q accession. SUB publishes a quarter later, and an
-  accession's header can change after acceptance (EDGAR PDS specification, post-acceptance corrections), so neither
-  can be read point-in-time at s(M). The company record captured before s(M)'s close can. The adoption is frozen here;
-  the comparison is reported, never used to switch: for every CIK in the first dry-run `sec_bulk` binding with an
-  accession in step 2's SUB quarters (2021q3..2024q3), the record SIC beside the SUB SIC of its latest accession
-  there, with the count of disagreements. Disagreements include genuine SIC changes since 2024, which the dry run
-  cannot separate; the count is an upper bound on the source effect.
+- **Source:** the `sec_header` of the CIK's latest 10-K- or 10-Q-family accession accepted before s(M), bound before
+  s(M)'s close (the header bootstrap or the daily header capture).
+- **Rule:** the header's `STANDARD INDUSTRIAL CLASSIFICATION` code; no code → `sic_null`; no bound header for that
+  accession → `sic_unloaded`. Used for the REIT exclusion (6798), F1's fund rule and the FF-12 map.
+- **This reproduces obligation 3 exactly** and needs no exception: the header bytes read are those available before
+  s(M)'s close. A post-acceptance correction made before the capture is included, which is information available
+  before the decision.
+- **Reported (not gated):** at each dry-run formation, the header SIC beside the company-record SIC from the same
+  session's `sec_bulk`, with REIT, fund and FF-12 effects of each disagreement.
 
 ### F4. Accounting (obligation 4)
 
-- **Source:** `sec_bulk`: in its window, the capture reads the zips `sec_*_bulk_refresh` last renamed into place,
-  records each zip's sha256, ETag and mtime, and binds the zip members for every superset CIK. A zip whose mtime is
-  before 00:00 on the session's date, or that changes during the read (sha256 before and after differ), is a
-  `transport_defect`. The 3 GB zips are not retained; the members are the bound bytes.
+- **Source:** `sec_bulk`: the capture downloads `companyfacts.zip` and `submissions.zip` from SEC itself in its window,
+  records each response's `Last-Modified`, `ETag` and sha256, and binds the members for every superset CIK. The zips
+  are not retained; the members are the bound bytes. The daemon's copies are not read.
+- **Completeness:** every submissions page named in a CIK's main JSON (`filings.files`) must be present as a member,
+  else `transport_defect`.
 - **Rule:** step 1's `pit_fundamentals` bundle built from those members by step 1's code with only its input reader
-  changed: evidence cutoff (acceptance New York date strictly before s(M)) and the four-month lag. The formation
-  manifest records which session's binding was used and the filings accepted after it and before s(M) that it
-  therefore lacks (from the `form25` daily accession feed's index read), as the fallback's cost.
+  changed: evidence cutoff (acceptance New York date strictly before s(M)) and the four-month lag.
+- **Freshness report:** each formation lists the 10-K- and 10-Q-family accessions for superset CIKs in the bound daily
+  indexes accepted before s(M) that the bound members lack.
 
-### F5. Shares and ME (obligation 5; exception X6)
+### F5. Shares and ME (obligation 5)
 
-Step 1 §"Market equity" on the F4 bundle: cover-count precedence, the 15-month age limit, blocked reads, context-date
-and acceptance-date bases, no share lag. The split product over (basis, s(M)] is replaced by F7's factor:
-ME = shares × F(b → s(M)) × P(s(M)), with b the last session on or before the basis date and P the F6 close. A
-basis before the lookback's first `etoro_close` binding leaves ME missing (`basis_before_lookback`), counted.
+Step 1 §"Market equity" exactly on the F4 bundle: cover-count precedence, the 15-month age limit, blocked reads,
+context-date and acceptance-date bases, no share lag. **The split product over (basis, s(M)]** uses Massive split
+events: shares × Π (`split_to` / `split_from`) over events with `execution_date` in (b, s(M)], with b the basis date
+and events selected from the latest `massive_splits` binding at or before s(M)'s window (bootstrap included).
+Execution-date semantics (premise 2) put the first post-split session on `execution_date`, which is step 1's stamp
+convention. ME = adjusted shares × P(s(M)), P the F6 close.
+- **Fixtures** (slice 3): forward split, reverse split and stock dividend; an event on the basis date and one on s(M);
+  context-date and acceptance-date bases; two events in the interval.
+- **Population checks (dry run, pass/fail):** at each formation, every security whose ME changes by more than ×1.5
+  or less than ×(2/3) from the previous formation while its split-adjusted price changes by less than ×1.2, listed
+  and adjudicated. Pass: no adjudicated case caused by a missing or misdated split.
 
-### F6. Raw close at a session d (obligation 6; exception X2)
+### F6. Raw close at a session d (obligation 6)
 
-- **Source:** `etoro_close` (the decision session's price package for d, bound before the next open), the next
-  session's `etoro_close`, and `etoro_rates` for d (in-session, pre-close).
-- **Rule, per instrument, all three required:**
-  1. **Rolled:** in d's response, `closingPrices.daily.date` is the session before d; the undated
-     `officialClosingPrice` is then the candidate close for d.
-  2. **Dated confirmation:** in the next session's response, `closingPrices.daily.date` is d and its price equals the
-     candidate to 1e-9 relative, or differs by exactly the factor F7 measures between the two responses' candles (a
-     re-base at the next open). Otherwise `close_unconfirmed`. A missing next-session response → `close_unconfirmed`.
-  3. **In-session anchor:** the latest `etoro_rates` bid or last execution for the instrument in d's pre-close window
-     lies within a factor of 1.15 of the candidate. A tradable price at d cannot be on a later corporate-action basis,
-     so a candidate pre-adjusted for the next open fails this check whenever the action's factor exceeds 1.15.
-     Otherwise `close_unanchored`.
-- **Validity:** a close meeting 1–3 is valid at d; otherwise the instrument has no valid close at d. A price ≤ 0 is
-  invalid.
-- **Exception (X2):** step 2's closes were Intrader's raw trade closes. The forward close is eToro's official close,
-  whose basis is undocumented; the rule above verifies date and basis per observation instead of relying on a vendor
-  contract. Residual: a pre-adjustment by a factor under 1.15 (stock dividends, small splits) passes; F7's dry-run
-  event table measures how often such actions occur.
-- **Dry run (pass/fail):** per ordinary session, the share of superset instruments with a valid close (pass ≥ 99%);
-  every F7 event over the dry run with the official closes on the sessions around it, showing whether any
-  pre-adjustment occurred (pass: none passed the anchor).
+- **Source:** `massive_grouped` for d (`adjusted=false`), bound in d's post-close window; the row whose `T` is the
+  FIGI's ticker on d in the bound `massive_tickers`.
+- **Rule:** valid when the response is `valid`, the row exists, `c` > 0 and finite, and `t` falls on d in New York
+  time. One row per ticker; a duplicate `T` → `row_defect` for that ticker.
+- **This reproduces obligation 6** from an authoritative, documented unadjusted source with a dated observation; no
+  exception is needed. The step-2 close was Intrader's raw trade close and this is Massive's consolidated daily close;
+  both are trade closes, and the dry run reports their relation to eToro's official close (parity, not gated).
+- **Dry run (pass/fail):** per ordinary session, the share of superset securities active in the bound tickers with a
+  valid close; pass ≥ 99%.
 
-### F7. Adjustment factors (obligation 7; exception X6)
+### F7. Split events (obligation 7)
 
-- **Source:** `etoro_candles` fetched in s(M)'s post-close window (1,000 OneDay bars, back-adjusted to s(M)), and F6
-  official closes bound in the lookback and accrual.
-- **Factor:** F(b → s(M)) = med_b / med_M, with med_b the median over the five sessions ending at b of
-  (official close at the session / candle close for that session in s(M)'s fetch), and med_M the same over the five
-  sessions ending at s(M). Both medians need ≥ 3 valid F6 closes. Bias between the official print and the Bid candle
-  cancels in the ratio. |ln F| < ln 1.05 → F = 1; otherwise F is applied as a share multiplier.
-- **Why this selection is not circular:** F measures the vendor's own adjustment between two observations of one
-  session, not a price move (`docs/review-prevention-log.md`, "A register SELECTED on the symptom under test").
-- **Classification (X6):** eToro's adjustment is assumed to be splits and stock dividends only. The dry run tests
-  that assumption: every F ≠ 1 at every dry-run formation, over the superset, adjudicated against the issuer's 8-K or
-  press release and recorded in a committed file. Pass: every event is a split or stock dividend with the matching
-  ratio to 2%. A non-split event fails the dry run and the rule is revised by amendment.
-- **Inconsistent windows:** fewer than 3 valid closes in either median window, or a spread of the five ratios beyond
-  2% inside either window → `factor_unresolved`, ME missing, counted.
+- **Source:** Massive split events (premise 2), bootstrap plus daily bindings; ticker mapped to FIGI on the day before
+  `execution_date` (the pre-event ticker), and refused (`split_unmapped`) when the ticker maps to no FIGI that day.
+- **Selection:** an event binds from the first binding that shows it (by `id`); a later change to an event with the
+  same `id`, or an event first shown after its execution date, is recorded and reported, never applied to a past
+  formation.
+- **Independent enumeration (dry run, pass/fail):** two sources detect actions without reading Massive's events:
+  1. sessions where the unadjusted close ratio P_d / P_{d−1} lies within 15% of a ratio n/m with n, m ≤ 20 and
+     n/m ∉ [0.8, 1.25], and no Massive event exists (candidate missed events);
+  2. eToro's back-adjusted candle history (`price_daily`), compared between two dry-run month-ends: a session whose
+     stored close changes by a ratio outside [0.98, 1.02] marks an eToro-applied action.
+  Every candidate from either source without a Massive event, and every Massive event that neither source shows, is
+  adjudicated against the issuer's filing. Pass: no adjudicated missed or misdated split.
 
 ### F8. MAX inputs (obligation 8; exception X3)
 
-- **Rule:** #3621's MAX at s(M) on daily returns from s(M)'s `etoro_candles` fetch (one adjustment basis across the
-  month by construction): close-to-close returns over the sessions of s(M)'s calendar month up to s(M), the previous
-  month's last session as the boundary bar; ≥ 15 returns; < 10 zero returns; returns only between bars on adjacent
-  sessions; #3621's return screen (−0.9, 3.0).
-- **Exception (X3):** #3621 used Intrader daily total returns on trade closes, with a ratio screen on unstamped
-  `adj_close/close` jumps. Forward MAX uses Bid-candle price returns, and the ratio screen becomes: a name whose F
-  factor between s(M − 1) and s(M) is `factor_unresolved` is screened (flagged), keeping #3621's precedence (screened
-  names flagged before the missing-value rules).
-- **Measurement before planning (parent slice 2):** on stage A and stage B, at every formation, #3621's MAX three
-  ways: as frozen; with price returns in place of total returns; and with the ratio screen removed. Printed per
-  formation: the cutoff, the flagged-set size and the symmetric difference against the frozen set. The parent's
-  planning uses #3621's MAX as frozen, so this measures the forward estimand's departure, and the declaration records
-  the figures.
+- **Daily total return** for a security on adjacent sessions d − 1, d with valid F6 closes:
+  gross g_d = (k_d · P_d + D_d) / P_{d−1}, net r_d = g_d − 1, where k_d = Π (`split_to` / `split_from`) over its
+  events with `execution_date` = d (1 if none), and D_d = Σ `cash_amount` over its USD dividends with
+  `ex_dividend_date` = d. `cash_amount` is per share on the basis before any split that day; a split and a dividend
+  on the same day, or a non-USD dividend, makes r_d invalid (`action_ambiguous`, `dividend_currency`). Dividends are
+  gross, pre-withholding (parent obligation 9).
+- **Rule:** #3621's MAX at s(M): the largest r_d over the sessions of s(M)'s calendar month up to s(M), with the
+  previous month's last session as the boundary bar; ≥ 15 returns; < 10 zero returns; returns only between bars on
+  adjacent sessions; the return screen (−0.9, 3.0); screened names flagged before the missing-value rules.
+- **Every input is bound before its cutoff:** each prior session's close and actions bind in that session's own
+  post-close window, so before s(M)'s close; s(M)'s own close and actions bind in s(M)'s post-close window (parent
+  invariant 1's decision-session package).
+- **Exception (X3): the ratio screen.** #3621 screens an `adj_close / close` move beyond ×1.5 between consecutive
+  usable bars, including across gaps, because the vendor's adjustment was unstamped. Here actions are dated events,
+  so the screen becomes: a window is screened when it contains a session d, compared with the previous usable bar
+  even across missing sessions, where an event exists and |ln(k_d · P_d / P_prev)| > ln 1.5 (the price did not move
+  as the event says), or where r_d is `action_ambiguous` or `dividend_currency`.
+- **Measurement before planning (parent slice 2):** on stage A and stage B, #3621's MAX as frozen beside MAX with the
+  replacement screen applied to Intrader's stamped events (the combined treatment), per formation: the cutoff, the
+  flagged-set size and the symmetric difference. The vendor change (Intrader closes to Massive closes) cannot be
+  measured historically, because Massive's 2 years do not overlap the panel; it is stated as unmeasured.
 
-### F9. Holding-month returns (obligation 9; exception X4)
+### F9. Holding-month returns (obligation 9)
 
-- **Status first** (F10) from F6 closes: `observed` when the instrument has a valid close at the month's last
-  session.
-- **Total return of an `observed` holding** for month m: PWB `adj_close` at the month's last session over `adj_close`
-  at the previous month's last session, minus 1, from the **first** PWB commit (by commit time) whose data include a
-  bar for the month's last session for at least 90% of the superset's mapped series. That commit binds for every
-  name-month in m; no later commit is read for m.
-- **Identity mapping** (§"Splicing"): eToro instrument ↔ PWB series by exact symbol, effective over the month, with
-  one PWB series per symbol, confirmed by price reconciliation after basis conversion: the ratio PWB `close` /
-  eToro candle close (from s(M + 1)'s fetch, both adjusted to near the same date) has a median within 0.98..1.02 and
-  a spread under 2% over the month's sessions. A failed or ambiguous mapping is `pwb_unmapped`.
-- **Entry eligibility:** a name is eligible to enter at s(M) only if mapped in the latest PWB commit bound before
-  s(M)'s close (amendment A3).
-- **Exception (X4):** a held `observed` name that the binding commit lacks or cannot map takes the F6 price return
-  over the month (official closes, scaled by F between s(M) and s(M + 1)), flagged `dividend_unavailable` and counted
-  per month. The parent requires a valid total return; the alternative, `INPUT_UNAVAILABLE` for the whole trial
-  because one name lost vendor coverage, ends the trial on a data event unrelated to the strategy. A3 makes this
-  residual case rare; the dry run measures it.
-- **Independent reference** (frozen before comparing; dry run only): for every mapped name-month, PWB's monthly total
-  return beside the F6 price return plus dividends from SEC records where available. Pass: median absolute difference
-  under 0.25 pp and no more than 1% of name-months beyond 2 pp, else PWB is rejected as the returns source before the
-  declaration.
-- **Cutoff:** the PWB commit may post-date the tenth-session cutoff. Holding returns inform no decision, so a later
-  vendor view of a past month is not look-ahead; the commit is bound when first seen.
+- **Total return** of an `observed` holding for month m: G = Π g_d over the sessions of m after s(m − 1) through
+  s(m) (F8's formula, adjacent sessions only); R = G − 1. Gross relative and net return are both stored.
+- **Inputs:** closes from `massive_grouped` (or `massive_grouped_recovery`) bindings; split and dividend events from
+  the latest `massive_splits` and `massive_dividends` bindings at or before the month's returns cutoff. Using the
+  cutoff's view picks up a dividend recorded late; it never reads evidence after the cutoff.
+- **Validity:** every session in the month has a valid F6 close and a valid r_d. Otherwise the holding has no valid
+  total return: an incomplete input under the parent (completed only by a recovery binding inside the returns window),
+  never a coverage exit.
+- **Selection:** at the returns cutoff, `month_returns` binds each holding's (status, G, inputs); `month_final` binds
+  when the month's set is complete.
+- **Independent reference (dry run, pass/fail), frozen before comparing,** stratified:
+  - **daily returns:** for every superset security and dry-run session, r_d beside the return from eToro's stored
+    `price_daily` closes (split back-adjusted, no dividends) on days with no dividend; pass: median absolute
+    difference under 0.1 pp and no more than 0.5% of security-days beyond 2 pp, with every one beyond 10 pp
+    adjudicated;
+  - **splits:** F7's enumeration;
+  - **dividends:** for every security with a Massive dividend in the dry run, the amount and ex-date beside the
+    issuer's 8-K or press release for a random sample of 100 frozen by seed `3740-sliceF-div`, plus every special
+    dividend; pass: no adjudicated wrong amount or ex-date beyond 1 cent or one session;
+  - **terminations:** F10's table.
 
 ### F10. Statuses and terminations (obligation 10)
 
-- **Coverage** is our own: an instrument's closes stop when F6 yields no valid close at the month's last session.
-  This record is survivorship-free because it is captured as the sessions happen.
-- **Termination evidence:** Form 25 and 25-NSE filings (`form25` kind, accessions accepted by the month's returns
-  cutoff), parsed and matched to the security by `scripts/build_2282_form25_register.py`'s rules (dual CIK indexing,
-  debt-lifecycle exclusion, the class named in the filing, the provision); the provision gives step 1's
-  `classify_termination` class.
-- **Rule:** step 1's classifier: `terminal` when a matched Form 25 exists, with step 1's terminal value fractions for
-  both arms applied to the return through the last valid close; `coverage_exit` otherwise, at the last valid close,
-  an interior gap included.
-- **Partial-month return to the last valid close:** PWB `adj_close` through that session where the binding commit has
-  it, else the F6 price return (flagged as in X4).
+- **States per security per month, in order:**
+  1. **Capture state:** a session with no admissible `massive_grouped` or recovery binding is `capture_missing` for
+     every security. That is an incomplete input, never a status.
+  2. **Source coverage:** a security is `source_ceased` from the first session after its last valid close when its
+     FIGI is inactive in the bound `massive_tickers` (or shows `delisted_utc` on or before that session) by the
+     returns cutoff. A security still active with no row on a session has an **interior gap** on that session.
+  3. **Status,** step 1's rule: `terminal` when `source_ceased` and a matched Form 25 exists; `coverage_exit` when
+     `source_ceased` with no matched Form 25, or on an interior gap; else `observed`. `end_bar` is the last valid close
+     before the first ceased or gap session.
+- **Termination evidence:** `TerminationEvidence` (`app/services/series_termination.py:150-166`) built per security:
+  `linked` when a `sec_form25` accession accepted by the returns cutoff matches the security under
+  `classify_form25_match` (`app/services/research_corpus_ingest.py:1566`) and the #2282 register's rules (dual CIK
+  indexing, debt-lifecycle exclusion, the class named in the filing); `provision` from the filing, the latest
+  amendment by acceptance taking precedence; `q_suffix` by `archive_symbol_candidates`' rule
+  (`research_corpus_ingest.py:340`) on the last ticker. `classify_termination` (`series_termination.py:168`) then
+  gives the class, with step 1's terminal value fractions for both arms.
+- **Partial-month return** for `terminal` and `coverage_exit`: Π g_d through `end_bar`, from the same inputs as F9.
+- **Daily index completeness:** a business day whose `sec_daily_index` is not bound by its window end is retried as
+  a new acquisition until the nine-month limit; until it binds, every security that ceased in the month has an
+  incomplete status.
 
 ### F11. B1 (obligation 11)
 
-- **Returns:** the `nport_quarter` kind downloads each new quarterly N-PORT data set itself, parses it with
-  `load_3619_nport_returns`'s parser from the pinned tree, and, for each forward month, binds IVV's (`C000012040`)
-  Item B.5.a return from the filing with the earliest acceptance in the first data set that contains the month. Two
-  filings with that acceptance time, or two values for the month in that filing, refuse the month (`B1_AMBIGUOUS`,
-  terminal at the nine-month limit as `INPUT_UNAVAILABLE`).
-- **Bands:** SPY's F6 close at s(M_0) is bound under the key `b1_entry_close` (from M_0's `etoro_close`; its dated
-  confirmation arrives the next session, and the binding is valid only when it passes F6), and its exit close at
-  s(M_0 + 24) likewise.
+- **Returns:** each `nport_dataset` version is parsed with `load_3619_nport_returns`'s parser from the pinned tree.
+  A dataset version is **accepted** when it parses and its IVV (`C000012040`) rows pass step 2's identity gate.
+  `b1_month` for month m selects IVV's Item B.5.a return from the filing with the earliest acceptance in the first
+  accepted version (by poll order) containing m; two filings with that acceptance time, or two values for m in it,
+  refuse the month (`B1_AMBIGUOUS`, `INPUT_UNAVAILABLE` at the nine-month limit). Later versions are provenance only.
+- **Bands:** `b1_entry_close` is SPY's F6 close at s(M_0), selected at the end of s(M_0)'s `massive_grouped` window
+  (08:00 on the next session's date). Its receipt's witness deadline is that window's end plus 60 minutes, and the
+  B1 gate is evaluated then: no returns-kind selection for month M_0 + 1 is made before the gate passes.
+  `b1_exit_close` is SPY's close at s(M_0 + 24), likewise.
 
 ### F12. Factors (obligation 12)
 
-The `french` kind downloads the five-factor and momentum monthly files itself, parses them with the pinned
-`reference_data` parser, and binds, per dataset, the first download whose observations cover all 24 forward months.
-Step 2's checks (unit, completeness) apply at binding and are re-verified at the verdict. The daemon's
-`reference_data_snapshots` rows are not read.
+Each `french_file` version is parsed with the pinned `reference_data` parser; it is **accepted** when step 2's checks
+(unit, completeness) pass. `factor` for each dataset (five-factor, momentum) selects the first accepted version (by
+poll order) whose observations cover all 24 forward months. Earlier and rejected versions are provenance only.
 
-### F13. CIK link (population step 2; exception X7)
+### F13. CIK link and ticker mapping (population step 2; exception X7)
 
-- **Rule:** an instrument links to CIK c at s(M) when c's latest 10-K- or 10-Q-family accession accepted before s(M)
-  has a cover class matching the instrument under F1 rule 2, and no other CIK's latest periodic cover in the bound
-  data matches the same symbol (`link_ambiguous` otherwise). Candidate CIKs come from SEC's `company_tickers_exchange.json`,
-  bound daily in `sec_bulk`'s window, and `external_identifiers`; the cover decides.
-- **Exception (X7):** step 1 linked on Form 3/4/5 `issuerTradingSymbol` evidence from the quarterly Insider
-  Transactions Data Sets, which do not contain the current quarter's filings at a monthly formation. The cover is
-  the issuer's own statement of its trading symbol, structured and point-in-time by acceptance.
-- **Dry run:** at each formation, the cover link beside step 1's linkage on the latest published data sets, counts
-  of agreement and each disagreement listed.
+- **eToro to Massive:** an eToro instrument maps to the FIGI whose ticker on s(M) in the bound `massive_tickers`
+  equals the eToro symbol, after the class-suffix table frozen from premise 5(f). No match → `unmapped`; two →
+  `map_ambiguous`.
+- **CIK link:** the FIGI's `cik` on s(M) in the bound `massive_tickers`. Missing → `cik_missing`.
+- **Exception (X7):** step 1 linked on Form 3/4/5 `issuerTradingSymbol` evidence, which the quarterly data sets lag by
+  a quarter. Massive's link is dated by its reference snapshot.
+- **Validation (dry run, pass/fail):** at each formation, the Massive CIK beside SEC's `company_tickers_exchange.json`
+  bound the same session and beside step 1's linkage on its latest data sets. Every disagreement is adjudicated.
+  Pass: no adjudicated case where Massive's CIK is wrong.
 
 ### F14. Return cutoffs (step 1 Amendment 3; exception X9)
 
-The `jkp_cutoffs` kind binds each new `return_cutoffs.csv` when first seen. A holding month's clip uses that month's
-row from the first binding containing it; if none exists at the month's returns cutoff, the latest month's row in the
-latest binding (carry-forward). The clip is a containment for vendor errors, not an economic quantity, so a recent
-month's bounds serve it. Step 1's per-row consistency check and refusals apply; raw and clipped values are both kept.
+- **Selection:** at month m's returns cutoff, `cutoff` binds the row for m from the latest accepted `jkp_file` bound by
+  then, if it has one; otherwise the row of the latest month in that version (carry-forward). The selection is never
+  replaced by a later version. A version is accepted when step 1's per-row check passes for every row. No accepted
+  version, or a non-finite or inverted row → `INPUT_UNAVAILABLE` at the nine-month limit.
+- **Exception (X9):** step 1 clips with the holding month's own row. JKP publishes months in arrears (premise 11), so
+  forward months are usually carried. Clipping bounds a vendor error; it also caps real gains and floors real losses.
+- **Measurement before planning (parent slice 2):** on stage A and stage B, the book's and the control median's G per
+  arm with each month clipped by its own row beside clipped by the row a reader would have had at that month's returns
+  cutoff (the last row in the JKP version then current; versions reconstructed from `Last-Modified` history where
+  available, else a fixed lag equal to premise 11's). Printed: counts of clips changed, both arms, and the five months
+  with the largest change. The declaration records the figures.
 
 ## Formation resolution (amendment A1)
 
 The parent resolves a formation once the previous month's returns are bound, from the book's holdings. Holdings are
-not formed before the verdict (invariant 7), so slice F splits the work:
-- **During the accrual,** in the manifest window, `formation_manifest` binds the instrument-level inputs for the whole
-  superset (F1–F8, F13, eligibility, MAX, ME, raw close, refusals by code, coverage) and `month_manifest` binds every
-  superset instrument's status for the month ending at s(M) and, as they arrive, the return components. Population
-  refusals that need no holdings (`SESSION_MISSING`, `ME_INVALID`, `UNIVERSE_SHORT`, a missing pre-close kind) mark
-  `formation_missed` at once.
-- **At the verdict,** the report forms the paths from those bindings and applies the parent's holding-dependent rule
-  (`PRICE_INVALID` for a holding with no valid close that was not realised) deterministically. A formation missed
-  this way counts toward `ACCRUAL_GAPS` exactly as if found during the accrual; the outcome is the same, only its
-  discovery moves to the verdict.
+not formed before the verdict (invariant 7), so:
+- **During the accrual,** `formation_inputs` for M binds, at the end of s(M)'s last window, the instrument-level inputs
+  for the whole superset (F1–F8, F13, eligibility, MAX, ME, raw close, codes); population refusals that need no
+  holdings mark `formation_missed` at once.
+- **At the verdict,** the report forms the paths and applies the parent's holding-dependent rule (`PRICE_INVALID` for
+  a holding with no valid close that was not realised) from those bindings. A formation missed this way counts toward
+  `ACCRUAL_GAPS` exactly as if found during the accrual.
 
 ## Splicing (invariant 6)
 
 | element | identity mapping | adjustment basis | overlap reconciliation | vendor precedence |
 |---|---|---|---|---|
 | historical ↔ forward | none: the forward path starts all cash at s(M_0) | — | — | — |
-| official close ↔ candles | eToro `instrumentID` | official nominal at d (F6); candles adjusted to s(M) | F7 medians | official for levels; candles for factors and MAX |
-| eToro ↔ PWB | exact symbol over the month, one series per symbol | PWB adjusted to its commit | F9 ratio test | PWB for holding total returns; F6 for status and level |
-| eToro ↔ SEC | F13 cover link | — | F13 dry-run table | cover link only |
+| eToro ↔ Massive | symbol on s(M) via the frozen suffix table, to composite FIGI | — | F13 and F9's daily-return comparison with eToro candles | eToro for listing and tradability; Massive for prices and actions |
+| Massive closes ↔ actions | ticker on the session (FIGI-keyed) | unadjusted closes; dated events | F7's enumeration | Massive only |
+| Massive ↔ SEC | F13's CIK | — | F13 table | SEC for accounting, SIC, Form 25 |
 | B1 | IVV class `C000012040` | NAV total return | step 2's identity gate | N-PORT only |
 
 ## Schema interface (pinned runtime)
 
-Captured bytes live on disk. The tables a capture or the verdict reads or writes are `forward_capture_receipts`
-(all columns) and `strategy_holdout_accesses` (`access_id`, `strategy_id`, `strategy_version`, `result_version`,
-`access_kind`, `accessed_by`, `purpose`, `accessed_at`). Slice F's code holds that list in one constant, with a test
-that the hashed `information_schema` slice covers exactly those columns.
+Captured bytes live on disk. The capture and verdict processes read and write only:
+- `forward_capture_attempts` (`attempt_id`, `trial`, `kind`, `source_id`, `period_key`, `request`, `state`,
+  `created_at`, `updated_at`);
+- `forward_capture_components` (`attempt_id`, `component`, `sha256`, `path`, `bytes`, `validation_class`,
+  `defect_rows`);
+- `forward_capture_receipts` (`receipt_sha256`, `attempt_id`, `prev_receipt_sha256`, `code_commit`,
+  `construction_hash`, `lock_hash`, `schema_hash`, `ledger_commit`, `witness_deadline`, `rekor_entry`,
+  `rekor_checkpoint`, `tsa_token`, `created_at`);
+- `forward_capture_selections` (`trial`, `selection_kind`, `selection_key`, `component_sha256s`, `rule_version`,
+  `value`, `decided_at`);
+- `strategy_holdout_accesses` (`access_id`, `strategy_id`, `strategy_version`, `result_version`, `access_kind`,
+  `accessed_by`, `purpose`, `accessed_at`).
+
+The code holds this list in one constant, with a test that the hashed `information_schema` slice covers exactly these
+columns. Dry-run reports that read other tables (`price_daily`, `instrument_universe_membership`) run as separate
+scripts outside the pinned interface; their output is evidence, never an input.
 
 ## Declared exceptions
 
-| id | parent rule | forward rule | why | dry-run evidence |
+| id | parent rule | forward rule | why | evidence before declaration |
 |---|---|---|---|---|
-| X1 | SUB `sic` of the latest accession | company-record `sic` bound before s(M) | SUB lags a quarter; headers can be corrected after acceptance | F3 comparison (upper bound) |
-| X2 | Intrader raw trade close | eToro official close, verified per observation | no other per-session raw close covers the population | F6 shares and event table |
-| X3 | MAX on Intrader total returns with the ratio screen | Bid-candle price returns; `factor_unresolved` screen | no dividend source before s(M)'s close | F8 historical measurement |
-| X4 | a valid total return for every observed holding | F6 price return, flagged, for a held name the PWB commit lacks | one vendor gap would otherwise end the trial | F9 counts |
-| X6 | step 1's split stamps | F7's measured vendor factor; ME missing before the lookback | no dated split source with ratios exists | F7 adjudication |
-| X7 | Form 3/4/5 symbol linkage | cover-page `dei:TradingSymbol` | the insider data sets lag a quarter | F13 table |
-| X8 | — (parent names 8-A as candidate) | CERT*/8-A12B, else PWB first bar | pre-EDGAR listings have no certification | F2 table |
-| X9 | the holding month's JKP cutoffs | carry-forward when unpublished | JKP publishes in arrears | counts of carried months |
+| X3 | MAX ratio screen on unstamped `adj_close / close` | event-consistency screen (§F8) | actions are dated events here | F8 stage A/B measurement |
+| X5 | tradability from `instrument_universe_membership` | `isTradable` in the bound `etoro_listing` at s(M) | the membership table is daemon state, rewritten outside the pinned runtime | parity: at each dry-run formation, the two predicates side by side with every disagreement and its reason |
+| X7 | Form 3/4/5 symbol linkage | Massive `cik` on s(M) | the insider data sets lag a quarter | F13 table |
+| X8 | Form 8-A 12(b) registration (candidate) | Massive `list_date` | acceptance is not effectiveness or continuity | F2 table |
+| X9 | the holding month's JKP cutoffs | latest row available at the returns cutoff | JKP publishes in arrears | F14 measurement |
 
-**Amendments to the parent:** A1 (formation resolution, above); A2 (lookback inputs from the dry run); A3 (entry
-needs a PWB mapping at s(M)). X5 of round 1 (tradability from the bound listing instead of
-`instrument_universe_membership`) stands: the membership table is written by the daemon from the same endpoint and
-is printed as parity only.
+X1, X2, X4 and X6 of v2 are withdrawn: F3, F6, F9 and F5/F7 now reproduce their obligations.
+
+**Amendments to the parent:** A1 (formation resolution); A2 (lookback). v2's A3 (entry needs a PWB mapping) is
+withdrawn with PWB.
 
 ## Dry run (prospective)
 
-At least three consecutive month-ends before the declaration, from the dry-run tag, trial `3740-slice-f-dryrun`, its
-own Rekor key. A retrospective plumbing test on stored data validates code first and measures artefact sizes and the
-candle-fetch completion time under the daemon's load. **Accepted only if every item passes:**
-1. every window acquired and witnessed on time, or each miss explained by a logged transport defect;
-2. F1 adjudication, F2 adjudication, F6 valid-close share and pre-adjustment table, F7 adjudication, F9 reference
-   comparison, each against the pass rule stated in its section;
-3. F3, F13, X4 and X9 tables printed (reported, not gated);
-4. the parent's parity table;
-5. the witness drills of §"Witness", each with the expected outcome;
-6. a disk projection for 24 formations within the capture root's free space;
-7. at least one F7 event and one Form 25 termination in the superset during the dry run; if none occur, the dry run
-   extends month by month until both have (a quiet period cannot pass these checks vacuously);
-8. no portfolio formed, weighted or valued: instrument-level checks only.
+**Plumbing test first,** on the dry-run key, measures premise 5 (a)–(g) and validates code; the spec's pass rules for
+it: (a) grouped daily for every session of two weeks is available before 08:00 next-session-date; (b) SPY and IVV
+present on every session; (c) at least 95% of eToro type-5 US instruments mapped; (d) at least 18 of 20 delisted names
+present before their delisting; (e) documented; (f) suffix table frozen; (g) the daily cycle fits the window at 4
+calls per minute. A failed item is an amendment with its own checkpoint 1.
 
-A failed item is revised by an amendment with its own checkpoint 1; if the revision changes a historically
-reproducible input, the parent's slice 3 (planning) is re-run.
+**Then at least three consecutive month-ends** from the dry-run tag, trial `3740-slice-f-dryrun`, own Rekor key.
+Accepted only if every item passes:
+1. **Captures:** every mandatory window acquired and witnessed on time. A miss fails this item whatever its cause;
+   transport defects are listed. Abandoned attempts: none outside the drills.
+2. **Pass/fail validations:** F1, F2, F5, F6, F7, F9 (every stratum) and F13, each against its stated rule.
+3. **Reported tables:** F3, F4 freshness, X5 parity, the parent's parity table.
+4. **Measurements before planning:** F8 and F14 on stage A and B, printed and recorded.
+5. **Event coverage:** at least five split events, one reverse split, one special dividend and one Form 25
+   termination in the superset during the dry run; if not, the dry run extends month by month until they have
+   occurred. F7's and F9's adjudications include the non-event cases they list, so quiet sessions are tested too.
+6. **Witness drills,** on the dry-run key, each with its expected outcome: publication failure past its deadline
+   (inadmissible, chain continues); publication retried after a timeout, with the duplicate submission's behaviour
+   recorded (one entry, or two entries for one receipt, both matched); a second receipt for one identity
+   (`CAPTURE_AMBIGUOUS`); a receipt deleted locally after logging (unmatched entry, `CAPTURE_AMBIGUOUS`); a deleted
+   chain tail (the tile scan lists entries with no receipt); a branch (two receipts with one predecessor); a local
+   timestamp edited (the RFC 3161 token disagrees); a crash in each attempt state (the stated outcome).
+7. **Completeness scan cost:** the full tile scan over the dry run's log range, with its time and bytes, and the
+   projection to 24 months plus the nine-month limit. Pass: the projection completes within 7 days on this machine.
+8. **Disk projection** for the whole retained inventory (daily captures, failed-attempt bytes, provenance versions,
+   the dry run and the nine-month tail), with peak usage. Pass: within the capture root's free space with 2× margin.
+9. **No portfolio** formed, weighted or valued: instrument-level checks only.
+
+A failed item is revised by an amendment with its own checkpoint 1; a revision that changes a historically
+reproducible input re-runs the parent's slice 3 (planning).
 
 ## Build slices
 
 1. This spec and the probe (this PR).
-2. Receipts, artefact store, attempt state machine, Rekor witness and the verdict-side checker, with the drills on a
-   scratch key. Codex checkpoint 2.
-3. Capture kinds and the F-rules with fixture tests; the manifests; the launchd agent. Codex checkpoint 2.
-4. The F8 historical measurement (with the parent's slice 2).
+2. Attempts, components, receipts, selections, the artefact store, the Rekor v2 and RFC 3161 witness and the
+   verdict-side checker with the tile scan, with the drills on a scratch key. Codex checkpoint 2.
+3. The capture kinds and the F-rules with fixture tests; the launchd agent. Codex checkpoint 2.
+4. The F8 and F14 historical measurements (with the parent's slice 2).
 5. Plumbing test, then the prospective dry run, posted on #3740.
 
 ## Known limits
 
-- The official close's basis is verified per observation, not by vendor contract; a pre-adjustment under a factor of
-  1.15 passes F6 (X2).
-- Holding returns rely on PWB, a monthly Yahoo-derived republish; a held name it lacks earns price return only (X4).
-- Forward MAX is on Bid-candle price returns (X3).
-- Rekor's key enumeration is experimental (§"Witness").
-- The witness shows tampering; it does not prevent it.
+- Massive is one vendor for prices and actions; F7 and F9 enumerate its errors against eToro and filings, but a
+  Massive error that eToro shares is not caught.
+- The vendor change in MAX's daily closes is unmeasured historically (X3).
+- Forward clipping uses carried JKP rows (X9).
+- A structurally invalid total return for an observed holding (`dividend_currency`, `action_ambiguous` on a held
+  name) cannot be completed and runs to `INPUT_UNAVAILABLE` under the parent's rule; the dry run counts how often
+  each code occurs in the superset.
+- The witness shows tampering with logged receipts; it does not detect a fetch made outside the protocol.
+
+## Round 2 dispositions (for round 3's task A)
+
+| finding | v3 |
+|---|---|
+| 1 witness completeness | Rekor v2 full tile scan by trial key; verdict waits for it; cost gated (dry run 7) |
+| 2 timestamp authentication | RFC 3161 token, signed checkpoints, consistency proofs, pinned TUF root |
+| 3 publication failure | chain links receipts only; verdict order chain → proof → admissibility |
+| 4 crashes | attempt state table; no parsing of unpersisted bytes; persisted bytes recovered, not refetched |
+| 5 registry | acquisition and selection identities, two tables, every selection listed |
+| 6 manifests | `month_status`, `month_returns`, `month_final` selections |
+| 7 discovery | every poll receipted and witnessed; poll order fixes version order |
+| 8 SEC kinds | `sec_daily_index`, `sec_header`, `sec_form25`, `sec_bulk`, `sec_ticker_map` registered and scheduled |
+| 9 Form 25 cutoff | daily index per date, retried to the nine-month limit; acceptance by cutoff separated from acquisition |
+| 10 rates and fallback | eToro rates removed; fallback restricted to three metadata kinds |
+| 11, 18, 19, 27 F6 basis | Massive `adjusted=false` grouped daily, dated, bound before the next open |
+| 12 MAX cutoff | each session's inputs bound in its own post-close window |
+| 13 B1 deadline | B1 close valid at once; gate at window end + 60 min, before any month M_0 + 1 selection |
+| 14 final month | daily grouped and actions through the last returns cutoff; no candles needed |
+| 15 refusal taxonomy | §"Outcomes" table with scope and precedence |
+| 16 read interface | five tables with columns; ledger checks in preflight step 3 |
+| 17 superset | FIGI-keyed, sticky, market-wide kinds unfiltered; SEC window after listing window |
+| 18 A2 | admissible objects listed, validator re-run, continuous coverage, bootstrap |
+| 19, 20 F1 | every security validated against the cover title; FIGI is the security identity |
+| 21 F13 | Massive dated reference snapshot; validated against SEC map and step 1 |
+| 22, 23 F2 | Massive `list_date`; validation both directions at the 36-month boundary |
+| 24 F3 | accession header bound before close: obligation 3 exactly; X1 withdrawn |
+| 25 F4 | capture downloads the zips itself; page completeness; freshness report from daily indexes |
+| 26 F5 | dated split events; fixtures and ME discontinuity census |
+| 28–31 F7 | dated Massive events; independent enumeration from prices and eToro candles, both directions |
+| 32, 33 X3 | replacement screen defined; combined measurement; vendor change stated unmeasured |
+| 34–40 F9 | total return from documented closes and actions; formula; stratified reference with pass rules; cutoff view |
+| 41, 42 F10 | capture state, source cessation and interior gap separated; ordered predicates; `end_bar` |
+| 43 F10 classifier | full `TerminationEvidence` construction with Q-suffix and amendment precedence |
+| 44 F11/F12 | acceptance before selection; poll order; versions kept as provenance |
+| 45, 46 F14 | X9 kept with a historical measurement; one selection at the cutoff, never replaced |
+| 47 dry run | any capture miss fails; drills separate; event coverage with non-event cases |
+| 48 runtime | own Massive key; per-tick budget, timeouts, queue |
+| 49 disk | whole-inventory projection with margin |
+| 50 drills | enumerated with outcomes |
+| 51 X5 | parity table with reasons; X5 in the exception table |
+| 52 probe | v2 probe items kept; Massive items join after the key (premise 5) |
+| 53 A2 attribution | corrected: the rule was v1 of this spec |
 
 ## Checkpoint log
 
-**Round 1 (44 findings: 37 BLOCKING, 5 WARNING, 2 NIT; verdict "not fit to be built").** Revisions:
-- **1, 5 (witness):** Rekor append-only log with a chained receipt, inclusion proofs and key enumeration; outcome
-  table separating late witnesses, misses and ambiguity.
-- **2, 3, 4 (protocol):** binding registry with component granularity and a unique index; attempt state machine with
-  the first-observation rule; absolute windows, polling and the nine-month timestamp.
-- **6:** acquisition superset, sticky, with SPY and IVV.
-- **7:** lookback amendment A2.
-- **8:** formation resolution amendment A1; no interim weights.
-- **9:** `b1_entry_close` refusal at its window end stops the trial.
-- **10:** N-PORT and French fetched and bound by the capture itself, with deterministic selection.
-- **11:** tick preflight and receipt provenance fields; schema interface listed.
-- **12:** cover-page link (X7).
-- **13, 14:** F1 taxonomy with fund SICs, exact symbol matching, duplicates rule, full adjudication.
-- **15, 16:** F2 from certifications and class-matched 8-A12B, PWB fallback declared (X8).
-- **17:** SIC from the company record bound before s(M) (X1).
-- **18, 19:** F6's roll, dated confirmation and in-session anchor.
-- **20–25:** F7 measures the vendor factor between two observations of one session at each formation; FINRA removed;
-  adjudication of every event.
-- **26, 27:** X3 restated with a screen and a three-way historical measurement before planning.
-- **28–33:** holding returns from PWB `adj_close` (the analogue of step 1's Intrader `adj_close`), no dividend
-  extraction, deterministic commit selection, identity mapping after basis conversion, entry restricted to mapped
-  names (A3), an independent reference with pass rules.
-- **34, 36:** statuses and coverage from our own closes; partial-month returns defined.
-- **35:** Form 25 matched by the #2282 register's rules.
-- **37:** JKP cutoffs captured, with carry-forward (X9).
-- **38:** premises labelled by evidence type; the probe extended.
-- **39:** quota completion measured in the plumbing test and gated in the dry run.
-- **40:** `sec_bulk` handoff rules.
-- **41, 42:** dry-run pass rules, event coverage, instrument-level checks allowed.
-- **43, 44:** FINRA removed; slice numbering made explicit.
+**Round 1 (44 findings: 37 BLOCKING, 5 WARNING, 2 NIT).** Applied in v2 (commit `88c7248f`); round 2 judged 10
+applied, 32 partial, 2 not applied.
 
-**Round 2 (53 findings: 46 BLOCKING, 5 WARNING, 2 NIT; checkpoint 1 open).** Round 1 dispositions: 10 APPLIED
-(22–24, 28, 29, 38, 42–44), 32 PARTIAL, 2 NOT APPLIED (27, 34). The source-validity findings (11–14, 26–46) led to
-§"Route change after round 2"; the protocol findings (1–10, 15–18, 47–51) apply to v3 unchanged.
+**Round 2 (53 findings: 46 BLOCKING, 5 WARNING, 2 NIT).** Source-validity findings led to the Massive route;
+dispositions above. Round 3 runs after premise 5 is measured.
