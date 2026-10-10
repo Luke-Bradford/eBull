@@ -1204,3 +1204,169 @@ References use your **S/P/F/R** notation. **APPLIED** means the correction is pr
 54. **WARNING — The disposition table is itself an inaccurate judgement artefact.** **S259–285.** It conflates added prose, partial requirements, future work, and verified corrections. The claims about checkpoint-log edits cannot be checked within R10–75. **Fix:** replace the table with accurate individual dispositions, distinguish verified text from future implementation, and label inaccessible log claims unverified.
 
 55. **NIT — “Exact integer counts” does not describe the decisive arithmetic.** **S213–218.** The branches also depend on annualised weighted errors and yield ratios, whose arithmetic and rounding are unspecified. **Fix:** say that count thresholds use integers and separately specify exact decimal/rational arithmetic and boundary comparisons for monetary and yield tests.
+
+## Round 8 (on the measurement spec v2, `c29de5e6`)
+
+**S is not ready for acceptance, even as the narrowed historical screen.** The v5 deferrals are legitimate. The remaining blockers concern this screen’s truth construction, blindness, event accounting and executable verdict. A pass can still result from shared omissions, self-confirming date derivation, unresolved evidence or deterioration after D_MAX.
+
+I read only the permitted material and performed the permitted mirror checks. The commit, 22,879 CSV files and cited AAPL observations match S. I did not rerun the planning probe, inspect the reserved cohort, compare EDGAR events or modify files. Source-rule observations below concern the contracts and evidence in the permitted material; I did not independently retrieve external rule texts.
+
+References below use **S**, **P**, and **F7** as requested; **probe** denotes the disclosed script. “APPLIED” concerns the specification, not verified implementation.
+
+**Task A — dispositions of round 7 findings 1–55**
+
+1. **PARTIAL** — Reference comparison follows committed extractor output, but the scorer, configuration and adjudication implementation lack an explicit prior freeze (S98–110, 228–232).
+2. **APPLIED** — Performance-based calibration and the claimed protection of the parent’s decision are removed (S20–26, 215–219).
+3. **MOVED** — Parent-book bounds, including controls and references, are expressly assigned to v5 (S20–26).
+4. **PARTIAL** — The weighted formula is removed; event reconciliation, invalid prices, split alignment and exact arithmetic remain incomplete (S189–210).
+5. **APPLIED** — D_MAX now decides acceptance; unavailable formation-input treatment is expressly deferred (S24, 207–213).
+6. **PARTIAL** — Keyed unresolved declarations are never correct, but unkeyed ambiguities and undefined truth can still escape decisive scoring (S124–125, 150–152, 177–179, 204–211).
+7. **LAPSED** — The nine-month maturity decision is removed from this screen (S154–164, 200–224).
+8. **PARTIAL** — Universal adjudication is required in prose, but the branch permits up to 20 unadjudicated keys without a conservative bound (S170–171, 204–206).
+9. **PARTIAL** — Branch priority is explicit; several undefined-input and unresolved-truth cases still lack executable outcomes (S202–211).
+10. **LAPSED** — The prospective extension is removed.
+11. **PARTIAL** — Substantive changes receive a reserved cohort and deadline, but that cohort’s replay overlaps the first replay and rerun termination remains ambiguous (S79–84, 221–224).
+12. **LAPSED** — Discretionary prospective date shifting is removed.
+13. **LAPSED** — Prospective P is removed; an analogous incomplete-truth problem remains in the historical screen (S5–7, 45–52, 170–181).
+14. **PARTIAL** — Issuer and exchange evidence are introduced, but rule-table fallback can validate the route’s own unsupported derivation (S173–179).
+15. **LAPSED** — The completeness detectors are removed.
+16. **MOVED** — The calendar’s role is expressly reserved for v5 (S25).
+17. **PARTIAL** — A fixed lookback and conservative earlier-declaration rule are supplied, but omitted earlier events are not independently inventoried and “missed” conflicts with possible later discovery (S79–81).
+18. **APPLIED** — The replay explicitly prohibits future-triggered searches and backdated discovery (S98–101).
+19. **PARTIAL** — Candidate rules and immutable output improve the contract; parsing, unkeyed ambiguity and event lifecycle cases remain incomplete (S110–127).
+20. **LAPSED** — H1 and its source-content claim are removed.
+21. **PARTIAL** — The route’s table is fixed, but unsupported venue applicability can also enter adjudicated truth (S129–144, 173–175).
+22. **NOT APPLIED** — The unsupported valuation convention is replaced with another unsupported convention: last close before acceptance (S139).
+23. **NOT APPLIED** — Unknown timely notice is knowingly ignored without an independent truth prerequisite (S141–144, 173–175).
+24. **PARTIAL** — Non-session dates receive a branch, but the ordinary, transition and exceptional rows still overlap without precedence (S133–139).
+25. **PARTIAL** — Current SEC metadata is removed as class evidence; one linked priced series per CIK still does not prove the declaration’s security class (S74–78).
+26. **PARTIAL** — Some amount corrections are handled; changed dates, cancellations, cross-key supersession and ties are not (S121–125).
+27. **PARTIAL** — Deduplication precedes summation, but mutable identity fields, component ambiguity and compensating errors remain (S121–125, 150–152).
+28. **PARTIAL** — `basis_review` flags some cases without specifying the route transformation, adjudicated conversion or unknown-basis outcome (S146–148).
+29. **PARTIAL** — Quantisation and rounding mode are stated; issuer precision, aggregate precision and the unnecessary float conversion remain problematic (S182–184).
+30. **PARTIAL** — Merger consideration and some noncash items are excluded, but mixed actions and dividend-versus-capital/terminal classifications remain incomplete (S32–33, 116–118, 256–257).
+31. **PARTIAL** — AAPL inference is labelled correctly, but agreement still promotes unvalidated reference conventions into accepted truth (S41–46, 180–184).
+32. **PARTIAL** — Shared errors are acknowledged; the asserted acquisition lineage and “independent reference” description remain unsupported (S6, 48–52).
+33. **PARTIAL** — Direct CSV use eliminates the database-reconciliation problem, but HEAD plus newly calculated hashes does not establish correspondence to committed file bytes (S54–56, 204–205).
+34. **PARTIAL** — Missing sessions are identified, but uncovered intervals can still disappear from the effective event denominator without preventing pass (S58–62, 197–211).
+35. **MOVED** — The parent’s security classifier and monthly population are expressly assigned to v5 (S25–26).
+36. **MOVED** — The parent’s ME rule is expressly assigned to v5; the pilot uses the named stage-B artefact (S25–26, 66–73).
+37. **MOVED** — Monthly population work and the parent’s full required-set dry run are expressly deferred (S23–26).
+38. **PARTIAL** — A fixed cohort and retained series mapping are specified, but effective-dated identity and ambiguous/changed mapping policies are absent (S54–56, 74–78).
+39. **PARTIAL** — Duration guarantees are removed; the minimum-count adequacy claim is still unsupported and its quarter-loss assertion is false (S215–219).
+40. **MOVED** — Calendar acquisition/completeness belongs to the deferred calendar and forward-acquisition design (S24–26).
+41. **MOVED** — Calendar field semantics belong to its deferred v5 role (S25).
+42. **MOVED** — Calendar matching and temporal policy belong to the deferred v5 design (S24–26).
+43. **MOVED** — Forward cadence, bootstrap and completeness are expressly deferred (S24–25).
+44. **MOVED** — Forward EDGAR acquisition is expressly deferred; historical acquisition still needs its own complete contract (S24–25, 103–108).
+45. **MOVED** — Forward binding and late-completion policy belong to v5; historical revision handling remains an independent defect (S24–26, 121–125).
+46. **PARTIAL** — Timestamp functions improve, but the parent’s EDGAR-specific evidence cutoff and several boundary conventions remain unresolved (S156–166; P412–413).
+47. **APPLIED** — Forward operational readiness is explicitly deferred; historical acceptance times are used for the screen (S24–25, 98–108).
+48. **APPLIED** — Exploratory reference exposure and its influence on the window and bars are explicitly disclosed (S86–94).
+49. **PARTIAL** — The earlier script and absence of verification/logging are disclosed, but its outputs and admissibility are not reconciled (S88–94).
+50. **PARTIAL** — EDGAR bytes and database mapping rows are retained; rule/calendar/scorer versions and complete adjudication/reference provenance remain missing (S228–232).
+51. **PARTIAL** — Name, key and month denominators are separated, but unkeyed evidence, unresolved truth and conflict classifications remain incomplete (S124–125, 177–198).
+52. **NOT APPLIED** — Removing sampling does not remove the requirement to freeze scorer, canonicalisation and adjudication rules before exposure (S110, 186–187, 228–232, 260–261).
+53. **APPLIED** — The disposition now expressly says deferred elsewhere; this applies to the requested disclosure correction, not completion of the underlying probe work (S246–247, 261).
+54. **PARTIAL** — The table distinguishes some deferrals, but still labels incomplete corrections APPLIED and wrongly treats finding 52 as lapsed (S249–261).
+55. **PARTIAL** — Integer counts and Decimal shares are distinguished, but division precision, summation and threshold rounding remain unspecified (S194–195, 202–210).
+
+**Task B — all findings**
+
+1. **BLOCKING — The event inventory cannot establish the stated recall.** **S16–18, 45–52, 170–181.** Adjudicating the union of route and reference events cannot discover an event absent from both. S51’s suggestion that issuer adjudication catches both-sided misses has no corresponding search procedure. **Fix:** require an independently constructed cohort/window inventory, including apparent non-payers, or narrow the question and verdict to agreement and coverage within the observed candidate inventory.
+
+2. **BLOCKING — Agreement is accepted as truth despite explicitly unvalidated semantics.** **S41–46, 180–184.** An agreeing amount/date can share an erroneous date convention, class assignment or adjustment basis. Acknowledging this limitation does not establish correctness of those accepted keys. **Fix:** require field-specific evidence for accepted truth, including agreeing keys, or describe agreement as unverified concordance and prevent it from certifying correctness.
+
+3. **BLOCKING — Missing reference coverage can silently reduce the tested obligation.** **S58–62, 197–211.** Events in uncovered intervals enter scoring only when another source happens to supply them. Uncovered sessions themselves never affect acceptance. A route that misses distributions in those intervals can pass. **Fix:** independently resolve uncovered intervals, or make unresolved coverage an inconclusive prerequisite unless a conservative bound proves the verdict unchanged.
+
+4. **BLOCKING — `source_absent` has contradictory and incomplete scoring semantics.** **S177–179, 191–193, 204–210.** It is described as unresolved but also as a route miss when reference-present; it is neither defined as a true key nor assigned an amount/yield. Reference-absent, route-only cases have no decisive treatment. **Fix:** define one unresolved-truth state for every provenance combination, with explicit denominator and worst-case error treatment; otherwise require inconclusive.
+
+5. **BLOCKING — Up to 20 unadjudicated keys can reach pass.** **S170–171, 204–211.** The universal-adjudication requirement conflicts with the branch threshold. One unknown key could contain an extra event, a ≥1% missed distribution or enough error to change either aggregate test. **Fix:** require zero verdict-relevant unadjudicated keys, or prove every acceptance condition under all possible resolutions.
+
+6. **WARNING — Failure to confirm a reference event is incorrectly called a reference error.** **S45–46, 177–179, 197–198.** Missing evidence is not evidence that the reference is wrong. This also conflicts with the later unresolved category. **Fix:** distinguish confirmed reference errors, unsupported candidates and unresolved source absence.
+
+7. **BLOCKING — Adjudication can validate the route using the same unsupported date rule.** **S129–144, 173–175.** The route mechanically derives a date; adjudication can fall back to that identical table. Consequently, S144’s claim that the table cannot make the route look better is false. **Fix:** prohibit unsupported route derivations from establishing truth. Require independent designation evidence or retain unresolved truth.
+
+8. **BLOCKING — Adjudication lacks an executable evidence-resolution protocol.** **S173–187.** “Where one is found” leaves search effort and stopping discretionary. There is no rule for conflicting notices, later corrections, issuer pages quoting stale designations or determining that evidence is absent. The named source list also does not clearly include direct exchange retrieval. **Fix:** freeze source eligibility, search steps, stopping conditions, conflict precedence, correction handling and unresolved outcomes before exposure.
+
+9. **WARNING — The headline question promises more than the pass conditions.** **S16–18, 207–219.** “Each cash distribution” implies universal timely correctness, while the screen deliberately permits some errors. The “independent reference” introduction also conflicts with S48–52. **Fix:** state the thresholded question precisely and describe the reference’s independence as unverified.
+
+10. **WARNING — The minimum count neither establishes coverage nor enforces the stated quarter-loss protection.** **S191, 205, 215–219.** A count of 1,500 can concentrate in a subset of names, months, venues or easy event classes. It is about 72.46% of 2,070; losing a quarter leaves approximately 1,552–1,553 events and can still pass. **Fix:** correct the arithmetic and remove the adequacy inference. Precommit and report relevant coverage strata; require any coverage necessary for the conclusion separately from total event count.
+
+11. **WARNING — The per-event threshold rationale contradicts the disclosed percentile and uses a different yield definition.** **S92, 194–195, 215–217; probe66–68.** A yield just above 1% is below the reported 2.4784% 99th percentile. The probe divides by the event-day close, whereas scoring uses the preceding-session close. **Fix:** remove or correct the percentile claim and label the exploratory yield basis accurately. A constructed threshold can stand without this false justification.
+
+12. **BLOCKING — One linked priced series per CIK does not establish declaration class.** **S74–78; permitted builder212–215, 773–778; P42–44.** The exclusion counts linked priced series; it does not establish that an issuer has only one relevant class. Assigning every class-unspecified declaration to the cohort series is therefore unsupported. Conversely, multiple class amounts do not inherently make the cohort’s amount unknowable if the class is identifiable. **Fix:** require dated class evidence and a unique declaration-to-security match; preserve genuine ambiguity as unavailable.
+
+13. **BLOCKING — Identity mapping has no effective-date or failure contract.** **S54–56, 66–78, 228–232.** The specification does not resolve ticker reuse, renamed files, successor CIKs, class changes, multiple map rows, missing files or unmatched series. Nor does it require exactly 1,000 successfully mapped distinct cohort members. **Fix:** freeze security identifiers and effective intervals, validate cardinality, and assign explicit prerequisite failures without dropping members.
+
+14. **WARNING — The corpus binding does not prove that files are the committed files.** **S54–56, 204–205, 228–230.** An unchanged HEAD can coexist with modified or untracked CSVs. A hash calculated during the run records those bytes but does not independently validate them; the expected value for the “file hash check” is unspecified. **Fix:** read committed blobs or reconcile each selected file to its commit-tree entry, then retain the expected manifest and actual hashes.
+
+15. **BLOCKING — Reference parsing and validity rules are missing.** **S37–43, 54–62, 182–195.** Nine-field rows do not establish valid dates, unique sessions, finite numeric values, positive closes, usable split factors or an event aggregation convention. Malformed and duplicate records have no branch. **Fix:** freeze the CSV schema and validation rules, including ordering, duplicates, units and nonfinite/nonpositive values; propagate failures explicitly.
+
+16. **BLOCKING — Gross amount and currency are not established for accepted truth.** **S32, 41–46, 113, 120, 173–184; P500–501.** The reference’s gross/net and currency conventions are unknown, while the extraction contract assumes USD amounts and only explicitly handles recognisably non-USD text. Agreement does not resolve this. **Fix:** define the screen’s gross cash-per-share convention, required currency evidence and ambiguous-symbol treatment; unknown basis/currency cannot certify a correct key.
+
+17. **BLOCKING — Split review does not define either the route ledger or the true amount.** **S146–152, 170–175.** `basis_review` names a condition but supplies no transformation for intervening or simultaneous splits, restated disclosures or declaration dates that differ from acceptance. It also does not define the route’s treatment after this reference-derived flag is added. **Fix:** freeze evidence-based amount transformations and separate post-run truth flags from immutable route values; unknown basis must remain unresolved.
+
+18. **WARNING — Mixed distributions and terminal cash need a screen-level classification rule.** **S32–33, 116–118, 256–257.** “In-kind is not cash” does not classify mixed cash/stock elections, fractional-share cash or distributions combining capital and dividend components. Excluding merger consideration does not resolve all terminal-payment cases. **Fix:** define included cash components, excluded actions and ambiguous-action outcomes. The full accounting handoff can remain explicitly deferred to v5.
+
+19. **BLOCKING — The supposedly EDGAR-only route requires an undefined price input.** **S16, 98–101, 139.** The ≥25% test uses the last close before acceptance. EDGAR replay supplies no specified daily close source, and reference input is forbidden until after output is committed. **Fix:** either declare and freeze an additional point-in-time price source and rename the route accordingly, or make derivations requiring unavailable valuation evidence unresolved.
+
+20. **BLOCKING — Venue applicability remains unsupported.** **S129–144, 173–175.** Applying the FINRA table to every venue does not establish that the resulting date is the relevant exchange designation. The unpinned NYSE rule is acknowledged but not resolved, and truth can fall back to the same table. **Fix:** pin applicable venue/version rules and historical venue identity, or freeze unsupported cases as unresolved. Any deliberate mechanical exception needs independent truth evaluation.
+
+21. **BLOCKING — Unknown timely notice defaults into a potentially valid-looking date.** **S141–144, 173–175.** S explicitly does not know whether the notice prerequisite holds, yet normal derivation can still become adjudicated truth. **Fix:** require documented notice/designation evidence where the rule depends on it; otherwise retain an unknown-notice outcome that cannot become correct by fallback.
+
+22. **BLOCKING — The ≥25% valuation convention is still invented.** **S139.** The specification supplies no documented authority for measuring against the last close before filing acceptance. Moving the price anchor from the prior version does not resolve F7’s objection. **Fix:** use documented valuation/designation evidence or retain uncertainty. If retained purely as an extractor heuristic, prohibit it from establishing truth.
+
+23. **BLOCKING — Every “special” or liquidating distribution is assigned exceptional timing without supporting authority.** **S139, 173–175.** The text makes the label alone sufficient for the payable-date-plus-one-session rule, independently of the percentage criterion or a designation. **Fix:** document the actual applicable treatment and evidence requirements; an unsupported label-based heuristic must not become authoritative truth.
+
+24. **BLOCKING — The ex-date table is not an executable decision tree.** **S133–139.** A session-date ordinary row, the May 28 transition row and the exceptional-distribution row can apply simultaneously. A non-session record date can also overlap the exceptional row. **Fix:** specify precedence, qualified applicability and missing/invalid-payable-date outcomes as ordered branches.
+
+25. **WARNING — Several extraction semantics remain open despite being described as a contract.** **S110–120.** Declaration-date recognition is requested but no corresponding trigger is given; table candidates use next-sentence/paragraph language; money syntax, year inference, date validation and “prior-period table” detection are unspecified. **Fix:** bind a deterministic parser/configuration before exposure and enumerate these decisions and refusal outcomes. A narrow parser is permissible, but its behavior must be fixed and measurable.
+
+26. **BLOCKING — Ambiguous and unresolved evidence may have no key and disappear.** **S119–125, 150–152, 170–171, 191–198.** An ambiguous candidate produces “no declaration”; an amount-only E3 produces “no key.” Yet adjudication and decisive scoring operate on keys. An alert without a reliable ex-date or class has no route to either resolution or a conservative verdict effect. **Fix:** maintain an unresolved-candidate inventory independent of keys, resolve its possible in-window events and specify what unresolved residuals do to acceptance.
+
+27. **BLOCKING — Declaration identity and revision handling are incomplete.** **S121–125.** Identity includes fields that corrections can change. The supersession rule handles only changed amounts with unchanged record/payable dates; cancellations, corrected dates, changed class, omitted dates and cross-key replacements are unspecified. A cancellation can also be discarded as a negative statement. **Fix:** define stable component identities and a complete amendment/cancellation state machine, including deterministic ties.
+
+28. **BLOCKING — Deduplication and aggregation can create a wrong ledger that nevertheless matches.** **S121–125, 150–152, 180–184.** Two distinct components with the same tuple may collapse; one component with differing incomplete disclosures may duplicate. Opposing component errors can also produce the correct aggregate. **Fix:** require component provenance and reconciliation before aggregation, define permitted netting and make unresolved component identity affect availability.
+
+29. **BLOCKING — Deadline scoring does not specify immutable as-of route states.** **S98–101, 121–127, 191–193.** Chronological processing alone does not say how each deadline’s ledger is reconstructed after later supersession or conflict. “First discovery” on a declaration does not timestamp every resulting key revision. **Fix:** retain an event-sourced state history and score each cutoff from only transitions available before that cutoff.
+
+30. **BLOCKING — Date conflicts lack a reconciliation algorithm.** **S150–152, 170–175, 191–193.** Since identity for scoring includes ex-date, a shifted event initially appears as two different keys. S does not define how it becomes one `date_conflict`, how duplicate adjudications coalesce, or which date controls month/window membership and deadline selection. **Fix:** precommit event matching across dates, deterministic conflict precedence and treatment of events shifted across window or month boundaries.
+
+31. **BLOCKING — D_MAX correctness does not imply D_RET correctness.** **S191–213.** Although D_MAX is earlier, route correctness is not monotonic. A later erroneous revision or conflict can turn a correct D_MAX key into a wrong or unresolved D_RET key; later spurious keys can also appear. The run still passes. **Fix:** apply acceptance rules at both deadlines, or explicitly define and justify a ledger policy that preserves the required D_MAX state through D_RET.
+
+32. **BLOCKING — The claimed parent deadline correspondence leaves its EDGAR exception unresolved.** **S156–160; P402–413.** S derives D_MAX from the two binding categories, but P separately makes acceptance-versioned EDGAR evidence subject to step 1’s evidence cutoff. The allowed parent excerpt does not establish that cutoff’s equivalence to S’s functions. **Fix:** resolve and pin the applicable evidence-eligibility rule, or label D_MAX a screen proxy and explicitly defer the parent-specific correspondence.
+
+33. **WARNING — Timestamp boundaries and ties are not fully specified.** **S79–84, 98–101, 156–166.** Replay endpoints stop at “23:59”; D_RET has no explicit strict/inclusive comparison; equal acceptance timestamps lack a deterministic processing order. Header absence or mismatch also lacks a stated outcome. **Fix:** use exact half-open intervals, explicit cutoff comparisons, an accession tie-break and timestamp-validation rules.
+
+34. **BLOCKING — Amount comparison depends on unavailable or ambiguous issuer precision.** **S173–184.** Agreeing keys bypass adjudication, yet equality itself requires the issuer’s stated decimal places. Aggregate keys may combine declarations with different precisions. Coarse issuer formatting can also create a large accepted monetary difference. **Fix:** retain evidence for the comparison scale, define aggregate precision and precommit a justified maximum comparison error or exact canonical-decimal equality.
+
+35. **WARNING — The float conversion needlessly discards the reference’s source representation.** **S54–56, 182–184.** Direct CSV reads provide decimal strings; converting through a float and then `repr` introduces a separate transformation and may discard source precision. **Fix:** parse the original numeric token directly as Decimal and retain it.
+
+36. **BLOCKING — Missing or invalid yield denominators have no executable outcome.** **S194–195, 204–211.** “Last earlier close” can be absent, arbitrarily stale, zero, negative or invalid. Division or the resulting thresholds can then be undefined or misleading without triggering a prerequisite failure. **Fix:** specify valid-price requirements, maximum staleness and a conservative unresolved-price/inconclusive branch.
+
+37. **BLOCKING — Yield amounts and prior closes can be on different share bases.** **S146–148, 194–195, 209–210.** A nominal ex-date amount divided by a raw pre-split close can understate or overstate yield around a simultaneous split. That can move an error below both decisive yield thresholds. **Fix:** align numerator and denominator using documented corporate-action evidence; unknown alignment cannot support a passing score.
+
+38. **WARNING — “Exact Decimal” does not specify exact arithmetic.** **S194–195, 202–210.** Decimal division generally rounds; context precision, rounding and summation order are not fixed. Boundary decisions therefore remain implementation-dependent. **Fix:** use exact rational comparisons where practical, or freeze precision, rounding, aggregation order and boundary behavior.
+
+39. **BLOCKING — The freeze does not cover every verdict-affecting choice or exposure channel.** **S86–110, 186–187, 228–232.** Only the extractor commit is explicitly frozen before the run. The spec hash appears in a later manifest, and scorer, canonicalisation, adjudication implementation, calendar and configuration versions lack a stated pre-exposure commitment. Raw acquired filings and diagnostic output also need an explicit exposure boundary. **Fix:** commit all deterministic elements before inspecting run data/output, then separately commit route output before reference joins and adjudication.
+
+40. **BLOCKING — The reserved rerun is not guaranteed to be untouched.** **S79–84, 221–223.** For any shared CIK, the primary and reserved replays both include 2023 filings. First-run candidates, exclusions and retained text can expose evidence needed by the reserved test, including historical declarations. **Fix:** precommit genuinely unexposed evaluation material and an exposure audit, or call the second run exploratory rather than an untouched confirmation.
+
+41. **BLOCKING — The rerun policy does not define a complete terminal state machine.** **S221–224.** It is unclear whether substantive reruns are allowed after pass, how the reserved result combines with the first result, what happens after an inconclusive reserved run, or whether a second inconclusive prohibits further substantive attempts. Infrastructure retries have no finite completion deadline. **Fix:** enumerate permitted transitions, attempt limits, authoritative final outcomes and deadlines for every path.
+
+42. **BLOCKING — Partial accession retrieval is not clearly an incomplete run.** **S103–108, 204–206.** “Every document” is required, but incompleteness is triggered by an unfetched listing or accession. The contract does not clearly address a fetched index with missing documents, truncated successful responses or an HTML error body recorded as content. **Fix:** require a validated document inventory and successful receipt/status for every required object; propagate any missing or invalid object to incomplete.
+
+43. **WARNING — Listing completeness and consistency are asserted without validation criteria.** **S103–108, 228–230.** Naming continuation pages does not define how their enumeration, range coverage, duplicate accessions or changes during acquisition are checked. Retaining fetched bytes alone cannot establish that omitted accessions never existed in the listing. **Fix:** retain listing receipts and freeze pagination, consistency, deduplication and coverage checks.
+
+44. **WARNING — “Three retries with backoff” leaves acquisition behavior underdefined.** **S106–108.** The text does not specify total attempts, timeouts, backoff schedule, retryable responses or preservation of already accepted bytes between attempts. **Fix:** bind these in the frozen acquisition configuration and retain attempt-level receipts. This is historical-run reproducibility, separate from the deferred forward contract.
+
+45. **WARNING — The reproducibility bundle omits material needed to reproduce the verdict.** **S156, 173–187, 228–232.** Missing items include rule texts/versions, calendar version, scorer and dependency versions, canonical configuration, complete adjudication source snapshots and a recoverable binding to reference bytes. URLs and quotes may not preserve the decisive context. **Fix:** retain or immutably reference each contributing input and executable version, with field-level adjudication provenance.
+
+46. **WARNING — The earlier planning read is disclosed but not reconciled.** **S88–94; probe35–59.** The script parses all artefact rows and computes reported figures from database dividend/close rows, whereas the eventual screen uses mirror files. No retained planning output, database snapshot or comparison to verified permitted planning material is specified. The script establishes scope, not what exact historical execution returned. **Fix:** preserve available execution evidence, reconcile the planning inputs/results and explicitly resolve access-policy applicability. Do not describe the old read as retrospectively verified.
+
+47. **WARNING — The exposure ledger omits the previously used performance calibration.** **S86–94; F7 finding 2.** F7 records stage-B performance values used to justify v1’s tolerance. Removing that argument is correct, but the present exposure section only describes the reference probe; removal does not erase earlier knowledge. **Fix:** disclose the previously visible performance figures and their former design role, while clearly separating them from any unobserved EDGAR comparison.
+
+48. **WARNING — The pre-window declaration rule is ambiguous and can mislabel successful extraction.** **S79–81, 121–125.** An original declaration before 2023 may be restated in a replayed filing before D_MAX. S81 says the true key counts as missed based on the adjudicated declaration’s acceptance, while the replay may actually discover it in time. Multiple evidentiary declarations make that anchor unclear. **Fix:** score actual frozen-route discovery by the deadline; report lookback-related misses separately, or state an explicit deliberate penalty and its event-selection rule.
+
+49. **WARNING — The disposition table remains an inaccurate judgement artefact.** **S249–261.** It declares unresolved source-rule, identity, amount-basis, coverage, freeze and arithmetic findings applied. Finding 52 is incorrectly treated as disappearing with sampling, although most of it concerns the broader freeze. **Fix:** replace the table with individual dispositions reflecting remaining work, distinguish implementation from textual commitments and retain the valid v5 deferrals.

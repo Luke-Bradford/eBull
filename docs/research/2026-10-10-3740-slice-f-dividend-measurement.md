@@ -7,6 +7,21 @@ scored against an independent reference with every disagreement adjudicated. v1'
 no independent forward inventory exists, so its "truth" could not certify recall (round 7, 13). Nothing has been
 extracted or compared.
 
+**Round 8 (on v2, `c29de5e6`): 49 findings (32 BLOCKING, 17 WARNING), verbatim in the findings file.** v2's v5
+deferrals were accepted (13 MOVED). Its central blocker (round 8, 1): adjudicating the union of route and reference
+cannot find an event both miss, so v2 cannot certify recall against truth, and no complete independent account-free
+inventory is held. **Decided for v3 (supervisor, 2026-10-10, under the 2026-10-08 delegation):**
+- **Question becomes concordance**, the parent's own standard: "Dry-run agreement is compatibility evidence, not a
+  population guarantee" (parent lines 504–505). v3 asks whether the EDGAR route agrees with Intrader's vendor
+  inventory (recall against it, plus precision after adjudicating route-only events), and claims nothing about
+  events neither carries. This is round 8's own fix for finding 1.
+- **An exploratory pilot runs before v3 is written**, because round 8's findings 15–30 (parsing, identity,
+  revisions, aggregation, basis, date derivation) are empirical questions about what EDGAR dividend text looks like,
+  and eight checkpoint rounds have designed them on paper. Pilot cohort: names ranked 1,001–1,100 by ME at the
+  2023-09-30 formation (disjoint from the decisive top 1,000, which stays unexposed to any extraction), same window,
+  every accession and document fetched under SEC fair access, output labelled exploratory. Its failure classes, with
+  counts, fix v3's extraction contract, then v3 goes to round 9.
+
 Parent: step 3 spec (`docs/research/2026-10-10-3740-step3-vw-book.md`; obligation 9 at lines 500–505; MAX at 218;
 sealing invariant 1 at 402–413; returns window at 441–447). Route note:
 `docs/research/2026-10-10-3740-slice-f-forward-capture.md` §"Route after the no-account rule".
