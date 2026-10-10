@@ -206,7 +206,8 @@ this measurement's.
 - **Fetch and mirror.** Each evidence item's document and its filing's `-index-headers.html` are fetched from
   `/Archives/edgar/data/<CIK>/<accession>/`, under the row's CIK or its `counterparty_cik`, and kept gzipped
   (`mtime` 0) in the mirror. The output records the sha256 and length of the bytes as served. A rerun reads the
-  mirror and fetches nothing.
+  mirror and fetches nothing. Only a served body is mirrored: index headers must carry `ACCEPTANCE-DATETIME`, and a
+  document must be non-empty and not an SEC refusal page, so a bad 200 is fetched again on the next run.
 - **Acceptance.** The item's `acceptance` must equal the headers' `ACCEPTANCE-DATETIME` (14 digits, EDGAR's Eastern
   clock, as served).
 - **Quote.** At most 300 characters, and it must occur in the document's text with all whitespace removed from both.
@@ -214,7 +215,8 @@ this measurement's.
   This is a rule by construction, because no source rule says how an EDGAR HTML document becomes text.
 - **Fields.** Read off the row's quotes. A date counts in a role only when it sits within 40 characters of that
   role's words in the same quote:
-  - **split:** the ratio, read as "a-for-b" in numerals or number words, or as "a:b".
+  - **split:** the ratio, read as "a-for-b" in numerals or number words, or as "a:b" (never a clock time), within
+    40 characters of split words ("split", "stock dividend", "distribution", "combination" and the like).
   - **split effective date:** quoted beside adjusted-basis or ex-date words (§1: the first session on the adjusted
     basis). Otherwise, the record date (beside "record") and the payable date (beside "payable", "paid",
     "distributed", "distribution date" or "issued") must be quoted, and the effective date must be FINRA 11140's date

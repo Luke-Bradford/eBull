@@ -12435,3 +12435,24 @@ neighbouring container and match it.**
   with no candidate is a guaranteed miss, and the count of those caps recall. If the cap is below the bar, record the
   fail and spend the effort on the revision instead.
 - Enforced in: `docs/research/3739-event-file/README.md` § "Slice 3b" (the bound and its inputs).
+
+### An optional CSV field compared by equality matches an empty value (#3739)
+
+- Failure (bot review, #3739 slice 3b, PR #3751): the checker's single-class test compared a cover's title and
+  symbol with the row's by `==`. A row with an empty `class_title` or `class_symbol` would match a cover value that
+  is also empty.
+- Prevention: before comparing a user-supplied CSV field by equality, guard it for truthiness
+  (`title and t == title`). Grep the diff for `== <field>` on values read with `.get(...) or ""`.
+- Enforced in: `scripts/build_3739_slice3b.py` (`_class_failures`), and
+  `tests/test_3739_slice3b.py::test_an_empty_class_title_or_symbol_matches_no_cover`.
+
+### A permanent mirror validates the body before it caches it, not the status alone (#3739)
+
+- Failure (bot review, #3739 slice 3b, PR #3751): the evidence mirror cached any HTTP 200 body forever, and a rerun
+  reads the mirror instead of fetching. A refusal page served with status 200 would have become a permanent quote
+  mismatch.
+- Prevention: before writing a fetched body to a cache that later runs trust, assert its expected shape, such as
+  the header's marker or a non-empty, non-refusal document. A rejected body is not cached, so the next run fetches
+  it again.
+- Enforced in: `scripts/build_3739_slice3b.py` (`served_body`), and
+  `tests/test_3739_slice3b.py::test_only_a_served_body_is_mirrored`.

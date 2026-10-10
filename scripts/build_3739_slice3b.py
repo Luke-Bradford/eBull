@@ -175,8 +175,10 @@ _DASH: Final = r"[-‐‑‒–—]"
 _FOR_RATIO: Final = re.compile(
     rf"(?<![\w.])(?P<a>{_NUMBER})\s*{_DASH}?\s*for\s*{_DASH}?\s*(?P<b>{_NUMBER})(?!\w)", re.IGNORECASE
 )
-#: "10:1", "1:20": numerals only, a new shares for b old.
-_COLON_RATIO: Final = re.compile(rf"(?<![\w.:])(?P<a>{_NUMERAL})\s*:\s*(?P<b>{_NUMERAL})(?![\w:])")
+#: "10:1", "1:20": numerals only, a new shares for b old; never a clock time ("4:01 p.m.").
+_COLON_RATIO: Final = re.compile(
+    rf"(?<![\w.:])(?P<a>{_NUMERAL})\s*:\s*(?P<b>{_NUMERAL})(?![\w:])(?!\s*[ap]\.?\s?m\b)", re.IGNORECASE
+)
 _MONTHS: Final = {
     name: number
     for number, names in enumerate(
@@ -237,14 +239,26 @@ def number_value(text: str) -> Fraction | None:
     return value
 
 
-def stated_ratios(text: str) -> set[Fraction]:
-    out: set[Fraction] = set()
+def ratio_spans(text: str) -> list[tuple[Fraction, int, int]]:
+    """Every ratio the grammar reads, wherever it stands; :func:`stated_ratios` keeps those in a split's terms."""
+    out: list[tuple[Fraction, int, int]] = []
     for pattern in (_FOR_RATIO, _COLON_RATIO):
         for match in pattern.finditer(text):
             a, b = number_value(match["a"]), number_value(match["b"])
             if a and b:
-                out.add(a / b)
+                out.append((a / b, match.start(), match.end()))
     return out
+
+
+def stated_ratios(text: str) -> set[Fraction]:
+    """Ratios within ``ROLE_REACH`` of split words, so "4:1" in a vote count or "one for one" in a merger is not read
+    as a split ratio."""
+    words = list(SPLIT_WORDS.finditer(text))
+    return {
+        value
+        for value, start, end in ratio_spans(text)
+        if any(start - ROLE_REACH <= w.end() and w.start() <= end + ROLE_REACH for w in words)
+    }
 
 
 def dated_spans(text: str) -> list[tuple[date, int, int]]:
@@ -286,6 +300,9 @@ def dated_near(text: str, value: date, words: re.Pattern[str]) -> bool:
 EFFECTIVE_WORDS: Final = re.compile(
     r"\b(split[- ]adjusted|post[- ](reverse[- ])?split|adjusted) basis|\bex[- ](dividend|distribution|date|split)\b",
     re.I,
+)
+SPLIT_WORDS: Final = re.compile(
+    r"\b(split|stock dividend|share dividend|distribut\w*|combin\w*|consolidat\w*|reclassif\w*)", re.I
 )
 RECORD_WORDS: Final = re.compile(r"\brecord\b", re.I)
 PAYABLE_WORDS: Final = re.compile(r"\b(payable|paid|distributed|distribution date|issued)\b", re.I)
@@ -481,7 +498,7 @@ def _class_failures(
             (ratio is not None and ratio in stated_ratios(text)) or (effective and effective in stated_dates(text))
         ):
             return []
-    if any(compact(t).casefold() == title or s == symbol for t, s in single_classes):
+    if any((title and compact(t).casefold() == title) or (symbol and s == symbol) for t, s in single_classes):
         return []
     return ["neither an action quote nor a single-class cover names the class title or symbol"]
 
@@ -556,6 +573,17 @@ def mirror_path(mirror: Path, accession: str, name: str) -> Path:
     return mirror / accession / f"{name}.gz"
 
 
+#: SEC's fair-access refusal pages, which a misbehaving proxy or client could pass on with status 200.
+_REFUSAL_MARKERS: Final = (b"Request Rate Threshold Exceeded", b"Undeclared Automated Tool")
+
+
+def served_body(url: str, content: bytes) -> bool:
+    """A body worth mirroring: index headers carry their acceptance; a document is non-empty and not a refusal page."""
+    if url.endswith("-index-headers.html"):
+        return _HEADER_ACCEPTANCE.search(content) is not None
+    return bool(content.strip()) and not any(marker in content for marker in _REFUSAL_MARKERS)
+
+
 def fetch_into_mirror(urls: Mapping[str, Path]) -> Counter[str]:
     """Fetch every URL whose mirror file is absent; write the served bytes gzipped (mtime 0). Non-200 writes nothing."""
     pending = {url: path for url, path in urls.items() if not path.exists()}
@@ -571,9 +599,13 @@ def fetch_into_mirror(urls: Mapping[str, Path]) -> Counter[str]:
                 if got.response is None or got.response.status_code != 200:
                     status[f"http_{got.response.status_code}" if got.response else "transport_error"] += 1
                     continue
-                path = pending[str(got.key)]
+                url, content = str(got.key), got.response.content
+                if not served_body(url, content):
+                    status["invalid_body"] += 1  # not cached, so a rerun fetches it again
+                    continue
+                path = pending[url]
                 path.parent.mkdir(parents=True, exist_ok=True)
-                publish(path, gzip.compress(got.response.content, mtime=0))
+                publish(path, gzip.compress(content, mtime=0))
                 status["fetched"] += 1
 
     asyncio.run(run())
@@ -610,8 +642,9 @@ def check_row(record_type: str, row: Row, mirror: Path) -> Verdict:
         entry["quote_found"] = compact(item.quote) in compact(document_text(raw, item.document))
         if not entry["quote_found"]:
             verdict.failures.append(f"evidence_{n}: quote does not occur in {item.document}")
-        # Only the issuer's own cover can say which of its classes is the only one; a counterparty's cannot.
-        cover = single_class(raw) if item.cik == row.values["cik"] else None
+        # Only the issuer's own cover can say which of its classes is the only one; a counterparty's cannot. A
+        # misquoted item already fails the row; it lends nothing to the class check either.
+        cover = single_class(raw) if item.cik == row.values["cik"] and entry["quote_found"] else None
         entry["single_class"] = list(cover) if cover else None
         if cover:
             single_classes.append(cover)

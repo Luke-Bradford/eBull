@@ -49,16 +49,28 @@ def split(**overrides: str) -> dict[str, str]:
         ("twenty-five-for-one", Fraction(25)),
     ],
 )
-def test_stated_ratios_read_new_shares_for_old(text: str, ratio: Fraction) -> None:
-    assert ratio in s3b.stated_ratios(text)
+def test_the_ratio_grammar_reads_new_shares_for_old(text: str, ratio: Fraction) -> None:
+    assert ratio in {value for value, _, _ in s3b.ratio_spans(text)}
 
 
 def test_words_and_a_disagreeing_bracketed_numeral_state_no_ratio() -> None:
-    assert s3b.stated_ratios("a three (4)-for-one split") == set()
+    assert s3b.ratio_spans("a three (4)-for-one split") == []
 
 
 def test_text_with_no_ratio_states_none() -> None:
-    assert s3b.stated_ratios("shares for issuance under the plan") == set()
+    assert s3b.ratio_spans("shares for issuance under the plan") == []
+
+
+def test_a_ratio_is_stated_only_beside_split_words() -> None:
+    assert s3b.stated_ratios("a ten-for-one forward stock split") == {Fraction(10)}
+    assert s3b.stated_ratios("approved by a margin of 4:1 at the annual meeting") == set()
+    assert s3b.stated_ratios("holders receive one for one in the merger") == set()
+    assert s3b.stated_ratios("a 1-for-20 reverse split") == {Fraction(1, 20)}
+
+
+def test_a_clock_time_is_not_a_colon_ratio() -> None:
+    assert s3b.ratio_spans("effective at 4:01 p.m. Eastern Time") == []
+    assert s3b.ratio_spans("effective at 10:30 am") == []
 
 
 @pytest.mark.parametrize(
@@ -213,6 +225,22 @@ def test_single_class_reads_the_cover_12b_contexts() -> None:
     assert s3b.single_class(b"<p>no inline XBRL</p>") is None
 
 
+def test_an_empty_class_title_or_symbol_matches_no_cover() -> None:
+    quotes = SPLIT_QUOTES[:2]
+    assert s3b.field_failures("split", split(class_title="", class_symbol=""), quotes, [("", "")]) == NO_CLASS
+
+
+def test_only_a_served_body_is_mirrored() -> None:
+    header_url = f"https://www.sec.gov/Archives/edgar/data/1/x/{ACCESSION}-index-headers.html"
+    assert s3b.served_body(header_url, f"<ACCEPTANCE-DATETIME>{ACCEPTANCE}".encode())
+    assert not s3b.served_body(header_url, b"<html>Request Rate Threshold Exceeded</html>")
+    assert s3b.served_body("https://www.sec.gov/a/doc.htm", DOCUMENT)
+    assert not s3b.served_body(
+        "https://www.sec.gov/a/doc.htm", b"Your Request Originates from an Undeclared Automated Tool"
+    )
+    assert not s3b.served_body("https://www.sec.gov/a/doc.htm", b"  ")
+
+
 def test_a_cancelled_row_states_no_fields() -> None:
     assert s3b.field_failures("split", split(status="cancelled"), ["the split was withdrawn"]) == []
 
@@ -335,6 +363,15 @@ def test_a_counterparty_cover_does_not_identify_the_class(tmp_path: Path) -> Non
     verdict = s3b.check_row("split", row, tmp_path / "m")
     assert verdict.failures == NO_CLASS
     assert {e["single_class"] for e in verdict.evidence} == {None}
+
+
+def test_a_misquoted_item_lends_no_single_class(tmp_path: Path) -> None:
+    values = split() | evidence(1, SPLIT_QUOTES[0]) | evidence(2, SPLIT_QUOTES[1]) | evidence(3, "not in the document")
+    row = s3b.read_rows(write_records(tmp_path / "r.csv", [values]))[0]
+    mirror_filing(tmp_path / "m", DOCUMENT)
+    verdict = s3b.check_row("split", row, tmp_path / "m")
+    assert verdict.evidence[2]["single_class"] is None
+    assert "evidence_3: quote does not occur in nvda-20240607.htm" in verdict.failures
 
 
 def test_check_row_fails_a_misquote_a_wrong_acceptance_and_an_unserved_document(tmp_path: Path) -> None:
