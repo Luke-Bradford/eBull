@@ -47,6 +47,103 @@
     "register": "inputs/form25-register-through-2026-10-08.csv",
     "register_sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489"
    }
+  },
+  {
+   "slice": "2b",
+   "path": "inputs/fsnds-notes-2024q1-2026-09-extract.jsonl.gz",
+   "sha256": "4b29dcd6d22e3e1642148bb74c6bd2113d55635b43cf7142e46f08914ec79b5c",
+   "what": "StockholdersEquityNoteStockSplitConversionRatio1 and dei EntityCommonStockSharesOutstanding facts, every issuer and form, from the Financial Statement and Notes data sets 2024q1 .. 2026-09, each with its EDGAR acceptance",
+   "inputs": {
+    "archives_sha256": {
+     "fsnds_2024q1_notes.zip": "7d32ab3c55b73518da7ed2806585d1af2cb43cf9e70315021daaa3d4ccaca9e2",
+     "fsnds_2024q2_notes.zip": "0cd96e543861de383be5b4a45fc780d2c2e00148c577102531de42c0fef615a1",
+     "fsnds_2024q3_notes.zip": "4f9df2afb9f13cc59332041732d65615befc807e34419a4d529c727796b88761",
+     "fsnds_2024q4_notes.zip": "9170c007b27cc886b4bf772e569c0202796635cacb620972e272de83f75ecaa3",
+     "fsnds_2025q1_notes.zip": "f2e45bc99c25d615cf2261d537e35e0d4c0b6ab3e61c4dbdae46a82625181426",
+     "fsnds_2025q2_notes.zip": "088afacafbd37170d24cef1102d66db0bd0e5bbe901ecbf3b36a25023a14d3a9",
+     "fsnds_2025q3_notes.zip": "194ec982f296e8ddbfd0de7d60f0b0de3b74101d1bfc0d1230a96441d366cdd9",
+     "fsnds_2025_10_notes.zip": "023d5ea5fd4ccd8626447dfb7d9fa036e0fca8a7b8bf39159ac4163d041faef7",
+     "fsnds_2025_11_notes.zip": "a58753e3ad42fbb38bc154beb34c74c211e4b3649c7bd4b1b9faabf1f4ca1094",
+     "fsnds_2025_12_notes.zip": "b8204dd58360c782da4d15c88a4c5b9f737baefc886c8a265601535caee39030",
+     "fsnds_2026_01_notes.zip": "ca33a8f8f60a0be26793c143094a45ed9f6829ce767d59ab390fd0c27ea7d9a9",
+     "fsnds_2026_02_notes.zip": "b136c03e65d09cae85317daf76c6f368e7331add69cd41f970ca9cb0070506b8",
+     "fsnds_2026_03_notes.zip": "d1c1711e6cee2f197fb91879521da178329d1c1ed369f9086aa501aff45f83d4",
+     "fsnds_2026_04_notes.zip": "5c0d73348971b33e03a195a1b2806fe5bddaac80e0a6c1567efc16e75447b17e",
+     "fsnds_2026_05_notes.zip": "be53d43208bd8a37fd1c8e074767a89647137d85b616404d6007aa1ec9f3b9e2",
+     "fsnds_2026_06_notes.zip": "33b66c361c7300ba2c9329fa1e99a606d090296d0e009c8c0176acb3076b7745",
+     "fsnds_2026_07_notes.zip": "e3dddc51764c4b8932b0444690648f42775c9569b7d257cc41bcbccd19c8443b",
+     "fsnds_2026_08_notes.zip": "b94cca57b452afcf2acbdf6de7dee71c1f9c1231a63619e3e6e28d43c576a6a6",
+     "fsnds_2026_09_notes.zip": "c747318c0cdd6ac2802ab20ecce80a2c9ba5032232eeb2ae020307e92108c244"
+    },
+    "submissions_zip_sha256": "39945f2c3e79de58540be92ff7e5ad0ba4dcccf296ade2a3744030006719a332"
+   }
+  },
+  {
+   "slice": "2b",
+   "path": "inputs/insider-observations-2022q3-2026q3.jsonl.gz",
+   "sha256": "67a21589066fe75c16e6dc02c60c4c3a9a4d4a9d0462ee1874f216b96737fa5e",
+   "what": "#3361 rule-2 stored observations (issuer CIK, unified symbol, acceptance), insider data sets 2022q3 .. 2026q3: every one accepted from 2024-07-01, and per (CIK, symbol) the latest in the 730 days before",
+   "inputs": {
+    "quarters_sha256": {
+     "insider_2022q3.zip": "846c1115906b1c45dd8761da076a32ea0cb9f8995dae76f81d0cd93b7e05b032",
+     "insider_2022q4.zip": "6c6a909bd2eaaa0a24ccf5f0071b404670c115845d2939bc592bf3ce420dcdb9",
+     "insider_2023q1.zip": "0b476188f52a0862e71886eb31a81f6345fc6616403b52188484aef0438cfcfb",
+     "insider_2023q2.zip": "7e636787231ae0f00accf5c3627298402dedd1aefffd7c50fb48292e5d3a8fbb",
+     "insider_2023q3.zip": "26947559fbd710ca4fb007e2ff0481b13ebc3ca47153e77a9b0bc84db250a48e",
+     "insider_2023q4.zip": "be19822ad9116ea6c1a55303b1f2e23864f21101e42d2da0455a6ff2b33e1a9e",
+     "insider_2024q1.zip": "8e9bb34335416829a88e4ca7d09bb8aaceca689da9718fef22c298d6f18c9b04",
+     "insider_2024q2.zip": "782abee663e466b243f953625ae319da93c3e896816007d5a375e558c94dc7c1",
+     "insider_2024q3.zip": "8b55b4ffd91e56770fc0e71f9b73e6886f3c60fac8b7266e4b3e5586d2857910",
+     "insider_2024q4.zip": "44763a00aa8a2077747bc015f12c6a4c09ba7cae4a2d031bf24398f9db9e52f3",
+     "insider_2025q1.zip": "37f6b4287df129b88acf0782498540640d055b1c893320877e329945b534a8c2",
+     "insider_2025q2.zip": "64e7f81328933b1281bd8737961048d76d2ab3d5d1d2d7149a32ec061b0e3ff2",
+     "insider_2025q3.zip": "9c57f272b7230500771f661bc1fe181527ed6b76a6f45d23a910c7fc7e9fcfa4",
+     "insider_2025q4.zip": "6af26a68f5834eab96dff2c568530d9213638d3e6c9d1256e4f6c9f8af1d2d28",
+     "insider_2026q1.zip": "3dcb680593f5829bc951cb0969e858b60fc21a6835b094838218093a849592d6",
+     "insider_2026q2.zip": "11f1b2bbbdcbe6347a34437c02d04202fda0eca1dbb023726e4b56504b802e27",
+     "insider_2026q3.zip": "a4e6a681cfcfa43a3d9e4ca9cfec1fd26a59d0a01eac7e9f7b5a0122092c90f3"
+    },
+    "submissions_zip_sha256": "39945f2c3e79de58540be92ff7e5ad0ba4dcccf296ade2a3744030006719a332"
+   }
+  },
+  {
+   "slice": "2b",
+   "path": "candidates-split.csv",
+   "sha256": "eea475b9799c5f009bd648d1c77c305540065e3218b2e78d459444ae0eb0b129",
+   "what": "spec section 3.2 split screen, pass-1 candidate list, event window 2024-07-01 .. 2026-09-30",
+   "inputs": {
+    "through": "2026-09-30",
+    "notes_sha256": "4b29dcd6d22e3e1642148bb74c6bd2113d55635b43cf7142e46f08914ec79b5c",
+    "observations_sha256": "67a21589066fe75c16e6dc02c60c4c3a9a4d4a9d0462ee1874f216b96737fa5e",
+    "extract_sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
+    "register_sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489"
+   }
+  },
+  {
+   "slice": "2b",
+   "path": "candidates-symbol-change.csv",
+   "sha256": "f30c26303448b9a804205acde6d017583b5653cd833685445caeb2f7e2973aca",
+   "what": "spec section 3.2 symbol-change screen, pass-1 candidate list, event window 2024-07-01 .. 2026-09-30",
+   "inputs": {
+    "through": "2026-09-30",
+    "notes_sha256": "4b29dcd6d22e3e1642148bb74c6bd2113d55635b43cf7142e46f08914ec79b5c",
+    "observations_sha256": "67a21589066fe75c16e6dc02c60c4c3a9a4d4a9d0462ee1874f216b96737fa5e",
+    "extract_sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
+    "register_sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489"
+   }
+  },
+  {
+   "slice": "2b",
+   "path": "candidates-termination.csv",
+   "sha256": "ed32df9997a446b1b7d0485e9ec237fbde5a27c87e4b3775279b101cbdb1f318",
+   "what": "spec section 3.2 termination screen, pass-1 candidate list, event window 2024-07-01 .. 2026-09-30",
+   "inputs": {
+    "through": "2026-09-30",
+    "notes_sha256": "4b29dcd6d22e3e1642148bb74c6bd2113d55635b43cf7142e46f08914ec79b5c",
+    "observations_sha256": "67a21589066fe75c16e6dc02c60c4c3a9a4d4a9d0462ee1874f216b96737fa5e",
+    "extract_sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
+    "register_sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489"
+   }
   }
  ]
 }
