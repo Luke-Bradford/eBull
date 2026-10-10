@@ -157,9 +157,9 @@ def year_before(day: date) -> date:
     return day.replace(year=day.year - 1) if (day.month, day.day) != (2, 29) else date(day.year - 1, 2, 28)
 
 
-def overlaps(start: date, end: date, through: date) -> bool:
-    """The interval reaches into the event window [EVENT_START, through]."""
-    return start <= through and end >= EVENT_START
+def overlaps(start: date, end: date, through: date, event_start: date = EVENT_START) -> bool:
+    """The interval reaches into the event window [event_start, through]."""
+    return start <= through and end >= event_start
 
 
 # --------------------------------------------------------------------------- notes extract
@@ -473,7 +473,7 @@ def positive(value: str) -> Decimal | None:
     return number if number.is_finite() and number > 0 else None
 
 
-def xbrl_candidates(facts: Iterable[NoteFact], through: date) -> list[SplitCandidate]:
+def xbrl_candidates(facts: Iterable[NoteFact], through: date, event_start: date = EVENT_START) -> list[SplitCandidate]:
     """§3.2: each ratio fact accepted in the window, whatever its context date, with interval [context end - 1 year,
     acceptance]. One candidate per (filing, context end, class): its repeated presentations are one indication."""
     groups: dict[tuple[str, str, str, str], list[NoteFact]] = defaultdict(list)
@@ -485,7 +485,7 @@ def xbrl_candidates(facts: Iterable[NoteFact], through: date) -> list[SplitCandi
         accepted = group[0].accepted
         assert accepted is not None
         day = ny_date(accepted)
-        if not EVENT_START <= day <= through:
+        if not event_start <= day <= through:
             continue
         values = {(f.uom, f.value) for f in group}
         (uom, value), *rest = sorted(values)
@@ -505,7 +505,9 @@ class Cover:
     shares: Decimal
 
 
-def covers(facts: Iterable[NoteFact], through: date, ledger: Counter[str]) -> dict[tuple[str, str], list[Cover]]:
+def covers(
+    facts: Iterable[NoteFact], through: date, ledger: Counter[str], event_start: date = EVENT_START
+) -> dict[tuple[str, str], list[Cover]]:
     """Per (CIK, class), the cover count of each 10-Q and 10-K, in period order, an amendment replacing its original.
 
     Read from the registrant's facts only (``coreg`` empty: a co-registrant's count is another entity's) in unit
@@ -558,11 +560,13 @@ def covers(facts: Iterable[NoteFact], through: date, ledger: Counter[str]) -> di
     }
     # A series whose first cover is dated in the window has no earlier cover in the archives read, so a jump from
     # its pre-window count cannot be seen: a new registrant, or an archive the build did not read. Published.
-    ledger["cover:series_first_in_window"] = sum(series[0].reported >= EVENT_START for series in ordered.values())
+    ledger["cover:series_first_in_window"] = sum(series[0].reported >= event_start for series in ordered.values())
     return ordered
 
 
-def cover_candidates(series: Mapping[tuple[str, str], Sequence[Cover]], through: date) -> list[SplitCandidate]:
+def cover_candidates(
+    series: Mapping[tuple[str, str], Sequence[Cover]], through: date, event_start: date = EVENT_START
+) -> list[SplitCandidate]:
     """§3.2: consecutive covers whose count ratio lies outside [0.8, 1.25]; the interval is the two covers' dates."""
     low, high = COUNT_BAND
     out = []
@@ -572,7 +576,9 @@ def cover_candidates(series: Mapping[tuple[str, str], Sequence[Cover]], through:
             if Decimal(str(low)) <= ratio <= Decimal(str(high)):
                 continue
             start, end = earlier.reported, later.reported
-            if ny_date(later.accepted) > through or not overlaps(min(start, end), max(start, end), through):
+            if ny_date(later.accepted) > through or not overlaps(
+                min(start, end), max(start, end), through, event_start
+            ):
                 continue
             out.append(
                 SplitCandidate(
@@ -593,19 +599,21 @@ def unread_business_days(start: date, extract_from: date) -> list[date]:
     ]
 
 
-def item_503_candidates(filings: Iterable[Filing], through: date) -> list[SplitCandidate]:
+def item_503_candidates(
+    filings: Iterable[Filing], through: date, event_start: date = EVENT_START, extract_from: date = EXTRACT_FROM
+) -> list[SplitCandidate]:
     """§3.2: any 8-K whose items include 5.03, with interval [acceptance, + 92 days]. Refuses unless the extract
-    reaches back to the first acceptance whose interval meets the window (EVENT_START - 92 days, 2024-03-31, a Sunday
-    before the extract's 2024-04-01: the only day it misses is one EDGAR accepts nothing on)."""
-    missing = unread_business_days(EVENT_START - ITEM_503_SPAN, EXTRACT_FROM)
+    reaches back to the first acceptance whose interval meets the window (for stage C, EVENT_START - 92 days,
+    2024-03-31, a Sunday before the extract's 2024-04-01: the only day it misses is one EDGAR accepts nothing on)."""
+    missing = unread_business_days(event_start - ITEM_503_SPAN, extract_from)
     if missing:
-        raise ValueError(f"the filing extract starts {EXTRACT_FROM}; Item 5.03 acceptances on {missing} are unread")
+        raise ValueError(f"the filing extract starts {extract_from}; Item 5.03 acceptances on {missing} are unread")
     out = []
     for filing in filings:
         if filing.form not in ITEM_503_FORMS or ITEM_503 not in filing.items:
             continue
         day = filing.accepted_date
-        if day > through or not overlaps(day, day + ITEM_503_SPAN, through):
+        if day > through or not overlaps(day, day + ITEM_503_SPAN, through, event_start):
             continue
         out.append(
             SplitCandidate(

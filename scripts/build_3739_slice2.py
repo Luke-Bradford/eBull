@@ -227,8 +227,8 @@ def submission_filings(cik: str, payload: Mapping[str, Any]) -> Iterator[Filing]
         )
 
 
-def extract_filings(archive: zipfile.ZipFile) -> Iterator[Filing]:
-    """Every filing of ``EXTRACT_FORMS`` accepted on or after ``EXTRACT_FROM``, over all members. A member whose name
+def extract_filings(archive: zipfile.ZipFile, extract_from: date = EXTRACT_FROM) -> Iterator[Filing]:
+    """Every filing of ``EXTRACT_FORMS`` accepted on or after ``extract_from``, over all members. A member whose name
     is not a CIK file refuses, so a format change cannot silently drop filers; EDGAR's 16-byte
     ``placeholder.txt`` is the one known non-CIK member."""
     for name in sorted(archive.namelist()):
@@ -238,19 +238,24 @@ def extract_filings(archive: zipfile.ZipFile) -> Iterator[Filing]:
         if match is None:
             raise ValueError(f"unexpected submissions.zip member {name!r}")
         for filing in submission_filings(match.group(1), json.loads(archive.read(name))):
-            if filing.form in EXTRACT_FORMS and filing.accepted_date >= EXTRACT_FROM:
+            if filing.form in EXTRACT_FORMS and filing.accepted_date >= extract_from:
                 yield filing
 
 
-def is_entrant_filing(filing: Filing, base: date) -> bool:
-    """§2 item 2's filing test, accepted in (F - 92 days, F + 24 months]."""
-    if not base - ENTRANT_LOOKBACK < filing.accepted_date <= ENTRANT_LAST:
+def is_entrant_filing(filing: Filing, base: date, last: date = ENTRANT_LAST) -> bool:
+    """§2 item 2's filing test, accepted in (F - 92 days, F + 24 months]; ``last`` is F + 24 months."""
+    if not base - ENTRANT_LOOKBACK < filing.accepted_date <= last:
         return False
     return filing.form in ENTRANT_FORMS or (filing.form == "8-K" and SHELL_STATUS_ITEM in filing.items)
 
 
 def pass1(
-    base: Formation, base_date: date, k: int, filings: Iterable[Filing], register: Iterable[tuple[str, str]]
+    base: Formation,
+    base_date: date,
+    k: int,
+    filings: Iterable[Filing],
+    register: Iterable[tuple[str, str]],
+    entrant_last: date = ENTRANT_LAST,
 ) -> dict[str, dict[str, list[str]]]:
     """U pass 1: CIK -> {basis: evidence}. ``incumbent`` evidence is the issuer's rank at F; ``entrant`` the
     qualifying accessions; ``terminated`` the register events' accessions. ``register`` is (issuer CIK, accession)
@@ -268,7 +273,7 @@ def pass1(
         if rank <= k:
             u[cik]["incumbent"].append(str(rank))
     for filing in filings:
-        if filing.cik not in ranks and is_entrant_filing(filing, base_date):
+        if filing.cik not in ranks and is_entrant_filing(filing, base_date, entrant_last):
             u[filing.cik]["entrant"].append(filing.accession)
     for cik, accession in register:
         u[cik]["terminated"].append(accession)
@@ -355,9 +360,9 @@ def checked(path: Path, digest: str) -> Path:
     return path
 
 
-def extract(archive: Path, out: Path) -> None:
+def extract(archive: Path, out: Path, extract_from: date = EXTRACT_FROM) -> None:
     with zipfile.ZipFile(archive) as zf:
-        count = write_gz_lines(out, (dataclasses.asdict(filing) for filing in extract_filings(zf)))
+        count = write_gz_lines(out, (dataclasses.asdict(filing) for filing in extract_filings(zf, extract_from)))
     print(json.dumps({"zip_sha256": sha256_of(archive), "rows": count, "extract_sha256": sha256_of(out)}))
 
 
