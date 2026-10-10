@@ -7121,6 +7121,9 @@ def etoro_dividend_calendar_capture() -> None:
         # Fetch first: no DB connection is held across the HTTP request (the dev cluster has no headroom).
         response = fetch_dividend_calendar()
         with connect_job(autocommit=True) as conn:
+            # A refused or empty page raises here after its row commits. ``_tracked_job`` records only
+            # ``error_msg`` on failure (never ``note``), and that message names the capture id, status and
+            # calendar-row count, so the failed run still points at its stored evidence.
             report = store_capture(conn, response)
         tracker.row_count = 1
         tracker.note = (

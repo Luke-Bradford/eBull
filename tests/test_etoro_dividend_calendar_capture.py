@@ -48,6 +48,16 @@ def test_fetch_keeps_status_headers_and_body_and_drops_cookies(monkeypatch: pyte
 
 def test_fetch_refuses_a_body_over_the_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(capture, "MAX_PAYLOAD_BYTES", 4)
-    monkeypatch.setattr(capture.httpx, "stream", _fake_stream(httpx.Response(200, content=b"12345"), {}))
+    # Chunked (no Content-Length), so only the streamed count can catch it.
+    served = httpx.Response(200, content=iter([b"12", b"345"]))
+    monkeypatch.setattr(capture.httpx, "stream", _fake_stream(served, {}))
     with pytest.raises(capture.DividendCalendarCaptureError, match="HTTP 200 body exceeds 4 bytes; not stored"):
+        capture.fetch_dividend_calendar()
+
+
+def test_fetch_refuses_an_oversize_declared_length_before_reading(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(capture, "MAX_PAYLOAD_BYTES", 4)
+    served = httpx.Response(200, headers=[("Content-Length", "99")], content=b"")
+    monkeypatch.setattr(capture.httpx, "stream", _fake_stream(served, {}))
+    with pytest.raises(capture.DividendCalendarCaptureError, match="declares 99 bytes, over 4; not stored"):
         capture.fetch_dividend_calendar()

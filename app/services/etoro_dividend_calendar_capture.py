@@ -72,6 +72,11 @@ def fetch_dividend_calendar(
     with httpx.stream(
         "GET", url, headers={"User-Agent": USER_AGENT}, timeout=timeout, follow_redirects=False
     ) as response:
+        declared = response.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > MAX_PAYLOAD_BYTES:
+            raise DividendCalendarCaptureError(
+                f"HTTP {response.status_code} declares {declared} bytes, over {MAX_PAYLOAD_BYTES}; not stored"
+            )
         body = bytearray()
         for chunk in response.iter_bytes():
             body += chunk

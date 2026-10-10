@@ -50,16 +50,21 @@ def test_store_then_refuse_then_append_only(ebull_test_conn: psycopg.Connection[
 
     # The same bytes again are a second observation, not a duplicate.
     store_capture(conn, _response(200, _PAGE))
-    with pytest.raises(DividendCalendarCaptureError, match="HTTP 403 with 0 calendar rows"):
+    with pytest.raises(DividendCalendarCaptureError, match=r"^capture \d+: HTTP 403 with 0 calendar rows"):
         store_capture(conn, _response(403, b"Attention Required! | Cloudflare"))
-    with pytest.raises(DividendCalendarCaptureError, match="HTTP 200 with 0 calendar rows"):
+    with pytest.raises(DividendCalendarCaptureError, match=r"^capture \d+: HTTP 200 with 0 calendar rows"):
         store_capture(conn, _response(200, b"<html>challenge</html>"))
     assert conn.execute(
         "SELECT http_status, ex_date_marker_count FROM etoro_dividend_calendar_captures ORDER BY capture_id"
     ).fetchall() == [(200, 2), (200, 2), (403, 0), (200, 0)]
 
-    # Append-only: the fixture empties tables under session_replication_role = replica, which skips the trigger.
-    with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
-        conn.execute("UPDATE etoro_dividend_calendar_captures SET http_status = 200")
-    with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
-        conn.execute("DELETE FROM etoro_dividend_calendar_captures")
+    # Append-only. Each statement runs in an open transaction that is rolled back, so even without the trigger
+    # nothing would commit; the fixture empties tables under session_replication_role = replica.
+    conn.autocommit = False
+    for statement in (
+        "UPDATE etoro_dividend_calendar_captures SET http_status = 200",
+        "DELETE FROM etoro_dividend_calendar_captures",
+    ):
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(statement)
+        conn.rollback()
