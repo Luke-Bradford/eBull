@@ -331,3 +331,62 @@ for p in ('docs/research/3739-event-file/replica-2022/inputs/fsnds-notes-2022q1-
     print(p, len(c), min(c.values()), max(c.values()))
 "
 ```
+
+## Slice 3e (2026-10-10): the second replica (F = 2020-07-31). FAIL by count ceiling, before adjudication
+
+Every artefact below was built by the slice 3d code (`edada332`, merged before any of them existed) and is pinned in
+`manifest.json` (slice `3e`).
+
+| artefact | figure |
+|---|---:|
+| filing extract from 2020-04-01 (`submissions.zip`, Last-Modified 2026-10-10 04:33 GMT) | 479,094 filings |
+| notes extract, FSNDS 2020q2 .. 2023q1 (12 archives) | 120,848 facts from 82,216 filings |
+| U pass 1 at F = 2020-07-31 (stage A's formation), K = 1,500 | 4,081 issuers (1,500 incumbents, 2,581 entrants) |
+| split candidates, events 2020-08-01 .. 2022-07-31, evidence through 2023-02-19 | 20,825 (xbrl_ratio 5,715, cover_count 3,256, stock_dividend 5,337, item_503 6,517); 10,065 on 2,535 U issuers |
+| Intrader `split_factor` stamps in the window / the comparison set (`in_u`) | 541 / **n = 43** on 43 issuers (9 reverse) |
+
+**Power at n = 43** (§3.4, Amendment 1; the bars do not change with n). The count bar allows ⌊0.03 × 43⌋ = 1 miss.
+Under the table's assumption of independent misses at a common true recall p:
+
+| n (misses allowed) | P(count-bar pass) at p = 0.995 | 0.99 | 0.97 | 0.95 | 0.90 |
+|---|---:|---:|---:|---:|---:|
+| 43 (1) | 0.98 | 0.93 | 0.63 | 0.36 | 0.06 |
+
+This is p⁴³ + 43(1 − p)p⁴², the probability of passing the count bar alone. The same formula at n = 42 reproduces the
+spec's row (0.98, 0.93, 0.64, 0.37, 0.07).
+
+**Count ceiling.** Three comparison stamps have **no split candidate on their CIK anywhere in the window**, so no record
+can match them. Count recall is therefore at most **40 / 43 = 93.0%, below the 97% bar**, whatever adjudication
+finds. That is the replica's second fail. §3.4: "A second fail stops the route: stage C is not buildable by this
+protocol, and #3740 moves to forward paper accrual."
+
+The evidence for the ceiling is the pinned candidate list itself: each of these CIKs has zero candidates in it. The
+§3.4 readings (Amendment 1: unmatched stamps are read under §3.3's inputs and published, never excluded):
+
+| stamp | factor | linkage CIK | reading under §3.3's inputs (EDGAR, read 2026-10-10) |
+|---|---:|---|---|
+| `CAPD` 2021-06-04 | 10 | 0001086082 Cannapowder, Inc. | `no_document`. The CIK's last filing is a Form 15-12G (`0001493152-20-008405`, 2020-05-12), so no filing of the CIK states an action in the window. It is an incumbent at rank 1,098 of stage A's 2020-07-31 formation. |
+| `EXC` 2022-02-02 | 1.40262 | 0001109357 Exelon Corp | A distribution of another issuer's securities, for which §3.1 writes no record. 8-K `0001104659-22-010604` (`tm224978d1_8k.htm`): "Each Exelon shareholder received one share of Constellation’s common stock for every three shares of Exelon common stock held by such shareholder at 5:00 p.m. Eastern Time, on January 20, 2022, the record date." |
+| `OCCI` 2022-03-14 | 1.044752 | 0001716951 OFS Credit Company, Inc. | A same-class distribution payable partly in shares, which §3.1 would record as a `split`. 424B3 `0001716951-22-000016` (`occi424b3atmprosupp31622.htm`): "The distribution is payable on April 29, 2022 in cash or shares of our common stock to stockholders of record as of March 15, 2022." The fund files no 10-Q, 10-K or 8-K, so no screen reads it. |
+
+Any two of these already exceed the one miss allowed. The 10,065 candidate rows on U are not adjudicated, as in the
+2022 replica, because no outcome can change the verdict. The readings inform the diagnosis and change no recall
+figure (§3.4). In one case each: a deregistered issuer, a vendor stamp for a spin-off, and a security whose issuer
+files no form the screens read.
+
+Reproduce the candidate count on U, n and the three symbols from the pinned files (the power table is the formula
+above):
+
+```bash
+PYTHONPATH=. uv run python - <<'PY'
+import csv, gzip, io
+from datetime import date
+R = "docs/research/3739-event-file/replica-2020"
+u = {r["cik"] for r in csv.DictReader(open(f"{R}/u-pass1.csv"))}
+c = [r for r in csv.DictReader(io.StringIO(gzip.decompress(open(f"{R}/candidates-split.csv.gz", "rb").read()).decode()))
+     if r["cik"] in u]
+s = [r for r in csv.DictReader(open(f"{R}/comparison-intrader-stamps.csv")) if r["in_u"] == "1"]
+print(len(c), len(s), [r["vendor_symbol"] for r in s if not any(x["cik"] == r["cik"] for x in c)])
+PY
+```
+

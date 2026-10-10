@@ -209,6 +209,74 @@
     "linkage_manifest_sha256": "1738bc39c29b9dd5da5cc2d64cce2e28df8bc2eb8ad67b03a7fa76ecc0f7f470",
     "source": "research_price_daily joined to research_price_series, dev ebull, read 2026-10-10"
    }
+  },
+  {
+   "slice": "3e",
+   "path": "replica-2020/inputs/submissions-2026-10-10-extract-from-2020-04-01.jsonl.gz",
+   "sha256": "c4c122984a69c771985a1d8fca99e9d0e268530db48df8a2200502a129789bb5",
+   "what": "8-A12B, 10-12B, 8-K12B, 8-K and 8-K/A filings accepted from 2020-04-01, every filer in EDGAR submissions.zip (spec section 3.4 second replica, F = 2020-07-31)",
+   "inputs": {
+    "submissions_zip_sha256": "39c288191b846ccc1e2fc79b5da95c3d53d26e29f9c9b3373be2aa6c1e569e3f",
+    "submissions_zip_last_modified": "Sat, 10 Oct 2026 04:33:26 GMT"
+   }
+  },
+  {
+   "slice": "3e",
+   "path": "replica-2020/inputs/fsnds-notes-2020q2-2023q1-extract.jsonl.gz",
+   "sha256": "80af19ee1d165bc941a98907f08e4d694ac56e3610c906d8c320684cc93acc1b",
+   "what": "the split screens' XBRL facts (ratio fact, dei cover counts and Amendment 1's five stock-dividend elements), every issuer and form, from the Financial Statement and Notes data sets 2020q2 .. 2023q1, each with its EDGAR acceptance",
+   "inputs": {
+    "archives_sha256": {
+     "fsnds_2020q2_notes.zip": "f2ba7501bafd49118d613338120ba7b7a496cc1ca9da9ccafb8916962606a969",
+     "fsnds_2020q3_notes.zip": "6c9dd29c26d41f7d076bcadf14efdb00185ce5656baec4cb8e1c5f307fd45c22",
+     "fsnds_2020q4_notes.zip": "2dea33d67af372fc88a1a09a8a28f554c31a35a7ca8b073bd3b41dd5d1ad36a7",
+     "fsnds_2021q1_notes.zip": "f078ddcbc25594bafb4eba0110d834587e3ba315f236a54c5b928bc29fd99276",
+     "fsnds_2021q2_notes.zip": "fbbc99dff34cdd1b898a7e5b34b66b89fcf313bc4a620b2248a9ae663cb97d22",
+     "fsnds_2021q3_notes.zip": "e3664ccd756e9e3e0eec977d6f91dcea6a4b5db7425547009f84595e5724de05",
+     "fsnds_2021q4_notes.zip": "279e0e2d790c9fc50b8fdc11ecc3ebd17853cef6b477e335afe4d1952b9fcb86",
+     "fsnds_2022q1_notes.zip": "6d8ae74740a8a6b667899e8c6930b25720c2d8eb1296c77a9e81a2b4cb5f627d",
+     "fsnds_2022q2_notes.zip": "736eb8c4a7eb7dbe8c14b980c4f955b0ae03acf1603ce1629a33db5ad428f83f",
+     "fsnds_2022q3_notes.zip": "e6f8fd80500f5b38ffd8686ad4fbfa4bdcf298f75e0593a1ea5ec01cdff43abd",
+     "fsnds_2022q4_notes.zip": "05138194da418d1049cbd539e4da04974d3043ecb4fc3bda02ab9c4224421337",
+     "fsnds_2023q1_notes.zip": "cc1ceca2181c57e0d1fc7a44b0003db9c59abf55d3cef67c1876841b659e0958"
+    },
+    "submissions_zip_sha256": "39c288191b846ccc1e2fc79b5da95c3d53d26e29f9c9b3373be2aa6c1e569e3f"
+   }
+  },
+  {
+   "slice": "3e",
+   "path": "replica-2020/u-pass1.csv",
+   "sha256": "dc3faacf1b304016a7b708002a643e4194205a03d25c46ef05e437fb58c2014b",
+   "what": "replica U pass 1 (section 2 items 1-2), K = 1500, base formation 2020-07-31",
+   "inputs": {
+    "calibration_sha256": "347f2fa155432c1ae104fc71adeccb4d48353d362ff02ffc8afaa8c65ac8732d",
+    "extract_sha256": "c4c122984a69c771985a1d8fca99e9d0e268530db48df8a2200502a129789bb5",
+    "stage_a_manifest_sha256": "e0924564ef1639f9473586523679894eb5d1741a75a3a3b8ddce5858917cae6e"
+   }
+  },
+  {
+   "slice": "3e",
+   "path": "replica-2020/candidates-split.csv.gz",
+   "sha256": "930457942f13f7e9f6754c94d4548b4238b7b403da534b6ddee219224bf80f45",
+   "what": "spec section 3.2 split screens as revised by Amendment 1 on the section 3.4 second replica, candidate list pinned before replica adjudication, event window 2020-08-01 .. 2022-07-31, evidence through 2023-02-19",
+   "inputs": {
+    "through": "2022-07-31",
+    "evidence_through": "2023-02-19",
+    "notes_sha256": "80af19ee1d165bc941a98907f08e4d694ac56e3610c906d8c320684cc93acc1b",
+    "extract_sha256": "c4c122984a69c771985a1d8fca99e9d0e268530db48df8a2200502a129789bb5",
+    "code": "edada332"
+   }
+  },
+  {
+   "slice": "3e",
+   "path": "replica-2020/comparison-intrader-stamps.csv",
+   "sha256": "933efe5e1317c05a9947d5aad14c4bf7812f2214ed5e704d1ca58ffb4a3b2a4a",
+   "what": "spec section 3.4 comparison set for the second replica, pinned before adjudication: every icyDenev/Intrader split_factor stamp (not 1) dated 2020-08-01 .. 2022-07-31, with the #3361 linkage as of its stamp date; rows with in_u = 1 are the comparison set",
+   "inputs": {
+    "u_sha256": "dc3faacf1b304016a7b708002a643e4194205a03d25c46ef05e437fb58c2014b",
+    "linkage_manifest_sha256": "1738bc39c29b9dd5da5cc2d64cce2e28df8bc2eb8ad67b03a7fa76ecc0f7f470",
+    "source": "research_price_daily joined to research_price_series, dev ebull, read 2026-10-10"
+   }
   }
  ]
 }
