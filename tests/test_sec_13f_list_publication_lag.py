@@ -49,15 +49,15 @@ def test_unpublished_target_inside_grace_uses_prior_quarter() -> None:
 def test_q1_fallback_crosses_the_year() -> None:
     calls: list[tuple[int, int]] = []
     result = fetch_latest_published_list(date(2027, 1, 5), _fetcher({(2026, 3)}, calls))
-    assert result[:2] == (2026, 3)
-    assert result[4] == (2026, 4)
+    assert (result.year, result.quarter) == (2026, 3)
+    assert result.unpublished_quarter == (2026, 4)
 
 
 def test_grace_bound_is_inclusive_then_raises() -> None:
     # 2026q3 ends 2026-09-30; day 45 still falls back, day 46 raises.
     last_grace_day = date(2026, 11, 14)
     assert (last_grace_day - date(2026, 9, 30)).days == LIST_PUBLICATION_GRACE_DAYS
-    assert fetch_latest_published_list(last_grace_day, _fetcher({(2026, 2)}, []))[4] == (2026, 3)
+    assert fetch_latest_published_list(last_grace_day, _fetcher({(2026, 2)}, [])).unpublished_quarter == (2026, 3)
     with pytest.raises(urllib.error.HTTPError):
         fetch_latest_published_list(date(2026, 11, 15), _fetcher({(2026, 2)}, []))
 

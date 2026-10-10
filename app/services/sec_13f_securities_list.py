@@ -61,7 +61,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date
-from typing import Final
+from typing import Final, NamedTuple
 
 import psycopg
 import psycopg.rows
@@ -164,28 +164,33 @@ def fetch_13f_list_txt(year: int, quarter: int) -> tuple[str, str]:
     raise last_err
 
 
+class PublishedList(NamedTuple):
+    year: int
+    quarter: int
+    payload: str
+    source_url: str
+    unpublished_quarter: tuple[int, int] | None
+    """The target quarter when the fallback was taken, else ``None``."""
+
+
 def fetch_latest_published_list(
     today: date,
     fetch: Callable[[int, int], tuple[str, str]],
-) -> tuple[int, int, str, str, tuple[int, int] | None]:
+) -> PublishedList:
     """Fetch the last closed quarter's Official List, or the quarter before
-    it while SEC has not yet published the new one (#3630).
-
-    Returns ``(year, quarter, payload, source_url, unpublished_quarter)``;
-    ``unpublished_quarter`` is the target quarter when the fallback was
-    taken, else ``None``. A 404 on the target past
+    it while SEC has not yet published the new one (#3630). A 404 on the target past
     :data:`LIST_PUBLICATION_GRACE_DAYS`, any non-404 error, and any error
     on the fallback quarter all raise."""
     year, quarter = _last_completed_quarter(today)
     try:
         payload, source_url = fetch(year, quarter)
-        return year, quarter, payload, source_url, None
+        return PublishedList(year, quarter, payload, source_url, None)
     except urllib.error.HTTPError as err:
         if err.code != 404 or (today - _calendar_quarter_end(year, quarter)).days > LIST_PUBLICATION_GRACE_DAYS:
             raise
     prior_year, prior_quarter = _last_completed_quarter(_calendar_quarter_end(year, quarter))
     payload, source_url = fetch(prior_year, prior_quarter)
-    return prior_year, prior_quarter, payload, source_url, (year, quarter)
+    return PublishedList(prior_year, prior_quarter, payload, source_url, (year, quarter))
 
 
 def _store_raw_list(
