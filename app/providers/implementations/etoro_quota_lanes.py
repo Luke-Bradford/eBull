@@ -478,6 +478,7 @@ EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
     (_MARKET, "_http"): 8,
     (_SOCIAL, "_http_rankings"): 1,
     (_SOCIAL, "_http_live"): 1,
+    # get_rates + get_closing_prices: two call expressions on one lane-F client (#3740), not a weight.
     (_PERISH, "_http_rates"): 2,
     (_PERISH, "_http_eligibility"): 1,
     (_PERISH, "_http_what_if"): 1,

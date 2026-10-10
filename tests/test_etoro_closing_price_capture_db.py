@@ -47,9 +47,11 @@ def test_store_then_refuse_then_append_only(ebull_test_conn: psycopg.Connection[
         store_capture(conn, _response(401, b'{"errorCode":"Unauthorized"}'))
     with pytest.raises(ClosingPriceCaptureError, match=r"^capture \d+: HTTP 200 with 0 instrument rows"):
         store_capture(conn, _response(200, b"[]"))
+    with pytest.raises(ClosingPriceCaptureError, match=r"^capture \d+: HTTP 200 with None instrument rows"):
+        store_capture(conn, _response(200, b"[" * 100_000))
     assert conn.execute(
         "SELECT http_status, instrument_rows FROM etoro_closing_price_captures ORDER BY capture_id"
-    ).fetchall() == [(200, 2), (401, None), (200, 0)]
+    ).fetchall() == [(200, 2), (401, None), (200, 0), (200, None)]
 
     # Each refused statement runs in an open transaction that is rolled back.
     conn.autocommit = False

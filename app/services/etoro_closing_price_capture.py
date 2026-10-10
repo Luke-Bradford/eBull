@@ -40,7 +40,7 @@ def count_instrument_rows(body: bytes) -> int | None:
     """Length of the top-level JSON array; None when the body is not one (liveness only, not validation)."""
     try:
         decoded = json.loads(body)
-    except ValueError:
+    except ValueError, RecursionError:  # a pathologically nested body must not escape before the row is stored
         return None
     return len(decoded) if isinstance(decoded, list) else None
 
