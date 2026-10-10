@@ -308,6 +308,13 @@ def test_publish_all_writes_every_file_or_none(tmp_path: Path, monkeypatch: pyte
     assert (a.read_bytes(), b.read_bytes()) == (b"1", b"2")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a.csv", "b.csv"]
 
+    # A staging file left by a killed run does not block the next one.
+    e = tmp_path / "e.csv"
+    (tmp_path / ".e.csv.staging").write_bytes(b"stale")
+    s2b.publish_all({e: b"5"})
+    assert e.read_bytes() == b"5" and not (tmp_path / ".e.csv.staging").exists()
+    e.unlink()
+
     c, d = tmp_path / "c.csv", tmp_path / "d.csv"
     real_link = s2b.os.link
 

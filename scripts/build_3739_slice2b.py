@@ -94,12 +94,13 @@ def publish(out: Path, payload: bytes) -> None:
 def publish_all(payloads: Mapping[Path, bytes]) -> None:
     """Publish every payload or none: each is written to a staging file first, then hard-linked to its name (a link
     refuses an existing name). On any failure the names linked so far are removed, so a rerun is not refused by a
-    partial set."""
+    partial set. A staging file left by a killed run is replaced."""
     staged: dict[Path, Path] = {}
     linked: list[Path] = []
     try:
         for out, payload in payloads.items():
             staging = out.with_name(f".{out.name}.staging")
+            staging.unlink(missing_ok=True)  # only this function writes that name: a crashed run's leftover
             publish(staging, payload)
             staged[out] = staging
         for out, staging in staged.items():
