@@ -8,7 +8,9 @@ measurement.
 
 The page is server-rendered (one ``data-ex-dividend-date`` attribute per row) and its HTML differs on every
 fetch, so every capture is a new row. A non-200 response or a page with no calendar rows is stored and then
-fails the job: a Cloudflare challenge would otherwise read as a successful capture of nothing.
+fails the job: a Cloudflare challenge would otherwise read as a successful capture of nothing. Two cases
+store no row and fail the job through ``job_runs`` only: a transport error (no response exists) and a body
+over ``MAX_PAYLOAD_BYTES``.
 """
 
 from __future__ import annotations
@@ -31,10 +33,13 @@ USER_AGENT: Final = "eBull/1.0 reference-data"
 EX_DATE_MARKER: Final = b'data-ex-dividend-date="'
 #: Session cookies say nothing about the page and are not kept.
 _DROPPED_HEADERS: Final = frozenset({"set-cookie"})
+#: Fixed by construction at about 17x the 954,392-byte page measured on 2026-10-10: room for the calendar to
+#: grow, while an unrelated or runaway response is refused before it is held in memory or stored.
+MAX_PAYLOAD_BYTES: Final = 16 * 1024 * 1024
 
 
 class DividendCalendarCaptureError(RuntimeError):
-    """The capture was stored but the page was refused or held no calendar rows."""
+    """The page was refused, held no calendar rows, or exceeded the size bound."""
 
 
 @dataclass(frozen=True)
@@ -64,17 +69,26 @@ def fetch_dividend_calendar(
 ) -> CalendarResponse:
     """One GET, no redirects followed: a redirect means the source moved, and is stored as such."""
     requested_at = now()
-    response = httpx.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout, follow_redirects=False)
-    return CalendarResponse(
-        url=url,
-        requested_at=requested_at,
-        observed_at=now(),
-        status=response.status_code,
-        headers=tuple(
-            (name, value) for name, value in response.headers.multi_items() if name.lower() not in _DROPPED_HEADERS
-        ),
-        body=response.content,
-    )
+    with httpx.stream(
+        "GET", url, headers={"User-Agent": USER_AGENT}, timeout=timeout, follow_redirects=False
+    ) as response:
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            body += chunk
+            if len(body) > MAX_PAYLOAD_BYTES:
+                raise DividendCalendarCaptureError(
+                    f"HTTP {response.status_code} body exceeds {MAX_PAYLOAD_BYTES} bytes; not stored"
+                )
+        return CalendarResponse(
+            url=url,
+            requested_at=requested_at,
+            observed_at=now(),
+            status=response.status_code,
+            headers=tuple(
+                (name, value) for name, value in response.headers.multi_items() if name.lower() not in _DROPPED_HEADERS
+            ),
+            body=bytes(body),
+        )
 
 
 _INSERT: Final = """
@@ -118,6 +132,7 @@ def store_capture(conn: psycopg.Connection[Any], response: CalendarResponse) -> 
 
 __all__ = [
     "EX_DATE_MARKER",
+    "MAX_PAYLOAD_BYTES",
     "URL",
     "USER_AGENT",
     "CalendarResponse",
