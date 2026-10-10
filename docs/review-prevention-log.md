@@ -12456,3 +12456,23 @@ neighbouring container and match it.**
   it again.
 - Enforced in: `scripts/build_3739_slice3b.py` (`served_body`), and
   `tests/test_3739_slice3b.py::test_only_a_served_body_is_mirrored`.
+
+### A per-item coverage claim comes from committed code, not a hand join (#3739)
+
+- Failure (caught in slice 3c, 2026-10-10): slice 3b's README listed `AMC` 2023-08-23 as having no candidate whose
+  interval covers the stamp date. The pinned list's Item 5.03 candidate `S004986`, [2023-08-14, 2023-11-14], covers
+  it. The claim came from a join done outside committed code.
+- Prevention: a sentence that names which items a pinned list covers or misses cites the command that printed it,
+  and that command prints every item's row, not a hand-picked subset.
+- Enforced in: `scripts/build_3739_slice3c.py coverage` (prints every stamp's covering candidates and its inputs'
+  sha256), cited by `docs/research/3739-event-file/README.md` § "Slice 3c".
+
+### A fail-closed claim needs its counterexample search, not its happy path (#3739)
+
+- Failure (Codex checkpoint 1, #3739 Amendment 1 round 6): the amendment claimed a wrong constructed ex-date "surfaces
+  as unresolved basis" through the rescale detector. A pair whose shared sessions all precede both dates is
+  explained whatever the date, so raw prices between the dates are wrong silently.
+- Prevention: before writing that a downstream check catches an error, construct the case where the check's inputs
+  never span the error (here: no shared session between the two dates). If one exists, state the error as a limit.
+- Enforced in: `docs/research/2026-10-09-3739-stage-c-panel.md` §"Source rules" (split effective date) and
+  §"Known limits" (constructed (b)(1) dates).
