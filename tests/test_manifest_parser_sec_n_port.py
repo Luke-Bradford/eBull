@@ -70,6 +70,7 @@ def _seed_pending_n_port(
     *,
     accession: str,
     filer_cik: str,
+    filed_at: datetime = datetime(2026, 2, 26, tzinfo=UTC),
 ) -> None:
     record_manifest_entry(
         conn,
@@ -80,7 +81,7 @@ def _seed_pending_n_port(
         subject_type="institutional_filer",
         subject_id=filer_cik,
         instrument_id=None,
-        filed_at=datetime(2026, 2, 26, tzinfo=UTC),
+        filed_at=filed_at,
         primary_document_url=f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/"
         f"{accession.replace('-', '')}/primary_doc.xml",
     )
@@ -457,6 +458,41 @@ def test_agent_cik_row_tombstones_before_archive_fetch(
 
     # CRITICAL: parser must NOT have hit the SEC archive at all.
     assert calls == [], f"agent-CIK guard should short-circuit before fetch; got calls={calls}"
+
+
+def test_filed_before_retention_cutoff_tombstones_before_fetch(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3631: a filing dated before the retention cutoff reports an even
+    older period, so it tombstones without a fetch. The two 2020 General
+    American Investors filings whose option rows carry ``valUSD`` ``N/A``
+    (EdgarTools rejects them) were retried hourly forever before this."""
+    accession = "0001387131-20-004400"
+    _seed_pending_n_port(
+        ebull_test_conn,
+        accession=accession,
+        filer_cik="0000040417",
+        filed_at=datetime(2020, 5, 4, 20, 19, 57, tzinfo=UTC),
+    )
+    ebull_test_conn.commit()
+
+    calls = _patch_fetch_map(monkeypatch, {})
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_n_port", max_rows=10)
+    ebull_test_conn.commit()
+
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, accession)
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.error == "retention floor (filed before cutoff)"
+    assert calls == []
+    # The per-CIK path skips accessions present in the ingest log.
+    log = ebull_test_conn.execute(
+        "SELECT status, error FROM n_port_ingest_log WHERE accession_number = %s", (accession,)
+    ).fetchall()
+    assert log == [("failed", "retention floor (filed before cutoff)")]
 
 
 def test_parser_registered_via_register_all() -> None:

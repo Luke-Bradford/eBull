@@ -16,7 +16,8 @@ ParseOutcome contract:
     shares, resolved CUSIP) and written via ``record_fund_observation``;
     ``ownership_funds_current`` refreshed per touched instrument; one
     ``n_port_ingest_log`` row with status='success' / 'partial'.
-  * ``status='tombstoned'`` — primary_doc.xml fetch failed,
+  * ``status='tombstoned'`` — filed before the 8-quarter retention
+    cutoff (pre-fetch, #3631), primary_doc.xml fetch failed,
     ``NPortMissingSeriesError`` raised (filing lacks series id), or
     parse otherwise raised deterministically. ``n_port_ingest_log``
     records 'failed' so dashboard counts converge.
@@ -142,6 +143,40 @@ def _parse_n_port(
             status="tombstoned",
             parser_version=_PARSER_VERSION_NPORT,
             error=f"row.cik is a known filing-agent CIK ({padded_filer_cik})",
+        )
+
+    # #3631 — an NPORT-P reports holdings as of a month end and is filed
+    # after it, so ``period_end <= filed date``. A filing dated before the
+    # retention cutoff cannot pass the post-parse period gate below, so it
+    # is tombstoned before the fetch. The post-parse gate stays: a recent
+    # NPORT-P/A can restate an old period. (UTC filed date >= ET filed date.)
+    if row.filed_at is not None and not n_port_within_retention(row.filed_at.date()):
+        log_error = "retention floor (filed before cutoff)"
+        # The ingest-log row is what the per-CIK path reads to skip an
+        # accession it has already handled, as the post-parse branch does.
+        try:
+            with conn.transaction():
+                _record_ingest_attempt(
+                    conn,
+                    filer_cik=filer_cik,
+                    accession_number=accession,
+                    fund_series_id=None,
+                    period_of_report=None,
+                    status="failed",
+                    holdings_inserted=0,
+                    holdings_skipped=0,
+                    error=log_error,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "n_port manifest parser: ingest-log INSERT failed after pre-fetch retention skip accession=%s",
+                accession,
+            )
+            return _failed_outcome("log error after retention skip")
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_NPORT,
+            error=log_error,
         )
 
     # NPORT-P primary doc lives at the accession's primary_doc.xml.
