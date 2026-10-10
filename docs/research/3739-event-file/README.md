@@ -223,9 +223,9 @@ this measurement's.
   - **split effective date:** quoted beside adjusted-basis or ex-date words (§1: the first session on the adjusted
     basis). Otherwise, the record date (beside "record") and the payable date (beside "payable", "paid",
     "distributed", "distribution date" or "issued") must be quoted, and the effective date must be FINRA 11140's date
-    from them: the NYSE session after payable for a distribution of 25% or more, else the record date (superseded by
-    Amendment 1: before 2024-05-28, the business day before the record date; slice 3d changes the code). A reverse
-    split has no such fallback (§1 source rules).
+    from them: the NYSE session after payable for a distribution of 25% or more, else the record date (Amendment 1,
+    slice 3d: for a record date before 2024-05-28, the NYSE business day before it). A reverse split has no such
+    fallback (§1 source rules).
   - **split class:** named by title or symbol in an action quote (one that also states the ratio or the effective
     date), or the issuer's own evidence document has a cover that tags exactly one 12(b) class (one
     `dei:Security12bTitle` + `dei:TradingSymbol` context, Reg S-K Item 601(b)(104)) and that class is the row's. A
@@ -280,3 +280,54 @@ Each command prints its inputs' sha256 beside the figures; they equal the pins a
 changes (stock-dividend screen, evidence horizon, closed band, checker ratio forms and versioned fallback, the
 unmatched-stamp listing), then the 2020 replica's U and comparison size n with the power table,
 pinned before its adjudication.
+
+## Slice 3d (2026-10-10): Amendment 1 in code
+
+Nothing of the 2020 replica is produced by this slice; the code is frozen (merged) first, as Amendment 1 requires.
+
+**Screens** (`scripts/build_3739_slice2b.py`, `split_screens`; the replica's `screens` calls it):
+
+- **Stock-dividend screen** (`stock_dividend`): a positive value of one of the five elements in a 10-Q or 10-K (or
+  its amendment), any dimension, accepted by the evidence cutoff. Interval [context start, acceptance + 92 days].
+  FSNDS carries no context start, and its `qtrs` is the duration rounded to whole quarters (readme, NUM), so the
+  interval opens at `reported` − (qtrs + ½) × 92 days, never after the true start. One candidate per (filing,
+  interval start, class), and no ratio: adjudication reads it from the filing.
+- **Evidence horizon.** Ratio facts, covers and stock-dividend facts read filings accepted through the evidence
+  cutoff, and a candidate is kept when its interval meets the window. Item 5.03 still reads through the window's end.
+  `split_screens` refuses a cutoff under window end + 203 days, and refuses notes that hold no archive for a filing
+  month from window start − 92 days to the cutoff. Replicas take `through` + 203 days (2020: 2023-02-19).
+- **Closed band.** A count ratio ≤ 0.8 or ≥ 1.25 raises a candidate.
+- **Reduced notes carry their tag set.** `notes-reduce` heads each file with the tags kept, and `notes-extract`
+  refuses a file reduced for another set, so a reduction made before the stock-dividend tags cannot be joined.
+
+**Checker** (`scripts/build_3739_slice3b.py`):
+
+- **Ratio forms.** "p% stock (or share) dividend (or distribution)" reads as 1 + p/100. "x additional shares for
+  (or per) each share" reads as 1 + x. A percentage must name the dividend it sizes, so "decreased by 90%" beside a
+  split is not read as a ratio.
+- **Effective basis.** Each split row carries `effective_basis`: `stated` (a quote states the date in its role),
+  `fallback_b2` (25% or more: the session after payable) or `fallback_b1` (under 25%: the record date from
+  2024-05-28, else the NYSE business day before it). The checker derives the basis and fails a row whose stated
+  basis differs.
+- **Version chains.** Each row carries `version` and `supersedes`. Per key (split and symbol change: CIK, class
+  title, effective date; first trade: CIK, class title; termination: `event_key`), version 1 supersedes nothing,
+  each later version supersedes an earlier version of its key, and no version is superseded twice. A key that
+  breaks this fails every row it holds.
+
+Slice 3c's coverage figures reproduce under this code (38 and 39 of 42).
+
+`split_screens` knows which archives were read by the `archive` label of the facts in the joined extract. A label is
+there only when its archive's facts were joined, so the check never passes a month that was not read. An archive
+with no fact at all would be refused, not passed. On both pinned extracts every archive contributes periodic cover
+facts (2022q1–2024q3: 11 quarters, 6,269 to 9,375 each; stage C 2024q1–2026-09: 19 archives, 361 at least):
+
+```bash
+PYTHONPATH=. uv run python -c "
+from collections import Counter
+from scripts.build_3739_slice2b import read_notes, COVER_TAG, COVER_FORMS
+for p in ('docs/research/3739-event-file/replica-2022/inputs/fsnds-notes-2022q1-2024q3-extract.jsonl.gz',
+          'docs/research/3739-event-file/inputs/fsnds-notes-2024q1-2026-09-extract.jsonl.gz'):
+    c = Counter(f.archive for f in read_notes(p) if f.tag == COVER_TAG and f.form in COVER_FORMS)
+    print(p, len(c), min(c.values()), max(c.values()))
+"
+```

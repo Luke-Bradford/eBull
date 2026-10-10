@@ -4,10 +4,11 @@ Spec: ``docs/research/2026-10-09-3739-stage-c-panel.md`` §3.2 (screens), §3.1 
 over every issuer, not only U). Nothing here reads a price: the inputs are SEC structured data sets, the slice-2a
 filing extract and the slice-2a register extract.
 
-``notes-extract`` reads Financial Statement and Notes archives and keeps the two XBRL facts the split screen reads,
-every issuer and every form, each with its filing's acceptance from EDGAR ``submissions.zip`` (the clock step 1
-uses, ``acceptance_ny_date``). companyfacts strips the per-class cover counts (``sec-edgar.md`` §7.17) and plain
-FSDS carries no notes (§7.18), so FSNDS is the only structured source of both.
+``notes-extract`` reads Financial Statement and Notes archives and keeps the XBRL facts the split screens read (the
+ratio fact, the cover counts and, since Amendment 1, the stock-dividend facts), every issuer and every form, each
+with its filing's acceptance from EDGAR ``submissions.zip`` (the clock step 1 uses, ``acceptance_ny_date``).
+companyfacts strips the per-class cover counts (``sec-edgar.md`` §7.17) and plain FSDS carries no notes (§7.18), so
+FSNDS is the only structured source of them.
 
 ``insider-extract`` runs the #3361 linkage's admission (rule 2, ``_admit_all`` unchanged) over the insider data
 sets and keeps every stored observation accepted from the symbol look-back before the event window on.
@@ -18,7 +19,7 @@ sets and keeps every stored observation accepted from the symbol look-back befor
         --out <notes.jsonl.gz> <fsnds_*_notes.zip ...>
     PYTHONPATH=. uv run python scripts/build_3739_slice2b.py insider-extract --submissions <submissions.zip> \\
         --out <observations.jsonl.gz> <insider_YYYYqN.zip ...>
-    PYTHONPATH=. uv run python scripts/build_3739_slice2b.py screens --through <date> \\
+    PYTHONPATH=. uv run python scripts/build_3739_slice2b.py screens --through <date> --evidence-through <date> \\
         --notes <f> --notes-sha256 <d> --observations <f> --observations-sha256 <d> \\
         --extract <f> --extract-sha256 <d> --register <f> --register-sha256 <d> --out-dir <dir>
 """
@@ -52,14 +53,33 @@ from scripts.build_3739_slice2 import EXTRACT_FROM, Filing, checked, read_extrac
 #: reaches into [EVENT_START, through].
 EVENT_START: Final = date(2024, 7, 1)
 
-#: §3.2's two XBRL facts, each prefix-matched on its taxonomy version (``sec-edgar.md`` §7.18: ``version`` is
+#: §3.2's XBRL facts, each prefix-matched on its taxonomy version (``sec-edgar.md`` §7.18: ``version`` is
 #: per-row, ``us-gaap/2025``; a company-extension tag of the same name carries the accession as its version).
 RATIO_TAG: Final = "StockholdersEquityNoteStockSplitConversionRatio1"
 COVER_TAG: Final = "EntityCommonStockSharesOutstanding"
-NOTE_TAGS: Final = {RATIO_TAG: "us-gaap/", COVER_TAG: "dei/"}
-#: §3.2: covers of consecutive 10-Q and 10-K filings, an amendment replacing its original.
+#: Amendment 1's stock-dividend elements (spec §"Source rules": a chosen set whose taxonomy labels name a stock
+#: dividend, not an exhaustive inventory).
+STOCK_DIVIDEND_TAGS: Final = frozenset(
+    {
+        "DividendsStock",
+        "DividendsCommonStockStock",
+        "StockIssuedDuringPeriodValueStockDividend",
+        "StockDividendsShares",
+        "CommonStockDividendsShares",
+    }
+)
+NOTE_TAGS: Final = {RATIO_TAG: "us-gaap/", COVER_TAG: "dei/"} | dict.fromkeys(STOCK_DIVIDEND_TAGS, "us-gaap/")
+#: §3.2: covers of consecutive 10-Q and 10-K filings, an amendment replacing its original. The stock-dividend screen
+#: reads the same forms ("a 10-Q or 10-K"; an amendment only adds proposals, never removes one).
 COVER_FORMS: Final = frozenset({"10-Q", "10-K", "10-Q/A", "10-K/A"})
-COUNT_BAND: Final = (0.8, 1.25)
+#: §3.2: a count jump raises a candidate at ratio ≤ 0.8 or ≥ 1.25 (Amendment 1 closed the ends, so a 5-for-4 split's
+#: exact 1.25 is raised).
+COUNT_BAND: Final = (Decimal("0.8"), Decimal("1.25"))
+#: Amendment 1's evidence horizon: periodic-report screens read filings accepted through window end + 203 days (the
+#: longest fiscal quarter, 98 days, + the longest 10-K deadline, 90, + the Rule 12b-25 extension, 15).
+EVIDENCE_HORIZON: Final = timedelta(days=203)
+#: Amendment 1: a stock-dividend fact's interval is [context start, acceptance + 92 days].
+STOCK_DIVIDEND_SPAN: Final = timedelta(days=92)
 #: The class axis as the data sets spell it: "Statement" and "Axis" are truncated (FSNDS readme, DIM), so
 #: us-gaap ``StatementClassOfStockAxis`` is ``ClassOfStock``.
 CLASS_AXIS: Final = "ClassOfStock"
@@ -191,6 +211,21 @@ class NoteFact:
     #: "" for the registrant; else a co-registrant, parent or other entity (FSNDS readme, NUM ``coreg``).
     coreg: str
     value: str
+
+
+def archive_months(label: str) -> list[tuple[int, int]]:
+    """The (year, month) filing months a data-set archive covers: a quarter ("2020q2") or a month ("2025_08")."""
+    year, sep, part = label.partition("q") if "q" in label else label.partition("_")
+    if sep == "q":
+        first = 3 * int(part) - 2
+        return [(int(year), m) for m in range(first, first + 3)]
+    return [(int(year), int(part))]
+
+
+def months_between(start: date, end: date) -> list[tuple[int, int]]:
+    """Every (year, month) from ``start``'s month to ``end``'s, inclusive."""
+    first, last = (start.year, start.month), (end.year, end.month)
+    return [(y, m) for y in range(start.year, end.year + 1) for m in range(1, 13) if first <= (y, m) <= last]
 
 
 def archive_label(path: Path) -> str:
@@ -433,7 +468,7 @@ def read_observations(path: Path) -> list[Observation]:
 
 @dataclass(frozen=True)
 class SplitCandidate:
-    screen: str  # "xbrl_ratio" | "cover_count" | "item_503"
+    screen: str  # "xbrl_ratio" | "cover_count" | "stock_dividend" | "item_503"
     cik: str
     #: The class axis member, "" for none (the default dimension).
     class_member: str
@@ -473,9 +508,13 @@ def positive(value: str) -> Decimal | None:
     return number if number.is_finite() and number > 0 else None
 
 
-def xbrl_candidates(facts: Iterable[NoteFact], through: date, event_start: date = EVENT_START) -> list[SplitCandidate]:
-    """§3.2: each ratio fact accepted in the window, whatever its context date, with interval [context end - 1 year,
-    acceptance]. One candidate per (filing, context end, class): its repeated presentations are one indication."""
+def xbrl_candidates(
+    facts: Iterable[NoteFact], through: date, event_start: date = EVENT_START, evidence_through: date | None = None
+) -> list[SplitCandidate]:
+    """§3.2: each ratio fact accepted in the window or its evidence horizon (through ``evidence_through``, default
+    ``through``), whatever its context date, with interval [context end - 1 year, acceptance], kept when the interval
+    meets the window. One candidate per (filing, context end, class): its repeated presentations are one indication."""
+    cutoff = through if evidence_through is None else evidence_through
     groups: dict[tuple[str, str, str, str], list[NoteFact]] = defaultdict(list)
     for fact in facts:
         if fact.tag == RATIO_TAG and fact.accepted is not None:
@@ -485,13 +524,64 @@ def xbrl_candidates(facts: Iterable[NoteFact], through: date, event_start: date 
         accepted = group[0].accepted
         assert accepted is not None
         day = ny_date(accepted)
-        if not event_start <= day <= through:
+        start = year_before(date.fromisoformat(reported))
+        if not event_start <= day <= cutoff or not overlaps(start, day, through, event_start):
             continue
         values = {(f.uom, f.value) for f in group}
         (uom, value), *rest = sorted(values)
         ratio = str(positive(value)) if not rest and uom == "pure" and positive(value) else ""
-        start = year_before(date.fromisoformat(reported))
         out.append(SplitCandidate("xbrl_ratio", cik, member, start, day, accepted, ratio, (adsh,)))
+    return out
+
+
+def context_start_bound(reported: date, qtrs: str) -> date | None:
+    """The earliest day a fact's context can start. FSNDS carries no start date, and ``qtrs`` is the duration
+    "rounded to the nearest whole number" of quarters (readme, NUM), so the duration is under (qtrs + 1/2) quarters
+    and the start lies after ``reported`` - (qtrs + 1/2) * 92 days. None when ``qtrs`` is not a whole number ≥ 0."""
+    if not qtrs.isdigit():
+        return None
+    return reported - timedelta(days=(2 * int(qtrs) + 1) * 46)
+
+
+def stock_dividend_candidates(
+    facts: Iterable[NoteFact],
+    through: date,
+    event_start: date = EVENT_START,
+    evidence_through: date | None = None,
+    ledger: Counter[str] | None = None,
+) -> list[SplitCandidate]:
+    """Amendment 1's stock-dividend screen: a positive value of a stock-dividend element in a 10-Q or 10-K, under any
+    dimension, accepted by the evidence cutoff (``evidence_through``, default ``through``), with interval [context
+    start, acceptance + 92 days], kept when the interval meets the window. The context start is
+    :func:`context_start_bound`, so the interval never opens after it. One candidate per (filing, interval start,
+    class): a filing's presentations of one dividend under several elements or equity components are one indication.
+    The screen proposes on presence; adjudication reads the ratio from the filing, so the candidate carries none.
+
+    A co-registrant's fact (``coreg`` set) is kept, unlike the cover screen's: ``coreg`` is a function of the
+    dimension segments (FSNDS readme, NUM), and Amendment 1 counts any dimension. A filer can tag its own dividend
+    under a legal-entity member, so dropping those could miss it; another entity's dividend raised on the filer's CIK
+    is rejected in adjudication (§3.3)."""
+    cutoff = through if evidence_through is None else evidence_through
+    ledger = Counter() if ledger is None else ledger
+    groups: dict[tuple[str, str, date, str], str] = {}
+    for fact in facts:
+        if fact.tag not in STOCK_DIVIDEND_TAGS or fact.form not in COVER_FORMS:
+            continue
+        if fact.accepted is None or positive(fact.value) is None:
+            ledger["stock_dividend:no_acceptance" if fact.accepted is None else "stock_dividend:not_positive"] += 1
+            continue
+        start = context_start_bound(date.fromisoformat(fact.reported), fact.qtrs)
+        if start is None:
+            ledger["stock_dividend:unreadable_qtrs"] += 1
+            continue
+        groups[(fact.cik, fact.adsh, start, class_in(fact.segments))] = fact.accepted
+    out = []
+    for (cik, adsh, start, member), accepted in sorted(groups.items()):
+        day = ny_date(accepted)
+        end = day + STOCK_DIVIDEND_SPAN
+        if day > cutoff or not overlaps(start, end, through, event_start):
+            continue
+        out.append(SplitCandidate("stock_dividend", cik, member, start, end, accepted, "", (adsh,)))
     return out
 
 
@@ -565,20 +655,24 @@ def covers(
 
 
 def cover_candidates(
-    series: Mapping[tuple[str, str], Sequence[Cover]], through: date, event_start: date = EVENT_START
+    series: Mapping[tuple[str, str], Sequence[Cover]],
+    through: date,
+    event_start: date = EVENT_START,
+    evidence_through: date | None = None,
 ) -> list[SplitCandidate]:
-    """§3.2: consecutive covers whose count ratio lies outside [0.8, 1.25]; the interval is the two covers' dates."""
+    """§3.2: consecutive covers whose count ratio is ≤ 0.8 or ≥ 1.25 (Amendment 1), raised by a cover accepted by
+    the evidence cutoff (``evidence_through``, default ``through``); the interval is the two covers' dates and must
+    meet the window."""
     low, high = COUNT_BAND
+    cutoff = through if evidence_through is None else evidence_through
     out = []
     for (cik, member), ordered in series.items():
         for earlier, later in zip(ordered, ordered[1:], strict=False):
             ratio = later.shares / earlier.shares
-            if Decimal(str(low)) <= ratio <= Decimal(str(high)):
+            if low < ratio < high:
                 continue
             start, end = earlier.reported, later.reported
-            if ny_date(later.accepted) > through or not overlaps(
-                min(start, end), max(start, end), through, event_start
-            ):
+            if ny_date(later.accepted) > cutoff or not overlaps(min(start, end), max(start, end), through, event_start):
                 continue
             out.append(
                 SplitCandidate(
@@ -682,14 +776,53 @@ def read_register_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def screens(through: date, notes: Path, observations: Path, extract: Path, register: Path, out_dir: Path) -> None:
-    ledger: Counter[str] = Counter()
-    facts = read_notes(notes)
-    split = [
-        *xbrl_candidates(facts, through),
-        *cover_candidates(covers(facts, through, ledger), through),
-        *item_503_candidates(read_extract(extract), through),
+def split_screens(
+    facts: Sequence[NoteFact],
+    filings: Iterable[Filing],
+    event_start: date,
+    through: date,
+    evidence_through: date,
+    extract_from: date,
+    ledger: Counter[str],
+) -> list[SplitCandidate]:
+    """Every §3.2 split screen over the window [event_start, through] (Amendment 1): the periodic-report screens
+    (ratio facts, covers, stock-dividend facts) read filings accepted through ``evidence_through``; Item 5.03 reads
+    through ``through``, because its interval starts at acceptance."""
+    if evidence_through < through + EVIDENCE_HORIZON:
+        raise ValueError(f"the evidence cutoff {evidence_through} is under 203 days after the window's end {through}")
+    # The notes must hold an archive for every filing month from the first acceptance whose 92-day interval meets the
+    # window to the evidence cutoff, so an extract joined over a shorter span is refused. This proves archive presence
+    # only; that an archive's facts are complete rests on notes-reduce keeping every NOTE_TAGS fact and on
+    # notes-extract refusing a file reduced for another tag set. The joined extract keeps
+    # no archive list, so an archive is known by its facts' labels. A label is present only when that archive's facts
+    # were joined, so every month counted here was read (no false pass). An archive that contributed no fact would be
+    # reported missing: a refusal, never a pass. Every archive of both pinned extracts contributes periodic cover
+    # facts (count command in docs/research/3739-event-file/README.md, slice 3d).
+    read = {month for label in {f.archive for f in facts} for month in archive_months(label)}
+    missing = [m for m in months_between(event_start - STOCK_DIVIDEND_SPAN, evidence_through) if m not in read]
+    if missing:
+        raise ValueError(f"the notes extract holds no archive for filing months {missing}")
+    return [
+        *xbrl_candidates(facts, through, event_start, evidence_through),
+        *cover_candidates(covers(facts, evidence_through, ledger, event_start), through, event_start, evidence_through),
+        *stock_dividend_candidates(facts, through, event_start, evidence_through, ledger),
+        *item_503_candidates(filings, through, event_start, extract_from),
     ]
+
+
+def screens(
+    through: date,
+    evidence_through: date,
+    notes: Path,
+    observations: Path,
+    extract: Path,
+    register: Path,
+    out_dir: Path,
+) -> None:
+    ledger: Counter[str] = Counter()
+    split = split_screens(
+        read_notes(notes), read_extract(extract), EVENT_START, through, evidence_through, EXTRACT_FROM, ledger
+    )
     symbol = symbol_candidates(summarise_symbols(read_observations(observations), through))
     termination = termination_candidates(read_register_rows(register))
     payloads = {
@@ -726,6 +859,7 @@ def screens(through: date, notes: Path, observations: Path, extract: Path, regis
         json.dumps(
             {
                 "through": through.isoformat(),
+                "evidence_through": evidence_through.isoformat(),
                 "split_by_screen": dict(Counter(c.screen for c in split)),
                 "split_issuers": len({c.cik for c in split}),
                 "symbol_change_issuers": len(symbol),
@@ -751,6 +885,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     insider.add_argument("quarters", type=Path, nargs="+")
     scr = sub.add_parser("screens")
     scr.add_argument("--through", type=date.fromisoformat, required=True)
+    scr.add_argument("--evidence-through", type=date.fromisoformat, required=True)
     for name in ("notes", "observations", "extract", "register"):
         scr.add_argument(f"--{name}", type=Path, required=True)
         scr.add_argument(f"--{name}-sha256", required=True)
@@ -763,6 +898,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         screens(
             args.through,
+            args.evidence_through,
             checked(args.notes, args.notes_sha256),
             checked(args.observations, args.observations_sha256),
             checked(args.extract, args.extract_sha256),

@@ -181,6 +181,18 @@ _CLOCK: Final = r"[ap]\.?\s?m|eastern|central|mountain|pacific|e[sd]?t|c[sd]?t|m
 _COLON_RATIO: Final = re.compile(
     rf"(?<![\w.:])(?P<a>{_NUMERAL})\s*:\s*(?P<b>{_NUMERAL})(?![\w:])(?!\s*({_CLOCK})\b)", re.IGNORECASE
 )
+#: Amendment 1's stock-dividend forms: "a 5% stock dividend" (ratio 1 + p/100) and "three additional shares for each
+#: share held" (ratio 1 + x). Each is read only in its own syntax: a percentage names the stock or share dividend or
+#: distribution it sizes, so "decreased by 90%" beside a split is no ratio.
+_PERCENT_RATIO: Final = re.compile(
+    rf"(?<![\w.])(?P<p>{_NUMBER})\s*(?:%|per\s?cent\b)\s*(?:common\s+)?(?:stock|share)\s+(?:dividend|distribution)",
+    re.IGNORECASE,
+)
+_ADDITIONAL_RATIO: Final = re.compile(
+    rf"(?<![\w.])(?P<x>{_NUMBER})\s+additional\s+shares?\b[^.;]{{0,60}}?\b(?:for|per)\s+(?:each\s+|every\s+)?"
+    rf"(?:(?:one|1)\s+)?(?:\(1\)\s+)?(?:outstanding\s+)?shares?\b",
+    re.IGNORECASE,
+)
 _MONTHS: Final = {
     name: number
     for number, names in enumerate(
@@ -249,6 +261,14 @@ def ratio_spans(text: str) -> list[tuple[Fraction, int, int]]:
             a, b = number_value(match["a"]), number_value(match["b"])
             if a and b:
                 out.append((a / b, match.start(), match.end()))
+    for match in _PERCENT_RATIO.finditer(text):
+        p = number_value(match["p"])
+        if p:
+            out.append((1 + p / 100, match.start(), match.end()))
+    for match in _ADDITIONAL_RATIO.finditer(text):
+        x = number_value(match["x"])
+        if x:
+            out.append((1 + x, match.start(), match.end()))
     return out
 
 
@@ -362,7 +382,15 @@ FIRST_TRADE_WORDS: Final = re.compile(
 
 # --------------------------------------------------------------------------- §3.3 checker: records
 
-RECORD_TYPES: Final = ("split", "symbol_change", "first_trade", "termination_end")
+#: §3.1's key of each record type. A termination row carries the register's event key (§9) in one column.
+RECORD_KEYS: Final = {
+    "split": ("cik", "class_title", "effective_date"),
+    "symbol_change": ("cik", "class_title", "effective_date"),
+    "first_trade": ("cik", "class_title"),
+    "termination_end": ("event_key",),
+}
+#: The record types the checker reads: exactly the keyed ones, so ``version_failures`` has a key for each.
+RECORD_TYPES: Final = tuple(RECORD_KEYS)
 STATUSES: Final = frozenset({"confirmed", "contested", "cancelled"})
 MAX_EVIDENCE: Final = 3
 _ACCESSION: Final = re.compile(r"\d{10}-\d{2}-\d{6}")
@@ -438,6 +466,40 @@ def read_rows(path: Path) -> list[Row]:
         return rows
 
 
+def version_failures(record_type: str, rows: Sequence[Row]) -> dict[int, list[str]]:
+    """§3.1 (Amendment 1): one row per (key, version), and every version of a key on one action's supersession chain:
+    version 1 supersedes nothing, each later version names an earlier version of its key, and no version is
+    superseded twice. A key that breaks this is a build error, so every row of that key fails (by line)."""
+    by_key: dict[tuple[str, ...], list[Row]] = {}
+    for row in rows:
+        by_key.setdefault(tuple(row.values.get(c) or "" for c in RECORD_KEYS[record_type]), []).append(row)
+    out: dict[int, list[str]] = {}
+    for key, group in by_key.items():
+        parsed: dict[int, list[int | None]] = {}
+        problems: list[str] = []
+        for row in group:
+            version, supersedes = row.values.get("version") or "", row.values.get("supersedes") or ""
+            if not version.isdigit() or int(version) < 1 or (supersedes and not supersedes.isdigit()):
+                problems.append(f"line {row.line}: version {version!r} / supersedes {supersedes!r} is malformed")
+                continue
+            parsed.setdefault(int(version), []).append(int(supersedes) if supersedes else None)
+        for version, parents in sorted(parsed.items()):
+            if len(parents) > 1:
+                problems.append(f"version {version} is repeated")
+            for parent in parents:
+                if (parent is None) != (version == 1):
+                    problems.append(f"version {version} supersedes {parent}: only version 1 supersedes nothing")
+                elif parent is not None and (parent >= version or parent not in parsed):
+                    problems.append(f"version {version} supersedes {parent}, not an earlier version of the key")
+        named = Counter(p for parents in parsed.values() for p in parents if p is not None)
+        problems += [f"version {v} is superseded {n} times" for v, n in sorted(named.items()) if n > 1]
+        if problems:
+            message = f"key {key} is not one action's supersession chain: " + "; ".join(problems)
+            for row in group:
+                out[row.line] = [message]
+    return out
+
+
 def _date(values: Mapping[str, str], name: str) -> date | None:
     text = values.get(name) or ""
     try:
@@ -447,9 +509,14 @@ def _date(values: Mapping[str, str], name: str) -> date | None:
 
 
 #: FINRA Rule 11140(b)(1)-(2), the spec's source rule for a split's effective date when filings state only record and
-#: payable dates: a distribution of 25% or more goes ex the first business day after the payable date, a smaller one
-#: on the record date.
+#: payable dates: a distribution of 25% or more goes ex the first business day after the payable date (b)(2); a
+#: smaller one (b)(1) on the record date under the text operative 2024-05-28 (Regulatory Notice 24-04), the business
+#: day before the record date under the text operative 2017-09-05 (Regulatory Notice 17-19). Amendment 1 versions
+#: (b)(1) by the record date.
 LARGE_DISTRIBUTION: Final = Fraction(1, 4)
+B1_RECORD_DATE_TEXT_FROM: Final = date(2024, 5, 28)
+#: How a split row's effective date was set (Amendment 1): stated in a quote, or constructed by (b)(2) or (b)(1).
+EFFECTIVE_BASES: Final = ("stated", "fallback_b2", "fallback_b1")
 
 
 def next_session(day: date) -> date:
@@ -459,11 +526,28 @@ def next_session(day: date) -> date:
     return day
 
 
-def _fallback_failures(effective: date, ratio: Fraction, values: Mapping[str, str], texts: Sequence[str]) -> list[str]:
+def previous_session(day: date) -> date:
+    day -= timedelta(days=1)
+    while market_calendar.us_market_status(day) == "closed":
+        day -= timedelta(days=1)
+    return day
+
+
+def fallback_date(ratio: Fraction, record: date, payable: date) -> tuple[date, str]:
+    """FINRA 11140's ex-date from record and payable dates, and its basis."""
+    if ratio - 1 >= LARGE_DISTRIBUTION:
+        return next_session(payable), "fallback_b2"
+    return (record if record >= B1_RECORD_DATE_TEXT_FROM else previous_session(record)), "fallback_b1"
+
+
+def _fallback(
+    effective: date, ratio: Fraction, values: Mapping[str, str], texts: Sequence[str]
+) -> tuple[str | None, list[str]]:
     """No quote states the effective date in its role: the spec's record-and-payable fallback, which a reverse split
-    lacks. Each of the two dates must be quoted beside the words of its own role."""
+    lacks. Each of the two dates must be quoted beside the words of its own role. Returns the basis when the
+    fallback sets the row's date, else the failures."""
     if ratio < 1:
-        return [
+        return None, [
             f"no quote states effective_date {effective} as the adjusted-basis session; a reverse split has no fallback"
         ]
     record, payable = _date(values, "record_date"), _date(values, "payable_date")
@@ -473,14 +557,16 @@ def _fallback_failures(effective: date, ratio: Fraction, values: Mapping[str, st
         or not any(dated_near(t, record, RECORD_WORDS) for t in texts)
         or not any(dated_near(t, payable, PAYABLE_WORDS) for t in texts)
     ):
-        return [
+        return None, [
             f"no quote states effective_date {effective} as the adjusted-basis session, "
             "nor record_date and payable_date in their roles"
         ]
-    derived = next_session(payable) if ratio - 1 >= LARGE_DISTRIBUTION else record
+    derived, basis = fallback_date(ratio, record, payable)
     if derived != effective:
-        return [f"effective_date {effective} is not {derived}, the FINRA 11140 date from record and payable dates"]
-    return []
+        return None, [
+            f"effective_date {effective} is not {derived}, the FINRA 11140 date from record and payable dates"
+        ]
+    return basis, []
 
 
 def _class_failures(
@@ -548,10 +634,20 @@ def field_failures(
             if ratio not in set().union(*(stated_ratios(t) for t in texts)):
                 failures.append(f"no quote states the ratio {ratio}")
         effective = _date(values, "effective_date")
+        basis: str | None = None
         if effective is None:
             failures.append("effective_date is not an ISO date")
-        elif ratio is not None and not any(dated_near(t, effective, EFFECTIVE_WORDS) for t in texts):
-            failures += _fallback_failures(effective, ratio, values, texts)
+        elif any(dated_near(t, effective, EFFECTIVE_WORDS) for t in texts):
+            basis = "stated"
+        elif ratio is not None:
+            # A date the fallback cannot set has no basis to compare: the date failure is reported and the row fails.
+            basis, fallback_failures = _fallback(effective, ratio, values, texts)
+            failures += fallback_failures
+        stated_basis = values.get("effective_basis") or ""
+        if stated_basis not in EFFECTIVE_BASES:
+            failures.append(f"effective_basis {stated_basis!r} is not one of {list(EFFECTIVE_BASES)}")
+        elif basis is not None and stated_basis != basis:
+            failures.append(f"effective_basis {stated_basis!r} is not {basis!r}, how the quotes set effective_date")
         failures += _class_failures(values, texts, ratio, effective, single_classes)
     elif record_type == "symbol_change":
         needs_symbol("old_symbol")
@@ -670,6 +766,10 @@ def check(record_type: str, records: Path, mirror: Path, out: Path) -> None:
                 urls[item.header_url] = mirror_path(mirror, item.accession, f"{item.accession}-index-headers.html")
     fetched = fetch_into_mirror(urls)
     verdicts = [check_row(record_type, row, mirror) for row in rows]
+    chains = version_failures(record_type, rows)
+    for verdict in verdicts:
+        verdict.failures += chains.get(verdict.line, [])
+        verdict.passed = not verdict.failures
     buffer = io.StringIO()
     for verdict in verdicts:
         buffer.write(json.dumps(verdict.__dict__, sort_keys=True) + "\n")

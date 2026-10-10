@@ -55,28 +55,27 @@ from scripts.build_3739_slice2 import (
     sha256_of,
 )
 from scripts.build_3739_slice2b import (
+    EVIDENCE_HORIZON,
     ITEM_503_SPAN,
+    NOTE_TAGS,
     SPLIT_COLUMNS,
     NoteFact,
     archive_label,
-    cover_candidates,
-    covers,
     csv_bytes,
-    item_503_candidates,
     publish,
     publish_all,
     read_notes,
     read_notes_archive,
     split_rows,
+    split_screens,
     with_acceptance,
-    xbrl_candidates,
 )
 
 
 @dataclass(frozen=True)
 class Replica:
-    """§3.4's replica window. ``through`` is both the last event date and the evidence cutoff, as slice 2b's
-    ``--through`` is for stage C; ``entrant_last`` is F + 24 months (§2 item 2)."""
+    """§3.4's replica window. ``through`` is the last event date; the periodic-report screens read evidence through
+    :attr:`evidence_through`, ``through`` + 203 days (Amendment 1); ``entrant_last`` is F + 24 months (§2 item 2)."""
 
     base: date
     event_start: date
@@ -92,6 +91,10 @@ class Replica:
         if self.extract_from > self.base - ENTRANT_LOOKBACK or self.extract_from > self.event_start - ITEM_503_SPAN:
             raise ValueError(f"extract_from {self.extract_from} does not cover the entrant or Item 5.03 look-back")
 
+    @property
+    def evidence_through(self) -> date:
+        return self.through + EVIDENCE_HORIZON
+
 
 REPLICAS: Final = {
     "2022": Replica(date(2022, 7, 31), date(2022, 8, 1), date(2024, 7, 31), date(2024, 7, 31), date(2022, 4, 1)),
@@ -103,11 +106,17 @@ REPLICAS: Final = {
 
 
 def notes_reduce(archive: Path, out: Path) -> None:
-    """One archive's §3.2 facts (acceptance not yet attached), headed by a line naming the archive, its sha256 and
-    its ledger, so the joined extract can pin the archive after the archive is deleted."""
+    """One archive's §3.2 facts (acceptance not yet attached), headed by a line naming the archive, its sha256, its
+    ledger and the tags kept, so the joined extract can pin the archive after the archive is deleted, and a file
+    reduced under another tag set (before Amendment 1's stock-dividend tags) is refused."""
     ledger: Counter[str] = Counter()
     facts = read_notes_archive(archive, ledger)
-    head = {"archive": archive.name, "archive_sha256": sha256_of(archive), "ledger": dict(sorted(ledger.items()))}
+    head = {
+        "archive": archive.name,
+        "archive_sha256": sha256_of(archive),
+        "ledger": dict(sorted(ledger.items())),
+        "tags": sorted(NOTE_TAGS),
+    }
     lines = [json.dumps(head, sort_keys=True)] + [json.dumps(asdict(f), sort_keys=True) for f in facts]
     publish(out, gzip.compress(("\n".join(lines) + "\n").encode(), mtime=0))
     print(json.dumps({**head, "facts": len(facts), "reduced_sha256": sha256_of(out)}, indent=1))
@@ -116,8 +125,10 @@ def notes_reduce(archive: Path, out: Path) -> None:
 def read_reduced(path: Path) -> tuple[dict[str, Any], list[NoteFact]]:
     rows = iter(read_gz_lines(path))
     head = next(rows, None)
-    if not isinstance(head, dict) or set(head) != {"archive", "archive_sha256", "ledger"}:
+    if not isinstance(head, dict) or set(head) != {"archive", "archive_sha256", "ledger", "tags"}:
         raise ValueError(f"{path} does not start with a reduced-archive head line")
+    if head["tags"] != sorted(NOTE_TAGS):
+        raise ValueError(f"{path} was reduced for the tags {head['tags']}, not {sorted(NOTE_TAGS)}")
     label = archive_label(Path(head["archive"]))
     facts = [NoteFact(**row) for row in rows]
     if any(f.archive != label for f in facts):
@@ -192,13 +203,16 @@ def universe(replica: Replica, calibration: Path, extract_path: Path, out: Path)
 
 def screens(replica: Replica, notes: Path, extract_path: Path, out_dir: Path) -> None:
     ledger: Counter[str] = Counter()
-    facts = read_notes(notes)
     start, through = replica.event_start, replica.through
-    split = [
-        *xbrl_candidates(facts, through, start),
-        *cover_candidates(covers(facts, through, ledger, start), through, start),
-        *item_503_candidates(read_extract(extract_path), through, start, replica.extract_from),
-    ]
+    split = split_screens(
+        read_notes(notes),
+        read_extract(extract_path),
+        start,
+        through,
+        replica.evidence_through,
+        replica.extract_from,
+        ledger,
+    )
     target = out_dir / "candidates-split.csv.gz"
     if target.exists():  # a clear message; publish_all's link refuses an existing name regardless, so no race
         raise FileExistsError(f"refusing to replace a pinned candidate list: {target}")
@@ -207,6 +221,7 @@ def screens(replica: Replica, notes: Path, extract_path: Path, out_dir: Path) ->
         json.dumps(
             {
                 "window": [start.isoformat(), through.isoformat()],
+                "evidence_through": replica.evidence_through.isoformat(),
                 "split_by_screen": dict(Counter(c.screen for c in split)),
                 "split_issuers": len({c.cik for c in split}),
                 "ledger": dict(sorted(ledger.items())),
