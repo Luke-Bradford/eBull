@@ -44,6 +44,12 @@ daily total-return input remains (17), and its historical measurement would prin
 slice forbids (18). It would need a full parent amendment with its own checkpoint 1, so it is a last resort, not the
 next step.
 
+**Update (measurement spec v1, `docs/research/2026-10-10-3740-slice-f-dividend-measurement.md`).** Intrader's stamps
+**are** a dated distribution inventory: its headerless files carry a split coefficient and a nominal cash dividend
+per share on the ex-date (verified on AAPL's dated actions), already ingested as `research_price_daily.dividend` and
+`.split_factor`; it ends 2024-09-27, so it is the reference for the historical tests only. The spec supersedes the
+bullets below where they differ.
+
 **Next step: a measurement spec, written and checkpointed before anything is captured or compared.** Round 6
 (27 findings: 17 BLOCKING, 8 WARNING, 2 NIT) rejected the first sketch of it (EDGAR and the eToro calendar scored
 against a frozen 12-month inventory with a 99% coverage stop rule); the sketch and its threshold are withdrawn.
@@ -769,3 +775,5 @@ deterministic codes above, and the codes' counts are printed beside the verdict.
   4–7, 10, 21, 23, 24 partial; 11–20, 25 lapsed. Applied now: claims and labels narrowed (20–22, 25–27 wording); the
   measurement sketch and its 99% rule withdrawn and replaced by the decisions above. Open for the measurement spec:
   1–19, 23, 24.
+- **Measurement spec v1** (`docs/research/2026-10-10-3740-slice-f-dividend-measurement.md`): per-finding dispositions
+  for all 27 of round 6 are in its last table. Round 7 runs on it.
