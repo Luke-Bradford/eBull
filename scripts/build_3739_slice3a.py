@@ -31,7 +31,6 @@ the 2020 fallback).
 from __future__ import annotations
 
 import argparse
-import csv
 import gzip
 import json
 import zipfile
@@ -91,7 +90,7 @@ class Replica:
         # The extract must reach the entrant look-back and the first Item 5.03 acceptance whose interval meets the
         # window; item_503_candidates also refuses on the second, by business day.
         if self.extract_from > self.base - ENTRANT_LOOKBACK or self.extract_from > self.event_start - ITEM_503_SPAN:
-            raise ValueError(f"extract_from {self.extract_from} misses the entrant or Item 5.03 look-back")
+            raise ValueError(f"extract_from {self.extract_from} does not cover the entrant or Item 5.03 look-back")
 
 
 REPLICAS: Final = {
@@ -116,8 +115,8 @@ def notes_reduce(archive: Path, out: Path) -> None:
 
 def read_reduced(path: Path) -> tuple[dict[str, Any], list[NoteFact]]:
     rows = iter(read_gz_lines(path))
-    head = next(rows)
-    if set(head) != {"archive", "archive_sha256", "ledger"}:
+    head = next(rows, None)
+    if not isinstance(head, dict) or set(head) != {"archive", "archive_sha256", "ledger"}:
         raise ValueError(f"{path} does not start with a reduced-archive head line")
     label = archive_label(Path(head["archive"]))
     facts = [NoteFact(**row) for row in rows]
@@ -173,11 +172,8 @@ def universe(replica: Replica, calibration: Path, extract_path: Path, out: Path)
     if formation is None:
         raise ValueError(f"neither published panel has the formation {replica.base}")
     u = pass1(formation, replica.base, k, read_extract(extract_path), [], replica.entrant_last)
-    with out.open("x", newline="") as handle:
-        writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow(["cik", "incumbent_rank", "entrant_accessions"])
-        for cik, bases in u.items():
-            writer.writerow([cik, ";".join(bases.get("incumbent", [])), ";".join(bases.get("entrant", []))])
+    rows = ([cik, ";".join(b.get("incumbent", [])), ";".join(b.get("entrant", []))] for cik, b in u.items())
+    publish(out, csv_bytes(("cik", "incumbent_rank", "entrant_accessions"), rows))
     counts = {basis: sum(1 for b in u.values() if basis in b) for basis in ("incumbent", "entrant")}
     print(
         json.dumps(

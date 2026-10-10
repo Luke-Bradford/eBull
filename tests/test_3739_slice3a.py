@@ -100,3 +100,10 @@ def test_notes_extract_refuses_overlapping_archives_before_reading_submissions(t
         s3a.notes_extract([first, second], tmp_path / "absent.zip", tmp_path / "out.jsonl.gz")
     with pytest.raises(ValueError, match="reduced twice"):
         s3a.notes_extract([first, first], tmp_path / "absent.zip", tmp_path / "out.jsonl.gz")
+
+
+def test_an_empty_reduced_file_refuses_with_a_clear_error(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.jsonl.gz"
+    empty.write_bytes(gzip.compress(b""))
+    with pytest.raises(ValueError, match="head line"):
+        s3a.read_reduced(empty)
