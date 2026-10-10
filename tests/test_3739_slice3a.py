@@ -29,6 +29,8 @@ def test_replicas_are_the_spec_windows() -> None:
         date(2020, 8, 1),
         date(2022, 7, 31),
     )
+    # Amendment 1: periodic-report evidence through window end + 203 days.
+    assert (REPLICA.evidence_through, fallback.evidence_through) == (date(2025, 2, 19), date(2023, 2, 19))
 
 
 def test_a_replica_whose_extract_misses_the_look_back_refuses() -> None:
@@ -100,6 +102,17 @@ def test_notes_extract_refuses_overlapping_archives_before_reading_submissions(t
         s3a.notes_extract([first, second], tmp_path / "absent.zip", tmp_path / "out.jsonl.gz")
     with pytest.raises(ValueError, match="reduced twice"):
         s3a.notes_extract([first, first], tmp_path / "absent.zip", tmp_path / "out.jsonl.gz")
+
+
+def test_a_file_reduced_for_another_tag_set_refuses(tmp_path: Path) -> None:
+    # A file reduced before Amendment 1 holds no stock-dividend facts: absent, not zero, so it cannot be joined.
+    path = reduced(tmp_path, "2022q1", "0000000001-24-000001")
+    lines = gzip.decompress(path.read_bytes()).decode().splitlines()
+    head = json.loads(lines[0]) | {"tags": [s2b.COVER_TAG, s2b.RATIO_TAG]}
+    old = tmp_path / "old.jsonl.gz"
+    old.write_bytes(gzip.compress(("\n".join([json.dumps(head), *lines[1:]]) + "\n").encode()))
+    with pytest.raises(ValueError, match="reduced for the tags"):
+        s3a.read_reduced(old)
 
 
 def test_an_empty_reduced_file_refuses_with_a_clear_error(tmp_path: Path) -> None:

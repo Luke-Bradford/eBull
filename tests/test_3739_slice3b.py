@@ -27,6 +27,7 @@ def split(**overrides: str) -> dict[str, str]:
         "ratio": "10",
         "record_date": "",
         "payable_date": "",
+        "effective_basis": "stated",
         "status": "confirmed",
     }
     return values | overrides
@@ -51,6 +52,30 @@ def split(**overrides: str) -> dict[str, str]:
 )
 def test_the_ratio_grammar_reads_new_shares_for_old(text: str, ratio: Fraction) -> None:
     assert ratio in {value for value, _, _ in s3b.ratio_spans(text)}
+
+
+@pytest.mark.parametrize(
+    ("text", "ratio"),
+    [
+        ("a 5% stock dividend", Fraction(21, 20)),
+        ("a five percent stock dividend", Fraction(21, 20)),
+        ("a 100 per cent stock dividend", Fraction(2)),
+        ("three additional shares for each share held", Fraction(4)),
+        ("one additional share of common stock for each one share outstanding", Fraction(2)),
+        ("0.5 additional shares per share", Fraction(3, 2)),
+    ],
+)
+def test_amendment_1_reads_percentage_and_additional_share_ratios(text: str, ratio: Fraction) -> None:
+    assert ratio in {value for value, _, _ in s3b.ratio_spans(text)}
+
+
+def test_a_percentage_is_a_ratio_only_beside_split_words() -> None:
+    assert s3b.stated_ratios("declared a 5% stock dividend payable December 14") == {Fraction(21, 20)}
+    assert s3b.stated_ratios("issued 4.5% notes due 2030") == set()
+    assert s3b.stated_ratios("holders approved the plan by 95%") == set()
+    # A percentage beside split words that sizes something else is no ratio.
+    assert s3b.stated_ratios("Following the 1-for-10 reverse stock split, shares decreased by 90%") == {Fraction(1, 10)}
+    assert s3b.stated_ratios("The stock split occurred; ownership remained 5%.") == set()
 
 
 def test_words_and_a_disagreeing_bracketed_numeral_state_no_ratio() -> None:
@@ -175,7 +200,7 @@ def test_the_effective_date_must_be_quoted_in_its_role() -> None:
 def test_a_large_distribution_goes_ex_the_session_after_payable() -> None:
     # FINRA 11140(b)(2): payable Friday 2024-06-07, so ex Monday 2024-06-10.
     quotes = ["a ten-for-one split", "to holders of record on June 6, 2024.", "The shares are payable on June 7, 2024."]
-    values = split(record_date="2024-06-06", payable_date="2024-06-07")
+    values = split(record_date="2024-06-06", payable_date="2024-06-07", effective_basis="fallback_b2")
     assert s3b.field_failures("split", values, quotes, [NVDA_COVER]) == []
     wrong = s3b.field_failures("split", values | {"effective_date": "2024-06-06"}, quotes, [NVDA_COVER])
     assert wrong == ["effective_date 2024-06-06 is not 2024-06-10, the FINRA 11140 date from record and payable dates"]
@@ -195,16 +220,54 @@ def test_the_session_after_payable_skips_an_nyse_holiday() -> None:
     assert s3b.next_session(date(2024, 7, 3)) == date(2024, 7, 5)  # Independence Day
 
 
-def test_a_small_distribution_goes_ex_on_the_record_date() -> None:
-    # FINRA 11140(b)(1): a 5% stock dividend, distribution < 25%.
-    quotes = ["a 21-for-20 split", "record on December 1, 2022, payable on December 14, 2022"]
-    values = split(ratio="21/20", effective_date="2022-12-01", record_date="2022-12-01", payable_date="2022-12-14")
+def test_a_small_distribution_goes_ex_by_the_b1_text_in_force_on_the_record_date() -> None:
+    # FINRA 11140(b)(1), a distribution < 25%: from 2024-05-28 the record date itself.
+    quotes = ["a 5% stock dividend", "record on June 3, 2024, payable on June 14, 2024"]
+    values = split(
+        ratio="21/20",
+        effective_date="2024-06-03",
+        record_date="2024-06-03",
+        payable_date="2024-06-14",
+        effective_basis="fallback_b1",
+    )
     assert s3b.field_failures("split", values, quotes, [NVDA_COVER]) == []
+    # Before 2024-05-28 (Regulatory Notice 17-19): the NYSE business day before the record date. Record Thursday
+    # 2022-12-01, so ex Wednesday 2022-11-30.
+    old = ["a 5% stock dividend", "record on December 1, 2022, payable on December 14, 2022"]
+    before = values | {"record_date": "2022-12-01", "payable_date": "2022-12-14", "effective_date": "2022-11-30"}
+    assert s3b.field_failures("split", before, old, [NVDA_COVER]) == []
+    on_record = s3b.field_failures("split", before | {"effective_date": "2022-12-01"}, old, [NVDA_COVER])
+    assert on_record == [
+        "effective_date 2022-12-01 is not 2022-11-30, the FINRA 11140 date from record and payable dates"
+    ]
+
+
+def test_the_b1_business_day_before_the_record_date_skips_a_holiday_and_a_weekend() -> None:
+    # Record Monday 2022-01-03: the session before is Friday 2021-12-31 (New Year's Day 2022 fell on a Saturday and
+    # NYSE does not observe it on the Friday). Record Tuesday 2022-01-18: Monday was Martin Luther King Jr. Day.
+    assert s3b.fallback_date(Fraction(21, 20), date(2022, 1, 3), date(2022, 1, 14)) == (
+        date(2021, 12, 31),
+        "fallback_b1",
+    )
+    assert s3b.fallback_date(Fraction(21, 20), date(2022, 1, 18), date(2022, 1, 28))[0] == date(2022, 1, 14)
+    assert s3b.fallback_date(Fraction(5, 4), date(2022, 1, 18), date(2022, 1, 28)) == (
+        date(2022, 1, 31),
+        "fallback_b2",
+    )
+
+
+def test_the_effective_basis_must_say_how_the_quotes_set_the_date() -> None:
+    assert s3b.field_failures("split", split(effective_basis="fallback_b1"), SPLIT_QUOTES, [NVDA_COVER]) == [
+        "effective_basis 'fallback_b1' is not 'stated', how the quotes set effective_date"
+    ]
+    assert s3b.field_failures("split", split(effective_basis=""), SPLIT_QUOTES, [NVDA_COVER]) == [
+        "effective_basis '' is not one of ['stated', 'fallback_b2', 'fallback_b1']"
+    ]
 
 
 def test_a_reverse_split_has_no_record_date_fallback() -> None:
     quotes = ["a one-for-ten reverse split", "record on June 6, 2024, payable on June 7, 2024"]
-    values = split(ratio="1/10", record_date="2024-06-06", payable_date="2024-06-07")
+    values = split(ratio="1/10", record_date="2024-06-06", payable_date="2024-06-07", effective_basis="fallback_b2")
     assert s3b.field_failures("split", values, quotes, [NVDA_COVER]) == [
         "no quote states effective_date 2024-06-10 as the adjusted-basis session; a reverse split has no fallback"
     ]
@@ -381,6 +444,36 @@ def test_a_misquoted_item_lends_no_single_class(tmp_path: Path) -> None:
     verdict = s3b.check_row("split", row, tmp_path / "m")
     assert verdict.evidence[2]["single_class"] is None
     assert "evidence_3: quote does not occur in nvda-20240607.htm" in verdict.failures
+
+
+def chain(*links: tuple[str, str], key: str = "2024-06-10") -> list[s3b.Row]:
+    return [
+        s3b.Row(line, split(effective_date=key, version=version, supersedes=supersedes), ())
+        for line, (version, supersedes) in enumerate(links, 2)
+    ]
+
+
+def test_one_supersession_chain_per_key_passes() -> None:
+    rows = chain(("1", ""), ("2", "1"), ("3", "2")) + chain(("1", ""), key="2024-06-11")
+    assert s3b.version_failures("split", rows) == {}
+
+
+@pytest.mark.parametrize(
+    ("links", "problem"),
+    [
+        ((("1", ""), ("1", "")), "version 1 is repeated"),  # a second action at the key
+        ((("1", ""), ("2", "1"), ("3", "1")), "version 1 is superseded 2 times"),  # a branch
+        ((("1", ""), ("2", "")), "version 2 supersedes None: only version 1 supersedes nothing"),
+        ((("1", "1"),), "version 1 supersedes 1: only version 1 supersedes nothing"),
+        ((("1", ""), ("3", "2")), "version 3 supersedes 2, not an earlier version of the key"),
+        ((("1", ""), ("x", "1")), "line 3: version 'x' / supersedes '1' is malformed"),
+    ],
+)
+def test_a_broken_chain_fails_every_row_of_its_key(links: tuple[tuple[str, str], ...], problem: str) -> None:
+    rows = chain(*links)
+    failures = s3b.version_failures("split", rows)
+    assert set(failures) == {r.line for r in rows}
+    assert all(problem in f[0] for f in failures.values()), failures
 
 
 def test_check_row_fails_a_misquote_a_wrong_acceptance_and_an_unserved_document(tmp_path: Path) -> None:
