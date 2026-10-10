@@ -593,6 +593,8 @@ JOB_ETORO_INVESTOR_SNAPSHOT = "etoro_investor_snapshot"
 JOB_ETORO_PERISHABLES_SNAPSHOT = "etoro_perishables_snapshot"
 # #3545 — hourly eToro bid/ask for the validated universe while the NYSE session is open.
 JOB_ETORO_SESSION_RATES_CAPTURE = "etoro_session_rates_capture"
+# #3740 slice F — daily raw capture of eToro's official closing prices (no history served upstream).
+JOB_ETORO_CLOSING_PRICE_CAPTURE = "etoro_closing_price_capture"
 # #3471 — the AI-discretionary-v1 demo trial: the after-close decision run (claim, pack, one
 # tool-less model call, one-transaction publish) and the in-session execution of its legs.
 JOB_AI_TRIAL_DECISION_RUN = "ai_trial_decision_run"
@@ -3192,6 +3194,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # sample. A lost hour stays absent and the coverage report shows it.
         catch_up_on_boot=False,
         prerequisite=_all_of(_bootstrap_complete, _nyse_session_open_now),
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_CLOSING_PRICE_CAPTURE,
+        display_name="eToro official closing price capture (#3740)",
+        # Same SOURCE lane as the #3381 recorders (no new lane), after its 22:07 fire. 23:17 UTC is after
+        # the US close in both DST regimes and before the next Asian open, so `officialClosingPrice` is the
+        # session just ended for US names. One request on lane F.
+        source="etoro_crowd",
+        description=(
+            "Daily 23:17 UTC — stores eToro's official closing prices for every instrument (latest, "
+            "previous day, week and month-end) exactly as served (gzip body, status, clocks), with no "
+            "parsing. eToro keeps no history. FAILS, after storing the response, on a non-200 or a body "
+            "with no instrument rows."
+        ),
+        cadence=Cadence.daily(hour=23, minute=17),
+        catch_up_on_boot=True,
+        # No upstream history and an append stamped with its own fetch clocks: a late fire beats a lost day.
+        rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_CORE_ELIGIBILITY_REFRESH,
@@ -8009,6 +8030,34 @@ def etoro_session_rates_capture() -> None:
             result.universe_size,
             result.instruments_served,
             result.instruments_quoted,
+        )
+
+
+def etoro_closing_price_capture() -> None:
+    """Capture eToro's official closing prices for every instrument (#3740 slice F). Read-only."""
+    from app.services.etoro_closing_price_capture import store_capture
+
+    creds = _load_etoro_credentials(JOB_ETORO_CLOSING_PRICE_CAPTURE)
+    if creds is None:
+        _record_prereq_skip(JOB_ETORO_CLOSING_PRICE_CAPTURE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    if settings.etoro_env != "demo":
+        # Same client and refusal as etoro_session_rates_capture.
+        _record_prereq_skip(JOB_ETORO_CLOSING_PRICE_CAPTURE, f"etoro_env {settings.etoro_env!r} is not demo")
+        return
+
+    with _tracked_job(JOB_ETORO_CLOSING_PRICE_CAPTURE) as tracker:
+        # Fetch first: no DB connection is held across the HTTP request (the dev cluster has no headroom).
+        with EtoroPerishablesProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider:
+            response = provider.get_closing_prices()
+        with connect_job(autocommit=True) as conn:
+            # A refused or empty response raises here after its row commits; the message names the capture.
+            report = store_capture(conn, response)
+        tracker.row_count = 1
+        tracker.note = (
+            f"capture={report.capture_id} status={report.http_status} rows={report.instrument_rows} "
+            f"bytes={report.payload_bytes} sha={report.response_sha256[:12]}"
         )
 
 

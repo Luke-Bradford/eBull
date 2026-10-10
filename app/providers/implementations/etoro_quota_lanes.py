@@ -440,6 +440,16 @@ CALL_SITES: tuple[CallSite, ...] = (
     ),
     # --- #3381 slice 3: the perishables recorder, one client per lane --------
     CallSite(_PERISH, "get_rates", "_http_rates", "GET", "/api/v1/market-data/instruments/rates", "F_market_data", 60),
+    # #3740 slice F: the official closing-price capture, on the rates client's lane-F clock.
+    CallSite(
+        _PERISH,
+        "get_closing_prices",
+        "_http_rates",
+        "GET",
+        "/api/v1/market-data/instruments/history/closing-price",
+        "F_market_data",
+        60,
+    ),
     CallSite(
         _PERISH,
         "post_eligibility",
@@ -468,7 +478,7 @@ EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
     (_MARKET, "_http"): 8,
     (_SOCIAL, "_http_rankings"): 1,
     (_SOCIAL, "_http_live"): 1,
-    (_PERISH, "_http_rates"): 1,
+    (_PERISH, "_http_rates"): 2,
     (_PERISH, "_http_eligibility"): 1,
     (_PERISH, "_http_what_if"): 1,
 }
