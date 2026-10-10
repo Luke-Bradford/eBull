@@ -256,3 +256,269 @@ For task B, these are the findings against the revised document, including unres
 53. **NIT — A2: the replaced rule is attributed to the wrong document.** [Lines 199–200](../../docs/research/2026-10-10-3740-slice-f-forward-capture.md:199). “The parent’s ‘never inputs to the trial’ (round 1 of this spec)” conflates the parent contract with the prior slice-F draft. **Fix:** identify the original rule’s actual source and separately state any parent amendment.
 
 **Overall assessment: checkpoint 1 remains open; not fit to build as a determinate forward-accrual contract.** The revision resolves several original mechanisms, but invariants 1–6 remain materially unmet. Invariant 7’s prohibition is now clear, and invariant 8’s acquisition-access row is specified, but those improvements do not repair the sealing and source-validity defects. Obligations 1–12 still contain unresolved capture, validation or substitution issues. X2, X3, X4, X6, X8 and X9 require substantive justification and measurement; A2/A3 require complete launch and estimand contracts before declaration.
+
+## Round 3 (on v3, `dbcde782`)
+
+**Checkpoint 1 remains open.** Massive resolves the central nominal-price and dated-action problems, but v3 still has sealing, scheduling, identity, action-history and termination defects. Premise 5’s plumbing rules are insufficient in several places.
+
+I read only the permitted local files/ranges and the allowed external documentation. For Massive, I used the HTML equivalents where the Markdown URLs failed. No files were edited, and no live API measurements were performed.
+
+All target line references below refer to [v3](/Users/lukebradford/Dev/.ebull-autonomy/docs/research/2026-10-10-3740-slice-f-forward-capture.md). **APPLIED** means the original finding was resolved, including by removing its mechanism; it does not certify the replacement.
+
+**Task A — round-2 findings 1–53**
+
+1. **PARTIAL** — Full tile scanning replaces incomplete search, but authenticated scan boundaries, shard transitions and complete enumeration verification remain unspecified (L207–216).
+2. **PARTIAL** — RFC 3161 and pinned trust material are added; the verification procedure and proof of timely log publication remain incomplete (L199–219).
+3. **APPLIED** — Receipt chaining no longer depends on successful publication; inadmissibility has a separate transition (L197–219).
+4. **PARTIAL** — Recovery states are specified, but crashes between filesystem completion and database state changes can still permit reacquisition (L135–150).
+5. **PARTIAL** — Logical selections are enumerated, but are not independently sealed, and the declared schema cannot implement the stated component uniqueness directly (L156–193, L538–547).
+6. **PARTIAL** — Separate status, return and final identities exist; delayed-status completion and the month’s required security set remain unresolved (L191–193, L435–469).
+7. **PARTIAL** — Discovery polls are witnessed, but mutable download targets and simultaneous-version ordering remain unresolved (L178–181, L236–248).
+8. **PARTIAL** — SEC kinds are registered; new-entrant bootstrap, completion dependencies and several recovery schedules remain incomplete (L173–177, L232–241).
+9. **PARTIAL** — Index acquisition can continue after the evidence cutoff, but missing filing bodies and immutable status selection are not reconciled (L235, L467–469).
+10. **APPLIED** — Rates are removed and fallback is restricted to named metadata kinds (L252–254).
+11. **APPLIED** — The next-session confirmation dependency is removed; the replacement price acquisition can finish before the next open (L233, L374–384).
+12. **PARTIAL** — Ordinary daily captures satisfy the intended timing, but MAX recovery and action-version selection can still introduce later evidence (L242–245, L412–414).
+13. **APPLIED** — The independently valid close and 09:00 witness gate replace the impossible confirmation deadline (L478–480).
+14. **APPLIED** — Daily price/action capture removes the formation-only candle dependency (L233, L427–431).
+15. **PARTIAL** — Outcomes are clearer, but returns-witness failures contradict the parent’s required refusal scope without an amendment (L264–273).
+16. **PARTIAL** — Ledger checks and explicit tables improve the interface; binding keys, persistence metadata and witness storage still disagree with the schema (L107–116, L538–553).
+17. **PARTIAL** — Retirement is removed and market-wide capture helps; new-entrant SEC dependencies and historical identity coverage remain incomplete (L275–295).
+18. **PARTIAL** — Lookback kinds, bootstrap and validator checks are added; historical mapping, dry-run witness verification and semantic compatibility remain incomplete (L287–297).
+19. **PARTIAL** — Accepted securities enter validation, but security-class/context matching and missing-reference outcomes remain unspecified (L316–320).
+20. **PARTIAL** — FIGIs improve identity, but ticker matching and exchange preference do not establish eToro instrument equivalence or RTH pricing semantics (L313–315, L491–499).
+21. **APPLIED** — Dated Massive reference captures replace periodic-cover symbol linkage (L491–496).
+22. **APPLIED** — Certification/8-A acceptance is no longer used as the listing-age input (L324–334).
+23. **PARTIAL** — Validation now checks false eligibility, but symbol listing dates still lack security continuity and relisting treatment (L324–334).
+24. **PARTIAL** — The unsupported upper-bound claim is removed; the parent’s required accession-level source comparison is still absent (L338–346).
+25. **PARTIAL** — Direct SEC downloads and page completeness improve acquisition; ZIP persistence and a complete cutoff-eligible accession inventory remain unresolved (L350–358).
+26. **PARTIAL** — Convention fixtures are specified; the conditional ME discontinuity detector is not whole-population reconciliation (L362–372).
+27. **APPLIED** — Documented `adjusted=false` replaces the intraday nominal-price anchor (L50–54, L376–382).
+28. **APPLIED** — Independent daily prices and dated actions remove the candle/close dependency cycle (L374–399).
+29. **APPLIED** — Exact dated split products replace median factors and deadbands (L363–369).
+30. **PARTIAL** — Independent candidate detectors are added, but their blind spots and incomplete action enumeration remain (L393–399).
+31. **PARTIAL** — The 24-month action bootstrap supplies nominal duration, but lacks the historical ticker mappings needed to use it (L289–293, L388–389).
+32. **PARTIAL** — A daily replacement is defined, but it changes the screened error class and mishandles events inside gaps (L415–423).
+33. **PARTIAL** — Combined historical measurement is required and the vendor change is acknowledged; the historical proxy does not cover every implemented branch (L420–423).
+34. **PARTIAL** — PWB basis conversion is removed; effective action-to-security identity remains underdefined (L388–389, L403–406, L531–533).
+35. **APPLIED** — The PWB 90% vintage-selection denominator is removed.
+36. **APPLIED** — The additional PWB entry screen and A3 are withdrawn (L567–568).
+37. **APPLIED** — Price-return substitution is removed; invalid total returns remain incomplete inputs (L432–434, L618–620).
+38. **APPLIED** — F9 explicitly restricts action evidence to bindings available by the returns cutoff (L429–431).
+39. **PARTIAL** — Separate validation strata exist, but the dividend reference, missing-event coverage and termination test remain incomplete (L437–446).
+40. **PARTIAL** — Gross/net formulas and close checks are explicit; action-row validity and partial-period boundary cases remain incomplete (L378–379, L403–407, L466).
+41. **PARTIAL** — Whole-response acquisition failure is separated from economic status; row defects, reference failure and cessation timing still lack complete treatment (L450–458).
+42. **PARTIAL** — `end_bar` precedes the first gap, but missing initial boundaries and incomplete partial returns remain unresolved (L453–466).
+43. **PARTIAL** — `TerminationEvidence` is named, but Q-suffix classification remains unreachable in the unmatched case and amendment precedence contradicts the cited matcher (L456–465).
+44. **APPLIED** — Provenance versions and first-accepted logical selections are separated (L179–188, L473–487).
+45. **PARTIAL** — X9 now requires measurement; reconstructed publication vintages and a fixed-lag substitute do not establish the historical treatment claimed (L503–513).
+46. **APPLIED** — One cutoff selection is made at a specified time and cannot be replaced (L503–506).
+47. **PARTIAL** — Missed mandatory captures now fail, and artifacts are enumerated; event-validation coverage remains incomplete (L580–587).
+48. **PARTIAL** — Dedicated Massive quota, timeouts and tick budgets improve runtime; omitted calls, early-close windows and dependent scheduling remain unresolved (L117–127, L230–235).
+49. **APPLIED** — Full retention, peak storage, margin and low-space preflight are specified (L114, L596–597).
+50. **PARTIAL** — More drills exist, but edit/revert and incomplete enumeration are absent, and duplicate handling conflicts with the verifier (L588–595).
+51. **APPLIED** — X5 states its replacement predicate and requires disagreement reasons in accepted dry-run artifacts (L560, L583).
+52. **NOT APPLIED** — V3 documents no empty/error-response handling fix; the probe itself was outside this review’s permitted reads (L663).
+53. **APPLIED** — A2 correctly attributes the replaced restriction to v1 of slice F (L299).
+
+**Task B — defects in v3**
+
+1. **BLOCKING — The specified signing algorithm does not implement Rekor v2’s supported workflow.**  
+   **L199–202.** V3 specifies plain Ed25519 over a SHA-256 digest. Rekor v2 supports HashedRekord v0.0.2; Sigstore’s client specification excludes plain Ed25519 from that construction. **Fix:** specify a supported signing algorithm, exact signed bytes, hash algorithm, request encoding and verification procedure; exercise the actual service before accepting the witness design. [Rekor v2 specification](https://raw.githubusercontent.com/sigstore/architecture-docs/main/rekor-v2-spec.md), [Sigstore client specification](https://raw.githubusercontent.com/sigstore/architecture-docs/main/client-spec.md).
+
+2. **BLOCKING — Logical selections are immutable only by local assertion.**  
+   **L159–161, L183–193, L197–219, L546–547.** Receipts witness acquisitions, but no operation receipts or witnesses a `forward_capture_selections` row. A cutoff vintage, factor selection or formation manifest can therefore be changed locally without changing an acquisition receipt. **Fix:** give selections canonical signed receipts, identities, decision deadlines and external commitments; verify their uniqueness and referenced components.
+
+3. **BLOCKING — The signed receipt payload is not defined sufficiently to protect acquisition meaning.**  
+   **L137–140, L157–158, L197–204, L539–547.** The schema separates mutable attempt metadata, component hashes and witness material, without specifying exactly which identity, request, validation result and timestamps the receipt digest commits. Hashing the eventual row would also include fields populated after signing. **Fix:** define canonical immutable receipt bytes, including complete identity and component inventory; store publication evidence separately.
+
+4. **BLOCKING — The declared schema cannot directly enforce the declared binding constraint.**  
+   **L156–158, L539–551.** The component table lacks `trial`, `kind`, `source_id` and `period_key`, although the partial unique index is required over those fields. The attempt table also omits the component hashes said to be stored at `persisted`. Hashing only the declared column interface would not establish the required uniqueness constraints. **Fix:** provide an implementable normalized schema, transactional binding operation and constraint/index validation.
+
+5. **BLOCKING — The crash protocol still has an observation-replacement interval.**  
+   **L135–150.** Files are finalized before the database marks the attempt `persisted`. A crash between those steps leaves complete response bytes under a state whose prescribed outcome permits abandonment and another acquisition. Multi-component attempts have the same problem after some components finish. **Fix:** recover every completed file deterministically before retrying; define filesystem/database transition ordering, directory durability and component-level recovery.
+
+6. **BLOCKING — Pagination lacks a coherent persistence and snapshot contract.**  
+   **L139–144, L166–169.** Fetching `next_url` requires parsing a page, while `persisted` appears to require completion of every component. Retrying later pages can also combine pages from different mutable source states. **Fix:** persist and receipt pages independently before parsing; commit the pagination inventory and ordering; define duplicate, missing, shifting and incomplete-page outcomes.
+
+7. **BLOCKING — A timely TSA token does not prove timely append-only publication.**  
+   **L203–219.** The token timestamps the receipt digest, while admissibility only requires eventual valid log inclusion. A receipt can be timestamped before the deadline and selectively logged afterward. The verifier also does not explicitly bind and authenticate the token’s imprint to the receipt. **Fix:** verify the token and trusted chain against the exact payload, and obtain deadline evidence covering log inclusion—such as a timestamped inclusion checkpoint containing the receipt.
+
+8. **BLOCKING — “Full scan” lacks authenticated, independently fixed boundaries.**  
+   **L207–216.** A genesis index is shard-specific; subsequent shards need their own ranges. A locally selected stale final checkpoint can omit a deleted tail. Reading tiles without validating entry bundles and their hashes against authenticated checkpoints does not establish completeness. Consistency proofs also cannot connect unrelated shard trees. **Fix:** specify per-shard start/end checkpoints, independently obtain the terminal checkpoints, verify all complete and partial tiles, and define shard-transition verification. [Rekor v2 client guidance](https://github.com/sigstore/rekor-tiles/blob/main/CLIENTS.md).
+
+9. **WARNING — Duplicate-publication acceptance contradicts one-to-one enumeration.**  
+   **L209, L213–214, L589–591.** The verifier requires receipts and logged entries to match one to one, while the drill permits two entries for one receipt. **Fix:** distinguish duplicate entries for identical canonical receipt bytes from distinct receipts claiming one identity, and use the same rule in publication recovery and verification.
+
+10. **BLOCKING — Failed and abandoned attempts are not necessarily externally committed.**  
+    **L135–152, L246–248, L580–581.** A crash in `intent` or `persisting` leaves only local attempt/access rows. Yet poll failures and abandoned-attempt counts are treated as immutable evidence. Deleting an unreceipted attempt is invisible to the receipt scan. **Fix:** externally commit attempt intent or an independently retained attempt inventory, then append completion/abandonment records without overwriting it.
+
+11. **BLOCKING — Witness failure changes the parent’s verdict without a declared amendment.**  
+    **L264–273, L567–568.** V3 treats inadmissible returns/B1/factor receipts as unbound inputs potentially ending in `INPUT_UNAVAILABLE`. Parent L365 assigns failed sealing of those inputs to `CAPTURE_AMBIGUOUS`. Only A1/A2 are declared. **Fix:** preserve the parent’s outcome or explicitly amend that lifecycle row, with exact distinction between missing acquisition and failed witness.
+
+12. **BLOCKING — Early-close reference and SEC windows are impossible.**  
+    **L230–232.** Only the eToro window has an early-close start. On a 13:00 close, the reference window runs 13:30–12:40 and the SEC window 14:00–12:40. **Fix:** define executable early-close windows for every dependent kind and validate the complete pinned calendar.
+
+13. **BLOCKING — New-security dependency discovery can finish at the SEC deadline.**  
+    **L231–232, L279–282.** The ticker window and SEC window end simultaneously. A FIGI discovered near that end cannot receive the same-session SEC work promised by the superset rule. **Fix:** set explicit dependency deadlines and reserved completion intervals, or define a deterministic deferred-eligibility rule.
+
+14. **BLOCKING — Premise 5(g)’s workload omits a potentially dominant acquisition kind.**  
+    **L123–124, L171, L231, L575–576.** The estimate omits per-FIGI `massive_events` calls. If these run daily as the registry/window imply, 1,000 securities alone require at least 250 minutes at four calls/minute—longer than the ordinary reference window. Initial overview/bootstrap calls also need separate budgeting. **Fix:** specify event-query cadence and population, then gate the complete dependency workload, including bootstrap and growth.
+
+15. **WARNING — Runtime acceptance does not cover the complete constrained system.**  
+    **L117–127, L572–576.** The plumbing capacity rule addresses Massive calls, while SEC ZIPs, filing work, witness publication and shared eToro/SEC contention also consume deadlines. The eight-minute budget lacks component-level interruption/resumption rules and witness priority. **Fix:** test complete ticks under defined contention, with durable progress, deadline priorities and reserved witness capacity.
+
+16. **BLOCKING — Recovery and bootstrap work lack complete identities and executable windows.**  
+    **L163–181, L242–245, L289–293, L467–469.** `massive_grouped_recovery`, historical action bootstrap and repeated SEC-index recovery are absent from the registry or lack full start/end/witness/retry rules. “A new acquisition” does not explain its relationship to the original immutable identity. **Fix:** register each kind and its logical selection, including all deadline and collision rules.
+
+17. **BLOCKING — Discovery does not freeze the bytes later selected.**  
+    **L178–181, L236–248, L475–487.** A poll may identify a mutable URL whose contents change before the later download. French/JKP content versions cannot be identified from a URL alone. Multiple datasets discovered in one poll also lack a total ordering. **Fix:** bind content-bearing poll bytes directly, or bind immutable version locators plus expected hashes; define ordering and unavailable-version outcomes.
+
+18. **BLOCKING — MAX recovery can violate the formation cutoff.**  
+    **L242–245, L412–414.** Recovery remains open through the month’s later returns cutoff and is admitted for “MAX lookback” without restricting eligibility to the formation’s pre-close deadline. The claim that all earlier-session inputs bind in their own windows is therefore false. **Fix:** determine admissibility per use: later recovery may serve holding returns, but a formation may reference only recoveries witnessed before its applicable cutoff.
+
+19. **BLOCKING — Monthly completeness has no frozen denominator.**  
+    **L191–193, L277–285, L435–436.** The superset grows forever, books are not formed, yet `month_final` waits for “every” return selection. It is unspecified whether later entrants enlarge an earlier month’s required set or which securities need instrument-level results. **Fix:** bind a finite per-month candidate/continuing-security inventory independently of returns, and define completion against that inventory.
+
+20. **BLOCKING — Delayed SEC evidence conflicts with cutoff-time status binding.**  
+    **L191–192, L235, L435, L460–469.** Status is selected at the returns cutoff, but eligible indexes and Form 25 bodies may arrive afterward. F10 blocks on missing indexes, not missing eligible filing bodies. Amendment form variants are not explicitly included in the acquisition filter. **Fix:** freeze the evidence-eligibility cutoff separately from completion; require all eligible indexes and filing bodies before binding status, including explicit amendment handling.
+
+21. **BLOCKING — “Latest amendment wins” contradicts the cited source rule.**  
+    **L461–463.** The permitted [matcher range](/Users/lukebradford/Dev/.ebull-autonomy/app/services/research_corpus_ingest.py:1566) explicitly rejects conflicting provisions/suspension dates and says latest-filed or `/A` precedence would invent a source rule. V3 introduces exactly that precedence. **Fix:** preserve the matcher’s conflict refusal, or establish and cite the applicable documented amendment treatment before changing it.
+
+22. **BLOCKING — The Q-suffix terminal branch is unreachable.**  
+    **L456–465.** An unmatched ceased security is assigned `coverage_exit` before `classify_termination` can use `q_suffix`. Constructing that field later does not reproduce the classifier’s unmatched-Q behavior. **Fix:** integrate the complete termination-evidence classification into status selection, including unlinked Q-suffix, conflicting and unverified cases.
+
+23. **BLOCKING — Cessation and filing evidence are not tied to the same effective event.**  
+    **L453–465.** Being inactive by the cutoff can retrospectively classify an earlier missing session as cessation, even if trading resumed before a later delisting. A matched Form 25 also lacks an explicit suspension/effective-event relationship to the cessation. Massive documents `delisted_utc` as the last traded date, not a generic filing-effective date. **Fix:** construct dated trading/cessation intervals and match the terminating event to the relevant security interval. [Massive All Tickers](https://massive.com/docs/rest/stocks/tickers/all-tickers).
+
+24. **BLOCKING — Partial-month boundary cases remain undefined.**  
+    **L427–434, L453–466.** There is no executable rule for no usable bar after entry, a missing initial boundary, an invalid action before `end_bar`, or a resumed series after its first gap. A status can exist while its required partial total return is still invalid. **Fix:** enumerate these cases, preserve incomplete-input status where appropriate, and require valid partial-return inputs before monthly completion.
+
+25. **BLOCKING — The promised late return completion has no acquisition path.**  
+    **L192, L242–245, L268, L429–436.** The registry permits later return completion within nine months, but grouped recovery ends at the returns cutoff and F9 permits completion only inside that returns window. **Fix:** specify which cutoff-eligible missing components can be acquired later and how their eligibility is established, or remove the contradictory completion promise and explicitly classify permanent failures.
+
+26. **BLOCKING — Historical action bootstrap lacks the identity history required to use it.**  
+    **L289–295, L388–389.** Two years of split events are fetched, but ticker snapshots begin only at the dry-run start. An older event cannot be mapped by its pre-event ticker using those captures. Literal “day before execution” also fails across weekends/holidays. **Fix:** capture historical reference mappings for required event dates and security intervals; use the prior trading session where appropriate.
+
+27. **BLOCKING — Latest rolling action snapshots omit required historical events.**  
+    **L168–169, L363–365, L429–431.** Each daily action response covers only ±30 days. F5 needs up to 15 months, while the latest snapshot at a returns cutoff can omit dividends/splits from the beginning of the holding month. The initial bootstrap does not fill later gaps indefinitely. **Fix:** maintain a cumulative, identity-deduplicated event inventory and select its versioned state as of each cutoff.
+
+28. **BLOCKING — Action revision precedence is contradictory.**  
+    **L363–365, L390–392, L429–431.** F7 binds the first event observation, while F5/F9 select latest bindings. Neither establishes cancellation, changed execution date, disappearing event or superseding-ID treatment. An announced event that is later cancelled can remain economically applied. **Fix:** define immutable event revisions and deterministic as-of selections, including cancellation and unresolved-conflict outcomes.
+
+29. **BLOCKING — Dividend identity and deduplication are unspecified.**  
+    **L169, L403–406, L429–431.** Splits have a ticker-to-FIGI rule, but dividends do not. Summing amounts without a dated mapping and event-ID selection can attach an old ticker’s dividend to a new occupant or count one event multiple times across captures. **Fix:** define effective-dated dividend mapping and exactly-once event selection before calculating `D_d`.
+
+30. **BLOCKING — Required action fields have no deterministic validators.**  
+    **L145–148, L388–407.** Calculations require event IDs, dates, tickers, positive split ratios and finite amounts/currencies. Several are optional in Massive’s schema. Missing fields, duplicate/conflicting IDs, invalid ratios and malformed amounts have no specified scope or outcome. **Fix:** freeze per-row validators and map each defect to affected security/date inputs without discarding unrelated valid rows. [Massive Splits](https://massive.com/docs/rest/stocks/corporate-actions/splits), [Massive Dividends](https://massive.com/docs/rest/stocks/corporate-actions/dividends).
+
+31. **WARNING — The claimed dividend share-basis rule is not documented.**  
+    **L406–407.** Massive describes `cash_amount` as the original per-share amount in its currency; that does not establish v3’s stronger “before any split that day” assertion. Same-day cases are refused anyway, making that assertion unnecessary. **Fix:** remove the unsupported interpretation and document the basis needed for every accepted case, including intervening splits; retain explicit refusal where the source contract is insufficient. [Massive Dividends](https://massive.com/docs/rest/stocks/corporate-actions/dividends).
+
+32. **BLOCKING — First non-empty grouped data need not be a complete acceptable observation.**  
+    **L75–76, L145–151, L378–384, L573–574.** The plumbing test measures first non-empty availability, while first persistence permanently binds the response. A partial successful response can therefore bind before complete data becomes available. Missing rows then become exclusions or coverage gaps. **Fix:** define response-level readiness/completeness rules, distinguish a valid empty result from unavailable data, and measure the actual first-binding policy prospectively.
+
+33. **BLOCKING — F6 turns one row defect into a whole-response failure.**  
+    **L147–150, L378–379.** A duplicate ticker produces `row_defect`, but F6 requires the response to be `valid`. Read literally, one bad ticker invalidates every otherwise usable close, contradicting scoped row handling. **Fix:** admit unaffected rows from a bound `row_defect` component and specify deterministic ticker-level defects.
+
+34. **BLOCKING — Unadjusted aggregate close is asserted to reproduce RTH/exchange-close treatment.**  
+    **L313–315, L376–382.** `adjusted=false` establishes split basis. The allowed endpoint documentation defines `c` for the aggregate period; it does not, by itself, establish the precise RTH or market-on-close print assumed by the parent. Dry-run price agreement cannot supply that contract. **Fix:** establish the documented session/eligible-trade/closing-print semantics or declare and review a pricing-session exception. [Massive Daily Market Summary](https://massive.com/docs/rest/stocks/aggregates/daily-market-summary).
+
+35. **BLOCKING — Missing reference identity has no complete forward outcome.**  
+    **L279–285, L376–377, L453–455, L491–499.** `composite_figi` is optional, and a required daily ticker snapshot may be absent or defective. The spec handles an unmatched formation symbol, but not all consequences for existing holdings, action mapping and status classification. **Fix:** distinguish missing capture, missing source identity, ambiguous mapping and actual cessation, with immutable per-session mappings and explicit refusal/completion rules. [Massive All Tickers](https://massive.com/docs/rest/stocks/tickers/all-tickers).
+
+36. **BLOCKING — F1’s source substitution and validation joins are incompletely declared.**  
+    **L305–320, L555–568.** The parent specifies SEC filer/SIC evidence after eToro type; v3 principally adopts Massive’s type taxonomy without listing that source substitution. Its cover-title comparison also lacks class/symbol/context joins and rules for multiple or conflicting titles. **Fix:** declare the classifier substitution, freeze explicit accepted codes and security-level joins, and specify unknown/conflicting validation outcomes.
+
+37. **BLOCKING — Symbol first-listing date does not establish the required security listing history.**  
+    **L324–334.** The documented field is the symbol’s first listing date. V3 has no operative continuity, successor, relisting or reused-symbol rule. Checking the dry-run population cannot validate future entrants; two years of experimental ticker-change coverage cannot establish a 36-month history. **Fix:** require security-specific continuity evidence or explicitly adopt and measure a narrower proxy with unknown-age handling. [Massive Overview](https://massive.com/docs/rest/stocks/tickers/ticker-overview), [Massive Ticker Events](https://massive.com/docs/rest/stocks/corporate-actions/ticker-events).
+
+38. **BLOCKING — Header acquisition does not guarantee the latest eligible accession for new entrants.**  
+    **L239–241, L279–285, L338–339, L357–358.** Header bootstrap occurs only at dry-run start. A later entrant’s latest filing may predate all captured indexes, while delayed indexes can conceal a newer eligible accession. **Fix:** bootstrap each newly required CIK and establish a complete eligible-accession inventory before choosing the latest header; otherwise retain `sic_unloaded`.
+
+39. **BLOCKING — F3 omits the parent’s required source-compatibility evidence.**  
+    **L342–346, L565.** The parent requires header-versus-SUB comparison over every accession in overlapping quarters, including unmatched accessions. V3 instead compares latest header SIC against current company-record SIC at dry-run formations, then claims exact reproduction. **Fix:** perform the prescribed accession-level comparison and provide the header-field documentation, or explicitly amend that obligation.
+
+40. **BLOCKING — SEC ZIP handling conflicts with the acquisition state machine.**  
+    **L137–144, L176, L350–354.** The response is a ZIP, but only extracted members bind and the ZIP is not retained. Extraction necessarily parses the response; the protocol does not specify when that parsing is permitted, how ZIP hashes are verified later, or how crash recovery preserves the same source bytes. **Fix:** define a durable ZIP acquisition followed by a receipted extraction manifest and controlled disposal, or retain the ZIP.
+
+41. **WARNING — The ME validation gate checks only a selected error class.**  
+    **L370–372.** The detector omits smaller missed distributions, offsetting errors, first formations and cases with substantial real price movement. Passing it does not establish the whole-population reconciliation required by obligations 5/7. **Fix:** reconcile every required share basis and event product, reporting the detector as supplementary evidence rather than completeness proof.
+
+42. **WARNING — X3 changes the screened error class, beyond its stated rationale.**  
+    **L415–423, L559.** #3621 screens adjustment-ratio moves without intervening stamps; v3 tests price consistency where an event exists. Unstamped errors can now pass, while a correctly stamped action with a genuine large price move can be screened. **Fix:** state those changed false-positive/false-negative classes explicitly and require the historical comparison to cover the complete replacement, including its ambiguity branches, before accepting X3.
+
+43. **BLOCKING — The replacement MAX screen mishandles actions inside gaps.**  
+    **L417–419.** It compares consecutive usable bars across gaps using only `k_d`, the later session’s split product. An action inside the gap is omitted; if no event occurs on the later session, the check may not run at all. **Fix:** use the cumulative applicable event product over the entire comparison interval and define event/currency ambiguity over that interval.
+
+44. **BLOCKING — Independent return validation is not reproducible enough to serve as the stated gate.**  
+    **L437–446, L552–553.** Mutable `price_daily` values are used without a frozen comparison snapshot or precise reference construction. Missing reference observations have no pass/fail treatment. The tests do not independently validate complete monthly and partial-period total-return construction. **Fix:** freeze reference bytes, identity/basis conversions, denominators, uncovered cases and expected daily/monthly/partial-return calculations before comparison.
+
+45. **WARNING — Dividend validation samples supplied events and tolerates a wrong ex-date.**  
+    **L443–445.** Sampling only Massive-listed dividends cannot detect omitted dividends. Allowing a one-session date error can accept incorrect MAX timing or move income across a month boundary. **Fix:** independently enumerate a frozen validation population including missing-event cases; require exact ex-date agreement or explicit adjudication of every discrepancy. Treat sample agreement only as compatibility evidence.
+
+46. **BLOCKING — The termination validation gate points to a nonexistent test specification.**  
+    **L446, L448–469, L582, L585–587.** F9 requires “F10’s table,” but F10 contains no reference table, expected results, tolerances or acceptance criteria. One observed Form 25 does not exercise amendment conflicts, unmatched Q names, interior gaps or collector failure. **Fix:** supply the promised independent termination table and deterministic fixtures/pass rules for each branch.
+
+47. **BLOCKING — B1 adds a required exit-price dependency absent from the parent.**  
+    **L186, L268, L481.** The parent uses SPY’s entry raw close for B1’s one-band transaction costs; IVV N-PORT supplies returns. Making `b1_exit_close` a mandatory selection can refuse an otherwise complete trial for an unnecessary SPY observation. **Fix:** remove that dependency or explicitly amend and justify the additional B1 requirement.
+
+48. **BLOCKING — F14’s historical measurement can substitute invented publication history.**  
+    **L509–513.** A current `Last-Modified` observation does not reconstruct historical vintages. A fixed lag inferred from one current observation is a scenario, not “the row a reader would have had” at each historical cutoff. **Fix:** use retained historical versions with actual availability evidence, or label and analyze fixed-lag scenarios separately while leaving the actual historical availability effect unmeasured.
+
+49. **WARNING — X9’s rationale does not establish the necessity or limits of carry-forward.**  
+    **L503–513, L617.** Publication lag does not by itself rule out acquiring the actual holding-month row during the parent’s completion period. Carried bounds also have no maximum age or special missing-vintage treatment. **Fix:** prefer the documented holding-month row where the completion contract permits; otherwise make the estimand change, age policy and stress-period effects explicit for acceptance.
+
+50. **BLOCKING — Premise 5(e) has no substantive pass rule.**  
+    **L81–82, L575.** “Documented” accepts any observed filter behavior, future-event coverage or non-USD frequency. Yet correct interval selection and usable action amounts directly determine ME and total-return validity. **Fix:** specify assertions for filter inclusivity, pagination, required fields, event timing/revisions, currency coverage and structural refusal exposure, with explicit failed-gate consequences.
+
+51. **WARNING — Premise 5(a)’s timing test is underspecified and cannot establish future availability.**  
+    **L75–76, L572–574.** Retrospective responses cannot reveal when data first became available. Even a prospective two-week success is operational evidence, not a future deadline guarantee. **Fix:** require timestamped prospective observations under the actual polling/binding policy, report the sample and latency distribution, and retain explicit operational failure handling.
+
+52. **WARNING — Premise 5(c)/(d) permits unexplained coverage losses in unfrozen samples.**  
+    **L78–80, L574–575.** A 95% symbol-match rate says nothing about FIGI/CIK/action/history usability. Eighteen successes from twenty delisted names permits two unexplained failures and is not a survivorship-coverage guarantee. Selection dates, seeds, strata and denominators are not frozen. **Fix:** freeze those populations, distinguish identifier matching from complete usability, adjudicate failures and quantify the resulting population restriction.
+
+53. **WARNING — Several dry-run gates do not establish the continuing validity implied by “reproduces.”**  
+    **L316–334, L370–399, L497–499, L565, L582.** The finite dry-run population can establish compatibility, but cannot guarantee future classification, listing continuity, action completeness or mapping correctness. Future entrants do not receive the same independent adjudication gate. **Fix:** distinguish documented source guarantees from sampled checks, and define deterministic forward handling for newly encountered or unresolved cases.
+
+54. **WARNING — Witness drills still omit required or load-bearing failures.**  
+    **L588–595.** Edit/revert and incomplete enumeration are absent. Several listed drills describe observations without a final expected state/code; selection tampering is also untested despite its role in evaluation. **Fix:** enumerate each mutation, truncation, stale-checkpoint, shard-transition and selection-tampering drill with the exact expected verifier result.
+
+55. **WARNING — Invariant 8’s complete lifecycle is not operationalized.**  
+    **L137, L152, L548–549.** Acquisition read rows are specified, but verdict `evaluate` timing and the parent’s abandoned-run classifier are not mapped to the new attempt states. The inherited requirement remains applicable. **Fix:** specify evaluation-access recording before evaluation reads and a deterministic classification for every failed/recovered attempt.
+
+56. **NIT — Review status contradicts the actual round-3 premise state.**  
+    **L5, L48, L672.** The document says round 3 runs after Massive premises are measured, although this review intentionally precedes those measurements. **Fix:** label this as a design review with measurement gates still pending.
+
+57. **NIT — The disposition table misattributes finding numbers.**  
+    **L637–645.** The F6 row groups findings 18 and 19 with nominal-price findings, then separately assigns those same numbers to A2 and F1. **Fix:** correct the cross-reference mapping so the table can be audited mechanically.
+
+**Parent-contract cross-check**
+
+| Requirement | Result against v3 |
+|---|---|
+| Sealing invariant 1 — cutoffs | Unmet: unsealed selections, MAX recovery and delayed-status timing; findings 2, 18–20. |
+| Invariant 2 — immutability | Unmet: crash recovery, pagination and contradictory event selection; 5–6, 28. |
+| Invariant 3 — unique identities | Unmet: schema, missing recovery identities and selection sealing; 2–4, 16. |
+| Invariant 4 — executable windows | Unmet: early closes, dependency timing and incomplete recovery schedules; 12–16. |
+| Invariant 5 — external witness | Unmet: signing workflow, timely publication and scan completeness; 1–10, 54. |
+| Invariant 6 — splicing | Unmet: historical action identity, dividend mapping and session semantics; 26, 29, 34–35. |
+| Invariant 7 — no interim result | Specified adequately: portfolio formation/valuation is prohibited; instrument-level checks are distinguished. |
+| Invariant 8 — access rows | Acquisition requirement specified; evaluation and abandoned-attempt lifecycle need completion; 55. |
+| Obligation 1 — security type | Incomplete source exception, security-level validation and RTH treatment; 34–36. |
+| Obligation 2 — listing age | Symbol-date proxy does not establish security history; 37. |
+| Obligation 3 — SIC | Latest-accession acquisition and required source comparison incomplete; 38–39. |
+| Obligation 4 — accounting | Direct capture improves provenance; persistence/completeness protocol incomplete; 20, 38, 40. |
+| Obligation 5 — shares/ME | Formula/fixtures improve; historical action coverage and reconciliation incomplete; 26–28, 41. |
+| Obligation 6 — raw close | Split basis is documented; readiness, row validity and session semantics remain unresolved; 32–34. |
+| Obligation 7 — split events | Dated source exists; historical mapping, cumulative inventory and revision handling incomplete; 26–30. |
+| Obligation 8 — MAX | Cutoff and across-gap defects; changed screen needs explicit acceptance; 18, 42–43. |
+| Obligation 9 — holding returns | Action completeness, identity, partial returns and validation remain incomplete; 24–31, 44–45. |
+| Obligation 10 — terminations | Matcher precedence, Q branch, timing and validation defective; 20–24, 46. |
+| Obligation 11 — B1 | First-accepted selection improves; sealing/discovery issues and extra exit dependency remain; 2, 17, 47. |
+| Obligation 12 — factors | First-accepted rule is stated correctly; common selection-sealing/discovery defects remain; 2, 17. |
+| Prospective dry run | Three month-ends and hard capture gates are retained; plumbing and validation acceptance are incomplete; 14–15, 44–46, 50–54. |
+| Parity | Required parent parity and X5 disagreement tables are included; neither establishes source validity outside the measured population. |
+
+**Overall assessment:** v3 is a substantial source-design improvement, but is not yet a determinate forward-accrual contract ready for implementation approval. The missing API key is not itself the defect: several proposed tests can pass while required inputs remain unusable or incorrectly sealed. Repair the protocol and source-rule conflicts first, then run the strengthened plumbing and prospective validation gates before closing checkpoint 1.
