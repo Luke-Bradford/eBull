@@ -790,9 +790,14 @@ def split_screens(
     through ``through``, because its interval starts at acceptance."""
     if evidence_through < through + EVIDENCE_HORIZON:
         raise ValueError(f"the evidence cutoff {evidence_through} is under 203 days after the window's end {through}")
-    # The notes must hold every filing month from the first acceptance whose 92-day interval meets the window to the
-    # evidence cutoff; an extract reduced for a shorter span would silently drop late covers. An archive appears by
-    # its facts' labels: every 10-Q and 10-K carries a cover count, so a read archive is never empty of them.
+    # The notes must hold an archive for every filing month from the first acceptance whose 92-day interval meets the
+    # window to the evidence cutoff, so an extract joined over a shorter span is refused. This proves archive presence
+    # only; that an archive's facts are complete rests on notes-reduce keeping every NOTE_TAGS fact and on
+    # notes-extract refusing a file reduced for another tag set. The joined extract keeps
+    # no archive list, so an archive is known by its facts' labels. A label is present only when that archive's facts
+    # were joined, so every month counted here was read (no false pass). An archive that contributed no fact would be
+    # reported missing: a refusal, never a pass. Every archive of both pinned extracts contributes periodic cover
+    # facts (count command in docs/research/3739-event-file/README.md, slice 3d).
     read = {month for label in {f.archive for f in facts} for month in archive_months(label)}
     missing = [m for m in months_between(event_start - STOCK_DIVIDEND_SPAN, evidence_through) if m not in read]
     if missing:

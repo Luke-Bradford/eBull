@@ -640,6 +640,7 @@ def field_failures(
         elif any(dated_near(t, effective, EFFECTIVE_WORDS) for t in texts):
             basis = "stated"
         elif ratio is not None:
+            # A date the fallback cannot set has no basis to compare: the date failure is reported and the row fails.
             basis, fallback_failures = _fallback(effective, ratio, values, texts)
             failures += fallback_failures
         stated_basis = values.get("effective_basis") or ""

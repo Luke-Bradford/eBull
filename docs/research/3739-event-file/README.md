@@ -315,3 +315,19 @@ Nothing of the 2020 replica is produced by this slice; the code is frozen (merge
   breaks this fails every row it holds.
 
 Slice 3c's coverage figures reproduce under this code (38 and 39 of 42).
+
+`split_screens` knows which archives were read by the `archive` label of the facts in the joined extract. A label is
+there only when its archive's facts were joined, so the check never passes a month that was not read. An archive
+with no fact at all would be refused, not passed. On both pinned extracts every archive contributes periodic cover
+facts (2022q1–2024q3: 11 quarters, 6,269 to 9,375 each; stage C 2024q1–2026-09: 19 archives, 361 at least):
+
+```bash
+PYTHONPATH=. uv run python -c "
+from collections import Counter
+from scripts.build_3739_slice2b import read_notes, COVER_TAG, COVER_FORMS
+for p in ('docs/research/3739-event-file/replica-2022/inputs/fsnds-notes-2022q1-2024q3-extract.jsonl.gz',
+          'docs/research/3739-event-file/inputs/fsnds-notes-2024q1-2026-09-extract.jsonl.gz'):
+    c = Counter(f.archive for f in read_notes(p) if f.tag == COVER_TAG and f.form in COVER_FORMS)
+    print(p, len(c), min(c.values()), max(c.values()))
+"
+```
