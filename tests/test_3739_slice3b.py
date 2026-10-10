@@ -453,6 +453,11 @@ def chain(*links: tuple[str, str], key: str = "2024-06-10") -> list[s3b.Row]:
     ]
 
 
+def test_every_record_type_the_checker_reads_has_a_key() -> None:
+    assert s3b.RECORD_TYPES == ("split", "symbol_change", "first_trade", "termination_end")
+    assert set(s3b.RECORD_TYPES) == set(s3b.RECORD_KEYS)
+
+
 def test_one_supersession_chain_per_key_passes() -> None:
     rows = chain(("1", ""), ("2", "1"), ("3", "2")) + chain(("1", ""), key="2024-06-11")
     assert s3b.version_failures("split", rows) == {}

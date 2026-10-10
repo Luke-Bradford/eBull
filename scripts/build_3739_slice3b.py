@@ -382,7 +382,15 @@ FIRST_TRADE_WORDS: Final = re.compile(
 
 # --------------------------------------------------------------------------- §3.3 checker: records
 
-RECORD_TYPES: Final = ("split", "symbol_change", "first_trade", "termination_end")
+#: §3.1's key of each record type. A termination row carries the register's event key (§9) in one column.
+RECORD_KEYS: Final = {
+    "split": ("cik", "class_title", "effective_date"),
+    "symbol_change": ("cik", "class_title", "effective_date"),
+    "first_trade": ("cik", "class_title"),
+    "termination_end": ("event_key",),
+}
+#: The record types the checker reads: exactly the keyed ones, so ``version_failures`` has a key for each.
+RECORD_TYPES: Final = tuple(RECORD_KEYS)
 STATUSES: Final = frozenset({"confirmed", "contested", "cancelled"})
 MAX_EVIDENCE: Final = 3
 _ACCESSION: Final = re.compile(r"\d{10}-\d{2}-\d{6}")
@@ -456,15 +464,6 @@ def read_rows(path: Path) -> list[Row]:
                 problems.append(f"status {values.get('status')!r} is not one of {sorted(STATUSES)}")
             rows.append(Row(line, values, tuple(items), tuple(problems)))
         return rows
-
-
-#: §3.1's key of each record type. A termination row carries the register's event key (§9) in one column.
-RECORD_KEYS: Final = {
-    "split": ("cik", "class_title", "effective_date"),
-    "symbol_change": ("cik", "class_title", "effective_date"),
-    "first_trade": ("cik", "class_title"),
-    "termination_end": ("event_key",),
-}
 
 
 def version_failures(record_type: str, rows: Sequence[Row]) -> dict[int, list[str]]:
