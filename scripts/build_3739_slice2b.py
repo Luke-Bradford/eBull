@@ -91,6 +91,29 @@ def publish(out: Path, payload: bytes) -> None:
         raise
 
 
+def publish_all(payloads: Mapping[Path, bytes]) -> None:
+    """Publish every payload or none: each is written to a staging file first, then hard-linked to its name (a link
+    refuses an existing name). On any failure the names linked so far are removed, so a rerun is not refused by a
+    partial set."""
+    staged: dict[Path, Path] = {}
+    linked: list[Path] = []
+    try:
+        for out, payload in payloads.items():
+            staging = out.with_name(f".{out.name}.staging")
+            publish(staging, payload)
+            staged[out] = staging
+        for out, staging in staged.items():
+            os.link(staging, out)
+            linked.append(out)
+    except BaseException:
+        for out in linked:
+            out.unlink(missing_ok=True)
+        raise
+    finally:
+        for staging in staged.values():
+            staging.unlink(missing_ok=True)
+
+
 def csv_bytes(header: Sequence[str], rows: Iterable[Sequence[Any]]) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
@@ -677,8 +700,7 @@ def screens(through: date, notes: Path, observations: Path, extract: Path, regis
     existing = [str(p) for p in targets.values() if p.exists()]
     if existing:
         raise FileExistsError(f"refusing to replace pinned candidate lists: {existing}")
-    for name, payload in payloads.items():
-        publish(targets[name], payload)
+    publish_all({targets[name]: payload for name, payload in payloads.items()})
     print(
         json.dumps(
             {

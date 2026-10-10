@@ -300,3 +300,23 @@ def test_publish_refuses_an_existing_file(tmp_path: Path) -> None:
     with pytest.raises(FileExistsError):
         s2b.publish(out, b"b")
     assert out.read_bytes() == b"a"
+
+
+def test_publish_all_writes_every_file_or_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    a, b = tmp_path / "a.csv", tmp_path / "b.csv"
+    s2b.publish_all({a: b"1", b: b"2"})
+    assert (a.read_bytes(), b.read_bytes()) == (b"1", b"2")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.csv", "b.csv"]
+
+    c, d = tmp_path / "c.csv", tmp_path / "d.csv"
+    real_link = s2b.os.link
+
+    def failing_link(src: Path, dst: Path) -> None:
+        if Path(dst) == d:
+            raise OSError("disk full")
+        real_link(src, dst)
+
+    monkeypatch.setattr(s2b.os, "link", failing_link)
+    with pytest.raises(OSError, match="disk full"):
+        s2b.publish_all({c: b"3", d: b"4"})
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.csv", "b.csv"]
