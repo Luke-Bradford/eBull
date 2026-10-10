@@ -12424,3 +12424,14 @@ neighbouring container and match it.**
   checked on covers that state their date (Apple 10-Q of 2024-08-01: ddate 20240731, datp 12, "as of July 19").
   Read the readme's column definitions before using a data-set date column.
 - Enforced in: `scripts/build_3739_slice2b.py` (`reported_date`), `tests/test_3739_slice2b.py`.
+
+### Before paying for adjudication, bound its result from the pinned candidate list (#3739)
+
+- Failure (caught before the labour, #3739 slice 3b, 2026-10-10): the slice 3a handoff scheduled adjudication of all
+  4,214 replica rows before measuring recall. Two of the 42 comparison stamps have no candidate on their CIK at all,
+  and adjudication writes records only from candidates. So count recall could not exceed 40 / 42 = 95.2% against a
+  97% bar, and the adjudication could not have changed the verdict.
+- Prevention: once the comparison set and the candidate list are both pinned, join them first. A comparison item
+  with no candidate is a guaranteed miss, and the count of those caps recall. If the cap is below the bar, record the
+  fail and spend the effort on the revision instead.
+- Enforced in: `docs/research/3739-event-file/README.md` § "Slice 3b" (the bound and its inputs).

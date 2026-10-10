@@ -198,6 +198,17 @@
     "notes_sha256": "5b3bbfb608f58edc7a5bdf7c19b85805b643a05afe6e21db3d3f66a7558c6bd4",
     "extract_sha256": "be0bdda721dcc4efbca7784762a83495d21062fc89e40b3a7bfebcd9e369fe4b"
    }
+  },
+  {
+   "slice": "3b",
+   "path": "replica-2022/comparison-intrader-stamps.csv",
+   "sha256": "6a9e0e5b53759b4a5201a156f7ba0de3f037f91ac8ab3e155b0d73612e9cbd52",
+   "what": "spec section 3.4 comparison set, pinned before replica adjudication: every icyDenev/Intrader split_factor stamp (not 1) dated 2022-08-01 .. 2024-07-31, with the #3361 linkage as of its stamp date; rows with in_u = 1 are the comparison set",
+   "inputs": {
+    "u_sha256": "9794f71f850a4fb70ab32b0ef381ca6dc8dc633cba515929de51010baa54c57b",
+    "linkage_manifest_sha256": "1738bc39c29b9dd5da5cc2d64cce2e28df8bc2eb8ad67b03a7fa76ecc0f7f470",
+    "source": "research_price_daily joined to research_price_series, dev ebull, read 2026-10-10"
+   }
   }
  ]
 }
