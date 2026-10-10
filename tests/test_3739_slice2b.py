@@ -327,3 +327,14 @@ def test_publish_all_writes_every_file_or_none(tmp_path: Path, monkeypatch: pyte
     with pytest.raises(OSError, match="disk full"):
         s2b.publish_all({c: b"3", d: b"4"})
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a.csv", "b.csv"]
+
+
+def test_publish_all_never_removes_a_name_it_did_not_create(tmp_path: Path) -> None:
+    pinned, new = tmp_path / "pinned.csv", tmp_path / "new.csv"
+    pinned.write_bytes(b"frozen")
+    with pytest.raises(FileExistsError):
+        s2b.publish_all({new: b"1", pinned: b"2"})
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["pinned.csv"]
+    assert pinned.read_bytes() == b"frozen"
+    with pytest.raises(ValueError, match="staging"):
+        s2b.publish_all({tmp_path / ".x.staging": b"1"})

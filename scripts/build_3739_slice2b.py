@@ -26,6 +26,7 @@ sets and keeps every stored observation accepted from the symbol look-back befor
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import gzip
 import io
@@ -91,28 +92,38 @@ def publish(out: Path, payload: bytes) -> None:
         raise
 
 
+def discard(paths: Iterable[Path]) -> None:
+    """Best-effort removal: one failed unlink does not stop the rest, and never masks the error being handled."""
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
 def publish_all(payloads: Mapping[Path, bytes]) -> None:
     """Publish every payload or none: each is written to a staging file first, then hard-linked to its name (a link
-    refuses an existing name). On any failure the names linked so far are removed, so a rerun is not refused by a
-    partial set. A staging file left by a killed run is replaced."""
-    staged: dict[Path, Path] = {}
+    refuses an existing name). On a failure the names linked so far are removed, so a rerun is not refused by a
+    partial set. A staging file left by a killed run is replaced.
+
+    Scope: one manual invocation per directory. Concurrent runs, or a kill between two links, are not handled; the
+    names a killed run linked are refused by name on the next run, never replaced."""
+    if any(out.name.startswith(".") for out in payloads):
+        raise ValueError("an output name starting with '.' could be another output's staging name")
+    staged: list[Path] = []
     linked: list[Path] = []
     try:
         for out, payload in payloads.items():
             staging = out.with_name(f".{out.name}.staging")
-            staging.unlink(missing_ok=True)  # only this function writes that name: a crashed run's leftover
+            discard([staging])  # only this function writes that name: a killed run's leftover
+            staged.append(staging)  # before the write: publish removes its own partial file
             publish(staging, payload)
-            staged[out] = staging
-        for out, staging in staged.items():
+        for out, staging in zip(payloads, staged, strict=True):
             os.link(staging, out)
-            linked.append(out)
+            linked.append(out)  # after the link: a name the link refused is never removed
     except BaseException:
-        for out in linked:
-            out.unlink(missing_ok=True)
+        discard(linked)
         raise
     finally:
-        for staging in staged.values():
-            staging.unlink(missing_ok=True)
+        discard(staged)
 
 
 def csv_bytes(header: Sequence[str], rows: Iterable[Sequence[Any]]) -> bytes:
