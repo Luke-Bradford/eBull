@@ -3204,13 +3204,16 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         source="etoro_crowd",
         description=(
             "Daily 23:17 UTC — stores eToro's official closing prices for every instrument (latest, "
-            "previous day, week and month-end) exactly as served (gzip body, status, clocks), with no "
-            "parsing. eToro keeps no history. FAILS, after storing the response, on a non-200 or a body "
-            "with no instrument rows."
+            "previous day, week and month-end) exactly as served (gzip body, status, clocks), without "
+            "transformation; the JSON is decoded only to count rows. eToro keeps no history. FAILS, after "
+            "storing the response, on a non-200 or a body with no instrument rows."
         ),
         cadence=Cadence.daily(hour=23, minute=17),
         catch_up_on_boot=True,
         # No upstream history and an append stamped with its own fetch clocks: a late fire beats a lost day.
+        # This covers LOST fires (lane_busy, misfire). A fire that runs and fails on a transport error stores
+        # nothing and fails the run; `record_job_finish` stamps a transient failure's `next_retry_at` and
+        # `jobs_retry_sweeper` re-fires it (#1509), as for every scheduled job.
         rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),

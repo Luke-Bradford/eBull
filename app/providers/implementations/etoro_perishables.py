@@ -145,7 +145,11 @@ class EtoroPerishablesProvider:
         return RawResponse(response.status_code, _decode(response), datetime.now(UTC))
 
     def get_closing_prices(self) -> RawBytesResponse:
-        """One request for every instrument's official closing prices (lane F); the body kept as bytes."""
+        """One request for every instrument's official closing prices (lane F); the body kept as bytes.
+
+        The client's 30 s timeout is httpx's per-operation bound (connect, each read), not a total: capture 1 on
+        2026-10-10 received 4,258,746 bytes in 0.73 s.
+        """
         requested_at = datetime.now(UTC)
         response = self._http_rates.get(CLOSING_PRICES_PATH, headers={"x-request-id": str(uuid4())})
         return RawBytesResponse(response.status_code, response.content, requested_at, datetime.now(UTC))
