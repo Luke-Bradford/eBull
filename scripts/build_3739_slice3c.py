@@ -84,6 +84,8 @@ def gaps(notes: Path) -> None:
 def candidates(notes: Path, extract: Path, evidence_through: date) -> list[SplitCandidate]:
     facts = read_notes(notes)
     start, end = REPLICA.event_start, REPLICA.through
+    # Slice 3a's event window: a candidate counts if its interval meets [start, end]; the later evidence cutoff only
+    # lets covers and ratio facts accepted after end close an interval that starts inside the window.
     in_window = [
         c
         for c in (

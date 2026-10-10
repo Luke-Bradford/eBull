@@ -262,7 +262,7 @@ pinned replica-2022 inputs:
 
 | measurement | figure |
 |---|---:|
-| days between distinct acceptance dates of consecutive covers of a (CIK, class) series (69,841 gaps, 9,522 series): p50 / p90 / p99 / p99.9 | 91 / 126 / 197 / 431 |
+| days between distinct acceptance dates of consecutive covers of a (CIK, class) series (69,841 gaps, 9,522 series): p50 / p90 / p99 / p99.9; gaps over 200 days (`over_200`) | 91 / 126 / 197 / 431; 664 |
 | comparison stamps with a covering candidate on their CIK (CIK-level interval coverage, not a class, ratio or date match), covers and ratio facts read through 2024-07-31 → 2024-09-30 | 38 → 39 of 42 (`WRB` gains a cover-count candidate, ratio 1.48849) |
 
 ```bash
