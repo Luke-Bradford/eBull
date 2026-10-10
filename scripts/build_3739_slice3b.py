@@ -175,9 +175,11 @@ _DASH: Final = r"[-‐‑‒–—]"
 _FOR_RATIO: Final = re.compile(
     rf"(?<![\w.])(?P<a>{_NUMBER})\s*{_DASH}?\s*for\s*{_DASH}?\s*(?P<b>{_NUMBER})(?!\w)", re.IGNORECASE
 )
-#: "10:1", "1:20": numerals only, a new shares for b old; never a clock time ("4:01 p.m.").
+#: A time's suffix: meridiem or a US time zone ("4:01 p.m.", "16:01 Eastern", "10:30 ET").
+_CLOCK: Final = r"[ap]\.?\s?m|eastern|central|mountain|pacific|e[sd]?t|c[sd]?t|m[sd]?t|p[sd]?t|new york time"
+#: "10:1", "1:20": numerals only, a new shares for b old; never a clock time.
 _COLON_RATIO: Final = re.compile(
-    rf"(?<![\w.:])(?P<a>{_NUMERAL})\s*:\s*(?P<b>{_NUMERAL})(?![\w:])(?!\s*[ap]\.?\s?m\b)", re.IGNORECASE
+    rf"(?<![\w.:])(?P<a>{_NUMERAL})\s*:\s*(?P<b>{_NUMERAL})(?![\w:])(?!\s*({_CLOCK})\b)", re.IGNORECASE
 )
 _MONTHS: Final = {
     name: number
@@ -301,8 +303,12 @@ EFFECTIVE_WORDS: Final = re.compile(
     r"\b(split[- ]adjusted|post[- ](reverse[- ])?split|adjusted) basis|\bex[- ](dividend|distribution|date|split)\b",
     re.I,
 )
+#: The words of a split's own terms (by construction). Bare "distribution" or "combination" are left out: they also
+#: name a dividend in cash or a business combination, which carry their own "a for b" exchange ratios.
 SPLIT_WORDS: Final = re.compile(
-    r"\b(split|stock dividend|share dividend|distribut\w*|combin\w*|consolidat\w*|reclassif\w*)", re.I
+    r"\b(split|(stock|share) (dividend|distribution)|(share|stock) consolidation|reclassification"
+    r"|combination of (the )?(issued and )?(outstanding )?(shares|common stock))",
+    re.I,
 )
 RECORD_WORDS: Final = re.compile(r"\brecord\b", re.I)
 PAYABLE_WORDS: Final = re.compile(r"\b(payable|paid|distributed|distribution date|issued)\b", re.I)

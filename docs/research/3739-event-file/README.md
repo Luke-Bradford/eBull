@@ -216,7 +216,9 @@ this measurement's.
 - **Fields.** Read off the row's quotes. A date counts in a role only when it sits within 40 characters of that
   role's words in the same quote:
   - **split:** the ratio, read as "a-for-b" in numerals or number words, or as "a:b" (never a clock time), within
-    40 characters of split words ("split", "stock dividend", "distribution", "combination" and the like).
+    40 characters of a split's own words: "split", "stock dividend", "share distribution", "share consolidation",
+    "reclassification" or "combination of the outstanding shares". A bare "distribution" or "combination" does not
+    count, because those words also name cash dividends and business combinations.
   - **split effective date:** quoted beside adjusted-basis or ex-date words (§1: the first session on the adjusted
     basis). Otherwise, the record date (beside "record") and the payable date (beside "payable", "paid",
     "distributed", "distribution date" or "issued") must be quoted, and the effective date must be FINRA 11140's date

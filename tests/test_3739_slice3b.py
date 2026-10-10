@@ -71,6 +71,15 @@ def test_a_ratio_is_stated_only_beside_split_words() -> None:
 def test_a_clock_time_is_not_a_colon_ratio() -> None:
     assert s3b.ratio_spans("effective at 4:01 p.m. Eastern Time") == []
     assert s3b.ratio_spans("effective at 10:30 am") == []
+    assert s3b.ratio_spans("the split is effective at 16:01 Eastern") == []
+    assert s3b.ratio_spans("the split is effective at 00:01 ET") == []
+
+
+def test_a_cash_distribution_or_business_combination_is_not_split_terms() -> None:
+    assert s3b.stated_ratios("in the business combination, holders receive one for one") == set()
+    assert s3b.stated_ratios("a cash distribution approved 4:1 by holders") == set()
+    assert s3b.stated_ratios("a combination of the outstanding shares on a 1-for-10 basis") == {Fraction(1, 10)}
+    assert s3b.stated_ratios("a 5% stock dividend, or 21-for-20") == {Fraction(21, 20)}
 
 
 @pytest.mark.parametrize(
