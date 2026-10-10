@@ -1,8 +1,10 @@
 """Read-only eToro calls for the #3381 slice 3 perishables recorder.
 
-Three endpoints on three documented quotas (``etoro_quota_lanes``):
+Four endpoints on three documented quotas (``etoro_quota_lanes``):
 
 * ``GET /api/v1/market-data/instruments/rates`` — lane F, the shared market-data pool.
+* ``GET /api/v1/market-data/instruments/history/closing-price`` — lane F; used by the #3740 official-close
+  capture, which keeps the body as bytes.
 * ``POST /api/v2/trading/info/demo/eligibility`` — lane B, dedicated 20/min.
 * ``POST /api/v2/trading/info/demo/costs`` — lane C, dedicated 20/min.
 
@@ -47,6 +49,8 @@ ELIGIBILITY_BATCH_SIZE: Final = 100
 RATES_PATH: Final = "/api/v1/market-data/instruments/rates"
 ELIGIBILITY_PATH: Final = "/api/v2/trading/info/demo/eligibility"
 WHAT_IF_PATH: Final = "/api/v2/trading/info/demo/costs"
+#: No parameters: one response carries every instrument (16,681 rows, 4,258,746 bytes on 2026-10-10).
+CLOSING_PRICES_PATH: Final = "/api/v1/market-data/instruments/history/closing-price"
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,16 @@ class RawResponse:
 
     status: int
     body: Any
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
+class RawBytesResponse:
+    """One response as served, body undecoded, for callers that hash and store the exact bytes."""
+
+    status: int
+    body: bytes
+    requested_at: datetime
     observed_at: datetime
 
 
@@ -130,10 +144,21 @@ class EtoroPerishablesProvider:
         )
         return RawResponse(response.status_code, _decode(response), datetime.now(UTC))
 
+    def get_closing_prices(self) -> RawBytesResponse:
+        """One request for every instrument's official closing prices (lane F); the body kept as bytes.
+
+        The client's 30 s timeout is httpx's per-operation bound (connect, each read), not a total: capture 1 on
+        2026-10-10 received 4,258,746 bytes in 0.73 s.
+        """
+        requested_at = datetime.now(UTC)
+        response = self._http_rates.get(CLOSING_PRICES_PATH, headers={"x-request-id": str(uuid4())})
+        return RawBytesResponse(response.status_code, response.content, requested_at, datetime.now(UTC))
+
 
 __all__ = [
     "ELIGIBILITY_BATCH_SIZE",
     "RATES_BATCH_SIZE",
     "EtoroPerishablesProvider",
+    "RawBytesResponse",
     "RawResponse",
 ]
