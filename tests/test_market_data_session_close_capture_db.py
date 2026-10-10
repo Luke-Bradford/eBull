@@ -93,6 +93,17 @@ def test_only_the_completed_session_bar_is_captured(ebull_test_conn: psycopg.Con
     assert _captures(conn) == [(days[-1], Decimal("102"))]
 
 
+def test_no_capture_when_nothing_is_fetched_or_served(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """An instrument already fresh for the session is skipped unfetched; an empty response writes nothing."""
+    conn = ebull_test_conn
+    days = _setup(conn, 4, "100")
+    _run(conn, [[]], fresh_through=days[-1])
+    assert _captures(conn) == []
+    _run(conn, [[_bar(days[-1], "102")]], fresh_through=days[-1])
+    _run(conn, [[_bar(days[-1], "103")]], fresh_through=days[-1])  # fresh now: never fetched
+    assert _captures(conn) == [(days[-1], Decimal("102"))]
+
+
 def test_no_capture_without_a_session_boundary(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     """Without `fresh_through` the caller has not said which bar is its own session's."""
     conn = ebull_test_conn

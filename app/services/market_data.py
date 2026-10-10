@@ -1630,8 +1630,9 @@ def _record_session_close_captures(
 
     Only the bar dated the sweep's completed session is kept: that is the one fetched on its own session,
     before any later back-adjustment. Same transaction as the bar write, so a rolled-back write leaves no
-    capture. Every matching bar becomes a row, duplicates included (``_normalise_candles`` does not dedup);
-    the close is stored as served.
+    capture. It is an OBSERVATION log, not a write log: a bar identical to the stored one changes nothing in
+    ``price_daily`` and is still captured, because what was served is the evidence. Every matching bar becomes
+    a row, duplicates included (``_normalise_candles`` does not dedup); the close is stored as served.
     """
     rows = [
         {"instrument_id": instrument_id, "session_date": session, "close": b.close}
