@@ -125,10 +125,14 @@ def test_covers_take_the_latest_context_an_amendment_and_skip_co_registrants() -
             cover("A5", "20240930", "2024-11-01T20:00:00.000Z", "20241025", "131"),
             # An 8-K's cover is not a periodic cover.
             cover("A6", "20240930", "2024-11-02T20:00:00.000Z", "20241025", "1", form="8-K"),
+            # An amendment accepted after the cutoff does not replace its original.
+            cover("A7", "20240331", "2026-10-02T20:00:00.000Z", "20260925", "1", form="10-Q/A"),
         ],
+        THROUGH,
         ledger,
     )
     assert [(c.adsh, c.shares) for c in series[("0000000001", "")]] == [("A1", Decimal(100)), ("A3", Decimal(120))]
+    assert ledger["cover:after_cutoff"] == 1
     assert ledger["cover:replaced"] == 1
     assert ledger["cover:not_read"] == 1
     assert ledger["cover:ambiguous_filing"] == 1
@@ -217,6 +221,11 @@ def test_item_503_candidates(form: str, accepted: str, items: tuple[str, ...], e
     if candidates:
         (c,) = candidates
         assert c.end - c.start == s2b.ITEM_503_SPAN and c.ratio == ""
+
+
+def test_the_filing_extract_misses_no_business_day_of_the_item_503_look_back() -> None:
+    assert s2b.unread_business_days(s2b.EVENT_START - s2b.ITEM_503_SPAN, s2b.EXTRACT_FROM) == []
+    assert s2b.unread_business_days(date(2024, 3, 29), date(2024, 4, 1)) == [date(2024, 3, 29)]
 
 
 def obs(cik: str, symbol: str, acceptance: str) -> s2b.Observation:

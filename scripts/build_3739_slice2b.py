@@ -45,7 +45,7 @@ from app.services.factor_panel_artefact import read_gz_lines
 from app.services.pit_fundamentals import SubmissionsIndex, acceptance_ny_date, parse_submissions
 from app.services.security_linkage import WINDOW_DAYS, Admitted, admit_row
 from scripts.build_3361_security_linkage import _admit_all, _submission_text
-from scripts.build_3739_slice2 import Filing, checked, read_extract, sha256_of
+from scripts.build_3739_slice2 import EXTRACT_FROM, Filing, checked, read_extract, sha256_of
 
 #: §3.1: splits and symbol changes effective from this date are recorded. A screen keeps a candidate whose interval
 #: reaches into [EVENT_START, through].
@@ -469,7 +469,7 @@ class Cover:
     shares: Decimal
 
 
-def covers(facts: Iterable[NoteFact], ledger: Counter[str]) -> dict[tuple[str, str], list[Cover]]:
+def covers(facts: Iterable[NoteFact], through: date, ledger: Counter[str]) -> dict[tuple[str, str], list[Cover]]:
     """Per (CIK, class), the cover count of each 10-Q and 10-K, in period order, an amendment replacing its original.
 
     Read from the registrant's facts only (``coreg`` empty: a co-registrant's count is another entity's) in unit
@@ -484,6 +484,10 @@ def covers(facts: Iterable[NoteFact], ledger: Counter[str]) -> dict[tuple[str, s
         member = class_member(fact.segments)
         if fact.coreg or fact.uom != "shares" or member is None or fact.accepted is None:
             ledger["cover:not_read"] += 1
+            continue
+        if ny_date(fact.accepted) > through:
+            # Before slots resolve, so an amendment accepted after the cutoff cannot replace its original.
+            ledger["cover:after_cutoff"] += 1
             continue
         if positive(fact.value) is None:
             ledger["cover:non_positive"] += 1
@@ -543,8 +547,23 @@ def cover_candidates(series: Mapping[tuple[str, str], Sequence[Cover]], through:
     return out
 
 
+def unread_business_days(start: date, extract_from: date) -> list[date]:
+    """Weekdays in [start, extract_from): days a filing could be accepted (EDGAR accepts on business days) that the
+    filing extract does not cover."""
+    return [
+        start + timedelta(days=i)
+        for i in range((extract_from - start).days)
+        if (start + timedelta(days=i)).weekday() < 5
+    ]
+
+
 def item_503_candidates(filings: Iterable[Filing], through: date) -> list[SplitCandidate]:
-    """§3.2: any 8-K whose items include 5.03, with interval [acceptance, + 92 days]."""
+    """§3.2: any 8-K whose items include 5.03, with interval [acceptance, + 92 days]. Refuses unless the extract
+    reaches back to the first acceptance whose interval meets the window (EVENT_START - 92 days, 2024-03-31, a Sunday
+    before the extract's 2024-04-01: the only day it misses is one EDGAR accepts nothing on)."""
+    missing = unread_business_days(EVENT_START - ITEM_503_SPAN, EXTRACT_FROM)
+    if missing:
+        raise ValueError(f"the filing extract starts {EXTRACT_FROM}; Item 5.03 acceptances on {missing} are unread")
     out = []
     for filing in filings:
         if filing.form not in ITEM_503_FORMS or ITEM_503 not in filing.items:
@@ -624,7 +643,7 @@ def screens(through: date, notes: Path, observations: Path, extract: Path, regis
     facts = read_notes(notes)
     split = [
         *xbrl_candidates(facts, through),
-        *cover_candidates(covers(facts, ledger), through),
+        *cover_candidates(covers(facts, through, ledger), through),
         *item_503_candidates(read_extract(extract), through),
     ]
     symbol = symbol_candidates(summarise_symbols(read_observations(observations), through))
