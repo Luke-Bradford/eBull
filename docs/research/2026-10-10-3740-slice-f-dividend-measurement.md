@@ -22,6 +22,42 @@ inventory is held. **Decided for v3 (supervisor, 2026-10-10, under the 2026-10-0
   every accession and document fetched under SEC fair access, output labelled exploratory. Its failure classes, with
   counts, fix v3's extraction contract, then v3 goes to round 9.
 
+**Pilot result (exploratory; 2026-10-10 19:30Z; `scripts/pilot_3740_slice_f_dividend_extraction.py`; tally sha256
+`28b9bfb3…8790`).** Ranks 1,001–1,100 at the 2023-09-30 formation; forms 8-K, 10-Q, 10-K (and amendments), 6-K,
+20-F, 40-F accepted 2023-01-01..2024-12-31 ET; HTML and text documents only. Fetched: 3,026 of 3,026 listed
+accessions (3.4 GB cached under `var/research/3740_slicef_pilot/`, not committed). Intrader events with ex-dates
+2023-10-02..2024-08-30: 158 on 44 payer names.
+
+| outcome over the 158 reference events | events |
+|---|---:|
+| matched by the pilot extractor (same ex-date, amount equal to 4 dp) | 71 |
+| amount found but a different amount on the same ex-date | 4 |
+| amount mentioned in EDGAR but no dated declaration extracted | 82 |
+| amount not mentioned at all | 1 |
+| route-only keys (extracted, no reference event) | 4 |
+
+Splitting the 87 unmatched by whether **any** fetched document of the issuer contains a year-bearing date string
+(nine formats: "November 15, 2023", "Nov. 15, 2023", "11/15/2023", ISO, and so on) for the ex-date or any of the
+three sessions after it: **28 events on 15 of the 44 payers have no such date text at all**; 130 of 158 do. So the
+fetched EDGAR content dates at most 130 events (82.3%), an upper bound because a coincidental date string counts as
+present; at least 28 (17.7%) have no dated declaration in these forms (the 28 are listed by the reproduction in
+the handoff on #3740; none was read by hand). Of the 59 date-text-present events the extractor missed, the classes seen are: amount and
+dates in adjacent sentences (fixed in the pilot, 198 candidates), rate-change sentences with two amounts, equity
+statement tables ("Dividends declared: $0.11375 per share") with no dates, and same-ex-date components summed by the
+reference (ref 1.60 against declared 0.60 + 1.00).
+
+**Decision (supervisor, under the 2026-10-08 delegation).** An EDGAR-only dividend route cannot pass a coverage
+screen near the 1% bar: about a sixth of this pilot's distributions carry no dated EDGAR text, whatever the extractor
+does. v3 of this spec as an **EDGAR-only** screen is therefore **not written**: it would spend checkpoint rounds
+deciding a route already shown inadequate. EDGAR stays the **amount** source candidate (157 of 158 amounts are
+mentioned). The ex-date needs a second source. The only account-free forward candidate assessed so far is eToro's
+public dividend calendar (ex-date and amount; route note §"Route after the no-account rule"). It has no archive, so
+its evidence exists only from the day we start capturing it. **Next:** a raw daily capture of that calendar (bytes,
+fetch time, hash; no parsing decisions), built as its own slice, so a prospective EDGAR-plus-calendar concordance can
+later be measured on captured history rather than designed on paper. The pilot cohort is near the top-1,000 boundary.
+Larger issuers may furnish declarations more completely, which a later measurement on the decisive cohort would show.
+That is a reason to measure, not to assume.
+
 Parent: step 3 spec (`docs/research/2026-10-10-3740-step3-vw-book.md`; obligation 9 at lines 500–505; MAX at 218;
 sealing invariant 1 at 402–413; returns window at 441–447). Route note:
 `docs/research/2026-10-10-3740-slice-f-forward-capture.md` §"Route after the no-account rule".
