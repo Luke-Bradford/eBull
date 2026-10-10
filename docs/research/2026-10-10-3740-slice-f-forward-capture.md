@@ -1,13 +1,71 @@
 # #3740 slice F — the forward capture for step 3's paper accrual
 
-Status: **draft v4; Codex checkpoint 1 open after round 4 (59 findings, not yet applied; see §"Checkpoint log").** This is a design review: the Massive premises (premise 5)
-are unmeasured until the operator's `MASSIVE_API_KEY` exists, and each is gated by the plumbing test before the dry
-run. Nothing has been built. Earlier versions: v2 `88c7248f` (reviewed by round 2), v3 `dbcde782` (round 3). Raw
-findings: `docs/research/3740-slice-f-ckpt1-findings.md`.
+Status: **v4 below is SUPERSEDED: it rests on Massive, which the 2026-10-10 no-account rule removes (#3740,
+2026-10-10 16:21Z). §"Route after the no-account rule" records which account-free sources have been assessed for
+parent obligations 6, 7 and 9, what is still unassessed, and the next measurement (revised after checkpoint 1 round
+5).** v4 is kept unchanged below it as the record
+round 4 reviewed. Nothing has been built. Earlier versions: v2 `88c7248f` (round 2), v3 `dbcde782` (round 3), v4
+`59742928` (round 4). Raw findings: `docs/research/3740-slice-f-ckpt1-findings.md`.
 
-Parent: `docs/research/2026-10-10-3740-step3-vw-book.md` ("the parent"), §"Forward accrual", whose §"Sealing
-invariants" (1–8) and §"Slice F's obligations" (1–12) this spec must meet. The parent's rules stand unless a row of
-§"Declared exceptions" (X) or §"Amendments to the parent" (A) replaces one.
+## Route after the no-account rule (2026-10-10)
+
+**Rule.** Data comes only from sources needing no sign-up, no terms accepted in the operator's name, no subscription
+and no payment: eToro (our broker), SEC EDGAR, FINRA public files, Fed/FRED, Nasdaq Trader's public symbol files and
+the public research datasets already pinned (#3740, 2026-10-10 16:21Z).
+
+**Measured** (`PYTHONPATH=. uv run python -m scripts.probe_3740_slice_f_account_free`, run 2026-10-10 ~17:45Z on the
+dev DB, with response hashes printed). These are presence counts over what the dev DB stores, over all stored
+instruments with the named XBRL facts, **not** over the parent's eligible top-1,000 population; they measure our
+current pipeline, not what EDGAR could supply (round 5, 1–4).
+
+| need (parent obligation) | account-free source | measured | meets it? |
+|---|---|---|---|
+| raw close at a session (6) | eToro, captured by us in the session's own window | design only. The parent admits this candidate only with eToro documentation and a capture-time contract that an own-session bar is unadjusted; neither exists (round 5, 22) | **unresolved** |
+| dated split events with ratios (7) | eToro's served history, refetched against our own nominal captures | in one current `price_daily` vintage, four published split boundaries are compatible with split adjustment (NVDA 2024-06-07 → 06-10 ratio 1.0073, AVGO 07-12 → 07-15 1.0070, CMG 06-25 → 06-26 1.0079, WMT 02-23 → 02-26 1.0168; illustrative nominal ratios ignoring price moves: 0.1, 0.1, 0.02, 0.333). That is compatible with adjustment; it does not measure rescale timing, and forward detection cannot cover the 15-month basis history before capture starts (round 5, 23–24) | **unresolved**: corroboration at most; an independent dated inventory is still needed |
+| cash dividends at the ex-date (9) | 8-K Item 8.01 regex parser (`app/services/dividend_calendar.py`) | of 1,182 stored instruments with XBRL `dps_declared` > 0 in periods ending ≥ 2025-07-01, 443 have ≥ 1 parsed 8-K dividend row with record date and amount (date predicate `coalesce(ex, record, declaration)` ≥ 2025-10-01) and 124 have ≥ 3 rows. Over all stored `dividend_events` rows with that predicate (1,634, no payer join), 29 carry an ex-date and 1,371 a record date | **pipeline gap, not source absence**: the parser reads Item 8.01 primary documents only; announcements also sit in Item 7.01/2.02 exhibits (round 5, 6). Record dates map to ex-dates only under the applicable exchange/FINRA rule version, with exceptions (round 5, 7; FINRA Rule 11140) |
+| | XBRL `CommonStockDividendsPerShareDeclared` (`financial_periods.dps_declared`) | of 1,642 stored instruments with XBRL `dividends_paid` > 0 in periods ending ≥ 2025-07-01, 1,095 carry `dps_declared` > 0 and 547 do not; the fact is per fiscal period, by declaration, undated | **no** as a dated ledger; usable as a candidate detector |
+| | PWB `adj_close` (parent's named candidate) | README at Hub sha `c64377a3`: "gated for download. Approval is tied to a Papers With Backtest subscription" (the Hub reports `gated=False` today; unauthenticated download succeeds); "Refreshed monthly"; the 2026-10-01 version covers to 2026-08-05 | **excluded by the rule**: the provider ties download to a subscription. Its lag (~8 weeks) also misses the returns cutoff |
+| | eToro public dividend calendar (`etoro.com/investing/dividend-calendar/`; missed in the first draft, round 5, 5) | one snapshot (2026-10-10): 333 rows, 262 distinct suffix-free symbols (not a US or common-stock classifier); ex-dates 2026-05-01..2026-10-09, payment dates 2026-10-12..2026-11-23, so in this snapshot every row had gone ex and awaited payment; publication and removal policy unknown. Columns: symbol, sector, ex-date, payment date, annual and periodic amount; no record date, no currency. Page text: "The information provided below is indicative and subject to change." A marketing page, fetchable without an account | **unassessed**: coverage, amount basis, revisions and identity untested |
+| | FINRA Daily List | OTC corporate actions incl. dividend ex-dates (round 5, 8); not the exchange-listed population | **no** for this population |
+
+Also looked at and not adopted: Nasdaq's website calendar endpoint (`api.nasdaq.com/api/calendar/dividends`) answers
+without an account with ex, record and payment dates and amounts, but it is an undocumented website backend, not a
+published data product, and its terms of use were not found. It is outside the rule's list.
+
+**Finding, as narrowed by round 5.** No account-free source has yet been *demonstrated* to supply obligation 9's
+dividends, obligation 7's dated split inventory, or obligation 6's capture contract. That is a statement about what
+has been assessed, not an impossibility claim (round 5, 1, 21).
+
+**Withdrawn: the price-return lower bound as the route.** The first draft proposed reading condition 4 on a book
+return that omits uncertain dividends. Round 5 showed it does not hold as stated: it breaks the matched-control
+comparison unless controls keep complete total returns (11), it does not order condition 3's loadings or power (12),
+it is unproven on the parent's net wealth path (13), "certain receipt" is not an executable credit rule (14), MAX's
+daily total-return input remains (17), and its historical measurement would print quantities the parent's planning
+slice forbids (18). It would need a full parent amendment with its own checkpoint 1, so it is a last resort, not the
+next step.
+
+**Next step: a measurement spec, written and checkpointed before anything is captured or compared.** Round 6
+(27 findings: 17 BLOCKING, 8 WARNING, 2 NIT) rejected the first sketch of it (EDGAR and the eToro calendar scored
+against a frozen 12-month inventory with a 99% coverage stop rule); the sketch and its threshold are withdrawn.
+Decided now, under the 2026-10-08 delegation:
+- **No independent account-free event reference is held.** The research corpus's dividend-adjusted `adj_close` is
+  an adjusted series, not an event inventory (round 6, 1), and its series come from `paperswithbacktest/Stocks-Daily-Price`
+  (two vintages: 7,870 and 7,693 series) and `icyDenev/Intrader` (22,879 series) by `research_price_series.vendor`,
+  measured 2026-10-10. Whether Intrader's stamps are a dated distribution inventory with amounts is the first thing
+  the measurement spec checks; if not, the reference is EDGAR issuer announcements reconciled two ways with the
+  candidate, with disagreements adjudicated against the issuer's filing (round 6, 2, 11).
+- **Two separate tests** (round 6, 5, 9): a historical, oracle-guided EDGAR content-feasibility audit, labelled as
+  such; and a prospective common comparison in which every candidate (an EDGAR discovery process run without
+  reference answers, and a daily capture of the eToro calendar) is scored on one frozen population and window, at
+  the deadline each dependent input actually has (round 6, 8).
+- **Outcomes** (round 6, 15–17): pass authorises only a slice F v5 design with its own checkpoint 1; route-fail is
+  recorded as "this frozen route did not demonstrate the required coverage", and whether to try another route or stop
+  #3740 is then a supervisor resource decision, stated as such; inconclusive extends once, by a bound the spec fixes.
+- The spec fixes the event contract, ex-date rule table by venue and version, two-way reconciliation, combination
+  policy, error budget (in the book's G, not event counts) and capture protocol per round 6, 3–4, 6–7, 10–14 and
+  18–19, and the probe's reproducibility per 22–24.
+
+Obligations 6 and 7 still need their own evidence either way (round 5, 22–24).
 
 ## What slice F is for
 
@@ -702,3 +760,12 @@ deterministic codes above, and the codes' counts are printed beside the verdict.
 - **Round 4 (59: 39 BLOCKING, 18 WARNING, 2 NIT; on v4).** Task A: 22 of round 3's findings applied, 35 partial. Not
   applied yet. Finding counts per round (44, 53, 57, 59) are not falling; the route question this raises is on #3740
   (2026-10-10 handoff) and is decided before round 5.
+- **Round 5 (25: 14 BLOCKING, 11 WARNING; on the route note, not v4).** Applied in the note's revision: claims
+  narrowed to "not yet demonstrated" and labelled as pipeline presence counts (1–4, 6–8); the eToro dividend calendar
+  added and measured (5); PWB excluded by the access rule rather than by inversion (9, 10); the price-return lower
+  bound withdrawn as the route (11–20); obligations 6 and 7 marked unresolved (21–24). Findings 15, 16 and 25 concern
+  the withdrawn route and lapse with it. Verbatim in the findings file.
+- **Round 6 (27: 17 BLOCKING, 8 WARNING, 2 NIT; on the revised note).** Task A: round 5's 3, 8, 9, 22 applied; 1, 2,
+  4–7, 10, 21, 23, 24 partial; 11–20, 25 lapsed. Applied now: claims and labels narrowed (20–22, 25–27 wording); the
+  measurement sketch and its 99% rule withdrawn and replaced by the decisions above. Open for the measurement spec:
+  1–19, 23, 24.

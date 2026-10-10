@@ -798,3 +798,259 @@ All **L** references below refer to [the v4 target](/Users/lukebradford/Dev/.ebu
 | Parity | **Included:** the parent’s table is required and remains reporting-only. |
 
 **Overall assessment:** V4 is a meaningful improvement, but is not ready to close checkpoint 1. The missing API key is not the blocker. The design must first resolve its sealing contradictions, acquire all evidence its rules require, and strengthen the gates that currently permit incomplete or structurally unusable inputs to pass.
+
+## Round 5 (on the route note, `docs/research/2026-10-10-3740-slice-f-forward-capture.md` lines 1-83 before revision)
+
+**The route note is not ready to accept.** The measurements establish gaps in the current pipeline, not the claimed impossibility. The lower-bound implication is conditional for B1, fails for an incompletely credited control, and does not transfer to condition 3.
+
+I reviewed the queries rather than rerunning the dev-DB measurements. No files changed.
+
+References below: **R** = [route note](/Users/lukebradford/Dev/.ebull-autonomy/docs/research/2026-10-10-3740-slice-f-forward-capture.md:9); **P** = [parent](/Users/lukebradford/Dev/.ebull-autonomy/docs/research/2026-10-10-3740-step3-vw-book.md:18); **S** = [measurement script](/Users/lukebradford/Dev/.ebull-autonomy/scripts/probe_3740_slice_f_account_free.py:1); **D** = [dividend parser](/Users/lukebradford/Dev/.ebull-autonomy/app/services/dividend_calendar.py:1); **F** = [prior findings](/Users/lukebradford/Dev/.ebull-autonomy/docs/research/3740-slice-f-ckpt1-findings.md:99); **E** = [eToro measurement](/Users/lukebradford/Dev/.ebull-autonomy/.claude/skills/data-sources/etoro-api.md:309).
+
+1. **BLOCKING — Pipeline incompleteness does not establish source impossibility.**  
+   **R 15–35, 49–52; S 35–81.** The SQL measures existing database contents. Missing events can arise from acquisition, filing selection, extraction, linking or source absence; the note acknowledges that ingestion completeness is unverified. Neither these counts nor failure of a price-only power test establishes “no account-free confirmation route.”  
+   **Fix:** state “no compliant complete return source has yet been demonstrated,” separate those failure causes, and limit the stop conclusion to the particular frozen route tested.
+
+2. **BLOCKING — The measured populations do not match the estimand.**  
+   **R 22–23; S 39–49, 70–75; P 39–45.** These are stored instruments with qualifying XBRL facts—not all filers and not the monthly top-1,000 eligible common-stock population. There is no exchange, security-class, tradability, ME-ranking or required-held-security restriction. Broad-population gaps do not establish gaps in the required population; XBRL-selected denominators can also omit relevant dividend payers.  
+   **Fix:** report the broad inventory separately, then measure coverage and unresolved events for a frozen eligible population, including carried holdings and control requirements.
+
+3. **WARNING — “1,634 such rows” has the wrong implied subject.**  
+   **R 16, 22; S 42–65.** The 443/124 counts join events to the 1,182 payers and require record date plus amount. The 1,634/29/1,371 query covers *all* event rows passing its date predicate, without that join or amount requirement. “Such” makes these appear to share a denominator.  
+   **Fix:** explicitly name the second population, or apply the same payer join and validity filters. Print both denominators if both are useful.
+
+4. **WARNING — The time windows and event counts do not measure annual ledger completeness.**  
+   **R 22–23; S 20–22, 41–45, 49, 61, 71–74.** `COALESCE(ex_date, record_date, declaration_date)` selects different economic dates for different rows; it does not mean “announcements since.” There is no upper cutoff. “Last four fiscal quarters” is not implemented by a lower bound of July 2025. Three rows need not be three distinct distributions or a complete annual schedule. The XBRL `bool_or` flags can come from different periods, and cash paid need not correspond to the linked common share’s declared DPS.  
+   **Fix:** freeze an as-of timestamp and explicit intervals; distinguish declaration, ex-date and fiscal-period populations; reconcile security class and distinct event identity. Label these as presence counts until independently checked.
+
+5. **BLOCKING — A permitted eToro dividend source was missed.**  
+   **R 25, 33–35.** eToro’s public [dividend calendar](https://www.etoro.com/investing/dividend-calendar/) exposes ex-dates, payment dates and periodic amounts without requiring a real position. This contradicts the source-wide “no dividend field outside … `totalFees`” claim. The page calls its information indicative, so its existence does **not** establish a complete ledger.  
+   **Fix:** add it as an unqualified candidate and assess identity, amount basis, historical/forward coverage, revisions and capture availability before accepting or rejecting it.
+
+6. **WARNING — The SEC assessment is confined to one deliberately limited parser.**  
+   **R 22; D 3–16.** The parser reads Item 8.01 primary documents and targets ≥80% extraction on Dividend Aristocrats. That is not a completeness test for EDGAR. Dividend announcements can appear in other items and attached exhibits: this [SEC-filed Item 7.01 announcement](https://www.sec.gov/Archives/edgar/data/1287032/000128703224000153/psec-20240508.htm) includes common-dividend amounts and record/payment dates. The docstring’s “only” is therefore too broad.  
+   **Fix:** distinguish the parser’s scope from EDGAR’s scope; audit relevant items, exhibits and periodic filings for the required securities. An unfiled press release remains unavailable through EDGAR, but that is a narrower claim.
+
+7. **WARNING — Missing explicit ex-dates are not necessarily undatable events.**  
+   **R 22, 33–35, 38.** The 29 explicit ex-dates understate potentially usable dated evidence. Documented rules relate ordinary ex-dates to record dates, with exceptions for large distributions, late information and other cases. This should be assessed through the applicable rules, not inferred solely from settlement arithmetic. [SEC explanation](https://www.investor.gov/introduction-investing/investing-basics/glossary/ex-dividend-dates-when-are-you-entitled-stock-and), [FINRA Rule 11140](https://www.finra.org/rules-guidance/rulebooks/finra-rules/11140).  
+   **Fix:** classify explicit dates, dates derivable under a documented applicable rule, and unresolved exceptions. Pin historical rule versions for the 2014–2024 measurement; do not apply today’s rule throughout.
+
+8. **WARNING — “FINRA … no dividend data” is overbroad.**  
+   **R 26.** FINRA describes its Daily List as containing OTC corporate actions, including dividend ex-dates. That population does not supply the required exchange-listed large-cap ledger, and access conditions still need checking. [FINRA description](https://syndication.finra.org/content/corporate-actions-public-companies-what-you-should-know).  
+   **Fix:** identify the particular public files assessed and reject them for demonstrated coverage/access limitations, rather than attributing no dividend data to FINRA generally.
+
+9. **WARNING — The separate-ledger requirement and its citations are overstated.**  
+   **R 24, 33–35; P 500–505; F 208, 575, 580, 713–714, 728–729.** Obligation 9 expressly includes captured PWB `adj_close` as a candidate; it does not require every return construction to invert prices into a separate cash ledger. Moreover, round-2 finding 29 concerns split-factor medians. Round-4 Task B finding 45 concerns terminal-event precedence; Task A finding 45 concerns dividend enumeration. The citations mix numbering schemes.  
+   **Fix:** state separately the requirements for return construction and independent validation, and cite findings by round, task, number and title. Lack of an inversion contract rejects inversion, not automatically direct adjusted-return use.
+
+10. **WARNING — The script does not reproduce the quoted PWB access evidence.**  
+    **R 15, 24; S 103–112.** The README uses a multiline `extra_gated_prompt`; the script prints its key line but drops the continuation containing the subscription statement. Both HTTP requests use mutable current resources, and the script retains neither their revision nor bytes. The [current card](https://huggingface.co/datasets/paperswithbacktest/Stocks-Daily-Price/blob/main/README.md) supports the subscription concern, despite the reported `gated=False`, but the claimed dated measurement is not preserved by this script.  
+    **Fix:** retain a pinned revision and response hashes, print the parsed complete field, and distinguish documented access policy, runtime gating and observed data lag.
+
+11. **BLOCKING — Two lower bounds cannot establish the matched-control total-return comparison.**  
+    **R 37–46; P 25.** If both book and controls omit dividends, beating the control median does not imply beating its total-return median. For example, book price return 6%, control price return 5%, book dividends 0%, control dividends 3%: the price comparison passes while the total-return comparison fails. Leaving controls on total return instead preserves the dividend-data requirement.  
+    **Fix:** provide complete control total returns, a justified upper bound on them, or explicitly amend condition 4 to a price-return comparison without claiming the original implication. Apply the rule to every matched draw before calculating the median.
+
+12. **BLOCKING — Return ordering does not preserve factor loadings or their significance.**  
+    **R 38–47, 49–51; P 94–106, 140–167.** Even if each total return exceeds its price return, the omitted dividend component can have positive or negative partial factor loadings. Loadings, residual variance, standard errors and rejection probabilities are not ordered by the return lower bound. Price-only power also does not bound power for an eventual selectively credited-dividend series.  
+    **Fix:** explicitly define condition 3 on the chosen observable return series and acknowledge the changed claim. Freeze that series before planning; do not treat price-only planning as validation of an unspecified partial-dividend variant.
+
+13. **BLOCKING — The lower-bound proof does not yet cover the parent’s net wealth path.**  
+    **R 38–45; P 378–398, 434–439, 500–507.** Adding nonnegative dividends establishes ordering for suitably matched gross returns. It does not by itself prove ordering after changed portfolio drift, rebalancing, transaction costs, cash treatment, terminal proceeds and coverage exits. “Parent construction and costs” does not specify which quantities stay identical or establish monotonicity when recomputed.  
+    **Fix:** define both wealth recurrences and prove the ordering under the actual cost and trading rules. Preserve identical event/status conventions in each termination arm, charge entry/exit costs, and exclude double-counted terminal distributions. Scope the conclusion to the parent’s modeled terminal conventions.
+
+14. **BLOCKING — “Receipt is certain” is not an executable dividend-credit rule.**  
+    **R 38–41; P 500–505.** Certainty that a dividend exists or will be paid does not establish entitlement for the paper holding, correct security class, split basis, gross amount, economic date or absence of duplication. Crediting actual broker receipts can also substitute payment-date, post-withholding accounting for the parent’s gross ex-date convention.  
+    **Fix:** either freeze zero credits throughout or define a deterministic evidence-and-entitlement rule with gross amounts, ex-date attribution, revision handling and unresolved-event treatment. Apply the same frozen policy in planning and forward evaluation.
+
+15. **WARNING — “The cost is power, roughly … dividend yield” conflates different effects.**  
+    **R 39–40; P 104–106.** Omitted yield approximates a gross return drag under simplifying assumptions. It is neither the loss of condition-3 power nor a quantified change in condition-4 beat probability. Compounding, costs and different control yields matter.  
+    **Fix:** call it an approximate return drag; report loading power and beat survival as separate measured quantities.
+
+16. **WARNING — The demonstrated comparator would be IVV, not literally SPY.**  
+    **R 37–46; P 124–126, 387–391, 508–509.** The parent explicitly proxies SPY using IVV N-PORT returns. A lower-bound beat against that series proves a beat against the adopted proxy, subject to its costs; it does not establish a literal SPY beat.  
+    **Fix:** consistently label B1 “IVV total return, the parent’s SPY proxy,” retain its specified charges, and disclose the historical source transition.
+
+17. **BLOCKING — Zero holding dividends do not eliminate all dividend-dependent inputs.**  
+    **R 40–41, 50–51; P 407–409, 498–505.** The parent also calls for daily total-return adjustment inputs for the last MAX observation. Changing only condition 4 leaves this requirement, obligation 9 and the return series used by condition 3 unresolved. Changing MAX to price returns can change eligibility and therefore the book itself.  
+    **Fix:** enumerate the affected parent clauses before measurement. Freeze whether MAX remains unchanged or changes, and evaluate the exact proposed construction; a holding-return-only sensitivity does not validate a construction with different selection.
+
+18. **BLOCKING — Item 1 conflicts with the planning slice’s explicit information restriction.**  
+    **R 43–51; P 140–147.** The decision asks to print and use net growth and benchmark/control comparisons. Premise 5 expressly prohibits printing or using those quantities. The proposed parent amendment is deferred until after measurement and mentions only condition 4.  
+    **Fix:** adopt and checkpoint the historical diagnostic amendment before running it. Specify who sees the results, what decisions they may affect, and how the family-selection rule remains protected from performance-based reselection.
+
+19. **BLOCKING — The power continuation criterion is not fully precommitted.**  
+    **R 47–52; P 143–175.** “Keeps … at the parent’s floor” leaves unclear whether the original selected family set must pass, the ordered search is rerun, or bars from a different return series are reused. The floor is specifically the **two-arm conjunction bound** `p₁ + p₂ − 1 ≥ 0.80`, not each arm individually reaching 0.80.  
+    **Fix:** freeze the family-search policy and rerun the parent’s exact null/power calibration on the selected return definition: 119 months, 24-month replications, block length 3, 10,000 replications, prescribed seeds, cross-arm bars and refusal handling. Print arm powers and their conjunction bound; retain the parent’s diagnostic-only sensitivity figures.
+
+20. **BLOCKING — Item 1’s report and its role in stopping are undefined.**  
+    **R 45–52.** “How often” has no observational unit: one historical path, rolling windows, arms or random draws. No denominator, tie treatment, undefined-result treatment or paired control construction is specified. Merely “reported” allows continuation even if no original beat survives—which can be intentional, but is not a beat-survival gate.  
+    **Fix:** freeze the reporting grid and paired comparisons. Report net G, both benchmark margins, valid counts, original-beat counts and surviving-beat counts per arm, including the zero-original-beats case. If using rolling 24-month windows, label their overlap. Explicitly make item 1 diagnostic-only, or precommit a numerical criterion and complete failure/refusal branches before looking.
+
+21. **BLOCKING — Statistical success is insufficient to authorize the proposed source route.**  
+    **R 20–21, 49–52; P 470–471, 490–505.** The continuation branch depends on power and reporting even though raw-close documentation remains open and split coverage is unestablished. Historical return sensitivity cannot resolve either source requirement. Conversely, failure of this sensitivity cannot rule out every compliant alternative.  
+    **Fix:** distinguish “statistically worth designing” from “source-feasible” and “accepted for accrual.” Require obligations 6–9 to close, or receive explicit amendments, before acceptance; narrow the terminal conclusion to the route actually tested.
+
+22. **BLOCKING — The raw-close route does not meet obligation 6 as written.**  
+    **R 20, 35, 50; P 490–495.** The parent requires documentation and a capture-time contract establishing the own-session bar’s unadjusted basis. The route concedes that contract is absent. The current [eToro closing-price documentation](https://api-portal.etoro.com/api-reference/market-data/get-historical-closing-prices) names an official closing-price field but does not establish the required adjustment/finality semantics.  
+    **Fix:** keep obligation 6 explicitly unresolved until that evidence exists, or propose a reviewed source/estimand exception. Preserve first-capture, entrant and whole-population reconciliation requirements.
+
+23. **WARNING — Four smooth split boundaries do not measure the claimed rescaling mechanism.**  
+    **R 21; S 23–28, 84–101.** The query reads one current database vintage around four known splits. It neither compares an original nominal capture with a later fetch nor measures adjustment timing, revision behavior or exact factor recovery. Smooth boundaries support compatibility with adjustment, not the claimed forward mechanism. Symbol-based joins followed by `dict` can also silently collapse multiple matching rows.  
+    **Fix:** label these observations narrowly; use unique instrument identities and reject duplicates. Validate retained before/after source vintages against independently dated events, without promoting sampled agreement into a source contract.
+
+24. **BLOCKING — Forward rescale detection cannot supply obligation 7’s historical coverage by itself.**  
+    **R 21, 35, 50–51; P 402–416, 488–497.** Own nominal captures begin at capture inception; candidates and new entrants can require split history back to a share-count basis up to 15 months earlier. “SEC confirmation per event” also confirms detected events without independently establishing that none were missed. Later confirmation may miss formation cutoffs.  
+    **Fix:** define an independent dated inventory over each required basis interval, exact factor products, startup/entrant coverage and unresolved-event outcomes. Specify confirmation availability before dependent cutoffs; use rescale detection as corroboration unless completeness is established.
+
+25. **WARNING — The seven-instrument price comparison cannot establish universal safety or a return bound.**  
+    **R 20, 25, 38–40; E 311–332.** Negative average bid/market level bias and high correlations in seven instruments do not prove every eToro close is below the market close, that the bias is constant, or that eToro price returns bound market total returns. Varying level discounts can reverse return ordering. They also do not establish equivalence between candles and the proposed closing-price field.  
+    **Fix:** separate “no dividend adjustment” from price-basis equivalence. Validate the exact endpoint and required population, preserve an explicit basis exception where necessary, and reconcile broker marks with the parent’s cost convention.
+
+## Round 6 (on the revised route note)
+
+**The revised note is not ready to accept.** The proposed measurement could become a useful feasibility screen, but its reference inventory, comparison windows, coverage definition, and decision branches are not sufficiently specified. The stop rule is neither complete nor fully precommitted.
+
+I inspected the script without running it and changed no files. An initial contextual search returned some adjacent lines outside the requested ranges; the findings below rely on the requested material and external documentation.
+
+References: **R** = [revised route note](/Users/lukebradford/Dev/.ebull-autonomy/docs/research/2026-10-10-3740-slice-f-forward-capture.md:10); **P** = [parent](/Users/lukebradford/Dev/.ebull-autonomy/docs/research/2026-10-10-3740-step3-vw-book.md:39); **S** = [probe](/Users/lukebradford/Dev/.ebull-autonomy/scripts/probe_3740_slice_f_account_free.py:1).
+
+**Task A — disposition of round-5 findings**
+
+“APPLIED” concerns the requested correction, not acceptance of the underlying source.
+
+1. **PARTIAL** — R17–19 and R35–37 narrow the evidence correctly; R60–62 restores the unsupported source-impossibility conclusion.
+2. **PARTIAL** — Broad counts are labelled; R49–52 still lacks the exact parent population, carried/control requirements, and a frozen membership manifest.
+3. **APPLIED** — R25 and S71–72 explicitly distinguish the all-event denominator from the payer join.
+4. **PARTIAL** — R25–26 now describe presence counts and predicates; snapshot, distinct-event, and script-label problems remain.
+5. **PARTIAL** — The eToro calendar is included and measured, but its proposed assessment does not yet resolve identity, amount basis, or timely coverage.
+6. **PARTIAL** — The parser limitation is acknowledged; the next EDGAR test still restricts discovery to selected 8-K items and exhibits.
+7. **PARTIAL** — Applicable historical rules and exceptions are acknowledged, but no executable rule mapping or exception-evidence policy is frozen.
+8. **APPLIED** — R29 correctly identifies FINRA Daily List’s OTC scope instead of claiming FINRA has no dividends.
+9. **APPLIED** — R27 rejects PWB on the access rule; the separate-ledger/inversion objection and mixed citations are removed.
+10. **PARTIAL** — A revision is named and a README hash is printed; mutable retrieval and omission of the multiline access statement remain.
+11. **LAPSED** — The price-return matched-control route is withdrawn.
+12. **LAPSED** — The proposed transfer from return ordering to loading power is withdrawn.
+13. **LAPSED** — The unproved net-wealth lower-bound route is withdrawn.
+14. **LAPSED** — The “certain receipt” credit policy is withdrawn.
+15. **LAPSED** — The withdrawn route no longer equates omitted yield with lost power.
+16. **LAPSED** — The withdrawn lower-bound claim no longer purports to establish a literal SPY beat.
+17. **LAPSED** — The proposal to avoid dividend requirements through zero holding credits is withdrawn; R43 acknowledges MAX remains.
+18. **LAPSED** — The prohibited historical performance measurement is withdrawn.
+19. **LAPSED** — The old power continuation gate is withdrawn; the replacement coverage gate has separate defects below.
+20. **LAPSED** — The old beat-survival reporting gate is withdrawn; replacement reporting and decision branches remain incomplete.
+21. **PARTIAL** — R63 preserves obligations 6 and 7, but failure remains overgeneralised and the success branch is unspecified.
+22. **APPLIED** — R23 explicitly leaves the documentation and capture contract unresolved.
+23. **PARTIAL** — Timing claims are narrowed and multiple instrument IDs are rejected; categorical adjustment wording and duplicate-row handling remain.
+24. **PARTIAL** — Historical insufficiency is acknowledged; required basis intervals, entrant coverage, confirmation deadlines, and refusal outcomes remain unspecified.
+25. **LAPSED** — The seven-instrument comparison is no longer used to establish a universal return bound.
+
+**Task B — remaining defects**
+
+1. **BLOCKING — An adjusted-price series is not yet an event inventory.**  
+   **R49–52.** Availability of total returns does not establish that the referenced data enumerate individual distributions with exact ex-dates and cash amounts. An adjusted series alone cannot supply that ledger; reverse engineering requires additional data and a documented adjustment convention, including split and other-action treatment.  
+   **Fix:** name an explicit event dataset and schema, or document and validate the provider-supported extraction method. If neither exists, mark the proposed reference unavailable.
+
+2. **BLOCKING — Reference independence, access, and coverage are unestablished.**  
+   **R12–14, R27, R51–52.** A row title in another document does not identify the provider, upstream lineage, permitted access, security coverage, or available dates. Recording a vintage alone does not establish independence from either candidate. The supplied text also does not establish whether this reference differs from the excluded PWB source.  
+   **Fix:** freeze the exact artifact, provenance, access basis, fields, coverage, and known omissions. Do not assume the unread cross-reference resolves these requirements.
+
+3. **BLOCKING — “Frozen now” does not describe a frozen measurement.**  
+   **R49–60.** The formation date, 12-month endpoints, capture start/end, reference revision, and membership list are absent. “Latest formation” moves when the panel changes.  
+   **Fix:** record concrete dates and time zones, immutable population/reference manifests, and the extraction and scoring versions before candidate comparisons.
+
+4. **BLOCKING — The proposed population does not fully specify the parent’s population.**  
+   **R49–50; P39–45.** The parent requires eToro listing, decision-session tradability for entry, and monthly ME selection. The abbreviated definition omits the first two explicitly and substitutes one historical formation for a changing population. Required carried securities and controls are not addressed.  
+   **Fix:** freeze the full eligibility construction and required security set. A single formation can be a pilot cohort, but label it accordingly and specify subsequent entrant, holding, and control validation.
+
+5. **BLOCKING — The historical and prospective tests cannot currently share the stated denominator.**  
+   **R49–61.** EDGAR is assessed against a frozen 12-month inventory; eToro is captured for the next eight weeks. Those are different event sets. If the reference is historical, new captures cannot establish historical calendar presence. If it is prospective, the complete inventory and its final vintage cannot already be frozen.  
+   **Fix:** separate historical EDGAR diagnostics from a common prospective comparison. Freeze prospective membership, dates, reference-construction rules, and adjudication deadlines now; freeze the resulting event inventory later under those rules.
+
+6. **BLOCKING — The EDGAR test introduces avoidable false negatives.**  
+   **R53–55.** It limits discovery to three 8-K items and EX-99 exhibits, omitting the periodic-filing assessment requested in round 5. Requiring a record date also excludes an announcement that supplies the required amount and an explicit authoritative ex-date directly.  
+   **Fix:** enumerate relevant filing and attachment coverage, and score explicit-ex-date evidence separately from rule-derived dates. Otherwise describe failure as failure of this restricted extraction route.
+
+7. **BLOCKING — Ex-date derivation still lacks executable documented rules.**  
+   **R25, R54–55.** “Exchange/FINRA rule in force” is directionally correct, but does not determine jurisdiction, applicable version, business-day calendar, distribution classification, or exception handling. Under the documented rules, distribution size, payable date, timely notice, and exchange designation can matter; SEC acceptance before ex-date does not itself establish timely notice to the exchange.  
+   **Fix:** pin a venue/version decision table and required evidence for each branch. Preserve explicit dates, derivable dates, and unresolved exceptions separately. Use the documented transition rules rather than settlement arithmetic: Nasdaq expressly specifies the May 2024 transition and treats distributions of at least 25% differently. [FINRA Rule 11140](https://www.finra.org/rules-guidance/rulebooks/finra-rules/11140), [Nasdaq Rule 11140](https://listingcenter.nasdaq.com/rulebook/nasdaq/rules/nasdaq-equity-11), [Nasdaq transition notice](https://www.nasdaqtrader.com/TraderNews.aspx?id=ETA2024-29).
+
+8. **BLOCKING — Availability is tested asymmetrically and against an unexplained deadline.**  
+   **R54, R56–58; P498–505.** EDGAR must precede the ex-date, while a calendar event can apparently qualify whenever it “appeared.” Economic attribution at ex-date does not, by itself, prescribe that acquisition deadline. Conversely, eventual appearance may be too late for the required capture or MAX input.  
+   **Fix:** cite the actual deadline for each dependent input and apply it consistently. Report publication, acceptance, first capture, usable-by-deadline status, and final corrected agreement separately.
+
+9. **BLOCKING — Reference-guided retrieval does not establish an operational discovery route.**  
+   **R53–55.** Searching EDGAR for already-known events measures whether evidence can be found with an oracle. It does not demonstrate that the proposed acquisition and extraction process independently discovers those events.  
+   **Fix:** label the guided audit as source-content feasibility. Separately run a frozen discovery process without reference answers, then reconcile acquisition, extraction, linking, dating, and genuine source-absence failures.
+
+10. **BLOCKING — “Exact ex-date and amount” lacks an event and amount contract.**  
+    **R50–61; P500–503.** There is no canonical security/class mapping, event identifier, currency, gross/pre-withholding definition, per-share split basis, or treatment of ordinary versus special distributions. Separate same-day distributions may be merged or duplicated. Literal numeric equality is also undefined across differing precision.  
+    **Fix:** freeze event keys, distribution scope, amount semantics, decimal normalization, and justified tolerances. Unknown currency or basis must remain unresolved, not become a match.
+
+11. **BLOCKING — Recall alone can accept a wrong ledger.**  
+    **R53–61.** A candidate containing every reference event plus invented or duplicate dividends can achieve 100% coverage. “Revisions and duplicates observed” imposes no acceptance condition. Nonpayer false positives are invisible to a denominator containing only genuine distributions.  
+    **Fix:** reconcile both directions over the full security population: missed, extra, duplicate, conflicting, and unmatched events, with precommitted outcomes and reference-error adjudication.
+
+12. **BLOCKING — The combined source is not an executable policy.**  
+    **R58, R60–61.** “Both combined” could mean event union, field-level assembly, or choosing whichever value retrospectively matches the reference. Conflicts, cancellations, revisions, and source precedence are undefined. An event that was briefly correct and later wrong could still count as having appeared.  
+    **Fix:** freeze source precedence, permitted field combinations, revision selection, conflict refusal, and deduplication. Score the actual combined policy at its required cutoff; report an oracle union only as a diagnostic.
+
+13. **BLOCKING — The 99% threshold has no stated basis and permits economically unbounded omissions.**  
+    **R60–61; P500–505.** No parent rule or error budget supports 99%. One percent of event counts can contain the largest distributions or be concentrated in important securities. Passing does not specify what happens to the remaining events.  
+    **Fix:** justify the threshold as a feasibility screen or propose a reviewed tolerance amendment. Report per-security completeness and distribution magnitude alongside counts, and precommit treatment of every unresolved required event.
+
+14. **BLOCKING — Sample agreement cannot establish future completeness.**  
+    **R49–61; P504–505.** Neither a single historical cohort nor eight weeks covers all future entrants, seasonal schedules, special distributions, and revision regimes. The parent explicitly says dry-run agreement is compatibility evidence, not a population guarantee. Neither eight weeks nor twelve months has a stated adequacy rationale.  
+    **Fix:** distinguish a time-budgeted pilot from validation sufficient to advance the design. State event and exception coverage requirements, justify duration, and retain ongoing reconciliation and refusal rules even after perfect sample agreement.
+
+15. **BLOCKING — The stop rule lacks inconclusive and failure branches.**  
+    **R60–63.** It does not handle an unavailable/incomplete reference, zero events, insufficient event classes, fetch outages, failed identity mapping, unfinished adjudication, or an immature reference at week eight. These are not all evidence of source failure.  
+    **Fix:** freeze separate pass, route-fail, and inconclusive branches, including bounded extension rules, deadlines, exact integer scoring without percentage-rounding ambiguity, and treatment of unresolved denominator members.
+
+16. **BLOCKING — Failure is again promoted into source impossibility.**  
+    **R35–37 versus R60–62.** Failing two implementations on a cohort cannot establish that obligation 9 “has no account-free source.” It may establish inadequate extraction, timing, reference quality, or this particular combined route. The forced amendment-or-stop choice excludes remediation without explaining that policy choice.  
+    **Fix:** conclude “this frozen route did not demonstrate the required coverage.” If the supervisor chooses to stop further source work, identify that as a resource decision, not a fact proved by the measurement.
+
+17. **BLOCKING — The success branch does not state what success authorizes.**  
+    **R60–67; P470–471, P498–505.** Obligations 6 and 7 are explicitly retained, but the note does not say whether passing permits another design review, satisfies the dividend component, or authorizes accrual. Event coverage alone does not validate MAX inputs or the separate daily-return, split, and termination tests.  
+    **Fix:** make passing authorize a specified next design/checkpoint step only. Preserve the parent’s full closure and accepted-dry-run requirements, with no automatic source or accrual acceptance.
+
+18. **WARNING — Daily capture is insufficiently specified to support the measurement.**  
+    **R56–58.** Bytes and a daily hash do not define capture time, time zone, page variant, successful completeness, retry limits, missed days, or first/last observation. Start/end censoring and events appearing after the eight-week boundary remain untreated.  
+    **Fix:** freeze the capture schedule and metadata, completeness checks, outage treatment, and a justified observation tail. Keep capture failures distinct from absent events.
+
+19. **WARNING — The calendar parser can silently produce a plausible partial measurement.**  
+    **R16, R28; S131–143.** It scans every HTML table by positional columns, silently drops rows failing minimal shape checks, sorts date strings without validation, and never parses amounts. One surviving row defeats its only completeness check.  
+    **Fix:** target and validate the intended table and headers; validate dates and amounts; count and retain rejected rows; detect truncation/schema changes and fail the measurement when completeness is unknown.
+
+20. **WARNING — “Suffix-free (US)” is an unsupported security classifier.**  
+    **R28; S136, S142.** Absence of a dot in a symbol does not establish US listing, common-stock status, or parent eligibility. The public calendar includes suffix-free ADR symbols, illustrating that the heuristic does not identify the required security class.  
+    **Fix:** report “suffix-free symbols” only, then join through authoritative instrument and listing/class identities. [eToro calendar](https://www.etoro.com/investing/dividend-calendar/).
+
+21. **WARNING — One calendar snapshot is described as a general publication policy.**  
+    **R28.** The observed date ranges support a statement about the captured rows. They do not establish that the page always lists only already-ex distributions awaiting payment, or establish its lead time and retention policy.  
+    **Fix:** qualify the sentence as a snapshot observation; determine publication and removal behavior through retained captures or provider documentation. The page describes upcoming payouts and explicitly allows changes. [eToro calendar](https://www.etoro.com/investing/dividend-calendar/).
+
+22. **WARNING — The split evidence still begins with a stronger claim than it supports.**  
+    **R24; S92–110.** “Is split-adjusted across four published splits” is categorical, despite the later compatibility qualification. Smooth boundaries do not uniquely identify adjustment. The script rejects multiple instrument IDs but still silently collapses repeated instrument/date rows; expected nominal ratios also ignore ordinary price movement.  
+    **Fix:** say “four boundaries are compatible with split adjustment.” Validate unique instrument/date observations and finite positive prices, document the split references, and retain approximate nominal ratios as illustrations only.
+
+23. **WARNING — The database measurement is not reproducibly frozen.**  
+    **R16–19; S40–113.** The probe queries live tables without explicitly establishing a shared repeatable snapshot or retaining the contributing rows. Its printed HTTP hashes do not bind the SQL evidence. An approximate run time does not reproduce later-changing counts.  
+    **Fix:** use a read-only consistent snapshot and retain the result artifact, parameters, exact timestamp, and relevant row/event identities or a reproducible database snapshot.
+
+24. **WARNING — PWB’s quoted evidence is still not reproduced by the probe.**  
+    **R16–17, R27; S33–34, S115–125.** Metadata and README use mutable endpoints; the reported dataset SHA does not bind the subsequent README request. The printer still omits the multiline subscription text. It does not test the claimed successful unauthenticated data download, preserve response bytes, or independently verify the data maximum date.  
+    **Fix:** fetch the README at the reported immutable revision, preserve evidence, parse the complete field, and distinguish card assertions from separately observed download/data coverage. The current card supports the subscription concern, but not this probe’s historical reproducibility claim. [Provider README](https://huggingface.co/datasets/paperswithbacktest/Stocks-Daily-Price/blob/main/README.md).
+
+25. **WARNING — The checkpoint log overstates application.**  
+    **R762–766.** It presents findings 1–10 as applied although the revised stop conclusion, population definition, EDGAR test, and PWB reproduction remain incomplete. Withdrawal also should not be confused with implementing the old route’s fixes.  
+    **Fix:** record individual dispositions consistent with Task A, separating applied corrections, remaining work, and withdrawn-route findings.
+
+26. **NIT — The script’s explanatory labels are stale.**  
+    **S7–8, S23, S59–60.** It now performs an eToro GET despite “No eToro call”; its lower-bounded fiscal query is not “the last four fiscal quarters,” and its coalesced event date is not an announcement date.  
+    **Fix:** describe the public calendar GET explicitly and print the actual fiscal/event predicates.
+
+27. **NIT — The round-5 severity totals are wrong.**  
+    **R762; findings file’s Round 5, items 1–25.** The individual labels total **14 BLOCKING and 11 WARNING**, not 13 and 12.  
+    **Fix:** correct the checkpoint-log totals.
