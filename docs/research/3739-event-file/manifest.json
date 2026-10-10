@@ -145,6 +145,59 @@
     "extract_sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
     "register_sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489"
    }
+  },
+  {
+   "slice": "3a",
+   "path": "replica-2022/inputs/submissions-2026-10-09-extract-from-2022-04-01.jsonl.gz",
+   "sha256": "be0bdda721dcc4efbca7784762a83495d21062fc89e40b3a7bfebcd9e369fe4b",
+   "what": "8-A12B, 10-12B, 8-K12B, 8-K and 8-K/A filings accepted from 2022-04-01, every filer in EDGAR submissions.zip (spec section 3.4 replica, F = 2022-07-31)",
+   "inputs": {
+    "submissions_zip_sha256": "39945f2c3e79de58540be92ff7e5ad0ba4dcccf296ade2a3744030006719a332"
+   }
+  },
+  {
+   "slice": "3a",
+   "path": "replica-2022/inputs/fsnds-notes-2022q1-2024q3-extract.jsonl.gz",
+   "sha256": "5b3bbfb608f58edc7a5bdf7c19b85805b643a05afe6e21db3d3f66a7558c6bd4",
+   "what": "StockholdersEquityNoteStockSplitConversionRatio1 and dei EntityCommonStockSharesOutstanding facts, every issuer and form, from the Financial Statement and Notes data sets 2022q1 .. 2024q3, each with its EDGAR acceptance",
+   "inputs": {
+    "archives_sha256": {
+     "fsnds_2022q1_notes.zip": "6d8ae74740a8a6b667899e8c6930b25720c2d8eb1296c77a9e81a2b4cb5f627d",
+     "fsnds_2022q2_notes.zip": "736eb8c4a7eb7dbe8c14b980c4f955b0ae03acf1603ce1629a33db5ad428f83f",
+     "fsnds_2022q3_notes.zip": "e6f8fd80500f5b38ffd8686ad4fbfa4bdcf298f75e0593a1ea5ec01cdff43abd",
+     "fsnds_2022q4_notes.zip": "05138194da418d1049cbd539e4da04974d3043ecb4fc3bda02ab9c4224421337",
+     "fsnds_2023q1_notes.zip": "cc1ceca2181c57e0d1fc7a44b0003db9c59abf55d3cef67c1876841b659e0958",
+     "fsnds_2023q2_notes.zip": "7e6df1b41e51e649bb5a0ff923c4f41e9488c4c592286f4c1c2b6c1fe25faa40",
+     "fsnds_2023q3_notes.zip": "1b102217ac767a627537b90f5d9c9d0a9b297a192e012e478d38bcd47773dbbd",
+     "fsnds_2023q4_notes.zip": "8fdbd209683e8010ad8360fef0fc268bb957620976288fea2140a35594cd74cd",
+     "fsnds_2024q1_notes.zip": "7d32ab3c55b73518da7ed2806585d1af2cb43cf9e70315021daaa3d4ccaca9e2",
+     "fsnds_2024q2_notes.zip": "0cd96e543861de383be5b4a45fc780d2c2e00148c577102531de42c0fef615a1",
+     "fsnds_2024q3_notes.zip": "4f9df2afb9f13cc59332041732d65615befc807e34419a4d529c727796b88761"
+    },
+    "submissions_zip_sha256": "39945f2c3e79de58540be92ff7e5ad0ba4dcccf296ade2a3744030006719a332"
+   }
+  },
+  {
+   "slice": "3a",
+   "path": "replica-2022/u-pass1.csv",
+   "sha256": "9794f71f850a4fb70ab32b0ef381ca6dc8dc633cba515929de51010baa54c57b",
+   "what": "replica U pass 1 (section 2 items 1-2), K = 1500, base formation 2022-07-31",
+   "inputs": {
+    "calibration_sha256": "347f2fa155432c1ae104fc71adeccb4d48353d362ff02ffc8afaa8c65ac8732d",
+    "extract_sha256": "be0bdda721dcc4efbca7784762a83495d21062fc89e40b3a7bfebcd9e369fe4b",
+    "stage_b_manifest_sha256": "83422f50c09d2c9c2b9613d12804a1f73187824cd5200e9ae2c75a439c288592"
+   }
+  },
+  {
+   "slice": "3a",
+   "path": "replica-2022/candidates-split.csv.gz",
+   "sha256": "3ba2f732b7f9177260ddfa7bb34794e3b53ece40eeafb5ea4b5ae04553264150",
+   "what": "spec section 3.2 split screens on the section 3.4 replica, candidate list pinned before replica adjudication, event window 2022-08-01 .. 2024-07-31",
+   "inputs": {
+    "through": "2024-07-31",
+    "notes_sha256": "5b3bbfb608f58edc7a5bdf7c19b85805b643a05afe6e21db3d3f66a7558c6bd4",
+    "extract_sha256": "be0bdda721dcc4efbca7784762a83495d21062fc89e40b3a7bfebcd9e369fe4b"
+   }
   }
  ]
 }

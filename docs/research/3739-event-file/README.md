@@ -125,3 +125,54 @@ PYTHONPATH=. uv run python scripts/build_3739_slice2b.py screens --through 2026-
 
 Both extracts read the 2026-10-09 `submissions.zip` (the slice-2a pin), so they replay only from the committed
 `inputs/`; `screens` replays from those.
+
+## Slice 3a (2026-10-10): the replica's U and split candidates
+
+Built by `scripts/build_3739_slice3a.py` at the commit that adds this section, under `replica-2022/`. §3.4's replica
+is §2's pass 1 items 1–2 with F = 2022-07-31 and events effective 2022-08-01 .. 2024-07-31; it measures split screens
+only, so no symbol-change or termination list is pinned and no insider data are read. Slice 2a's K = 1,500 is reused
+(K is fixed once by construction, §2). The screens are slice 2b's code with the window passed in; with the defaults
+they replay stage C's three pinned lists byte for byte. No price is read.
+
+**Replica U pass 1:** 2,791 issuers: 1,500 incumbents (stage-B artefact, formation 2022-07-31) and 1,291 entrants
+(qualifying filing accepted 2022-05-01 .. 2024-07-31). The filing extract starts 2022-04-01, the first day of the
+month before F − 92 days, as slice 2a's 2024-04-01 does for stage C.
+
+**Replica split candidates:** 15,512 on 4,796 issuers (XBRL ratio 4,678; cover-count jump 3,650; Item 5.03 7,184).
+4,214 rows on 1,565 U issuers (Item 5.03 2,396; XBRL 1,168; cover 650) are what replica adjudication reads.
+
+- **Evidence cutoff = 2024-07-31,** the last event date, as the spec states the window. A cover or XBRL fact
+  accepted after it is not read (5,936 covers), so a split in the window's last weeks is raised only by an earlier
+  filing or its Item 5.03 8-K. This can only lower measured recall: a pass holds under any later cutoff.
+- **Notes inputs:** FSNDS quarterly 2022q1 .. 2024q3, 99,433 facts from 75,970 filings, 57 with no acceptance in
+  `submissions.zip` (dropped). 2022q1 gives the covers before the window. Each archive was reduced alone
+  (`notes-reduce`) and deleted, for disk; the reduced file heads carry each archive's sha256, all in the manifest.
+  The 2024q1 .. q3 digests equal slice 2b's.
+- **Cover ledger:** 3,353 covers replaced by an amendment; 1,265 not read; 1,190 non-positive; 4 ambiguous filings;
+  1,213 class series whose first cover is dated in the window.
+- **Spot checks** (screens raise, adjudication decides): Tesla 3:1 (2022-08), Palo Alto 3:1 (2022-09), Walmart 3:1
+  (2024-02), Chipotle 50:1 (2024-06), NVIDIA 10:1 (2024-06) and Broadcom 10:1 (2024-07) are all raised. NVIDIA's and
+  Broadcom's only non-5.03 candidates are XBRL facts whose interval ends at the 10-Q acceptance, before the effective
+  date (the spec's accepted precision limit for XBRL intervals); adjudication takes the date from the filing.
+
+```bash
+PYTHONPATH=. uv run python scripts/build_3739_slice3a.py extract --replica 2022 --zip submissions.zip \
+    --out replica-2022/inputs/submissions-2026-10-09-extract-from-2022-04-01.jsonl.gz
+PYTHONPATH=. uv run python scripts/build_3739_slice3a.py notes-reduce --out 2022q1.reduced.jsonl.gz \
+    fsnds_2022q1_notes.zip                                                     # once per archive in the manifest
+PYTHONPATH=. uv run python scripts/build_3739_slice3a.py notes-extract --submissions submissions.zip \
+    --out replica-2022/inputs/fsnds-notes-2022q1-2024q3-extract.jsonl.gz 2022q1.reduced.jsonl.gz ...
+PYTHONPATH=. uv run python scripts/build_3739_slice3a.py universe --replica 2022 \
+    --calibration calibration-k-g.json \
+    --calibration-sha256 347f2fa155432c1ae104fc71adeccb4d48353d362ff02ffc8afaa8c65ac8732d \
+    --extract replica-2022/inputs/submissions-2026-10-09-extract-from-2022-04-01.jsonl.gz \
+    --extract-sha256 be0bdda721dcc4efbca7784762a83495d21062fc89e40b3a7bfebcd9e369fe4b --out replica-2022/u-pass1.csv
+PYTHONPATH=. uv run python scripts/build_3739_slice3a.py screens --replica 2022 \
+    --notes replica-2022/inputs/fsnds-notes-2022q1-2024q3-extract.jsonl.gz \
+    --notes-sha256 5b3bbfb608f58edc7a5bdf7c19b85805b643a05afe6e21db3d3f66a7558c6bd4 \
+    --extract replica-2022/inputs/submissions-2026-10-09-extract-from-2022-04-01.jsonl.gz \
+    --extract-sha256 be0bdda721dcc4efbca7784762a83495d21062fc89e40b3a7bfebcd9e369fe4b --out-dir replica-2022
+```
+
+Next (slice 3b): the deterministic checker (§3.3), adjudication of the 4,214 U rows, the comparison set (Intrader
+`split_factor` stamps 2022-08-01 .. 2024-07-31 on series the #3361 linkage ties to replica CIKs) and recall.
