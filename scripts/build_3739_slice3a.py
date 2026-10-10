@@ -129,6 +129,8 @@ def notes_extract(reduced: Sequence[Path], submissions: Path, out: Path) -> None
     ledger: Counter[str] = Counter()
     archives: dict[str, str] = {}
     seen: dict[str, str] = {}
+    # Every archive's facts are held at once: with_acceptance reads them per issuer. That is bounded by the reduced
+    # files (the 2022 replica joins 99,433 facts, 2.2 MB gzipped); disk, which notes-reduce bounds, was the limit.
     facts: list[NoteFact] = []
     for path in reduced:
         head, archive_facts = read_reduced(path)
@@ -198,7 +200,7 @@ def screens(replica: Replica, notes: Path, extract_path: Path, out_dir: Path) ->
         *item_503_candidates(read_extract(extract_path), through, start, replica.extract_from),
     ]
     target = out_dir / "candidates-split.csv.gz"
-    if target.exists():
+    if target.exists():  # a clear message; publish_all's link refuses an existing name regardless, so no race
         raise FileExistsError(f"refusing to replace a pinned candidate list: {target}")
     publish_all({target: gzip.compress(csv_bytes(SPLIT_COLUMNS, split_rows(split)), mtime=0)})
     print(
