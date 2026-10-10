@@ -1,6 +1,6 @@
 # #3740 slice F — the forward capture for step 3's paper accrual
 
-Status: **draft v4; Codex checkpoint 1 open after round 3.** This is a design review: the Massive premises (premise 5)
+Status: **draft v4; Codex checkpoint 1 open after round 4 (59 findings, not yet applied; see §"Checkpoint log").** This is a design review: the Massive premises (premise 5)
 are unmeasured until the operator's `MASSIVE_API_KEY` exists, and each is gated by the plumbing test before the dry
 run. Nothing has been built. Earlier versions: v2 `88c7248f` (reviewed by round 2), v3 `dbcde782` (round 3). Raw
 findings: `docs/research/3740-slice-f-ckpt1-findings.md`.
@@ -699,3 +699,6 @@ deterministic codes above, and the codes' counts are printed beside the verdict.
 - **Round 2 (53: 46 BLOCKING).** Source-validity findings moved market data to Massive (v3).
 - **Round 3 (57: 43 BLOCKING, 12 WARNING, 2 NIT; on v3).** Task A: 17 of round 2's findings applied, 35 partial, 1
   not applied (52, the probe, which round 3 did not read). Applied in v4 (table above).
+- **Round 4 (59: 39 BLOCKING, 18 WARNING, 2 NIT; on v4).** Task A: 22 of round 3's findings applied, 35 partial. Not
+  applied yet. Finding counts per round (44, 53, 57, 59) are not falling; the route question this raises is on #3740
+  (2026-10-10 handoff) and is decided before round 5.
