@@ -540,6 +540,8 @@ JOB_FRED_REFERENCE_REFRESH = "fred_reference_refresh"
 JOB_FACTOR_LIBRARY_REFERENCE_REFRESH = "factor_library_reference_refresh"
 # #3622 — daily forward archive of IBKR's public borrow file (no history exists upstream).
 JOB_IBKR_BORROW_ARCHIVE = "ibkr_borrow_archive"
+# #3740 slice F — daily raw capture of eToro's public dividend calendar page (no archive exists upstream).
+JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE = "etoro_dividend_calendar_capture"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -2842,6 +2844,22 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=20, minute=45),
         catch_up_on_boot=True,
         # No upstream history and an idempotent, self-stamped append: a late fire beats a lost day.
+        rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE,
+        display_name="eToro dividend calendar capture (#3740)",
+        source="reference_data",
+        description=(
+            "Daily 12:40 UTC (before the US open) — stores eToro's public dividend "
+            "calendar page exactly as served (status, headers, gzip body), with no "
+            "parsing. eToro keeps no history. FAILS, after storing the response, on a "
+            "non-200 or a page with no calendar rows."
+        ),
+        cadence=Cadence.daily(hour=12, minute=40),
+        catch_up_on_boot=True,
+        # No upstream history and an append stamped with its own fetch clocks: a late fire beats a lost day.
         rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),
@@ -7092,6 +7110,22 @@ def ibkr_borrow_archive() -> None:
         tracker.note = (
             f"status={report.status} snapshot={report.snapshot_id} rows={report.row_count} "
             f"as_of={report.provider_as_of.isoformat()} sha={report.response_sha256[:12]}"
+        )
+
+
+def etoro_dividend_calendar_capture() -> None:
+    """Capture eToro's public dividend calendar page (#3740 slice F)."""
+    from app.services.etoro_dividend_calendar_capture import fetch_dividend_calendar, store_capture
+
+    with _tracked_job(JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE) as tracker:
+        # Fetch first: no DB connection is held across the HTTP request (the dev cluster has no headroom).
+        response = fetch_dividend_calendar()
+        with connect_job(autocommit=True) as conn:
+            report = store_capture(conn, response)
+        tracker.row_count = 1
+        tracker.note = (
+            f"capture={report.capture_id} status={report.http_status} rows={report.ex_date_marker_count} "
+            f"bytes={report.payload_bytes} sha={report.response_sha256[:12]}"
         )
 
 
