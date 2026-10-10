@@ -61,6 +61,7 @@ from app.services.n_port_ingest import (
     _archive_file_url,
     _record_ingest_attempt,
     _resolve_cusip_to_instrument_id,
+    n_port_retention_cutoff,
     n_port_within_retention,
     parse_n_port_payload,
 )
@@ -149,8 +150,9 @@ def _parse_n_port(
     # after it, so ``period_end <= filed date``. A filing dated before the
     # retention cutoff cannot pass the post-parse period gate below, so it
     # is tombstoned before the fetch. The post-parse gate stays: a recent
-    # NPORT-P/A can restate an old period. (UTC filed date >= ET filed date.)
-    if row.filed_at is not None and not n_port_within_retention(row.filed_at.date()):
+    # NPORT-P/A can restate an old period. Same floor as the per-CIK path's
+    # ``parse_submissions_index``. (UTC filed date >= ET filed date.)
+    if row.filed_at is not None and row.filed_at.astimezone(UTC).date() < n_port_retention_cutoff():
         log_error = "retention floor (filed before cutoff)"
         # The ingest-log row is what the per-CIK path reads to skip an
         # accession it has already handled, as the post-parse branch does.
