@@ -887,6 +887,8 @@ def refresh_market_data(
                                 frontier_before=frontier_before,
                                 cause=write_branch,
                             )
+                    if fresh_through is not None:
+                        _record_session_close_captures(conn, instrument_id, bars, session=fresh_through)
                     computed = _compute_and_store_features(conn, instrument_id)
             # Accumulate the running totals ONLY after the transaction has
             # committed cleanly (#1293 / Codex): incrementing inside the
@@ -1614,6 +1616,37 @@ def _record_backdated_inserts(
                 }
                 for price_date in backdated_insert_dates
             ],
+        )
+
+
+def _record_session_close_captures(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    bars: Sequence[OHLCVBar],
+    *,
+    session: date,
+) -> None:
+    """Append the close served for ``session`` to ``etoro_session_close_captures`` (#3740, sql/479).
+
+    Only the bar dated the sweep's completed session is kept: that is the one fetched on its own session,
+    before any later back-adjustment. Same transaction as the bar write, so a rolled-back write leaves no
+    capture. Every matching bar becomes a row, duplicates included (``_normalise_candles`` does not dedup);
+    the close is stored as served.
+    """
+    rows = [
+        {"instrument_id": instrument_id, "session_date": session, "close": b.close}
+        for b in bars
+        if b.price_date == session
+    ]
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO etoro_session_close_captures (instrument_id, session_date, close)
+            VALUES (%(instrument_id)s, %(session_date)s, %(close)s)
+            """,
+            rows,
         )
 
 
