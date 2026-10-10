@@ -28,6 +28,7 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 
 from scripts.build_3739_slice2 import read_extract, sha256_of
@@ -59,7 +60,7 @@ def gaps(notes: Path) -> None:
     days: list[int] = []
     for ordered in series.values():
         accepted = sorted({ny_date(c.accepted) for c in ordered})
-        days += [(later - earlier).days for earlier, later in zip(accepted, accepted[1:], strict=False)]
+        days += [(later - earlier).days for earlier, later in pairwise(accepted)]
     days.sort()
     if not days:
         raise SystemExit(f"{notes}: no series has two covers accepted on distinct dates, so there is no gap to report")
