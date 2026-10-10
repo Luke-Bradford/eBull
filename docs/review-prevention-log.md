@@ -12424,3 +12424,35 @@ neighbouring container and match it.**
   checked on covers that state their date (Apple 10-Q of 2024-08-01: ddate 20240731, datp 12, "as of July 19").
   Read the readme's column definitions before using a data-set date column.
 - Enforced in: `scripts/build_3739_slice2b.py` (`reported_date`), `tests/test_3739_slice2b.py`.
+
+### Before paying for adjudication, bound its result from the pinned candidate list (#3739)
+
+- Failure (caught before the labour, #3739 slice 3b, 2026-10-10): the slice 3a handoff scheduled adjudication of all
+  4,214 replica rows before measuring recall. Two of the 42 comparison stamps have no candidate on their CIK at all,
+  and adjudication writes records only from candidates. So count recall could not exceed 40 / 42 = 95.2% against a
+  97% bar, and the adjudication could not have changed the verdict.
+- Prevention: once the comparison set and the candidate list are both pinned, join them first. A comparison item
+  with no candidate is a guaranteed miss, and the count of those caps recall. If the cap is below the bar, record the
+  fail and spend the effort on the revision instead.
+- Enforced in: `docs/research/3739-event-file/README.md` § "Slice 3b" (the bound and its inputs).
+
+### An optional CSV field compared by equality matches an empty value (#3739)
+
+- Failure (bot review, #3739 slice 3b, PR #3751): the checker's single-class test compared a cover's title and
+  symbol with the row's by `==`. A row with an empty `class_title` or `class_symbol` would match a cover value that
+  is also empty.
+- Prevention: before comparing a user-supplied CSV field by equality, guard it for truthiness
+  (`title and t == title`). Grep the diff for `== <field>` on values read with `.get(...) or ""`.
+- Enforced in: `scripts/build_3739_slice3b.py` (`_class_failures`), and
+  `tests/test_3739_slice3b.py::test_an_empty_class_title_or_symbol_matches_no_cover`.
+
+### A permanent mirror validates the body before it caches it, not the status alone (#3739)
+
+- Failure (bot review, #3739 slice 3b, PR #3751): the evidence mirror cached any HTTP 200 body forever, and a rerun
+  reads the mirror instead of fetching. A refusal page served with status 200 would have become a permanent quote
+  mismatch.
+- Prevention: before writing a fetched body to a cache that later runs trust, assert its expected shape, such as
+  the header's marker or a non-empty, non-refusal document. A rejected body is not cached, so the next run fetches
+  it again.
+- Enforced in: `scripts/build_3739_slice3b.py` (`served_body`), and
+  `tests/test_3739_slice3b.py::test_only_a_served_body_is_mirrored`.

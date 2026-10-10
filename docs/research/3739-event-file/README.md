@@ -174,5 +174,76 @@ PYTHONPATH=. uv run python scripts/build_3739_slice3a.py screens --replica 2022 
     --extract-sha256 be0bdda721dcc4efbca7784762a83495d21062fc89e40b3a7bfebcd9e369fe4b --out-dir replica-2022
 ```
 
-Next (slice 3b): the deterministic checker (§3.3), adjudication of the 4,214 U rows, the comparison set (Intrader
-`split_factor` stamps 2022-08-01 .. 2024-07-31 on series the #3361 linkage ties to replica CIKs) and recall.
+## Slice 3b (2026-10-10): the checker and the replica's comparison set
+
+Built by `scripts/build_3739_slice3b.py` at the commit that adds this section.
+
+**Comparison set** (§3.4), pinned before any replica adjudication in `replica-2022/comparison-intrader-stamps.csv`:
+every `icyDenev/Intrader` `split_factor` stamp (≠ 1) dated 2022-08-01 .. 2024-07-31, with the #3361 linkage
+(manifest `1738bc39…`) as of the stamp date. Rows with `in_u = 1` are the comparison set.
+
+| | stamps | series or issuers |
+|---|---:|---:|
+| all stamps in the window | 747 | 654 series |
+| linked to a CIK | 420 | |
+| **linked to a replica-U CIK (the comparison set)** | **42** | **38 issuers** (16 stamps < 1) |
+
+The 327 unlinked stamps are the linkage's typed abstentions: no evidence in 730 days 280 (235 never seen), symbol
+collision 46, unparsed form 1.
+
+**The 2022 replica fails §3.4's count bar whatever adjudication finds.** Adjudication writes records only from
+candidates (§3.2–3.3), and two comparison stamps have no split candidate on their CIK anywhere in the window:
+Commerce Bancshares (`CBSH`, 2022-12-01, factor 1.05) and Southern Copper (`SCCO`, 2024-05-07, factor 1.0104). Both
+factors lie inside the cover screen's [0.8, 1.25] band, and neither issuer has an XBRL ratio fact or an Item 5.03 8-K
+in the window. So count recall is at most 40 / 42 = 95.2%, below 97%. Three more stamps have candidates on their CIK
+but none whose interval covers the stamp date: `UHAL` 2022-11-10 (factor 10), `WRB` 2024-07-11 (1.5) and `AMC`
+2023-08-23 (1.133333; a covering candidate exists for its 2023-08-24 stamp). The per-stamp coverage table is
+reproduced by joining the two pinned files on CIK. What each of the five actions was is adjudication's question, not
+this measurement's.
+
+**The checker** (§3.3), `check --type <record type>`, over an event-file record CSV:
+
+- **Fetch and mirror.** Each evidence item's document and its filing's `-index-headers.html` are fetched from
+  `/Archives/edgar/data/<CIK>/<accession>/`, under the row's CIK or its `counterparty_cik`, and kept gzipped
+  (`mtime` 0) in the mirror. The output records the sha256 and length of the bytes as served. A rerun reads the
+  mirror and fetches nothing. Only a served body is mirrored: index headers must carry `ACCEPTANCE-DATETIME`, and a
+  document must be non-empty and not an SEC refusal page, so a bad 200 is fetched again on the next run.
+- **Acceptance.** The item's `acceptance` must equal the headers' `ACCEPTANCE-DATETIME` (14 digits, EDGAR's Eastern
+  clock, as served).
+- **Quote.** At most 300 characters, and it must occur in the document's text with all whitespace removed from both.
+  The text drops comments, scripts and styles, turns every tag into a space, unescapes entities and applies NFKC.
+  This is a rule by construction, because no source rule says how an EDGAR HTML document becomes text.
+- **Fields.** Read off the row's quotes. A date counts in a role only when it sits within 40 characters of that
+  role's words in the same quote:
+  - **split:** the ratio, read as "a-for-b" in numerals or number words, or as "a:b" (never a clock time), within
+    40 characters of a split's own words: "split", "stock dividend", "share distribution", "share consolidation",
+    "reclassification" or "combination of the outstanding shares". A bare "distribution" or "combination" does not
+    count, because those words also name cash dividends and business combinations.
+  - **split effective date:** quoted beside adjusted-basis or ex-date words (§1: the first session on the adjusted
+    basis). Otherwise, the record date (beside "record") and the payable date (beside "payable", "paid",
+    "distributed", "distribution date" or "issued") must be quoted, and the effective date must be FINRA 11140's date
+    from them: the NYSE session after payable for a distribution of 25% or more, else the record date. A reverse
+    split has no such fallback (§1 source rules).
+  - **split class:** named by title or symbol in an action quote (one that also states the ratio or the effective
+    date), or the issuer's own evidence document has a cover that tags exactly one 12(b) class (one
+    `dei:Security12bTitle` + `dei:TradingSymbol` context, Reg S-K Item 601(b)(104)) and that class is the row's. A
+    12(b) row quoted from a multi-class cover, or from a counterparty's cover, does not identify the class.
+  - **symbol_change:** both symbols and the date.
+  - **first_trade:** the date beside first-session words.
+  - **termination_end:** the date beside the words of its basis (`last_trading_day`, `suspended` or
+    `merger_closing`), unless the row is `not_stated`.
+
+  The word lists and the 40-character reach are by construction. They show a quote gives the date its role, and the
+  adjudication log records why the quotes describe one completed action. A `cancelled` row states no fields.
+- **Smoke run:** NVIDIA's 10:1 split row (8-K `0001045810-24-000144`, effective 2024-06-10, its single-class cover
+  identifying the class) passed, and a rerun from the mirror fetched nothing.
+
+```bash
+PYTHONPATH=. uv run python scripts/build_3739_slice3b.py comparison --replica 2022 \
+    --u replica-2022/u-pass1.csv --u-sha256 9794f71f850a4fb70ab32b0ef381ca6dc8dc633cba515929de51010baa54c57b \
+    --out replica-2022/comparison-intrader-stamps.csv
+PYTHONPATH=. uv run python scripts/build_3739_slice3b.py check --type split --records <records.csv> \
+    --mirror <dir> --out <check.jsonl>
+```
+
+Next: §3.4's one screen revision, then the replica with F = 2020-07-31 (the decision and its reasons are on #3739).
