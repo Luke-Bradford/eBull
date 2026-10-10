@@ -106,13 +106,14 @@ def publish_all(payloads: Mapping[Path, bytes]) -> None:
 
     Scope: one manual invocation per directory. Concurrent runs, or a kill between two links, are not handled; the
     names a killed run linked are refused by name on the next run, never replaced."""
-    if any(out.name.startswith(".") for out in payloads):
-        raise ValueError("an output name starting with '.' could be another output's staging name")
+    stagings = {out: out.with_name(f".{out.name}.staging") for out in payloads}
+    if set(stagings.values()) & set(payloads):
+        raise ValueError("an output path is another output's staging path")
     staged: list[Path] = []
     linked: list[Path] = []
     try:
         for out, payload in payloads.items():
-            staging = out.with_name(f".{out.name}.staging")
+            staging = stagings[out]
             discard([staging])  # only this function writes that name: a killed run's leftover
             staged.append(staging)  # before the write: publish removes its own partial file
             publish(staging, payload)
