@@ -12413,3 +12413,14 @@ neighbouring container and match it.**
   digest (`pinned_manifests`, `*_PINS`). If published artefacts carry it, pin the new input beside the manifest
   instead.
 - Enforced in: `scripts/build_3609_factor_panel.py` (`RETURN_CUTOFFS`), and the step 1 spec Amendment 3, "Pinning".
+
+### A Financial Statement data-set `ddate` is a month end, not the fact's date (#3739)
+
+- Failure (caught before use, #3739 slice 2b, 2026-10-10): the first split-screen run bounded each cover-count jump
+  by `num.ddate`. The FSDS/FSNDS readme defines `ddate` as "the end date for the data value, rounded to the nearest
+  month end" (and `sub.period` likewise), so a cover dated 2024-10-14 reads as 2024-09-30. An interval built on it can
+  exclude a split effective in the rounded-away days.
+- Prevention: when a date from `num.tsv` bounds anything, use the reported date, `ddate − datp` days. The sign was
+  checked on covers that state their date (Apple 10-Q of 2024-08-01: ddate 20240731, datp 12, "as of July 19").
+  Read the readme's column definitions before using a data-set date column.
+- Enforced in: `scripts/build_3739_slice2b.py` (`reported_date`), `tests/test_3739_slice2b.py`.

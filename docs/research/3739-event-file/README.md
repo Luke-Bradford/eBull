@@ -65,9 +65,63 @@ PYTHONPATH=. uv run python scripts/build_3739_slice2.py universe \
 rows. Rerunning them reproduces the committed inputs only while those sources are unchanged. Replaying U means running
 `universe` on the committed `inputs/`.
 
-## Slice 2b (next): the candidate screens
+## Slice 2b (2026-10-10): the candidate screens
 
-§3.2's split, symbol-change and termination screens, with their candidate lists pinned here. Item 5.03 8-Ks come from
-the extract above. The XBRL split-ratio facts and per-class cover counts are dimensional notes facts, so they need
-the Financial Statement and Notes data sets: 2024q2 (for the cover before the window), 2025q3 and the 2026 months
-after 2026-07 are not on this machine yet.
+Built by `scripts/build_3739_slice2b.py` at the commit that adds this section. §3.2's screens run over every issuer
+in the source data (§2), event window 2024-07-01 .. 2026-09-30, the last day every input covers. No price is read.
+
+| list | candidates | issuers | of which in U pass 1 |
+|---|---:|---:|---:|
+| `candidates-split.csv.gz` (gzip, `mtime` 0) | 16,666 | 4,518 | 5,617 on 2,014 issuers |
+| `candidates-symbol-change.csv` | 563 issuers | 563 | |
+| `candidates-termination.csv` | 685 events | 667 | 667 |
+
+Split candidates by screen: XBRL ratio 5,426; cover-count jump 4,456; Item 5.03 6,784. Adjudication (slice 4) reads
+the U rows; the rest stay pinned for pass 2's closure.
+
+**Split screen inputs.** `StockholdersEquityNoteStockSplitConversionRatio1` and the per-class cover counts are notes
+and dimensional facts, absent from plain FSDS and companyfacts (`sec-edgar.md` §7.17, §7.18), so they are read from
+the Financial Statement and Notes data sets: quarterly 2024q1 .. 2025q3, monthly 2025-10 .. 2026-09 (DERA
+consolidated 2025-07 .. 09 into 2025q3 on 2026-10-07; the build refuses archives that share a filing). 92,123
+facts from 69,143 filings; 46 facts have no acceptance in `submissions.zip` and are dropped.
+
+- **Dates.** `num.ddate` is rounded to the nearest month end (FSNDS readme). The reported date is `ddate − datp`
+  days; the sign was checked against covers that state their date (Apple 10-Q of 2024-08-01, "as of July 19, 2024":
+  ddate 20240731, datp 12; NVIDIA 10-Q of 2024-08-28, "as of August 23, 2024": ddate 20240831, datp 8). Intervals
+  use reported dates, so a split near a month end is not rounded out of its interval.
+- **Class axis.** The data sets spell `us-gaap:StatementClassOfStockAxis` as `ClassOfStock` in `segments` (the
+  spec's §3.2 is corrected to say so). A cover fact is read under the default dimension or exactly one
+  `ClassOfStock` member, from the registrant only (`coreg` empty), unit `shares`.
+- **Cover ledger.** 2,866 covers replaced by a later amendment of the same period; 1,452 facts not read (co-registrant,
+  other dimension or unit); 1,564 non-positive; 2,099 class series whose first cover is dated in the window, so a
+  jump from before it cannot be seen (new registrants, and classes first reported per member).
+
+**Symbol-change inputs.** #3361 rule 2 (unchanged code) over the insider data sets 2022q3 .. 2026q3: 804,623 stored
+observations (917 issuer-integrity exclusions, 68 with no acceptance). The extract keeps every observation accepted
+from 2024-07-01 and, per (CIK, symbol), the latest in the 730 days before it, which is the symbol in force at the
+window's start. 2026q2 and 2026q3 are served from `/files/datastandardsinnovation/` (the app's bulk download misses
+them: #3747).
+
+**Spot checks** (screens recall known actions; adjudication decides): O'Reilly 15:1 (June 2025) is raised by all three
+split screens, the cover interval 2025-05-05 .. 2025-08-04, ratio 14.89; Fastenal 2:1, Interactive Brokers 4:1
+(both classes), Broadcom 10:1, Super Micro 10:1 and Lam Research 10:1 by the XBRL and cover screens; Block's SQ → XYZ
+change is a symbol-change candidate.
+
+```bash
+PYTHONPATH=. uv run python scripts/build_3739_slice2b.py notes-extract --submissions submissions.zip \
+    --out notes.jsonl.gz fsnds_2024q1_notes.zip ... fsnds_2026_09_notes.zip   # the 19 archives in the manifest
+PYTHONPATH=. uv run python scripts/build_3739_slice2b.py insider-extract --submissions submissions.zip \
+    --out observations.jsonl.gz insider_2022q3.zip ... insider_2026q3.zip     # the 17 quarters in the manifest
+PYTHONPATH=. uv run python scripts/build_3739_slice2b.py screens --through 2026-09-30 \
+    --notes inputs/fsnds-notes-2024q1-2026-09-extract.jsonl.gz \
+    --notes-sha256 4b29dcd6d22e3e1642148bb74c6bd2113d55635b43cf7142e46f08914ec79b5c \
+    --observations inputs/insider-observations-2022q3-2026q3.jsonl.gz \
+    --observations-sha256 67a21589066fe75c16e6dc02c60c4c3a9a4d4a9d0462ee1874f216b96737fa5e \
+    --extract inputs/submissions-2026-10-09-extract.jsonl.gz \
+    --extract-sha256 1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d \
+    --register inputs/form25-register-through-2026-10-08.csv \
+    --register-sha256 68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489 --out-dir .
+```
+
+Both extracts read the 2026-10-09 `submissions.zip` (the slice-2a pin), so they replay only from the committed
+`inputs/`; `screens` replays from those.
