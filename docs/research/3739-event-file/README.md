@@ -72,7 +72,7 @@ in the source data (§2), event window 2024-07-01 .. 2026-09-30, the last day ev
 
 | list | candidates | issuers | of which in U pass 1 |
 |---|---:|---:|---:|
-| `candidates-split.csv` | 16,666 | 4,518 | 5,617 on 2,014 issuers |
+| `candidates-split.csv.gz` (gzip, `mtime` 0) | 16,666 | 4,518 | 5,617 on 2,014 issuers |
 | `candidates-symbol-change.csv` | 563 issuers | 563 | |
 | `candidates-termination.csv` | 685 events | 667 | 667 |
 

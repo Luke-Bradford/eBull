@@ -108,8 +108,8 @@
   },
   {
    "slice": "2b",
-   "path": "candidates-split.csv",
-   "sha256": "eea475b9799c5f009bd648d1c77c305540065e3218b2e78d459444ae0eb0b129",
+   "path": "candidates-split.csv.gz",
+   "sha256": "340c23d35afc0584927beeca70c6f298c988b7a146fc308cccd1492155d0fa37",
    "what": "spec section 3.2 split screen, pass-1 candidate list, event window 2024-07-01 .. 2026-09-30",
    "inputs": {
     "through": "2026-09-30",
@@ -117,7 +117,8 @@
     "observations_sha256": "67a21589066fe75c16e6dc02c60c4c3a9a4d4a9d0462ee1874f216b96737fa5e",
     "extract_sha256": "1bd3989bb8b59f63d1e3bb137335b74cfa99309c401d2196424c79e10898d74d",
     "register_sha256": "68bc4062b9071c1c6da33d403aa663ec2ca2ea55d4785da0462e628e2111e489"
-   }
+   },
+   "csv_sha256": "eea475b9799c5f009bd648d1c77c305540065e3218b2e78d459444ae0eb0b129"
   },
   {
    "slice": "2b",

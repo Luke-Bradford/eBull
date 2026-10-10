@@ -649,7 +649,8 @@ def screens(through: date, notes: Path, observations: Path, extract: Path, regis
     symbol = symbol_candidates(summarise_symbols(read_observations(observations), through))
     termination = termination_candidates(read_register_rows(register))
     payloads = {
-        "candidates-split.csv": csv_bytes(SPLIT_COLUMNS, split_rows(split)),
+        # Gzipped (mtime 0, so the bytes replay): at ~1.8 MB the plain CSV overflows the review bot's prompt.
+        "candidates-split.csv.gz": gzip.compress(csv_bytes(SPLIT_COLUMNS, split_rows(split)), mtime=0),
         "candidates-symbol-change.csv": csv_bytes(
             ("candidate", "cik", "symbol", "last_before", "first_in", "last_in", "count_in"),
             (
