@@ -10220,6 +10220,10 @@ def cusip_universe_backfill() -> None:
             result = backfill_cusip_coverage(conn)
 
         tracker.row_count = result.inserted
+        if result.unpublished_quarter is not None:
+            # #3630 — publication lag, not a failure: say which list ran.
+            uy, uq = result.unpublished_quarter
+            tracker.note = f"{uy}Q{uq} Official List not yet published; used the prior quarter's list"
         logger.info(
             "cusip_universe_backfill: list_rows=%d instruments_seen=%d "
             "inserted=%d already_mapped=%d unresolvable=%d ambiguous=%d "

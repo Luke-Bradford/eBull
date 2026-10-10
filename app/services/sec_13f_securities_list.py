@@ -74,9 +74,19 @@ from app.services.cusip_resolver import (
     _similarity,
     sweep_resolvable_unresolved_cusips,
 )
+from app.services.institutional_holdings import _calendar_quarter_end
 from app.services.sec_13f_filer_directory import _last_completed_quarter
 
 logger = logging.getLogger(__name__)
+
+# #3630 — SEC's Form 13F FAQ says the Official List "is available shortly
+# after the end of each calendar quarter"; it gives no day count. Filers
+# need the list to file, and Rule 13f-1(a)(1) sets the 13F-HR deadline at
+# 45 days after quarter end, so that is the bound past which a missing
+# list is no longer publication lag and the 404 is raised (a rename, the
+# #2118 class, is then the likelier cause). Inside the bound the job uses
+# the prior quarter's list, which is still SEC's latest published one.
+LIST_PUBLICATION_GRACE_DAYS: Final[int] = 45
 
 
 # SEC renamed the TXT at 2026q2 (#2118): the pre-rename name 404s for
@@ -123,6 +133,10 @@ class CusipCoverageBackfillResult:
     """Pending ``unresolved_13f_cusips`` rows claimed as Official-List
     option classes this run (#2353). Defaulted so existing constructions
     in tests keep working; the production path always supplies it."""
+    unpublished_quarter: tuple[int, int] | None = None
+    """The derived target quarter when SEC had not yet published its list
+    and the run used the prior quarter's instead (#3630). ``None`` when the
+    target list was served or the caller pinned the quarter."""
 
 
 def fetch_13f_list_txt(year: int, quarter: int) -> tuple[str, str]:
@@ -148,6 +162,30 @@ def fetch_13f_list_txt(year: int, quarter: int) -> tuple[str, str]:
             last_err = err
     assert last_err is not None  # loop body always runs: patterns is non-empty
     raise last_err
+
+
+def fetch_latest_published_list(
+    today: date,
+    fetch: Callable[[int, int], tuple[str, str]],
+) -> tuple[int, int, str, str, tuple[int, int] | None]:
+    """Fetch the last closed quarter's Official List, or the quarter before
+    it while SEC has not yet published the new one (#3630).
+
+    Returns ``(year, quarter, payload, source_url, unpublished_quarter)``;
+    ``unpublished_quarter`` is the target quarter when the fallback was
+    taken, else ``None``. A 404 on the target past
+    :data:`LIST_PUBLICATION_GRACE_DAYS`, any non-404 error, and any error
+    on the fallback quarter all raise."""
+    year, quarter = _last_completed_quarter(today)
+    try:
+        payload, source_url = fetch(year, quarter)
+        return year, quarter, payload, source_url, None
+    except urllib.error.HTTPError as err:
+        if err.code != 404 or (today - _calendar_quarter_end(year, quarter)).days > LIST_PUBLICATION_GRACE_DAYS:
+            raise
+    prior_year, prior_quarter = _last_completed_quarter(_calendar_quarter_end(year, quarter))
+    payload, source_url = fetch(prior_year, prior_quarter)
+    return prior_year, prior_quarter, payload, source_url, (year, quarter)
 
 
 def _store_raw_list(
@@ -618,13 +656,23 @@ def backfill_cusip_coverage(
     SELECT; re-running on a populated install is cheap (one read,
     zero writes).
     """
-    if year is None or quarter is None:
-        today_d = today if today is not None else date.today()
+    unpublished_quarter: tuple[int, int] | None = None
+    today_d = today if today is not None else date.today()
+    if year is None and quarter is None:
+        year, quarter, payload, source_url, unpublished_quarter = fetch_latest_published_list(today_d, fetch)
+        if unpublished_quarter is not None:
+            logger.info(
+                "cusip_universe_backfill: %sQ%s Official List not yet published; using %sQ%s",
+                unpublished_quarter[0],
+                unpublished_quarter[1],
+                year,
+                quarter,
+            )
+    else:
         y, q = _last_completed_quarter(today_d)
         year = year if year is not None else y
         quarter = quarter if quarter is not None else q
-
-    payload, source_url = fetch(year, quarter)
+        payload, source_url = fetch(year, quarter)
     # Persist the raw SEC body BEFORE parsing — eBull non-negotiable
     # (Claude review BLOCKING #914). Re-wash workflows can replay
     # against the stored body without re-fetching from SEC; the
@@ -750,4 +798,5 @@ def backfill_cusip_coverage(
         tombstoned_conflict=conflict,
         sweep=sweep,
         tombstoned_option_pseudo_cusip=option_tombstoned,
+        unpublished_quarter=unpublished_quarter,
     )
