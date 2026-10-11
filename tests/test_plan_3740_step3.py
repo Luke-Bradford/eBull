@@ -236,3 +236,5 @@ def test_no_powered_set_evaluates_every_candidate_and_chooses_none() -> None:
 def test_a_set_needs_a_fit_for_each_arm() -> None:
     with pytest.raises(PlanError, match="one fit per arm"):
         plan_set({"worst_case": _fit(STRONG)}, ("value",), replications=10)
+    with pytest.raises(PlanError, match="at least one replication"):
+        plan_set(dict.fromkeys(ARMS, _fit(STRONG)), ("value",), replications=0)

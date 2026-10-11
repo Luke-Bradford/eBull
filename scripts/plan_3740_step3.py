@@ -94,7 +94,8 @@ def _grid(first: Month, count: int) -> tuple[Month, ...]:
 
 
 HISTORICAL_GRID: Final = _grid(HISTORICAL_FIRST, HISTORICAL_MONTHS)
-assert HISTORICAL_GRID[-1] == HISTORICAL_LAST
+if HISTORICAL_GRID[-1] != HISTORICAL_LAST:
+    raise PlanError(f"{HISTORICAL_MONTHS} months from {HISTORICAL_FIRST} do not end at {HISTORICAL_LAST}")
 #: Labels only: G1 keys each observation by month, and a replication's rows take these in order.
 _GRID: Final = _grid((1, 1), FORWARD_MONTHS)
 
@@ -253,6 +254,8 @@ def plan_set(fits: Mapping[str, ArmFit], chosen: Sequence[str], replications: in
     """One evaluated set: the bars from both arms' nulls, each arm's power, and the criterion."""
     if set(fits) != set(ARMS):
         raise PlanError(f"a set needs one fit per arm {ARMS}, got {sorted(fits)}")
+    if replications <= 0:
+        raise PlanError(f"a run needs at least one replication, got {replications}")
     names = [INTENDED[f] for f in chosen]
     null: dict[str, list[tuple[float, ...] | None]] = {}
     alternative: dict[str, list[tuple[float, ...] | None]] = {}
