@@ -43,6 +43,11 @@ FED_EBP_URL: Final = "https://www.federalreserve.gov/econres/notes/feds-notes/eb
 JKP_USA_MONTHLY_VW_CAP_URL: Final = (
     "https://jkpfactors-data.s3.amazonaws.com/public/%5Busa%5D_%5Ball_factors%5D_%5Bmonthly%5D_%5Bvw_cap%5D.zip"
 )
+#: #3740 condition 1: JKP's ``developed`` region, MSCI-developed countries except the USA, country factor returns
+#: weighted by lagged market cap (bkelly-lab/ReplicationCrisis ``GlobalFactors/portfolios.R`` at ``67174c7f``).
+JKP_DEVELOPED_MONTHLY_VW_CAP_URL: Final = (
+    "https://jkpfactors-data.s3.amazonaws.com/public/%5Bdeveloped%5D_%5Ball_factors%5D_%5Bmonthly%5D_%5Bvw_cap%5D.zip"
+)
 #: #3609 step 1: the NYSE size breakpoints JKP's factors are built on (``me`` percentiles, USD millions).
 JKP_NYSE_CUTOFFS_URL: Final = "https://jkpfactors-data.s3.amazonaws.com/public/other/nyse_cutoffs.csv"
 #: #3730: the monthly return percentiles JKP winsorise non-CRSP holding returns at (step 1 spec Amendment 3).
@@ -61,6 +66,7 @@ AQR_FACTOR_PARSER_VERSION: Final = "aqr-factor-monthly-xlsx-v1"
 FRED_PARSER_VERSION: Final = "fred-csv-v1"
 GLOBAL_Q_PARSER_VERSION: Final = "global-q-monthly-csv-v1"
 JKP_PARSER_VERSION: Final = "jkp-monthly-csv-zip-v1"
+JKP_REGIONAL_PARSER_VERSION: Final = "jkp-regional-monthly-csv-zip-v1"
 JKP_CUTOFFS_PARSER_VERSION: Final = "jkp-nyse-cutoffs-csv-v1"
 JKP_RETURN_CUTOFFS_PARSER_VERSION: Final = "jkp-return-cutoffs-csv-v1"
 FED_EBP_PARSER_VERSION: Final = "fed-ebp-monthly-csv-v2"
@@ -224,6 +230,8 @@ _FED_EBP_UNITS: Final[Mapping[str, ReferenceUnit]] = {
 }
 _FED_EBP_DATE_FORMATS: Final = ("%m/%d/%Y", "%Y-%m-%d")
 _JKP_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_stocks", "n_stocks_min", "date", "ret")
+#: A regional file aggregates country factors, so it counts countries where a country file counts stocks.
+_JKP_REGIONAL_HEADER: Final = ("location", "name", "freq", "weighting", "direction", "n_countries", "date", "ret")
 _JKP_CUTOFFS_HEADER: Final = ("eom", "n", "nyse_p1", "nyse_p20", "nyse_p50", "nyse_p80")
 #: Three families of the same four percentiles: USD total return, local-currency total return, USD excess return.
 _JKP_RETURN_PERCENTILES: Final = ("0_1", "1", "99", "99_9")
@@ -571,11 +579,13 @@ def parse_jkp_monthly_zip(
     *,
     location: str,
     weighting: str,
+    expected_header: tuple[str, ...] = _JKP_HEADER,
 ) -> ParsedReferenceData:
     """Parse one JKP ``[location]_[all_factors]_[monthly]_[weighting]`` ZIP: one long-format CSV.
 
     ``ret`` is already a decimal return signed by the factor's ``direction`` (long the predicted
-    out-performer), so it is stored as published, one series per factor ``name``.
+    out-performer), so it is stored as published, one series per factor ``name``. Country files carry
+    ``_JKP_HEADER`` and regional files ``_JKP_REGIONAL_HEADER``; columns are read by name.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
@@ -587,8 +597,9 @@ def parse_jkp_monthly_zip(
         raise ReferenceDataSourceError("JKP response is not a valid UTF-8 CSV ZIP") from exc
     reader = csv.reader(io.StringIO(text))
     header = tuple(cell.strip() for cell in next(reader, ()))
-    if header != _JKP_HEADER:
-        raise ReferenceDataSourceError(f"JKP header {header!r}; expected {_JKP_HEADER!r}")
+    if header != expected_header:
+        raise ReferenceDataSourceError(f"JKP header {header!r}; expected {expected_header!r}")
+    column = {name: index for index, name in enumerate(header)}
     observations: list[ReferenceObservation] = []
     missing_count = 0
     for row_number, row in enumerate(reader, start=2):
@@ -596,18 +607,19 @@ def parse_jkp_monthly_zip(
             continue
         if len(row) != len(header):
             raise ReferenceDataSourceError(f"JKP row {row_number}: ragged row")
-        if (row[0], row[2], row[3]) != (location, "monthly", weighting):
+        identity = (row[column["location"]], row[column["freq"]], row[column["weighting"]])
+        if identity != (location, "monthly", weighting):
             raise ReferenceDataSourceError(
-                f"JKP row {row_number}: {row[0]}/{row[2]}/{row[3]}; expected {location}/monthly/{weighting}"
+                f"JKP row {row_number}: {'/'.join(identity)}; expected {location}/monthly/{weighting}"
             )
-        series_key = row[1].strip()
+        series_key = row[column["name"]].strip()
         if not series_key:
             raise ReferenceDataSourceError(f"JKP row {row_number}: empty factor name")
         try:
-            when = date.fromisoformat(row[7].strip())
+            when = date.fromisoformat(row[column["date"]].strip())
         except ValueError as exc:
             raise ReferenceDataSourceError(f"JKP row {row_number}: invalid date") from exc
-        raw = row[8].strip()
+        raw = row[column["ret"]].strip()
         if not raw or raw.upper() in ("NA", "NAN"):
             missing_count += 1
             continue
@@ -846,8 +858,10 @@ def _aqr_parser(sheet: str, header: tuple[str | None, ...]) -> Parser:
     return lambda payload: parse_aqr_monthly_sheet(payload, sheet=sheet, header=header)
 
 
-def _jkp_parser(location: str, weighting: str) -> Parser:
-    return lambda payload: parse_jkp_monthly_zip(payload, location=location, weighting=weighting)
+def _jkp_parser(location: str, weighting: str, expected_header: tuple[str, ...] = _JKP_HEADER) -> Parser:
+    return lambda payload: parse_jkp_monthly_zip(
+        payload, location=location, weighting=weighting, expected_header=expected_header
+    )
 
 
 def _french(dataset_key: str, filename: str, series_keys: tuple[str, ...]) -> ReferenceDatasetSpec:
@@ -918,6 +932,13 @@ _FACTOR_LIBRARY: Final = (
         JKP_USA_MONTHLY_VW_CAP_URL,
         JKP_PARSER_VERSION,
         _jkp_parser("usa", "vw_cap"),
+    ),
+    ReferenceDatasetSpec(
+        "jkp",
+        "jkp_developed_monthly_vw_cap",
+        JKP_DEVELOPED_MONTHLY_VW_CAP_URL,
+        JKP_REGIONAL_PARSER_VERSION,
+        _jkp_parser("developed", "vw_cap", _JKP_REGIONAL_HEADER),
     ),
     ReferenceDatasetSpec(
         "jkp",
@@ -1240,6 +1261,7 @@ __all__ = [
     "GLOBAL_Q_PARSER_VERSION",
     "JKP_CUTOFFS_PARSER_VERSION",
     "JKP_PARSER_VERSION",
+    "JKP_REGIONAL_PARSER_VERSION",
     "JKP_RETURN_CUTOFFS_PARSER_VERSION",
     "OSAP_PARSER_VERSION",
     "OSAP_USER_AGENT",
