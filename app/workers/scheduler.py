@@ -2586,6 +2586,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.monthly(day=DRILL_DAY, hour=DRILL_HOUR, minute=DRILL_MINUTE),
         catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_FINRA_REGSHO_DAILY_REFRESH,

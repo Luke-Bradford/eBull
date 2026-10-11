@@ -37,6 +37,7 @@ def test_the_job_is_registered_on_the_spec_slot() -> None:
     assert job.source == "risk_metrics"
     assert job.catch_up_on_boot is True
     assert job.rearm_on_lost_fire is False
+    assert job.prerequisite is scheduler._bootstrap_complete
 
     from app.jobs.runtime import _INVOKERS
 
