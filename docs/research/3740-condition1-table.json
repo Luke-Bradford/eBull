@@ -1,0 +1,221 @@
+{
+  "families": {
+    "GP/A": true,
+    "investment": true,
+    "value": true
+  },
+  "inputs": {
+    "developed": {
+      "dataset_key": "jkp_developed_monthly_vw_cap",
+      "definition": "JKP `developed`: countries with msci_development == 'developed' except USA (ZWE and VEN excluded for data issues), country factor returns weighted by lagged market cap, at least 3 countries a month (bkelly-lab/ReplicationCrisis GlobalFactors/portfolios.R at 67174c7f170bf8b952b3c86876f187fd9970b5ba)",
+      "location": "developed",
+      "sha256": "3bf7460655b2a6ba61acffa88cb35958812a58f1d2d5a0669d5626735768715c",
+      "snapshot_id": 106
+    },
+    "table9": {
+      "sha256": "141c9571f00445937356328e22fd030e69dea4b68dea986f85dda6859ca3cc7d",
+      "url": "https://jkpfactors-data.s3.amazonaws.com/documents/Documentation.pdf"
+    },
+    "us": {
+      "dataset_key": "jkp_usa_monthly_vw_cap",
+      "location": "usa",
+      "sha256": "f766aa2c7db1f97594f79f9063275161b7038e936db9ea960eac6eb7ec27ca80",
+      "snapshot_id": 38
+    }
+  },
+  "members": [
+    {
+      "member": {
+        "citation": "Rosenberg, Reid, and Lanstein (1985)",
+        "family": "value",
+        "markets_evidence": "only the first page was readable (publisher preview, https://web.archive.org/web/20230518022721id_/https://www.pm-research.com/content/iijpormgmt/11/3/9.extract.jpg): \"approximately 1400 stocks in a prospectively defined universe of large companies, called the HICAP universe\"; the subtitle concludes \"prices on the NYSE are inefficient\"",
+        "name": "be_me",
+        "original_sample": "1973-1984",
+        "publication_year": 1985,
+        "uses_developed_ex_us": "undetermined"
+      },
+      "supported": true,
+      "windows": [
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.001189724642136167,
+          "months": 464,
+          "nw_lag": 5,
+          "nw_t": 0.5779757479019181,
+          "passes": true,
+          "region": "usa",
+          "start": "1986-01"
+        },
+        {
+          "counting": false,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.003999066253783428,
+          "months": 464,
+          "nw_lag": 5,
+          "nw_t": 2.431801220939461,
+          "passes": true,
+          "region": "developed",
+          "start": "1986-01"
+        }
+      ]
+    },
+    {
+      "member": {
+        "citation": "Basu (1983)",
+        "family": "value",
+        "markets_evidence": "https://web.archive.org/web/20240716070810id_/http://www-2.rotman.utoronto.ca/~kan/3032/pdf/AssetPricingAnomalies/Basu_JFE_1983.pdf \u00a72.1: Compustat PDE and CRSP monthly; \"a firm was required to have been listed on the New York Stock Exchange\"",
+        "name": "ni_me",
+        "original_sample": "1963-1979",
+        "publication_year": 1983,
+        "uses_developed_ex_us": "no"
+      },
+      "supported": true,
+      "windows": [
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.004093755963381731,
+          "months": 488,
+          "nw_lag": 5,
+          "nw_t": 1.6706556039878286,
+          "passes": true,
+          "region": "usa",
+          "start": "1984-01"
+        },
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.003981688906373382,
+          "months": 464,
+          "nw_lag": 5,
+          "nw_t": 2.6005941047314756,
+          "passes": true,
+          "region": "developed",
+          "start": "1986-01"
+        }
+      ]
+    },
+    {
+      "member": {
+        "citation": "Desai, Rajgopal, and Venkatachalam (2004)",
+        "family": "value",
+        "markets_evidence": "published p. 360 \u00a7III (faculty.washington.edu/rajgopal/files/drv_tar2004.pdf, via the Wayback Machine): \"the universe of firms listed on the NYSE, Amex, and NASDAQ markets ... on the Compustat and the CRSP tapes. We exclude closed-end funds, investment trusts, and foreign companies\"",
+        "name": "ocf_me",
+        "original_sample": "1973-1997",
+        "publication_year": 2004,
+        "uses_developed_ex_us": "no"
+      },
+      "supported": true,
+      "windows": [
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.002971625271217374,
+          "months": 236,
+          "nw_lag": 4,
+          "nw_t": 1.1236953243224668,
+          "passes": true,
+          "region": "usa",
+          "start": "2005-01"
+        },
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.003320560924466166,
+          "months": 464,
+          "nw_lag": 5,
+          "nw_t": 2.5185431579490407,
+          "passes": true,
+          "region": "developed",
+          "start": "1986-01"
+        }
+      ]
+    },
+    {
+      "member": {
+        "citation": "Novy-Marx (2013)",
+        "family": "GP/A",
+        "markets_evidence": "https://mysimon.rochester.edu/novy-marx/research/OSoV.pdf (June 2012 draft) \u00a72.4 \"International evidence\", Table 5: \"stocks from developed markets outside the US ... The data come from Compustat Global. ... covers July 1990 to October 2009\"",
+        "name": "gp_at",
+        "original_sample": "1963-2010",
+        "publication_year": 2013,
+        "uses_developed_ex_us": "yes"
+      },
+      "supported": true,
+      "windows": [
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.004220896351814168,
+          "months": 128,
+          "nw_lag": 4,
+          "nw_t": 1.6930279110423976,
+          "passes": true,
+          "region": "usa",
+          "start": "2014-01"
+        },
+        {
+          "counting": false,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.0013235803908174673,
+          "months": 464,
+          "nw_lag": 5,
+          "nw_t": 1.49080614641249,
+          "passes": true,
+          "region": "developed",
+          "start": "1986-01"
+        }
+      ]
+    },
+    {
+      "member": {
+        "citation": "Cooper, Gulen, and Schill (2008)",
+        "family": "investment",
+        "markets_evidence": "https://web.archive.org/web/20220209144359id_/http://www.krannert.purdue.edu/faculty/hgulen/asset_growth.pdf \u00a7I: \"all NYSE, Amex, and NASDAQ nonfinancial firms ... listed on the CRSP monthly stock return files and the Compustat annual industrial files\"; the abstract says \"U.S. stock returns\"",
+        "name": "at_gr1",
+        "original_sample": "1968-2003",
+        "publication_year": 2008,
+        "uses_developed_ex_us": "no"
+      },
+      "supported": true,
+      "windows": [
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.001564969141850769,
+          "months": 188,
+          "nw_lag": 4,
+          "nw_t": 0.8125142569600647,
+          "passes": true,
+          "region": "usa",
+          "start": "2009-01"
+        },
+        {
+          "counting": true,
+          "end": "2024-08",
+          "failure": null,
+          "mean": 0.0007468071660480352,
+          "months": 464,
+          "nw_lag": 5,
+          "nw_t": 0.7005134462901389,
+          "passes": true,
+          "region": "developed",
+          "start": "1986-01"
+        }
+      ]
+    }
+  ],
+  "min_months": 24,
+  "schema": "3740-condition1-v1",
+  "window_end": "2024-08-31"
+}

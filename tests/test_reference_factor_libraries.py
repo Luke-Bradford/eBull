@@ -134,6 +134,33 @@ def test_jkp_parser_refuses_the_wrong_slice_or_shape(row: str, match: str) -> No
         parse_jkp_monthly_zip(_zip(_JKP_HEADER + row), location="usa", weighting="vw_cap")
 
 
+_JKP_REGIONAL_HEADER = "location,name,freq,weighting,direction,n_countries,date,ret\n"
+
+
+def test_jkp_developed_spec_reads_the_regional_layout_by_column_name() -> None:
+    spec = REFERENCE_DATASETS["jkp_developed_monthly_vw_cap"]
+    parsed = spec.parser(
+        _zip(
+            _JKP_REGIONAL_HEADER + "developed,be_me,monthly,vw_cap,1,22,2020-12-31,-0.016\n"
+            "developed,gp_at,monthly,vw_cap,1,4,1986-01-31,NA\n"
+        )
+    )
+    assert spec.parser_version == "jkp-regional-monthly-csv-zip-v1"
+    assert parsed.missing_count == 1
+    assert [(o.series_key, o.observation_date, o.value) for o in parsed.observations] == [
+        ("be_me", date(2020, 12, 31), Decimal("-0.016")),
+    ]
+    # A country file under the regional spec, or a regional file under the country spec, is a format change.
+    with pytest.raises(ReferenceDataSourceError, match="header"):
+        spec.parser(_zip(_JKP_HEADER + "usa,be_me,monthly,vw_cap,1,505,8,1926-02-28,0.012\n"))
+    with pytest.raises(ReferenceDataSourceError, match="header"):
+        REFERENCE_DATASETS["jkp_usa_monthly_vw_cap"].parser(
+            _zip(_JKP_REGIONAL_HEADER + "developed,be_me,monthly,vw_cap,1,22,2020-12-31,-0.016\n")
+        )
+    with pytest.raises(ReferenceDataSourceError, match="expected developed/monthly/vw_cap"):
+        spec.parser(_zip(_JKP_REGIONAL_HEADER + "world_ex_us,be_me,monthly,vw_cap,1,51,2020-12-31,-0.025\n"))
+
+
 def test_aqr_tsmom_sheet_with_a_blank_date_header_cell() -> None:
     header = (None, "TSMOM", "TSMOM^CM", "TSMOM^EQ", "TSMOM^FI", "TSMOM^FX")
     payload = _xlsx(
