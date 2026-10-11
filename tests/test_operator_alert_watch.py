@@ -273,7 +273,7 @@ def test_an_allowed_chokepoint_pages_with_the_auto_trading_default() -> None:
     [
         ("kill_switch_row_missing", None, "kill_switch row is missing", "leave the switch as it is now."),
         ("sandbox_committed", True, "switch read on at verify", "leave the switch as it is now."),
-        ("exception", None, "could not complete (exception: RuntimeError: boom)", "none needed for trading."),
+        ("exception", None, "could not complete (RuntimeError: boom)", "none needed for trading."),
     ],
 )
 def test_each_run_failure_pages_with_its_own_safe_default(
@@ -292,6 +292,14 @@ def test_each_run_failure_pages_with_its_own_safe_default(
     assert says in notice.message
     assert "(dirty tree)" in notice.message
     assert notice.message.endswith(f"Safe default: {default}")
+
+
+def test_a_failed_verdict_with_no_recognised_cause_gets_the_strict_default() -> None:
+    """Unreachable today (the verdict rule and the schema CHECKs bound both causes), but a failure
+    the watch cannot explain must never read as "no action needed"."""
+    event = _drill(entry_verdict="failed", chokepoints=(DrillChokepoint("C1", "kill_refused"),))
+    [notice] = plan(WatchState(), Observation(drills=[event]), now=_DRILL_NOW)
+    assert notice.message.endswith("Safe default: set enable_auto_trading = false until a re-run passes.")
 
 
 def test_a_corrupt_runtime_config_pages_but_auto_trading_off_does_not() -> None:

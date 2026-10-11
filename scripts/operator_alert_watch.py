@@ -315,19 +315,20 @@ def _entry_failed_notice(e: DrillEvent, key: str) -> Notice:
             f"A probe published the drill's activation; the switch read {state} at verify. "
             "Fix the probe before the next drill."
         )
-    elif e.run_failure is not None:
+    elif e.run_failure == "exception":
         parts.append(
-            f"The drill could not complete ({e.run_failure}: {e.failure_detail}), so no chokepoint is proven "
-            "this month. Re-run it with scripts.run_kill_switch_drill from ~/Dev/eBull after reading that."
+            f"The drill could not complete ({e.failure_detail}), so no chokepoint is proven this month. "
+            "Re-run it with scripts.run_kill_switch_drill from ~/Dev/eBull after reading that."
         )
     # The drill never changes trading state itself: a self-test that halts trading on its own bug
     # would be an unexplained halt. The strictest applicable default is named instead.
-    if broken:
-        parts.append("Safe default: set enable_auto_trading = false until a re-run passes.")
-    elif e.run_failure in ("kill_switch_row_missing", "sandbox_committed"):
+    if e.run_failure in ("kill_switch_row_missing", "sandbox_committed") and not broken:
         parts.append("Safe default: leave the switch as it is now.")
-    else:
+    elif e.run_failure == "exception" and not broken:
         parts.append("Safe default: none needed for trading.")
+    else:
+        # A broken chokepoint, or a failure this watch does not recognise: the kill path is in doubt.
+        parts.append("Safe default: set enable_auto_trading = false until a re-run passes.")
     return Notice(
         title="eBull kill drill FAILED",
         message=" ".join(parts),
