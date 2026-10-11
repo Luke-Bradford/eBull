@@ -192,6 +192,9 @@ def read_series(payload: bytes, location: str) -> dict[str, list[tuple[date, str
         raise ValueError(f"the {location} file's header {reader.fieldnames!r} lacks a column this report reads")
     series: dict[str, list[tuple[date, str]]] = {}
     for row in reader:
+        # DictReader fills a short row with None and files a long row's extras under the key None.
+        if None in row or None in row.values():
+            raise ValueError(f"ragged row at line {reader.line_num} of the {location} file")
         if (row["location"], row["freq"], row["weighting"]) != (location, "monthly", "vw_cap"):
             raise ValueError(f"row for {row['location']}/{row['freq']}/{row['weighting']} in the {location} file")
         series.setdefault(row["name"], []).append((date.fromisoformat(row["date"]), row["ret"].strip()))

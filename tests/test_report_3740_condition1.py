@@ -97,5 +97,11 @@ def test_read_series_keeps_na_rows_and_refuses_a_header_without_a_read_column() 
     assert rows == {"be_me": [(date(1986, 1, 31), "NA")]}
     with pytest.raises(ValueError, match="lacks a column"):
         read_series(_zip("location,name,freq,weighting,direction,n_countries,date,value\n"), "developed")
+    for ragged in (
+        "developed,be_me,monthly,vw_cap,1,4,1986-01-31\n",
+        "developed,be_me,monthly,vw_cap,1,4,1986-01-31,0.1,x\n",
+    ):
+        with pytest.raises(ValueError, match="ragged row at line 2"):
+            read_series(_zip(header + ragged), "developed")
     with pytest.raises(ValueError, match="in the developed file"):
         read_series(_zip(header + "world,be_me,monthly,vw_cap,1,52,1986-01-31,0.1\n"), "developed")
