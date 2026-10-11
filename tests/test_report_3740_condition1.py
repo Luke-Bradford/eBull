@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
 from datetime import date
 from typing import Literal
 
-from scripts.report_3740_condition1 import Member, calendar_months, evaluate, evaluate_window
+import pytest
+
+from scripts.report_3740_condition1 import Member, calendar_months, evaluate, evaluate_window, read_series
 
 
 def _rows(start: tuple[int, int], end: tuple[int, int], value: str = "0.01") -> list[tuple[date, str]]:
@@ -78,3 +82,20 @@ def test_a_member_absent_from_a_counting_file_is_unsupported() -> None:
     result = evaluate({"usa": {}, "developed": {}}, [_member("a", "value")])
     assert result["members"][0]["supported"] is False
     assert result["families"] == {"value": False}
+
+
+def _zip(text: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("f.csv", text)
+    return buffer.getvalue()
+
+
+def test_read_series_keeps_na_rows_and_refuses_a_header_without_a_read_column() -> None:
+    header = "location,name,freq,weighting,direction,n_countries,date,ret\n"
+    rows = read_series(_zip(header + "developed,be_me,monthly,vw_cap,1,4,1986-01-31,NA\n"), "developed")
+    assert rows == {"be_me": [(date(1986, 1, 31), "NA")]}
+    with pytest.raises(ValueError, match="lacks a column"):
+        read_series(_zip("location,name,freq,weighting,direction,n_countries,date,value\n"), "developed")
+    with pytest.raises(ValueError, match="in the developed file"):
+        read_series(_zip(header + "world,be_me,monthly,vw_cap,1,52,1986-01-31,0.1\n"), "developed")

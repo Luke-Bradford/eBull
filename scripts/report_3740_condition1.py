@@ -187,8 +187,11 @@ def read_series(payload: bytes, location: str) -> dict[str, list[tuple[date, str
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         (name,) = [member for member in archive.namelist() if not member.endswith("/")]
         text = archive.read(name).decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    if not {"location", "name", "freq", "weighting", "date", "ret"} <= set(reader.fieldnames or ()):
+        raise ValueError(f"the {location} file's header {reader.fieldnames!r} lacks a column this report reads")
     series: dict[str, list[tuple[date, str]]] = {}
-    for row in csv.DictReader(io.StringIO(text)):
+    for row in reader:
         if (row["location"], row["freq"], row["weighting"]) != (location, "monthly", "vw_cap"):
             raise ValueError(f"row for {row['location']}/{row['freq']}/{row['weighting']} in the {location} file")
         series.setdefault(row["name"], []).append((date.fromisoformat(row["date"]), row["ret"].strip()))
@@ -242,6 +245,8 @@ def evaluate_member(
     member: Member, us_rows: Sequence[tuple[date, str]], developed_rows: Sequence[tuple[date, str]]
 ) -> dict[str, Any]:
     us = evaluate_window(us_rows, region="usa", start=(member.publication_year + 1, 1), counting=True)
+    # The first PUBLISHED month, NA rows included: a published NA month is inside the window and fails the
+    # "exactly one finite value for every calendar month" validity rule rather than moving the start.
     first = min((month_key(day) for day, _ in developed_rows), default=(WINDOW_END.year + 1, 1))
     developed = evaluate_window(
         developed_rows, region="developed", start=first, counting=member.uses_developed_ex_us == "no"
@@ -282,7 +287,10 @@ def load_pinned(conn: psycopg.Connection[Any], pinned: Pinned) -> bytes:
 
 
 def check_signs(payloads: Mapping[str, bytes], members: Sequence[Member]) -> None:
-    """Each series must carry Table 9's sign for its member: JKP's ``ret`` is already signed by ``direction``."""
+    """Each series must carry Table 9's sign for its member: JKP's ``ret`` is already signed by ``direction``.
+
+    ``jkp_directions`` refuses a factor whose ``direction`` is not one constant value across its rows.
+    """
     signs = load_table9_signs()
     for location, payload in payloads.items():
         directions = jkp_directions(payload)
