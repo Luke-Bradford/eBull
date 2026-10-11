@@ -81,6 +81,7 @@ from app.services.investor_cohort_recorder import record_investor_snapshot
 from app.services.job_heartbeat import REPORTING_WRITE_TIMEOUT_MS
 from app.services.job_progress import JobProgress, degradation_reason
 from app.services.job_telemetry import JobTelemetryAggregator, flush_to_job_run
+from app.services.kill_switch_drill_schedule import DRILL_DAY, DRILL_HOUR, DRILL_MINUTE, occurrence_at_or_before
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
 from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.market_data import refresh_market_data, refresh_quotes, refresh_signal_quotes
@@ -739,6 +740,8 @@ JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
 JOB_FINRA_REGSHO_DAILY_REFRESH = "finra_regsho_daily_refresh"
 # #3543 — daily engine-book risk snapshot vs mandate (measurement only).
 JOB_ENGINE_BOOK_RISK_SNAPSHOT = "engine_book_risk_snapshot"
+# #3614 slice 3 — monthly recorded kill-switch drill (sandbox: never commits a kill-switch change).
+JOB_KILL_SWITCH_DRILL = "kill_switch_drill"
 
 # #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional).
 # Closes the post-bootstrap freshness drift: bulk archives are
@@ -2569,6 +2572,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=9, minute=0),
         catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_KILL_SWITCH_DRILL,
+        display_name="Kill-switch drill (#3614)",
+        source="risk_metrics",
+        description=(
+            "Monthly on the 3rd at 06:12 UTC — activates the kill switch inside a transaction it always "
+            "rolls back, checks that every broker-entry chokepoint refuses, and records the verdict, the "
+            "book's SL/TP state and an estimated time-to-flat. With the switch already on it only observes. "
+            "Never commits a kill-switch change; calls no broker method. A failed verdict is paged by the "
+            "operator alert watch, not by this job; the run fails only when nothing was recorded."
+        ),
+        cadence=Cadence.monthly(day=DRILL_DAY, hour=DRILL_HOUR, minute=DRILL_MINUTE),
+        catch_up_on_boot=True,
     ),
     ScheduledJob(
         name=JOB_FINRA_REGSHO_DAILY_REFRESH,
@@ -11400,6 +11417,33 @@ def engine_book_risk_snapshot() -> None:
         with connect_job() as conn:
             snap = run_engine_book_risk_snapshot(conn, datetime.now(UTC))
         tracker.row_count = 0 if snap is None else 1
+
+
+def kill_switch_drill() -> None:
+    """``_INVOKERS['kill_switch_drill']`` — #3614 slice 3, trigger ``scheduled``.
+
+    Records the occurrence it serves as ``scheduled_for``: the latest slot at or before now, so a
+    catch-up fire names the slot it is catching up. The overdue notice judges a slot by when a drill
+    STARTED, never by this field, so a late fire does not satisfy an earlier slot.
+    """
+    from app.services.kill_switch_drill import DRILL_ACTOR, run_kill_switch_drill
+
+    with _tracked_job(JOB_KILL_SWITCH_DRILL) as tracker:
+        # Two fresh connections per run (lock + evaluation), each closed by the drill itself.
+        run = run_kill_switch_drill(
+            lambda: connect_job(connect_timeout=5),
+            trigger="scheduled",
+            actor=DRILL_ACTOR,
+            scheduled_for=occurrence_at_or_before(datetime.now(UTC)),
+            # 0 when ``record_job_start`` failed: no ``job_runs`` row exists to reference.
+            job_run_id=tracker.run_id or None,
+        )
+        if run is None:
+            raise RuntimeError("another kill drill holds the drill lock; nothing recorded")
+        tracker.row_count = 1
+        tracker.note = (
+            f"event={run.event_id} mode={run.mode} entry_verdict={run.entry_verdict} run_failure={run.run_failure}"
+        )
 
 
 def finra_regsho_daily_refresh() -> None:
