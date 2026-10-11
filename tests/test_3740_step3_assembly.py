@@ -58,6 +58,7 @@ def test_members_are_signed_by_table9_and_none_is_no_input() -> None:
         ([_row(1, gp_at="0.2")], SIGNS_CSV, "not a number"),
         ([_row(1, gp_at=True)], SIGNS_CSV, "not a number"),
         ([_row(1)], b"name,sign\ngp_at,1\n", "no sign"),
+        ([_row(1) | {"characteristics": {"gp_at": {"value": 0.1}}}], SIGNS_CSV, "no at_gr1 characteristic"),
     ],
 )
 def test_member_pass_refuses(rows: list[dict[str, Any]], signs: bytes, match: str) -> None:
@@ -118,6 +119,14 @@ def test_extra_members_feed_the_composite() -> None:
     assert no_value <= set(three.scores.composite)
     assert "gp_at" not in value_only.scores.by_operation
     assert {"gp_at", "at_gr1", "GP/A", "investment"} <= set(three.scores.by_operation)
+
+
+def test_score_refuses_a_universe_name_without_a_member_row() -> None:
+    month = _month()
+    members = _members(month)
+    del members[UNIVERSE_SIZE]
+    with pytest.raises(ReportError, match=f"no member row: \\[{UNIVERSE_SIZE}\\]"):
+        score(month, members, ALL)
 
 
 def test_one_of_three_families_is_no_composite() -> None:

@@ -74,7 +74,10 @@ def read_members(verified: VerifiedArtefact) -> dict[date, dict[int, dict[str, f
             raise ReportError(f"admitted (M, name_key) {(row['M'], name)} is repeated")
         values: dict[str, float] = {}
         for c in EXTRA_MEMBERS:
-            raw = row["characteristics"][c]["value"]
+            try:
+                raw = row["characteristics"][c]["value"]
+            except (KeyError, TypeError) as exc:
+                raise ReportError(f"row {(row['M'], name)}: no {c} characteristic value") from exc
             if raw is None:
                 continue
             if isinstance(raw, bool) or not isinstance(raw, int | float):
@@ -100,6 +103,9 @@ def check_members(months: Sequence[PanelMonth], members: Members) -> None:
 def score(month: PanelMonth, members: Mapping[int, Mapping[str, float]], chosen: Sequence[str]) -> ScoredMonth:
     """§"The book" steps 1, 2 and 4: step 2's universe, the chosen families' strict-majority composite, its bands."""
     names = book_universe({name: panel.me for name, panel in month.admitted.items()})
+    unread = [name for name in names if name not in members]
+    if unread:
+        raise ReportError(f"{month.formation}: {len(unread)} universe names have no member row: {unread[:5]}")
     industry = {name: month.admitted[name].industry for name in names}
     signed: dict[str, dict[int, float]] = {c: {} for family in chosen for c in FAMILIES[family]}
     for name in names:
