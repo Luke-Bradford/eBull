@@ -133,9 +133,10 @@ def _cap_scale(u: Sequence[float], cap: float) -> float:
         # The crossing if no further name saturates first. The unsaturated sum is re-summed, never decremented: a
         # dominant name subtracted from the total would erase the small names' precision.
         s = (cap - NAME_CAP * k) / math.fsum(u[k:])
-        if s <= NAME_CAP / ui:
+        # cap < NAME_CAP · n_g crosses on the last piece at the latest; take it there even if rounding says otherwise.
+        if s <= NAME_CAP / ui or k == len(u) - 1:
             return s
-    raise AssertionError("unreachable: cap < NAME_CAP · n_g crosses before every name saturates")
+    raise AssertionError("unreachable: the loop returns on its last piece")
 
 
 def cap_solution(me: Mapping[int, float], group: Mapping[int, str], caps: Mapping[str, float]) -> CapSolution:

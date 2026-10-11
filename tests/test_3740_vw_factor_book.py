@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable
 
 import pytest
 
@@ -157,7 +158,7 @@ def test_an_invalid_target_me_is_refused(bad: float) -> None:
         cap_solution({1: 1.0, 2: bad}, {1: "A", 2: "A"}, {"A": 2.0})
 
 
-def _bisect(lo: float, hi: float, fn, target: float) -> float:
+def _bisect(lo: float, hi: float, fn: Callable[[float], float], target: float) -> float:
     """Independent oracle: the smallest x in [lo, hi] with fn(x) >= target, fn non-decreasing."""
     for _ in range(200):
         mid = (lo + hi) / 2
