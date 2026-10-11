@@ -30,7 +30,8 @@ nothing is not one. Comparisons are persisted as per-check results the app can r
 | Beta | OLS on SPY, date-intersected | `risk_metrics.ols_beta`; SPY via `_resolve_benchmark_instrument_ids` (primary-listing tiebreak) |
 | Concentration | largest / top-5 instrument share of gross; HHI = Σ sᵢ² with sᵢ in percent (0–10,000) | US DoJ/FTC Horizontal Merger Guidelines 2010 §5.3 (percent-share convention) |
 
-**Fixed by construction** (no published rule; frozen in `ENGINE_BOOK_RISK_POLICY = "engine-book-risk-v1"`):
+**Fixed by construction** (no published rule; frozen in `ENGINE_BOOK_RISK_POLICY`, `"engine-book-risk-v1"` at slice 1,
+`"engine-book-risk-v2"` since #3612 added the 2008 scenario):
 
 - **Window:** the 252 most recent session returns to the mark session (252 = `risk_metrics.TRADING_DAYS`, the
   annualisation constant, so window and annualisation agree). Minimum 60 aligned returns
@@ -41,15 +42,16 @@ nothing is not one. Comparisons are persisted as per-check results the app can r
   conditional σ annualised by √252 — a scaled one-day forecast, not a one-year forecast.
 - **Stress:** a linear single-factor approximation, not a historical book loss: per instrument
   max(−1, βᵢ · R_SPY), weighted by wᵢ, summed — signed (a loss is negative). Instruments whose βᵢ is undefined
-  use βᵢ = 1 and are counted, with their exposure, as `beta_defaulted`. Scenarios: SPY close 2020-02-19 → 2020-03-23
-  and 2022-01-03 → 2022-10-12 — the S&P 500's closing peak and trough of each episode. **Price** return (close),
+  use βᵢ = 1 and are counted, with their exposure, as `beta_defaulted`. Scenarios: SPY close 2007-10-09 → 2009-03-09
+  (v2, #3612), 2020-02-19 → 2020-03-23 and 2022-01-03 → 2022-10-12 — the S&P 500's closing peak and trough of each episode. **Price** return (close),
   matching the price-return betas it multiplies:
-  - `STRESS_2020 = 222.95 / 338.34 − 1 = −0.34104747` (8 dp),
+  - `STRESS_2008 = 68.110001 / 156.479996 − 1 = −0.56473669` (8 dp),
+  - `STRESS_2020 = 222.95 / 338.34 − 1 = −0.34104747`,
   - `STRESS_2022 = 356.56 / 477.71 − 1 = −0.25360574`.
   Frozen constants; reproduce with
-  `SELECT bar_date, close FROM research_price_daily WHERE series_id = 7694 AND bar_date IN ('2020-02-19','2020-03-23','2022-01-03','2022-10-12')`
-  (series 7694 = `icyDenev/Intrader` SPY). The four dates are also the max/min `close` of series 7694 over
-  2020-01-01..2020-06-30 and 2021-12-01..2022-12-31 — checked over every bar in those ranges, not a sample.
+  `SELECT bar_date, close FROM research_price_daily WHERE series_id = 7694 AND bar_date IN ('2007-10-09','2009-03-09','2020-02-19','2020-03-23','2022-01-03','2022-10-12')`
+  (series 7694 = `icyDenev/Intrader` SPY). The six dates are also the max/min `close` of series 7694 over
+  2007-01-01..2009-12-31, 2020-01-01..2020-06-30 and 2021-12-01..2022-12-31 — checked over every bar in those ranges, not a sample.
 
 ## Design
 
@@ -79,7 +81,7 @@ nothing is not one. Comparisons are persisted as per-check results the app can r
    NULL (sql/311's CHECK admits a NULL limit on a configured row). The set:
    - `forecast_vol_vs_target` — flagged when EWMA vol > `target_volatility_pct`. A fact under any reading of
      "target"; it does not define the target's semantics, which stay open (P4).
-   - `stress_2020_vs_max_drawdown`, `stress_2022_vs_max_drawdown` — flagged when the signed stress return
+   - `stress_2008_vs_max_drawdown` (v2), `stress_2020_vs_max_drawdown`, `stress_2022_vs_max_drawdown` — flagged when the signed stress return
      < −`max_portfolio_drawdown_pct`. Reads "this scenario alone, from today's book, would exceed the drawdown
      limit"; it is not a running-peak drawdown.
    - `positions_vs_max_concurrent` — open engine trades (the executor's lifecycle unit) vs the effective
@@ -93,7 +95,8 @@ nothing is not one. Comparisons are persisted as per-check results the app can r
    `gross_usd`, `position_count`, `instrument_count`, `open_trade_count`, `cost_marked_count`, `stale_count`,
    `largest_share_pct`, `top5_share_pct` (fewer than five → all), `hhi`, `hist_vol_pct`, `ewma_vol_pct`, `beta`,
    `vol_n_obs`, `beta_n_obs`, `sample_first`, `sample_last`, `history_status`, `beta_defaulted_count`,
-   `beta_defaulted_weight_pct`, `stress_2020_pct`, `stress_2022_pct`, `checks JSONB`, `positions JSONB` (per
+   `beta_defaulted_weight_pct`, `stress_2020_pct`, `stress_2022_pct`, `stress_2008_pct` (sql/481; NULL only on v1
+   rows), `checks JSONB`, `positions JSONB` (per
    position: trade id, position id, instrument, units, mark, mark date or `cost`, MV, weight of capital, βᵢ with
    its n_obs or `defaulted`). Every NUMERIC finite (`<> 'NaN'`); percentages in percent units, 8 dp; comparisons
    made on the unrounded values. A refused run writes no row; its reason is the job's recorded error.

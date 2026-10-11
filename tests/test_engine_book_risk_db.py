@@ -60,6 +60,24 @@ def test_an_empty_book_writes_one_append_only_row(ebull_test_conn: psycopg.Conne
     ).fetchone()
     assert row == (Decimal("10000.000000"), Decimal("0E-6"), "empty_book", "false")
 
+    # sql/481: a v1 row predates the 2008 scenario and may omit it; any later policy must state it.
+    copy_without_2008 = """
+        INSERT INTO engine_book_risk_snapshots (
+            session_date, policy_version, measured_at, pool_event_id, capital_usd, gross_usd, position_count,
+            instrument_count, open_trade_count, cost_marked_count, stale_count, vol_n_obs, beta_n_obs,
+            hist_vol_pct, ewma_vol_pct, beta, history_status, beta_defaulted_count, beta_defaulted_weight_pct,
+            stress_2020_pct, stress_2022_pct, checks, positions)
+        SELECT session_date, %s, measured_at, pool_event_id, capital_usd, gross_usd, position_count,
+               instrument_count, open_trade_count, cost_marked_count, stale_count, vol_n_obs, beta_n_obs,
+               hist_vol_pct, ewma_vol_pct, beta, history_status, beta_defaulted_count, beta_defaulted_weight_pct,
+               stress_2020_pct, stress_2022_pct, checks, positions
+        FROM engine_book_risk_snapshots WHERE policy_version = %s
+    """
+    conn.execute(copy_without_2008, ("engine-book-risk-v1", ENGINE_BOOK_RISK_POLICY))
+    with pytest.raises(psycopg.errors.CheckViolation, match="stress_2008_shape"), conn.transaction():
+        conn.execute(copy_without_2008, ("engine-book-risk-v9", ENGINE_BOOK_RISK_POLICY))
+    conn.commit()
+
     # A second run for the session is a no-op; the row cannot be rewritten or removed.
     assert run_engine_book_risk_snapshot(conn, _NOW) is None
     for statement in (
@@ -95,7 +113,8 @@ def test_the_read_model_shows_the_running_policy_newest_first(ebull_test_conn: p
                s.position_count, s.instrument_count, s.open_trade_count, s.cost_marked_count, s.stale_count,
                s.largest_share_pct, s.top5_share_pct, s.hhi, s.hist_vol_pct, s.ewma_vol_pct, s.beta, s.vol_n_obs,
                s.beta_n_obs, s.sample_first, s.sample_last, s.history_status, s.beta_defaulted_count,
-               s.beta_defaulted_weight_pct, s.stress_2020_pct, s.stress_2022_pct, %s::jsonb, %s::jsonb
+               s.beta_defaulted_weight_pct, s.stress_2020_pct, s.stress_2022_pct, %s::jsonb, %s::jsonb,
+               s.stress_2008_pct
         FROM engine_book_risk_snapshots s WHERE s.policy_version = %s
     """
     # A newer row under another policy version answers a different question: never shown.

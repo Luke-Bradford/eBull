@@ -39,12 +39,14 @@ const LATEST: EngineBookRiskLatest = {
   history_status: "ok",
   beta_defaulted_count: 0,
   beta_defaulted_weight_pct: "0E-8",
+  stress_2008_pct: "-21.81803562",
   stress_2020_pct: "-13.17638420",
   stress_2022_pct: "-9.79806906",
   checks: {
     stale_marks: { status: "evaluated", value: "0", limit: "0", flagged: false },
     forecast_vol_vs_target: { status: "evaluated", value: "4.04665230", limit: "18.0000", flagged: false },
     positions_vs_max_concurrent: { status: "evaluated", value: "4", limit: "30", flagged: false },
+    stress_2008_vs_max_drawdown: { status: "evaluated", value: "-21.81803562", limit: "25.0000", flagged: false },
     stress_2020_vs_max_drawdown: { status: "evaluated", value: "-13.17638420", limit: "25.0000", flagged: false },
     stress_2022_vs_max_drawdown: { status: "evaluated", value: "-9.79806906", limit: "25.0000", flagged: false },
   },
@@ -90,6 +92,8 @@ describe("EngineBookRiskPanel", () => {
     const checks = within(screen.getByRole("list", { name: "Mandate checks" }));
     const stress = checks.getByText("2020 crash stress vs max drawdown").closest("li")!;
     expect(stress).toHaveTextContent("-13.18% vs -25.00%");
+    const crisis = checks.getByText("2008 crisis stress vs max drawdown").closest("li")!;
+    expect(crisis).toHaveTextContent("-21.82% vs -25.00%");
     expect(checks.getByText("Forecast volatility vs target").closest("li")!).toHaveTextContent("4.05% vs 18.00%");
     expect(screen.getByText(/US\$16,078\.03 of US\$40,000\.00 \(40\.20%\)/)).toBeInTheDocument();
   });

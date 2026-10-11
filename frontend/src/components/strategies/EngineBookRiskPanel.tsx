@@ -12,6 +12,7 @@ type CheckKind = "vol" | "stress" | "count";
 /** Stored check keys in reading order (`app/services/engine_book_risk.py::compute_snapshot`). */
 const CHECKS: { key: string; label: string; kind: CheckKind }[] = [
   { key: "forecast_vol_vs_target", label: "Forecast volatility vs target", kind: "vol" },
+  { key: "stress_2008_vs_max_drawdown", label: "2008 crisis stress vs max drawdown", kind: "stress" },
   { key: "stress_2020_vs_max_drawdown", label: "2020 crash stress vs max drawdown", kind: "stress" },
   { key: "stress_2022_vs_max_drawdown", label: "2022 bear stress vs max drawdown", kind: "stress" },
   { key: "positions_vs_max_concurrent", label: "Open trades vs cap", kind: "count" },
@@ -102,7 +103,7 @@ function Figures({ snap }: { snap: EngineBookRiskLatest }) {
       </dd>
       <dt className="text-slate-500">Stress (approx.)</dt>
       <dd>
-        2020 crash {pctPoints(snap.stress_2020_pct)} · 2022 bear {pctPoints(snap.stress_2022_pct)}
+        2008 crisis {pctPoints(snap.stress_2008_pct)} · 2020 crash {pctPoints(snap.stress_2020_pct)} · 2022 bear {pctPoints(snap.stress_2022_pct)}
         {snap.beta_defaulted_count > 0
           ? ` · ${snap.beta_defaulted_count} instrument(s), ${pctPointsUnsigned(snap.beta_defaulted_weight_pct)} of capital, assumed beta 1`
           : ""}
@@ -142,8 +143,8 @@ function Recent({ view }: { view: EngineBookRiskResponse }) {
           <li key={r.session_date} className="flex flex-wrap items-center gap-2 py-1 text-sm tabular-nums">
             <span className="w-28">{formatDate(r.session_date)}</span>
             <span className="text-slate-700 dark:text-slate-200">
-              {money(r.gross_usd)} · vol {r.ewma_vol_pct === null ? "—" : pctPointsUnsigned(r.ewma_vol_pct)} · 2020
-              stress {pctPoints(r.stress_2020_pct)}
+              {money(r.gross_usd)} · vol {r.ewma_vol_pct === null ? "—" : pctPointsUnsigned(r.ewma_vol_pct)} · 2008
+              stress {pctPoints(r.stress_2008_pct)}
             </span>
             {r.flagged.length > 0 ? <Badge tone="warn">{r.flagged.length} over</Badge> : null}
           </li>

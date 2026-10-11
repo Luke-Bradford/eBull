@@ -40,11 +40,13 @@ from app.services.strategy_capital_sandbox import sandbox_bound
 from app.services.strategy_control_plane import EFFECTIVE_MAX_CONCURRENT_SQL
 from app.services.strategy_engine_capital import load_engine_capital_authority
 
-ENGINE_BOOK_RISK_POLICY: Final = "engine-book-risk-v1"
+# v2 (#3612) added STRESS_2008; v1 rows carry no 2008 figure (sql/481).
+ENGINE_BOOK_RISK_POLICY: Final = "engine-book-risk-v2"
 WINDOW_RETURNS: Final = TRADING_DAYS
 MIN_OBS: Final = MIN_RETURNS_VOL_BETA
 EWMA_LAMBDA: Final = Decimal("0.94")
 # SPY close, peak -> trough (spec "Source rule"; reproduce from research series 7694).
+STRESS_2008: Final = Decimal("-0.56473669")  # 2007-10-09 -> 2009-03-09
 STRESS_2020: Final = Decimal("-0.34104747")  # 2020-02-19 -> 2020-03-23
 STRESS_2022: Final = Decimal("-0.25360574")  # 2022-01-03 -> 2022-10-12
 # Calendar-day bound on the WINDOW_RETURNS + 1 session window (asserted per run).
@@ -126,6 +128,7 @@ class Snapshot:
     history_status: HistoryStatus
     beta_defaulted_count: int
     beta_defaulted_weight_pct: Decimal
+    stress_2008_pct: Decimal
     stress_2020_pct: Decimal
     stress_2022_pct: Decimal
     checks: dict[str, dict[str, Any]]
@@ -265,6 +268,7 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
             status = "ok" if beta is not None else "degenerate"
 
     shares = sorted((mv / gross * _HUNDRED for mv in mv_by_instrument.values()), reverse=True) if gross > 0 else []
+    stress_2008 = stress(STRESS_2008)
     stress_2020 = stress(STRESS_2020)
     stress_2022 = stress(STRESS_2022)
     ewma_pct = None if ewma is None else ewma * _HUNDRED
@@ -276,6 +280,7 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
         "forecast_vol_vs_target": _check(
             ewma_pct, limit_vol, ewma_pct is not None and limit_vol is not None and ewma_pct > limit_vol
         ),
+        "stress_2008_vs_max_drawdown": _check(stress_2008, limit_dd, limit_dd is not None and stress_2008 < -limit_dd),
         "stress_2020_vs_max_drawdown": _check(stress_2020, limit_dd, limit_dd is not None and stress_2020 < -limit_dd),
         "stress_2022_vs_max_drawdown": _check(stress_2022, limit_dd, limit_dd is not None and stress_2022 < -limit_dd),
         "positions_vs_max_concurrent": _check(
@@ -309,6 +314,7 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
         history_status=status,
         beta_defaulted_count=len(defaulted),
         beta_defaulted_weight_pct=_q(sum((weights[i] for i in defaulted), _ZERO) * _HUNDRED),
+        stress_2008_pct=_q(stress_2008),
         stress_2020_pct=_q(stress_2020),
         stress_2022_pct=_q(stress_2022),
         checks=checks,
@@ -451,10 +457,10 @@ def write_snapshot(conn: psycopg.Connection[Any], snap: Snapshot) -> bool:
             position_count, instrument_count, open_trade_count, cost_marked_count, stale_count,
             largest_share_pct, top5_share_pct, hhi, hist_vol_pct, ewma_vol_pct, beta,
             vol_n_obs, beta_n_obs, sample_first, sample_last, history_status,
-            beta_defaulted_count, beta_defaulted_weight_pct, stress_2020_pct, stress_2022_pct,
+            beta_defaulted_count, beta_defaulted_weight_pct, stress_2008_pct, stress_2020_pct, stress_2022_pct,
             checks, positions
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                  %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                  %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
         ON CONFLICT (session_date, policy_version) DO NOTHING
         RETURNING 1
         """,
@@ -483,6 +489,7 @@ def write_snapshot(conn: psycopg.Connection[Any], snap: Snapshot) -> bool:
             snap.history_status,
             snap.beta_defaulted_count,
             snap.beta_defaulted_weight_pct,
+            snap.stress_2008_pct,
             snap.stress_2020_pct,
             snap.stress_2022_pct,
             json.dumps(snap.checks),

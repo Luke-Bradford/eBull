@@ -3955,6 +3955,7 @@ export interface EngineBookRiskLatest {
   history_status: "ok" | "insufficient_history" | "degenerate" | "empty_book";
   beta_defaulted_count: number;
   beta_defaulted_weight_pct: string;
+  stress_2008_pct: string;
   stress_2020_pct: string;
   stress_2022_pct: string;
   checks: Record<string, EngineBookRiskCheck>;
@@ -3969,6 +3970,7 @@ export interface EngineBookRiskRecent {
   hist_vol_pct: string | null;
   ewma_vol_pct: string | null;
   beta: string | null;
+  stress_2008_pct: string;
   stress_2020_pct: string;
   stress_2022_pct: string;
   stale_count: number;

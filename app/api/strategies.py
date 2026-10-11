@@ -3897,6 +3897,7 @@ class EngineBookRiskRecentResponse(BaseModel):
     hist_vol_pct: Decimal | None
     ewma_vol_pct: Decimal | None
     beta: Decimal | None
+    stress_2008_pct: Decimal
     stress_2020_pct: Decimal
     stress_2022_pct: Decimal
     stale_count: int
@@ -3928,6 +3929,7 @@ class EngineBookRiskLatestResponse(BaseModel):
     history_status: str
     beta_defaulted_count: int
     beta_defaulted_weight_pct: Decimal
+    stress_2008_pct: Decimal
     stress_2020_pct: Decimal
     stress_2022_pct: Decimal
     checks: dict[str, dict[str, Any]]
