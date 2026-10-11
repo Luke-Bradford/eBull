@@ -6,18 +6,24 @@ stubbed. No database, no network.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from app.services.kill_switch_drill import C2_EARLY_CODES, C3_EARLY_CODES
+from app.services.kill_switch_drill_schedule import DRILL_OCCURRENCE_GRACE, DRILL_WATCH_FROM
 from app.services.strategy_capital_sandbox import SANDBOX_EXCEEDED
 from scripts import operator_alert_watch
 from scripts.operator_alert_watch import (
     _BLOCK_PERSIST_S,
+    _CONFIG_CORRUPT_CODES,
     _PAGED_BLOCKS,
     _PAGED_ENTRY_REFUSALS,
     _SEEN_TTL_S,
     Block,
+    DrillChokepoint,
+    DrillEvent,
     EntryRefusal,
     KillSwitchChange,
     Observation,
@@ -92,6 +98,9 @@ def test_each_kill_switch_change_pages_once_in_audit_order() -> None:
         ("eBull kill switch deactivated", 4),
     ]
     assert "by operator" in notices[0].message and ": drill." in notices[0].message
+    # Under kill, broker SL/TP and exact-owned exits run; recommendation EXIT and core sells do not.
+    assert "New entries are refused; exits still run" not in notices[0].message
+    assert "recommendation EXITs and core rebalance sells are refused" in notices[0].message
     assert plan(_all_delivered(WatchState(), obs), obs, now=_NOW + 300) == []
 
 
@@ -217,3 +226,138 @@ def test_an_unwritable_status_file_is_named_in_the_notice(tmp_path: Path, monkey
     monkeypatch.setattr(operator_alert_watch, "send_push", lambda **kw: messages.append(str(kw["message"])) is None)
     assert operator_alert_watch.run(status_file=blocker / "s.json") == 0
     assert messages and messages[0].endswith("[alert watch status file unwritable: not de-duplicated]")
+
+
+# ──────────────────────────── kill drills (#3614 slice 3) ────────────────────────────
+
+# Just after the first watched slot's grace, with that slot satisfied, so nothing is overdue.
+_SLOT = datetime(2026, 11, 3, 6, 12, tzinfo=UTC)
+_DRILL_NOW = (_SLOT + DRILL_OCCURRENCE_GRACE).timestamp()
+_PASSED = (DrillChokepoint("C1", "kill_refused", "kill_switch"), DrillChokepoint("C2", "kill_refused"))
+
+
+def _drill(event_id: int = 3, **kw: object) -> DrillEvent:
+    base: dict[str, object] = {
+        "event_id": event_id,
+        "started_at": _SLOT.timestamp() + 1,
+        "trigger": "scheduled",
+        "actor": "kill-drill",
+        "entry_verdict": "passed",
+        "book_verdict": "ok",
+        "chokepoints": _PASSED,
+        "code_commit": "e79ac4832f0c1d2e",
+        "code_dirty": False,
+    }
+    base.update(kw)
+    return DrillEvent(**base)  # type: ignore[arg-type]
+
+
+def test_a_passed_drill_with_a_clean_book_sends_nothing() -> None:
+    assert plan(WatchState(), Observation(drills=[_drill()]), now=_DRILL_NOW) == []
+
+
+def test_an_allowed_chokepoint_pages_with_the_auto_trading_default() -> None:
+    chokepoints = (DrillChokepoint("C1", "kill_refused", "kill_switch"), DrillChokepoint("C2", "allowed"))
+    obs = Observation(drills=[_drill(entry_verdict="failed", chokepoints=chokepoints)])
+    [notice] = plan(WatchState(), obs, now=_DRILL_NOW)
+    assert (notice.title, notice.priority) == ("eBull kill drill FAILED", 5)
+    assert "C1 kill_refused (kill_switch), C2 allowed" in notice.message
+    assert "C2 may not stop under kill" in notice.message
+    assert "build e79ac4832f0c" in notice.message
+    assert notice.message.endswith("Safe default: set enable_auto_trading = false until a re-run passes.")
+    assert plan(_all_delivered(WatchState(), obs, now=_DRILL_NOW), obs, now=_DRILL_NOW + 300) == []
+
+
+@pytest.mark.parametrize(
+    ("run_failure", "verify", "says", "default"),
+    [
+        ("kill_switch_row_missing", None, "kill_switch row is missing", "leave the switch as it is now."),
+        ("sandbox_committed", True, "switch read on at verify", "leave the switch as it is now."),
+        ("exception", None, "could not complete (RuntimeError: boom)", "none needed for trading."),
+    ],
+)
+def test_each_run_failure_pages_with_its_own_safe_default(
+    run_failure: str, verify: bool | None, says: str, default: str
+) -> None:
+    # An exception before evaluation leaves the entry verdict ``not_run``; it still pages.
+    event = _drill(
+        entry_verdict="not_run",
+        chokepoints=(),
+        run_failure=run_failure,
+        failure_detail="RuntimeError: boom",
+        kill_active_at_verify=verify,
+        code_dirty=True,
+    )
+    [notice] = plan(WatchState(), Observation(drills=[event]), now=_DRILL_NOW)
+    assert says in notice.message
+    assert "(dirty tree)" in notice.message
+    assert notice.message.endswith(f"Safe default: {default}")
+
+
+def test_a_failed_verdict_with_no_recognised_cause_gets_the_strict_default() -> None:
+    """Unreachable today (the verdict rule and the schema CHECKs bound both causes), but a failure
+    the watch cannot explain must never read as "no action needed"."""
+    event = _drill(entry_verdict="failed", chokepoints=(DrillChokepoint("C1", "kill_refused"),))
+    [notice] = plan(WatchState(), Observation(drills=[event]), now=_DRILL_NOW)
+    assert notice.message.endswith("Safe default: set enable_auto_trading = false until a re-run passes.")
+
+
+def test_a_corrupt_runtime_config_pages_but_auto_trading_off_does_not() -> None:
+    corrupt = (DrillChokepoint("C1", "kill_refused"), DrillChokepoint("C2", "other_refusal", "runtime_config_corrupt"))
+    off = (DrillChokepoint("C1", "kill_refused"), DrillChokepoint("C2", "other_refusal", "auto_trading_disabled"))
+    obs = Observation(
+        drills=[
+            _drill(3, entry_verdict="incomplete", chokepoints=corrupt),
+            _drill(4, entry_verdict="incomplete", chokepoints=off),
+        ]
+    )
+    [notice] = plan(WatchState(), obs, now=_DRILL_NOW)
+    assert notice.title == "eBull runtime config unreadable"
+    assert "event 3" in notice.message and "runtime_config_corrupt" in notice.message
+
+
+def test_book_defects_page_with_counts_and_ownerships() -> None:
+    event = _drill(
+        book_verdict="defects",
+        unmapped=1,
+        multiply_mapped=0,
+        without_stop=2,
+        without_target=0,
+        defect_ownerships=(11, 12, 15),
+    )
+    [notice] = plan(WatchState(), Observation(drills=[event]), now=_DRILL_NOW)
+    assert notice.title == "eBull book defects found by kill drill"
+    assert "1 unmapped and 0 multiply mapped ownerships, 2 positions without a stop" in notice.message
+    assert "(ownerships: 11, 12, 15)" in notice.message
+
+
+def test_a_later_passing_drill_does_not_hide_an_earlier_failure() -> None:
+    obs = Observation(
+        drills=[_drill(3, entry_verdict="failed", run_failure="exception", failure_detail="x"), _drill(4)]
+    )
+    assert [n.title for n in plan(WatchState(), obs, now=_DRILL_NOW)] == ["eBull kill drill FAILED"]
+
+
+def test_an_undrilled_slot_pages_once_at_the_end_of_its_grace() -> None:
+    assert plan(WatchState(), Observation(), now=_DRILL_NOW - 1) == []
+    [notice] = plan(WatchState(), Observation(), now=_DRILL_NOW)
+    assert (notice.title, notice.priority) == ("eBull kill drill overdue", 3)
+    assert "2026-11-03 06:12Z" in notice.message
+    state = _all_delivered(WatchState(), Observation(), now=_DRILL_NOW)
+    assert plan(state, Observation(), now=_DRILL_NOW + 300) == []
+    # A drill run late does not satisfy the slot after the fact, and nothing is re-sent.
+    late = Observation(drills=[_drill(started_at=_DRILL_NOW + 600)])
+    assert plan(state, late, now=_DRILL_NOW + 900) == []
+
+
+def test_no_slot_before_the_watch_start_is_overdue() -> None:
+    assert plan(WatchState(), Observation(), now=(DRILL_WATCH_FROM + timedelta(days=20)).timestamp()) == []
+
+
+def test_drill_keys_never_expire_but_others_still_do() -> None:
+    state = WatchState(seen={"kill_drill:3:entry": _NOW, "kill_drill_overdue:x": _NOW, "kill_switch:1": _NOW})
+    assert set(settle(state, [], now=_NOW + 100 * _SEEN_TTL_S).seen) == {"kill_drill:3:entry", "kill_drill_overdue:x"}
+
+
+def test_config_corrupt_codes_are_codes_the_drill_records() -> None:
+    assert _CONFIG_CORRUPT_CODES < C2_EARLY_CODES | C3_EARLY_CODES

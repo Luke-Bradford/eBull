@@ -414,9 +414,11 @@ when one overruns). Scheduled-only, so NOT added to the
   cross-process at the Ollama server-side queue (spec §1). Scheduled-only,
   so NOT added to the ``bootstrap_stages.lane`` CHECK.
 
-* ``risk_metrics`` — ``risk_metrics_refresh`` (#591 PR-B) and
+* ``risk_metrics`` — ``risk_metrics_refresh`` (#591 PR-B),
   ``engine_book_risk_snapshot`` (#3543, DB-only, sole writer of
-  ``engine_book_risk_snapshots``). The
+  ``engine_book_risk_snapshots``) and ``kill_switch_drill`` (#3614, DB-only,
+  monthly 06:12 UTC on the 3rd, seconds long; sole writer of the
+  ``kill_switch_drill_*`` tables, and its kill-row write always rolls back). The
   orchestrator-driven weekly risk-metric recompute. DB-only producer (no
   external host), so the lane is purely a write-overlap bucket, not a
   rate limiter. Its own lane keeps it write-disjoint: it is the sole
