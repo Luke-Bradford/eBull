@@ -131,7 +131,8 @@ def exit_reasons(formation: Formation, name: int) -> tuple[ExitReason, ...]:
     )
 
 
-def _check(formation: Formation, held: frozenset[int]) -> None:
+def check_formation(formation: Formation, held: frozenset[int]) -> None:
+    """``PRICE_INVALID`` for a universe name or holding without a valid raw close; universe names need ME and group."""
     bad = sorted(
         name
         for name in formation.universe | held
@@ -146,12 +147,20 @@ def _check(formation: Formation, held: frozenset[int]) -> None:
         raise ValueError(f"{formation.formation}: {len(uncovered)} universe names lack an ME or group: {uncovered[:5]}")
 
 
-def _carried(step: Step, names: Sequence[int]) -> frozenset[int]:
+def carried(step: Step, names: Sequence[int]) -> frozenset[int]:
     """The names still held at the next formation: those whose holding month ended ``observed``."""
     missing = [name for name in names if name not in step.returns]
     if missing:
         raise ValueError(f"{step.formation}: {len(missing)} holdings have no holding-month return: {missing[:5]}")
     return frozenset(name for name in names if step.returns[name].status is HoldingStatus.OBSERVED)
+
+
+def capped_weights(formation: Formation, targets: Sequence[int]) -> CapSolution:
+    """§"The book" step 6: value weights on ME at s(M) under both caps; the universe is the cap reference."""
+    reference = {name: formation.me[name] for name in formation.universe}
+    return cap_solution(
+        {name: formation.me[name] for name in targets}, formation.group, sector_caps(reference, formation.group)
+    )
 
 
 def book_decisions(formations: Sequence[Formation | Missed]) -> BookDecisions:
@@ -164,18 +173,15 @@ def book_decisions(formations: Sequence[Formation | Missed]) -> BookDecisions:
     for formation in formations:
         if isinstance(formation, Missed):
             steps.append(formation)
-            held = _carried(formation, sorted(held))
+            held = carried(formation, sorted(held))
             continue
-        _check(formation, held)
+        check_formation(formation, held)
         reasons = {name: found for name in sorted(held) if (found := exit_reasons(formation, name))}
         entrants = (formation.bands.decile & formation.eligible) - held
         targets = tuple(sorted((held - reasons.keys()) | entrants))
         if len(targets) < MIN_HOLDINGS:
             insufficient.append(formation.formation)
-        reference = {name: formation.me[name] for name in formation.universe}
-        solution = cap_solution(
-            {name: formation.me[name] for name in targets}, formation.group, sector_caps(reference, formation.group)
-        )
+        solution = capped_weights(formation, targets)
         sales = {
             name: TradeCategory.FORCED_EXIT if found[0] in FORCED_REASONS else TradeCategory.DISCRETIONARY_EXIT
             for name, found in reasons.items()
@@ -186,7 +192,7 @@ def book_decisions(formations: Sequence[Formation | Missed]) -> BookDecisions:
         steps.append(step)
         caps[formation.formation] = solution
         reasons_by[formation.formation] = reasons
-        held = _carried(step, targets)
+        held = carried(step, targets)
     return BookDecisions(tuple(steps), tuple(insufficient), caps, reasons_by)
 
 
@@ -196,6 +202,9 @@ __all__ = [
     "ExitReason",
     "Formation",
     "book_decisions",
+    "capped_weights",
+    "carried",
+    "check_formation",
     "exit_reasons",
     "max_flagged",
 ]
