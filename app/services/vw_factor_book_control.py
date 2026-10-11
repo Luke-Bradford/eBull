@@ -62,7 +62,8 @@ def control_decisions(formations: Sequence[Formation | Missed], book: BookDecisi
             steps.append(formation)
             held = carried(formation, sorted(held))
             continue
-        assert isinstance(book_step, Captured)
+        if not isinstance(book_step, Captured):  # unreachable after the check above; narrows, and survives -O
+            raise ValueError(f"{formation.formation}: the book's step is not captured")
         rng = random.Random(control_seed(draw, formation.formation))
         check_formation(formation, held)
         n = len(book_step.targets)
