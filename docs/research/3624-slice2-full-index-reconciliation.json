@@ -923,13 +923,7 @@
    "ours": true,
    "archive_file_latest_filing_date": "2026-09-08",
    "header": {
-    "header_blocks": 1,
-    "misplaced_tags": 0,
-    "envelope_ok": true,
     "structure_defect": null,
-    "outside_tags": 0,
-    "noncanonical_tags": 0,
-    "markers_in_block": [],
     "raw_tags": [
      "ACCEPTANCE-DATETIME",
      "ACCESSION-NUMBER",
@@ -966,7 +960,6 @@
      "TYPE",
      "ZIP"
     ],
-    "repeated_tags": [],
     "accession_numbers": [
      "0001193125-26-399416"
     ],
@@ -982,7 +975,6 @@
     "filer_ciks": [
      "0000873303"
     ],
-    "other_ciks": [],
     "sha256": "76363b30a9cb91f1462f953f12c38a8411b305fde7d7cf0a1c9b1f181ffa57d9"
    },
    "header_error": null
@@ -995,13 +987,7 @@
    "ours": false,
    "archive_file_latest_filing_date": "2026-09-15",
    "header": {
-    "header_blocks": 1,
-    "misplaced_tags": 0,
-    "envelope_ok": true,
     "structure_defect": null,
-    "outside_tags": 0,
-    "noncanonical_tags": 0,
-    "markers_in_block": [],
     "raw_tags": [
      "ABS-ASSET-CLASS",
      "ACCEPTANCE-DATETIME",
@@ -1041,7 +1027,6 @@
      "TYPE",
      "ZIP"
     ],
-    "repeated_tags": [],
     "accession_numbers": [
      "0001193125-26-394511"
     ],
@@ -1059,15 +1044,14 @@
      "0001133438",
      "0002149906"
     ],
-    "other_ciks": [],
     "sha256": "77bd2a29140cc696e73c5b121af2d48e1e4c694101ec2c3a15fe602679643c41"
    },
    "header_error": null
   }
  ],
  "provenance": {
-  "script_sha256": "702e6db85f49f5f98b9078159a8101c90f4ce7b8cabc80a99fd6a4524dc204df",
-  "head": "f50075752e862f077a92303e00ceb84458df6a62",
+  "script_sha256": "d9bb102e13039766a2f11318d3c43ec8639da06e4c13d91a6dad9699e8343fdd",
+  "head": "d59a0bc8c22092ce55aa09f6246ad4919f25369e",
   "script_clean_at_head": true
  }
 }

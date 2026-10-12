@@ -53,9 +53,10 @@ Three commands, outputs committed beside this spec. The third reads the first's 
     A="$RA/d6c42d554a703832a3a477a0b04b0f8cc96ce868180b1bb58e9be99ad717de8b/submissions.zip"
     B="$RA/928d67221c6e6183bc343e7234c1391448c15cd1dd644d36b425db2f99ba4350/submissions.zip"
     M="docs/research/3624-slice2-8k-items-measurement.json"
+    C="docs/research/3624-slice2-ciks.json"
     PYTHONPATH=. uv run python -m scripts.measure_3624_slice2_8k_items --archive "$A" --previous "$B" \
-        --headers --negative-sample 2000 --out "$M"
-    PYTHONPATH=. uv run python -m scripts.measure_3624_slice2_8k_items --archive "$A" \
+        --ciks-from "$C" --headers --negative-sample 2000 --out "$M"
+    PYTHONPATH=. uv run python -m scripts.measure_3624_slice2_8k_items --archive "$A" --ciks-from "$C" \
         --index-cache var/research/3624/full-index --out docs/research/3624-slice2-full-index-reconciliation.json
     PYTHONPATH=. uv run python -m scripts.measure_3624_slice2_8k_items --archive "$A" \
         --daily-index-cache var/research/3624/daily-index --index-cache var/research/3624/full-index \
@@ -78,16 +79,18 @@ which is acceptable only because `last-modified` bounds nothing.
 - **Daily index:** 5,516 `master.YYYYMMDD.idx[.gz]` files from 2004-08-23 to 2026-10-07, each with its sha256, its
   `Last Data Received` line and its listing's `last-modified` (`file_list`). Six quarters publish only the `.idx.gz`
   form (2011 Q3 and Q4, 2013 Q1, Q3 and Q4, 2014 Q2; `file_list`).
-- **Our CIKs:** the 5,310 CIKs in `external_identifiers` (`provider='sec'`, `identifier_type='cik'`), written out in
-  full in the measurement JSON (`ciks`, sha256 `d1c01c68…`).
+- **Our CIKs:** the 5,310 CIKs in `external_identifiers` (`provider='sec'`, `identifier_type='cik'`) on
+  2026-10-08, pinned in `docs/research/3624-slice2-ciks.json` (`ciks_sha256` `d1c01c68…`, checked on load) and
+  written out again in the measurement JSON (`ciks`). The live table has since gained CIKs, and the seeded negative
+  sample is drawn from our CIKs' accessions, so an unpinned re-run draws a different sample.
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`702e6db8…`), `HEAD`
-  (`f5007575`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`d9bb102e…`), `HEAD`
+  (`d59a0bc8`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
-are as of 2026-10-08, read by the first command (queries in the script).
+are as of 2026-10-12, read by the first command (queries in the script).
 
 ## Labels
 
@@ -103,7 +106,7 @@ change is not adverse by itself. Item 2.02 stays out: it is slice 3's event-timi
 
 **Every accession counts, amendments included.** An amendment can carry a target item because a rule requires the
 accountant's letter by amendment (Item 4.02(c)(3); Reg S-K Item 304(a)(3)), to correct the original, or for another
-reason. The two structured sources checked carry no amendment link: `amends_accession` is NULL on all 9,049 8-K/A
+reason. The two structured sources checked carry no amendment link: `amends_accession` is NULL on all 9,060 8-K/A
 rows of `sec_filing_manifest`, and no key of any CIK's `recent` block in the archive names an amendment (0 keys
 containing "amend"). The producer therefore neither links nor discards: each accession with the item is an
 observation with its form recorded. Collapsing observations into events is a consumer's declared choice. The same
@@ -202,19 +205,19 @@ engagement of a new independent accountant".
 3. **The archive agrees with `filing_events` on every shared field** (`filing_events`). Population: our CIKs'
    8-K-family accessions from `FIRST` through 2026-10-06, `filing_events` joined to `external_identifiers` by
    instrument; each distinct non-NULL `filing_events` item set is compared on its own.
-   - **Items:** 399,534 shared accessions with no NULL row: every item set equals the archive's. 21 with NULL and
-     non-NULL rows: every non-NULL set equals it. 759 have only NULL rows. 0 differ.
+   - **Items:** 399,537 shared accessions with no NULL row: every item set equals the archive's. 18 with NULL and
+     non-NULL rows: every non-NULL set equals it. 767 have only NULL rows. 0 differ.
    - **Denominators** (`by_year`): event rows and event accessions dated within the window. Accessions dated after
-     the archive's last date are counted apart (97 accessions and 97 event rows in 2026). The 2026 in-window
+     the archive's last date are counted apart (347 accessions and 358 event rows in 2026). The 2026 in-window
      denominator is 39,604 accessions: 39,603 shared and 1 events-only.
-   - **Form and filing date:** equal on all 400,314 shared accessions.
+   - **Form and filing date:** equal on all 400,322 shared accessions.
    - **Coverage:** archive-only accessions by year are in `by_year`: 30,124 in 2015, falling to 17 in 2026, the
      shape of the 8-K ingest horizon (skill §11.2). The cause is not audited.
    - **Captured near filing:** 15,661 shared accessions have their earliest `filing_events` row written 0 to 3
      Eastern days after the filing date. 15,655 of them have item sets, and the current stored sets agree with
-     archive A (15,638 no-NULL, 17 mixed); the other 6 are all NULL. `filing_events` keeps current values only, so
+     archive A (15,640 no-NULL, 15 mixed); the other 6 are all NULL. `filing_events` keeps current values only, so
      this shows current agreement, not that nothing changed.
-4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,375
+4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,589
    non-tombstone `eight_k_filings` accessions at this run (live ingest grows the table between runs;
    `cross_source.typed_accessions` is the figure of record), left-joined to `eight_k_items`; 72,241 are in the archive, all with
    valid items there. The parser stored no item rows for 52,353 of them. Within the overlap it never holds a target
@@ -229,15 +232,12 @@ engagement of a new independent accountant".
      `(form, filing_date, items)` variant, any appearance whose items are not valid (missing, empty or invalid), a
      target code, or 10 or more codes (`ITEM_CAP`, set after round 2 found 13-code lists truncated). It is wider
      than the target positives; `labels` counts those.
-   - **Structure:** every header has exactly one `<SEC-HEADER>` block (`header_block_counts`); under the grammar
-     all 9,041 have a balanced envelope, no structural defect under the token-stream walk, no tag outside the
-     envelope, no misplaced tag and no non-upper-case name (`structure`); filer CIKs read by path equal those of the
-     earlier block extraction on every one; and every one has
-     exactly one `<ACCESSION-NUMBER>`, equal to the accession requested (`field_outcome_rows`). On these 9,041 the
-     raw tag census (`raw_tag_presence`, headers carrying each tag) finds `<PRIVATE-TO-PUBLIC>` on 65 and
-     `<CONFIRMING-COPY>` on 3, all inside the header block (`marker_presence` whole-body,
-     `marker_presence_in_header_block` inside it), and **0**
-     `<TIMESTAMP>` and **0** `<PAPER>`. These are observations on the inspected set, not format rules.
+   - **Structure:** under the header grammar (below, `grammar_sha256`) all 9,041 parse with no defect
+     (`structure_defect`), and every one has exactly one `<ACCESSION-NUMBER>`, equal to the accession requested
+     (`field_outcome_rows`). On these 9,041 the raw tag census (`raw_tag_presence`, headers carrying each tag) finds
+     `<PRIVATE-TO-PUBLIC>` on 65 and `<CONFIRMING-COPY>` on 3 (`marker_presence`; the grammar admits both only at
+     submission level), and **0** `<TIMESTAMP>` and **0** `<PAPER>`. These are observations on the inspected set,
+     not format rules.
    - **Items against the archive:** 5 archive lists are cut short of their header (13 archive codes, 14 or 15 in
      the header); no shorter archive list disagrees (`archive_item_count_by_disagreement`). 4 carry pre-2004 codes
      on both sides, all dated `FIRST` and accepted after 17:30 on Friday 2004-08-20; 1 is empty on both sides.
@@ -353,7 +353,7 @@ engagement of a new independent accountant".
   | field | ok when | otherwise |
   |---|---|---|
   | retrieval | the body was fetched | `no_header`, last error stored; every other field `not_evaluated` |
-  | parse | every `<` opens a strict tag (`<NAME>` or `</NAME>`, upper case, nothing else in the brackets); containers nest and close; a registrant role opens only directly in the envelope; exactly one `<SEC-HEADER>` followed by exactly one `</SEC-HEADER>`, and no opening tag outside that envelope; `<ACCESSION-NUMBER>`, `<ACCEPTANCE-DATETIME>`, `<TYPE>`, `<FILING-DATE>` and `<DATE-OF-FILING-DATE-CHANGE>` each at most once anywhere in the body; every opening tag at the start of its line (after blanks) | `malformed`, with the cause |
+  | parse | the body is accepted in full by the header grammar below | `malformed`, with the cause and line |
   | accession | exactly one `<ACCESSION-NUMBER>`, equal to the inventory key | `no_accession`, `accession_mismatch` |
   | `<PAPER>` | absent | `paper` |
   | `<PRIVATE-TO-PUBLIC>` | absent | `private_to_public` |
@@ -368,19 +368,44 @@ engagement of a new independent accountant".
   | `<DATE-OF-FILING-DATE-CHANGE>` | 8 digits forming a real date, equal to the acceptance date | `no_correction_date`, `correction_invalid`, `corrected` (later), `correction_before_acceptance` (earlier); `not_evaluated` without a valid acceptance date |
 
   An absent correction date is not read as "no correction": without it the header does not say whether a PAC
-  occurred. **Header grammar:** every tag is counted wherever it occurs in the retrieved body, inside the header
-  block or not, and markers and correction evidence are detected anywhere. The body is read as a token stream:
-  any `<` that does not open a strict tag (a space before `>`, lower or mixed case, anything else) is
-  `unsupported_markup`. The PDS SGML declaration makes names case-insensitive (`NAMECASE GENERAL YES`); the
-  producer accepts only upper-case names, so other casing is `malformed`, never an unrecognised tag. **Containers**
-  are the elements whose end tag the PDS DTD requires (`- -`, pp. 77–80): the seven registrant roles (`FILER`,
-  `FILED-BY`, `SERIAL-COMPANY`, `SUBJECT-COMPANY`, `REPORTING-OWNER`, `ISSUER`, `FILED-FOR`), `COMPANY-DATA`,
-  `OWNER-DATA`, `FILING-VALUES`, the addresses, `FORMER-COMPANY`, `FORMER-NAME` and the series elements, plus the
-  envelope. A container must close in order; a role's content (`regist-data`) holds no role, so a role opens only
-  directly in the envelope; a leaf has no end tag; a value is read only from a tag that
-  starts its line, so a layout the grammar does not accept fails as `malformed` instead of hiding a tag. The
-  measurement script implements this table (`parse_header`, `field_outcomes`), and premise 6's class counts come
-  from it.
+  occurred.
+
+  **Header grammar.** A closed line grammar, frozen by the sha256 of its table (`GRAMMAR_SHA256`, recorded as
+  `grammar_sha256` in the output); any change to it is a new version.
+  - **Source.** The PDS submission-header and FILER tag tables (§3.2.2, pp. 14–17), with the DTD's submission front
+    matter (p. 76) for the leaves the table omits. Two of the table's spellings are typos and the DTD's are used
+    (`<CONFIRMING COPY>` is `CONFIRMING-COPY`; `<ASSIGNED-SIC` lacks its `>`). The `.hdr.sgml` file adds two
+    elements that are not PDS elements, and the grammar names them as extensions: the envelope, whose first
+    non-blank line is `<SEC-HEADER><accession>.hdr.sgml : <YYYYMMDD>` and whose last is `</SEC-HEADER>`, and
+    `<ACCEPTANCE-DATETIME>` at submission level.
+  - **Lines.** Every non-blank line is exactly one of `<LEAF>value`, `<CONTAINER>` or `</CONTAINER>`, starting at
+    column 1. A value is the rest of its line and holds no `<`. The EMPTY elements (`CORRECTION`, `PAPER`,
+    `PRIVATE-TO-PUBLIC`, `DELETION`, `CONFIRMING-COPY`) and the containers carry none. Text on a line of its own,
+    such as a second item code or a second date, is `non_tag_line`, never part of the value above it.
+  - **Placement and count.** Each element is permitted only under its table parent, and at most once per parent
+    instance unless the table marks it repeatable (`ITEMS`, `REFERENCES-429`, `GROUP-MEMBERS`, `FILER`,
+    `FORMER-COMPANY`, `FORMER-NAME`). Each `FILER` holds exactly one `COMPANY-DATA` or `OWNER-DATA` (the DTD's
+    `regist-data`), and that holds exactly one `<CIK>` (`cmpy-data`). So a second CIK in one company data, or
+    `<ITEMS>` inside it, is `malformed`. Containers close in order. Whether other elements are present is not
+    enforced: every field read has its own outcome above, and no other element feeds a label. Element order is not
+    enforced either, because no field read depends on it.
+  - **What is not admitted.** Only the `FILER` role is admitted. Every other role, the series containers
+    (`MERGER-SERIES-AND-CLASSES-CONTRACTS` included) and any name outside the table, in any casing or spacing, is
+    `malformed`. The PDS declaration makes names case-insensitive (`NAMECASE GENERAL YES`); the producer accepts
+    only the table's upper-case spellings. This is a construction choice. None of the 9,041 inspected headers
+    carries another role or a series element (`raw_tag_presence`), and each one admitted would widen the grammar
+    without a case to test it on.
+  - **Causes.** `envelope`, `outside_envelope`, `non_tag_line`, `unknown_element`, `misplaced`, `repeated`,
+    `value_not_permitted`, `unbalanced`, `registrant_data_count`, `cik_count`, `unclosed`, each recorded with its
+    line number. Markers and correction evidence are still detected anywhere in the body.
+  - **Reuse first.** edgartools' `SubmissionFormatParser` (5.30.2) was run on the eight round 8–11
+    counterexamples. It fails closed only on the two unbalanced ones: it drops a continuation line silently, keeps
+    `<ITEMS >` under a separate key, and returns two CIKs in one company data as a list. It is not adopted.
+  - **Fixtures.** Every round 8–11 counterexample, and one case per cause, is a test
+    (`tests/test_measure_3624_slice2_header_grammar.py`).
+
+  The measurement script implements this table (`header_structure`, `parse_header`, `field_outcomes`), and premise
+  6's class counts come from it.
 
 ### Row classes, labels in doubt, and intervals
 
@@ -604,11 +629,11 @@ of work preceded this spec's acceptance, and both read no price, return or outco
 - **Classification predicates applied to the 9,041 inspected headers**, as measurement only (class counts, no labels
   for a consumer, no full population). Each executed version is a configuration tried: the tag-based
   timing-uncertain rule at `a24131e1` and `77231ed1`, and the production predicates at `44ac5fdc`, `22876703`,
-  `c7ea8ba9`, `847be55b` and `f5007575`. Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
+  `c7ea8ba9`, `847be55b`, `f5007575` and `73614936` (run again at `d59a0bc8`, which pins our CIKs and changes no predicate). Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
   outcomes.
 
 Build step 2 therefore registers two non-claiming entries: `3624-slice2-construction-measurement`, listing those
-seven versions by commit (`searches=7`, plus any added by a later re-run), and the production configuration below, registered prospectively before
+eight versions by commit (`searches=8`, plus any added by a later re-run), and the production configuration below, registered prospectively before
 the production build's first data read.
 
 The producer and its fixtures are written first and read no data (build step 1). Then, before the production
@@ -994,5 +1019,15 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
     role nests only in the envelope; filer CIKs are read by path under `FILER/COMPANY-DATA` or `OWNER-DATA`. A
     subject company nested in a filer and a missing `</FILER>` now fail closed. Codex's counterexamples and the
     9,418 cached headers were run through the new walk: every counterexample fails, every cached header passes with
-    the same filer set.
+    the same filer set. That comparison was not recorded, and round 11 withdraws the claim (166).
   - **Text** (162): four searches.
+- **Round 11** (`var/research/3624/ckpt1_slice2_r11.txt`): 0 open, 4 new (163–166), 4 resolved. The measurement
+  was re-run at `d59a0bc8`. A first re-run at `73614936` read the live CIK list, which had gained 5 CIKs, and so
+  drew a different negative sample; `d59a0bc8` pins the 10-08 list and that output is the one committed.
+  - **Grammar** (163, 164, 165): rounds 8 to 11 each found one more gap in a pattern-based parser (layout,
+    envelope, case, roles, then content model), so the parser was replaced rather than patched. edgartools was
+    tested first and rejected. The closed line grammar above checks placement, count and whole-line values. Two
+    CIKs in one company data, `<ITEMS>` inside it, a continuation line after an item or a date, and an unclosed
+    `MERGER-SERIES-AND-CLASSES-CONTRACTS` now fail closed, and are fixtures.
+  - **Equivalence claims** (166): dropped. Premise 6 no longer compares filer sets with the earlier extraction, and
+    the round-10 note's 9,418-header claim is withdrawn. The grammar's census on the 9,041 stands on its own.
