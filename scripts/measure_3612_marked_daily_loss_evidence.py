@@ -1,20 +1,27 @@
 """#3612 slice 2 spec evidence (docs/proposals/risk/2026-10-12-3612-marked-daily-loss.md), demo account.
 
-Four read-only censuses over every stored row from ``--since`` (default 2026-09-15, the first stored
+Five read-only censuses over every stored row from ``--since`` (default 2026-09-15, the first stored
 position marks, #3068) to ``--until`` (default: yesterday, New York):
 
-1. **Close-capture lag.** For each NYSE session P, the lag from P's regular close (16:00 New York, 13:00 on
-   a half day) to the first successful ``daily_portfolio_sync`` run started on P's New York date at or
-   after it. This is the delay a capture taken on that run would carry.
+1. **Job-start lag after the close.** For each NYSE session P, the lag from P's regular close (16:00 New
+   York, 13:00 on a half day) to the START of the first successful ``daily_portfolio_sync`` run on P's New
+   York date at or after it. A successful run is not a successful capture, and the snapshot is observed
+   after the run starts; this bounds neither from above.
 2. **Snapshot continuity.** Every UTC date in range with no ``broker_account_equity_snapshots`` row, and
    every row whose stored mark count differs from its declared long + short count.
-3. **After-close movement by instrument.** For each stored mark taken on a NYSE session's UTC date after
-   that session's close, whether its ``close_rate`` equals ``price_daily.close`` for the session. A name
-   that does not trade after the close shows no inequality.
+3. **Retained-row price comparison by instrument.** For each stored mark taken on a NYSE session's UTC
+   date after that session's close, whether its ``close_rate`` equals today's ``price_daily.close`` for
+   the session. ``price_daily`` is back-adjusted and overwritten (sql/479 header), so an inequality is not
+   by itself after-close movement. Every mark is counted: missing instrument metadata and missing bars are
+   reported, and the counts reconcile.
 4. **Unit conservation over consecutive snapshots.** Population: positions in either endpoint's marks,
    positions with a ``trade_events`` row in ``(o1, o2]`` and engine ownership rows claimed in ``(o1, o2]``.
    Checks ``units(d1) + open units - close units = units(d2)`` (0 where absent), and that every close has
    ``realized_pnl_usd``. Reported per population group.
+5. **Point claims.** The live pool limits; R times of day; the first stored mark date; the full event and
+   ownership history of every position failing section 4; the closes of positions present in the preceding
+   snapshot, with ``realised - U_S * closed/held - (price - close_rate) * closed * conversion``; and the
+   age of each stored mark's ``pnl_timestamp`` against its snapshot's ``observed_at``.
 
 Run: PYTHONPATH=. uv run python scripts/measure_3612_marked_daily_loss_evidence.py [--since D] [--until D]
 """
@@ -52,7 +59,7 @@ ORDER BY s.snapshot_date
 _MARKS_VS_CLOSE_SQL = """
 SELECT m.instrument_id, i.symbol, m.close_rate, pd.close
 FROM broker_account_position_marks m
-JOIN instruments i ON i.instrument_id = m.instrument_id
+LEFT JOIN instruments i ON i.instrument_id = m.instrument_id
 LEFT JOIN price_daily pd ON pd.instrument_id = m.instrument_id AND pd.price_date = %s
 WHERE m.environment = 'demo' AND m.snapshot_date = %s
 """
@@ -108,10 +115,10 @@ def close_capture_lag(conn: psycopg.Connection[Any], since: date, until: date) -
         else:
             lags.append(((row[0] - _regular_close(day)).total_seconds() / 60, day))
     lags.sort()
-    print(f"[1] sessions {len(lags) + len(missing)}, with a run after the close {len(lags)}, without {len(missing)}")
+    print(f"[1] sessions {len(lags) + len(missing)}, with a successful run started after the close {len(lags)}")
     if lags:
         print(
-            f"    lag minutes: min {lags[0][0]:.1f}, median {lags[len(lags) // 2][0]:.1f}, "
+            f"    job-start lag minutes: min {lags[0][0]:.1f}, median {lags[len(lags) // 2][0]:.1f}, "
             f"max {lags[-1][0]:.1f} ({lags[-1][1]}); over 15 min: {sum(1 for lag, _ in lags if lag > 15)}"
         )
     for day in missing:
@@ -137,27 +144,37 @@ def after_close_movement(conn: psycopg.Connection[Any], since: date, until: date
     total: Counter[str] = Counter()
     moved: Counter[str] = Counter()
     no_bar = 0
+    no_metadata = 0
+    seen = 0
     considered = 0
     for snapshot_date, observed_at, _declared, _marks in rows:
         if us_market_status(snapshot_date) == "closed" or observed_at <= _regular_close(snapshot_date):
             continue
         considered += 1
-        for _instrument_id, symbol, rate, close in conn.execute(_MARKS_VS_CLOSE_SQL, (snapshot_date, snapshot_date)):
+        for instrument_id, symbol, rate, close in conn.execute(_MARKS_VS_CLOSE_SQL, (snapshot_date, snapshot_date)):
+            seen += 1
+            if symbol is None:
+                no_metadata += 1
+                symbol = f"id {instrument_id}"
             if close is None:
                 no_bar += 1
                 continue
             total[symbol] += 1
             if close != rate:
                 moved[symbol] += 1
-    print(f"[3] session-date snapshots taken after the close: {considered}; marks with no price_daily bar: {no_bar}")
+    print(
+        f"[3] session-date snapshots taken after the close: {considered}; marks {seen} = compared "
+        f"{sum(total.values())} + no price_daily bar {no_bar}; of them with no instrument metadata: {no_metadata}"
+    )
     for symbol in sorted(total):
         print(f"    {symbol:10} marks {total[symbol]:3}  close_rate != session close {moved[symbol]:3}")
 
 
-def unit_conservation(conn: psycopg.Connection[Any], since: date, until: date) -> None:
+def unit_conservation(conn: psycopg.Connection[Any], since: date, until: date) -> list[int]:
     snaps = conn.execute(_SNAPSHOTS_SQL, (since, until)).fetchall()
     by_group: Counter[str] = Counter()
     broken: list[str] = []
+    failing: list[int] = []
     pairs = 0
     for (d1, o1, _a, _b), (d2, o2, _c, _d) in zip(snaps, snaps[1:], strict=False):
         pairs += 1
@@ -166,6 +183,7 @@ def unit_conservation(conn: psycopg.Connection[Any], since: date, until: date) -
             key = "+".join(groups)
             by_group[key] += 1
             if u1 + net != u2 or missing_pnl:
+                failing.append(int(position_id))
                 broken.append(
                     f"{d1}->{d2} position {position_id} ({key}): {u1} + {net} vs {u2}, null pnl {missing_pnl}"
                 )
@@ -173,6 +191,84 @@ def unit_conservation(conn: psycopg.Connection[Any], since: date, until: date) -
     print(f"    failing conservation or with a NULL-P&L close: {len(broken)}")
     for line in broken:
         print(f"    {line}")
+    return failing
+
+
+_POOL_SQL = """
+SELECT risk_profile, max_daily_loss_pct, capital_limit FROM strategy_paper_pool_events
+ORDER BY strategy_paper_pool_event_id DESC LIMIT 1
+"""
+
+_R_TIMES_SQL = """
+SELECT min((observed_at AT TIME ZONE 'America/New_York')::time),
+       max((observed_at AT TIME ZONE 'America/New_York')::time),
+       (SELECT min(snapshot_date) FROM broker_account_position_marks WHERE environment = 'demo')
+FROM broker_account_equity_snapshots s
+WHERE s.environment = 'demo' AND s.snapshot_date BETWEEN %s AND %s AND extract(isodow FROM s.snapshot_date) < 6
+  AND (s.observed_at AT TIME ZONE 'America/New_York')::time >= time '16:00'
+"""
+
+_HISTORY_SQL = """
+SELECT 'event', e.event_kind, e.executed_at, e.units, e.realized_pnl_usd, e.instrument_id
+FROM trade_events e WHERE e.position_id = %(p)s
+UNION ALL
+SELECT 'ownership', o.broker_position_id::text, o.claimed_at, NULL, NULL, NULL
+FROM strategy_position_ownership o WHERE o.broker_position_id = %(p)s
+UNION ALL
+SELECT 'mark', m.snapshot_date::text, NULL, m.units, NULL, m.instrument_id
+FROM broker_account_position_marks m WHERE m.environment = 'demo' AND m.position_id = %(p)s
+ORDER BY 3 NULLS LAST
+"""
+
+_IDENTITY_SQL = """
+WITH s AS (
+    SELECT snapshot_date AS d, observed_at AS o, lead(observed_at) OVER (ORDER BY snapshot_date) AS o2
+    FROM broker_account_equity_snapshots WHERE environment = 'demo' AND snapshot_date BETWEEN %s AND %s
+)
+SELECT e.position_id, e.executed_at, e.fees_usd, m.asset_currency_id,
+       e.realized_pnl_usd - m.unrealized_pnl * e.units / m.units
+         - (e.price - m.close_rate) * e.units * m.close_conversion_rate AS residual
+FROM s
+JOIN broker_account_position_marks m ON m.environment = 'demo' AND m.snapshot_date = s.d
+JOIN trade_events e ON e.position_id = m.position_id AND e.event_kind = 'close'
+ AND e.executed_at > s.o AND (s.o2 IS NULL OR e.executed_at <= s.o2)
+ORDER BY e.executed_at
+"""
+
+_PNL_AGE_SQL = """
+SELECT count(*), count(m.pnl_timestamp),
+       min(extract(epoch FROM s.observed_at - m.pnl_timestamp)),
+       max(extract(epoch FROM s.observed_at - m.pnl_timestamp)),
+       count(*) FILTER (WHERE m.total_fees <> 0), count(*) FILTER (WHERE m.asset_currency_id <> 1),
+       count(*) FILTER (WHERE NOT m.is_buy)
+FROM broker_account_position_marks m
+JOIN broker_account_equity_snapshots s USING (environment, snapshot_date)
+WHERE m.environment = 'demo' AND m.snapshot_date BETWEEN %s AND %s
+"""
+
+
+def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failing: list[int]) -> None:
+    print(
+        f"[5] latest pool event (risk_profile, max_daily_loss_pct, capital_limit): {conn.execute(_POOL_SQL).fetchone()}"
+    )
+    r = conn.execute(_R_TIMES_SQL, (since, until)).fetchone()
+    if r is not None:
+        print(f"    weekday snapshots after 16:00 New York: earliest {r[0]}, latest {r[1]}; first stored mark {r[2]}")
+    for position_id in failing:
+        print(f"    history of position {position_id} (kind, detail, at, units, realised, instrument):")
+        for row in conn.execute(_HISTORY_SQL, {"p": position_id}):
+            print(f"      {row}")
+    rows = conn.execute(_IDENTITY_SQL, (since, until)).fetchall()
+    worst = max((abs(row[4]) for row in rows), default=None)
+    print(f"    closes of positions in the preceding snapshot: {len(rows)}; max |residual| {worst}")
+    for row in rows:
+        print(f"      position {row[0]} at {row[1]}: fees {row[2]}, asset currency {row[3]}, residual {row[4]:.4f}")
+    age = conn.execute(_PNL_AGE_SQL, (since, until)).fetchone()
+    if age is not None:
+        print(
+            f"    marks {age[0]}, with pnl_timestamp {age[1]}, age vs observed_at {age[2]}..{age[3]} s; "
+            f"non-zero total_fees {age[4]}, non-USD asset {age[5]}, short {age[6]}"
+        )
 
 
 def main() -> None:
@@ -186,7 +282,8 @@ def main() -> None:
         close_capture_lag(conn, args.since, until)
         snapshot_continuity(conn, args.since, until)
         after_close_movement(conn, args.since, until)
-        unit_conservation(conn, args.since, until)
+        failing = unit_conservation(conn, args.since, until)
+        point_claims(conn, args.since, until, failing)
 
 
 if __name__ == "__main__":
