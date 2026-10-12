@@ -169,7 +169,9 @@ def simulate(anchor: date, days: Sequence[Day], rule: Rule, cost: float) -> dict
     }
 
 
-def readout(name: str, e0: float, cost: float, anchor: date, days: Sequence[Day], baseline: float | None):
+def readout(
+    name: str, e0: float, cost: float, anchor: date, days: Sequence[Day], baseline: float | None
+) -> tuple[Readout, float]:
     run = simulate(anchor, days, RULES[name](e0), cost)
     path = run["path"]
     crisis: dict[str, float | None] = {}
