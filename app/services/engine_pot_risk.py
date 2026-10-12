@@ -707,6 +707,14 @@ def _at(value: str | None) -> datetime | None:
     return None if value is None else datetime.fromisoformat(value)
 
 
+def _anchor_mark(row: list[Any]) -> DailyMark:
+    """Decode one sql/482 child. Its columns are NOT NULL; a NULL still refuses rather than raising."""
+    position_id, units, pnl, at, fees = row
+    if units is None or pnl is None:
+        _refuse(f"anchor mark of position {position_id} is incomplete", "engine_pot_daily_anchor_incomplete")
+    return DailyMark(Decimal(units), Decimal(pnl), _at(at), None if fees is None else Decimal(fees))
+
+
 def observe_daily_marked_pnl(
     conn: psycopg.Connection[Any],
     snapshot: BrokerAccountRiskSnapshot,
@@ -744,10 +752,7 @@ def observe_daily_marked_pnl(
             account_currency_id=int(anchor_json[1]),
             currency=anchor_json[2],
             declared_positions=int(anchor_json[3]),
-            marks={
-                int(pid): DailyMark(Decimal(units), Decimal(pnl), _at(at), Decimal(fees))
-                for pid, units, pnl, at, fees in marks_json
-            },
+            marks={int(row[0]): _anchor_mark(row) for row in marks_json},
         )
     )
     events: dict[int, list[LedgerEvent]] = {}

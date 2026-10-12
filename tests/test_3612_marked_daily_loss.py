@@ -15,6 +15,7 @@ from app.services.engine_pot_risk import (
     DailyAnchor,
     DailyMark,
     LedgerEvent,
+    _anchor_mark,
     _price_book,
     daily_anchor_session,
     marked_daily_pnl,
@@ -423,3 +424,20 @@ def test_opposite_infinite_realised_aggregates_refuse_instead_of_raising_invalid
     with pytest.raises(EngineCapitalObservationError) as raised:
         _price_book(closes, {}, book, OBS)  # type: ignore[arg-type]
     assert raised.value.reason_code == "engine_capital_population_incomplete"
+
+
+@pytest.mark.parametrize("null_at", [1, 2, 4])
+def test_a_null_anchor_value_refuses_instead_of_raising(null_at: int) -> None:
+    row: list[Any] = [1, "10", "100", S_AT.isoformat(), "0"]
+    row[null_at] = None
+    with pytest.raises(EngineCapitalObservationError) as raised:
+        marked_daily_pnl(
+            anchor=DailyAnchor(S_AT, 1, "USD", 1, {1: _anchor_mark(row)}),
+            live={},
+            book=[],
+            events={},
+            observed_at=OBS,
+            decided_at=DECIDED,
+            max_mark_age_seconds=MAX_AGE,
+        )
+    assert raised.value.reason_code == "engine_pot_daily_anchor_incomplete"
