@@ -96,14 +96,7 @@ def test_a_non_finite_numeric_is_refused_at_rest(
         "total_fees": "0",
     }
     row[column] = value
-    # A typmod column already refuses ±Infinity as an overflow; NaN, and every value in the
-    # unconstrained `total_fees`, reach the CHECK.
-    expected = (
-        psycopg.errors.CheckViolation
-        if value == "NaN" or column == "total_fees"
-        else (psycopg.errors.CheckViolation, psycopg.errors.NumericValueOutOfRange)
-    )
-    with pytest.raises(expected), ebull_test_conn.transaction():
+    with pytest.raises(psycopg.errors.CheckViolation), ebull_test_conn.transaction():
         ebull_test_conn.execute(
             """
             INSERT INTO broker_account_session_close_marks (

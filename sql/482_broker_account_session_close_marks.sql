@@ -19,7 +19,9 @@
 -- declared count refuses.
 --
 -- PostgreSQL `numeric` admits 'NaN' and, since PostgreSQL 14, '±Infinity'. Every numeric column is
--- CHECKed finite. `NaN = NaN` holds for numeric (sql/374), so `<> 'NaN'` is the working test.
+-- CHECKed finite. `NaN = NaN` holds for numeric (sql/374), so `<> 'NaN'` is the working test. The
+-- columns carry no typmod, as sql/479: a finite value the writer's gate accepts cannot then overflow
+-- at INSERT, and the broker's values are stored as served.
 --
 -- UPDATE and DELETE are refused on both tables (sql/424's `etoro_crowd_append_only`), so S can be
 -- neither edited nor deleted and replaced by a later snapshot. The test harness empties tables under
@@ -44,13 +46,13 @@ CREATE TABLE IF NOT EXISTS broker_account_session_close_marks (
     position_id           BIGINT        NOT NULL,
     instrument_id         INTEGER       NOT NULL,
     is_buy                BOOLEAN       NOT NULL,
-    units                 NUMERIC(20,8) NOT NULL,
-    amount                NUMERIC(20,6) NOT NULL,
-    unrealized_pnl        NUMERIC(20,6) NOT NULL,
-    market_value          NUMERIC(20,6) NOT NULL,
+    units                 NUMERIC NOT NULL,
+    amount                NUMERIC NOT NULL,
+    unrealized_pnl        NUMERIC NOT NULL,
+    market_value          NUMERIC NOT NULL,
     is_partially_altered  BOOLEAN       NOT NULL,
-    close_rate            NUMERIC(20,8) NOT NULL,
-    close_conversion_rate NUMERIC(20,10) NOT NULL,
+    close_rate            NUMERIC NOT NULL,
+    close_conversion_rate NUMERIC NOT NULL,
     asset_currency_id     INTEGER       NOT NULL CHECK (asset_currency_id > 0),
     pnl_timestamp         TIMESTAMPTZ   NOT NULL,
     total_fees            NUMERIC       NOT NULL,
