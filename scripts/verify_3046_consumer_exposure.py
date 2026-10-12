@@ -310,7 +310,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/strategy_comparator.py",
-        276,
+        358,
         "LATEST_VALID_CLOSE_SQL (comparator endpoints)",
         "COMPOSED",
         ("caller_span_whole_history",),

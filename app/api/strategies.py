@@ -64,7 +64,12 @@ from app.services.strategy_base_currency import (
     SUPPORTED_DEPLOYMENT_CURRENCIES,
 )
 from app.services.strategy_capital_sandbox import sandbox_bound, sandbox_headroom
-from app.services.strategy_comparator import ComparatorUnavailableReason, HurdleUnavailableReason, load_comparator
+from app.services.strategy_comparator import (
+    ComparatorUnavailableReason,
+    GbpUnavailableReason,
+    HurdleUnavailableReason,
+    load_comparator,
+)
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -1250,6 +1255,26 @@ class StrategyComparatorHurdle(BaseModel):
     unavailable_reason: HurdleUnavailableReason | None
 
 
+class StrategyComparatorGbp(BaseModel):
+    """#3616 slice 2 — slice 1's returns restated in GBP at ECB rates; NOT after tax.
+
+    Spec: docs/specs/metrics/2026-10-12-3616-gbp-isa-comparator.md
+    """
+
+    #: Built from ``strategy_comparator.GbpComparison`` via ``asdict``, like the hurdle.
+    model_config = ConfigDict(extra="forbid")
+
+    fx_source: Literal["ecb_reference_fx_rates_daily"]
+    fx_start_date: date | None
+    fx_end_date: date | None
+    #: ``φ_E / φ_S``, dimensionless.
+    fx_multiplier: Decimal | None
+    comparator_return: Decimal | None
+    engine_return: Decimal | None
+    engine_excess: Decimal | None
+    unavailable_reason: GbpUnavailableReason | None
+
+
 class StrategyComparator(BaseModel):
     """#3616 slice 1 — the pot against an investable UCITS S&P 500 fund.
 
@@ -1272,6 +1297,7 @@ class StrategyComparator(BaseModel):
     unavailable_reason: ComparatorUnavailableReason | None
     engine_excess: Decimal | None
     hurdle: StrategyComparatorHurdle
+    gbp: StrategyComparatorGbp
 
 
 class StrategyWealthHistoryResponse(BaseModel):
