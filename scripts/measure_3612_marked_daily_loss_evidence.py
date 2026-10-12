@@ -325,7 +325,8 @@ FROM (
 _ENGINE_CLOSE_DAYS_SQL = """
 SELECT count(*), count(DISTINCT (e.executed_at AT TIME ZONE 'America/New_York')::date),
        string_agg(DISTINCT ((e.executed_at AT TIME ZONE 'America/New_York')::date)::text, ','),
-       string_agg(e.position_id || ' at ' || (e.executed_at AT TIME ZONE 'America/New_York')::text || ' New York', '; ')
+       string_agg(e.position_id::text || ' at '
+                  || (e.executed_at AT TIME ZONE 'America/New_York')::text || ' New York', '; ')
 FROM trade_events e
 WHERE e.event_kind = 'close' AND e.executed_at >= %s AND e.executed_at < %s
   AND EXISTS (SELECT 1 FROM strategy_position_ownership o
