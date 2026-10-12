@@ -20,6 +20,8 @@ from app.services.strategy_position_manager import manage_owned_position
 from tests.test_ai_trial_deadline_db import _POSITION_ID, _opened_arm_leg, _position
 from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW
 
+pytestmark = pytest.mark.usefixtures("marked_daily_loss_neutral")
+
 Conn = psycopg.Connection[Any]
 _EDIT_OPERATION_ID = UUID("5a4f0e7e-3471-4c2c-9d00-3c3c3c3c3c3c")
 # A day after the fill, well before the 2026-10-19 deadline.

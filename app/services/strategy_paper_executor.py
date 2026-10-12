@@ -36,7 +36,7 @@ from app.providers.broker import (
 from app.security.unattended_guard import refuse_entry_if_unmerged_code
 from app.services.broker_settlement_arms import effective_open_minimum, select_underlying_long_arms
 from app.services.cost_model import COST_MODEL_ID
-from app.services.engine_pot_risk import advance_pot_drawdown, observe_pot_nav
+from app.services.engine_pot_risk import advance_pot_drawdown, observe_daily_marked_pnl, observe_pot_nav
 from app.services.market_calendar import us_market_status
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
@@ -1044,6 +1044,8 @@ def _observe_local_mandate_risk(
         if open_strategy_lifecycles >= intent.mandate_max_concurrent_positions:
             return "portfolio_concurrency_limit"
         daily_loss_limit = pool_base * intent.mandate_max_daily_loss_pct / Decimal("100")
+        if not daily_realised_pnl.is_finite():
+            return "engine_capital_population_incomplete"
         if daily_realised_pnl <= -daily_loss_limit:
             return "portfolio_daily_loss_limit"
         # #3541: the ENGINE POT's drawdown, never the account's. A refusal returns from
@@ -1057,6 +1059,19 @@ def _observe_local_mandate_risk(
             return exc.reason_code
         if isinstance(drawdown, str):
             return drawdown
+        # #3612 slice 2: the realised check above cannot see an open book falling. Both
+        # marked refusals come after the drawdown advance, which this block commits.
+        try:
+            daily_marked_pnl = observe_daily_marked_pnl(
+                conn, risk, decided_at=now, max_mark_age_seconds=intent.max_quote_age_seconds
+            )
+        except EngineCapitalObservationError as exc:
+            logger.warning(
+                "paper signal %s: marked daily loss refused as %s (%s)", intent.signal_id, exc.reason_code, exc
+            )
+            return exc.reason_code
+        if daily_marked_pnl <= -daily_loss_limit:
+            return "portfolio_daily_marked_loss_limit"
     return deployment_base, pool_base, pending_total, drawdown
 
 

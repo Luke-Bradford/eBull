@@ -12,6 +12,8 @@ from app.services.ai_trial_wind_down import read_v1_declarations, wind_down_refu
 from tests.test_ai_trial_deadline_db import _opened_arm_leg
 from tests.test_ai_trial_intent_db import SESSION, _declare
 
+pytestmark = pytest.mark.usefixtures("marked_daily_loss_neutral")
+
 Conn = psycopg.Connection[Any]
 
 
