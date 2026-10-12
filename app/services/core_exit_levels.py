@@ -72,10 +72,13 @@ now the rebalance band:
   ``buy_core`` toward that edge, pre-cost and subject to the minimum-amount floor
   (``tests/test_2603_core_allocator.py::
   test_a_stopped_out_core_is_rebought_to_the_lower_band_edge``).  That buy carries its
-  own stop and target, anchored on the ask and repaired to the fill.
+  own stop and target, anchored on the ask and repaired to the fill
+  (``tests/test_2603_core_executor.py::
+  test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target``).
 - Nothing in the allocator or the executor's buy path branches on why the core is
   underweight.  The buy passes the same execution gates as any core buy (eligibility,
-  quote freshness, broker preflight, sandbox headroom).  The one RISK gate on it is the
+  quote freshness, broker preflight, sandbox headroom -- the last pinned by
+  ``test_over_the_sandbox_bound_only_a_buy_is_refused``).  The one RISK gate on it is the
   engine pot's drawdown limit: ``execute_core_rebalance`` refuses non-sell actions with
   ``portfolio_drawdown_limit`` when the pot's observed drawdown is at or beyond the
   portfolio mandate's ``max_portfolio_drawdown_pct`` (``_observe_core_portfolio_drawdown``;

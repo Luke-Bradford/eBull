@@ -12506,5 +12506,6 @@ neighbouring container and match it.**
   limit. The docstring stayed, and the risk committee read it as a possible whipsaw defect.
 - Prevention: when a PR puts an attended-only executor on a schedule, grep its callees' docstrings for "attended",
   "manual", "no re-entry" and similar claims about who triggers it, and correct them in the same PR.
-- Enforced in: `app/services/core_exit_levels.py` module docstring ("What happens after the stop fires") and
+- Enforced in: review only; no mechanical check exists for the grep. The corrected instance is
+  `app/services/core_exit_levels.py` ("What happens after the stop fires"), with its behaviour pinned by
   `tests/test_2603_core_allocator.py::test_a_stopped_out_core_is_rebought_to_the_lower_band_edge`.

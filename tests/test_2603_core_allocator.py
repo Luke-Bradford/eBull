@@ -430,4 +430,7 @@ def test_a_stopped_out_core_is_rebought_to_the_lower_band_edge() -> None:
     assert decision.action == "buy_core"
     assert decision.reason_code is None
     assert decision.core_pct == Decimal("0")
+    # Lower edge = target - band = 45%; 45% of the 1000 sleeve, from 0 core, is 450.
+    # The 10% reserve is not a trigger (the cash side stays at 55%).
+    assert decision.lower_pct == Decimal("45")
     assert decision.amount == Decimal("450")
