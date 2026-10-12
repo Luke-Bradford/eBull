@@ -10,12 +10,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.providers.broker import BrokerDirectPositionInvestment
 from app.services import strategy_paper_executor
 from app.services.engine_pot_risk import (
     DailyAnchor,
     DailyMark,
     LedgerEvent,
     _anchor_mark,
+    _check_units_conserved,
     _price_book,
     daily_anchor_session,
     marked_daily_pnl,
@@ -405,14 +407,16 @@ def test_the_realised_mandate_sql_is_byte_identical() -> None:
 
 
 class _Closes:
-    def __init__(self, rows: list[tuple[int, int, int, Decimal]]) -> None:
-        self.rows = rows
+    """``_price_book``'s two reads in order: the per-position ledger, then the trades' close slices."""
+
+    def __init__(self, *results: list[tuple[Any, ...]]) -> None:
+        self.results = list(results)
 
     def execute(self, *_a: object) -> _Closes:
         return self
 
-    def fetchall(self) -> list[tuple[int, int, int, Decimal]]:
-        return self.rows
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self.results.pop(0)
 
 
 def test_opposite_infinite_realised_aggregates_refuse_instead_of_raising_invalid_operation() -> None:
@@ -420,10 +424,59 @@ def test_opposite_infinite_realised_aggregates_refuse_instead_of_raising_invalid
     # aggregate, so it is tested on the reader's own arithmetic.
     released_at = OPENED + timedelta(days=1)
     book = [(1, "closed", 1, 1, CLAIMED, released_at), (2, "closed", 1, 2, CLAIMED, released_at)]
-    closes = _Closes([(1, 1, 0, Decimal("Infinity")), (2, 1, 0, Decimal("-Infinity"))])
+    closes = _Closes(
+        [
+            (1, Decimal("1"), 1, Decimal("1"), 0, Decimal("Infinity")),
+            (2, Decimal("1"), 1, Decimal("1"), 0, Decimal("-Infinity")),
+        ],
+        [],
+    )
     with pytest.raises(EngineCapitalObservationError) as raised:
         _price_book(closes, {}, book, OBS)  # type: ignore[arg-type]
     assert raised.value.reason_code == "engine_capital_population_incomplete"
+
+
+def test_a_close_slice_matched_to_two_trades_refuses_instead_of_counting_twice() -> None:
+    # `orders.broker_order_ref` is not unique by constraint; one unowned slice, event 9, matches both.
+    released_at = OPENED + timedelta(days=1)
+    book = [(1, "closed", 1, 1, CLAIMED, released_at), (2, "closed", 1, 2, CLAIMED, released_at)]
+    one = Decimal("1")
+    ledger = [(1, one, 1, one, 0, one), (2, one, 1, one, 0, one)]
+    slices = [(1, 1, one, 0, one, [9]), (2, 1, one, 0, one, [9])]
+    with pytest.raises(EngineCapitalObservationError) as raised:
+        _price_book(_Closes(ledger, slices), {}, book, OBS)  # type: ignore[arg-type]
+    assert raised.value.reason_code == "engine_capital_population_incomplete"
+    assert "another trade" in str(raised.value)
+
+
+def _broker_units(units: str) -> BrokerDirectPositionInvestment:
+    return BrokerDirectPositionInvestment(
+        position_id=0,
+        instrument_id=1,
+        is_buy=True,
+        units=Decimal(units),
+        amount=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        market_value=Decimal("100"),
+        is_partially_altered=True,
+        close_rate=Decimal("100"),
+        close_conversion_rate=Decimal("1"),
+        asset_currency_id=1,
+    )
+
+
+def test_opposite_unit_discrepancies_on_two_positions_of_one_trade_do_not_cancel() -> None:
+    # Ledger balances 1 and 2 against broker units 2 and 1: the totals agree, A does not.
+    ledgers: list[tuple[int, Decimal | None, int, Decimal]] = [
+        (1, Decimal("2"), 1, Decimal("1")),
+        (2, Decimal("3"), 1, Decimal("1")),
+    ]
+    held = {1: _broker_units("2"), 2: _broker_units("1")}
+    with pytest.raises(EngineCapitalObservationError) as raised:
+        _check_units_conserved(7, ledgers, 0, Decimal("0"), held)
+    assert raised.value.reason_code == "engine_capital_population_incomplete"
+    # B's 1-unit shortfall is an unowned close slice under the entry order: reconciled.
+    _check_units_conserved(7, [ledgers[1]], 1, Decimal("1"), {2: held[2]})
 
 
 @pytest.mark.parametrize("null_at", [1, 2, 4])

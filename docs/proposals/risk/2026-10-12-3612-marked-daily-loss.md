@@ -137,7 +137,7 @@ This slice closes exactly that gap: **the marked move of positions that have not
       - Neither `ai_trial_policy.POLICY_MODULES` (10 modules) nor `ranking_pot_policy.POLICY_MODULES` (28) contains `engine_pot_risk` or the executor (section 5), so no declaration hash moves.
    3. **The marked check.** `observe_daily_marked_pnl`, then the threshold `daily <= −daily_loss_limit`, which returns `portfolio_daily_marked_loss_limit`. A marked-limit breach and a marked-observation refusal both come after the drawdown advance. The realised refusal keeps its earlier return.
 
-   **Out of scope, recorded on #3612 as a remaining slice.** The drawdown index can link a NAV built on an incomplete ledger: `_price_book` accepts a released position with any close history. `refresh_strategy_health` → `_pot_drawdown_block` advances the index every tick without anything this slice adds. The fix belongs in `observe_pot_nav`, covering both callers.
+   **Out of scope, recorded on #3612 as a remaining slice.** The drawdown index can link a NAV built on an incomplete ledger: `_price_book` accepts a released position with any close history. `refresh_strategy_health` → `_pot_drawdown_block` advances the index every tick without anything this slice adds. The fix belongs in `observe_pot_nav`, covering both callers. **Resolved 2026-10-12** by `engine_pot_risk._check_units_conserved` inside `_price_book`, which both NAV readers share. Each position's ledger balance (open less its closes) must be at least its broker units, zero once released, and a trade's shortfalls must sum to the unowned partial-close slices under its entry order, whose realised P&L is now counted. With no open ingested yet, a held position passes only with no recorded close or slice and `isPartiallyAltered` false.
 8. **The two limits are independent.**
    - The realised check sums every demo close in the New York calendar day. `_MANDATE_OBSERVATION_SQL` has no epoch, ownership or verdict filter, so it includes the operator's closes.
    - The marked check covers E only, from S, and refuses outright once E has a close in W.
@@ -306,7 +306,7 @@ v1 does read every close's `units`, for ledger reconciliation. It requires them 
 | 6 label duration | WARNING | Resolved: label reworded, with a resumption test |
 | 7 close units are read | NIT | Resolved: close units required non-NULL and finite, with a test |
 
-Still open and deferred: the drawdown-ledger integrity in `observe_pot_nav` (r4.6, r5.6). It is recorded on #3612.
+Still open and deferred: the drawdown-ledger integrity in `observe_pot_nav` (r4.6, r5.6). It is recorded on #3612. Resolved 2026-10-12 by unit conservation in `_price_book` (Design 7, the out-of-scope note).
 
 | round 10 finding | severity | disposition |
 |---|---|---|

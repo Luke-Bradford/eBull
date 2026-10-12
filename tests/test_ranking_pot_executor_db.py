@@ -250,6 +250,14 @@ def test_an_entry_submits_from_its_slot_and_a_reentry_waits_for_the_booking(
 
     # Booked (+7.50 net): the slot's wealth is 47.50 and the ticket is that.
     _book_close(conn, position=2842001, net_profit="7.5")
+    # History ingest lands the position's open with its close (`trade_events.events_from_history`);
+    # without it the pot NAV cannot reconcile units and refuses the entry (#3612).
+    conn.execute(
+        "INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units, price, "
+        " executed_at, source, raw_payload) "
+        "VALUES (2842001, 2842, 2842, 'open', 'buy', 1, 100, now() - interval '1 day', 'etoro_history', '{}')"
+    )
+    conn.commit()
     broker2 = _pot_broker(2843, now2)
     entered = px.execute_pot_signal(conn, broker=broker2, signal_id=signal2, now=now2)
     assert entered.verdict == "submitted"
@@ -269,12 +277,9 @@ def test_an_entry_submits_from_its_slot_and_a_reentry_waits_for_the_booking(
     per = out["vs_shadow"]["per_rebalance"]
     assert [p["attempt_id"] for p in per] == [a1, a2] and per[0]["shadow"] is None
     (first,), (second,) = per[0]["entries"], per[1]["entries"]
-    # Trade 1 owns position 2842001, whose open event never landed; trade 2 is submitted with no position yet.
-    assert (first["status"], Decimal(first["ask"]), first["fill_reason"]) == (
-        "closed",
-        Decimal(100),
-        "open_event_missing",
-    )
+    # Trade 1 owns position 2842001, closed; trade 2 is submitted with no position yet. A missing open
+    # (`open_event_missing`) is covered by the pure readout test.
+    assert (first["status"], Decimal(first["ask"]), first["fill_reason"]) == ("closed", Decimal(100), None)
     assert (second["status"], Decimal(second["amount"]), second["fill_reason"]) == (
         "entry_pending",
         Decimal("47.50"),

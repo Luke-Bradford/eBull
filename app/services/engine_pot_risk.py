@@ -42,6 +42,7 @@ from app.services.strategy_engine_capital import EngineCapitalObservationError, 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _HUNDRED = Decimal("100")
+_HALF_STORED_UNIT = Decimal("5E-9")  # half the last place of `trade_events.units` NUMERIC(20,8), sql/194
 
 PotRiskRefusal = Literal["engine_pot_risk_stale", "engine_pot_epoch_mismatch"]
 """Refusals of the risk STATE, as distinct from ``EngineCapitalRefusal`` (the observation)."""
@@ -153,6 +154,27 @@ def book_membership(rows: list[tuple[Any, ...]], at: datetime) -> tuple[dict[int
     return held, released
 
 
+# eToro books a PARTIAL close under a NEW position id that shares the entry order's
+# `orderId` and that nobody owns (`broker_closed_release`, attended 2026-09-23). The
+# predicate is `ai_trial_readout._CLOSE_ROWS_SQL`'s. `orders.broker_order_ref` is not unique by
+# constraint, so `_price_book` refuses a slice matched to two trades rather than count it twice.
+_SIBLING_CLOSES_SQL = """
+    SELECT t.trade_id, count(ev.event_id), COALESCE(sum(ev.units),0),
+           count(ev.event_id) FILTER (WHERE ev.realized_pnl_usd IS NULL), COALESCE(sum(ev.realized_pnl_usd),0),
+           array_agg(ev.event_id)
+    FROM unnest(%s::bigint[]) AS t(trade_id)
+    JOIN trade_events ev ON ev.event_kind = 'close' AND ev.executed_at <= %s
+     AND NOT EXISTS (SELECT 1 FROM strategy_position_ownership other WHERE other.broker_position_id = ev.position_id)
+     AND EXISTS (
+         SELECT 1 FROM strategy_trade_orders sto
+         JOIN orders o ON o.order_id = sto.order_id
+         WHERE sto.strategy_trade_id = t.trade_id AND sto.purpose = 'entry'
+           AND (ev.order_id::text = o.broker_order_ref OR ev.raw_payload ->> 'orderId' = o.broker_order_ref)
+     )
+    GROUP BY t.trade_id
+"""
+
+
 def _price_book(
     conn: psycopg.Connection[Any],
     positions: dict[int, BrokerDirectPositionInvestment],
@@ -188,40 +210,132 @@ def _price_book(
 
     # A held position's partial closes are realised; a close after the snapshot is still
     # inside that position's unrealised.
-    closes = conn.execute(
+    members = [*held, *released]
+    ledger = conn.execute(
         """
         SELECT ids.position_id,
-               count(event.event_id) AS close_count,
-               count(event.event_id) FILTER (WHERE event.realized_pnl_usd IS NULL) AS missing_pnl,
-               COALESCE(sum(event.realized_pnl_usd),0) AS realised
+               sum(event.units) FILTER (WHERE event.event_kind='open') AS open_units,
+               count(event.event_id) FILTER (WHERE event.event_kind='close') AS close_count,
+               COALESCE(sum(event.units) FILTER (WHERE event.event_kind='close'),0) AS closed_units,
+               count(event.event_id) FILTER (
+                   WHERE event.event_kind='close' AND event.realized_pnl_usd IS NULL
+               ) AS missing_pnl,
+               COALESCE(sum(event.realized_pnl_usd) FILTER (WHERE event.event_kind='close'),0) AS realised
         FROM unnest(%s::bigint[]) AS ids(position_id)
         LEFT JOIN trade_events event
-          ON event.position_id=ids.position_id AND event.event_kind='close' AND event.executed_at <= %s
+          ON event.position_id=ids.position_id AND event.executed_at <= %s
         GROUP BY ids.position_id
         """,
-        ([*held, *released], at),
+        (members, at),
     ).fetchall()
+    # Every member came from one of these rows (`book_membership`), and `broker_position_id` is
+    # UNIQUE (sql/281), so each member has exactly one trade.
+    trade_of = {
+        int(position_id): int(trade_id)
+        for trade_id, _status, _instrument_id, position_id, _claimed_at, _released_at in rows
+        if position_id is not None and int(position_id) in members
+    }
+    siblings: dict[int, tuple[int, Decimal, int, Decimal]] = {}
+    sliced: set[int] = set()
+    for trade_id, count, units, missing, amount, event_ids in conn.execute(
+        _SIBLING_CLOSES_SQL, (sorted(set(trade_of.values())), at)
+    ).fetchall():
+        if sliced & set(event_ids):
+            raise EngineCapitalObservationError(
+                f"a close slice matches strategy trade {trade_id} and another trade",
+                "engine_capital_population_incomplete",
+            )
+        sliced.update(event_ids)
+        siblings[int(trade_id)] = (int(count), Decimal(str(units)), int(missing), Decimal(str(amount)))
+
     realised = _ZERO
-    for position_id, close_count, missing_pnl, amount in closes:
-        if int(missing_pnl):
-            raise EngineCapitalObservationError(
-                f"owned position {position_id} has a close without realised P&L",
-                "engine_capital_population_incomplete",
+    by_trade: dict[int, list[tuple[int, Decimal | None, int, Decimal]]] = {}
+    for position_id, open_units, close_count, closed_units, missing_pnl, amount in ledger:
+        realised += _closes_realised(f"owned position {position_id}", int(missing_pnl), amount)
+        by_trade.setdefault(trade_of[int(position_id)], []).append(
+            (
+                int(position_id),
+                None if open_units is None else Decimal(str(open_units)),
+                int(close_count),
+                Decimal(str(closed_units)),
             )
-        if int(close_count) == 0 and int(position_id) in released:
-            raise EngineCapitalObservationError(
-                f"released position {position_id} has no close event by the snapshot",
-                "engine_capital_population_incomplete",
-            )
-        position_realised = Decimal(str(amount))
-        if not position_realised.is_finite():
-            # Two aggregates of opposite infinite sign would otherwise raise
-            # `decimal.InvalidOperation` in the sum and abort the whole paper cycle (#3612).
-            raise EngineCapitalObservationError(
-                f"owned position {position_id} realised P&L is not finite", "engine_capital_population_incomplete"
-            )
-        realised += position_realised
+        )
+    for trade_id, ledgers in by_trade.items():
+        sibling_count, sibling_units, sibling_missing, sibling_amount = siblings.get(trade_id, (0, _ZERO, 0, _ZERO))
+        realised += _closes_realised(f"strategy trade {trade_id} close slice", sibling_missing, sibling_amount)
+        _check_units_conserved(trade_id, ledgers, sibling_count, sibling_units, {pid: positions[pid] for pid in held})
     return realised, unrealised
+
+
+def _closes_realised(label: str, missing_pnl: int, amount: Any) -> Decimal:
+    if missing_pnl:
+        raise EngineCapitalObservationError(
+            f"{label} has a close without realised P&L", "engine_capital_population_incomplete"
+        )
+    value = Decimal(str(amount))
+    if not value.is_finite():
+        # Two aggregates of opposite infinite sign would otherwise raise
+        # `decimal.InvalidOperation` in the sum and abort the whole paper cycle (#3612).
+        raise EngineCapitalObservationError(
+            f"{label} realised P&L is not finite", "engine_capital_population_incomplete"
+        )
+    return value
+
+
+def _check_units_conserved(
+    trade_id: int,
+    ledgers: list[tuple[int, Decimal | None, int, Decimal]],
+    sibling_count: int,
+    sibling_units: Decimal,
+    held: dict[int, BrokerDirectPositionInvestment],
+) -> None:
+    """Refuse a NAV priced on an incomplete ledger (#3612).
+
+    ``ledgers`` are ``(position_id, open units, close count, closed units)`` of the trade's
+    book positions; ``held`` maps the book's held positions to their broker rows.
+
+    Without this a released position passed with any close history, so a recorded partial
+    followed by an unrecorded final close left that close's P&L out; and a held position whose
+    partial close was unrecorded had its units and mark reduced with no realised P&L beside
+    them. Both NAV readers link what they price into a drawdown index. The ledger's units
+    contract (sql/194): the open carries the ORIGINAL size and each close its slice. So each
+    position's ledger balance (open less its own closes) is at least its broker units (zero
+    once released), and the trade's shortfalls sum to the unowned partial-close slices under its
+    entry order. With no slice, every position therefore reconciles on its own, and opposite
+    discrepancies on two positions of one trade (sql/282) cannot cancel.
+    """
+    # The ledger stores units at NUMERIC(20,8), so each stored value is within half an
+    # eighth-place unit of what the broker reported; the broker's own units are unrounded.
+    shortfall = _ZERO
+    stored_values = sibling_count
+    for position_id, open_units, close_count, closed_units in ledgers:
+        row = held.get(position_id)
+        if open_units is None:
+            # The open is ingested by the next portfolio sync, after the ownership claim
+            # (measured 3s to 11 minutes on every engine position, 2026-10-12). Until then the
+            # position is whole only if nothing has closed: no recorded close or slice, and the
+            # broker's `isPartiallyAltered` -- documented as "whether this position was
+            # partially closed" -- is false. The rule `ranking_pot_loss` uses for a fresh fill.
+            if row is not None and close_count == 0 and sibling_count == 0 and row.is_partially_altered is False:
+                continue
+            raise EngineCapitalObservationError(
+                f"owned position {position_id} has no recorded open by the snapshot",
+                "engine_capital_population_incomplete",
+            )
+        broker = _ZERO if row is None else row.units
+        gap = open_units - closed_units - broker
+        stored_values += 1 + close_count
+        if not gap.is_finite() or gap < -(1 + close_count) * _HALF_STORED_UNIT:
+            raise EngineCapitalObservationError(
+                f"owned position {position_id} ledger leaves {open_units - closed_units} units, the broker {broker}",
+                "engine_capital_population_incomplete",
+            )
+        shortfall += gap
+    if abs(shortfall - sibling_units) > stored_values * _HALF_STORED_UNIT:
+        raise EngineCapitalObservationError(
+            f"strategy trade {trade_id} ledger is short {shortfall} units against {sibling_units} in close slices",
+            "engine_capital_population_incomplete",
+        )
 
 
 def observe_pot_nav(conn: psycopg.Connection[Any], snapshot: BrokerAccountRiskSnapshot) -> PotNav:
