@@ -309,6 +309,15 @@ INVENTORY: tuple[Occurrence, ...] = (
         "called twice; the two closes become a period return — upper bound only",
     ),
     Occurrence(
+        "app/services/strategy_comparator.py",
+        273,
+        "LATEST_VALID_CLOSE_SQL (comparator endpoints)",
+        "COMPOSED",
+        ("caller_span_whole_history",),
+        "#3616: called for S and E of the pot's TWR window; the two closes become the "
+        "comparator return — upper bound only",
+    ),
+    Occurrence(
         "app/services/thesis.py",
         1219,
         "52w high/low aggregate",
