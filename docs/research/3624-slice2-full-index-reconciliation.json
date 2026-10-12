@@ -987,7 +987,7 @@
    "ours": false,
    "archive_file_latest_filing_date": "2026-09-15",
    "header": {
-    "structure_defect": null,
+    "structure_defect": "not_admitted@7",
     "raw_tags": [
      "ABS-ASSET-CLASS",
      "ACCEPTANCE-DATETIME",
@@ -1034,24 +1034,18 @@
     "correction_tags": [],
     "acceptance_et": "20260917171143",
     "type": "8-K",
-    "filing_date": "20260917",
-    "filing_date_change": "20260917",
-    "items": [
-     "1.01",
-     "9.01"
-    ],
-    "filer_ciks": [
-     "0001133438",
-     "0002149906"
-    ],
+    "filing_date": null,
+    "filing_date_change": null,
+    "items": [],
+    "filer_ciks": [],
     "sha256": "77bd2a29140cc696e73c5b121af2d48e1e4c694101ec2c3a15fe602679643c41"
    },
    "header_error": null
   }
  ],
  "provenance": {
-  "script_sha256": "d9bb102e13039766a2f11318d3c43ec8639da06e4c13d91a6dad9699e8343fdd",
-  "head": "d59a0bc8c22092ce55aa09f6246ad4919f25369e",
+  "script_sha256": "7792dd33bc1593d42c6d1124b2c907bb1f5cf3de75d0182cd94c5c54086fc048",
+  "head": "ffd87d74fa8cb1f40bb05a0a5587da149dbc6d5a",
   "script_clean_at_head": true
  }
 }

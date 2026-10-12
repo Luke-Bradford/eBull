@@ -86,8 +86,8 @@ which is acceptable only because `last-modified` bounds nothing.
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`d9bb102e…`), `HEAD`
-  (`d59a0bc8`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`7792dd33…`), `HEAD`
+  (`ffd87d74`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
 are as of 2026-10-12, read by the first command (queries in the script).
@@ -232,9 +232,9 @@ engagement of a new independent accountant".
      `(form, filing_date, items)` variant, any appearance whose items are not valid (missing, empty or invalid), a
      target code, or 10 or more codes (`ITEM_CAP`, set after round 2 found 13-code lists truncated). It is wider
      than the target positives; `labels` counts those.
-   - **Structure:** under the header grammar (below, `grammar_sha256`) all 9,041 parse with no defect
-     (`structure_defect`), and every one has exactly one `<ACCESSION-NUMBER>`, equal to the accession requested
-     (`field_outcome_rows`). On these 9,041 the raw tag census (`raw_tag_presence`, headers carrying each tag) finds
+   - **Structure:** under the header grammar (below, `grammar_sha256`), 9,038 of the 9,041 parse with no defect
+     and 3 fail on a DTD group; those 3 are the confirming copies (`structure_defect`). Every one has exactly one
+     `<ACCESSION-NUMBER>`, equal to the accession requested (`field_outcome_rows`). On these 9,041 the raw tag census (`raw_tag_presence`, headers carrying each tag) finds
      `<PRIVATE-TO-PUBLIC>` on 65 and `<CONFIRMING-COPY>` on 3 (`marker_presence`; the grammar admits both only at
      submission level), and **0** `<TIMESTAMP>` and **0** `<PAPER>`. These are observations on the inspected set,
      not format rules.
@@ -359,7 +359,7 @@ engagement of a new independent accountant".
   | `<PRIVATE-TO-PUBLIC>` | absent | `private_to_public` |
   | `<CONFIRMING-COPY>` | absent | `confirming_copy` |
   | correction evidence | none of `<CORRECTION>`, `<DELETION>`, `<TIMESTAMP>` anywhere in the body | `correction_evidence`, with the tags found |
-  | `<ACCEPTANCE-DATETIME>` | 14 digits forming a real date and time | `no_acceptance`, `acceptance_invalid` |
+  | `<ACCEPTANCE-DATETIME>` | 14 digits forming a real date and time, in the year the accession's middle two digits give | `no_acceptance`, `acceptance_invalid`, `acceptance_year_mismatch` |
   | `<FILING-DATE>` | 8 digits forming a real date | `no_filing_date`, `filing_date_invalid` |
   | `<TYPE>` | in the 8-K family | `type_out_of_scope` |
   | `<ITEMS>` | non-empty, every code in the vocabulary, no code twice | `items_empty`, `items_invalid` |
@@ -372,36 +372,43 @@ engagement of a new independent accountant".
 
   **Header grammar.** A closed line grammar, frozen by the sha256 of its table (`GRAMMAR_SHA256`, recorded as
   `grammar_sha256` in the output); any change to it is a new version.
-  - **Source.** The PDS submission-header and FILER tag tables (§3.2.2, pp. 14–17), with the DTD's submission front
-    matter (p. 76) for the leaves the table omits. Two of the table's spellings are typos and the DTD's are used
+  - **Source.** The PDS DTD (Appendix C, pp. 75–76) gives each element's parent, order and count where it declares
+    the element; the PDS tag tables (§3.2.2, pp. 14–17) give them for the elements the DTD omits
+    (`ORGANIZATION-NAME`, the non-US address elements). Two table spellings are typos and the DTD's are used
     (`<CONFIRMING COPY>` is `CONFIRMING-COPY`; `<ASSIGNED-SIC` lacks its `>`). The `.hdr.sgml` file adds two
     elements that are not PDS elements, and the grammar names them as extensions: the envelope, whose first
     non-blank line is `<SEC-HEADER><accession>.hdr.sgml : <YYYYMMDD>` and whose last is `</SEC-HEADER>`, and
-    `<ACCEPTANCE-DATETIME>` at submission level.
+    `<ACCEPTANCE-DATETIME>`, required and first at submission level, where every inspected header has it.
+  - **Admitted elements.** The PDS elements that the inspected 8-K headers carry (`raw_tag_presence`), the PDS
+    paper, release, confirming-copy and correction elements (`PAPER`, `PRIVATE-TO-PUBLIC`, `CONFIRMING-COPY`,
+    `CORRECTION`, `TIMESTAMP`, `DELETION`) at their DTD places, and the two extensions. The only role is `FILER`, and
+    its registrant data is `COMPANY-DATA`. Every other PDS element, role and series container
+    (`MERGER-SERIES-AND-CLASSES-CONTRACTS` included) is `not_admitted`, as is any name in another casing or with a
+    space. This is stricter than the PDS: it can withhold a label, never certify one.
   - **Lines.** Every non-blank line is exactly one of `<LEAF>value`, `<CONTAINER>` or `</CONTAINER>`, starting at
-    column 1. A value is the rest of its line and holds no `<`. The EMPTY elements (`CORRECTION`, `PAPER`,
-    `PRIVATE-TO-PUBLIC`, `DELETION`, `CONFIRMING-COPY`) and the containers carry none. Text on a line of its own,
-    such as a second item code or a second date, is `non_tag_line`, never part of the value above it.
-  - **Placement and count.** Each element is permitted only under its table parent, and at most once per parent
-    instance unless the table marks it repeatable (`ITEMS`, `REFERENCES-429`, `GROUP-MEMBERS`, `FILER`,
-    `FORMER-COMPANY`, `FORMER-NAME`). Each `FILER` holds exactly one `COMPANY-DATA` or `OWNER-DATA` (the DTD's
-    `regist-data`), and that holds exactly one `<CIK>` (`cmpy-data`). So a second CIK in one company data, or
-    `<ITEMS>` inside it, is `malformed`. Containers close in order. Whether other elements are present is not
-    enforced: every field read has its own outcome above, and no other element feeds a label. Element order is not
-    enforced either, because no field read depends on it.
-  - **What is not admitted.** Only the `FILER` role is admitted. Every other role, the series containers
-    (`MERGER-SERIES-AND-CLASSES-CONTRACTS` included) and any name outside the table, in any casing or spacing, is
-    `malformed`. The PDS declaration makes names case-insensitive (`NAMECASE GENERAL YES`); the producer accepts
-    only the table's upper-case spellings. This is a construction choice. None of the 9,041 inspected headers
-    carries another role or a series element (`raw_tag_presence`), and each one admitted would widen the grammar
-    without a case to test it on.
-  - **Causes.** `envelope`, `outside_envelope`, `non_tag_line`, `unknown_element`, `misplaced`, `repeated`,
-    `value_not_permitted`, `unbalanced`, `registrant_data_count`, `cik_count`, `unclosed`, each recorded with its
-    line number. Markers and correction evidence are still detected anywhere in the body.
-  - **Reuse first.** edgartools' `SubmissionFormatParser` (5.30.2) was run on the eight round 8–11
-    counterexamples. It fails closed only on the two unbalanced ones: it drops a continuation line silently, keeps
-    `<ITEMS >` under a separate key, and returns two CIKs in one company data as a list. It is not adopted.
-  - **Fixtures.** Every round 8–11 counterexample, and one case per cause, is a test
+    column 1. A value is the rest of its line and holds no `<`. The EMPTY elements and the containers carry none.
+    Text on a line of its own, such as a second item code or a second date, is `non_tag_line`, never part of the
+    value above it. A body with no non-blank line is `envelope`.
+  - **Order, count and groups, all enforced.** Children come in source order: front matter before `FILER`, so
+    `<ITEMS>` after `</FILER>` is `order`. Each element is within its count: `1` required once, `?` at most once,
+    `*` any, `+` at least one. The DTD's required elements are enforced: `ACCESSION-NUMBER`, `TYPE`,
+    `PUBLIC-DOCUMENT-COUNT` and `FILING-DATE` in the front matter; at least one `FILER` (§3.2.2's `1+`);
+    `COMPANY-DATA` in each filer, with `CONFORMED-NAME` and `CIK` once; `FORM-TYPE` and `ACT` in `FILING-VALUES`;
+    both fields of `FORMER-COMPANY`. The DTD's groups are whole: `CORRECTION` with `TIMESTAMP` (`%pac-id;`) and
+    `FILE-NUMBER` with `FILM-NUMBER` (`%filing-id;`). So a second CIK in one company data, `<ITEMS>` inside it, or a
+    company data without a conformed name is `malformed`.
+  - **Measured on the 9,041** (`structure_defect`): 9,038 accepted and 3 `group`, each a `FILING-VALUES` with
+    `FILE-NUMBER` and no `FILM-NUMBER`. The 3 are the 3 headers carrying `<CONFIRMING-COPY>`, so they were
+    `items_unestablished` already and the class counts do not move. No inspected header departs from the source
+    order.
+  - **Causes.** `envelope`, `outside_envelope`, `non_tag_line`, `not_admitted`, `misplaced`, `order`, `repeated`,
+    `value_not_permitted`, `unbalanced`, `missing`, `group`, `unclosed`, each recorded with its line number.
+    Markers and correction evidence are still detected anywhere in the body.
+  - **Reuse first.** edgartools' `SubmissionFormatParser` was run on the eight round 8–11 counterexamples. It
+    raises only on the two unbalanced ones, drops a continuation line silently and keeps `<ITEMS >` under a separate
+    key, so it is not adopted. The comparison is a test
+    (`test_edgartools_submission_parser_fails_closed_only_on_unbalanced_containers`, at the version `uv.lock` pins).
+  - **Fixtures.** Every round 8–12 counterexample, and one case per cause, is a test
     (`tests/test_measure_3624_slice2_header_grammar.py`).
 
   The measurement script implements this table (`header_structure`, `parse_header`, `field_outcomes`), and premise
@@ -440,7 +447,8 @@ valid acceptance date, so a row with an unusable acceptance (`0001104659-09-0221
     not ok (no body, or one that cannot be trusted, says whether the submission was electronic), or when the body
     carries `<PAPER>` or `<CONFIRMING-COPY>`. A paper filing can be public before, and in an earlier year than, its
     EDGAR record, and no pinned source dates it.
-  - Otherwise, a trusted electronic body without a usable acceptance date: `start` is the first session strictly
+  - Otherwise, a trusted electronic body without a usable acceptance date (absent, invalid, or outside the
+    accession's year, which it then contradicts): `start` is the first session strictly
     after 1 January of the accession number's year (the inventory key's middle two digits). The dissemination
     guidance says the accession number is "assigned automatically to an accepted submission by EDGAR", and its
     middle two digits "represent the year". This deliberately covers sessions that may precede the real
@@ -629,11 +637,13 @@ of work preceded this spec's acceptance, and both read no price, return or outco
 - **Classification predicates applied to the 9,041 inspected headers**, as measurement only (class counts, no labels
   for a consumer, no full population). Each executed version is a configuration tried: the tag-based
   timing-uncertain rule at `a24131e1` and `77231ed1`, and the production predicates at `44ac5fdc`, `22876703`,
-  `c7ea8ba9`, `847be55b`, `f5007575` and `73614936` (run again at `d59a0bc8`, which pins our CIKs and changes no predicate). Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
+  `c7ea8ba9`, `847be55b`, `f5007575`, `73614936` (on the live CIK list, 5 CIKs larger, so a different negative
+  sample), `d59a0bc8` (the same predicates on the pinned list) and `ffd87d74`. Each run counts separately, since a
+  different covered population is a different configuration. Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
   outcomes.
 
 Build step 2 therefore registers two non-claiming entries: `3624-slice2-construction-measurement`, listing those
-eight versions by commit (`searches=8`, plus any added by a later re-run), and the production configuration below, registered prospectively before
+ten runs by commit (`searches=10`, plus any added by a later re-run), and the production configuration below, registered prospectively before
 the production build's first data read.
 
 The producer and its fixtures are written first and read no data (build step 1). Then, before the production
@@ -1031,3 +1041,14 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
     `MERGER-SERIES-AND-CLASSES-CONTRACTS` now fail closed, and are fixtures.
   - **Equivalence claims** (166): dropped. Premise 6 no longer compares filer sets with the earlier extraction, and
     the round-10 note's 9,418-header claim is withdrawn. The grammar's census on the 9,041 stands on its own.
+- **Round 12** (`var/research/3624/ckpt1_slice2_r12.txt`): 0 open, 5 new (167–171), 4 resolved. The measurement
+  was re-run at `ffd87d74`.
+  - **Acceptance against the accession year** (167): an acceptance outside the year of the accession's middle two
+    digits is `acceptance_year_mismatch`, which is not ok, so the row takes the accession-year fallback and is never
+    `ok`. 0 of the 9,041 inspected mismatch (`field_outcome_rows`).
+  - **Source order and count** (168): the grammar enforces the DTD's order, required elements and groups, and admits
+    only the PDS elements the inspected headers carry plus the marker and correction elements. 3 inspected headers
+    now fail on `%filing-id;`; they are the 3 confirming copies, so none changes class.
+  - **Ledger** (169): `73614936` and `d59a0bc8` are registered as separate runs; ten in all.
+  - **Empty body** (170): `envelope`, with fixtures for an empty and a blank body.
+  - **edgartools comparison** (171): kept as a test, so the claim reproduces at the pinned version.
