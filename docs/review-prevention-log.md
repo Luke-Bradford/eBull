@@ -12487,3 +12487,13 @@ neighbouring container and match it.**
   matching gate branch with a test row.
 - Enforced in: `app/services/account_equity_evidence.py::session_close_snapshot_defect` and
   `tests/test_3612_session_close_anchor.py::test_a_position_without_a_usable_mark_time_fees_or_values_refuses_the_whole_snapshot`.
+
+### A value decoded from JSON is None-safe unless its column is NOT NULL and says so (#3612)
+
+- Failure (bot review, PR #3774): `observe_daily_marked_pnl` built `Decimal(fees)` from a `json_agg` row. A NULL
+  would raise `TypeError` and abort the paper cycle, although the pure core it feeds handles `fees is None` as a
+  named refusal.
+- Prevention: every `Decimal(...)`/`datetime.fromisoformat(...)` over a JSON-decoded column either goes through a
+  None-safe helper or is preceded by a check that refuses by name.
+- Enforced in: `app/services/engine_pot_risk.py::_anchor_mark` and
+  `tests/test_3612_marked_daily_loss.py::test_a_null_anchor_value_refuses_instead_of_raising`.

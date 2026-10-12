@@ -681,6 +681,16 @@ const REFUSAL_LABELS: Record<string, string> = {
   engine_pot_epoch_mismatch: "The engine pot's drawdown record belongs to a different pot epoch",
   portfolio_concurrency_limit: "The mandate's concurrent-position limit is reached",
   portfolio_daily_loss_limit: "The mandate's daily loss limit is reached",
+  engine_capital_population_incomplete: "The engine book's P&L could not be fully observed",
+  portfolio_daily_marked_loss_limit: "The mandate's daily loss limit is reached on marked P&L",
+  engine_pot_daily_close_in_window:
+    "An engine position closed after the daily anchor; new entries wait until a later session's close capture becomes the anchor",
+  engine_pot_daily_anchor_missing: "No broker close capture exists for the prior session, so marked daily P&L cannot be measured",
+  engine_pot_daily_anchor_incomplete: "The prior session's close capture does not hold every position it declares",
+  engine_pot_daily_accounting_unverified: "A position's broker fees changed since the daily anchor, or were not reported",
+  engine_pot_daily_mark_stale:
+    "A position's broker mark is missing, in the future, older than the quote-age bound, or older than its anchor",
+  engine_pot_daily_event_unwitnessed: "A position changed since the daily anchor without a matching ledger event",
   portfolio_cash_reserve_limit: "The mandate's cash reserve leaves no room to open",
   portfolio_active_risk_limit: "The mandate's active risk budget is fully committed",
   portfolio_position_loss_limit: "Loss at the stop would exceed the mandate's per-position limit",

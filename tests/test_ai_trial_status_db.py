@@ -16,6 +16,8 @@ from app.services.ai_trial_version import FUND_V1
 from tests.test_ai_trial_deadline_db import _opened_arm_leg
 from tests.test_ai_trial_intent_db import NOW
 
+pytestmark = pytest.mark.usefixtures("marked_daily_loss_neutral")
+
 Conn = psycopg.Connection[Any]
 
 SESSION = date(2026, 10, 5)

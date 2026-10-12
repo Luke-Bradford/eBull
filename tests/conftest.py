@@ -628,3 +628,16 @@ def assume_trial_powered(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.trial_register import TrialRegister
 
     monkeypatch.setattr(TrialRegister, "freeze_power_record", lambda self, trial: {"fixture": "assume_trial_powered"})
+
+
+# #3612 slice 2: the paper executor's marked daily-loss gate needs a session-close anchor S
+# that matches the engine book at the decision. Suites that drive the trial / pot legs through
+# the executor, and do not test that gate, opt in to a flat figure. The gate itself is tested
+# in tests/test_3612_marked_daily_loss*.py and tests/test_strategy_paper_executor.py.
+@pytest.fixture
+def marked_daily_loss_neutral(monkeypatch: pytest.MonkeyPatch) -> None:
+    from decimal import Decimal
+
+    from app.services import strategy_paper_executor
+
+    monkeypatch.setattr(strategy_paper_executor, "observe_daily_marked_pnl", lambda *_a, **_k: Decimal("0"))
