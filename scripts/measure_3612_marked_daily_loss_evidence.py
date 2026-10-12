@@ -323,7 +323,8 @@ FROM (
 
 _ENGINE_CLOSE_DAYS_SQL = """
 SELECT count(*), count(DISTINCT (e.executed_at AT TIME ZONE 'America/New_York')::date),
-       string_agg(DISTINCT ((e.executed_at AT TIME ZONE 'America/New_York')::date)::text, ',')
+       string_agg(DISTINCT ((e.executed_at AT TIME ZONE 'America/New_York')::date)::text, ','),
+       string_agg(e.position_id || ' at ' || (e.executed_at AT TIME ZONE 'America/New_York')::text || ' New York', '; ')
 FROM trade_events e
 WHERE e.event_kind = 'close' AND e.executed_at >= %s AND e.executed_at < %s
   AND EXISTS (SELECT 1 FROM strategy_position_ownership o
@@ -393,7 +394,7 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
     if engine_closes is not None:
         print(
             f"    engine-owned closes in range: {engine_closes[0]} on {engine_closes[1]} New York dates"
-            f" ({engine_closes[2]})"
+            f" ({engine_closes[2]}): {engine_closes[3]}"
         )
     for module in (ai_trial_policy, ranking_pot_policy):
         names = sorted(str(m) for m in module.POLICY_MODULES)

@@ -15,8 +15,8 @@ This slice closes exactly that gap: **the marked move of positions that have not
 
 - Combining a close's realised P&L with marks needs eToro's realised and unrealised conventions to agree, fees and collateral included. Checkpoint 1 rounds 4 to 7 showed that no eToro document states that rule. Each witness added to stand in for it brought new surface: fees as a signed running total, and `amount` including collateral (`app/providers/broker.py`).
 - So v1 does not combine them. **Any engine close since the anchor refuses further entries for the rest of the day** (`engine_pot_daily_close_in_window`). That is fail-closed. The realised check still covers the closes themselves.
-- **When entries resume.** The refusal lasts until the first New York date whose anchor S was captured after the close. A close during D's session resumes on D + 1. A close after S on a Friday, or on the day before a holiday, keeps refusing through the weekend or holiday, until the next session's S.
-- **How often it binds.** In the census, 2026-09-15 to 2026-10-11, there was 1 engine-owned close, at 09:35 New York on 2026-09-23 (section 5). Under this rule it would have refused entries for the rest of that day. This is a count of closes, not a measure of future blocked windows, which depend on how often strategies exit.
+- **When entries resume.** The refusal lasts until the first New York date whose anchor S was captured after the close and itself passes the endpoint, reconciliation and straddle checks. An immutable S that straddles a close keeps refusing until a later session's S. A close during D's session resumes on D + 1. A close after S on a Friday, or on the day before a holiday, keeps refusing through the weekend or holiday, until the next session's S.
+- **How often it binds.** In the census, 2026-09-15 to 2026-10-11, there was 1 engine-owned close, on 2026-09-23 (section 5 prints its position and time). Under this rule it would have refused entries for the rest of that day. This is a count of closes, not a measure of future blocked windows, which depend on how often strategies exit.
 - **What v1 guarantees.** v1 only adds refusals. Every entry it admits, today's realised-only gate also admits, so it is never weaker than today.
   - It does not claim to see every loss. Each residual below is a loss that today's gate does not see either.
   - Each residual is named so that a later slice can close it, not because v1 relies on it being zero.
@@ -122,11 +122,11 @@ This slice closes exactly that gap: **the marked move of positions that have not
    The new function `engine_pot_risk.observe_daily_marked_pnl(conn, snapshot, *, decided_at, max_mark_age_seconds) -> Decimal` combines that statement with the live snapshot in Python. It derives D, `D_start`, P and `P_close` from `snapshot.observed_at`.
    - `observe_pot_nav`, `advance_pot_drawdown`, `engine_book_rows`, `book_membership` and `_MANDATE_OBSERVATION_SQL` keep their implementations.
    - `_price_book` changes in one place (7.2). Also changed: the executor function, the scheduler job, two provider field comments, and `frontend/src/pages/StrategiesPage.tsx`'s refusal map (10).
-   - An event committed after the statement's snapshot is not seen. A close it records still changes the live snapshot's units or presence, and the case table then refuses.
+   - An event committed after the statement's snapshot is not seen. A close it records normally changes the live snapshot's units or presence, and the case table then refuses. The exceptions are named residuals 3 and 4.
 6. **Exception contract.** The function raises `EngineCapitalObservationError` with one of the codes above, which are added to `EngineCapitalRefusal`. `_observe_local_mandate_risk` catches it inside its transaction block and returns the code, as it already does for `advance_pot_drawdown`. The code reaches `_persist_rejection`; the message, which names the position, is logged.
 7. **Executor changes.** In `_observe_local_mandate_risk`:
    1. **The realised check.**
-      - Its dates come from `risk.observed_at` instead of `now`.
+      - Its dates stay derived from `now`, exactly as today (r10 finding 1). Deriving them from `risk.observed_at` would change the gate across New York midnight: an operator close just after midnight, outside E, counts toward the new day on `now` but not on the snapshot's day, so today's gate refuses where the changed one would admit. The marked check derives its own D from `risk.observed_at`, independently.
       - Its `daily_realised_pnl` must be finite before the comparison, else it refuses `engine_capital_population_incomplete`.
       - `_MANDATE_OBSERVATION_SQL`'s text is unchanged.
       - It still sums the whole New York calendar day as visible when it runs, the frozen preview gates' behaviour, kept because they share the SQL.
@@ -195,6 +195,8 @@ S exists only if a qualifying snapshot is inserted on P's New York date after `P
   - the same reconciliation failure on the live side refuses;
   - a close with NULL or NaN `units` in the position's ledger refuses `event_unwitnessed`, and a later exit in the same cycle executes;
   - the `close_in_window` label's resumption rule: a close after Friday's S still refuses on Saturday and Monday, and a Monday-evening capture releases entries from Tuesday;
+  - a Monday S with mark 16:00:00, a close at 16:00:01 and receipt 16:00:02 keeps refusing on Tuesday;
+  - realised check at midnight: risk observed Friday 23:59:50, decision Saturday 00:00:10, operator close outside E at 00:00:05 with −2,000 realised refuses `portfolio_daily_loss_limit`, as today;
   - a mark 50 s old at receipt, with receipt 20 s before the decision and a 60 s bound, refuses; 30 s plus 20 s passes;
   - events exactly at `S.observed_at` are outside W, and events exactly at `risk.observed_at` are inside it.
 - **Calendar:**
@@ -259,7 +261,7 @@ No authorisation surface changes. This adds:
 Rounds 4 to 6, each finding with its disposition, are in the closure table at `c2109f14` (`git show c2109f14:docs/proposals/risk/2026-10-12-3612-marked-daily-loss.md`). r8 removed the realised term, which supersedes:
 - r4.2, r6.3 and r6.6: the realised/unrealised identity;
 - r5.1, r5.2 and r6.2: fees on closes, now refused outright as a close;
-- r6.4: a split hiding a missing close, now caught by unit and ledger reconciliation without a realised term;
+- r6.4: a split hiding a missing close. This is partly addressed: unit and ledger reconciliation catch every non-offsetting case, and the exactly offsetting case is accepted as named residual 4;
 - r6.7: dividends at close, now a close;
 - r6.12: NULL rules for close fields, for the realised and fee fields, which v1 does not read.
 
@@ -270,7 +272,7 @@ v1 does read every close's `units`, for ledger reconciliation. It requires them 
 | 1 `amount` includes collateral | BLOCKING | Superseded: cost basis is not a v1 witness |
 | 2 accounting identity rests on a sample | BLOCKING | Superseded: no realised term; a close refuses |
 | 3 live mark can precede anchor | BLOCKING | Resolved: `t_now(p) > t_S(p)` (Design 4), with a midnight test |
-| 4 mark time vs position tuple | WARNING | Resolved: straddling events refuse; no instant shared across fields is assumed |
+| 4 mark time vs position tuple | WARNING | Partly addressed: straddling events and ledger disagreement refuse; the remaining case is accepted as named residual 3 |
 | 5 account-level charges | WARNING | Open, stated as a v1 exclusion (Scope) |
 | 6 50/25 unreproduced | WARNING | Resolved: the history prints each `investment_usd` |
 | 7 policy counts | WARNING | Resolved: section 5 prints both lists |
@@ -281,7 +283,7 @@ v1 does read every close's `units`, for ledger reconciliation. It requires them 
 
 | round 8 finding | severity | disposition |
 |---|---|---|
-| 1 delayed close defeats straddle | BLOCKING | Resolved: ledger reconciliation at both endpoints (Design 4), measured 252/252, counterexample test |
+| 1 delayed close defeats straddle | BLOCKING | Resolved for the stated counterexample (units disagree with the ledger) by reconciliation at both endpoints, measured 252/252 and tested. The units-agree variant is named residual 3 |
 | 2 fee rule from a CHECK | WARNING | Resolved: stated as conservative local policy, with no inclusion claim |
 | 3 account-level charges | WARNING | Open, stated as a v1 exclusion (Scope) |
 | 4 doubled mark-age allowance | WARNING | Resolved: age measured at `decided_at` |
@@ -303,3 +305,12 @@ v1 does read every close's `units`, for ledger reconciliation. It requires them 
 | 7 close units are read | NIT | Resolved: close units required non-NULL and finite, with a test |
 
 Still open and deferred: the drawdown-ledger integrity in `observe_pot_nav` (r4.6, r5.6). It is recorded on #3612.
+
+| round 10 finding | severity | disposition |
+|---|---|---|
+| 1 realised date moved to `risk.observed_at` breaks monotonicity | BLOCKING | Resolved: the realised check keeps `now` (Design 7.1); the midnight operator-close regression test is added |
+| 2 dispositions stronger than the residuals | WARNING | Resolved: r6.4, r7.4 and r8.1 qualified; Design 5 points to residuals 3 and 4 |
+| 3 straddled immutable anchor | WARNING | Resolved: the resumption rule requires a passing S; tested |
+| 4 engine close time | NIT | Resolved: section 5 prints each engine-owned close's position and time |
+
+Round 10's judgement: the three round-9 cases are WARNING-level residuals under the monotone guarantee, and the drawdown-ledger deferral is acceptable.
