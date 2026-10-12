@@ -266,13 +266,13 @@ INVENTORY: tuple[Occurrence, ...] = (
     Occurrence("app/services/risk_metrics.py", 1659, "eligibility pre-filter", "METADATA"),
     Occurrence(
         "app/services/engine_book_risk.py",
-        408,
+        414,
         "load_inputs return history",
         "WINDOWED",
         ("engine_book_risk",),
         "held instruments + SPY over the last 253 NYSE sessions (bounded by LOOKBACK_DAYS)",
     ),
-    Occurrence("app/services/engine_book_risk.py", 418, "load_inputs latest mark", "SINGLE_BAR"),
+    Occurrence("app/services/engine_book_risk.py", 424, "load_inputs latest mark", "SINGLE_BAR"),
     Occurrence(
         "app/services/market_regime_provider.py",
         206,

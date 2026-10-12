@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 
 from app.services.engine_book_risk import (
+    STRESS_2008,
     STRESS_2020,
     BookInputs,
     HeldPosition,
@@ -105,7 +106,7 @@ def test_empty_book() -> None:
     assert snap.history_status == "empty_book"
     assert (snap.hist_vol_pct, snap.ewma_vol_pct, snap.beta) == (0, 0, 0)
     assert (snap.largest_share_pct, snap.top5_share_pct, snap.hhi) == (None, None, None)
-    assert (snap.stress_2020_pct, snap.stress_2022_pct, snap.gross_usd) == (0, 0, 0)
+    assert (snap.stress_2008_pct, snap.stress_2020_pct, snap.stress_2022_pct, snap.gross_usd) == (0, 0, 0, 0)
     assert snap.checks["forecast_vol_vs_target"]["status"] == "no_limit"
     assert snap.checks["stale_marks"] == {"status": "evaluated", "value": "0", "limit": "0", "flagged": False}
 
@@ -120,6 +121,7 @@ def test_a_book_tracking_spy_has_beta_one_and_scenario_stress() -> None:
     assert last is not None
     weight = 50 * last / Decimal("10000")
     assert snap.beta == (weight).quantize(Decimal("1e-8"))
+    assert snap.stress_2008_pct == (weight * STRESS_2008 * 100).quantize(Decimal("1e-8"))
     assert snap.stress_2020_pct == (weight * STRESS_2020 * 100).quantize(Decimal("1e-8"))
     assert (snap.largest_share_pct, snap.top5_share_pct, snap.hhi) == (100, 100, 10000)
     assert snap.beta_defaulted_count == 0
@@ -173,7 +175,7 @@ def test_stress_is_floored_at_a_total_loss_per_instrument() -> None:
     snap = compute_snapshot(_inputs((_position(1, _A, units="1"),), {_A: levered}, capital="100"))
     assert snap.positions[0]["beta"] != "defaulted"
     weight = Decimal(snap.positions[0]["weight_of_capital_pct"])
-    assert snap.stress_2020_pct == -weight
+    assert snap.stress_2008_pct == snap.stress_2020_pct == -weight
 
 
 @pytest.mark.parametrize(
@@ -205,6 +207,8 @@ def test_stress_flag_compares_the_signed_loss() -> None:
         _inputs((_position(1, _A, units="100"),), {_A: a}, mandate=MandateLimits(True, Decimal("50"), Decimal("40"), 9))
     )
     assert loose.checks["stress_2020_vs_max_drawdown"]["flagged"] is False
+    # -56% breaches a 40% limit at beta 1 where -34% does not.
+    assert loose.checks["stress_2008_vs_max_drawdown"]["flagged"] is True
     assert loose.checks["stress_2022_vs_max_drawdown"]["flagged"] is False
 
 
@@ -215,3 +219,8 @@ def test_zero_variance_spy_is_degenerate() -> None:
     assert snap.history_status == "degenerate"
     assert snap.beta is None and snap.hist_vol_pct == 0
     assert snap.beta_defaulted_count == 1
+
+
+def test_stress_2008_reproduces_from_the_spy_closes() -> None:
+    # Series 7694 (Intrader SPY) closes at the 2007-10-09 peak and the 2009-03-09 trough (spec "Source rule").
+    assert (Decimal("68.110001") / Decimal("156.479996") - 1).quantize(Decimal("1e-8")) == STRESS_2008

@@ -36,6 +36,7 @@ class RecentSnapshot:
     hist_vol_pct: Decimal | None
     ewma_vol_pct: Decimal | None
     beta: Decimal | None
+    stress_2008_pct: Decimal
     stress_2020_pct: Decimal
     stress_2022_pct: Decimal
     stale_count: int
@@ -69,6 +70,7 @@ class LatestSnapshot:
     history_status: str
     beta_defaulted_count: int
     beta_defaulted_weight_pct: Decimal
+    stress_2008_pct: Decimal
     stress_2020_pct: Decimal
     stress_2022_pct: Decimal
     checks: dict[str, dict[str, Any]]
@@ -90,7 +92,8 @@ _ROWS_SQL: Final = """
     SELECT session_date, measured_at, pool_event_id, capital_usd, gross_usd, position_count, instrument_count,
            open_trade_count, cost_marked_count, stale_count, largest_share_pct, top5_share_pct, hhi,
            hist_vol_pct, ewma_vol_pct, beta, vol_n_obs, beta_n_obs, sample_first, sample_last, history_status,
-           beta_defaulted_count, beta_defaulted_weight_pct, stress_2020_pct, stress_2022_pct, checks, positions
+           beta_defaulted_count, beta_defaulted_weight_pct, stress_2008_pct, stress_2020_pct, stress_2022_pct, checks,
+           positions
     FROM engine_book_risk_snapshots
     WHERE policy_version = %s
     ORDER BY session_date DESC
@@ -127,6 +130,7 @@ def load_engine_book_risk_status(conn: Conn, *, now: datetime | None = None) -> 
             hist_vol_pct=r["hist_vol_pct"],
             ewma_vol_pct=r["ewma_vol_pct"],
             beta=r["beta"],
+            stress_2008_pct=r["stress_2008_pct"],
             stress_2020_pct=r["stress_2020_pct"],
             stress_2022_pct=r["stress_2022_pct"],
             stale_count=r["stale_count"],
