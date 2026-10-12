@@ -436,6 +436,19 @@ def test_opposite_infinite_realised_aggregates_refuse_instead_of_raising_invalid
     assert raised.value.reason_code == "engine_capital_population_incomplete"
 
 
+def test_a_close_slice_matched_to_two_trades_refuses_instead_of_counting_twice() -> None:
+    # `orders.broker_order_ref` is not unique by constraint; one unowned slice, event 9, matches both.
+    released_at = OPENED + timedelta(days=1)
+    book = [(1, "closed", 1, 1, CLAIMED, released_at), (2, "closed", 1, 2, CLAIMED, released_at)]
+    one = Decimal("1")
+    ledger = [(1, one, 1, one, 0, one), (2, one, 1, one, 0, one)]
+    slices = [(1, 1, one, 0, one, [9]), (2, 1, one, 0, one, [9])]
+    with pytest.raises(EngineCapitalObservationError) as raised:
+        _price_book(_Closes(ledger, slices), {}, book, OBS)  # type: ignore[arg-type]
+    assert raised.value.reason_code == "engine_capital_population_incomplete"
+    assert "another trade" in str(raised.value)
+
+
 def _broker_units(units: str) -> BrokerDirectPositionInvestment:
     return BrokerDirectPositionInvestment(
         position_id=0,

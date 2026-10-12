@@ -154,6 +154,27 @@ def book_membership(rows: list[tuple[Any, ...]], at: datetime) -> tuple[dict[int
     return held, released
 
 
+# eToro books a PARTIAL close under a NEW position id that shares the entry order's
+# `orderId` and that nobody owns (`broker_closed_release`, attended 2026-09-23). The
+# predicate is `ai_trial_readout._CLOSE_ROWS_SQL`'s. `orders.broker_order_ref` is not unique by
+# constraint, so `_price_book` refuses a slice matched to two trades rather than count it twice.
+_SIBLING_CLOSES_SQL = """
+    SELECT t.trade_id, count(ev.event_id), COALESCE(sum(ev.units),0),
+           count(ev.event_id) FILTER (WHERE ev.realized_pnl_usd IS NULL), COALESCE(sum(ev.realized_pnl_usd),0),
+           array_agg(ev.event_id)
+    FROM unnest(%s::bigint[]) AS t(trade_id)
+    JOIN trade_events ev ON ev.event_kind = 'close' AND ev.executed_at <= %s
+     AND NOT EXISTS (SELECT 1 FROM strategy_position_ownership other WHERE other.broker_position_id = ev.position_id)
+     AND EXISTS (
+         SELECT 1 FROM strategy_trade_orders sto
+         JOIN orders o ON o.order_id = sto.order_id
+         WHERE sto.strategy_trade_id = t.trade_id AND sto.purpose = 'entry'
+           AND (ev.order_id::text = o.broker_order_ref OR ev.raw_payload ->> 'orderId' = o.broker_order_ref)
+     )
+    GROUP BY t.trade_id
+"""
+
+
 def _price_book(
     conn: psycopg.Connection[Any],
     positions: dict[int, BrokerDirectPositionInvestment],
@@ -207,13 +228,25 @@ def _price_book(
         """,
         (members, at),
     ).fetchall()
-    trade_of = {int(row[3]): int(row[0]) for row in rows if row[3] is not None and int(row[3]) in members}
-    siblings = {
-        int(trade_id): (int(count), Decimal(str(units)), int(missing), Decimal(str(amount)))
-        for trade_id, count, units, missing, amount in conn.execute(
-            _SIBLING_CLOSES_SQL, (sorted(set(trade_of.values())), at)
-        ).fetchall()
+    # Every member came from one of these rows (`book_membership`), and `broker_position_id` is
+    # UNIQUE (sql/281), so each member has exactly one trade.
+    trade_of = {
+        int(position_id): int(trade_id)
+        for trade_id, _status, _instrument_id, position_id, _claimed_at, _released_at in rows
+        if position_id is not None and int(position_id) in members
     }
+    siblings: dict[int, tuple[int, Decimal, int, Decimal]] = {}
+    sliced: set[int] = set()
+    for trade_id, count, units, missing, amount, event_ids in conn.execute(
+        _SIBLING_CLOSES_SQL, (sorted(set(trade_of.values())), at)
+    ).fetchall():
+        if sliced & set(event_ids):
+            raise EngineCapitalObservationError(
+                f"a close slice matches strategy trade {trade_id} and another trade",
+                "engine_capital_population_incomplete",
+            )
+        sliced.update(event_ids)
+        siblings[int(trade_id)] = (int(count), Decimal(str(units)), int(missing), Decimal(str(amount)))
 
     realised = _ZERO
     by_trade: dict[int, list[tuple[int, Decimal | None, int, Decimal]]] = {}
@@ -232,25 +265,6 @@ def _price_book(
         realised += _closes_realised(f"strategy trade {trade_id} close slice", sibling_missing, sibling_amount)
         _check_units_conserved(trade_id, ledgers, sibling_count, sibling_units, {pid: positions[pid] for pid in held})
     return realised, unrealised
-
-
-# eToro books a PARTIAL close under a NEW position id that shares the entry order's
-# `orderId` and that nobody owns (`broker_closed_release`, attended 2026-09-23). The
-# predicate is `ai_trial_readout._CLOSE_ROWS_SQL`'s.
-_SIBLING_CLOSES_SQL = """
-    SELECT t.trade_id, count(ev.event_id), COALESCE(sum(ev.units),0),
-           count(ev.event_id) FILTER (WHERE ev.realized_pnl_usd IS NULL), COALESCE(sum(ev.realized_pnl_usd),0)
-    FROM unnest(%s::bigint[]) AS t(trade_id)
-    JOIN trade_events ev ON ev.event_kind = 'close' AND ev.executed_at <= %s
-     AND NOT EXISTS (SELECT 1 FROM strategy_position_ownership other WHERE other.broker_position_id = ev.position_id)
-     AND EXISTS (
-         SELECT 1 FROM strategy_trade_orders sto
-         JOIN orders o ON o.order_id = sto.order_id
-         WHERE sto.strategy_trade_id = t.trade_id AND sto.purpose = 'entry'
-           AND (ev.order_id::text = o.broker_order_ref OR ev.raw_payload ->> 'orderId' = o.broker_order_ref)
-     )
-    GROUP BY t.trade_id
-"""
 
 
 def _closes_realised(label: str, missing_pnl: int, amount: Any) -> Decimal:
