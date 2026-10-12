@@ -416,6 +416,7 @@ def main() -> None:
     until: date = args.until or datetime.now(UTC).astimezone(_NY).date() - timedelta(days=1)
     print(f"range {args.since} .. {until}")
     with psycopg.connect(settings.database_url) as conn:
+        conn.read_only = True
         close_capture_lag(conn, args.since, until)
         snapshot_continuity(conn, args.since, until)
         after_close_movement(conn, args.since, until)
