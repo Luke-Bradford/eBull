@@ -424,7 +424,7 @@ CORRECTION_TAGS: Final = ("CORRECTION", "DELETION", "TIMESTAMP")
 
 
 #: A header line: an opening tag with its value, or a closing tag. The name is anything between the brackets, so a
-#: name with a space or in lower case reaches the grammar and fails there as ``unknown_element``.
+#: name with a space or in lower case reaches the grammar and fails there as ``not_admitted``.
 _LINE: Final = re.compile(r"<(/?)([^<>]*)>(.*)")
 #: The ``.hdr.sgml`` envelope's opening line (EDGAR Archives; not a PDS element): ``<accession>.hdr.sgml : <date>``.
 _ENVELOPE_VALUE: Final = re.compile(r"\d{10}-\d{2}-\d{6}\.hdr\.sgml : \d{8}")
@@ -435,112 +435,101 @@ EXTENSIONS: Final = (ENVELOPE, "ACCEPTANCE-DATETIME")
 #: PDS EMPTY elements (DTD, p. 76): their line carries no value.
 EMPTY: Final = frozenset({"CORRECTION", "PAPER", "PRIVATE-TO-PUBLIC", "DELETION", "CONFIRMING-COPY"})
 _ADDRESS: Final = (
-    "ADDRESS-IS-A-NON-US-LOCATION",
-    "STREET1",
-    "STREET2",
-    "CITY",
-    "NON-US-STATE-TERRITORY",
-    "STATE",
-    "PROVINCE-COUNTRY",
-    "ZIP",
+    ("ADDRESS-IS-A-NON-US-LOCATION", False, "?"),
+    ("STREET1", False, "?"),
+    ("STREET2", False, "?"),
+    ("CITY", False, "?"),
+    ("NON-US-STATE-TERRITORY", False, "?"),
+    ("STATE", False, "?"),
+    ("PROVINCE-COUNTRY", False, "?"),
+    ("ZIP", False, "?"),
 )
-_REGISTRANT: Final = (
-    "CONFORMED-NAME",
-    "CIK",
-    "ASSIGNED-SIC",
-    "ORGANIZATION-NAME",
-    "RELATIONSHIP",
-    "IRS-NUMBER",
-    "STATE-OF-INCORPORATION",
-    "FISCAL-YEAR-END",
-    "LEGAL-ENTITY-IDENTIFIER",
-)
-_FORMER: Final = ("FORMER-CONFORMED-NAME", "DATE-CHANGED")
-#: The closed header grammar: each container's permitted children, as ``name: (is_container, repeatable)``. A child
-#: not repeatable occurs at most once per parent instance. Transcribed from the PDS submission-header and FILER tag
-#: tables (§3.2.2, pp. 14-17) and the DTD's submission front matter (p. 76), plus :data:`EXTENSIONS`. Only the FILER
-#: role is admitted: every cached 8-K header carries only FILER, and any other role, element or placement is
-#: ``malformed``. Required elements are not enforced here; the fields read have their own outcomes, and identity is
-#: enforced by :func:`header_structure` (one company or owner data per role, one CIK in it).
-GRAMMAR: Final[dict[str, dict[str, tuple[bool, bool]]]] = {
-    ENVELOPE: {
-        **{
-            name: (False, False)
-            for name in (
-                "CORRECTION",
-                "TIMESTAMP",
-                "PAPER",
-                "PRIVATE-TO-PUBLIC",
-                "ACCESSION-NUMBER",
-                "DELETION",
-                "TYPE",
-                "CATEGORY",
-                "CONFIRMING-COPY",
-                "PUBLIC-DOCUMENT-COUNT",
-                "CALENDAR-YEAR-ENDING",
-                "REFERENCE-462B",
-                "PERIOD",
-                "DEPOSITOR-CIK",
-                "SPONSOR-CIK",
-                "MA-I_INDIVIDUAL",
-                "FILING-DATE",
-                "DATE-OF-FILING-DATE-CHANGE",
-                "ACTION-DATE",
-                "RECEIVED-DATE",
-                "EFFECTIVENESS-DATE",
-                "RESOURCE-EXT-ISSUER",
-                "ABS-RULE",
-                "PERIOD-START",
-                "NO-INITIAL-PERIOD-ACTIVITY",
-                "NO-ANNUAL-ACTIVITY",
-                "NO-QUARTERLY-ACTIVITY",
-                "REGISTERED-ENTITY",
-                "ABS-ASSET-CLASS",
-                "ISSUING-ENTITY-NAME",
-                "SECURITIZER-FILE-NUMBER",
-                "IS-FILER-A-NEW-REGISTRANT",
-                "IS-FILER-A-WELL-KNOWN-SEASONED-ISSUER",
-                "FILED-PURSUANT-TO-GENERAL-INSTRUCTION-A2",
-                "IS-FUND-24F2-ELIGIBLE",
-                "ACCEPTANCE-DATETIME",
-            )
-        },
-        **{name: (False, True) for name in ("REFERENCES-429", "ITEMS", "GROUP-MEMBERS")},
-        "FILER": (True, True),
-    },
-    "FILER": {
-        "DELETION": (False, False),
-        "COMPANY-DATA": (True, False),
-        "OWNER-DATA": (True, False),
-        "FILING-VALUES": (True, False),
-        "BUSINESS-ADDRESS": (True, False),
-        "MAIL-ADDRESS": (True, False),
-        "FORMER-COMPANY": (True, True),
-        "FORMER-NAME": (True, True),
-    },
-    "COMPANY-DATA": {name: (False, False) for name in _REGISTRANT},
-    "OWNER-DATA": {name: (False, False) for name in _REGISTRANT},
-    "FILING-VALUES": {name: (False, False) for name in ("DELETION", "FORM-TYPE", "ACT", "FILE-NUMBER", "FILM-NUMBER")},
-    "BUSINESS-ADDRESS": {name: (False, False) for name in (*_ADDRESS, "PHONE")},
-    "MAIL-ADDRESS": {name: (False, False) for name in _ADDRESS},
-    "FORMER-COMPANY": {name: (False, False) for name in _FORMER},
-    "FORMER-NAME": {name: (False, False) for name in _FORMER},
+#: The closed header grammar: each container's children in their source order, as ``(name, is_container, count)``
+#: with count ``1`` (required, once), ``?`` (at most once), ``*`` (any) or ``+`` (at least one). Order and count are
+#: the PDS DTD's (pp. 75-76) where it declares the element, else the §3.2.2 tables' (pp. 14-17). Admitted are the
+#: PDS elements the inspected 8-K headers carry (``raw_tag_presence``), the PDS paper, release, confirming-copy and
+#: correction elements, and :data:`EXTENSIONS`; ``ACCEPTANCE-DATETIME`` is first, where every inspected header has
+#: it. Every other element, role or placement is ``malformed``: stricter than the PDS, so it can only withhold a
+#: label, never certify one.
+GRAMMAR: Final[dict[str, tuple[tuple[str, bool, str], ...]]] = {
+    ENVELOPE: (
+        ("ACCEPTANCE-DATETIME", False, "1"),
+        ("CORRECTION", False, "?"),
+        ("TIMESTAMP", False, "?"),
+        ("PAPER", False, "?"),
+        ("PRIVATE-TO-PUBLIC", False, "?"),
+        ("ACCESSION-NUMBER", False, "1"),
+        ("DELETION", False, "?"),
+        ("TYPE", False, "1"),
+        ("CONFIRMING-COPY", False, "?"),
+        ("PUBLIC-DOCUMENT-COUNT", False, "1"),
+        ("PERIOD", False, "?"),
+        ("ITEMS", False, "*"),
+        ("FILING-DATE", False, "1"),
+        ("DATE-OF-FILING-DATE-CHANGE", False, "?"),
+        ("FILER", True, "+"),
+    ),
+    "FILER": (
+        ("DELETION", False, "?"),
+        ("COMPANY-DATA", True, "1"),
+        ("FILING-VALUES", True, "?"),
+        ("BUSINESS-ADDRESS", True, "?"),
+        ("MAIL-ADDRESS", True, "?"),
+        ("FORMER-COMPANY", True, "*"),
+    ),
+    "COMPANY-DATA": (
+        ("CONFORMED-NAME", False, "1"),
+        ("CIK", False, "1"),
+        ("ASSIGNED-SIC", False, "?"),
+        ("ORGANIZATION-NAME", False, "?"),
+        ("IRS-NUMBER", False, "?"),
+        ("STATE-OF-INCORPORATION", False, "?"),
+        ("FISCAL-YEAR-END", False, "?"),
+    ),
+    "FILING-VALUES": (
+        ("DELETION", False, "?"),
+        ("FORM-TYPE", False, "1"),
+        ("ACT", False, "1"),
+        ("FILE-NUMBER", False, "?"),
+        ("FILM-NUMBER", False, "?"),
+    ),
+    "BUSINESS-ADDRESS": (*_ADDRESS, ("PHONE", False, "?")),
+    "MAIL-ADDRESS": _ADDRESS,
+    "FORMER-COMPANY": (("FORMER-CONFORMED-NAME", False, "1"), ("DATE-CHANGED", False, "1")),
 }
-#: The grammar's sha256 over its sorted JSON, recorded with every output so a change to it is a new version.
+#: DTD groups whose members occur together or not at all: ``%pac-id;`` and ``%filing-id;``.
+GROUPS: Final[dict[str, tuple[str, ...]]] = {
+    ENVELOPE: ("CORRECTION", "TIMESTAMP"),
+    "FILING-VALUES": ("FILE-NUMBER", "FILM-NUMBER"),
+}
+#: The grammar's sha256 over its JSON, recorded with every output so a change to it is a new version.
 GRAMMAR_SHA256: Final = hashlib.sha256(
-    json.dumps({k: sorted(v.items()) for k, v in sorted(GRAMMAR.items())}).encode()
+    json.dumps([GRAMMAR, GROUPS, sorted(EMPTY)], sort_keys=True).encode()
 ).hexdigest()
+
+
+def _closing_defect(name: str, seen: Counter[str]) -> str | None:
+    """A container's count or group defect at its close, else ``None``."""
+    for child, _, count in GRAMMAR[name]:
+        if count in "1+" and not seen[child]:
+            return "missing"
+    group = GROUPS.get(name, ())
+    return "group" if len({seen[member] for member in group}) > 1 else None
 
 
 def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
     """The first defect (``"<cause>@<line>"``, ``None`` if none) and every leaf value by path, under :data:`GRAMMAR`.
 
     Every non-blank line is exactly one of ``<LEAF>value``, ``<CONTAINER>`` or ``</CONTAINER>``; the first line opens
-    the envelope and the last non-blank line closes it. A value is the rest of its line and holds no ``<``; an EMPTY
-    element has none. Each role holds exactly one company or owner data, which holds exactly one CIK."""
+    the envelope and the last non-blank line closes it. Children come in grammar order, each within its count, and
+    groups are whole. A value is the rest of its line and holds no ``<``; an EMPTY element and a container have none.
+    """
     lines = [(n, line) for n, line in enumerate(text.split("\n"), 1) if line.strip()]
     values: dict[str, list[str]] = defaultdict(list)
-    stack: list[tuple[str, Counter[str]]] = []
+    if not lines:
+        return "envelope@0", values
+    # Each open container: its name, its children's counts, and the grammar position of its last child.
+    stack: list[tuple[str, Counter[str], list[int]]] = []
     for position, (n, line) in enumerate(lines):
         match = _LINE.fullmatch(line.rstrip("\r"))
         close, name, value = match.groups() if match else ("", "", "")
@@ -550,35 +539,38 @@ def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
         if match is None:
             return f"non_tag_line@{n}", values
         if position == 0:
-            stack.append((ENVELOPE, Counter()))
+            stack.append((ENVELOPE, Counter(), [-1]))
             continue
         if not stack:
             return f"outside_envelope@{n}", values
-        parent, seen = stack[-1]
+        parent, seen, last = stack[-1]
         if close:
             if name != parent or value:
                 return f"unbalanced@{n}", values
-            if name in ("COMPANY-DATA", "OWNER-DATA") and seen["CIK"] != 1:
-                return f"cik_count@{n}", values
-            if name == "FILER" and seen["COMPANY-DATA"] + seen["OWNER-DATA"] != 1:
-                return f"registrant_data_count@{n}", values
+            if defect := _closing_defect(name, seen):
+                return f"{defect}@{n}", values
             stack.pop()
             continue
-        rule = GRAMMAR[parent].get(name)
-        if rule is None:
-            return f"{'unknown_element' if all(name not in c for c in GRAMMAR.values()) else 'misplaced'}@{n}", values
-        is_container, repeatable = rule
+        children = [child for child, _, _ in GRAMMAR[parent]]
+        if name not in children:
+            admitted = any(name in (c for c, _, _ in rules) for rules in GRAMMAR.values())
+            return f"{'misplaced' if admitted else 'not_admitted'}@{n}", values
+        index = children.index(name)
+        _, is_container, count = GRAMMAR[parent][index]
+        if index < last[0]:
+            return f"order@{n}", values
         seen[name] += 1
-        if seen[name] > 1 and not repeatable:
+        if seen[name] > 1 and count in "1?":
             return f"repeated@{n}", values
+        last[0] = index
         if "<" in value or (value and (is_container or name in EMPTY)):
             return f"value_not_permitted@{n}", values
-        path = "/".join([*(s for s, _ in stack), name])
+        path = "/".join([*(s for s, _, _ in stack), name])
         if is_container:
-            stack.append((name, Counter()))
+            stack.append((name, Counter(), [-1]))
         else:
             values[path].append(value)
-    return (f"unclosed@{lines[-1][0] if lines else 0}" if stack else None), values
+    return (f"unclosed@{lines[-1][0]}" if stack else None), values
 
 
 def parse_header(text: str) -> dict[str, Any]:
@@ -605,9 +597,7 @@ def parse_header(text: str) -> dict[str, Any]:
         "filing_date": one("FILING-DATE"),
         "filing_date_change": one("DATE-OF-FILING-DATE-CHANGE"),
         "items": sorted(values.get(f"{ENVELOPE}/ITEMS", [])),
-        "filer_ciks": sorted(
-            {cik for role in ("COMPANY-DATA", "OWNER-DATA") for cik in values.get(f"{ENVELOPE}/FILER/{role}/CIK", [])}
-        ),
+        "filer_ciks": sorted(set(values.get(f"{ENVELOPE}/FILER/COMPANY-DATA/CIK", []))),
     }
 
 
@@ -678,13 +668,22 @@ _CORRECTION_OUTCOME: Final = {
 }
 
 
+def usable_acceptance(raw: str | None, accession: str) -> str | None:
+    """``YYYY-MM-DD`` of a 14-digit acceptance that is a real date and time in the accession's year, else ``None``.
+
+    The accession's middle two digits are the year of the submission (SEC, Accessing EDGAR Data), so an acceptance
+    in another year contradicts it and bounds nothing."""
+    accepted = _ymd(raw) if len(raw or "") == 14 else None
+    return accepted if accepted and raw and raw[2:4] == accession[11:13] else None
+
+
 def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> dict[str, str]:
     """The spec's field contract for one ``(cik, accession)`` row; a field whose inputs are not ok is
     ``not_evaluated``. ``header`` is ``None`` when no body was retrieved."""
     if header is None:
         return {"retrieval": "no_header"}
     raw_accepted, raw_filed = header["acceptance_et"], header["filing_date"]
-    accepted = _ymd(raw_accepted) if len(raw_accepted or "") == 14 else None
+    accepted = usable_acceptance(raw_accepted, accession)
     filed = _ymd(raw_filed) if len(raw_filed or "") == 8 else None
     numbers, items = header["accession_numbers"], header["items"]
     out = {
@@ -695,7 +694,13 @@ def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> d
             m.lower().replace("-", "_"): m.lower().replace("-", "_") if m in header["markers"] else "ok"
             for m in MARKERS
         },
-        "acceptance": "ok" if accepted else "no_acceptance" if raw_accepted is None else "acceptance_invalid",
+        "acceptance": "ok"
+        if accepted
+        else "no_acceptance"
+        if raw_accepted is None
+        else "acceptance_year_mismatch"
+        if _ymd(raw_accepted) and len(raw_accepted) == 14
+        else "acceptance_invalid",
         "filing_date": "ok" if filed else "no_filing_date" if raw_filed is None else "filing_date_invalid",
         "type": "ok" if header["type"] in FORMS else "type_out_of_scope",
         "items": "items_empty"
@@ -709,7 +714,7 @@ def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> d
         else "ok"
         if filed >= accepted
         else "date_before_acceptance",
-        "correction": _CORRECTION_OUTCOME[correction_category(header)],
+        "correction": _CORRECTION_OUTCOME[correction_category(header, accession)],
         "correction_evidence": "correction_evidence" if header["correction_tags"] else "ok",
     }
     return out
@@ -723,10 +728,10 @@ def row_class(outcomes: dict[str, str]) -> str:
     return "ok"
 
 
-def correction_category(header: dict[str, Any]) -> str:
+def correction_category(header: dict[str, Any], accession: str) -> str:
     """The PDS correction field against the acceptance date: ``later``, ``equal``, ``earlier``, ``missing``,
-    ``invalid``, or ``acceptance_unusable`` when there is no valid acceptance date to compare with."""
-    accepted = _ymd(header["acceptance_et"]) if len(header["acceptance_et"] or "") == 14 else None
+    ``invalid``, or ``acceptance_unusable`` when there is no usable acceptance date (:func:`usable_acceptance`)."""
+    accepted = usable_acceptance(header["acceptance_et"], accession)
     raw = header["filing_date_change"]
     if accepted is None:
         return "acceptance_unusable"
@@ -738,7 +743,7 @@ def correction_category(header: dict[str, Any]) -> str:
     return "later" if change > accepted else "equal" if change == accepted else "earlier"
 
 
-def compare_header(apps: list[Appearance], header: dict[str, Any]) -> list[str]:
+def compare_header(apps: list[Appearance], header: dict[str, Any], accession: str) -> list[str]:
     """Where the archive and the header disagree, and header states the producer treats as uncertain, as tags."""
     tags: list[str] = [] if header["structure_defect"] is None else ["malformed"]
     if any(not valid(x[3]) or list(x[3]) != header["items"] for x in apps):
@@ -763,6 +768,8 @@ def compare_header(apps: list[Appearance], header: dict[str, Any]) -> list[str]:
         tags.append("no_acceptance")
     elif accepted is None:
         tags.append("acceptance_invalid")
+    elif usable_acceptance(raw_accepted, accession) is None:
+        tags.append("acceptance_year_mismatch")
     if raw_filed is None:
         tags.append("no_filing_date")
     elif filed is None:
@@ -772,7 +779,7 @@ def compare_header(apps: list[Appearance], header: dict[str, Any]) -> list[str]:
             tags.append("filing_date_before_acceptance")
         elif filed > accepted:
             tags.append("filing_date_after_acceptance")
-    correction = correction_category(header)  # PDS: "Date when the last Post Acceptance occurred"
+    correction = correction_category(header, accession)  # PDS: "Date when the last Post Acceptance occurred"
     tag = {
         "later": "post_acceptance_change",
         "missing": "no_filing_date_change",
@@ -817,7 +824,7 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
             continue
         header = read_header(cache, accession)
         presence.update(header.pop("raw_tags"))
-        found = compare_header(arch[accession], header)
+        found = compare_header(arch[accession], header, accession)
         tags[kind].update(found or ["agree"])
         accepted, filed = _ymd(header["acceptance_et"]), _ymd(header["filing_date"])
         if accepted and filed:
@@ -846,7 +853,7 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
         and _ymd(r["acceptance_et"]) == _ymd(r["filing_date"])
         and r["acceptance_et"][8:] > "173000"
     )
-    corrections = Counter(f"{r['kind']}_{correction_category(r)}" for r in rows)
+    corrections = Counter(f"{r['kind']}_{correction_category(r, r['accession'])}" for r in rows)
     # Class census under the production predicates, in both units: (cik, accession) rows of our CIKs, and
     # accessions (counted once under each class any of its rows has). Field outcomes are per row.
     class_rows: Counter[str] = Counter()
