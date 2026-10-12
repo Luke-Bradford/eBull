@@ -43,7 +43,7 @@ This slice closes exactly that gap: **the marked move of positions that have not
   - v1 does not assume they share the mark's instant.
   - Instead it reconciles each endpoint's broker units against the ledger: the open's units minus every recorded close executed at or before that snapshot's receipt time must equal the broker's `units` (Design 4).
   - On all 252 stored marks, this reconciles, 69 of them engine-owned; every position has its open event (section 5).
-  - A close the ledger has not yet recorded, or recorded late, therefore refuses, whichever side of the mark time it happened on.
+  - A close the ledger has not yet recorded, or recorded late, therefore refuses whenever the broker's units already reflect it, whichever side of the mark time it happened on. When both units and ledger lag, the close is unseen; that is named residual 3.
 - **`totalFees`** is documented as *"Total overnight fees and dividends charged/paid on the position in USD. Negative amount represents refund"*. No eToro document states whether, or when, those amounts also enter `unrealizedPnL`. So v1 adopts a **conservative local policy**: any change in `totalFees` between the two endpoints refuses (Design 4), and v1 neither adds nor subtracts it.
   - It is NULL on the 134 stored marks before 2026-10-01, when its capture began, and present and 0 on all 118 since (section 5).
 - **Event identity.** `trade_events` allows one open per position (`uq_trade_events_open`) and one close per `(position_id, executed_at)` (`uq_trade_events_close`).
@@ -112,6 +112,7 @@ This slice closes exactly that gap: **the marked move of positions that have not
      - Otherwise `engine_pot_daily_mark_stale`.
    - **Ledger reconciliation at both endpoints (r8 finding 1).** For each p in E present in S, and each p in E present live, `units(open) − Σ units(close executed ≤ that snapshot's receipt time)` must equal the snapshot's `units`. Otherwise `event_unwitnessed`.
      - This covers a close whose event is recorded late. Example: S's units already show a close that the ledger does not hold.
+   - **Close veto through the decision (r11 finding 1).** Any recorded close of an E position executed in `(S.observed_at, decided_at]` refuses `close_in_window`. This includes positions claimed after the snapshot, and closes recorded after the live snapshot but before the decision. The marked figure itself still cuts at `risk.observed_at`. A close executed but not yet recorded by `decided_at` is seen on a later decision; that delay is the ledger's own.
    - **Straddle.** Any engine event executed between a position's mark time and its snapshot's receipt time, on either side, also gives `event_unwitnessed`, because units and mark may then describe different instants. The census found none (section 4).
    - **Numeric.** Every value read is checked `is_finite()` before any arithmetic. S is finite at rest by CHECK. The live side is checked by `observe_pot_nav`, which runs first.
 5. **One read.** One SQL statement reads, under one snapshot even in READ COMMITTED:
@@ -193,6 +194,7 @@ S exists only if a qualifying snapshot is inserted on P's New York date after `P
   - an engine event between a position's mark time and its snapshot's receipt time, on either side, refuses `event_unwitnessed`;
   - r8's counterexample refuses `event_unwitnessed`: S holds 5 units after a partial close of 10 whose event is not yet recorded, and live also holds 5;
   - the same reconciliation failure on the live side refuses;
+  - an engine close executed and recorded between `risk.observed_at` and `decided_at` refuses `close_in_window`;
   - a close with NULL or NaN `units` in the position's ledger refuses `event_unwitnessed`, and a later exit in the same cycle executes;
   - the `close_in_window` label's resumption rule: a close after Friday's S still refuses on Saturday and Monday, and a Monday-evening capture releases entries from Tuesday;
   - a Monday S with mark 16:00:00, a close at 16:00:01 and receipt 16:00:02 keeps refusing on Tuesday;
@@ -314,3 +316,16 @@ Still open and deferred: the drawdown-ledger integrity in `observe_pot_nav` (r4.
 | 4 engine close time | NIT | Resolved: section 5 prints each engine-owned close's position and time |
 
 Round 10's judgement: the three round-9 cases are WARNING-level residuals under the monotone guarantee, and the drawdown-ledger deferral is acceptable.
+
+| round 11 finding | severity | disposition |
+|---|---|---|
+| 1 closes between snapshot and decision | WARNING | Resolved: close veto through `decided_at` (Design 4), tested |
+| 2 delayed-close sentence | WARNING | Resolved: qualified with residual 3 |
+| 3 close-to-capture gap | WARNING | Accepted residual 1. Follow-up: measure capture delay from S rows and set a maximum |
+| 4 account-level charges | WARNING | Accepted residual 2. Follow-up on #3612 |
+| 5 offsetting split and close | WARNING | Accepted residual 4 |
+| 6 fee posting time | WARNING | Accepted residual 5 |
+| 7 drawdown ledger integrity | WARNING | Open, deferred to `observe_pot_nav` (both callers), recorded on #3612 |
+| 8 script window description | NIT | Resolved |
+
+Checkpoint 1 closed at round 11, with no BLOCKING finding.

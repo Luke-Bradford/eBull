@@ -18,7 +18,8 @@ position marks, #3068) to ``--until`` (default: yesterday, New York):
    positions with a ``trade_events`` row in ``(o1, o2]``, engine ownership rows claimed in ``(o1, o2]``, and
    every engine ownership row claimed by ``o2`` (``owned_by_o2``, a superset of the gate's population E).
    Each position's window runs from its mark time at d1 to its mark time at d2 (``pnl_timestamp``, else the
-   snapshot's ``observed_at`` where the position is absent), as the gate cuts it. Checks
+   snapshot's ``observed_at`` where the position is absent). The gate itself uses receipt-time windows plus a
+   separate straddle refusal; this census reports the straddling events that refusal would see. Checks
    ``units(d1) + open units - close units = units(d2)`` and ``amount(d1) + open investment_usd - close
    investment_usd = amount(d2)`` (0 where absent), and that every close has ``realized_pnl_usd`` and zero
    ``fees_usd``. Reports events falling between a mark time and its snapshot's receipt time.
