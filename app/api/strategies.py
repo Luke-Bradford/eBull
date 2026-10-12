@@ -1233,6 +1233,10 @@ class StrategyWealthHistoryPoint(BaseModel):
 
 
 class StrategyComparatorHurdle(BaseModel):
+    #: Built from ``strategy_comparator.Hurdle`` via ``asdict``: a field on one
+    #: side and not the other fails validation instead of being dropped.
+    model_config = ConfigDict(extra="forbid")
+
     #: ``core_target_pct`` / 100, a share of the core allocator's sleeve.
     core_target_weight: Decimal | None
     #: The core's share of the pot: target × (1 − active_weight).
@@ -1254,7 +1258,7 @@ class StrategyComparator(BaseModel):
     docs/specs/metrics/2026-10-12-3616-investable-comparator.md
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     symbol: str
     instrument_id: int | None

@@ -148,3 +148,21 @@ def test_wealth_history_comparator_and_hurdle_against_a_funded_pot(
     wire = response.model_dump(mode="json", by_alias=True)["comparator"]
     assert wire["return"] == "0.02"
     assert "comparator_return" not in wire
+
+
+def test_a_matching_listing_wins_over_another_row_with_the_symbol(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    # A lower-id, primary row in the wrong currency must not mask the USD/LSE class.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments
+            (instrument_id, symbol, company_name, currency, exchange, is_tradable, is_primary_listing)
+        VALUES (2461600, %s, 'iShares Core S&P 500 UCITS ETF', 'GBP', '7', true, true)
+        """,
+        (COMPARATOR_SYMBOL,),
+    )
+    _instrument(ebull_test_conn)
+    response = get_strategy_wealth_history(days=365, conn=ebull_test_conn)
+    assert response.comparator.instrument_id == _INSTRUMENT_ID
+    assert response.comparator.unavailable_reason == "pot_return_unavailable"

@@ -257,11 +257,14 @@ def _with(base: Hurdle, **changes: Any) -> Hurdle:
     return replace(base, **changes)
 
 
+#: A row matching the USD/LSE class wins over any other row sharing the symbol,
+#: so a mismatch is reported only when no matching row exists.
 _INSTRUMENT_SQL = """
     SELECT instrument_id, currency, exchange
     FROM instruments
     WHERE symbol = %(symbol)s
-    ORDER BY is_primary_listing DESC, instrument_id
+    ORDER BY (currency = %(currency)s AND exchange = %(exchange)s) IS TRUE DESC,
+             is_primary_listing DESC, instrument_id
     LIMIT 1
 """
 
@@ -291,7 +294,10 @@ def latest_valid_close(conn: psycopg.Connection[Any], instrument_id: int, on_or_
 def load_comparator(
     conn: psycopg.Connection[Any], history: Sequence[StrategyWealthPoint], returns: TimeWeightedReturns
 ) -> Comparator:
-    row = conn.execute(_INSTRUMENT_SQL, {"symbol": COMPARATOR_SYMBOL}).fetchone()
+    row = conn.execute(
+        _INSTRUMENT_SQL,
+        {"symbol": COMPARATOR_SYMBOL, "currency": COMPARATOR_CURRENCY, "exchange": COMPARATOR_EXCHANGE},
+    ).fetchone()
     instrument = None if row is None else ComparatorInstrument(int(row[0]), row[1], row[2])
     window = pot_window(history, returns)
     start_close = end_close = None
