@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -9,6 +10,7 @@ import psycopg
 import pytest
 
 from app.services.account_equity_evidence import record_session_close_snapshot
+from tests.fixtures.ebull_test_db import _reset_planner_tables, _truncate_planner_tables
 from tests.test_3612_session_close_anchor import CLOSE, position, snapshot
 
 SESSION = date(2026, 10, 12)
@@ -87,7 +89,16 @@ def test_update_delete_and_truncate_are_refused_on_both_tables(ebull_test_conn: 
 def test_a_non_finite_numeric_is_refused_at_rest(
     ebull_test_conn: psycopg.Connection[tuple], column: str, value: str
 ) -> None:
-    assert record_session_close_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot(positions=()))
+    # A parent declaring the one child this test tries to insert; the insert itself must fail.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO broker_account_session_close_snapshots (
+            environment, session_date, observed_at, account_currency_id, currency,
+            official_direct_long_positions, official_direct_short_positions
+        ) VALUES ('demo', %s, %s, 1, 'USD', 1, 0)
+        """,
+        (SESSION, CLOSE + timedelta(minutes=10)),
+    )
     row = {
         "units": "2",
         "amount": "100",
@@ -125,3 +136,18 @@ def test_a_snapshot_written_for_one_session_does_not_block_the_next(
     assert record_session_close_snapshot(ebull_test_conn, environment="demo", snapshot=tuesday)
     sessions = {r[0] for r in _stored(ebull_test_conn)}
     assert sessions == {SESSION, SESSION + timedelta(days=1)}
+
+
+@pytest.mark.parametrize("cleanup", [_reset_planner_tables, _truncate_planner_tables])
+def test_the_harness_cleanup_empties_the_append_only_tables(
+    ebull_test_conn: psycopg.Connection[tuple], cleanup: Callable[[psycopg.Connection[tuple]], None]
+) -> None:
+    """Both fixture paths run under ``session_replication_role = replica``, which disables the
+    sql/482 UPDATE/DELETE/TRUNCATE triggers, and empty parent and children together."""
+    assert record_session_close_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot())
+    ebull_test_conn.commit()
+    cleanup(ebull_test_conn)
+    assert ebull_test_conn.execute(
+        "SELECT (SELECT count(*) FROM broker_account_session_close_snapshots),"
+        " (SELECT count(*) FROM broker_account_session_close_marks)"
+    ).fetchone() == (0, 0)
