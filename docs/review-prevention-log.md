@@ -12510,3 +12510,16 @@ neighbouring container and match it.**
   ("What happens after the stop fires"), with its behaviour pinned by
   `tests/test_2603_core_allocator.py::test_a_stopped_out_core_is_rebought_to_the_lower_band_edge` and its cited
   tests resolved by `test_every_test_the_core_exit_levels_docstring_cites_exists`.
+
+### A risk control is compared at a matched risk outcome, against the engine's own baseline (#3612)
+
+- Failure (Codex checkpoint 1, #3612 de-gross note, 2026-10-12): the first draft priced Grossman–Zhou against a
+  static pot that rebalances through any fall, and claimed "a lower static target is the cheaper way to a lower
+  drawdown" by comparing pots with 50.5% and 24.9% maximum drawdowns. Measured at the same 25% bound, the claim
+  reversed: the best feasible static target returned 0.30 points a year less since 1993. The static baseline also
+  ignored the core's own buy refusal at the drawdown limit (`strategy_core_executor.py:1199-1207`).
+- Prevention: before calling one exposure rule cheaper than another, (1) model the baseline from the executors'
+  actual refusals, read in code, and (2) compare the alternatives at the same risk outcome (here: zero closes beyond
+  the floor), searching the alternative's parameter at a stated grid and taking its best feasible value.
+- Enforced in: review only. The measured instance is `scripts/measure_3612_degross_ladder.py` (`today` rule,
+  `best_target_holding_limit_under_today`).
