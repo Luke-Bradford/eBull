@@ -129,6 +129,11 @@ CASES: list[tuple[str, str, str]] = [
     ("missing_filing_date", _replace("<FILING-DATE>20231214\n", ""), "missing"),
     ("file_number_without_film_number", _replace("<ACT>34\n", "<ACT>34\n<FILE-NUMBER>000-00261\n"), "group"),
     ("correction_without_timestamp", _replace("<ACCESSION-NUMBER>", "<CORRECTION>\n<ACCESSION-NUMBER>"), "group"),
+    (
+        "deletion_in_two_places",
+        _replace("<TYPE>8-K\n", "<DELETION>\n<TYPE>8-K\n").replace("<COMPANY-DATA>\n", "<DELETION>\n<COMPANY-DATA>\n"),
+        "deletion_places",
+    ),
     ("empty_body", "", "envelope"),
     ("blank_body", " \n\n\t\n", "envelope"),
     ("unclosed_envelope", _replace("</SEC-HEADER>\n", ""), "unclosed"),
@@ -149,11 +154,18 @@ def test_correction_evidence_is_detected_inside_a_valid_header() -> None:
     assert row_class(field_outcomes(header, ACCESSION, CIK)) == "items_unestablished"
 
 
-def test_acceptance_outside_the_accession_year_is_unusable() -> None:
-    """167: a well-formed acceptance in another year than the accession's contradicts it and bounds nothing."""
+@pytest.mark.parametrize(
+    ("year", "dated"),
+    [
+        ("2022", ("ACCEPTANCE-DATETIME", "FILING-DATE", "DATE-OF-FILING-DATE-CHANGE")),
+        ("1923", ("ACCEPTANCE-DATETIME", "DATE-OF-FILING-DATE-CHANGE")),
+    ],
+)
+def test_acceptance_outside_the_accession_year_is_unusable(year: str, dated: tuple[str, ...]) -> None:
+    """167: a well-formed acceptance outside the accession's year (``20YY``) contradicts it and bounds nothing."""
     text = VALID
-    for tag in ("ACCEPTANCE-DATETIME", "FILING-DATE", "DATE-OF-FILING-DATE-CHANGE"):
-        text = text.replace(f"<{tag}>2023", f"<{tag}>2022")
+    for tag in dated:
+        text = text.replace(f"<{tag}>2023", f"<{tag}>{year}")
     header = parse_header(text)
     assert header["structure_defect"] is None
     outcomes = field_outcomes(header, ACCESSION, CIK)
@@ -188,3 +200,42 @@ def test_edgartools_submission_parser_fails_closed_only_on_unbalanced_containers
     assert observed == EDGARTOOLS_RAISES
     # The continuation line's code 4.02 is dropped without an error.
     assert SubmissionFormatParser().parse(texts["items_continuation"])["ITEMS"] == ["1.01", "9.01"]
+
+
+SECOND_FILER = "<FILER>\n<COMPANY-DATA>\n<CONFORMED-NAME>SECOND FILER\n<CIK>{cik}\n</COMPANY-DATA>\n</FILER>\n"
+
+
+def test_cik_tag_in_another_form_leaves_discovery_unresolved() -> None:
+    """172: a character reference hides a CIK from the grammar's filer set; discovery counts it as unresolved."""
+    header = parse_header(_replace("</SEC-HEADER>\n", SECOND_FILER.format(cik="00000999&#57;9") + "</SEC-HEADER>\n"))
+    assert header["filer_ciks"] == [CIK, "00000999&#57;9"]
+    assert header["discovered_ciks"] == [CIK]
+    assert header["unresolved_cik_tags"] == 1
+
+
+def test_a_rejected_header_still_discovers_every_cik_line() -> None:
+    """173: discovery does not depend on the grammar accepting the header."""
+    text = _replace(
+        "</FILER>\n", "</FILER>\n<SUBJECT-COMPANY>\n</SUBJECT-COMPANY>\n" + SECOND_FILER.format(cik="0000099999")
+    )
+    header = parse_header(text)
+    assert str(header["structure_defect"]).startswith("not_admitted")
+    assert header["filer_ciks"] == [CIK]  # read before the defect; the second filer is never reached
+    assert header["discovered_ciks"] == [CIK, "0000099999"]
+    assert header["unresolved_cik_tags"] == 0
+
+
+def test_values_are_not_trimmed() -> None:
+    """174: a non-breaking space around an item code leaves the code invalid, never silently valid."""
+    outcomes = field_outcomes(parse_header(_replace("<ITEMS>4.01\n", "<ITEMS>\u00a04.01\u00a0\n")), ACCESSION, CIK)
+    assert outcomes["items"] == "items_invalid"
+    assert row_class(outcomes) == "label_in_doubt"
+
+
+def test_abs_front_matter_is_admitted() -> None:
+    """175: the PDS depositor and sponsor CIKs (an ABS 8-K, 0001193125-26-394511) sit between PERIOD and ITEMS."""
+    header = parse_header(
+        _replace("<ITEMS>4.01\n", "<DEPOSITOR-CIK>0001133438\n<SPONSOR-CIK>0000047288\n<ITEMS>4.01\n")
+    )
+    assert header["structure_defect"] is None
+    assert header["filer_ciks"] == [CIK]

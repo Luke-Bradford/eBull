@@ -427,6 +427,9 @@ CORRECTION_TAGS: Final = ("CORRECTION", "DELETION", "TIMESTAMP")
 #: name with a space or in lower case reaches the grammar and fails there as ``not_admitted``.
 _LINE: Final = re.compile(r"<(/?)([^<>]*)>(.*)")
 #: The ``.hdr.sgml`` envelope's opening line (EDGAR Archives; not a PDS element): ``<accession>.hdr.sgml : <date>``.
+#: A whole ``<CIK>`` line with exactly ten ASCII digits, and a CIK tag in any form.
+_CIK_LINE: Final = re.compile(r"^<CIK>([0-9]{10})$", re.M)
+_CIK_TAG: Final = re.compile(r"<\s*cik\b", re.I)
 _ENVELOPE_VALUE: Final = re.compile(r"\d{10}-\d{2}-\d{6}\.hdr\.sgml : \d{8}")
 ENVELOPE: Final = "SEC-HEADER"
 #: The extensions the ``.hdr.sgml`` file adds to the PDS submission header: the envelope (:data:`ENVELOPE`) and
@@ -444,58 +447,88 @@ _ADDRESS: Final = (
     ("PROVINCE-COUNTRY", False, "?"),
     ("ZIP", False, "?"),
 )
+_OPTIONAL: Final = "?"
 #: The closed header grammar: each container's children in their source order, as ``(name, is_container, count)``
 #: with count ``1`` (required, once), ``?`` (at most once), ``*`` (any) or ``+`` (at least one). Order and count are
-#: the PDS DTD's (pp. 75-76) where it declares the element, else the §3.2.2 tables' (pp. 14-17). Admitted are the
-#: PDS elements the inspected 8-K headers carry (``raw_tag_presence``), the PDS paper, release, confirming-copy and
-#: correction elements, and :data:`EXTENSIONS`; ``ACCEPTANCE-DATETIME`` is first, where every inspected header has
-#: it. Every other element, role or placement is ``malformed``: stricter than the PDS, so it can only withhold a
-#: label, never certify one.
+#: the PDS DTD's (pp. 75-76) where it declares the element, else the §3.2.2 tables' (pp. 14-17), except that two
+#: table entries without a symbol, ``ORGANIZATION-NAME`` and ``CALENDAR-YEAR-ENDING``, are optional (spec "Header
+#: grammar"). Where neither source orders two elements, the order here is fixed by construction. Plus
+#: :data:`EXTENSIONS`, with ``ACCEPTANCE-DATETIME`` first, where every inspected header has it. The only role is
+#: ``FILER``; every other role, element or placement is ``malformed``.
 GRAMMAR: Final[dict[str, tuple[tuple[str, bool, str], ...]]] = {
     ENVELOPE: (
         ("ACCEPTANCE-DATETIME", False, "1"),
-        ("CORRECTION", False, "?"),
-        ("TIMESTAMP", False, "?"),
-        ("PAPER", False, "?"),
-        ("PRIVATE-TO-PUBLIC", False, "?"),
+        ("CORRECTION", False, _OPTIONAL),
+        ("TIMESTAMP", False, _OPTIONAL),
+        ("PAPER", False, _OPTIONAL),
+        ("PRIVATE-TO-PUBLIC", False, _OPTIONAL),
         ("ACCESSION-NUMBER", False, "1"),
-        ("DELETION", False, "?"),
+        ("DELETION", False, _OPTIONAL),
         ("TYPE", False, "1"),
-        ("CONFIRMING-COPY", False, "?"),
+        ("CATEGORY", False, _OPTIONAL),
+        ("CONFIRMING-COPY", False, _OPTIONAL),
         ("PUBLIC-DOCUMENT-COUNT", False, "1"),
-        ("PERIOD", False, "?"),
+        ("CALENDAR-YEAR-ENDING", False, _OPTIONAL),
+        ("REFERENCE-462B", False, _OPTIONAL),
+        ("REFERENCES-429", False, "*"),
+        ("PERIOD", False, _OPTIONAL),
+        ("DEPOSITOR-CIK", False, _OPTIONAL),
+        ("SPONSOR-CIK", False, _OPTIONAL),
         ("ITEMS", False, "*"),
+        ("MA-I_INDIVIDUAL", False, _OPTIONAL),
         ("FILING-DATE", False, "1"),
-        ("DATE-OF-FILING-DATE-CHANGE", False, "?"),
+        ("DATE-OF-FILING-DATE-CHANGE", False, _OPTIONAL),
+        ("EFFECTIVENESS-DATE", False, _OPTIONAL),
+        ("ACTION-DATE", False, _OPTIONAL),
+        ("RECEIVED-DATE", False, _OPTIONAL),
+        ("RESOURCE-EXT-ISSUER", False, _OPTIONAL),
+        ("GROUP-MEMBERS", False, "*"),
+        ("ABS-RULE", False, _OPTIONAL),
+        ("SECURITIZER-FILE-NUMBER", False, _OPTIONAL),
+        ("PERIOD-START", False, _OPTIONAL),
+        ("NO-INITIAL-PERIOD-ACTIVITY", False, _OPTIONAL),
+        ("NO-ANNUAL-ACTIVITY", False, _OPTIONAL),
+        ("NO-QUARTERLY-ACTIVITY", False, _OPTIONAL),
+        ("REGISTERED-ENTITY", False, _OPTIONAL),
+        ("ABS-ASSET-CLASS", False, _OPTIONAL),
+        ("ISSUING-ENTITY-NAME", False, _OPTIONAL),
         ("FILER", True, "+"),
+        ("IS-FILER-A-NEW-REGISTRANT", False, _OPTIONAL),
+        ("IS-FILER-A-WELL-KNOWN-SEASONED-ISSUER", False, _OPTIONAL),
+        ("FILED-PURSUANT-TO-GENERAL-INSTRUCTION-A2", False, _OPTIONAL),
+        ("IS-FUND-24F2-ELIGIBLE", False, _OPTIONAL),
     ),
     "FILER": (
-        ("DELETION", False, "?"),
+        ("DELETION", False, _OPTIONAL),
         ("COMPANY-DATA", True, "1"),
-        ("FILING-VALUES", True, "?"),
-        ("BUSINESS-ADDRESS", True, "?"),
-        ("MAIL-ADDRESS", True, "?"),
+        ("FILING-VALUES", True, _OPTIONAL),
+        ("BUSINESS-ADDRESS", True, _OPTIONAL),
+        ("MAIL-ADDRESS", True, _OPTIONAL),
         ("FORMER-COMPANY", True, "*"),
+        ("FORMER-NAME", True, "*"),
     ),
     "COMPANY-DATA": (
         ("CONFORMED-NAME", False, "1"),
         ("CIK", False, "1"),
-        ("ASSIGNED-SIC", False, "?"),
-        ("ORGANIZATION-NAME", False, "?"),
-        ("IRS-NUMBER", False, "?"),
-        ("STATE-OF-INCORPORATION", False, "?"),
-        ("FISCAL-YEAR-END", False, "?"),
+        ("ASSIGNED-SIC", False, _OPTIONAL),
+        ("ORGANIZATION-NAME", False, _OPTIONAL),
+        ("RELATIONSHIP", False, _OPTIONAL),
+        ("IRS-NUMBER", False, _OPTIONAL),
+        ("STATE-OF-INCORPORATION", False, _OPTIONAL),
+        ("FISCAL-YEAR-END", False, _OPTIONAL),
+        ("LEGAL-ENTITY-IDENTIFIER", False, _OPTIONAL),
     ),
     "FILING-VALUES": (
-        ("DELETION", False, "?"),
+        ("DELETION", False, _OPTIONAL),
         ("FORM-TYPE", False, "1"),
         ("ACT", False, "1"),
-        ("FILE-NUMBER", False, "?"),
-        ("FILM-NUMBER", False, "?"),
+        ("FILE-NUMBER", False, _OPTIONAL),
+        ("FILM-NUMBER", False, _OPTIONAL),
     ),
-    "BUSINESS-ADDRESS": (*_ADDRESS, ("PHONE", False, "?")),
+    "BUSINESS-ADDRESS": (*_ADDRESS, ("PHONE", False, _OPTIONAL)),
     "MAIL-ADDRESS": _ADDRESS,
     "FORMER-COMPANY": (("FORMER-CONFORMED-NAME", False, "1"), ("DATE-CHANGED", False, "1")),
+    "FORMER-NAME": (("FORMER-CONFORMED-NAME", False, "1"), ("DATE-CHANGED", False, "1")),
 }
 #: DTD groups whose members occur together or not at all: ``%pac-id;`` and ``%filing-id;``.
 GROUPS: Final[dict[str, tuple[str, ...]]] = {
@@ -530,10 +563,10 @@ def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
         return "envelope@0", values
     # Each open container: its name, its children's counts, and the grammar position of its last child.
     stack: list[tuple[str, Counter[str], list[int]]] = []
+    deletion_parents: set[str] = set()  # the DTD allows DELETION in at most one of its three places per header
     for position, (n, line) in enumerate(lines):
         match = _LINE.fullmatch(line.rstrip("\r"))
         close, name, value = match.groups() if match else ("", "", "")
-        value = value.strip()
         if position == 0 and (match is None or close or name != ENVELOPE or not _ENVELOPE_VALUE.fullmatch(value)):
             return f"envelope@{n}", values
         if match is None:
@@ -563,6 +596,10 @@ def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
         if seen[name] > 1 and count in "1?":
             return f"repeated@{n}", values
         last[0] = index
+        if name == "DELETION":
+            deletion_parents.add(parent)
+            if len(deletion_parents) > 1:
+                return f"deletion_places@{n}", values
         if "<" in value or (value and (is_container or name in EMPTY)):
             return f"value_not_permitted@{n}", values
         path = "/".join([*(s for s, _, _ in stack), name])
@@ -598,6 +635,10 @@ def parse_header(text: str) -> dict[str, Any]:
         "filing_date_change": one("DATE-OF-FILING-DATE-CHANGE"),
         "items": sorted(values.get(f"{ENVELOPE}/ITEMS", [])),
         "filer_ciks": sorted(set(values.get(f"{ENVELOPE}/FILER/COMPANY-DATA/CIK", []))),
+        # Discovery, independent of the grammar: every whole-line ten-digit CIK anywhere in the body, and the
+        # CIK tags in any other form (any case, spacing or value), which leave discovery unresolved.
+        "discovered_ciks": sorted(set(_CIK_LINE.findall(text))),
+        "unresolved_cik_tags": len(_CIK_TAG.findall(text)) - len(_CIK_LINE.findall(text)),
     }
 
 
@@ -672,9 +713,10 @@ def usable_acceptance(raw: str | None, accession: str) -> str | None:
     """``YYYY-MM-DD`` of a 14-digit acceptance that is a real date and time in the accession's year, else ``None``.
 
     The accession's middle two digits are the year of the submission (SEC, Accessing EDGAR Data), so an acceptance
-    in another year contradicts it and bounds nothing."""
+    in another year contradicts it and bounds nothing. The two digits are read as ``20YY``, since the estimand starts
+    at :data:`FIRST`."""
     accepted = _ymd(raw) if len(raw or "") == 14 else None
-    return accepted if accepted and raw and raw[2:4] == accession[11:13] else None
+    return accepted if accepted and raw and raw[:4] == f"20{accession[11:13]}" else None
 
 
 def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> dict[str, str]:
@@ -867,6 +909,20 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
         for cik in r["classes"]:
             outcome_rows.update(f"{field}={value}" for field, value in r["field_outcomes"][cik].items())
     marker_presence = Counter(m for r in rows for m in r["markers"])
+    # The spec's discovery rule: a rejected header gives every covered CIK on a <CIK> line a doubt row, and a CIK tag
+    # in any other form refuses the build.
+    discovery = {
+        "unresolved_headers": sorted(r["accession"] for r in rows if r["unresolved_cik_tags"]),
+        "rejected_headers": sum(1 for r in rows if r["structure_defect"]),
+        "rejected_naming_other_covered_ciks": sorted(
+            r["accession"]
+            for r in rows
+            if r["structure_defect"] and set(r["discovered_ciks"]) & ours - {x[0] for x in r["archive"]}
+        ),
+        "accepted_naming_non_filer_ciks": sum(
+            1 for r in rows if not r["structure_defect"] and set(r["discovered_ciks"]) - set(r["filer_ciks"])
+        ),
+    }
     structure = Counter(str(r["structure_defect"]).split("@")[0] for r in rows)
     for kind, accession, _ in failures:
         n_rows = len({x[0] for x in arch[accession] if x[0] in ours})
@@ -889,6 +945,7 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
             "class_accessions": dict(sorted(class_accessions.items())),
             "field_outcome_rows": dict(sorted(outcome_rows.items())),
             "marker_presence": dict(sorted(marker_presence.items())),
+            "discovery": discovery,
             "structure_defect": dict(sorted(structure.items())),
             "grammar_sha256": GRAMMAR_SHA256,
             "archive_item_count_by_disagreement": dict(sorted(lengths.items(), key=lambda kv: kv[0])),
