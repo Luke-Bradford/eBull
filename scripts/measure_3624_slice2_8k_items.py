@@ -541,6 +541,12 @@ GRAMMAR_SHA256: Final = hashlib.sha256(
 ).hexdigest()
 
 
+def _unix(text: str) -> str:
+    """The body with CRLF line ends read as LF: the one line-terminator rule for the grammar and discovery alike. A
+    lone CR stays in its line, where it is part of a value."""
+    return text.replace("\r\n", "\n")
+
+
 def _closing_defect(name: str, seen: Counter[str]) -> str | None:
     """A container's count or group defect at its close, else ``None``."""
     for child, _, count in GRAMMAR[name]:
@@ -557,7 +563,7 @@ def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
     the envelope and the last non-blank line closes it. Children come in grammar order, each within its count, and
     groups are whole. A value is the rest of its line and holds no ``<``; an EMPTY element and a container have none.
     """
-    lines = [(n, line) for n, line in enumerate(text.split("\n"), 1) if line.strip()]
+    lines = [(n, line) for n, line in enumerate(_unix(text).split("\n"), 1) if line.strip()]
     values: dict[str, list[str]] = defaultdict(list)
     if not lines:
         return "envelope@0", values
@@ -565,7 +571,7 @@ def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
     stack: list[tuple[str, Counter[str], list[int]]] = []
     deletion_parents: set[str] = set()  # the DTD allows DELETION in at most one of its three places per header
     for position, (n, line) in enumerate(lines):
-        match = _LINE.fullmatch(line.rstrip("\r"))
+        match = _LINE.fullmatch(line)
         close, name, value = match.groups() if match else ("", "", "")
         if position == 0 and (match is None or close or name != ENVELOPE or not _ENVELOPE_VALUE.fullmatch(value)):
             return f"envelope@{n}", values
@@ -614,6 +620,7 @@ def parse_header(text: str) -> dict[str, Any]:
     """The SGML header's acceptance (Eastern wall clock), type, filing date, filing-date change, items, filer CIKs,
     each read only at its grammar path (:func:`header_structure`); ``structure_defect`` is ``None`` only for a header
     the grammar accepts in full. Markers and correction evidence are detected anywhere in the body."""
+    text = _unix(text)
     defect, values = header_structure(text)
 
     def one(tag: str) -> str | None:

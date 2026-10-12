@@ -239,3 +239,14 @@ def test_abs_front_matter_is_admitted() -> None:
     )
     assert header["structure_defect"] is None
     assert header["filer_ciks"] == [CIK]
+
+
+def test_crlf_line_ends_read_as_lf_for_grammar_and_discovery() -> None:
+    """177: one line-terminator rule, so a CRLF body parses and discovers exactly as its LF form does."""
+    lf, crlf = parse_header(VALID), parse_header(VALID.replace("\n", "\r\n"))
+    assert crlf["structure_defect"] is None
+    assert (crlf["filer_ciks"], crlf["discovered_ciks"], crlf["unresolved_cik_tags"]) == (
+        lf["filer_ciks"],
+        lf["discovered_ciks"],
+        0,
+    )
