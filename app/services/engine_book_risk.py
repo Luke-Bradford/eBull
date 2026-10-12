@@ -413,8 +413,8 @@ def load_inputs(conn: psycopg.Connection[Any], measured_at: datetime) -> BookInp
                     raise EngineBookRiskRefusal(
                         "book_shape_unsupported", f"held position {position_id} has no broker row"
                     )
-                # Leverage stays refused: no leverage until validated, and a leveraged position's
-                # initial amount is margin, not exposure, so its cost fallback would be wrong.
+                # Refused: an instrument mismatch, a non-USD mark, or leverage (no leverage until validated;
+                # a leveraged position's initial amount is margin, not exposure). Either side is measured.
                 if int(r[1]) != instrument_id or r[6] != 1 or r[7] != "USD":
                     raise EngineBookRiskRefusal(
                         "book_shape_unsupported",
