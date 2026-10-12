@@ -975,6 +975,10 @@
     "filer_ciks": [
      "0000873303"
     ],
+    "discovered_ciks": [
+     "0000873303"
+    ],
+    "unresolved_cik_tags": 0,
     "sha256": "76363b30a9cb91f1462f953f12c38a8411b305fde7d7cf0a1c9b1f181ffa57d9"
    },
    "header_error": null
@@ -987,7 +991,7 @@
    "ours": false,
    "archive_file_latest_filing_date": "2026-09-15",
    "header": {
-    "structure_defect": "not_admitted@7",
+    "structure_defect": null,
     "raw_tags": [
      "ABS-ASSET-CLASS",
      "ACCEPTANCE-DATETIME",
@@ -1034,18 +1038,29 @@
     "correction_tags": [],
     "acceptance_et": "20260917171143",
     "type": "8-K",
-    "filing_date": null,
-    "filing_date_change": null,
-    "items": [],
-    "filer_ciks": [],
+    "filing_date": "20260917",
+    "filing_date_change": "20260917",
+    "items": [
+     "1.01",
+     "9.01"
+    ],
+    "filer_ciks": [
+     "0001133438",
+     "0002149906"
+    ],
+    "discovered_ciks": [
+     "0001133438",
+     "0002149906"
+    ],
+    "unresolved_cik_tags": 0,
     "sha256": "77bd2a29140cc696e73c5b121af2d48e1e4c694101ec2c3a15fe602679643c41"
    },
    "header_error": null
   }
  ],
  "provenance": {
-  "script_sha256": "7792dd33bc1593d42c6d1124b2c907bb1f5cf3de75d0182cd94c5c54086fc048",
-  "head": "ffd87d74fa8cb1f40bb05a0a5587da149dbc6d5a",
+  "script_sha256": "45791ceae50059d6da1db22e5c7fe013133f16f8eb1364451f73defb6c025e1b",
+  "head": "2ce339e3b012d28e27bdb8fe3ec563641e1e95a0",
   "script_clean_at_head": true
  }
 }

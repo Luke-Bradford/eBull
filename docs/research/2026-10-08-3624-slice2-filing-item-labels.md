@@ -86,8 +86,8 @@ which is acceptable only because `last-modified` bounds nothing.
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`7792dd33…`), `HEAD`
-  (`ffd87d74`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`45791cea…`), `HEAD`
+  (`2ce339e3`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
 are as of 2026-10-12, read by the first command (queries in the script).
@@ -309,7 +309,12 @@ engagement of a new independent accountant".
   - every daily file dated `FIRST` to `F`;
   - every quarterly file from 2004 Q3 to the quarter holding `F`;
   - the archive;
-  - any header filer CIK not already a row (a **header-only** row).
+  - any header filer CIK not already a row (a **header-only** row);
+  - for a header the grammar rejects, every covered CIK on any line `<CIK>` followed by exactly ten ASCII digits,
+    anywhere in its body, not already a row: a header-only row whose parse is `malformed`, so it is
+    `items_unestablished`. **Discovery** is this line scan, independent of the grammar, so a rejected header still
+    names every CIK it carries. A CIK tag in any other form (another case, spacing or value, a character
+    reference) leaves discovery unresolved, and the producer refuses (`HEADER_CIK_UNRESOLVED`).
 - **Listing.** A row's **listing day** `D` is the first daily file listing it; a row in no daily file has none. The
   row records `listing_lag`, its first file's `last-modified` date minus `D`, or null, as a diagnostic.
 - **Index reading.** One parse contract for daily and quarterly files. A file must have the `CIK|…` column header
@@ -359,11 +364,11 @@ engagement of a new independent accountant".
   | `<PRIVATE-TO-PUBLIC>` | absent | `private_to_public` |
   | `<CONFIRMING-COPY>` | absent | `confirming_copy` |
   | correction evidence | none of `<CORRECTION>`, `<DELETION>`, `<TIMESTAMP>` anywhere in the body | `correction_evidence`, with the tags found |
-  | `<ACCEPTANCE-DATETIME>` | 14 digits forming a real date and time, in the year the accession's middle two digits give | `no_acceptance`, `acceptance_invalid`, `acceptance_year_mismatch` |
+  | `<ACCEPTANCE-DATETIME>` | 14 digits forming a real date and time, in the year `20YY` the accession's middle two digits `YY` give | `no_acceptance`, `acceptance_invalid`, `acceptance_year_mismatch` |
   | `<FILING-DATE>` | 8 digits forming a real date | `no_filing_date`, `filing_date_invalid` |
   | `<TYPE>` | in the 8-K family | `type_out_of_scope` |
   | `<ITEMS>` | non-empty, every code in the vocabulary, no code twice | `items_empty`, `items_invalid` |
-  | `<FILER>` CIKs | include the row's CIK, read only as a `<CIK>` under `SEC-HEADER/FILER/COMPANY-DATA` (or `OWNER-DATA`) | `not_a_filer` |
+  | `<FILER>` CIKs | include the row's CIK, read only as a `<CIK>` under `SEC-HEADER/FILER/COMPANY-DATA` | `not_a_filer` |
   | date order | filing date on or after the acceptance date | `date_before_acceptance`; `not_evaluated` without both dates |
   | `<DATE-OF-FILING-DATE-CHANGE>` | 8 digits forming a real date, equal to the acceptance date | `no_correction_date`, `correction_invalid`, `corrected` (later), `correction_before_acceptance` (earlier); `not_evaluated` without a valid acceptance date |
 
@@ -379,14 +384,20 @@ engagement of a new independent accountant".
     elements that are not PDS elements, and the grammar names them as extensions: the envelope, whose first
     non-blank line is `<SEC-HEADER><accession>.hdr.sgml : <YYYYMMDD>` and whose last is `</SEC-HEADER>`, and
     `<ACCEPTANCE-DATETIME>`, required and first at submission level, where every inspected header has it.
-  - **Admitted elements.** The PDS elements that the inspected 8-K headers carry (`raw_tag_presence`), the PDS
-    paper, release, confirming-copy and correction elements (`PAPER`, `PRIVATE-TO-PUBLIC`, `CONFIRMING-COPY`,
-    `CORRECTION`, `TIMESTAMP`, `DELETION`) at their DTD places, and the two extensions. The only role is `FILER`, and
-    its registrant data is `COMPANY-DATA`. Every other PDS element, role and series container
-    (`MERGER-SERIES-AND-CLASSES-CONTRACTS` included) is `not_admitted`, as is any name in another casing or with a
-    space. This is stricter than the PDS: it can withhold a label, never certify one.
+  - **Admitted elements.** The whole PDS submission front matter (the DTD's and the §3.2.2 table's, so the ABS
+    `DEPOSITOR-CIK` and `SPONSOR-CIK` a real 8-K carries are admitted), the two extensions, and one role, `FILER`,
+    whose registrant data is `COMPANY-DATA` with the DTD's and the table's fields. Every other role (the DTD's six
+    others and the table's ABS roles), the series containers (`MERGER-SERIES-AND-CLASSES-CONTRACTS` included),
+    `OWNER-DATA`, and any name in another casing or with a space, is `not_admitted`.
+  - **Where the sources disagree.** The table gives no symbol, which it defines as required, for two elements the
+    DTD does not declare: `ORGANIZATION-NAME`, on 1,895 of the 9,041 inspected headers, and `CALENDAR-YEAR-ENDING`,
+    on none (`raw_tag_presence`). Both are optional here; treating them as required would reject most disseminated
+    8-K headers. Where the table and the DTD give different counts (`ASSIGNED-SIC`, `RELATIONSHIP`) or orders
+    (`EFFECTIVENESS-DATE`, `ACTION-DATE`, `RECEIVED-DATE`), the DTD's are used. Where neither orders two elements,
+    the grammar fixes an order by construction, and a header in another order is `malformed`.
   - **Lines.** Every non-blank line is exactly one of `<LEAF>value`, `<CONTAINER>` or `</CONTAINER>`, starting at
-    column 1. A value is the rest of its line and holds no `<`. The EMPTY elements and the containers carry none.
+    column 1. A value is the rest of its line, untrimmed, and holds no `<`. The EMPTY elements and the containers
+    carry none.
     Text on a line of its own, such as a second item code or a second date, is `non_tag_line`, never part of the
     value above it. A body with no non-blank line is `envelope`.
   - **Order, count and groups, all enforced.** Children come in source order: front matter before `FILER`, so
@@ -396,19 +407,21 @@ engagement of a new independent accountant".
     `COMPANY-DATA` in each filer, with `CONFORMED-NAME` and `CIK` once; `FORM-TYPE` and `ACT` in `FILING-VALUES`;
     both fields of `FORMER-COMPANY`. The DTD's groups are whole: `CORRECTION` with `TIMESTAMP` (`%pac-id;`) and
     `FILE-NUMBER` with `FILM-NUMBER` (`%filing-id;`). So a second CIK in one company data, `<ITEMS>` inside it, or a
-    company data without a conformed name is `malformed`.
+    company data without a conformed name is `malformed`. `DELETION` occurs in at most one of its three places
+    (submission, filer, filing values), as the DTD's note requires.
   - **Measured on the 9,041** (`structure_defect`): 9,038 accepted and 3 `group`, each a `FILING-VALUES` with
     `FILE-NUMBER` and no `FILM-NUMBER`. The 3 are the 3 headers carrying `<CONFIRMING-COPY>`, so they were
     `items_unestablished` already and the class counts do not move. No inspected header departs from the source
-    order.
+    order. Discovery (`discovery`): 0 headers with a CIK tag in another form, and none of the 3 rejected headers
+    names a covered CIK outside its own rows; on every accepted header the discovered CIKs are exactly its filers.
   - **Causes.** `envelope`, `outside_envelope`, `non_tag_line`, `not_admitted`, `misplaced`, `order`, `repeated`,
-    `value_not_permitted`, `unbalanced`, `missing`, `group`, `unclosed`, each recorded with its line number.
+    `value_not_permitted`, `deletion_places`, `unbalanced`, `missing`, `group`, `unclosed`, each recorded with its line number.
     Markers and correction evidence are still detected anywhere in the body.
   - **Reuse first.** edgartools' `SubmissionFormatParser` was run on the eight round 8–11 counterexamples. It
     raises only on the two unbalanced ones, drops a continuation line silently and keeps `<ITEMS >` under a separate
     key, so it is not adopted. The comparison is a test
     (`test_edgartools_submission_parser_fails_closed_only_on_unbalanced_containers`, at the version `uv.lock` pins).
-  - **Fixtures.** Every round 8–12 counterexample, and one case per cause, is a test
+  - **Fixtures.** Every round 8–13 counterexample, and one case per cause, is a test
     (`tests/test_measure_3624_slice2_header_grammar.py`).
 
   The measurement script implements this table (`header_structure`, `parse_header`, `field_outcomes`), and premise
@@ -638,12 +651,12 @@ of work preceded this spec's acceptance, and both read no price, return or outco
   for a consumer, no full population). Each executed version is a configuration tried: the tag-based
   timing-uncertain rule at `a24131e1` and `77231ed1`, and the production predicates at `44ac5fdc`, `22876703`,
   `c7ea8ba9`, `847be55b`, `f5007575`, `73614936` (on the live CIK list, 5 CIKs larger, so a different negative
-  sample), `d59a0bc8` (the same predicates on the pinned list) and `ffd87d74`. Each run counts separately, since a
+  sample), `d59a0bc8` (the same predicates on the pinned list), `ffd87d74` and `2ce339e3`. Each run counts separately, since a
   different covered population is a different configuration. Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
   outcomes.
 
 Build step 2 therefore registers two non-claiming entries: `3624-slice2-construction-measurement`, listing those
-ten runs by commit (`searches=10`, plus any added by a later re-run), and the production configuration below, registered prospectively before
+eleven runs by commit (`searches=11`, plus any added by a later re-run), and the production configuration below, registered prospectively before
 the production build's first data read.
 
 The producer and its fixtures are written first and read no data (build step 1). Then, before the production
@@ -666,7 +679,8 @@ cover enough of any universe. No consumer may read it without a registration tha
 - names the artefact version and states the known limits.
 
 **Progression.** Accepted when all eight hold:
-1. **Refusals:** `ARCHIVE_INCOMPLETE`, `INDEX_UNREADABLE`, `INDEX_INCOMPLETE`, `CALENDAR_RANGE` and the
+1. **Refusals:** `ARCHIVE_INCOMPLETE`, `INDEX_UNREADABLE`, `INDEX_INCOMPLETE`, `HEADER_CIK_UNRESOLVED`,
+   `CALENDAR_RANGE` and the
    coverage-end check did not fire.
 2. **Census reproduction:** for covered CIKs, on version 1's pinned inputs, the census reproduces premise 2's
    archive identity and validity counts. A later version instead reconciles its own counts internally and explains
@@ -1052,3 +1066,16 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
   - **Ledger** (169): `73614936` and `d59a0bc8` are registered as separate runs; ten in all.
   - **Empty body** (170): `envelope`, with fixtures for an empty and a blank body.
   - **edgartools comparison** (171): kept as a test, so the claim reproduces at the pinned version.
+- **Round 13** (`var/research/3624/ckpt1_slice2_r13.txt`): 2 open (167, 168), 5 new (172–176), 3 resolved. The
+  measurement was re-run at `2ce339e3`.
+  - **Full year** (167): the acceptance year must equal `20YY`, so a `19YY` acceptance is a mismatch.
+  - **Sources that disagree** (168): `ORGANIZATION-NAME` and `CALENDAR-YEAR-ENDING` are stated as optional against
+    the table, with the measured reason; `DELETION` in more than one place is `deletion_places`.
+  - **Discovery apart from the grammar** (172, 173): every whole-line ten-digit `<CIK>` in a fetched body is
+    discovered, so a rejected header gives each covered CIK it names a doubt row, and a CIK tag in any other form,
+    a character reference included, refuses the build (`HEADER_CIK_UNRESOLVED`).
+  - **Raw values** (174): values are not trimmed; a padded item code is `items_invalid`.
+  - **Admitted set** (175): the whole PDS front matter is admitted, since a real ABS 8-K (`0001193125-26-394511`)
+    carries `DEPOSITOR-CIK` and `SPONSOR-CIK`; that header parses again and premise 1's filer claim holds for both
+    rows.
+  - **`OWNER-DATA`** (176): removed from the field table; it is not admitted.
