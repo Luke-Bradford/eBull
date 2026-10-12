@@ -447,10 +447,18 @@ def test_every_test_the_core_exit_levels_docstring_cites_exists() -> None:
     exists, so each ``tests/<file>.py::<name>`` citation is resolved here.
     """
     doc = core_exit_levels.__doc__ or ""
-    citations = re.findall(r"(tests/[\w/]+\.py)::\s*(test_\w+)", doc)
-    assert len(citations) == 4
+    citations = set(re.findall(r"(tests/[\w/]+\.py)::\s*(test_\w+)", doc))
+    # Explicit, so a citation the regex stops matching fails here rather than going
+    # unchecked.  Adding a citation to the docstring means adding it here.
+    executor = "tests/test_2603_core_executor.py"
+    assert citations == {
+        ("tests/test_2603_core_allocator.py", "test_a_stopped_out_core_is_rebought_to_the_lower_band_edge"),
+        (executor, "test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target"),
+        (executor, "test_over_the_sandbox_bound_only_a_buy_is_refused"),
+        (executor, "test_core_drawdown_refusal_precedes_durable_order_authority"),
+    }
     repo_root = Path(__file__).resolve().parent.parent
     for file, name in citations:
         tree = ast.parse((repo_root / file).read_text())
-        defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
         assert name in defined, f"{file}::{name} is cited but not defined"
