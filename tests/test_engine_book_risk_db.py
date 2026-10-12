@@ -107,6 +107,8 @@ def test_the_read_model_shows_the_running_policy_newest_first(ebull_test_conn: p
     assert load_engine_book_risk_status(conn, now=_NOW).latest is None
 
     assert run_engine_book_risk_snapshot(conn, _NOW) is not None
+    # No column list: positional over the table's column order. sql/481 appended stress_2008_pct after
+    # `positions`, so it is the last selected value; every copied row's policy is non-v1 and carries it.
     copy = """
         INSERT INTO engine_book_risk_snapshots
         SELECT (s.session_date + %s)::date, %s, s.measured_at, s.pool_event_id, s.capital_usd, s.gross_usd,
