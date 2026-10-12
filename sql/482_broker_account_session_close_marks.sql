@@ -21,8 +21,10 @@
 -- PostgreSQL `numeric` admits 'NaN' and, since PostgreSQL 14, '±Infinity'. Every numeric column is
 -- CHECKed finite. `NaN = NaN` holds for numeric (sql/374), so `<> 'NaN'` is the working test.
 --
--- UPDATE is refused on both tables (sql/424's `etoro_crowd_append_only`, as sql/479). DELETE stays
--- possible for test cleanup. `instrument_id` carries no FK, as sql/383.
+-- UPDATE and DELETE are refused on both tables (sql/424's `etoro_crowd_append_only`), so S can be
+-- neither edited nor deleted and replaced by a later snapshot. The test harness empties tables under
+-- `session_replication_role = replica`, which skips the triggers. `instrument_id` carries no FK, as
+-- sql/383.
 
 CREATE TABLE IF NOT EXISTS broker_account_session_close_snapshots (
     environment                     TEXT        NOT NULL,
@@ -69,20 +71,20 @@ CREATE TABLE IF NOT EXISTS broker_account_session_close_marks (
 
 DROP TRIGGER IF EXISTS broker_account_session_close_snapshots_append_only ON broker_account_session_close_snapshots;
 CREATE TRIGGER broker_account_session_close_snapshots_append_only
-    BEFORE UPDATE ON broker_account_session_close_snapshots
+    BEFORE UPDATE OR DELETE ON broker_account_session_close_snapshots
     FOR EACH ROW EXECUTE FUNCTION etoro_crowd_append_only();
 
 DROP TRIGGER IF EXISTS broker_account_session_close_marks_append_only ON broker_account_session_close_marks;
 CREATE TRIGGER broker_account_session_close_marks_append_only
-    BEFORE UPDATE ON broker_account_session_close_marks
+    BEFORE UPDATE OR DELETE ON broker_account_session_close_marks
     FOR EACH ROW EXECUTE FUNCTION etoro_crowd_append_only();
 
 COMMENT ON TABLE broker_account_session_close_snapshots IS
     '#3612 slice 2: the first official account snapshot observed on a NYSE session''s New York date after '
     'its regular close, with every direct position marked inside [close, observed_at]. The anchor S of the '
-    'marked daily-loss check. Insert-once (UPDATE refused).';
+    'marked daily-loss check. Insert-once (UPDATE and DELETE refused).';
 
 COMMENT ON TABLE broker_account_session_close_marks IS
     '#3612 slice 2: the per-position broker terms of S, one row per direct position, shorts included. '
     'Child count must equal the parent''s official_direct_long_positions + official_direct_short_positions '
-    '(consumer precondition). Insert-once (UPDATE refused).';
+    '(consumer precondition). Insert-once (UPDATE and DELETE refused).';
