@@ -12535,3 +12535,17 @@ neighbouring container and match it.**
   write down its denominator. A spec that states a weight without naming the enforcing line has not done this.
 - Enforced in: `app/services/strategy_comparator.py::hurdle_weights` (docstring) and
   `tests/test_3616_strategy_comparator.py::test_live_mandate_core_is_its_target_share_of_the_non_active_pot`.
+
+### A tax rate applied to a TWR is not an after-tax return (#3616)
+
+- Failure (Codex checkpoint 1, #3616 slice 2 spec, round 1, 2026-10-12): the draft published the engine's "after UK
+  tax" return as `R£ · (1 − t)` on the pot's time-weighted return, citing the SEC's Form N-1A post-liquidation
+  formula. N-1A taxes each distribution when paid and each lot on its own basis. A TWR is a flow-neutral chain, not
+  anyone's chargeable gain. Tax also depends on disposal dates and tax years, and on each holding's character: an
+  offshore income gain on a non-reporting fund such as SPY is income and cannot be netted against capital losses.
+  The haircut could be wrong in either direction.
+- Prevention: an after-tax figure comes from disposals matched under HMRC rules per tax year (`tax_ledger`), with
+  each instrument's tax character established from its source (HMRC's reporting-fund list for funds). If that
+  machinery does not cover the trades, publish no after-tax number; say what is missing.
+- Enforced in: `docs/specs/metrics/2026-10-12-3616-gbp-isa-comparator.md`, "Why this slice computes no after-tax
+  return".
