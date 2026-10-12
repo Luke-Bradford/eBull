@@ -15,7 +15,8 @@ position marks, #3068) to ``--until`` (default: yesterday, New York):
    by itself after-close movement. Every mark is counted: missing instrument metadata and missing bars are
    reported, and the counts reconcile.
 4. **Unit conservation over consecutive snapshots.** Population: positions in either endpoint's marks,
-   positions with a ``trade_events`` row in ``(o1, o2]`` and engine ownership rows claimed in ``(o1, o2]``.
+   positions with a ``trade_events`` row in ``(o1, o2]``, engine ownership rows claimed in ``(o1, o2]``, and
+   every engine ownership row claimed by ``o2`` (``owned_by_o2``, a superset of the gate's population E).
    Checks ``units(d1) + open units - close units = units(d2)`` (0 where absent), and that every close has
    ``realized_pnl_usd``. Reported per population group.
 5. **Point claims.** The live pool limits; R times of day; the first stored mark date; the full event and
@@ -73,6 +74,8 @@ WITH pop AS (
     UNION
     SELECT broker_position_id, 'ownership' FROM strategy_position_ownership
      WHERE claimed_at > %(o1)s AND claimed_at <= %(o2)s
+    UNION
+    SELECT broker_position_id, 'owned_by_o2' FROM strategy_position_ownership WHERE claimed_at <= %(o2)s
 )
 SELECT p.position_id, array_agg(DISTINCT p.grp ORDER BY p.grp),
        COALESCE((SELECT units FROM broker_account_position_marks
@@ -225,13 +228,13 @@ WITH s AS (
     SELECT snapshot_date AS d, observed_at AS o, lead(observed_at) OVER (ORDER BY snapshot_date) AS o2
     FROM broker_account_equity_snapshots WHERE environment = 'demo' AND snapshot_date BETWEEN %s AND %s
 )
-SELECT e.position_id, e.executed_at, e.fees_usd, m.asset_currency_id,
+SELECT e.position_id, s.o, LEAST(s.o2, %s), e.executed_at, e.fees_usd, m.asset_currency_id,
        e.realized_pnl_usd - m.unrealized_pnl * e.units / m.units
          - (e.price - m.close_rate) * e.units * m.close_conversion_rate AS residual
 FROM s
 JOIN broker_account_position_marks m ON m.environment = 'demo' AND m.snapshot_date = s.d
 JOIN trade_events e ON e.position_id = m.position_id AND e.event_kind = 'close'
- AND e.executed_at > s.o AND (s.o2 IS NULL OR e.executed_at <= s.o2)
+ AND e.executed_at > s.o AND e.executed_at <= LEAST(s.o2, %s)
 ORDER BY e.executed_at
 """
 
@@ -239,11 +242,39 @@ _PNL_AGE_SQL = """
 SELECT count(*), count(m.pnl_timestamp),
        min(extract(epoch FROM s.observed_at - m.pnl_timestamp)),
        max(extract(epoch FROM s.observed_at - m.pnl_timestamp)),
-       count(*) FILTER (WHERE m.total_fees <> 0), count(*) FILTER (WHERE m.asset_currency_id <> 1),
-       count(*) FILTER (WHERE NOT m.is_buy)
+       count(*) FILTER (WHERE m.total_fees = 0), count(*) FILTER (WHERE m.total_fees <> 0),
+       count(*) FILTER (WHERE m.total_fees IS NULL),
+       count(*) FILTER (WHERE m.asset_currency_id = 1), count(*) FILTER (WHERE m.asset_currency_id <> 1),
+       count(*) FILTER (WHERE m.asset_currency_id IS NULL),
+       count(*) FILTER (WHERE m.is_buy), count(*) FILTER (WHERE NOT m.is_buy), count(*) FILTER (WHERE m.is_buy IS NULL)
 FROM broker_account_position_marks m
 JOIN broker_account_equity_snapshots s USING (environment, snapshot_date)
 WHERE m.environment = 'demo' AND m.snapshot_date BETWEEN %s AND %s
+"""
+
+_FEES_SPLIT_SQL = """
+SELECT format('marks: first date with total_fees present %s, NULL total_fees on or after it %s',
+              min(snapshot_date) FILTER (WHERE total_fees IS NOT NULL),
+              count(*) FILTER (WHERE total_fees IS NULL AND snapshot_date >= (
+                  SELECT min(snapshot_date) FROM broker_account_position_marks
+                   WHERE environment = 'demo' AND total_fees IS NOT NULL)))
+FROM broker_account_position_marks WHERE environment = 'demo'
+UNION ALL
+SELECT format('trade_events %s: %s rows, fees_usd NULL %s, zero %s', event_kind, count(*),
+              count(*) FILTER (WHERE fees_usd IS NULL), count(*) FILTER (WHERE fees_usd = 0))
+FROM trade_events GROUP BY event_kind
+"""
+
+_EVENTS_AUDIT_SQL = """
+SELECT count(*),
+       count(*) FILTER (WHERE units IN ('NaN', 'Infinity', '-Infinity') OR price IN ('NaN', 'Infinity', '-Infinity')
+                        OR fees_usd IN ('NaN', 'Infinity', '-Infinity')
+                        OR realized_pnl_usd IN ('NaN', 'Infinity', '-Infinity')),
+       count(*) FILTER (WHERE fees_usd = 0), count(*) FILTER (WHERE fees_usd <> 0),
+       count(*) FILTER (WHERE fees_usd IS NULL),
+       count(*) FILTER (WHERE event_kind = 'close'),
+       count(*) FILTER (WHERE event_kind = 'close' AND realized_pnl_usd IS NULL)
+FROM trade_events
 """
 
 
@@ -258,16 +289,29 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
         print(f"    history of position {position_id} (kind, detail, at, units, realised, instrument):")
         for row in conn.execute(_HISTORY_SQL, {"p": position_id}):
             print(f"      {row}")
-    rows = conn.execute(_IDENTITY_SQL, (since, until)).fetchall()
-    worst = max((abs(row[4]) for row in rows), default=None)
+    cutoff = datetime.combine(until + timedelta(days=1), time.min, tzinfo=UTC)
+    rows = conn.execute(_IDENTITY_SQL, (since, until, cutoff, cutoff)).fetchall()
+    worst = max((abs(row[6]) for row in rows), default=None)
     print(f"    closes of positions in the preceding snapshot: {len(rows)}; max |residual| {worst}")
     for row in rows:
-        print(f"      position {row[0]} at {row[1]}: fees {row[2]}, asset currency {row[3]}, residual {row[4]:.4f}")
+        print(
+            f"      position {row[0]} in ({row[1]:%Y-%m-%d %H:%M}Z, {row[2]:%Y-%m-%d %H:%M}Z]"
+            f" at {row[3]:%Y-%m-%d %H:%M}Z: fees {row[4]}, asset currency {row[5]}, residual {row[6]:.4f}"
+        )
     age = conn.execute(_PNL_AGE_SQL, (since, until)).fetchone()
     if age is not None:
+        print(f"    marks {age[0]}, with pnl_timestamp {age[1]}, age vs observed_at {age[2]}..{age[3]} s")
+        print(f"    total_fees zero {age[4]} / non-zero {age[5]} / NULL {age[6]}")
+        print(f"    asset currency USD {age[7]} / other {age[8]} / NULL {age[9]}")
+        print(f"    is_buy true {age[10]} / false {age[11]} / NULL {age[12]}")
+    fees = conn.execute(_FEES_SPLIT_SQL).fetchall()
+    for row in fees:
+        print(f"    {row[0]}")
+    ev = conn.execute(_EVENTS_AUDIT_SQL).fetchone()
+    if ev is not None:
         print(
-            f"    marks {age[0]}, with pnl_timestamp {age[1]}, age vs observed_at {age[2]}..{age[3]} s; "
-            f"non-zero total_fees {age[4]}, non-USD asset {age[5]}, short {age[6]}"
+            f"    trade_events {ev[0]}: non-finite units/price/fees/realised {ev[1]}; fees_usd zero {ev[2]}"
+            f" / non-zero {ev[3]} / NULL {ev[4]}; closes {ev[5]} with NULL realised {ev[6]}"
         )
 
 

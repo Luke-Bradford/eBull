@@ -15,7 +15,7 @@ Rounds 1 to 3 anchored the day on `broker_account_equity_snapshots`: the last wr
 - Round 2 found that this drops the move between the close and the mark.
 - Round 3 repriced the mark to a live-fetched candle close, and that added four BLOCKING findings of its own: re-basing, dating, basis and exit latency.
 
-Round 4 removed external prices. The anchor is the broker's own marks, captured once from the first qualifying sync observation after P's regular close, so the day is a difference of two broker marks. Round 5, this version, keeps that design and closes round 4's findings: the accounting identity, the mark timestamp, numeric safety, and census precision.
+Round 4 removed external prices. The anchor is the broker's own marks, captured once from the first qualifying sync observation after P's regular close, so the day is a difference of two broker marks. Rounds 5 and 6 keep that design. The closure audit is at the end of this spec.
 
 ## Source rule
 
@@ -26,13 +26,16 @@ Round 4 removed external prices. The anchor is the broker's own marks, captured 
   **The reference for a held position is the prior session's close.** For a US listing that is the regular-session close: 16:00 New York, or 13:00 on a `us_market_status` half day.
 - **Mark source and time.** Both sides are eToro's per-position `unrealizedPnL` from `TradingRealAdminApi_Position` (sql/383 header), as stored for #3068.
   - `unrealizedPnL.timestamp` is the documented time "when the broker struck the mark" (`BrokerDirectPositionInvestment.pnl_timestamp`, `app/providers/broker.py`).
-  - On all 252 stored marks from 2026-09-15 to 2026-10-11, it is present and 0.07 to 4.2 s before its snapshot's `observed_at` (section 5). So the mark time, not the receipt time, is the instant S stands for, and S requires it (Design 1).
-- **Realised and unrealised are on one convention.** eToro's `unrealizedPnL` and the close's `realized_pnl_usd` must agree, or a close at S's mark would show a spurious P&L. Census of every close of a position present in the preceding stored snapshot (section 5): 5 closes, `realised − U_S × closed/held − (price − close_rate_S) × closed × conversion` is within ±0.0076 USD.
-  - All 5 have `fees_usd` 0 and a USD asset currency.
-  - All 252 marks have `total_fees` 0, a USD asset currency and `is_buy` true.
+  - On all 252 stored marks from 2026-09-15 to 2026-10-11, it is present and 0.07 to 4.2 s before its snapshot's `observed_at` (section 5). Each position's mark time, not the snapshot's receipt time, is therefore the cut for that position on both sides (Design 3).
+- **Realised and unrealised are on one convention.** eToro's `unrealizedPnL` and the close's `realized_pnl_usd` must agree, or a close at S's mark would show a spurious P&L. Census of every close of a position present in the preceding stored snapshot, event window capped at `--until` (section 5): 5 closes; `realised − U_S × closed/held − (price − close_rate_S) × closed × conversion` is at most 0.0076 USD in absolute value.
+  - That is a historical maximum, not a guaranteed bound. At that size, one cent per close is 0.0025% of the 40,000 pool, against a 2.5% limit.
+  - Conditions of the census: all 5 closes have `fees_usd` 0 and a USD asset currency.
+  - All 252 marks are USD and `is_buy` true.
+  - `total_fees` is NULL on the 134 marks dated before 2026-10-01, when its capture began. It is present on all 118 marks since and is 0 on every one.
+  - In `trade_events`, all 13 closes carry `fees_usd` 0, and all 23 opens carry NULL: the ingestion records fees on closes only.
 
-  The identity is measured only under those conditions, so the design refuses outside them (Design 4).
-- **`totalFees`** is documented as *"Total overnight fees and dividends charged/paid on the position in USD. Negative amount represents refund"* (`app/providers/broker.py`). That one signed number carries both fees and dividends. How a dividend is signed in it has not been observed: every stored value is 0.
+  No documented eToro rule says whether `realized_pnl_usd` or `unrealizedPnL` include `totalFees`. The identity is therefore admitted only where fees are known to be zero, and every other case refuses (Design 4).
+- **`totalFees`** is documented as *"Total overnight fees and dividends charged/paid on the position in USD. Negative amount represents refund"* (`app/providers/broker.py`). That one signed number carries both fees and dividends.
 - **Event identity.** `trade_events` allows one open per position (`uq_trade_events_open`) and one close per `(position_id, executed_at)` (`uq_trade_events_close`). A duplicated round trip therefore cannot add a second open, and a duplicated close breaks unit conservation.
 - **Principal flows are excluded exactly.** `PotNav` separates principal from P&L (`engine_pot_risk.py`, module docstring, GIPS 2020 2.A.24(e)/(f) as already cited there), and this term uses P&L only.
 - **Parent/child completeness** is a documented precondition: the sql/383 header requires the mark count to equal `official_direct_long_positions + official_direct_short_positions`. **Currency** must be documented as USD, the same refusal `observe_pot_nav` applies (`_snapshot_positions`).
@@ -43,68 +46,88 @@ Round 4 removed external prices. The anchor is the broker's own marks, captured 
 - **D, P and S.**
   - D is `risk.observed_at`'s New York date, and `D_start` is D 00:00 New York. The reset at New York midnight is local policy; the quoted IBKR text gives no reset time.
   - P is `latest_completed_us_session(D_start)`, and `P_close` is P's regular close. Both helpers are in `market_calendar.py`, which is ranking-policy-hashed, so they are called and never edited.
-  - S is P's close capture (Design 1). On weekends and holidays P does not move: Saturday, Sunday and Monday all measure from Friday's S, so a loss can appear in the figure of every calendar day until the next session's S exists.
+  - S is P's close capture (Design 1). On weekends and holidays P does not move. Saturday through Monday measure from the latest preceding session's S, normally Friday's, so a loss can appear in the figure of every calendar day until the next session's S exists.
 - **What is not counted, and when.** Moves between `P_close` and S's mark time are excluded from D's figure. On P itself they are counted by any observation after S, which still measures from the session before P. From S to D's midnight, an observation on P (from the previous S) and on D (from S) both count the move.
   - Measured, every mark taken after its session's close, 2026-09-15 to 2026-10-11 (section 3, a retained-row comparison against `price_daily`, which is back-adjusted, sql/479 header):
     - IEP, NXH, SPY.RTH, SVOL, SVXY and VOO: `close_rate` equals the session's stored close on all 139;
-    - QQQ: differs on 15 of 19, and GME on 14 of 18. Both trade 24/5.
-  - The excluded interval is stored per capture (S's `observed_at` and each child's `pnl_timestamp`), so each day's interval is auditable. Its expected length is the job's start lag after the close: median 0.0 minutes, maximum 76.8 (2026-09-25), over 15 minutes on 3 of 19 sessions (section 1). That is job-start lag, not capture lag; capture lag is measured from S rows once they exist.
+    - QQQ: differs on 15 of 19, and GME on 14 of 18.
+  - The excluded interval's length is **unmeasured until S rows exist**. Each S stores its `observed_at` and every child's `pnl_timestamp`, so every day's interval is auditable from then on.
+  - Section 1 is scheduling evidence only. A successful sync started after the close on all 19 sessions, at a job-start lag of median 0.0 minutes and maximum 76.8.
 
 ## Design
 
 1. **Close capture (schema and writer).**
    - Migration `sql/482_broker_account_session_close_marks.sql` creates `broker_account_session_close_snapshots (environment, session_date, observed_at, currency, account_currency_id, official_direct_long_positions, official_direct_short_positions, PRIMARY KEY (environment, session_date))` and `broker_account_session_close_marks`.
-     - The marks table has `broker_account_position_marks`'s per-position columns, `pnl_timestamp NOT NULL` included, keyed `(environment, session_date, position_id)`, with an FK to the parent.
-     - Every numeric column is CHECKed finite (`<> 'NaN'` and not `±Infinity`, which PostgreSQL `numeric` admits).
+     - The marks table has `broker_account_position_marks`'s per-position columns, keyed `(environment, session_date, position_id)`, with an FK to the parent. `pnl_timestamp` and `total_fees` are NOT NULL.
+     - Every numeric column is CHECKed finite: `<> 'NaN'` and not `±Infinity`, both of which PostgreSQL `numeric` admits.
      - Both tables are insert-once: UPDATE is refused by sql/424's `etoro_crowd_append_only` trigger, as in sql/479.
-   - The same migration adds finite CHECKs to `trade_events.units`, `price`, `fees_usd` and `realized_pnl_usd`. Today's CHECKs (`units > 0`, `price > 0`) admit NaN, because PostgreSQL sorts NaN above every number. 0 of 36 existing rows violate them (section 5 counts, re-checked by the migration's own validation).
+     - `trade_events` gets no new constraint. Its writer is `sync_portfolio`, which runs before any evidence savepoint, so a CHECK failure there would abort the portfolio refresh (r5 finding 5). Its values are validated at read time instead (4).
    - Writer: `account_equity_evidence.record_session_close_snapshot(conn, *, environment, snapshot)`.
      - It derives `P = latest_completed_us_session(snapshot.observed_at)`.
-     - It writes only when all of these hold: `snapshot.observed_at`'s New York date is P; every direct position has a `pnl_timestamp` at or after `P_close`; and `_validate_snapshot` accepts the snapshot.
-     - The parent is `INSERT … ON CONFLICT DO NOTHING RETURNING`, and the children are inserted only when the parent row was inserted. So S is **the first qualifying snapshot successfully inserted**, never replaced. A later run the same evening changes nothing.
-   - It is called from `daily_portfolio_sync` (scheduler, demo) after `record_account_equity_snapshot`, in its **own** savepoint with the same catch-log-and-continue handling that the equity snapshot already has (`app/workers/scheduler.py`, the `with conn.transaction():` around `record_account_equity_snapshot`). A capture failure therefore neither loses the equity snapshot nor fails the sync. It is logged as ERROR and surfaces as `engine_pot_daily_anchor_missing` on D's entries.
-   - The job runs every 5 to 10 minutes on the live schedule, so no new job or connection lane is added.
-2. **Population E.** E is every `broker_position_id` with an ownership row on an eligible trade under the pot epoch (`engine_book_rows`) whose `claimed_at ≤ risk.observed_at`. This is the cut `book_membership` applies to a snapshot (r2 B2).
-3. **Per-position daily P&L.** With W = `(S.observed_at, risk.observed_at]`, for each p in E:
+     - It writes only when all of these hold:
+       - `snapshot.observed_at`'s New York date is P;
+       - `_validate_snapshot` accepts the snapshot;
+       - every direct position has a finite `unrealized_pnl` and `units`, a non-NULL `total_fees`, and a `pnl_timestamp` in `[P_close, snapshot.observed_at]`.
+     - The parent is `INSERT … ON CONFLICT DO NOTHING RETURNING`, and the children are inserted only when the parent row was inserted. So S is **the first qualifying snapshot successfully inserted**, never replaced, and a later run the same evening changes nothing.
+     - A non-qualifying snapshot writes nothing and logs one INFO line naming the failed condition.
+   - It is called from `daily_portfolio_sync` (scheduler, demo) after `record_account_equity_snapshot`, in its **own** savepoint, with the same catch-log-and-continue handling the equity snapshot has (`app/workers/scheduler.py`, the `with conn.transaction():` around `record_account_equity_snapshot`).
+     - A write that raises is logged at ERROR and leaves the equity snapshot and the sync intact.
+     - No run, no fetched snapshot, or no qualifying snapshot simply leaves S absent. That surfaces only as `engine_pot_daily_anchor_missing` on D's entries.
+   - `daily_portfolio_sync` already runs repeatedly through the evening (section 1), so no new job or connection lane is added.
+   - The provider comments on `pnl_timestamp` ("nothing reads it for a verdict") and `total_fees` ("a MEMO … never an operand") are updated to name this consumer. Their optional parsing stays, for consumers that do not need them.
+2. **Population E.** E is every eligible trade under the pot epoch, read with `engine_book_rows`' eligibility, and its ownership row's `broker_position_id` where `claimed_at ≤ risk.observed_at`.
+   - An eligible trade whose status is open, closing or closed with no ownership row refuses `engine_capital_population_incomplete`, inside the same statement, as `book_membership` does (r5 finding 4).
+   - This is the cut `book_membership` applies to a snapshot (r2 B2).
+3. **Per-position windows and daily P&L.**
+   - Each position is cut at its own mark times. `t_S(p)` is p's `pnl_timestamp` in S if present, else `S.observed_at`. `t_now(p)` is p's live `pnl_timestamp` if present, else `risk.observed_at`.
+   - p's window is `W_p = (t_S(p), t_now(p)]`, so units, marks and events agree at both ends (r5 finding 3).
 
-   `daily_p = U_now(p) − U_S(p) + Σ realised(p, closes in W)`
+   `daily_p = U_now(p) − U_S(p) + Σ realised(p, closes in W_p)`
 
    - `U_now(p)` is the live snapshot's `unrealized_pnl` if p is present, else 0.
    - `U_S(p)` is S's stored mark if p is present, else 0.
    - The book's daily P&L is Σ over E.
-   - Under the measured identity, a close executed in W at a price equal to S's `close_rate` contributes 0. For example, closing half: −50 + 50 = 0.
-   - A position opened in W contributes against its purchase price, which is IBKR's "New Position" case.
+   - Under the measured identity, a close executed in `W_p` at a price equal to S's `close_rate` contributes 0. For example, closing half: −50 + 50 = 0.
+   - A position opened in `W_p` contributes against its purchase price, which is IBKR's "New Position" case.
    - A position closed before S belongs to P's day, whether or not its close was recorded (see 7 on the ledger).
 4. **Witnesses.** Each refuses the entry with its own code; none is coerced.
    - **Anchor.**
      - No S row for P gives `engine_pot_daily_anchor_missing`.
      - A currency other than USD gives `engine_capital_snapshot_unusable`, as `_snapshot_positions`.
      - A NULL declared count, or a mark count different from `official_direct_long_positions + official_direct_short_positions`, gives `engine_pot_daily_anchor_incomplete`. A declared 0 with 0 marks passes.
-   - **Accounting scope.** `engine_pot_daily_accounting_unverified` is returned, for any p in E, when:
-     - p is short;
-     - p's asset currency is not USD;
-     - `total_fees` is NULL on either side, or differs between S and now;
-     - a close in W has non-zero `fees_usd`.
+   - **Live mark freshness.** For every p in E present in the live snapshot, `pnl_timestamp` must be non-NULL and in `[risk.observed_at − max_quote_age_seconds, risk.observed_at]`. Otherwise the entry refuses `engine_pot_daily_mark_stale`. This is the executor's own quote-age bound (`_age_ok`).
+   - **Per-case evidence (r5 findings 1 and 2).** Each p in E falls into exactly one case by presence in S and in the live snapshot. Any evidence named below that is missing or not as required gives `engine_pot_daily_accounting_unverified`. A NULL or non-finite event value gives `engine_pot_daily_event_unwitnessed`.
 
-     These are the cases outside the measured identity. A dividend changes `total_fees` with a sign not yet observed, so an ex-dividend day on a held name refuses entries until the next S. Replacing that refusal with a signed term is #3612 follow-up work, due once one engine-held dividend has been observed.
+     | case | evidence required |
+     |---|---|
+     | held: in S and live | both sides `is_buy`, asset currency USD, `total_fees` = 0 (non-NULL) |
+     | closed in W: in S, not live | S side as above; every close in `W_p` has `fees_usd` = 0 (non-NULL) |
+     | opened in W: not in S, live | live side as above; its open event is in `W_p` |
+     | round trip: in neither, events in `W_p` | its open is in `W_p` with `side` `buy`; every close has `fees_usd` = 0 (non-NULL). It contributes realised only, which is USD by column, so no currency or mark convention enters. |
+     | historical: in neither, no events in `W_p` | contributes 0. If its `claimed_at` is in `W_p`, it refuses `engine_pot_daily_event_unwitnessed` (r2 B2's open-and-close with no events). |
+
+     These are the only cases inside the measured identity (Source rule): long, USD, all fees zero.
+     - Open events carry no fees in the ledger (23 of 23 NULL). An open's cost is therefore witnessed by the position's own `total_fees` = 0 on the live or S side, never by the event.
+     - A dividend changes `total_fees`, so an ex-dividend day on a held name refuses entries until the next S. Replacing that refusal with a signed term is #3612 follow-up work, due once one engine-held dividend has been observed.
    - **Events.** For every p in E:
-     - `units_S(p) + Σ open units − Σ close units (events in W) = units_now(p)`, with units 0 where p is absent from a side;
-     - every close in W has a non-NULL `realized_pnl_usd`;
-     - if p is absent from S and its `claimed_at` is in W, its open event is in W.
+     - `units_S(p) + Σ open units − Σ close units (events in W_p) = units_now(p)`, with units 0 where p is absent from a side;
+     - every close in `W_p` has a non-NULL, finite `realized_pnl_usd`.
 
-     A failure gives `engine_pot_daily_event_unwitnessed`. A position present in S is not asked for an open in W, so a claim recorded just after S for a position opened before it is accepted (r4 finding 13).
-     - The unit check catches a missing partial or final close in W. Section 4's census shows that shape is real: position 3602947846 (instrument 3075, no ownership row, never in a mark) opened 0.646 units on 2026-09-23, recorded a close of 0.323, and has no further event.
-   - **Numeric.** Every value is finite at rest (the CHECKs above, plus `observe_pot_nav`'s finiteness check on the live side). The function also checks `is_finite()` before any arithmetic, as a second barrier, with the codes above.
+     A failure gives `engine_pot_daily_event_unwitnessed`.
+     - The unit check catches a missing partial or final close in `W_p`. Section 4's census shows that shape is real: position 3602947846 (instrument 3075, never owned, never in a mark) opened 0.646 units on 2026-09-23, recorded a close of 0.323, and has no further event.
+     - Event identity is the schema's: one open per position, one close per `(position_id, executed_at)`. A duplicated close breaks conservation.
+   - **Numeric.** Every value read is checked `is_finite()` before any arithmetic, with the codes above. The new tables' CHECKs make S finite at rest. The live side is checked by `observe_pot_nav`, which runs first.
    - **Splits.** A split after S changes units at the broker without a trade event, so the unit check refuses D's entries until the next session's S, taken after the split. U is a USD value, so it is not re-based.
 5. **One read.** One SQL statement reads, under one snapshot even in READ COMMITTED:
    - S's parent and marks;
-   - E, with `claimed_at`;
-   - E's `trade_events` in W.
+   - E, eligible trades without ownership included;
+   - E's `trade_events` after `S.observed_at − max_quote_age_seconds`, a superset of every `W_p`, which Python then cuts per position.
 
    The new function `engine_pot_risk.observe_daily_marked_pnl(conn, snapshot) -> Decimal` combines that statement with the live snapshot in Python. It derives D, `D_start`, P and `P_close` from `snapshot.observed_at`.
    - `observe_pot_nav`, `advance_pot_drawdown`, `engine_book_rows`, `book_membership`, `_price_book` and `_MANDATE_OBSERVATION_SQL` keep their implementations.
+   - The executor function, the scheduler job and the two provider field comments change (1, 7).
    - The daily figure depends only on that statement and the live snapshot, never on `observe_pot_nav`'s separate reads.
-   - An event committed after the statement's snapshot is not seen. If it changed units before `risk.observed_at`, the unit check refuses.
+   - An event committed after the statement's snapshot is not seen. If it changed units before `t_now(p)`, the unit check refuses.
 6. **Exception contract.** The function raises `EngineCapitalObservationError` with one of the codes above, which are added to `EngineCapitalRefusal`. `_observe_local_mandate_risk` catches it inside its transaction block and returns the code, as it already does for `advance_pot_drawdown`. The code reaches `_persist_rejection`; the message, which names the position, is logged.
 7. **Executor changes.** In `_observe_local_mandate_risk`:
    1. The realised check's dates come from `risk.observed_at` instead of `now` (r3 finding 8). Its `daily_realised_pnl` must be finite before the comparison, else it refuses `engine_capital_population_incomplete`. `_MANDATE_OBSERVATION_SQL`'s text is unchanged.
@@ -127,23 +150,22 @@ Round 4 removed external prices. The anchor is the broker's own marks, captured 
     - one line each for `engine_pot_daily_anchor_missing`, `_anchor_incomplete`, `_accounting_unverified` and `engine_pot_daily_event_unwitnessed`.
 11. **Exits.**
     - The check sits only on the entry sizing path (`_risk_and_amount` → `_observe_local_mandate_risk`), and every refusal it adds is a returned code, never a raise.
-    - The capture writer runs in `daily_portfolio_sync`'s savepoint, so the paper cycle does not wait on it.
-    - The new `trade_events` CHECKs make a non-finite event fail at insert, in the sync that writes it, which is where a malformed broker value belongs.
+    - The capture writer runs in `daily_portfolio_sync`'s own savepoint, after `sync_portfolio`, and the paper cycle does not wait on it.
+    - Nothing in this slice adds a constraint to the ingestion path that records exits.
 
 ## Operational dependency
 
-S exists only if a qualifying snapshot is inserted on P's New York date after `P_close`. A miss refuses entries for D, which is fail-closed, and appears as `engine_pot_daily_anchor_missing` in the entry's recorded reason and as an ERROR in the sync log. A successful sync run started after the close existed for 19 of 19 sessions since 2026-09-15 (section 1). That counts runs, not captures; capture coverage is measured from S rows after deployment.
+S exists only if a qualifying snapshot is inserted on P's New York date after `P_close`. A miss refuses entries for D, which is fail-closed, and appears as `engine_pot_daily_anchor_missing` in the entry's recorded reason. A raising write is also an ERROR in the sync log. A successful sync run started after the close existed for 19 of 19 sessions since 2026-09-15 (section 1). That counts runs, not captures; capture coverage is measured from S rows after deployment.
 
 ## Tests
 
 - **Writer (DB):**
-  - nothing is written for an observation before `P_close`, on a closed day, on the New York date after P, or with any position's `pnl_timestamp` before `P_close` or NULL;
+  - nothing is written for an observation before `P_close`, on a closed day, on the New York date after P, or with any position's `pnl_timestamp` NULL, before `P_close` or after `observed_at`, or `total_fees` NULL;
   - the first qualifying observation writes the parent and children;
   - a later one the same evening changes nothing, children included;
   - UPDATE is refused, and NaN or Infinity is refused in each numeric column;
   - a half day uses 13:00;
   - a capture failure leaves the equity snapshot stored and the sync successful.
-- **Migration (DB):** each new `trade_events` CHECK refuses NaN, `Infinity` and `-Infinity`, and asserts `diag.constraint_name`.
 - **Pure, over the per-position formula:**
   - held, +100 at S → −400 now gives −500;
   - a half close and a full close, executed in W at S's `close_rate`, each give 0;
@@ -160,12 +182,18 @@ S exists only if a qualifying snapshot is inserted on P's New York date after `P
   - a units change with no event (a split) refuses;
   - a child-count mismatch refuses `anchor_incomplete`, and so does a NULL declared count, while a genuine zero-position S passes;
   - a non-USD or undocumented account currency refuses;
-  - a short, a non-USD asset, `total_fees` NULL or changed, and a close with fees each refuse `accounting_unverified`;
-  - events exactly at `S.observed_at` are excluded, and events exactly at `risk.observed_at` are included.
+  - for each case in the per-case table, each missing or wrong piece of evidence refuses with its stated code: a short, a non-USD asset, `total_fees` NULL or non-zero, a close with `fees_usd` NULL or non-zero, and a round-trip open with `side` `sell`;
+  - a historical position with no events and `claimed_at` before `W_p` contributes 0 without refusing;
+  - an eligible trade with no ownership refuses `engine_capital_population_incomplete`;
+  - a live `pnl_timestamp` that is NULL, older than `max_quote_age_seconds` or later than `risk.observed_at` refuses `mark_stale`;
+  - per-position cut: an event exactly at `t_S(p)` is excluded, and one exactly at `t_now(p)` is included;
+  - a trade between a position's `pnl_timestamp` and the snapshot's `observed_at` is placed on the correct side and conserves;
+  - NaN or Infinity in an event's units or realised value refuses `event_unwitnessed` rather than raising.
 - **Calendar:**
   - D, `D_start`, P and `P_close` for a Monday, for the Tuesday after a Monday holiday, for the day after a half day, across both 2026 DST transitions (03-08, 11-01), and across a year boundary;
   - `risk.observed_at` one microsecond either side of Friday → Saturday midnight selects different P;
-  - either side of Saturday → Sunday midnight selects the same P.
+  - either side of Saturday → Sunday midnight selects the same P;
+  - the Monday after a Friday closure (2026-04-03, Good Friday) uses Thursday's S.
 - **Threshold:** at, just below and just above −limit; a non-breach proceeds to sizing.
 - **Executor (DB):**
   - the marked check refuses when realised P&L does not breach;
@@ -192,16 +220,27 @@ Every figure in this spec comes from `PYTHONPATH=. uv run python scripts/measure
 3. **Retained-row price comparison.**
    - 176 marks taken after their session's close; all 176 compared, none missing a bar or instrument metadata.
    - The per-instrument figures are in the Source rule section.
-4. **Unit conservation, 26 consecutive snapshot pairs.** The population is endpoint marks plus event positions plus engine ownership claimed in the window.
-   - Position-pairs by group: 237 endpoint only, 7 endpoint + event, 6 endpoint + event + ownership, 7 event only.
+4. **Unit conservation, 26 consecutive snapshot pairs.** The population is:
+   - endpoint marks;
+   - positions with an event in the window;
+   - engine ownership claimed in the window;
+   - every engine ownership row claimed by the later endpoint (`owned_by_o2`). That last group is a superset of E, so the census covers E, older and released claims included.
+
+   Results:
+   - Position-pairs by group: 174 endpoint only, 6 endpoint + event, 1 endpoint + event + owned_by_o2, 6 endpoint + event + owned_by_o2 + ownership, 63 endpoint + owned_by_o2, 7 event only, 18 owned_by_o2 only.
    - One failure, position 3602947846. Its full history in section 5 shows two events and no ownership row or mark at any time.
+   - Every pair that includes an owned position conserves.
 5. **Point claims:**
    - the pool limits;
    - weekday after-close snapshot times, 16:14:37 to 19:56:03 New York;
    - the first stored mark date;
    - the failing position's history;
-   - the 5-close identity, max |residual| 0.0076;
-   - mark timestamps on 252 of 252 marks, 0.07 to 4.2 s old, with 0 non-zero `total_fees`, 0 non-USD and 0 short.
+   - the 5-close identity, max |residual| 0.0076, each with its event window;
+   - mark timestamps on 252 of 252 marks, 0.07 to 4.2 s old;
+   - `total_fees`: 118 zero, 0 non-zero and 134 NULL, all NULLs dated before 2026-10-01;
+   - asset currency: 252 USD;
+   - `is_buy`: 252 true;
+   - `trade_events`: 36 rows, 0 non-finite, `fees_usd` NULL on 23 of 23 opens and 0 on 13 of 13 closes, and 0 closes with NULL realised.
 
 The census is retrospective over retained rows. It does not show that a row existed at each past decision instant. The live gate reads at decision time, and an absent S refuses.
 
@@ -209,5 +248,39 @@ The census is retrospective over retained rows. It does not show that a row exis
 
 No authorisation surface changes. This adds:
 - a fail-closed entry refusal on the demo paper executor;
-- an append-only evidence capture, written by an existing demo job from a snapshot that job already fetches;
-- finiteness CHECKs on `trade_events`.
+- an append-only evidence capture, written by an existing demo job from a snapshot that job already fetches.
+
+## Closure audit, rounds 4 and 5
+
+| round.finding | severity | disposition |
+|---|---|---|
+| r4.1 numeric before exits | BLOCKING | Resolved: finite checks before every comparison or sum (Design 4, 7.1); no new constraint on the exit-recording ingestion path (Design 1) |
+| r4.2 accounting identity | BLOCKING | Resolved by measurement plus scope: 5-close identity; only long, USD, all-fees-zero cases admitted (Design 4 table) |
+| r4.3 mark time vs receipt | BLOCKING | Resolved: per-position `pnl_timestamp` cuts (Design 3); S window and live freshness (Design 1, 4) |
+| r4.4 residual wording | WARNING | Resolved (Source rule, "What is not counted") |
+| r4.5 reset and carry-forward | WARNING | Resolved: midnight reset labelled local policy; weekend and holiday carry-forward stated and tested |
+| r4.6 drawdown ledger integrity | WARNING | **Open, deferred**: out of scope (Design 7), recorded on #3612 as a remaining slice |
+| r4.7 sync success ≠ capture | WARNING | Resolved: counts relabelled; capture failure handling specified (Design 1) |
+| r4.8 job-start lag | WARNING | Resolved: scheduling evidence only; interval unmeasured until S exists |
+| r4.9 back-adjusted comparison | WARNING | Resolved: relabelled retained-row comparison; not a safety input |
+| r4.10 silent mark exclusion | WARNING | Resolved: left joins; counts reconcile (section 3) |
+| r4.11 unreproduced claims | WARNING | Resolved: section 5; cadence and 24/5 wording removed |
+| r4.12 event identity | WARNING | Resolved: unique indexes cited |
+| r4.13 claimed-in-W in S | WARNING | Resolved: per-case table |
+| r4.14 realised cutoff | WARNING | Retained, documented (Design 7.1): frozen shared SQL |
+| r4.15–18 | NIT | Resolved (wording) |
+| r5.1 fee scope | BLOCKING | Resolved: non-NULL zero fees required on every present side and every close |
+| r5.2 per-case witnesses | BLOCKING | Resolved: case table (Design 4) |
+| r5.3 mark freshness and cut | BLOCKING | Resolved: per-position windows; S timestamp bounds; live age bound |
+| r5.4 ownership-less trades | WARNING | Resolved (Design 2) |
+| r5.5 CHECK on ingestion path | WARNING | Resolved: `trade_events` CHECKs dropped; read-time validation |
+| r5.6 = r4.6 | WARNING | Open, deferred |
+| r5.7 NULL fees miscounted | WARNING | Resolved: 134 NULL found and explained (section 5) |
+| r5.8 unreproduced claims | WARNING | Resolved: removed or added to section 5 |
+| r5.9 unbounded census window | WARNING | Resolved: capped at `--until` |
+| r5.10 census vs E | WARNING | Resolved: `owned_by_o2` superset group |
+| r5.11 lag as expected length | WARNING | Resolved: wording |
+| r5.12 missing-anchor ERROR | WARNING | Resolved: ERROR only for a raising write |
+| r5.13 provider comments | NIT | Resolved (Design 1) |
+| r5.14 closure audit | NIT | This table |
+| r5.15 Friday holiday | NIT | Resolved, with a test |
