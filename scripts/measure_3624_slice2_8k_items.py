@@ -428,7 +428,7 @@ CORRECTION_TAGS: Final = ("CORRECTION", "DELETION", "TIMESTAMP")
 _LINE: Final = re.compile(r"<(/?)([^<>]*)>(.*)")
 #: The ``.hdr.sgml`` envelope's opening line (EDGAR Archives; not a PDS element): ``<accession>.hdr.sgml : <date>``.
 #: A whole ``<CIK>`` line with exactly ten ASCII digits, and a CIK tag in any form.
-_CIK_LINE: Final = re.compile(r"^<CIK>([0-9]{10})$", re.M)
+_CIK_LINE: Final = re.compile(r"<CIK>([0-9]{10})")
 _CIK_TAG: Final = re.compile(r"<\s*cik\b", re.I)
 _ENVELOPE_VALUE: Final = re.compile(r"\d{10}-\d{2}-\d{6}\.hdr\.sgml : \d{8}")
 ENVELOPE: Final = "SEC-HEADER"
@@ -541,10 +541,11 @@ GRAMMAR_SHA256: Final = hashlib.sha256(
 ).hexdigest()
 
 
-def _unix(text: str) -> str:
-    """The body with CRLF line ends read as LF: the one line-terminator rule for the grammar and discovery alike. A
-    lone CR stays in its line, where it is part of a value."""
-    return text.replace("\r\n", "\n")
+def header_lines(text: str) -> list[str]:
+    """The body's lines, split once at LF with exactly one CR removed where it ends a CRLF terminator: the one
+    line-terminator rule, applied once, for the grammar and discovery alike. Any other CR stays in its line, where
+    it is part of a value."""
+    return [line.removesuffix("\r") for line in text.split("\n")]
 
 
 def _closing_defect(name: str, seen: Counter[str]) -> str | None:
@@ -556,14 +557,15 @@ def _closing_defect(name: str, seen: Counter[str]) -> str | None:
     return "group" if len({seen[member] for member in group}) > 1 else None
 
 
-def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
+def header_structure(body: list[str]) -> tuple[str | None, dict[str, list[str]]]:
     """The first defect (``"<cause>@<line>"``, ``None`` if none) and every leaf value by path, under :data:`GRAMMAR`.
 
     Every non-blank line is exactly one of ``<LEAF>value``, ``<CONTAINER>`` or ``</CONTAINER>``; the first line opens
     the envelope and the last non-blank line closes it. Children come in grammar order, each within its count, and
     groups are whole. A value is the rest of its line and holds no ``<``; an EMPTY element and a container have none.
+    ``body`` is :func:`header_lines` of the text.
     """
-    lines = [(n, line) for n, line in enumerate(_unix(text).split("\n"), 1) if line.strip()]
+    lines = [(n, line) for n, line in enumerate(body, 1) if line.strip()]
     values: dict[str, list[str]] = defaultdict(list)
     if not lines:
         return "envelope@0", values
@@ -620,8 +622,9 @@ def parse_header(text: str) -> dict[str, Any]:
     """The SGML header's acceptance (Eastern wall clock), type, filing date, filing-date change, items, filer CIKs,
     each read only at its grammar path (:func:`header_structure`); ``structure_defect`` is ``None`` only for a header
     the grammar accepts in full. Markers and correction evidence are detected anywhere in the body."""
-    text = _unix(text)
-    defect, values = header_structure(text)
+    body = header_lines(text)
+    defect, values = header_structure(body)
+    cik_lines = [m.group(1) for line in body if (m := _CIK_LINE.fullmatch(line))]
 
     def one(tag: str) -> str | None:
         found = values.get(f"{ENVELOPE}/{tag}", [])
@@ -644,8 +647,8 @@ def parse_header(text: str) -> dict[str, Any]:
         "filer_ciks": sorted(set(values.get(f"{ENVELOPE}/FILER/COMPANY-DATA/CIK", []))),
         # Discovery, independent of the grammar: every whole-line ten-digit CIK anywhere in the body, and the
         # CIK tags in any other form (any case, spacing or value), which leave discovery unresolved.
-        "discovered_ciks": sorted(set(_CIK_LINE.findall(text))),
-        "unresolved_cik_tags": len(_CIK_TAG.findall(text)) - len(_CIK_LINE.findall(text)),
+        "discovered_ciks": sorted(set(cik_lines)),
+        "unresolved_cik_tags": sum(len(_CIK_TAG.findall(line)) for line in body) - len(cik_lines),
     }
 
 

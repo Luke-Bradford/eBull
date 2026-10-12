@@ -250,3 +250,23 @@ def test_crlf_line_ends_read_as_lf_for_grammar_and_discovery() -> None:
         lf["discovered_ciks"],
         0,
     )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "outcome"),
+    [
+        # A lone CR used as a line break joins two tags into one line, which is malformed.
+        ("<ITEMS>4.01\n", "<ITEMS>4.01\r<ITEMS>2.02\n", ("parse", "malformed")),
+        # CR before a CRLF: one CR is the terminator's, the other stays in the value.
+        ("<ITEMS>4.01\n", "<ITEMS>4.01\r\r\n", ("items", "items_invalid")),
+        ("<CIK>0000003545\n", "<CIK>0000003545\r\r\n", ("filer", "not_a_filer")),
+    ],
+)
+def test_a_cr_that_is_not_a_crlf_terminator_stays_in_its_line(old: str, new: str, outcome: tuple[str, str]) -> None:
+    """178: the terminator rule runs once, so an extra CR never turns an invalid value valid."""
+    header = parse_header(_replace(old, new))
+    outcomes = field_outcomes(header, ACCESSION, CIK)
+    assert outcomes[outcome[0]] == outcome[1]
+    assert row_class(outcomes) != "ok"
+    if old.startswith("<CIK>"):
+        assert (header["discovered_ciks"], header["unresolved_cik_tags"]) == ([], 1)
