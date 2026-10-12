@@ -9,142 +9,153 @@ The paper executor refuses an entry with `portfolio_daily_loss_limit` when today
 
 An open book can fall by any amount without a single close, and that check never sees it. Take a fully invested pot on a −5% SPY day with no stop hit: its realised P&L is 0, so new entries keep opening into the fall. The live pool event allows 2.5% (`growth`, `max_daily_loss_pct` = 2.5, capital 40,000; `SELECT risk_profile, max_daily_loss_pct, capital_limit FROM strategy_paper_pool_events ORDER BY strategy_paper_pool_event_id DESC LIMIT 1`, 2026-10-12). The pot would lose about 5% of `pool_base`, twice the limit, with the gate silent.
 
+## Round 4: what changed and why
+
+Rounds 1 to 3 anchored the day on `broker_account_equity_snapshots`: the last write of each UTC date, taken anywhere from 16:14 to 19:57 New York. Round 2 showed that a mark taken after the close drops the move between the close and that mark. Round 3 repriced the mark to a live-fetched candle close. That fix added four BLOCKING findings of its own:
+- a split after a full close re-bases the fetched price;
+- the fetched price is not dated to the observer's session;
+- the price basis was inferred from samples;
+- a pre-cycle fetch delays exits.
+
+Each of these comes from pricing a stored position with a price from somewhere else. This round removes that: **the anchor is the broker's own marks, captured once at P's close**, so the day is a difference of two broker marks and no external price enters.
+
 ## Source rule
 
 - **Daily P&L convention (published).** Interactive Brokers, TWS Reference, "Profit and Loss" (<https://www.interactivebrokers.com.hk/php/webhelp/TWS_Reference_Information/pnl_.htm>):
   - Daily P&L: *"(current price - prior day's closing price) x (total number of outstanding shares) plus New Position calculation for all new positions."*
   - New Position: *"(current price - purchase price) x (number of outstanding shares purchased today)."*
 
-  This slice adopts that convention. **The reference for a held position is the prior session's closing price.**
-- **Which close: eToro's own daily bar for session P.** The marks are eToro's per-position `close_rate`, so the reference must be on the same price basis. Measured on the dev DB and the live candle endpoint, 2026-10-12:
-  - Marks and eToro's daily candle close share a basis. Every mark in a Friday, Saturday or Sunday snapshot (09-18 to 10-11, 114 position-days) equals `price_daily.close` for that Friday exactly.
-  - eToro's daily cut is per instrument. On 2026-10-09, SPY.RTH, VOO and NXH have no five-minute bar after the one starting 15:55 New York, and that bar's close equals the daily close. QQQ trades 24/5: on 2026-10-08 its daily close (748.61) equals the close of the bar starting 16:55, and differs from the bars either side (748.35, 748.42). So the cut is 16:00 New York for regular-session names and 17:00 for 24/5 names.
-  - Only 24/5 names drift after R. Every weekday mismatch between R's mark and P's daily close (29 position-days) is QQQ (3006) or GME (1699). The reprice R → P close, summed over R's marks, reaches −961.55 USD (D = 2026-09-22). `scripts/measure_3612_anchor_coverage.py` prints it per session.
-  - **Not the official-closing-price endpoint** (`etoro_closing_price_captures`, sql/480). That is a last-trade print on another basis: VOO 715.59 against a weekend mark and daily close of 715.60. It is undated and captured once a day since 2026-10-10.
-  - **Not `price_daily`.** It records no fetch time, so finality cannot be shown at decision time. A bar written before the instrument's cut would latch, because `_candles_are_fresh` then skips it.
-  - **Not `etoro_session_close_captures`** (sql/479). It holds 11 instruments for 2026-10-09, none of them held.
-- **Mark source.**
-  - **now** is the executor's live `BrokerAccountRiskSnapshot`, at `risk.observed_at`.
-  - **R** is the #3068 stored marks (`broker_account_position_marks`), repriced to P's close (Design 2).
-- **Reprice identity (measured, 262 of 262 stored marks).** `unrealized_pnl = market_value − amount` exactly. `market_value = units × close_rate × close_conversion_rate` within 0.0144, which is cent rounding. All 262 marks are long, USD (`asset_currency_id` 1), with `total_fees` 0. So for a long USD position with no fees: `U at price x = U_R + units_R × close_conversion_rate_R × (x − close_rate_R)`. A short, a non-USD asset currency or non-zero fees has no measured identity and refuses (Design 3).
+  **The reference for a held position is the prior session's close.** For a US listing that is the regular-session close: 16:00 New York, or 13:00 on a `us_market_status` half day.
+- **Mark source.** Both sides are eToro's per-position `unrealizedPnL` from `TradingRealAdminApi_Position` (sql/383 header), as stored for #3068:
+  - **now** is the executor's live `BrokerAccountRiskSnapshot`, at `risk.observed_at`;
+  - **the reference** is the close capture S (Design 1).
+
+  A difference of two broker marks needs no price basis, adjustment or reprice assumption.
 - **Principal flows are excluded exactly.** `PotNav` separates principal from P&L (`engine_pot_risk.py`, module docstring, GIPS 2020 2.A.24(e)/(f) as already cited there), and this term uses P&L only.
-- **Parent/child completeness** is a documented precondition: the sql/383 header requires a snapshot's mark count to equal `official_direct_long_positions + official_direct_short_positions`. **Currency** must be documented as USD, the same refusal `observe_pot_nav` applies (`_snapshot_positions`).
+- **Parent/child completeness** is a documented precondition: the sql/383 header requires the mark count to equal `official_direct_long_positions + official_direct_short_positions`. **Currency** must be documented as USD, the same refusal `observe_pot_nav` applies (`_snapshot_positions`).
 - **Limit and denominator are unchanged:** `pool_base × mandate_max_daily_loss_pct / 100` (sql/311 denominates every mandate percentage on effective pot capital).
 
 **Local policy choices** (no published rule found; each is frozen by this spec):
 
-- **Market day D** is `risk.observed_at`'s New York date, and `D_start` is D 00:00 New York. **P** is `latest_completed_us_session(D_start)`. `P_close` is P's regular close: 16:00 New York, or 13:00 on a `us_market_status` half day. Both helpers are in `market_calendar.py`, which is ranking-policy-hashed, so they are called and never edited.
-- **Positions source R.** R is the `broker_account_equity_snapshots` row (demo) with `snapshot_date = D_start.astimezone(UTC).date() − 1`.
-  - R is always before `D_start`, because that UTC date ends at 19:00 or 20:00 New York on D − 1.
-  - **What that row is.** It is the last observation of its UTC date that the upsert accepted. `record_account_equity_snapshot`'s `ON CONFLICT … DO UPDATE … WHERE` restricts which conflicting inserts update the stored row. An update is accepted only while the stored row's date is still the current UTC date; its `now()` is the transaction start time. A later observation of a date that has already ended is not applied.
-  - **Why not "the latest row before New York midnight".** A row with the same UTC date as `D_start` is overwritten during D. For example, the 00:43Z 2026-10-12 row was replaced at 00:51Z.
-- **R is used only for its position set and its marks, repriced to P's close.** That needs the engine book to be unchanged between P's cut and R. **Quiet interval:** no `trade_events` row for any position in E falls in `(min(R.observed_at, P_close), D_start]`. Otherwise the entry refuses with `engine_pot_daily_anchor_moved`.
-  - The interval covers every per-instrument cut without knowing it, because every cut is at or before `D_start`.
-  - It replaces r2's freshness rule. A stale R is still correct when the book was quiet, and refused when it was not.
-  - Measured, 18 NYSE sessions from 2026-09-16 to 2026-10-09: 0 engine-owned events in the interval. One session (D = 09-23) has 4 events for two non-engine positions, each opened 20:05 and closed 20:07 New York on 09-22.
+- **D, P and the capture instant.**
+  - D is `risk.observed_at`'s New York date, and `D_start` is D 00:00 New York.
+  - P is `latest_completed_us_session(D_start)`, and `P_close` is P's regular close. Both helpers are in `market_calendar.py`, which is ranking-policy-hashed, so they are called and never edited.
+  - S, P's close capture, is the first accepted broker snapshot observed at or after `P_close` and on P's New York date.
+- **The residual is the gap from the close to the capture.** A position's move between `P_close` and S falls in neither day. That move is zero for a name with no trading after the close. Measured census over every stored mark taken after a session's close, 2026-09-15 to 2026-10-11 (evidence script, section 3):
+  - IEP, NXH, SPY.RTH, SVOL, SVXY and VOO: `close_rate` equals the session's daily close on all 139 such marks;
+  - QQQ: differs on 15 of 19, and GME on 14 of 18. Both are 24/5 names.
+
+  The gap is the sync's lag after the close: median 0.0 minutes, maximum 76.8 (2026-09-25), over 15 minutes on 3 of 19 sessions (section 1). This is bounded by the capture's own `observed_at`, which is stored, so each day's residual window is auditable.
+- **Windows overlap after the close, as IBKR's do.** IBKR resets its daily P&L near midnight, while the reference is the prior close. An observation on D after D's close still measures from S_P, and D + 1 measures from S_D, so the interval from S_D to D's midnight is in both days. This is the published convention, chosen on purpose. It counts a loss twice rather than never.
 
 ## Design
 
-1. **Population E.** E is every `broker_position_id` with an ownership row on an eligible trade under the pot epoch (`engine_book_rows`) whose `claimed_at ≤ risk.observed_at`. This is the same point-in-time cut `book_membership` applies to the snapshot (ckpt-1 r2 B2).
-   - Presence in each snapshot decides the U terms, not `released_at`, which can lag the broker (r1 F3).
-2. **Per-position daily P&L.** For each p in E, with the window W = `(R.observed_at, risk.observed_at]`:
+1. **Close capture (schema and writer).**
+   - Migration `sql/482_broker_account_session_close_marks.sql` creates `broker_account_session_close_snapshots (environment, session_date, observed_at, currency, account_currency_id, official_direct_long_positions, official_direct_short_positions, PRIMARY KEY (environment, session_date))` and `broker_account_session_close_marks`. The marks table has the same per-position columns as `broker_account_position_marks`, keyed `(environment, session_date, position_id)`, with an FK to the parent.
+   - Both tables are insert-once. UPDATE is refused by sql/424's `etoro_crowd_append_only` trigger, as in sql/479.
+   - Writer: `account_equity_evidence.record_session_close_snapshot(conn, *, environment, snapshot)`.
+     - It derives `P = latest_completed_us_session(observed_at)`.
+     - It writes only when `observed_at ≥ P_close` and `observed_at`'s New York date is P.
+     - The parent is `INSERT … ON CONFLICT DO NOTHING RETURNING`, and the children are inserted only when the parent row was inserted, in the same transaction.
+     - The first qualifying observation therefore wins and is never replaced. A later run of the same evening changes nothing.
+   - It reuses `_validate_snapshot` and `summarise_direct_positions` unchanged.
+   - It is called from `daily_portfolio_sync` (scheduler, demo) next to `record_account_equity_snapshot`, in the same transaction. That job runs every 5 to 10 minutes, so no new job or connection lane is added.
+   - If no qualifying run happens on P, there is no S, and D's entries refuse.
+2. **Population E.** E is every `broker_position_id` with an ownership row on an eligible trade under the pot epoch (`engine_book_rows`) whose `claimed_at ≤ risk.observed_at`. This is the cut `book_membership` applies to a snapshot (r2 B2).
+3. **Per-position daily P&L.** With W = `(S.observed_at, risk.observed_at]`, for each p in E:
 
-   `daily_p = U_now(p) − U_ref(p) + Σ realised(p, closes in W)`
+   `daily_p = U_now(p) − U_S(p) + Σ realised(p, closes in W)`
 
    - `U_now(p)` is the live snapshot's `unrealized_pnl` if p is present, else 0.
-   - `U_ref(p)` is `U_R(p) + units_R(p) × close_conversion_rate_R(p) × (close_P(instrument) − close_rate_R(p))` if p is in R's marks, else 0.
-   - The book's daily P&L is Σ over E. A close at P's close contributes 0.
-   - A position opened in W contributes against its purchase price, which is IBKR's "New Position" case.
-   - Example, QQQ held: R's mark is 758.56 at 19:48, and P's daily close is 757.92. The reference is 757.92, so the 19:48 after-hours move is counted in D, where r2 dropped it.
-3. **Witnesses.** Each refuses the entry with its own code; none is coerced.
+   - `U_S(p)` is S's stored mark if p is present, else 0.
+   - The book's daily P&L is Σ over E.
+   - A close in W whose execution price equals S's mark contributes 0. For example, closing half: −50 + 50 = 0.
+   - A position opened in W contributes its unrealised P&L against purchase price, which is IBKR's "New Position" case.
+   - A position closed before S is P's business, whether or not its close was recorded. An unrecorded close is a ledger-completeness defect for `observe_pot_nav`'s contract (see 7).
+4. **Witnesses.** Each refuses the entry with its own code; none is coerced.
    - **Anchor.**
-     - No R row gives `engine_pot_daily_anchor_missing`.
+     - No S row for P gives `engine_pot_daily_anchor_missing`.
      - A currency other than USD gives `engine_capital_snapshot_unusable`, as `_snapshot_positions`.
      - A NULL declared count, or a mark count different from `official_direct_long_positions + official_direct_short_positions`, gives `engine_pot_daily_anchor_incomplete`. A NULL is unproven completeness, so it takes the completeness code. A declared 0 with 0 marks passes.
-     - A non-quiet interval gives `engine_pot_daily_anchor_moved`.
-   - **Reference.** For each p in E present in R:
-     - no fetched close for its instrument dated exactly P gives `engine_pot_daily_reference_missing`;
-     - `is_buy` false, `asset_currency_id` other than USD, or `total_fees` ≠ 0 gives `engine_pot_daily_reprice_unverified`.
-   - **Events (r1 F2, r2 B2).** For every p in E:
-     - `units_R(p) + Σ open units − Σ close units (events in W) = units_now(p)`, with units 0 where p is absent from a side;
+   - **Events.** For every p in E:
+     - `units_S(p) + Σ open units − Σ close units (events in W) = units_now(p)`, with units 0 where p is absent from a side;
      - every close in W has a non-NULL `realized_pnl_usd`;
-     - if p's `claimed_at` is in W, at least one open event for p is in W.
+     - if `claimed_at` is in W, at least one open event for p is in W.
 
-     A failure gives `engine_pot_daily_event_unwitnessed`. The third check closes r2 B2: a position opened and closed inside W with no events would otherwise pass as 0.
-   - **Splits.** Daily candles are back-adjusted at fetch (`market_data.py`, #2066). A split after R re-bases P's bar, while R's units and rate stay pre-split. The broker changes the units without a trade event, so the unit check above refuses. A split applied before R leaves R and the bar on the same basis.
-   - **Live side.** `observe_pot_nav(conn, risk)` keeps its refusals: an owned position absent from the broker, a mismatched instrument, an unusable snapshot.
-4. **P's closes are fetched once per cycle, outside the transaction.**
-   - `strategy_paper_cycle` (`app/workers/scheduler.py`) already refreshes the halt feed before the cycle. It also fetches the daily close for P there: `EtoroMarketDataProvider.get_daily_candles(instrument_id, 10)` for each distinct instrument in R's marks, keeping the bar with `price_date = P`.
-   - Ten bars cover the longest NYSE closure run.
-   - The bar is final by construction, because the cycle runs after `D_start`, which is after every cut on P.
-   - The result is a `Mapping[int, Decimal]` passed through `run_strategy_paper_cycle` and `execute_fired_paper_signal`. Any fetch failure passes an empty mapping, which refuses entries with `engine_pot_daily_reference_missing` and leaves exits untouched (#3546's halt-feed rule).
-   - About 10 GETs per cycle, against the documented 120 market-data GET/min shared budget (etoro-api skill).
-5. **One consistent read (r1 F9).** One SQL statement reads, under one snapshot even in READ COMMITTED:
-   - R's parent row and its marks;
+     A failure gives `engine_pot_daily_event_unwitnessed`.
+     - The third check catches an open-and-close inside W with no events (r2 B2).
+     - The first catches a missing final close inside W. That case is real: section 4's census finds one, a non-engine position on instrument 3075 that opened 0.646 units on 2026-09-23, recorded a close of 0.323 and left the account with no further event.
+   - **Numeric validity.** Any NaN or infinite `unrealized_pnl`, `units` or `realized_pnl_usd` read for E gives `engine_pot_daily_anchor_incomplete` for S's values or `engine_pot_daily_event_unwitnessed` for events. A non-finite live value is already refused by `observe_pot_nav`. Every value is checked before any arithmetic, so no `decimal` exception can escape.
+   - **Splits.** A split after S changes units at the broker without a trade event, so the unit check refuses D's entries. U is a value in USD, so it is split-invariant. The refusal is fail-closed and lasts one day: the next S is post-split.
+5. **One read.** One SQL statement reads, under one snapshot even in READ COMMITTED:
+   - S's parent row and its marks;
    - E, with `claimed_at`;
-   - the `trade_events` of E in the quiet interval and in W.
+   - E's `trade_events` in W.
 
-   The new function `engine_pot_risk.observe_daily_marked_pnl(conn, snapshot, prior_closes) -> Decimal` combines that statement with the live snapshot in Python. It derives D, `D_start`, P and `P_close` from `snapshot.observed_at`. Every existing function is unchanged.
-   - The epoch is the first pool event's `changed_at`, as `observe_pot_nav` reads it. No code path updates or deletes `strategy_paper_pool_events` (grep of `app/` for `UPDATE`/`DELETE` on it, 2026-10-12), so the epoch cannot move inside a window.
-6. **Exception contract.** The function raises `EngineCapitalObservationError` with one of the codes above, added to `EngineCapitalRefusal`. `_observe_local_mandate_risk` catches it inside its transaction block and returns the code, as it already does for `advance_pot_drawdown`. The code reaches `_persist_rejection`; the message, which names the position, is logged.
-7. **Executor placement (r1 F11, F12, r2 B3).** Inside `_observe_local_mandate_risk`'s transaction:
+   The new function `engine_pot_risk.observe_daily_marked_pnl(conn, snapshot) -> Decimal` combines that statement with the live snapshot in Python. It derives D, `D_start`, P and `P_close` from `snapshot.observed_at`. Every existing function is unchanged.
+   - The daily figure depends only on this statement and the live snapshot, never on `observe_pot_nav`'s separate reads.
+   - An event recorded concurrently is either visible to the statement or not. If it is invisible and changed units, the unit check refuses. If it is visible, it is counted.
+   - The epoch is the first pool event's `changed_at`, as `observe_pot_nav` reads it. No code path updates or deletes `strategy_paper_pool_events` (grep of `app/` for `UPDATE`/`DELETE` on it, 2026-10-12).
+6. **Exception contract.** The function raises `EngineCapitalObservationError` with one of the codes above, which are added to `EngineCapitalRefusal`. `_observe_local_mandate_risk` catches it inside its transaction block and returns the code, as it already does for `advance_pot_drawdown`. The code reaches `_persist_rejection`; the message, which names the position, is logged.
+7. **Executor placement.** Inside `_observe_local_mandate_risk`'s transaction, the order is:
    1. the realised check, unchanged;
-   2. `observe_daily_marked_pnl`, so every witness runs **before** the drawdown index links the observation;
-   3. `advance_pot_drawdown(conn, observe_pot_nav(conn, risk))`, unchanged;
-   4. the threshold `daily <= −daily_loss_limit` returns `portfolio_daily_marked_loss_limit`.
+   2. `advance_pot_drawdown(conn, observe_pot_nav(conn, risk))`, unchanged;
+   3. `observe_daily_marked_pnl`, then the threshold `daily <= −daily_loss_limit` returning `portfolio_daily_marked_loss_limit`.
 
-   - A threshold refusal comes after the drawdown advance, so it never withholds a valid observation.
-   - A witness refusal does withhold the executor's advance for that call. The drawdown index is still advanced every tick by `refresh_strategy_health` → `_pot_drawdown_block` (`strategy_paper_runtime.py`), which does not call the new function.
-   - A refusal returns from inside the block, as the drawdown refusal does: the reads and any drawdown advance commit, nothing else.
+   - A daily refusal of either kind comes after the drawdown advance, so it never withholds an observation the drawdown contract accepts.
+   - **On r2 B3 and r3 finding 4.** The concern is that the drawdown index can link a NAV built on an incomplete ledger. That is real, and it belongs to `observe_pot_nav`, not to this check. `refresh_strategy_health` → `_pot_drawdown_block` (`strategy_paper_runtime.py`) advances the index every tick without calling anything this slice adds. So no ordering inside the executor can protect the index, and r3 placed the witnesses before the advance for no protective effect. The gap is that `observe_pot_nav` has no unit-conservation witness. It is recorded on the PR as pre-existing, outside this slice.
+   - The realised check's dates come from `risk.observed_at` instead of `now`, so both checks share one clock (r3 finding 8). The SQL text and its parameters' meaning are unchanged; only the instant they are derived from moves. `risk.observed_at` is at most `max_quote_age_seconds` older than `now` (`_age_ok` above it).
 8. **The two limits are independent, with different windows and populations.**
    - The realised check sums every demo close in the New York calendar day. `_MANDATE_OBSERVATION_SQL` has no epoch, ownership or verdict filter, so it includes the operator's closes.
-   - The marked check covers E only, from P's close.
-   - So the realised one refuses a −2,000 close in the New York day even when the close was at P's close. The marked one refuses a −2,000 mark move with no close. Both are tested.
+   - The marked check covers E only, from S.
+   - So the realised one refuses a −2,000 close in the New York day even when the close was at S's mark. The marked one refuses a −2,000 mark move with no close. Both are tested.
 9. **Frozen preview gates are out of scope.**
    - `ai_trial_start_gate.py` and `ranking_pot_activation.py` are hashed into declarations 16 and 23 (`ai_trial_policy.POLICY_MODULES`, `ranking_pot_policy.POLICY_MODULES`) and keep realised-only.
-   - Both import `_MANDATE_OBSERVATION_SQL` from the executor, and the new code changes none of the functions they call. So **`_MANDATE_OBSERVATION_SQL` stays byte-identical**, pinned by a test on its SHA-256.
-   - Both programmes are halted or paused (#2437, 10-09). A later declaration adopts the marked check by calling the new function.
+   - Both import `_MANDATE_OBSERVATION_SQL` from the executor, so **it stays byte-identical**, pinned by a test on its SHA-256.
+   - Both programmes are halted or paused (#2437, 10-09).
 10. **Operator labels** in `StrategiesPage.tsx`'s refusal map:
     - `portfolio_daily_marked_loss_limit`, "The mandate's daily loss limit is reached on marked P&L";
-    - one line each for `engine_pot_daily_anchor_missing`, `_anchor_incomplete`, `_anchor_moved`, `_reference_missing`, `_reprice_unverified` and `engine_pot_daily_event_unwitnessed`.
-11. **Exits.** The check sits only on the entry sizing path (`_risk_and_amount` → `_observe_local_mandate_risk`). Exit and protective paths neither call it nor need the fetched closes. A test asserts that the exit path never calls `observe_daily_marked_pnl`.
+    - one line each for `engine_pot_daily_anchor_missing`, `_anchor_incomplete` and `engine_pot_daily_event_unwitnessed`.
+11. **Exits.** The check sits only on the entry sizing path (`_risk_and_amount` → `_observe_local_mandate_risk`). Exit and protective paths do not call it. A test asserts that the exit path never calls `observe_daily_marked_pnl`. The capture writer runs inside `daily_portfolio_sync`, and a failure there is that job's failure, as today. The paper cycle does not wait on it.
 
 ## Operational dependency
 
-R exists only if `daily_portfolio_sync` (scheduler, demo) writes at least one accepted snapshot on **every UTC date, trading or not**. A missed date refuses entries for the next market day, which is fail-closed. It surfaces as the job's own failure and as the refusal code on the next entry. Since 2026-09-15 there is no missing date (`scripts/measure_3612_anchor_coverage.py`).
+S exists only if `daily_portfolio_sync` succeeds at least once on P's New York date after `P_close`. A miss refuses entries for D, which is fail-closed. It surfaces as the job's own failure and as the refusal code on the next entry. 19 of 19 sessions since 2026-09-15 had such a run (section 1).
 
 ## Tests
 
+- **Writer (DB):**
+  - an observation before `P_close`, on a closed day, or on the New York date after P writes nothing;
+  - the first observation at or after `P_close` writes the parent and children;
+  - a later one the same evening changes nothing, children included;
+  - UPDATE is refused;
+  - a half day uses 13:00;
+  - the writer and `record_account_equity_snapshot` commit or roll back together.
 - **Pure, over the per-position formula:**
-  - held, R mark equal to P close, +100 at R → −400 now gives −500;
-  - held, 24/5, R mark above P close by 10 USD of U, unchanged now gives +10;
-  - half close at P's close gives 0, and so does a full close at P's close;
+  - held, +100 at S → −400 now gives −500;
+  - a half close and a full close in W at S's mark each give 0, the close executed after S;
   - opened in W, now −400, gives −400;
   - opened and closed in W gives its realised P&L;
-  - claimed before R and present in R's marks counts its repriced mark;
-  - closed before R and released locally after R contributes 0 and does not refuse;
+  - claimed before S and present in S counts its S mark;
+  - closed before S and released locally after S contributes 0 and does not refuse;
   - principal change with P&L unchanged gives 0.
-- **Reprice:** the identity on a stored-mark fixture reproduces `unrealized_pnl` at `close_rate` to the cent. A short, a non-USD asset currency and non-zero fees each refuse `reprice_unverified`.
 - **Witnesses:**
-  - an unrecorded partial close refuses `event_unwitnessed`, and so does an unrecorded final close after an earlier recorded partial;
+  - an unrecorded partial close in W refuses `event_unwitnessed`, and so does an unrecorded final close after a recorded partial (the 3075 shape);
   - a close with NULL P&L refuses;
-  - an ownership claimed in W with no open event refuses, as does r2 B2's open-and-close with no events;
-  - a child-count mismatch refuses `anchor_incomplete`, and so does a NULL declared count, while a genuine zero-position snapshot passes;
-  - a non-USD or undocumented account currency refuses;
-  - an E event inside the quiet interval refuses `anchor_moved`, while a non-E event there does not;
-  - a missing instrument close, and a bar dated other than P, refuse `reference_missing`;
-  - events exactly at `R.observed_at` are excluded and events exactly at `risk.observed_at` are included.
+  - an ownership claimed in W with no open event refuses, as does an open-and-close in W with no events;
+  - a units change with no event (a split) refuses;
+  - a child-count mismatch refuses `anchor_incomplete`, and so does a NULL declared count or a NaN mark, while a genuine zero-position S passes;
+  - a non-USD or undocumented currency refuses;
+  - events exactly at `S.observed_at` are excluded, and events exactly at `risk.observed_at` are included.
 - **Calendar:**
-  - D, `D_start`, R date, P and `P_close` for a Monday, for the Tuesday after a Monday holiday, for the day after a half day (13:00 close), across both 2026 DST transitions (03-08, 11-01), and across a year boundary;
-  - the quiet-interval bounds: an event exactly at its lower bound is outside it, and one exactly at `D_start` is inside it.
+  - D, `D_start`, P and `P_close` for a Monday, for the Tuesday after a Monday holiday, for the day after a half day, across both 2026 DST transitions (03-08, 11-01), and across a year boundary;
+  - `risk.observed_at` one microsecond either side of New York midnight selects different P.
 - **Threshold:** at, just below and just above −limit; a non-breach proceeds to sizing.
-- **Fetch (pure, provider stubbed):** one call per distinct instrument; a raising provider yields an empty mapping, with entries refused and exits still run.
 - **Executor (DB):**
   - the marked check refuses when realised P&L does not breach;
   - the realised check still refuses when the marked one does not;
-  - after a marked threshold refusal, the drawdown state has advanced to the current observation;
-  - after a witness refusal, it has not;
-  - each anchor, reference and witness refusal reaches the entry's recorded reason;
+  - after a marked refusal of either kind, the drawdown state has advanced to the current observation;
+  - each anchor and witness refusal reaches the entry's recorded reason;
   - an exit with a breached daily loss still executes.
 - **Drift:**
   - the `_MANDATE_OBSERVATION_SQL` SHA-256 is pinned;
@@ -153,29 +164,21 @@ R exists only if `daily_portfolio_sync` (scheduler, demo) writes at least one ac
 
 ## Full-population verification
 
-`scripts/measure_3612_anchor_coverage.py` runs over every NYSE session D from 2026-09-16 on. For each it derives R, P and the quiet interval with the same calendar helpers, and prints:
-- R's time;
-- the declared and stored mark counts;
-- the count of demo events in the quiet interval, which covers all demo positions, a superset of E;
-- how many R marks equal P's `price_daily` close;
-- the USD reprice R → P close.
+The figures come from `PYTHONPATH=. uv run python scripts/measure_3612_marked_daily_loss_evidence.py --since 2026-09-15 --until 2026-10-11`, run 2026-10-12. 2026-09-15 is the first stored position mark (#3068).
 
-`price_daily` stands in for the live fetch only because the run is retrospective. Run on 2026-10-12, 18 sessions:
-- an R row exists for every session;
-- declared equals stored marks for every session;
-- the quiet interval is empty for 17 sessions, and holds the 4 non-engine events above on D = 09-23;
-- R's time ranges from 16:14 to 19:57 New York;
-- the reprice is 0.00 on every Monday, and between −961.55 and +194.48 USD on other days.
+1. **Close-capture lag.**
+   - 19 NYSE sessions, every one with a successful `daily_portfolio_sync` after the close on its New York date.
+   - Lag: median 0.0 minutes, maximum 76.8 (2026-09-25), over 15 minutes on 3 sessions.
+2. **Snapshot continuity, every UTC date.**
+   - 27 of 27 dates have a snapshot.
+   - No row has a NULL declared count or a count different from its stored marks.
+3. **Movement after the close, every mark taken after its session's close.** The full census is in the Source rule section. Only QQQ (15 of 19) and GME (14 of 18), both 24/5 names, ever differ. No mark lacked a daily bar.
+4. **Unit conservation, 26 consecutive snapshot pairs.** The population is endpoint marks plus event positions plus engine ownership claimed in the window, so intra-window round trips are included.
+   - Position-pairs by group: 237 endpoint only, 7 endpoint + event, 6 endpoint + event + ownership, 7 event only.
+   - One failure: the 3075 position above, which has no engine ownership row.
 
-These are retained rows, measured retrospectively. They do not prove a row existed at each past decision instant: the upsert can insert a row later. The live gate reads at decision time, and an absent row refuses.
-
-**Unit conservation.** `scripts/measure_3612_unit_conservation.py` covers every demo position in consecutive stored snapshot pairs from 2026-09-15 on, the operator's positions included as well as the engine book:
-
-`units(d1) + Σ open units − Σ close units in (observed_at(d1), observed_at(d2)] = units(d2)`
-
-- It holds for **260 of 260** pairs (measured 2026-10-12).
-- `trade_events` held 23 opens and 13 closes, every close with `realized_pnl_usd`.
+The census is retrospective over retained rows. It does not show that a row existed at each past decision instant. The live gate reads at decision time, and an absent S refuses.
 
 ## Security
 
-No authorisation surface changes. This is an additional fail-closed entry refusal on the demo paper executor. It reads stored broker evidence, the live snapshot it already holds, and eToro's public daily candles through the existing market-data provider.
+No authorisation surface changes. This adds a fail-closed entry refusal to the demo paper executor, and an append-only evidence capture written by an existing demo job from a snapshot it already fetches.
