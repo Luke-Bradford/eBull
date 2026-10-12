@@ -1323,12 +1323,23 @@ def consumer_audit() -> dict[str, Any]:
     return out
 
 
+def our_ciks(conn: psycopg.Connection[Any], pinned: Path | None) -> set[str]:
+    """Our CIKs: the pinned list (its ``ciks_sha256`` checked) when given, else ``external_identifiers`` now."""
+    if pinned is None:
+        return {str(value).zfill(10) for (value,) in conn.execute(_CIKS).fetchall()}
+    data = json.loads(pinned.read_text())
+    ciks = set(data["ciks"])
+    if hashlib.sha256("\n".join(sorted(ciks)).encode()).hexdigest() != data["ciks_sha256"]:
+        raise SystemExit(f"{pinned}: ciks_sha256 does not match its list")
+    return ciks
+
+
 def measure(
-    archive_path: Path, with_headers: bool, negatives: int, previous: Path | None, cache: Path
+    archive_path: Path, with_headers: bool, negatives: int, previous: Path | None, cache: Path, pinned: Path | None
 ) -> dict[str, Any]:
     with psycopg.connect(settings.database_url) as conn:
         conn.read_only = True
-        ours = {str(value).zfill(10) for (value,) in conn.execute(_CIKS).fetchall()}
+        ours = our_ciks(conn, pinned)
         events = conn.execute(_EVENTS, {"forms": sorted(FORMS)}).fetchall()
         typed = {accession: list(codes) for accession, codes in conn.execute(_TYPED).fetchall()}
         links = conn.execute(_AMENDMENT_LINKS).fetchone()
@@ -1392,6 +1403,7 @@ def main() -> int:
     parser.add_argument("--index-cache", type=Path, help="reconcile against EDGAR full-index instead (cache dir)")
     parser.add_argument("--daily-index-cache", type=Path, help="measure EDGAR's daily indexes instead (cache dir)")
     parser.add_argument("--measurement", type=Path, help="the first command's output, for --daily-index-cache")
+    parser.add_argument("--ciks-from", type=Path, help="a pinned CIK list (JSON with ciks and ciks_sha256)")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     if args.daily_index_cache:
@@ -1400,10 +1412,12 @@ def main() -> int:
         result = daily_index(args.archive, args.daily_index_cache, args.index_cache, args.measurement)
     elif args.index_cache:
         with psycopg.connect(settings.database_url) as conn:
-            ours = {str(value).zfill(10) for (value,) in conn.execute(_CIKS).fetchall()}
+            ours = our_ciks(conn, args.ciks_from)
         result = index_reconciliation(args.archive, args.index_cache, ours)
     else:
-        result = measure(args.archive, args.headers, args.negative_sample, args.previous, args.header_cache)
+        result = measure(
+            args.archive, args.headers, args.negative_sample, args.previous, args.header_cache, args.ciks_from
+        )
     result["provenance"] = provenance()
     text = json.dumps(result, indent=1, default=str)
     if args.out:
