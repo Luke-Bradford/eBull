@@ -418,7 +418,7 @@ def load_inputs(conn: psycopg.Connection[Any], measured_at: datetime) -> BookInp
                 if int(r[1]) != instrument_id or r[6] != 1 or r[7] != "USD":
                     raise EngineBookRiskRefusal(
                         "book_shape_unsupported",
-                        f"position {position_id}: instrument {r[1]}, is_buy {r[5]}, leverage {r[6]}, currency {r[7]}",
+                        f"position {position_id}: instrument {r[1]}, leverage {r[6]}, currency {r[7]}",
                     )
                 positions.append(
                     HeldPosition(
