@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Final, Literal, cast, get_args
@@ -20,6 +21,7 @@ from app.api.auth import require_session, require_session_or_service_token
 from app.api.portfolio import get_portfolio
 from app.config import settings
 from app.db import get_conn
+from app.db.snapshot import snapshot_read
 from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 from app.security.master_key import MasterKeyError, ensure_broker_key_loaded
 from app.security.secrets_crypto import CredentialCryptoConfigError
@@ -62,6 +64,7 @@ from app.services.strategy_base_currency import (
     SUPPORTED_DEPLOYMENT_CURRENCIES,
 )
 from app.services.strategy_capital_sandbox import sandbox_bound, sandbox_headroom
+from app.services.strategy_comparator import ComparatorUnavailableReason, HurdleUnavailableReason, load_comparator
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -1229,6 +1232,48 @@ class StrategyWealthHistoryPoint(BaseModel):
     cumulative_return: Decimal | None = None
 
 
+class StrategyComparatorHurdle(BaseModel):
+    #: Built from ``strategy_comparator.Hurdle`` via ``asdict``: a field on one
+    #: side and not the other fails validation instead of being dropped.
+    model_config = ConfigDict(extra="forbid")
+
+    #: ``core_target_pct`` / 100, a share of the core allocator's sleeve.
+    core_target_weight: Decimal | None
+    #: The core's share of the pot: target × (1 − active_weight).
+    core_weight: Decimal | None
+    active_weight: Decimal | None
+    core_mandate_event_id: int | None
+    pool_event_id: int | None
+    multiplier: Decimal | None
+    hurdle_return: Decimal | None
+    required_active_excess: Decimal | None
+    unavailable_reason: HurdleUnavailableReason | None
+
+
+class StrategyComparator(BaseModel):
+    """#3616 slice 1 — the pot against an investable UCITS S&P 500 fund.
+
+    NOT the S&P 500 total-return index ``benchmark_refusals`` refuses.  Returns
+    are unrounded cumulative FRACTIONS.  Spec:
+    docs/specs/metrics/2026-10-12-3616-investable-comparator.md
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    symbol: str
+    instrument_id: int | None
+    label: str
+    basis: Literal["accumulating_ucits_market_price_return_usd"]
+    window_start: date | None
+    window_end: date | None
+    start_close_date: date | None
+    end_close_date: date | None
+    comparator_return: Decimal | None = Field(alias="return")
+    unavailable_reason: ComparatorUnavailableReason | None
+    engine_excess: Decimal | None
+    hurdle: StrategyComparatorHurdle
+
+
 class StrategyWealthHistoryResponse(BaseModel):
     basis: Literal["exact_owned_mark_to_market_nav"] = "exact_owned_mark_to_market_nav"
     #: #3334 item 3 — describes the LAST COMPLETE point.  The return runs from
@@ -1241,6 +1286,7 @@ class StrategyWealthHistoryResponse(BaseModel):
     benchmark_comparison_available: Literal[False] = False
     #: #2602 item 5 — the flag above says there is no benchmark; this says why.
     benchmark_refusals: tuple[BenchmarkRefusal, ...] = BENCHMARK_REFUSALS
+    comparator: StrategyComparator
     points: list[StrategyWealthHistoryPoint]
 
 
@@ -3764,12 +3810,17 @@ def get_strategy_wealth_history(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyWealthHistoryResponse:
     """Return principal plus realised and historical open marks for the sleeve."""
-    history = load_strategy_wealth_history(conn, days=days)
-    returns = time_weighted_returns(history)
+    # One snapshot (#3616): a candle heal that rebases CSPX.L between the two
+    # endpoint reads would otherwise mix price bases into one comparator return.
+    with snapshot_read(conn):
+        history = load_strategy_wealth_history(conn, days=days)
+        returns = time_weighted_returns(history)
+        comparator = load_comparator(conn, history, returns)
     return StrategyWealthHistoryResponse(
         total_return_available=returns.total_return_available,
         return_since=returns.return_since,
         return_unavailable_reason=returns.unavailable_reason,
+        comparator=StrategyComparator.model_validate(asdict(comparator)),
         points=[
             StrategyWealthHistoryPoint(
                 date=point.date,

@@ -6,7 +6,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as aiTrialApi from "@/api/aiTrial";
 import * as rankingPotApi from "@/api/rankingPot";
 import * as strategiesApi from "@/api/strategies";
-import type { FiredSignal, StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
+import type {
+  FiredSignal,
+  StrategyOverviewResponse,
+  StrategyOwnedPosition,
+  StrategyPnlHistoryResponse,
+  StrategyResultArm,
+} from "@/api/types";
 import { BENCHMARK_REFUSALS } from "@/components/strategies/__fixtures__/benchmarkRefusals";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 
@@ -423,6 +429,32 @@ const FUNDED_SIGNAL: FiredSignal = {
   },
 };
 
+/** #3616: the comparator is always present on the wealth payload. */
+const UNAVAILABLE_COMPARATOR: StrategyPnlHistoryResponse["comparator"] = {
+  symbol: "CSPX.L",
+  instrument_id: null,
+  label: "iShares Core S&P 500 UCITS ETF (USD, Acc)",
+  basis: "accumulating_ucits_market_price_return_usd",
+  window_start: null,
+  window_end: null,
+  start_close_date: null,
+  end_close_date: null,
+  return: null,
+  unavailable_reason: "comparator_instrument_missing",
+  engine_excess: null,
+  hurdle: {
+    core_target_weight: null,
+    core_weight: null,
+    active_weight: null,
+    core_mandate_event_id: null,
+    pool_event_id: null,
+    multiplier: null,
+    hurdle_return: null,
+    required_active_excess: null,
+    unavailable_reason: "mandate_unconfigured",
+  },
+};
+
 function approvedOverview(): StrategyOverviewResponse {
   const strategy = OVERVIEW.strategies[0]!;
   return {
@@ -497,6 +529,7 @@ describe("StrategiesPage", () => {
       basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
       return_basis: "time_weighted_start_of_period_flows",
+      comparator: UNAVAILABLE_COMPARATOR,
       return_since: null,
       return_unavailable_reason: "no_complete_point",
       benchmark_comparison_available: false,
@@ -1193,6 +1226,7 @@ describe("StrategiesPage", () => {
       basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
       return_basis: "time_weighted_start_of_period_flows",
+      comparator: UNAVAILABLE_COMPARATOR,
       return_since: null,
       return_unavailable_reason: "insufficient_history",
       benchmark_comparison_available: false,

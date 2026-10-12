@@ -57,18 +57,20 @@ Out of scope (later #3616 slices): GBP, tax and ISA wrappers; realised sleeve at
 ### The hurdle (no source rule; fixed by construction)
 
 - **Weights.** These come from the current enabled core mandate event and the current pool event. If either is missing, or the pool is `unconfigured` → `mandate_unconfigured`.
-  - The core weight `w_core` = `core_target_pct` / 100 (`strategy_core_mandate`).
   - The active weight `w_active` = `active_risk_budget_pct` / 100. It is the cap on non-core committed capital as a share of `pool_base` (`strategy_paper_executor.py:1212-1214`), so it is a capital weight at full use, not a risk measure.
-  - Cash = 1 − `w_core` − `w_active`.
+  - The core target `core_target_weight` = `core_target_pct` / 100 (`strategy_core_mandate`). It is **not** a share of the pot. The allocator measures it over `core_market_value + cash_balance` (`strategy_core_allocator.py`, `sleeve_value`), and that cash is the pot's sandbox headroom (`observe_core_sleeve`), which is net of everything committed, active included.
+  - The core's pot weight `w_core` = `core_target_weight` × (1 − `w_active`): with the active sleeves at their cap, the core's sleeve is the remaining 1 − `w_active` of the pot.
+  - Cash = 1 − `w_core` − `w_active` = (1 − `w_active`)(1 − `core_target_weight`).
+  - *Corrected in the build (#3616, Codex checkpoint 2):* the merged draft set `w_core` = `core_target_pct` / 100, which mixes two denominators and gave 5/3 instead of 13/6 at the live 50/30.
   - The scenario must be allowed by the executor's cash reserve: total committed capital is capped at `pool_base` × (1 − `cash_reserve_pct` / 100) (`strategy_paper_executor.py:1202-1205`).
-  - Any weight outside [0, 1], or `w_core` + `w_active` > 1 − `cash_reserve_pct` / 100 → `mandate_weights_invalid`. That is checked before `no_active_budget` (`w_active` = 0).
-  - The live values are 50 + 30 = 80, within 90.
-- **Scenario.** The scenario's starting capital equals `pool_base`, and the mandate percentages apply to it as initial weights. The executor's caps are also fractions of `pool_base`, so the active weight is that cap at full use. The pot is then bought and held over the window, with no leverage and no rebalancing. Over one buy-and-hold period, the pot's return is exactly the weighted sum of the sleeves' returns. Two assumptions are stated beside the figure:
+  - `core_target_weight` or `w_active` outside [0, 1], or `w_core` + `w_active` > 1 − `cash_reserve_pct` / 100 → `mandate_weights_invalid`. That is checked before `no_active_budget` (`w_active` = 0).
+  - The live values are 35 + 30 = 65, within 90.
+- **Scenario.** The scenario's starting capital equals `pool_base`, at the initial weights above. The executor's caps are fractions of `pool_base`, so the active weight is that cap at full use, and the core holds its target share of the rest. The pot is then bought and held over the window, with no leverage and no rebalancing. Over one buy-and-hold period, the pot's return is exactly the weighted sum of the sleeves' returns. Two assumptions are stated beside the figure:
   - the core earns the comparator's return;
   - cash earns 0. Uninvested principal adds no P&L to the pot NAV by construction (`strategy_wealth`).
 - **Formulas.**
   - The pot matches the comparator when the active sleeves return `hurdle_return = r_cmp · (1 − w_core) / w_active`.
-  - The multiplier is `(1 − w_core) / w_active`, which is 5/3 at the live 50/30.
+  - The multiplier is `(1 − w_core) / w_active`, which is 0.65 / 0.3 = 13/6 at the live 50/30.
   - `required_active_excess = hurdle_return − r_cmp`.
   - A `hurdle_return` below −1 cannot be matched exactly without leverage → `hurdle_infeasible`. Under these assumptions, even a total loss in the active sleeves would leave the pot ahead.
 - **It is a counterfactual under the current mandate.** The response returns the weights and the mandate event ids used. A mandate edit changes the hurdle and nothing else.
@@ -90,7 +92,9 @@ comparator: {
       | null,                          # the first that applies, in this order
   engine_excess: Decimal | null,   # pot cumulative_return at E − return (fraction); NULL iff return is NULL
   hurdle: {
-    core_weight: Decimal | null, active_weight: Decimal | null,
+    core_target_weight: Decimal | null,     # core_target_pct / 100, a share of the core sleeve
+    core_weight: Decimal | null,            # the core's share of the pot
+    active_weight: Decimal | null,
     core_mandate_event_id: int | null, pool_event_id: int | null,
     multiplier: Decimal | null,              # available from the mandate alone
     hurdle_return: Decimal | null,           # NULL when return or multiplier is NULL, or infeasible
@@ -112,16 +116,17 @@ comparator: {
 All returns are unrounded cumulative fractions, not annualised; rounding is UI-only. The `days` query parameter bounds the window exactly as it bounds the TWR.
 
 **Worked example (dev DB, 2026-10-12):**
-- S = 2026-09-18 and E = 2026-10-09; the pot's cumulative return is 0.010937.
-- CSPX.L moved from 822.94 to 841.59, a return of 0.022663.
-- Engine excess: −0.011726.
-- Multiplier 5/3, so the hurdle return is 0.037771 and the required active excess is 0.015108, both from the unrounded comparator return 0.0226626….
+- S = 2026-09-17 and E = 2026-10-09; the pot's cumulative return is 0.010937. `return_since` is 2026-09-18: the chain starts from the unfunded 2026-09-17 base, and the first linked point's `period_start` is that base (Rule 3).
+- CSPX.L moved from 822.86 to 841.59, a return of 0.022762.
+- Engine excess: −0.011825.
+- Multiplier 13/6, so the hurdle return is 0.049318 and the required active excess is 0.026556, both from the unrounded comparator return 0.0227620….
+- *Corrected in the build (#3616):* the merged draft used S = 2026-09-18, which is `return_since`, contradicting the window rule above.
 
 ## UI
 
 The comparison extends the existing Portfolio-tab return strip in `StrategyPortfolioLens`; there is no new panel, per the "simplify the existing page" rule.
-- **Line 1:** "vs UCITS comparator iShares Core S&P 500 (USD, Acc), 18 Sep – 9 Oct: +2.27% · engine −1.17 pts". The dates are S and E. When S differs from the strip's existing "since" date (first funding), the tooltip says why. The tooltip also states the market-price basis, both resolved close dates, the assumed LSE cutoff and its timing against the US close, a resolution to an earlier close (up to 4 calendar days) when one applies, and the investability qualification above.
-- **Line 2:** "Active sleeves would need +3.78% (+1.51 percentage points over the comparator) to match it". The hint is built from the returned weights: "at today's mandate: 30% active at its full cap, 50% core assumed to track the comparator, 20% cash earning 0; held without rebalancing or leverage".
+- **Line 1:** "vs UCITS comparator iShares Core S&P 500 (USD, Acc), 17 Sept – 9 Oct: +2.28% · engine -1.18 pts". The dates are S and E. When S differs from the strip's existing "since" date (first funding), the tooltip says why. The tooltip also states the market-price basis, both resolved close dates, the assumed LSE cutoff and its timing against the US close, a resolution to an earlier close (up to 4 calendar days) when one applies, and the investability qualification above.
+- **Line 2:** "Active sleeves would need +4.93% (+2.66 percentage points over the comparator) to match it". The hint is built from the returned weights: "at today's mandate: 30% active at its full cap, 35% core (its 50% target of the other 70%) assumed to track the comparator, 35% cash earning 0; held without rebalancing or leverage".
 - Each field degrades on its own:
   - An unavailable hurdle replaces line 2 with its reason in plain words. `hurdle_infeasible` reads "Under these assumptions, even a total loss in the active sleeves would leave the pot ahead".
   - An unavailable comparator shows "—" with its reason, never a 0.
@@ -148,11 +153,11 @@ The comparison extends the existing Portfolio-tab return strip in `StrategyPortf
   - no pot return → `pot_return_unavailable`;
   - changing `days` moves S, E and the comparator together.
 - **Pure (hurdle):**
-  - a multiplier of 5/3 at 50/30;
+  - a multiplier of 13/6 at 50/30, with the core at 35% of the pot;
   - `no_active_budget`, `mandate_weights_invalid` (including a cash-reserve violation) and `mandate_unconfigured` (missing core mandate, missing pool, unconfigured pool), with the precedence and null invariants;
   - a mandate change moving only the hurdle outputs;
   - a zero comparator return and a negative one;
-  - `hurdle_infeasible` below −1, with `engine_excess` still present; exactly −1 (comparator −60% at 50/30) stays feasible;
+  - `hurdle_infeasible` below −1, with `engine_excess` still present; exactly −1 (comparator −62.5% at core 40 / active 50, multiplier 1.6) stays feasible;
   - a multiplier still present while the comparator return is NULL.
 - **Binding:** `COMPARATOR_SYMBOL ∈ BENCHMARK_SYMBOLS`.
 - **DB:** one test of the new SQL on a sparse fixture: the latest valid close on or before a date, returned with its `price_date`, and no future rows read.

@@ -505,7 +505,7 @@ def test_benchmark_symbols_constant_is_the_expected_set() -> None:
     # be in the always-fresh set or its closes freeze (#1818). SPY = the risk
     # layer's beta benchmark — distinct purpose, both kept fresh here.
     assert BENCHMARK_SYMBOLS == frozenset(
-        {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+        {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY", "CSPX.L"}
     )
 
 
