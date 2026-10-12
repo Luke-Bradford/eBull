@@ -24,8 +24,9 @@ position marks, #3068) to ``--until`` (default: yesterday, New York):
    ``fees_usd``. Reports events falling between a mark time and its snapshot's receipt time.
 5. **Point claims.** The live pool limits (current state, not bounded); R times of day; the first stored
    mark date; the ledger-vs-broker unit reconciliation at every mark; the full event and ownership history
-   of every position failing section 4; the closes of positions present in the preceding snapshot, with ``realised - U_S * closed/held - (price - close_rate) * closed * conversion``; and the
-   age of each stored mark's ``pnl_timestamp`` against its snapshot's ``observed_at``.
+   of every position failing section 4; the closes of positions present in the preceding snapshot, with
+   ``realised - U_S * closed/held - (price - close_rate) * closed * conversion``; and the age of each
+   stored mark's ``pnl_timestamp`` against its snapshot's ``observed_at``.
 
 Run: PYTHONPATH=. uv run python scripts/measure_3612_marked_daily_loss_evidence.py [--since D] [--until D]
 """
