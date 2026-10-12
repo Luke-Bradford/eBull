@@ -123,6 +123,14 @@ def test_a_half_day_uses_the_13_00_close() -> None:
         position(total_fees=Decimal("NaN")),
         position(units="Infinity"),
         position(pnl="NaN"),
+        position(units="0"),
+        replace(position(), amount=Decimal("Infinity")),
+        replace(position(), market_value=Decimal("NaN")),
+        replace(position(), market_value=Decimal("106")),
+        replace(position(), close_rate=Decimal("0")),
+        replace(position(), close_rate=Decimal("Infinity")),
+        replace(position(), close_conversion_rate=Decimal("-1")),
+        replace(position(), asset_currency_id=0),
     ],
 )
 def test_a_position_without_a_usable_mark_time_fees_or_values_refuses_the_whole_snapshot(

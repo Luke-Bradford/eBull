@@ -373,6 +373,9 @@ def session_close_snapshot_defect(snapshot: BrokerAccountRiskSnapshot) -> str | 
     observed on P's New York date, so after P's regular close and before New York midnight,
     and every direct position must carry a finite mark and units, a reported finite
     ``totalFees`` and a mark time inside ``[P's close, observed_at]``.
+
+    Every CHECK sql/482 places on a child row is also a branch here, so a bad snapshot is
+    refused by name rather than raising at INSERT.
     """
     try:
         _validate_snapshot(snapshot)
@@ -383,8 +386,22 @@ def session_close_snapshot_defect(snapshot: BrokerAccountRiskSnapshot) -> str | 
         return f"observed_at {snapshot.observed_at.isoformat()} is not on session {session} after its close"
     close_at = _session_close_utc(session)
     for position in snapshot.direct_positions:
-        if not (position.unrealized_pnl.is_finite() and position.units.is_finite()):
-            return f"position {position.position_id} has a non-finite mark or units"
+        values = (
+            position.units,
+            position.amount,
+            position.unrealized_pnl,
+            position.market_value,
+            position.close_rate,
+            position.close_conversion_rate,
+        )
+        if not all(value.is_finite() for value in values):
+            return f"position {position.position_id} has a non-finite numeric field"
+        if position.units <= 0 or position.close_rate <= 0 or position.close_conversion_rate <= 0:
+            return f"position {position.position_id} has non-positive units, close rate or conversion rate"
+        if position.asset_currency_id <= 0:
+            return f"position {position.position_id} has a non-positive asset currency id"
+        if abs(position.market_value - (position.amount + position.unrealized_pnl)) > Decimal("0.000001"):
+            return f"position {position.position_id} market value is not amount plus unrealised P&L"
         if position.total_fees is None or not position.total_fees.is_finite():
             return f"position {position.position_id} has no finite totalFees"
         if position.pnl_timestamp is None or not close_at <= position.pnl_timestamp <= snapshot.observed_at:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -121,11 +120,9 @@ def test_a_snapshot_written_for_one_session_does_not_block_the_next(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     monday = snapshot()
-    tuesday = replace(
-        snapshot(
-            observed_at=monday.observed_at + timedelta(days=1),
-            positions=(position(pnl_timestamp=CLOSE + timedelta(days=1, minutes=5)),),
-        )
+    tuesday = snapshot(
+        observed_at=monday.observed_at + timedelta(days=1),
+        positions=(position(pnl_timestamp=CLOSE + timedelta(days=1, minutes=5)),),
     )
     assert record_session_close_snapshot(ebull_test_conn, environment="demo", snapshot=monday)
     assert record_session_close_snapshot(ebull_test_conn, environment="demo", snapshot=tuesday)
