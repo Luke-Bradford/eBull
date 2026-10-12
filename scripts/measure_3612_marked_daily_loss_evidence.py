@@ -22,9 +22,9 @@ position marks, #3068) to ``--until`` (default: yesterday, New York):
    ``units(d1) + open units - close units = units(d2)`` and ``amount(d1) + open investment_usd - close
    investment_usd = amount(d2)`` (0 where absent), and that every close has ``realized_pnl_usd`` and zero
    ``fees_usd``. Reports events falling between a mark time and its snapshot's receipt time.
-5. **Point claims.** The live pool limits; R times of day; the first stored mark date; the full event and
-   ownership history of every position failing section 4; the closes of positions present in the preceding
-   snapshot, with ``realised - U_S * closed/held - (price - close_rate) * closed * conversion``; and the
+5. **Point claims.** The live pool limits (current state, not bounded); R times of day; the first stored
+   mark date; the ledger-vs-broker unit reconciliation at every mark; the full event and ownership history
+   of every position failing section 4; the closes of positions present in the preceding snapshot, with ``realised - U_S * closed/held - (price - close_rate) * closed * conversion``; and the
    age of each stored mark's ``pnl_timestamp`` against its snapshot's ``observed_at``.
 
 Run: PYTHONPATH=. uv run python scripts/measure_3612_marked_daily_loss_evidence.py [--since D] [--until D]
@@ -220,13 +220,14 @@ def unit_conservation(conn: psycopg.Connection[Any], since: date, until: date) -
                     f"{d1}->{d2} position {position_id} ({key}): units {u1} + {net} vs {u2}, bad close {bad_close}"
                 )
             if a1 + inv != a2:
+                failing.append(int(position_id))
                 amount_broken.append(f"{d1}->{d2} position {position_id} ({key}): amount {a1} + {inv} vs {a2}")
     print(f"[4] snapshot pairs {pairs}; position-pairs by population group: {dict(sorted(by_group.items()))}")
     print(f"    events between a position's mark time and its snapshot's receipt time: {straddling}")
     print(f"    failing unit conservation, or with a close lacking realised or zero fees: {len(broken)}")
     for line in broken:
         print(f"    {line}")
-    print(f"    failing cost-basis conservation (amount + open - close investment_usd): {len(amount_broken)}")
+    print(f"    cost-basis discrepancies (amount + open - close investment_usd): {len(amount_broken)}")
     for line in amount_broken:
         print(f"    {line}")
     return failing
@@ -240,7 +241,7 @@ ORDER BY strategy_paper_pool_event_id DESC LIMIT 1
 _R_TIMES_SQL = """
 SELECT min((observed_at AT TIME ZONE 'America/New_York')::time),
        max((observed_at AT TIME ZONE 'America/New_York')::time),
-       (SELECT min(snapshot_date) FROM broker_account_position_marks WHERE environment = 'demo')
+       (SELECT min(snapshot_date) FROM broker_account_position_marks WHERE environment = 'demo' AND snapshot_date <= %s)
 FROM broker_account_equity_snapshots s
 WHERE s.environment = 'demo' AND s.snapshot_date BETWEEN %s AND %s AND extract(isodow FROM s.snapshot_date) < 6
   AND (s.observed_at AT TIME ZONE 'America/New_York')::time >= time '16:00'
@@ -302,12 +303,30 @@ SELECT format('trade_events %%s: %%s rows, fees_usd NULL %%s, zero %%s', event_k
 FROM trade_events WHERE executed_at < %(cutoff)s GROUP BY event_kind
 """
 
+_LEDGER_RECONCILIATION_SQL = """
+SELECT count(*), count(*) FILTER (WHERE ledger IS NULL),
+       count(*) FILTER (WHERE ledger IS NOT NULL AND ledger <> units),
+       count(*) FILTER (WHERE owned), count(*) FILTER (WHERE owned AND (ledger IS NULL OR ledger <> units))
+FROM (
+    SELECT m.units,
+           (SELECT sum(CASE e.event_kind WHEN 'open' THEN e.units ELSE -e.units END)
+              FROM trade_events e WHERE e.position_id = m.position_id AND e.executed_at <= s.observed_at
+            HAVING count(*) FILTER (WHERE e.event_kind = 'open') > 0) AS ledger,
+           EXISTS (SELECT 1 FROM strategy_position_ownership o
+                    WHERE o.broker_position_id = m.position_id AND o.claimed_at < %s) AS owned
+    FROM broker_account_position_marks m
+    JOIN broker_account_equity_snapshots s USING (environment, snapshot_date)
+    WHERE m.environment = 'demo' AND m.snapshot_date BETWEEN %s AND %s
+) x
+"""
+
 _ENGINE_CLOSE_DAYS_SQL = """
 SELECT count(*), count(DISTINCT (e.executed_at AT TIME ZONE 'America/New_York')::date),
        string_agg(DISTINCT ((e.executed_at AT TIME ZONE 'America/New_York')::date)::text, ',')
 FROM trade_events e
 WHERE e.event_kind = 'close' AND e.executed_at >= %s AND e.executed_at < %s
-  AND EXISTS (SELECT 1 FROM strategy_position_ownership o WHERE o.broker_position_id = e.position_id)
+  AND EXISTS (SELECT 1 FROM strategy_position_ownership o
+               WHERE o.broker_position_id = e.position_id AND o.claimed_at < %s)
 """
 
 _EVENTS_AUDIT_SQL = """
@@ -330,10 +349,10 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
     print(
         f"[5] latest pool event (risk_profile, max_daily_loss_pct, capital_limit): {conn.execute(_POOL_SQL).fetchone()}"
     )
-    r = conn.execute(_R_TIMES_SQL, (since, until)).fetchone()
+    r = conn.execute(_R_TIMES_SQL, (until, since, until)).fetchone()
     if r is not None:
         print(f"    weekday snapshots after 16:00 New York: earliest {r[0]}, latest {r[1]}; first stored mark {r[2]}")
-    for position_id in failing:
+    for position_id in sorted(set(failing)):
         print(f"    history of position {position_id} (kind, detail, at, units, realised, instrument):")
         for row in conn.execute(_HISTORY_SQL, {"p": position_id, "cutoff": cutoff, "until": until}):
             print(f"      {row}")
@@ -355,6 +374,12 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
     fees = conn.execute(_FEES_SPLIT_SQL, {"until": until, "cutoff": cutoff}).fetchall()
     for row in fees:
         print(f"    {row[0]}")
+    rec = conn.execute(_LEDGER_RECONCILIATION_SQL, (cutoff, since, until)).fetchone()
+    if rec is not None:
+        print(
+            f"    ledger units at each snapshot's observed_at vs broker units: marks {rec[0]}, no open event {rec[1]},"
+            f" mismatched {rec[2]}; engine-owned marks {rec[3]}, of them not reconciling {rec[4]}"
+        )
     ev = conn.execute(_EVENTS_AUDIT_SQL, {"cutoff": cutoff}).fetchone()
     if ev is not None:
         print(
@@ -363,7 +388,7 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
             f" NULL units/price/investment or non-finite investment {ev[7]}"
         )
     print(f"    (lifetime queries in this section are bounded by executed_at / claimed_at < {cutoff:%Y-%m-%d %H:%M}Z)")
-    engine_closes = conn.execute(_ENGINE_CLOSE_DAYS_SQL, (since, cutoff)).fetchone()
+    engine_closes = conn.execute(_ENGINE_CLOSE_DAYS_SQL, (since, cutoff, cutoff)).fetchone()
     if engine_closes is not None:
         print(
             f"    engine-owned closes in range: {engine_closes[0]} on {engine_closes[1]} New York dates"
@@ -376,6 +401,7 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
             f"    {module.__name__}.POLICY_MODULES: {len(names)} modules;"
             f" engine_pot_risk or executor among them: {hits}"
         )
+        print(f"      {names}")
 
 
 def main() -> None:
