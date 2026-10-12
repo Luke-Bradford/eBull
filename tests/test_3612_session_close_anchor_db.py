@@ -66,13 +66,15 @@ def test_a_genuinely_empty_book_stores_a_parent_with_zero_counts(ebull_test_conn
     assert [(r[3], r[4], r[5]) for r in rows] == [(0, 0, None)]
 
 
-def test_update_and_delete_are_refused_on_both_tables(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+def test_update_delete_and_truncate_are_refused_on_both_tables(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     assert record_session_close_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot())
     for sql in (
         "UPDATE broker_account_session_close_snapshots SET currency = 'GBP'",
         "UPDATE broker_account_session_close_marks SET total_fees = 1",
         "DELETE FROM broker_account_session_close_marks",
         "DELETE FROM broker_account_session_close_snapshots",
+        "TRUNCATE broker_account_session_close_marks",
+        "TRUNCATE broker_account_session_close_snapshots CASCADE",
     ):
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"), ebull_test_conn.transaction():
             ebull_test_conn.execute(sql)
