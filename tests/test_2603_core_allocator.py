@@ -415,3 +415,19 @@ def test_the_dead_trigger_refusal_is_what_changed_and_not_the_arithmetic() -> No
     decision = evaluate_core_rebalance(spec, sleeve("0", "1000"))
     assert decision.lower_pct == Decimal("0.0001")
     assert decision.action == "buy_core"
+
+
+def test_a_stopped_out_core_is_rebought_to_the_lower_band_edge() -> None:
+    """#3612: the scheduled rebalance is the core's re-entry rule after a broker stop.
+
+    ``core_exit_levels``'s module docstring relies on this: a stop-out leaves the
+    sleeve all cash, and the allocator has no notion of why, so it buys back to the
+    near (lower) band edge.  The risk gate that can refuse that buy is the executor's
+    pot drawdown limit, not the allocator.  Mandate shape as live (50 ± 5, 10% reserve).
+    """
+    spec = mandate(target="50", band="5", reserve="10")
+    decision = evaluate_core_rebalance(spec, sleeve("0", "1000"))
+    assert decision.action == "buy_core"
+    assert decision.reason_code is None
+    assert decision.core_pct == Decimal("0")
+    assert decision.amount == Decimal("450")
