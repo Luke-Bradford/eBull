@@ -86,8 +86,8 @@ which is acceptable only because `last-modified` bounds nothing.
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`45791cea…`), `HEAD`
-  (`2ce339e3`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`6f1b9f35…`), `HEAD`
+  (`d2ada933`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
 are as of 2026-10-12, read by the first command (queries in the script).
@@ -396,7 +396,8 @@ engagement of a new independent accountant".
     (`EFFECTIVENESS-DATE`, `ACTION-DATE`, `RECEIVED-DATE`), the DTD's are used. Where neither orders two elements,
     the grammar fixes an order by construction, and a header in another order is `malformed`.
   - **Lines.** Every non-blank line is exactly one of `<LEAF>value`, `<CONTAINER>` or `</CONTAINER>`, starting at
-    column 1. A value is the rest of its line, untrimmed, and holds no `<`. The EMPTY elements and the containers
+    column 1. A line ends at LF or CRLF, read the same way by the grammar and by discovery; a lone CR is part of
+    its line. A value is the rest of its line, untrimmed, and holds no `<`. The EMPTY elements and the containers
     carry none.
     Text on a line of its own, such as a second item code or a second date, is `non_tag_line`, never part of the
     value above it. A body with no non-blank line is `envelope`.
@@ -651,12 +652,12 @@ of work preceded this spec's acceptance, and both read no price, return or outco
   for a consumer, no full population). Each executed version is a configuration tried: the tag-based
   timing-uncertain rule at `a24131e1` and `77231ed1`, and the production predicates at `44ac5fdc`, `22876703`,
   `c7ea8ba9`, `847be55b`, `f5007575`, `73614936` (on the live CIK list, 5 CIKs larger, so a different negative
-  sample), `d59a0bc8` (the same predicates on the pinned list), `ffd87d74` and `2ce339e3`. Each run counts separately, since a
+  sample), `d59a0bc8` (the same predicates on the pinned list), `ffd87d74`, `2ce339e3` and `d2ada933`. Each run counts separately, since a
   different covered population is a different configuration. Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
   outcomes.
 
 Build step 2 therefore registers two non-claiming entries: `3624-slice2-construction-measurement`, listing those
-eleven runs by commit (`searches=11`, plus any added by a later re-run), and the production configuration below, registered prospectively before
+twelve runs by commit (`searches=12`, plus any added by a later re-run), and the production configuration below, registered prospectively before
 the production build's first data read.
 
 The producer and its fixtures are written first and read no data (build step 1). Then, before the production
@@ -1079,3 +1080,7 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
     carries `DEPOSITOR-CIK` and `SPONSOR-CIK`; that header parses again and premise 1's filer claim holds for both
     rows.
   - **`OWNER-DATA`** (176): removed from the field table; it is not admitted.
+- **Round 14** (`var/research/3624/ckpt1_slice2_r14.txt`): 0 open, 1 new (177), 7 resolved. The measurement was
+  re-run at `d2ada933`.
+  - **Line ends** (177): CRLF is read as LF once, before both the grammar and the `<CIK>` scan, with a CRLF
+    fixture.
