@@ -23,11 +23,12 @@
 -- columns carry no typmod, as sql/479: a finite value the writer's gate accepts cannot then overflow
 -- at INSERT, and the broker's values are stored as served.
 --
--- UPDATE, DELETE and TRUNCATE are refused on both tables (sql/424's `etoro_crowd_append_only`, with
--- sql/441's statement-level TRUNCATE guard), so S can be neither edited nor removed and replaced by a
--- later snapshot. The test harness empties tables under `session_replication_role = replica`, which
--- disables all three. `instrument_id` carries no FK, as
--- sql/383.
+-- UPDATE, DELETE and TRUNCATE are refused on both tables (sql/424's `etoro_crowd_append_only`, which
+-- raises unconditionally, so it serves the statement-level TRUNCATE guard as sql/441's does). S can be
+-- neither edited nor removed and replaced by a later snapshot. The test harness empties tables under
+-- `session_replication_role = replica`, which disables all three.
+--
+-- `instrument_id` carries no FK, as sql/383.
 
 CREATE TABLE IF NOT EXISTS broker_account_session_close_snapshots (
     environment                     TEXT        NOT NULL,

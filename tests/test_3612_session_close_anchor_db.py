@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import LiteralString
 
 import psycopg
 import pytest
@@ -68,18 +69,38 @@ def test_a_genuinely_empty_book_stores_a_parent_with_zero_counts(ebull_test_conn
     assert [(r[3], r[4], r[5]) for r in rows] == [(0, 0, None)]
 
 
-def test_update_delete_and_truncate_are_refused_on_both_tables(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+_PARENT = "broker_account_session_close_snapshots"
+_CHILD = "broker_account_session_close_marks"
+
+
+@pytest.mark.parametrize(
+    ("statements", "guarded"),
+    [
+        (("UPDATE broker_account_session_close_snapshots SET currency = 'GBP'",), _PARENT),
+        (("UPDATE broker_account_session_close_marks SET total_fees = 1",), _CHILD),
+        (("DELETE FROM broker_account_session_close_marks",), _CHILD),
+        (("DELETE FROM broker_account_session_close_snapshots",), _PARENT),
+        (("TRUNCATE broker_account_session_close_marks",), _CHILD),
+        # The child's own guard is dropped inside the savepoint, so only the parent's can fire.
+        (
+            (
+                "DROP TRIGGER broker_account_session_close_marks_no_truncate ON broker_account_session_close_marks",
+                "TRUNCATE broker_account_session_close_snapshots CASCADE",
+            ),
+            _PARENT,
+        ),
+    ],
+)
+def test_update_delete_and_truncate_are_refused_on_both_tables(
+    ebull_test_conn: psycopg.Connection[tuple], statements: tuple[LiteralString, ...], guarded: str
+) -> None:
     assert record_session_close_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot())
-    for sql in (
-        "UPDATE broker_account_session_close_snapshots SET currency = 'GBP'",
-        "UPDATE broker_account_session_close_marks SET total_fees = 1",
-        "DELETE FROM broker_account_session_close_marks",
-        "DELETE FROM broker_account_session_close_snapshots",
-        "TRUNCATE broker_account_session_close_marks",
-        "TRUNCATE broker_account_session_close_snapshots CASCADE",
+    with (
+        pytest.raises(psycopg.errors.RaiseException, match=f"^{guarded} is append-only"),
+        ebull_test_conn.transaction(),
     ):
-        with pytest.raises(psycopg.errors.RaiseException, match="append-only"), ebull_test_conn.transaction():
-            ebull_test_conn.execute(sql)
+        for statement in statements:
+            ebull_test_conn.execute(statement)
 
 
 @pytest.mark.parametrize(
