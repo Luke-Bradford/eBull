@@ -453,6 +453,16 @@ const UNAVAILABLE_COMPARATOR: StrategyPnlHistoryResponse["comparator"] = {
     required_active_excess: null,
     unavailable_reason: "mandate_unconfigured",
   },
+  gbp: {
+    fx_source: "ecb_reference_fx_rates_daily",
+    fx_start_date: null,
+    fx_end_date: null,
+    fx_multiplier: null,
+    comparator_return: null,
+    engine_return: null,
+    engine_excess: null,
+    unavailable_reason: "comparator_unavailable",
+  },
 };
 
 function approvedOverview(): StrategyOverviewResponse {

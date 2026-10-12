@@ -1,6 +1,7 @@
-"""The pot's return against an investable UCITS S&P 500 fund, and the active hurdle (#3616 slice 1).
+"""The pot's return against an investable UCITS S&P 500 fund, and the active hurdle (#3616 slices 1-2).
 
-Spec: ``docs/specs/metrics/2026-10-12-3616-investable-comparator.md``.
+Specs: ``docs/specs/metrics/2026-10-12-3616-investable-comparator.md`` (slice 1) and
+``docs/specs/metrics/2026-10-12-3616-gbp-isa-comparator.md`` (slice 2, the GBP restatement).
 
 The comparator is the market-price return of ``CSPX.L`` (iShares Core S&P 500
 UCITS ETF, USD Accumulating, IE00B5BMR087) as eToro quotes it, over the pot's
@@ -13,6 +14,10 @@ is bought and held over the window.  Over one buy-and-hold period the pot's
 return is exactly the weighted sum of the sleeves', so the active sleeves match
 the comparator at ``r_cmp · (1 − w_core) / w_active``, where ``w_core`` is the
 core's share of the POT (``hurdle_weights``).
+
+Slice 2 restates both returns in GBP (``gbp_comparison``).  It publishes no
+after-tax figure: a tax rate applied to a TWR is not anyone's tax (the slice 2
+spec, "Why this slice computes no after-tax return").
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from typing import Any, Final, Literal
 
 import psycopg
 
+from app.services.fx_history import FX_BASE
 from app.services.strategy_control_plane import PaperPool, load_paper_pool
 from app.services.strategy_core_mandate import CoreMandate, load_core_mandate
 from app.services.strategy_wealth import StrategyWealthPoint, TimeWeightedReturns
@@ -42,6 +48,15 @@ COMPARATOR_BASIS: Final = "accumulating_ucits_market_price_return_usd"
 #: its latest close.
 COMPARATOR_MAX_CLOSE_AGE: Final = timedelta(days=4)
 
+#: ECB reference rates in ``fx_rates_daily``, GBP per 1 USD.  The pot and the
+#: comparator are both USD, so one rate converts both alike.
+GBP_FX_SOURCE: Final = "ecb_reference_fx_rates_daily"
+GBP_QUOTE_CURRENCY: Final = "GBP"
+#: A CHOSEN tolerance, as for closes: the longest TARGET closure (Good Friday to
+#: Easter Monday) puts a date at most 4 days after its latest fixing.  It can
+#: also let a missing ordinary fixing through.
+GBP_MAX_RATE_AGE: Final = timedelta(days=4)
+
 ComparatorUnavailableReason = Literal[
     "comparator_instrument_missing",
     "comparator_instrument_mismatch",
@@ -49,6 +64,8 @@ ComparatorUnavailableReason = Literal[
     "comparator_close_missing",
     "comparator_stale",
 ]
+#: Authoritative precedence: the first that applies, in this order.
+GbpUnavailableReason = Literal["comparator_unavailable", "fx_rate_missing", "fx_rate_stale"]
 HurdleUnavailableReason = Literal[
     "mandate_unconfigured",
     "mandate_weights_invalid",
@@ -72,6 +89,29 @@ class ComparatorInstrument:
 class Close:
     price_date: date
     close: Decimal
+
+
+@dataclass(frozen=True)
+class FxRate:
+    """A GBP-per-USD rate and the date it was fixed for."""
+
+    rate_date: date
+    rate: Decimal
+
+
+@dataclass(frozen=True)
+class GbpComparison:
+    """Slice 1's returns restated in GBP; returns are unrounded cumulative fractions."""
+
+    fx_source: str = GBP_FX_SOURCE
+    fx_start_date: date | None = None
+    fx_end_date: date | None = None
+    #: ``φ_E / φ_S``, dimensionless.
+    fx_multiplier: Decimal | None = None
+    comparator_return: Decimal | None = None
+    engine_return: Decimal | None = None
+    engine_excess: Decimal | None = None
+    unavailable_reason: GbpUnavailableReason | None = "comparator_unavailable"
 
 
 @dataclass(frozen=True)
@@ -112,6 +152,7 @@ class Comparator:
     comparator_return: Decimal | None = None
     unavailable_reason: ComparatorUnavailableReason | None = None
     engine_excess: Decimal | None = None
+    gbp: GbpComparison = GbpComparison()
 
 
 def pot_window(history: Sequence[StrategyWealthPoint], returns: TimeWeightedReturns) -> PotWindow | None:
@@ -187,6 +228,47 @@ def compare(
         instrument_id=instrument_id,
         comparator_return=comparator_return,
         engine_excess=window.pot_return - comparator_return,
+        **dates,
+    )
+
+
+def gbp_comparison(
+    comparator: Comparator, window: PotWindow | None, start_rate: FxRate | None, end_rate: FxRate | None
+) -> GbpComparison:
+    """Restate the comparator and the pot in GBP; the first reason that applies wins.
+
+    Exact, not approximate: the pot TWR places every flow at the start of its
+    sub-period (``D = V_prev + F``) and every pot value is USD, so each
+    sub-period's GBP relative is its USD relative times the ratio of the rates
+    at its two valuation dates.  Linked, the inner rates cancel and
+    ``1 + R£ = (1 + R$) · φ_E / φ_S``.  The rates are read at the POT's S and E,
+    the one valuation date convention for both returns, even where a comparator
+    close resolved to an earlier day.
+
+    The GBP excess is ``φ · (R_e$ − R_c$)``, a positive rescaling, so it never
+    changes the sign of slice 1's excess.
+    """
+    if comparator.comparator_return is None or window is None:
+        return GbpComparison()
+    dates: dict[str, Any] = {
+        "fx_start_date": None if start_rate is None else start_rate.rate_date,
+        "fx_end_date": None if end_rate is None else end_rate.rate_date,
+    }
+    if start_rate is None or end_rate is None:
+        return GbpComparison(unavailable_reason="fx_rate_missing", **dates)
+    if window.start - start_rate.rate_date > GBP_MAX_RATE_AGE or window.end - end_rate.rate_date > GBP_MAX_RATE_AGE:
+        return GbpComparison(unavailable_reason="fx_rate_stale", **dates)
+    # No collapse rule: S and E sharing one fresh fixing is phi = 1, computable
+    # under the convention above, unlike a comparator close collapse.
+    multiplier = end_rate.rate / start_rate.rate
+    comparator_gbp = (_ONE + comparator.comparator_return) * multiplier - _ONE
+    engine_gbp = (_ONE + window.pot_return) * multiplier - _ONE
+    return GbpComparison(
+        fx_multiplier=multiplier,
+        comparator_return=comparator_gbp,
+        engine_return=engine_gbp,
+        engine_excess=engine_gbp - comparator_gbp,
+        unavailable_reason=None,
         **dates,
     )
 
@@ -291,6 +373,33 @@ def latest_valid_close(conn: psycopg.Connection[Any], instrument_id: int, on_or_
     return None if row is None else Close(price_date=row[0], close=Decimal(str(row[1])))
 
 
+#: The pair is USD -> GBP only.  ``rate`` is NUMERIC(18,10) with ``CHECK (rate > 0)``
+#: (sql/196), but ``'NaN' > 0`` is TRUE in Postgres, so NaN can be stored.  NaN
+#: sorts above Infinity, so ``< 'Infinity'`` excludes it; ``> 0`` stays as the
+#: closes' rule.  No row dated after ``on_or_before`` is read.  Not ``fx_history.load_fx_rates_for_date``: the date
+#: it returns is the newest across ALL pairs, not this pair's.
+LATEST_VALID_GBP_RATE_SQL = """
+    SELECT rate_date, rate
+    FROM fx_rates_daily
+    WHERE base_currency = %(base)s
+      AND quote_currency = %(quote)s
+      AND rate_date <= %(on_or_before)s
+      AND rate > 0
+      AND rate < 'Infinity'::numeric
+    ORDER BY rate_date DESC
+    LIMIT 1
+"""
+
+
+def latest_valid_gbp_rate(conn: psycopg.Connection[Any], on_or_before: date) -> FxRate | None:
+    """The latest finite, positive GBP-per-USD rate dated on or before ``on_or_before``."""
+    row = conn.execute(
+        LATEST_VALID_GBP_RATE_SQL,
+        {"base": FX_BASE, "quote": GBP_QUOTE_CURRENCY, "on_or_before": on_or_before},
+    ).fetchone()
+    return None if row is None else FxRate(rate_date=row[0], rate=Decimal(str(row[1])))
+
+
 def load_comparator(
     conn: psycopg.Connection[Any], history: Sequence[StrategyWealthPoint], returns: TimeWeightedReturns
 ) -> Comparator:
@@ -305,7 +414,13 @@ def load_comparator(
         start_close = latest_valid_close(conn, instrument.instrument_id, window.start)
         end_close = latest_valid_close(conn, instrument.instrument_id, window.end)
     weights = hurdle_weights(load_core_mandate(conn), load_paper_pool(conn))
-    return compare(instrument, window, start_close, end_close, weights)
+    comparator = compare(instrument, window, start_close, end_close, weights)
+    if comparator.comparator_return is None or window is None:
+        return comparator
+    gbp = gbp_comparison(
+        comparator, window, latest_valid_gbp_rate(conn, window.start), latest_valid_gbp_rate(conn, window.end)
+    )
+    return replace(comparator, gbp=gbp)
 
 
 __all__ = [
@@ -314,13 +429,18 @@ __all__ = [
     "Comparator",
     "ComparatorInstrument",
     "ComparatorUnavailableReason",
+    "FxRate",
+    "GbpComparison",
+    "GbpUnavailableReason",
     "Hurdle",
     "HurdleUnavailableReason",
     "PotWindow",
     "compare",
+    "gbp_comparison",
     "hurdle",
     "hurdle_weights",
     "latest_valid_close",
+    "latest_valid_gbp_rate",
     "load_comparator",
     "pot_window",
 ]

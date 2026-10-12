@@ -1,4 +1,4 @@
-"""#3616 slice 1 — the comparator's close lookup and its wiring into /strategies/wealth-history."""
+"""#3616 slices 1-2 — the comparator's close and rate lookups and their wiring into /strategies/wealth-history."""
 
 from __future__ import annotations
 
@@ -9,7 +9,13 @@ from typing import Any
 import psycopg
 
 from app.api.strategies import get_strategy_wealth_history
-from app.services.strategy_comparator import COMPARATOR_SYMBOL, Close, latest_valid_close
+from app.services.strategy_comparator import (
+    COMPARATOR_SYMBOL,
+    Close,
+    FxRate,
+    latest_valid_close,
+    latest_valid_gbp_rate,
+)
 from app.services.strategy_control_plane import configure_paper_pool
 from app.services.strategy_core_mandate import CORE_MANDATE_MODE, CORE_MANDATE_POLICY_VERSION
 
@@ -65,6 +71,36 @@ def test_every_row_invalid_is_no_close(ebull_test_conn: psycopg.Connection[tuple
     assert latest_valid_close(ebull_test_conn, _INSTRUMENT_ID, date(2026, 9, 30)) is None
 
 
+def _rates(conn: psycopg.Connection[Any], rows: list[tuple[str, str, str]]) -> None:
+    for day, quote, rate in rows:
+        conn.execute(
+            """
+            INSERT INTO fx_rates_daily (rate_date, base_currency, quote_currency, rate)
+            VALUES (%s, 'USD', %s, %s::numeric)
+            """,
+            (day, quote, rate),
+        )
+
+
+def test_latest_valid_gbp_rate_is_pair_specific_skips_nan_and_never_reads_the_future(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _rates(
+        ebull_test_conn,
+        [
+            ("2026-09-01", "GBP", "0.75"),
+            # CHECK (rate > 0) admits NaN: 'NaN' > 0 is TRUE in Postgres.
+            ("2026-09-03", "GBP", "NaN"),
+            # A newer EUR row must not lend its date to GBP.
+            ("2026-09-04", "EUR", "0.9"),
+            ("2026-09-08", "GBP", "0.76"),
+        ],
+    )
+    assert latest_valid_gbp_rate(ebull_test_conn, date(2026, 9, 7)) == FxRate(date(2026, 9, 1), Decimal("0.75"))
+    assert latest_valid_gbp_rate(ebull_test_conn, date(2026, 9, 8)) == FxRate(date(2026, 9, 8), Decimal("0.76"))
+    assert latest_valid_gbp_rate(ebull_test_conn, date(2026, 8, 31)) is None
+
+
 def test_wealth_history_always_carries_the_comparator(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     response = get_strategy_wealth_history(days=365, conn=ebull_test_conn)
     comparator = response.comparator
@@ -72,6 +108,8 @@ def test_wealth_history_always_carries_the_comparator(ebull_test_conn: psycopg.C
     assert comparator.unavailable_reason == "comparator_instrument_missing"
     assert comparator.comparator_return is None and comparator.engine_excess is None
     assert comparator.hurdle.unavailable_reason == "mandate_unconfigured"
+    assert comparator.gbp.unavailable_reason == "comparator_unavailable"
+    assert comparator.gbp.fx_start_date is None and comparator.gbp.comparator_return is None
     assert response.benchmark_comparison_available is False
 
 
@@ -96,6 +134,12 @@ def test_wealth_history_comparator_and_hurdle_against_a_funded_pot(
         VALUES (%(id)s, CURRENT_DATE - 1, 100), (%(id)s, CURRENT_DATE, 102)
         """,
         {"id": _INSTRUMENT_ID},
+    )
+    conn.execute(
+        """
+        INSERT INTO fx_rates_daily (rate_date, base_currency, quote_currency, rate)
+        VALUES (CURRENT_DATE - 1, 'USD', 'GBP', 0.8), (CURRENT_DATE, 'USD', 'GBP', 0.75)
+        """
     )
     configure_paper_pool(
         conn,
@@ -145,6 +189,14 @@ def test_wealth_history_comparator_and_hurdle_against_a_funded_pot(
     # The refused S&P 500 TR index line stays refused beside an available comparator.
     assert response.benchmark_comparison_available is False
     assert {refusal.benchmark for refusal in response.benchmark_refusals} >= {"sp500_total_return"}
+    gbp = comparator.gbp
+    assert gbp.unavailable_reason is None
+    assert (gbp.fx_start_date, gbp.fx_end_date) == (comparator.window_start, today[0])
+    multiplier_gbp = Decimal("0.75") / Decimal("0.8")
+    assert gbp.fx_multiplier == multiplier_gbp
+    assert gbp.comparator_return == Decimal("1.02") * multiplier_gbp - 1
+    assert gbp.engine_return == multiplier_gbp - 1
+    assert gbp.engine_excess == multiplier_gbp * Decimal("-0.02")
     wire = response.model_dump(mode="json", by_alias=True)["comparator"]
     assert wire["return"] == "0.02"
     assert "comparator_return" not in wire

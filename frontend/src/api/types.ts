@@ -3443,6 +3443,21 @@ export interface StrategyUcitsComparator {
       | "hurdle_infeasible"
       | null;
   };
+  /**
+   * #3616 slice 2 — the returns above restated in GBP at ECB rates; NOT after tax.
+   * Spec: docs/specs/metrics/2026-10-12-3616-gbp-isa-comparator.md
+   */
+  gbp: {
+    fx_source: "ecb_reference_fx_rates_daily";
+    fx_start_date: string | null;
+    fx_end_date: string | null;
+    /** `φ_E / φ_S`, dimensionless. */
+    fx_multiplier: string | null;
+    comparator_return: string | null;
+    engine_return: string | null;
+    engine_excess: string | null;
+    unavailable_reason: "comparator_unavailable" | "fx_rate_missing" | "fx_rate_stale" | null;
+  };
 }
 
 export interface StrategyOwnedPosition {
