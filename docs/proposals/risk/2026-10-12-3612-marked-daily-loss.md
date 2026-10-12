@@ -17,7 +17,15 @@ This slice closes exactly that gap: **the marked move of positions that have not
 - So v1 does not combine them. **Any engine close since the anchor refuses further entries for the rest of the day** (`engine_pot_daily_close_in_window`). That is fail-closed. The realised check still covers the closes themselves.
 - **When entries resume.** The refusal lasts until the first New York date whose anchor S was captured after the close. A close during D's session resumes on D + 1. A close after S on a Friday, or on the day before a holiday, keeps refusing through the weekend or holiday, until the next session's S.
 - **How often it binds.** In the census, 2026-09-15 to 2026-10-11, there was 1 engine-owned close, at 09:35 New York on 2026-09-23 (section 5). Under this rule it would have refused entries for the rest of that day. This is a count of closes, not a measure of future blocked windows, which depend on how often strategies exit.
-- **Not covered: account-level charges.** A charge the broker books to the account without attributing it to a position is outside every position's `unrealizedPnL` and `totalFees`, and v1 does not see it. None is measured here, and none is assumed absent. The realised check, NAV and reconciliation are where account cash is seen.
+- **What v1 guarantees.** v1 only adds refusals. Every entry it admits, today's realised-only gate also admits, so it is never weaker than today.
+  - It does not claim to see every loss. Each residual below is a loss that today's gate does not see either.
+  - Each residual is named so that a later slice can close it, not because v1 relies on it being zero.
+- **Named residuals (r9):**
+  1. The interval between `P_close` and S's mark time. It is measurable once S exists (Source rule).
+  2. Account-level charges: a charge booked to the account without being attributed to a position. It is outside every position's `unrealizedPnL` and `totalFees`, and so outside both engine guards and `PotNav`. The only observer of account cash is `account_reconciliation_check` (#2844 clause 3), which compares broker equity with the local book; it is not an entry guard.
+  3. Position-tuple coherence. eToro documents a time for the P&L mark only. If the broker served units that lag a close while its P&L already reflected it, and the ledger also lacked that close, the units and ledger would agree, and the missing realised P&L would go unseen. Ledger reconciliation at both endpoints catches every case where units and ledger disagree. On all 252 stored marks they agree (section 5).
+  4. A split exactly offsetting an unrecorded close: for example, half closed unrecorded, then a 2-for-1 split restoring the units. Any non-offsetting combination fails the unit and ledger checks.
+  5. Fee posting time. `totalFees` must be unchanged between the endpoints, but when a fee or dividend enters `unrealizedPnL` relative to `totalFees` is undocumented. A posting that moves between them inside the window is unseen. All 118 stored values since capture began are 0 (section 5).
 - The follow-up slice v2 adds the realised term once the accounting rule is established. Its evidence so far is in sections 4 and 5: the 5-close identity, and cost-basis conservation with its 4 exceptions. v1 does not use either.
 
 ## Source rule
@@ -138,7 +146,7 @@ This slice closes exactly that gap: **the marked move of positions that have not
    - Both import `_MANDATE_OBSERVATION_SQL`, so **it stays byte-identical**, pinned by a test on its SHA-256.
 10. **Operator labels** in `StrategiesPage.tsx`'s refusal map:
     - `portfolio_daily_marked_loss_limit`, "The mandate's daily loss limit is reached on marked P&L";
-    - `engine_pot_daily_close_in_window`, "An engine position closed today; new entries wait for tonight's close capture";
+    - `engine_pot_daily_close_in_window`, "An engine position closed after the daily anchor; new entries wait until a later session's close capture becomes the anchor";
     - one line each for `engine_pot_daily_anchor_missing`, `_anchor_incomplete`, `_accounting_unverified`, `_mark_stale` (a position's broker mark is missing, in the future, older than the quote-age bound, or older than its anchor) and `engine_pot_daily_event_unwitnessed`.
 11. **Exits.**
     - The check sits only on the entry sizing path (`_risk_and_amount` → `_observe_local_mandate_risk`), and every refusal it adds is a returned code.
@@ -185,6 +193,8 @@ S exists only if a qualifying snapshot is inserted on P's New York date after `P
   - an engine event between a position's mark time and its snapshot's receipt time, on either side, refuses `event_unwitnessed`;
   - r8's counterexample refuses `event_unwitnessed`: S holds 5 units after a partial close of 10 whose event is not yet recorded, and live also holds 5;
   - the same reconciliation failure on the live side refuses;
+  - a close with NULL or NaN `units` in the position's ledger refuses `event_unwitnessed`, and a later exit in the same cycle executes;
+  - the `close_in_window` label's resumption rule: a close after Friday's S still refuses on Saturday and Monday, and a Monday-evening capture releases entries from Tuesday;
   - a mark 50 s old at receipt, with receipt 20 s before the decision and a 60 s bound, refuses; 30 s plus 20 s passes;
   - events exactly at `S.observed_at` are outside W, and events exactly at `risk.observed_at` are inside it.
 - **Calendar:**
@@ -251,9 +261,9 @@ Rounds 4 to 6, each finding with its disposition, are in the closure table at `c
 - r5.1, r5.2 and r6.2: fees on closes, now refused outright as a close;
 - r6.4: a split hiding a missing close, now caught by unit and ledger reconciliation without a realised term;
 - r6.7: dividends at close, now a close;
-- r6.12: NULL rules for close fields, which v1 does not read.
+- r6.12: NULL rules for close fields, for the realised and fee fields, which v1 does not read.
 
-v1 also checks units and finiteness on opens.
+v1 does read every close's `units`, for ledger reconciliation. It requires them non-NULL and finite; otherwise `event_unwitnessed`, a returned code. It also checks units and finiteness on opens.
 
 | round 7 finding | severity | disposition |
 |---|---|---|
@@ -281,5 +291,15 @@ v1 also checks units and finiteness on opens.
 | 8 policy-list contents | NIT | Resolved: counts and names printed |
 | 9 earlier dispositions | NIT | Resolved: supersession listed with reasons; full table at `c2109f14` |
 | 10 UI file in inventory | NIT | Resolved (Design 5) |
+
+| round 9 finding | severity | disposition |
+|---|---|---|
+| 1 tuple coherence: stale units with fresh P&L | BLOCKING | Named residual 3. Contested as BLOCKING because v1 is monotone over today's gate (Scope, "What v1 guarantees"). No eToro field establishes tuple coherence, and no local witness can. |
+| 2 split exactly offsetting an unrecorded close | BLOCKING | Named residual 4, same rationale. Every non-offsetting case refuses. |
+| 3 fee posting time | BLOCKING | Named residual 5, same rationale |
+| 4 drawdown advance before evidence refusal | WARNING | Open, deferred with r4.6 to `observe_pot_nav`, the shared fix for both callers |
+| 5 account-charge backstop overstated | WARNING | Resolved: the only observer named, and stated as not an entry guard |
+| 6 label duration | WARNING | Resolved: label reworded, with a resumption test |
+| 7 close units are read | NIT | Resolved: close units required non-NULL and finite, with a test |
 
 Still open and deferred: the drawdown-ledger integrity in `observe_pot_nav` (r4.6, r5.6). It is recorded on #3612.
