@@ -78,7 +78,8 @@ now the rebalance band:
 - Nothing in the allocator or the executor's buy path branches on why the core is
   underweight.  The buy passes the same execution gates as any core buy (eligibility,
   quote freshness, broker preflight, sandbox headroom -- the last pinned by
-  ``test_over_the_sandbox_bound_only_a_buy_is_refused``).  The one RISK gate on it is the
+  ``tests/test_2603_core_executor.py::
+  test_over_the_sandbox_bound_only_a_buy_is_refused``).  The one RISK gate on it is the
   engine pot's drawdown limit: ``execute_core_rebalance`` refuses non-sell actions with
   ``portfolio_drawdown_limit`` when the pot's observed drawdown is at or beyond the
   portfolio mandate's ``max_portfolio_drawdown_pct`` (``_observe_core_portfolio_drawdown``;

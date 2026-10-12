@@ -6,11 +6,15 @@ Pure-logic tier — no DB, no clock, no broker.  Spec:
 
 from __future__ import annotations
 
+import ast
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
+from app.services import core_exit_levels
 from app.services.strategy_core_allocator import (
     CoreRebalanceDecision,
     CoreSleeveState,
@@ -434,3 +438,19 @@ def test_a_stopped_out_core_is_rebought_to_the_lower_band_edge() -> None:
     # The 10% reserve is not a trigger (the cash side stays at 55%).
     assert decision.lower_pct == Decimal("45")
     assert decision.amount == Decimal("450")
+
+
+def test_every_test_the_core_exit_levels_docstring_cites_exists() -> None:
+    """The stop-out paragraph in ``core_exit_levels`` rests on tests in other files.
+
+    A renamed or deleted test would leave the docstring claiming a pin that no longer
+    exists, so each ``tests/<file>.py::<name>`` citation is resolved here.
+    """
+    doc = core_exit_levels.__doc__ or ""
+    citations = re.findall(r"(tests/[\w/]+\.py)::\s*(test_\w+)", doc)
+    assert len(citations) == 4
+    repo_root = Path(__file__).resolve().parent.parent
+    for file, name in citations:
+        tree = ast.parse((repo_root / file).read_text())
+        defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        assert name in defined, f"{file}::{name} is cited but not defined"
