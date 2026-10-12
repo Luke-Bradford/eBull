@@ -4045,9 +4045,10 @@ _T3_SUPPLY_LESS_RECHECK = "7 days"
 # Listing it here makes that invariant real. It is DISTINCT from SPY (the risk
 # layer's beta benchmark, a tradable ETF): the two S&P 500 series serve separately
 # specced purposes (beta regression vs the report comparison line) and are not
-# interchangeable.
+# interchangeable. CSPX.L is #3616's investable UCITS comparator
+# (``strategy_comparator.COMPARATOR_SYMBOL``), kept fresh for the same reason.
 BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
-    {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+    {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY", "CSPX.L"}
 )
 
 # T3 candle eligibility query.

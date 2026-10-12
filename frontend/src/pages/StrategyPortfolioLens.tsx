@@ -41,6 +41,7 @@ import { investNarrative } from "@/lib/investSummary";
 import { aggregate, namedList, positionsOutsideStrategyPnl, potWealthSummary } from "@/lib/strategyAggregate";
 import { money, number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
+import { comparatorLines } from "@/lib/ucitsComparator";
 import { useAsync } from "@/lib/useAsync";
 
 function toneOf(value: number | null): "muted" | "positive" | "negative" {
@@ -296,6 +297,9 @@ export function StrategyPortfolioLens() {
   // #3334 item 3: the server dates the time-weighted return. It is inception
   // only when inception is inside the history window, so it is always labelled.
   const returnSince = pnlHistory.data?.return_since ?? null;
+  // ⚠ Guarded on the field, not just the payload: a fixture or an API older
+  // than #3616 carries no comparator, and the strip must not take the lens down.
+  const comparator = pnlHistory.data?.comparator ? comparatorLines(pnlHistory.data.comparator, returnSince) : null;
   const sp500Refusal = data.benchmark_refusals.find((refusal) => refusal.benchmark === "sp500_total_return");
   // #3516: the plain-English "what happens next" from the folded Invest page.
   // Only `next` is read here; the where-the-money-is sentence sits on Setup.
@@ -418,6 +422,20 @@ export function StrategyPortfolioLens() {
             hint={pool.capital_observation_complete === false ? "Checked at each order" : "Budget less commitments"}
           />
         </div>
+
+        {/* #3616 slice 1: an investable UCITS fund, NOT the S&P 500 TR index the
+            tile above refuses; labelled "UCITS comparator", never "benchmark". */}
+        {comparator ? (
+          <div className="mt-3 space-y-0.5 text-sm text-slate-600 dark:text-slate-300" aria-label="UCITS comparator">
+            <p title={comparator.line1Title}>{comparator.line1}</p>
+            <p>
+              {comparator.line2}
+              {comparator.line2Title ? (
+                <span className="block text-xs text-slate-500 dark:text-slate-400">{comparator.line2Title}</span>
+              ) : null}
+            </p>
+          </div>
+        ) : null}
 
         {actionError ? (
           <p role="alert" className="mt-3 text-sm text-rose-700 dark:text-rose-300">

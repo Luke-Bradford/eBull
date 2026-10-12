@@ -12523,3 +12523,15 @@ neighbouring container and match it.**
   the floor), searching the alternative's parameter at a stated grid and taking its best feasible value.
 - Enforced in: review only. The measured instance is `scripts/measure_3612_degross_ladder.py` (`today` rule,
   `best_target_holding_limit_under_today`).
+
+### A mandate percentage is a share of whatever its allocator divides by, not of the pot (#3616)
+
+- Failure (Codex checkpoint 2, #3616 slice 1 build, 2026-10-12): the merged comparator spec, after four clean
+  checkpoint-1 rounds, set the core's pot weight to `core_target_pct` / 100 beside the active cap
+  `active_risk_budget_pct` / 100. The two have different denominators: the active cap is a share of `pool_base`, but the
+  core allocator measures its target over `core_market_value + cash_balance`, and that cash is sandbox headroom net
+  of active commitments. At the live 50/30 the core is 35% of the pot, so the hurdle multiplier is 13/6, not 5/3.
+- Prevention: before combining two mandate percentages in one formula, read the code that enforces each one and
+  write down its denominator. A spec that states a weight without naming the enforcing line has not done this.
+- Enforced in: `app/services/strategy_comparator.py::hurdle_weights` (docstring) and
+  `tests/test_3616_strategy_comparator.py::test_live_mandate_core_is_its_target_share_of_the_non_active_pot`.
