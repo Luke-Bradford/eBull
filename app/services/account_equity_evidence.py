@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import psycopg
 import psycopg.rows
@@ -18,6 +20,11 @@ from app.providers.broker import (
 )
 from app.services.fx import FxRateNotFound, convert
 from app.services.fx_history import load_fx_rates_for_date
+from app.services.market_calendar import latest_completed_us_session, us_market_status
+
+logger = logging.getLogger(__name__)
+
+_NEW_YORK = ZoneInfo("America/New_York")
 
 SOURCE_VERSION = "etoro-pnl-v1"
 
@@ -347,6 +354,118 @@ def _replace_position_marks(
                 for position in positions
             ],
         )
+
+
+def _session_close_utc(session: date) -> datetime:
+    """NYSE regular close of ``session``: 16:00 New York, 13:00 on a half day.
+
+    The same rule as ``ai_trial_pack_reader.session_close_utc``, restated because that
+    module imports the scoring stack and ``market_calendar`` is policy-hashed.
+    """
+    close = time(13, 0) if us_market_status(session) == "half_day" else time(16, 0)
+    return datetime.combine(session, close, tzinfo=_NEW_YORK).astimezone(UTC)
+
+
+def session_close_snapshot_defect(snapshot: BrokerAccountRiskSnapshot) -> str | None:
+    """Name why ``snapshot`` cannot be a session-close anchor S, or ``None``. Pure.
+
+    #3612 slice 2, Design 1. P is ``latest_completed_us_session(observed_at)``. S must be
+    observed on P's New York date, so after P's regular close and before New York midnight,
+    and every direct position must carry a finite mark and units, a reported finite
+    ``totalFees`` and a mark time inside ``[P's close, observed_at]``.
+    """
+    try:
+        _validate_snapshot(snapshot)
+    except AccountEquityEvidenceError as exc:
+        return f"snapshot refused: {exc}"
+    session = latest_completed_us_session(snapshot.observed_at)
+    if snapshot.observed_at.astimezone(_NEW_YORK).date() != session:
+        return f"observed_at {snapshot.observed_at.isoformat()} is not on session {session} after its close"
+    close_at = _session_close_utc(session)
+    for position in snapshot.direct_positions:
+        if not (position.unrealized_pnl.is_finite() and position.units.is_finite()):
+            return f"position {position.position_id} has a non-finite mark or units"
+        if position.total_fees is None or not position.total_fees.is_finite():
+            return f"position {position.position_id} has no finite totalFees"
+        if position.pnl_timestamp is None or not close_at <= position.pnl_timestamp <= snapshot.observed_at:
+            return f"position {position.position_id} mark time {position.pnl_timestamp} outside [{close_at}, receipt]"
+    return None
+
+
+def record_session_close_snapshot(
+    conn: psycopg.Connection[Any],
+    *,
+    environment: Literal["demo", "real"],
+    snapshot: BrokerAccountRiskSnapshot,
+) -> bool:
+    """Store ``snapshot`` as its session's close anchor S if it qualifies and none exists (#3612).
+
+    Insert-once: the first qualifying snapshot of a session is S and is never replaced, so
+    the marked daily figure always measures from one fixed set of broker marks. The children
+    are written only when the parent insert took, so a second qualifying snapshot of the
+    same evening writes nothing. Returns whether S was written.
+    """
+    defect = session_close_snapshot_defect(snapshot)
+    if defect is not None:
+        logger.info("Session-close anchor not written: %s", defect)
+        return False
+    account_currency_id = snapshot.account_currency_id
+    assert account_currency_id is not None  # _validate_snapshot refused a missing id
+    session = latest_completed_us_session(snapshot.observed_at)
+    direct = summarise_direct_positions(snapshot.instrument_investments)
+    row = conn.execute(
+        """
+        INSERT INTO broker_account_session_close_snapshots (
+            environment,session_date,observed_at,account_currency_id,currency,
+            official_direct_long_positions,official_direct_short_positions
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (environment,session_date) DO NOTHING
+        RETURNING session_date
+        """,
+        (
+            environment,
+            session,
+            snapshot.observed_at.astimezone(UTC),
+            account_currency_id,
+            DOCUMENTED_ACCOUNT_CURRENCIES.get(account_currency_id),
+            direct.long_positions,
+            direct.short_positions,
+        ),
+    ).fetchone()
+    if row is None:
+        return False
+    if snapshot.direct_positions:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO broker_account_session_close_marks (
+                    environment,session_date,position_id,instrument_id,is_buy,
+                    units,amount,unrealized_pnl,market_value,is_partially_altered,
+                    close_rate,close_conversion_rate,asset_currency_id,pnl_timestamp,total_fees
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                [
+                    (
+                        environment,
+                        session,
+                        position.position_id,
+                        position.instrument_id,
+                        position.is_buy,
+                        position.units,
+                        position.amount,
+                        position.unrealized_pnl,
+                        position.market_value,
+                        position.is_partially_altered,
+                        position.close_rate,
+                        position.close_conversion_rate,
+                        position.asset_currency_id,
+                        position.pnl_timestamp,
+                        position.total_fees,
+                    )
+                    for position in snapshot.direct_positions
+                ],
+            )
+    return True
 
 
 def _decimal(value: Any) -> Decimal | None:
