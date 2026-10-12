@@ -415,10 +415,6 @@ def cross_source(arch: dict[str, list[Appearance]], typed: dict[str, list[str]])
 
 #: The SGML header file in the filing's folder.
 _HEADER_URL: Final = "https://www.sec.gov/Archives/edgar/data/{cik}/{bare}/{accession}.hdr.sgml"
-_SGML: Final = re.compile(r"<SEC-HEADER>(.*?)</SEC-HEADER>", re.S)
-_CIK: Final = re.compile(r"^[ \t]*<CIK>(.*)$", re.M)
-#: Header tags that must occur at most once.
-_SCALAR_TAGS: Final = ("ACCESSION-NUMBER", "ACCEPTANCE-DATETIME", "TYPE", "FILING-DATE", "DATE-OF-FILING-DATE-CHANGE")
 #: PDS markers of a non-ordinary submission: paper, private-to-public release, confirming copy of a paper filing.
 #: Each is its own field outcome, and any one makes the row ``items_unestablished``.
 MARKERS: Final = ("PAPER", "PRIVATE-TO-PUBLIC", "CONFIRMING-COPY")
@@ -427,121 +423,191 @@ MARKERS: Final = ("PAPER", "PRIVATE-TO-PUBLIC", "CONFIRMING-COPY")
 CORRECTION_TAGS: Final = ("CORRECTION", "DELETION", "TIMESTAMP")
 
 
-#: An opening tag anywhere, and one that starts its line after optional blanks (the layout the grammar accepts).
-_ANY_TAG: Final = re.compile(r"<([A-Z][A-Z0-9-]*)>")
-_LINE_TAG: Final = re.compile(r"^[ \t]*<([A-Z][A-Z0-9-]*)>", re.M)
-#: Every opening or closing tag name, any case.
-_ANY_NAME: Final = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)>")
-#: The only markup the grammar accepts: ``<NAME>`` or ``</NAME>``, upper case, nothing else between the brackets.
-_STRICT_TAG: Final = re.compile(r"<(/?)([A-Z][A-Z0-9-]*)>")
-#: PDS DTD registrant roles (pp. 77-78): each takes ``regist-data``, which holds no role, so a role nests only in the
-#: envelope.
-ROLES: Final = frozenset(
-    {"FILER", "FILED-BY", "SERIAL-COMPANY", "SUBJECT-COMPANY", "REPORTING-OWNER", "ISSUER", "FILED-FOR"}
+#: A header line: an opening tag with its value, or a closing tag. The name is anything between the brackets, so a
+#: name with a space or in lower case reaches the grammar and fails there as ``unknown_element``.
+_LINE: Final = re.compile(r"<(/?)([^<>]*)>(.*)")
+#: The ``.hdr.sgml`` envelope's opening line (EDGAR Archives; not a PDS element): ``<accession>.hdr.sgml : <date>``.
+_ENVELOPE_VALUE: Final = re.compile(r"\d{10}-\d{2}-\d{6}\.hdr\.sgml : \d{8}")
+ENVELOPE: Final = "SEC-HEADER"
+#: The extensions the ``.hdr.sgml`` file adds to the PDS submission header: the envelope (:data:`ENVELOPE`) and
+#: ``<ACCEPTANCE-DATETIME>``. Neither is a PDS element; each occurs exactly once in every cached header.
+EXTENSIONS: Final = (ENVELOPE, "ACCEPTANCE-DATETIME")
+#: PDS EMPTY elements (DTD, p. 76): their line carries no value.
+EMPTY: Final = frozenset({"CORRECTION", "PAPER", "PRIVATE-TO-PUBLIC", "DELETION", "CONFIRMING-COPY"})
+_ADDRESS: Final = (
+    "ADDRESS-IS-A-NON-US-LOCATION",
+    "STREET1",
+    "STREET2",
+    "CITY",
+    "NON-US-STATE-TERRITORY",
+    "STATE",
+    "PROVINCE-COUNTRY",
+    "ZIP",
 )
-#: Elements whose end tag the PDS DTD requires (``- -``, pp. 77-80), plus the ``.hdr.sgml`` envelope.
-CONTAINERS: Final = ROLES | {
-    "SEC-HEADER",
-    "COMPANY-DATA",
-    "OWNER-DATA",
-    "FILING-VALUES",
-    "BUSINESS-ADDRESS",
-    "MAIL-ADDRESS",
-    "FORMER-COMPANY",
-    "FORMER-NAME",
-    "ACQUIRING-DATA",
-    "CLASS-CONTRACT",
-    "DOCUMENT",
-    "EXISTING-SERIES-AND-CLASSES-CONTRACTS",
-    "MERGER",
-    "NEW-CLASSES-CONTRACTS",
-    "NEW-SERIES",
-    "NEW-SERIES-AND-CLASSES-CONTRACTS",
-    "SERIES",
-    "SERIES-AND-CLASSES-CONTRACTS-DATA",
-    "SUBMISSION",
-    "TABLE",
-    "TARGET-DATA",
-    "TEXT",
+_REGISTRANT: Final = (
+    "CONFORMED-NAME",
+    "CIK",
+    "ASSIGNED-SIC",
+    "ORGANIZATION-NAME",
+    "RELATIONSHIP",
+    "IRS-NUMBER",
+    "STATE-OF-INCORPORATION",
+    "FISCAL-YEAR-END",
+    "LEGAL-ENTITY-IDENTIFIER",
+)
+_FORMER: Final = ("FORMER-CONFORMED-NAME", "DATE-CHANGED")
+#: The closed header grammar: each container's permitted children, as ``name: (is_container, repeatable)``. A child
+#: not repeatable occurs at most once per parent instance. Transcribed from the PDS submission-header and FILER tag
+#: tables (§3.2.2, pp. 14-17) and the DTD's submission front matter (p. 76), plus :data:`EXTENSIONS`. Only the FILER
+#: role is admitted: every cached 8-K header carries only FILER, and any other role, element or placement is
+#: ``malformed``. Required elements are not enforced here; the fields read have their own outcomes, and identity is
+#: enforced by :func:`header_structure` (one company or owner data per role, one CIK in it).
+GRAMMAR: Final[dict[str, dict[str, tuple[bool, bool]]]] = {
+    ENVELOPE: {
+        **{
+            name: (False, False)
+            for name in (
+                "CORRECTION",
+                "TIMESTAMP",
+                "PAPER",
+                "PRIVATE-TO-PUBLIC",
+                "ACCESSION-NUMBER",
+                "DELETION",
+                "TYPE",
+                "CATEGORY",
+                "CONFIRMING-COPY",
+                "PUBLIC-DOCUMENT-COUNT",
+                "CALENDAR-YEAR-ENDING",
+                "REFERENCE-462B",
+                "PERIOD",
+                "DEPOSITOR-CIK",
+                "SPONSOR-CIK",
+                "MA-I_INDIVIDUAL",
+                "FILING-DATE",
+                "DATE-OF-FILING-DATE-CHANGE",
+                "ACTION-DATE",
+                "RECEIVED-DATE",
+                "EFFECTIVENESS-DATE",
+                "RESOURCE-EXT-ISSUER",
+                "ABS-RULE",
+                "PERIOD-START",
+                "NO-INITIAL-PERIOD-ACTIVITY",
+                "NO-ANNUAL-ACTIVITY",
+                "NO-QUARTERLY-ACTIVITY",
+                "REGISTERED-ENTITY",
+                "ABS-ASSET-CLASS",
+                "ISSUING-ENTITY-NAME",
+                "SECURITIZER-FILE-NUMBER",
+                "IS-FILER-A-NEW-REGISTRANT",
+                "IS-FILER-A-WELL-KNOWN-SEASONED-ISSUER",
+                "FILED-PURSUANT-TO-GENERAL-INSTRUCTION-A2",
+                "IS-FUND-24F2-ELIGIBLE",
+                "ACCEPTANCE-DATETIME",
+            )
+        },
+        **{name: (False, True) for name in ("REFERENCES-429", "ITEMS", "GROUP-MEMBERS")},
+        "FILER": (True, True),
+    },
+    "FILER": {
+        "DELETION": (False, False),
+        "COMPANY-DATA": (True, False),
+        "OWNER-DATA": (True, False),
+        "FILING-VALUES": (True, False),
+        "BUSINESS-ADDRESS": (True, False),
+        "MAIL-ADDRESS": (True, False),
+        "FORMER-COMPANY": (True, True),
+        "FORMER-NAME": (True, True),
+    },
+    "COMPANY-DATA": {name: (False, False) for name in _REGISTRANT},
+    "OWNER-DATA": {name: (False, False) for name in _REGISTRANT},
+    "FILING-VALUES": {name: (False, False) for name in ("DELETION", "FORM-TYPE", "ACT", "FILE-NUMBER", "FILM-NUMBER")},
+    "BUSINESS-ADDRESS": {name: (False, False) for name in (*_ADDRESS, "PHONE")},
+    "MAIL-ADDRESS": {name: (False, False) for name in _ADDRESS},
+    "FORMER-COMPANY": {name: (False, False) for name in _FORMER},
+    "FORMER-NAME": {name: (False, False) for name in _FORMER},
 }
-_FILER_CIK_PATHS: Final = (("SEC-HEADER", "FILER", "COMPANY-DATA"), ("SEC-HEADER", "FILER", "OWNER-DATA"))
+#: The grammar's sha256 over its sorted JSON, recorded with every output so a change to it is a new version.
+GRAMMAR_SHA256: Final = hashlib.sha256(
+    json.dumps({k: sorted(v.items()) for k, v in sorted(GRAMMAR.items())}).encode()
+).hexdigest()
 
 
-def header_structure(text: str) -> tuple[str | None, list[str]]:
-    """The first structural defect (``None`` if none) and the filer CIKs, read by walking the token stream.
+def header_structure(text: str) -> tuple[str | None, dict[str, list[str]]]:
+    """The first defect (``"<cause>@<line>"``, ``None`` if none) and every leaf value by path, under :data:`GRAMMAR`.
 
-    Every ``<`` must open a strict tag; containers must nest and close; a role opens only directly in the envelope;
-    a leaf has no end tag. Filer CIKs are the ``<CIK>`` values under a filer's company or owner data."""
-    tokens = list(_STRICT_TAG.finditer(text))
-    if text.count("<") != len(tokens):
-        return "unsupported_markup", []
-    stack: list[str] = []
-    filers: set[str] = set()
-    for token in tokens:
-        close, name = token.groups()
-        if name not in CONTAINERS:
-            if close:
-                return "end_tag_of_leaf", []
-            if name == "CIK" and tuple(stack) in _FILER_CIK_PATHS:
-                end = text.find("\n", token.end())
-                filers.add(text[token.end() : end if end >= 0 else None].strip())
-        elif close:
-            if not stack or stack[-1] != name:
-                return "unbalanced", []
+    Every non-blank line is exactly one of ``<LEAF>value``, ``<CONTAINER>`` or ``</CONTAINER>``; the first line opens
+    the envelope and the last non-blank line closes it. A value is the rest of its line and holds no ``<``; an EMPTY
+    element has none. Each role holds exactly one company or owner data, which holds exactly one CIK."""
+    lines = [(n, line) for n, line in enumerate(text.split("\n"), 1) if line.strip()]
+    values: dict[str, list[str]] = defaultdict(list)
+    stack: list[tuple[str, Counter[str]]] = []
+    for position, (n, line) in enumerate(lines):
+        match = _LINE.fullmatch(line.rstrip("\r"))
+        close, name, value = match.groups() if match else ("", "", "")
+        value = value.strip()
+        if position == 0 and (match is None or close or name != ENVELOPE or not _ENVELOPE_VALUE.fullmatch(value)):
+            return f"envelope@{n}", values
+        if match is None:
+            return f"non_tag_line@{n}", values
+        if position == 0:
+            stack.append((ENVELOPE, Counter()))
+            continue
+        if not stack:
+            return f"outside_envelope@{n}", values
+        parent, seen = stack[-1]
+        if close:
+            if name != parent or value:
+                return f"unbalanced@{n}", values
+            if name in ("COMPANY-DATA", "OWNER-DATA") and seen["CIK"] != 1:
+                return f"cik_count@{n}", values
+            if name == "FILER" and seen["COMPANY-DATA"] + seen["OWNER-DATA"] != 1:
+                return f"registrant_data_count@{n}", values
             stack.pop()
-        elif name == "SEC-HEADER" and stack:
-            return "nested_envelope", []
-        elif name in ROLES and stack != ["SEC-HEADER"]:
-            return "role_nesting", []
+            continue
+        rule = GRAMMAR[parent].get(name)
+        if rule is None:
+            return f"{'unknown_element' if all(name not in c for c in GRAMMAR.values()) else 'misplaced'}@{n}", values
+        is_container, repeatable = rule
+        seen[name] += 1
+        if seen[name] > 1 and not repeatable:
+            return f"repeated@{n}", values
+        if "<" in value or (value and (is_container or name in EMPTY)):
+            return f"value_not_permitted@{n}", values
+        path = "/".join([*(s for s, _ in stack), name])
+        if is_container:
+            stack.append((name, Counter()))
         else:
-            stack.append(name)
-    return ("unclosed" if stack else None), sorted(filers)
+            values[path].append(value)
+    return (f"unclosed@{lines[-1][0] if lines else 0}" if stack else None), values
 
 
 def parse_header(text: str) -> dict[str, Any]:
-    """The SGML header's acceptance (Eastern wall clock), type, filing date, filing-date change, items, filer CIKs.
-
-    Tags are counted wherever they occur in the retrieved body, inside the header block or not; a value is read only
-    from a tag that starts its line (after blanks). The parse is ``malformed`` (fail closed, never a hidden tag) on:
-    ``misplaced_tags``, opening tags that do not start their line; ``envelope_ok`` false, anything but exactly one
-    ``<SEC-HEADER>`` followed by exactly one ``</SEC-HEADER>``; ``outside_tags``, opening tags outside that envelope;
-    ``noncanonical_tags``, tag names not in upper case (SGML names are case-insensitive under the PDS declaration, so
-    a lower-case tag would otherwise escape every upper-case match)."""
-    found = _SGML.search(text)
-    body = found.group(1) if found else text
-    opens, closes = text.count("<SEC-HEADER>"), text.count("</SEC-HEADER>")
-    envelope_ok = opens == 1 and closes == 1 and text.index("<SEC-HEADER>") < text.index("</SEC-HEADER>")
-    outside = text[: found.start()] + text[found.end() :] if found else text
-    defect, filer_ciks = header_structure(text)
+    """The SGML header's acceptance (Eastern wall clock), type, filing date, filing-date change, items, filer CIKs,
+    each read only at its grammar path (:func:`header_structure`); ``structure_defect`` is ``None`` only for a header
+    the grammar accepts in full. Markers and correction evidence are detected anywhere in the body."""
+    defect, values = header_structure(text)
 
     def one(tag: str) -> str | None:
-        match = re.search(rf"^[ \t]*<{tag}>(.*)$", body, re.M)
-        return match.group(1).strip() if match else None
+        found = values.get(f"{ENVELOPE}/{tag}", [])
+        return found[0] if found else None
 
-    def anywhere(tag: str) -> int:
-        return len(re.findall(rf"<{tag}>", text))
+    def anywhere(tag: str) -> bool:
+        return f"<{tag}>" in text
 
     return {
-        "header_blocks": len(_SGML.findall(text)),
-        "misplaced_tags": len(_ANY_TAG.findall(text)) - len(_LINE_TAG.findall(text)),
-        "envelope_ok": envelope_ok,
         "structure_defect": defect,
-        "outside_tags": len(_ANY_TAG.findall(outside)) if envelope_ok else None,
-        "noncanonical_tags": sum(1 for name in _ANY_NAME.findall(text) if name != name.upper()),
-        "markers_in_block": sorted(t for t in MARKERS if f"<{t}>" in body) if found else [],
-        # Every opening tag name anywhere in the raw body, for the tag-presence census.
-        "raw_tags": sorted(set(_ANY_TAG.findall(text))),
-        "repeated_tags": sorted(t for t in _SCALAR_TAGS if anywhere(t) > 1),
-        "accession_numbers": [m.strip() for m in re.findall(r"^[ \t]*<ACCESSION-NUMBER>(.*)$", body, re.M)],
+        "raw_tags": sorted(set(re.findall(r"<([A-Z][A-Z0-9-]*)>", text))),
+        "accession_numbers": values.get(f"{ENVELOPE}/ACCESSION-NUMBER", []),
         "markers": sorted(t for t in MARKERS if anywhere(t)),
         "correction_tags": sorted(t for t in CORRECTION_TAGS if anywhere(t)),
         "acceptance_et": one("ACCEPTANCE-DATETIME"),
         "type": one("TYPE"),
         "filing_date": one("FILING-DATE"),
         "filing_date_change": one("DATE-OF-FILING-DATE-CHANGE"),
-        "items": sorted(m.strip() for m in re.findall(r"^[ \t]*<ITEMS>(.*)$", body, re.M)),
-        "filer_ciks": filer_ciks,
-        "other_ciks": sorted({m.strip() for m in _CIK.findall(re.sub(r"<FILER>.*?</FILER>", "", body, flags=re.S))}),
+        "items": sorted(values.get(f"{ENVELOPE}/ITEMS", [])),
+        "filer_ciks": sorted(
+            {cik for role in ("COMPANY-DATA", "OWNER-DATA") for cik in values.get(f"{ENVELOPE}/FILER/{role}/CIK", [])}
+        ),
     }
 
 
@@ -623,15 +689,7 @@ def field_outcomes(header: dict[str, Any] | None, accession: str, cik: str) -> d
     numbers, items = header["accession_numbers"], header["items"]
     out = {
         "retrieval": "ok",
-        "parse": "ok"
-        if header["header_blocks"] == 1
-        and header["envelope_ok"]
-        and header["structure_defect"] is None
-        and header["outside_tags"] == 0
-        and not header["noncanonical_tags"]
-        and not header["repeated_tags"]
-        and not header["misplaced_tags"]
-        else "malformed",
+        "parse": "ok" if header["structure_defect"] is None else "malformed",
         "accession": "ok" if numbers == [accession] else "no_accession" if not numbers else "accession_mismatch",
         **{
             m.lower().replace("-", "_"): m.lower().replace("-", "_") if m in header["markers"] else "ok"
@@ -682,9 +740,7 @@ def correction_category(header: dict[str, Any]) -> str:
 
 def compare_header(apps: list[Appearance], header: dict[str, Any]) -> list[str]:
     """Where the archive and the header disagree, and header states the producer treats as uncertain, as tags."""
-    tags: list[str] = ["repeated_tag"] if header["repeated_tags"] else []
-    if header["header_blocks"] != 1:
-        tags.append("malformed")
+    tags: list[str] = [] if header["structure_defect"] is None else ["malformed"]
     if any(not valid(x[3]) or list(x[3]) != header["items"] for x in apps):
         tags.append("items")
     if not header["items"]:
@@ -804,12 +860,7 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
         for cik in r["classes"]:
             outcome_rows.update(f"{field}={value}" for field, value in r["field_outcomes"][cik].items())
     marker_presence = Counter(m for r in rows for m in r["markers"])
-    marker_in_block = Counter(m for r in rows for m in r["markers_in_block"])
-    structure = Counter(
-        f"{k}={r[k]}"
-        for r in rows
-        for k in ("envelope_ok", "structure_defect", "outside_tags", "noncanonical_tags", "misplaced_tags")
-    )
+    structure = Counter(str(r["structure_defect"]).split("@")[0] for r in rows)
     for kind, accession, _ in failures:
         n_rows = len({x[0] for x in arch[accession] if x[0] in ours})
         class_rows[f"{kind}_rows"] += n_rows
@@ -827,13 +878,12 @@ def headers(arch: dict[str, list[Appearance]], ours: set[str], negatives: int, c
             "same_day_dated_accepted_after_1730": same_late,
             "correction_field": dict(sorted(corrections.items())),
             "raw_tag_presence": dict(sorted(presence.items())),
-            "header_block_counts": dict(Counter(str(r["header_blocks"]) for r in rows)),
             "class_rows": dict(sorted(class_rows.items())),
             "class_accessions": dict(sorted(class_accessions.items())),
             "field_outcome_rows": dict(sorted(outcome_rows.items())),
             "marker_presence": dict(sorted(marker_presence.items())),
-            "marker_presence_in_header_block": dict(sorted(marker_in_block.items())),
-            "structure": dict(sorted(structure.items())),
+            "structure_defect": dict(sorted(structure.items())),
+            "grammar_sha256": GRAMMAR_SHA256,
             "archive_item_count_by_disagreement": dict(sorted(lengths.items(), key=lambda kv: kv[0])),
             "tags": {k: dict(sorted(v.items())) for k, v in tags.items()},
             "filing_minus_acceptance_days": dict(sorted(lag.items(), key=lambda kv: int(kv[0]))),
