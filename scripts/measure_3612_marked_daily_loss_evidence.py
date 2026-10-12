@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from app.config import settings
+from app.services import ai_trial_policy, ranking_pot_policy
 from app.services.market_calendar import us_market_status
 
 _NY = ZoneInfo("America/New_York")
@@ -246,14 +247,16 @@ WHERE s.environment = 'demo' AND s.snapshot_date BETWEEN %s AND %s AND extract(i
 """
 
 _HISTORY_SQL = """
-SELECT 'event', e.event_kind, e.executed_at, e.units, e.realized_pnl_usd, e.instrument_id
-FROM trade_events e WHERE e.position_id = %(p)s
+SELECT 'event', e.event_kind || ' investment_usd ' || e.investment_usd, e.executed_at, e.units, e.realized_pnl_usd,
+       e.instrument_id
+FROM trade_events e WHERE e.position_id = %(p)s AND e.executed_at < %(cutoff)s
 UNION ALL
 SELECT 'ownership', o.broker_position_id::text, o.claimed_at, NULL, NULL, NULL
-FROM strategy_position_ownership o WHERE o.broker_position_id = %(p)s
+FROM strategy_position_ownership o WHERE o.broker_position_id = %(p)s AND o.claimed_at < %(cutoff)s
 UNION ALL
 SELECT 'mark', m.snapshot_date::text, NULL, m.units, NULL, m.instrument_id
-FROM broker_account_position_marks m WHERE m.environment = 'demo' AND m.position_id = %(p)s
+FROM broker_account_position_marks m
+WHERE m.environment = 'demo' AND m.position_id = %(p)s AND m.snapshot_date <= %(until)s
 ORDER BY 3 NULLS LAST
 """
 
@@ -287,16 +290,24 @@ WHERE m.environment = 'demo' AND m.snapshot_date BETWEEN %s AND %s
 """
 
 _FEES_SPLIT_SQL = """
-SELECT format('marks: first date with total_fees present %s, NULL total_fees on or after it %s',
+SELECT format('marks: first date with total_fees present %%s, NULL total_fees on or after it %%s',
               min(snapshot_date) FILTER (WHERE total_fees IS NOT NULL),
               count(*) FILTER (WHERE total_fees IS NULL AND snapshot_date >= (
                   SELECT min(snapshot_date) FROM broker_account_position_marks
-                   WHERE environment = 'demo' AND total_fees IS NOT NULL)))
-FROM broker_account_position_marks WHERE environment = 'demo'
+                   WHERE environment = 'demo' AND total_fees IS NOT NULL AND snapshot_date <= %(until)s)))
+FROM broker_account_position_marks WHERE environment = 'demo' AND snapshot_date <= %(until)s
 UNION ALL
-SELECT format('trade_events %s: %s rows, fees_usd NULL %s, zero %s', event_kind, count(*),
+SELECT format('trade_events %%s: %%s rows, fees_usd NULL %%s, zero %%s', event_kind, count(*),
               count(*) FILTER (WHERE fees_usd IS NULL), count(*) FILTER (WHERE fees_usd = 0))
-FROM trade_events GROUP BY event_kind
+FROM trade_events WHERE executed_at < %(cutoff)s GROUP BY event_kind
+"""
+
+_ENGINE_CLOSE_DAYS_SQL = """
+SELECT count(*), count(DISTINCT (e.executed_at AT TIME ZONE 'America/New_York')::date),
+       string_agg(DISTINCT ((e.executed_at AT TIME ZONE 'America/New_York')::date)::text, ',')
+FROM trade_events e
+WHERE e.event_kind = 'close' AND e.executed_at >= %s AND e.executed_at < %s
+  AND EXISTS (SELECT 1 FROM strategy_position_ownership o WHERE o.broker_position_id = e.position_id)
 """
 
 _EVENTS_AUDIT_SQL = """
@@ -307,12 +318,15 @@ SELECT count(*),
        count(*) FILTER (WHERE fees_usd = 0), count(*) FILTER (WHERE fees_usd <> 0),
        count(*) FILTER (WHERE fees_usd IS NULL),
        count(*) FILTER (WHERE event_kind = 'close'),
-       count(*) FILTER (WHERE event_kind = 'close' AND realized_pnl_usd IS NULL)
-FROM trade_events
+       count(*) FILTER (WHERE event_kind = 'close' AND realized_pnl_usd IS NULL),
+       count(*) FILTER (WHERE units IS NULL OR price IS NULL OR investment_usd IS NULL
+                        OR investment_usd IN ('NaN', 'Infinity', '-Infinity'))
+FROM trade_events WHERE executed_at < %(cutoff)s
 """
 
 
 def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failing: list[int]) -> None:
+    cutoff = datetime.combine(until + timedelta(days=1), time.min, tzinfo=UTC)
     print(
         f"[5] latest pool event (risk_profile, max_daily_loss_pct, capital_limit): {conn.execute(_POOL_SQL).fetchone()}"
     )
@@ -321,9 +335,8 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
         print(f"    weekday snapshots after 16:00 New York: earliest {r[0]}, latest {r[1]}; first stored mark {r[2]}")
     for position_id in failing:
         print(f"    history of position {position_id} (kind, detail, at, units, realised, instrument):")
-        for row in conn.execute(_HISTORY_SQL, {"p": position_id}):
+        for row in conn.execute(_HISTORY_SQL, {"p": position_id, "cutoff": cutoff, "until": until}):
             print(f"      {row}")
-    cutoff = datetime.combine(until + timedelta(days=1), time.min, tzinfo=UTC)
     rows = conn.execute(_IDENTITY_SQL, (since, until, cutoff, cutoff)).fetchall()
     worst = max((abs(row[7]) for row in rows), default=None)
     print(f"    closes of positions in the preceding snapshot: {len(rows)}; max |residual| {worst}")
@@ -339,14 +352,29 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
         print(f"    total_fees zero {age[4]} / non-zero {age[5]} / NULL {age[6]}")
         print(f"    asset currency USD {age[7]} / other {age[8]} / NULL {age[9]}")
         print(f"    is_buy true {age[10]} / false {age[11]} / NULL {age[12]}")
-    fees = conn.execute(_FEES_SPLIT_SQL).fetchall()
+    fees = conn.execute(_FEES_SPLIT_SQL, {"until": until, "cutoff": cutoff}).fetchall()
     for row in fees:
         print(f"    {row[0]}")
-    ev = conn.execute(_EVENTS_AUDIT_SQL).fetchone()
+    ev = conn.execute(_EVENTS_AUDIT_SQL, {"cutoff": cutoff}).fetchone()
     if ev is not None:
         print(
             f"    trade_events {ev[0]}: non-finite units/price/fees/realised {ev[1]}; fees_usd zero {ev[2]}"
-            f" / non-zero {ev[3]} / NULL {ev[4]}; closes {ev[5]} with NULL realised {ev[6]}"
+            f" / non-zero {ev[3]} / NULL {ev[4]}; closes {ev[5]} with NULL realised {ev[6]};"
+            f" NULL units/price/investment or non-finite investment {ev[7]}"
+        )
+    print(f"    (lifetime queries in this section are bounded by executed_at / claimed_at < {cutoff:%Y-%m-%d %H:%M}Z)")
+    engine_closes = conn.execute(_ENGINE_CLOSE_DAYS_SQL, (since, cutoff)).fetchone()
+    if engine_closes is not None:
+        print(
+            f"    engine-owned closes in range: {engine_closes[0]} on {engine_closes[1]} New York dates"
+            f" ({engine_closes[2]})"
+        )
+    for module in (ai_trial_policy, ranking_pot_policy):
+        names = sorted(str(m) for m in module.POLICY_MODULES)
+        hits = [n for n in names if "engine_pot_risk" in n or "strategy_paper_executor" in n]
+        print(
+            f"    {module.__name__}.POLICY_MODULES: {len(names)} modules;"
+            f" engine_pot_risk or executor among them: {hits}"
         )
 
 
