@@ -12476,3 +12476,14 @@ neighbouring container and match it.**
   never span the error (here: no shared session between the two dates). If one exists, state the error as a limit.
 - Enforced in: `docs/research/2026-10-09-3739-stage-c-panel.md` §"Source rules" (split effective date) and
   §"Known limits" (constructed (b)(1) dates).
+
+### A writer's pure qualification gate covers every CHECK its table enforces (#3612)
+
+- Failure (bot review, PR #3773): `session_close_snapshot_defect` checked finiteness of units, mark and fees, but
+  sql/482 also refuses non-positive units and rates, non-finite amount or market value, and a broken
+  `market_value = amount + unrealized_pnl` identity. Such a snapshot passed the gate and raised at INSERT, logged at
+  ERROR instead of the specified named INFO refusal.
+- Prevention: when a writer has a pure gate in front of an insert, list the migration's CHECKs and give each a
+  matching gate branch with a test row.
+- Enforced in: `app/services/account_equity_evidence.py::session_close_snapshot_defect` and
+  `tests/test_3612_session_close_anchor.py::test_a_position_without_a_usable_mark_time_fees_or_values_refuses_the_whole_snapshot`.

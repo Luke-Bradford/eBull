@@ -5630,7 +5630,7 @@ def daily_portfolio_sync() -> None:
     if credentials are missing.
     """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
-    from app.services.account_equity_evidence import record_account_equity_snapshot
+    from app.services.account_equity_evidence import record_account_equity_snapshot, record_session_close_snapshot
 
     creds = _load_etoro_credentials(JOB_DAILY_PORTFOLIO_SYNC)
     if creds is None:
@@ -5676,6 +5676,16 @@ def daily_portfolio_sync() -> None:
                     logger.warning(
                         "Portfolio sync: official account-equity evidence could not be stored; "
                         "portfolio sync will continue",
+                        exc_info=True,
+                    )
+                try:
+                    # #3612 slice 2: the session-close anchor S of the marked daily-loss
+                    # check, in its own savepoint. Insert-once; a missing S refuses entries.
+                    with conn.transaction():
+                        record_session_close_snapshot(conn, environment="demo", snapshot=account_snapshot)
+                except Exception:
+                    logger.error(
+                        "Portfolio sync: session-close anchor could not be stored; portfolio sync will continue",
                         exc_info=True,
                     )
 
