@@ -21,6 +21,7 @@ const LATEST: EngineBookRiskLatest = {
   pool_event_id: 7,
   capital_usd: "40000.000000",
   gross_usd: "16078.026146",
+  net_usd: "16078.026146",
   position_count: 4,
   instrument_count: 1,
   open_trade_count: 4,
@@ -56,12 +57,14 @@ const LATEST: EngineBookRiskLatest = {
       position_id: 3603268128,
       instrument_id: 3417,
       symbol: "SPY.RTH",
+      side: "long",
       units: "0.16227400",
       mark: "763.680000",
       mark_date: "2026-10-01",
       market_value_usd: "123.92540832",
       weight_of_capital_pct: "0.30981352",
       beta: "0.96118875",
+      beta_assumed: null,
       beta_n_obs: 235,
     },
   ],
@@ -122,6 +125,39 @@ describe("EngineBookRiskPanel", () => {
     render(<EngineBookRiskPanel />);
     expect(await screen.findByText("Partly checked")).toBeInTheDocument();
     expect(screen.getByText("no limit set")).toBeInTheDocument();
+  });
+
+  it("shows a short's side, signed weight and net, and says a rally is not stress-tested", async () => {
+    const short = {
+      ...LATEST,
+      gross_usd: "1123.925408",
+      net_usd: "-876.074592",
+      beta_defaulted_count: 1,
+      beta_defaulted_weight_pct: "2.50000000",
+      positions: [
+        ...LATEST.positions,
+        {
+          ...LATEST.positions[0]!,
+          position_id: 3603268129,
+          instrument_id: 9999,
+          symbol: "XYZ",
+          side: "short" as const,
+          market_value_usd: "-1000.00000000",
+          weight_of_capital_pct: "-2.50000000",
+          beta: "defaulted",
+          beta_assumed: "0",
+        },
+      ],
+    };
+    mockRisk({ policy_version: "engine-book-risk-v3", job: JOB, latest: short, recent: [] });
+    render(<EngineBookRiskPanel />);
+    expect(await screen.findByText(/net -US\$876\.07/)).toBeInTheDocument();
+    expect(screen.getByText(/a rally or squeeze is not stress-tested/)).toBeInTheDocument();
+    expect(screen.getByText(/assumed beta 1 if net long, 0 if net short/)).toBeInTheDocument();
+    const row = within(screen.getByRole("list", { name: "Positions measured" })).getByText(/XYZ/).closest("li")!;
+    expect(row).toHaveTextContent("short");
+    expect(row).toHaveTextContent("-2.50% of capital");
+    expect(row).toHaveTextContent("beta 0 (assumed)");
   });
 
   it("shows a retry on a failed fetch", async () => {

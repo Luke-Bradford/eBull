@@ -40,8 +40,9 @@ from app.services.strategy_capital_sandbox import sandbox_bound
 from app.services.strategy_control_plane import EFFECTIVE_MAX_CONCURRENT_SQL
 from app.services.strategy_engine_capital import load_engine_capital_authority
 
-# v2 (#3612) added STRESS_2008; v1 rows carry no 2008 figure (sql/481).
-ENGINE_BOOK_RISK_POLICY: Final = "engine-book-risk-v2"
+# v2 (#3612) added STRESS_2008; v1 rows carry no 2008 figure (sql/481). v3 (#3612) measures x1 shorts with
+# signed weights instead of refusing them, and stores net_usd (sql/483); spec section "v3: signed weights".
+ENGINE_BOOK_RISK_POLICY: Final = "engine-book-risk-v3"
 WINDOW_RETURNS: Final = TRADING_DAYS
 MIN_OBS: Final = MIN_RETURNS_VOL_BETA
 EWMA_LAMBDA: Final = Decimal("0.94")
@@ -76,6 +77,8 @@ class HeldPosition:
     units: Decimal
     initial_units: Decimal | None
     initial_amount_usd: Decimal
+    # ``broker_positions.is_buy`` (NOT NULL, sql/024); units are positive on both sides.
+    is_buy: bool
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,7 @@ class Snapshot:
     pool_event_id: int
     capital_usd: Decimal
     gross_usd: Decimal
+    net_usd: Decimal
     position_count: int
     instrument_count: int
     open_trade_count: int
@@ -185,32 +189,38 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
     session = inputs.session
     calendar = list(inputs.calendar)
 
-    # Marks: last valid close on or before the session; cost basis (remaining) when none.
+    # Marks: last valid close on or before the session; cost basis (remaining) when none. MV is signed
+    # (negative for a short); an instrument carries its net MV (weights, returns, stress) and its gross
+    # exposure, the sum of its lots' |MV| (gross, concentration), so offsetting lots do not vanish from gross.
     rows: list[dict[str, Any]] = []
     mv_by_instrument: dict[int, Decimal] = {}
+    gross_by_instrument: dict[int, Decimal] = {}
     cost_marked = stale = 0
     for p in inputs.positions:
+        sign = _ONE if p.is_buy else -_ONE
         bars = inputs.closes.get(p.instrument_id, {})
         mark_date = max((d for d, c in bars.items() if d <= session and _valid(c)), default=None)
         if mark_date is None:
             mark: Decimal | None = None
             if p.initial_units is not None and p.initial_units > 0:
-                mv = p.initial_amount_usd * p.units / p.initial_units
+                mv = sign * p.initial_amount_usd * p.units / p.initial_units
             else:
-                mv = p.initial_amount_usd
+                mv = sign * p.initial_amount_usd
             cost_marked += 1
             stale += 1
         else:
             mark = bars[mark_date]
             assert mark is not None
-            mv = p.units * mark
+            mv = sign * p.units * mark
             stale += mark_date < session
         mv_by_instrument[p.instrument_id] = mv_by_instrument.get(p.instrument_id, _ZERO) + mv
+        gross_by_instrument[p.instrument_id] = gross_by_instrument.get(p.instrument_id, _ZERO) + abs(mv)
         rows.append(
             {
                 "trade_id": p.trade_id,
                 "position_id": p.position_id,
                 "instrument_id": p.instrument_id,
+                "side": "long" if p.is_buy else "short",
                 "units": str(p.units),
                 "mark": None if mark is None else str(mark),
                 "mark_date": "cost" if mark_date is None else mark_date.isoformat(),
@@ -219,11 +229,14 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
             }
         )
 
-    gross = sum(mv_by_instrument.values(), _ZERO)
+    gross = sum(gross_by_instrument.values(), _ZERO)
+    net = sum(mv_by_instrument.values(), _ZERO)
     weights = {i: mv / inputs.capital for i, mv in mv_by_instrument.items()}
     spy_returns = session_returns(inputs.spy_closes, calendar)
 
-    # Per-instrument beta (stress); beta = 1 when undefined, counted with its exposure.
+    # Per-instrument beta (stress). Undefined beta is assumed 1 for a net-long instrument and 0 for a net-short
+    # one, so a short with no measured beta earns no hedge gain in a market-fall scenario; it is counted with
+    # its gross exposure either way.
     betas: dict[int, Decimal] = {}
     beta_obs: dict[int, int] = {}
     inst_returns: dict[int, dict[date, Decimal]] = {}
@@ -235,13 +248,20 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
         if result.beta is not None and result.n_obs >= MIN_OBS:
             betas[i] = result.beta
     defaulted = [i for i in mv_by_instrument if i not in betas]
+    assumed = {i: _ZERO if mv_by_instrument[i] < 0 else _ONE for i in defaulted}
     for row in rows:
         i = row["instrument_id"]
         row["beta"] = str(_q(betas[i])) if i in betas else "defaulted"
+        row["beta_assumed"] = str(assumed[i]) if i in assumed else None
         row["beta_n_obs"] = beta_obs[i]
 
+    # The floor is on the instrument's return (a price cannot go below zero): it bounds a short's gain at
+    # |w|, never its loss.
     def stress(shock: Decimal) -> Decimal:
-        return sum((w * max(-_ONE, betas.get(i, _ONE) * shock) for i, w in weights.items()), _ZERO) * _HUNDRED
+        return (
+            sum((w * max(-_ONE, betas.get(i, assumed.get(i, _ONE)) * shock) for i, w in weights.items()), _ZERO)
+            * _HUNDRED
+        )
 
     hist_vol = ewma = beta = None
     vol_n = beta_n = 0
@@ -251,8 +271,10 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
         status = "empty_book"
         hist_vol = ewma = beta = _ZERO
     else:
-        dates = [d for d, _ in spy_returns if all(d in inst_returns[i] for i in weights)]
-        book = [(d, sum((w * inst_returns[i][d] for i, w in weights.items()), _ZERO)) for d in dates]
+        # An instrument netting to zero adds nothing to the book return and needs no history.
+        exposed = [i for i, w in weights.items() if w != 0]
+        dates = [d for d, _ in spy_returns if all(d in inst_returns[i] for i in exposed)]
+        book = [(d, sum((weights[i] * inst_returns[i][d] for i in exposed), _ZERO)) for d in dates]
         vol_n = len(book)
         if book:
             first, last = book[0][0], book[-1][0]
@@ -267,7 +289,7 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
             beta = fit.beta
             status = "ok" if beta is not None else "degenerate"
 
-    shares = sorted((mv / gross * _HUNDRED for mv in mv_by_instrument.values()), reverse=True) if gross > 0 else []
+    shares = sorted((g / gross * _HUNDRED for g in gross_by_instrument.values()), reverse=True) if gross > 0 else []
     stress_2008 = stress(STRESS_2008)
     stress_2020 = stress(STRESS_2020)
     stress_2022 = stress(STRESS_2022)
@@ -296,6 +318,7 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
         pool_event_id=inputs.pool_event_id,
         capital_usd=inputs.capital,
         gross_usd=_q(gross),
+        net_usd=_q(net),
         position_count=len(inputs.positions),
         instrument_count=len(mv_by_instrument),
         open_trade_count=inputs.open_trade_count,
@@ -313,7 +336,9 @@ def compute_snapshot(inputs: BookInputs) -> Snapshot:
         sample_last=last,
         history_status=status,
         beta_defaulted_count=len(defaulted),
-        beta_defaulted_weight_pct=_q(sum((weights[i] for i in defaulted), _ZERO) * _HUNDRED),
+        beta_defaulted_weight_pct=_q(
+            sum((gross_by_instrument[i] for i in defaulted), _ZERO) / inputs.capital * _HUNDRED
+        ),
         stress_2008_pct=_q(stress_2008),
         stress_2020_pct=_q(stress_2020),
         stress_2022_pct=_q(stress_2022),
@@ -388,7 +413,9 @@ def load_inputs(conn: psycopg.Connection[Any], measured_at: datetime) -> BookInp
                     raise EngineBookRiskRefusal(
                         "book_shape_unsupported", f"held position {position_id} has no broker row"
                     )
-                if int(r[1]) != instrument_id or not r[5] or r[6] != 1 or r[7] != "USD":
+                # Leverage stays refused: no leverage until validated, and a leveraged position's
+                # initial amount is margin, not exposure, so its cost fallback would be wrong.
+                if int(r[1]) != instrument_id or r[6] != 1 or r[7] != "USD":
                     raise EngineBookRiskRefusal(
                         "book_shape_unsupported",
                         f"position {position_id}: instrument {r[1]}, is_buy {r[5]}, leverage {r[6]}, currency {r[7]}",
@@ -401,6 +428,7 @@ def load_inputs(conn: psycopg.Connection[Any], measured_at: datetime) -> BookInp
                         units=Decimal(str(r[2])),
                         initial_units=None if r[3] is None else Decimal(str(r[3])),
                         initial_amount_usd=Decimal(str(r[4])),
+                        is_buy=bool(r[5]),
                     )
                 )
 
@@ -453,14 +481,14 @@ def write_snapshot(conn: psycopg.Connection[Any], snap: Snapshot) -> bool:
     inserted = conn.execute(
         """
         INSERT INTO engine_book_risk_snapshots (
-            session_date, policy_version, measured_at, pool_event_id, capital_usd, gross_usd,
+            session_date, policy_version, measured_at, pool_event_id, capital_usd, gross_usd, net_usd,
             position_count, instrument_count, open_trade_count, cost_marked_count, stale_count,
             largest_share_pct, top5_share_pct, hhi, hist_vol_pct, ewma_vol_pct, beta,
             vol_n_obs, beta_n_obs, sample_first, sample_last, history_status,
             beta_defaulted_count, beta_defaulted_weight_pct, stress_2008_pct, stress_2020_pct, stress_2022_pct,
             checks, positions
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                  %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                  %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
         ON CONFLICT (session_date, policy_version) DO NOTHING
         RETURNING 1
         """,
@@ -471,6 +499,7 @@ def write_snapshot(conn: psycopg.Connection[Any], snap: Snapshot) -> bool:
             snap.pool_event_id,
             snap.capital_usd,
             snap.gross_usd,
+            snap.net_usd,
             snap.position_count,
             snap.instrument_count,
             snap.open_trade_count,

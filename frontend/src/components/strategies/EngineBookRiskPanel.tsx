@@ -79,12 +79,14 @@ function Figures({ snap }: { snap: EngineBookRiskLatest }) {
   const capital = number(snap.capital_usd);
   const gross = number(snap.gross_usd);
   const invested = capital && gross !== null ? pctPointsUnsigned(String((gross / capital) * 100)) : "—";
+  const holdsShorts = snap.positions.some((p) => p.side === "short");
   return (
     <dl className="mt-3 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm tabular-nums">
       <dt className="text-slate-500">Invested</dt>
       <dd>
         {money(snap.gross_usd)} of {money(snap.capital_usd)} ({invested}) · {snap.instrument_count} instruments,{" "}
         {snap.position_count} positions
+        {holdsShorts ? ` · net ${money(snap.net_usd)}` : ""}
       </dd>
       <dt className="text-slate-500">Volatility</dt>
       <dd>
@@ -105,8 +107,13 @@ function Figures({ snap }: { snap: EngineBookRiskLatest }) {
       <dd>
         2008 crisis {pctPoints(snap.stress_2008_pct)} · 2020 crash {pctPoints(snap.stress_2020_pct)} · 2022 bear {pctPoints(snap.stress_2022_pct)}
         {snap.beta_defaulted_count > 0
-          ? ` · ${snap.beta_defaulted_count} instrument(s), ${pctPointsUnsigned(snap.beta_defaulted_weight_pct)} of capital, assumed beta 1`
+          ? ` · ${snap.beta_defaulted_count} instrument(s), ${pctPointsUnsigned(snap.beta_defaulted_weight_pct)} of capital, ${holdsShorts ? "assumed beta 1 if net long, 0 if net short" : "assumed beta 1"}`
           : ""}
+        {holdsShorts ? (
+          <span className="block text-slate-500">
+            Every scenario is a market fall: the book holds shorts, and a rally or squeeze is not stress-tested.
+          </span>
+        ) : null}
       </dd>
     </dl>
   );
@@ -120,11 +127,15 @@ function Positions({ snap }: { snap: EngineBookRiskLatest }) {
       <ul className="mt-1 divide-y divide-slate-200 dark:divide-slate-800" aria-label="Positions measured">
         {snap.positions.map((p) => (
           <li key={p.position_id} className="flex flex-wrap justify-between gap-2 py-1 tabular-nums">
-            <span className="font-medium">{p.symbol ?? `#${p.instrument_id}`}</span>
+            <span className="font-medium">
+              {p.symbol ?? `#${p.instrument_id}`}
+              {p.side === "short" ? " · short" : ""}
+            </span>
             <span className="text-slate-700 dark:text-slate-200">
-              {money(p.market_value_usd)} · {pctPointsUnsigned(p.weight_of_capital_pct)} of capital · mark{" "}
-              {p.mark_date === "cost" ? "cost basis (no close)" : formatDate(p.mark_date)} · beta{" "}
-              {p.beta === "defaulted" ? "1 (assumed)" : (number(p.beta)?.toFixed(2) ?? "—")}
+              {money(p.market_value_usd)} ·{" "}
+              {p.side === "short" ? pctPoints(p.weight_of_capital_pct) : pctPointsUnsigned(p.weight_of_capital_pct)} of
+              capital · mark {p.mark_date === "cost" ? "cost basis (no close)" : formatDate(p.mark_date)} · beta{" "}
+              {p.beta === "defaulted" ? `${p.beta_assumed ?? "1"} (assumed)` : (number(p.beta)?.toFixed(2) ?? "—")}
             </span>
           </li>
         ))}
