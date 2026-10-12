@@ -17,8 +17,11 @@ position marks, #3068) to ``--until`` (default: yesterday, New York):
 4. **Unit conservation over consecutive snapshots.** Population: positions in either endpoint's marks,
    positions with a ``trade_events`` row in ``(o1, o2]``, engine ownership rows claimed in ``(o1, o2]``, and
    every engine ownership row claimed by ``o2`` (``owned_by_o2``, a superset of the gate's population E).
-   Checks ``units(d1) + open units - close units = units(d2)`` (0 where absent), and that every close has
-   ``realized_pnl_usd``. Reported per population group.
+   Each position's window runs from its mark time at d1 to its mark time at d2 (``pnl_timestamp``, else the
+   snapshot's ``observed_at`` where the position is absent), as the gate cuts it. Checks
+   ``units(d1) + open units - close units = units(d2)`` and ``amount(d1) + open investment_usd - close
+   investment_usd = amount(d2)`` (0 where absent), and that every close has ``realized_pnl_usd`` and zero
+   ``fees_usd``. Reports events falling between a mark time and its snapshot's receipt time.
 5. **Point claims.** The live pool limits; R times of day; the first stored mark date; the full event and
    ownership history of every position failing section 4; the closes of positions present in the preceding
    snapshot, with ``realised - U_S * closed/held - (price - close_rate) * closed * conversion``; and the
@@ -44,6 +47,11 @@ _NY = ZoneInfo("America/New_York")
 
 _FIRST_RUN_SQL = """
 SELECT min(started_at) FROM job_runs
+WHERE job_name = 'daily_portfolio_sync' AND status = 'success' AND started_at >= %s AND started_at < %s
+"""
+
+_RUN_COUNT_SQL = """
+SELECT count(*) FROM job_runs
 WHERE job_name = 'daily_portfolio_sync' AND status = 'success' AND started_at >= %s AND started_at < %s
 """
 
@@ -78,20 +86,29 @@ WITH pop AS (
     SELECT broker_position_id, 'owned_by_o2' FROM strategy_position_ownership WHERE claimed_at <= %(o2)s
 )
 SELECT p.position_id, array_agg(DISTINCT p.grp ORDER BY p.grp),
-       COALESCE((SELECT units FROM broker_account_position_marks
-                  WHERE environment = 'demo' AND snapshot_date = %(d1)s AND position_id = p.position_id), 0),
-       COALESCE((SELECT units FROM broker_account_position_marks
-                  WHERE environment = 'demo' AND snapshot_date = %(d2)s AND position_id = p.position_id), 0),
+       COALESCE(a.units, 0), COALESCE(b.units, 0),
        COALESCE((SELECT sum(CASE e.event_kind WHEN 'open' THEN e.units ELSE -e.units END)
                    FROM trade_events e
-                  WHERE e.position_id = p.position_id AND e.executed_at > %(o1)s AND e.executed_at <= %(o2)s
-                    AND e.event_kind IN ('open', 'close')), 0),
+                  WHERE e.position_id = p.position_id AND e.executed_at > w.t1 AND e.executed_at <= w.t2), 0),
        (SELECT count(*) FROM trade_events e
-         WHERE e.position_id = p.position_id AND e.executed_at > %(o1)s AND e.executed_at <= %(o2)s
-           AND e.event_kind = 'close' AND e.realized_pnl_usd IS NULL)
+         WHERE e.position_id = p.position_id AND e.executed_at > w.t1 AND e.executed_at <= w.t2
+           AND e.event_kind = 'close' AND (e.realized_pnl_usd IS NULL OR e.fees_usd IS DISTINCT FROM 0)),
+       COALESCE(a.amount, 0), COALESCE(b.amount, 0),
+       COALESCE((SELECT sum(CASE e.event_kind WHEN 'open' THEN e.investment_usd ELSE -e.investment_usd END)
+                   FROM trade_events e
+                  WHERE e.position_id = p.position_id AND e.executed_at > w.t1 AND e.executed_at <= w.t2), 0),
+       (SELECT count(*) FROM trade_events e
+         WHERE e.position_id = p.position_id
+           AND ((e.executed_at > w.t1 AND e.executed_at <= %(o1)s)
+                OR (e.executed_at > w.t2 AND e.executed_at <= %(o2)s)))
 FROM pop p
+LEFT JOIN broker_account_position_marks a
+  ON a.environment = 'demo' AND a.snapshot_date = %(d1)s AND a.position_id = p.position_id
+LEFT JOIN broker_account_position_marks b
+  ON b.environment = 'demo' AND b.snapshot_date = %(d2)s AND b.position_id = p.position_id
+CROSS JOIN LATERAL (SELECT COALESCE(a.pnl_timestamp, %(o1)s) AS t1, COALESCE(b.pnl_timestamp, %(o2)s) AS t2) w
 WHERE p.position_id IS NOT NULL
-GROUP BY p.position_id
+GROUP BY p.position_id, a.units, b.units, a.amount, b.amount, w.t1, w.t2
 """
 
 
@@ -109,10 +126,13 @@ def _sessions(since: date, until: date) -> list[date]:
 
 def close_capture_lag(conn: psycopg.Connection[Any], since: date, until: date) -> None:
     lags: list[tuple[float, date]] = []
+    runs: list[int] = []
     missing: list[date] = []
     for day in _sessions(since, until):
         end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=_NY)
         row = conn.execute(_FIRST_RUN_SQL, (_regular_close(day), end)).fetchone()
+        count = conn.execute(_RUN_COUNT_SQL, (_regular_close(day), end)).fetchone()
+        runs.append(int(count[0]) if count else 0)
         if row is None or row[0] is None:
             missing.append(day)
         else:
@@ -124,6 +144,9 @@ def close_capture_lag(conn: psycopg.Connection[Any], since: date, until: date) -
             f"    job-start lag minutes: min {lags[0][0]:.1f}, median {lags[len(lags) // 2][0]:.1f}, "
             f"max {lags[-1][0]:.1f} ({lags[-1][1]}); over 15 min: {sum(1 for lag, _ in lags if lag > 15)}"
         )
+    if runs:
+        ordered = sorted(runs)
+        print(f"    successful runs per session after the close: min {ordered[0]}, median {ordered[len(ordered) // 2]}")
     for day in missing:
         print(f"    no run after the close on {day}")
 
@@ -178,21 +201,32 @@ def unit_conservation(conn: psycopg.Connection[Any], since: date, until: date) -
     by_group: Counter[str] = Counter()
     broken: list[str] = []
     failing: list[int] = []
+    amount_broken: list[str] = []
+    straddling = 0
     pairs = 0
     for (d1, o1, _a, _b), (d2, o2, _c, _d) in zip(snaps, snaps[1:], strict=False):
         pairs += 1
         params = {"d1": d1, "d2": d2, "o1": o1, "o2": o2}
-        for position_id, groups, u1, u2, net, missing_pnl in conn.execute(_CONSERVATION_SQL, params):
+        for position_id, groups, u1, u2, net, bad_close, a1, a2, inv, straddle in conn.execute(
+            _CONSERVATION_SQL, params
+        ):
             key = "+".join(groups)
             by_group[key] += 1
-            if u1 + net != u2 or missing_pnl:
+            straddling += int(straddle)
+            if u1 + net != u2 or bad_close:
                 failing.append(int(position_id))
                 broken.append(
-                    f"{d1}->{d2} position {position_id} ({key}): {u1} + {net} vs {u2}, null pnl {missing_pnl}"
+                    f"{d1}->{d2} position {position_id} ({key}): units {u1} + {net} vs {u2}, bad close {bad_close}"
                 )
+            if a1 + inv != a2:
+                amount_broken.append(f"{d1}->{d2} position {position_id} ({key}): amount {a1} + {inv} vs {a2}")
     print(f"[4] snapshot pairs {pairs}; position-pairs by population group: {dict(sorted(by_group.items()))}")
-    print(f"    failing conservation or with a NULL-P&L close: {len(broken)}")
+    print(f"    events between a position's mark time and its snapshot's receipt time: {straddling}")
+    print(f"    failing unit conservation, or with a close lacking realised or zero fees: {len(broken)}")
     for line in broken:
+        print(f"    {line}")
+    print(f"    failing cost-basis conservation (amount + open - close investment_usd): {len(amount_broken)}")
+    for line in amount_broken:
         print(f"    {line}")
     return failing
 
@@ -228,7 +262,7 @@ WITH s AS (
     SELECT snapshot_date AS d, observed_at AS o, lead(observed_at) OVER (ORDER BY snapshot_date) AS o2
     FROM broker_account_equity_snapshots WHERE environment = 'demo' AND snapshot_date BETWEEN %s AND %s
 )
-SELECT e.position_id, s.o, LEAST(s.o2, %s), e.executed_at, e.fees_usd, m.asset_currency_id,
+SELECT e.position_id, s.o, LEAST(s.o2, %s), e.executed_at, e.fees_usd, m.asset_currency_id, m.total_fees,
        e.realized_pnl_usd - m.unrealized_pnl * e.units / m.units
          - (e.price - m.close_rate) * e.units * m.close_conversion_rate AS residual
 FROM s
@@ -291,12 +325,13 @@ def point_claims(conn: psycopg.Connection[Any], since: date, until: date, failin
             print(f"      {row}")
     cutoff = datetime.combine(until + timedelta(days=1), time.min, tzinfo=UTC)
     rows = conn.execute(_IDENTITY_SQL, (since, until, cutoff, cutoff)).fetchall()
-    worst = max((abs(row[6]) for row in rows), default=None)
+    worst = max((abs(row[7]) for row in rows), default=None)
     print(f"    closes of positions in the preceding snapshot: {len(rows)}; max |residual| {worst}")
     for row in rows:
         print(
             f"      position {row[0]} in ({row[1]:%Y-%m-%d %H:%M}Z, {row[2]:%Y-%m-%d %H:%M}Z]"
-            f" at {row[3]:%Y-%m-%d %H:%M}Z: fees {row[4]}, asset currency {row[5]}, residual {row[6]:.4f}"
+            f" at {row[3]:%Y-%m-%d %H:%M}Z: fees {row[4]}, asset currency {row[5]}, anchor total_fees {row[6]},"
+            f" residual {row[7]:.4f}"
         )
     age = conn.execute(_PNL_AGE_SQL, (since, until)).fetchone()
     if age is not None:
