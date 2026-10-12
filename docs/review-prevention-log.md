@@ -12497,3 +12497,16 @@ neighbouring container and match it.**
   None-safe helper or is preceded by a check that refuses by name.
 - Enforced in: `app/services/engine_pot_risk.py::_anchor_mark` and
   `tests/test_3612_marked_daily_loss.py::test_a_null_anchor_value_refuses_instead_of_raising`.
+
+### Scheduling an attended-only path re-opens every docstring that reasoned from "attended only" (#3612)
+
+- Failure (#3612 trace, 2026-10-12): `core_exit_levels` (#3284, 2026-09-21) recorded "no re-entry rule, so a stop
+  leaves the sleeve in cash indefinitely" as an accepted cost. Three days later #3359 scheduled
+  `core_rebalance_execution` daily, which rebuys a stopped-out core toward the lower band edge below the pot drawdown
+  limit. The docstring stayed, and the risk committee read it as a possible whipsaw defect.
+- Prevention: when a PR puts an attended-only executor on a schedule, grep its callees' docstrings for "attended",
+  "manual", "no re-entry" and similar claims about who triggers it, and correct them in the same PR.
+- Enforced in: review only for the sweep itself. The corrected instance is `app/services/core_exit_levels.py`
+  ("What happens after the stop fires"), with its behaviour pinned by
+  `tests/test_2603_core_allocator.py::test_a_stopped_out_core_is_rebought_to_the_lower_band_edge` and its cited
+  tests resolved by `test_every_test_the_core_exit_levels_docstring_cites_exists`.
