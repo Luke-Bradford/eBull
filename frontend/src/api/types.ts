@@ -3920,14 +3920,20 @@ export interface EngineBookRiskPosition {
   position_id: number;
   instrument_id: number;
   symbol: string | null;
+  /** `broker_positions.is_buy`; a short is an x1 CFD (engine-book-risk-v3). */
+  side: "long" | "short";
   units: string;
   mark: string | null;
   /** ISO date of the close used, or `"cost"` when no close exists. */
   mark_date: string;
+  /** Signed: negative for a short. */
   market_value_usd: string;
+  /** Signed: negative for a short. */
   weight_of_capital_pct: string;
-  /** Instrument beta to SPY, or `"defaulted"` (β = 1 used for stress). */
+  /** Instrument beta to SPY, or `"defaulted"` (stress uses `beta_assumed`). */
   beta: string;
+  /** β used for stress when `beta` is `"defaulted"`: "1" for a net-long instrument, "0" for net-short; else null. */
+  beta_assumed: string | null;
   beta_n_obs: number;
 }
 
@@ -3936,7 +3942,10 @@ export interface EngineBookRiskLatest {
   measured_at: string;
   pool_event_id: number;
   capital_usd: string;
+  /** Sum of every position's |market value|. */
   gross_usd: string;
+  /** Signed sum of position market values; below gross when the book holds shorts. */
+  net_usd: string;
   position_count: number;
   instrument_count: number;
   open_trade_count: number;

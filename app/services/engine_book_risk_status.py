@@ -52,6 +52,8 @@ class LatestSnapshot:
     pool_event_id: int
     capital_usd: Decimal
     gross_usd: Decimal
+    #: Signed sum of position MVs; negative for a net-short book (v3, sql/483).
+    net_usd: Decimal
     position_count: int
     instrument_count: int
     open_trade_count: int
@@ -89,7 +91,7 @@ class EngineBookRiskStatus:
 _LATEST_FIELDS: Final = tuple(f.name for f in fields(LatestSnapshot))
 
 _ROWS_SQL: Final = """
-    SELECT session_date, measured_at, pool_event_id, capital_usd, gross_usd, position_count, instrument_count,
+    SELECT session_date, measured_at, pool_event_id, capital_usd, gross_usd, net_usd, position_count, instrument_count,
            open_trade_count, cost_marked_count, stale_count, largest_share_pct, top5_share_pct, hhi,
            hist_vol_pct, ewma_vol_pct, beta, vol_n_obs, beta_n_obs, sample_first, sample_last, history_status,
            beta_defaulted_count, beta_defaulted_weight_pct, stress_2008_pct, stress_2020_pct, stress_2022_pct, checks,

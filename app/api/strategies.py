@@ -3911,6 +3911,7 @@ class EngineBookRiskLatestResponse(BaseModel):
     pool_event_id: int
     capital_usd: Decimal
     gross_usd: Decimal
+    net_usd: Decimal
     position_count: int
     instrument_count: int
     open_trade_count: int
