@@ -1,0 +1,97 @@
+{
+  "measured_on": "2026-10-13",
+  "series": "XUDLUSS",
+  "requested": [
+    "1975-01-01",
+    "2026-10-13"
+  ],
+  "sha256": "6e87fd5c6b17a81130716ddc935f3977f9e839a7a7a04a3fbca01dfc77b73f82",
+  "bytes": 259464,
+  "observations": 13089,
+  "first": "1975-01-02",
+  "last": "2026-10-12",
+  "decimal_places": {
+    "0": 1,
+    "1": 17,
+    "2": 177,
+    "3": 1920,
+    "4": 10974
+  },
+  "observed_weekdays": {
+    "Fri": 2624,
+    "Mon": 2446,
+    "Thu": 2678,
+    "Tue": 2662,
+    "Wed": 2679
+  },
+  "gap_days_histogram": {
+    "1": 10348,
+    "2": 24,
+    "3": 2443,
+    "4": 179,
+    "5": 94
+  },
+  "widest_gap_days": 5,
+  "widest_gaps_latest_3": [
+    [
+      "2025-04-17",
+      "2025-04-22"
+    ],
+    [
+      "2025-12-24",
+      "2025-12-29"
+    ],
+    [
+      "2026-04-02",
+      "2026-04-07"
+    ]
+  ],
+  "largest_moves_pct": [
+    [
+      8.29,
+      "2016-06-23",
+      "2016-06-24"
+    ],
+    [
+      4.64,
+      "1985-09-20",
+      "1985-09-23"
+    ],
+    [
+      4.53,
+      "1985-03-20",
+      "1985-03-21"
+    ]
+  ],
+  "largest_move_pct_since_2019": [
+    3.32,
+    "2022-09-22",
+    "2022-09-23"
+  ],
+  "calendar_sha256": "538b3482c28b85ecd2db606a0d5ae6ad17248900b6498700ce0a48d26a3ecde6",
+  "calendar_cross_check": {
+    "calendar_years": [
+      2019,
+      2028
+    ],
+    "holidays_per_year": {
+      "2019": 8,
+      "2020": 8,
+      "2021": 8,
+      "2022": 10,
+      "2023": 9,
+      "2024": 8,
+      "2025": 8,
+      "2026": 8,
+      "2027": 8,
+      "2028": 8
+    },
+    "checked_interval": [
+      "2019-01-01",
+      "2026-10-12"
+    ],
+    "weekday_holidays_in_interval": 65,
+    "working_days_without_observation": [],
+    "observations_on_non_working_days": []
+  }
+}
