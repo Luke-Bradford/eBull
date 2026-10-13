@@ -12622,4 +12622,3 @@ neighbouring container and match it.**
   exception writes an error row and then re-raises, and a body the column cannot hold is kept as its hash and length.
 - Enforced in: `tests/test_tax_broker_evidence_db.py::test_an_unexpected_exception_is_recorded_then_raised` and
   `::test_a_nul_body_is_kept_as_its_hash`.
-
