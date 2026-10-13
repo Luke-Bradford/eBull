@@ -17,8 +17,8 @@ The summary printed to stdout carries counts and order-level shapes only.
 ``--checks`` reads the saved bodies (no network) and prints, per order, the checks the slice 3c spec freezes: unit
 conservation (execution units = closed units + units held in ``broker_positions``), the consideration corroboration
 ``|units x openRate x openConversion - consideration| / consideration``, the proceeds corroboration
-``|units x closeRate - (investment + netProfit)| / proceeds`` for USD-priced close pieces, and ``frozenAmount`` against
-consideration + charges (which the spec rejects as a reconciliation).
+``|units x closeRate - (investment + netProfit)| / proceeds`` for USD-priced close pieces, and per-indicator counts of
+observed and non-zero charge values.
 
 Run (dev, demo credentials, one GET per order at <= 1 per 1.5 s, inside the documented 60/60 s quota)::
 
@@ -206,6 +206,22 @@ def checks() -> None:
         totals["history_social_parent_zero"] += sum(
             1 for p in history if int(p["socialTradeId"]) == 0 and int(p["parentPositionId"]) == 0
         )
+        totals["sync_rows"] += len(sync)
+        totals["sync_mirror_parent_zero"] += sum(
+            1 for p in sync if int(p["mirrorID"]) == 0 and int(p["parentPositionID"]) == 0
+        )
+        for p in sync:
+            for key in ("totalExternalFees", "totalExternalTaxes"):
+                totals[f"sync {key} observed"] += 1
+                totals[f"sync {key} non-zero"] += _d(p[key]) != 0
+        for pid in {e[1] for e in events}:
+            for label, source in (
+                ("held total_fees", {k: v[2] for k, v in held.items()}),
+                ("archived total_fees", archived_fees),
+            ):
+                if pid in source:
+                    totals[f"{label} observed"] += 1
+                    totals[f"{label} non-zero"] += _d(source[pid]) != 0
         out.append(f"sync_settlement={sorted({p['settlementTypeID'] for p in sync})}")
         charges: dict[str, Decimal] = {}
         if sync:
@@ -233,6 +249,12 @@ def checks() -> None:
             charges["lookup_totalCosts"] = _d(body["totalCosts"])
             charges["lookup_fees"] = sum((_d(o["fees"]) for o in parsed), Decimal(0))
             charges["lookup_taxes"] = sum((_d(o["taxes"]) for o in parsed), Decimal(0))
+            totals["lookup totalCosts observed"] += 1
+            totals["lookup totalCosts non-zero"] += _d(body["totalCosts"]) != 0
+            for x in body["positionExecutions"]:
+                for key in ("fees", "taxes"):
+                    totals[f"lookup execution {key} observed"] += 1
+                    totals[f"lookup execution {key} non-zero"] += _d(x["openingData"][key]) != 0
             if len(parsed) == 1:
                 units = _d(parsed[0]["units"])
                 rate, conversion = _d(parsed[0]["avgPrice"]), _d(parsed[0]["avgConversionRate"])
