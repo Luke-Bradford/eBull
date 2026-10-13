@@ -536,6 +536,20 @@ def test_fetch_failures() -> None:
     assert slow.outcome == "incomplete" and "deadline" in (slow.error or "")
 
 
+def test_a_slow_header_phase_stops_before_the_first_read() -> None:
+    # Headers took 51 s: one more 10 s read could pass 60 s, so no body read is attempted.
+    clock = iter([0.0, 51.0])
+    fetch = fetch_capped(
+        _client(httpx.MockTransport(lambda r: _response(200, b"DATE,XUDLUSS\r\n"))),
+        source=tax_fx.SOURCE_BOE,
+        url="https://boe.test/x",
+        max_bytes=1024,
+        now=lambda: FETCHED_AT,
+        monotonic=lambda: next(clock),
+    )
+    assert (fetch.outcome, fetch.body) == ("incomplete", b"")
+
+
 def test_oversize_keeps_only_the_first_64_kib() -> None:
     body = b"y" * (tax_fx.OVERSIZE_KEEP_BYTES * 2)
     fetch = _fetch(_client(httpx.MockTransport(lambda r: _response(200, body))), max_bytes=100_000)

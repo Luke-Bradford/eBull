@@ -67,6 +67,8 @@ STALE_ALERT_LAG: Final = 4
 MAX_ABS_LN_MOVE: Final = Decimal("0.15")
 MAX_REVISIONS_PER_RUN: Final = 5
 FETCH_DEADLINE_SECONDS: Final = 60.0
+#: httpx applies its timeout per operation (connect, write, each read), never in total.
+FETCH_OPERATION_TIMEOUT_SECONDS: Final = 10.0
 #: A BoE row is at most 27 bytes; 32 per requested day plus the header line.
 BOE_BYTES_PER_DAY: Final = 32
 BOE_BYTES_BASE: Final = 64
@@ -163,14 +165,23 @@ def fetch_capped(
 ) -> Fetch:
     """One GET with no redirect followed, ``Accept-Encoding: identity`` and the raw entity bytes streamed under a limit.
 
-    The deadline is checked after the headers and after every chunk; a single stalled read is bounded by the client's
-    per-operation timeout, set to the same value, so the worst case is the deadline plus one read timeout.
+    End-to-end deadline: httpx bounds each operation, not the request, so every operation gets
+    ``FETCH_OPERATION_TIMEOUT_SECONDS`` and the fetch stops (``incomplete``) before any read that could carry it past
+    ``deadline_seconds``: after the headers and after every chunk, at least one operation timeout must remain.
+    Connect, write and the header read take at most three operation timeouts, inside the deadline.
     """
     fetched_at = now()
     started = monotonic()
     headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
+
+    def check_budget() -> None:
+        if monotonic() - started + FETCH_OPERATION_TIMEOUT_SECONDS > deadline_seconds:
+            raise httpx.ReadTimeout(f"the next read could pass the {deadline_seconds:g} s fetch deadline")
+
     try:
-        with client.stream("GET", url, headers=headers, follow_redirects=False, timeout=deadline_seconds) as response:
+        with client.stream(
+            "GET", url, headers=headers, follow_redirects=False, timeout=FETCH_OPERATION_TIMEOUT_SECONDS
+        ) as response:
             framing = {
                 "http_status": response.status_code,
                 "content_length_header": response.headers.get("content-length"),
@@ -178,6 +189,7 @@ def fetch_capped(
             }
             body = bytearray()
             try:
+                check_budget()
                 for chunk in response.iter_raw():
                     body += chunk
                     if len(body) > max_bytes:
@@ -190,8 +202,7 @@ def fetch_capped(
                             body=bytes(body[:OVERSIZE_KEEP_BYTES]),
                             **framing,
                         )
-                    if monotonic() - started > deadline_seconds:
-                        raise httpx.ReadTimeout(f"passed the {deadline_seconds:g} s fetch deadline")
+                    check_budget()
             except httpx.HTTPError as exc:
                 return Fetch(
                     source, url, fetched_at, "incomplete", f"{type(exc).__name__}: {exc}", body=bytes(body), **framing
