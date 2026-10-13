@@ -777,9 +777,11 @@ Rules:
   currency, stamped to the latest closed session (`MAX(price_daily.price_date)`,
   data-anchored — NOT wall-clock). Idempotent (`ON CONFLICT (snapshot_date)`).
 - Per-day FX lives in `fx_rates_daily` (USD-base ECB rows from Frankfurter
-  time-series), **distinct from the tax `fx_rates` table** (sql/013) — dropping
-  ECB rows into the tax table would silently change the safety-critical
-  USD tax-disposal path (`tax_ledger._load_fx_rate`). Mirrors the live
+  time-series), **distinct from the tax FX tables** (`tax_fx_*`, sql/484, read
+  through `app.services.tax_fx`) — dropping ECB rows into the tax path would
+  silently change the safety-critical USD tax-disposal path. (Until #3616
+  slice 3c the tax path was the sql/013 `fx_rates` table and
+  `tax_ledger._load_fx_rate`; sql/485 dropped both.) Mirrors the live
   `live_fx_rates` USD-base convention so `fx.convert` (direct+inverse only) has
   parity.
 - Own `db_eod_snapshot` JobLock lane (write-disjoint; #1527 starvation class).

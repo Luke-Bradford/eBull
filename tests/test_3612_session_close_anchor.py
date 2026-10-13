@@ -220,7 +220,7 @@ def test_an_anchor_write_failure_keeps_the_equity_snapshot_and_the_sync(
     monkeypatch.setattr(
         scheduler,
         "sync_portfolio",
-        lambda _conn, _portfolio, trade_history: SimpleNamespace(
+        lambda _conn, _portfolio, trade_history, environment, portfolio_fetched_at: SimpleNamespace(
             positions_updated=1,
             positions_opened_externally=0,
             positions_closed_externally=0,

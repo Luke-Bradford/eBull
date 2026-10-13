@@ -69,6 +69,7 @@ def _sync(conn: psycopg.Connection[Any], positions: list[BrokerPosition]) -> Non
         conn,
         BrokerPortfolio(positions=positions, available_cash=Decimal("0"), raw_payload={}),
         now=_NOW,
+        environment="demo",
     )
 
 
