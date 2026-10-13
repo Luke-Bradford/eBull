@@ -12,7 +12,8 @@ publication pattern of the series and its agreement with the England-and-Wales b
       --requested-to 2026-10-13 --calendar bank-holidays.json --out <file.json>
 
 The calendar measured for the spec is committed in ``docs/research/3616-slice3b-inputs/``. The XUDLUSS body is not
-(the Bank's exchange-rate data is not licensed for redistribution); its sha256 is in the output. The output carries
+(this project's conservative handling rule while the Bank's reuse terms for the series are unresolved); its sha256 is
+in the output. The output carries
 counts and dates only, never a rate.
 
 Neither source needs an account or key.

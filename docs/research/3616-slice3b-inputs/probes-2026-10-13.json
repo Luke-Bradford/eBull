@@ -71,31 +71,31 @@
       "bytes": 142,
       "gzip_bytes": 135,
       "sha256": "9ca2c4b67a62dd7db9b677c2bcf5265a283ff0d0a94e650686e37d070b1751d3",
-      "body": "<head><title>Object moved</title></head>\n<body><h1>Object Moved</h1>This object may be found <a HREF=\"ErrorPage.asp?ei=1131\">here</a>.</body>\n"
+      "body": null
     },
     "default_urllib_agent": {
       "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/2019&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
       "user_agent": "Python-urllib/3.14",
       "status": 403,
       "content_type": "text/html",
-      "content_length_header": "446",
+      "content_length_header": "448",
       "content_encoding": null,
-      "bytes": 446,
-      "gzip_bytes": 289,
-      "sha256": "19603d5ec18ba9e6c74fcac84506a6696b13df9a12229ea4faf0dfa4d1de7df4",
-      "body": "<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have permission to access \"http&#58;&#47;&#47;www&#46;bankofengland&#46;co&#46;uk&#47;boeapps&#47;database&#47;&#95;iadb&#45;fromshowcolumns&#46;asp&#63;\" on this server.<P>\nReference&#32;&#35;18&#46;dbb00f17&#46;1791898875&#46;44bde7e\n<P>https&#58;&#47;&#47;errors&#46;edgesuite&#46;net&#47;18&#46;dbb00f17&#46;1791898875&#46;44bde7e</P>\n</BODY>\n</HTML>\n"
+      "bytes": 448,
+      "gzip_bytes": 290,
+      "sha256": "bf6f8d2ef313887c57fc7f85bdc7e827f4e9eaca9b40eedc22cb57f68dedaa47",
+      "body": null
     },
     "default_httpx_agent": {
       "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/2019&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
       "user_agent": "python-httpx/0.28.1",
       "status": 403,
       "content_type": "text/html",
-      "content_length_header": "446",
+      "content_length_header": "448",
       "content_encoding": null,
-      "bytes": 446,
+      "bytes": 448,
       "gzip_bytes": 290,
-      "sha256": "e0c1b039f7c454604b7485ab94ee04c0655cd5d01d18dba47ebc7f2f594e4358",
-      "body": "<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have permission to access \"http&#58;&#47;&#47;www&#46;bankofengland&#46;co&#46;uk&#47;boeapps&#47;database&#47;&#95;iadb&#45;fromshowcolumns&#46;asp&#63;\" on this server.<P>\nReference&#32;&#35;18&#46;dbb00f17&#46;1791898875&#46;44bdf92\n<P>https&#58;&#47;&#47;errors&#46;edgesuite&#46;net&#47;18&#46;dbb00f17&#46;1791898875&#46;44bdf92</P>\n</BODY>\n</HTML>\n"
+      "sha256": "2cc2cab0bbc2517ded01a86430a541653cbc50d798de7dcbb54024c381a7ec73",
+      "body": null
     }
   }
 }

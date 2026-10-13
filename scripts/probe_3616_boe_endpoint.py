@@ -3,12 +3,13 @@
 
 Measurement only. Each probe is one GET with ``Accept-Encoding: identity`` and no redirect following, sent with the
 User-Agent the build will use (``USER_AGENT``), except the probes that show the default Python client strings are
-refused. The manifest records status, content type, ``Content-Length``,
-``Content-Encoding``, body length, gzipped length and sha256. Each exact body is saved under ``--bodies`` (keep that
-directory out of the repository: the Bank's exchange-rate data is not licensed for redistribution, spec "Source rule").
-A body is quoted in the manifest only when it is exactly the header line or an HTML page; every other body stays
-private. The two ``default_*_agent`` probes send those clients' User-Agent strings through urllib; they test the
+refused. The two ``default_*_agent`` probes send those clients' User-Agent strings through urllib; they test the
 strings, not the clients.
+
+The manifest records status, content type, ``Content-Length``, ``Content-Encoding``, body length, gzipped length and
+sha256. Each exact body is saved under ``--bodies``. Keep that directory out of the repository: that is this
+project's conservative handling rule while the Bank's reuse terms for the series are unresolved (spec "Source rule").
+A body is quoted in the manifest only when it is exactly the header line; every other body stays private.
 
     uv run python scripts/probe_3616_boe_endpoint.py --today 2026-10-13 --bodies var/research/3616/inputs \\
       --out <file.json>
@@ -56,7 +57,7 @@ def probe(name: str, target: str, user_agent: str, bodies: Path) -> dict[str, An
         status, headers, body = exc.code, exc.headers, exc.read()
     digest = hashlib.sha256(body).hexdigest()
     (bodies / f"{name}-{digest[:12]}.body").write_bytes(body)
-    rate_free = body == b"DATE,XUDLUSS\r\n" or body.lstrip().startswith(b"<")
+    rate_free = body == b"DATE,XUDLUSS\r\n"
     return {
         "url": target,
         "user_agent": user_agent,
