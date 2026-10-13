@@ -514,6 +514,13 @@ database. Precedent (2026-08-05, #2218): `_tracked_job` has three of these conne
 (start, failure, success); the first draft of `test_job_degraded_terminal.py` wrote
 four rows into dev `job_runs` before that was noticed.
 
+⚠ **A "runs without error" test still runs the writes.** `TestReaperIdempotent` called
+`reap_orphaned_syncs(reap_all=True)` only to assert it returned an int. Against an idle
+dev DB it changed nothing, so it passed for months. Against a live one it failed every
+running sync, including the nightly full sync, on every push from any worktree (#3785).
+The size tripwire cannot see it, because an UPDATE does not grow the database. If the
+function under test mutates state, redirect it or do not call it.
+
 ⚠ Then the guard catches the DOCSTRING. `tests/smoke/test_no_settings_url_in_destructive_paths.py`
 is a line-literal grep and does not know prose from code, so a comment *explaining*
 the trap trips it. Reword around the literal call spelling and say why, rather than

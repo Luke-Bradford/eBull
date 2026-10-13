@@ -61,6 +61,7 @@ class TaxSummaryResponse(BaseModel):
     disposals_same_day: int
     disposals_bed_and_breakfast: int
     disposals_s104: int
+    disposals_total: int
     annual_exempt_gbp: float
     exempt_remaining_gbp: float
     estimated_cgt_basic_scenario: float
@@ -135,6 +136,7 @@ def get_tax_summary(
         disposals_same_day=s.disposals_same_day,
         disposals_bed_and_breakfast=s.disposals_bed_and_breakfast,
         disposals_s104=s.disposals_s104,
+        disposals_total=s.disposals_total,
         annual_exempt_gbp=_f(s.annual_exempt_gbp),
         exempt_remaining_gbp=_f(s.exempt_remaining_gbp),
         estimated_cgt_basic_scenario=_f(s.estimated_cgt_basic_scenario),

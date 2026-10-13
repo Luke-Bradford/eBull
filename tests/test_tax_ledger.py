@@ -16,6 +16,7 @@ from app.services.tax_ledger import (
     _cgt_rates_for_disposal,
     _compute_tax_year,
     _match_disposals_for_instrument,
+    _split_exact,
     _to_uk_date,
     available_tax_years,
     current_tax_year,
@@ -732,6 +733,173 @@ class TestMixedDisposal:
 
 
 # ===========================================================================
+# TestStatutoryIdentification — TCGA 1992 ss104-106A, HMRC CG51560
+# ===========================================================================
+
+
+def _at(day: int, hour: int) -> datetime:
+    return datetime(2026, 9, day, hour, 0, 0, tzinfo=UTC)
+
+
+class TestStatutoryIdentification:
+    def test_same_day_acquisitions_are_one_transaction(self) -> None:
+        """s105(1)(a): two buys on one day are one acquisition at their average cost."""
+        b1 = _lot(tax_lot_id=1, event_time=_at(23, 8), quantity=_D("10"), amount_gbp=_D("100"))
+        b2 = _lot(tax_lot_id=2, event_time=_at(23, 9), quantity=_D("10"), amount_gbp=_D("300"))
+        sell = _lot(tax_lot_id=3, event_time=_at(23, 10), direction="disposal", quantity=_D("10"), amount_gbp=_D("250"))
+        matches, pool = _match_disposals_for_instrument([b1, b2], [sell])
+        assert {m.matching_rule for m in matches} == {"same_day"}
+        assert sum(m.acquisition_cost_gbp for m in matches) == _D("200")
+        assert sum(m.matched_units for m in matches) == _D("10")
+        assert (pool.units, pool.cost_gbp) == (_D("10"), _D("200"))
+
+    def test_a_days_own_disposal_takes_its_acquisition_before_an_earlier_30_day_claim(self) -> None:
+        """Same-day identification runs on every day before the 30-day rule: the day-5 buy belongs to the
+        day-5 sale, so the day-2 sale falls to the pool."""
+        old = _lot(tax_lot_id=1, event_time=_at(1, 8), quantity=_D("10"), amount_gbp=_D("100"))
+        new = _lot(tax_lot_id=2, event_time=_at(5, 8), quantity=_D("10"), amount_gbp=_D("150"))
+        sell_early = _lot(
+            tax_lot_id=3, event_time=_at(2, 9), direction="disposal", quantity=_D("10"), amount_gbp=_D("120")
+        )
+        sell_late = _lot(
+            tax_lot_id=4, event_time=_at(5, 10), direction="disposal", quantity=_D("10"), amount_gbp=_D("160")
+        )
+        matches, pool = _match_disposals_for_instrument([old, new], [sell_early, sell_late])
+        by_disposal = {m.disposal_lot.tax_lot_id: m for m in matches}
+        assert len(matches) == 2
+        assert (by_disposal[3].matching_rule, by_disposal[3].acquisition_cost_gbp) == ("s104_pool", _D("100"))
+        assert by_disposal[4].matching_rule == "same_day"
+        assert by_disposal[4].acquisition_lot is new
+        assert by_disposal[4].acquisition_cost_gbp == _D("150")
+        assert pool.units == _D("0")
+
+    def test_two_same_day_disposals_of_one_purchase_leave_no_pool(self) -> None:
+        """The measured IUSA.L shape (order 383293149): one buy of 0.646048, two same-day sales of 0.323024.
+        Every unit is identified same-day and nothing is left in the pool."""
+        buy = _lot(tax_lot_id=1, event_time=_at(23, 7), quantity=_D("0.646048"), amount_gbp=_D("37.00"))
+        s1 = _lot(
+            tax_lot_id=2, event_time=_at(23, 8), direction="disposal", quantity=_D("0.323024"), amount_gbp=_D("18.49")
+        )
+        s2 = _lot(
+            tax_lot_id=3, event_time=_at(23, 9), direction="disposal", quantity=_D("0.323024"), amount_gbp=_D("18.50")
+        )
+        matches, pool = _match_disposals_for_instrument([buy], [s1, s2])
+        assert {m.matching_rule for m in matches} == {"same_day"}
+        assert sum(m.matched_units for m in matches) == _D("0.646048")
+        assert sum(m.acquisition_cost_gbp for m in matches) == _D("37.00")
+        assert sum(m.disposal_proceeds_gbp for m in matches) == _D("36.99")
+        assert (pool.units, pool.cost_gbp) == (_D("0"), _D("0"))
+
+    def test_same_day_disposals_are_one_disposal_split_pro_rata(self) -> None:
+        """s105(1)(a): two sales on one day are one disposal. Its pool identification is allocated to the two lots
+        by units, and each lot keeps its own proceeds share of the day."""
+        buy = _lot(tax_lot_id=1, event_time=_at(1, 8), quantity=_D("40"), amount_gbp=_D("400"))
+        s1 = _lot(tax_lot_id=2, event_time=_at(9, 8), direction="disposal", quantity=_D("10"), amount_gbp=_D("90"))
+        s2 = _lot(tax_lot_id=3, event_time=_at(9, 9), direction="disposal", quantity=_D("30"), amount_gbp=_D("390"))
+        matches, pool = _match_disposals_for_instrument([buy], [s1, s2])
+        by_disposal = {m.disposal_lot.tax_lot_id: m for m in matches}
+        assert {m.matching_rule for m in matches} == {"s104_pool"}
+        assert (by_disposal[2].matched_units, by_disposal[2].acquisition_cost_gbp) == (_D("10"), _D("100"))
+        assert (by_disposal[3].matched_units, by_disposal[3].acquisition_cost_gbp) == (_D("30"), _D("300"))
+        # The day's proceeds (480 for 40 units) are averaged: 12 per unit.
+        assert by_disposal[2].disposal_proceeds_gbp == _D("120")
+        assert by_disposal[3].disposal_proceeds_gbp == _D("360")
+        assert pool.units == _D("0")
+
+    def test_rows_are_at_database_scale_and_still_conserve(self) -> None:
+        """Three same-day 1-unit buys at £1 against a 1-unit sale: each row is a third, which NUMERIC(18,6) cannot
+        hold. Every value is already at 6 dp, so the stored rows plus the pool still sum to 3 units and £3."""
+        buys = [_lot(tax_lot_id=i, event_time=_at(23, 8 + i), quantity=_D("1"), amount_gbp=_D("1")) for i in (1, 2, 3)]
+        sell = _lot(tax_lot_id=4, event_time=_at(23, 12), direction="disposal", quantity=_D("1"), amount_gbp=_D("2"))
+        matches, pool = _match_disposals_for_instrument(buys, [sell])
+        assert len(matches) == 3
+        for m in matches:
+            for value in (m.matched_units, m.acquisition_cost_gbp, m.disposal_proceeds_gbp, m.gain_or_loss_gbp):
+                assert value == value.quantize(_D("0.000001"))
+        assert sum(m.matched_units for m in matches) == _D("1")
+        assert sum(m.matched_units for m in matches) + pool.units == _D("3")
+        assert sum(m.acquisition_cost_gbp for m in matches) + pool.cost_gbp == _D("3")
+        assert sum(m.disposal_proceeds_gbp for m in matches) == _D("2")
+
+    def test_a_small_split_over_many_lots_never_goes_negative(self) -> None:
+        """Rounding each share independently can overshoot the total and leave a negative remainder; cumulative
+        rounding cannot."""
+        shares = _split_exact(_D("0.000002"), [_D("681"), _D("672"), _D("687"), _D("409")])
+        assert all(s >= 0 for s in shares)
+        assert sum(shares) == _D("0.000002")
+
+    def test_shares_that_round_to_nothing_emit_no_row(self) -> None:
+        """A 0.000002-unit sale identified against four same-day buys: two buy lots' shares round to 0 on every
+        column and emit no row; the rows that remain still carry the whole identification."""
+        buys = [
+            _lot(tax_lot_id=i, event_time=_at(23, 8 + i), quantity=_D(q), amount_gbp=_D(q))
+            for i, q in enumerate(("681", "672", "687", "409"), start=1)
+        ]
+        sell = _lot(
+            tax_lot_id=9,
+            event_time=_at(23, 14),
+            direction="disposal",
+            quantity=_D("0.000002"),
+            amount_gbp=_D("0.000002"),
+        )
+        matches, _ = _match_disposals_for_instrument(buys, [sell])
+        assert 0 < len(matches) < 4
+        assert all(m.matched_units > 0 for m in matches)
+        assert sum(m.matched_units for m in matches) == _D("0.000002")
+        assert sum(m.acquisition_cost_gbp for m in matches) == _D("0.000002")
+
+    def test_a_day_with_two_sale_lots_over_two_rules_conserves_and_stays_non_negative(self) -> None:
+        """A day with two sale lots (9 and 4 units) identified partly same-day (12) and partly under the 30-day
+        rule (1): the day's rows sum exactly to its units and proceeds, no row is negative, and each lot is
+        within one unit of the scale per identification of its own units."""
+        same_day_buys = [
+            _lot(tax_lot_id=1, event_time=_at(4, 8), quantity=_D("7"), amount_gbp=_D("777")),
+            _lot(tax_lot_id=2, event_time=_at(4, 9), quantity=_D("5"), amount_gbp=_D("333")),
+        ]
+        later = _lot(tax_lot_id=3, event_time=_at(20, 8), quantity=_D("11"), amount_gbp=_D("1234"))
+        s1 = _lot(tax_lot_id=4, event_time=_at(4, 10), direction="disposal", quantity=_D("9"), amount_gbp=_D("999"))
+        s2 = _lot(tax_lot_id=5, event_time=_at(4, 11), direction="disposal", quantity=_D("4"), amount_gbp=_D("444"))
+        matches, _ = _match_disposals_for_instrument([*same_day_buys, later], [s1, s2])
+        assert {m.matching_rule for m in matches} == {"same_day", "bed_and_breakfast"}
+        assert sum(m.matched_units for m in matches) == _D("13")
+        assert sum(m.disposal_proceeds_gbp for m in matches) == _D("1443")
+        for disposal in (s1, s2):
+            lot_units = sum(m.matched_units for m in matches if m.disposal_lot is disposal)
+            assert abs(lot_units - disposal.quantity) <= _D("0.000002")
+        for m in matches:
+            assert m.matched_units == m.matched_units.quantize(_D("0.000001"))
+            assert min(m.matched_units, m.acquisition_cost_gbp, m.disposal_proceeds_gbp) >= 0
+
+    def test_units_and_cost_are_conserved_across_all_three_rules(self) -> None:
+        """Every acquired unit and pound ends in exactly one place: a match or the closing pool."""
+        acquisitions = [
+            _lot(tax_lot_id=1, event_time=_at(1, 8), quantity=_D("3"), amount_gbp=_D("1000")),
+            _lot(tax_lot_id=2, event_time=_at(4, 8), quantity=_D("7"), amount_gbp=_D("777")),
+            _lot(tax_lot_id=3, event_time=_at(4, 9), quantity=_D("5"), amount_gbp=_D("333")),
+            _lot(tax_lot_id=4, event_time=_at(20, 8), quantity=_D("11"), amount_gbp=_D("1234")),
+        ]
+        disposals = [
+            _lot(tax_lot_id=5, event_time=_at(2, 8), direction="disposal", quantity=_D("2"), amount_gbp=_D("700")),
+            _lot(tax_lot_id=6, event_time=_at(4, 10), direction="disposal", quantity=_D("9"), amount_gbp=_D("999")),
+            _lot(tax_lot_id=7, event_time=_at(4, 11), direction="disposal", quantity=_D("4"), amount_gbp=_D("444")),
+            _lot(tax_lot_id=8, event_time=_at(15, 8), direction="disposal", quantity=_D("6"), amount_gbp=_D("600")),
+        ]
+        matches, pool = _match_disposals_for_instrument(acquisitions, disposals)
+        acquired_units = sum((a.quantity for a in acquisitions), _D("0"))
+        acquired_cost = sum((a.amount_gbp for a in acquisitions), _D("0"))
+        assert sum(m.matched_units for m in matches) + pool.units == acquired_units
+        assert sum(m.acquisition_cost_gbp for m in matches) + pool.cost_gbp == acquired_cost
+        for disposal in disposals:
+            rows = [m for m in matches if m.disposal_lot is disposal]
+            assert sum(m.matched_units for m in rows) == disposal.quantity
+            assert sum(m.disposal_proceeds_gbp for m in rows) == pytest.approx(
+                disposal.quantity
+                * sum(d.amount_gbp for d in disposals if d.uk_date == disposal.uk_date)
+                / sum(d.quantity for d in disposals if d.uk_date == disposal.uk_date)
+            )
+
+
+# ===========================================================================
 # TestMultiYear
 # ===========================================================================
 
@@ -1015,6 +1183,7 @@ class TestTaxYearSummary:
                     "cnt_same_day": 2,
                     "cnt_bnb": 1,
                     "cnt_s104": 3,
+                    "cnt_total": 5,
                 }
             ]
         )
@@ -1040,6 +1209,7 @@ class TestTaxYearSummary:
         assert result.disposals_same_day == 2
         assert result.disposals_bed_and_breakfast == 1
         assert result.disposals_s104 == 3
+        assert result.disposals_total == 5
 
         # Annual exempt fully consumed: net 4000 > 3000 allowance -> 0 left.
         assert result.annual_exempt_gbp == _D("3000")
@@ -1064,6 +1234,7 @@ class TestTaxYearSummary:
                     "cnt_same_day": 0,
                     "cnt_bnb": 0,
                     "cnt_s104": 0,
+                    "cnt_total": 0,
                 }
             ]
         )
@@ -1090,6 +1261,7 @@ class TestTaxYearSummary:
                     "cnt_same_day": 0,
                     "cnt_bnb": 0,
                     "cnt_s104": 2,
+                    "cnt_total": 2,
                 }
             ]
         )
