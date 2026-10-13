@@ -257,6 +257,9 @@ def checks() -> None:
                     totals[f"lookup execution {key} non-zero"] += _d(x["openingData"][key]) != 0
             if len(parsed) == 1:
                 units = _d(parsed[0]["units"])
+                for p in sync:
+                    totals["sync initialUnits beside a lookup"] += 1
+                    totals["sync initialUnits = lookup openingData.units"] += _d(p["initialUnits"]) == units
                 rate, conversion = _d(parsed[0]["avgPrice"]), _d(parsed[0]["avgConversionRate"])
             execution_positions = {int(x["positionId"]) for x in body["positionExecutions"]}
             out.append(f"executions_cover_positions={execution_positions == set(positions)}")

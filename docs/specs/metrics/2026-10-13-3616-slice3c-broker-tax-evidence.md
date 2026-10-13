@@ -39,7 +39,8 @@ reads the generations except tests and the acceptance queries. This slice also r
   keeps the response text instead (`body_text`).
   Its printed summary is `var/research/3616/slice3c_lookup_summary.txt`.
 - `--checks` recomputes the per-order checks from the saved bodies and the DB, with no network
-  (`var/research/3616/slice3c_checks.txt`; its `totals` line carries every population count with its denominator).
+  (`var/research/3616/slice3c_checks.txt`; its `totals` line carries the per-observation counts with their denominators; the lookup-shape, `addedFunds`,
+  `markup` and archive counts are in `--facts`).
 - `--facts` prints the DB and lookup-shape facts as counts and dates, never an identifier
   (`var/research/3616/slice3c_facts.txt`).
 - Code searches are recorded with their commands in `var/research/3616/slice3c_code_search.txt`.
@@ -141,8 +142,9 @@ account's complete history (Limits).
     (`ingest_trade_events`): one open per position whatever its source, and one close per `(position_id, executed_at)`
     (`sql/194_trade_events.sql`, the two unique indexes). A later observation that disagrees on units or realised P&L is
     counted as `conflict_anomaly` and logged, not stored; other fields are not compared. The history watermark is the
-    latest stored history close's `executed_at`, less 7 days (`compute_history_min_date`), so a history row not written
-    is fetched again next time. A failed history fetch is passed on as `None` (`fetch_trade_history_safely`) and stored
+    latest stored history close's `executed_at`, less 7 days (`compute_history_min_date`). A batch whose history rows are
+    all withheld therefore cannot move it, and the next fetch starts where it would have; a single row not written is
+    fetched again only while it stays inside the next overlap. A failed history fetch is passed on as `None` (`fetch_trade_history_safely`) and stored
     nowhere. `daily_portfolio_sync` fetches the portfolio, then the history, in one provider session
     (`scheduler.py`, the block after `compute_history_min_date`); `sync_portfolio` writes `broker_positions` and then
     calls `record_trade_events` in one transaction that its caller commits.
@@ -150,8 +152,8 @@ account's complete history (Limits).
     so a stored number is the shortest decimal that round-trips the double the broker's text decoded to. A number the
     broker sent with more precision than a double holds was altered before storage, and nothing stored can show it.
 18. **The retired route** (`--facts`, code search file). `tax_lots` and `fx_rates` hold 0 rows; `fills` holds 1, whose
-    order's `broker_order_ref` starts `DEMO-`. No code or migration inserts, updates or copies into `fx_rates`; its one reader
-    is `tax_ledger._load_fx_rate`, called only by `_ingest_fills`. `sql/013_tax_disposal_matching.sql` creates it; later
+    order's `broker_order_ref` starts `DEMO-`. No code or migration inserts, updates or copies into `fx_rates`; its one
+    application reader is `tax_ledger._load_fx_rate` (the measurement script also counts its rows), called only by `_ingest_fills`. `sql/013_tax_disposal_matching.sql` creates it; later
     migrations name it only in comments. Two comments describe it as the live tax FX table: the
     `daily_tax_reconciliation` docstring (`scheduler.py`, "Requires fx_rates to be") and `app/services/fx.py`'s module
     docstring.
@@ -181,15 +183,16 @@ account's complete history (Limits).
   - adjustment indicators: `positionExecutions[].addedFunds`, and sync `totalFees` (overnight fees and dividends).
 
   Not gated: `openingData.marketSpread` (*"The market spread at execution time"*). That the spread is inside
-  `avgPrice` and so inside the investment is an assumption, bounded by the acquisition check (Design 4.9): a spread
-  charged on top of the investment would have to stay within 0.1% to pass. Additional margin has no separate field; the
-  money conservation check (Design 4.9) enforces its absence, because a held single position must then hold exactly
-  the consideration.
+  `avgPrice`, and so inside the investment, is an assumption this slice cannot check: a spread debited separately from
+  the investment would appear in no field read here. Funds added to a position are reported by `addedFunds` (gated).
+  The Design 4.9 checks are consistency checks between named broker fields; none of them reconciles cash, which is
+  3d's.
 
-  `broker_positions.total_fees` and `broker_positions_closed.total_fees` are not inputs: the sync writes them from the
-  same payload whose `totalFees` the ledger observes (Design 2), so after this slice every value the sync sees is
-  retained as an observation. Before it, the ledger kept only first observations; the values written in between are
-  the current and archived ones, all 0 on 2026-10-13 (fact 9), which is the only check there can be for that period.
+  `broker_positions.total_fees` and `broker_positions_closed.total_fees` are not derivation inputs: the sync writes them
+  from the same payload whose `totalFees` the ledger observes (Design 2), so after this slice every value the sync sees
+  is retained as an observation. Before it, the ledger kept only first observations, and the values seen in between
+  survive only as the current and archived ones. The migration therefore checks that legacy population on the
+  deployment itself (Design 1); on dev all are 0 (fact 9).
 - **Conversion to sterling.** HMRC CG78310, applied by 3b: each USD amount is converted at the rate for the date it is
   given or received, from `resolve_tax_fx` under 3b's consumer contract (3b spec, Design 3).
 - **The unit of acquisition.** Share identification acts on acquisitions and disposals of securities of the same class
@@ -201,7 +204,13 @@ account's complete history (Limits).
 
 ### 1. Storage (migration `sql/485_tax_broker_evidence.sql`)
 
-The migration first raises, naming the table, unless `tax_lots` and `fx_rates` are both empty (fact 18). It then:
+The migration first takes the portfolio sync's transaction lock (`pg_advisory_xact_lock` on
+`_SYNC_PORTFOLIO_XACT_LOCK_KEY`, the key `sync_portfolio` takes), so no sync writes `broker_positions` while it checks.
+It raises, naming the table, unless `tax_lots` and `fx_rates` are both empty (fact 18), and raises, naming the
+positions, unless every `broker_positions` and `broker_positions_closed` row whose `position_id` is in `trade_events`
+has a non-NULL `total_fees` of 0: legacy fee evidence the ledger never observed is either known to be zero at
+deployment or the migration does not run (recovery: a reviewed migration importing those values as observations). It
+then:
 - drops `fx_rates` (Design 8);
 - creates `trade_ledger_scope`, adds `trade_events.environment`, backfills both and constrains the column (Design 2);
 - creates `trade_event_observations` and `trade_history_fetches` (Design 2);
@@ -312,17 +321,23 @@ of the portfolio refresh `broker_positions` holds: its environment, account, tim
 3d's.
 
 **Observations the ledger does not keep.** When `ingest_trade_events` meets an existing row on either unique index, it
-makes one decision per incoming observation. Its baseline is the latest retained payload of the same source and event
-kind for that event: the stored row if it has that source, else the latest `trade_event_observations` row of that
-source (supplemental or amendment). The comparison runs field by field over every field of the field table (Design 4)
-for that source, normalised by Design 4.3's rules; a field present in one and absent in the other is a difference;
-`isPartiallyAltered` is excluded as a lifecycle field. Then:
+makes one decision per incoming observation. Its baseline is the latest `trade_event_observations` row for
+`(event_id, source, event_kind)`, of any kind; when there is none, the stored row if it has that source; otherwise
+there is no baseline. The comparison runs field by field over every field of the field table (Design 4) for that
+source, normalised by Design 4.3's rules; a field present in one and absent in the other is a difference. Then:
 - no baseline (the first observation of this source for an event stored from another source): write
   `kind = 'supplemental'`;
 - identical to the baseline: write nothing (repeats deduplicate);
-- different: write `kind = 'amendment'`, which becomes the new baseline. A correction writes one amendment, a repeated
-  correction nothing, a reversion another amendment. Amendment rows are never deleted, so `source_amended` is
-  sticky.
+- differing only in `isPartiallyAltered`: write `kind = 'lifecycle'`;
+- differing in any other field: write `kind = 'amendment'`.
+
+Whatever is written becomes the next baseline. A correction writes one amendment, the same correction again nothing, a
+reversion another amendment; amendment rows are never deleted, so `source_amended` is sticky. A lifecycle row does not
+make the order amended, but derivation reads it (Design 4.8).
+
+**Both sources in one batch.** `merge_events` keeps a portfolio open over a history open of the same position. It now
+also returns the history opens it set aside, and `ingest_trade_events` passes each to the decision above after the
+kept row is inserted, so a set-aside open is compared and retained like any later observation.
 
 Columns: `observation_id`, `event_id` of the stored row, `kind`, `observed_at`, `source`, `stored_normalised JSONB`,
 `observed_normalised JSONB`, `observed_raw JSONB`. The stored row is never changed (sql/194's contract). Derivation
@@ -459,8 +474,8 @@ failure in checks 1–6 makes the order `unresolved` whatever its product.
      held position whose units equal `remainingUnits` (else `piece_coverage_incomplete`). Every piece the broker lists
      is then accounted for by positive stored closes or a held position, which is what makes the shared opening one
      execution.
-   - **Without *F*:** exactly one position, observed open by the sync with `isPartiallyAltered` false (else
-     `executions_unestablished`). This is weaker evidence: nothing establishes the order's final status or that no
+   - **Without *F*:** exactly one position, observed open by the sync, with `isPartiallyAltered` false in every
+     retained sync payload, stored or lifecycle (never observed altered; else `executions_unestablished`). This is weaker evidence: nothing establishes the order's final status or that no
      other execution exists, so the subject and its lots record `execution_evidence = sync_only` (`lookup` with *F*),
      and 3d decides whether that suffices.
    - **Acquisition date.** Every time candidate — *F*'s `executionTime` and `openTime`, sync `openDateTime`, each
@@ -472,14 +487,17 @@ failure in checks 1–6 makes the order `unresolved` whatever its product.
      every retained sync payload's `totalExternalFees`, `totalExternalTaxes` and `totalFees`; every close row's
      `fees`. Else `charges_nonzero:<indicator>`. Each is required where its source exists (*F*, a sync payload, a close
      row); a position the sync never observed has no `totalFees` observation, which is recorded, not failed (Limits).
+   - **Opening units.** With *F*, every retained sync `initialUnits` equals *F*'s `openingData.units` (else
+     `opening_units_conflict`): on this account the sync reports the whole order's units even for a piece of a split
+     order (9 of 9 orders with both, `--checks`).
    - **Units.** Execution units (*F*'s `openingData.units`, else the sync `initialUnits`) = Σ close-row units + Σ held
      units of the order's positions, exactly (else `units_not_conserved`).
    - **Consideration.** Every stored initial investment (sync `initialAmountInDollars`, history `initialInvestment`) is
      equal (else `consideration_conflict`). That amount is the acquisition's `usd_amount`.
    - **Money.** Σ close rows' `investment` + Σ held positions' `amount` = the consideration, exactly (else
-     `investment_not_conserved`). The PnL page documents `amount` as the initial investment plus additional margin; a
-     long x1 real position has no margin, and all 10 held real-id positions show `amount = initial_amount_in_dollars`
-     (fact 7).
+     `investment_not_conserved`). The PnL page documents `amount` as the initial investment plus additional margin, so
+     this is a consistency check between broker fields: it shows the position ledger and the order agree, not that no
+     margin was ever added (all 10 held real-id positions show `amount = initial_amount_in_dollars`, fact 7).
    - **Against the execution.** |units × rate × conversion − consideration| ≤ 0.001 × consideration, with rate and
      conversion from *F*'s `avgPrice` and `avgConversionRate`, else the sync `openRate` and `openConversionRate` (else
      `consideration_implausible`). The conversion rate turns the pricing currency into USD, so this holds in any pricing
@@ -702,7 +720,9 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
 - two identical executions where one `closed` piece has no stored close, with `remainingUnits` positive and with it 0:
   `piece_coverage_incomplete` both times (0 passes the field check, which allows it);
 - a close-only position: `open_event_missing`;
-- a no-lookup admitted order: lots carry `execution_evidence = sync_only`;
+- a no-lookup admitted order: lots carry `execution_evidence = sync_only`; the same order with a later `lifecycle`
+  observation of `isPartiallyAltered` true: `executions_unestablished`;
+- a sync `initialUnits` of 9 beside a lookup and held position of 10: `opening_units_conflict`;
 - a non-zero `markup` or `addedFunds`: `charges_nonzero`; a non-zero `marketSpread`: no reason;
 - a sync `totalFees` non-zero in the stored row and zero in a later amendment, and the reverse: `charges_nonzero` both
   times (and `source_amended`);
@@ -746,7 +766,8 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
 - no scope row: `refused` (`scope_unestablished`) with no lookup attempted; a held position of another account:
   `positions_out_of_scope`; a latest refresh with outcome `scope_refused`, or another environment:
   `portfolio_out_of_scope`; an empty `scope_unverified` refresh: the run proceeds;
-- the migration guard refuses a non-empty `tax_lots`; the backfill guard refuses a non-demo credential and an empty
+- the migration guard refuses a non-empty `tax_lots`, and a ledger position whose `broker_positions` or archived row
+  has `total_fees` non-zero or NULL (an earlier archived non-zero beside a later zero included); the backfill guard refuses a non-demo credential and an empty
   access log; the scope backfill refuses two sync `CID`s, a NULL `CID`, and a non-empty ledger with no sync row;
 - `record_trade_events`: a first batch with a `CID` establishes the scope; a batch where one payload lacks the `CID`
   is refused; a batch with another environment or `CID`
@@ -756,7 +777,10 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
 - `ingest_trade_events` writes an amendment for a history close re-observed with a different `investment` or a missing
   field, and a supplemental observation for a history open beside a sync open in both arrival orders (once, not on
   every re-observation); history first, then a sync supplement, then a revised sync supplement writes one amendment; the same revision again
-  writes nothing; a reversion writes a second amendment;
+  writes nothing; a reversion writes a second amendment; the same three steps on a sync-first open (same-source
+  baseline) write the same rows; a sync re-observation differing only in `isPartiallyAltered` writes one `lifecycle`
+  row and no amendment; one batch carrying a sync open and a contradictory history open of an unseen position stores
+  the sync row and retains the history open as `supplemental`;
 - `record_trade_events` writes a `failed` fetch row for a failed fetch, with its `min_date` and `portfolio_fetched_at`.
 
 Provider calls are faked; no test reaches the broker.
@@ -789,7 +813,8 @@ Measured over every stored order (21), event (36) and position (23), not a sampl
 adjustment indicator in every stored observation (including sync `totalFees`, every execution's `addedFunds` and
 every archive row), unit and money conservation, piece binding for the 13 found orders, copy and parent ids on both
 sources, the two corroboration ratios, account agreement and the lookup shapes (`--checks`, `--facts`, default mode).
-ILMN is unmeasured beyond its lookup status. Not yet run as the build will: partition, identity, field domains, dates,
+ILMN has no acquisition quantity, so it has no conservation or corroboration measurement; its history rows
+are in the fee, copy and parent counts. Not yet run as the build will: partition, identity, field domains, dates,
 amendments and instrument resolution; they run on the full population for the first time at acceptance, which is why
 the acceptance counts are expectations.
 
