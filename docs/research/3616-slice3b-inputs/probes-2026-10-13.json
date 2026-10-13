@@ -1,0 +1,101 @@
+{
+  "probed_on": "2026-10-13",
+  "probes": {
+    "full_vpd_n": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/1975&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
+      "user_agent": "eBull/1.0 (+https://github.com/Luke-Bradford/eBull)",
+      "status": 200,
+      "content_type": "application/csv",
+      "content_length_header": null,
+      "content_encoding": null,
+      "bytes": 259464,
+      "gzip_bytes": 58357,
+      "sha256": "6e87fd5c6b17a81130716ddc935f3977f9e839a7a7a04a3fbca01dfc77b73f82",
+      "body": null
+    },
+    "full_vpd_y": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/1975&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=Y&VFD=N",
+      "user_agent": "eBull/1.0 (+https://github.com/Luke-Bradford/eBull)",
+      "status": 200,
+      "content_type": "application/csv",
+      "content_length_header": null,
+      "content_encoding": null,
+      "bytes": 259464,
+      "gzip_bytes": 58357,
+      "sha256": "6e87fd5c6b17a81130716ddc935f3977f9e839a7a7a04a3fbca01dfc77b73f82",
+      "body": null
+    },
+    "full_no_vpd": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/1975&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VFD=N",
+      "user_agent": "eBull/1.0 (+https://github.com/Luke-Bradford/eBull)",
+      "status": 200,
+      "content_type": "application/csv",
+      "content_length_header": null,
+      "content_encoding": null,
+      "bytes": 259464,
+      "gzip_bytes": 58357,
+      "sha256": "6e87fd5c6b17a81130716ddc935f3977f9e839a7a7a04a3fbca01dfc77b73f82",
+      "body": null
+    },
+    "supported_range_vpd_n": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/2019&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
+      "user_agent": "eBull/1.0 (+https://github.com/Luke-Bradford/eBull)",
+      "status": 200,
+      "content_type": "application/csv",
+      "content_length_header": "39113",
+      "content_encoding": null,
+      "bytes": 39113,
+      "gzip_bytes": 9010,
+      "sha256": "f43f34d2b707a6cc1cfb7ab3c33e9e49ba2f44e20ea4b48fbc974868fbadcf79",
+      "body": null
+    },
+    "weekend_only": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=03/Oct/2026&Dateto=04/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
+      "user_agent": "eBull/1.0 (+https://github.com/Luke-Bradford/eBull)",
+      "status": 200,
+      "content_type": "application/csv",
+      "content_length_header": "14",
+      "content_encoding": null,
+      "bytes": 14,
+      "gzip_bytes": 34,
+      "sha256": "edcb491a576262424da02a334b77b18065fd593d672bb484cdfade0c11b0af2d",
+      "body": "DATE,XUDLUSS\r\n"
+    },
+    "unknown_series": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Oct/2026&Dateto=13/Oct/2026&SeriesCodes=XUDLZZZ&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
+      "user_agent": "eBull/1.0 (+https://github.com/Luke-Bradford/eBull)",
+      "status": 302,
+      "content_type": "application/csv",
+      "content_length_header": "142",
+      "content_encoding": null,
+      "bytes": 142,
+      "gzip_bytes": 135,
+      "sha256": "9ca2c4b67a62dd7db9b677c2bcf5265a283ff0d0a94e650686e37d070b1751d3",
+      "body": "<head><title>Object moved</title></head>\n<body><h1>Object Moved</h1>This object may be found <a HREF=\"ErrorPage.asp?ei=1131\">here</a>.</body>\n"
+    },
+    "default_urllib_agent": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/2019&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
+      "user_agent": "Python-urllib/3.14",
+      "status": 403,
+      "content_type": "text/html",
+      "content_length_header": "448",
+      "content_encoding": null,
+      "bytes": 448,
+      "gzip_bytes": 290,
+      "sha256": "89044679a685687bac8a93d3050b24b166a8df47503b84fac137c9c3daf7fefa",
+      "body": "<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have permission to access \"http&#58;&#47;&#47;www&#46;bankofengland&#46;co&#46;uk&#47;boeapps&#47;database&#47;&#95;iadb&#45;fromshowcolumns&#46;asp&#63;\" on this server.<P>\nReference&#32;&#35;18&#46;5b1e1202&#46;1791897903&#46;1539f38c\n<P>https&#58;&#47;&#47;errors&#46;edgesuite&#46;net&#47;18&#46;5b1e1202&#46;1791897903&#46;1539f38c</P>\n</BODY>\n</HTML>\n"
+    },
+    "default_httpx_agent": {
+      "url": "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=01/Jan/2019&Dateto=13/Oct/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=N&VFD=N",
+      "user_agent": "python-httpx/0.28.1",
+      "status": 403,
+      "content_type": "text/html",
+      "content_length_header": "448",
+      "content_encoding": null,
+      "bytes": 448,
+      "gzip_bytes": 290,
+      "sha256": "a448666bef7c96a550c551211c08ab3267284de3d78b32b4748edfb031d46ff8",
+      "body": "<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have permission to access \"http&#58;&#47;&#47;www&#46;bankofengland&#46;co&#46;uk&#47;boeapps&#47;database&#47;&#95;iadb&#45;fromshowcolumns&#46;asp&#63;\" on this server.<P>\nReference&#32;&#35;18&#46;5b1e1202&#46;1791897903&#46;1539f3ed\n<P>https&#58;&#47;&#47;errors&#46;edgesuite&#46;net&#47;18&#46;5b1e1202&#46;1791897903&#46;1539f3ed</P>\n</BODY>\n</HTML>\n"
+    }
+  }
+}
