@@ -386,3 +386,4 @@ def test_a_write_without_an_environment_fails(conn: psycopg.Connection[Any]) -> 
             "INSERT INTO trade_events (position_id, etoro_instrument_id, event_kind, side, units, executed_at, "
             "source, raw_payload) VALUES (1, 4077, 'open', 'buy', 1, now(), 'etoro_sync', '{}')"
         )
+    conn.rollback()
