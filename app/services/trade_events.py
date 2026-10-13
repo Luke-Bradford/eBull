@@ -564,8 +564,7 @@ def ingest_trade_events(
             "parent_position_id": event.parent_position_id,
             "source": event.source,
             "raw_payload": Jsonb(event.raw_payload),
-            # Always explicit: sql/485's column DEFAULT exists only for the pre-reload window, and slice 3c
-            # part 2's migration drops it.
+            # The column has no default (sql/487, #3796): every write states its environment.
             "environment": environment,
         }
         sql = _INSERT_OPEN_SQL if event.event_kind == "open" else _INSERT_CLOSE_SQL

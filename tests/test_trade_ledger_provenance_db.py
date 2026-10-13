@@ -377,3 +377,12 @@ def _seed_access_log(conn: psycopg.Connection[Any], environment: str = "demo", l
             """,
             (row[0], operator_id),
         )
+
+
+def test_a_write_without_an_environment_fails(conn: psycopg.Connection[Any]) -> None:
+    # sql/487 (#3796): no default, so a writer that bypasses ingest cannot be labelled demo under any scope.
+    with pytest.raises(psycopg.errors.NotNullViolation, match="environment"):
+        conn.execute(
+            "INSERT INTO trade_events (position_id, etoro_instrument_id, event_kind, side, units, executed_at, "
+            "source, raw_payload) VALUES (1, 4077, 'open', 'buy', 1, now(), 'etoro_sync', '{}')"
+        )

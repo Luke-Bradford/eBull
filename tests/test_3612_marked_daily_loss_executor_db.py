@@ -131,8 +131,8 @@ def _released_close(conn: psycopg.Connection[Any], *, position_id: int, realised
         """
         INSERT INTO trade_events (
             position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
-            price,executed_at,fees_usd,realized_pnl_usd,investment_usd,source,raw_payload
-        ) VALUES (%s,2449001,2449001,'close','sell',1,100,%s,0,%s::numeric,100,'etoro_history','{}')
+            price,executed_at,fees_usd,realized_pnl_usd,investment_usd,source,raw_payload, environment
+        ) VALUES (%s,2449001,2449001,'close','sell',1,100,%s,0,%s::numeric,100,'etoro_history','{}', 'demo')
         """,
         (position_id, at, realised),
     )

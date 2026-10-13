@@ -119,8 +119,8 @@ def test_status_shows_positions_with_tickets_pnl_and_rebalances(
     )
     conn.execute(
         "INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units, price, "
-        " executed_at, fees_usd, realized_pnl_usd, source, raw_payload) "
-        "VALUES (98001, 2842, 2842, 'close', 'sell', 1, 107.25, now(), 0, 7.25, 'etoro_history', '{}')"
+        " executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment) "
+        "VALUES (98001, 2842, 2842, 'close', 'sell', 1, 107.25, now(), 0, 7.25, 'etoro_history', '{}', 'demo')"
     )
 
     s2 = status.load_status(conn, now=datetime.combine(d2, time(23, 45), UTC))

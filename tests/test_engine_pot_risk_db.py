@@ -65,8 +65,9 @@ def _open(conn: psycopg.Connection[Any], *, units: str) -> None:
     conn.execute(
         """
         INSERT INTO trade_events (
-            position_id,etoro_instrument_id,instrument_id,event_kind,side,executed_at,units,price,source,raw_payload
-        ) VALUES (%s,2449001,2449001,'open','buy',%s,%s,100,'etoro_sync','{}')
+            position_id,etoro_instrument_id,instrument_id,event_kind,side,executed_at,units,price,source,raw_payload,
+            environment
+        ) VALUES (%s,2449001,2449001,'open','buy',%s,%s,100,'etoro_sync','{}', 'demo')
         """,
         (_POSITION_ID, _NOW - timedelta(days=1), Decimal(units)),
     )
@@ -77,8 +78,8 @@ def _close(conn: psycopg.Connection[Any], *, pnl: str, minutes: int) -> None:
         """
         INSERT INTO trade_events (
             position_id,etoro_instrument_id,instrument_id,event_kind,side,executed_at,units,price,
-            realized_pnl_usd,source,raw_payload
-        ) VALUES (%s,2449001,2449001,'close','sell',%s,1,100,%s,'etoro_sync','{}')
+            realized_pnl_usd,source,raw_payload, environment
+        ) VALUES (%s,2449001,2449001,'close','sell',%s,1,100,%s,'etoro_sync','{}', 'demo')
         """,
         (_POSITION_ID, _NOW + timedelta(minutes=minutes), Decimal(pnl)),
     )
@@ -300,8 +301,9 @@ def test_a_partial_close_slice_under_a_new_position_id_is_realised_and_reconcile
         """
         INSERT INTO trade_events (
             position_id,etoro_instrument_id,instrument_id,event_kind,side,executed_at,units,price,
-            realized_pnl_usd,source,raw_payload
-        ) VALUES (%s,2449001,2449001,'close','sell',%s,1,100,5,'etoro_history',jsonb_build_object('orderId',%s::text))
+            realized_pnl_usd,source,raw_payload, environment
+        ) VALUES (%s,2449001,2449001,'close','sell',%s,1,100,5,'etoro_history',
+                  jsonb_build_object('orderId',%s::text), 'demo')
         """,
         (_POSITION_ID + 7, _NOW - timedelta(minutes=1), ref[0]),
     )
