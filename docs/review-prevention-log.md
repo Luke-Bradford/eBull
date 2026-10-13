@@ -12562,6 +12562,7 @@ neighbouring container and match it.**
   writer against the dev DB. The line-literal guard and the size tripwire both miss an internal UPDATE.
 - Enforced in: `.claude/skills/engineering/test-quality.md` ("An integration test through a production entry point
   may open its OWN connection"); review only.
+
 ### A per-lot disposal loop is not the share identification rules (#3616)
 
 - Failure (Codex checkpoint 1, #3616 slice 3 spec, round 1, 2026-10-13): `tax_ledger._match_disposals_for_instrument`
