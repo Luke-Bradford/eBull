@@ -38,6 +38,7 @@ HEADER = f"DATE,{SERIES}"
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 # The storage column is NUMERIC(12,6): at most 6 integer and 6 fractional digits (spec Design 1).
 _ROW = re.compile(r"(\d{2}) (" + "|".join(MONTHS) + r") (\d{4}),(\d{1,6}(?:\.\d{1,6})?)")
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")  # date.fromisoformat alone also accepts compact forms
 CALENDAR_DIVISION = "england-and-wales"
 MIN_HOLIDAYS_PER_YEAR = 8
 
@@ -99,7 +100,10 @@ def parse_bank_holidays(body: bytes) -> dict[int, frozenset[date]]:
     """
     try:
         division = json.loads(body)[CALENDAR_DIVISION]
-        dates = [date.fromisoformat(event["date"]) for event in division["events"]]
+        raw_dates = [event["date"] for event in division["events"]]
+        if not all(isinstance(d, str) and _ISO_DATE.fullmatch(d) for d in raw_dates):
+            raise ValueError("a date is not YYYY-MM-DD")
+        dates = [date.fromisoformat(d) for d in raw_dates]
     except (ValueError, KeyError, TypeError) as exc:
         raise IncompleteFetch(f"calendar is not the documented shape: {exc}") from exc
     if division.get("division") != CALENDAR_DIVISION or not dates or len(set(dates)) != len(dates):
@@ -139,7 +143,7 @@ def measure(observations: list[Observation]) -> dict[str, Any]:
         "widest_gaps_latest_3": [[a.isoformat(), b.isoformat()] for a, b in pairs if (b - a).days == widest][-3:],
         "largest_moves_pct": [[round(m, 2), a.isoformat(), b.isoformat()] for m, a, b in moves[:3]],
         "largest_move_pct_since_2019": next(
-            [round(m, 2), a.isoformat(), b.isoformat()] for m, a, b in moves if a >= date(2019, 1, 1)
+            ([round(m, 2), a.isoformat(), b.isoformat()] for m, a, b in moves if a >= date(2019, 1, 1)), None
         ),
     }
 

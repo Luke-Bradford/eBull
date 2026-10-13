@@ -89,6 +89,7 @@ def main() -> None:
         "weekend_only": (url("XUDLUSS", date(2026, 10, 3), date(2026, 10, 4), "N"), USER_AGENT),
         "unknown_series": (url("XUDLZZZ", date(2026, 10, 1), today, "N"), USER_AGENT),
         "default_urllib_agent": (supported, f"Python-urllib/{sys.version_info.major}.{sys.version_info.minor}"),
+        # Pinned: the string httpx 0.28.1 (the locked version) sends. The build tests its real client separately.
         "default_httpx_agent": (supported, "python-httpx/0.28.1"),
     }
     results = {name: probe(name, target, agent, args.bodies) for name, (target, agent) in probes.items()}
