@@ -502,6 +502,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #3612 slice 2 — session-close anchor (sql/482), child-to-parent.
     "broker_account_session_close_marks",
     "broker_account_session_close_snapshots",
+    # #3616 slice 3b (sql/484) — fetches, observations and both revision logs are reached through their FKs to
+    # runs. The seeded calendar years and source control are restored from the template, not wiped.
+    "tax_fx_runs",
     # #3385 slice 2a, child-to-parent.
     "hunt_trial_retries",
     "hunt_trial_outcomes",

@@ -543,6 +543,8 @@ JOB_FACTOR_LIBRARY_REFERENCE_REFRESH = "factor_library_reference_refresh"
 JOB_IBKR_BORROW_ARCHIVE = "ibkr_borrow_archive"
 # #3740 slice F — daily raw capture of eToro's public dividend calendar page (no archive exists upstream).
 JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE = "etoro_dividend_calendar_capture"
+# #3616 slice 3b — Bank of England XUDLUSS tax FX source, verified against the GOV.UK bank-holiday calendar.
+JOB_TAX_FX_REFRESH = "tax_fx_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -2881,6 +2883,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=True,
         # No upstream history and an append stamped with its own fetch clocks: a late fire beats a lost day.
         rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_TAX_FX_REFRESH,
+        display_name="Tax FX refresh, Bank of England (#3616)",
+        source="db",
+        description=(
+            "Daily 11:43 UTC (after the Bank's 10:00 London update aim) — fetches XUDLUSS "
+            "from 2019 and the GOV.UK bank-holiday calendar, stores both bodies, and "
+            "accepts a rate only once two consecutive eligible responses agree. FAILS on "
+            "a skipped or refused run, or when the accepted horizon falls more than 4 "
+            "working days behind."
+        ),
+        cadence=Cadence.daily(hour=11, minute=43),
+        catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -7163,6 +7180,24 @@ def ibkr_borrow_archive() -> None:
         tracker.note = (
             f"status={report.status} snapshot={report.snapshot_id} rows={report.row_count} "
             f"as_of={report.provider_as_of.isoformat()} sha={report.response_sha256[:12]}"
+        )
+
+
+def tax_fx_refresh() -> None:
+    """Fetch and verify the Bank of England tax FX series (#3616 slice 3b)."""
+    import httpx
+
+    from app.services.tax_fx import run_tax_fx_refresh
+
+    with _tracked_job(JOB_TAX_FX_REFRESH) as tracker:
+        # A dedicated connection: the run holds its session advisory lock on it from start to end.
+        with connect_job(autocommit=True) as conn, httpx.Client() as client:
+            report = run_tax_fx_refresh(conn, client)
+        tracker.row_count = report.inserted + report.revised
+        tracker.note = (
+            f"run={report.run_id} inserted={report.inserted} revised={report.revised} "
+            f"awaiting={report.awaiting_confirmation} calendar_years={report.calendar_years_changed} "
+            f"accepted_through={report.accepted_through}"
         )
 
 
