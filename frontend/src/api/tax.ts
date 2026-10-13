@@ -21,6 +21,8 @@ export interface TaxSummary {
   disposals_same_day: number;
   disposals_bed_and_breakfast: number;
   disposals_s104: number;
+  /** Statutory disposals (security, day); the per-rule counts can overlap. */
+  disposals_total: number;
   annual_exempt_gbp: number;
   exempt_remaining_gbp: number;
   estimated_cgt_basic_scenario: number;

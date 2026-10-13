@@ -211,8 +211,6 @@ function YearSelect({
 // ---------------------------------------------------------------------------
 
 function TaxSummaryView({ summary: s }: { summary: TaxSummary }) {
-  const disposalCount =
-    s.disposals_same_day + s.disposals_bed_and_breakfast + s.disposals_s104;
   const netPositive = s.net_gain_gbp >= 0;
 
   return (
@@ -234,7 +232,7 @@ function TaxSummaryView({ summary: s }: { summary: TaxSummary }) {
           label="Est. CGT (higher)"
           value={formatMoney(s.estimated_cgt_higher_scenario, GBP)}
         />
-        <Metric label="Disposals" value={formatNumber(disposalCount, 0)} />
+        <Metric label="Disposals" value={formatNumber(s.disposals_total, 0)} />
         <Metric
           label="Exempt remaining"
           value={formatMoney(s.exempt_remaining_gbp, GBP)}
