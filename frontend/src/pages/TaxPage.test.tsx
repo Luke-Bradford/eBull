@@ -51,6 +51,7 @@ function makeSummary(overrides: Partial<TaxSummary> = {}): TaxSummary {
     disposals_same_day: 1,
     disposals_bed_and_breakfast: 2,
     disposals_s104: 3,
+    disposals_total: 5,
     annual_exempt_gbp: 3000,
     exempt_remaining_gbp: 0,
     estimated_cgt_basic_scenario: 160,

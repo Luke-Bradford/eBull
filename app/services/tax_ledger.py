@@ -144,6 +144,9 @@ class TaxYearSummary:
     disposals_same_day: int
     disposals_bed_and_breakfast: int
     disposals_s104: int
+    # Statutory disposals (one per security per day, s105(1)(a)). One disposal can be identified under more
+    # than one rule, so the three per-rule counts can sum to more than this.
+    disposals_total: int
     # Annual exempt amount (£3,000) and how much of it is unused after this
     # year's net gain. Computed here — never in the API handler — so the CGT
     # treatment stays owned by the engine (source rule).
@@ -624,6 +627,8 @@ def _match_disposals_for_instrument(
                 _split_exact(d_proceeds, acq_weights),
                 strict=True,
             ):
+                if units == 0 and cost == 0 and lot_proceeds == 0:
+                    continue  # a share that rounded to nothing on every column is not a row
                 matches.append(
                     DisposalMatch(
                         disposal_lot=disp,
@@ -855,8 +860,8 @@ def tax_year_summary(
     # Three separate cursors so each query gets its own result set.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         # A gain or loss belongs to a statutory disposal, which is every disposal of one security on one day
-        # (TCGA 1992 s105(1)(a)), so its sign is read after summing that day's match rows. The counts are disposal
-        # lots per rule: one lot can have several rows (one per acquisition lot it was identified with).
+        # (TCGA 1992 s105(1)(a)), so its sign is read after summing that day's match rows. The counts are statutory
+        # disposals too: per rule, those identified (wholly or partly) under it, and in total.
         cur.execute(
             """
             WITH disposals AS (
@@ -869,12 +874,13 @@ def tax_year_summary(
                 (SELECT COALESCE(SUM(gain) FILTER (WHERE gain > 0), 0) FROM disposals) AS total_gains,
                 (SELECT COALESCE(SUM(gain) FILTER (WHERE gain < 0), 0) FROM disposals) AS total_losses,
                 COALESCE(SUM(gain_or_loss_gbp), 0) AS net_gain,
-                COUNT(DISTINCT disposal_tax_lot_id) FILTER (WHERE matching_rule = 'same_day')
+                COUNT(DISTINCT (instrument_id, disposal_uk_date)) FILTER (WHERE matching_rule = 'same_day')
                     AS cnt_same_day,
-                COUNT(DISTINCT disposal_tax_lot_id) FILTER (WHERE matching_rule = 'bed_and_breakfast')
+                COUNT(DISTINCT (instrument_id, disposal_uk_date)) FILTER (WHERE matching_rule = 'bed_and_breakfast')
                     AS cnt_bnb,
-                COUNT(DISTINCT disposal_tax_lot_id) FILTER (WHERE matching_rule = 's104_pool')
-                    AS cnt_s104
+                COUNT(DISTINCT (instrument_id, disposal_uk_date)) FILTER (WHERE matching_rule = 's104_pool')
+                    AS cnt_s104,
+                COUNT(DISTINCT (instrument_id, disposal_uk_date)) AS cnt_total
             FROM disposal_matches
             WHERE tax_year = %(ty)s
             """,
@@ -953,6 +959,7 @@ def tax_year_summary(
         disposals_same_day=int(agg["cnt_same_day"]),
         disposals_bed_and_breakfast=int(agg["cnt_bnb"]),
         disposals_s104=int(agg["cnt_s104"]),
+        disposals_total=int(agg["cnt_total"]),
         annual_exempt_gbp=ANNUAL_EXEMPT,
         exempt_remaining_gbp=exempt_remaining,
         estimated_cgt_basic_scenario=est_basic,

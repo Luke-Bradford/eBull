@@ -828,6 +828,26 @@ class TestStatutoryIdentification:
         assert all(s >= 0 for s in shares)
         assert sum(shares) == _D("0.000002")
 
+    def test_shares_that_round_to_nothing_emit_no_row(self) -> None:
+        """A 0.000002-unit sale identified against four same-day buys: two buy lots' shares round to 0 on every
+        column and emit no row; the rows that remain still carry the whole identification."""
+        buys = [
+            _lot(tax_lot_id=i, event_time=_at(23, 8 + i), quantity=_D(q), amount_gbp=_D(q))
+            for i, q in enumerate(("681", "672", "687", "409"), start=1)
+        ]
+        sell = _lot(
+            tax_lot_id=9,
+            event_time=_at(23, 14),
+            direction="disposal",
+            quantity=_D("0.000002"),
+            amount_gbp=_D("0.000002"),
+        )
+        matches, _ = _match_disposals_for_instrument(buys, [sell])
+        assert 0 < len(matches) < 4
+        assert all(m.matched_units > 0 for m in matches)
+        assert sum(m.matched_units for m in matches) == _D("0.000002")
+        assert sum(m.acquisition_cost_gbp for m in matches) == _D("0.000002")
+
     def test_a_day_with_two_sale_lots_over_two_rules_conserves_and_stays_non_negative(self) -> None:
         """A day with two sale lots (9 and 4 units) identified partly same-day (12) and partly under the 30-day
         rule (1): the day's rows sum exactly to its units and proceeds, no row is negative, and each lot is
@@ -1163,6 +1183,7 @@ class TestTaxYearSummary:
                     "cnt_same_day": 2,
                     "cnt_bnb": 1,
                     "cnt_s104": 3,
+                    "cnt_total": 5,
                 }
             ]
         )
@@ -1188,6 +1209,7 @@ class TestTaxYearSummary:
         assert result.disposals_same_day == 2
         assert result.disposals_bed_and_breakfast == 1
         assert result.disposals_s104 == 3
+        assert result.disposals_total == 5
 
         # Annual exempt fully consumed: net 4000 > 3000 allowance -> 0 left.
         assert result.annual_exempt_gbp == _D("3000")
@@ -1212,6 +1234,7 @@ class TestTaxYearSummary:
                     "cnt_same_day": 0,
                     "cnt_bnb": 0,
                     "cnt_s104": 0,
+                    "cnt_total": 0,
                 }
             ]
         )
@@ -1238,6 +1261,7 @@ class TestTaxYearSummary:
                     "cnt_same_day": 0,
                     "cnt_bnb": 0,
                     "cnt_s104": 2,
+                    "cnt_total": 2,
                 }
             ]
         )
