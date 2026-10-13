@@ -544,8 +544,9 @@ GRAMMAR_SHA256: Final = hashlib.sha256(
 def header_lines(text: str) -> list[str]:
     """The body's lines, split once at LF with exactly one CR removed where it ends a CRLF terminator: the one
     line-terminator rule, applied once, for the grammar and discovery alike. Any other CR stays in its line, where
-    it is part of a value."""
-    return [line.removesuffix("\r") for line in text.split("\n")]
+    it is part of a value, including a CR ending the last fragment, which no LF follows."""
+    *terminated, last = text.split("\n")
+    return [line.removesuffix("\r") for line in terminated] + [last]
 
 
 def _closing_defect(name: str, seen: Counter[str]) -> str | None:

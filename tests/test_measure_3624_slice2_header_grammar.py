@@ -270,3 +270,13 @@ def test_a_cr_that_is_not_a_crlf_terminator_stays_in_its_line(old: str, new: str
     assert row_class(outcomes) != "ok"
     if old.startswith("<CIK>"):
         assert (header["discovered_ciks"], header["unresolved_cik_tags"]) == ([], 1)
+
+
+def test_a_terminal_lone_cr_stays_in_the_last_line() -> None:
+    """179: only a CR that an LF follows is a terminator's, so a body ending in a lone CR keeps it, and the closing
+    tag then carries a value."""
+    assert VALID.endswith("</SEC-HEADER>\n")
+    header = parse_header(VALID.removesuffix("\n") + "\r")
+    assert header["structure_defect"] is not None
+    assert row_class(field_outcomes(header, ACCESSION, CIK)) != "ok"
+    assert parse_header(VALID.removesuffix("\n"))["structure_defect"] is None
