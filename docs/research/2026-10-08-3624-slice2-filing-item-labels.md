@@ -1094,3 +1094,6 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
   - **Terminal CR** (179): `header_lines` removed a CR from the last fragment, which no LF ends. Only LF-terminated
     fragments now lose a CR, with a terminal-lone-CR fixture.
   - **Provenance** (180): the code pin names the executing script and `HEAD` of this run.
+- **Round 17** (`var/research/3624/ckpt1_slice2_r17.txt`): 0 open, 0 new, 2 resolved (179, 180). Checkpoint 1 is
+  closed: 43 isolated fixture checks pass, recomputed field outcomes match every recorded header row, and the
+  three outputs' hashes reconcile.
