@@ -117,3 +117,34 @@ def test_a_second_run_skips_while_the_lock_is_held(ebull_test_conn: psycopg.Conn
         assert run_order_lookup_capture(conn, broker, "demo").state == "captured"
         row = conn.execute("SELECT pg_try_advisory_lock(%s)", [TAX_EVIDENCE_LOCK_KEY]).fetchone()
         assert row is not None and row[0] is True
+
+
+def test_a_nul_body_is_kept_as_its_hash(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    _seed(ebull_test_conn)
+    broker = _FakeBroker({7: RawOrderLookup(200, '{"orderId": 7}\x00', None)})
+    with _connect() as conn:
+        run_order_lookup_capture(conn, broker, "demo")
+    [(outcome, body, sha, detail)] = _rows(
+        "SELECT outcome, body_text, body_sha256, error_detail FROM tax_order_lookups WHERE order_id = 7"
+    )
+    assert (outcome, body, sha) == ("malformed", None, None)
+    assert detail.startswith("body not stored: contains NUL (sha256 ")
+
+
+class _BrokenBroker(_FakeBroker):
+    def lookup_order_raw(self, order_id: int) -> RawOrderLookup:
+        self.asked.append(order_id)
+        raise KeyError("defect")
+
+
+def test_an_unexpected_exception_is_recorded_then_raised(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    _seed(ebull_test_conn)
+    broker = _BrokenBroker({})
+    with _connect() as conn, pytest.raises(KeyError):
+        run_order_lookup_capture(conn, broker, "demo")
+    assert _rows("SELECT outcome, http_status, error_detail FROM tax_order_lookups") == [
+        ("transport_error", None, "KeyError: 'defect'")
+    ]
+    # The lock was released: another run proceeds.
+    with _connect() as conn:
+        assert run_order_lookup_capture(conn, _FakeBroker({}), "demo").state == "captured"

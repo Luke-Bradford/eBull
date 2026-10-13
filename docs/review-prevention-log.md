@@ -12612,3 +12612,14 @@ neighbouring container and match it.**
   untrusted text catches `RecursionError` beside `ValueError`.
 - Enforced in: `tests/test_tax_broker_evidence.py::test_classify_lookup` and
   `tests/test_trade_events.py::TestObservationNormalisation::test_payload_account_id`.
+
+### An evidence capture records the attempt before anything can abort it (#3616)
+
+- Failure (review bot, PR #3797, 2026-10-13): the lookup capture called the broker and then inserted the row. An
+  exception from the call that was not an HTTP outcome, or a body containing NUL (which Postgres `TEXT` refuses), would
+  have aborted the run with that attempt unstored, losing the one record that the attempt happened.
+- Prevention: in a capture whose rows are evidence, every attempt writes its row on every path. An unexpected
+  exception writes an error row and then re-raises, and a body the column cannot hold is kept as its hash and length.
+- Enforced in: `tests/test_tax_broker_evidence_db.py::test_an_unexpected_exception_is_recorded_then_raised` and
+  `::test_a_nul_body_is_kept_as_its_hash`.
+

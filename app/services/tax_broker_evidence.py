@@ -275,32 +275,22 @@ def capture_order_lookups(
     report = CaptureReport(state="captured")
     for order in plan:
         requested_at = datetime.now(UTC)
-        raw = broker.lookup_order_raw(order.order_id)
+        try:
+            raw = broker.lookup_order_raw(order.order_id)
+        except Exception as exc:
+            # Not an HTTP outcome: a defect. The attempt is still recorded, then the run fails loudly.
+            _insert_attempt(
+                conn,
+                environment,
+                order,
+                requested_at,
+                RawOrderLookup(http_status=None, body_text=None, error_detail=f"{type(exc).__name__}: {exc}"),
+                "transport_error",
+                None,
+            )
+            raise
         outcome, account_id = classify_lookup(order.order_id, raw)
-        body = raw.body_text
-        conn.execute(
-            """
-            INSERT INTO tax_order_lookups
-                (environment, order_id, requested_at, policy_id, outcome, http_status, error_detail,
-                 body_text, body_sha256, account_id, order_event_max_id)
-            VALUES
-                (%(env)s, %(order_id)s, %(requested_at)s, %(policy)s, %(outcome)s, %(status)s, %(error)s,
-                 %(body)s, %(sha)s, %(account)s, %(e)s)
-            """,
-            {
-                "env": environment,
-                "order_id": order.order_id,
-                "requested_at": requested_at,
-                "policy": TAX_EVIDENCE_POLICY_ID,
-                "outcome": outcome,
-                "status": raw.http_status,
-                "error": raw.error_detail,
-                "body": body,
-                "sha": hashlib.sha256(body.encode("utf-8")).hexdigest() if body is not None else None,
-                "account": account_id,
-                "e": order.max_event_id,
-            },
-        )
+        _insert_attempt(conn, environment, order, requested_at, raw, outcome, account_id)
         report.attempted += 1
         report.outcomes[outcome] = report.outcomes.get(outcome, 0) + 1
         if outcome in _STOP_OUTCOMES:
@@ -308,6 +298,48 @@ def capture_order_lookups(
             break
     report.deferred = len(first) + len(retry) - report.attempted
     return report
+
+
+def _insert_attempt(
+    conn: psycopg.Connection[Any],
+    environment: str,
+    order: LedgerOrder,
+    requested_at: datetime,
+    raw: RawOrderLookup,
+    outcome: LookupOutcome,
+    account_id: int | None,
+) -> None:
+    body = raw.body_text
+    error = raw.error_detail
+    if body is not None and "\x00" in body:
+        # Postgres TEXT cannot hold NUL. Such a body is not valid JSON (classified malformed, or by its status), so
+        # it is kept as its hash and length rather than lost with the attempt.
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        error = f"body not stored: contains NUL (sha256 {digest}, {len(body)} chars)" + (f"; {error}" if error else "")
+        body = None
+    conn.execute(
+        """
+        INSERT INTO tax_order_lookups
+            (environment, order_id, requested_at, policy_id, outcome, http_status, error_detail,
+             body_text, body_sha256, account_id, order_event_max_id)
+        VALUES
+            (%(env)s, %(order_id)s, %(requested_at)s, %(policy)s, %(outcome)s, %(status)s, %(error)s,
+             %(body)s, %(sha)s, %(account)s, %(e)s)
+        """,
+        {
+            "env": environment,
+            "order_id": order.order_id,
+            "requested_at": requested_at,
+            "policy": TAX_EVIDENCE_POLICY_ID,
+            "outcome": outcome,
+            "status": raw.http_status,
+            "error": error,
+            "body": body,
+            "sha": hashlib.sha256(body.encode("utf-8")).hexdigest() if body is not None else None,
+            "account": account_id,
+            "e": order.max_event_id,
+        },
+    )
 
 
 def run_order_lookup_capture(
