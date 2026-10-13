@@ -132,6 +132,9 @@ def measure(observations: list[Observation]) -> dict[str, Any]:
         ),
         reverse=True,
     )
+    since_2019 = [[round(m, 2), a.isoformat(), b.isoformat()] for m, a, b in moves if a >= date(2019, 1, 1)]
+    if not since_2019:
+        raise SystemExit("measurement needs observations on or after 2019-01-01 (spec fact 4)")
     return {
         "observations": len(observations),
         "first": days[0].isoformat(),
@@ -142,9 +145,7 @@ def measure(observations: list[Observation]) -> dict[str, Any]:
         "widest_gap_days": widest,
         "widest_gaps_latest_3": [[a.isoformat(), b.isoformat()] for a, b in pairs if (b - a).days == widest][-3:],
         "largest_moves_pct": [[round(m, 2), a.isoformat(), b.isoformat()] for m, a, b in moves[:3]],
-        "largest_move_pct_since_2019": next(
-            ([round(m, 2), a.isoformat(), b.isoformat()] for m, a, b in moves if a >= date(2019, 1, 1)), None
-        ),
+        "largest_move_pct_since_2019": since_2019[0],
     }
 
 
