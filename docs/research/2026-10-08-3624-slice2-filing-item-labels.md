@@ -86,11 +86,11 @@ which is acceptable only because `last-modified` bounds nothing.
 - **Form 8-K:** SEC 873 (02-25), sha256 `730ab1de…`, from `https://www.sec.gov/files/form8-k.pdf`.
 - **EDGAR PDS Technical Specification**, version 2.0, March 2025 (sha256 `fd9d0359…`), from
   `https://www.sec.gov/info/edgar/specifications/pds_dissemination_spec.pdf`.
-- **Code:** every output's `provenance` block records the executing script's sha256 (`6f1b9f35…`), `HEAD`
-  (`d2ada933`) and that the script was clean at `HEAD`. All three outputs carry the same block.
+- **Code:** every output's `provenance` block records the executing script's sha256 (`d8348e72…`), `HEAD`
+  (`178540c5`) and that the script was clean at `HEAD`. All three outputs carry the same block.
 
 Database figures (`filing_events`, `eight_k_*`, `sec_filing_manifest`, `financial_facts_raw`, `sec_8k_item_codes`)
-are as of 2026-10-12, read by the first command (queries in the script).
+are as of 2026-10-13, read by the first command (queries in the script).
 
 ## Labels
 
@@ -217,7 +217,7 @@ engagement of a new independent accountant".
      Eastern days after the filing date. 15,655 of them have item sets, and the current stored sets agree with
      archive A (15,640 no-NULL, 15 mixed); the other 6 are all NULL. `filing_events` keeps current values only, so
      this shows current agreement, not that nothing changed.
-4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,589
+4. **The typed body parser is not an independent completeness check** (`cross_source`). Population: the 72,611
    non-tombstone `eight_k_filings` accessions at this run (live ingest grows the table between runs;
    `cross_source.typed_accessions` is the figure of record), left-joined to `eight_k_items`; 72,241 are in the archive, all with
    valid items there. The parser stored no item rows for 52,353 of them. Within the overlap it never holds a target
@@ -652,12 +652,12 @@ of work preceded this spec's acceptance, and both read no price, return or outco
   for a consumer, no full population). Each executed version is a configuration tried: the tag-based
   timing-uncertain rule at `a24131e1` and `77231ed1`, and the production predicates at `44ac5fdc`, `22876703`,
   `c7ea8ba9`, `847be55b`, `f5007575`, `73614936` (on the live CIK list, 5 CIKs larger, so a different negative
-  sample), `d59a0bc8` (the same predicates on the pinned list), `ffd87d74`, `2ce339e3`, `d2ada933` and `66f387c6`. Each run counts separately, since a
+  sample), `d59a0bc8` (the same predicates on the pinned list), `ffd87d74`, `2ce339e3`, `d2ada933`, `66f387c6` and `178540c5`. Each run counts separately, since a
   different covered population is a different configuration. Any later re-run of the measurement adds its commit. Each change was made for a source-rule or checkpoint finding, never by comparing
   outcomes.
 
 Build step 2 therefore registers two non-claiming entries: `3624-slice2-construction-measurement`, listing those
-thirteen runs by commit (`searches=13`, plus any added by a later re-run), and the production configuration below, registered prospectively before
+fourteen runs by commit (`searches=14`, plus any added by a later re-run), and the production configuration below, registered prospectively before
 the production build's first data read.
 
 The producer and its fixtures are written first and read no data (build step 1). Then, before the production
@@ -1089,3 +1089,8 @@ The build rung is behavioural with data semantics: fixtures, Codex checkpoint 2,
   - **One split** (178): the CRLF rule had run twice and is not idempotent, so `<ITEMS>2.02\r\r\n` read as
     valid. `header_lines` now splits once and the grammar and the `<CIK>` scan share its lines, with fixtures for
     a lone CR and for a CR before CRLF on an item and a CIK line.
+- **Round 16** (`var/research/3624/ckpt1_slice2_r16.txt`): 0 open, 2 new (179, 180), 1 resolved (178). The
+  measurement was re-run at `178540c5`; only `cross_source.typed_accessions` moved (72,589 to 72,611, live ingest).
+  - **Terminal CR** (179): `header_lines` removed a CR from the last fragment, which no LF ends. Only LF-terminated
+    fragments now lose a CR, with a terminal-lone-CR fixture.
+  - **Provenance** (180): the code pin names the executing script and `HEAD` of this run.
