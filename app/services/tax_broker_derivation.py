@@ -257,8 +257,8 @@ def _id(value: Any) -> Any:
     return value if type(value) is int and 0 < value <= BIGINT_MAX else _INVALID
 
 
-def _positive_int(value: Any) -> Any:
-    return value if type(value) is int and 0 < value <= BIGINT_MAX else _INVALID
+#: A positive integer that fits a BIGINT: the same domain as an id.
+_positive_int = _id
 
 
 def _non_negative_int(value: Any) -> Any:
@@ -1028,9 +1028,7 @@ def derive_order(
             if sum(close_investments, Decimal(0)) + sum(held_amounts, Decimal(0)) != consideration:
                 reasons.add("investment_not_conserved")
 
-        if None not in (execution_units, rate, conversion, consideration):
-            assert execution_units is not None and rate is not None and conversion is not None
-            assert consideration is not None
+        if execution_units is not None and rate is not None and conversion is not None and consideration is not None:
             if not _within_tolerance(execution_units * rate * conversion, consideration):
                 reasons.add("consideration_implausible")
 
@@ -1069,10 +1067,15 @@ def derive_order(
     if reasons:
         return result("unresolved")
 
-    assert acquired_at is not None and execution_units is not None and consideration is not None
-    assert etoro_instrument_id is not None
     instrument_id = next(iter(app_instruments))
-    assert instrument_id is not None
+    if (
+        acquired_at is None
+        or execution_units is None
+        or consideration is None
+        or etoro_instrument_id is None
+        or instrument_id is None
+    ):
+        raise RuntimeError(f"order {order_id} passed every check with an undefined lot input")
     evidence: ExecutionEvidence = "lookup" if f is not None else "sync_only"
     lots = [
         LotDraft(
