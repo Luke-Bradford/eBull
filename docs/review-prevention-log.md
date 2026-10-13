@@ -12575,5 +12575,7 @@ neighbouring container and match it.**
 - Prevention: identification is computed on the statutory unit, one acquisition and one disposal per security per
   day, in the statutory order across the whole history (same-day on every day, then 30-day earliest-first, then the
   pool in date order), and only then allocated back to lots. Test a disposal rule with two same-day lots on each
-  side and assert unit and cost conservation into the closing pool.
+  side and assert unit and cost conservation into the closing pool. A pro-rata split written to a fixed-scale
+  column rounds cumulative shares (never each share on its own, which can leave a negative remainder), and emits
+  no row whose every column rounded to zero.
 - Enforced in: `tests/test_tax_ledger.py::TestStatutoryIdentification`.
