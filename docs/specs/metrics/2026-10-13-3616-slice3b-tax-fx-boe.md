@@ -33,9 +33,12 @@ never a rate.
   - They live on the dev machine under `var/research/3616/inputs/` (gitignored), named `<probe>-<sha256 prefix>.body`.
   - The full-series download is `XUDLUSS_1975-01-01_2026-10-13.csv.gz`, whose gzip wraps the hashed entity bytes.
   - Each is identified by its full sha256 in the outputs.
-- **Recovery.** That machine is the only copy. If it is lost, a fresh download through the same scripts re-measures
-  the facts as of the new date. A changed hash then shows whether the Bank's history moved; it cannot restore the old
-  bytes.
+- **Recovery.** That machine is the only copy, and keeping a second archive is deliberately declined: these are
+  one-off design measurements, and the build's own `tax_fx_fetches` keeps every production body.
+  - The consequence is that if the machine is lost, the original measurement cannot be audited byte for byte.
+  - A fresh download through the same scripts re-measures the facts as of the new date.
+  - A changed hash shows only that the bytes differ. Whether history moved is found by comparing parsed observations
+    over the common interval, which needs the original bytes.
 
 1. **The tax `fx_rates` table (sql/013) has no writer** (code inspection).
    - `grep -rnE "(INSERT INTO|UPDATE|COPY) +fx_rates\b" app scripts sql tests` returns nothing.
@@ -81,7 +84,8 @@ never a rate.
      may not be republished or redistributed without LSEG's consent.
 8. **Reuse terms.**
    - The Bank's legal page permits users to *"download, display or print the Resources for personal use or internal
-     use"*.
+     use"*. That permission is subject to the page's other terms, which treat the Database separately and speak of
+     non-commercial re-use.
    - Reproduction of database data falls under the Open Government Licence, which excludes *"selected exchange rate
      data and series"*.
    - **The eBull repository is public** (`gh repo view`: `PUBLIC`).
@@ -108,15 +112,21 @@ authenticated app.
   third party whose content the rates include. That is a constraint on 3d.
 - **One question stays open.** The published pages do not settle whether persistent private storage of XUDLUSS falls
   under the legal page's personal and internal-use permission, or under the database terms.
-  - **Recommendation:** treat it as permitted personal and internal use, and confirm with the Bank's data team before
-    any use beyond that.
-  - **If the answer is adverse,** the job is disabled and the source stays `unavailable`. A new spec then chooses a
-    permitted source or evidence design. Merely changing how bodies are stored would not answer the question.
+  - **Assumption:** proceeding is an explicit project assumption that this is permitted personal and internal use,
+    pending the Bank's data team.
+  - **Recommendation:** ask the Bank's data team before any use beyond that.
+  - **The control** is `tax_fx_source_control.enabled` (Design 1). An adverse answer sets it false, which makes every
+    date `unavailable` at once. A new spec then chooses a permitted source or evidence design. Merely changing how
+    bodies are stored would not answer the question.
 
 ## Design
 
 ### 1. Storage (migration `sql/484_tax_fx_boe.sql`)
 
+- **`tax_fx_source_control`**: one row, `enabled` (seeded true), `reason` and `changed_at`.
+  - It is changed only by a reviewed migration, which first takes `pg_advisory_xact_lock(TAX_FX_LOCK_KEY)`, so a change
+    cannot race a run or a publication.
+  - A run checks it first and exits as `skipped` when it is false.
 - **`tax_fx_runs`**: one row per job run, created first.
   - Columns:
     - `run_id`, an identity assigned under the run lock (Design 2), which totally orders runs;
@@ -135,10 +145,11 @@ authenticated app.
   - Columns:
     - `fetch_id` and `run_id` (FK);
     - `source` (`boe_xudluss` or `govuk_bank_holidays`), `request_url`, `user_agent`, `fetched_at`;
-    - `outcome` (`received`, `incomplete` or `transport_error`) and `error`;
+    - `outcome` (`received`, `incomplete`, `oversize` or `transport_error`) and `error`;
     - `http_status`, `content_length_header` and `content_encoding_header`, each NULL when absent;
     - `body_gz` (the exact entity bytes received, gzipped), `body_sha256` and `body_length`.
   - `incomplete` means headers arrived and the transfer then failed. Any bytes received are kept.
+  - `oversize` means the body passed its byte limit (Design 2, step 2). Only the first 64 KiB are kept.
   - Retention is permanent. At the measured 9,010 gzipped bytes, the BoE body takes about 3.3 MB in the first year;
     it grows slowly as the range lengthens. Calendar bodies and database overhead are extra.
 - **`tax_fx_observations`** holds the current value per date: `observation_date` (PK), `usd_per_gbp NUMERIC(12,6)`
@@ -165,14 +176,20 @@ from start to end. A second invocation of any kind, scheduled or manual, waits, 
 1. **Open the run.** Mark any earlier `in_progress` run `abandoned`. Insert this run as `in_progress` and commit.
 2. **Fetch.** Fetch both sources and commit each fetch row at once, linked to the run.
    - Both requests send `User-Agent: eBull/1.0 (+https://github.com/Luke-Bradford/eBull)` (fact 6) and
-     `Accept-Encoding: identity`. They time out after 30 s and never follow redirects.
+     `Accept-Encoding: identity`. Neither follows redirects.
+   - **Deadline.** Each fetch has a 60 s end-to-end limit, body included.
+   - **Byte limits.** Bodies are streamed under a limit:
+     - BoE: 64 + 32 × (days in the requested span) bytes. A row is at most 27 bytes.
+     - Calendar: 1 MiB, against a measured 22 KB.
    - **BoE.** The CSV URL from the measurement script, with `VPD=N` (fact 7: no provisional data) and `VFD=N`.
      - `Datefrom` is `FX_FLOOR = 2019-01-01`, the calendar seed's first year.
      - `Dateto` is `run_date`.
      - Dates use a fixed English month table, never the process locale.
    - **GOV.UK.** `https://www.gov.uk/bank-holidays.json`.
-3. **A BoE fetch that is not `received`** makes the run `skipped`, and the job raises. It adds no evidence, so the
-   current state stands.
+3. **A BoE fetch that is `incomplete` or a `transport_error`** makes the run `skipped`, and the job raises. It adds no
+   evidence, so the current state stands.
+   - An `oversize` BoE fetch is a wrong response, not a missing one, so it is `refused`.
+   - So is an `oversize` calendar.
 4. **Otherwise one transaction validates and applies.** The first failed check rolls the transaction back. The run is
    then committed as `refused`, with the check and the dates involved, and the job raises.
    1. **BoE response.** HTTP 200; no `Content-Encoding`; `body_length` equals `Content-Length` when that header is
@@ -221,7 +238,11 @@ from start to end. A second invocation of any kind, scheduled or manual, waits, 
        Write the calendar candidate's added and changed years, with a `tax_fx_calendar_revisions` row for each. Mark
        the run `applied` with its counts and `accepted_through`, the latest stored date (*L*).
 5. **After commit, the job raises `feed_stale`** if *L* is more than `STALE_ALERT_LAG = 4` working days before
-   `run_date`. That is the Bank's two-working-day window, plus one day for confirmation, plus one.
+   `run_date`.
+   - While the store is empty, *L* is NULL. The alert then fires when the earliest eligible run since the store was
+     last empty is more than `STALE_ALERT_LAG` working days before `run_date`.
+   - That origin is read from `tax_fx_runs`, so a retry cannot reset it.
+   - This covers persistent disagreement on the first dates as well as an ordinary two-run bootstrap. That is the Bank's two-working-day window, plus one day for confirmation, plus one.
    - Because it measures the accepted horizon, not the body, it also catches confirmation that has stalled while
      fresh bodies keep arriving.
    - The alert is operational. `BOOTSTRAP_MAX_LAG` is policy.
@@ -250,8 +271,10 @@ from start to end. A second invocation of any kind, scheduled or manual, waits, 
 - A test rebuilds both from evidence after a sequence that includes a revision and a changed future calendar year, and
   compares the result with the live tables.
 
-**A crash** at any point leaves a run `in_progress` that the next run marks `abandoned`. If that run had a received BoE
-fetch, the source is unhealthy until a later run applies (Design 3).
+**A crash** before a run's terminal state commits leaves it `in_progress`, and the next run marks it `abandoned`. If
+that run had a received BoE fetch, the source is unhealthy until a later run applies (Design 3).
+- A crash after an `applied` commit leaves the run `applied`; only its post-commit alert is lost.
+- The next run re-evaluates the alert.
 
 ### 3. Which rate a date takes
 
@@ -265,7 +288,8 @@ the observations, the calendar and the latest applied
 `resolve_tax_fx(state, rate_date) -> TaxFxRate` is pure. 3c passes each event's Europe/London date, as `_to_uk_date`
 does today.
 
-**Health.** The source is healthy when three conditions hold:
+**Health.** The source is healthy when four conditions hold:
+- `tax_fx_source_control.enabled` is true;
 - the latest run with a `received` BoE fetch is `applied`;
 - that run's `policy_id` equals `TAX_FX_POLICY_ID`;
 - `tax_fx_observations` is not empty.
@@ -300,7 +324,7 @@ Rounding moves `gbp_per_usd` by at most 5×10⁻¹¹, so a converted amount move
 
 `tax_fx_state_is_current(conn, state) -> bool` takes `pg_advisory_xact_lock_shared(TAX_FX_LOCK_KEY)`. It then reads,
 at READ COMMITTED, whether the source is still healthy and the latest run with a received BoE fetch is still
-`state.run_id`.
+`state.run_id`, and that the source is still enabled.
 - The shared lock conflicts with a run's exclusive lock and is held to the caller's commit, so no run can change the
   answer between the check and the publication.
 - It raises if called inside a REPEATABLE READ or stricter transaction, whose snapshot could be older than the check.
@@ -404,6 +428,19 @@ committed (Source rule, "Reuse").
   - duplicate dates are refused;
   - a year with 7 dates is refused.
 
+**Byte limits and control:**
+- an oversize BoE body and a slow body passing the 60 s deadline are refused and skipped respectively, and the lock is
+  released;
+- disabling an already healthy, populated source makes every date `unavailable`, and a previously loaded state fails
+  `tax_fx_state_is_current`.
+
+**Bootstrap alert:**
+- a first run with nothing confirmed raises no alert;
+- persistent disagreement on the first date raises `feed_stale` after `STALE_ALERT_LAG` working days, measured from
+  the first eligible run.
+
+**Crash after commit:** an `applied` run stays `applied`.
+
 **Validate and apply** (a pure planning function over in-memory state, with synthetic bodies whose dates follow the
 seed calendar). With an empty store:
 - a complete body is eligible but confirms nothing, and the next identical body applies;
@@ -481,7 +518,8 @@ Transport and framing:
 ## Acceptance (dev DB)
 
 After the build merges, the jobs child reloads (PID changed), and `tax_fx_refresh` runs twice (bootstrap, Design 3):
-- **Runs.** The first run is `applied` and `eligible`, with `inserted` 0. The second is `applied`, with one `received`
+- **Runs.** The first run is `applied` and `eligible`, with `inserted` 0 and `accepted_through` NULL. The source is
+  `unavailable` until the second run. The second is `applied`, with one `received`
   fetch per source.
 - **Observations.** `tax_fx_observations` holds exactly the confirmed prefix that step 4.10 derives from the two stored
   bodies, at those values. `accepted_through` equals its last date.
@@ -511,7 +549,7 @@ series. Every run therefore repeats the exact-coverage check before applying any
 - **Outbound calls.** The job makes two unauthenticated outbound GETs to fixed public URLs, with an identifying
   User-Agent. Their only parameters are dates formatted from `date` objects; no user input reaches a request.
 - **Response handling.** Responses are parsed strictly and redirects are not followed.
-- **Writes.** The job writes only the six new tables: runs, fetches, observations, revisions, calendar years and
-  calendar revisions.
+- **Writes.** The job writes only six new tables: runs, fetches, observations, revisions, calendar years and calendar
+  revisions. A seventh, the source control, is written only by migration.
 - **No change to any trust boundary.** No endpoint, authorisation check, order path or capital path changes.
 - **Data use.** It stays personal and internal. No Bank rate enters the public repository (fact 8).

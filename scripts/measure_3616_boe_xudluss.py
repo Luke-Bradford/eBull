@@ -94,7 +94,8 @@ def parse_bank_holidays(body: bytes) -> dict[int, frozenset[date]]:
 
     Every year from the first to the last listed must hold at least ``MIN_HOLIDAYS_PER_YEAR`` distinct dates (the 8
     recurring England-and-Wales bank and public holidays). That is a plausibility check only: it does not prove a year
-    complete. The spec's acceptance checks (Design 2) carry that.
+    complete. The spec additionally checks agreement with the series over the received observation interval; neither
+    check independently proves calendar completeness.
     """
     try:
         division = json.loads(body)[CALENDAR_DIVISION]
