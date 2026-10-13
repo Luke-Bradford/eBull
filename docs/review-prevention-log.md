@@ -12549,3 +12549,16 @@ neighbouring container and match it.**
   machinery does not cover the trades, publish no after-tax number; say what is missing.
 - Enforced in: `docs/specs/metrics/2026-10-12-3616-gbp-isa-comparator.md`, "Why this slice computes no after-tax
   return".
+
+### A smoke test of a state-changing helper mutates whatever database it reaches (#3785)
+
+- Failure (2026-10-13, found after an OS-update outage): `tests/test_sync_orchestrator_api.py::TestReaperIdempotent`
+  called `reap_orphaned_syncs()` and `reap_orphaned_syncs(reap_all=True)` to assert they returned an int. The reaper
+  opens its own connection on `settings.database_url`, so each pre-push DB-tier run set every running dev
+  `sync_runs` row to `failed`/`orchestrator_crash` and cancelled its downstream layers. In 14 days, 21 of 34 crash
+  reaps had no jobs boot near them, including the nightly full sync on four nights.
+- Prevention: a test that calls a production function which writes must point that function at the test database
+  (autouse `settings.database_url` redirect) or not call it. "Returns without error" is not a reason to run a
+  writer against the dev DB. The line-literal guard and the size tripwire both miss an internal UPDATE.
+- Enforced in: `.claude/skills/engineering/test-quality.md` ("An integration test through a production entry point
+  may open its OWN connection"); review only.
