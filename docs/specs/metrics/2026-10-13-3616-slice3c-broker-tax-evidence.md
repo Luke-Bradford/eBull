@@ -22,7 +22,8 @@ evidence and publishes it as one generation.
 
 **Admitted is not yet tax consideration.** An admitted lot carries the broker's stated amount with
 `consideration_status = broker_stated_unreconciled`. Whether those amounts are the TCGA consideration needs a
-reconciliation against an independent record of the account's cash, which no stored source provides (Source rules,
+reconciliation against an independent record of the account's cash, which none of the sources evaluated here
+provides (Source rules,
 Limits). 3d decides that reconciliation and must not publish a tax figure from an unreconciled lot.
 
 **What it does not do.** It changes no published tax figure. Reconciling consideration, matching, security identity
@@ -170,7 +171,8 @@ account's complete history (Limits).
   of disposal.
 - **What this slice can and cannot establish.** The broker's trade record states what the account committed (the
   order's initial investment) and what each close returned (`investment + netProfit`). No eToro page documents these
-  fields as the cash debited or credited, and no stored source records the account's cash per trade (fact 10). This
+  fields as the cash debited or credited, and none of the stored sources this slice evaluated (history, sync, lookup payloads and the daily account snapshots,
+fact 10) records the account's cash per trade. This
   slice therefore records them as the broker's stated amounts, with three bounds on their being wrong: every documented
   charge and adjustment indicator listed below is zero in every observation, so nothing in s38(2) arises from them; the execution
   record corroborates them (Design 4.9); the position ledger conserves them exactly (Design 4.9). Turning them into
@@ -205,7 +207,9 @@ account's complete history (Limits).
 ### 1. Storage (migration `sql/485_tax_broker_evidence.sql`)
 
 The migration first takes the portfolio sync's transaction lock (`pg_advisory_xact_lock` on
-`_SYNC_PORTFOLIO_XACT_LOCK_KEY`, the key `sync_portfolio` takes), so no sync writes `broker_positions` while it checks.
+`_SYNC_PORTFOLIO_XACT_LOCK_KEY`, the key `sync_portfolio` takes), so no sync writes `broker_positions` while it checks,
+and `LOCK TABLE tax_lots IN SHARE ROW EXCLUSIVE MODE`, which waits for an in-flight `_ingest_fills` insert to commit and
+blocks any new one until the migration commits with its trigger installed (Design 8).
 It raises, naming the table, unless `tax_lots` and `fx_rates` are both empty (fact 18), and raises, naming the
 positions, unless every `broker_positions` and `broker_positions_closed` row, whether or not its position is yet in
 `trade_events`, has a non-NULL `total_fees` of 0 (on dev: 10 and 6 rows, all 0, `--facts`): legacy fee evidence the ledger never observed is either known to be zero at
@@ -298,12 +302,20 @@ A batch not written records its fetch as `scope_unverified` (no account) or `sco
 lets the rest of the portfolio sync commit. Every payload of a batch not written, sync and history alike, is still
 retained as a `trade_event_observations` row with `kind = 'unscoped'`, its source, event kind, `position_id`, close
 `executed_at` (history closes), the fetch row's id and `event_id` NULL; an identical repeat for the same
-`(position_id, source, event_kind, executed_at)` is not written again. At derivation each `unscoped` observation that
-names an event of the ledger is compared, by the amendment rule, with that event's latest retained payload of the same
-source and kind: a difference makes the order `unresolved` with `unscoped_conflict`; an identical one changes nothing.
-So a fee, proceeds or opening value a withheld batch carried is never lost behind a later clean batch, a flat account's
-routine history re-walk (identical rows) quarantines nothing, and another account's positions, which name no ledger
-event, change nothing. Because the watermark moves only on written history rows (fact 16), the
+`(position_id, source, event_kind, executed_at)` is not written again. At derivation, every `unscoped` observation is
+attached by `position_id` to the subject holding that position, before any event matching. For each, the baseline is
+the latest retained payload that is not `unscoped` with the same `(position_id, source, event_kind)` and, for a close,
+the same `executed_at`: the stored row if it has that source, else the latest supplemental, amendment or lifecycle
+observation. Then:
+- no baseline (an unseen close piece, a changed close timestamp, or a source the ledger has not retained for that
+  position): the order is `unresolved` with `unscoped_unmatched`;
+- different by the amendment rule: `unscoped_conflict`;
+- identical: nothing.
+
+The comparison runs at each derivation, so an unscoped close that a later clean batch writes unchanged stops being
+unmatched once its baseline exists. A fee, proceeds or opening value a withheld batch carried is therefore never lost
+behind a later clean batch; a flat account's routine history re-walk, once the clean batch writes the same rows,
+quarantines nothing; and another account's positions, which belong to no subject, change nothing. Because the watermark moves only on written history rows (fact 16), the
 next batch that carries the account fetches the skipped closes again, as far back as the endpoint serves them. So no
 row of an unverified or other account enters the ledger, suppresses a row under its global unique indexes, or moves the
 watermark. Moving the ledger to another environment or account is a reviewed migration, never a side effect.
@@ -349,7 +361,8 @@ make the order amended, but derivation reads it (Design 4.8).
 also returns the history opens it set aside, and `ingest_trade_events` passes each to the decision above after the
 kept row is inserted, so a set-aside open is compared and retained like any later observation.
 
-Columns: `observation_id`, `event_id` of the stored row (NULL for `unscoped`), `position_id`, `executed_at` (closes), `fetch_id`, `kind`,
+Columns: `observation_id`, `event_id` of the stored row (NULL for `unscoped`), `position_id`, `event_kind` (`open` or `close`, NOT NULL),
+`executed_at` (NOT NULL for closes), `fetch_id`, `kind`,
 `observed_at`, `source`, `stored_normalised JSONB`,
 `observed_normalised JSONB`, `observed_raw JSONB`. The stored row is never changed (sql/194's contract). Derivation
 treats a supplemental observation as one more payload of the order (every field check of its source applies to it, so
@@ -713,8 +726,10 @@ returns. Registration mirrors `tax_fx_refresh`: `SCHEDULED_JOBS`, the lane map i
   The documented closed-position counts endpoint identifies the caller by GCID, not by account, so it is not used as a
   completeness check.
 - **Closes while nothing is held.** History arriving in a batch with no open positions is not written until a later
-  batch carries the account (Design 2). Closes older than the endpoint then serves are lost; this is visible as
-  `scope_unverified` fetch rows.
+  batch carries the account (Design 2). Their payloads are retained as `unscoped` observations, so the
+  evidence is not lost, but a close the endpoint no longer serves by then is never written to the ledger
+  automatically; its order stays `unresolved` (`unscoped_unmatched`) until a reviewed recovery imports it from the
+  retained payload.
 - **Precision of stored payloads.** Ledger payloads already passed through a binary double (fact 17); a broker value
   beyond a double's precision could have been altered before storage. Lookup bodies keep their text.
 - **Sync-only executions.** Without a lookup, an admitted order's single execution and filled status are assumed, and
@@ -760,7 +775,8 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
 - exclusion: a CFD order with every binding check passing is excluded; a CFD order with a lookup instrument mismatch, a
   quarantined position or an amendment is `unresolved`, not excluded; a lookup with an unknown `settlementType` is
   `found`, fails the field check (`invalid_field`) and is retried after 7 days; valid → unknown product → valid,
-  valid → non-zero fee with `openingData.orderId` missing → valid: `unresolved` at every step (`lookup_amended` sticky);
+  valid → non-zero fee with `openingData.orderId` missing → valid: admitted on the first body (all else passing), then
+  `unresolved` from the contradictory body onward (`lookup_amended` sticky);
   a body whose `orderId` is not the asked id: `malformed`, *F* unchanged;
 - every other failing check in Design 4, including: a missing `fees` (not zero); `orderID` and `orderId` disagreeing in
   one payload; a close row's `units` column differing from its payload; events disagreeing on instrument; a lowercase
@@ -779,7 +795,8 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
 - the fingerprint is stable under array reordering, excludes `run_id`, `fx_run_id` and itself, and changes with
   `evidence_policy_id`;
 - lookup classification: every row of the response table, including a non-JSON 200, a JSON array 200, `{}` and
-  `{"orderId": <asked>, "asset": {}, "positionExecutions": [{}]}` (all `malformed`);
+  (all `malformed`), and `{"orderId": <asked>, "asset": {}, "positionExecutions": [{}]}`, which is `found` and then
+  fails derivation with `missing_field` reasons;
 - lookup candidates: every row of the candidate table, the 30/10 split with spill-over, the interleaving, and that an
   order failing every run does not keep a retry candidate waiting beyond the attempts ahead of it; a run stopped by
   `rate_limited` after its first attempt;
@@ -796,7 +813,8 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
 - no scope row: `refused` (`scope_unestablished`) with no lookup attempted; a held position of another account:
   `positions_out_of_scope`; a latest refresh with outcome `scope_refused`, or another environment:
   `portfolio_out_of_scope`; an empty `scope_unverified` refresh: the run proceeds;
-- after the migration an insert into `tax_lots` raises;
+- after the migration an insert into `tax_lots` raises; an insert in flight when the migration starts commits first and
+  the migration then refuses on the non-empty table;
 - the migration guard refuses a non-empty `tax_lots`, and a ledger position whose `broker_positions` or archived row
   has `total_fees` non-zero or NULL (an earlier archived non-zero beside a later zero included, and an archived position
   not yet in `trade_events`); the backfill guard refuses a non-demo credential and an empty
@@ -805,7 +823,9 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
   is refused and its payloads are retained as `unscoped`; a ledger position reported with `totalFees` 5 in a refused
   batch and 0 in the next clean one is `unresolved` (`unscoped_conflict`); a closed ledger position whose history row
   shows `fees` 5 in a refused batch and 0 again later: `unscoped_conflict`; a flat account's history-only batch
-  repeating stored closes unchanged: `unscoped` rows, no reason; a batch with another environment or `CID`
+  repeating stored closes unchanged: `unscoped` rows, no reason; a refused batch reporting a close at another timestamp,
+  an unseen close piece, or a sync payload for a history-only position, followed by a clean batch without it:
+  `unscoped_unmatched`; an unscoped close later written unchanged by a clean batch: no reason; a batch with another environment or `CID`
   writes no `trade_events` row and a `scope_refused` fetch row; a batch with history but no open positions writes a
   `scope_unverified` fetch row and no ledger row, and the next batch with the account ingests those closes; the
   portfolio sync commits in every case;
