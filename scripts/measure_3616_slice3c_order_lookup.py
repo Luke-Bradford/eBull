@@ -257,7 +257,13 @@ def checks() -> None:
                     totals[f"lookup execution {key} non-zero"] += _d(x["openingData"][key]) != 0
             if len(parsed) == 1:
                 units = _d(parsed[0]["units"])
+                for p in sync + history:
+                    totals["open rate beside a lookup"] += 1
+                    totals["open rate = lookup avgPrice"] += _d(p["openRate"]) == _d(parsed[0]["avgPrice"])
                 for p in sync:
+                    totals["sync openConversionRate = lookup avgConversionRate"] += _d(p["openConversionRate"]) == _d(
+                        parsed[0]["avgConversionRate"]
+                    )
                     totals["sync initialUnits beside a lookup"] += 1
                     totals["sync initialUnits = lookup openingData.units"] += _d(p["initialUnits"]) == units
                 rate, conversion = _d(parsed[0]["avgPrice"]), _d(parsed[0]["avgConversionRate"])
@@ -358,6 +364,11 @@ _FACT_QUERIES: tuple[tuple[str, str], ...] = (
         "broker_positions_closed, every row: rows, positions, total_fees non-zero, total_fees NULL",
         "SELECT count(*), count(DISTINCT position_id), count(*) FILTER (WHERE total_fees <> 0), "
         "count(*) FILTER (WHERE total_fees IS NULL) FROM broker_positions_closed",
+    ),
+    (
+        "broker_positions, every row: rows, real-id rows, total_fees non-zero, total_fees NULL",
+        "SELECT count(*), count(*) FILTER (WHERE position_id > 0), count(*) FILTER (WHERE total_fees <> 0), "
+        "count(*) FILTER (WHERE total_fees IS NULL) FROM broker_positions",
     ),
     (
         "distinct sync CIDs (count only)",

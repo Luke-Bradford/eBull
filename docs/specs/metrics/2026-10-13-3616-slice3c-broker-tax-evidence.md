@@ -190,7 +190,7 @@ account's complete history (Limits).
 
   `broker_positions.total_fees` and `broker_positions_closed.total_fees` are not derivation inputs: the sync writes them
   from the same payload whose `totalFees` the ledger observes (Design 2), so after this slice every value the sync sees
-  is retained as an observation. Before it, the ledger kept only first observations, and the values seen in between
+  is retained as an observation, from a written batch or, for a refused one, as an `unscoped` observation. Before it, the ledger kept only first observations, and the values seen in between
   survive only as the current and archived ones. The migration therefore checks that legacy population on the
   deployment itself (Design 1); on dev all are 0 (fact 9).
 - **Conversion to sterling.** HMRC CG78310, applied by 3b: each USD amount is converted at the rate for the date it is
@@ -207,8 +207,8 @@ account's complete history (Limits).
 The migration first takes the portfolio sync's transaction lock (`pg_advisory_xact_lock` on
 `_SYNC_PORTFOLIO_XACT_LOCK_KEY`, the key `sync_portfolio` takes), so no sync writes `broker_positions` while it checks.
 It raises, naming the table, unless `tax_lots` and `fx_rates` are both empty (fact 18), and raises, naming the
-positions, unless every `broker_positions` and `broker_positions_closed` row whose `position_id` is in `trade_events`
-has a non-NULL `total_fees` of 0: legacy fee evidence the ledger never observed is either known to be zero at
+positions, unless every `broker_positions` and `broker_positions_closed` row, whether or not its position is yet in
+`trade_events`, has a non-NULL `total_fees` of 0 (on dev: 10 and 6 rows, all 0, `--facts`): legacy fee evidence the ledger never observed is either known to be zero at
 deployment or the migration does not run (recovery: a reviewed migration importing those values as observations). It
 then:
 - drops `fx_rates` (Design 8);
@@ -243,7 +243,9 @@ belongs to exactly one subject.
 - `trade_event_ids BIGINT[]` (sorted; empty for an orphan), `lookup_id` (the *F* used, or NULL);
 - `held_positions JSONB`: position id → `{units, amount, cid}` read from `broker_positions`, or `null` when the
   position has no row;
-- `first_event_at`, `last_event_at` (NULL for an orphan); `execution_evidence` (NULL unless admitted).
+- `first_event_at`, `last_event_at` (NULL for an orphan); `execution_evidence` (NULL unless admitted);
+  `total_fees_unobserved_position_ids BIGINT[]` (sorted; the order's positions with no retained sync payload, hence no
+  `totalFees` observation; empty when every position was observed).
 - Primary key `(run_id, subject)`.
 
 **`tax_evidence_lots`.** One row per admitted acquisition or disposal per published run, built by the table in Design
@@ -293,7 +295,12 @@ must carry a valid `CID`, all equal; a missing, invalid or second `CID` refuses 
   A batch with no account (no open positions) writes no `trade_events` row.
 
 A batch not written records its fetch as `scope_unverified` (no account) or `scope_refused` (a mismatch), logs, and
-lets the rest of the portfolio sync commit. Because the watermark moves only on written history rows (fact 16), the
+lets the rest of the portfolio sync commit. A refused batch's sync payloads are still retained, each as a
+`trade_event_observations` row with `kind = 'unscoped'`, its `position_id`, the fetch row's id and `event_id` NULL
+(an unverified batch has no sync payloads). Derivation makes any order with an `unscoped` observation of one of its
+positions `unresolved` with `unscoped_observation`, so evidence a refused batch carried about a ledger position is
+never lost behind a later clean batch; for another account's positions, which never enter the ledger, it changes
+nothing. Because the watermark moves only on written history rows (fact 16), the
 next batch that carries the account fetches the skipped closes again, as far back as the endpoint serves them. So no
 row of an unverified or other account enters the ledger, suppresses a row under its global unique indexes, or moves the
 watermark. Moving the ledger to another environment or account is a reviewed migration, never a side effect.
@@ -339,7 +346,8 @@ make the order amended, but derivation reads it (Design 4.8).
 also returns the history opens it set aside, and `ingest_trade_events` passes each to the decision above after the
 kept row is inserted, so a set-aside open is compared and retained like any later observation.
 
-Columns: `observation_id`, `event_id` of the stored row, `kind`, `observed_at`, `source`, `stored_normalised JSONB`,
+Columns: `observation_id`, `event_id` of the stored row (NULL for `unscoped`), `position_id`, `fetch_id`, `kind`,
+`observed_at`, `source`, `stored_normalised JSONB`,
 `observed_normalised JSONB`, `observed_raw JSONB`. The stored row is never changed (sql/194's contract). Derivation
 treats a supplemental observation as one more payload of the order (every field check of its source applies to it, so
 a sync observation with a non-zero `mirrorID` fails the copy gate whichever arrived first) and an amendment as
@@ -385,8 +393,9 @@ A run asks at most 40: up to 30 from the first-attempt queue, newest order first
 oldest first; and up to 10 from the retry queue, oldest latest attempt first. A queue's unused slots go to the other.
 The two are interleaved, one retry then three first attempts, so a run stopped early by `rate_limited` or `auth_failed`
 has still served retries in proportion. Because the retry queue is ordered by latest attempt, a retry candidate is
-reached after at most as many retry attempts as there are retry candidates ahead of it; a run that stops early simply
-makes fewer attempts. Under sustained overload of more than 30 new orders per run, the oldest first attempts wait; the
+reached after at most as many retry attempts as there are orders whose latest attempt is older than its own (eligible
+now or later); a failing candidate goes to the back after each attempt, and a run that stops early simply makes fewer
+attempts. Under sustained overload of more than 30 new orders per run, the oldest first attempts wait; the
 stored ledger holds 21 orders in total (fact 1). The run records how many candidates it deferred and why it stopped.
 
 **Which body is used.** Derivation uses *F*. A later `not_found` or error never discards it. Two `found` bodies of one
@@ -412,7 +421,7 @@ subjects are always `unresolved`. Every event belongs to exactly one subject. Th
 
 `derive_order(scope, order_id, events, observations, lookups, held) -> OrderEvidence` takes the run's
 scope (environment and account), the order's events,
-their supplemental and amendment observations, its `found` bodies (oldest first, *F* last), and per position the
+all their retained observations (`supplemental`, `amendment`, `lifecycle` and `unscoped`, read in the same snapshot), its `found` bodies (oldest first, *F* last), and per position the
 `broker_positions` row (`units`, `amount`, payload `CID`) or `None`. It runs the checks below in order and records every one that fails. A check whose inputs an earlier failure
 left undefined is skipped, so `reasons` names causes, not their consequences.
 
@@ -486,10 +495,15 @@ failure in checks 1–6 makes the order `unresolved` whatever its product.
      `totalCosts`, and each execution's `addedFunds`, `openingData.fees`, `openingData.taxes` and `openingData.markup`;
      every retained sync payload's `totalExternalFees`, `totalExternalTaxes` and `totalFees`; every close row's
      `fees`. Else `charges_nonzero:<indicator>`. Each is required where its source exists (*F*, a sync payload, a close
-     row); a position the sync never observed has no `totalFees` observation, which is recorded, not failed (Limits).
+     row); a position the sync never observed has no `totalFees` observation, which is recorded in
+     `total_fees_unobserved_position_ids`, not failed (Limits).
    - **Opening units.** With *F*, every retained sync `initialUnits` equals *F*'s `openingData.units` (else
      `opening_units_conflict`): on this account the sync reports the whole order's units even for a piece of a split
      order (9 of 9 orders with both, `--checks`).
+   - **Opening rates.** Every retained sync `openRate` and history `openRate` equals *F*'s `avgPrice`, and every
+     retained sync `openConversionRate` equals *F*'s `avgConversionRate`; without *F*, every retained `openRate` of the
+     order is one value (else `opening_rate_conflict`). Measured: 25 of 25 open rates and 9 of 9 conversion rates
+     beside a lookup are equal (`--checks`). The corroboration check below then uses the one agreed rate.
    - **Units.** Execution units (*F*'s `openingData.units`, else the sync `initialUnits`) = Σ close-row units + Σ held
      units of the order's positions, exactly (else `units_not_conserved`).
    - **Consideration.** Every stored initial investment (sync `initialAmountInDollars`, history `initialInvestment`) is
@@ -722,7 +736,10 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
 - a close-only position: `open_event_missing`;
 - a no-lookup admitted order: lots carry `execution_evidence = sync_only`; the same order with a later `lifecycle`
   observation of `isPartiallyAltered` true: `executions_unestablished`;
-- a sync `initialUnits` of 9 beside a lookup and held position of 10: `opening_units_conflict`;
+- a sync `initialUnits` of 9 beside a lookup and held position of 10: `opening_units_conflict`; a sync `openRate` of
+  200 beside a lookup `avgPrice` of 100, every amount consistent: `opening_rate_conflict`;
+- `total_fees_unobserved_position_ids`: empty for an order whose positions all have sync payloads, the history-only
+  position for one that has none;
 - a non-zero `markup` or `addedFunds`: `charges_nonzero`; a non-zero `marketSpread`: no reason;
 - a sync `totalFees` non-zero in the stored row and zero in a later amendment, and the reverse: `charges_nonzero` both
   times (and `source_amended`);
@@ -767,10 +784,12 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
   `positions_out_of_scope`; a latest refresh with outcome `scope_refused`, or another environment:
   `portfolio_out_of_scope`; an empty `scope_unverified` refresh: the run proceeds;
 - the migration guard refuses a non-empty `tax_lots`, and a ledger position whose `broker_positions` or archived row
-  has `total_fees` non-zero or NULL (an earlier archived non-zero beside a later zero included); the backfill guard refuses a non-demo credential and an empty
+  has `total_fees` non-zero or NULL (an earlier archived non-zero beside a later zero included, and an archived position
+  not yet in `trade_events`); the backfill guard refuses a non-demo credential and an empty
   access log; the scope backfill refuses two sync `CID`s, a NULL `CID`, and a non-empty ledger with no sync row;
 - `record_trade_events`: a first batch with a `CID` establishes the scope; a batch where one payload lacks the `CID`
-  is refused; a batch with another environment or `CID`
+  is refused and its payloads are retained as `unscoped`; a ledger position reported with `totalFees` 5 in a refused
+  batch and 0 in the next clean one is `unresolved` (`unscoped_observation`); a batch with another environment or `CID`
   writes no `trade_events` row and a `scope_refused` fetch row; a batch with history but no open positions writes a
   `scope_unverified` fetch row and no ledger row, and the next batch with the account ingests those closes; the
   portfolio sync commits in every case;
