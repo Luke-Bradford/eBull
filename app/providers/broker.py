@@ -77,6 +77,18 @@ class BrokerOrderDetail:
     raw_payload: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class RawOrderLookup:
+    """One order lookup as received: the status and the body text, never parsed (#3616 slice 3c).
+
+    ``http_status`` is None when no response arrived (``error_detail`` says why).
+    """
+
+    http_status: int | None
+    body_text: str | None
+    error_detail: str | None
+
+
 class BrokerOrderLookupError(RuntimeError):
     """A detailed order lookup failed or returned an unsafe shape."""
 

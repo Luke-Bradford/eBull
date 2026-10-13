@@ -213,6 +213,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #3616 slice 3c (sql/485) — observations reference events and fetches; the scope is a singleton.
     "trade_event_observations",
     "trade_history_fetches",
+    # #3616 slice 3c part 2a (sql/486), append-only (the wipe runs with triggers disabled).
+    "tax_order_lookups",
     "trade_ledger_scope",
     "trade_events",
     "broker_positions_closed",

@@ -545,6 +545,7 @@ JOB_IBKR_BORROW_ARCHIVE = "ibkr_borrow_archive"
 JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE = "etoro_dividend_calendar_capture"
 # #3616 slice 3b — Bank of England XUDLUSS tax FX source, verified against the GOV.UK bank-holiday calendar.
 JOB_TAX_FX_REFRESH = "tax_fx_refresh"
+JOB_TAX_BROKER_EVIDENCE_REFRESH = "tax_broker_evidence_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -2897,6 +2898,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "working days behind."
         ),
         cadence=Cadence.daily(hour=11, minute=43),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_TAX_BROKER_EVIDENCE_REFRESH,
+        display_name="Tax evidence from the broker record (#3616 slice 3c)",
+        source="db",
+        description=(
+            "Daily 12:13 UTC (after tax_fx_refresh and the morning portfolio syncs) — asks the "
+            "broker's order lookup about the ledger's orders, at most 40 per run, and stores "
+            "every response as received; lookups may expire, so capture runs early. FAILS on "
+            "a refused run (no ledger scope, or a scope in another environment)."
+        ),
+        cadence=Cadence.daily(hour=12, minute=13),
         catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,
     ),
@@ -7205,6 +7220,33 @@ def tax_fx_refresh() -> None:
             f"run={report.run_id} inserted={report.inserted} revised={report.revised} "
             f"awaiting={report.awaiting_confirmation} calendar_years={report.calendar_years_changed} "
             f"accepted_through={report.accepted_through}"
+        )
+
+
+def tax_broker_evidence_refresh() -> None:
+    """Capture the broker's order lookups for the tax evidence (#3616 slice 3c, part 2a)."""
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.tax_broker_evidence import run_order_lookup_capture
+
+    creds = _load_etoro_credentials(JOB_TAX_BROKER_EVIDENCE_REFRESH)
+    if creds is None:
+        _record_prereq_skip(JOB_TAX_BROKER_EVIDENCE_REFRESH, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_TAX_BROKER_EVIDENCE_REFRESH) as tracker:
+        # One autocommit connection: the run holds its session advisory lock on it, and each attempt commits as it
+        # lands. Lookups are informational reads on the D_order_info quota lane.
+        with (
+            connect_job(autocommit=True) as conn,
+            EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as broker,
+        ):
+            report = run_order_lookup_capture(conn, broker, settings.etoro_env)
+        if report.state == "refused":
+            raise RuntimeError(f"tax_broker_evidence_refresh refused: {report.reason}")
+        tracker.row_count = report.attempted
+        tracker.note = (
+            f"state={report.state} attempted={report.attempted} deferred={report.deferred} "
+            f"stopped_by={report.stopped_by} outcomes={report.outcomes}"
         )
 
 

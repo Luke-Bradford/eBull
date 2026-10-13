@@ -63,6 +63,7 @@ from app.providers.broker import (
     CloseOrderPositionFill,
     OrderParams,
     OrderStatus,
+    RawOrderLookup,
 )
 from app.providers.implementations.etoro_quota_lanes import CALL_SITES, LANES, min_interval_for_stamps
 from app.providers.implementations.etoro_request_log import attempt_observer
@@ -1067,6 +1068,31 @@ class EtoroBrokerProvider(BrokerProvider):
         if not isinstance(raw, dict):
             raise OrderDetailParseError("order detail response must be an object")
         return _parse_order_detail(raw, reference_id=reference_id)
+
+    def lookup_order_raw(self, order_id: int) -> RawOrderLookup:
+        """The same GET as ``lookup_order`` by order id, on the same quota lane, returned as received.
+
+        Never raises on an HTTP status and never parses the body: the tax evidence capture (#3616 slice 3c) keeps
+        the broker's decimal text and classifies the response itself. A transport error returns ``http_status``
+        None. Informational read; the unattended broker-mutation guard does not apply.
+        """
+        if type(order_id) is not int or order_id <= 0:
+            raise ValueError("order_id must be a positive integer")
+        try:
+            response = self._http_read.get(
+                f"{self._v2_info_prefix}/orders:lookup",
+                params={"orderId": order_id},
+                headers=self._request_headers(),
+            )
+        except httpx.HTTPStatusError as exc:
+            # ResilientClient raises after its final retry of a 429 or retryable 5xx: keep that response, so a
+            # sustained 429 reaches the capture as rate_limited and stops the run.
+            return RawOrderLookup(
+                http_status=exc.response.status_code, body_text=exc.response.text, error_detail=str(exc)
+            )
+        except httpx.HTTPError as exc:
+            return RawOrderLookup(http_status=None, body_text=None, error_detail=f"{type(exc).__name__}: {exc}")
+        return RawOrderLookup(http_status=response.status_code, body_text=response.text, error_detail=None)
 
     def check_instrument_eligibility(
         self,

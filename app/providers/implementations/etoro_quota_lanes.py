@@ -356,6 +356,9 @@ CALL_SITES: tuple[CallSite, ...] = (
     CallSite(
         _BROKER, "lookup_order", "_http_read", "GET", "/api/v2/trading/info/demo/orders:lookup", "D_order_info", 60
     ),
+    CallSite(
+        _BROKER, "lookup_order_raw", "_http_read", "GET", "/api/v2/trading/info/demo/orders:lookup", "D_order_info", 60
+    ),
     # --- lane E: account-read pool ------------------------------------------
     CallSite(
         _BROKER, "get_portfolio", "_http_read", "GET", "/api/v1/trading/info/demo/portfolio", "E_account_read", 60
@@ -469,7 +472,7 @@ CALL_SITES: tuple[CallSite, ...] = (
 # serve several templates.  A new endpoint moves these numbers and fails the
 # drift test until its lane is recorded above.
 EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
-    (_BROKER, "_http_read"): 6,
+    (_BROKER, "_http_read"): 7,
     (_BROKER, "_http_write"): 7,
     # One expression, inside a `while True` — so this count says nothing about
     # how many REQUESTS one logical call issues.  That is the whole reason the
