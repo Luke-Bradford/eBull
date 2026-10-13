@@ -450,186 +450,191 @@ def _ingest_cash_events(conn: psycopg.Connection[Any]) -> int:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _DayIdentification:
+    """One identification between a day's single disposal and a day's single acquisition (or the pool)."""
+
+    rule: MatchingRule
+    disposal_day: date
+    acquisition_day: date | None  # None for s104_pool
+    units: Decimal
+    cost_gbp: Decimal
+
+
+#: Every quantity and GBP column the matcher writes is NUMERIC(18,6) (sql/001, sql/013). Each computed share is
+#: quantized to that scale and the last share of a split takes the exact remainder, so the rows still sum to their
+#: total after the database stores them.
+_DB_SCALE = _D("0.000001")
+
+
+def _split_exact(total: Decimal, weights: list[Decimal]) -> list[Decimal]:
+    """A non-negative ``total`` split pro rata to ``weights`` at the database scale.
+
+    Each share is the difference of two rounded cumulative shares, so no share is negative (rounding a running
+    total is monotone) and the shares sum to ``total``; the last share takes the exact remainder.
+    """
+    weight_sum = sum(weights, _D("0"))
+    cumulative = _D("0")
+    previous = _D("0")
+    shares: list[Decimal] = []
+    for w in weights[:-1]:
+        cumulative += w
+        rounded = (total * cumulative / weight_sum).quantize(_DB_SCALE)
+        shares.append(rounded - previous)
+        previous = rounded
+    return [*shares, total - previous]
+
+
 def _match_disposals_for_instrument(
     acquisitions: list[TaxLot],
     disposals: list[TaxLot],
 ) -> tuple[list[DisposalMatch], PoolState]:
-    """Pure function: match disposals against acquisitions using HMRC rules.
+    """Pure function: identify disposals with acquisitions of one security under the share identification rules.
 
-    Returns (matches, final_pool_state).
-    All date comparisons use uk_date (Europe/London calendar date).
+    Returns (matches, final_pool_state). All date comparisons use uk_date (Europe/London calendar date).
+
+    The statutory order (TCGA 1992 ss104-106A; HMRC CG51560):
+
+    1. **One transaction per day.** All acquisitions of the security on one day are a single acquisition, and all
+       disposals on one day a single disposal (s105(1)(a)), so each day's cost and proceeds are averaged before any
+       identification.
+    2. **Same day** (s105(1)(b)), on every day, before anything else. A later day's acquisition therefore serves that
+       day's own disposal before it can serve an earlier disposal under the 30-day rule.
+    3. **Following 30 days** (s106A(5)): earlier disposals first, each against the earliest remaining acquisitions in
+       the 30 days after it.
+    4. **Section 104 pool** (s104), walked in date order with every acquisition's unidentified remainder entering on
+       its own day.
+
+    Each day-level identification is then allocated back to the individual lots pro rata to their units, with exact
+    remainders, so ``disposal_matches`` keeps a row per (disposal lot, acquisition lot) for the audit trail and the
+    rows of a day sum exactly to the day's identification.
     """
-    if not disposals:
-        # No disposals — just compute the pool from all acquisitions
-        pool = MutablePoolState(units=_D("0"), cost_gbp=_D("0"))
-        for acq in acquisitions:
-            pool.units += acq.quantity
-            pool.cost_gbp += acq.amount_gbp  # full lot — exact cost
-        instrument_id = acquisitions[0].instrument_id if acquisitions else 0
-        return [], PoolState(
-            instrument_id=instrument_id,
-            units=pool.units,
-            cost_gbp=pool.cost_gbp,
-            avg_cost_gbp=pool.avg_cost_gbp,
-        )
+    instrument_id = (disposals or acquisitions)[0].instrument_id if (disposals or acquisitions) else 0
 
-    instrument_id = disposals[0].instrument_id
+    acq_by_day: dict[date, list[TaxLot]] = {}
+    for acq in sorted(acquisitions, key=lambda a: (a.event_time, a.tax_lot_id)):
+        acq_by_day.setdefault(acq.uk_date, []).append(acq)
+    disp_by_day: dict[date, list[TaxLot]] = {}
+    for disp in sorted(disposals, key=lambda d: (d.event_time, d.tax_lot_id)):
+        disp_by_day.setdefault(disp.uk_date, []).append(disp)
 
-    # remaining_acq is the single source of truth for unmatched units
-    remaining_acq: dict[int, Decimal] = {a.tax_lot_id: a.quantity for a in acquisitions}
-    in_pool: set[int] = set()  # lot IDs whose units have been added to pool
-    pool = MutablePoolState(units=_D("0"), cost_gbp=_D("0"))
-    matches: list[DisposalMatch] = []
+    acq_units_left = {d: sum((a.quantity for a in lots), _D("0")) for d, lots in acq_by_day.items()}
+    acq_cost_left = {d: sum((a.amount_gbp for a in lots), _D("0")) for d, lots in acq_by_day.items()}
+    disp_units_left = {d: sum((x.quantity for x in lots), _D("0")) for d, lots in disp_by_day.items()}
+    identifications: list[_DayIdentification] = []
 
-    acq_sorted = sorted(acquisitions, key=lambda a: (a.uk_date, a.event_time))
-    disposals_sorted = sorted(disposals, key=lambda d: (d.uk_date, d.event_time))
+    def take(acq_day: date, units: Decimal) -> Decimal:
+        """Withdraw ``units`` from a day's acquisition at that day's average cost; the last withdrawal takes the
+        exact remaining cost, so the day's cost is conserved."""
+        if units == acq_units_left[acq_day]:
+            cost = acq_cost_left[acq_day]
+        else:
+            cost = (units * acq_cost_left[acq_day] / acq_units_left[acq_day]).quantize(_DB_SCALE)
+        acq_units_left[acq_day] -= units
+        acq_cost_left[acq_day] -= cost
+        return cost
 
-    for disposal in disposals_sorted:
-        d_uk = disposal.uk_date
-        disposal_remaining = disposal.quantity
+    # Step 1: same day, on every day first.
+    for day in sorted(disp_by_day.keys() & acq_by_day.keys()):
+        units = min(disp_units_left[day], acq_units_left[day])
+        if units > 0:
+            identifications.append(_DayIdentification("same_day", day, day, units, take(day, units)))
+            disp_units_left[day] -= units
 
-        # Step 1: add pre-disposal acquisitions to pool (excluding same-day)
-        for acq in acq_sorted:
-            if acq.tax_lot_id in in_pool:
-                continue
-            if acq.uk_date >= d_uk:
-                break  # same-day and future — skip for now
-            remaining = remaining_acq[acq.tax_lot_id]
-            if remaining <= 0:
-                in_pool.add(acq.tax_lot_id)
-                continue
-            pool.units += remaining
-            # (remaining / quantity) * amount avoids repeating-decimal loss
-            # when remaining == quantity: (q/q)*a = 1*a = a exactly
-            pool.cost_gbp += (remaining / acq.quantity) * acq.amount_gbp
-            in_pool.add(acq.tax_lot_id)
-
-        # Step 2: same-day rule
-        same_day_acqs = [a for a in acq_sorted if a.uk_date == d_uk and remaining_acq[a.tax_lot_id] > 0]
-        for acq in same_day_acqs:
-            if disposal_remaining <= 0:
+    # Step 2: the following 30 days, earlier disposals first, earliest acquisitions first.
+    acq_days = sorted(acq_by_day)
+    for day in sorted(disp_by_day):
+        window_end = day + timedelta(days=30)
+        for acq_day in acq_days:
+            if disp_units_left[day] <= 0:
                 break
-            match_units = min(disposal_remaining, remaining_acq[acq.tax_lot_id])
-            # per_unit_cost (GBP/unit) = amount_gbp (GBP) / quantity (units)
-            per_unit_cost = acq.amount_gbp / acq.quantity
-            # match_units (units) * per_unit_cost (GBP/unit) = acq_cost (GBP)
-            acq_cost = match_units * per_unit_cost
-            # per_unit_proceeds (GBP/unit) = amount_gbp (GBP) / quantity (units)
-            per_unit_proceeds = disposal.amount_gbp / disposal.quantity
-            # match_units (units) * per_unit_proceeds (GBP/unit) = proceeds (GBP)
-            disp_proceeds = match_units * per_unit_proceeds
-
-            matches.append(
-                DisposalMatch(
-                    disposal_lot=disposal,
-                    acquisition_lot=acq,
-                    matching_rule="same_day",
-                    matched_units=match_units,
-                    acquisition_cost_gbp=acq_cost,
-                    disposal_proceeds_gbp=disp_proceeds,
-                    gain_or_loss_gbp=disp_proceeds - acq_cost,
-                )
-            )
-            remaining_acq[acq.tax_lot_id] -= match_units
-            disposal_remaining -= match_units
-
-        # After same-day matching: remaining same-day units enter the pool
-        for acq in same_day_acqs:
-            if acq.tax_lot_id in in_pool:
+            if acq_day <= day or acq_day > window_end or acq_units_left[acq_day] <= 0:
                 continue
-            remaining = remaining_acq[acq.tax_lot_id]
-            if remaining > 0:
-                pool.units += remaining
-                pool.cost_gbp += (remaining / acq.quantity) * acq.amount_gbp
-            in_pool.add(acq.tax_lot_id)
+            units = min(disp_units_left[day], acq_units_left[acq_day])
+            identifications.append(_DayIdentification("bed_and_breakfast", day, acq_day, units, take(acq_day, units)))
+            disp_units_left[day] -= units
 
-        # Step 3: 30-day rule (bed and breakfast)
-        if disposal_remaining > 0:
-            window_start = d_uk + timedelta(days=1)
-            window_end = d_uk + timedelta(days=30)
-            bnb_acqs = sorted(
-                [
-                    a
-                    for a in acquisitions
-                    if window_start <= a.uk_date <= window_end and remaining_acq[a.tax_lot_id] > 0
-                ],
-                key=lambda a: (a.uk_date, a.event_time),
-            )
-            for acq in bnb_acqs:
-                if disposal_remaining <= 0:
-                    break
-                match_units = min(disposal_remaining, remaining_acq[acq.tax_lot_id])
-                per_unit_cost = acq.amount_gbp / acq.quantity
-                acq_cost = match_units * per_unit_cost
-                per_unit_proceeds = disposal.amount_gbp / disposal.quantity
-                disp_proceeds = match_units * per_unit_proceeds
-
-                matches.append(
-                    DisposalMatch(
-                        disposal_lot=disposal,
-                        acquisition_lot=acq,
-                        matching_rule="bed_and_breakfast",
-                        matched_units=match_units,
-                        acquisition_cost_gbp=acq_cost,
-                        disposal_proceeds_gbp=disp_proceeds,
-                        gain_or_loss_gbp=disp_proceeds - acq_cost,
-                    )
-                )
-                remaining_acq[acq.tax_lot_id] -= match_units
-                # remaining_acq still holds any leftover units — they enter
-                # the pool when Step 1 of a later disposal reaches this date
-                disposal_remaining -= match_units
-
-        # Step 4: Section 104 pool
-        if disposal_remaining > 0 and pool.units > 0:
-            match_units = min(disposal_remaining, pool.units)
-            # Use proportional fraction to avoid non-terminating decimal
-            # expansion when pool_cost / pool_units is repeating.
-            # fraction (dimensionless) = match_units (units) / pool_units (units)
-            # acq_cost (GBP) = fraction * pool_cost (GBP)
-            if match_units == pool.units:
+    # Step 3: the s104 pool, in date order. A day with an acquisition remainder had its disposal fully identified
+    # same-day, so the order of the two within one day cannot matter.
+    pool = MutablePoolState(units=_D("0"), cost_gbp=_D("0"))
+    for day in sorted(acq_by_day.keys() | disp_by_day.keys()):
+        if day in acq_by_day:
+            pool.units += acq_units_left[day]
+            pool.cost_gbp += acq_cost_left[day]
+        if day not in disp_by_day or disp_units_left[day] <= 0:
+            continue
+        if pool.units > 0:
+            units = min(disp_units_left[day], pool.units)
+            if units == pool.units:
                 # Full pool depletion — take exact remaining cost, no rounding
-                acq_cost = pool.cost_gbp
+                cost = pool.cost_gbp
             else:
                 # Quantize to 6 dp (matching DB NUMERIC(18,6)) so that
                 # cumulative subtractions leave an exact remainder for the
                 # final full-depletion withdrawal — guarantees cost conservation.
-                acq_cost = ((match_units / pool.units) * pool.cost_gbp).quantize(_D("0.000001"))
-            per_unit_proceeds = disposal.amount_gbp / disposal.quantity
-            disp_proceeds = match_units * per_unit_proceeds
-
-            matches.append(
-                DisposalMatch(
-                    disposal_lot=disposal,
-                    acquisition_lot=None,
-                    matching_rule="s104_pool",
-                    matched_units=match_units,
-                    acquisition_cost_gbp=acq_cost,
-                    disposal_proceeds_gbp=disp_proceeds,
-                    gain_or_loss_gbp=disp_proceeds - acq_cost,
-                )
-            )
-            pool.units -= match_units
-            pool.cost_gbp -= acq_cost
-            disposal_remaining -= match_units
-
-        if disposal_remaining > 0:
+                cost = ((units / pool.units) * pool.cost_gbp).quantize(_DB_SCALE)
+            identifications.append(_DayIdentification("s104_pool", day, None, units, cost))
+            pool.units -= units
+            pool.cost_gbp -= cost
+            disp_units_left[day] -= units
+        if disp_units_left[day] > 0:
             logger.warning(
-                "Disposal lot %d has %s unmatched units for instrument %d. This indicates incomplete acquisition data.",
-                disposal.tax_lot_id,
-                disposal_remaining,
+                "Disposal lots %s have %s unmatched units for instrument %d (incomplete acquisition data).",
+                [x.tax_lot_id for x in disp_by_day[day]],
+                disp_units_left[day],
                 instrument_id,
             )
 
-    # After all disposals: add any remaining acquisitions to pool
-    for acq in acq_sorted:
-        if acq.tax_lot_id in in_pool:
-            continue
-        remaining = remaining_acq[acq.tax_lot_id]
-        if remaining > 0:
-            pool.units += remaining
-            pool.cost_gbp += (remaining / acq.quantity) * acq.amount_gbp
-        in_pool.add(acq.tax_lot_id)
+    # Allocate each day-level identification back to the lots, at the database scale.
+    #
+    # The day's proceeds are averaged over its units (s105(1)(a)). An identification's proceeds are the difference
+    # of two rounded running totals of the day's identified units, so a fully identified day's rows sum exactly to
+    # its proceeds. Each identification is then split over the day's disposal lots, and each lot's share over the
+    # acquisition day's lots, by ``_split_exact``, so every identification's rows sum exactly to it and none is
+    # negative. A broker lot's own rows can differ from its pro-rata share by one unit of the scale per
+    # identification; the statutory figures are the day's, not the lot's.
+    matches: list[DisposalMatch] = []
+    identified_units: dict[date, Decimal] = {}
+    for ident in identifications:
+        disp_lots = disp_by_day[ident.disposal_day]
+        day_units = sum((x.quantity for x in disp_lots), _D("0"))
+        day_proceeds = sum((x.amount_gbp for x in disp_lots), _D("0"))
+        u0 = identified_units.get(ident.disposal_day, _D("0"))
+        u1 = u0 + ident.units
+        identified_units[ident.disposal_day] = u1
+        p0 = day_proceeds if u0 == day_units else (u0 * day_proceeds / day_units).quantize(_DB_SCALE)
+        p1 = day_proceeds if u1 == day_units else (u1 * day_proceeds / day_units).quantize(_DB_SCALE)
+        weights = [x.quantity for x in disp_lots]
+        per_disp = zip(
+            disp_lots,
+            _split_exact(ident.units, weights),
+            _split_exact(ident.cost_gbp, weights),
+            _split_exact(p1 - p0, weights),
+            strict=True,
+        )
+        for disp, d_units, d_cost, d_proceeds in per_disp:
+            acq_lots: list[TaxLot | None] = (
+                [None] if ident.acquisition_day is None else list(acq_by_day[ident.acquisition_day])
+            )
+            acq_weights = [_D("1") if a is None else a.quantity for a in acq_lots]
+            for acq, units, cost, lot_proceeds in zip(
+                acq_lots,
+                _split_exact(d_units, acq_weights),
+                _split_exact(d_cost, acq_weights),
+                _split_exact(d_proceeds, acq_weights),
+                strict=True,
+            ):
+                matches.append(
+                    DisposalMatch(
+                        disposal_lot=disp,
+                        acquisition_lot=acq,
+                        matching_rule=ident.rule,
+                        matched_units=units,
+                        acquisition_cost_gbp=cost,
+                        disposal_proceeds_gbp=lot_proceeds,
+                        gain_or_loss_gbp=lot_proceeds - cost,
+                    )
+                )
 
     # Invariant checks
     if pool.units < 0:
@@ -849,19 +854,26 @@ def tax_year_summary(
     """Read-only: aggregated tax year view with CGT scenario estimates."""
     # Three separate cursors so each query gets its own result set.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # A gain or loss belongs to a statutory disposal, which is every disposal of one security on one day
+        # (TCGA 1992 s105(1)(a)), so its sign is read after summing that day's match rows. The counts are disposal
+        # lots per rule: one lot can have several rows (one per acquisition lot it was identified with).
         cur.execute(
             """
+            WITH disposals AS (
+                SELECT SUM(gain_or_loss_gbp) AS gain
+                FROM disposal_matches
+                WHERE tax_year = %(ty)s
+                GROUP BY instrument_id, disposal_uk_date
+            )
             SELECT
-                COALESCE(SUM(CASE WHEN gain_or_loss_gbp > 0
-                    THEN gain_or_loss_gbp ELSE 0 END), 0) AS total_gains,
-                COALESCE(SUM(CASE WHEN gain_or_loss_gbp < 0
-                    THEN gain_or_loss_gbp ELSE 0 END), 0) AS total_losses,
+                (SELECT COALESCE(SUM(gain) FILTER (WHERE gain > 0), 0) FROM disposals) AS total_gains,
+                (SELECT COALESCE(SUM(gain) FILTER (WHERE gain < 0), 0) FROM disposals) AS total_losses,
                 COALESCE(SUM(gain_or_loss_gbp), 0) AS net_gain,
-                COUNT(*) FILTER (WHERE matching_rule = 'same_day')
+                COUNT(DISTINCT disposal_tax_lot_id) FILTER (WHERE matching_rule = 'same_day')
                     AS cnt_same_day,
-                COUNT(*) FILTER (WHERE matching_rule = 'bed_and_breakfast')
+                COUNT(DISTINCT disposal_tax_lot_id) FILTER (WHERE matching_rule = 'bed_and_breakfast')
                     AS cnt_bnb,
-                COUNT(*) FILTER (WHERE matching_rule = 's104_pool')
+                COUNT(DISTINCT disposal_tax_lot_id) FILTER (WHERE matching_rule = 's104_pool')
                     AS cnt_s104
             FROM disposal_matches
             WHERE tax_year = %(ty)s
@@ -875,10 +887,11 @@ def tax_year_summary(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT gain_or_loss_gbp, disposal_uk_date
+            SELECT SUM(gain_or_loss_gbp) AS gain_or_loss_gbp, disposal_uk_date
             FROM disposal_matches
             WHERE tax_year = %(ty)s
-              AND gain_or_loss_gbp > 0
+            GROUP BY instrument_id, disposal_uk_date
+            HAVING SUM(gain_or_loss_gbp) > 0
             """,
             {"ty": tax_year},
         )
@@ -903,10 +916,10 @@ def tax_year_summary(
     net_gain = Decimal(str(agg["net_gain"]))
     dividend_total = Decimal(str(div_row["dividend_total"]))
 
-    # Per-match weighted CGT estimates.
-    # Invariant: gain_rows contains only rows where gain_or_loss_gbp > 0
-    # (filtered in the SQL query). total_gains is the sum of the same
-    # positive values. The scale factor below (taxable_net / total_gains)
+    # Per-disposal weighted CGT estimates.
+    # Invariant: gain_rows holds one row per statutory disposal (security, day)
+    # whose net result is > 0 (filtered in the SQL query). total_gains is the
+    # sum of the same positive values. The scale factor below (taxable_net / total_gains)
     # is therefore a valid ratio. If the query is ever changed to include
     # losses, the denominator must also change.
     weighted_basic = _D("0")

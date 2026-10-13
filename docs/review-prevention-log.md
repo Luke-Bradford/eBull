@@ -12562,3 +12562,17 @@ neighbouring container and match it.**
   writer against the dev DB. The line-literal guard and the size tripwire both miss an internal UPDATE.
 - Enforced in: `.claude/skills/engineering/test-quality.md` ("An integration test through a production entry point
   may open its OWN connection"); review only.
+### A per-lot disposal loop is not the share identification rules (#3616)
+
+- Failure (Codex checkpoint 1, #3616 slice 3 spec, round 1, 2026-10-13): `tax_ledger._match_disposals_for_instrument`
+  walked disposals one lot at a time, and each lot ran same-day, 30-day and pool matching before the next lot was
+  seen. That breaks TCGA 1992 s105 in three ways, each reproduced: two buys on one day were matched at the first
+  buy's price instead of their average; a day-2 sale took a day-5 buy under the 30-day rule before the day-5 sale
+  could claim it same-day; and a buy sold in two same-day pieces left the second piece's units in the pool as well,
+  so 0.323024 phantom units remained on the measured IUSA.L order. Its tests matched one lot against one lot, where
+  all three cases are invisible.
+- Prevention: identification is computed on the statutory unit, one acquisition and one disposal per security per
+  day, in the statutory order across the whole history (same-day on every day, then 30-day earliest-first, then the
+  pool in date order), and only then allocated back to lots. Test a disposal rule with two same-day lots on each
+  side and assert unit and cost conservation into the closing pool.
+- Enforced in: `tests/test_tax_ledger.py::TestStatutoryIdentification`.
