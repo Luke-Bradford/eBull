@@ -560,6 +560,8 @@ def ingest_trade_events(
             "parent_position_id": event.parent_position_id,
             "source": event.source,
             "raw_payload": Jsonb(event.raw_payload),
+            # Always explicit: sql/485's column DEFAULT exists only for the pre-reload window, and slice 3c
+            # part 2's migration drops it.
             "environment": environment,
         }
         sql = _INSERT_OPEN_SQL if event.event_kind == "open" else _INSERT_CLOSE_SQL
@@ -832,6 +834,8 @@ def record_trade_events(
     counters = TradeEventCounters()
     real_positions = [bp for bp in positions if bp.position_id is not None and bp.position_id >= 0]
     account_ids = [payload_account_id(bp.raw_payload) for bp in real_positions]
+    # Callers hold sync_portfolio's transaction lock (_SYNC_PORTFOLIO_XACT_LOCK_KEY), so batches are serial; the
+    # scope insert below still tolerates a concurrent first writer rather than aborting the sync.
     scope = _load_scope(conn)
 
     batch_account: int | None = None
@@ -842,18 +846,21 @@ def record_trade_events(
         outcome = "scope_unverified"
     else:
         batch_account = account_ids[0]
-        if scope is not None and (scope["environment"] != environment or scope["account_id"] != batch_account):
+        if scope is None:
+            established = conn.execute(
+                """
+                INSERT INTO trade_ledger_scope (singleton, environment, account_id, established_at)
+                VALUES (TRUE, %(env)s, %(account)s, now())
+                ON CONFLICT (singleton) DO NOTHING
+                """,
+                {"env": environment, "account": batch_account},
+            )
+            if established.rowcount == 1:
+                logger.info("trade_events: ledger scope established (environment %s)", environment)
+            scope = _load_scope(conn)
+        if scope is None or scope["environment"] != environment or scope["account_id"] != batch_account:
             outcome = "scope_refused"
         else:
-            if scope is None:
-                conn.execute(
-                    """
-                    INSERT INTO trade_ledger_scope (singleton, environment, account_id, established_at)
-                    VALUES (TRUE, %(env)s, %(account)s, now())
-                    """,
-                    {"env": environment, "account": batch_account},
-                )
-                logger.info("trade_events: ledger scope established (environment %s)", environment)
             outcome = "ok" if trade_history is not None and trade_history.rows is not None else "failed"
 
     fetch_id = _insert_fetch_row(

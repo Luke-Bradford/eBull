@@ -262,22 +262,10 @@ def ingest_tax_events(conn: psycopg.Connection[Any]) -> IngestionResult:
     broker record (the slice 3c evidence run); sql/485 refuses any insert into ``tax_lots``. The signature and the
     zero ``fills_ingested`` stay until slice 3d moves matching onto the evidence generation.
     """
-    inserted = 0
     cash = _ingest_cash_events(conn)
 
-    already = 0
-
-    logger.info(
-        "ingest_tax_events: fills_ingested=%d cash_events=%d already_present=%d",
-        inserted,
-        cash,
-        already,
-    )
-    return IngestionResult(
-        fills_ingested=inserted,
-        cash_events_ingested=cash,
-        already_present=already,
-    )
+    logger.info("ingest_tax_events: cash_events=%d", cash)
+    return IngestionResult(fills_ingested=0, cash_events_ingested=cash, already_present=0)
 
 
 def _ingest_cash_events(conn: psycopg.Connection[Any]) -> int:
