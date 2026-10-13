@@ -102,7 +102,11 @@ account's complete history (Limits).
    | history close `fees` | 0 | 13 |
 
    The non-zero values are the two CFD orders (SVXY 1.5, SVOL 0.72), equal across the three indicators that carry
-   them. 7 positions, all history-only, have no `totalFees` observation.
+   them. 7 positions, all history-only, have no `totalFees` observation. The lookup also documents `addedFunds`
+   (*"Additional funds added to the position"*), `openingData.markup` (*"The markup applied to the spread"*) and
+   `openingData.marketSpread` (*"The market spread at execution time"*) (`--facts`, "lookup shape"): `addedFunds` is
+   absent from all 13 bodies; `markup` is 0 on all 13 real-asset executions and non-zero on the 2 CFD ones;
+   `marketSpread` is non-zero on 10 of the 13 real-asset executions.
 10. **Disposal proceeds of USD-priced pieces** (`--checks`). For the 3 close pieces of real orders whose lookup
     `asset.currency` is `USD` (SPY.RTH ×1, AAPL ×2), `investment + netProfit` differs from `units × closeRate` by at
     most a relative 0.0002339584; the 2 CFD pieces (SVXY, SVOL) are within 0.0000096. The history row carries no close
@@ -141,7 +145,10 @@ account's complete history (Limits).
     broker sent with more precision than a double holds was altered before storage, and nothing stored can show it.
 18. **The retired route** (`--facts`, code search file). `tax_lots` and `fx_rates` hold 0 rows; `fills` holds 1, whose
     order's `broker_order_ref` starts `DEMO-`. No code writes `fx_rates` (`INTO fx_rates\b`: no match); its one reader
-    is `tax_ledger._load_fx_rate`, called only by `_ingest_fills`; the migrations name it only in comments.
+    is `tax_ledger._load_fx_rate`, called only by `_ingest_fills`. `sql/013_tax_disposal_matching.sql` creates it; later
+    migrations name it only in comments. Two comments describe it as the live tax FX table: the
+    `daily_tax_reconciliation` docstring (`scheduler.py`, "Requires fx_rates to be") and `app/services/fx.py`'s module
+    docstring.
     `daily_tax_reconciliation` is on-demand only (the comment above the on-demand list in `scheduler.SCHEDULED_JOBS`).
 
 ## Source rules
@@ -157,11 +164,20 @@ account's complete history (Limits).
   order's initial investment) and what each close returned (`investment + netProfit`). No eToro page documents these
   fields as the cash debited or credited, and no stored source records the account's cash per trade (fact 10). This
   slice therefore records them as the broker's stated amounts, with three bounds on their being wrong: every documented
-  charge and adjustment indicator observed is zero, so nothing in s38(2) arises from any documented field; the execution
+  charge and adjustment indicator listed below is zero in every observation, so nothing in s38(2) arises from them; the execution
   record corroborates them (Design 4.9); the position ledger conserves them exactly (Design 4.9). Turning them into
   consideration needs an independent cash record, which is 3d's.
-- **`totalFees`.** Documented as overnight fees and dividends. Neither is an s38(2) incidental cost, but a non-zero value
-  on a long x1 real position is outside the verified shape, so it refuses admission rather than being classified.
+- **The indicators and how each is treated.** Treatment follows each field's documented meaning:
+  - charges, which would be s38(2) costs if non-zero: lookup `totalCosts`, execution `fees` and `taxes`, sync
+    `totalExternalFees` and `totalExternalTaxes`, close `fees`. Every observation must be zero.
+  - adjustments to the money in the position: lookup `addedFunds` (absent or zero), and `totalFees` (overnight fees and
+    dividends; neither is an s38(2) cost, but a non-zero value on a long x1 real position is outside the verified shape)
+    in every sync payload, held row and archived row. Every observation must be zero.
+  - `openingData.markup`, a charge on the spread: must be zero, as on every real-asset execution observed.
+  - `openingData.marketSpread`, the market's spread at execution: a component of the execution price, already inside
+    the price and the investment, so it is recorded and not gated.
+  - additional margin: no field reports it separately; the money conservation check (Design 4.9) enforces its absence,
+    because a held single position must then hold exactly the consideration.
 - **Conversion to sterling.** HMRC CG78310, applied by 3b: each USD amount is converted at the rate for the date it is
   given or received, from `resolve_tax_fx` under 3b's consumer contract (3b spec, Design 3).
 - **The unit of acquisition.** Share identification acts on acquisitions and disposals of securities of the same class
@@ -207,7 +223,7 @@ belongs to exactly one subject.
 - `held_positions JSONB`: position id → `{units, amount, total_fees, cid}` read from `broker_positions`, or `null` when
   the position has no row; `archived_total_fees JSONB`: position id → the latest `broker_positions_closed.total_fees`,
   for positions that have one;
-- `first_event_at`, `last_event_at` (NULL for an orphan).
+- `first_event_at`, `last_event_at` (NULL for an orphan); `execution_evidence` (NULL unless admitted).
 - Primary key `(run_id, subject)`.
 
 **`tax_evidence_lots`.** One row per admitted acquisition or disposal per published run, built by the table in Design
@@ -215,7 +231,8 @@ belongs to exactly one subject.
 - `run_id`, `lot_key`, `subject`, `order_id`, `instrument_id` (NOT NULL), `etoro_instrument_id`, `direction`;
 - `position_ids BIGINT[]`, `trade_event_ids BIGINT[]` (both sorted, non-empty);
 - `executed_at`, `uk_date`, `tax_year`;
-- `units NUMERIC(20,8)`, `usd_amount NUMERIC(20,4)`, `consideration_status` (`broker_stated_unreconciled`);
+- `units NUMERIC(20,8)`, `usd_amount NUMERIC(20,4)`, `consideration_status` (`broker_stated_unreconciled`),
+  `execution_evidence` (`lookup` or `sync_only`);
 - the FX fields of 3b's consumer contract: `fx_rate_date`, `fx_status`, `fx_observation_date`, `fx_usd_per_gbp`,
   `fx_gbp_per_usd NUMERIC(20,10)`, `fx_policy_id`, `fx_run_id`;
 - `amount_gbp NUMERIC(40,14)`, the exact product `usd_amount × fx_gbp_per_usd`; NULL when `fx_status` is `pending`;
@@ -229,9 +246,11 @@ belongs to exactly one subject.
 - A value with more decimal places than its column, or outside its column's range, fails its field check rather than
   being rounded: units `NUMERIC(20,8)`, money `NUMERIC(20,4)`, rates `NUMERIC(20,10)`.
 - A computed disposal amount (`investment + netProfit`) outside `NUMERIC(20,4)` fails as `invalid_field:proceeds`.
-- All arithmetic and canonical formatting run inside `decimal.localcontext()` with `prec = 60`, `Inexact` and
-  `Rounded` trapped: an operand of at most 16+4 digits times one of at most 10+10 has at most 40 significant digits,
-  so the product is exact, and a rounding anywhere raises instead of passing silently. `amount_gbp` (at most 26
+- 3c's own arithmetic (sums, conservation, the plausibility products, `amount_gbp`) and canonical formatting run
+  inside `decimal.localcontext()` with `prec = 60` and `Inexact` and `Rounded` trapped: an operand of at most 16+4
+  digits times one of at most 10+10 has at most 40 significant digits, so the product is exact, and a rounding raises
+  instead of passing silently. `resolve_tax_fx` and every other 3b call run outside that context, because 3b rounds
+  its reciprocal rate by design. `amount_gbp` (at most 26
   integer and 14 fractional digits) fits `NUMERIC(40,14)` exactly. The plausibility ratios are the one division; they
   are computed as `|a − b| ≤ 0.001 × b`, with no division.
 - The rounding policy for matched and pooled amounts is 3d's.
@@ -240,13 +259,14 @@ belongs to exactly one subject.
 
 **One environment and one account per ledger, fixed before anything is written.** `trade_ledger_scope` holds one row,
 `(environment, account_id, established_at)`. The migration creates it from the existing ledger: `demo` (the backfill
-below) and the one distinct sync `CID` (fact 11); it raises if the sync rows carry more than one `CID`, and leaves the
-table empty if the ledger is empty.
+below) and the sync `CID`. It requires every sync row to carry a valid, non-NULL `CID` and all to be equal (fact 11),
+and leaves the table empty if the ledger is empty. Any other case, including a non-empty ledger with no sync row,
+raises: the recovery is a reviewed migration that states the scope.
 
 `sync_portfolio` and `record_trade_events` gain a required `environment` argument, passed by both callers from the
 provider's environment (`settings.etoro_env` in `daily_portfolio_sync`, `self._env` in the websocket re-sync). Before
-writing any `trade_events` row, `record_trade_events` establishes the batch's account: the one `CID` its sync payloads
-carry (two or more → refused). Then:
+writing any `trade_events` row, `record_trade_events` establishes the batch's account: every sync payload in the batch
+must carry a valid `CID`, all equal; a missing, invalid or second `CID` refuses the batch. Then:
 - **no scope row:** a batch with an account establishes the scope `(environment, CID)` in the same transaction and is
   written; a batch with no account writes no `trade_events` row;
 - **a scope row:** the batch is written only if its environment equals the scope's and its account equals the scope's.
@@ -274,10 +294,10 @@ the three can be checked from stored data. The column is then `NOT NULL` with `C
 and pass it with a `TradeHistoryFetch(min_date, started_at, finished_at, rows)` from `fetch_trade_history_safely`
 (`rows` is `None` on failure) through `sync_portfolio` to `record_trade_events`. It writes one `trade_history_fetches`
 row per call, in the sync's transaction: `fetch_id`, `environment`, `account_id` (the batch's, or NULL),
-`portfolio_fetched_at`, `min_date`, `started_at`, `finished_at`, `outcome` (`ok`, `failed`, `scope_unverified` or
-`scope_refused`) and `row_count`. The row and the `broker_positions` it accompanies commit together, so the run's
-latest fetch row dates the portfolio observation it read. A sync that fails before `record_trade_events` leaves no row
-and no `broker_positions` change. Coverage before the first recorded `ok` fetch is unknown; how 3d labels coverage is
+`portfolio_fetched_at`, `portfolio_real_positions` (the count), `min_date`, `started_at`, `finished_at`, `outcome`
+(`ok`, `failed`, `scope_unverified` or `scope_refused`) and `row_count`. Every committed sync writes exactly one row in
+the transaction that writes `broker_positions`, and a sync that fails rolls both back, so the latest row is the identity
+of the portfolio refresh `broker_positions` holds: its environment, account, time and scope outcome. Coverage before the first recorded `ok` fetch is unknown; how 3d labels coverage is
 3d's.
 
 **Observations the ledger does not keep.** When `ingest_trade_events` meets an existing row on either unique index, it
@@ -287,13 +307,17 @@ difference. `isPartiallyAltered` is excluded as a lifecycle field. It writes a `
 transaction when:
 - the sources or kinds differ (a history open beside a sync open, either way round): always, `kind = 'supplemental'`,
   unless an identical supplemental observation is already stored;
-- the source and kind are the same and any compared field differs: `kind = 'amendment'`.
+- the source and kind are the same and any compared field differs: `kind = 'amendment'`;
+- a supplemental observation is also compared with the latest retained supplemental observation of the same source and
+  kind for that event: identical → nothing written; any compared field different → `kind = 'amendment'`.
 
 Columns: `observation_id`, `event_id` of the stored row, `kind`, `observed_at`, `source`, `stored_normalised JSONB`,
 `observed_normalised JSONB`, `observed_raw JSONB`. The stored row is never changed (sql/194's contract). Derivation
 treats a supplemental observation as one more payload of the order (every field check of its source applies to it, so
 a sync observation with a non-zero `mirrorID` fails the copy gate whichever arrived first) and an amendment as
-`source_amended`.
+`source_amended`. The charge check (Design 4.9) reads every retained payload — stored rows, supplemental observations
+and the observed side of amendments — so a later zero never erases an earlier non-zero `totalFees` or
+`totalExternalFees`.
 
 ### 3. Capturing order lookups
 
@@ -305,7 +329,7 @@ The service classifies:
 
 | response | outcome |
 |---|---|
-| 200, body parses as a JSON object whose `orderId` is the asked id, with an `asset` object and a non-empty `positionExecutions` array of objects | `found` |
+| 200, body parses as a JSON object and passes the *bind*-phase lookup rows of the field table (Design 4) whose domain is object, non-empty array or id, with `orderId` the asked id | `found` |
 | 200, anything else | `malformed` |
 | 404 | `not_found` |
 | 429 | `rate_limited`; the run stops asking |
@@ -331,9 +355,11 @@ id (*E*):
 
 A run asks at most 40: up to 30 from the first-attempt queue, newest order first, because retention (if any) loses the
 oldest first; and up to 10 from the retry queue, oldest latest attempt first. A queue's unused slots go to the other.
-Every retry candidate is reached within ⌈retry queue length / 10⌉ runs. Under sustained overload of more than 30 new
-orders per run, the oldest first attempts wait; the stored ledger holds 21 orders in total (fact 1). The run records how
-many candidates it deferred.
+The two are interleaved, one retry then three first attempts, so a run stopped early by `rate_limited` or `auth_failed`
+has still served retries in proportion. Because the retry queue is ordered by latest attempt, a retry candidate is
+reached after at most as many retry attempts as there are retry candidates ahead of it; a run that stops early simply
+makes fewer attempts. Under sustained overload of more than 30 new orders per run, the oldest first attempts wait; the
+stored ledger holds 21 orders in total (fact 1). The run records how many candidates it deferred and why it stopped.
 
 **Which body is used.** Derivation uses *F*. A later `not_found` or error never discards it. Two `found` bodies of one
 order are compared on every lookup field of the field table except the lifecycle ones: the execution list may grow (a
@@ -356,7 +382,8 @@ A real-id `broker_positions` row with no `trade_events` row is the subject `posi
 `orphan_position`, unless its payload names an order already present, which then gains `orphan_position`. Position
 subjects are always `unresolved`. Every event belongs to exactly one subject. There are none today (fact 7).
 
-`derive_order(order_id, events, observations, lookups, held, archived_fees) -> OrderEvidence` takes the order's events,
+`derive_order(scope, order_id, events, observations, lookups, held, archived_fees) -> OrderEvidence` takes the run's
+scope (environment and account), the order's events,
 their supplemental and amendment observations, its `found` bodies (oldest first, *F* last), and per position the
 `broker_positions` row (`units`, `amount`, `total_fees`, payload `CID`) or `None`, and the latest archived `total_fees`
 if any. It runs the checks below in order and records every one that fails. A check whose inputs an earlier failure
@@ -367,7 +394,8 @@ left undefined is skipped, so `reasons` names causes, not their consequences.
 1. **Identity.** Each event's position id and broker instrument id agree between column and payload, and each close
    row's `units` and `executed_at` columns equal its payload `units` and `closeTimestamp` (else
    `identity_conflict:<name>`). The columns are authoritative thereafter. Every event of the order names one broker
-   instrument id (else `instrument_conflict`).
+   instrument id (else `instrument_conflict`). Every position of the order has an open event (else
+   `open_event_missing`).
 2. **Account.** The set of account ids from sync `CID`, *F*'s `accountId` and held positions' `CID` has exactly one
    member, equal to the run's scope (else `account_conflict`, or `account_unestablished` when empty).
 3. **Fields.** Each field the binding checks read (the rows of the field table marked *bind*) is present and in its
@@ -420,14 +448,17 @@ failure in checks 1–6 makes the order `unresolved` whatever its product.
      is then accounted for by positive stored closes or a held position, which is what makes the shared opening one
      execution.
    - **Without *F*:** exactly one position, observed open by the sync with `isPartiallyAltered` false (else
-     `executions_unestablished`).
+     `executions_unestablished`). This is weaker evidence: nothing establishes the order's final status or that no
+     other execution exists, so the subject and its lots record `execution_evidence = sync_only` (`lookup` with *F*),
+     and 3d decides whether that suffices.
    - **Acquisition date.** Every time candidate — *F*'s `executionTime` and `openTime`, sync `openDateTime`, each
      history row's `openTimestamp` — falls on one Europe/London date (else `acquisition_date_conflict`). Each close
      row's `executed_at` is at or after the acquisition time (else `close_before_open`).
 9. **Quantities and money.**
-   - **Charges and adjustments.** Every indicator observed is zero: *F*'s `totalCosts` and each execution's `fees` and
-     `taxes`; every sync payload's `totalExternalFees` and `totalExternalTaxes`; each held position's `total_fees`
-     and each archived `total_fees`; every close row's `fees`. Else `charges_nonzero:<indicator>`. Indicators are
+   - **Charges and adjustments.** Every observation of every gated indicator (Source rules) is zero: *F*'s
+     `totalCosts`, `addedFunds` when present, and each execution's `fees`, `taxes` and `markup`; every retained sync
+     payload's `totalExternalFees`, `totalExternalTaxes` and `totalFees`; each held position's `total_fees` and each
+     archived `total_fees`; every close row's `fees`. Else `charges_nonzero:<indicator>`. Indicators are
      required where their source exists (a sync payload, a held or archived row, *F*, a close row); a position never
      observed by the sync has no `totalFees` observation, which is recorded, not failed (Limits).
    - **Units.** Execution units (*F*'s `openingData.units`, else the sync `initialUnits`) = Σ close-row units + Σ held
@@ -476,6 +507,7 @@ orders, after the exclusion point. Each is required where its source is present.
 | real | sync | `initialUnits` | units |
 | real | sync | `initialAmountInDollars` | money, positive |
 | real | sync | `totalExternalFees`, `totalExternalTaxes` | money, non-negative |
+| real | sync | `totalFees` | money |
 | real | sync | `openRate`, `openConversionRate` | rate |
 | real | sync | `openDateTime` | Ts |
 | real | history | `isBuy` | boolean |
@@ -492,9 +524,12 @@ orders, after the exclusion point. Each is required where its source is present.
 | real | lookup | executions' `state` | `open` or `closed` |
 | real | lookup | `asset.leverage` | positive integer |
 | real | lookup | `totalCosts` | money, non-negative |
-| real | lookup | `openingData.units`, executions' `remainingUnits` | units |
+| real | lookup | `openingData.units` | units |
+| real | lookup | executions' `remainingUnits` | units or 0 (Design 4.8 rejects a zero `closed` piece) |
 | real | lookup | `openingData.avgPrice`, `openingData.avgConversionRate` | rate |
-| real | lookup | `openingData.fees`, `openingData.taxes` | money, non-negative |
+| real | lookup | `openingData.fees`, `openingData.taxes`, `openingData.markup` | money, non-negative |
+| real | lookup | `addedFunds` (optional) | money |
+| real | lookup | `openingData.marketSpread` | non-negative decimal (recorded, not gated) |
 | real | lookup | `openingData.executionTime`, `openingData.openTime` | Ts |
 | real | `broker_positions` | `units` | units or 0 |
 | real | `broker_positions` | `amount`, `total_fees` | money (`amount` non-negative) |
@@ -515,7 +550,8 @@ orders, after the exclusion point. Each is required where its source is present.
 `uk_date` is the Europe/London date of `executed_at`; `tax_year` the UK tax year containing it. `fingerprint` is the
 SHA-256 of canonical JSON over exactly these keys: `canonical_version` (`1`), `evidence_policy_id`, `lot_key`,
 `subject`, `order_id`, `instrument_id`, `etoro_instrument_id`, `direction`, `position_ids`, `trade_event_ids`,
-`executed_at`, `uk_date`, `tax_year`, `units`, `usd_amount`, `consideration_status`, `fx_rate_date`, `fx_status`,
+`executed_at`, `uk_date`, `tax_year`, `units`, `usd_amount`, `consideration_status`, `execution_evidence`,
+`fx_rate_date`, `fx_status`,
 `fx_observation_date`, `fx_usd_per_gbp`, `fx_gbp_per_usd`, `fx_policy_id`, `amount_gbp`. Keys sorted; arrays sorted
 ascending; NULL as JSON null; timestamps as UTC ISO 8601 with microseconds; each decimal as `format(d, 'f')` with
 trailing fractional zeros and a trailing point removed, inside the Design 1 context (never `normalize()`).
@@ -549,7 +585,12 @@ back any open transaction and then calls `pg_advisory_unlock(TAX_EVIDENCE_LOCK_K
 5. In one `snapshot_read` (REPEATABLE READ) block, read the scope, the environment's `trade_events` and observations,
    the found lookups, the latest and latest `ok` history fetches, `broker_positions` and the latest
    `broker_positions_closed.total_fees` per position, with their watermarks.
-6. Scope. Every held real-id position's `CID` equals the scope's account (else `refused`, `positions_out_of_scope`).
+6. Scope. The latest `trade_history_fetches` row (the refresh `broker_positions` holds, Design 2) has the scope's
+   environment and, unless its outcome is `scope_unverified` with `portfolio_real_positions` 0, the scope's account and
+   outcome `ok` or `failed` (else `refused`, `portfolio_out_of_scope`); with no such row, `refused`
+   (`portfolio_unobserved`). Every held real-id position's `CID` equals the scope's account (else `refused`,
+   `positions_out_of_scope`). An empty unverified portfolio is accepted because it supplies no held input: an order
+   that needed one fails conservation instead. Archived fees are read only for positions of the ledger's orders.
    Per-order account checks are Design 4.2.
 7. Derive every subject (Design 4) and its sterling (Design 5), in memory.
 8. Publish in one READ COMMITTED transaction: call `tax_fx_state_is_current(conn, state)`; if false, the run is
@@ -583,7 +624,8 @@ returns. Registration mirrors `tax_fx_refresh`: `SCHEDULED_JOBS`, the lane map i
   `tax_lots`.
 - `fx_rates` is dropped. The settled decision "Own EOD NAV-snapshot table (#1594)" names `fx_rates` and `_load_fx_rate`
   as the tax path ECB rows must stay out of; its wording is updated to name the 3b tables. The decision is unchanged.
-  The sync layer named `fx_rates` is a different thing and is untouched.
+  The sync layer named `fx_rates` is a different thing and is untouched. The `daily_tax_reconciliation` docstring and
+  `app/services/fx.py`'s module docstring are updated to point at the 3b tables and this slice.
 - The tests that seed `fx_rates` or `fills` for the tax path are rewritten or removed with the code they test; the
   matcher's pure tests stay.
 
@@ -619,6 +661,8 @@ returns. Registration mirrors `tax_fx_refresh`: `SCHEDULED_JOBS`, the lane map i
   `scope_unverified` fetch rows.
 - **Precision of stored payloads.** Ledger payloads already passed through a binary double (fact 17); a broker value
   beyond a double's precision could have been altered before storage. Lookup bodies keep their text.
+- **Sync-only executions.** Without a lookup, an admitted order's single execution and filled status are assumed, and
+  its lots say so (`execution_evidence = sync_only`).
 - **Undetectable adjustments.** An amount the broker changed without changing the investment, the units, the prices or a
   documented charge field is not seen. A position the sync never observed has no `totalFees` observation (7 today).
 - **Amendments** older than the 7-day history overlap are never re-observed (fact 16), and a lookup changed after its
@@ -643,7 +687,12 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
 - capture before a partial close, then a refresh listing the new piece: not `lookup_amended`; a refresh that drops a
   piece, changes `openingData` or `totalCosts`, or drops a field: `lookup_amended`;
 - two identical executions where one `closed` piece has no stored close, with `remainingUnits` positive and with it 0:
-  `piece_coverage_incomplete` both times;
+  `piece_coverage_incomplete` both times (0 passes the field check, which allows it);
+- a close-only position: `open_event_missing`;
+- a no-lookup admitted order: lots carry `execution_evidence = sync_only`;
+- a non-zero `markup` or `addedFunds`: `charges_nonzero`; a non-zero `marketSpread`: no reason;
+- a sync `totalFees` non-zero in the stored row and zero in a later amendment, and the reverse: `charges_nonzero` both
+  times (and `source_amended`);
 - an order with two different openings: `multiple_executions`;
 - exclusion: a CFD order with every binding check passing is excluded; a CFD order with a lookup instrument mismatch, a
   quarantined position or an amendment is `unresolved`, not excluded; an unknown `settlementType` is `invalid_field`;
@@ -663,9 +712,13 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
   without rounding; a rounding raises;
 - the fingerprint is stable under array reordering, excludes `run_id`, `fx_run_id` and itself, and changes with
   `evidence_policy_id`;
-- lookup classification: every row of the response table, including a non-JSON 200, a JSON array 200 and `{}`;
-- lookup candidates: every row of the candidate table, the 30/10 split with spill-over, and that an order failing every
-  run does not keep a retry candidate waiting longer than ⌈queue / 10⌉ runs;
+- lookup classification: every row of the response table, including a non-JSON 200, a JSON array 200, `{}` and
+  `{"orderId": <asked>, "asset": {}, "positionExecutions": [{}]}` (all `malformed`);
+- lookup candidates: every row of the candidate table, the 30/10 split with spill-over, the interleaving, and that an
+  order failing every run does not keep a retry candidate waiting beyond the attempts ahead of it; a run stopped by
+  `rate_limited` after its first attempt;
+- the evidence context: an `amount_gbp` from a 3b rate whose reciprocal does not terminate (3b rounds it outside the
+  trapped context; the run publishes);
 - FX: `published`, `carried_forward`, `pending` (lot stored, `amount_gbp` NULL), `unavailable` (run refused).
 
 DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
@@ -675,16 +728,18 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
   `abandoned`; after a run raises, the lock is free and the connection runs another query;
 - `tax_fx_state_is_current` false at publication: run `refused`, nothing but the run row written;
 - no scope row: `refused` (`scope_unestablished`) with no lookup attempted; a held position of another account:
-  `positions_out_of_scope`;
+  `positions_out_of_scope`; a latest refresh with outcome `scope_refused`, or another environment:
+  `portfolio_out_of_scope`; an empty `scope_unverified` refresh: the run proceeds;
 - the migration guard refuses a non-empty `tax_lots`; the backfill guard refuses a non-demo credential and an empty
-  access log; the scope backfill refuses two sync `CID`s;
-- `record_trade_events`: a first batch with a `CID` establishes the scope; a batch with another environment or `CID`
+  access log; the scope backfill refuses two sync `CID`s, a NULL `CID`, and a non-empty ledger with no sync row;
+- `record_trade_events`: a first batch with a `CID` establishes the scope; a batch where one payload lacks the `CID`
+  is refused; a batch with another environment or `CID`
   writes no `trade_events` row and a `scope_refused` fetch row; a batch with history but no open positions writes a
   `scope_unverified` fetch row and no ledger row, and the next batch with the account ingests those closes; the
   portfolio sync commits in every case;
 - `ingest_trade_events` writes an amendment for a history close re-observed with a different `investment` or a missing
   field, and a supplemental observation for a history open beside a sync open in both arrival orders (once, not on
-  every re-observation);
+  every re-observation); history first, then a sync supplement, then a revised sync supplement writes an amendment;
 - `record_trade_events` writes a `failed` fetch row for a failed fetch, with its `min_date` and `portfolio_fetched_at`.
 
 Provider calls are faked; no test reaches the broker.
@@ -699,7 +754,7 @@ counts is investigated before 3d starts.
 - `tax_order_lookups`: 21 attempts from the first run, 13 `found` and 8 `not_found`, plus one per order opened since
   2026-10-13.
 - `tax_evidence_subjects` for the run, over the 21 orders known on 2026-10-13:
-  - `admitted`: 8 (NXH, AAPL, SPY.RTH ×6);
+  - `admitted`: 8 (NXH, AAPL, SPY.RTH ×6); NXH with `execution_evidence = sync_only`, the 7 others `lookup`;
   - `excluded_non_share_product`: 6 (VOO, QQQ, IEP ×2, SVXY, SVOL);
   - `unresolved`: 7. ILMN: `account_unestablished`, `settlement_unestablished`. GME ×2:
     `pricing_currency_unestablished`. CSPX.L ×3 and IUSA.L: `close_conversion_unestablished`.
@@ -708,7 +763,8 @@ counts is investigated before 3d starts.
 - One acquisition and one disposal checked by hand: units, USD amount, the 3b rate for the UK date (compared on the DB,
   not printed) and `amount_gbp`.
 - `trade_events.environment` is `demo` on every row; `fx_rates` does not exist; `tax_lots` is empty;
-  `trade_history_fetches` has a row from the first sync after deploy, `ok` if any position is open.
+  `trade_history_fetches` has a row from the first sync after deploy, whose outcome is `ok` when the history fetch
+  succeeded and the batch passed the scope check, and otherwise the outcome recorded for the reason.
 
 ## Full-population verification
 

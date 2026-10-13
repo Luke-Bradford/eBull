@@ -393,7 +393,11 @@ def facts() -> None:
             f"orderCurrency={b['orderCurrency']} totalCosts=fees+taxes:"
             f"{_d(b['totalCosts']) == sum((_d(x['openingData']['fees']) + _d(x['openingData']['taxes']) for x in b['positionExecutions'][:1]), Decimal(0))}"  # noqa: E501
         ] += 1
+        shape[f"addedFunds present={'addedFunds' in b}"] += 1
         for x in b["positionExecutions"]:
+            o = x["openingData"]
+            for key in ("markup", "marketSpread"):
+                shape[f"{a['settlementType']} execution {key} non-zero={_d(o[key]) != 0}"] += 1
             shape["executions"] += 1
             shape["executions with openingData.orderId = order id"] += int(x["openingData"]["orderId"]) == int(order_id)
     for key, count in sorted(shape.items()):
