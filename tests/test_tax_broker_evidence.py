@@ -44,6 +44,10 @@ def _raw(status: int | None, body: str | None = None) -> RawOrderLookup:
         (_raw(200, '{"orderId": 7, "orderID": 8, "accountId": 99}'), ("found", 99)),
         (_raw(200, '{"orderId": 7, "accountId": 99, "accountID": 98}'), ("found", None)),
         (_raw(200, '{"orderId": 7, "accountId": true}'), ("found", None)),
+        # Out of BIGINT range: not an account id, so the attempt is still stored.
+        (_raw(200, '{"orderId": 7, "accountId": 9223372036854775808}'), ("found", None)),
+        (_raw(200, '{"orderId": 7, "accountId": 9223372036854775807}'), ("found", 9223372036854775807)),
+        (_raw(200, "[" * 100_000 + "]" * 100_000), ("malformed", None)),
     ],
 )
 def test_classify_lookup(raw: RawOrderLookup, expected: tuple[str, int | None]) -> None:

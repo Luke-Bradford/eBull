@@ -57,8 +57,12 @@ class OrderLookupReader(Protocol):
     def lookup_order_raw(self, order_id: int) -> RawOrderLookup: ...
 
 
+#: The largest value a BIGINT column holds: an id from a broker body is bound to one, so a larger value is not an id.
+BIGINT_MAX = 2**63 - 1
+
+
 def _is_id(value: Any) -> bool:
-    return type(value) is int and value > 0
+    return type(value) is int and 0 < value <= BIGINT_MAX
 
 
 def classify_lookup(order_id: int, raw: RawOrderLookup) -> tuple[LookupOutcome, int | None]:
@@ -81,7 +85,7 @@ def classify_lookup(order_id: int, raw: RawOrderLookup) -> tuple[LookupOutcome, 
         return "http_error", None
     try:
         body = json.loads(raw.body_text or "", parse_float=Decimal)
-    except ValueError:
+    except ValueError, RecursionError:
         return "malformed", None
     if not isinstance(body, dict):
         return "malformed", None

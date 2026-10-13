@@ -12599,3 +12599,16 @@ neighbouring container and match it.**
 - Prevention: route every read of a saved or live response body through one shape guard
   (`isinstance(body, dict)`, here `_found`), and format nullable joined columns with a fallback.
 - Enforced in: `scripts/measure_3616_slice3c_order_lookup.py::_found`; review only.
+
+### An integer from a broker body is not a BIGINT until range-checked (#3616)
+
+- Failure (review bot, PR #3797, 2026-10-13): the lookup capture accepted any positive JSON integer as the body's
+  `accountId` and bound it to the `BIGINT` column `tax_order_lookups.account_id`. A value above 2^63-1 would have
+  raised at the insert and aborted the run with that attempt unstored, exactly the evidence the capture exists to keep.
+  The ledger's `CID` check (`payload_account_id`, #3795) had the same gap, and a deeply nested 200 body raised
+  `RecursionError`, which `except ValueError` does not catch.
+- Prevention: any value parsed from a broker body and bound to a `BIGINT` column passes an int64 range check
+  (`0 < v <= 2**63 - 1`), and an out-of-range value is "not an id", classified rather than raised. A parser over
+  untrusted text catches `RecursionError` beside `ValueError`.
+- Enforced in: `tests/test_tax_broker_evidence.py::test_classify_lookup` and
+  `tests/test_trade_events.py::TestObservationNormalisation::test_payload_account_id`.

@@ -321,6 +321,8 @@ class TestObservationNormalisation:
             ({"CID": "42"}, None),
             ({"CID": True}, None),
             ({"CID": 42, "cid": 42.0}, None),
+            ({"CID": 2**63}, None),
+            ({"CID": 2**63 - 1}, 2**63 - 1),
             ({"CID": 42, "cid": [42]}, None),
             ({"CID": 42, "cid": {"id": 42}}, None),
         ],

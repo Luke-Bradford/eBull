@@ -235,6 +235,10 @@ class TradeHistoryFetch:
     rows: Sequence[BrokerClosedTrade] | None
 
 
+# trade_ledger_scope.account_id and trade_history_fetches.account_id are BIGINT: a larger CID is not an account id.
+_BIGINT_MAX = 2**63 - 1
+
+
 def payload_account_id(payload: dict[str, Any]) -> int | None:
     """The payload's ``CID`` when it is one valid id (a positive integer under every spelling), else None."""
     values = [v for k, v in payload.items() if k.lower() == "cid"]
@@ -243,7 +247,7 @@ def payload_account_id(payload: dict[str, Any]) -> int | None:
     first = values[0]
     for value in values:
         # Each spelling on its own: an int, never a bool or a float that compares equal to one.
-        if type(value) is not int or value <= 0 or value != first:
+        if type(value) is not int or not 0 < value <= _BIGINT_MAX or value != first:
             return None
     return first
 
