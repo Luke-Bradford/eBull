@@ -159,7 +159,7 @@ def _compared_fields(source: EventSource, event_kind: EventKind) -> tuple[str, .
     return _HISTORY_CLOSE_FIELDS if event_kind == "close" else _HISTORY_OPEN_FIELDS
 
 
-def _canonical_decimal(value: Decimal) -> str:
+def canonical_decimal(value: Decimal) -> str:
     """``format(d, 'f')`` with trailing fractional zeros and a trailing point removed, ``-0`` written ``0``."""
     text = format(value, "f")
     if "." in text:
@@ -177,9 +177,9 @@ def _normalise_value(field_name: str, value: Any) -> Any:
     if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, (int, Decimal)):
-        return _canonical_decimal(Decimal(value))
+        return canonical_decimal(Decimal(value))
     if isinstance(value, float):
-        return _canonical_decimal(Decimal(str(value)))
+        return canonical_decimal(Decimal(str(value)))
     if isinstance(value, str) and field_name in _TIMESTAMP_FIELDS:
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))

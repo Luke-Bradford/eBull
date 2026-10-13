@@ -119,6 +119,21 @@ def test_a_later_failure_never_hides_the_found_body() -> None:
     assert _queues(_order(1, e=11, held=True), _attempt(1, "found", 3), _attempt(1, "not_found", 1)) == ([], [1])
 
 
+def test_a_found_body_failing_a_field_check_is_retried_after_seven_days_or_a_policy_change() -> None:
+    order = _order(1, held=True)
+    young, old = _attempt(1, "found", 1), _attempt(1, "found", 7)
+    other_policy = _attempt(1, "found", 1, policy="broker_evidence_v0")
+
+    def retry(attempt: LookupAttempt, failing: bool) -> list[int]:
+        failing_found = frozenset({attempt.lookup_id}) if failing else frozenset()
+        return [o.order_id for o in lookup_candidates([order], [attempt], NOW, failing_found=failing_found)[1]]
+
+    assert retry(young, failing=True) == []
+    assert retry(old, failing=True) == [1]
+    assert retry(other_policy, failing=True) == [1]
+    assert retry(old, failing=False) == []
+
+
 def test_the_settling_lookup() -> None:
     # Closed 20 days ago, last asked 15 days ago (5 days after the last event): one settling lookup is due.
     assert _queues(_order(1, last_days_ago=20), _attempt(1, "found", 15)) == ([], [1])
