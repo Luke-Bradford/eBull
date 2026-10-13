@@ -6,7 +6,9 @@ User-Agent the build will use (``USER_AGENT``), except the probes that show the 
 refused. The manifest records status, content type, ``Content-Length``,
 ``Content-Encoding``, body length, gzipped length and sha256. Each exact body is saved under ``--bodies`` (keep that
 directory out of the repository: the Bank's exchange-rate data is not licensed for redistribution, spec "Source rule").
-Only a body that holds no rate (a header-only or error body) is quoted in the manifest.
+A body is quoted in the manifest only when it is exactly the header line or an HTML page; every other body stays
+private. The two ``default_*_agent`` probes send those clients' User-Agent strings through urllib; they test the
+strings, not the clients.
 
     uv run python scripts/probe_3616_boe_endpoint.py --today 2026-10-13 --bodies var/research/3616/inputs \\
       --out <file.json>
@@ -54,7 +56,7 @@ def probe(name: str, target: str, user_agent: str, bodies: Path) -> dict[str, An
         status, headers, body = exc.code, exc.headers, exc.read()
     digest = hashlib.sha256(body).hexdigest()
     (bodies / f"{name}-{digest[:12]}.body").write_bytes(body)
-    holds_rates = status == 200 and body.count(b"\r\n") > 1
+    rate_free = body == b"DATE,XUDLUSS\r\n" or body.lstrip().startswith(b"<")
     return {
         "url": target,
         "user_agent": user_agent,
@@ -65,7 +67,7 @@ def probe(name: str, target: str, user_agent: str, bodies: Path) -> dict[str, An
         "bytes": len(body),
         "gzip_bytes": len(gzip.compress(body, mtime=0)),
         "sha256": digest,
-        "body": None if holds_rates else body.decode("latin-1"),
+        "body": body.decode("latin-1") if rate_free else None,
     }
 
 

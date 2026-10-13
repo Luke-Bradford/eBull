@@ -28,7 +28,11 @@ never a rate.
 **What is committed and what is not.**
 - The calendar input is committed in `docs/research/3616-slice3b-inputs/`, because GOV.UK content is under the Open
   Government Licence v3.0.
-- The Bank's bodies are kept outside the repository and identified by sha256 (fact 8).
+- The Bank's bodies are kept off the public repository (fact 8). They live on the dev machine under
+  `var/research/3616/inputs/` (gitignored), named `<probe>-<sha256 prefix>.body`, plus the full-series download
+  `XUDLUSS_1975-01-01_2026-10-13.csv.gz`. Each is identified by its full sha256 in the outputs.
+- A later download can differ, because the Bank may revise. Reproducing the facts exactly therefore needs those
+  private files.
 
 1. **The tax `fx_rates` table (sql/013) has no writer** (code inspection).
    - `grep -rnE "(INSERT INTO|UPDATE|COPY) +fx_rates\b" app scripts sql tests` returns nothing.
@@ -55,8 +59,9 @@ never a rate.
      `Content-Length` 39,113, equal to its body, which is 9,010 bytes gzipped. Neither carries a `Content-Encoding`.
    - A weekend-only range returns 200 and the header line only.
    - An unknown series returns **302** with `content-type: application/csv` and an HTML body.
-   - **The default User-Agents of Python's `urllib` and of `httpx` 0.28.1 get 403 "Access Denied".** The build's
-     identifying agent, `eBull/1.0 (+https://github.com/Luke-Bradford/eBull)`, gets 200.
+   - **The User-Agent strings `Python-urllib/3.x` and `python-httpx/0.28.1` (httpx's default) get 403 "Access
+     Denied".** The build's identifying string, `eBull/1.0 (+https://github.com/Luke-Bradford/eBull)`, gets 200.
+     The probes sent each string through urllib; the build tests its real httpx client against the same rule.
 7. **Bank of England statements.**
    - **Statistics FAQ.** *"all published Interest & Exchange rates data is published at 9:30am every working day"*.
      Permission requests for these data go to the Bank's data team.
@@ -66,7 +71,9 @@ never a rate.
      publish 1 -2 working days after the date to which they relate. At times however, there may be further
      delays."*
    - **Database help, provisional data.** `VPD=Y` *"need only be included if provisional data is desired"*.
-   - **Revisions.** No page states a revision policy; the help documents a view of *"new and revised data"*.
+   - **Revisions.** No page states a revision schedule or a finality guarantee. The help documents a view of *"new and
+     revised data"*. The legal page reserves the Bank's right to change information, timing and methods without
+     notice.
    - **Spot-rate notes.** The rates are *"prepared using multiple sources"*, possibly including LSEG, whose content
      may not be republished or redistributed without LSEG's consent.
 8. **Reuse terms.**
@@ -94,10 +101,13 @@ authenticated app.
 - **Nothing that holds a Bank rate enters the public repository.** That covers bodies, fixtures and quoted values.
   Tests use synthetic values.
 - **No endpoint in this slice exposes a rate.**
-- **Any later display or export of raw rates beyond the operator needs the Bank's permission first.** That is a
-  constraint on 3d.
-- Whether XUDLUSS is among the "selected exchange rate data" excluded from the Open Government Licence matters only for
-  reproduction, which this project does not do.
+- **Any later display or export of raw rates beyond the operator needs permission first,** from the Bank and from any
+  third party whose content the rates include. That is a constraint on 3d.
+- **One question stays open.** The published pages do not settle whether persistent private storage of XUDLUSS falls
+  under the legal page's personal and internal-use permission, or under the database terms.
+  - **Recommendation:** treat it as permitted personal and internal use, and confirm with the Bank's data team before
+    any use beyond that.
+  - **Safe default if the answer is no:** drop `body_gz` retention and keep only hashes.
 
 ## Design
 
@@ -108,10 +118,11 @@ authenticated app.
     - `run_id`, an identity assigned under the run lock (Design 2), which totally orders runs;
     - `started_at` and `finished_at`;
     - `state` (`in_progress`, `applied`, `refused`, `skipped` or `abandoned`) and `reason`;
+    - `eligible`, true when every check except confirmation (Design 2, steps 4.1–4.9) passed;
     - `policy_id` and `parser_version`;
     - `calendar_used` (`fetched` or `stored`);
     - `latest_observation_date`;
-    - the counts `inserted`, `revised` and `calendar_years_added`.
+    - the counts `inserted`, `revised`, `awaiting_confirmation` and `calendar_years_changed`.
   - `applied` is written in the same transaction as the derived changes it made.
 - **`tax_fx_fetches`** is the raw evidence: one row per download attempt. Rows are never updated or deleted.
   - Columns:
@@ -128,15 +139,21 @@ authenticated app.
 - **`tax_fx_revisions`** records every value change: `observation_date`, `old_usd_per_gbp`, `new_usd_per_gbp` and
   `run_id`. Rows are append-only.
 - **`tax_fx_calendar_years`** holds the England-and-Wales holidays for each year.
-  - Columns: `year` (PK), `holiday_dates date[]` and `source` (`seed:<sha256>` or `run:<run_id>`).
+  - Columns: `year` (PK), `holiday_dates date[]` and `source` (`seed:<sha256>`, or `run:<run_id>` for the run that
+    last added or changed it).
   - The migration seeds 2019–2028 as literal rows from the committed calendar file.
   - The constant `CALENDAR_SEED_SHA256` is that file's full sha256. A test asserts the migration's rows equal the
     file.
+- **`tax_fx_calendar_revisions`** records every added or changed year: `year`, `old_dates` (NULL when added),
+  `new_dates` and `run_id`. Rows are append-only.
 
 ### 2. A run
 
-A run holds the session advisory lock `pg_advisory_lock(TAX_FX_LOCK_KEY)` on its own connection from start to end. A
-second invocation of any kind, scheduled or manual, waits, so runs never overlap.
+A run holds the exclusive session advisory lock `pg_advisory_lock(TAX_FX_LOCK_KEY)` on its own dedicated connection
+from start to end. A second invocation of any kind, scheduled or manual, waits, so runs never overlap.
+- The lock is released with `pg_advisory_unlock` in a `finally`.
+- If the unlock cannot be confirmed, the connection is closed rather than returned to a pool.
+- Publishers take the same key shared (Design 3).
 
 1. **Open the run.** Mark any earlier `in_progress` run `abandoned`. Insert this run as `in_progress` and commit.
 2. **Fetch.** Fetch both sources and commit each fetch row at once, linked to the run.
@@ -157,30 +174,43 @@ second invocation of any kind, scheduled or manual, waits, so runs never overlap
       - A calendar that is not received means `calendar_used = 'stored'`.
       - A received calendar that fails any of these refuses the run.
    3. **Plausibility.** Every move between consecutive observations in the body is at most 15% |ln|. That is about
-      1.8 times the largest move since 1975 (fact 4). This is a scale check against a misplaced decimal point, not
-      proof of correctness.
+      1.8 times the largest move since 1975 (fact 4).
+      - Every value that differs from its stored value is also within 15% of it.
+      - At most 5 stored dates differ in one run.
+      - These are anomaly gates against a misplaced decimal point or a rescaled series, not proof of correctness.
    4. **No regression.** Every date in `tax_fx_observations` is in the body. A missing date cannot be told apart from
       a truncated response, so it refuses.
-   5. **Confirmed revisions.** A changed value for a stored date is accepted only when the previous run whose BoE
-      fetch was `received` holds the same new value in its stored body. Otherwise the run refuses as
-      `revision_unconfirmed`. A one-off bad response therefore never applies; a genuine revision applies on the second
-      run that shows it.
-   6. **Calendar history is fixed.** A received calendar may add years, and may change a year only for dates after
-      the stored *L*. On bootstrap that is the body's *L*.
-      - A change that touches an earlier date refuses as `calendar_history_changed`.
-      - The historical calendar is therefore the seed, measured exact against the series (fact 5). A replacement
-        calendar can never explain away a missing observation.
-   7. **Continuity.** The calendar covers every year from `FX_FLOOR` through next year.
-   8. **Exact coverage.** Over every date from `FX_FLOOR` to the body's last observation *L*, the observed dates equal
-      the working days under the calendar, in both directions. This refuses a suffix-only or interior-gapped body,
-      and an observation on a weekend or holiday.
-   9. **Bootstrap readiness.** When `tax_fx_observations` is empty, *L* must be on or after the working day three
-      working days before today. Otherwise the run refuses as `bootstrap_stale`, because a stale first body is more
-      likely truncated than delayed.
-   10. **Apply.** Insert new dates. Update confirmed revisions, writing a `tax_fx_revisions` row for each. Add calendar
-       years. Mark the run `applied` with its counts.
-5. **After commit, the job raises `feed_stale`** if *L* is before the working day three working days before today:
-   the Bank's two-working-day window plus one. The applied data stands, since its presence and coverage are verified.
+   5. **Calendar changes.** A received calendar may add years. It may change a stored year only for dates after today
+      (Europe/London).
+      - Any change to today or earlier refuses as `calendar_history_changed`. That covers a date between the old and
+        new *L*, because *L* is never after today.
+      - The window is "after today", not a longer notice period, because special holidays can be declared at short
+        notice. The 2022 state funeral holiday, 2022-09-19, is in the calendar.
+      - The seed's dates up to 2026-10-12, the measured-through date, are therefore fixed. A date can change only while
+        it is still in the future.
+      - A false future holiday is caught when that date passes. Step 4.7 refuses any observation on it, and a matching
+        missing observation must survive two consecutive eligible bodies (step 4.10).
+   6. **Continuity.** The calendar covers every year from `FX_FLOOR` through next year.
+   7. **Exact coverage.** Over every date from `FX_FLOOR` to the body's last observation, the observed dates equal the
+      working days under the candidate calendar, in both directions. This refuses a suffix-only or interior-gapped
+      body, and an observation on a weekend or holiday.
+   8. **Freshness.** The body's last observation is no more than `BOOTSTRAP_MAX_LAG = 3` working days before today.
+      When `tax_fx_observations` is empty, a stale body refuses as `bootstrap_stale`.
+   9. **Eligibility.** A run that reaches this point is `eligible`.
+   10. **Confirmation, the last check.** A value is *confirmed* when the previous run with a received BoE fetch was
+       `eligible` under the same `policy_id` and its stored body holds the same value for that date.
+       - A changed stored value that is unconfirmed refuses the run as `revision_unconfirmed`. The run stays
+         `eligible`, so the next run can confirm it.
+       - An unconfirmed new date waits, counted in `awaiting_confirmation`. It is not applied, and it resolves as
+         `pending`.
+       - So every stored value has been seen in two consecutive eligible responses. A one-off bad response, bootstrap
+         included, never becomes a rate.
+   11. **Apply.** Insert confirmed new dates. Update confirmed revisions, writing a `tax_fx_revisions` row for each.
+       Write the calendar candidate's added and changed years, with a `tax_fx_calendar_revisions` row for each. Mark
+       the run `applied` with its counts.
+5. **After commit, the job raises `feed_stale`** if the body's last observation is more than `STALE_ALERT_LAG = 3`
+   working days old: the Bank's two-working-day window plus one. That alert is operational. `BOOTSTRAP_MAX_LAG` is
+   policy.
 
 **Parser contracts.** Both move from the measurement script into `app/providers/implementations/boe.py` and
 `govuk_calendar.py`.
@@ -193,13 +223,17 @@ second invocation of any kind, scheduled or manual, waits, so runs never overlap
 - **`parse_bank_holidays`**:
   - the `england-and-wales` division is present, with unique ISO dates;
   - each listed year from the first to the last holds at least 8 dates.
-  - The count is a plausibility check only. Correctness comes from steps 4.6 and 4.8.
+  - The count is a plausibility check only. Agreement with the series comes from steps 4.5 and 4.7.
 
 **Replay.** The derived tables can be rebuilt from the seed file (by `CALENDAR_SEED_SHA256`), `tax_fx_runs` and
 `tax_fx_fetches` alone.
-- After any applied run, `tax_fx_observations` equals that run's BoE body exactly. Step 4.4 makes the body a superset
-  of the stored dates, and its values are the stored values (step 4.5).
-- The calendar is the seed plus the years added by applied runs, in `run_id` order.
+- Start from an empty store and the seed calendar.
+- Re-run steps 4.5 and 4.10–4.11 for each `applied` run in `run_id` order, over its stored BoE and calendar bodies.
+- Confirmation reads the stored body of the previous received run, whatever that run's state, so refused-eligible
+  runs take part as confirmers.
+- The planning function is the same code the job uses.
+- A test rebuilds both from evidence after a sequence that includes a revision and a changed future calendar year, and
+  compares the result with the live tables.
 
 **A crash** at any point leaves a run `in_progress` that the next run marks `abandoned`. If that run had a received BoE
 fetch, the source is unhealthy until a later run applies (Design 3).
@@ -215,12 +249,13 @@ fetch, the source is unhealthy until a later run applies (Design 3).
 `resolve_tax_fx(state, rate_date) -> TaxFxRate` is pure. 3c passes each event's Europe/London date, as `_to_uk_date`
 does today.
 
-**Health.** The source is healthy when two conditions hold:
+**Health.** The source is healthy when three conditions hold:
 - the latest run with a `received` BoE fetch is `applied`;
-- that run's `policy_id` equals `TAX_FX_POLICY_ID`.
+- that run's `policy_id` equals `TAX_FX_POLICY_ID`;
+- `tax_fx_observations` is not empty.
 
 An `in_progress`, `abandoned` or `refused` run with a received body therefore makes the source unhealthy. A `skipped`
-run does not count. With no applied run at all, the source is not ready.
+run does not count. Bootstrap takes two runs: the first is eligible but confirms nothing.
 
 The statuses, in order:
 1. **`unavailable`.** The source is not healthy. Every date refuses.
@@ -228,7 +263,7 @@ The statuses, in order:
 3. **`pending`.** The date is after *L*: it is not in accepted evidence, whether unpublished, delayed or truncated.
    The calendar is never consulted after *L*.
 4. **`published`.** The date has an observation. The rate is its value.
-5. **`carried_forward`.** Otherwise the date is a weekend or holiday on or before *L*, because step 4.8 verified every
+5. **`carried_forward`.** Otherwise the date is a weekend or holiday on or before *L*, because step 4.7 verified every
    working day up to *L*. Let *p* be the latest earlier observation date.
    - The rate is *p*'s value.
    - If no observation precedes the date on or after `FX_FLOOR`, as for 2019-01-01, the answer is `out_of_range`.
@@ -247,8 +282,12 @@ The rate fields are NULL unless the status is `published` or `carried_forward`.
 Rounding moves `gbp_per_usd` by at most 5×10⁻¹¹, so a converted amount moves by at most the dollar amount × 5×10⁻¹¹:
 £0.0005 on $10,000,000.
 
-`tax_fx_state_is_current(conn, state) -> bool` is true when the source is still healthy and the latest run with a
-received BoE fetch is still `state.run_id`.
+`tax_fx_state_is_current(conn, state) -> bool` takes `pg_advisory_xact_lock_shared(TAX_FX_LOCK_KEY)`. It then reads,
+at READ COMMITTED, whether the source is still healthy and the latest run with a received BoE fetch is still
+`state.run_id`.
+- The shared lock conflicts with a run's exclusive lock and is held to the caller's commit, so no run can change the
+  answer between the check and the publication.
+- It raises if called inside a REPEATABLE READ or stricter transaction, whose snapshot could be older than the check.
 
 **The consumer contract, which 3c and 3d must follow.**
 - **Stored on each lot:** `rate_date`, `observation_date`, `usd_per_gbp`, `policy_id` and `run_id`. The `run_id` is
@@ -256,19 +295,19 @@ received BoE fetch is still `state.run_id`.
 - **When a lot is stale:** `resolve_tax_fx(rate_date)` on a current state returns a different `observation_date`,
   `usd_per_gbp` or `policy_id`. That comparison covers a revised value, a newly published date that was previously
   carried, and a policy change.
-- **Publishing:** results are valid as of the state they were computed from. A publishing transaction calls
-  `tax_fx_state_is_current` and aborts if it is false.
+- **Publishing:** results are valid as of the state they were computed from. A publishing transaction, at READ
+  COMMITTED, calls `tax_fx_state_is_current` before its writes and aborts if it is false.
 - **While `unavailable`:** nothing FX-dependent is published, and staleness is decided once the source is healthy
   again.
 
 `TAX_FX_POLICY_ID = "boe_xudluss_ew_calendar_v1"` names:
 - the request's data parameters: `VPD=N` and `FX_FLOOR`;
 - the parser contracts;
-- validation steps 4.1–4.9;
+- validation steps 4.1–4.10 and `BOOTSTRAP_MAX_LAG`;
 - the resolver rules.
 
-Changing any of them is a new policy ID, so every dependent lot goes stale. The schedule and the stale-feed threshold
-are operational and outside the policy ID.
+Changing any of them is a new policy ID, so every dependent lot goes stale. The schedule, the User-Agent and
+`STALE_ALERT_LAG` are operational and outside the policy ID.
 
 ### 4. Job
 
@@ -289,12 +328,13 @@ Each run logs its counts, *L* and any revision with its old and new value.
 ### 5. What this policy cannot absorb
 
 - **Withdrawing a stored observation** fails step 4.4.
-- **Publishing on a weekend or holiday** fails step 4.8.
-- **Rewriting a past calendar date** fails step 4.6.
-- **A move above 15%** fails step 4.3.
+- **Publishing on a weekend or holiday** fails step 4.7.
+- **Changing a calendar date on or before today** fails step 4.5.
+- **A move above 15%, or more than 5 revisions in one run,** fails step 4.3.
 
-Each leaves the source `unavailable` and the job failing daily. The recovery is a new spec that designs the data
-transition and a new `TAX_FX_POLICY_ID`. This slice provides no override.
+Each leaves the source `unavailable` and the job failing daily. The Bank reserves the right to make such changes
+without notice (fact 7). The recovery is a new spec that designs the data transition and a new `TAX_FX_POLICY_ID`.
+This slice provides no override.
 
 ### 6. Not changed
 
@@ -315,10 +355,13 @@ These are frozen under `TAX_FX_POLICY_ID`. No published rule exists for any of t
   by HMRC endorsement.
 - **A date takes that date's published daily observation**, whatever the time of the event on that date.
 - **A non-publication day takes the latest earlier publication.** The England-and-Wales calendar decides
-  non-publication days. It is fixed for past dates and verified against the series on every run (fact 5).
-- **The Bank's current value is authoritative once confirmed.** A revision applies when two consecutive received runs
-  show it.
-- **The plausibility bound is 15%.**
+  non-publication days.
+  - It is fixed for today and every earlier date.
+  - Every run checks that the calendar's date set agrees with the series. That establishes agreement between the two
+    accepted date sets, not the calendar's independent truth.
+- **A value is used only after two consecutive eligible responses agree on it.** That includes a revision, which then
+  replaces the stored value.
+- **The anomaly gates are 15% per move or revision, and 5 revisions per run.**
 - **Evidence that contradicts the stored state makes the whole source `unavailable`.**
 - **`FX_FLOOR` is 2019-01-01.**
 
@@ -347,29 +390,38 @@ committed (Source rule, "Reuse").
 
 **Validate and apply** (a pure planning function over in-memory state, with synthetic bodies whose dates follow the
 seed calendar). With an empty store:
-- a complete body applies;
+- a complete body is eligible but confirms nothing, and the next identical body applies;
+- a body scaled ×10 that is followed by the true body confirms nothing;
 - a header-only body is refused;
 - a suffix-only body is refused;
 - an interior-gapped body is refused;
 - a body stale beyond three working days is refused as `bootstrap_stale`;
 - a body with a 20% jump is refused.
 
+A rate-free probe body (header only, or HTML) is embedded in the manifest. An LF-only rate body and a non-200 CSV body
+are not.
+
 With a stored state:
 - a missing stored date is refused;
-- a changed value is refused once, then applied when the previous received run showed the same value;
-- a new tail date is inserted.
+- a changed value is refused once, then applied when the previous eligible run showed the same value;
+- a revision confirmed only by a refused-ineligible run (an HTTP 206 body, say) is not confirmed;
+- 6 revisions in one run are refused, and so is a revision of more than 15%;
+- a new tail date waits one run, then is inserted.
 
 Calendar cases:
 - dropping 2019 keeps it;
-- removing both 2022 special holidays is refused under step 4.6;
-- adding a holiday on a past working day, paired with that date missing from the body, is refused under step 4.6;
-- next year absent from both the stored and fetched calendars is refused under step 4.7.
+- removing both 2022 special holidays is refused under step 4.5;
+- adding a holiday on a past working day, paired with that date missing from the body, is refused under step 4.5;
+- the same pairing on the day after the stored *L* is refused under step 4.5;
+- a holiday added for tomorrow applies and is recorded in `tax_fx_calendar_revisions`;
+- next year absent from both the stored and fetched calendars is refused under step 4.6.
 
 Transport and framing:
 - HTTP 206, 302 and 500 with a parser-valid body are each refused;
 - so are a body shorter than its `Content-Length` and a `Content-Encoding: gzip` response.
 
-**HTTP adapter** (httpx `MockTransport`):
+**HTTP adapter** (httpx `MockTransport`; plus one live check in acceptance that the real client's User-Agent gets
+200):
 - a failure before headers is `transport_error`;
 - a failure mid-body is `incomplete` with its partial bytes kept;
 - both make the run `skipped`.
@@ -397,21 +449,24 @@ Transport and framing:
 - refused and skipped runs leave their fetch and run rows, read back on a fresh connection after the job raises, and
   change no derived row;
 - a second run started while the first holds the lock waits;
+- after a refusal, a skip and an unexpected exception, another connection can take the lock;
+- a refresh trying to commit while a publisher holds the shared lock waits for the publisher's commit;
 - a crash simulated after the fetch commit leaves the source `unavailable` until the next applied run;
 - a pre-seeded `fx_rates` row, `tax_lots` row and `fx_rates_daily` row are unchanged after a run, and `_load_fx_rate`
   returns the same value for the seeded date.
 
 ## Acceptance (dev DB)
 
-After the build merges, the jobs child reloads (PID changed) and `tax_fx_refresh` runs once:
-- **Run.** The latest `tax_fx_runs` row is `applied`, with one `received` fetch per source.
-- **Observations.** `tax_fx_observations` holds exactly the observations in that run's stored BoE body, starting
-  2019-01-02.
+After the build merges, the jobs child reloads (PID changed), and `tax_fx_refresh` runs twice (bootstrap, Design 3):
+- **Runs.** The first run is `applied` and `eligible`, with `inserted` 0. The second is `applied`, with one `received`
+  fetch per source.
+- **Observations.** `tax_fx_observations` holds exactly the dates of the second body that the first body confirms, at
+  those values. It starts 2019-01-02.
 - **Calendar.** `tax_fx_calendar_years` covers 2019 through at least next year.
-- **Resolver statuses.** For 2026-10-12, Saturday 2026-10-10, 2026-04-06 and 2025-12-25, `resolve_tax_fx` returns the
-  status the calendar implies. Each value equals the one parsed from that run's stored body for the expected
-  observation date. These values are read on the dev DB and not copied into the repository.
-- **Run date.** `pending` when the run date is after *L*.
+- **Resolver order.** Each expected status is derived in resolver order: health, `FX_FLOOR`, *L*, observation, then
+  calendar. The check covers 2026-10-12, Saturday 2026-10-10, 2026-04-06, 2025-12-25, 2018-12-31 and the run date.
+  - Every rate-bearing answer's value equals the stored body's value for its observation date.
+  - These values are read on the dev DB and not copied into the repository.
 - **Non-interference.** `fx_rates` and `tax_lots` still hold 0 rows, and the build PR's diff does not touch
   `app/services/tax_ledger.py`.
 
@@ -423,14 +478,15 @@ The calendar rule matched the series over every date from 2019-01-01 to 2026-10-
 direction. That is the complete interval the measured snapshot covers, and it is the historical calendar this policy
 freezes.
 
-It is not a proof about later dates or later Bank behaviour. That is why every run repeats the exact-coverage check
-before applying anything.
+It is not a proof about later dates or later Bank behaviour, nor about the calendar's truth independently of the
+series. Every run therefore repeats the exact-coverage check before applying anything.
 
 ## Security
 
 - **Outbound calls.** The job makes two unauthenticated outbound GETs to fixed public URLs, with an identifying
   User-Agent. Their only parameters are dates formatted from `date` objects; no user input reaches a request.
 - **Response handling.** Responses are parsed strictly and redirects are not followed.
-- **Writes.** The job writes only the six new tables.
+- **Writes.** The job writes only the six new tables: runs, fetches, observations, revisions, calendar years and
+  calendar revisions.
 - **No change to any trust boundary.** No endpoint, authorisation check, order path or capital path changes.
 - **Data use.** It stays personal and internal. No Bank rate enters the public repository (fact 8).
