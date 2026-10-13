@@ -211,7 +211,7 @@ def checks() -> None:
             1 for p in sync if int(p["mirrorID"]) == 0 and int(p["parentPositionID"]) == 0
         )
         for p in sync:
-            for key in ("totalExternalFees", "totalExternalTaxes"):
+            for key in ("totalExternalFees", "totalExternalTaxes", "totalFees"):
                 totals[f"sync {key} observed"] += 1
                 totals[f"sync {key} non-zero"] += _d(p[key]) != 0
         for pid in {e[1] for e in events}:
@@ -352,6 +352,11 @@ _FACT_QUERIES: tuple[tuple[str, str], ...] = (
         "leverage = 1) FROM broker_positions WHERE position_id > 0",
     ),
     (
+        "broker_positions_closed, every row: rows, positions, total_fees non-zero, total_fees NULL",
+        "SELECT count(*), count(DISTINCT position_id), count(*) FILTER (WHERE total_fees <> 0), "
+        "count(*) FILTER (WHERE total_fees IS NULL) FROM broker_positions_closed",
+    ),
+    (
         "distinct sync CIDs (count only)",
         "SELECT count(DISTINCT raw_payload->>'CID'), count(*) FILTER (WHERE "
         "raw_payload->>'CID' IS NULL) FROM trade_events WHERE source = 'etoro_sync'",
@@ -393,9 +398,12 @@ def facts() -> None:
             f"orderCurrency={b['orderCurrency']} totalCosts=fees+taxes:"
             f"{_d(b['totalCosts']) == sum((_d(x['openingData']['fees']) + _d(x['openingData']['taxes']) for x in b['positionExecutions'][:1]), Decimal(0))}"  # noqa: E501
         ] += 1
-        shape[f"addedFunds present={'addedFunds' in b}"] += 1
         for x in b["positionExecutions"]:
             o = x["openingData"]
+            added = x.get("addedFunds")
+            shape[
+                f"execution addedFunds {'absent' if added is None else 'zero' if _d(added) == 0 else 'non-zero'}"
+            ] += 1
             for key in ("markup", "marketSpread"):
                 shape[f"{a['settlementType']} execution {key} non-zero={_d(o[key]) != 0}"] += 1
             shape["executions"] += 1
