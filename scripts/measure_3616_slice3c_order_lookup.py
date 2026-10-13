@@ -11,8 +11,10 @@ documented ``orders:lookup`` operation (``trading--demo/get-order-information-an
   ``fees``/``taxes``/``avgPrice``/``avgConversionRate``, ``investedAmountCurrency``;
 - and whether every ``trade_events`` position of the order appears among its executions.
 
-The raw bodies go to ``var/research/3616/slice3c/order_lookup_raw.json`` (gitignored: they carry account identifiers).
-The summary printed to stdout carries counts and order-level shapes only.
+The bodies go to ``var/research/3616/slice3c/order_lookup_raw.json`` (gitignored: they carry account identifiers).
+The default-mode summary and ``--checks`` print order and position ids (trade identifiers the spec cites) but never an
+account id, ``gcid`` or ``CID``; ``--facts`` prints counts and dates only. Only a 200 whose body is a JSON object counts
+as found (``_found``).
 
 ``--checks`` reads the saved bodies (no network) and prints, per order, the checks the slice 3c spec freezes: unit
 conservation (execution units = closed units + units held in ``broker_positions``), the consideration corroboration
@@ -75,6 +77,12 @@ def _credentials(conn: psycopg.Connection[Any]) -> tuple[str, str]:
     return keys[0], keys[1]
 
 
+def _found(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The body of a saved lookup that returned HTTP 200 with a JSON object, else None."""
+    body = entry.get("body")
+    return body if entry.get("http_status") == 200 and isinstance(body, dict) else None
+
+
 def main() -> None:
     with psycopg.connect(settings.database_url) as conn:
         rows = conn.execute(_ORDERS_SQL).fetchall()
@@ -103,8 +111,9 @@ def main() -> None:
     _OUT.write_text(json.dumps(raw, indent=2, default=str))
 
     statuses = Counter(entry["http_status"] for entry in raw.values())
-    account_ids = {json.dumps(e["body"].get("accountId")) for e in raw.values() if e["http_status"] == 200}
-    gcids = {json.dumps(e["body"].get("gcid")) for e in raw.values() if e["http_status"] == 200}
+    found_bodies = [b for b in map(_found, raw.values()) if b is not None]
+    account_ids = {json.dumps(b.get("accountId")) for b in found_bodies}
+    gcids = {json.dumps(b.get("gcid")) for b in found_bodies}
     print(f"orders={len(raw)} http_status={dict(statuses)}")
     print(f"distinct accountId among 200s={len(account_ids)} distinct gcid={len(gcids)}")
     for order_id in sorted(events):
@@ -193,12 +202,12 @@ def checks() -> None:
     worst_proceeds = Decimal(0)
     for order_id, events in sorted(by_order.items()):
         entry = saved[str(order_id)]
-        body = entry["body"] if entry["http_status"] == 200 else None
+        body = _found(entry)
         sync = [e[5] for e in events if e[2] == "etoro_sync"]
         history = [e[5] for e in events if e[2] == "etoro_history"]
         closes = [e for e in events if e[3] == "close"]
         positions = sorted({e[1] for e in events})
-        out = [f"{order_id} {events[0][6]:8} lookup={'Y' if body else 'N'} positions={len(positions)}"]
+        out = [f"{order_id} {events[0][6] or '?':8} lookup={'Y' if body else 'N'} positions={len(positions)}"]
         totals["orders"] += 1
         totals["close_rows"] += len(closes)
         totals["close_fees_zero"] += sum(1 for e in closes if _d(e[5]["fees"]) == 0)
@@ -394,7 +403,7 @@ def facts() -> None:
                 "FROM trade_events WHERE event_kind = 'open' GROUP BY 1"
             ).fetchall()
         )
-    found = [e["body"] for e in saved.values() if e["http_status"] == 200]
+    found = [b for b in map(_found, saved.values()) if b is not None]
     account_ids = [b.get("accountId") for b in found]
     print(
         f"lookup accountId: found={len(found)} missing={account_ids.count(None)} distinct={len(set(account_ids))} "
@@ -402,9 +411,10 @@ def facts() -> None:
     )
     shape: Counter[str] = Counter()
     for order_id, entry in saved.items():
-        if entry["http_status"] != 200:
+        found_body = _found(entry)
+        if found_body is None:
             continue
-        b = entry["body"]
+        b = found_body
         a = b["asset"]
         shape[
             f"status={b['status'].get('name')} transaction={b['transaction']} action={b['action']} side={a['side']} "
@@ -432,9 +442,9 @@ def facts() -> None:
             ).fetchall()
         )
     pairs = Counter(
-        (str(e["body"]["asset"]["currency"]).upper(), currencies.get(int(o)))
-        for o, e in saved.items()
-        if e["http_status"] == 200
+        (str(body["asset"]["currency"]).upper(), currencies.get(int(o)))
+        for o, body in ((o, _found(e)) for o, e in saved.items())
+        if body is not None
     )
     print(f"lookup asset.currency vs instruments.currency (orders): {dict(pairs)}")
     by_status: dict[int, list[str]] = defaultdict(list)

@@ -910,4 +910,6 @@ No order, capital or authorisation path changes. The new broker call is the docu
 used by order reconciliation and metered on its shared quota lane, and it runs only after the scope pre-check. The
 ingestion scope check refuses ledger writes only; it never blocks the portfolio sync. The writes are the job's own
 tables, one new column and three new tables beside `trade_events`. Account identifiers stay in the database and the
-gitignored `var/`: the repo is public, so no lookup body, account id or customer id is committed.
+gitignored `var/`: the repo is public, so no lookup body, account id or customer id is committed. The spec and the script's
+summaries cite broker order and position ids of the demo account: they identify trades, are readable only with that
+account's keys, and are not account identifiers.
