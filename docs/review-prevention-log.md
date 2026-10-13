@@ -12579,3 +12579,23 @@ neighbouring container and match it.**
   column rounds cumulative shares (never each share on its own, which can leave a negative remainder), and emits
   no row whose every column rounded to zero.
 - Enforced in: `tests/test_tax_ledger.py::TestStatutoryIdentification`.
+
+### A research script's output contract is what it prints, not what its PR says (#3616)
+
+- Failure (review bot, PR #3794, 2026-10-13): the PR said `scripts/measure_3616_slice3c_order_lookup.py` "prints counts
+  only, never identifiers", but its default mode and `--checks` print order and position ids per order. The script
+  never printed an account id, `gcid` or `CID`, but the stated contract was wider than the code.
+- Prevention: before stating what a research script prints, grep its `print(` calls for `order_id`, `position_id`,
+  `accountId`, `gcid` and `CID`, and state the exact class it prints: trade identifiers, account identifiers or counts
+  only. In a public repo, account identifiers never reach stdout or a committed file.
+- Enforced in: the script's module docstring; review only.
+
+### A parsed broker body is not an object until checked (#3616)
+
+- Failure (review bot, PR #3794, 2026-10-13): the same script read `e["body"].get("accountId")` for every HTTP 200. A
+  200 whose body is a JSON array or scalar, which the slice 3c spec itself classifies as `malformed`, would have raised
+  `AttributeError` and lost the whole run's summary. A `LEFT JOIN` symbol formatted with `:8` would likewise have
+  raised on NULL.
+- Prevention: route every read of a saved or live response body through one shape guard
+  (`isinstance(body, dict)`, here `_found`), and format nullable joined columns with a fallback.
+- Enforced in: `scripts/measure_3616_slice3c_order_lookup.py::_found`; review only.
