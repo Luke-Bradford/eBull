@@ -969,21 +969,26 @@ def _retain_unscoped(
         (e.position_id, e.source, e.event_kind, e.executed_at if e.event_kind == "close" else None, e.raw_payload)
         for e in history_events
     )
+    if not observations:
+        return
+    # The latest unscoped observation per key, for every position of the batch, in one query.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        rows = cur.execute(
+            """
+            SELECT DISTINCT ON (position_id, source, event_kind, executed_at)
+                   position_id, source, event_kind, executed_at, observed_normalised
+            FROM trade_event_observations
+            WHERE kind = 'unscoped' AND position_id = ANY(%(pids)s)
+            ORDER BY position_id, source, event_kind, executed_at, observation_id DESC
+            """,
+            {"pids": sorted({o[0] for o in observations})},
+        ).fetchall()
+    latest = {
+        (r["position_id"], r["source"], r["event_kind"], r["executed_at"]): r["observed_normalised"] for r in rows
+    }
     for position_id, source, event_kind, executed_at, raw in observations:
         observed = normalise_payload(source, event_kind, raw)
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            latest = cur.execute(
-                """
-                SELECT observed_normalised
-                FROM trade_event_observations
-                WHERE kind = 'unscoped' AND position_id = %(pid)s AND source = %(source)s
-                  AND event_kind = %(kind)s AND executed_at IS NOT DISTINCT FROM %(executed_at)s
-                ORDER BY observation_id DESC
-                LIMIT 1
-                """,
-                {"pid": position_id, "source": source, "kind": event_kind, "executed_at": executed_at},
-            ).fetchone()
-        if latest is not None and latest["observed_normalised"] == observed:
+        if latest.get((position_id, source, event_kind, executed_at)) == observed:
             continue
         conn.execute(
             """
