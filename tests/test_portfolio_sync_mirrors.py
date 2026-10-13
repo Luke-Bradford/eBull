@@ -75,7 +75,7 @@ def test_sync_mirrors_fresh_insert(conn: psycopg.Connection[Any]) -> None:
     """Spec §8.2: first sync inserts copy_traders + copy_mirrors +
     copy_mirror_positions rows with active=TRUE."""
     payload = two_mirror_payload()
-    result = sync_portfolio(conn, payload, now=_NOW)
+    result = sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
 
     assert _count(conn, "copy_traders") == 2
@@ -97,9 +97,9 @@ def test_sync_mirrors_idempotent_resync(conn: psycopg.Connection[Any]) -> None:
     """Spec §8.2: re-running the same payload is idempotent —
     row counts unchanged, active still TRUE, updated_at refreshed."""
     payload = two_mirror_payload()
-    sync_portfolio(conn, payload, now=_NOW)
+    sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
-    sync_portfolio(conn, payload, now=_NOW)
+    sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
 
     assert _count(conn, "copy_traders") == 2
@@ -115,7 +115,7 @@ def test_sync_mirrors_evicts_closed_nested_positions(
     same mirror and positions in other mirrors are untouched.
     copy_mirrors.active stays TRUE."""
     payload = two_mirror_payload()
-    sync_portfolio(conn, payload, now=_NOW)
+    sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
     assert _count(conn, "copy_mirror_positions") == 6
 
@@ -126,7 +126,7 @@ def test_sync_mirrors_evicts_closed_nested_positions(
         payload,
         mirrors=(trimmed_mirror, payload.mirrors[1]),
     )
-    sync_portfolio(conn, trimmed_payload, now=_NOW)
+    sync_portfolio(conn, trimmed_payload, now=_NOW, environment="demo")
     conn.commit()
 
     # The removed row is gone, siblings remain.
@@ -169,7 +169,7 @@ def test_sync_mirrors_evicts_all_positions_when_mirror_empties(
     that mirror (exploits Postgres `position_id <> ALL('{}')` === TRUE
     semantics)."""
     payload = two_mirror_payload()
-    sync_portfolio(conn, payload, now=_NOW)
+    sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
 
     empty_mirror = dataclasses.replace(payload.mirrors[0], positions=())
@@ -177,7 +177,7 @@ def test_sync_mirrors_evicts_all_positions_when_mirror_empties(
         payload,
         mirrors=(empty_mirror, payload.mirrors[1]),
     )
-    sync_portfolio(conn, emptied_payload, now=_NOW)
+    sync_portfolio(conn, emptied_payload, now=_NOW, environment="demo")
     conn.commit()
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -217,7 +217,7 @@ def test_sync_mirrors_partial_disappearance_soft_closes(
         full_payload,
         mirrors=(full_payload.mirrors[1],),  # drop mirror A
     )
-    result = sync_portfolio(conn, partial_payload, now=_NOW)
+    result = sync_portfolio(conn, partial_payload, now=_NOW, environment="demo")
     conn.commit()
 
     # Mirror A: soft-closed, nested positions retained.
@@ -280,7 +280,7 @@ def test_sync_mirrors_recopy_resurrects_closed_mirror(
     conn.commit()
 
     # Sync the full payload — mirror A re-appears.
-    sync_portfolio(conn, two_mirror_payload(), now=_NOW)
+    sync_portfolio(conn, two_mirror_payload(), now=_NOW, environment="demo")
     conn.commit()
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -306,7 +306,7 @@ def test_sync_mirrors_total_disappearance_raises(
     empty_payload = dataclasses.replace(two_mirror_payload(), mirrors=())
 
     with pytest.raises(RuntimeError, match="empty mirrors"):
-        sync_portfolio(conn, empty_payload, now=_NOW)
+        sync_portfolio(conn, empty_payload, now=_NOW, environment="demo")
     conn.rollback()
 
     # Both rows survive as active=TRUE.
@@ -396,14 +396,14 @@ def test_sync_mirrors_archives_evicted_position(
     before being DELETEd — the copied trader's exit becomes durable
     history instead of vanishing."""
     payload = two_mirror_payload()
-    sync_portfolio(conn, payload, now=_NOW)
+    sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
     # No archive yet: the first sync inserts the mirror (it was not active
     # before this cycle), so nothing is treated as a close.
     assert _count(conn, "copy_mirror_closed_positions") == 0
 
     later = _NOW + timedelta(hours=1)
-    sync_portfolio(conn, _trimmed_first_mirror_payload(payload, keep_from=1), now=later)
+    sync_portfolio(conn, _trimmed_first_mirror_payload(payload, keep_from=1), now=later, environment="demo")
     conn.commit()
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -428,14 +428,14 @@ def test_sync_mirrors_archive_idempotent_same_cycle(
     """#1927: re-running the same eviction at the same timestamp is a
     no-op on the archive (ON CONFLICT DO NOTHING) — no duplicate exit."""
     payload = two_mirror_payload()
-    sync_portfolio(conn, payload, now=_NOW)
+    sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
 
     later = _NOW + timedelta(hours=1)
     trimmed = _trimmed_first_mirror_payload(payload, keep_from=1)
-    sync_portfolio(conn, trimmed, now=later)
+    sync_portfolio(conn, trimmed, now=later, environment="demo")
     conn.commit()
-    sync_portfolio(conn, trimmed, now=later)
+    sync_portfolio(conn, trimmed, now=later, environment="demo")
     conn.commit()
 
     assert _count(conn, "copy_mirror_closed_positions") == 1
@@ -450,13 +450,13 @@ def test_sync_mirrors_recopy_does_not_archive_stale_retained_positions(
     soft-close time, not at re-copy time, and we do not hold that time.
     Only genuine same-episode closes on an already-active mirror archive."""
     payload = two_mirror_payload()
-    sync_portfolio(conn, payload, now=_NOW)
+    sync_portfolio(conn, payload, now=_NOW, environment="demo")
     conn.commit()
 
     # Partial disappearance: mirror[0] absent from a non-empty payload →
     # soft-closed (active=FALSE), its 3 positions RETAINED for audit.
     only_second = dataclasses.replace(payload, mirrors=(payload.mirrors[1],))
-    sync_portfolio(conn, only_second, now=_NOW + timedelta(hours=1))
+    sync_portfolio(conn, only_second, now=_NOW + timedelta(hours=1), environment="demo")
     conn.commit()
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -471,7 +471,7 @@ def test_sync_mirrors_recopy_does_not_archive_stale_retained_positions(
     # 1001 evicted. Because the mirror was NOT active at the start of this
     # sync, the eviction is NOT archived.
     recopy = _trimmed_first_mirror_payload(payload, keep_from=1)
-    sync_portfolio(conn, recopy, now=_NOW + timedelta(hours=2))
+    sync_portfolio(conn, recopy, now=_NOW + timedelta(hours=2), environment="demo")
     conn.commit()
 
     assert _count(conn, "copy_mirror_closed_positions") == 0

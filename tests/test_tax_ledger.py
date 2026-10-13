@@ -1059,65 +1059,15 @@ _NOW = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
 
 
 class TestIngestion:
-    @patch("app.services.tax_ledger._utcnow", return_value=_NOW)
-    def test_fills_ingested_with_fx_conversion(self, _mock: MagicMock) -> None:
-        # Cursor 1: un-ingested fills query
-        fill_rows = [
-            {
-                "fill_id": 1,
-                "filled_at": datetime(2025, 7, 1, 10, 0, 0, tzinfo=UTC),
-                "price": _D("10"),
-                "units": _D("100"),
-                "gross_amount": _D("1000"),
-                "fees": _D("5"),
-                "instrument_id": 42,
-                "action": "BUY",
-                "instrument_currency": "USD",
-            }
-        ]
-        fills_cursor = _make_cursor(fill_rows)
-
-        # Cursor 2: FX rate lookup
-        fx_cursor = _make_cursor([{"rate": _D("0.80")}])
-
-        conn = _make_conn([fills_cursor, fx_cursor])
-
-        # conn.execute returns a result with rowcount=1 (row inserted)
-        exec_result = MagicMock()
-        exec_result.rowcount = 1
-        conn.execute.return_value = exec_result
-
+    def test_fills_route_is_retired(self) -> None:
+        # #3616 slice 3c: fills are the app's own order record, a subset of the account's trades; tax evidence is the
+        # broker record. ingest_tax_events reads no fill and writes no lot.
+        conn = MagicMock()
         result = ingest_tax_events(conn)
-
-        assert result.fills_ingested == 1
+        assert result.fills_ingested == 0
         assert result.already_present == 0
-        # Verify the INSERT was called
-        assert conn.execute.call_count >= 1
-
-    @patch("app.services.tax_ledger._utcnow", return_value=_NOW)
-    def test_missing_fx_rate_raises(self, _mock: MagicMock) -> None:
-        fill_rows = [
-            {
-                "fill_id": 1,
-                "filled_at": datetime(2025, 7, 1, 10, 0, 0, tzinfo=UTC),
-                "price": _D("10"),
-                "units": _D("100"),
-                "gross_amount": _D("1000"),
-                "fees": _D("5"),
-                "instrument_id": 42,
-                "action": "BUY",
-                "instrument_currency": "USD",
-            }
-        ]
-        fills_cursor = _make_cursor(fill_rows)
-        # FX rate not found
-        fx_cursor = _make_cursor([])
-        fx_cursor.fetchone.return_value = None
-
-        conn = _make_conn([fills_cursor, fx_cursor])
-
-        with pytest.raises(RuntimeError, match="Missing FX rate"):
-            ingest_tax_events(conn)
+        conn.cursor.assert_not_called()
+        conn.execute.assert_not_called()
 
 
 # ===========================================================================

@@ -120,7 +120,7 @@ from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import StaleInstrument, find_stale_instruments, generate_thesis, instrument_lock
-from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely
+from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely, ledger_environment
 from app.services.universe import sync_universe
 from app.services.watermarks import get_watermark, set_watermark
 
@@ -5668,7 +5668,8 @@ def daily_portfolio_sync() -> None:
             env=settings.etoro_env,
         ) as broker:
             portfolio = broker.get_portfolio()
-            # None on fetch failure — positions still sync; the
+            portfolio_fetched_at = datetime.now(UTC)
+            # rows None on fetch failure — positions still sync; the
             # unmoved watermark re-covers the window next tick.
             trade_history = fetch_trade_history_safely(broker, history_min_date)
             account_snapshot = None
@@ -5682,7 +5683,13 @@ def daily_portfolio_sync() -> None:
                     )
 
         with connect_job() as conn:
-            result = sync_portfolio(conn, portfolio, trade_history=trade_history)
+            result = sync_portfolio(
+                conn,
+                portfolio,
+                trade_history=trade_history,
+                environment=ledger_environment(settings.etoro_env),
+                portfolio_fetched_at=portfolio_fetched_at,
+            )
             if account_snapshot is not None:
                 try:
                     # sync_portfolio has already opened the outer transaction;
@@ -9050,10 +9057,13 @@ def etoro_lookups_refresh() -> None:
 
 def daily_tax_reconciliation() -> None:
     """
-    Ingest new fills into tax_lots and re-run disposal matching.
+    Ingest cash events into tax_lots and re-run disposal matching.
 
-    Runs daily. Idempotent — safe to re-run. Requires fx_rates to be
-    populated for any non-GBP instruments before ingestion.
+    Runs on demand. Idempotent — safe to re-run. The fills route and the
+    ``fx_rates`` table it read are retired (#3616 slice 3c, sql/485):
+    tax FX is the slice 3b tables (``tax_fx_*``) and tax evidence is the
+    broker record (the slice 3c evidence run). ``tax_lots`` has no writer
+    until slice 3d moves matching onto the evidence generation.
 
     Two separate connections are used intentionally so that a matching
     failure does not roll back committed tax_lot ingestion. If the

@@ -2,7 +2,10 @@
 FX conversion service.
 
 Handles currency conversion for display purposes using live_fx_rates.
-Tax-related conversions continue to use the fx_rates table (sql/013).
+Tax conversions do not use this module: their rate is the Bank of England
+series of #3616 slice 3b (``app.services.tax_fx``, tables ``tax_fx_*``),
+consumed by the slice 3c evidence lots. The sql/013 ``fx_rates`` table is
+dropped (sql/485).
 
 FX invariant: rate = units of to_currency per 1 unit of from_currency.
 """

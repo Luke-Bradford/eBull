@@ -11,7 +11,8 @@ Shape:
 - ``plan_run`` is the pure validate-and-apply planner (spec Design 2, steps 4.1-4.11). The job and
   ``replay_from_evidence`` both call it.
 - ``load_tax_fx_state`` / ``resolve_tax_fx`` / ``tax_fx_state_is_current`` are the consumer contract (Design 3). No
-  consumer exists yet: slice 3c is the first. Nothing here changes ``fx_rates``, ``_load_fx_rate`` or any tax figure.
+  consumer is slice 3c's evidence run. Nothing here changes a published tax figure (sql/485 dropped the old
+  ``fx_rates`` table and ``_load_fx_rate``).
 
 A value is stored only after two consecutive eligible responses agree on it, and the stored set is always a complete
 prefix of working days from ``FX_FLOOR``. Evidence that contradicts the stored state refuses the run and leaves the

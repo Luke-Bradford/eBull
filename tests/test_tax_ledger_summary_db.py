@@ -19,6 +19,9 @@ _IID = 990_361_601
 
 
 def _lot(conn: psycopg.Connection[tuple], at: datetime, direction: str, units: str, gbp: str) -> None:
+    # sql/485 refuses every insert into tax_lots (the fills route is retired); the matcher and the summary still read
+    # it until #3616 slice 3d, so the fixture lifts the refusal for its own insert only.
+    conn.execute("ALTER TABLE tax_lots DISABLE TRIGGER tax_lots_refuse_insert")
     conn.execute(
         """
         INSERT INTO tax_lots (instrument_id, event_time, event_type, direction, quantity, cost_or_proceeds,
@@ -27,6 +30,7 @@ def _lot(conn: psycopg.Connection[tuple], at: datetime, direction: str, units: s
         """,
         (_IID, at, "BUY" if direction == "acquisition" else "EXIT", direction, units, gbp, gbp),
     )
+    conn.execute("ALTER TABLE tax_lots ENABLE TRIGGER tax_lots_refuse_insert")
 
 
 def test_summary_nets_each_statutory_disposal_before_reading_its_sign(
@@ -74,6 +78,7 @@ def test_summary_nets_each_statutory_disposal_before_reading_its_sign(
         (datetime(2026, 9, 2, 9, tzinfo=UTC), "acquisition", "10", "1000"),
         (datetime(2026, 9, 24, 9, tzinfo=UTC), "disposal", "10", "6000"),
     ):
+        conn.execute("ALTER TABLE tax_lots DISABLE TRIGGER tax_lots_refuse_insert")
         conn.execute(
             """
             INSERT INTO tax_lots (instrument_id, event_time, event_type, direction, quantity, cost_or_proceeds,
@@ -82,6 +87,7 @@ def test_summary_nets_each_statutory_disposal_before_reading_its_sign(
             """,
             (_IID + 1, at, direction, units, gbp, gbp),
         )
+        conn.execute("ALTER TABLE tax_lots ENABLE TRIGGER tax_lots_refuse_insert")
     run_disposal_matching(conn, instrument_id=_IID + 1)
     summary = tax_year_summary(conn, "2026/27")
     assert (summary.total_gains_gbp, summary.net_gain_gbp) == (Decimal("5000"), Decimal("4845"))

@@ -13,7 +13,6 @@ from app.services.instrument_price_currency import (
     FxReference,
     classify_price_currency,
 )
-from app.services.tax_ledger import _load_fx_rate
 
 NOW = datetime(2026, 9, 23, 12, tzinfo=UTC)
 # Rates from the 2026-09-23 census (live_fx_rates USD→GBP 0.74832, USD→EUR 0.87237).
@@ -75,11 +74,6 @@ def test_no_candidate_within_tolerance() -> None:
 def test_two_candidates_within_tolerance_is_ambiguous() -> None:
     close = FxReference(usd_per_unit={"USD": Decimal(1), "XXA": Decimal("1.01")}, quoted_at=NOW)
     assert classify_price_currency(Decimal("1.005"), NOW, close, NOW) == (None, "ambiguous")
-
-
-def test_tax_fx_treats_gbx_as_gbp_without_a_query() -> None:
-    # A GBX label must not abort the tax ingest batch on a missing GBX row.
-    assert _load_fx_rate(None, NOW.date(), "GBX") == Decimal("1")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("rate", [None, Decimal(0), Decimal(-1), Decimal("NaN")])

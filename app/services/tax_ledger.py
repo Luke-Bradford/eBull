@@ -249,188 +249,23 @@ def _cgt_rates_for_disposal(uk_date: date) -> tuple[Decimal, Decimal]:
     raise RuntimeError(f"No CGT rate period covers disposal date {uk_date}. Update _CGT_RATE_PERIODS in tax_ledger.py.")
 
 
-def _load_fx_rate(
-    conn: psycopg.Connection[Any],
-    rate_date: date,
-    from_currency: str,
-) -> Decimal:
-    """Look up FX rate for from_currency -> GBP on the given date.
-
-    Returns Decimal("1") for GBP. Raises RuntimeError if missing.
-
-    GBX (pence, #3322) keys as GBP: fill money reaching this path is not in the
-    instrument's price unit, so only the currency matters, and a pence label must
-    not abort the whole ingest batch on a missing ``GBX`` row.
-    """
-    if from_currency.upper() in ("GBP", "GBX"):
-        return _D("1")
-
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT rate
-            FROM fx_rates
-            WHERE rate_date = %(rate_date)s
-              AND from_currency = %(from_currency)s
-              AND to_currency = 'GBP'
-            """,
-            {"rate_date": rate_date, "from_currency": from_currency.upper()},
-        )
-        row = cur.fetchone()
-
-    if row is None:
-        raise RuntimeError(
-            f"Missing FX rate: {from_currency}->GBP on {rate_date}. Populate fx_rates before ingesting tax events."
-        )
-    return Decimal(str(row["rate"]))
-
-
 # ---------------------------------------------------------------------------
 # Ingestion
 # ---------------------------------------------------------------------------
 
 
 def ingest_tax_events(conn: psycopg.Connection[Any]) -> IngestionResult:
-    """Ingest fills and cash events into tax_lots. Idempotent."""
-    inserted, attempted = _ingest_fills(conn)
+    """Ingest cash events into tax_lots. Idempotent.
+
+    The fills route is retired (#3616 slice 3c): ``fills`` is the app's own order record, a subset of the account's
+    trades, and reading it beside the broker record would count those trades twice. Tax evidence comes from the
+    broker record (the slice 3c evidence run); sql/485 refuses any insert into ``tax_lots``. The signature and the
+    zero ``fills_ingested`` stay until slice 3d moves matching onto the evidence generation.
+    """
     cash = _ingest_cash_events(conn)
 
-    already = attempted - inserted
-
-    logger.info(
-        "ingest_tax_events: fills_ingested=%d cash_events=%d already_present=%d",
-        inserted,
-        cash,
-        already,
-    )
-    return IngestionResult(
-        fills_ingested=inserted,
-        cash_events_ingested=cash,
-        already_present=already,
-    )
-
-
-def _ingest_fills(conn: psycopg.Connection[Any]) -> tuple[int, int]:
-    """Read fills not yet in tax_lots, convert to GBP, write tax_lots rows.
-
-    Returns (inserted, attempted) — inserted counts rows actually written
-    (via RETURNING), attempted counts fills processed. The difference is
-    duplicates silently absorbed by ON CONFLICT DO NOTHING.
-    """
-    # Load un-ingested fills (read phase — before transaction)
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT f.fill_id, f.filled_at, f.price, f.units,
-                   f.gross_amount, f.fees,
-                   o.instrument_id, o.action,
-                   i.currency AS instrument_currency
-            FROM fills f
-            JOIN orders o ON o.order_id = f.order_id
-            JOIN instruments i ON i.instrument_id = o.instrument_id
-            WHERE f.fill_id NOT IN (
-                SELECT reference_fill_id
-                FROM tax_lots
-                WHERE reference_fill_id IS NOT NULL
-            )
-              AND f.units > 0
-            ORDER BY f.filled_at ASC
-            """
-        )
-        rows = cur.fetchall()
-
-    if not rows:
-        return 0, 0
-
-    # Resolve FX rates (read phase — before transaction)
-    # Collect unique (uk_date, currency) pairs
-    rate_cache: dict[tuple[date, str], Decimal] = {}
-    for row in rows:
-        uk_dt = _to_uk_date(row["filled_at"])
-        currency = row["instrument_currency"] or "USD"
-        key = (uk_dt, currency.upper())
-        if key not in rate_cache:
-            rate_cache[key] = _load_fx_rate(conn, uk_dt, currency)
-
-    # Write phase — single atomic transaction
-    # NOTE: The fill rows were loaded before this transaction opens.
-    # A concurrent fill committed between the NOT IN snapshot and this
-    # transaction would be re-attempted here; ON CONFLICT DO NOTHING
-    # absorbs the duplicate safely. The RETURNING clause ensures we
-    # count only actually-inserted rows, not conflict-skipped ones.
-    inserted = 0
-    attempted = 0
-    with conn.transaction():
-        for row in rows:
-            action: str = row["action"]
-            gross_amount = Decimal(str(row["gross_amount"]))
-            fees = Decimal(str(row["fees"]))
-            units = Decimal(str(row["units"]))
-            filled_at: datetime = row["filled_at"]
-            uk_dt = _to_uk_date(filled_at)
-            currency = (row["instrument_currency"] or "USD").upper()
-            fx_rate = rate_cache[(uk_dt, currency)]
-
-            if action in ("BUY", "ADD"):
-                direction: TaxEventDirection = "acquisition"
-                # cost_or_proceeds = gross + fees (total allowable cost)
-                # gross_amount (USD) + fees (USD) = total_cost (USD)
-                cost_or_proceeds = gross_amount + fees
-            elif action == "EXIT":
-                direction = "disposal"
-                # cost_or_proceeds = gross - fees (net proceeds)
-                # gross_amount (USD) - fees (USD) = net_proceeds (USD)
-                cost_or_proceeds = gross_amount - fees
-            else:
-                logger.warning(
-                    "_ingest_fills: unknown action=%s for fill_id=%d, skipping",
-                    action,
-                    row["fill_id"],
-                )
-                continue
-
-            # total (USD) * rate (GBP/USD) = amount (GBP)
-            amount_gbp = cost_or_proceeds * fx_rate
-            tax_year = _compute_tax_year(uk_dt)
-
-            attempted += 1
-            result = conn.execute(
-                """
-                INSERT INTO tax_lots (
-                    instrument_id, event_time, event_type, direction,
-                    quantity, cost_or_proceeds,
-                    original_currency, fx_rate_to_gbp, amount_gbp,
-                    tax_year, reference_fill_id
-                )
-                VALUES (
-                    %(instrument_id)s, %(event_time)s, %(event_type)s,
-                    %(direction)s, %(quantity)s, %(cost_or_proceeds)s,
-                    %(original_currency)s, %(fx_rate)s, %(amount_gbp)s,
-                    %(tax_year)s, %(fill_id)s
-                )
-                ON CONFLICT (reference_fill_id)
-                    WHERE reference_fill_id IS NOT NULL
-                DO NOTHING
-                """,
-                {
-                    "instrument_id": row["instrument_id"],
-                    "event_time": filled_at,
-                    "event_type": action,
-                    "direction": direction,
-                    "quantity": units,
-                    "cost_or_proceeds": cost_or_proceeds,
-                    "original_currency": currency,
-                    "fx_rate": fx_rate,
-                    "amount_gbp": amount_gbp,
-                    "tax_year": tax_year,
-                    "fill_id": row["fill_id"],
-                },
-            )
-            # rowcount is 0 when ON CONFLICT DO NOTHING skips the row
-            if result.rowcount > 0:
-                inserted += 1
-
-    return inserted, attempted
+    logger.info("ingest_tax_events: cash_events=%d", cash)
+    return IngestionResult(fills_ingested=0, cash_events_ingested=cash, already_present=0)
 
 
 def _ingest_cash_events(conn: psycopg.Connection[Any]) -> int:

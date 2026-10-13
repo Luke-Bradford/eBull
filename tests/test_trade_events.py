@@ -24,10 +24,14 @@ from app.services.trade_events import (
     POST_TRADE_SYNC_JOB,
     TradeEventCounters,
     _side,
+    classify_observation,
     events_from_history,
     fetch_trade_history_safely,
+    ledger_environment,
     merge_events,
+    normalise_payload,
     open_events_from_positions,
+    payload_account_id,
 )
 from app.workers.scheduler import JOB_DAILY_PORTFOLIO_SYNC
 
@@ -203,16 +207,19 @@ class TestMergeEvents:
         counters = TradeEventCounters()
         portfolio_opens = open_events_from_positions([_broker_position(position_id=100)], counters)
         history = events_from_history([_closed_trade(position_id=100)], counters)
-        merged = merge_events(portfolio_opens, history)
+        merged, set_aside = merge_events(portfolio_opens, history)
         opens = [e for e in merged if e.event_kind == "open"]
         assert len(opens) == 1
         assert opens[0].source == "etoro_sync"
+        # The history open is set aside for comparison, not dropped (#3616 slice 3c).
+        assert [(e.position_id, e.event_kind, e.source) for e in set_aside] == [(100, "open", "etoro_history")]
         # The history close survives the merge.
         assert any(e.event_kind == "close" for e in merged)
 
     def test_history_only_position_keeps_its_synthesized_open(self) -> None:
         counters = TradeEventCounters()
-        merged = merge_events([], events_from_history([_closed_trade()], counters))
+        merged, set_aside = merge_events([], events_from_history([_closed_trade()], counters))
+        assert set_aside == []
         assert any(e.event_kind == "open" and e.source == "etoro_history" for e in merged)
 
 
@@ -244,10 +251,85 @@ class TestFetchTradeHistorySafely:
         ],
     )
     def test_failures_return_none_so_positions_still_sync(self, exc: Exception) -> None:
-        assert fetch_trade_history_safely(_RaisingBroker(exc), datetime(2020, 1, 1, tzinfo=UTC)) is None  # type: ignore[arg-type]
+        fetch = fetch_trade_history_safely(_RaisingBroker(exc), datetime(2020, 1, 1, tzinfo=UTC))  # type: ignore[arg-type]
+        assert fetch.rows is None
+        assert fetch.min_date == datetime(2020, 1, 1, tzinfo=UTC)
+        assert fetch.started_at <= fetch.finished_at
 
 
 def test_post_trade_sync_job_name_matches_scheduler_constant() -> None:
     """POST_TRADE_SYNC_JOB is duplicated to avoid a circular import —
     this pin is the drift guard (#1593 spec §1.3)."""
     assert POST_TRADE_SYNC_JOB == JOB_DAILY_PORTFOLIO_SYNC
+
+
+class TestObservationNormalisation:
+    """#3616 slice 3c, spec Design 2 and 4.3: what an observation is compared on."""
+
+    def test_keys_match_case_insensitively_and_numbers_compare_by_value(self) -> None:
+        a = normalise_payload("etoro_sync", "open", {"orderID": 5, "totalFees": 0.0, "openRate": 97.30})
+        b = normalise_payload("etoro_sync", "open", {"orderId": 5.0, "totalfees": 0, "OpenRate": 97.3})
+        assert a == b == {"orderid": "5", "totalfees": "0", "openrate": "97.3"}
+
+    def test_fields_outside_the_field_table_are_not_compared(self) -> None:
+        # A held position's live valuation changes every sync; it is not an amendment.
+        a = normalise_payload("etoro_sync", "open", {"orderID": 5, "unrealizedPnL": 1.5})
+        b = normalise_payload("etoro_sync", "open", {"orderID": 5, "unrealizedPnL": -3.0})
+        assert a == b
+
+    def test_two_spellings_that_disagree_are_kept_as_a_conflict(self) -> None:
+        assert normalise_payload("etoro_sync", "open", {"orderID": 5, "orderId": 6}) == {
+            "orderid": {"conflict": ["5", "6"]}
+        }
+
+    def test_booleans_stay_distinct_from_numbers_and_timestamps_normalise_to_utc(self) -> None:
+        a = normalise_payload("etoro_history", "close", {"isBuy": True, "closeTimestamp": "2025-11-14T20:24:35+01:00"})
+        assert a == {"isbuy": True, "closetimestamp": "2025-11-14T19:24:35.000000Z"}
+        assert normalise_payload("etoro_history", "close", {"isBuy": 1}) == {"isbuy": "1"}
+
+    def test_history_open_is_compared_on_its_open_fields_only(self) -> None:
+        payload = {"orderId": 1, "netProfit": 5, "closeRate": 2}
+        assert normalise_payload("etoro_history", "open", payload) == {"orderid": "1"}
+        assert normalise_payload("etoro_history", "close", payload) == {
+            "orderid": "1",
+            "netprofit": "5",
+            "closerate": "2",
+        }
+
+    def test_classification(self) -> None:
+        base = {"orderid": "1", "ispartiallyaltered": False, "totalfees": "0"}
+        assert classify_observation(None, base) == "supplemental"
+        assert classify_observation(base, dict(base)) is None
+        assert classify_observation(base, {**base, "ispartiallyaltered": True}) == "lifecycle"
+        assert classify_observation(base, {**base, "totalfees": "5"}) == "amendment"
+        # Absent is never zero: a dropped field is an amendment.
+        assert classify_observation(base, {"orderid": "1", "ispartiallyaltered": False}) == "amendment"
+        assert classify_observation(base, {**base, "ispartiallyaltered": True, "totalfees": "5"}) == "amendment"
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ({"CID": 42}, 42),
+            ({"cid": 42}, 42),
+            ({"CID": 42, "cid": 42}, 42),
+            ({"CID": 42, "cid": 43}, None),
+            ({}, None),
+            ({"CID": None}, None),
+            ({"CID": 0}, None),
+            ({"CID": -1}, None),
+            ({"CID": 42.0}, None),
+            ({"CID": "42"}, None),
+            ({"CID": True}, None),
+            ({"CID": 42, "cid": 42.0}, None),
+            ({"CID": 42, "cid": [42]}, None),
+            ({"CID": 42, "cid": {"id": 42}}, None),
+        ],
+    )
+    def test_payload_account_id(self, payload: dict[str, Any], expected: int | None) -> None:
+        assert payload_account_id(payload) == expected
+
+    def test_ledger_environment_refuses_an_unknown_value(self) -> None:
+        assert ledger_environment("demo") == "demo"
+        assert ledger_environment("real") == "real"
+        with pytest.raises(ValueError, match="unknown broker environment"):
+            ledger_environment("live")

@@ -253,7 +253,7 @@ def test_portfolio_sync_external_open_into_closed_ebull_position_flips_source(
     ebull_test_conn.commit()
 
     portfolio = _broker_portfolio_with_position(instrument_id=iid, units=Decimal("4"), open_price=Decimal("125"))
-    sync_portfolio(ebull_test_conn, portfolio, now=_NOW)
+    sync_portfolio(ebull_test_conn, portfolio, now=_NOW, environment="demo")
     ebull_test_conn.commit()
 
     source, units = _read_position_source_units(ebull_test_conn, iid)

@@ -1063,7 +1063,11 @@ class EtoroWebSocketSubscriber:
         # WS-only test path doesn't need).
         from app.providers.implementations.etoro_broker import EtoroBrokerProvider
         from app.services.portfolio_sync import sync_portfolio
-        from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely
+        from app.services.trade_events import (
+            compute_history_min_date,
+            fetch_trade_history_safely,
+            ledger_environment,
+        )
 
         # Watermark read on a briefly-held pool conn BEFORE the provider
         # session — never hold a pooled conn across HTTP (#1472 class).
@@ -1076,13 +1080,20 @@ class EtoroWebSocketSubscriber:
             env=self._env,
         ) as broker:
             portfolio = broker.get_portfolio()
+            portfolio_fetched_at = datetime.now(UTC)
             trade_history = fetch_trade_history_safely(broker, history_min_date)
 
         with self._pool.connection() as conn:
             # ``ConnectionPool.connection()`` already commits on clean
             # exit / rolls back on error via ``with conn:`` — no
             # explicit commit needed here.
-            sync_portfolio(conn, portfolio, trade_history=trade_history)
+            sync_portfolio(
+                conn,
+                portfolio,
+                trade_history=trade_history,
+                environment=ledger_environment(self._env),
+                portfolio_fetched_at=portfolio_fetched_at,
+            )
 
     def _sync_upsert(self, update: QuoteUpdate) -> None:
         """Sync helper offloaded to a worker thread per tick so the

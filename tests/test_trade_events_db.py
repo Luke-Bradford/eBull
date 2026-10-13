@@ -39,6 +39,15 @@ def _seed_instrument(conn: psycopg.Connection[Any], iid: int, symbol: str) -> No
     )
 
 
+def _fetch_id(conn: psycopg.Connection[Any]) -> int:
+    row = conn.execute(
+        "INSERT INTO trade_history_fetches (environment, portfolio_fetched_at, portfolio_real_positions, outcome) "
+        "VALUES ('demo', now(), 0, 'failed') RETURNING fetch_id"
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 def _trade(position_id: int, units: str, close_at: datetime) -> BrokerClosedTrade:
     return BrokerClosedTrade(
         position_id=position_id,
@@ -66,17 +75,22 @@ def test_reingest_is_idempotent_and_anomaly_is_loud(
 ) -> None:
     conn = ebull_test_conn
     _seed_instrument(conn, 4077, "ILMN")
+    fid = _fetch_id(conn)
     close_at = datetime(2025, 11, 14, 19, 24, 35, tzinfo=UTC)
     trades = [_trade(900001, "82.135523", close_at)]
 
     # First ingest: open + close land, instrument resolved.
-    first = ingest_trade_events(conn, events_from_history(trades, TradeEventCounters()), TradeEventCounters())
+    first = ingest_trade_events(
+        conn, events_from_history(trades, TradeEventCounters()), TradeEventCounters(), environment="demo", fetch_id=fid
+    )
     assert first.inserted == 2
     assert first.duplicate == 0
     assert first.unresolved_instrument == 0
 
     # Second ingest of the SAME rows: pure no-op via the partial uniques.
-    second = ingest_trade_events(conn, events_from_history(trades, TradeEventCounters()), TradeEventCounters())
+    second = ingest_trade_events(
+        conn, events_from_history(trades, TradeEventCounters()), TradeEventCounters(), environment="demo", fetch_id=fid
+    )
     assert second.inserted == 0
     assert second.duplicate == 2
     assert second.conflict_anomaly == 0
@@ -87,7 +101,13 @@ def test_reingest_is_idempotent_and_anomaly_is_loud(
     # Conflicting re-observation (same keys, different units): first
     # observation kept, anomaly counted — never silently merged.
     conflicting = [_trade(900001, "50", close_at)]
-    third = ingest_trade_events(conn, events_from_history(conflicting, TradeEventCounters()), TradeEventCounters())
+    third = ingest_trade_events(
+        conn,
+        events_from_history(conflicting, TradeEventCounters()),
+        TradeEventCounters(),
+        environment="demo",
+        fetch_id=fid,
+    )
     assert third.inserted == 0
     assert third.conflict_anomaly >= 1
     with conn.cursor() as cur:
@@ -98,7 +118,9 @@ def test_reingest_is_idempotent_and_anomaly_is_loud(
 
     # Unresolved instrument: row still lands with NULL FK (no silent drops).
     ghost = [replace(_trade(900002, "1", close_at), instrument_id=999999991)]
-    fourth = ingest_trade_events(conn, events_from_history(ghost, TradeEventCounters()), TradeEventCounters())
+    fourth = ingest_trade_events(
+        conn, events_from_history(ghost, TradeEventCounters()), TradeEventCounters(), environment="demo", fetch_id=fid
+    )
     assert fourth.inserted == 2
     assert fourth.unresolved_instrument == 2
     with conn.cursor() as cur:
@@ -111,7 +133,13 @@ def test_reingest_is_idempotent_and_anomaly_is_loud(
     # null_price counts LANDED rows only (ingest-time, spec §15): a
     # sentinel close rate lands as NULL price and is counted once.
     sentinel = [replace(_trade(900003, "2", close_at), close_rate=Decimal("0"))]
-    fifth = ingest_trade_events(conn, events_from_history(sentinel, TradeEventCounters()), TradeEventCounters())
+    fifth = ingest_trade_events(
+        conn,
+        events_from_history(sentinel, TradeEventCounters()),
+        TradeEventCounters(),
+        environment="demo",
+        fetch_id=fid,
+    )
     assert fifth.inserted == 2
     assert fifth.null_price == 1  # close landed NULL; the open kept its valid rate
     with conn.cursor() as cur:

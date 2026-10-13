@@ -35,12 +35,11 @@ import psycopg.rows
 import psycopg.types.json
 
 from app.providers.broker import (
-    BrokerClosedTrade,
     BrokerMirror,
     BrokerPortfolio,
     BrokerPosition,
 )
-from app.services.trade_events import record_trade_events
+from app.services.trade_events import LedgerEnvironment, TradeHistoryFetch, record_trade_events
 
 logger = logging.getLogger(__name__)
 
@@ -615,19 +614,28 @@ def sync_portfolio(
     conn: psycopg.Connection[Any],
     portfolio: BrokerPortfolio,
     now: datetime | None = None,
-    trade_history: Sequence[BrokerClosedTrade] | None = None,
+    trade_history: TradeHistoryFetch | None = None,
+    *,
+    environment: LedgerEnvironment,
+    portfolio_fetched_at: datetime | None = None,
 ) -> PortfolioSyncResult:
     """Reconcile local state against a broker portfolio snapshot.
 
     Must be called inside a transaction (autocommit=False, the default).
     The caller is responsible for committing.
 
-    ``trade_history``: closed-trade rows the caller fetched alongside the
-    portfolio (same provider session). When provided, close events are
-    ingested into the ``trade_events`` ledger; open events are ingested
-    from the portfolio payload on every call regardless (idempotent).
-    Pass None when the history fetch failed — positions still sync and
+    ``trade_history``: the history fetch the caller made alongside the
+    portfolio (same provider session). When its rows are present, close
+    events are ingested into the ``trade_events`` ledger; open events are
+    ingested from the portfolio payload on every call regardless
+    (idempotent). A failed fetch (``rows`` None) still syncs positions and
     the next run's watermark re-covers the gap (#1593 spec §7).
+
+    ``environment`` is the provider's; ``portfolio_fetched_at`` is when
+    ``get_portfolio`` returned (defaults to ``now``). Both reach the
+    ledger's scope check and its ``trade_history_fetches`` row (#3616
+    slice 3c); a batch outside the ledger's scope writes no ledger row
+    and never blocks this sync.
     """
     if now is None:
         now = datetime.now(UTC)
@@ -848,7 +856,13 @@ def sync_portfolio(
     # re-emit, DO NOTHING dedupes), closes from the supplied history
     # rows. Pure DB writes — all HTTP happened in the caller's provider
     # session before this transaction.
-    ledger_counters = record_trade_events(conn, portfolio.positions, trade_history)
+    ledger_counters = record_trade_events(
+        conn,
+        portfolio.positions,
+        trade_history,
+        environment=environment,
+        portfolio_fetched_at=portfolio_fetched_at if portfolio_fetched_at is not None else now,
+    )
     logger.info("trade_events ingest: %s", ledger_counters.log_line())
 
     for row in local_rows:

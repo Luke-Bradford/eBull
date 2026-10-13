@@ -23,7 +23,6 @@ from app.services.tax_fx import (
     run_tax_fx_refresh,
     tax_fx_state_is_current,
 )
-from app.services.tax_ledger import _load_fx_rate
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_tax_fx import LAST, SEED, SEED_BYTES, _response, calendar_body, csv, series
 
@@ -79,24 +78,15 @@ def test_runs_apply_refuse_skip_crash_and_replay(
     ebull_test_conn: psycopg.Connection[tuple], seeded_instrument_id: int
 ) -> None:
     conn = ebull_test_conn
-    # Non-interference: the existing tax FX table, the tax lots and the ECB table are untouched by every run.
-    conn.execute(
-        "INSERT INTO fx_rates (rate_date, from_currency, to_currency, rate) VALUES ('2026-10-12','USD','GBP',0.75)"
-    )
+    # Non-interference: the ECB table is untouched by every run. (The sql/013 fx_rates table and the fills route
+    # into tax_lots were retired by #3616 slice 3c, sql/485.)
+    del seeded_instrument_id
     conn.execute(
         "INSERT INTO fx_rates_daily (rate_date, base_currency, quote_currency, rate) "
         "VALUES ('2026-10-12','USD','GBP',0.74)"
     )
-    conn.execute(
-        "INSERT INTO tax_lots (instrument_id, event_time, event_type, quantity, cost_or_proceeds, tax_year) "
-        "VALUES (%s, '2026-10-12T15:00Z', 'acquisition', 1, 100, '2026/27')",
-        (seeded_instrument_id,),
-    )
     conn.commit()
-    untouched = (
-        "SELECT (SELECT array_agg(f::text) FROM fx_rates f), (SELECT array_agg(t::text) FROM tax_lots t), "
-        "(SELECT array_agg(d::text) FROM fx_rates_daily d)"
-    )
+    untouched = "SELECT (SELECT array_agg(d::text) FROM fx_rates_daily d)"
     before = _rows(untouched)
 
     server = _Server()
@@ -162,7 +152,6 @@ def test_runs_apply_refuse_skip_crash_and_replay(
     assert observations == live_observations and calendar == live_calendar
 
     assert _rows(untouched) == before
-    assert _load_fx_rate(conn, date(2026, 10, 12), "USD") == Decimal("0.75")
 
     conn.rollback()
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):

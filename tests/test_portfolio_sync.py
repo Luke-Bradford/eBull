@@ -117,7 +117,7 @@ class TestExistingPositionUpdate:
             local_positions=[(42, Decimal("5"))],
             local_cash=Decimal("5000"),
         )
-        result = sync_portfolio(conn, _portfolio([pos], Decimal("5000")), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([pos], Decimal("5000")), now=_NOW, environment="demo")
 
         assert result.positions_updated == 1
         assert result.positions_opened_externally == 0
@@ -126,7 +126,7 @@ class TestExistingPositionUpdate:
     def test_passes_correct_params_to_update(self) -> None:
         pos = _pos(instrument_id=42, units=Decimal("5"), open_price=Decimal("100"), current_price=Decimal("120"))
         conn = _mock_conn(local_positions=[(42, Decimal("5"))], local_cash=Decimal("5000"))
-        sync_portfolio(conn, _portfolio([pos], Decimal("5000")), now=_NOW)
+        sync_portfolio(conn, _portfolio([pos], Decimal("5000")), now=_NOW, environment="demo")
 
         # Find the UPDATE call
         update_calls = [
@@ -150,7 +150,7 @@ class TestExternallyOpenedPosition:
     def test_counts_as_opened_externally(self) -> None:
         pos = _pos(instrument_id=99)
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([pos]), now=_NOW, environment="demo")
 
         assert result.positions_opened_externally == 1
         assert result.positions_updated == 0
@@ -158,7 +158,7 @@ class TestExternallyOpenedPosition:
     def test_inserts_with_correct_cost_basis(self) -> None:
         pos = _pos(instrument_id=99, units=Decimal("3"), open_price=Decimal("50"), current_price=Decimal("55"))
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW, environment="demo")
 
         insert_calls = [
             c
@@ -178,7 +178,7 @@ class TestExternallyOpenedPosition:
     def test_open_date_defaults_to_now_without_raw_field(self) -> None:
         pos = _pos(instrument_id=99)
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW, environment="demo")
 
         insert_calls = [
             c
@@ -196,7 +196,7 @@ class TestExternallyOpenedPosition:
             raw_payload={"openDateTime": "2026-03-15T10:30:00Z"},
         )
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW, environment="demo")
 
         insert_calls = [
             c
@@ -225,7 +225,7 @@ class TestExternallyClosedPosition:
             local_cash=Decimal("0"),
         )
         broker_pos = _pos(instrument_id=8, units=Decimal("1"))
-        result = sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW, environment="demo")
 
         assert result.positions_closed_externally == 1
         assert result.positions_opened_externally == 0
@@ -236,7 +236,7 @@ class TestExternallyClosedPosition:
             local_cash=Decimal("0"),
         )
         broker_pos = _pos(instrument_id=8, units=Decimal("1"))
-        sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW)
+        sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW, environment="demo")
 
         update_calls = [c for c in conn.execute.call_args_list if _is_zero_out_update(c.args[0])]
         assert len(update_calls) == 1
@@ -263,7 +263,7 @@ class TestEmptyBrokerGuard:
         # accidental RuntimeError raised elsewhere in the call stack
         # would not satisfy this assertion.
         with pytest.raises(RuntimeError, match="refusing to zero"):
-            sync_portfolio(conn, _portfolio([]), now=_NOW)
+            sync_portfolio(conn, _portfolio([]), now=_NOW, environment="demo")
 
     def test_guard_raises_before_any_write(self) -> None:
         """Strongest form of the guard test: raise happens before any write.
@@ -281,7 +281,7 @@ class TestEmptyBrokerGuard:
             local_cash=Decimal("0"),
         )
         with pytest.raises(RuntimeError):
-            sync_portfolio(conn, _portfolio([]), now=_NOW)
+            sync_portfolio(conn, _portfolio([]), now=_NOW, environment="demo")
 
         # Zero writes must have occurred. Stronger than "no zero-out
         # updates" — catches any write attempted before the raise.
@@ -293,7 +293,7 @@ class TestEmptyBrokerGuard:
     def test_empty_broker_with_empty_local_does_not_raise(self) -> None:
         """Boundary: fully empty on both sides is a valid no-op."""
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio([], Decimal("0")), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([], Decimal("0")), now=_NOW, environment="demo")
         assert result.positions_closed_externally == 0
         assert result.positions_opened_externally == 0
         assert result.positions_updated == 0
@@ -305,7 +305,7 @@ class TestCashReconciliation:
 
     def test_records_positive_delta(self) -> None:
         conn = _mock_conn(local_positions=[], local_cash=Decimal("1000"))
-        result = sync_portfolio(conn, _portfolio([], Decimal("1500")), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([], Decimal("1500")), now=_NOW, environment="demo")
 
         assert result.cash_delta == Decimal("500")
         assert result.broker_cash == Decimal("1500")
@@ -323,13 +323,13 @@ class TestCashReconciliation:
 
     def test_records_negative_delta(self) -> None:
         conn = _mock_conn(local_positions=[], local_cash=Decimal("2000"))
-        result = sync_portfolio(conn, _portfolio([], Decimal("1800")), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([], Decimal("1800")), now=_NOW, environment="demo")
 
         assert result.cash_delta == Decimal("-200")
 
     def test_skips_insert_within_tolerance(self) -> None:
         conn = _mock_conn(local_positions=[], local_cash=Decimal("1000"))
-        result = sync_portfolio(conn, _portfolio([], Decimal("1000.005")), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([], Decimal("1000.005")), now=_NOW, environment="demo")
 
         assert result.cash_delta == Decimal("0.005")
         # No cash_ledger INSERT because delta < 0.01 tolerance.
@@ -343,7 +343,7 @@ class TestCashReconciliation:
     def test_exact_tolerance_boundary_skips(self) -> None:
         """Delta exactly at tolerance (0.01) is NOT greater than tolerance → skip."""
         conn = _mock_conn(local_positions=[], local_cash=Decimal("1000"))
-        sync_portfolio(conn, _portfolio([], Decimal("1000.01")), now=_NOW)
+        sync_portfolio(conn, _portfolio([], Decimal("1000.01")), now=_NOW, environment="demo")
 
         insert_calls = [
             c
@@ -355,7 +355,7 @@ class TestCashReconciliation:
     def test_just_above_tolerance_records(self) -> None:
         """Delta just above tolerance triggers the insert."""
         conn = _mock_conn(local_positions=[], local_cash=Decimal("1000"))
-        sync_portfolio(conn, _portfolio([], Decimal("1000.011")), now=_NOW)
+        sync_portfolio(conn, _portfolio([], Decimal("1000.011")), now=_NOW, environment="demo")
 
         insert_calls = [
             c
@@ -370,7 +370,7 @@ class TestEmptyPortfolio:
 
     def test_empty_broker_no_local_state(self) -> None:
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio([], Decimal("0")), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([], Decimal("0")), now=_NOW, environment="demo")
 
         assert result == PortfolioSyncResult(
             positions_updated=0,
@@ -393,7 +393,7 @@ class TestMixedScenario:
         local = [(1, Decimal("10")), (3, Decimal("8"))]  # 3 missing from broker → closed
 
         conn = _mock_conn(local_positions=local, local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio(broker_positions), now=_NOW)
+        result = sync_portfolio(conn, _portfolio(broker_positions), now=_NOW, environment="demo")
 
         assert result.positions_updated == 1
         assert result.positions_opened_externally == 1
@@ -495,7 +495,7 @@ class TestMultiPositionSync:
             current_price=Decimal("120"),
         )
         conn = _mock_conn(local_positions=[(42, Decimal("10"))], local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio([p1, p2]), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([p1, p2]), now=_NOW, environment="demo")
 
         assert result.positions_updated == 1
         assert result.positions_opened_externally == 0
@@ -526,7 +526,7 @@ class TestMultiPositionSync:
             current_price=Decimal("120"),
         )
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio([p1, p2]), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([p1, p2]), now=_NOW, environment="demo")
 
         assert result.positions_opened_externally == 1
 
@@ -569,7 +569,7 @@ class TestPositionSource:
         """
         pos = _pos(instrument_id=99)
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW, environment="demo")
 
         insert_calls = [
             c
@@ -601,7 +601,7 @@ class TestPositionSource:
         """
         pos = _pos(instrument_id=42, units=Decimal("5"), open_price=Decimal("100"), current_price=Decimal("120"))
         conn = _mock_conn(local_positions=[(42, Decimal("5"))], local_cash=Decimal("5000"))
-        sync_portfolio(conn, _portfolio([pos], Decimal("5000")), now=_NOW)
+        sync_portfolio(conn, _portfolio([pos], Decimal("5000")), now=_NOW, environment="demo")
 
         update_calls = [
             c for c in conn.execute.call_args_list if isinstance(c.args[0], str) and "UPDATE positions SET" in c.args[0]
@@ -620,7 +620,7 @@ class TestReopenedPositionOpenDate:
         """Verify the INSERT's ON CONFLICT SET includes open_date."""
         pos = _pos(instrument_id=99)
         conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
-        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW, environment="demo")
 
         insert_calls = [
             c
@@ -929,7 +929,7 @@ class TestBrokerPositionsInSyncPortfolio:
     def test_sync_reports_broker_positions_upserted(self) -> None:
         bp = _detailed_pos(position_id=5001, instrument_id=42)
         conn = _mock_conn(local_positions=[(42, Decimal("10"))], local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio([bp]), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([bp]), now=_NOW, environment="demo")
 
         assert result.broker_positions_upserted == 1
         # Existing positions-table update still works
@@ -940,7 +940,7 @@ class TestBrokerPositionsInSyncPortfolio:
         updates the positions table (broker_positions upsert is skipped)."""
         bp = _pos(instrument_id=42)
         conn = _mock_conn(local_positions=[(42, Decimal("10"))], local_cash=Decimal("0"))
-        result = sync_portfolio(conn, _portfolio([bp]), now=_NOW)
+        result = sync_portfolio(conn, _portfolio([bp]), now=_NOW, environment="demo")
 
         assert result.positions_updated == 1
         assert result.broker_positions_upserted == 0

@@ -210,6 +210,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "position_alerts",
     "watchlist",
     # #1593 — trade ledger + closed-position archive (FK → instruments).
+    # #3616 slice 3c (sql/485) — observations reference events and fetches; the scope is a singleton.
+    "trade_event_observations",
+    "trade_history_fetches",
+    "trade_ledger_scope",
     "trade_events",
     "broker_positions_closed",
     "broker_positions",
