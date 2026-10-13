@@ -88,7 +88,7 @@ account's complete history (Limits).
    investment differs from `units × open rate × open conversion rate` by a relative gap printed in full per order; the
    largest is 0.0000936852 (AAPL). This corroborates the amount; it does not establish it (Source rules).
    - `frozenAmount` is not a reconciliation. The page documents it as "the amount frozen/reserved for the order
-     including costs", which is the request, not the execution.
+     including costs": a reserved amount, not an executed cash debit, so it does not establish acquisition consideration.
 9. **Charge and adjustment indicators** (`--checks`, `totals`, each indicator counted separately per observation). The
    PnL page documents `totalExternalFees` as *"Total fees in USD charged on the position. Example - TicketFee. This
    value does not include overnight fees and dividends"*, `totalExternalTaxes` as *"Total taxes in USD charged on the
@@ -126,7 +126,8 @@ account's complete history (Limits).
     one `CID`, none NULL; the 13 found lookups carry one `accountId`, none missing, equal to it. The 5 private-stream
     `Trading.*` events in `broker_private_events` carry one other `CID`, and none carries the sync's. The environment
     label therefore does not identify the account.
-12. **Every broker credential this database has used is labelled demo** (`--facts`). `broker_credentials` holds two
+12. **All currently stored credentials, and every credential the retained access log references, are labelled demo**
+    (`--facts`); what was used before the log began, or labelled differently then, rests on Design 2's assumptions. `broker_credentials` holds two
     rows, `api_key` and `user_key`, both `demo`. `broker_credential_access_log` holds rows from 2026-06-03, all joined
     to a demo credential, with 0 NULL credentials under an `ON DELETE SET NULL` foreign key. `trade_events.recorded_at`
     starts 2026-06-13.
@@ -303,7 +304,12 @@ lets the rest of the portfolio sync commit. Every payload of a batch not written
 retained as a `trade_event_observations` row with `kind = 'unscoped'`, its source, event kind, `position_id`, close
 `executed_at` (history closes), the fetch row's id and `event_id` NULL; an identical repeat for the same
 `(position_id, source, event_kind, executed_at)` is not written again. At derivation, every `unscoped` observation is
-attached by `position_id` to the subject holding that position, before any event matching. For each, the baseline is
+attached to subjects before any event matching: to the subject holding its `position_id`; failing that, to every
+order subject named by any order id in the payload (read under Design 4.3's normalisation, every alias, so conflicting
+ids attach it to each order they name). An observation attached by order id alone names a position the ledger does not
+hold, so it has no baseline and makes that order `unscoped_unmatched`. One matching neither a known position nor a
+known order is kept and attached to nothing (another account's position, or an order not yet in the ledger, which a
+later derivation attaches once a clean batch writes it). For each attached observation, the baseline is
 the latest retained payload that is not `unscoped` with the same `(position_id, source, event_kind)` and, for a close,
 the same `executed_at`: the stored row if it has that source, else the latest supplemental, amendment or lifecycle
 observation. Then:
@@ -315,7 +321,7 @@ observation. Then:
 The comparison runs at each derivation, so an unscoped close that a later clean batch writes unchanged stops being
 unmatched once its baseline exists. A fee, proceeds or opening value a withheld batch carried is therefore never lost
 behind a later clean batch; a flat account's routine history re-walk, once the clean batch writes the same rows,
-quarantines nothing; and another account's positions, which belong to no subject, change nothing. Because the watermark moves only on written history rows (fact 16), the
+quarantines nothing; and another account's positions, which match no subject, change nothing. Because the watermark moves only on written history rows (fact 16), the
 next batch that carries the account fetches the skipped closes again, as far back as the endpoint serves them. So no
 row of an unverified or other account enters the ledger, suppresses a row under its global unique indexes, or moves the
 watermark. Moving the ledger to another environment or account is a reviewed migration, never a side effect.
@@ -381,7 +387,7 @@ The service classifies:
 
 | response | outcome |
 |---|---|
-| 200, body parses as a JSON object whose `orderId` is the asked id | `found` (identity-bound; its fields are validated at derivation, Design 4.3) |
+| 200, body parses as a JSON object, and some top-level key equal to `orderid` case-insensitively holds the asked id | `found` (identity-bound; every field, including a second order-id alias that disagrees, is validated at derivation, Design 4.3) |
 | 200, anything else | `malformed` (not bound to the order, so it is evidence of nothing about it) |
 | 404 | `not_found` |
 | 429 | `rate_limited`; the run stops asking |
@@ -796,7 +802,9 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
   `evidence_policy_id`;
 - lookup classification: every row of the response table, including a non-JSON 200, a JSON array 200, `{}` and
   (all `malformed`), and `{"orderId": <asked>, "asset": {}, "positionExecutions": [{}]}`, which is `found` and then
-  fails derivation with `missing_field` reasons;
+  fails derivation with `missing_field` reasons; a body carrying `orderID` (not `orderId`) equal to the asked id and a
+  non-zero fee: `found`, `charges_nonzero`; a body with `orderId` the asked id and `orderID` another: `found`,
+  `field_conflict:orderId`;
 - lookup candidates: every row of the candidate table, the 30/10 split with spill-over, the interleaving, and that an
   order failing every run does not keep a retry candidate waiting beyond the attempts ahead of it; a run stopped by
   `rate_limited` after its first attempt;
@@ -824,7 +832,8 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
   batch and 0 in the next clean one is `unresolved` (`unscoped_conflict`); a closed ledger position whose history row
   shows `fees` 5 in a refused batch and 0 again later: `unscoped_conflict`; a flat account's history-only batch
   repeating stored closes unchanged: `unscoped` rows, no reason; a refused batch reporting a close at another timestamp,
-  an unseen close piece, or a sync payload for a history-only position, followed by a clean batch without it:
+  an unseen close piece, a close under a new position id naming an admitted order (cached lookup unchanged), or a sync
+  payload for a history-only position, followed by a clean batch without it:
   `unscoped_unmatched`; an unscoped close later written unchanged by a clean batch: no reason; a batch with another environment or `CID`
   writes no `trade_events` row and a `scope_refused` fetch row; a batch with history but no open positions writes a
   `scope_unverified` fetch row and no ledger row, and the next batch with the account ingests those closes; the
