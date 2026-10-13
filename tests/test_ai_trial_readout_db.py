@@ -39,8 +39,8 @@ def test_a_broker_closed_arm_leg_is_valued_from_its_close_row(
             """
             INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units,
                                       price, executed_at, fees_usd, realized_pnl_usd, investment_usd, order_id,
-                                      source, raw_payload, recorded_at)
-            VALUES (%s, %s, %s, 'close', 'sell', 0.625, 116, %s, 0, 10, 62.5, %s, 'etoro_history', %s, %s)
+                                      source, raw_payload, recorded_at, environment)
+            VALUES (%s, %s, %s, 'close', 'sell', 0.625, 116, %s, 0, 10, 62.5, %s, 'etoro_history', %s, %s, 'demo')
             """,
             (
                 position_id,

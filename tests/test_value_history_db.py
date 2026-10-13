@@ -58,17 +58,17 @@ def _seed(conn: psycopg.Connection[tuple], today: date) -> None:
         """
         INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind,
                                   side, units, price, executed_at, investment_usd,
-                                  realized_pnl_usd, source, raw_payload)
+                                  realized_pnl_usd, source, raw_payload, environment)
         VALUES
           -- P1: 10u @100 but only 900 invested (2x-ish leverage) → equity basis,
           -- not notional, must be used (cost_per_unit = 900/10 = 90).
-          (%(po)s, %(o)s, %(o)s, 'open',  'buy',  10, 100, %(open)s,  900, NULL, 'etoro_sync', '{}'::jsonb),
-          (%(pc)s, %(c)s, %(c)s, 'open',  'buy',   6,  50, %(open)s,  300, NULL, 'etoro_sync', '{}'::jsonb),
-          (%(pc)s, %(c)s, %(c)s, 'close', 'sell',  6,  50, %(close)s, 300,    0, 'etoro_history', '{}'::jsonb),
+          (%(po)s, %(o)s, %(o)s, 'open',  'buy',  10, 100, %(open)s,  900, NULL, 'etoro_sync', '{}'::jsonb, 'demo'),
+          (%(pc)s, %(c)s, %(c)s, 'open',  'buy',   6,  50, %(open)s,  300, NULL, 'etoro_sync', '{}'::jsonb, 'demo'),
+          (%(pc)s, %(c)s, %(c)s, 'close', 'sell',  6,  50, %(close)s, 300,    0, 'etoro_history', '{}'::jsonb, 'demo'),
           -- P3: NULL open price → excluded from the line; its close must NOT
           -- emit an orphan SELL marker (Codex ckpt-2 P2 / M2 guard).
-          (%(pn)s, %(c)s, %(c)s, 'open',  'buy',   5, NULL, %(open)s,  250, NULL, 'etoro_sync', '{}'::jsonb),
-          (%(pn)s, %(c)s, %(c)s, 'close', 'sell',  5,  50, %(close)s, 250,    0, 'etoro_history', '{}'::jsonb)
+          (%(pn)s, %(c)s, %(c)s, 'open',  'buy',   5, NULL, %(open)s,  250, NULL, 'etoro_sync', '{}'::jsonb, 'demo'),
+          (%(pn)s, %(c)s, %(c)s, 'close', 'sell',  5,  50, %(close)s, 250,    0, 'etoro_history', '{}'::jsonb, 'demo')
         ON CONFLICT DO NOTHING
         """,
         {

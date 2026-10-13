@@ -142,8 +142,8 @@ def test_an_unowned_slice_under_the_entry_order_is_a_partial_close_and_refuses(
     ebull_test_conn.execute(
         """
         INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
-                                  executed_at,realized_pnl_usd,order_id,source,raw_payload)
-        VALUES (%s,%s,%s,'close','sell',0.1,%s,0,%s,'etoro_history',%s)
+                                  executed_at,realized_pnl_usd,order_id,source,raw_payload,environment)
+        VALUES (%s,%s,%s,'close','sell',0.1,%s,0,%s,'etoro_history',%s,'demo')
         """,
         (
             position_id + 1,

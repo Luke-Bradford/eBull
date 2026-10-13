@@ -1309,8 +1309,8 @@ def test_mandate_daily_loss_refuses_at_the_exact_market_day_boundary(
         """
         INSERT INTO trade_events (
             position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
-            price,executed_at,fees_usd,realized_pnl_usd,investment_usd,source,raw_payload
-        ) VALUES (7443001,2449001,2449001,'close','sell',1,100,%s,0,-30,100,'etoro_history','{}')
+            price,executed_at,fees_usd,realized_pnl_usd,investment_usd,source,raw_payload,environment
+        ) VALUES (7443001,2449001,2449001,'close','sell',1,100,%s,0,-30,100,'etoro_history','{}','demo')
         """,
         (_NOW,),
     )

@@ -12622,3 +12622,14 @@ neighbouring container and match it.**
   exception writes an error row and then re-raises, and a body the column cannot hold is kept as its hash and length.
 - Enforced in: `tests/test_tax_broker_evidence_db.py::test_an_unexpected_exception_is_recorded_then_raised` and
   `::test_a_nul_body_is_kept_as_its_hash`.
+
+### A column default that bridges a deploy is dropped with every bypassing writer updated (#3796)
+
+- Failure (review bot, PRs #3795 and #3798, 2026-10-13): sql/485 gave `trade_events.environment` a `DEFAULT 'demo'`
+  so that the pre-485 jobs process (still running while the pre-push smoke run applied the migration to the dev DB)
+  and about 25 test fixtures kept working. Left in place, the default would have silently labelled any later
+  bypassing writer `demo` under a `real` scope.
+- Prevention: when a deploy window needs a default, record its removal as an issue at once, and drop it after the
+  jobs child PID has changed. Before the drop, grep `INSERT INTO <table>` across `app/`, `scripts/` and `tests/`, make
+  every writer state the column, and pin the missing-column refusal with a test.
+- Enforced in: `tests/test_trade_ledger_provenance_db.py::test_a_write_without_an_environment_fails`.

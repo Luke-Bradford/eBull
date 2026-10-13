@@ -230,6 +230,12 @@ def run_migrations() -> list[str]:
         # for ALTER SYSTEM (forbidden inside a tx block). On partial failure
         # (body succeeds, schema_migrations INSERT fails) the next boot
         # re-runs the body; safe because such migrations must be idempotent.
+        #
+        # A file may also delimit its own transaction with ``BEGIN;`` …
+        # ``COMMIT;`` (140 of 487 files on 2026-10-13, sql/484-487 among
+        # them; reproduce with ``grep -l '^BEGIN;' sql/*.sql | wc -l``):
+        # the one execute() runs it as written, and the schema_migrations
+        # row is recorded after it.
         autocommit = _wants_autocommit(sql)
         with psycopg.connect(settings.database_url, autocommit=autocommit) as conn:
             try:

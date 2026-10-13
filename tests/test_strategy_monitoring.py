@@ -205,10 +205,10 @@ def test_owned_pnl_excludes_manual_same_instrument_lifecycle(
         """
         INSERT INTO trade_events (
             position_id, etoro_instrument_id, instrument_id, event_kind, side,
-            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
         ) VALUES
-          (7001, %s, %s, 'close', 'sell', 5, 12, now(), 1.25, 12.50, 'etoro_history', '{}'::jsonb),
-          (7002, %s, %s, 'close', 'sell', 8, 30, now(), 20, 999, 'etoro_history', '{}'::jsonb)
+          (7001, %s, %s, 'close', 'sell', 5, 12, now(), 1.25, 12.50, 'etoro_history', '{}'::jsonb, 'demo'),
+          (7002, %s, %s, 'close', 'sell', 8, 30, now(), 20, 999, 'etoro_history', '{}'::jsonb, 'demo')
         """,
         (instrument_id, instrument_id, instrument_id, instrument_id),
     )
@@ -254,10 +254,10 @@ def test_realised_history_keeps_retired_versions_and_excludes_manual_positions(
         """
         INSERT INTO trade_events (
             position_id, etoro_instrument_id, instrument_id, event_kind, side,
-            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
         ) VALUES
-          (7453091, %s, %s, 'close', 'sell', 1, 17, now(), 1, 7, 'etoro_history', '{}'::jsonb),
-          (7453092, %s, %s, 'close', 'sell', 1, 900, now(), 1, 890, 'etoro_history', '{}'::jsonb)
+          (7453091, %s, %s, 'close', 'sell', 1, 17, now(), 1, 7, 'etoro_history', '{}'::jsonb, 'demo'),
+          (7453092, %s, %s, 'close', 'sell', 1, 900, now(), 1, 890, 'etoro_history', '{}'::jsonb, 'demo')
         """,
         (instrument_id, instrument_id, instrument_id, instrument_id),
     )
@@ -326,11 +326,12 @@ def test_order_activity_shows_owned_fills_and_unfilled_alpha_entries_only(
         """
         INSERT INTO trade_events (
             position_id, etoro_instrument_id, instrument_id, event_kind, side,
-            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
         ) VALUES
-          (3334101, %s, %s, 'open', 'buy', 2, 10, now() - interval '1 day', NULL, NULL, 'etoro_history', '{}'::jsonb),
-          (3334101, %s, %s, 'close', 'sell', 2, 13, now(), 0.5, 6, 'etoro_history', '{}'::jsonb),
-          (3334102, %s, %s, 'close', 'sell', 1, 900, now(), 1, 890, 'etoro_history', '{}'::jsonb)
+          (3334101, %s, %s, 'open', 'buy', 2, 10, now() - interval '1 day', NULL, NULL, 'etoro_history', '{}'::jsonb,
+           'demo'),
+          (3334101, %s, %s, 'close', 'sell', 2, 13, now(), 0.5, 6, 'etoro_history', '{}'::jsonb, 'demo'),
+          (3334102, %s, %s, 'close', 'sell', 1, 900, now(), 1, 890, 'etoro_history', '{}'::jsonb, 'demo')
         """,
         (instrument_id,) * 6,
     )
@@ -399,8 +400,8 @@ def test_wealth_history_combines_principal_realised_and_eod_open_marks_without_m
         """
         INSERT INTO trade_events (
             position_id, etoro_instrument_id, instrument_id, event_kind, side,
-            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
-        ) VALUES (7453093, %s, %s, 'close', 'sell', 1, 17, now(), 1, 7, 'etoro_history', '{}'::jsonb)
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
+        ) VALUES (7453093, %s, %s, 'close', 'sell', 1, 17, now(), 1, 7, 'etoro_history', '{}'::jsonb, 'demo')
         """,
         (instrument_id, instrument_id),
     )
@@ -942,9 +943,9 @@ def test_fired_signal_exposes_exact_completed_trade_lifecycle(
         """
         INSERT INTO trade_events (
             position_id, etoro_instrument_id, instrument_id, event_kind, side,
-            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
         ) VALUES (7453005, %s, %s, 'close', 'sell', 10, 11, now(), 1.25, 8.75,
-                  'etoro_history', '{}'::jsonb)
+                  'etoro_history', '{}'::jsonb, 'demo')
         """,
         (instrument_id, instrument_id),
     )
@@ -1255,9 +1256,9 @@ def test_fired_signal_never_returns_a_partial_close_money_pair(
         """
         INSERT INTO trade_events (
             position_id, etoro_instrument_id, instrument_id, event_kind, side,
-            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
         ) VALUES (7453012, %s, %s, 'close', 'sell', 1, 16, now(), 2, NULL,
-                  'etoro_history', '{}'::jsonb)
+                  'etoro_history', '{}'::jsonb, 'demo')
         """,
         (instrument_id, instrument_id),
     )
@@ -1308,12 +1309,12 @@ def test_fired_signal_does_not_choose_between_ambiguous_position_owners(
         """
         INSERT INTO trade_events (
             position_id, etoro_instrument_id, instrument_id, event_kind, side,
-            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
         ) VALUES
             (7453008, %s, %s, 'close', 'sell', 1, 17, now() - interval '1 minute',
-             1, 4, 'etoro_history', '{}'::jsonb),
+             1, 4, 'etoro_history', '{}'::jsonb, 'demo'),
             (7453009, %s, %s, 'close', 'sell', 1, 18, now(),
-             2, 5, 'etoro_history', '{}'::jsonb)
+             2, 5, 'etoro_history', '{}'::jsonb, 'demo')
         """,
         (instrument_id, instrument_id, instrument_id, instrument_id),
     )
@@ -2148,8 +2149,8 @@ def _open_position_with_accrual(
             """
             INSERT INTO trade_events (
                 position_id, etoro_instrument_id, instrument_id, event_kind, side,
-                units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
-            ) VALUES (%s, %s, %s, 'close', 'sell', 5, 12, now(), 1.25, 12.50, 'etoro_history', '{}'::jsonb)
+                units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment
+            ) VALUES (%s, %s, %s, 'close', 'sell', 5, 12, now(), 1.25, 12.50, 'etoro_history', '{}'::jsonb, 'demo')
             """,
             (position_id, instrument_id, instrument_id),
         )

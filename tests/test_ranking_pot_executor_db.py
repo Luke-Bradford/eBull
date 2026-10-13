@@ -153,8 +153,8 @@ def _close_trade(conn: Conn, trade_id: int, *, position: int) -> None:
 def _book_close(conn: Conn, *, position: int, net_profit: str, fees: str = "0") -> None:
     conn.execute(
         "INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units, price, "
-        " executed_at, fees_usd, realized_pnl_usd, source, raw_payload) "
-        "VALUES (%s, 2842, 2842, 'close', 'sell', 1, 107.5, now(), %s, %s, 'etoro_history', '{}')",
+        " executed_at, fees_usd, realized_pnl_usd, source, raw_payload, environment) "
+        "VALUES (%s, 2842, 2842, 'close', 'sell', 1, 107.5, now(), %s, %s, 'etoro_history', '{}', 'demo')",
         (position, fees, net_profit),
     )
     conn.commit()
@@ -254,8 +254,8 @@ def test_an_entry_submits_from_its_slot_and_a_reentry_waits_for_the_booking(
     # without it the pot NAV cannot reconcile units and refuses the entry (#3612).
     conn.execute(
         "INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units, price, "
-        " executed_at, source, raw_payload) "
-        "VALUES (2842001, 2842, 2842, 'open', 'buy', 1, 100, now() - interval '1 day', 'etoro_history', '{}')"
+        " executed_at, source, raw_payload, environment) "
+        "VALUES (2842001, 2842, 2842, 'open', 'buy', 1, 100, now() - interval '1 day', 'etoro_history', '{}', 'demo')"
     )
     conn.commit()
     broker2 = _pot_broker(2843, now2)

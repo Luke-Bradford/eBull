@@ -1204,16 +1204,16 @@ def record_whole_close_witness(
     conn.execute(
         """
         INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
-                                  executed_at,investment_usd,order_id,source,raw_payload)
-        VALUES (%s,%s,%s,'open','buy',%s,%s,%s,NULL,'etoro_sync',%s)
+                                  executed_at,investment_usd,order_id,source,raw_payload,environment)
+        VALUES (%s,%s,%s,'open','buy',%s,%s,%s,NULL,'etoro_sync',%s,'demo')
         """,
         (position_id, CORE_INSTRUMENT_ID, CORE_INSTRUMENT_ID, units, opened, dollars, Jsonb(open_raw)),
     )
     conn.execute(
         """
         INSERT INTO trade_events (position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
-                                  executed_at,realized_pnl_usd,investment_usd,order_id,source,raw_payload)
-        VALUES (%s,%s,%s,'close','sell',%s,%s,-12.5,%s,%s,'etoro_history',%s)
+                                  executed_at,realized_pnl_usd,investment_usd,order_id,source,raw_payload,environment)
+        VALUES (%s,%s,%s,'close','sell',%s,%s,-12.5,%s,%s,'etoro_history',%s,'demo')
         """,
         (
             position_id,

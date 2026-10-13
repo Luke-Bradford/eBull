@@ -56,8 +56,8 @@ def test_a_leg_loss_at_the_limit_halts_the_trial_once(ebull_test_conn: Conn, mon
             """
             INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind, side, units,
                                       price, executed_at, fees_usd, realized_pnl_usd, investment_usd, order_id,
-                                      source, raw_payload, recorded_at)
-            VALUES (%s, %s, %s, 'close', 'sell', 0.3125, 90, %s, 0, %s, 31.25, 3471001, 'etoro_history', %s, %s)
+                                      source, raw_payload, recorded_at, environment)
+            VALUES (%s, %s, %s, 'close', 'sell', 0.3125, 90, %s, 0, %s, 31.25, 3471001, 'etoro_history', %s, %s, 'demo')
             """,
             (position_id, ARM_INSTRUMENT, ARM_INSTRUMENT, NOW, pnl, Jsonb({}), NOW),
         )

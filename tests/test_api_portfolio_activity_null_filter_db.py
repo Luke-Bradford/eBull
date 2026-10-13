@@ -46,10 +46,10 @@ def _seed_two_instruments(conn: psycopg.Connection[Any]) -> None:
         """
         INSERT INTO trade_events (position_id, etoro_instrument_id, instrument_id, event_kind,
                                   side, units, price, executed_at, investment_usd,
-                                  realized_pnl_usd, source, raw_payload)
+                                  realized_pnl_usd, source, raw_payload, environment)
         VALUES
-          (%(a)s, %(a)s, %(a)s, 'open', 'buy', 10, 100, %(t)s, 1000, NULL, 'etoro_sync', '{}'::jsonb),
-          (%(b)s, %(b)s, %(b)s, 'open', 'buy',  5,  50, %(t)s,  250, NULL, 'etoro_sync', '{}'::jsonb)
+          (%(a)s, %(a)s, %(a)s, 'open', 'buy', 10, 100, %(t)s, 1000, NULL, 'etoro_sync', '{}'::jsonb, 'demo'),
+          (%(b)s, %(b)s, %(b)s, 'open', 'buy',  5,  50, %(t)s,  250, NULL, 'etoro_sync', '{}'::jsonb, 'demo')
         ON CONFLICT DO NOTHING
         """,
         {"a": _IID_A, "b": _IID_B, "t": datetime(2026, 4, 1, 12, 0, tzinfo=UTC)},

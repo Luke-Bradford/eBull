@@ -31,8 +31,8 @@ def _event(conn: psycopg.Connection[Any], kind: str, at: datetime, units: str = 
         """
         INSERT INTO trade_events (
             position_id,etoro_instrument_id,instrument_id,event_kind,side,executed_at,units,price,
-            realized_pnl_usd,source,raw_payload
-        ) VALUES (%s,2449001,2449001,%s,%s,%s,%s,100,%s,'etoro_sync','{}')
+            realized_pnl_usd,source,raw_payload,environment
+        ) VALUES (%s,2449001,2449001,%s,%s,%s,%s,100,%s,'etoro_sync','{}','demo')
         """,
         (
             _POSITION_ID,
