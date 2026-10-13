@@ -23,7 +23,7 @@ Expected wall-clock <30s (single ~600 KB SEC fetch + Python-side fuzzy-match ove
 
 ## 5. Steady-state path
 
-`ScheduledJob(name=JOB_CUSIP_UNIVERSE_BACKFILL, source="sec_rate", cadence=Cadence.weekly(weekday=6, hour=5, minute=0), catch_up_on_boot=True)` at `app/workers/scheduler.py:893-923`. **Weekly Sunday 05:00 UTC** (not quarterly — the cron runs weekly but the underlying SEC publication is quarterly; re-running between publications is a cheap idempotent read). 30 min after `ownership_observations_backfill` (03:00) and 30 min after `etoro_lookups_refresh` (04:30). `catch_up_on_boot=True` so fresh install with empty `external_identifiers` benefits from running immediately.
+`ScheduledJob(name=JOB_CUSIP_UNIVERSE_BACKFILL, source="sec_rate", cadence=Cadence.weekly(weekday=6, hour=5, minute=0), catch_up_on_boot=True)` at `app/workers/scheduler.py:893-923`. **Weekly Sunday 05:00 UTC** (not quarterly — the cron runs weekly but the underlying SEC publication is quarterly; re-running between publications is a cheap idempotent read). 30 min after `ownership_observations_backfill` (03:00) and 30 min after `etoro_lookups_refresh` (04:30). `catch_up_on_boot=True` so fresh install with empty `external_identifiers` benefits from running immediately. **Publication lag (#3630):** SEC posts the list "shortly after the end of each calendar quarter" (Form 13F FAQ), so the first runs of a quarter can 404 on the new list. `fetch_latest_published_list` then uses the prior quarter's list and the run records success with a note; past 45 days after quarter end (the Rule 13f-1 filing deadline, `LIST_PUBLICATION_GRACE_DAYS`) the 404 is raised as a failure, since a rename (#2118) is then the likelier cause.
 
 ## 6. Manifest insert
 

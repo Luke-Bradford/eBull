@@ -118,7 +118,9 @@ from app.workers.scheduler import (
     JOB_DAILY_RESEARCH_REFRESH,
     JOB_DAILY_TAX_RECONCILIATION,
     JOB_DRS_DISCLOSURE_REFRESH,
+    JOB_ETORO_CLOSING_PRICE_CAPTURE,
     JOB_ETORO_CROWD_SNAPSHOT,
+    JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE,
     JOB_ETORO_INVESTOR_SNAPSHOT,
     JOB_ETORO_LOOKUPS_REFRESH,
     JOB_ETORO_PERISHABLES_SNAPSHOT,
@@ -217,7 +219,9 @@ from app.workers.scheduler import (
     daily_research_refresh,
     daily_tax_reconciliation,
     drs_disclosure_refresh,
+    etoro_closing_price_capture,
     etoro_crowd_snapshot,
+    etoro_dividend_calendar_capture,
     etoro_investor_snapshot,
     etoro_lookups_refresh,
     etoro_perishables_snapshot,
@@ -477,6 +481,8 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_FRED_REFERENCE_REFRESH: _adapt_zero_arg(fred_reference_refresh),
     JOB_FRENCH_REFERENCE_REFRESH: _adapt_zero_arg(french_reference_refresh),
     JOB_IBKR_BORROW_ARCHIVE: _adapt_zero_arg(ibkr_borrow_archive),
+    JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE: _adapt_zero_arg(etoro_dividend_calendar_capture),
+    JOB_ETORO_CLOSING_PRICE_CAPTURE: _adapt_zero_arg(etoro_closing_price_capture),
     JOB_STRATEGY_HALT_FEED_REFRESH: _adapt_zero_arg(strategy_halt_feed_refresh),
     JOB_STRATEGY_INTRADAY_HARVEST: _adapt_zero_arg(strategy_intraday_harvest),
     JOB_STRATEGY_OUTCOME_RESOLUTION: _adapt_zero_arg(strategy_outcome_resolution),
@@ -691,6 +697,8 @@ _INVOKERS[_scheduler.JOB_FINRA_SHORT_INTEREST_REFRESH] = _adapt_zero_arg(_schedu
 _INVOKERS[_scheduler.JOB_FINRA_REGSHO_DAILY_REFRESH] = _adapt_zero_arg(_scheduler.finra_regsho_daily_refresh)
 # #3543 — daily engine-book risk snapshot (09:00 UTC). Zero-param manual surface.
 _INVOKERS[_scheduler.JOB_ENGINE_BOOK_RISK_SNAPSHOT] = _adapt_zero_arg(_scheduler.engine_book_risk_snapshot)
+# #3614 slice 3 — monthly kill-switch drill (06:12 UTC on the 3rd). Zero-param manual surface.
+_INVOKERS[_scheduler.JOB_KILL_SWITCH_DRILL] = _adapt_zero_arg(_scheduler.kill_switch_drill)
 
 # #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional).
 # Each invoker HEADs the SEC URL once per fire and re-downloads

@@ -20,6 +20,7 @@ def test_a_populated_status_serialises() -> None:
         pool_event_id=7,
         capital_usd=Decimal("40000"),
         gross_usd=Decimal("16078.026146"),
+        net_usd=Decimal("-16078.026146"),
         position_count=1,
         instrument_count=1,
         open_trade_count=1,
@@ -38,6 +39,7 @@ def test_a_populated_status_serialises() -> None:
         history_status="ok",
         beta_defaulted_count=0,
         beta_defaulted_weight_pct=Decimal("0"),
+        stress_2008_pct=Decimal("-21.82"),
         stress_2020_pct=Decimal("-13.18"),
         stress_2022_pct=Decimal("-9.80"),
         checks={"stale_marks": {"status": "evaluated", "value": "0", "limit": "0", "flagged": False}},
@@ -51,6 +53,7 @@ def test_a_populated_status_serialises() -> None:
         hist_vol_pct=None,
         ewma_vol_pct=None,
         beta=None,
+        stress_2008_pct=Decimal("-21.82"),
         stress_2020_pct=Decimal("-13.18"),
         stress_2022_pct=Decimal("-9.80"),
         stale_count=0,
@@ -62,6 +65,8 @@ def test_a_populated_status_serialises() -> None:
     ).model_dump(mode="json")
     assert body["job"]["last_note"] == "benchmark_not_ready"
     assert body["latest"]["stress_2020_pct"] == "-13.18"
+    assert body["latest"]["stress_2008_pct"] == "-21.82"
+    assert body["latest"]["net_usd"] == "-16078.026146"
     assert body["latest"]["positions"] == [{"instrument_id": 3417, "symbol": "SPY.RTH", "beta": "defaulted"}]
     assert body["recent"][0]["flagged"] == ["stale_marks"]
 

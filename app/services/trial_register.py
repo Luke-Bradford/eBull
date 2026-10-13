@@ -235,7 +235,37 @@ from app.services.deflated_sharpe import expected_max_sharpe
 #: characteristics x 2 arms = 16 searches, enumerated by its spec before any evaluation and non-claiming. Not a
 #: `hunt-` entry, so it counts in M_inh: 502 -> 518. Measured the same way before the bump: the SAME five
 #: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-06-r24"
+#:
+#: r25 (2026-10-08, #3609 step 2) adds `3609-step2-exposure-planning-2026-10-08`: three family sets scored on stage A
+#: and regressed on FF5 + momentum for condition 3's power plan (exposures only, no return printed) = 3 searches. Not
+#: a `hunt-` entry, so it counts in M_inh: 518 -> 521. Measured the same way before the bump: the SAME five groups,
+#: 488 rows, every one `harness_validation`. It strands nothing that could have promoted. Its evidence pins the plan
+#: file; `tests/test_3609_step2_plan_pin.py` re-checks on every pre-push run that the file is that pin and that its
+#: recorded planner and import-closure hashes (`report_3609_step2_inputs.py` is not in that closure) are the
+#: committed tree's. This file is outside the closure, so editing it never moves the hash.
+#:
+#: r26 (2026-10-08, #3609 step 2 slice 4) adds `3609-step2-book-v1`, step 2's declared value book: one configuration
+#: on stage B, non-claiming in #2599's sense (its claim is condition 3 of the 2026-10-08 screen). Not a `hunt-`
+#: entry, so it counts in M_inh: 521 -> 522. Measured the same way before the bump: the SAME five groups, 488 rows,
+#: every one `harness_validation`. It strands nothing that could have promoted.
+#:
+#: r27 (2026-10-08, #3620 slice 2a) adds `3620-condition4-feasibility-2026-10-08`: one configuration (the spec's
+#: primary TSMOM book) run on W1 (development, S+1..2021-05) against B1 in the primary net scenario, under a rule
+#: frozen before the look: book G <= B1 G means the configuration is not declared. 1 search, registered before the
+#: run. Not a `hunt-` entry, so it counts in M_inh: 522 -> 523. Measured the same way before the bump: the SAME five
+#: groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
+#:
+#: r28 (2026-10-09, #3621 slice 4) adds `3621-avoidance-filters-v1`, the avoidance-filter enumeration: 5 filter sets x
+#: 6 populations x 2 arms + the MAX fidelity check's 2 arms = 62 searches, non-claiming, declared before any slice
+#: reads an outcome. Not a `hunt-` entry, so it counts in M_inh: 523 -> 585. Measured the same way before the bump:
+#: the SAME five groups, 488 rows, every one `harness_validation`. It strands nothing that could have promoted.
+#:
+#: r29 (2026-10-09, #3621 slice 5c) adds `3621-avoidance-filters-v2`: v1's five sets re-run on the Amendment-3 panel
+#: plus the short-interest filter and "all four": 7 filter sets x 6 populations x 2 arms + the MAX fidelity check's 2
+#: arms = 86 searches, non-claiming, declared before v2 reads either artefact. Not a `hunt-` entry, so it counts in
+#: M_inh: 585 -> 671. Measured the same way before the bump: the SAME five groups, 488 rows, every one
+#: `harness_validation`. It strands nothing that could have promoted.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-10-09-r29"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -1558,6 +1588,158 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
             searches=16,
+        ),
+        DeclaredTrial(
+            trial_id="3609-step2-exposure-planning-2026-10-08",
+            description=(
+                "#3609 step 2 condition-3 power plan: the book's scorer, decisions and base-cost path on stage A "
+                "(development, formations 2014-09..2021-04) for three family sets (value + GP/A + investment, value, "
+                "value + GP/A), each regressed on FF5 + momentum in both termination arms. Exposures, standard "
+                "errors, residual sd and R^2 were printed; no mean return, alpha or growth was. It chose the value "
+                "family as step 2's book (spec premise 6). Non-claiming; stage B was not read."
+            ),
+            evidence=(
+                "docs/research/2026-10-06-3609-step2-factor-book.md premise 6; "
+                "plan docs/research/3609-step2-exposure-plan.json "
+                "sha256=f60cb64e402615556ba8a46204bf5381168372dc29e36872cd36bf00476c109d "
+                "(script, stage-A pin and input-row digests inside); "
+                "reproduce with PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure (#3609, 2026-10-08)"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=3,
+        ),
+        # #3609 step 2 slice 4: pasted verbatim from `scripts.declare_3609_step2.declared_trial(<evidence>)`, whose
+        # payload the committed `declared` ledger row pins (payload_sha256 fb6f2ada73ab…). The
+        # declaration's integrity-only read is hold-out access 740. Never edit this row: any change
+        # refuses every later attempt; a changed trial needs a new declaration.
+        DeclaredTrial(
+            trial_id="3609-step2-book-v1",
+            description=(
+                "#3609 step 2 value book, version 1: one configuration (the spec's value-family book, its matched "
+                "random control, references and diagnostics) on stage A (development, formations 2014-09..2021-04) "
+                "and stage B (reused validation, formations 2021-05..2024-07), net of step 0's costs, screened by "
+                "the 2026-10-08 settled entry's four conditions. Its claim is condition 3, the HML loading on stage "
+                "B, powered in spec premise 6. No TrialDesign: #2599's claiming design is an IR margin, which this "
+                "screen does not claim. Step 1's 16 searches and the 3 exposure-planning searches stay counted."
+            ),
+            evidence=(
+                'docs/research/2026-10-06-3609-step2-factor-book.md §"Registration" and §"Slices" item 4; '
+                "spec_sha256=772a1ea2e76d060059c07c5b3e3dfd004a46a005c7bfd6e88b3df75d0b9a8ae6; "
+                "construction_sha256=d858baa1ff3756cf481cfd2fd414d1d00f0b9695510c8eb3fac2f9d347251f89; "
+                "register_policy_sha256=d5cd632246397252a33c04d6bbfddfc7d9b275ba902fdca19f2be99e78292651; "
+                "python=3.14; "
+                "stage_a_manifest_sha256=e50872104f77d4db4d16a41dd9b953bf064fa92704516c9813940b60ae8ec115; "
+                "step0_manifest_sha256=114efb16341df170012e856a31402938c784f54be8a950a26262af7db45e6a3b; "
+                "ff12_sha256=d801141acf039f2e06e6d4d9ba2b3992e9747a1d82fabd53ef21da4a3af79fff; "
+                "qmj_pdf_sha256=761c42f91d5f00fa75c8fb2b3722530562096de9491c80badf9e5b4091fbb2a9; "
+                "table9_sha256=2e55d05ca5770d3ad93867d56b51e9fe602a6e5aef5d469db4d5592337bcf6e2; "
+                "french_five_factor_monthly_response_sha256="
+                "36756c5c2559648519ac4b22913d860c6afd865cfebce920e3e8927f8e2d10b7; "
+                "french_five_factor_monthly_observations_sha256="
+                "06af2ed99758dcd94097000fea51db144905aa81b467547b23d4af6aec021f89; "
+                "french_momentum_monthly_response_sha256="
+                "c06d1c2e9a5e4f6985879722f23c6bb585f46b34eaf3fcb681d4de887e353f3e; "
+                "french_momentum_monthly_observations_sha256="
+                "07f3c1fbf5dfe48aec0edaaa793aff70c0f0c55e49073c86103278e324268f4e; "
+                "b1_close_2014_09_30=197.020004; holdout_strategy_id=3609-step2-book; holdout_strategy_version=v1"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=1,
+        ),
+        # #3620 slice 2a: registered BEFORE its run (spec §"Condition-4 feasibility on W1"); the script refuses without
+        # this row. Its output and ledger rows are committed after the run; this row is never edited.
+        DeclaredTrial(
+            trial_id="3620-condition4-feasibility-2026-10-08",
+            description=(
+                "#3620 slice 2a condition-4 feasibility look: the spec's one primary TSMOM configuration (every fund, "
+                "net cost, 0% cash, lagged timing) and B1 (SPY) in the same scenario, on W1 only (development, "
+                "S+1..min(2021-05, E)), each fund's returns, RF and raw closes truncated to W1 before any formation. "
+                "Prints the two annualised log growths, n, the bounds and the verdict. Frozen rule: book G <= B1 G "
+                "means NOT_DECLARED (the study stops); otherwise CONTINUE to slice 2. Outcome-based development "
+                "selection; non-claiming; W2 is not read as an outcome."
+            ),
+            evidence=(
+                'docs/research/2026-10-06-3620-cross-asset-tsmom.md §"Condition-4 feasibility on W1 (slice 2a)"; '
+                "output docs/research/3620-condition4-feasibility.json and ledger "
+                "docs/research/3620-feasibility-ledger.jsonl, committed after the run; "
+                "reproduce with PYTHONPATH=. uv run python -m scripts.plan_3620_feasibility (#3620, 2026-10-08)"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=1,
+        ),
+        # #3621 slice 4: pasted verbatim from `scripts.run_3621_avoidance --declare`, whose payload the committed
+        # `declared` row in docs/research/3621-ledger.jsonl pins (payload_sha256 d4b7713ff575…). The run refuses unless
+        # this row, that pin and the checkout agree. Never edit this row: a changed study needs a new trial id.
+        DeclaredTrial(
+            trial_id="3621-avoidance-filters-v1",
+            description=(
+                "#3621 avoidance filters, version 1: a preregistered, non-claiming enumeration on the #3609 panel "
+                "(step 1's restricted population, formations 2014-09..2024-07 over stages A and B, net of step 0's "
+                "costs). Five filter sets (MAX, sub-$5, young, sub-$5 + young, all three) x six populations (micro, "
+                "small, large, mega, top 1,000, rest) x two termination arms = 60, plus the MAX fidelity check's "
+                "two arms against JKP's rmax1_21d = 62. A pair's verdict (ELIGIBLE, NOT ELIGIBLE, NO_EFFECT or "
+                "REFUSED, zero margin, point estimates) only decides whether a later long-book spec may cite the "
+                "set. No premium or non-inferiority is claimed, so no TrialDesign. Retrospective: both stages had "
+                "been read before this declaration."
+            ),
+            evidence=(
+                'docs/research/2026-10-08-3621-avoidance-filters.md §"Registration" and §"Slices" item 4; '
+                "spec_sha256=4c3744b784c661a8a5a24b93528c653860fa37324b1beee3c02c3d9c1036b236; "
+                "construction_sha256=3b6bd4154b3fc2a3b17da9c01fddfd2c42c47699ad9d3727153318bd9c2a0983; "
+                "register_policy_sha256=d5cd632246397252a33c04d6bbfddfc7d9b275ba902fdca19f2be99e78292651; "
+                "python=3.14; "
+                "stage_a_manifest_sha256=e50872104f77d4db4d16a41dd9b953bf064fa92704516c9813940b60ae8ec115; "
+                "stage_b_capture_sha256=932c2f94f7a0b45539d00faa4afef34520b9bef18ceb56fb389c3bdb0e7ea228; "
+                "stage_b_manifest_sha256=3eee10059e817724c3951496b6a25494398dedfd417a5f50b78034b1894c95bc; "
+                "step0_manifest_sha256=114efb16341df170012e856a31402938c784f54be8a950a26262af7db45e6a3b; "
+                "jkp_code_commit=67174c7f; "
+                "holdout_strategy_id=3621-avoidance-filters; "
+                "holdout_strategy_version=v1; "
+                "ledger docs/research/3621-ledger.jsonl"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=62,
+        ),
+        # #3621 slice 5c: pasted verbatim from `scripts.run_3621_avoidance_v2 --declare`, whose payload the committed
+        # `declared` row in docs/research/3621-ledger.jsonl pins (payload_sha256 77d0d64b8e99…). The run refuses unless
+        # this row, that pin and the checkout agree. Never edit this row: a changed study needs a new trial id.
+        DeclaredTrial(
+            trial_id="3621-avoidance-filters-v2",
+            description=(
+                "#3621 avoidance filters, version 2: the base spec's preregistered, non-claiming enumeration "
+                "re-run on the Amendment-3 (clipped holding return) panel, formations 2014-09..2024-07 over "
+                "stages A and B, net of step 0's costs, with stage B rebuilt inside the run and refused unless "
+                "identical to v1's outside prices.holding. Seven filter sets (v1's five, SI = top decile of FINRA "
+                "short interest ratio from formation 2021-06, and MAX + sub-$5 + young + SI) x six populations x "
+                "two termination arms = 84, plus the MAX fidelity check's two arms = 86. Condition 5 (SI sets): "
+                "names with an SI value are at least 90% of U at every covered formation. A pair's verdict only "
+                "decides whether a later long-book spec may cite the set; no premium or non-inferiority is "
+                "claimed, so no TrialDesign. Retrospective: v1's sets were run on data whose outcomes are known."
+            ),
+            evidence=(
+                'docs/research/2026-10-09-3621-slice5-short-interest.md \u00a7"Registration" over '
+                "docs/research/2026-10-08-3621-avoidance-filters.md; "
+                "spec_sha256=69f247d169853478d3117123a0cc5fe9933ebbf221a1826fd8487b506856a27c; "
+                "construction_sha256=7c2da04e1813ee41185c5d0089e5c24f9d5b113acaff3979341db698b602fcbb; "
+                "register_policy_sha256=d5cd632246397252a33c04d6bbfddfc7d9b275ba902fdca19f2be99e78292651; "
+                "python=3.14; "
+                "base_spec_sha256=4c3744b784c661a8a5a24b93528c653860fa37324b1beee3c02c3d9c1036b236; "
+                "stage_a_manifest_sha256=e0924564ef1639f9473586523679894eb5d1741a75a3a3b8ddce5858917cae6e; "
+                "v1_stage_b_manifest_sha256=3eee10059e817724c3951496b6a25494398dedfd417a5f50b78034b1894c95bc; "
+                "step2_sub_manifest_sha256=d0f3f9a90f4c0fb49a51266ad55f9f7b3a8d7857338cb2661ad7e0545452f8dd; "
+                "step0_manifest_sha256=114efb16341df170012e856a31402938c784f54be8a950a26262af7db45e6a3b; "
+                "si_calendar_sha256=a3a98a592a4a6521fee8f41e12296d904a3010c82f1a1e3c96c4bc4e65dcda70; "
+                "si_payloads_sha256=1a15dd98dbfe76c073f74eb9a714d56eb74e5300afeedaad5fd543648d96805c; "
+                "si_counts_sha256=a12c79f09487cdee099280ce538f9339458860909c05cfcbd96de977c848727e; "
+                "si_names_sha256=c005ca8a83b3c8e2cb7c38afd17a7db55e778ced8711ef636b0fcc8af0d91b6d; "
+                "jkp_code_commit=67174c7f; "
+                "osap_code_commit=8db89244; "
+                "holdout_strategy_id=3621-avoidance-filters; "
+                "holdout_strategy_version=v2; "
+                "ledger docs/research/3621-ledger.jsonl"
+            ),
+            exactness=TrialExactness.EXACT,
+            searches=86,
         ),
         DeclaredTrial(
             trial_id="recent-evidence-refresh-cost-v4-2026-09-26",

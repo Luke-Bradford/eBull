@@ -81,6 +81,7 @@ from app.services.investor_cohort_recorder import record_investor_snapshot
 from app.services.job_heartbeat import REPORTING_WRITE_TIMEOUT_MS
 from app.services.job_progress import JobProgress, degradation_reason
 from app.services.job_telemetry import JobTelemetryAggregator, flush_to_job_run
+from app.services.kill_switch_drill_schedule import DRILL_DAY, DRILL_HOUR, DRILL_MINUTE, occurrence_at_or_before
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
 from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.market_data import refresh_market_data, refresh_quotes, refresh_signal_quotes
@@ -540,6 +541,8 @@ JOB_FRED_REFERENCE_REFRESH = "fred_reference_refresh"
 JOB_FACTOR_LIBRARY_REFERENCE_REFRESH = "factor_library_reference_refresh"
 # #3622 — daily forward archive of IBKR's public borrow file (no history exists upstream).
 JOB_IBKR_BORROW_ARCHIVE = "ibkr_borrow_archive"
+# #3740 slice F — daily raw capture of eToro's public dividend calendar page (no archive exists upstream).
+JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE = "etoro_dividend_calendar_capture"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -591,6 +594,8 @@ JOB_ETORO_INVESTOR_SNAPSHOT = "etoro_investor_snapshot"
 JOB_ETORO_PERISHABLES_SNAPSHOT = "etoro_perishables_snapshot"
 # #3545 — hourly eToro bid/ask for the validated universe while the NYSE session is open.
 JOB_ETORO_SESSION_RATES_CAPTURE = "etoro_session_rates_capture"
+# #3740 slice F — daily raw capture of eToro's official closing prices (no history served upstream).
+JOB_ETORO_CLOSING_PRICE_CAPTURE = "etoro_closing_price_capture"
 # #3471 — the AI-discretionary-v1 demo trial: the after-close decision run (claim, pack, one
 # tool-less model call, one-transaction publish) and the in-session execution of its legs.
 JOB_AI_TRIAL_DECISION_RUN = "ai_trial_decision_run"
@@ -735,6 +740,8 @@ JOB_FINRA_SHORT_INTEREST_REFRESH = "finra_short_interest_refresh"
 JOB_FINRA_REGSHO_DAILY_REFRESH = "finra_regsho_daily_refresh"
 # #3543 — daily engine-book risk snapshot vs mandate (measurement only).
 JOB_ENGINE_BOOK_RISK_SNAPSHOT = "engine_book_risk_snapshot"
+# #3614 slice 3 — monthly recorded kill-switch drill (sandbox: never commits a kill-switch change).
+JOB_KILL_SWITCH_DRILL = "kill_switch_drill"
 
 # #1233 PR-8 — Daily bulk-archive refresh (ETag-conditional).
 # Closes the post-bootstrap freshness drift: bulk archives are
@@ -2567,6 +2574,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
+        name=JOB_KILL_SWITCH_DRILL,
+        display_name="Kill-switch drill (#3614)",
+        source="risk_metrics",
+        description=(
+            "Monthly on the 3rd at 06:12 UTC — activates the kill switch inside a transaction it always "
+            "rolls back, checks that every broker-entry chokepoint refuses, and records the verdict, the "
+            "book's SL/TP state and an estimated time-to-flat. With the switch already on it only observes. "
+            "Never commits a kill-switch change; calls no broker method. A failed verdict is paged by the "
+            "operator alert watch, not by this job; the run fails only when nothing was recorded."
+        ),
+        cadence=Cadence.monthly(day=DRILL_DAY, hour=DRILL_HOUR, minute=DRILL_MINUTE),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
         name=JOB_FINRA_REGSHO_DAILY_REFRESH,
         display_name="FINRA RegSHO daily short volume refresh (#916)",
         source="finra",
@@ -2842,6 +2864,22 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=20, minute=45),
         catch_up_on_boot=True,
         # No upstream history and an idempotent, self-stamped append: a late fire beats a lost day.
+        rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE,
+        display_name="eToro dividend calendar capture (#3740)",
+        source="reference_data",
+        description=(
+            "Daily 12:40 UTC (before the US open) — stores eToro's public dividend "
+            "calendar page exactly as served (status, headers, gzip body), with no "
+            "parsing. eToro keeps no history. FAILS, after storing the response, on a "
+            "non-200 or a page with no calendar rows."
+        ),
+        cadence=Cadence.daily(hour=12, minute=40),
+        catch_up_on_boot=True,
+        # No upstream history and an append stamped with its own fetch clocks: a late fire beats a lost day.
         rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),
@@ -3174,6 +3212,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # sample. A lost hour stays absent and the coverage report shows it.
         catch_up_on_boot=False,
         prerequisite=_all_of(_bootstrap_complete, _nyse_session_open_now),
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_CLOSING_PRICE_CAPTURE,
+        display_name="eToro official closing price capture (#3740)",
+        # Same SOURCE lane as the #3381 recorders (no new lane), after its 22:07 fire. 23:17 UTC is after
+        # the US close in both DST regimes and before the next Asian open, so `officialClosingPrice` is the
+        # session just ended for US names. One request on lane F.
+        source="etoro_crowd",
+        description=(
+            "Daily 23:17 UTC — stores eToro's official closing prices for every instrument (latest, "
+            "previous day, week and month-end) exactly as served (gzip body, status, clocks), without "
+            "transformation; the JSON is decoded only to count rows. eToro keeps no history. FAILS, after "
+            "storing the response, on a non-200 or a body with no instrument rows."
+        ),
+        cadence=Cadence.daily(hour=23, minute=17),
+        catch_up_on_boot=True,
+        # No upstream history and an append stamped with its own fetch clocks: a late fire beats a lost day.
+        # This covers LOST fires (lane_busy, misfire). A fire that runs and fails on a transport error stores
+        # nothing and fails the run; `record_job_finish` stamps a transient failure's `next_retry_at` and
+        # `jobs_retry_sweeper` re-fires it (#1509), as for every scheduled job.
+        rearm_on_lost_fire=True,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_CORE_ELIGIBILITY_REFRESH,
@@ -3985,9 +4045,10 @@ _T3_SUPPLY_LESS_RECHECK = "7 days"
 # Listing it here makes that invariant real. It is DISTINCT from SPY (the risk
 # layer's beta benchmark, a tradable ETF): the two S&P 500 series serve separately
 # specced purposes (beta regression vs the report comparison line) and are not
-# interchangeable.
+# interchangeable. CSPX.L is #3616's investable UCITS comparator
+# (``strategy_comparator.COMPARATOR_SYMBOL``), kept fresh for the same reason.
 BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
-    {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
+    {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY", "CSPX.L"}
 )
 
 # T3 candle eligibility query.
@@ -5570,7 +5631,7 @@ def daily_portfolio_sync() -> None:
     if credentials are missing.
     """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
-    from app.services.account_equity_evidence import record_account_equity_snapshot
+    from app.services.account_equity_evidence import record_account_equity_snapshot, record_session_close_snapshot
 
     creds = _load_etoro_credentials(JOB_DAILY_PORTFOLIO_SYNC)
     if creds is None:
@@ -5616,6 +5677,16 @@ def daily_portfolio_sync() -> None:
                     logger.warning(
                         "Portfolio sync: official account-equity evidence could not be stored; "
                         "portfolio sync will continue",
+                        exc_info=True,
+                    )
+                try:
+                    # #3612 slice 2: the session-close anchor S of the marked daily-loss
+                    # check, in its own savepoint. Insert-once; a missing S refuses entries.
+                    with conn.transaction():
+                        record_session_close_snapshot(conn, environment="demo", snapshot=account_snapshot)
+                except Exception:
+                    logger.error(
+                        "Portfolio sync: session-close anchor could not be stored; portfolio sync will continue",
                         exc_info=True,
                     )
 
@@ -7095,6 +7166,25 @@ def ibkr_borrow_archive() -> None:
         )
 
 
+def etoro_dividend_calendar_capture() -> None:
+    """Capture eToro's public dividend calendar page (#3740 slice F)."""
+    from app.services.etoro_dividend_calendar_capture import fetch_dividend_calendar, store_capture
+
+    with _tracked_job(JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE) as tracker:
+        # Fetch first: no DB connection is held across the HTTP request (the dev cluster has no headroom).
+        response = fetch_dividend_calendar()
+        with connect_job(autocommit=True) as conn:
+            # A refused or empty page raises here after its row commits. ``_tracked_job`` records only
+            # ``error_msg`` on failure (never ``note``), and that message names the capture id, status and
+            # calendar-row count, so the failed run still points at its stored evidence.
+            report = store_capture(conn, response)
+        tracker.row_count = 1
+        tracker.note = (
+            f"capture={report.capture_id} status={report.http_status} rows={report.ex_date_marker_count} "
+            f"bytes={report.payload_bytes} sha={report.response_sha256[:12]}"
+        )
+
+
 def factor_library_reference_refresh() -> None:
     """Refresh the global-q, JKP and OSAP published factor libraries (#3623)."""
     from app.services.reference_data import FACTOR_LIBRARY_DATASET_KEYS
@@ -7972,6 +8062,34 @@ def etoro_session_rates_capture() -> None:
             result.universe_size,
             result.instruments_served,
             result.instruments_quoted,
+        )
+
+
+def etoro_closing_price_capture() -> None:
+    """Capture eToro's official closing prices for every instrument (#3740 slice F). Read-only."""
+    from app.services.etoro_closing_price_capture import store_capture
+
+    creds = _load_etoro_credentials(JOB_ETORO_CLOSING_PRICE_CAPTURE)
+    if creds is None:
+        _record_prereq_skip(JOB_ETORO_CLOSING_PRICE_CAPTURE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    if settings.etoro_env != "demo":
+        # Same client and refusal as etoro_session_rates_capture.
+        _record_prereq_skip(JOB_ETORO_CLOSING_PRICE_CAPTURE, f"etoro_env {settings.etoro_env!r} is not demo")
+        return
+
+    with _tracked_job(JOB_ETORO_CLOSING_PRICE_CAPTURE) as tracker:
+        # Fetch first: no DB connection is held across the HTTP request (the dev cluster has no headroom).
+        with EtoroPerishablesProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider:
+            response = provider.get_closing_prices()
+        with connect_job(autocommit=True) as conn:
+            # A refused or empty response raises here after its row commits; the message names the capture.
+            report = store_capture(conn, response)
+        tracker.row_count = 1
+        tracker.note = (
+            f"capture={report.capture_id} status={report.http_status} rows={report.instrument_rows} "
+            f"bytes={report.payload_bytes} sha={report.response_sha256[:12]}"
         )
 
 
@@ -10220,6 +10338,10 @@ def cusip_universe_backfill() -> None:
             result = backfill_cusip_coverage(conn)
 
         tracker.row_count = result.inserted
+        if result.unpublished_quarter is not None:
+            # #3630 — publication lag, not a failure: say which list ran.
+            uy, uq = result.unpublished_quarter
+            tracker.note = f"{uy}Q{uq} Official List not yet published; used the prior quarter's list"
         logger.info(
             "cusip_universe_backfill: list_rows=%d instruments_seen=%d "
             "inserted=%d already_mapped=%d unresolvable=%d ambiguous=%d "
@@ -11307,6 +11429,33 @@ def engine_book_risk_snapshot() -> None:
         with connect_job() as conn:
             snap = run_engine_book_risk_snapshot(conn, datetime.now(UTC))
         tracker.row_count = 0 if snap is None else 1
+
+
+def kill_switch_drill() -> None:
+    """``_INVOKERS['kill_switch_drill']`` — #3614 slice 3, trigger ``scheduled``.
+
+    Records the occurrence it serves as ``scheduled_for``: the latest slot at or before now, so a
+    catch-up fire names the slot it is catching up. The overdue notice judges a slot by when a drill
+    STARTED, never by this field, so a late fire does not satisfy an earlier slot.
+    """
+    from app.services.kill_switch_drill import DRILL_ACTOR, run_kill_switch_drill
+
+    with _tracked_job(JOB_KILL_SWITCH_DRILL) as tracker:
+        # Two fresh connections per run (lock + evaluation), each closed by the drill itself.
+        run = run_kill_switch_drill(
+            lambda: connect_job(connect_timeout=5),
+            trigger="scheduled",
+            actor=DRILL_ACTOR,
+            scheduled_for=occurrence_at_or_before(datetime.now(UTC)),
+            # 0 when ``record_job_start`` failed: no ``job_runs`` row exists to reference.
+            job_run_id=tracker.run_id or None,
+        )
+        if run is None:
+            raise RuntimeError("another kill drill holds the drill lock; nothing recorded")
+        tracker.row_count = 1
+        tracker.note = (
+            f"event={run.event_id} mode={run.mode} entry_verdict={run.entry_verdict} run_failure={run.run_failure}"
+        )
 
 
 def finra_regsho_daily_refresh() -> None:

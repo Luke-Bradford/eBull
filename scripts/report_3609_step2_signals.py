@@ -1,9 +1,9 @@
 """#3609 step 2's signal diagnostics (slice 3c-v(c)): printed, never gated.
 
 Spec: ``docs/research/2026-10-06-3609-step2-factor-book.md`` §"Diagnostics" (PR #3666): "Signals: one-month
-horizon, for the three retained families and the composite", and "Minimum effective sample". Pure functions over
+horizon, for the value family and the composite", and "Minimum effective sample". Pure functions over
 step 1's formations and the book's scores (``factor_book.composite_scores``, one per formation). Selection-conditioned:
-the families were chosen on stage A. The Newey–West rule is step 0's (``report_3609_baselines``).
+the family was chosen on stage A. The Newey–West rule is step 0's (``report_3609_baselines``).
 
 * **Population,** per formation M, signal and arm: universe names with the signal's score and a step-1 holding-month
   return. Each monthly value is keyed by its holding month M + 1, so a window's months are
@@ -39,7 +39,7 @@ from app.services.strategy_result import AmbiguityArm
 from scripts.report_3609_baselines import ols_newey_west
 from scripts.report_3609_step2_operations import Window
 
-#: The three retained families and the composite.
+#: The book's families (the value family alone) and the composite, which with one family ranks as the family does.
 SIGNALS: Final = (*FAMILIES, COMPOSITE)
 #: §"Diagnostics", Signals: the fewest names an IC is computed on, and a quintile's fewest.
 MIN_IC_NAMES: Final = 30

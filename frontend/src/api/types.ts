@@ -3396,7 +3396,68 @@ export interface StrategyPnlHistoryResponse {
   benchmark_comparison_available: false;
   /** #2602 item 5 — the flag above says there is no benchmark; this says why. */
   benchmark_refusals: BenchmarkRefusal[];
+  /** #3616 slice 1 — always present; NOT the refused S&P 500 TR index. */
+  comparator: StrategyUcitsComparator;
   points: StrategyPnlHistoryPoint[];
+}
+
+/**
+ * #3616 slice 1 — the pot against an investable UCITS S&P 500 fund (CSPX.L)
+ * and the active hurdle under today's mandate. Returns are unrounded
+ * cumulative FRACTIONS. Spec: docs/specs/metrics/2026-10-12-3616-investable-comparator.md
+ */
+export interface StrategyUcitsComparator {
+  symbol: string;
+  instrument_id: number | null;
+  label: string;
+  basis: "accumulating_ucits_market_price_return_usd";
+  window_start: string | null;
+  window_end: string | null;
+  start_close_date: string | null;
+  end_close_date: string | null;
+  return: string | null;
+  unavailable_reason:
+    | "comparator_instrument_missing"
+    | "comparator_instrument_mismatch"
+    | "pot_return_unavailable"
+    | "comparator_close_missing"
+    | "comparator_stale"
+    | null;
+  engine_excess: string | null;
+  hurdle: {
+    /** `core_target_pct` / 100: a share of the core allocator's sleeve, not of the pot. */
+    core_target_weight: string | null;
+    /** The core's share of the pot: target × (1 − active_weight). */
+    core_weight: string | null;
+    active_weight: string | null;
+    core_mandate_event_id: number | null;
+    pool_event_id: number | null;
+    multiplier: string | null;
+    hurdle_return: string | null;
+    required_active_excess: string | null;
+    unavailable_reason:
+      | "mandate_unconfigured"
+      | "mandate_weights_invalid"
+      | "no_active_budget"
+      | "comparator_return_unavailable"
+      | "hurdle_infeasible"
+      | null;
+  };
+  /**
+   * #3616 slice 2 — the returns above restated in GBP at ECB rates; NOT after tax.
+   * Spec: docs/specs/metrics/2026-10-12-3616-gbp-isa-comparator.md
+   */
+  gbp: {
+    fx_source: "ecb_reference_fx_rates_daily";
+    fx_start_date: string | null;
+    fx_end_date: string | null;
+    /** `φ_E / φ_S`, dimensionless. */
+    fx_multiplier: string | null;
+    comparator_return: string | null;
+    engine_return: string | null;
+    engine_excess: string | null;
+    unavailable_reason: "comparator_unavailable" | "fx_rate_missing" | "fx_rate_stale" | null;
+  };
 }
 
 export interface StrategyOwnedPosition {
@@ -3920,14 +3981,20 @@ export interface EngineBookRiskPosition {
   position_id: number;
   instrument_id: number;
   symbol: string | null;
+  /** `broker_positions.is_buy`; a short is an x1 CFD (engine-book-risk-v3). */
+  side: "long" | "short";
   units: string;
   mark: string | null;
   /** ISO date of the close used, or `"cost"` when no close exists. */
   mark_date: string;
+  /** Signed: negative for a short. */
   market_value_usd: string;
+  /** Signed: negative for a short. */
   weight_of_capital_pct: string;
-  /** Instrument beta to SPY, or `"defaulted"` (β = 1 used for stress). */
+  /** Instrument beta to SPY, or `"defaulted"` (stress uses `beta_assumed`). */
   beta: string;
+  /** β used for stress when `beta` is `"defaulted"`: "1" for a net-long instrument, "0" for net-short; else null. */
+  beta_assumed: string | null;
   beta_n_obs: number;
 }
 
@@ -3936,7 +4003,10 @@ export interface EngineBookRiskLatest {
   measured_at: string;
   pool_event_id: number;
   capital_usd: string;
+  /** Sum of every position's |market value|. */
   gross_usd: string;
+  /** Signed sum of position market values; below gross when the book holds shorts. */
+  net_usd: string;
   position_count: number;
   instrument_count: number;
   open_trade_count: number;
@@ -3955,6 +4025,7 @@ export interface EngineBookRiskLatest {
   history_status: "ok" | "insufficient_history" | "degenerate" | "empty_book";
   beta_defaulted_count: number;
   beta_defaulted_weight_pct: string;
+  stress_2008_pct: string;
   stress_2020_pct: string;
   stress_2022_pct: string;
   checks: Record<string, EngineBookRiskCheck>;
@@ -3969,6 +4040,7 @@ export interface EngineBookRiskRecent {
   hist_vol_pct: string | null;
   ewma_vol_pct: string | null;
   beta: string | null;
+  stress_2008_pct: string;
   stress_2020_pct: string;
   stress_2022_pct: string;
   stale_count: number;

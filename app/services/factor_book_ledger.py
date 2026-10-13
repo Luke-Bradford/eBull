@@ -85,22 +85,30 @@ def recorded_access_id(rows: Sequence[Mapping[str, Any]], run_id: str, *, before
     return access_id
 
 
-def require_committed_access(conn: psycopg.Connection[Any], run_id: str, access_id: int) -> None:
+def require_committed_access(
+    conn: psycopg.Connection[Any],
+    run_id: str,
+    access_id: int,
+    *,
+    strategy: tuple[str, str] = (STRATEGY_ID, STRATEGY_VERSION),
+    purpose: str | None = None,
+) -> None:
     """Refuse unless the access log holds this run's ``evaluate`` row, read on a connection that did not write it,
-    so only a committed row is visible."""
+    so only a committed row is visible. ``strategy`` and ``purpose`` default to step 2's; another trial that builds
+    stage B (#3621 v2) passes its own."""
     row = conn.execute(
         _COMMITTED_ACCESS,
         {
             "access_id": access_id,
-            "strategy_id": STRATEGY_ID,
-            "strategy_version": STRATEGY_VERSION,
+            "strategy_id": strategy[0],
+            "strategy_version": strategy[1],
             "run_id": run_id,
-            "purpose": access_purpose(run_id),
+            "purpose": access_purpose(run_id) if purpose is None else purpose,
         },
     ).fetchone()
     if row is None:
         raise StageBAccessError(
-            f"run {run_id}: no committed evaluate access {access_id} for {STRATEGY_ID} {STRATEGY_VERSION}"
+            f"run {run_id}: no committed evaluate access {access_id} for {strategy[0]} {strategy[1]}"
         )
 
 

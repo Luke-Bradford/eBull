@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
+from app.services.factor_book_declaration import payload_sha256
 from app.services.strategy_mt1_trial import NEGATIVE_CONTROL_TRIAL_ID, TRIAL_ID
 from app.services.trial_register import (
     HUNT_TRIAL_PREFIX,
@@ -28,7 +31,7 @@ def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> D
 
 class TestTheShippedDeclaration:
     def test_the_register_is_stamped_with_its_version(self) -> None:
-        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-10-06-r24"
+        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-10-09-r29"
 
     def test_every_declared_trial_carries_its_evidence(self) -> None:
         """⚠ An entry nobody can trace is indistinguishable from one invented."""
@@ -88,12 +91,16 @@ class TestTheShippedDeclaration:
         # ranking-pot-v1 (r21, #2842), inside M_inh, + 24
         # recent-evidence-refresh-cost-v4-2026-09-26 (r22, #3548), inside M_inh, + 1
         # ranking-pot-v2 (r23, #3592), inside M_inh, + 16 3609-step1-fidelity-v1
-        # (r24, #3609), inside M_inh. Moved
+        # (r24, #3609), inside M_inh, + 3 3609-step2-exposure-planning-2026-10-08
+        # (r25, #3609), inside M_inh, + 1 3609-step2-book-v1 (r26, #3609), inside M_inh, + 1
+        # 3620-condition4-feasibility-2026-10-08 (r27, #3620), inside M_inh, + 62
+        # 3621-avoidance-filters-v1 (r28, #3621), inside M_inh, + 86
+        # 3621-avoidance-filters-v2 (r29, #3621), inside M_inh. Moved
         # deliberately, not loosened: the pin exists to catch a
         # DROPPED entry, and an addition that raises M is the conservative
         # direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 521
-        assert TRIAL_REGISTER.inherited_floor().searches == 518
+        assert TRIAL_REGISTER.declared_count == 674
+        assert TRIAL_REGISTER.inherited_floor().searches == 671
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
     def test_the_two_mt1_controlled_pairs_are_charged_before_outcomes(self) -> None:
@@ -483,3 +490,17 @@ def test_the_2026_09_26_refresh_is_charged_per_window_and_inside_m_inh() -> None
     assert entry.searches == 24
     assert entry.exactness is TrialExactness.EXACT
     assert not entry.trial_id.startswith(HUNT_TRIAL_PREFIX)
+
+
+def test_every_payload_comment_names_its_own_rows_payload() -> None:
+    """A ``payload_sha256 <12 hex>…`` comment above a register row must be that row's pinned payload prefix: a
+    regenerated declaration once rewrote the first such comment in the file, step 2's, instead of its own (#3621)."""
+    source = (Path(__file__).resolve().parents[1] / "app/services/trial_register.py").read_text()
+    by_id = {trial.trial_id: trial for trial in TRIAL_REGISTER.trials}
+    found = 0
+    for match in re.finditer(r"payload_sha256 ([0-9a-f]{12})…", source):
+        trial_id = re.compile(r'trial_id="([^"]+)"').search(source, match.end())
+        assert trial_id is not None
+        assert payload_sha256(by_id[trial_id.group(1)]).startswith(match.group(1)), trial_id.group(1)
+        found += 1
+    assert found >= 2

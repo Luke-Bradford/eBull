@@ -16,6 +16,10 @@ Spec readings adopted by Amendment 2 (§"Daily screen"), first implemented here 
 - "a window containing a flagged bar" means a window containing a flagged pair's LATER bar: a pair whose later bar
   is after s(M) is not observable at s(M), so it flags s(M) in the census but does not screen the formation.
 
+Amendment 3 (#3730): each arm's holding return is clipped to the holding month's JKP ``ret_0_1`` / ``ret_99_9``
+(``GlobalFactors/portfolios.R`` lines 138-142 at ``67174c7f``). ``Holding.by_arm`` is the clipped value every book
+reads; ``raw_by_arm`` keeps the unclipped one and ``bounds`` the cutoffs applied.
+
 Readings that are ours, not the spec's text:
 - the liquidity and volatility windows end at s(M) inclusive;
 - a holding is ``observed`` when the holding month's last usable bar is on or after its last SPY session.
@@ -100,12 +104,32 @@ class PriceCharacteristic:
 
 
 @dataclass(frozen=True, slots=True)
+class ReturnBounds:
+    """JKP's ``ret_0_1`` / ``ret_99_9`` for one holding month (Amendment 3)."""
+
+    month: trr.Month
+    low: float
+    high: float
+
+    def __post_init__(self) -> None:
+        if not (math.isfinite(self.low) and math.isfinite(self.high) and self.low <= self.high):
+            raise PanelError(f"JKP return cutoffs for {self.month}: bounds {self.low}, {self.high}")
+
+    def clip(self, value: float) -> float:
+        return min(max(value, self.low), self.high)
+
+
+@dataclass(frozen=True, slots=True)
 class Holding:
     status: HoldingStatus
     #: s(M) to the holding month's last usable bar; 0 when it has none.
     period_return: float
     end_bar: date | None
+    #: Each arm's value clipped to ``bounds`` (Amendment 3): what every book reads.
     by_arm: Mapping[AmbiguityArm, float]
+    #: Each arm's value before the clip, including a ``terminal`` imputation.
+    raw_by_arm: Mapping[AmbiguityArm, float]
+    bounds: ReturnBounds
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,21 +186,30 @@ def _holding(
     month_ends: Mapping[trr.Month, trr.MonthEnd],
     holding_last_session: date,
     termination: tuple[TerminationClass, date] | None,
+    return_bounds: Mapping[trr.Month, ReturnBounds],
 ) -> Holding:
-    """§"Returns and holdings": weights fixed at s(M); the month-(t+1) return and its status."""
+    """§"Returns and holdings": weights fixed at s(M); the month-(t+1) return, its status and Amendment 3's clip."""
     held = trr.add_months(trr.month_of(formation), 1)
+    bounds = return_bounds.get(held)
+    if bounds is None:
+        raise PanelError(f"no JKP return cutoff row for holding month {held} (formation {formation})")
     end = month_ends.get(held)
     period_return = 0.0 if end is None else end.adj_close / start_adj - 1.0
     end_bar = None if end is None else end.bar_date
-    flat: dict[AmbiguityArm, float] = {arm: period_return for arm in ARMS}
     if end_bar is not None and end_bar >= holding_last_session:
-        return Holding(HoldingStatus.OBSERVED, period_return, end_bar, flat)
-    if termination is not None and trr.month_of(termination[1]) <= held:
-        by_arm: dict[AmbiguityArm, float] = {
-            arm: (1.0 + period_return) * terminal_value_fraction(termination[0], arm) - 1.0 for arm in ARMS
-        }
-        return Holding(HoldingStatus.TERMINAL, period_return, end_bar, by_arm)
-    return Holding(HoldingStatus.COVERAGE_EXIT, period_return, end_bar, flat)
+        status = HoldingStatus.OBSERVED
+    elif termination is not None and trr.month_of(termination[1]) <= held:
+        status = HoldingStatus.TERMINAL
+    else:
+        status = HoldingStatus.COVERAGE_EXIT
+    raw: dict[AmbiguityArm, float] = {
+        arm: (1.0 + period_return) * terminal_value_fraction(termination[0], arm) - 1.0
+        if status is HoldingStatus.TERMINAL and termination is not None
+        else period_return
+        for arm in ARMS
+    }
+    clipped: dict[AmbiguityArm, float] = {arm: bounds.clip(value) for arm, value in raw.items()}
+    return Holding(status, period_return, end_bar, clipped, raw, bounds)
 
 
 def series_prices(
@@ -185,12 +218,14 @@ def series_prices(
     *,
     holding_last_session: Mapping[date, date],
     termination: tuple[TerminationClass, date] | None,
+    return_bounds: Mapping[trr.Month, ReturnBounds],
     split_stamps: Sequence[SplitStamp] = (),
 ) -> SeriesPrices:
     """Every price quantity for one series at each formation where it has a usable bar on s(M).
 
     ``bars`` ascending; ``holding_last_session`` maps each formation to its holding month's last SPY session;
-    ``termination`` is the series' termination class and stored last bar, ``None`` for a live series.
+    ``termination`` is the series' termination class and stored last bar, ``None`` for a live series;
+    ``return_bounds`` maps each holding month to its JKP cutoffs, and a priced formation whose month has none refuses.
     """
     sessions = grid.sessions
     n = len(sessions)
@@ -302,7 +337,9 @@ def series_prices(
             dollar_volume=dollar_volume,
             dollar_volume_bars=len(traded),
             liquidity_screened=bool(screened_at[liquidity_window].any()),
-            holding=_holding(formation, float(adj[k]), month_ends, holding_last_session[formation], termination),
+            holding=_holding(
+                formation, float(adj[k]), month_ends, holding_last_session[formation], termination, return_bounds
+            ),
             month_end_after_decision=end_of_month.bar_date > sessions[k],
             daily_monthly=reconciled,
         )

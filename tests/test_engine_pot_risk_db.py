@@ -1,6 +1,7 @@
 """Engine-pot NAV population and drawdown state against a real database (#3541 slice 1).
 
-One test per new SQL mechanism: the exact-owned population read, and the state advance.
+One test per new SQL mechanism: the exact-owned population read, and the state advance;
+plus the #3612 ledger witness through the runtime caller.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from app.services.engine_pot_risk import (
     record_deployment_refusal,
 )
 from app.services.strategy_engine_capital import EngineCapitalObservationError
+from app.services.strategy_paper_runtime import _advance_deployment_risk, _pot_drawdown_block
 from tests.test_strategy_paper_executor import _NOW
 from tests.test_strategy_position_manager import _MANUAL_POSITION_ID, _POSITION_ID, _opened_trade
 
@@ -56,6 +58,17 @@ def _snapshot(*positions: BrokerDirectPositionInvestment, minutes: int = 0) -> B
         raw_payload={},
         direct_positions=positions,
         account_currency_id=1,
+    )
+
+
+def _open(conn: psycopg.Connection[Any], *, units: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id,etoro_instrument_id,instrument_id,event_kind,side,executed_at,units,price,source,raw_payload
+        ) VALUES (%s,2449001,2449001,'open','buy',%s,%s,100,'etoro_sync','{}')
+        """,
+        (_POSITION_ID, _NOW - timedelta(days=1), Decimal(units)),
     )
 
 
@@ -95,10 +108,23 @@ def test_population_prices_only_the_exact_owned_book(
     pot = observe_pot_nav(conn, _snapshot(_held(_POSITION_ID, "7"), _held(_MANUAL_POSITION_ID, "-500")))
     assert (pot.principal, pot.realised, pot.unrealised) == (principal[0], Decimal("0"), Decimal("7"))
 
+    # No open ingested yet (a fresh fill): whole only while the broker says it was never
+    # partially closed.
+    altered = replace(_held(_POSITION_ID, "7"), is_partially_altered=True)
+    assert _refusal(conn, _snapshot(altered)) == "engine_capital_population_incomplete"
+
     # A partial close inside the snapshot is realised; one after it is still in the unrealised.
+    # The ledger opened 2 units, so 1 remains at the snapshot -- the broker's units.
+    _open(conn, units="2")
     _close(conn, pnl="3", minutes=-1)
     _close(conn, pnl="11", minutes=5)
     assert observe_pot_nav(conn, _snapshot(_held(_POSITION_ID, "7"))).realised == Decimal("3")
+    # Broker units the ledger does not reach: a close the ledger has not recorded (#3612).
+    whole = replace(_held(_POSITION_ID, "7"), units=Decimal("2"))
+    assert _refusal(conn, _snapshot(whole)) == "engine_capital_population_incomplete"
+    # A ninth decimal the NUMERIC(20,8) ledger rounded away is not a missing close.
+    unrounded = replace(_held(_POSITION_ID, "7"), units=Decimal("1.000000004"))
+    assert observe_pot_nav(conn, _snapshot(unrounded)).realised == Decimal("3")
 
     assert _refusal(conn, _snapshot()) == "engine_capital_ownership_unwitnessed"
     assert _refusal(conn, _snapshot(_held(_POSITION_ID, "7", instrument_id=1))) == "engine_capital_ownership_mismatched"
@@ -113,6 +139,9 @@ def test_population_prices_only_the_exact_owned_book(
     assert observe_pot_nav(conn, _snapshot(_held(_POSITION_ID, "7"))).realised == Decimal("3")
     assert _refusal(conn, _snapshot()) == "engine_capital_ownership_unwitnessed"
     assert observe_pot_nav(conn, _snapshot(minutes=10)).realised == Decimal("14")
+    # A recorded partial and an unrecorded final close: 1 unit is left open in the ledger.
+    conn.execute("DELETE FROM trade_events WHERE position_id=%s AND realized_pnl_usd=11", (_POSITION_ID,))
+    assert _refusal(conn, _snapshot(minutes=10)) == "engine_capital_population_incomplete"
     conn.execute("DELETE FROM trade_events WHERE position_id=%s", (_POSITION_ID,))
     assert _refusal(conn, _snapshot(minutes=10)) == "engine_capital_population_incomplete"
 
@@ -210,3 +239,70 @@ def test_deployment_nav_prices_its_own_book_and_keeps_its_max_drawdown(
     with pytest.raises(EngineCapitalObservationError) as zero:
         observe_deployment_nav(conn, _snapshot(_held(_POSITION_ID, "7")), deployment_id)
     assert zero.value.reason_code == "engine_capital_population_incomplete"
+
+
+def test_an_incomplete_ledger_leaves_both_drawdown_states_unchanged(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3612: the runtime caller refuses before linking, for the pot and for a deployment."""
+    conn = ebull_test_conn
+    trade_id, deployment_id, _broker, _manual = _opened_trade(conn, monkeypatch)
+    conn.execute("UPDATE strategy_position_ownership SET claimed_at=%s", (_NOW - timedelta(days=1),))
+    conn.execute("UPDATE strategy_deployments SET created_at=%s", (_NOW - timedelta(days=2),))
+    _open(conn, units="2")
+    held = replace(_held(_POSITION_ID, "-50"), units=Decimal("2"))
+    assert _pot_drawdown_block(conn, risk=_snapshot(held), limit=Decimal("99"))[0] is False
+    _advance_deployment_risk(conn, risk=_snapshot(held), deployment_id=deployment_id)
+
+    def states() -> tuple[Any, ...]:
+        return (
+            conn.execute("SELECT * FROM strategy_engine_pot_risk_state").fetchall(),
+            conn.execute(
+                "SELECT nav_index,index_high_water,last_nav,last_pnl,observed_at "
+                "FROM strategy_deployment_nav_risk_state"
+            ).fetchall(),
+        )
+
+    before = states()
+    # Released after a recorded 1-unit partial; the final close is missing from the ledger.
+    _close(conn, pnl="40", minutes=1)
+    conn.execute(
+        "UPDATE strategy_position_ownership SET status='released',released_at=%s,release_reason='test' "
+        "WHERE strategy_trade_id=%s",
+        (_NOW + timedelta(minutes=2), trade_id),
+    )
+    blocked, reason = _pot_drawdown_block(conn, risk=_snapshot(minutes=3), limit=Decimal("99"))
+    assert blocked and "engine_capital_population_incomplete" in reason
+    _advance_deployment_risk(conn, risk=_snapshot(minutes=3), deployment_id=deployment_id)
+    assert states() == before
+    refusal = conn.execute("SELECT last_refusal FROM strategy_deployment_nav_risk_state").fetchone()
+    assert refusal is not None and refusal[0].startswith("engine_capital_population_incomplete")
+
+
+def test_a_partial_close_slice_under_a_new_position_id_is_realised_and_reconciles(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3612: eToro books a partial close under a new, unowned position id sharing the entry ``orderId``."""
+    conn = ebull_test_conn
+    trade_id, _deployment, _broker, _manual = _opened_trade(conn, monkeypatch)
+    conn.execute("UPDATE strategy_position_ownership SET claimed_at=%s", (_NOW - timedelta(days=1),))
+    _open(conn, units="2")
+    ref = conn.execute(
+        "SELECT o.broker_order_ref FROM strategy_trade_orders sto JOIN orders o ON o.order_id=sto.order_id "
+        "WHERE sto.strategy_trade_id=%s AND sto.purpose='entry'",
+        (trade_id,),
+    ).fetchone()
+    assert ref is not None and ref[0] is not None
+    half = _held(_POSITION_ID, "7")  # 1 of the 2 opened units remains
+    assert _refusal(conn, _snapshot(half)) == "engine_capital_population_incomplete"
+
+    conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id,etoro_instrument_id,instrument_id,event_kind,side,executed_at,units,price,
+            realized_pnl_usd,source,raw_payload
+        ) VALUES (%s,2449001,2449001,'close','sell',%s,1,100,5,'etoro_history',jsonb_build_object('orderId',%s::text))
+        """,
+        (_POSITION_ID + 7, _NOW - timedelta(minutes=1), ref[0]),
+    )
+    assert observe_pot_nav(conn, _snapshot(half)).realised == Decimal("5")

@@ -19,7 +19,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -409,3 +409,55 @@ def test_drill_evidence_refuses_update_and_delete(ebull_test_conn: Conn) -> None
         (list(tables),),
     ).fetchall()
     assert sorted(rows) == sorted((t, 27) for t in tables)
+
+
+# --------------------------------------------------------------------------
+# The alert watch's read (#3614 slice 3)
+# --------------------------------------------------------------------------
+
+
+def _position(ownership_id: int, broker_position_id: int | None, *, stop: bool = True) -> drill.BookPosition:
+    return drill.BookPosition(
+        ownership_id=ownership_id,
+        broker_position_id=broker_position_id,
+        instrument_id=1,
+        broker_row_updated_at=None,
+        stop_present=stop if broker_position_id is not None else None,
+        target_present=True if broker_position_id is not None else None,
+        broker_environment="demo",
+        us_listed=True,
+    )
+
+
+def test_the_alert_watch_reads_watched_drills_with_their_defect_ownerships(ebull_test_conn: Conn) -> None:
+    from app.services.kill_switch_drill_schedule import DRILL_WATCH_FROM
+    from scripts.operator_alert_watch import DrillChokepoint, _read_drills
+
+    def _record(started_at: datetime, positions: tuple[drill.BookPosition, ...]) -> int:
+        run = drill.DrillRun(drill.uuid.uuid4(), "manual", "test", started_at)
+        run.mode, run.finished_at = "sandbox", started_at
+        run.chokepoints = [
+            drill.ChokepointResult("C1", "kill_refused", "kill_switch", ("kill_switch",), True, None, started_at)
+        ]
+        run.snapshot = drill.BookSnapshot(started_at, positions, (), ())
+        return drill.record_drill(ebull_test_conn, run)
+
+    _record(DRILL_WATCH_FROM - timedelta(seconds=1), ())  # before the watch: not read
+    watched = _record(
+        DRILL_WATCH_FROM,
+        (
+            _position(10, 100),  # clean
+            _position(11, None),  # unmapped
+            _position(12, 120),  # multiply mapped
+            _position(12, 121),
+            _position(13, 130, stop=False),  # no stop
+        ),
+    )
+    ebull_test_conn.commit()
+
+    [event] = _read_drills(ebull_test_conn)
+    assert event.event_id == watched
+    assert (event.entry_verdict, event.book_verdict) == ("passed", "defects")
+    assert (event.unmapped, event.multiply_mapped, event.without_stop, event.without_target) == (1, 1, 1, 0)
+    assert event.defect_ownerships == (11, 12, 13)
+    assert event.chokepoints == (DrillChokepoint("C1", "kill_refused", "kill_switch"),)

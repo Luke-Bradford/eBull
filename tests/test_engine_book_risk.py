@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 
 from app.services.engine_book_risk import (
+    STRESS_2008,
     STRESS_2020,
     BookInputs,
     HeldPosition,
@@ -49,7 +50,26 @@ def _position(position_id: int, instrument_id: int, units: str = "10", **kw: obj
         units=Decimal(units),
         initial_units=kw.get("initial_units", Decimal(units)),  # type: ignore[arg-type]
         initial_amount_usd=kw.get("initial_amount_usd", Decimal("1000")),  # type: ignore[arg-type]
+        is_buy=kw.get("is_buy", True),  # type: ignore[arg-type]
     )
+
+
+def _short(position_id: int, instrument_id: int, units: str = "10", **kw: object) -> HeldPosition:
+    return _position(position_id, instrument_id, units, is_buy=False, **kw)
+
+
+def _scaled(closes: dict[date, Decimal | None], factor: Decimal) -> dict[date, Decimal | None]:
+    """A path whose every session return is ``factor`` x that of ``closes`` (e.g. -4 for an inverse 4x)."""
+    out: dict[date, Decimal | None] = {}
+    days = sorted(closes)
+    price = Decimal("100")
+    for prev, cur in zip([None, *days], days, strict=False):
+        if prev is not None:
+            a, b = closes[prev], closes[cur]
+            assert a is not None and b is not None
+            price = price * (1 + factor * (b / a - 1))
+        out[cur] = price
+    return out
 
 
 def _inputs(
@@ -105,7 +125,7 @@ def test_empty_book() -> None:
     assert snap.history_status == "empty_book"
     assert (snap.hist_vol_pct, snap.ewma_vol_pct, snap.beta) == (0, 0, 0)
     assert (snap.largest_share_pct, snap.top5_share_pct, snap.hhi) == (None, None, None)
-    assert (snap.stress_2020_pct, snap.stress_2022_pct, snap.gross_usd) == (0, 0, 0)
+    assert (snap.stress_2008_pct, snap.stress_2020_pct, snap.stress_2022_pct, snap.gross_usd) == (0, 0, 0, 0)
     assert snap.checks["forecast_vol_vs_target"]["status"] == "no_limit"
     assert snap.checks["stale_marks"] == {"status": "evaluated", "value": "0", "limit": "0", "flagged": False}
 
@@ -120,6 +140,7 @@ def test_a_book_tracking_spy_has_beta_one_and_scenario_stress() -> None:
     assert last is not None
     weight = 50 * last / Decimal("10000")
     assert snap.beta == (weight).quantize(Decimal("1e-8"))
+    assert snap.stress_2008_pct == (weight * STRESS_2008 * 100).quantize(Decimal("1e-8"))
     assert snap.stress_2020_pct == (weight * STRESS_2020 * 100).quantize(Decimal("1e-8"))
     assert (snap.largest_share_pct, snap.top5_share_pct, snap.hhi) == (100, 100, 10000)
     assert snap.beta_defaulted_count == 0
@@ -173,7 +194,7 @@ def test_stress_is_floored_at_a_total_loss_per_instrument() -> None:
     snap = compute_snapshot(_inputs((_position(1, _A, units="1"),), {_A: levered}, capital="100"))
     assert snap.positions[0]["beta"] != "defaulted"
     weight = Decimal(snap.positions[0]["weight_of_capital_pct"])
-    assert snap.stress_2020_pct == -weight
+    assert snap.stress_2008_pct == snap.stress_2020_pct == -weight
 
 
 @pytest.mark.parametrize(
@@ -205,6 +226,8 @@ def test_stress_flag_compares_the_signed_loss() -> None:
         _inputs((_position(1, _A, units="100"),), {_A: a}, mandate=MandateLimits(True, Decimal("50"), Decimal("40"), 9))
     )
     assert loose.checks["stress_2020_vs_max_drawdown"]["flagged"] is False
+    # -56% breaches a 40% limit at beta 1 where -34% does not.
+    assert loose.checks["stress_2008_vs_max_drawdown"]["flagged"] is True
     assert loose.checks["stress_2022_vs_max_drawdown"]["flagged"] is False
 
 
@@ -215,3 +238,104 @@ def test_zero_variance_spy_is_degenerate() -> None:
     assert snap.history_status == "degenerate"
     assert snap.beta is None and snap.hist_vol_pct == 0
     assert snap.beta_defaulted_count == 1
+
+
+def test_stress_2008_reproduces_from_the_spy_closes() -> None:
+    # Series 7694 (Intrader SPY) closes at the 2007-10-09 peak and the 2009-03-09 trough (spec "Source rule").
+    assert (Decimal("68.110001") / Decimal("156.479996") - 1).quantize(Decimal("1e-8")) == STRESS_2008
+
+
+# v3 (#3612): signed weights. Spec section "v3: signed weights".
+_Q = Decimal("1e-8")
+
+
+def test_a_pure_short_mirrors_the_long() -> None:
+    closes = {_A: _scaled(_path(300, scale=Decimal("0.01"), seed=3), Decimal("0.5"))}
+    long = compute_snapshot(_inputs((_position(1, _A, "50"),), closes))
+    short = compute_snapshot(_inputs((_short(1, _A, "50"),), closes))
+    assert short.positions[0]["side"] == "short"
+    assert short.gross_usd == long.gross_usd == long.net_usd == -short.net_usd
+    assert Decimal(short.positions[0]["market_value_usd"]) == -Decimal(long.positions[0]["market_value_usd"])
+    assert (short.hist_vol_pct, short.ewma_vol_pct) == (long.hist_vol_pct, long.ewma_vol_pct)
+    assert long.beta is not None and long.beta > 0 and short.beta == -long.beta
+    assert (short.largest_share_pct, short.hhi) == (long.largest_share_pct, long.hhi) == (100, 10000)
+    # beta 0.5 x a fall never reaches the floor, so the short gains exactly what the long loses.
+    assert short.stress_2020_pct == -long.stress_2020_pct > 0
+
+
+def test_offsetting_lots_net_in_exposure_but_not_in_gross() -> None:
+    a = _path(300, scale=Decimal("0.01"), seed=5)
+    closes = {_A: a, _B: dict(a)}
+    snap = compute_snapshot(_inputs((_position(1, _A), _short(2, _A), _position(3, _B)), closes))
+    alone = compute_snapshot(_inputs((_position(3, _B),), {_B: a}))
+    last = a[max(a)]
+    assert last is not None
+    assert snap.gross_usd == (30 * last).quantize(_Q)
+    assert snap.net_usd == (10 * last).quantize(_Q)
+    # A holds 2/3 of gross, B 1/3: HHI = 66.67^2 + 33.33^2.
+    assert snap.largest_share_pct == (Decimal(200) / 3).quantize(_Q)
+    assert snap.hhi == ((Decimal(200) / 3) ** 2 + (Decimal(100) / 3) ** 2).quantize(_Q)
+    # A nets to zero, so the book return is B's alone.
+    assert (snap.hist_vol_pct, snap.ewma_vol_pct, snap.beta) == (alone.hist_vol_pct, alone.ewma_vol_pct, alone.beta)
+    assert (snap.stress_2008_pct, snap.stress_2020_pct) == (alone.stress_2008_pct, alone.stress_2020_pct)
+    assert (snap.position_count, snap.instrument_count) == (3, 2)
+
+
+def test_a_long_short_pair_on_identical_returns_has_zero_vol() -> None:
+    a = _path(300, scale=Decimal("0.02"), seed=5)
+    snap = compute_snapshot(_inputs((_position(1, _A), _short(2, _B)), {_A: a, _B: dict(a)}))
+    assert snap.history_status == "ok"
+    assert (snap.hist_vol_pct, snap.ewma_vol_pct, snap.beta, snap.net_usd) == (0, 0, 0, 0)
+    assert snap.gross_usd > 0 and snap.largest_share_pct == 50
+
+
+def test_an_all_offset_book_is_measured_not_empty() -> None:
+    # No history at all for the instrument: netting to zero, it needs none.
+    snap = compute_snapshot(_inputs((_position(1, _A, initial_units=Decimal("10")), _short(2, _A)), {}))
+    assert snap.history_status == "ok"
+    assert (snap.hist_vol_pct, snap.ewma_vol_pct, snap.beta, snap.stress_2020_pct, snap.net_usd) == (0, 0, 0, 0, 0)
+    assert snap.vol_n_obs == 252
+    assert snap.gross_usd == 2000 and snap.largest_share_pct == 100
+    # Counts stay per position: both lots are cost-marked and stale.
+    assert (snap.cost_marked_count, snap.stale_count) == (2, 2)
+
+
+def test_an_unmeasured_short_is_assumed_beta_zero_and_counted_at_gross() -> None:
+    recent = {d: c for d, c in _path(300, scale=Decimal("0.01"), seed=3).items() if d >= _days(300)[-30]}
+    short = compute_snapshot(_inputs((_short(1, _A, "50"),), {_A: recent}))
+    assert short.positions[0]["beta"] == "defaulted" and short.positions[0]["beta_assumed"] == "0"
+    assert short.stress_2008_pct == short.stress_2020_pct == 0
+    long = compute_snapshot(_inputs((_position(1, _A, "50"),), {_A: recent}))
+    assert long.positions[0]["beta_assumed"] == "1"
+    assert long.beta_defaulted_weight_pct == short.beta_defaulted_weight_pct > 0
+    # A defaulted +w and -w pair reports their gross, not a netted 0.
+    pair = compute_snapshot(_inputs((_position(1, _A, "50"), _short(2, _B, "50")), {_A: recent, _B: dict(recent)}))
+    assert pair.beta_defaulted_count == 2
+    # Each figure is rounded to 8 dp on its own.
+    assert abs(pair.beta_defaulted_weight_pct - 2 * long.beta_defaulted_weight_pct) <= _Q
+
+
+def test_a_short_at_cost_is_negative_remaining_cost() -> None:
+    partial = compute_snapshot(
+        _inputs((_short(1, _A, units="5", initial_units=Decimal("10"), initial_amount_usd=Decimal("1000")),), {})
+    )
+    assert (partial.net_usd, partial.gross_usd) == (-500, 500)
+    unknown = compute_snapshot(_inputs((_short(1, _A, units="5", initial_units=None),), {}))
+    assert (unknown.net_usd, unknown.gross_usd) == (-1000, 1000)
+    assert Decimal(unknown.positions[0]["weight_of_capital_pct"]) == -10
+
+
+def test_a_short_gain_is_floored_and_a_short_loss_is_not() -> None:
+    spy = _path(300, scale=Decimal("0.01"), seed=3)
+    levered = compute_snapshot(_inputs((_short(1, _A, units="1"),), {_A: _scaled(spy, Decimal("4"))}, capital="100"))
+    weight = Decimal(levered.positions[0]["weight_of_capital_pct"])
+    assert weight < 0
+    # beta ~4 x a -34% fall floors the instrument at -100%: the short gains exactly |w|.
+    assert levered.stress_2020_pct == -weight
+    inverse = compute_snapshot(_inputs((_short(1, _A, units="1"),), {_A: _scaled(spy, Decimal("-4"))}, capital="100"))
+    beta = Decimal(inverse.positions[0]["beta"])
+    w = Decimal(inverse.positions[0]["weight_of_capital_pct"])
+    # beta ~-4: the instrument rises ~136% in 2020, more than 100% of the short's own weight lost.
+    assert beta < -3
+    assert inverse.stress_2020_pct == (w * beta * STRESS_2020).quantize(_Q)
+    assert inverse.stress_2020_pct < w

@@ -112,8 +112,8 @@ def test_another_series_is_not_checked() -> None:
 def test_premise_3s_row_and_the_book_at_or_below_the_cutoff() -> None:
     row = universe_month(_month(A, NAMES), UNIVERSE, _decision(A, (1, 3, 5, 2)), CUTOFF)
     assert (row.admitted, row.me_rank_last) == (6, CUTOFF)
-    # Families: 1 and 5 hold all three; 2 holds two (gp_a, value); 3 holds one.
-    assert (row.top_fam3, row.top_fam2, row.top_sic6221) == (2, 3, 1)
+    # The value family (the book's only one): 1, 2 and 5 have a member's value; 3 has only gp_at.
+    assert (row.top_all_families, row.top_sic6221) == (3, 1)
     # Above: 1, 2, 5 (3 equals the cutoff, so it is at or below); 4 and 6 are outside the universe.
     assert (row.above, row.shared, row.top_at_or_below, row.above_outside_top) == (3, 3, 1, 0)
     assert row.above_me_share_in_top == 1.0
@@ -140,7 +140,7 @@ def test_an_unpublished_cutoff_leaves_every_cutoff_field_unavailable() -> None:
         row.book_weight_at_or_below,
     )
     assert cutoff_fields == (None,) * len(cutoff_fields)
-    assert (row.admitted, row.top_fam3, row.book_holdings) == (6, 2, 1)
+    assert (row.admitted, row.top_all_families, row.book_holdings) == (6, 3, 1)
 
 
 def test_no_name_above_the_cutoff_has_no_share_and_a_book_in_cash_weighs_nothing() -> None:

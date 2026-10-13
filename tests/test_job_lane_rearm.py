@@ -19,7 +19,9 @@ from app.services.processes.health_verdict import compute_verdict
 from app.workers.scheduler import (
     JOB_CORE_ELIGIBILITY_REFRESH,
     JOB_CORE_REBALANCE_OBSERVATION,
+    JOB_ETORO_CLOSING_PRICE_CAPTURE,
     JOB_ETORO_CROWD_SNAPSHOT,
+    JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE,
     JOB_ETORO_INVESTOR_SNAPSHOT,
     JOB_ETORO_PERISHABLES_SNAPSHOT,
     JOB_EXECUTE_APPROVED_ORDERS,
@@ -283,6 +285,10 @@ def test_exactly_the_admitted_jobs_opt_in() -> None:
     ``ibkr_borrow_archive`` (#3622) joined on the same argument: it reads a public FTP file, appends one
     snapshot stamped with the file's own ``#BOF`` as-of (a repeat is deduplicated by hash), and IBKR keeps no
     history, so a late fire is the only recovery a lost day has.
+    ``etoro_dividend_calendar_capture`` (#3740 slice F) joined on the same argument: it reads a public page,
+    appends one row stamped with its own fetch clocks and never edits one, and eToro keeps no history.
+    ``etoro_closing_price_capture`` (#3740 slice F) joined on the same argument: one read-only request whose
+    body is appended with its own fetch clocks, and eToro serves no closing-price history.
     """
     opted_in = {job.name for job in SCHEDULED_JOBS if job.rearm_on_lost_fire}
     assert opted_in == {
@@ -292,6 +298,8 @@ def test_exactly_the_admitted_jobs_opt_in() -> None:
         JOB_ETORO_INVESTOR_SNAPSHOT,
         JOB_ETORO_PERISHABLES_SNAPSHOT,
         JOB_IBKR_BORROW_ARCHIVE,
+        JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE,
+        JOB_ETORO_CLOSING_PRICE_CAPTURE,
     }
 
 
@@ -304,6 +312,8 @@ def test_every_admitted_job_actually_arms() -> None:
         JOB_ETORO_INVESTOR_SNAPSHOT,
         JOB_ETORO_PERISHABLES_SNAPSHOT,
         JOB_IBKR_BORROW_ARCHIVE,
+        JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE,
+        JOB_ETORO_CLOSING_PRICE_CAPTURE,
     ):
         assert lost_fire_rearm_delay_seconds(_BY_NAME[name]) == RETRY_BASE_SECONDS
 

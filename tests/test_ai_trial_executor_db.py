@@ -36,6 +36,9 @@ from tests.fixtures.ebull_test_db import test_database_url
 from tests.fixtures.entry_ticket import assert_entry_ticket
 from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW, _published_pair, _signal
 
+pytestmark = pytest.mark.usefixtures("marked_daily_loss_neutral")
+
+
 Conn = psycopg.Connection[Any]
 _REQUEST_ID = UUID("5a4f0e7e-3471-4b2b-9d00-2b2b2b2b2b2b")
 

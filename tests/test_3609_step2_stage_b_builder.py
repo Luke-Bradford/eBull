@@ -450,6 +450,49 @@ def test_another_runs_sub_artefact_ends_the_run(tmp_path: Path, monkeypatch: pyt
     assert run.built == [] and run.events()[-1] == "failed"
 
 
+def test_a_gate_pinning_a_sub_binds_another_runs_sub_without_a_sub_published_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3621 v2: a rebuild whose inputs must equal step 2's binds step 2's SUB, which names step 2's run."""
+    sub = _sub_artefact(tmp_path, monkeypatch)
+    run = _Run(tmp_path, monkeypatch, declared=False)  # step 2's declaration is not the gate's
+    checked: list[int] = []
+    gate = builder.StageBGate(lambda rows: checked.append(len(rows)), lambda: {"spec_sha256": "9" * 64}, sub=sub)
+    other = "c" * 32
+    append_ledger(run.ledger, {"run_id": other, "event": "started"})
+    append_ledger(run.ledger, {"run_id": other, "event": "access_recorded", "access_id": 9})
+    out, digest = builder.publish_stage_b(
+        run.root,
+        other,
+        confirm_access=lambda run_id, access_id: run.confirmed.append((run_id, access_id)),
+        ledger=run.ledger,
+        committed_ledger=run.committed,
+        gate=gate,
+    )
+    assert checked and run.confirmed == [(other, 9)]
+    (built,) = run.built
+    assert built["step2_sub"] == sub and built["pins"] == builder.stage_b_pins(sub[1])
+    assert built["versions"] is gate.versions and built["provenance"] == {"run_id": other, "access_id": 9}
+    assert read_ledger(run.ledger)[-1]["event"] == builder.STAGE_B_EVENT
+    assert digest == sha256_file(out / builder.MANIFEST_FILE)
+
+
+def test_a_gate_refusal_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sub = _sub_artefact(tmp_path, monkeypatch)
+    run = _Run(tmp_path, monkeypatch)
+    _open_run(run, sub)
+
+    def refuse(rows: object) -> object:
+        raise DeclarationError("not v2's declaration")
+
+    gate = builder.StageBGate(refuse, lambda: {}, sub=sub)
+    with pytest.raises(DeclarationError, match="v2"):
+        builder.publish_stage_b(
+            run.root, RUN, confirm_access=lambda *_: None, ledger=run.ledger, committed_ledger=run.committed, gate=gate
+        )
+    assert run.built == [] and not run.root.exists() and "failed" not in run.events()
+
+
 # --------------------------------------------------------------------------- the capture binding
 
 

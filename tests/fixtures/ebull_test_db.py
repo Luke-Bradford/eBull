@@ -496,6 +496,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "etoro_session_rate_observations",
     "etoro_session_rate_requests",
     "etoro_session_rate_captures",
+    # #3740 slice F — no FK to instruments (sql/479, sql/480).
+    "etoro_session_close_captures",
+    "etoro_closing_price_captures",
+    # #3612 slice 2 — session-close anchor (sql/482), child-to-parent.
+    "broker_account_session_close_marks",
+    "broker_account_session_close_snapshots",
     # #3385 slice 2a, child-to-parent.
     "hunt_trial_retries",
     "hunt_trial_outcomes",

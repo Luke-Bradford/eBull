@@ -6,11 +6,15 @@ Pure-logic tier — no DB, no clock, no broker.  Spec:
 
 from __future__ import annotations
 
+import ast
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
+from app.services import core_exit_levels
 from app.services.strategy_core_allocator import (
     CoreRebalanceDecision,
     CoreSleeveState,
@@ -415,3 +419,46 @@ def test_the_dead_trigger_refusal_is_what_changed_and_not_the_arithmetic() -> No
     decision = evaluate_core_rebalance(spec, sleeve("0", "1000"))
     assert decision.lower_pct == Decimal("0.0001")
     assert decision.action == "buy_core"
+
+
+def test_a_stopped_out_core_is_rebought_to_the_lower_band_edge() -> None:
+    """#3612: the scheduled rebalance is the core's re-entry rule after a broker stop.
+
+    ``core_exit_levels``'s module docstring relies on this: a stop-out leaves the
+    sleeve all cash, and the allocator has no notion of why, so it buys back to the
+    near (lower) band edge.  The risk gate that can refuse that buy is the executor's
+    pot drawdown limit, not the allocator.  Mandate shape as live (50 ± 5, 10% reserve).
+    """
+    spec = mandate(target="50", band="5", reserve="10")
+    decision = evaluate_core_rebalance(spec, sleeve("0", "1000"))
+    assert decision.action == "buy_core"
+    assert decision.reason_code is None
+    assert decision.core_pct == Decimal("0")
+    # Lower edge = target - band = 45%; 45% of the 1000 sleeve, from 0 core, is 450.
+    # The 10% reserve is not a trigger (the cash side stays at 55%).
+    assert decision.lower_pct == Decimal("45")
+    assert decision.amount == Decimal("450")
+
+
+def test_every_test_the_core_exit_levels_docstring_cites_exists() -> None:
+    """The stop-out paragraph in ``core_exit_levels`` rests on tests in other files.
+
+    A renamed or deleted test would leave the docstring claiming a pin that no longer
+    exists, so each ``tests/<file>.py::<name>`` citation is resolved here.
+    """
+    doc = core_exit_levels.__doc__ or ""
+    citations = set(re.findall(r"(tests/[\w/]+\.py)::\s*(test_\w+)", doc))
+    # Explicit, so a citation the regex stops matching fails here rather than going
+    # unchecked.  Adding a citation to the docstring means adding it here.
+    executor = "tests/test_2603_core_executor.py"
+    assert citations == {
+        ("tests/test_2603_core_allocator.py", "test_a_stopped_out_core_is_rebought_to_the_lower_band_edge"),
+        (executor, "test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target"),
+        (executor, "test_over_the_sandbox_bound_only_a_buy_is_refused"),
+        (executor, "test_core_drawdown_refusal_precedes_durable_order_authority"),
+    }
+    repo_root = Path(__file__).resolve().parent.parent
+    for file, name in citations:
+        tree = ast.parse((repo_root / file).read_text())
+        defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
+        assert name in defined, f"{file}::{name} is cited but not defined"

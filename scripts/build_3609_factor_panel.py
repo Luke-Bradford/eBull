@@ -95,6 +95,7 @@ from app.services.factor_panel_prices import (
     DailyMonthly,
     FormationPrices,
     PriceCharacteristic,
+    ReturnBounds,
     SessionGrid,
     liquidity_terciles,
     me_discontinuity,
@@ -106,7 +107,7 @@ from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SE
 from app.services.security_linkage import Reason, load_security_linkage
 from app.services.series_termination import TERMINATION_RULE_VERSION, TerminationEvidence, classify_termination
 from app.services.strategies.validated_universe import load_validated_universe
-from app.services.total_return_reader import TOTAL_RETURN_SPLICE_VERSION
+from app.services.total_return_reader import TOTAL_RETURN_SPLICE_VERSION, Month, month_of
 from app.services.trial_register import TRIAL_REGISTER
 from app.services.universe_selection import (
     SURVIVORSHIP_FREE_VENDOR,
@@ -142,6 +143,17 @@ LARGEST_ME_LISTED: Final = 5
 DAILY_LOOKBACK_MONTHS: Final = 12
 RF_DATASET: Final = "french_three_factor_daily"
 RF_UNIT: Final = "decimal_return"
+#: Amendment 3 (#3730): JKP ``return_cutoffs.csv``, pinned here rather than in the slice 1 reference artefact so
+#: that artefact's manifest, and so ``STAGE_A_PINS``, still verify every published artefact. Loaded 2026-10-09 by
+#: ``scripts.refresh_2912_reference_data --source factor_library --dataset jkp_return_cutoffs``.
+RETURN_CUTOFFS: Final = {
+    "dataset_key": "jkp_return_cutoffs",
+    "snapshot_id": 91,
+    "response_sha256": "074e09d6ea2b2a74181888d09f395775aa60c4f4bc9992d290ad9598ed01566e",
+    "row_count": 15600,
+}
+RETURN_CUTOFF_LOW: Final = "ret_0_1"
+RETURN_CUTOFF_HIGH: Final = "ret_99_9"
 SPY_SYMBOL: Final = "SPY"
 OUT_DIR: Final = Path("var/research/3609_step1")
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
@@ -505,7 +517,8 @@ def dump_inputs(
     )
 
     manifest = reference_manifest(*REFERENCE)
-    for dataset, pinned in sorted(manifest["reference_snapshots"].items()):
+    pins = {**manifest["reference_snapshots"], RETURN_CUTOFFS["dataset_key"]: RETURN_CUTOFFS}
+    for dataset, pinned in sorted(pins.items()):
         params = {
             "snapshot_id": pinned["snapshot_id"],
             "dataset_key": dataset,
@@ -556,12 +569,42 @@ def read_rf(inputs: Path, first: date, bound: date) -> dict[date, float]:
     return out
 
 
+def read_return_bounds(inputs: Path) -> dict[Month, ReturnBounds]:
+    """Holding month -> JKP ``ret_0_1`` / ``ret_99_9`` from the frozen snapshot (Amendment 3).
+
+    A month end that is not one, a unit other than a decimal return, a duplicate, or a month with only one of the
+    two bounds refuses; ``ReturnBounds`` refuses a non-finite bound and ``low > high``."""
+    found: dict[Month, dict[str, float]] = defaultdict(dict)
+    for key, day, value, unit in read_gz_lines(inputs / Frozen.snapshot(RETURN_CUTOFFS["dataset_key"])):
+        if key not in (RETURN_CUTOFF_LOW, RETURN_CUTOFF_HIGH):
+            continue
+        eom = date.fromisoformat(day)
+        if (eom + timedelta(days=1)).day != 1:
+            raise PanelError(f"return cutoff {key} dated {day}, not a month end")
+        if unit != RF_UNIT:
+            raise PanelError(f"return cutoff {key} unit {unit!r} on {day}, expected {RF_UNIT!r}")
+        month = month_of(eom)
+        if key in found[month]:
+            raise PanelError(f"return cutoff {key} twice for {day}")
+        try:
+            found[month][key] = float(value)
+        except (TypeError, ValueError) as exc:
+            raise PanelError(f"return cutoff {key} on {day}: {value!r} is not a number") from exc
+    out: dict[Month, ReturnBounds] = {}
+    for month, pair in found.items():
+        if set(pair) != {RETURN_CUTOFF_LOW, RETURN_CUTOFF_HIGH}:
+            raise PanelError(f"return cutoffs for {month} hold only {sorted(pair)}")
+        out[month] = ReturnBounds(month, pair[RETURN_CUTOFF_LOW], pair[RETURN_CUTOFF_HIGH])
+    return out
+
+
 def price_series(
     inputs: Path,
     admitted: Sequence[AdmittedSeries],
     grid: SessionGrid,
     holding_last: Mapping[date, date],
     splits: Mapping[int, Sequence[SplitStamp]],
+    return_bounds: Mapping[Month, ReturnBounds],
 ) -> tuple[dict[int, Mapping[date, FormationPrices]], Counter[int], Counter[int]]:
     """Stream the frozen daily window series by series into each series' formation prices."""
     by_id = {a.series_id: a for a in admitted}
@@ -580,7 +623,12 @@ def price_series(
             for day, close, adj, volume, stamped, usable in rows
         ]
         got = series_prices(
-            bars, grid, holding_last_session=holding_last, termination=termination, split_stamps=splits.get(sid, ())
+            bars,
+            grid,
+            holding_last_session=holding_last,
+            termination=termination,
+            return_bounds=return_bounds,
+            split_stamps=splits.get(sid, ()),
         )
         prices[sid] = got.by_formation
         flags.update(got.flags_by_year)
@@ -652,6 +700,12 @@ def _prices_json(got: FormationPrices, tercile: int | None) -> dict[str, Any]:
             "period_return": holding.period_return,
             "end_bar": None if holding.end_bar is None else holding.end_bar.isoformat(),
             "by_arm": dict(holding.by_arm),
+            "raw_by_arm": dict(holding.raw_by_arm),
+            "bounds": {
+                "month": f"{holding.bounds.month[0]:04d}-{holding.bounds.month[1]:02d}",
+                "low": holding.bounds.low,
+                "high": holding.bounds.high,
+            },
         },
         "month_end_after_decision": got.month_end_after_decision,
         "daily_monthly": got.daily_monthly.value,
@@ -1053,7 +1107,9 @@ def read_inputs(inputs: Path, formations: Sequence[date]) -> Inputs:
     for sid, day, factor in read_gz_lines(inputs / Frozen.SPLITS):
         splits[sid].append(SplitStamp(date.fromisoformat(day), Decimal(factor)))
     grid = SessionGrid.build(sessions, read_rf(inputs, first_day, price_bound(formations)), decisions)
-    prices, flags, excused = price_series(inputs, admitted, grid, holding_last_sessions(formations, sessions), splits)
+    prices, flags, excused = price_series(
+        inputs, admitted, grid, holding_last_sessions(formations, sessions), splits, read_return_bounds(inputs)
+    )
     # The two reads share their admission predicates: a decision bar the stream does not price is a drift.
     priced = {(sid, decisions[m]) for sid, per in prices.items() for m in per}
     if priced != set(bars):
@@ -1268,6 +1324,27 @@ def publish(root: Path, formations: Sequence[date]) -> Path:
     return out
 
 
+@dataclass(frozen=True)
+class StageBGate:
+    """Whose declared run builds stage B: step 2's (``STEP2_GATE``), or #3621 v2's rebuild under Amendment 3."""
+
+    #: Refuses unless the trial's declaration matches this checkout; given the committed and run ledger rows.
+    check_declaration: Callable[[Sequence[Mapping[str, Any]]], object]
+    #: The spec and construction hashes the manifest records, checked before and after the build.
+    versions: Callable[[], dict[str, Any]]
+    #: A pinned extended SUB (artefact, manifest sha256) the trial binds, or ``None`` for the run's own
+    #: ``sub_published`` artefact. The SUB manifest names its publishing run and is frozen into ``inputs/``, so a
+    #: rebuild whose inputs must equal an earlier stage B's byte for byte binds that stage B's SUB.
+    sub: tuple[Path, str] | None = None
+
+
+def _step2_declaration(rows: Sequence[Mapping[str, Any]]) -> object:
+    return check_declaration(TRIAL_REGISTER, rows, CodeHashes.current())
+
+
+STEP2_GATE: Final = StageBGate(_step2_declaration, lambda: dataclasses.asdict(CodeHashes.current()))
+
+
 def publish_stage_b(
     root: Path,
     run_id: str,
@@ -1275,27 +1352,32 @@ def publish_stage_b(
     confirm_access: Callable[[str, int], None],
     ledger: Path = LEDGER_PATH,
     committed_ledger: Path = COMMITTED_LEDGER_PATH,
+    gate: StageBGate = STEP2_GATE,
 ) -> tuple[Path, str]:
     """Step 2 slice 2: the stage-B artefact, built only inside the declared run; returns it and its manifest sha256.
 
-    Refuses before any stage-B read unless the step 2 declaration matches this checkout, the run's ledger holds
-    ``started``, ``access_recorded`` and ``sub_published`` with no ``stage_b_published`` or terminal row, and the
-    access row is committed. The extended SUB is the run's own ``sub_published`` artefact. Any failure after the
-    gate ends the run with a ``failed`` row.
+    Refuses before any stage-B read unless the gate's declaration matches this checkout, the run's ledger holds
+    ``started`` and ``access_recorded`` (and ``sub_published`` unless the gate pins a SUB) with no
+    ``stage_b_published`` or terminal row, and the access row is committed. The extended SUB is the gate's pinned
+    one or the run's own ``sub_published`` artefact. Any failure after the gate ends the run with a ``failed`` row.
     """
     head = _clean_head()
     rows = read_ledger(committed_ledger, ledger)
-    check_declaration(TRIAL_REGISTER, rows, CodeHashes.current())
+    gate.check_declaration(rows)
     access_id = recorded_access_id(rows, run_id, before=STAGE_B_EVENT)
-    published_sub = run_event(rows, run_id, "sub_published")
-    step2_sub = (Path(published_sub["artefact"]), str(published_sub["manifest_sha256"]))
+    if gate.sub is None:
+        published_sub = run_event(rows, run_id, "sub_published")
+        step2_sub = (Path(published_sub["artefact"]), str(published_sub["manifest_sha256"]))
+    else:
+        step2_sub = gate.sub
     confirm_access(run_id, access_id)
     out = root / f"{datetime.now(UTC).date().isoformat()}-{head[:8]}-stageB-{run_id}"
     root.mkdir(parents=True, exist_ok=True)
     out.mkdir()  # exclusive: an existing artefact directory is refused, never resumed
     try:
-        # The first stage-B file read, after every gate above: a SUB artefact of another run ends this run.
-        if reference_manifest(*step2_sub).get("run_id") != run_id:
+        # The first stage-B file read, after every gate above: unless the gate pins it, a SUB artefact of another
+        # run ends this run.
+        if gate.sub is None and reference_manifest(*step2_sub).get("run_id") != run_id:
             raise PanelError(f"the extended SUB artefact {step2_sub[0]} was not published by run {run_id}")
         _publish_artefact(
             out,
@@ -1303,7 +1385,7 @@ def publish_stage_b(
             head=head,
             stage="B",
             pins=stage_b_pins(step2_sub[1]),
-            versions=lambda: dataclasses.asdict(CodeHashes.current()),
+            versions=gate.versions,
             step2_sub=step2_sub,
             provenance={"run_id": run_id, "access_id": access_id},
         )

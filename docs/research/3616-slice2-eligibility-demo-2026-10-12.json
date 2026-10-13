@@ -1,0 +1,412 @@
+{
+ "currency": "usd",
+ "eligibilities": [
+  {
+   "instrumentId": 3000,
+   "symbol": "SPY",
+   "minPositionExposure": 10.0,
+   "maxUnitsPerOrder": 1285.0,
+   "allowOpenPosition": true,
+   "allowClosePosition": true,
+   "allowPartialClosePosition": true,
+   "allowMitOrders": true,
+   "allowEntryOrders": true,
+   "allowExitOrders": true,
+   "allowTrailingStopLoss": true,
+   "requiresW8Ben": true,
+   "unitsQuantityType": "fractional",
+   "orderFillBehaviorType": "bestEffort",
+   "allowedOrderQuantityType": "all",
+   "tradeUnitType": "units",
+   "leverageConfigs": [
+    {
+     "settlementType": "cfd",
+     "direction": "long",
+     "leverageValues": [
+      1
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 100.0,
+     "defaultStopLossPercentage": 100.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "short",
+     "leverageValues": [
+      1,
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "long",
+     "leverageValues": [
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    }
+   ]
+  },
+  {
+   "instrumentId": 3075,
+   "symbol": "IUSA.L",
+   "minPositionExposure": 10.0,
+   "maxUnitsPerOrder": 25757.0,
+   "allowOpenPosition": true,
+   "allowClosePosition": true,
+   "allowPartialClosePosition": true,
+   "allowMitOrders": true,
+   "allowEntryOrders": true,
+   "allowExitOrders": true,
+   "allowTrailingStopLoss": true,
+   "requiresW8Ben": false,
+   "unitsQuantityType": "fractional",
+   "orderFillBehaviorType": "bestEffort",
+   "allowedOrderQuantityType": "all",
+   "tradeUnitType": "units",
+   "leverageConfigs": [
+    {
+     "settlementType": "real",
+     "direction": "long",
+     "leverageValues": [
+      1
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 100.0,
+     "defaultStopLossPercentage": 100.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "short",
+     "leverageValues": [
+      1,
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "long",
+     "leverageValues": [
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    }
+   ]
+  },
+  {
+   "instrumentId": 3417,
+   "symbol": "SPY.RTH",
+   "minPositionExposure": 10.0,
+   "maxUnitsPerOrder": 129.0,
+   "allowOpenPosition": true,
+   "allowClosePosition": true,
+   "allowPartialClosePosition": true,
+   "allowMitOrders": true,
+   "allowEntryOrders": true,
+   "allowExitOrders": true,
+   "allowTrailingStopLoss": true,
+   "requiresW8Ben": true,
+   "unitsQuantityType": "fractional",
+   "orderFillBehaviorType": "bestEffort",
+   "allowedOrderQuantityType": "all",
+   "tradeUnitType": "units",
+   "leverageConfigs": [
+    {
+     "settlementType": "real",
+     "direction": "long",
+     "leverageValues": [
+      1
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 100.0,
+     "defaultStopLossPercentage": 100.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "short",
+     "leverageValues": [
+      1,
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "long",
+     "leverageValues": [
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    }
+   ]
+  },
+  {
+   "instrumentId": 3434,
+   "symbol": "CSPX.L",
+   "minPositionExposure": 10.0,
+   "maxUnitsPerOrder": 2377.0,
+   "allowOpenPosition": true,
+   "allowClosePosition": true,
+   "allowPartialClosePosition": true,
+   "allowMitOrders": true,
+   "allowEntryOrders": true,
+   "allowExitOrders": true,
+   "allowTrailingStopLoss": true,
+   "requiresW8Ben": false,
+   "unitsQuantityType": "fractional",
+   "orderFillBehaviorType": "bestEffort",
+   "allowedOrderQuantityType": "all",
+   "tradeUnitType": "units",
+   "leverageConfigs": [
+    {
+     "settlementType": "real",
+     "direction": "long",
+     "leverageValues": [
+      1
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 100.0,
+     "defaultStopLossPercentage": 100.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "short",
+     "leverageValues": [
+      1,
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "long",
+     "leverageValues": [
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    }
+   ]
+  },
+  {
+   "instrumentId": 8020,
+   "symbol": "CSP1.L",
+   "minPositionExposure": 10.0,
+   "maxUnitsPerOrder": 2377.0,
+   "allowOpenPosition": true,
+   "allowClosePosition": true,
+   "allowPartialClosePosition": true,
+   "allowMitOrders": true,
+   "allowEntryOrders": true,
+   "allowExitOrders": true,
+   "allowTrailingStopLoss": true,
+   "requiresW8Ben": false,
+   "unitsQuantityType": "fractional",
+   "orderFillBehaviorType": "bestEffort",
+   "allowedOrderQuantityType": "all",
+   "tradeUnitType": "units",
+   "leverageConfigs": [
+    {
+     "settlementType": "real",
+     "direction": "long",
+     "leverageValues": [
+      1
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 100.0,
+     "defaultStopLossPercentage": 100.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "short",
+     "leverageValues": [
+      1,
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    },
+    {
+     "settlementType": "cfd",
+     "direction": "long",
+     "leverageValues": [
+      2,
+      5,
+      10,
+      20
+     ],
+     "isPotential": false,
+     "minPositionAmount": 10.0,
+     "allowEditStopLoss": true,
+     "minStopLossPercentage": 0.0,
+     "maxStopLossPercentage": 50.0,
+     "defaultStopLossPercentage": 50.0,
+     "allowEditTakeProfit": true,
+     "minTakeProfitPercentage": 0.0,
+     "maxTakeProfitPercentage": 1000.0,
+     "defaultTakeProfitPercentage": 1000.0,
+     "allowStopLossTakeProfit": true
+    }
+   ]
+  }
+ ],
+ "notFoundInstrumentIds": [],
+ "notFoundSymbols": []
+}

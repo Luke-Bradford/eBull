@@ -24,7 +24,8 @@ from scripts import report_3609_step2 as report
 M1, M2 = "2019-01-31", "2019-02-28"
 HOLDING = {M1: "2019-02", M2: "2019-03"}
 FIRST_BAR = "2010-01-04"
-SIGNS = {"gp_at": 1, "be_me": 1, "ni_me": 1, "ocf_me": 1, "at_gr1": -1}
+#: ocf_me's sign is flipped here (Table 9 gives +1) so a -1 sign is exercised on a book characteristic.
+SIGNS = {"gp_at": 1, "be_me": 1, "ni_me": 1, "ocf_me": -1, "at_gr1": -1}
 
 
 @pytest.fixture(scope="module")
@@ -155,8 +156,9 @@ def test_rows_become_admitted_names_with_closes_industries_and_signed_values(tmp
     assert one.industry == ff12.industry(3720) and first.admitted[2].industry == UNCLASSIFIED
     assert (one.sic, first.admitted[2].sic) == (3720, None)
     assert set(one.signed) == set(CHARACTERISTICS) - {"ni_me"}
-    assert one.signed["at_gr1"] == -rows[0]["characteristics"]["at_gr1"]["value"]  # Table 9 sign -1
-    assert one.signed["gp_at"] == rows[0]["characteristics"]["gp_at"]["value"]
+    assert one.signed["ocf_me"] == -rows[0]["characteristics"]["ocf_me"]["value"]  # sign -1
+    assert one.signed["be_me"] == rows[0]["characteristics"]["be_me"]["value"]
+    assert "gp_at" not in one.signed and "at_gr1" not in one.signed  # not book characteristics
     assert second.admitted[1].holding.status is HoldingStatus.TERMINAL
     assert second.admitted[1].holding.by_arm == {"best_case": -0.5, "worst_case": -1.0}
     assert second.close == {1: 11.0}

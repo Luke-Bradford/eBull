@@ -22,7 +22,8 @@ the SL and TP realistic?" and the answer was no: swept over every bar as a hypot
 entry, a **-25% stop fires on 35.7% of entries ever and 10.1% within a year**, which makes
 it a BEAR-MARKET EXIT rather than a spike guard.  In 2022 it stops out near the October
 low, and SPY then rose ~56% by 2024-09 (366 -> 572) with **no re-entry rule** to get back
-in.  A -50% stop fires on **8.2%**.
+in.  A -50% stop fires on **8.2%**.  (Written 2026-09-21, before the sleeve had a scheduled
+rebalance; the re-entry the scheduled rebalance now provides is described below.)
 
 Measured over SPY daily closes, ``icyDenev/Intrader`` -- the same (vendor, symbol) pair
 ``market_regime_provider.CHAIN_FALLBACK`` already pins -- **7,973 bars, 1993-01-29 ->
@@ -59,11 +60,42 @@ the close **9.3%**.
 close -- and it is reported so the close-based headline is not mistaken for a bound.  It
 does not change the ranking or the decision.
 
-⚠⚠ **The accepted cost, stated so it is not rediscovered as a defect.**  This is a
-deterministic buy-and-hold BETA sleeve with **no re-entry rule**, so ANY stop that fires
-leaves it in cash indefinitely.  -50% keeps that to 8.2% of entries while still cutting a
-genuine collapse.  Do NOT 'fix' it by tightening the stop -- that is the exact change the
-operator already reversed once, and the 35.7% figure above is why.
+⚠⚠ **What happens after the stop fires (#3612 trace, 2026-10-12).**  This paragraph used to
+say the sleeve has no re-entry rule, so a stop leaves it in cash indefinitely.  That was
+true of AUTOMATIC re-entry when written (2026-09-21, when ``execute_core_rebalance`` ran
+only from the attended endpoint) and stopped being true on 2026-09-24, when #3359
+scheduled ``core_rebalance_execution`` daily at 15:37 UTC.  The automatic re-entry rule is
+now the rebalance band:
+
+- A stop-out that takes the core below its lower band edge (a whole-sleeve stop-out
+  always does) makes the next in-session fire's ``evaluate_core_rebalance`` return
+  ``buy_core`` toward that edge, pre-cost and subject to the minimum-amount floor
+  (``tests/test_2603_core_allocator.py::
+  test_a_stopped_out_core_is_rebought_to_the_lower_band_edge``).  That buy carries its
+  own stop and target, anchored on the ask and repaired to the fill
+  (``tests/test_2603_core_executor.py::
+  test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target``).
+- Nothing in the allocator or the executor's buy path branches on why the core is
+  underweight.  The buy passes the same execution gates as any core buy (eligibility,
+  quote freshness, broker preflight, sandbox headroom -- the last pinned by
+  ``tests/test_2603_core_executor.py::
+  test_over_the_sandbox_bound_only_a_buy_is_refused``).  The one RISK gate on it is the
+  engine pot's drawdown limit: ``execute_core_rebalance`` refuses non-sell actions with
+  ``portfolio_drawdown_limit`` when the pot's observed drawdown is at or beyond the
+  portfolio mandate's ``max_portfolio_drawdown_pct`` (``_observe_core_portfolio_drawdown``;
+  ``tests/test_2603_core_executor.py::test_core_drawdown_refusal_precedes_durable_order_authority``).
+  At or beyond that limit no new core exposure is taken; lots still open stay open.
+
+So an automatic rebuy after a stop-out is the designed outcome, not a whipsaw defect.
+This is consistent with ``quant/portfolio-construction-and-risk.md`` ("The catastrophe
+levels on the core (−50% / +200%) are not a risk control"): the stop puts a trigger level
+on the broker's books, and the drawdown limit is the risk gate on taking core exposure
+again.  No settled decision or spec prescribes stop-out treatment for the core either way.
+Do NOT add a stop-aware rebuy refusal on the strength of the old paragraph: a beta sleeve
+held in cash after a crash misses the recovery, which is the cost the old paragraph
+accepted only because no automatic rebuy existed.  Do NOT 'fix' anything by tightening the
+stop either -- that is the exact change the operator already reversed once, and the 35.7%
+figure above is why.
 
 ⚠ **The target is a formality, not a control.**  +200% needs roughly eleven years at
 historical drift, so its only realistic trigger is a BAD TICK -- where firing would sell

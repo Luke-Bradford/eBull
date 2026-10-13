@@ -12331,3 +12331,234 @@ neighbouring container and match it.**
   raises.
 - Enforced in: `tests/test_3609_step2_declared_run.py::test_a_started_append_that_raises_after_its_row_is_durable_ends_the_run`
   and `::test_a_started_append_that_wrote_nothing_leaves_no_row`.
+
+### A settled policy is pointed to from a skill, never restated in it (#3609)
+
+- Failure (review bot on PR #3717, 2026-10-08): a settled-decisions entry carried a four-part admission rule, and
+  the `quant/research-process.md` skill restated its terms. Two copies of one rule drift, and an agent reading
+  only the skill would act on the stale copy.
+- Prevention: when a policy is decided in `docs/settled-decisions.md`, the skill gets a one-line summary and a
+  pointer to the dated entry, with no restated thresholds, conditions or figures. Before pushing, grep the skill
+  for each number and condition in the entry; any hit is a restatement.
+- Enforced in: this prevention log; `.claude/skills/quant/research-process.md` §"From backtest to forward test".
+
+### A test called "powered" carries its power calculation, from the construction's own planning inputs (#3609)
+
+- Failure (Codex checkpoint 1 round 2 on PR #3666, applied 2026-10-08): the step 2 draft called its exposure gate
+  "powered because loadings are identified from co-movement" and gated three FF loadings (HML, RMW, CMA) for a
+  three-family composite. Identification is not power. Measured on stage A (development), the composite's CMA
+  loading was 0.02 (t 0.3) and RMW's t 1.7: investment's exposure was not separable from value's, and adding GP/A to
+  value cancelled HML (0.03). On stage B's 39 months the gate would have failed for want of data, spending the one
+  confirmatory sample. Reproduce: `PYTHONPATH=. uv run python -m scripts.plan_3609_step2_exposure`.
+- Prevention: before a declaration freezes, compute the gate's power from planning inputs of the construction itself
+  (development data or sourced series, never the confirmation sample), per intended loading and for the conjunction
+  the verdict actually requires (every loading, every arm), against a declared target, with a sensitivity. A composite of correlated families needs each family's partial loading checked
+  separately; an integrated composite can cancel one exposure with another.
+- Enforced in: the step 2 spec, premise 6; `scripts/report_3609_step2_verdict.py` `G1_LOADINGS`, tested by
+  `tests/test_3609_step2_verdict.py::test_g1_reads_stage_b_only`.
+
+### A regenerated pin is rewritten at its own row, never by first match (#3621)
+
+- Failure (review bot on PR #3729, 2026-10-09): a review fix moved the run script's construction hash, so the
+  declaration was regenerated before merge. The script that rewrote the register comment's `payload_sha256 <prefix>…`
+  replaced the first such comment in `trial_register.py`, which was step 2's (`3609-step2-book-v1`), and left the new
+  row's comment on the stale prefix.
+- Prevention: rewrite a pin inside the slice of the file that belongs to its own trial id. After regenerating, grep
+  for both the old and the new prefix and confirm each hit sits on the right row.
+- Enforced in: `tests/test_trial_register.py::test_every_payload_comment_names_its_own_rows_payload`, which checks
+  every payload comment against the payload of the row that follows it.
+
+### A vendor holding return takes its source library's return bound; a screen elsewhere does not cover it (#3730)
+
+- Failure (#3621's declared run, 2026-10-09): the #3609 panel bounded daily returns only inside characteristic
+  windows, and its holding return was the month-end `adj_close` ratio with no bound. Unstamped reverse splits and
+  reorganisation splices in the Intrader series (EXXI ×250, GMBL ×658: `split_factor` 1, `close` jumping with
+  `adj_close`) entered the micro and rest books whole. The research quarantine did not contain them either: the panel
+  reads `research_bar_quarantine` only, and T3 admits a level break back when turnover spikes, which reverse-split
+  sessions often do. JKP's own code clips every non-CRSP holding return at the holding month's 0.1/99.9 percentiles
+  (`GlobalFactors/portfolios.R` at `67174c7f`, lines 138–142), and the panel spec had not adopted it.
+  Reproduce: `PYTHONPATH=. uv run python -m scripts.measure_3730_holding_jumps --precision`.
+- Prevention: when a spec adopts a published factor library, read the library's portfolio-return code, not only its
+  characteristic code, for any treatment of the holding return; adopt it or state why not. A guard on one window
+  (characteristics) says nothing about another (holdings): list every window a return crosses and name what bounds
+  each.
+- Enforced in: the #3609 step 1 spec, Amendment 3 (§"Returns and holdings"); `scripts/measure_3730_holding_jumps.py`.
+
+### A reference lookup in a research script refuses by name, never by `KeyError` (#3730)
+
+- Failure (review bot on PR #3732, 2026-10-09): the A/B indexed the JKP cutoff and NYSE cutoff maps directly, so a
+  missing month would have surfaced as a bare `KeyError` instead of the "no cutoff row" refusal the spec promises.
+- Prevention: before indexing a reference map with a key from another input, check membership and raise a named
+  refusal that says which key and which input. Grep a new research script for `\[[a-z_]+\[` before pushing.
+- Enforced in: `scripts/measure_3730_holding_jumps.py` (`ab`).
+
+### A frozen code pin of a concluded study is checked at its own commit, not at HEAD (#3730)
+
+- Failure (#3730 slice 2, 2026-10-09): `tests/test_3609_step2_plan_pin.py` compared the step 2 exposure plan's
+  recorded `code_closure_sha256` with the planner's import closure at HEAD. The planner imports the panel builder, so
+  the first legitimate builder change after step 2 concluded (the holding-return clip) failed the pin, and the only
+  ways out the test offered were regenerating a registered plan or leaving the builder frozen for good.
+- Prevention: a pin that records "this artefact was written by this code" is a claim about history. Verify it against
+  the commit that wrote the artefact (`git log -1 -- <artefact>`, then `git archive` that tree), with `GIT_*`
+  scrubbed. Keep HEAD comparisons for gates that guard a run that has not happened yet, such as `check_declaration`.
+- Enforced in: `tests/test_3609_step2_plan_pin.py::test_the_plan_was_written_by_the_committed_planner`.
+
+### A new frozen input is pinned where it does not move a manifest that published artefacts already pin (#3730)
+
+- Failure (avoided, #3730 slice 2): the handoff put the JKP return cutoffs in the slice 1 reference artefact. Doing
+  that republishes its manifest, which changes `REFERENCE[1]` and so `STAGE_A_PINS`. Every published stage-A artefact
+  records the old value in `pinned_manifests`, so `read_verified_artefact` would refuse all of them, including the
+  ones the step 2 and #3621 records cite.
+- Prevention: before adding an input to a pinned manifest, grep for the verifiers that compare that manifest's
+  digest (`pinned_manifests`, `*_PINS`). If published artefacts carry it, pin the new input beside the manifest
+  instead.
+- Enforced in: `scripts/build_3609_factor_panel.py` (`RETURN_CUTOFFS`), and the step 1 spec Amendment 3, "Pinning".
+
+### A Financial Statement data-set `ddate` is a month end, not the fact's date (#3739)
+
+- Failure (caught before use, #3739 slice 2b, 2026-10-10): the first split-screen run bounded each cover-count jump
+  by `num.ddate`. The FSDS/FSNDS readme defines `ddate` as "the end date for the data value, rounded to the nearest
+  month end" (and `sub.period` likewise), so a cover dated 2024-10-14 reads as 2024-09-30. An interval built on it can
+  exclude a split effective in the rounded-away days.
+- Prevention: when a date from `num.tsv` bounds anything, use the reported date, `ddate − datp` days. The sign was
+  checked on covers that state their date (Apple 10-Q of 2024-08-01: ddate 20240731, datp 12, "as of July 19").
+  Read the readme's column definitions before using a data-set date column.
+- Enforced in: `scripts/build_3739_slice2b.py` (`reported_date`), `tests/test_3739_slice2b.py`.
+
+### Before paying for adjudication, bound its result from the pinned candidate list (#3739)
+
+- Failure (caught before the labour, #3739 slice 3b, 2026-10-10): the slice 3a handoff scheduled adjudication of all
+  4,214 replica rows before measuring recall. Two of the 42 comparison stamps have no candidate on their CIK at all,
+  and adjudication writes records only from candidates. So count recall could not exceed 40 / 42 = 95.2% against a
+  97% bar, and the adjudication could not have changed the verdict.
+- Prevention: once the comparison set and the candidate list are both pinned, join them first. A comparison item
+  with no candidate is a guaranteed miss, and the count of those caps recall. If the cap is below the bar, record the
+  fail and spend the effort on the revision instead.
+- Enforced in: `docs/research/3739-event-file/README.md` § "Slice 3b" (the bound and its inputs).
+
+### An optional CSV field compared by equality matches an empty value (#3739)
+
+- Failure (bot review, #3739 slice 3b, PR #3751): the checker's single-class test compared a cover's title and
+  symbol with the row's by `==`. A row with an empty `class_title` or `class_symbol` would match a cover value that
+  is also empty.
+- Prevention: before comparing a user-supplied CSV field by equality, guard it for truthiness
+  (`title and t == title`). Grep the diff for `== <field>` on values read with `.get(...) or ""`.
+- Enforced in: `scripts/build_3739_slice3b.py` (`_class_failures`), and
+  `tests/test_3739_slice3b.py::test_an_empty_class_title_or_symbol_matches_no_cover`.
+
+### A permanent mirror validates the body before it caches it, not the status alone (#3739)
+
+- Failure (bot review, #3739 slice 3b, PR #3751): the evidence mirror cached any HTTP 200 body forever, and a rerun
+  reads the mirror instead of fetching. A refusal page served with status 200 would have become a permanent quote
+  mismatch.
+- Prevention: before writing a fetched body to a cache that later runs trust, assert its expected shape, such as
+  the header's marker or a non-empty, non-refusal document. A rejected body is not cached, so the next run fetches
+  it again.
+- Enforced in: `scripts/build_3739_slice3b.py` (`served_body`), and
+  `tests/test_3739_slice3b.py::test_only_a_served_body_is_mirrored`.
+
+### A per-item coverage claim comes from committed code, not a hand join (#3739)
+
+- Failure (caught in slice 3c, 2026-10-10): slice 3b's README listed `AMC` 2023-08-23 as having no candidate whose
+  interval covers the stamp date. The pinned list's Item 5.03 candidate `S004986`, [2023-08-14, 2023-11-14], covers
+  it. The claim came from a join done outside committed code.
+- Prevention: a sentence that names which items a pinned list covers or misses cites the command that printed it,
+  and that command prints every item's row, not a hand-picked subset.
+- Enforced in: `scripts/build_3739_slice3c.py coverage` (prints every stamp's covering candidates and its inputs'
+  sha256), cited by `docs/research/3739-event-file/README.md` § "Slice 3c".
+
+### A fail-closed claim needs its counterexample search, not its happy path (#3739)
+
+- Failure (Codex checkpoint 1, #3739 Amendment 1 round 6): the amendment claimed a wrong constructed ex-date "surfaces
+  as unresolved basis" through the rescale detector. A pair whose shared sessions all precede both dates is
+  explained whatever the date, so raw prices between the dates are wrong silently.
+- Prevention: before writing that a downstream check catches an error, construct the case where the check's inputs
+  never span the error (here: no shared session between the two dates). If one exists, state the error as a limit.
+- Enforced in: `docs/research/2026-10-09-3739-stage-c-panel.md` §"Source rules" (split effective date) and
+  §"Known limits" (constructed (b)(1) dates).
+
+### A writer's pure qualification gate covers every CHECK its table enforces (#3612)
+
+- Failure (bot review, PR #3773): `session_close_snapshot_defect` checked finiteness of units, mark and fees, but
+  sql/482 also refuses non-positive units and rates, non-finite amount or market value, and a broken
+  `market_value = amount + unrealized_pnl` identity. Such a snapshot passed the gate and raised at INSERT, logged at
+  ERROR instead of the specified named INFO refusal.
+- Prevention: when a writer has a pure gate in front of an insert, list the migration's CHECKs and give each a
+  matching gate branch with a test row.
+- Enforced in: `app/services/account_equity_evidence.py::session_close_snapshot_defect` and
+  `tests/test_3612_session_close_anchor.py::test_a_position_without_a_usable_mark_time_fees_or_values_refuses_the_whole_snapshot`.
+
+### A value decoded from JSON is None-safe unless its column is NOT NULL and says so (#3612)
+
+- Failure (bot review, PR #3774): `observe_daily_marked_pnl` built `Decimal(fees)` from a `json_agg` row. A NULL
+  would raise `TypeError` and abort the paper cycle, although the pure core it feeds handles `fees is None` as a
+  named refusal.
+- Prevention: every `Decimal(...)`/`datetime.fromisoformat(...)` over a JSON-decoded column either goes through a
+  None-safe helper or is preceded by a check that refuses by name.
+- Enforced in: `app/services/engine_pot_risk.py::_anchor_mark` and
+  `tests/test_3612_marked_daily_loss.py::test_a_null_anchor_value_refuses_instead_of_raising`.
+
+### Scheduling an attended-only path re-opens every docstring that reasoned from "attended only" (#3612)
+
+- Failure (#3612 trace, 2026-10-12): `core_exit_levels` (#3284, 2026-09-21) recorded "no re-entry rule, so a stop
+  leaves the sleeve in cash indefinitely" as an accepted cost. Three days later #3359 scheduled
+  `core_rebalance_execution` daily, which rebuys a stopped-out core toward the lower band edge below the pot drawdown
+  limit. The docstring stayed, and the risk committee read it as a possible whipsaw defect.
+- Prevention: when a PR puts an attended-only executor on a schedule, grep its callees' docstrings for "attended",
+  "manual", "no re-entry" and similar claims about who triggers it, and correct them in the same PR.
+- Enforced in: review only for the sweep itself. The corrected instance is `app/services/core_exit_levels.py`
+  ("What happens after the stop fires"), with its behaviour pinned by
+  `tests/test_2603_core_allocator.py::test_a_stopped_out_core_is_rebought_to_the_lower_band_edge` and its cited
+  tests resolved by `test_every_test_the_core_exit_levels_docstring_cites_exists`.
+
+### A risk control is compared at a matched risk outcome, against the engine's own baseline (#3612)
+
+- Failure (Codex checkpoint 1, #3612 de-gross note, 2026-10-12): the first draft priced Grossman–Zhou against a
+  static pot that rebalances through any fall, and claimed "a lower static target is the cheaper way to a lower
+  drawdown" by comparing pots with 50.5% and 24.9% maximum drawdowns. Measured at the same 25% bound, the claim
+  reversed: the best feasible static target returned 0.30 points a year less since 1993. The static baseline also
+  ignored the core's own buy refusal at the drawdown limit (`strategy_core_executor.py:1199-1207`).
+- Prevention: before calling one exposure rule cheaper than another, (1) model the baseline from the executors'
+  actual refusals, read in code, and (2) compare the alternatives at the same risk outcome (here: zero closes beyond
+  the floor), searching the alternative's parameter at a stated grid and taking its best feasible value.
+- Enforced in: review only. The measured instance is `scripts/measure_3612_degross_ladder.py` (`today` rule,
+  `best_target_holding_limit_under_today`).
+
+### A mandate percentage is a share of whatever its allocator divides by, not of the pot (#3616)
+
+- Failure (Codex checkpoint 2, #3616 slice 1 build, 2026-10-12): the merged comparator spec, after four clean
+  checkpoint-1 rounds, set the core's pot weight to `core_target_pct` / 100 beside the active cap
+  `active_risk_budget_pct` / 100. The two have different denominators: the active cap is a share of `pool_base`, but the
+  core allocator measures its target over `core_market_value + cash_balance`, and that cash is sandbox headroom net
+  of active commitments. At the live 50/30 the core is 35% of the pot, so the hurdle multiplier is 13/6, not 5/3.
+- Prevention: before combining two mandate percentages in one formula, read the code that enforces each one and
+  write down its denominator. A spec that states a weight without naming the enforcing line has not done this.
+- Enforced in: `app/services/strategy_comparator.py::hurdle_weights` (docstring) and
+  `tests/test_3616_strategy_comparator.py::test_live_mandate_core_is_its_target_share_of_the_non_active_pot`.
+
+### A tax rate applied to a TWR is not an after-tax return (#3616)
+
+- Failure (Codex checkpoint 1, #3616 slice 2 spec, round 1, 2026-10-12): the draft published the engine's "after UK
+  tax" return as `R£ · (1 − t)` on the pot's time-weighted return, citing the SEC's Form N-1A post-liquidation
+  formula. N-1A taxes each distribution when paid and each lot on its own basis. A TWR is a flow-neutral chain, not
+  anyone's chargeable gain. Tax also depends on disposal dates and tax years, and on each holding's character: an
+  offshore income gain on a non-reporting fund such as SPY is income and cannot be netted against capital losses.
+  The haircut could be wrong in either direction.
+- Prevention: an after-tax figure comes from disposals matched under HMRC rules per tax year (`tax_ledger`), with
+  each instrument's tax character established from its source (HMRC's reporting-fund list for funds). If that
+  machinery does not cover the trades, publish no after-tax number; say what is missing.
+- Enforced in: `docs/specs/metrics/2026-10-12-3616-gbp-isa-comparator.md`, "Why this slice computes no after-tax
+  return".
+
+### A smoke test of a state-changing helper mutates whatever database it reaches (#3785)
+
+- Failure (2026-10-13, found after an OS-update outage): `tests/test_sync_orchestrator_api.py::TestReaperIdempotent`
+  called `reap_orphaned_syncs()` and `reap_orphaned_syncs(reap_all=True)` to assert they returned an int. The reaper
+  opens its own connection on `settings.database_url`, so each pre-push DB-tier run set every running dev
+  `sync_runs` row to `failed`/`orchestrator_crash` and cancelled its downstream layers. In 14 days, 21 of 34 crash
+  reaps had no jobs boot near them, including the nightly full sync on four nights.
+- Prevention: a test that calls a production function which writes must point that function at the test database
+  (autouse `settings.database_url` redirect) or not call it. "Returns without error" is not a reason to run a
+  writer against the dev DB. The line-literal guard and the size tripwire both miss an internal UPDATE.
+- Enforced in: `.claude/skills/engineering/test-quality.md` ("An integration test through a production entry point
+  may open its OWN connection"); review only.

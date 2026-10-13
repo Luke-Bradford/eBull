@@ -155,3 +155,19 @@ def test_a_connection_inside_a_transaction_refuses(snapshots: dict[str, int]) ->
         conn.execute("SELECT 1")
         with pytest.raises(ReportError, match="no open transaction"):
             inputs.snapshot_digests(conn, snapshots)
+
+
+def test_a_value_that_overflows_its_float_refuses(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    snapshots: dict[str, int],
+) -> None:
+    ebull_test_conn.execute(
+        "UPDATE reference_data_observations SET value = 1e400 WHERE snapshot_id = %s AND series_key = 'Mom'"
+        " AND observation_date = '2020-01-31'",
+        (snapshots[MOMENTUM],),
+    )
+    ebull_test_conn.commit()
+    with _fresh() as conn:
+        pins = inputs.snapshot_digests(conn, snapshots)  # pinned after the change: only the float check can refuse
+    with _fresh() as conn, pytest.raises(ReportError, match="not finite as a float"):
+        inputs.read_factors(conn, snapshots, pins)

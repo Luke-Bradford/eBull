@@ -53,15 +53,13 @@ def _decision(
 
 SCORES = _scores(
     {
-        "gp_at": (1, 2, 3),
-        "be_me": (1, 2),
-        "at_gr1": (1, 2, 3, 4),
-        "gp_a": (1, 2, 3),
-        "value": (1, 2),
-        "investment": (1, 2, 3, 4),
-        COMPOSITE: (1, 2, 3),
+        "be_me": (1, 2, 3),
+        "ni_me": (1, 2),
+        "ocf_me": (1, 2, 3, 4),
+        "value": (1, 2, 3, 4),
+        COMPOSITE: (1, 2, 3, 4),
     },
-    {("ocf_me", "Manuf"): (5, 6), ("ocf_me", "HiTec"): (3,), ("investment", "Shops"): (5,)},
+    {("ni_me", "Manuf"): (5, 6), ("ni_me", "HiTec"): (3,), ("value", "Shops"): (5,)},
 )
 BANDS = Bands(
     order=(1, 2, 3),
@@ -75,33 +73,34 @@ BANDS = Bands(
 def test_uninformative_groups_are_counted_per_operation_with_the_books_post_trade_weight() -> None:
     row = construction_month(UNIVERSE, SCORES, BANDS, _decision((1, 3, 5)), NO_SALES)
     assert list(row.uninformative) == list(OPERATIONS)
-    # Two ocf_me groups, three names; the book holds 3 and 5 of them at 1/3 each.
-    assert row.uninformative["ocf_me"] == Uninformative(2, _a(3, 2, 2 / 3))
-    assert row.uninformative["investment"] == Uninformative(1, _a(1, 1, 1 / 3))
+    # Two ni_me groups, three names; the book holds 3 and 5 of them at 1/3 each.
+    assert row.uninformative["ni_me"] == Uninformative(2, _a(3, 2, 2 / 3))
+    assert row.uninformative["value"] == Uninformative(1, _a(1, 1, 1 / 3))
     assert row.uninformative[COMPOSITE] == Uninformative(0, _a(0, 0, 0.0))
 
 
 def test_book_weight_follows_the_decisions_target_weights() -> None:
     row = construction_month(UNIVERSE, SCORES, BANDS, _decision((3, 5), weights={3: 0.25, 5: 0.75}), NO_SALES)
-    assert row.uninformative["ocf_me"].affected == _a(3, 2, 1.0)
-    assert row.uninformative["investment"].affected == _a(1, 1, 0.75)
+    assert row.uninformative["ni_me"].affected == _a(3, 2, 1.0)
+    assert row.uninformative["value"].affected == _a(1, 1, 0.75)
 
 
 def test_an_all_cash_formation_weighs_nothing() -> None:
     row = construction_month(UNIVERSE, SCORES, BANDS, _decision(()), NO_SALES)
-    assert row.uninformative["ocf_me"].affected == _a(3, 0, 0.0)
+    assert row.uninformative["ni_me"].affected == _a(3, 0, 0.0)
     assert sum(p.names for p in row.patterns.values()) == len(UNIVERSE)
 
 
 def test_membership_patterns_partition_the_universe_in_operation_order() -> None:
-    assert pattern(SCORES, 1) == "gp_at+be_me+at_gr1+gp_a+value+investment+composite"
-    assert pattern(SCORES, 4) == "at_gr1+investment"
+    assert OPERATIONS == ("be_me", "ni_me", "ocf_me", "value", COMPOSITE)
+    assert pattern(SCORES, 1) == "be_me+ni_me+ocf_me+value+composite"
+    assert pattern(SCORES, 4) == "ocf_me+value+composite"
     assert pattern(SCORES, 5) == NO_SCORE
     row = construction_month(UNIVERSE, SCORES, BANDS, _decision((1, 2, 4)), NO_SALES)
     assert row.patterns == {
-        "at_gr1+investment": _a(1, 1, 1 / 3),
-        "gp_at+at_gr1+gp_a+investment+composite": _a(1, 0, 0.0),
-        "gp_at+be_me+at_gr1+gp_a+value+investment+composite": _a(2, 2, 2 / 3),
+        "ocf_me+value+composite": _a(1, 1, 1 / 3),
+        "be_me+ocf_me+value+composite": _a(1, 0, 0.0),
+        "be_me+ni_me+ocf_me+value+composite": _a(2, 2, 2 / 3),
         NO_SCORE: _a(2, 0, 0.0),
     }
     assert sum(p.names for p in row.patterns.values()) == len(UNIVERSE)
@@ -123,7 +122,7 @@ def test_identifier_decided_selections_come_from_the_bands_tie_sets() -> None:
 def test_a_book_or_group_name_outside_the_universe_or_an_unknown_operation_refuses() -> None:
     with pytest.raises(ValueError, match="book holds a name outside"):
         construction_month(UNIVERSE, SCORES, BANDS, _decision((1, 99)), NO_SALES)
-    stray = _scores({}, {("gp_at", "Manuf"): (99,)})
+    stray = _scores({}, {("be_me", "Manuf"): (99,)})
     with pytest.raises(ValueError, match="uninformative group holds a name outside"):
         construction_month(UNIVERSE, stray, BANDS, _decision(()), NO_SALES)
     unknown = _scores({}, {("rvol_21d", "Manuf"): (1,)})

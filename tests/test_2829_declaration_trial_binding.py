@@ -312,9 +312,24 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
 
         r24 (2026-10-06, #3609) added ``3609-step1-fidelity-v1`` (16 searches); the
         same command returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r25 (2026-10-08, #3609) added ``3609-step2-exposure-planning-2026-10-08`` (3 searches);
+        the same command returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r26 (2026-10-08, #3609) added ``3609-step2-book-v1`` (1 search); the same command returned
+        the same five groups, 488 rows, all ``harness_validation``.
+
+        r27 (2026-10-08, #3620) added ``3620-condition4-feasibility-2026-10-08`` (1 search); the same
+        command returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r28 (2026-10-09, #3621) added ``3621-avoidance-filters-v1`` (62 searches); the same command
+        returned the same five groups, 488 rows, all ``harness_validation``.
+
+        r29 (2026-10-09, #3621) added ``3621-avoidance-filters-v2`` (86 searches); the same command
+        returned the same five groups, 488 rows, all ``harness_validation``.
         """
-        assert TRIAL_REGISTER.declared_count == 521
-        assert len(TRIAL_REGISTER.trials) == 52
+        assert TRIAL_REGISTER.declared_count == 674
+        assert len(TRIAL_REGISTER.trials) == 57
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

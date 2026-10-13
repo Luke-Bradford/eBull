@@ -21,6 +21,7 @@ const LATEST: EngineBookRiskLatest = {
   pool_event_id: 7,
   capital_usd: "40000.000000",
   gross_usd: "16078.026146",
+  net_usd: "16078.026146",
   position_count: 4,
   instrument_count: 1,
   open_trade_count: 4,
@@ -39,12 +40,14 @@ const LATEST: EngineBookRiskLatest = {
   history_status: "ok",
   beta_defaulted_count: 0,
   beta_defaulted_weight_pct: "0E-8",
+  stress_2008_pct: "-21.81803562",
   stress_2020_pct: "-13.17638420",
   stress_2022_pct: "-9.79806906",
   checks: {
     stale_marks: { status: "evaluated", value: "0", limit: "0", flagged: false },
     forecast_vol_vs_target: { status: "evaluated", value: "4.04665230", limit: "18.0000", flagged: false },
     positions_vs_max_concurrent: { status: "evaluated", value: "4", limit: "30", flagged: false },
+    stress_2008_vs_max_drawdown: { status: "evaluated", value: "-21.81803562", limit: "25.0000", flagged: false },
     stress_2020_vs_max_drawdown: { status: "evaluated", value: "-13.17638420", limit: "25.0000", flagged: false },
     stress_2022_vs_max_drawdown: { status: "evaluated", value: "-9.79806906", limit: "25.0000", flagged: false },
   },
@@ -54,12 +57,14 @@ const LATEST: EngineBookRiskLatest = {
       position_id: 3603268128,
       instrument_id: 3417,
       symbol: "SPY.RTH",
+      side: "long",
       units: "0.16227400",
       mark: "763.680000",
       mark_date: "2026-10-01",
       market_value_usd: "123.92540832",
       weight_of_capital_pct: "0.30981352",
       beta: "0.96118875",
+      beta_assumed: null,
       beta_n_obs: 235,
     },
   ],
@@ -90,6 +95,8 @@ describe("EngineBookRiskPanel", () => {
     const checks = within(screen.getByRole("list", { name: "Mandate checks" }));
     const stress = checks.getByText("2020 crash stress vs max drawdown").closest("li")!;
     expect(stress).toHaveTextContent("-13.18% vs -25.00%");
+    const crisis = checks.getByText("2008 crisis stress vs max drawdown").closest("li")!;
+    expect(crisis).toHaveTextContent("-21.82% vs -25.00%");
     expect(checks.getByText("Forecast volatility vs target").closest("li")!).toHaveTextContent("4.05% vs 18.00%");
     expect(screen.getByText(/US\$16,078\.03 of US\$40,000\.00 \(40\.20%\)/)).toBeInTheDocument();
   });
@@ -118,6 +125,39 @@ describe("EngineBookRiskPanel", () => {
     render(<EngineBookRiskPanel />);
     expect(await screen.findByText("Partly checked")).toBeInTheDocument();
     expect(screen.getByText("no limit set")).toBeInTheDocument();
+  });
+
+  it("shows a short's side, signed weight and net, and says a rally is not stress-tested", async () => {
+    const short = {
+      ...LATEST,
+      gross_usd: "1123.925408",
+      net_usd: "-876.074592",
+      beta_defaulted_count: 1,
+      beta_defaulted_weight_pct: "2.50000000",
+      positions: [
+        ...LATEST.positions,
+        {
+          ...LATEST.positions[0]!,
+          position_id: 3603268129,
+          instrument_id: 9999,
+          symbol: "XYZ",
+          side: "short" as const,
+          market_value_usd: "-1000.00000000",
+          weight_of_capital_pct: "-2.50000000",
+          beta: "defaulted",
+          beta_assumed: "0",
+        },
+      ],
+    };
+    mockRisk({ policy_version: "engine-book-risk-v3", job: JOB, latest: short, recent: [] });
+    render(<EngineBookRiskPanel />);
+    expect(await screen.findByText(/net -US\$876\.07/)).toBeInTheDocument();
+    expect(screen.getByText(/a rally or squeeze is not stress-tested/)).toBeInTheDocument();
+    expect(screen.getByText(/assumed beta 1 if net long, 0 if net short/)).toBeInTheDocument();
+    const row = within(screen.getByRole("list", { name: "Positions measured" })).getByText(/XYZ/).closest("li")!;
+    expect(row).toHaveTextContent("short");
+    expect(row).toHaveTextContent("-2.50% of capital");
+    expect(row).toHaveTextContent("beta 0 (assumed)");
   });
 
   it("shows a retry on a failed fetch", async () => {

@@ -415,6 +415,36 @@ class TestBackfillCusipCoverage:
         # constant.
         assert rows[0][3] == "test://13flist"
 
+    def test_unpublished_quarter_falls_back_to_prior_list(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#3630: with no quarter pinned, a 404 on the new list inside the
+        grace window maps from the prior quarter's list and says so."""
+        import urllib.error
+        from email.message import Message
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=914_085, symbol="AAPL", company_name="Apple Inc.")
+        conn.commit()
+        payload = _line("037833100", "APPLE INC", "COM")
+
+        def fetch(year: int, quarter: int) -> tuple[str, str]:
+            if (year, quarter) == (2026, 3):
+                raise urllib.error.HTTPError("test://13flist2026q3", 404, "Not Found", Message(), None)
+            return payload, f"test://13flist{year}q{quarter}"
+
+        result = backfill_cusip_coverage(conn, today=date(2026, 10, 4), fetch=fetch)
+
+        assert result.unpublished_quarter == (2026, 3)
+        assert result.inserted == 1
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT period_year, period_quarter, source_url FROM sec_reference_documents "
+                "WHERE document_kind = '13f_securities_list'"
+            )
+            assert cur.fetchall() == [(2026, 2, "test://13flist2026q2")]
+
     def test_raw_payload_upsert_idempotent(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

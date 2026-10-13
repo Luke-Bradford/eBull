@@ -271,6 +271,9 @@ def read_factors(
                         f"{dataset}/{key}: no rows, a non-finite value or a unit other than {FACTOR_UNIT}"
                     )
                 values = {(day.year, day.month): float(value) for day, value, _ in rows}
+                # A finite Decimal can still overflow the float it becomes (Decimal("1e400") -> inf).
+                if not all(math.isfinite(v) for v in values.values()):
+                    raise ReportError(f"{dataset}/{key}: a value is not finite as a float")
                 if len(values) != len(rows) or key in factors:
                     raise ReportError(f"{dataset}/{key} repeats a calendar month or another dataset's series")
                 factors[key] = values

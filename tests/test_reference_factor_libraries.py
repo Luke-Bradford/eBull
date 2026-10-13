@@ -28,6 +28,7 @@ from app.services.reference_data import (
     parse_global_q_monthly_csv,
     parse_jkp_monthly_zip,
     parse_jkp_nyse_cutoffs_csv,
+    parse_jkp_return_cutoffs_csv,
     parse_osap_ls_wide_csv,
     resolve_global_q_monthly_url,
     resolve_osap_ls_wide_url,
@@ -133,6 +134,33 @@ def test_jkp_parser_refuses_the_wrong_slice_or_shape(row: str, match: str) -> No
         parse_jkp_monthly_zip(_zip(_JKP_HEADER + row), location="usa", weighting="vw_cap")
 
 
+_JKP_REGIONAL_HEADER = "location,name,freq,weighting,direction,n_countries,date,ret\n"
+
+
+def test_jkp_developed_spec_reads_the_regional_layout_by_column_name() -> None:
+    spec = REFERENCE_DATASETS["jkp_developed_monthly_vw_cap"]
+    parsed = spec.parser(
+        _zip(
+            _JKP_REGIONAL_HEADER + "developed,be_me,monthly,vw_cap,1,22,2020-12-31,-0.016\n"
+            "developed,gp_at,monthly,vw_cap,1,4,1986-01-31,NA\n"
+        )
+    )
+    assert spec.parser_version == "jkp-regional-monthly-csv-zip-v1"
+    assert parsed.missing_count == 1
+    assert [(o.series_key, o.observation_date, o.value) for o in parsed.observations] == [
+        ("be_me", date(2020, 12, 31), Decimal("-0.016")),
+    ]
+    # A country file under the regional spec, or a regional file under the country spec, is a format change.
+    with pytest.raises(ReferenceDataSourceError, match="header"):
+        spec.parser(_zip(_JKP_HEADER + "usa,be_me,monthly,vw_cap,1,505,8,1926-02-28,0.012\n"))
+    with pytest.raises(ReferenceDataSourceError, match="header"):
+        REFERENCE_DATASETS["jkp_usa_monthly_vw_cap"].parser(
+            _zip(_JKP_REGIONAL_HEADER + "developed,be_me,monthly,vw_cap,1,22,2020-12-31,-0.016\n")
+        )
+    with pytest.raises(ReferenceDataSourceError, match="expected developed/monthly/vw_cap"):
+        spec.parser(_zip(_JKP_REGIONAL_HEADER + "world_ex_us,be_me,monthly,vw_cap,1,51,2020-12-31,-0.025\n"))
+
+
 def test_aqr_tsmom_sheet_with_a_blank_date_header_cell() -> None:
     header = (None, "TSMOM", "TSMOM^CM", "TSMOM^EQ", "TSMOM^FI", "TSMOM^FX")
     payload = _xlsx(
@@ -168,11 +196,21 @@ def test_fed_ebp_parser_types_spreads_and_probability() -> None:
     ]
 
 
+def test_fed_ebp_parser_reads_the_2026_10_iso_dates() -> None:
+    """The 2026-10 release (snapshot 65) writes ISO dates with LF endings (#3716)."""
+    iso = parse_fed_ebp_csv(b"date,gz_spread,ebp,est_prob\n1973-01-01,1.13,-0.0475,0.18\n")
+    slash = parse_fed_ebp_csv(b"date,gz_spread,ebp,est_prob\r\n1/1/1973,1.13,-0.0475,0.18\r\n")
+    assert iso == slash
+    assert {o.observation_date for o in iso.observations} == {date(1973, 1, 1)}
+
+
 @pytest.mark.parametrize(
     ("text", "match"),
     [
         (b"date,gz_spread,ebp\n7/1/2026,1,1\n", "header"),
-        (b"date,gz_spread,ebp,est_prob\n2026-07-01,1,1,0.1\n", "invalid date"),
+        (b"date,gz_spread,ebp,est_prob\n2026-13-01,1,1,0.1\n", "invalid date"),
+        (b"date,gz_spread,ebp,est_prob\n20260701,1,1,0.1\n", "invalid date"),
+        (b"date,gz_spread,ebp,est_prob\nJul 2026,1,1,0.1\n", "invalid date"),
         (b"date,gz_spread,ebp,est_prob\n7/1/2026,1,1,1.5\n", r"outside \[0, 1\]"),
     ],
 )
@@ -244,6 +282,48 @@ def test_jkp_cutoffs_parser_refuses_drift(body: bytes, match: str) -> None:
         parse_jkp_nyse_cutoffs_csv(_CUTOFFS_HEADER + body)
     with pytest.raises(ReferenceDataSourceError, match="header"):
         parse_jkp_nyse_cutoffs_csv(b"eom,n,nyse_p20\n2014-08-31,1,2\n")
+
+
+_RETURN_CUTOFFS_HEADER = (
+    b"eom,n,ret_0_1,ret_1,ret_99,ret_99_9,ret_local_0_1,ret_local_1,ret_local_99,ret_local_99_9,"
+    b"ret_exc_0_1,ret_exc_1,ret_exc_99,ret_exc_99_9\n"
+)
+# Two rows in JKP's published shape: the excess family is the total family minus the month's one rate (0.003).
+_RETURN_CUTOFFS_ROWS = (
+    b"2019-10-31,40000,-0.6,-0.3,0.4,1.5,-0.61,-0.3,0.4,1.6,-0.603,-0.303,0.397,1.497\n"
+    b"2019-11-30,40001,-0.7,-0.35,0.5,1.8,-0.7,-0.35,NA,1.8,-0.702,-0.352,0.498,1.798\n"
+)
+
+
+def test_jkp_return_cutoffs_parser_keeps_every_family_as_decimal_returns() -> None:
+    parsed = parse_jkp_return_cutoffs_csv(_RETURN_CUTOFFS_HEADER + _RETURN_CUTOFFS_ROWS)
+    assert parsed.missing_count == 1
+    rows = {(o.series_key, o.observation_date): (o.value, o.unit) for o in parsed.observations}
+    assert rows[("ret_99_9", date(2019, 11, 30))] == (Decimal("1.8"), "decimal_return")
+    assert rows[("ret_exc_0_1", date(2019, 10, 31))] == (Decimal("-0.603"), "decimal_return")
+    assert rows[("n", date(2019, 10, 31))] == (Decimal("40000"), "count")
+    assert ("ret_local_99", date(2019, 11, 30)) not in rows
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        # The excess pair is shifted by 0.003 at the top and 0.004 at the bottom: not one rate.
+        (b"2019-10-31,40000,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.604,-0.303,0.397,1.497\n", "unequal shifts"),
+        (b"2019-10-31,40000,NA,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "missing ret_0_1"),
+        (b"2019-10-31,40000,0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,0.597,-0.303,0.397,1.497\n", "ret percentiles decrease"),
+        (b"2019-10-30,40000,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "not a month end"),
+        (_RETURN_CUTOFFS_ROWS.replace(b"2019-11-30", b"2019-12-31"), "does not follow"),
+        (b"2019-10-31,0.5,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "positive integer"),
+        (b"2019-10-31,NA,-0.6,-0.3,0.4,1.5,-0.6,-0.3,0.4,1.5,-0.603,-0.303,0.397,1.497\n", "missing n"),
+        (b"2019-10-31,40000,-0.6,-0.3,0.4,1.5\n", "ragged"),
+    ],
+)
+def test_jkp_return_cutoffs_parser_refuses_drift(body: bytes, match: str) -> None:
+    with pytest.raises(ReferenceDataSourceError, match=match):
+        parse_jkp_return_cutoffs_csv(_RETURN_CUTOFFS_HEADER + body)
+    with pytest.raises(ReferenceDataSourceError, match="header"):
+        parse_jkp_return_cutoffs_csv(_CUTOFFS_HEADER + b"2014-08-31,1400,30,600,2500,15000\n")
 
 
 def test_osap_parser_normalises_percent_to_decimal_as_published() -> None:

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from threading import Barrier, Event
 from time import sleep
 from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import psycopg
 import pytest
@@ -30,6 +31,7 @@ from app.providers.broker import (
 )
 from app.services import strategy_paper_executor
 from app.services.cost_model import COST_MODEL_ID
+from app.services.engine_pot_risk import daily_anchor_session
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.result_ledger import store_holdout_result, store_in_sample_result
 from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
@@ -166,6 +168,7 @@ def _seed(
             changed_by="test",
             reason="shared paper pool fixture",
         )
+    seed_session_close_anchor(conn, decided_at=_NOW)
     conn.execute(
         "INSERT INTO exchanges (exchange_id, country, asset_class) VALUES ('2', 'US', 'us_equity') "
         "ON CONFLICT (exchange_id) DO UPDATE SET asset_class='us_equity'"
@@ -430,6 +433,24 @@ def _seed(
     )
     conn.commit()
     return int(signal[0])
+
+
+def seed_session_close_anchor(conn: psycopg.Connection[Any], *, decided_at: datetime) -> datetime:
+    """An empty-book session-close anchor S (#3612) for the session before ``decided_at``'s
+    New York date, captured one minute after that session's close. Returns S's time."""
+    session = daily_anchor_session(decided_at)
+    observed_at = datetime.combine(session, time(16, 1), tzinfo=ZoneInfo("America/New_York"))
+    conn.execute(
+        """
+        INSERT INTO broker_account_session_close_snapshots (
+            environment, session_date, observed_at, account_currency_id, currency,
+            official_direct_long_positions, official_direct_short_positions
+        ) VALUES ('demo', %s, %s, 1, 'USD', 0, 0)
+        ON CONFLICT (environment, session_date) DO NOTHING
+        """,
+        (session, observed_at),
+    )
+    return observed_at
 
 
 def _rerank_signal(conn: psycopg.Connection[Any], signal_id: int) -> None:

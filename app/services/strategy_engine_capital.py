@@ -33,6 +33,13 @@ EngineCapitalRefusal = Literal[
     "engine_capital_ownership_mismatched",
     "engine_capital_snapshot_unusable",
     "engine_capital_population_incomplete",
+    # #3612 slice 2: the marked daily-loss observation (``engine_pot_risk.observe_daily_marked_pnl``).
+    "engine_pot_daily_anchor_missing",
+    "engine_pot_daily_anchor_incomplete",
+    "engine_pot_daily_close_in_window",
+    "engine_pot_daily_event_unwitnessed",
+    "engine_pot_daily_accounting_unverified",
+    "engine_pot_daily_mark_stale",
 ]
 """What a caller may report when this module refuses to observe the shared pot.
 

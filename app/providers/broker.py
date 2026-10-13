@@ -546,15 +546,20 @@ class BrokerDirectPositionInvestment:
     #: ``unrealizedPnL.assetCurrencyId``. Carried raw and mapped by the consumer: an id we
     #: have no documented code for must refuse, not be guessed.
     asset_currency_id: int
-    #: ``unrealizedPnL.timestamp`` -- when the broker struck the mark. EVIDENCE, not an
-    #: operand: nothing reads it for a verdict. It exists so the gap between this capture
-    #: and the local end-of-day book can be measured. ``None`` when absent or unparseable,
-    #: because a missing timestamp must not take down a comparand that does not use it.
+    #: ``unrealizedPnL.timestamp`` -- when the broker struck the mark. Not an operand of
+    #: this snapshot's reconciliation; it measures the gap between this capture and the
+    #: local end-of-day book. #3612's session-close anchor requires it inside
+    #: ``[session close, observed_at]`` and refuses the anchor otherwise
+    #: (``account_equity_evidence.session_close_snapshot_defect``). ``None`` when absent or
+    #: unparseable, because a missing timestamp must not take down a comparand that does
+    #: not use it.
     pnl_timestamp: datetime | None = None
     #: ``totalFees`` -- "Total overnight fees and dividends charged/paid on the position in
     #: USD. Negative amount represents refund". One signed number; the two cannot be
     #: separated. A MEMO for the #3540 NAV bridge, never an operand of this snapshot, so
-    #: ``None`` when absent or malformed rather than failing the snapshot.
+    #: ``None`` when absent or malformed rather than failing the snapshot. #3612's
+    #: session-close anchor requires it reported and finite, and the marked daily-loss
+    #: check refuses when it changes between the anchor and now; it is never added.
     total_fees: Decimal | None = None
 
 

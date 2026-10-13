@@ -28,6 +28,8 @@ from app.services.strategy_position_manager import configure_position_manager, m
 from tests.test_ai_trial_executor_db import _REQUEST_ID, _broker, _control_instrument, _enable_trading
 from tests.test_ai_trial_intent_db import ARM_INSTRUMENT, NOW, _published_pair
 
+pytestmark = pytest.mark.usefixtures("marked_daily_loss_neutral")
+
 Conn = psycopg.Connection[Any]
 _POSITION_ID = 34710001
 # NOW is Monday 2026-10-05 15:00 UTC; the fixture decision's horizon is 10 sessions, and

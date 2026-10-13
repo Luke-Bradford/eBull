@@ -60,9 +60,15 @@ def _verify(conn: psycopg.Connection[Any], dataset_keys: Sequence[str]) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", choices=tuple(_GROUPS), default="all")
+    parser.add_argument("--dataset", action="append", help="one dataset key of the group (repeatable)")
     parser.add_argument("--verify", action="store_true", help="read-only snapshot census; make no HTTP calls")
     args = parser.parse_args()
     keys = _GROUPS[args.source]
+    if args.dataset:
+        unknown = sorted(set(args.dataset) - set(keys))
+        if unknown:
+            parser.error(f"not in group {args.source!r}: {', '.join(unknown)}")
+        keys = tuple(args.dataset)
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         if args.verify:
             return _verify(conn, keys)
