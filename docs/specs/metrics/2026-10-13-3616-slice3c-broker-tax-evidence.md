@@ -295,12 +295,15 @@ must carry a valid `CID`, all equal; a missing, invalid or second `CID` refuses 
   A batch with no account (no open positions) writes no `trade_events` row.
 
 A batch not written records its fetch as `scope_unverified` (no account) or `scope_refused` (a mismatch), logs, and
-lets the rest of the portfolio sync commit. A refused batch's sync payloads are still retained, each as a
-`trade_event_observations` row with `kind = 'unscoped'`, its `position_id`, the fetch row's id and `event_id` NULL
-(an unverified batch has no sync payloads). Derivation makes any order with an `unscoped` observation of one of its
-positions `unresolved` with `unscoped_observation`, so evidence a refused batch carried about a ledger position is
-never lost behind a later clean batch; for another account's positions, which never enter the ledger, it changes
-nothing. Because the watermark moves only on written history rows (fact 16), the
+lets the rest of the portfolio sync commit. Every payload of a batch not written, sync and history alike, is still
+retained as a `trade_event_observations` row with `kind = 'unscoped'`, its source, event kind, `position_id`, close
+`executed_at` (history closes), the fetch row's id and `event_id` NULL; an identical repeat for the same
+`(position_id, source, event_kind, executed_at)` is not written again. At derivation each `unscoped` observation that
+names an event of the ledger is compared, by the amendment rule, with that event's latest retained payload of the same
+source and kind: a difference makes the order `unresolved` with `unscoped_conflict`; an identical one changes nothing.
+So a fee, proceeds or opening value a withheld batch carried is never lost behind a later clean batch, a flat account's
+routine history re-walk (identical rows) quarantines nothing, and another account's positions, which name no ledger
+event, change nothing. Because the watermark moves only on written history rows (fact 16), the
 next batch that carries the account fetches the skipped closes again, as far back as the endpoint serves them. So no
 row of an unverified or other account enters the ledger, suppresses a row under its global unique indexes, or moves the
 watermark. Moving the ledger to another environment or account is a reviewed migration, never a side effect.
@@ -346,7 +349,7 @@ make the order amended, but derivation reads it (Design 4.8).
 also returns the history opens it set aside, and `ingest_trade_events` passes each to the decision above after the
 kept row is inserted, so a set-aside open is compared and retained like any later observation.
 
-Columns: `observation_id`, `event_id` of the stored row (NULL for `unscoped`), `position_id`, `fetch_id`, `kind`,
+Columns: `observation_id`, `event_id` of the stored row (NULL for `unscoped`), `position_id`, `executed_at` (closes), `fetch_id`, `kind`,
 `observed_at`, `source`, `stored_normalised JSONB`,
 `observed_normalised JSONB`, `observed_raw JSONB`. The stored row is never changed (sql/194's contract). Derivation
 treats a supplemental observation as one more payload of the order (every field check of its source applies to it, so
@@ -365,8 +368,8 @@ The service classifies:
 
 | response | outcome |
 |---|---|
-| 200, body parses as a JSON object and passes every *bind*-phase lookup row of the field table (Design 4), including the product mapping, with `orderId` the asked id | `found` |
-| 200, anything else | `malformed` |
+| 200, body parses as a JSON object whose `orderId` is the asked id | `found` (identity-bound; its fields are validated at derivation, Design 4.3) |
+| 200, anything else | `malformed` (not bound to the order, so it is evidence of nothing about it) |
 | 404 | `not_found` |
 | 429 | `rate_limited`; the run stops asking |
 | 401 or 403 | `auth_failed`; the run stops asking |
@@ -384,6 +387,7 @@ id (*E*):
 | no attempt | yes, first-attempt queue |
 | *A* is `rate_limited`, `transport_error`, `http_error` or `auth_failed` | yes, retry queue |
 | *A* is `malformed`, and *E* > *A*`.order_event_max_id`, or *A* is 7 or more days old, or *A*`.policy_id` differs from the current policy | yes, retry queue |
+| *F* fails a Design 4 field check, and *F* is 7 or more days old or *F*`.policy_id` differs from the current policy | yes, retry queue |
 | *A* is `not_found` and *E* > *A*`.order_event_max_id` | yes, retry queue |
 | *F* exists and *E* > *F*`.order_event_max_id` | yes, retry queue |
 | *F* exists, no position of the order is held, and no attempt was made 7 or more days after its last event | yes, retry queue (the settling lookup) |
@@ -398,11 +402,15 @@ now or later); a failing candidate goes to the back after each attempt, and a ru
 attempts. Under sustained overload of more than 30 new orders per run, the oldest first attempts wait; the
 stored ledger holds 21 orders in total (fact 1). The run records how many candidates it deferred and why it stopped.
 
-**Which body is used.** Derivation uses *F*. A later `not_found` or error never discards it. Two `found` bodies of one
-order are compared on every lookup field of the field table except the lifecycle ones: the execution list may grow (a
+**Which body is used.** Derivation uses *F*, the latest `found` body, and runs every field check on it, so a later
+body that drops a required field, names an unknown product or reports a non-zero fee makes the order `unresolved`
+through those checks. A later `not_found`, `malformed` or error never discards *F*. All `found` bodies of one
+order are compared pairwise on every lookup field of the field table except the lifecycle ones: the execution list may grow (a
 partial close adds a piece, fact 5), and an execution's `state` and `remainingUnits` may change. Any other difference,
 including presence, makes the order `unresolved` with `lookup_amended`, as does an execution present in an earlier
-`found` body and absent from *F*. A correction made by the broker after the settling lookup is not observed (Limits).
+`found` body and absent from *F*. `lookup_amended` is sticky, like `source_amended`: a body that contradicted an
+earlier one stays on record, so valid → contradictory → valid remains `unresolved`, and clearing it needs a reviewed
+policy change. A correction made by the broker after the settling lookup is not observed (Limits).
 
 ### 4. Deriving the evidence (pure)
 
@@ -660,6 +668,10 @@ returns. Registration mirrors `tax_fx_refresh`: `SCHEDULED_JOBS`, the lane map i
 
 ### 8. Retiring the fills route and `fx_rates`
 
+- The migration also adds a `BEFORE INSERT` trigger on `tax_lots` that raises: `_ingest_fills` is its only writer
+  (`tax_ledger.py`, the one `INSERT INTO tax_lots`), so a jobs process still running the old code, or an on-demand
+  `daily_tax_reconciliation` started before the reload, cannot write a fill lot after the migration. 3d drops or
+  reshapes `tax_lots` and the trigger with it.
 - `_ingest_fills` and `_load_fx_rate` are deleted. `fills` is the app's own order record (`order_client._persist_fill`,
   `app/api/orders.py`), a subset of the account's trades; reading it beside the broker record would count those trades
   twice.
@@ -747,8 +759,9 @@ Pure (`tests/test_tax_broker_evidence.py`), each asserting outcome, reasons and 
 - an order with two different openings: `multiple_executions`;
 - exclusion: a CFD order with every binding check passing is excluded; a CFD order with a lookup instrument mismatch, a
   quarantined position or an amendment is `unresolved`, not excluded; a lookup with an unknown `settlementType` is
-  `malformed` and retried after 7 days, and a later `found` body for the same order becomes *F* (a `malformed` body is
-  never compared for `lookup_amended`);
+  `found`, fails the field check (`invalid_field`) and is retried after 7 days; valid → unknown product → valid,
+  valid → non-zero fee with `openingData.orderId` missing → valid: `unresolved` at every step (`lookup_amended` sticky);
+  a body whose `orderId` is not the asked id: `malformed`, *F* unchanged;
 - every other failing check in Design 4, including: a missing `fees` (not zero); `orderID` and `orderId` disagreeing in
   one payload; a close row's `units` column differing from its payload; events disagreeing on instrument; a lowercase
   enum; a CFD/REAL conflict; a position without a sync observation and no lookup; a lookup missing one stored position
@@ -783,13 +796,16 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
 - no scope row: `refused` (`scope_unestablished`) with no lookup attempted; a held position of another account:
   `positions_out_of_scope`; a latest refresh with outcome `scope_refused`, or another environment:
   `portfolio_out_of_scope`; an empty `scope_unverified` refresh: the run proceeds;
+- after the migration an insert into `tax_lots` raises;
 - the migration guard refuses a non-empty `tax_lots`, and a ledger position whose `broker_positions` or archived row
   has `total_fees` non-zero or NULL (an earlier archived non-zero beside a later zero included, and an archived position
   not yet in `trade_events`); the backfill guard refuses a non-demo credential and an empty
   access log; the scope backfill refuses two sync `CID`s, a NULL `CID`, and a non-empty ledger with no sync row;
 - `record_trade_events`: a first batch with a `CID` establishes the scope; a batch where one payload lacks the `CID`
   is refused and its payloads are retained as `unscoped`; a ledger position reported with `totalFees` 5 in a refused
-  batch and 0 in the next clean one is `unresolved` (`unscoped_observation`); a batch with another environment or `CID`
+  batch and 0 in the next clean one is `unresolved` (`unscoped_conflict`); a closed ledger position whose history row
+  shows `fees` 5 in a refused batch and 0 again later: `unscoped_conflict`; a flat account's history-only batch
+  repeating stored closes unchanged: `unscoped` rows, no reason; a batch with another environment or `CID`
   writes no `trade_events` row and a `scope_refused` fetch row; a batch with history but no open positions writes a
   `scope_unverified` fetch row and no ledger row, and the next batch with the account ingests those closes; the
   portfolio sync commits in every case;
