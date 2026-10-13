@@ -155,19 +155,40 @@ LEFT JOIN instruments i USING (instrument_id)
 """
 
 
+def _d(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+
 def checks() -> None:
+    """Per order: product sources, every charge indicator separately, unit and money conservation, per-position
+    binding of the lookup's ``state``/``remainingUnits`` to stored closes and holdings, copy/parent ids, and the two
+    plausibility ratios printed in full. Ends with population totals and denominators."""
     saved = json.loads(_OUT.read_text())
     with psycopg.connect(settings.database_url) as conn:
         rows = conn.execute(_CHECK_SQL).fetchall()
         held = {
-            r[0]: Decimal(str(r[1]))
-            for r in conn.execute("SELECT position_id, units FROM broker_positions WHERE position_id > 0")
+            r[0]: (_d(r[1]), _d(r[2]), r[3])
+            for r in conn.execute(
+                "SELECT position_id, units, amount, total_fees FROM broker_positions WHERE position_id > 0"
+            )
         }
+        archived_fees = dict(
+            conn.execute(
+                "SELECT DISTINCT ON (position_id) position_id, total_fees FROM broker_positions_closed "
+                "WHERE position_id > 0 ORDER BY position_id, closed_detected_at DESC"
+            ).fetchall()
+        )
+        conversion_keys = conn.execute(
+            "SELECT count(*) FROM trade_events, jsonb_object_keys(raw_payload) k "
+            "WHERE source = 'etoro_history' AND k ILIKE '%conversion%'"
+        ).fetchone()
     by_order: dict[int, list[tuple[Any, ...]]] = defaultdict(list)
     for row in rows:
         by_order[row[0]].append(row)
     stored_positions = {row[1] for row in rows}
-    print(f"broker_positions real ids not in trade_events: {sorted(set(held) - stored_positions)}")
+    print(f"broker_positions real-id rows={len(held)}; not in trade_events={sorted(set(held) - stored_positions)}")
+    print(f"history payload keys containing 'conversion': {conversion_keys[0] if conversion_keys else None}")
+    totals: Counter[str] = Counter()
     worst_acq = Decimal(0)
     worst_proceeds = Decimal(0)
     for order_id, events in sorted(by_order.items()):
@@ -175,46 +196,92 @@ def checks() -> None:
         body = entry["body"] if entry["http_status"] == 200 else None
         sync = [e[5] for e in events if e[2] == "etoro_sync"]
         history = [e[5] for e in events if e[2] == "etoro_history"]
-        considerations = {Decimal(str(p["initialAmountInDollars"])) for p in sync} | {
-            Decimal(str(p["initialInvestment"])) for p in history
-        }
+        closes = [e for e in events if e[3] == "close"]
+        positions = sorted({e[1] for e in events})
+        out = [f"{order_id} {events[0][6]:8} lookup={'Y' if body else 'N'} positions={len(positions)}"]
+        totals["orders"] += 1
+        totals["close_rows"] += len(closes)
+        totals["close_fees_zero"] += sum(1 for e in closes if _d(e[5]["fees"]) == 0)
+        totals["history_rows"] += len(history)
+        totals["history_social_parent_zero"] += sum(
+            1 for p in history if int(p["socialTradeId"]) == 0 and int(p["parentPositionId"]) == 0
+        )
+        out.append(f"sync_settlement={sorted({p['settlementTypeID'] for p in sync})}")
+        charges: dict[str, Decimal] = {}
+        if sync:
+            charges["sync_totalExternalFees"] = sum((_d(p["totalExternalFees"]) for p in sync), Decimal(0))
+            charges["sync_totalExternalTaxes"] = sum((_d(p["totalExternalTaxes"]) for p in sync), Decimal(0))
+        for p in positions:
+            if p in held:
+                charges.setdefault("held_totalFees", Decimal(0))
+                charges["held_totalFees"] += _d(held[p][2])
+            if p in archived_fees:
+                charges.setdefault("archived_totalFees", Decimal(0))
+                charges["archived_totalFees"] += _d(archived_fees[p])
+        units: Decimal | None = None
+        rate = conversion = None
         if body is not None:
+            asset = body["asset"]
+            out.append(
+                f"lookup settlement={asset['settlementType']} currency={asset['currency']} "
+                f"orderCurrency={body['orderCurrency']} action={body['action']} instrument_match="
+                f"{all(int(asset['instrumentId']) == int(e[5].get('instrumentId', e[5].get('instrumentID'))) for e in events)}"  # noqa: E501
+            )
             openings = {json.dumps(e["openingData"], sort_keys=True) for e in body["positionExecutions"]}
             parsed = [json.loads(o) for o in openings]
-            units = sum((Decimal(str(o["units"])) for o in parsed), Decimal(0))
-            rate, conversion = Decimal(str(parsed[0]["avgPrice"])), Decimal(str(parsed[0]["avgConversionRate"]))
-            charges = sum((Decimal(str(o["fees"])) + Decimal(str(o["taxes"])) for o in parsed), Decimal(0))
-            frozen: Decimal | None = Decimal(str(body["frozenAmount"]))
-            currency = body["asset"]["currency"]
-        elif sync:
-            units = Decimal(str(sync[0]["initialUnits"]))
-            rate, conversion = Decimal(str(sync[0]["openRate"])), Decimal(str(sync[0]["openConversionRate"]))
-            charges = Decimal(str(sync[0]["totalExternalFees"])) + Decimal(str(sync[0]["totalExternalTaxes"]))
-            frozen, currency = None, "USD" if conversion == 1 else "?"
-        else:
-            print(f"{order_id} {events[0][6]}: no lookup and no sync observation (units, product, account unknown)")
+            out.append(f"distinct_openings={len(parsed)}")
+            charges["lookup_totalCosts"] = _d(body["totalCosts"])
+            charges["lookup_fees"] = sum((_d(o["fees"]) for o in parsed), Decimal(0))
+            charges["lookup_taxes"] = sum((_d(o["taxes"]) for o in parsed), Decimal(0))
+            if len(parsed) == 1:
+                units = _d(parsed[0]["units"])
+                rate, conversion = _d(parsed[0]["avgPrice"]), _d(parsed[0]["avgConversionRate"])
+            execution_positions = {int(x["positionId"]) for x in body["positionExecutions"]}
+            out.append(f"executions_cover_positions={execution_positions == set(positions)}")
+            binding = []
+            for x in body["positionExecutions"]:
+                pid = int(x["positionId"])
+                closed_units = sum((e[4] for e in closes if e[1] == pid), Decimal(0))
+                if x["state"] == "closed":
+                    binding.append(closed_units == _d(x["remainingUnits"]) and pid not in held)
+                else:
+                    binding.append(pid in held and held[pid][0] == _d(x["remainingUnits"]))
+            out.append(f"position_state_binding={all(binding)}")
+        elif sync and len(positions) == 1:
+            units = _d(sync[0]["initialUnits"])
+            rate, conversion = _d(sync[0]["openRate"]), _d(sync[0]["openConversionRate"])
+        out.append("charges=" + ",".join(f"{k}:{v}" for k, v in sorted(charges.items())))
+        considerations = {_d(p["initialAmountInDollars"]) for p in sync} | {_d(p["initialInvestment"]) for p in history}
+        if units is None:
+            out.append("execution units unestablished")
+            print(" ".join(out))
             continue
-        closed = sum((e[4] for e in events if e[3] == "close"), Decimal(0))
-        held_units = sum((held[p] for p in {e[1] for e in events} if p in held), Decimal(0))
-        conserved = units == closed + held_units
-        line = f"{order_id} {events[0][6]:8} lookup={'Y' if body else 'N'} asset_ccy={currency} conserve={conserved}"
+        closed_total = sum((e[4] for e in closes), Decimal(0))
+        held_units = sum((held[p][0] for p in positions if p in held), Decimal(0))
+        out.append(f"units_conserved={units == closed_total + held_units}")
         if len(considerations) == 1:
             consideration = next(iter(considerations))
-            acq = abs(units * rate * conversion - consideration) / consideration
+            invested = sum((_d(e[5]["investment"]) for e in closes), Decimal(0)) + sum(
+                (held[p][1] for p in positions if p in held), Decimal(0)
+            )
+            out.append(f"money_conserved={invested == consideration}")
+            acq = abs(units * rate * conversion - consideration) / consideration  # type: ignore[operator]
             worst_acq = max(worst_acq, acq)
-            line += f" acq_rel={acq:.6f} charges={charges}"
-            if frozen is not None:
-                line += f" frozen-(cons+charges)={frozen - consideration - charges}"
+            out.append(f"acq_rel={acq}")
         else:
-            line += f" considerations={sorted(considerations)}"
-        for piece in (e[5] for e in events if e[3] == "close"):
-            if currency == "USD":
-                proceeds = Decimal(str(piece["investment"])) + Decimal(str(piece["netProfit"]))
-                rel = abs(Decimal(str(piece["units"])) * Decimal(str(piece["closeRate"])) - proceeds) / proceeds
+            out.append(f"considerations={sorted(considerations)}")
+        if body is not None and str(body["asset"]["currency"]).upper() == "USD":
+            for e in closes:
+                proceeds = _d(e[5]["investment"]) + _d(e[5]["netProfit"])
+                rel = abs(_d(e[5]["units"]) * _d(e[5]["closeRate"]) - proceeds) / proceeds
                 worst_proceeds = max(worst_proceeds, rel)
-                line += f" close_rel={rel:.6f}"
-        print(line)
-    print(f"max acquisition corroboration={worst_acq:.6f} max USD proceeds corroboration={worst_proceeds:.6f}")
+                out.append(f"close_rel={rel}")
+        print(" ".join(out))
+    print(f"totals: {dict(totals)}")
+    print(
+        f"max acquisition plausibility gap={worst_acq} "
+        f"max USD proceeds plausibility gap (lookup USD only)={worst_proceeds}"
+    )
 
 
 _FACT_QUERIES: tuple[tuple[str, str], ...] = (
@@ -227,7 +294,8 @@ _FACT_QUERIES: tuple[tuple[str, str], ...] = (
     (
         "access log: rows, rows without a credential, environments, first row",
         "SELECT count(*), count(*) FILTER (WHERE l.credential_id IS NULL), array_agg(DISTINCT c.environment), "
-        "min(l.accessed_at) FROM broker_credential_access_log l LEFT JOIN broker_credentials c ON c.id = l.credential_id",
+        "min(l.accessed_at) FROM broker_credential_access_log l "
+        "LEFT JOIN broker_credentials c ON c.id = l.credential_id",
     ),
     ("orders.broker_environment", "SELECT broker_environment, count(*) FROM orders GROUP BY 1"),
     (
@@ -244,6 +312,22 @@ _FACT_QUERIES: tuple[tuple[str, str], ...] = (
         "SELECT message_type, count(*), count(*) FILTER (WHERE content->>'CID' IN (SELECT cid FROM s)), "
         "count(*) FILTER (WHERE content->>'CID' IS NOT NULL AND content->>'CID' NOT IN (SELECT cid FROM s)) "
         "FROM broker_private_events GROUP BY 1 ORDER BY 1",
+    ),
+    (
+        "private-stream distinct CIDs other than the sync CID",
+        "WITH s AS (SELECT DISTINCT raw_payload->>'CID' AS cid FROM trade_events WHERE source = 'etoro_sync') "
+        "SELECT count(DISTINCT content->>'CID') FROM broker_private_events "
+        "WHERE content->>'CID' NOT IN (SELECT cid FROM s)",
+    ),
+    (
+        "fills by their order's broker reference prefix and environment",
+        "SELECT left(o.broker_order_ref, 5), o.broker_environment, count(*) FROM fills f "
+        "JOIN orders o USING (order_id) GROUP BY 1, 2",
+    ),
+    (
+        "held real-id positions: rows, amount = initial_amount_in_dollars, leverage 1",
+        "SELECT count(*), count(*) FILTER (WHERE amount = initial_amount_in_dollars), count(*) FILTER (WHERE "
+        "leverage = 1) FROM broker_positions WHERE position_id > 0",
     ),
     (
         "distinct sync CIDs (count only)",
@@ -275,6 +359,36 @@ def facts() -> None:
         f"lookup accountId: found={len(found)} missing={account_ids.count(None)} distinct={len(set(account_ids))} "
         f"equal_to_the_one_sync_CID={len(sync_cids) == 1 and {str(a) for a in account_ids} == sync_cids}"
     )
+    shape: Counter[str] = Counter()
+    for order_id, entry in saved.items():
+        if entry["http_status"] != 200:
+            continue
+        b = entry["body"]
+        a = b["asset"]
+        shape[
+            f"status={b['status'].get('name')} transaction={b['transaction']} action={b['action']} side={a['side']} "
+            f"leverage={a['leverage']} settlementType={a['settlementType']} currency={a['currency']} "
+            f"orderCurrency={b['orderCurrency']} totalCosts=fees+taxes:"
+            f"{_d(b['totalCosts']) == sum((_d(x['openingData']['fees']) + _d(x['openingData']['taxes']) for x in b['positionExecutions'][:1]), Decimal(0))}"  # noqa: E501
+        ] += 1
+        for x in b["positionExecutions"]:
+            shape["executions"] += 1
+            shape["executions with openingData.orderId = order id"] += int(x["openingData"]["orderId"]) == int(order_id)
+    for key, count in sorted(shape.items()):
+        print(f"lookup shape: {count} x {key}")
+    with psycopg.connect(settings.database_url) as conn:
+        currencies = dict(
+            conn.execute(
+                "SELECT DISTINCT COALESCE(te.order_id, (te.raw_payload->>'orderID')::bigint), i.currency "
+                "FROM trade_events te JOIN instruments i USING (instrument_id)"
+            ).fetchall()
+        )
+    pairs = Counter(
+        (str(e["body"]["asset"]["currency"]).upper(), currencies.get(int(o)))
+        for o, e in saved.items()
+        if e["http_status"] == 200
+    )
+    print(f"lookup asset.currency vs instruments.currency (orders): {dict(pairs)}")
     by_status: dict[int, list[str]] = defaultdict(list)
     for order_id, entry in saved.items():
         by_status[entry["http_status"]].append(str(placed.get(int(order_id))))
