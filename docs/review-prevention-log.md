@@ -12633,4 +12633,3 @@ neighbouring container and match it.**
   jobs child PID has changed. Before the drop, grep `INSERT INTO <table>` across `app/`, `scripts/` and `tests/`, make
   every writer state the column, and pin the missing-column refusal with a test.
 - Enforced in: `tests/test_trade_ledger_provenance_db.py::test_a_write_without_an_environment_fails`.
-
