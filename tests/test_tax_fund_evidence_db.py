@@ -249,6 +249,7 @@ def test_two_lists_with_one_parent_are_refused(spy: dict[str, Any]) -> None:
         _content(url=ASSET.replace(".gov.uk/", ".gov.uk:443/")),
         _content(url=ASSET + "?v=2"),
         _content(size=0),
+        _content(size=10**20),
         _content(root=[{"public_updated_at": "2026-10-12T11:30:44+01:00"}]),
         _content(published="2026-99-14T11:30:44+01:00"),
         _content(published="2026-10-12T11:30:44+00:60"),

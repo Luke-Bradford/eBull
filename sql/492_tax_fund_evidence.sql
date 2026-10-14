@@ -48,7 +48,8 @@ $$;
 -- GOV.UK's content item, sound per Design 1's table: its single `.ods` attachment object, or NULL when the body is
 -- not a JSON object, `public_updated_at` is not RFC 3339 with a zone or is after `fetched_at`, or the attachments do
 -- not hold exactly one `.ods` object on the asset host (HTTPS, no credentials, port, query or fragment) with a
--- positive integer `file_size`. A backstop for `tax_fund_evidence.read_content_item`, which decides first.
+-- positive integer `file_size` of at most ten digits (a body is at most 32 MiB, and the list check casts it). A
+-- backstop for `tax_fund_evidence.read_content_item`, which decides first.
 CREATE OR REPLACE FUNCTION tax_fund_content_attachment(body BYTEA, fetched_at TIMESTAMPTZ) RETURNS JSONB
 LANGUAGE plpgsql STABLE STRICT AS $$
 DECLARE
@@ -87,7 +88,7 @@ BEGIN
     IF cardinality(ods) <> 1
        OR ods[1] ->> 'url' !~ '^https://assets\.publishing\.service\.gov\.uk/[^?#@:]+\.ods$'
        OR jsonb_typeof(ods[1] -> 'file_size') IS DISTINCT FROM 'number'
-       OR ods[1] ->> 'file_size' !~ '^[1-9][0-9]*$' THEN
+       OR ods[1] ->> 'file_size' !~ '^[1-9][0-9]{0,9}$' THEN
         RETURN NULL;
     END IF;
     RETURN ods[1];
