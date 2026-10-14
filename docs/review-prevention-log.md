@@ -12668,3 +12668,18 @@ neighbouring container and match it.**
   undefined, never zero, and counts an order's consideration once per order.
 - Enforced in: `docs/specs/metrics/2026-10-14-3616-slice3d1-consideration-basis.md` (assumptions A1–A4, the
   consideration classes) and `scripts/measure_3616_slice3d_cash_deltas.py`; review only.
+
+### A statutory order is read from the manual's own list, and an identity pointer is validated as a graph (#3616)
+
+- Failure (Codex checkpoint 1, slice 3d-2 spec, rounds 1–2, 2026-10-14): the first draft took the share-identification
+  order from CG51560 and read TCGA s106A(9) as barring any later-acquisition identification, so it treated a disposal
+  exceeding the holding as missing evidence. CG51555 lists a fourth rule, s105(2) (later acquisitions, earliest first),
+  which s106A(9) expressly preserves. The same draft mapped a `.RTH` variant to its canonical row by checking one
+  pointer, which misses an unbound variant beside its base and a chained pointer whose evidence sits on a member with
+  no lots.
+- Prevention: take a statutory order from the manual page that enumerates it (here CG51555) and read every cross-
+  referenced subsection before calling a case unreachable; when a rule is left unimplemented, prove from the admitted
+  population that it cannot fire and fail closed if it does. Validate an identity mapping over the whole connected
+  component of its pointers and symbol pairs, and withhold every member when the component is malformed.
+- Enforced in: `docs/specs/metrics/2026-10-14-3616-slice3d2-statutory-matching.md` (Source rules, Designs 2–3, tests 11
+  and 12); review only until the build lands those tests.
