@@ -200,7 +200,6 @@ def main() -> None:
         ).fetchall()
         if not snaps:
             print("no snapshots")
-            snaps = []
         upto = [s for s in snaps if s[0].date() <= d["paid"]]
         first_last = f"{snaps[0][0]:%Y-%m-%d} to {snaps[-1][0]:%Y-%m-%d}" if snaps else "none"
         print(
@@ -280,11 +279,14 @@ def main() -> None:
         print("\n[observations]")
         for row in conn.execute(
             """
-            SELECT kind, (SELECT array_agg(k ORDER BY k) FROM (
-                       SELECT jsonb_object_keys(observed_normalised) UNION SELECT jsonb_object_keys(stored_normalised)
-                   ) keys(k) WHERE observed_normalised->k IS DISTINCT FROM stored_normalised->k) AS differs, count(*)
+            -- Per observation row o: the keys of either document whose values differ (correlated on o by design).
+            SELECT o.kind, (SELECT array_agg(k ORDER BY k)
+                              FROM (SELECT jsonb_object_keys(o.observed_normalised)
+                                    UNION SELECT jsonb_object_keys(o.stored_normalised)) AS keys(k)
+                             WHERE o.observed_normalised -> k IS DISTINCT FROM o.stored_normalised -> k) AS differs,
+                   count(*)
               FROM trade_event_observations o
-             WHERE source = 'etoro_sync' AND event_kind = 'open'
+             WHERE o.source = 'etoro_sync' AND o.event_kind = 'open'
                AND EXISTS (SELECT 1 FROM trade_events e WHERE e.event_id = o.event_id AND e.environment = %s)
              GROUP BY 1, 2 ORDER BY 1, 2
             """,

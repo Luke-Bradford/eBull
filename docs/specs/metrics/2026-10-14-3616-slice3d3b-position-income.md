@@ -422,7 +422,8 @@ With a pinned pair:
 - **Selection.** `effective_tax_matching` returns *M*.
 
 ```sql
--- subjects: every column but run_id (expect none); total_fees_nonzero_position_ids is NULL on B, so compared apart
+-- subjects: every pre-existing column but run_id (expect none). total_fees_unobserved_position_ids is 3c's
+-- (sql/485, 3c Design 1); total_fees_nonzero_position_ids is new and NULL on B, so it is checked apart below
 WITH s AS (SELECT run_id, subject, order_id, etoro_instrument_id, instrument_id, product, outcome, reasons,
                   trade_event_ids, lookup_id, held_positions, first_event_at, last_event_at, execution_evidence,
                   total_fees_unobserved_position_ids FROM tax_evidence_subjects)
@@ -441,20 +442,22 @@ UNION ALL
  SELECT subject, order_id, etoro_instrument_id, instrument_id, product, outcome, reasons, trade_event_ids, lookup_id,
         held_positions, first_event_at, last_event_at, execution_evidence, total_fees_unobserved_position_ids
    FROM s WHERE run_id = :E);
--- lots: every column but run_id and fingerprint (expect none)
+-- lots: every column but run_id and fingerprint (expect none); :B and :E are run ids
 WITH l AS (SELECT run_id, lot_key, subject, order_id, instrument_id, etoro_instrument_id, direction, position_ids,
                   trade_event_ids, executed_at, uk_date, tax_year, units, usd_amount, consideration_status,
                   execution_evidence, fx_rate_date, fx_status, fx_observation_date, fx_usd_per_gbp, fx_gbp_per_usd,
-                  fx_policy_id, fx_run_id, amount_gbp FROM tax_evidence_lots)
-(SELECT * FROM l WHERE run_id = :E EXCEPT ALL SELECT :E, lot_key, subject, order_id, instrument_id, etoro_instrument_id,
-   direction, position_ids, trade_event_ids, executed_at, uk_date, tax_year, units, usd_amount, consideration_status,
-   execution_evidence, fx_rate_date, fx_status, fx_observation_date, fx_usd_per_gbp, fx_gbp_per_usd, fx_policy_id,
-   fx_run_id, amount_gbp FROM l WHERE run_id = :B)
+                  fx_policy_id, fx_run_id, amount_gbp FROM tax_evidence_lots),
+     e AS (SELECT lot_key, subject, order_id, instrument_id, etoro_instrument_id, direction, position_ids,
+                  trade_event_ids, executed_at, uk_date, tax_year, units, usd_amount, consideration_status,
+                  execution_evidence, fx_rate_date, fx_status, fx_observation_date, fx_usd_per_gbp, fx_gbp_per_usd,
+                  fx_policy_id, fx_run_id, amount_gbp FROM l WHERE run_id = :E),
+     b AS (SELECT lot_key, subject, order_id, instrument_id, etoro_instrument_id, direction, position_ids,
+                  trade_event_ids, executed_at, uk_date, tax_year, units, usd_amount, consideration_status,
+                  execution_evidence, fx_rate_date, fx_status, fx_observation_date, fx_usd_per_gbp, fx_gbp_per_usd,
+                  fx_policy_id, fx_run_id, amount_gbp FROM l WHERE run_id = :B)
+(SELECT 'only_in_E' AS side, * FROM (SELECT * FROM e EXCEPT ALL SELECT * FROM b) x)
 UNION ALL
-(SELECT * FROM l WHERE run_id = :B EXCEPT ALL SELECT :B, lot_key, subject, order_id, instrument_id, etoro_instrument_id,
-   direction, position_ids, trade_event_ids, executed_at, uk_date, tax_year, units, usd_amount, consideration_status,
-   execution_evidence, fx_rate_date, fx_status, fx_observation_date, fx_usd_per_gbp, fx_gbp_per_usd, fx_policy_id,
-   fx_run_id, amount_gbp FROM l WHERE run_id = :E);
+(SELECT 'only_in_B', * FROM (SELECT * FROM b EXCEPT ALL SELECT * FROM e) y);
 -- the new array on E: on today's evidence (fact 3) expect 0; otherwise list and check against the retained payloads
 SELECT subject, total_fees_nonzero_position_ids FROM tax_evidence_subjects
  WHERE run_id = :E AND total_fees_nonzero_position_ids IS DISTINCT FROM '{}';
