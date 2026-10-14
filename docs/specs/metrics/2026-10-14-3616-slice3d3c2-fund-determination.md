@@ -470,7 +470,13 @@ DB (one module):
    (`offshore_fund` `true`, `offshore_basis` `assumed`) with 14 document rows; IUSA.L and CSPX.L `not_candidate`;
    `reporting_status` for SPY's 2026-09-23 disposal `non_reporting_assumed` resting on A1–A9. Any other Script
    outcome (a new filing, list match, fetch failure) is expected instead, with its refusal.
-4. Matching: the effective run's characters, identifications and dependencies, compared before and after, are
+4. The timestamp rules the Script compares by date, checked on the stored rows by query: every fetch the run
+   references has `fetched_at` ≤ cutoff; the observation's submissions fetch is the newest `sec_submissions` fetch for
+   the CIK with `fetched_at` ≤ cutoff, and cutoff − `fetched_at` ≤ 30 days; each document row's fetch is the newest of
+   its URL with the version's hash and `fetched_at` ≤ cutoff; `reviewed_at` ≤ cutoff's UTC date ≤ `review_by`; and
+   every `filingDate` in the stored submissions body is ≤ its `fetched_at` UTC date. Each must hold for the Script's
+   outcome to be the expected row.
+5. Matching: the effective run's characters, identifications and dependencies, compared before and after, are
    unchanged.
 
 ## Full-population verification
@@ -545,6 +551,9 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r9.2 (discovering run) | `(first_run_id, determination_id)` references the run's loads |
 | r9.3 (future rows) | a discovery's date must not follow its fetch's UTC date, checked in code and by trigger |
 | r9.4 (URL tests) | the character, canonical-spelling, dot-segment and percent-encoding cases are in Test 1 |
+| r1.25, r1.36, r2.10, r3.16, r3.24, r4.9, r5.2, r6.3 (Script date granularity, r12) | acceptance step 4 checks the step's timestamp rules on the stored rows, so the Script's date-level replay is not the only comparison |
+| r1.7, r1.26, r2.5, r3.2, r3.3 (succession, r12) | deferred by design: with one version and no second governing filing, no succession case exists to measure; v1 fails closed (`stale`, `review_out_of_date`) until a successor policy is written against SPY's next filing |
+| r4.16 (exclusions, r12) | carried as assumption A4, `assumed` basis, with the resolving work in `would_resolve`; every outcome that rests on it lists it |
 | r10.1 (future-row boundary) | coverage, discovery and the Script all bound filing dates by the submissions fetch's UTC date |
 | r6.13 (index) | Amendment 6's effective dates distinguished in the research index |
 | r3.5 (unresolved basis) | `offshore_basis` `unresolved` |
