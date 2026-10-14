@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 
 from app.providers.broker import RawOrderLookup
 from app.services import tax_broker_evidence
+from app.services.tax_broker_derivation import TAX_EVIDENCE_POLICY_ID
 from app.services.tax_broker_evidence import TAX_EVIDENCE_LOCK_KEY, run_tax_broker_evidence
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_tax_broker_derivation import sync_payload
@@ -261,7 +262,7 @@ def test_a_run_publishes_one_generation_and_a_later_one_leaves_it_unchanged(
         "SELECT state, account_id, trade_events_max_event_id IS NOT NULL, "
         "history_fetch_latest_id = history_fetch_ok_id, fx_run_id IS NOT NULL, evidence_policy_id "
         "FROM tax_evidence_runs"
-    ) == [("published", ACCOUNT, True, True, True, "broker_evidence_v1")]
+    ) == [("published", ACCOUNT, True, True, True, TAX_EVIDENCE_POLICY_ID)]
 
     _seed_held_order(ebull_test_conn, published_ledger, 22, 1001)
     ebull_test_conn.commit()

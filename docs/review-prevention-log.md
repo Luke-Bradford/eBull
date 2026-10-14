@@ -12642,3 +12642,14 @@ neighbouring container and match it.**
 - Prevention: when a change removes a check or reason and a comment says another path still covers the case, add the
   test for that case in the same commit.
 - Enforced in: `tests/test_tax_broker_derivation.py::test_a_sync_only_amendment_across_london_dates_is_a_date_conflict`.
+
+### A comparison helper over untrusted payloads must not raise before the field checks (#3616)
+
+- Failure (Codex checkpoint 2, policy `broker_evidence_v2`, 2026-10-14): the re-rendering test compared sync payloads
+  through `json.dumps`, which raises on a nested `Decimal`. A malformed broker field (`mirrorID: {"x": 1.2}`) would have
+  aborted the whole evidence run instead of leaving one order `unresolved` with `invalid_field:mirrorID`.
+- Prevention: any derivation helper that runs before or beside the field checks compares with plain equality (or a
+  canonicaliser that accepts every JSON shape), so a malformed value reaches the check that owns it. It treats an
+  absent field like an invalid one (the review bot, PR #3802), and its tests include a payload that omits the field.
+- Enforced in: `tests/test_tax_broker_derivation.py::test_a_malformed_nested_sync_field_beside_a_re_rendering_fails_its_field_check`
+  and `::test_sync_open_payloads_missing_their_open_time_fail_the_field_check_without_raising`.
