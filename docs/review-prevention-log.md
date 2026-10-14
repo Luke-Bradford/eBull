@@ -12653,3 +12653,18 @@ neighbouring container and match it.**
   absent field like an invalid one (the review bot, PR #3802), and its tests include a payload that omits the field.
 - Enforced in: `tests/test_tax_broker_derivation.py::test_a_malformed_nested_sync_field_beside_a_re_rendering_fails_its_field_check`
   and `::test_sync_open_payloads_missing_their_open_time_fail_the_field_check_without_raising`.
+
+### An aggregate cash balance is not per-lot proof, and a records rule is not a field definition (#3616)
+
+- Failure (Codex checkpoint 1, slice 3d-1 spec, rounds 1–3, 2026-10-14): the first draft promoted every admitted lot in a
+  day whose account credit balanced against the trade record to `cash_reconciled`. One equation constrains a sum, not
+  its parts: −100/+90 stated against −110/+100 actual balances the same. A later draft cited HMRC's CGT record-keeping
+  guidance as if it established that `investment + netProfit` is the amount received; the guidance says which records
+  evidence an amount, not what a broker field means. The measurement script also counted a split order's opening once
+  per position (a false +100 residual) and defaulted missing operands to zero.
+- Prevention: corroboration that sums several lots is labelled aggregate and never upgrades one lot; a per-lot claim
+  needs a comparison holding that lot alone. A records or documentation rule is cited for what it says, and any field
+  meaning it does not state is named as an assumption with its evidence. Measurement code treats a missing operand as
+  undefined, never zero, and counts an order's consideration once per order.
+- Enforced in: `docs/specs/metrics/2026-10-14-3616-slice3d1-consideration-basis.md` (assumptions A1–A4, the
+  consideration classes) and `scripts/measure_3616_slice3d_cash_deltas.py`; review only.
