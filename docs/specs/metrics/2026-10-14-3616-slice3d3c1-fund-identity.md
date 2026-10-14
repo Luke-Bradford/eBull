@@ -827,6 +827,8 @@ Rounds 1–4 (`rN.k` is round N finding k):
 No order or authorisation path changes. The step reads public documents from SEC, GLEIF, OpenFIGI (keyless) and
 GOV.UK, none needing an account (operator rule 2026-10-10).
 - Every body is bounded while it is read, and `content.xml` while it is decompressed.
-- XML is parsed with the repo's safe parser, with no entity resolution and no network access.
+- N-CEN XML is parsed with the repo's `SAFE_XML_PARSER`. The ODS `content.xml` is streamed with lxml's `iterparse`
+  set as that parser is (`resolve_entities=False`, `load_dtd=False`, `no_network=True`), because `iterparse` takes
+  those options rather than a parser object.
 - No redirects are followed.
 - Matching is unchanged.

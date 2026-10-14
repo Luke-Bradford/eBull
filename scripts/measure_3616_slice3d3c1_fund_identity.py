@@ -602,7 +602,7 @@ def _read_rows(stream: IO[bytes], baseline: int | None) -> list[tuple[str, ...]]
     tables = 0
     total_logical = 0
     rows: list[tuple[str, ...]] = []
-    for _event, el in ET.iterparse(stream, events=("end",), resolve_entities=False, no_network=True):
+    for _event, el in ET.iterparse(stream, events=("end",), resolve_entities=False, load_dtd=False, no_network=True):
         parent = el.getparent()
         if el.tag == T + "table":
             tables += 1
