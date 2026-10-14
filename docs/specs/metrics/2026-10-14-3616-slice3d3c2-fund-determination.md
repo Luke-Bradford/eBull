@@ -234,7 +234,7 @@ exactly those listed. Document and authority ids share one namespace, `[a-z0-9_]
 | `transparent_fund` | `transparent`, `opaque`, `unresolved` |
 | `reg29_sufficient_information`, `reg29_nonreporting_holdings` | `unresolved` only (holding-dependent) |
 
-Hashes are lowercase hexadecimal. A document URL contains no control or space character, equals its canonical parsed form, and its last path segment
+Hashes are lowercase hexadecimal. A document URL is ASCII printable characters only (U+0021 to U+007E), equals its canonical parsed form, and its last path segment
 is not `.` or `..` and contains no percent-encoding (authority URLs are provenance labels, never fetched by the step).
 
 Basis rules: an `unresolved` answer if and only if an `unresolved` basis, which needs `would_resolve`; `assumed` needs
@@ -291,10 +291,15 @@ security is refused with `run_failed`. A finished run is sealed: no row is added
 | `stale` | an unreviewed governing accession is recorded for the determination (below) |
 | `determined` | otherwise |
 
-**Unreviewed accessions.** Whenever a run reads a sound inventory (the `coverage_unavailable` tests pass), whatever
-the security's outcome, it records in `tax_fund_determination_unreviewed` each listed filing of a `refresh_forms` form
-filed on or after `monitor_from` and not in `reviewed_filings`. The record is permanent, so staleness latches even if
-a later inventory omits the accession, or an earlier-priority refusal hid it at the time.
+**Unreviewed accessions.** Recording a discovery needs less than admitting a determination. Right after reading the
+newest submissions fetch, before any observation and in its own committed transaction, the run records in
+`tax_fund_determination_unreviewed` each listed filing of a `refresh_forms` form filed on or after `monitor_from` and
+not in `reviewed_filings`, whenever the body is an object whose `cik` is the CIK and whose `filings.recent` lists are
+of equal length, and the row's form, date and accession are well formed. Currency, overflow `files` and the reviewed
+anchors are not required for this; they are required for `determined`. Each record carries the `submissions_fetch_id`
+and run that found it. Records are permanent and survive a later failure of the run, so staleness latches even if a
+later inventory omits the accession, an earlier-priority refusal hid it, or the discovering inventory was incomplete or
+old.
 
 The submissions JSON is SEC's own filing inventory for the CIK. That it is complete, and that nothing was filed between
 its fetch and the disposal or cutoff, is assumption A8, which Design 3 carries. A stale determination is used for
@@ -335,8 +340,10 @@ residual covers that.
 - `tax_fund_determination_runs`: `run_id` identity, `job_run_id` (FK `job_runs`), `fund_observed_at` (NULL when the
   fund step failed), `started_at`, `cutoff` (NULL until `succeeded`), `status` (`running`, `succeeded`, `failed`),
   `failure TEXT`; a trigger allows only `running` → `succeeded` or `failed`, once, and refuses deletion.
-- `tax_fund_determination_unreviewed`, insert only: primary key `(determination_id, accession)`, `form`, `filed`,
-  `first_run_id`; each a foreign key to its parent.
+- `tax_fund_determination_unreviewed`, insert only, exempt from run sealing because it is committed before the run
+  finishes: primary key `(determination_id, accession)`, `form`, `filed`, `first_run_id` and `submissions_fetch_id`,
+  each a foreign key to its parent; a trigger checks that the fetch's source is `sec_submissions` with the
+  determination's CIK URL as request key.
 - `tax_fund_determination_run_loads`: primary key `(run_id, determination_id)`, each a foreign key to its parent: the
   run's active determinations.
 - Every child table of a run (loads, observations, document rows) has a trigger refusing an insert under a run that
@@ -419,7 +426,9 @@ Pure:
    before `reviewed_at` and after `review_by` (`review_out_of_date`); a determination whose file is gone from the
    deployment (`no_determination`); across two runs, a new 497 in a sound inventory while a cited document is
    unavailable (the accession recorded despite `documents_unavailable`), then the document recovered and the accession
-   absent from the next inventory (`stale`).
+   absent from the next inventory (`stale`); an accession found in an inventory with overflow `files`, and in one 40
+   days old, then omitted by an admissible inventory (`stale`); a run that fails after recording a discovery, followed by
+   a successful run whose inventory omits it (`stale`).
 5. `reporting_status`: SPY's 2026-09-23 case (`non_reporting_assumed`, A1–A9); no run (`no_run`); a security absent
    from the newest run (`not_observed`, although an older run has it); a failed newest run (`run_failed`, although an
    older run succeeded); each of the first four outcomes returned before the date test; a date before
@@ -520,6 +529,9 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r7.6 (selector) | `--fund-observed-at` needs an offset and is normalised to UTC |
 | r7.7 (URL spelling) | control characters refused; a document URL must equal its canonical form |
 | r7.8 (s564H) | `would_resolve` includes s564G(3) and s564H |
+| r8.1, r8.2 (latch) | discoveries need only a well-formed body for the CIK, are committed before observations with their submissions fetch and run, and survive run failure |
+| r8.3 (URL characters) | ASCII printable only |
+| r8.4 (docstring) | corrected |
 | r6.13 (index) | Amendment 6's effective dates distinguished in the research index |
 | r3.5 (unresolved basis) | `offshore_basis` `unresolved` |
 | r3.7 (refusal order) | the first four outcomes are returned before the date test |

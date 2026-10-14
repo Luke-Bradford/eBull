@@ -170,7 +170,7 @@ def _keys(obj: Any, keys: set[str], where: str, errs: list[str]) -> bool:
 
 
 def _sec_url_ok(url: str, cik: str, accession: str) -> bool:
-    if any(ord(c) < 33 or ord(c) == 127 for c in url) or urlunsplit(urlsplit(url)) != url:
+    if not all(33 <= ord(c) <= 126 for c in url) or urlunsplit(urlsplit(url)) != url:
         return False
     parts = urlsplit(url)
     if parts.scheme != "https" or parts.netloc != "www.sec.gov" or parts.query or parts.fragment or ";" in parts.path:
@@ -547,7 +547,8 @@ def applicability(
 def reporting_status(
     det: dict[str, Any], search_outcome: str | None, d: date, cutoff: date
 ) -> tuple[str, str | None, list[str]]:
-    """Design 3 from step 3 on, for a ``determined`` security: (status, reason, assumption ids)."""
+    """Design 3 from step 5 onward, for a ``determined`` security: (status, reason, assumption ids). Evaluation-time
+    expiry (step 3) is outside this replay helper."""
     if not date.fromisoformat(det["valid_from"]) <= d <= cutoff:
         return "outside_interval", f"{d} outside {det['valid_from']}..{cutoff}", []
     answer, _, rests_on = offshore_fund(det)
