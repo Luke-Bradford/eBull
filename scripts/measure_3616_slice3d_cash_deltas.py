@@ -261,7 +261,7 @@ def _intervals(snaps: list[Any], events: list[Any], outcome_of: dict[int, str], 
             f"{sum(1 for e in inside if e[1] == 'close')},{symbols},{outcomes},{flow},"
             f"{charge_parts},{without},{with_}"
         )
-        if len(participating) == 1:
+        if len(participating) == 1 and None not in participating:
             parts = []
             for e in inside:
                 part = f"{e[1]}:initial={_opening(e[3])}"
@@ -286,7 +286,12 @@ def _lots(lots: list[Any], windows: list[Any], event_at: dict[int, Any]) -> None
     for direction, ids, symbol, uk_date, usd, evidence in lots:
         at = min(event_at[i] for i in ids)
         hit = [w for w in windows if w[0] < at <= w[1]]
-        status = "outside" if not hit else ("zero" if hit[0][2] == 0 else "residual")
+        if not hit:
+            status = "outside"
+        elif hit[0][2] is None:
+            status = "undefined"
+        else:
+            status = "zero" if hit[0][2] == 0 else "residual"
         counts[f"{direction}:{status}"] += 1
         print(f"{direction},{symbol},{uk_date},{usd},{evidence},{status},{hit[0][2] if hit else None}")
     print(f"lots={len(lots)} by_direction_status={dict(sorted(counts.items()))}")
