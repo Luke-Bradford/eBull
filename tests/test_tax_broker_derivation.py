@@ -925,3 +925,12 @@ def test_an_enum_in_another_case_is_not_an_amendment() -> None:
     later["asset"]["settlementType"] = "real"
     later["status"]["name"] = "FILLED"
     assert case.derive(case.body, later).outcome == "admitted"
+
+
+def test_a_sub_second_open_time_amendment_is_source_amended_only() -> None:
+    # The dev account's 2026-10-14 re-observations: the broker re-rendered openDateTime 3-10 ms apart.
+    case = Held()
+    case.observations.append(
+        observation(case.open, "amendment", sync_payload(21, openDateTime="2026-09-23T13:30:00.497Z"))
+    )
+    assert reasons_of(case.derive()) == ["source_amended"]

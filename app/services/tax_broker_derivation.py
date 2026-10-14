@@ -952,10 +952,10 @@ def derive_order(
     acquired_at: datetime | None = opening.get("executionTime")
     if lookup is None:
         # Every retained sync payload, stored or observed: a history-first open's sync evidence is an observation.
+        # Two values are an amendment (one position) or a second position, each already a reason; the time is then
+        # undefined and the checks needing it are skipped. A different London date is still caught below.
         sync_times = {values["openDateTime"] for _, values in sync_values} - {None}
         acquired_at = next(iter(sync_times)) if len(sync_times) == 1 else None
-        if len(sync_times) > 1:
-            reasons.add("acquisition_date_conflict")
     candidates = [opening.get("executionTime"), opening.get("openTime")]
     if lookup is not None:
         for _, opening_fields, _ in lookup.executions:
