@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -18,9 +18,11 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from app.services import tax_matching
+from app.services import tax_character, tax_matching
+from app.services.tax_character import FetchedInstance
 from app.services.tax_matching import MatchingRunReport, effective_tax_matching, run_tax_matching
 from tests.fixtures.ebull_test_db import test_database_url
+from tests.fixtures.xbrl_cover import cover
 
 ACCOUNT = 4242
 D = Decimal
@@ -65,6 +67,48 @@ def _instrument(iid: int, symbol: str, canonical: int | None = None) -> None:
             """,
             (iid, symbol, canonical),
         )
+
+
+def _store_instance(accession: str, body: bytes) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO tax_cover_instances (accession_number, source_url, fetched_at, body, body_sha256) "
+            "VALUES (%s, %s, now(), %s, %s)",
+            (accession, f"https://www.sec.gov/{accession}_htm.xml", body, hashlib.sha256(body).hexdigest()),
+        )
+
+
+def _cover_filing(iid: int, accession: str, filed: date, form: str = "10-Q") -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO filing_events (instrument_id, filing_date, filing_type, provider, provider_filing_id, "
+            "primary_document_url) VALUES (%s, %s, %s, 'sec', %s, %s)",
+            (iid, filed, form, accession, f"https://www.sec.gov/Archives/{accession}.htm"),
+        )
+
+
+def _share(iid: int, symbol: str, *, cik: str | None = None, stored: bool = True) -> str:
+    """Make instrument ``iid`` a share under ``tax_character_v1`` (3d-3a Design 2): Stocks, one primary CIK, a current
+    operating profile, and one 10-Q filed before every acquisition here whose stored instance lists ``symbol`` as
+    common stock. Returns the cover's accession."""
+    cik = cik or f"{iid:010d}"
+    accession = f"{cik}-25-000001"
+    with _connect() as conn:
+        conn.execute("UPDATE instruments SET instrument_type_id = 5 WHERE instrument_id = %s", (iid,))
+        conn.execute(
+            "INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary) "
+            "VALUES (%s, 'sec', 'cik', %s, TRUE)",
+            (iid, cik),
+        )
+        conn.execute(
+            "INSERT INTO instrument_sec_profile (instrument_id, cik, entity_type, sic, fetched_at) "
+            "VALUES (%s, %s, 'operating', '3571', now())",
+            (iid, cik),
+        )
+    _cover_filing(iid, accession, date(2025, 1, 2))
+    if stored:
+        _store_instance(accession, cover(cik, [("Common Stock", symbol)]))
+    return accession
 
 
 def _scope() -> None:
@@ -179,9 +223,11 @@ LOTS: list[Lot] = [
 
 @pytest.fixture
 def spy(ebull_test_conn: psycopg.Connection[Any]) -> Iterator[None]:
-    """The ledger scope and one instrument, on the wiped test database."""
+    """The ledger scope and one instrument (a share under 3d-3a, whatever its symbol), on the wiped test
+    database."""
     _scope()
     _instrument(1, "SPY")
+    _share(1, "SPY")
     yield
 
 
@@ -427,6 +473,7 @@ def test_an_unplaceable_subject_withholds_everything_with_no_security_row(spy: N
 
 def test_a_security_withheld_or_gone_in_the_next_generation(spy: None) -> None:
     _instrument(3, "QQQ")
+    _share(3, "QQQ")
     q = [
         ("Q1", "order:3", 3, "acquisition", date(2026, 1, 6), "5", "50"),
         ("Q2", "order:3", 3, "disposal", date(2026, 3, 2), "5", "70"),
@@ -525,3 +572,279 @@ def test_the_window_reads_the_generations_ok_fetch(spy: None) -> None:
         (datetime(2026, 10, 23, 22, 59, 59, tzinfo=UTC),),
         (datetime(2026, 10, 23, 23, tzinfo=UTC),),
     ]
+
+
+# --- 3d-3a: tax character (spec tests 4, 6-9; sql/490) ----------------------------------------------------------------
+
+
+def _refresh(fetch: Callable[[str], FetchedInstance]) -> tax_matching.CoverRefreshReport:
+    with _connect() as conn:
+        return tax_matching.refresh_cover_instances(conn, fetch)
+
+
+def _never(url: str) -> FetchedInstance:
+    raise AssertionError(f"fetched {url}")
+
+
+def _character(run_id: int | None) -> list[tuple]:
+    return _rows(
+        "SELECT tax_security_id, character, detail, cik, latest_cover, start_cover FROM tax_matching_characters "
+        "WHERE matching_run_id = %s ORDER BY 1",
+        (run_id,),
+    )
+
+
+def test_a_new_security_and_an_earlier_acquisition_get_their_covers_before_matching(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    _scope()
+    _instrument(1, "AAA")
+    latest = _share(1, "AAA", stored=False)
+    _generation(ADMITTED, LOTS)
+    fetched: list[str] = []
+
+    def fetch(url: str) -> FetchedInstance:
+        fetched.append(url)
+        return FetchedInstance(cover("0000000001", [("Common Stock", "AAA")]))
+
+    report = _refresh(fetch)
+    assert (report.selected, report.already_stored, report.stored, report.failures) == (1, 0, 1, ())
+    assert fetched == [f"https://www.sec.gov/Archives/{latest}_htm.xml"]
+    run = _run()
+    assert _character(run.matching_run_id) == [(1, "share", None, "0000000001", latest, latest)]
+    assert _refresh(_never).stored == 0  # a stored instance is not fetched again
+
+    # The next generation's first acquisition precedes the stored cover: the start cover is a new, older one.
+    _cover_filing(1, "0000000001-24-000009", date(2024, 6, 3))
+    _generation(ADMITTED, [("L0", "order:1", 1, "acquisition", date(2024, 7, 1), "1", "10"), *LOTS])
+    assert _refresh(fetch).stored == 1
+    assert fetched[-1] == "https://www.sec.gov/Archives/0000000001-24-000009_htm.xml"
+    later = _run()
+    assert _character(later.matching_run_id) == [(1, "share", None, "0000000001", latest, "0000000001-24-000009")]
+
+
+def test_failed_covers_store_nothing_every_cover_is_tried_and_the_next_run_retries(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    _scope()
+    for iid, symbol in ((1, "AAA"), (2, "BBB"), (3, "CCC"), (4, "DDD")):
+        _instrument(iid, symbol)
+        _share(iid, symbol, stored=False)
+    with _connect() as conn:  # DDD's primary document is not .htm: no instance URL
+        conn.execute(
+            "UPDATE filing_events SET primary_document_url = 'https://www.sec.gov/d.txt' WHERE instrument_id = 4"
+        )
+    _generation(
+        [(f"order:{i}", "admitted", i) for i in (1, 2, 3, 4)],
+        [(f"L{i}", f"order:{i}", i, "acquisition", date(2026, 1, 5), "1", "10") for i in (1, 2, 3, 4)],
+    )
+    outcomes = {
+        "0000000001": FetchedInstance(None, "transport ConnectError: down"),
+        "0000000002": FetchedInstance(b"<html><body>Rate limited</body></html>"),
+        "0000000003": FetchedInstance(cover("0000000003", [("Common Units", "CCC")])),
+    }
+    report = _refresh(lambda url: outcomes[url.split("/")[-1][:10]])
+    assert (report.selected, report.stored, report.no_instance_url) == (4, 1, 1)
+    assert report.failures == (
+        "0000000001-25-000001: transport ConnectError: down",
+        "0000000002-25-000001: not an XBRL instance",
+    )
+    assert _rows("SELECT accession_number FROM tax_cover_instances") == [("0000000003-25-000001",)]
+    run = _run()  # matching still runs on what is stored
+    assert [(r[0], r[1], r[2]) for r in _character(run.matching_run_id)] == [
+        (1, "unestablished", "cover_unavailable"),
+        (2, "unestablished", "cover_unavailable"),
+        (3, "unestablished", "listed_class_not_common_stock"),  # kept: a sound body is evidence
+        (4, "unestablished", "cover_unavailable"),
+    ]
+    # A malformed accession is a failed cover; the covers after it are still tried.
+    with _connect() as conn:
+        conn.execute("UPDATE filing_events SET provider_filing_id = '000000000A-25-000001' WHERE instrument_id = 1")
+    _generation(
+        [(f"order:{i}", "admitted", i) for i in (1, 2, 3, 4)],
+        [(f"L{i}", f"order:{i}", i, "acquisition", date(2026, 1, 5), "1", "10") for i in (1, 2, 3, 4)],
+    )
+    tried: list[str] = []
+    malformed = _refresh(lambda url: tried.append(url) or FetchedInstance(None, "http 503"))
+    assert malformed.failures == ("0000000002-25-000001: http 503", "000000000A-25-000001: malformed accession")
+    assert [u.split("/")[-1][:10] for u in tried] == ["0000000002"]
+    with _connect() as conn:
+        conn.execute("UPDATE filing_events SET provider_filing_id = '0000000001-25-000001' WHERE instrument_id = 1")
+    _generation(
+        [(f"order:{i}", "admitted", i) for i in (1, 2, 3, 4)],
+        [(f"L{i}", f"order:{i}", i, "acquisition", date(2026, 1, 5), "1", "10") for i in (1, 2, 3, 4)],
+    )
+    retried: list[str] = []
+    _refresh(lambda url: retried.append(url) or FetchedInstance(None, "http 503"))
+    assert sorted(u.split("/")[-1][:10] for u in retried) == ["0000000001", "0000000002"]
+
+
+def test_the_cover_table_refuses_oversize_a_wrong_digest_update_and_delete(spy: None) -> None:
+    body = b"<x/>"
+    insert = (
+        "INSERT INTO tax_cover_instances (accession_number, source_url, fetched_at, body, body_sha256) "
+        "VALUES ('0000000009-26-000001', 'u', now(), %s, %s)"
+    )
+    with _connect() as conn:
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(insert, (body, "0" * 64))
+        big = b"x" * (16 * 1024 * 1024 + 1)
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(insert, (big, hashlib.sha256(big).hexdigest()))
+        conn.execute(insert, (body, hashlib.sha256(body).hexdigest()))
+        for sql in ("UPDATE tax_cover_instances SET source_url = 'v'", "DELETE FROM tax_cover_instances"):
+            with pytest.raises(psycopg.errors.RaiseException, match="never updated or deleted"), conn.transaction():
+                conn.execute(sql)
+
+
+def test_only_the_selected_covers_bodies_are_read(spy: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    _cover_filing(1, "0000000001-24-000001", date(2024, 1, 2))  # older than the start cover: not selected
+    _store_instance("0000000001-24-000001", cover("0000000001", [("Common Stock", "SPY")]))
+    _generation(ADMITTED, LOTS)
+    read: list[bytes] = []
+    original = tax_character.read_cover
+    monkeypatch.setattr(tax_character, "read_cover", lambda body: read.append(body) or original(body))
+    run = _run()
+    assert len(read) == 1  # one selected cover, both newest and start
+    assert _character(run.matching_run_id)[0][4:] == ("0000000001-25-000001", "0000000001-25-000001")
+
+
+def test_the_seal_covers_the_character_columns_and_rows(spy: None) -> None:
+    generation = _generation(ADMITTED, LOTS)
+    run = _run()
+    digest = hashlib.sha256(_DOC.encode()).hexdigest()
+    columns = (
+        "INSERT INTO tax_matching_runs (evidence_run_id, matching_policy_id, class_policy_id, character_policy_id, "
+        "as_of, inputs_digest, inputs_document, state, computed_at, withheld_all) "
+    )
+    with _connect() as conn:
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():  # a policy with no as_of
+            conn.execute(
+                columns + "VALUES (%s, 'p', 'c', 'tax_character_v1', NULL, %s, %s, 'building', now(), FALSE)",
+                (generation, digest, _DOC),
+            )
+        with pytest.raises(psycopg.errors.RaiseException, match="takes no rows"), conn.transaction():
+            conn.execute(
+                "INSERT INTO tax_matching_characters (matching_run_id, tax_security_id, character) "
+                "VALUES (%s, 1, 'share')",
+                (run.matching_run_id,),
+            )
+        for n, change in enumerate(("character_policy_id = 'other'", "as_of = as_of - interval '1 day'")):
+            with conn.transaction():
+                row = conn.execute(
+                    columns + "VALUES (%s, %s, 'c', 'tax_character_v1', now(), %s, %s, 'building', now(), FALSE) "
+                    "RETURNING matching_run_id",
+                    (generation, f"p{n}", digest, _DOC),
+                ).fetchone()
+                assert row is not None
+                with pytest.raises(psycopg.errors.RaiseException, match="changes only"), conn.transaction():
+                    conn.execute(
+                        f"UPDATE tax_matching_runs SET state = 'published', counts = '{{}}', {change} "  # noqa: S608
+                        "WHERE matching_run_id = %s",
+                        (row[0],),
+                    )
+                conn.execute(
+                    "INSERT INTO tax_matching_securities (matching_run_id, tax_security_id, instrument_ids, status) "
+                    "VALUES (%s, 1, '{1}', 'withheld')",
+                    (row[0],),
+                )
+                conn.execute(
+                    "INSERT INTO tax_matching_characters (matching_run_id, tax_security_id, character, detail) "
+                    "VALUES (%s, 1, 'unestablished', 'sic')",
+                    (row[0],),
+                )
+                with pytest.raises(psycopg.errors.RaiseException, match="cannot be refused"), conn.transaction():
+                    conn.execute(
+                        "UPDATE tax_matching_runs SET state = 'refused', reason = 'x', counts = '{}' "
+                        "WHERE matching_run_id = %s",
+                        (row[0],),
+                    )
+                conn.execute(
+                    "UPDATE tax_matching_runs SET state = 'published', counts = '{}' WHERE matching_run_id = %s",
+                    (row[0],),
+                )
+
+
+def test_characters_route_withholding_and_reasons(spy: None) -> None:
+    _instrument(2, "SPY.RTH", 1)  # the lots of security 1 on its variant; one character, the base's symbol
+    _instrument(3, "ETFX")
+    with _connect() as conn:
+        # A variant carries its base's type (a NULL beside 5 is member_conflict); 6 is eToro's ETF.
+        conn.execute("UPDATE instruments SET instrument_type_id = 5 WHERE instrument_id = 2")
+        conn.execute("UPDATE instruments SET instrument_type_id = 6 WHERE instrument_id = 3")
+    _instrument(4, "GMEX")
+    _share(4, "GMEX")
+    lots: list[Lot] = [
+        ("L1", "order:1", 2, "acquisition", date(2026, 1, 5), "10", "100"),
+        ("L2", "order:1", 2, "disposal", date(2026, 3, 1), "4", "60"),
+        ("E1", "order:3", 3, "acquisition", date(2026, 1, 5), "1", "10"),
+    ]
+    _generation(
+        [*ADMITTED, ("order:3", "admitted", 3), ("order:5", "unresolved", 3), ("order:4", "unresolved", 4)], lots
+    )
+    run = _run()
+    assert [(r[0], r[1], r[2], r[3]) for r in _character(run.matching_run_id)] == [
+        (1, "share", None, "0000000001"),
+        (3, "unestablished", "exchange_traded_fund", None),
+        (4, "share", None, "0000000004"),
+    ]
+    assert _rows(
+        "SELECT tax_security_id, reason, detail FROM tax_matching_dependencies WHERE matching_run_id = %s ORDER BY seq",
+        (run.matching_run_id,),
+    ) == [
+        (3, "unresolved_subject", None),
+        (3, "character_unestablished", "exchange_traded_fund"),
+        (4, "unresolved_subject", None),
+    ]
+    (reasons,) = _rows(
+        "SELECT reasons FROM tax_statutory_disposals WHERE matching_run_id = %s", (run.matching_run_id,)
+    )[0]
+    assert {"offshore_fund_exclusion_assumed", "issuer_binding_assumed"} <= set(reasons)
+    assert "character_pending" not in reasons
+    (pool,) = _rows(
+        "SELECT pool_reasons FROM tax_matching_securities WHERE matching_run_id = %s AND status = 'computed'",
+        (run.matching_run_id,),
+    )[0]
+    assert {"offshore_fund_exclusion_assumed", "issuer_binding_assumed"} <= set(pool)
+
+
+def test_an_incomplete_character_population_raises_and_leaves_no_run(
+    spy: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _generation(ADMITTED, LOTS)
+    insert_rows = tax_matching._insert_rows
+
+    def with_a_security_lacking_a_character(conn: psycopg.Connection[Any], run_id: int, *args: Any) -> None:
+        insert_rows(conn, run_id, *args)
+        conn.execute(
+            "INSERT INTO tax_matching_securities (matching_run_id, tax_security_id, instrument_ids, status) "
+            "VALUES (%s, 99, '{99}', 'withheld')",
+            (run_id,),
+        )
+
+    monkeypatch.setattr(tax_matching, "_insert_rows", with_a_security_lacking_a_character)
+    with pytest.raises(RuntimeError, match="character rows do not match"):
+        _run()
+    assert _rows("SELECT count(*) FROM tax_matching_runs") == [(0,)]
+
+
+def test_selection_needs_the_current_character_policy_and_a_current_profile(spy: None) -> None:
+    generation = _generation(ADMITTED, LOTS)
+    with _connect() as conn, conn.transaction():  # a 3d-2 run of the same generation: no character policy
+        legacy = _building(conn, generation)
+        conn.execute(
+            "UPDATE tax_matching_runs SET state = 'published', counts = '{}' WHERE matching_run_id = %s", (legacy,)
+        )
+    assert _effective() is None
+    run = _run()
+    assert _effective() == tax_matching.EffectiveMatching(run.matching_run_id or 0, generation)
+    with _connect() as conn:
+        conn.execute("UPDATE instrument_sec_profile SET fetched_at = now() - interval '31 days'")
+    assert _effective() is None  # the profile went stale: unavailable, never the old run
+    stale = _run()
+    assert stale.outcome == "published" and stale.matching_run_id != run.matching_run_id
+    assert [(r[1], r[2]) for r in _character(stale.matching_run_id)] == [("unestablished", "sec_profile_unavailable")]
+    assert _rows(
+        "SELECT character_policy_id, as_of IS NOT NULL FROM tax_matching_runs WHERE matching_run_id = %s",
+        (stale.matching_run_id,),
+    ) == [("tax_character_v1", True)]

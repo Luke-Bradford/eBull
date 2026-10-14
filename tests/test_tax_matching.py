@@ -14,9 +14,16 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.tax_broker_evidence import EvidenceRunReport
+from app.services.tax_character import (
+    ISSUER_BINDING_ASSUMED,
+    OFFSHORE_FUND_EXCLUSION_ASSUMED,
+    Cover,
+    CoverFiling,
+    Profile,
+    SecurityEvidence,
+)
 from app.services.tax_ledger import _compute_tax_year
 from app.services.tax_matching import (
-    CHARACTER_PENDING,
     DISPOSAL_FORMULA_ASSUMED,
     EXECUTION_ASSUMED,
     HISTORY_COVERAGE_UNESTABLISHED,
@@ -24,6 +31,7 @@ from app.services.tax_matching import (
     SPREAD_INCLUSION_ASSUMED,
     SYNC_CHARGES_UNOBSERVED,
     WINDOW_OPEN,
+    CoverRefreshReport,
     Identified,
     InstrumentRow,
     LotRow,
@@ -39,12 +47,14 @@ from app.services.tax_matching import (
     identify_security,
     inputs_digest,
     inputs_document,
+    security_members,
     share_quanta,
     window_elapses_at,
 )
 
 D = Decimal
 HCU = HISTORY_COVERAGE_UNESTABLISHED
+IBA, OFE = ISSUER_BINDING_ASSUMED, OFFSHORE_FUND_EXCLUSION_ASSUMED
 #: A fetch long after every window in these tests: no ``window_open`` unless a test says otherwise.
 LATE = datetime(2030, 1, 1, tzinfo=UTC)
 
@@ -233,9 +243,9 @@ class TestWindow:
             date(2026, 9, 23),
         )
         # The depleted contributor's reason left at zero; the window did not.
-        assert before.pool.reasons == (HCU, WINDOW_OPEN)
+        assert before.pool.reasons == (HCU, IBA, OFE, WINDOW_OPEN)
         after = _identified(lots, datetime(2026, 10, 23, 23, tzinfo=UTC))
-        assert (after.pool.window_open_since, after.pool.reasons) == (None, (HCU,))
+        assert (after.pool.window_open_since, after.pool.reasons) == (None, (HCU, IBA, OFE))
 
     def test_a_30_day_acquisition_across_5_april_keeps_the_disposals_tax_year(self) -> None:
         r = _identified(
@@ -324,10 +334,10 @@ class TestReasons:
             _lot("s1", "d", date(2026, 3, 1), "10", "120"),
         ]
         r = _identified(lots)
-        assert r.pool.reasons == (EXECUTION_ASSUMED, HCU, SPREAD_INCLUSION_ASSUMED)
+        assert r.pool.reasons == (EXECUTION_ASSUMED, HCU, IBA, OFE, SPREAD_INCLUSION_ASSUMED)
         assert r.disposals[0].identifications[0].reasons == (EXECUTION_ASSUMED, HCU, SPREAD_INCLUSION_ASSUMED)
         cleared = _identified([*lots, _lot("s2", "d", date(2026, 4, 15), "10", "130")])
-        assert (cleared.pool.units, cleared.pool.reasons) == (D("0"), (HCU,))
+        assert (cleared.pool.units, cleared.pool.reasons) == (D("0"), (HCU, IBA, OFE))
 
     def test_a_mixed_day_carries_its_union_into_every_use(self) -> None:
         d1, d = date(2026, 3, 1), date(2026, 3, 10)
@@ -353,7 +363,7 @@ class TestReasons:
                 _lot("s", "d", d, "1", "11", {DISPOSAL_FORMULA_ASSUMED}),
             ]
         )
-        assert r.disposals[0].reasons == (CHARACTER_PENDING, DISPOSAL_FORMULA_ASSUMED, HCU, SPREAD_INCLUSION_ASSUMED)
+        assert r.disposals[0].reasons == (DISPOSAL_FORMULA_ASSUMED, HCU, IBA, OFE, SPREAD_INCLUSION_ASSUMED)
 
 
 # --- 10. classes ------------------------------------------------------------------------------------------------------
@@ -443,10 +453,38 @@ class TestClasses:
 # --- 11. the tax security ---------------------------------------------------------------------------------------------
 
 
+AS_OF = datetime(2026, 10, 14, 12, tzinfo=UTC)
+_CIK = "0000000001"
+_COVER = "0000000001-26-000001"
+
+
+def _share(symbol: str) -> SecurityEvidence:
+    """Character inputs ``classify`` decides are a share's (3d-3a): one Stocks member, a current operating profile, and
+    a newest cover listing the symbol as common stock; no acquisition, so no start cover is read."""
+    return SecurityEvidence(
+        types=frozenset({5}),
+        ciks=frozenset({_CIK}),
+        symbol=symbol,
+        symbols_ever=frozenset({symbol}),
+        profiles=(Profile("operating", "3571", AS_OF),),
+        filings=(CoverFiling(_COVER, date(2020, 1, 2), "https://www.sec.gov/a.htm"),),
+        first_acquisition=None,
+        covers={_COVER: Cover(frozenset({_CIK}), frozenset({("Common Stock", symbol)}), frozenset())},
+    )
+
+
 def _inputs(
-    lots: list[LotRow], subjects: list[SubjectRow], instruments: dict[int, InstrumentRow], fetch: datetime | None = LATE
+    lots: list[LotRow],
+    subjects: list[SubjectRow],
+    instruments: dict[int, InstrumentRow],
+    fetch: datetime | None = LATE,
+    characters: dict[int, SecurityEvidence] | None = None,
 ) -> MatchingInputs:
-    return MatchingInputs(1, "broker_evidence_v2", fetch, tuple(subjects), tuple(lots), instruments)
+    """By default every security's character inputs are a share's, so these tests exercise identification."""
+    bare = MatchingInputs(1, "broker_evidence_v2", fetch, tuple(subjects), tuple(lots), instruments, AS_OF, {})
+    if characters is None:
+        characters = {key: _share(instruments[key].symbol.upper()) for key in security_members(bare)}
+    return MatchingInputs(1, "broker_evidence_v2", fetch, tuple(subjects), tuple(lots), instruments, AS_OF, characters)
 
 
 def _rows_of(*rows: tuple[int, str, int | None]) -> dict[int, InstrumentRow]:
@@ -485,7 +523,13 @@ class TestMapping:
     ) -> None:
         result = compute_matching(_inputs([_lot_row(instrument=1)], [_subject()], _rows_of(*rows)))
         assert [(s.tax_security_id, s.instrument_ids, s.status) for s in result.securities] == [(1, (1,), "withheld")]
-        assert [(d.reason, d.instrument_id) for d in result.dependencies] == [("identity_unestablished", 1)]
+        assert [(d.reason, d.instrument_id, d.detail) for d in result.dependencies] == [
+            ("identity_unestablished", 1, "component [1, 2]"),
+            ("character_unestablished", None, "identity_unestablished"),
+        ]
+        assert [(s.character.character, s.character.detail) for s in result.securities] == [
+            ("unestablished", "identity_unestablished")
+        ]
         assert [p.tax_security_id for p in result.placements] == [None, None]
 
     def test_a_chain_withholds_everything_reachable(self) -> None:
@@ -496,7 +540,11 @@ class TestMapping:
             )
         )
         assert [(s.tax_security_id, s.status) for s in result.securities] == [(10, "withheld"), (12, "withheld")]
-        assert {d.reason for d in result.dependencies} == {"identity_unestablished", "unresolved_subject"}
+        assert {d.reason for d in result.dependencies} == {
+            "identity_unestablished",
+            "unresolved_subject",
+            "character_unestablished",
+        }
         assert sorted(p.instrument_id for p in result.placements) == [10, 11, 12]
 
     def test_a_lot_on_an_id_with_no_row_withholds_every_security(self) -> None:
@@ -578,12 +626,14 @@ def test_the_inputs_document_is_pinned() -> None:
     )
     document = inputs_document(inputs)
     assert document == (
-        '{"evidence":[["L1","' + "f" * 64 + '"],["L2","' + "f" * 64 + '"]],'
+        '{"character":[[1,[5],["0000000001"],"SPY",["SPY"],["operating","3571"],'
+        '["0000000001-26-000001",[["0000000001"],[["Common Stock","SPY"]],[]]],null]],'
+        '"evidence":[["L1","' + "f" * 64 + '"],["L2","' + "f" * 64 + '"]],'
         '"instruments":[[1,"SPY",null],[2,"SPY.RTH",1],[7,null,null]],'
         '"subjects":[["order:1","admitted",1,"lookup",[3,9]],["order:2","unresolved",null,null,[]]],'
-        '"version":"matching_inputs_v1"}'
+        '"version":"matching_inputs_v2"}'
     )
-    assert inputs_digest(document) == "91504c592217e3573f0b251a747cd1510ea7f36aff52cdf3d834d26dd9a02b7c"
+    assert inputs_digest(document) == "ae7c662027195be5afc40a4872e2c3c8d53c4de2ea6a47d3eb95f23d43604982"
 
 
 # --- run 2, from the spec's own day totals (Facts 3; Acceptance) ------------------------------------------------------
@@ -608,10 +658,10 @@ def test_run_2_spy_replays_the_acceptance_figures() -> None:
     ]
     (x,) = r.disposals
     assert (x.cost_gbp, x.gain_gbp) == (D("171.58565283374305"), D("0.86063438888195"))
-    assert x.reasons == (CHARACTER_PENDING, DISPOSAL_FORMULA_ASSUMED, HCU, SPREAD_INCLUSION_ASSUMED, WINDOW_OPEN)
+    assert x.reasons == (DISPOSAL_FORMULA_ASSUMED, HCU, IBA, OFE, SPREAD_INCLUSION_ASSUMED, WINDOW_OPEN)
     assert (r.pool.units, r.pool.cost_gbp) == (D("21.66720200"), D("12537.70775155264395"))
     assert (r.pool.reasons, r.pool.window_open_since) == (
-        (HCU, SPREAD_INCLUSION_ASSUMED, WINDOW_OPEN),
+        (HCU, IBA, OFE, SPREAD_INCLUSION_ASSUMED, WINDOW_OPEN),
         date(2026, 9, 23),
     )
 
@@ -619,7 +669,12 @@ def test_run_2_spy_replays_the_acceptance_figures() -> None:
 # --- 20. the jobs ----------------------------------------------------------------------------------------------------
 
 
-def _stub_jobs(monkeypatch: pytest.MonkeyPatch, evidence: Any, matching: MatchingRunReport) -> list[str]:
+_COVERS_OK = CoverRefreshReport(2, 1, 1, 0, ())
+
+
+def _stub_jobs(
+    monkeypatch: pytest.MonkeyPatch, evidence: Any, matching: MatchingRunReport, covers: CoverRefreshReport = _COVERS_OK
+) -> list[str]:
     from app.workers import scheduler
 
     calls: list[str] = []
@@ -646,12 +701,17 @@ def _stub_jobs(monkeypatch: pytest.MonkeyPatch, evidence: Any, matching: Matchin
         calls.append("matching")
         return matching
 
+    def refresh_covers(_conn: object) -> CoverRefreshReport:
+        calls.append("covers")
+        return covers
+
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)
     monkeypatch.setattr(scheduler, "connect_job", connected)
     monkeypatch.setattr(scheduler, "_load_etoro_credentials", lambda _name: ("api", "user"))
     monkeypatch.setattr("app.providers.implementations.etoro_broker.EtoroBrokerProvider", _Broker)
     monkeypatch.setattr("app.services.tax_broker_evidence.run_tax_broker_evidence", evidence)
     monkeypatch.setattr("app.services.tax_matching.run_tax_matching", run_matching)
+    monkeypatch.setattr("app.services.tax_matching.refresh_cover_instances", refresh_covers)
     return calls
 
 
@@ -668,7 +728,7 @@ class TestJobs:
         )
         with pytest.raises(RuntimeError, match=r"refused: scope_mismatch.*matching=already_published"):
             scheduler.tax_broker_evidence_refresh()
-        assert calls == ["matching"]
+        assert calls == ["covers", "matching"]
 
     def test_an_evidence_exception_still_runs_matching_and_fails_the_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -679,7 +739,7 @@ class TestJobs:
         calls = _stub_jobs(monkeypatch, boom, MatchingRunReport("published", 3, 4))
         with pytest.raises(RuntimeError, match=r"evidence raised OSError: broker down.*matching=published"):
             scheduler.tax_broker_evidence_refresh()
-        assert calls == ["matching"]
+        assert calls == ["covers", "matching"]
 
     def test_a_matching_refusal_fails_the_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -699,4 +759,15 @@ class TestJobs:
         _stub_jobs(monkeypatch, _evidence("skipped", "another run holds the lock"), MatchingRunReport("no_generation"))
         scheduler.tax_broker_evidence_refresh()
         scheduler.daily_tax_reconciliation()
-        assert calls == ["matching"]
+        assert calls == ["covers", "matching"]
+
+    def test_a_failed_cover_still_runs_matching_and_fails_both_jobs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.workers import scheduler
+
+        failed = CoverRefreshReport(2, 0, 1, 0, ("0000000001-26-000002: http 503",))
+        calls = _stub_jobs(monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), failed)
+        with pytest.raises(RuntimeError, match=r"failures=\['0000000001-26-000002: http 503'\].*matching=published"):
+            scheduler.tax_broker_evidence_refresh()
+        with pytest.raises(RuntimeError, match=r"http 503.*matching=published"):
+            scheduler.daily_tax_reconciliation()
+        assert calls == ["covers", "matching", "covers", "matching"]
