@@ -507,6 +507,14 @@ def test_content_item_unsound(body: bytes) -> None:
     assert read_content_item(body, FETCHED) is None
 
 
+def test_json_nested_past_the_parser_depth_is_unsound() -> None:
+    deep = b"[" * 100_000 + b"]" * 100_000
+    assert read_gleif_record(deep, LEI) is None
+    assert read_gleif_isins(deep) is None
+    assert read_figi(deep, 1) is None
+    assert read_content_item(deep, FETCHED) is None
+
+
 # --- ODS builder for tests 2 and 3 --------------------------------------------------------------------------------
 
 _NS = (

@@ -22,6 +22,7 @@ from app.services.tax_character import (
     Profile,
     SecurityEvidence,
 )
+from app.services.tax_fund_refresh import FundEvidenceReport
 from app.services.tax_ledger import _compute_tax_year
 from app.services.tax_matching import (
     DISPOSAL_FORMULA_ASSUMED,
@@ -677,10 +678,15 @@ def test_run_2_spy_replays_the_acceptance_figures() -> None:
 
 
 _COVERS_OK = CoverRefreshReport(2, 1, 1, 0, ())
+_FUNDS_OK = FundEvidenceReport(3, {}, 0, 0, ((3000, "candidate", "not_found"),), ())
 
 
 def _stub_jobs(
-    monkeypatch: pytest.MonkeyPatch, evidence: Any, matching: MatchingRunReport, covers: CoverRefreshReport = _COVERS_OK
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: Any,
+    matching: MatchingRunReport,
+    covers: CoverRefreshReport = _COVERS_OK,
+    funds: FundEvidenceReport | Exception = _FUNDS_OK,
 ) -> list[str]:
     from app.workers import scheduler
 
@@ -712,6 +718,12 @@ def _stub_jobs(
         calls.append("covers")
         return covers
 
+    def refresh_funds(_conn: object) -> FundEvidenceReport:
+        calls.append("funds")
+        if isinstance(funds, Exception):
+            raise funds
+        return funds
+
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)
     monkeypatch.setattr(scheduler, "connect_job", connected)
     monkeypatch.setattr(scheduler, "_load_etoro_credentials", lambda _name: ("api", "user"))
@@ -719,6 +731,7 @@ def _stub_jobs(
     monkeypatch.setattr("app.services.tax_broker_evidence.run_tax_broker_evidence", evidence)
     monkeypatch.setattr("app.services.tax_matching.run_tax_matching", run_matching)
     monkeypatch.setattr("app.services.tax_matching.refresh_cover_instances", refresh_covers)
+    monkeypatch.setattr("app.services.tax_fund_refresh.refresh_fund_evidence", refresh_funds)
     return calls
 
 
@@ -735,7 +748,7 @@ class TestJobs:
         )
         with pytest.raises(RuntimeError, match=r"refused: scope_mismatch.*matching=already_published"):
             scheduler.tax_broker_evidence_refresh()
-        assert calls == ["covers", "matching"]
+        assert calls == ["covers", "funds", "matching"]
 
     def test_an_evidence_exception_still_runs_matching_and_fails_the_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -746,7 +759,7 @@ class TestJobs:
         calls = _stub_jobs(monkeypatch, boom, MatchingRunReport("published", 3, 4))
         with pytest.raises(RuntimeError, match=r"evidence raised OSError: broker down.*matching=published"):
             scheduler.tax_broker_evidence_refresh()
-        assert calls == ["covers", "matching"]
+        assert calls == ["covers", "funds", "matching"]
 
     def test_a_matching_refusal_fails_the_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -766,7 +779,7 @@ class TestJobs:
         _stub_jobs(monkeypatch, _evidence("skipped", "another run holds the lock"), MatchingRunReport("no_generation"))
         scheduler.tax_broker_evidence_refresh()
         scheduler.daily_tax_reconciliation()
-        assert calls == ["covers", "matching"]
+        assert calls == ["covers", "funds", "matching"]
 
     def test_a_failed_cover_still_runs_matching_and_fails_both_jobs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -777,7 +790,21 @@ class TestJobs:
             scheduler.tax_broker_evidence_refresh()
         with pytest.raises(RuntimeError, match=r"http 503.*matching=published"):
             scheduler.daily_tax_reconciliation()
-        assert calls == ["covers", "matching", "covers", "matching"]
+        assert calls == ["covers", "funds", "matching", "covers", "funds", "matching"]
+
+    def test_a_failed_fund_step_still_runs_matching_and_fails_both_jobs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.workers import scheduler
+
+        failed = FundEvidenceReport(3, {"sec_ncen": 1}, 0, 0, (), ("gleif_record X: http 503",))
+        calls = _stub_jobs(monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), funds=failed)
+        with pytest.raises(RuntimeError, match=r"failures=\['gleif_record X: http 503'\].*matching=published"):
+            scheduler.tax_broker_evidence_refresh()
+        with pytest.raises(RuntimeError, match=r"http 503.*matching=published"):
+            scheduler.daily_tax_reconciliation()
+        _stub_jobs(monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), funds=OSError("down"))
+        with pytest.raises(RuntimeError, match=r"funds raised OSError: down.*matching=published"):
+            scheduler.daily_tax_reconciliation()
+        assert calls == ["covers", "funds", "matching", "covers", "funds", "matching"]
 
 
 # --- slice 3d-3b: A8 (distribution_character_assumed) -----------------------------------------------------------------

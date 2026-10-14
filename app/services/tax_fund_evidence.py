@@ -348,7 +348,7 @@ def read_gleif_record(body: bytes, lei: str) -> GleifRecord | None:
     """None means unsound: every field Design 2 judges must have its stated type; an absent key means none."""
     try:
         doc = json.loads(body)
-    except ValueError:
+    except ValueError, RecursionError:  # a body nested past the parser's depth is unsound
         return None
     data = doc.get("data") if isinstance(doc, dict) else None
     attrs = data.get("attributes") if isinstance(data, dict) and data.get("id") == lei else None
@@ -393,7 +393,7 @@ def read_gleif_isins(body: bytes) -> GleifIsins | None:
     """The first page of the ISIN relationship; None when unsound (JSON integers only, ``currentPage`` 1)."""
     try:
         doc = json.loads(body)
-    except ValueError:
+    except ValueError, RecursionError:  # a body nested past the parser's depth is unsound
         return None
     if not isinstance(doc, dict) or not isinstance(doc.get("data"), list) or not isinstance(doc.get("meta"), dict):
         return None
@@ -431,7 +431,7 @@ def read_figi(body: bytes, jobs: int) -> list[tuple[str, ...] | Unresolved] | No
     each exactly ``data`` (a list) or exactly ``warning`` (a string)."""
     try:
         doc = json.loads(body)
-    except ValueError:
+    except ValueError, RecursionError:  # a body nested past the parser's depth is unsound
         return None
     if not isinstance(doc, list) or len(doc) != jobs:
         return None
@@ -471,7 +471,7 @@ def read_content_item(body: bytes, fetched_at: datetime) -> ContentItem | None:
         raise ValueError("read_content_item needs an aware fetched_at")
     try:
         item = json.loads(body)
-    except ValueError:
+    except ValueError, RecursionError:
         return None
     if not isinstance(item, dict):
         return None
