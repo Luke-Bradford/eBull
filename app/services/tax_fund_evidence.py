@@ -465,7 +465,10 @@ class ContentItem:
 def read_content_item(body: bytes, fetched_at: datetime) -> ContentItem | None:
     """GOV.UK's content item, sound per Design 1's table, or None: a JSON object; ``public_updated_at`` RFC 3339 with
     a zone and not after the fetch; exactly one ``.ods`` attachment object, on the asset host over HTTPS with no
-    credentials, port, query or fragment, and a positive JSON integer ``file_size``."""
+    credentials, port, query or fragment, and a positive JSON integer ``file_size``. A naive ``fetched_at`` is a
+    caller error and raises."""
+    if fetched_at.tzinfo is None:
+        raise ValueError("read_content_item needs an aware fetched_at")
     try:
         item = json.loads(body)
     except ValueError:

@@ -474,6 +474,11 @@ def content(published: Any = "2026-10-12T11:30:44+01:00", attachments: Any = Non
     return json.dumps({"public_updated_at": published, "details": {"attachments": attachments}}).encode()
 
 
+def test_content_item_refuses_a_naive_fetch_time() -> None:
+    with pytest.raises(ValueError):
+        read_content_item(content(), FETCHED.replace(tzinfo=None))
+
+
 def test_content_item_sound() -> None:
     item = read_content_item(content(), FETCHED)
     assert item is not None and item.attachment_url == ODS_URL and item.file_size == 4549717
