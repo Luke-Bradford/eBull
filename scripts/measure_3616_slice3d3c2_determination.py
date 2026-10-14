@@ -28,8 +28,8 @@ observations. It replays a cutoff; it does not check reuse of an admitted run af
 The printout carries dates, symbols, CIKs, LEIs, ISINs and accession numbers, never an account identifier.
 
     uv run python -m scripts.measure_3616_slice3d3c2_determination \\
-        --determination docs/specs/metrics/2026-10-14-3616-slice3d3c2-spy-determination-v1.json \\
-        --docs var/research/3616/slice3d3c2/spy --authorities docs/specs/metrics/sources/3616-slice3d3c2
+        --determination app/services/tax_fund_determinations/0000884394_v1.json \\
+        --docs var/research/3616/slice3d3c2/spy --authorities app/services/tax_fund_determinations/authorities
 """
 
 from __future__ import annotations
