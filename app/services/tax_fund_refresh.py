@@ -405,6 +405,11 @@ class _Run:
         if got.body is None:
             self.failures.append(f"{source} {request_key}: {got.error}")
             return None
+        # An unsound body is deliberately not stored (spec Design 1, "Soundness": a failed fetch stores nothing). A
+        # stored fetch is evidence: an observation evaluates a source's newest fetch with no fallback, so storing a
+        # transient error page would turn it into an outcome, and sql/492's trigger refuses an unsound content item.
+        # Soundness is checked before persistence; an accepted body is passed to the store unchanged, byte for byte.
+        # Same contract as `refresh_cover_instances` (3d-3a Design 1). The failure itself is recorded in the job note.
         if not sound(got.body, fetched_at):
             self.failures.append(f"{source} {request_key}: unsound body")
             return None

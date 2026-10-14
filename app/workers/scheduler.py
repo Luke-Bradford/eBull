@@ -7301,6 +7301,8 @@ def _run_fund_evidence_step() -> tuple[str | None, str]:
     """Capture the held funds' public evidence and record their observations (#3616 slice 3d-3c-1, Design 4), on a
     fresh autocommit connection: (failure or None, note). Any recorded failure or an exception is a failure; stored
     evidence is never rolled back, and matching still runs."""
+    from collections import Counter
+
     from app.services.tax_fund_refresh import refresh_fund_evidence
 
     try:
@@ -7312,7 +7314,8 @@ def _run_fund_evidence_step() -> tuple[str | None, str]:
         return note, note
     note = (
         f"funds={report.funds} stored={dict(report.stored)} assessed={report.assessed} searched={report.searched} "
-        f"observations={list(report.observations)} failures={list(report.failures)}"
+        f"observations={dict(Counter(f'{o}/{so}' if so else o for _s, o, so in report.observations))} "
+        f"failures={list(report.failures)}"
     )
     return (note if report.failures else None), note
 
