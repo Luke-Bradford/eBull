@@ -113,7 +113,6 @@ def read_cover(body: bytes) -> Cover | None:
         text = (idents[0].text or "").strip() if len(idents) == 1 else ""
         sec = len(idents) == 1 and idents[0].get("scheme") == SEC_CIK_SCHEME and text.isdigit()
         issuer[str(ctx.get("id"))] = text.zfill(10) if sec else None
-    contexts = set(ids)
     ciks: set[str] = set()
     by_ctx: dict[str, dict[str, set[str]]] = {}
     for el in root.iter():
@@ -125,7 +124,7 @@ def read_cover(body: bytes) -> Cover | None:
         if q.localname not in ("EntityCentralIndexKey", "Security12bTitle", "TradingSymbol"):
             continue
         ref = el.get("contextRef") or ""
-        if ref not in contexts or issuer[ref] is None:
+        if issuer.get(ref) is None:
             return None
         ciks.add(str(issuer[ref]))
         text = " ".join("".join(el.itertext()).split())
@@ -247,10 +246,13 @@ def _fetch_instance(client: httpx.Client, url: str, out: Path, accession: str) -
     except httpx.HTTPError as exc:
         print(f"    {accession}: transport error, nothing stored: {exc}")
         return None
+    if status != 200:
+        print(f"    {url} http={status}: not an instance, nothing written")
+        return None
     body = b"".join(chunks)
     (out / f"instance_{accession}.xml.gz").write_bytes(gzip.compress(body))
     print(f"    fetched {url} http={status} sha256={hashlib.sha256(body).hexdigest()}")
-    return body if status == 200 else None
+    return body
 
 
 def main() -> None:
