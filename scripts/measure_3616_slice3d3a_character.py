@@ -108,7 +108,8 @@ def read_cover(body: bytes) -> Cover | None:
         return None
     issuer: dict[str, str | None] = {}
     for ctx in root.iter(f"{{{XBRLI}}}context"):
-        idents = list(ctx.iter(f"{{{XBRLI}}}identifier"))
+        entities = ctx.findall(f"{{{XBRLI}}}entity")
+        idents = entities[0].findall(f"{{{XBRLI}}}identifier") if len(entities) == 1 else []
         text = (idents[0].text or "").strip() if len(idents) == 1 else ""
         sec = len(idents) == 1 and idents[0].get("scheme") == SEC_CIK_SCHEME and text.isdigit()
         issuer[str(ctx.get("id"))] = text.zfill(10) if sec else None
@@ -361,13 +362,19 @@ def main() -> None:
             (run_id,),
         ).fetchone()
         assert mismatched is not None
+        mapped = [
+            r[0]
+            for r in conn.execute(
+                "SELECT instrument_id FROM tax_matching_instruments WHERE matching_run_id = %s", (run_id,)
+            ).fetchall()
+        ]
         unsealed = conn.execute(
             "SELECT count(*) FROM instruments i WHERE NOT EXISTS (SELECT 1 FROM tax_matching_instruments m "
             "WHERE m.matching_run_id = %(r)s AND m.instrument_id = i.instrument_id) AND ("
             "i.canonical_instrument_id = ANY(%(m)s) OR upper(i.symbol) = ANY(SELECT upper(symbol) || '.RTH' "
             "FROM instruments WHERE instrument_id = ANY(%(m)s)) OR upper(i.symbol) || '.RTH' = ANY(SELECT "
             "upper(symbol) FROM instruments WHERE instrument_id = ANY(%(m)s)))",
-            {"r": run_id, "m": members},
+            {"r": run_id, "m": mapped},
         ).fetchone()
         assert unsealed is not None
         if mismatched[0] or unsealed[0]:

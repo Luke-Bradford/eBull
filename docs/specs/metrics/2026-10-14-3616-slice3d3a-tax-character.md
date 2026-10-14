@@ -35,7 +35,7 @@ pairs. This slice adds no capture table.
 matching run with `effective_tax_matching` (run 1, over evidence run 2), then in one REPEATABLE READ transaction reads
 that sealed run's rows and the inputs Design 2 names (the stored bodies of only the selected covers), checks in that
 snapshot that `instruments` still matches the run's sealed `tax_matching_instruments` mapping and that no unmapped
-row now points at, is the `.RTH` variant of, or is the base symbol of an `.RTH`, member, checks afterwards that the effective run is unchanged, reads
+row now points at, is the `.RTH` variant of, or is the base symbol of an `.RTH`, any instrument of the sealed mapping, checks afterwards that the effective run is unchanged, reads
 each needed cover from `filing_raw_documents` or, when absent, fetches it (bounded, not stored), reads it with the
 strict reader `read_cover`, and applies Design 2 through one function, `classify`, which the build moves into the service. Output
 `var/research/3616/slice3d3a/population.txt`; fetched bodies with SHA-256 beside it (gitignored; no account
@@ -152,7 +152,8 @@ withheld security; its character is `unestablished`, `identity_unestablished`, w
   `SAFE_XML_PARSER`, is over 16 MiB (from `octet_length(payload)`, before the body is loaded), its root is not
   `{http://www.xbrl.org/2003/instance}xbrl`, an `xbrli:context` has no `id` or shares one with another, a `dei` fact
   (namespace exactly `http://xbrl.sec.gov/dei/` and four digits) of the three below has no `contextRef` or one naming
-  no context, that context does not have exactly one `xbrli:entity/xbrli:identifier` with scheme
+  no context, that context does not have exactly one direct `xbrli:entity` child holding exactly one direct
+  `xbrli:identifier` child (an identifier anywhere else, such as under `xbrli:scenario`, does not count) with scheme
   `http://www.sec.gov/CIK` and an all-digit value, or an `EntityCentralIndexKey` is not all digits. Otherwise its
   *CIKs* are the distinct `dei:EntityCentralIndexKey` values together with the identifiers of every context those
   facts use, zero-padded, so a class reported in another issuer's context makes the CIKs two; per `contextRef`, the `dei:TradingSymbol` values (under `symbol_key`) and
@@ -286,7 +287,7 @@ Pure, on `read_cover`, `classify`, the title grammar and the digest document:
    accession with two dates; no cover; the newest uninstanced; unusable instances (not XML, wrong root namespace, a
    `dei` fact on an undefined context, a context without an `id`, two contexts with one `id`, a fact without
    `contextRef`, a non-digit CIK, a 16 MiB + 1 byte body, a context without an entity identifier, one with a non-SEC
-   scheme); AAPL's only `EntityCentralIndexKey` with ("Common Stock", AAPL) in a context identifying CIK 0001130713
+   scheme, one directly under the context, one under `xbrli:scenario`); AAPL's only `EntityCentralIndexKey` with ("Common Stock", AAPL) in a context identifying CIK 0001130713
    (CIKs two: unusable); an instance with two CIKs, one of them ours, whose common
    class carries our symbol (unusable); our symbol in two contexts, "Common Stock" complete and "Common Units" without
    its exchange tag (ambiguous); a context with two titles and our symbol; the symbol's title "Common Units" (Energy
