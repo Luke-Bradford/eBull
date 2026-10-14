@@ -377,7 +377,7 @@ Matching reads none of these tables in this slice.
 
 ## Local policy (frozen under `fund_determination_v1`)
 
-The format, its questions, answers and basis rules; trust arrangements only; one version per CIK; the policy assumptions; `offshore_fund`'s
+The format, its questions, answers and basis rules (the two reg 29 questions `unresolved` only); trust arrangements only; one version per CIK; the policy assumptions; `offshore_fund`'s
 rule; the URL form; `content_sha256` and `document_text`; quote matching by substring after white-space collapse; the
 run gate; the outcome table and its order; the 7-day refresh and 30-day currency of the filing list; `review_by` one
 year after `reviewed_at`; Design 3's order and interval. Changing any of these is a new policy id.

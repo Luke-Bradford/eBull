@@ -593,6 +593,8 @@ def gate(
                 result, refusal = applicability(det, src, obs, sub, cutoff.date())
                 print(f"  fund observation {outcome}; search {search}; applicability {result} {refusal or ''}")
                 if result != "determined":
+                    # One determination is loaded, so a candidate of its CIK always has it: any refusal for that
+                    # candidate (binding, documents, quotes, review, coverage, staleness) fails the verification.
                     failed |= outcome == "candidate" and cik == det["cik"]
                     continue
                 answer, basis, rests_on = offshore_fund(det)
