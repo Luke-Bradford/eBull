@@ -244,7 +244,7 @@ def _request(
         deadline.tick()
         return _Got(None, _CUT)
     got = result[0]
-    if got.body is None and got.status is None or got.error == _CUT:
+    if (got.body is None and got.status is None) or got.error == _CUT:  # a transport error, or a cut
         deadline.tick()
     return got
 
