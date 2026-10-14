@@ -4,8 +4,8 @@ Spec: docs/specs/metrics/2026-10-13-3616-slice3c-broker-tax-evidence.md.
 
 Part 2a (this module so far) captures the broker's order lookups (Design 3). The broker answered ``orders:lookup``
 for recent orders only (spec fact 2), so lookups are captured early and kept as text in ``tax_order_lookups``
-(sql/486), one append-only row per attempt. Part 2b adds the pure derivation, the sterling values and the publishing
-run (Design 4-6) on the same lock and policy id.
+(sql/486), one append-only row per attempt. The pure derivation and sterling values (Design 4-5) are in
+``app/services/tax_broker_derivation.py``; the publishing run (Design 6) follows on the same lock and policy id.
 
 - ``classify_lookup`` is the response table of Design 3; ``lookup_candidates`` and ``plan_lookups`` are its candidate
   table, caps and interleaving. All three are pure.
@@ -28,12 +28,9 @@ import psycopg
 import psycopg.rows
 
 from app.providers.broker import RawOrderLookup
+from app.services.tax_broker_derivation import TAX_EVIDENCE_POLICY_ID, lookup_field_failures, parse_lookup_body
 
 logger = logging.getLogger(__name__)
-
-#: Names the checks, field table, product mapping, normalisation, tolerances, candidate rules and keys (Design 4.11).
-#: Changing any of them is a new policy id.
-TAX_EVIDENCE_POLICY_ID = "broker_evidence_v1"
 
 #: Session advisory lock held for a whole run (Design 6): int.from_bytes(b"taxevid3", "big").
 TAX_EVIDENCE_LOCK_KEY = 8386116358314222643
@@ -122,13 +119,15 @@ def lookup_candidates(
     attempts: Iterable[LookupAttempt],
     now: datetime,
     policy_id: str = TAX_EVIDENCE_POLICY_ID,
+    failing_found: frozenset[int] = frozenset(),
 ) -> tuple[list[LedgerOrder], list[LedgerOrder]]:
     """The first-attempt and retry queues, each in asking order (Design 3, candidate table).
 
     The first-attempt queue is newest order first, because retention (if any) loses the oldest first; the retry
     queue is oldest latest attempt first, so a failing candidate goes to the back after each attempt.
 
-    ⚠ The row "*F* fails a Design 4 field check" needs the derivation and arrives with it (part 2b).
+    ``failing_found`` holds the ``lookup_id`` of every ``found`` body that fails a Design 4 field check
+    (``load_failing_found``); such an *F* is asked again once 7 days old or under another policy.
     ⚠ The settling lookup is asked once ``now`` is 7 days past the order's last event: the spec's row ("no attempt
     was made 7 or more days after its last event") read alone would re-ask daily until then.
     """
@@ -156,6 +155,11 @@ def lookup_candidates(
                     or now - latest.requested_at >= RECHECK_AFTER
                     or latest.policy_id != policy_id
                 )
+            )
+            or (
+                f is not None
+                and f.lookup_id in failing_found
+                and (now - f.requested_at >= RECHECK_AFTER or f.policy_id != policy_id)
             )
             or (latest.outcome == "not_found" and e > latest.order_event_max_id)
             or (f is not None and e > f.order_event_max_id)
@@ -247,6 +251,21 @@ def load_lookup_attempts(conn: psycopg.Connection[Any], environment: str) -> lis
     return [LookupAttempt(**row) for row in rows]
 
 
+def load_failing_found(conn: psycopg.Connection[Any], environment: str) -> frozenset[int]:
+    """The latest ``found`` attempt of each order whose body fails a Design 4 field check on its own."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        rows = cur.execute(
+            """
+            SELECT DISTINCT ON (order_id) lookup_id, body_text
+            FROM tax_order_lookups
+            WHERE environment = %(env)s AND outcome = 'found'
+            ORDER BY order_id, lookup_id DESC
+            """,
+            {"env": environment},
+        ).fetchall()
+    return frozenset(r["lookup_id"] for r in rows if lookup_field_failures(parse_lookup_body(r["body_text"])))
+
+
 @dataclass
 class CaptureReport:
     state: Literal["captured", "refused", "skipped"]
@@ -269,7 +288,10 @@ def capture_order_lookups(
     """
     now = now if now is not None else datetime.now(UTC)
     first, retry = lookup_candidates(
-        load_ledger_orders(conn, environment), load_lookup_attempts(conn, environment), now
+        load_ledger_orders(conn, environment),
+        load_lookup_attempts(conn, environment),
+        now,
+        failing_found=load_failing_found(conn, environment),
     )
     plan = plan_lookups(first, retry)
     report = CaptureReport(state="captured")
