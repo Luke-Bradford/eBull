@@ -1,0 +1,178 @@
+{
+  "determination_id": "fund_determination_v1:0000884394:1",
+  "policy_id": "fund_determination_v1",
+  "binding": {
+    "cik": "0000884394",
+    "lei": "549300NZAMSJ8FXPQQ63",
+    "isin": "US78462F1030",
+    "mic": "ARCX",
+    "ticker": "SPY"
+  },
+  "valid_from": "2017-06-16",
+  "reviewed_filings": [
+    "0001193125-26-022316",
+    "0001193125-26-022775",
+    "0001193125-26-023648",
+    "0001410368-26-023904"
+  ],
+  "reviewed_through": "2026-03-13",
+  "documents": [
+    {
+      "doc_id": "prospectus_2026",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022316/d77353d485bpos.htm",
+      "accession": "0001193125-26-022316",
+      "form": "485BPOS",
+      "filed": "2026-01-26",
+      "role": "prospectus dated 2026-01-26 (Post-Effective Amendment No. 40)"
+    },
+    {
+      "doc_id": "standard_terms_2004",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013604000194/file002.htm",
+      "accession": "0000950136-04-000194",
+      "form": "485APOS EX-99.A1",
+      "filed": "2004-01-28",
+      "role": "Amended and Restated Standard Terms and Conditions of Trust, effective 2004-01-27"
+    },
+    {
+      "doc_id": "amendment_1",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013605000453/file004.htm",
+      "accession": "0000950136-05-000453",
+      "form": "485BPOS EX-99.A1",
+      "filed": "2005-01-28",
+      "role": "Amendment No. 1: special dividends (Section 3.04)"
+    },
+    {
+      "doc_id": "amendment_2",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095012309003326/y01192bexv99wa1.htm",
+      "accession": "0000950123-09-003326",
+      "form": "485BPOS EX-99.A1",
+      "filed": "2009-02-24",
+      "role": "Amendment No. 2: Exchange, Depository and NSCC definitions; successors; addresses"
+    },
+    {
+      "doc_id": "amendment_3",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095012310005702/y02740exv99waw1.htm",
+      "accession": "0000950123-10-005702",
+      "form": "485BPOS EX-99.A.1",
+      "filed": "2010-01-27",
+      "role": "Amendment No. 3: names of the Trust and its units"
+    },
+    {
+      "doc_id": "amendment_4",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312518013487/d469152dex99a15.htm",
+      "accession": "0001193125-18-013487",
+      "form": "485BPOS EX-99.A1(5)",
+      "filed": "2018-01-18",
+      "role": "Amendment No. 4: trustee replaced, effective 2017-06-16"
+    },
+    {
+      "doc_id": "amendment_5",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312518013487/d469152dex99a16.htm",
+      "accession": "0001193125-18-013487",
+      "form": "485BPOS EX-99.A1(6)",
+      "filed": "2018-01-18",
+      "role": "Amendment No. 5: settlement cycle (Sections 2.03, 3.04)"
+    },
+    {
+      "doc_id": "amendment_6",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312525013181/d875286dex99a17.htm",
+      "accession": "0001193125-25-013181",
+      "form": "485BPOS EX-99.A1(7)",
+      "filed": "2025-01-27",
+      "role": "Amendment No. 6: T+1 settlement cycle (Section 2.03)"
+    },
+    {
+      "doc_id": "amendment_7",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022316/d77353dex99a18.htm",
+      "accession": "0001193125-26-022316",
+      "form": "485BPOS EX-99.A1(8)",
+      "filed": "2026-01-26",
+      "role": "Amendment No. 7: name of the Trust"
+    }
+  ],
+  "findings": [
+    {
+      "question": "arrangement",
+      "answer": "single_arrangement_single_class",
+      "sources": ["TIOPA 2010 s360", "TIOPA 2010 s361", "IFM12282"],
+      "quotes": [
+        {"doc_id": "prospectus_2026", "text": "Each unit of fractional undivided interest in the Trust is referred to as a"},
+        {"doc_id": "prospectus_2026", "text": "The Trust is a unit investment trust that issues Units."}
+      ]
+    },
+    {
+      "question": "s355_limb",
+      "answer": "b",
+      "sources": ["TIOPA 2010 s355(1)(b)", "ITA 2007 s475", "TCGA 1992 s69"],
+      "quotes": [
+        {"doc_id": "standard_terms_2004", "text": "The Trustee declares it holds and will hold the Trust Fund as Trustee for the use and benefit of all present and future Beneficial Owners"},
+        {"doc_id": "standard_terms_2004", "text": "there will be conveyed and deposited with the Trustee in an irrevocable trust, all cash and securities so deposited"},
+        {"doc_id": "standard_terms_2004", "text": "all laws or rules of construction of such State shall govern the rights of the parties hereto and the Beneficial Owners"},
+        {"doc_id": "amendment_4", "text": "the Sponsor has appointed the Trustee as trustee of the SPDR 500 Trust as of June 16, 2017"},
+        {"doc_id": "prospectus_2026", "text": "The Trustee is a limited-purpose trust company organized under the laws of the Commonwealth of Massachusetts with its principal place of business at One Congress Street, Boston, Massachusetts 02114."}
+      ]
+    },
+    {
+      "question": "s356_condition_a",
+      "answer": "met",
+      "sources": ["TIOPA 2010 s356(3)", "IFM12232"],
+      "quotes": [
+        {"doc_id": "prospectus_2026", "text": "Units represent an undivided ownership interest in Portfolio Securities of the Trust."},
+        {"doc_id": "prospectus_2026", "text": "Holders of Units receive on the last Business Day of April, July, October and January an amount corresponding to the amount of any cash dividends declared on the Portfolio Securities during the applicable period, net of fees and expenses associated with operation of the Trust, and taxes, if applicable."}
+      ]
+    },
+    {
+      "question": "s356_condition_b",
+      "answer": "met",
+      "sources": ["TIOPA 2010 s356(4)-(5)", "IFM12233"],
+      "quotes": [
+        {"doc_id": "standard_terms_2004", "text": "No Beneficial Owner shall have any right to vote except as provided in Sections 9.01 and 10.01 or in any manner otherwise to control the operation and management of the Trust Fund"}
+      ]
+    },
+    {
+      "question": "s356_condition_c",
+      "answer": "met",
+      "sources": ["TIOPA 2010 s356(6)", "IFM12237", "IFM12282"],
+      "quotes": [
+        {"doc_id": "prospectus_2026", "text": "The Trust continuously issues and redeems"},
+        {"doc_id": "prospectus_2026", "text": "at their once-daily NAV. Units are listed individually for trading on the Exchange at prices established throughout the trading day"},
+        {"doc_id": "prospectus_2026", "text": "Units may be redeemed in-kind only in Creation Units at their NAV determined after receipt of a redemption request in proper form"}
+      ]
+    },
+    {
+      "question": "s357_condition_d",
+      "answer": "not_met",
+      "sources": ["TIOPA 2010 s357(1)-(2)", "IFM12242"],
+      "quotes": [
+        {"doc_id": "standard_terms_2004", "text": "A redeemer may at any time tender SPDRs in Creation Unit size aggregations to the Trustee for redemption"}
+      ]
+    },
+    {
+      "question": "period_of_account_end",
+      "answer": "09-30",
+      "sources": ["SI 2009/3001 reg 12 (period of account)", "SI 2009/3001 reg 54(2)"],
+      "quotes": [
+        {"doc_id": "prospectus_2026", "text": "the Trust’s fiscal year end changed from December 31 to September 30."}
+      ]
+    },
+    {
+      "question": "transparent_fund",
+      "answer": "unresolved",
+      "sources": ["SI 2009/3001 reg 11", "SI 2009/3001 reg 29", "IFM12252", "IFM12254", "IFM13470", "INTM180030", "INTM180040"],
+      "quotes": [
+        {"doc_id": "prospectus_2026", "text": "Units represent an undivided ownership interest in Portfolio Securities of the Trust."},
+        {"doc_id": "standard_terms_2004", "text": "The Trustee shall accrue all Income to the Trust as of the date on which the Trust is entitled to such Income as a holder of record of the Securities."},
+        {"doc_id": "prospectus_2026", "text": "are entitled to receive an amount representing dividends accumulated on Portfolio Securities through the quarterly dividend period"}
+      ]
+    },
+    {
+      "question": "reg29_sufficient_information",
+      "answer": "unresolved",
+      "sources": ["SI 2009/3001 reg 29(3)", "IFM13470"],
+      "quotes": [
+        {"doc_id": "prospectus_2026", "text": "a statement setting forth the amount being distributed, expressed as a dollar amount per Unit."}
+      ]
+    }
+  ],
+  "cleared_list_rows": []
+}
