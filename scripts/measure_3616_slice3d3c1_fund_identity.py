@@ -35,6 +35,7 @@ import re
 import sys
 import time
 import zipfile
+import zlib
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -421,7 +422,7 @@ def identity_outcome(
     dated = [f.report_date for f in filings if f.report_date is not None]
     period = max(dated) if dated else None
     got.update(
-        newest_period=str(period),
+        newest_period=str(period) if period is not None else None,
         amendments=sorted(f.accession for f in filings if f.form == "N-CEN/A" and f.report_date == period),
     )
     if newest is None:
@@ -456,7 +457,6 @@ def identity_outcome(
     if rec is None:
         return "lei_record_unavailable", got
     keys = sorted({name_key(n) for n in rec.names} - {""})
-    got["name_keys"] = keys
     if (
         rec.registration_status not in GLEIF_REGISTRATION_OK
         or rec.entity_status != "ACTIVE"
@@ -484,6 +484,7 @@ def identity_outcome(
     if len(hits) != 1:
         return "isin_unestablished", got
     got["isin"] = hits[0]
+    got["name_keys"] = keys  # a search key exists only for a candidate (spec Design 3 state rules)
     return "candidate", got
 
 
@@ -576,6 +577,7 @@ def read_reporting_list(body: bytes, baseline: int | None) -> list[tuple[str, ..
         with zipfile.ZipFile(io.BytesIO(body)) as z:
             if [i.filename for i in z.infolist()].count("content.xml") != 1:
                 return "content_xml_count"
+            print(f"  [reader] zip members={[(i.filename, i.file_size) for i in z.infolist()]}")
             info = z.getinfo("content.xml")
             if info.file_size > CONTENT_XML_MAX:
                 return "content_xml_declared_size"
@@ -591,6 +593,7 @@ def read_reporting_list(body: bytes, baseline: int | None) -> list[tuple[str, ..
         RuntimeError,
         EOFError,
         OSError,
+        zlib.error,
     ) as exc:
         return f"unusable: {type(exc).__name__}: {exc}"
 
@@ -708,8 +711,10 @@ def match_row(
     for t in targets:
         if any(t in sq for sq in squashed):
             return "identifier_in_text", t
-    if near_miss(isin_cell, isin) or (nsin is not None and near_miss(cusip_cell, nsin)):
+    if near_miss(isin_cell, isin):
         return "near_identifier", isin
+    if nsin is not None and near_miss(cusip_cell, nsin):
+        return "near_identifier", nsin
     if valid_isin(row[5].strip()) and row[5].strip()[:2] != isin[:2]:
         return None, None
     row_key = name_key(" ".join(row[2:5]))
@@ -788,7 +793,15 @@ def _fetch_chain(
     r = client.get(url, headers=ua)
     sha = _save(out, "ncen_" + newest.accession, r.content)
     print(f"  [n-cen {newest.accession}] {url} http={r.status_code} sha256={sha}")
-    if r.status_code != 200:
+    try:
+        root = ET.fromstring(r.content, parser=SAFE_XML_PARSER)
+        sound = root.tag == f"{{{NCEN}}}edgarSubmission" and [
+            e.text for e in root.findall("n:headerData/n:submissionType", {"n": NCEN})
+        ] == ["N-CEN"]
+    except ET.XMLSyntaxError:
+        sound = False
+    print(f"    capture sound (2xx, N-CEN root and submissionType)={200 <= r.status_code < 300 and sound}")
+    if not (200 <= r.status_code < 300 and sound):
         return ncen, record, isins, figi
     ncen[newest.accession] = r.content
     doc = read_ncen(r.content, cik)
@@ -799,11 +812,11 @@ def _fetch_chain(
     print(f"  [gleif record] http={rec.status_code} sha256={_save(out, 'gleif_record_' + doc.lei, rec.content)}")
     record = rec.content if rec.status_code == 200 else None
     print(f"    read_gleif_record={read_gleif_record(rec.content, doc.lei) if record else None}")
-    if record:
+    if record and read_gleif_record(record, doc.lei) is not None:
         entity = json.loads(record)["data"]["attributes"]["entity"]
         print(
             f"    legalForm={entity.get('legalForm')} jurisdiction={entity.get('jurisdiction')} "
-            f"legalAddress.country={entity.get('legalAddress', {}).get('country')} "
+            f"legalAddress={entity.get('legalAddress') if isinstance(entity.get('legalAddress'), dict) else None} "
             f"successorEntity={entity.get('successorEntity')} successorEntities={entity.get('successorEntities')}"
         )
     ir = client.get(f"{GLEIF}/{doc.lei}/isins", params={"page[size]": "200", "page[number]": "1"})
@@ -911,7 +924,10 @@ def main() -> None:
         item = content.json() if content.status_code == 200 else {}
     except ValueError:
         item = {}
-    details = item.get("details") if isinstance(item, dict) else None
+    if not isinstance(item, dict):
+        print("  precondition failed: content item is not a JSON object")
+        return
+    details = item.get("details")
     attachments = details.get("attachments") if isinstance(details, dict) else None
     attachments = attachments if isinstance(attachments, list) else []
     ods = [a for a in attachments if isinstance(a, dict) and str(a.get("url", "")).lower().endswith(".ods")]
@@ -919,10 +935,13 @@ def main() -> None:
         f"  public_updated_at={item.get('public_updated_at')} ods={[(a.get('url'), a.get('file_size')) for a in ods]}"
     )
     published = item.get("public_updated_at") if isinstance(item, dict) else None
-    rfc3339 = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})"
+    rfc3339 = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])"
     published_ok = isinstance(published, str) and re.fullmatch(rfc3339, published) is not None
     if published_ok:
-        published_ok = datetime.fromisoformat(str(published).replace("Z", "+00:00")) <= datetime.now(UTC)
+        try:
+            published_ok = datetime.fromisoformat(str(published).replace("Z", "+00:00")) <= datetime.now(UTC)
+        except ValueError:
+            published_ok = False
     url_ok = len(ods) == 1 and re.fullmatch(
         r"https://assets\.publishing\.service\.gov\.uk/[^?#@:]+\.ods", str(ods[0].get("url"))
     )
@@ -941,8 +960,6 @@ def main() -> None:
     print(f"  preconditions: http 200={r.status_code == 200} size equals file_size={len(r.content) == size}")
     if r.status_code != 200 or len(r.content) != size:
         return
-    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        print(f"  zip={[(i.filename, i.file_size) for i in z.infolist()]}")
     started = time.monotonic()
     parsed_list = read_reporting_list(r.content, None)
     print(f"  read_reporting_list (no earlier version) in {time.monotonic() - started:.1f}s")

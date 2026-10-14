@@ -169,8 +169,9 @@ Rounds 3 and 4 accepted the narrowing below as sound. 3d-3c is now:
 - The step takes `pg_try_advisory_lock` on a constant key, on its own connection. If another invocation holds the
   lock, the step fails at once ("concurrent refresh"), and the job's next run retries it.
 - It releases the lock in a `finally`.
-- Each stored fetch commits on its own. Searches and observations commit in one transaction after every fetch has
-  been tried.
+- Each stored fetch commits on its own. So does each completed assessment, and each completed search, so finished
+  work survives an interruption; an interrupted assessment or search writes nothing. The observations commit in one
+  transaction after every fetch, assessment and search has been tried.
 - Only then does the step raise if anything failed. A failure never rolls back stored evidence, and matching still
   runs.
 
@@ -285,7 +286,7 @@ elements; its value is its whole character content.
   - `notRegistrantSeparateInsuranceAccount/numOfExistingSeries`: exactly one, `1`.
   - `seriesCIKs/seriesCIK`: exactly one, whose attribute `cik`, padded, is the CIK.
   - `securityExchanges/securityExchange`: one or more, each with attributes `fundExchange` (a MIC,
-    `[A-Z0-9]{4}`) and `fundsTickerSymbol` (non-empty).
+    `[A-Z0-9]{4}`) and `fundsTickerSymbol` (with at least one non-white-space character, kept as filed).
 - **Listings** are stored as `[mic, ticker]` pairs with the ticker as filed; the symbol comparison uses `symbol_key`
   of it.
 - **Recorded, not judged:** trustee countries (`notRegistrantSeparateInsuranceAccount/trustees/trustee/trusteeStateCountry`
@@ -357,6 +358,10 @@ another fund. The same-country case is searched by name, so a row naming the fun
 (US78462F1048 is valid and two edits away) is `unresolved`. A row naming the fund under a valid foreign ISIN would be
 missed. That residual is why the outcome is `not_found`, a statement about this search and not about the list.
 
+*Example keys.* An example's `key` is the target that matched: the ISIN or the NSIN for `identifier` and
+`identifier_in_text` (the ISIN first when both occur); the ISIN for a near-ISIN match, and the NSIN for a near-CUSIP
+match (the ISIN first when both apply); the fund's name key for `name`.
+
 *Name keys.* A name key is built by Unicode upper-casing, taking the ASCII `[A-Z0-9]+` words (any other character
 separates words), dropping the generic words THE, TRUST, FUND, FUNDS, ETF, INC, PLC, LLC and SERIES, and
 concatenating the rest. The fund's keys come from GLEIF's legal name and every
@@ -399,8 +404,9 @@ white space handling still matters for the exact header and the stored examples.
   count-preserving loss of content passes them.
 
 A version's assessment (verdict, refusal, row count) is computed once per policy and stored, so baselines need no
-reparse. Work cut off by the deadline is stored as nothing: the version stays pending, or the search stays undone, and
-the observation is `unavailable`. Historical versions are parsed one at a time, and their rows are released before the
+reparse. Work cut off by the deadline is stored as nothing: the version stays pending, or the search stays undone. The
+outcome then follows the precedence above, which is authoritative throughout: incomplete coverage gives `unavailable`
+only when no completed search has established `listed` or `unresolved`. Historical versions are parsed one at a time, and their rows are released before the
 next.
 
 ### 3. Storage (migration `sql/492_tax_fund_evidence.sql`)
@@ -469,8 +475,14 @@ Also:
 - `refusal TEXT`, a structured reason where the outcome has one (for example `registration_unavailable`'s
   "unsupported URL" or "no stored document", or `unavailable`'s "pending version");
 - `evaluated_at TIMESTAMPTZ NOT NULL`, when the decision completed (after `observed_at`, the source cutoff);
-- `coverage JSONB`, for a candidate: every stored list fetch at `observed_at` with its state when evaluated
-  (`pending`, `unusable` or `searched`), so an `unavailable` observation stays explained after later runs;
+- `coverage JSONB`, required for a candidate (NULL otherwise): a JSON array with one entry per list fetch stored at
+  `observed_at`, each `{"list_fetch_id", "state"}`, where `state` is one of:
+  - `pending`: no assessment yet;
+  - `unusable`: assessed unusable;
+  - `usable_unsearched`: assessed usable, with no search row for this key yet;
+  - `searched`: a search row exists for this key.
+  So an `unavailable` observation stays explained after later runs complete the work. A trigger checks that the
+  entries match the stored fetches, and that every `searched` entry has its search row;
 - UNIQUE `(observed_at, tax_security_id)`.
 
 **State rules**, each written NULL-safe:
@@ -483,7 +495,9 @@ Also:
 For a candidate:
 - `list_fetch_id` non-NULL requires `content_fetch_id` non-NULL;
 - `not_found` requires both, and its list usable (trigger);
-- `unavailable` allows a content fetch with no list, or a list that is unusable or pending;
+- `unavailable` allows any pair: none; a content fetch with no list; or a list that is usable, unusable or pending
+  (a usable newest list still gives `unavailable` when the content fetch is stale, its search is unfinished, or an
+  older version is pending or unsearched);
 - `listed` and `unresolved` allow any pair, since completed searches decide them.
 
 A trigger checks every fetch id's source, and that its request key belongs to this observation:
@@ -563,8 +577,8 @@ Pure:
      - registrant: another CIK; an LEI failing mod 97; a letter in a check position; a padded or lower-case LEI;
      - form: `N-1A`; two series; a `seriesCIK` naming another CIK; another namespace; `submissionType` `N-CEN/A`;
      - last filing: `isRegistrantLastFiling` missing, then `Y`;
-     - listings: a `fundExchange` of `ARCX1`; a missing `fundsTickerSymbol`; a ticker `spy` (stored as filed, compared
-       by `symbol_key`);
+     - listings: a `fundExchange` of `ARCX1`; a missing `fundsTickerSymbol`; a sole blank ticker; a valid SPY listing
+       beside a blank one (refused); a ticker `spy` (stored as filed, compared by `symbol_key`);
      - a `registrantLei` with a child element.
    - Listings: the symbol absent; present twice.
    - GLEIF record:
@@ -597,9 +611,13 @@ Pure:
      - `listed` in an older version and absent in the newest stays `listed`;
      - `unresolved` likewise;
      - a new alias makes a new key, which searches every stored version;
-     - a version not searched before the deadline makes the outcome `unavailable`, and is searched by the next run;
+     - a version not searched before the deadline makes the outcome `unavailable` when no completed search is
+       positive, and is searched by the next run; with an older version's completed `identifier` match, the outcome
+       stays `listed`;
+     - a usable newest list with an older version pending gives `unavailable`;
      - a version whose assessment the deadline interrupted stays pending, and blocks `not_found` but not an
        established `listed`;
+     - example keys: a near-CUSIP match records the NSIN; a near-ISIN match the ISIN;
      - currency: the newest content fetch 30 days old exactly (current), and 30 days and 1 µs (unavailable); a newer
        unusable list with an older usable one (unavailable).
 3. **List usability**, each condition alone.
@@ -613,7 +631,8 @@ Pure:
      - 65,537 characters of raw data in a cell, across two paragraphs; 67,108,865 characters of logical text in a
        version;
      - literal U+E000 and U+E001 characters in a cell, beside real `text:s` and `text:tab` (preserved);
-     - archives: an unsupported compression method, an encrypted `content.xml`, a CRC error and truncated data (each
+     - archives: an unsupported compression method, an encrypted `content.xml`, invalid deflate data, a CRC error and
+       truncated data (each
        an unusable assessment; the next version is still assessed);
      - assessment order: a pending larger predecessor blocks assessing a later version; on resumption, the later
        version is assessed against it.
@@ -638,7 +657,8 @@ DB:
    - A new content fetch gets its list. A same-URL list with new bytes and a new size is captured under its new
      parent. A superseded childless parent is not retried.
    - Each of these stores nothing, fails the step after the others are tried, and keeps every stored fetch:
-     - a 200 HTML page as N-CEN; a 301;
+     - a 200 HTML page as N-CEN (no fetch stored, so `registration_unavailable`; a sound N-CEN failing the reader
+       is `registration_unusable`); a 301;
      - an ODS of the wrong size;
      - a content item with two `.ods` attachments, or a future `public_updated_at`;
      - a GLEIF body of 1 MiB + 1 byte;
@@ -647,16 +667,31 @@ DB:
    - Refused: a second `sec_ncen` fetch of an accession; a list whose parent is not a content item, or whose URL
      differs from the parent's attachment; two lists with one parent; any update or delete.
    - A second invocation while one holds the lock fails at once, and leaves the first's commits intact.
-   - A security added by a new evidence generation is observed before that generation is matched.
+   - In the usual sequence, a security added by a new evidence generation is observed before that generation is
+     matched. When a concurrent invocation fails on the lock, matching still runs, and the next run observes it.
+   - Deadline: a slow-drip response is cut at the remaining time; expiry inside a row, inside decompression, and during
+     a rate-gate wait each leave earlier committed work intact and the observation `unavailable`.
+   - Interruption after one assessment commits and before the next: the first survives; the next run assesses the
+     second against it, then searches.
+   - OpenFIGI collision (a 429) with a current stored mapping (still `candidate`), an expired one, and a changed job
+     list (both `isin_mapping_unavailable`).
 6. **Observations and searches.**
    - SPY gives `candidate`/`not_found`. CSPX.L gives `cik_unestablished` with NULL search columns.
    - `registration_final` keeps its accession, fetch id and LEI.
    - Each version is searched once per key: a second observation adds no search rows.
+   - Provenance: an unsupported URL keeps `ncen_source_url`; an amendment-only newest period keeps `newest_period` and
+     its `amendment_accessions`.
+   - Coverage: a deadline between assessment and search records `usable_unsearched`; after a later run completes the
+     search, the earlier observation's coverage still reads `usable_unsearched`, and the new one reads `searched`.
    - Refused:
      - a `cik_unestablished` row with a `search_outcome` or a fetch pair;
+     - a candidate without `coverage`, or with an entry for a fetch not stored, or a `searched` entry without its
+       search row;
      - a name-key array with a duplicate, an empty string or a NULL; a usable assessment with 0 rows; counts summing
        past `data_rows`;
      - an attachment URL on another host, over HTTP, or with a port;
+     - a content item whose root is a JSON array; a `public_updated_at` of `2026-99-14T11:30:44+01:00`,
+       `2026-10-12T11:30:44+00:60` or `2026-10-12T11:30:44+01:99`;
      - a `not_found` row with no list fetch, or with an unusable one;
      - a `candidate` missing any required column;
      - an `isin` outside `isin_set`;
@@ -700,7 +735,10 @@ DB:
   - only a version that is new, or not yet searched for the key, adds a search row, with counts 0 if it is today's
     body;
   - an older version with a match gives `listed` or `unresolved`;
-  - when nothing is due, no fetch or search row is added, and the observation reuses the stored results.
+  - fetch work and assessment or search work are separate: with no fetch due, a pending assessment, an unfinished
+    search or a changed key still adds its assessment or search row;
+  - only when coverage is already complete for the current key, and nothing is due, does the run add no fetch,
+    assessment or search row, and reuse the stored results.
 - **Matching:** run 5's three fund characters are unchanged in the effective run after the job.
 - The acceptance query and its output are posted on #3616.
 
@@ -737,7 +775,7 @@ Rounds 1–4 (`rN.k` is round N finding k):
 | r1.25, r2.25, r3.16, r3.18, r4.15 (bounds) | per-source limits; decompressed bytes; bounded text and repeats; a row cap; a step deadline after which unsearched versions give `unavailable`; each version searched once per key; complete counts with 25 examples per method (r5.1); assessments stored |
 | r1.22, r2.22, r3.13 | `pg_try_advisory_lock` for the step; per-fetch commits; the failure raised after commit |
 | r1.23, r2.23, r3.7 | resolved in round 4 (URL binding, no redirects) |
-| r1.24, r2.24, r3.22, r4.16 (OpenFIGI budget) | one batched request per fund per run; spacing; a 429 stops OpenFIGI for the step; the reset header recorded; the shared budget and retry stated |
+| r1.24, r2.24, r3.22, r4.16 (OpenFIGI budget) | an accepted, unresolved limitation, as Design 1 describes it: at most one batched request per due fund; spacing; a 429 stops OpenFIGI for the step; no coordination with the resolver |
 | r3.26, r4.11 (market binding) | the job is filtered to the N-CEN listing's own MIC, so the binding is (ISIN, MIC, ticker) |
 | r1.27, r2.27, r3.4, r4.10, r4.18 (provenance) | the Script implements the table in order with full provenance; it now emits the 13F rows, the effective characters, the GLEIF fields and raw filing counts; nine *rows*, not pairs; fresh capture distinguished from stored history |
 | r3.5, r3.11, r3.12, r3.21, r3.23, r3.24 | resolved in round 4 |
@@ -751,7 +789,7 @@ Rounds 1–4 (`rN.k` is round N finding k):
 | r5.6 (existing-store acceptance) | expected outcome derived from recorded assessments and searches |
 | r5.7 (white space) | the §6.1.2 algorithm across inline elements, as quoted in Source rules; claim narrowed to name matches |
 | r5.8 (aggregate limits) | raw and logical per-cell caps, a per-version logical cap, deadline checks every 1,000 rows, examples bounded while counting |
-| r5.9 (OpenFIGI coordination) | accepted residual, stated in Design 1: a collision delays an observation and never changes one; a shared limiter is a resolver change |
+| r5.9 (OpenFIGI coordination) | accepted, unresolved limitation (Design 1, r6.12) |
 | r5.10 (unavailable provenance) | accession, report date and URL kept before the availability test; `refusal` column |
 | r5.11 (ordered association) | jobs in GLEIF entry order, request key in that order, decoding by position against the stored jobs; name-key ASCII rule stated |
 | r5.12 (generation guarantee) | narrowed: the usual order, and the concurrent-refresh exception, which changes nothing matching computes |
@@ -771,6 +809,18 @@ Rounds 1–4 (`rN.k` is round N finding k):
 | r6.13 (existing-store acceptance) | expectation derived with the stored baseline; the nothing-due case |
 | r6.14 (attachment origin) | HTTPS on the GOV.UK asset host only, no credentials, port, query or fragment |
 | r6.15 (timing) | removed |
+| r7.1 (coverage states) | `usable_unsearched` added; coverage required for a candidate and checked against stored fetches and search rows |
+| r7.2 (`zlib.error`) | caught at the archive reader; invalid-deflate fixture |
+| r7.3 (Script validators) | the Script's content-item and timestamp checks return failures, diagnostics print only after validation, and archive inspection goes through the reader |
+| r7.4 (example key) | Design 2's example-key rule; the Script returns the NSIN for a near-CUSIP match |
+| r7.5 (nothing due) | fetch work separated from assessment and search work in the acceptance |
+| r7.6 (assessment commits) | each assessment and search commits on its own; interrupted work writes nothing |
+| r7.7 (N-CEN ticker) | non-white-space required, kept as filed, in the spec as in the Script |
+| r7.8 (tests) | provenance, validator, reconstruction, deadline, collision and concurrency tests added |
+| r7.9 (stale dispositions) | corrected |
+| r8.1–3 (Script boundaries) | the Script checks N-CEN capture soundness before using a body, accepts any 2xx, validates offsets (`[+-]HH:MM`, HH 00–23, MM 00–59), prints diagnostic GLEIF fields only when typed, and lists ZIP members inside the reader |
+| r8.4 (precedence wording) | Design 2's precedence stated as authoritative; the fetch-pair rule for `unavailable` widened; tests added |
+| r8.5 (Script fields) | `name_keys` returned only for a candidate; an absent period is `None` |
 
 ## Security
 
