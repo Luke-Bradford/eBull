@@ -32,7 +32,9 @@ from app.config import settings
 
 def main() -> None:
     with psycopg.connect(settings.database_url) as conn:
-        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        # Set before the first statement, so the whole read is one snapshot (review-prevention-log, isolation level).
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+        conn.read_only = True
         wanted = int(sys.argv[1]) if len(sys.argv) > 1 else None
         run = conn.execute(
             "SELECT r.run_id, r.evidence_policy_id, r.history_fetch_ok_id, r.history_fetch_latest_id, "
@@ -71,11 +73,16 @@ def main() -> None:
         for iid, (symbol, _) in instruments.items():
             by_symbol[symbol.upper()].append(iid)
 
+        pointed_from: dict[int, list[int]] = defaultdict(list)
+        for iid, (_, canonical) in instruments.items():
+            if canonical is not None:
+                pointed_from[canonical].append(iid)
+
         def neighbours(iid: int) -> set[int]:
             """Design 2 edges: the canonical pointer either way, and symbol X <-> X.RTH either way."""
             symbol, canonical = instruments[iid]
             sym = symbol.upper()
-            out = {v for v, (_, c) in instruments.items() if c == iid}
+            out = set(pointed_from.get(iid, []))
             if canonical is not None and canonical in instruments:
                 out.add(canonical)
             out.update(by_symbol.get(f"{sym}.RTH", []))

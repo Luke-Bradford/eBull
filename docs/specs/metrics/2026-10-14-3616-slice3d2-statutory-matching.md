@@ -245,7 +245,8 @@ document version. The same function computes the digest at publication and at se
 
 Every column below is NOT NULL unless it says NULL is allowed, and every child has an FK to its run.
 - **`tax_matching_runs`**: `matching_run_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`; `evidence_run_id` (FK `tax_evidence_runs`);
-  `matching_policy_id`; `class_policy_id`; `inputs_digest`; `inputs_document TEXT` (the exact canonical bytes
+  `matching_policy_id` (written from `TAX_MATCHING_POLICY_ID`); `class_policy_id` (from 3d-1's
+  `consideration_classes_v1`); `inputs_digest`; `inputs_document TEXT` (the exact canonical bytes
   hashed, so the inputs of any run, refused ones included, are reconstructable after a later insert or `instruments`
   change); `state` `building`, `published` or `refused`; `reason`
   (NULL allowed; non-NULL iff refused); `computed_at`; `history_fetch_started_at` (NULL allowed: no `ok` fetch);
@@ -298,8 +299,11 @@ security's lots and classes.
    `no_generation`. A run exists for the key: return its state and reason (`published` → `already_published`,
    `refused` → `refused` again, so a refusal stays visible).
 3. Classify, map, withhold and identify in memory (Designs 2–8); check the invariants and capacities.
-4. Insert the run `building` and its rows; seal it; commit. Any exception rolls the whole transaction back, so no
-   parent or child row of a failed run remains.
+4. Insert the run `building` and its rows; seal it; commit. A refusal is a decided outcome, not an exception: the run
+   is inserted `building` with no children and sealed `refused` in this same transaction, which commits, so the refusal
+   is stored and visible. Any exception rolls the whole transaction back, so no parent or child row of a failed run
+   remains; the exception propagates and the job records the failure (`_tracked_job`), which is how a failed seal is
+   told apart from a refusal.
 
 Matching is guaranteed only for the generation effective when a run resolves its inputs. A generation superseded
 before then is never matched; while it was effective and unmatched, `effective_tax_matching` returned *unavailable*.
