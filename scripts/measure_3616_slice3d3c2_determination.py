@@ -22,7 +22,8 @@ non-zero, printing nothing to stdout, if any check other than a pending hash fai
 cutoff, an ISO timestamp with an offset (default: the execution time), normalised to UTC and used throughout; review
 dates and filing dates are UTC calendar dates, compared inclusively. The Script holds no history of runs, so it
 neither latches staleness nor exercises ``fund_observation_unavailable``; it fails when the fund run has no
-observations.
+observations. It replays a cutoff; it does not check reuse of an admitted run after ``review_by`` (Design 3's
+``evaluated_at``), which the build's tests cover.
 
 The printout carries dates, symbols, CIKs, LEIs, ISINs and accession numbers, never an account identifier.
 
@@ -43,7 +44,7 @@ from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 
@@ -169,6 +170,8 @@ def _keys(obj: Any, keys: set[str], where: str, errs: list[str]) -> bool:
 
 
 def _sec_url_ok(url: str, cik: str, accession: str) -> bool:
+    if any(ord(c) < 33 or ord(c) == 127 for c in url) or urlunsplit(urlsplit(url)) != url:
+        return False
     parts = urlsplit(url)
     if parts.scheme != "https" or parts.netloc != "www.sec.gov" or parts.query or parts.fragment or ";" in parts.path:
         return False
@@ -678,7 +681,10 @@ def main() -> None:
     if cutoff.tzinfo is None:
         raise SystemExit("--cutoff needs a UTC offset")
     cutoff = cutoff.astimezone(UTC)
-    refused = gate(det, src, (body, fetched), a.fund_observed_at, cutoff)
+    fund_at = datetime.fromisoformat(a.fund_observed_at) if a.fund_observed_at else None
+    if fund_at is not None and fund_at.tzinfo is None:
+        raise SystemExit("--fund-observed-at needs a UTC offset")
+    refused = gate(det, src, (body, fetched), fund_at.astimezone(UTC).isoformat() if fund_at else None, cutoff)
     sys.exit(1 if failures or refused else 0)
 
 

@@ -556,7 +556,7 @@
     },
     {
       "assumption_id": "A9_terms_continuity",
-      "statement": "No change to the Trust's governing terms that would change a finding took effect before the disposal date without appearing in the reviewed documents.",
+      "statement": "No change that would change a finding took effect before the disposal date without appearing in the reviewed documents: neither a change to the Trust's governing terms nor a fact or action under existing powers that a finding relies on, including who the trustee is.",
       "evidence": [
         {
           "source_id": "amendment_6",
@@ -564,7 +564,7 @@
           "text": "Effective March 4, 2024, the following sentence in Section 5.02 of the Standard Terms:"
         }
       ],
-      "residual": "Amendments can take effect before they are filed: Amendment 6, filed 2025-01-27, made changes effective 2024-03-04 and on the T+1 settlement date in 2024. A complete filing inventory (A8) does not exclude an amendment already in effect but not yet filed."
+      "residual": "Amendments can take effect before they are filed: Amendment 6, filed 2025-01-27, made changes effective 2024-03-04 and on the T+1 settlement date in 2024. The Standard Terms also let the trustee resign and a successor be appointed without amending them. A complete filing inventory (A8) does not exclude either taking effect before it is filed."
     }
   ],
   "findings": [
@@ -798,7 +798,7 @@
       ],
       "contrary": [],
       "reasoning": "Two further routes exclude arrangements: regulations under s359, and investment bond arrangements (s355(4); TCGA s151W and ITA s564U for capital gains and income tax; CTA 2009 s519 concerns corporation tax), defined in ITA s564G. s564G's conditions were read but not applied to the Trust in full: its subsection (2) allows redemption payments to be reduced or satisfied in shares or other securities, and the Trust has a specified lifetime term and termination provisions, with cash redemption at NAV on termination, so neither in-kind redemption nor the absence of a term disqualifies it. Whether its additional payments are capped at a commercial return on a loan (s564G(1)(e)) and whether its units are a financial liability (s564G(1)(i)) were not analysed. For s359, the contents of SI 2009/3001 (snapshot ofr2009_contents) show no exclusion from the definition in its Part 1; its Part 2 Chapter 3 exceptions (regs 25-31C) are exceptions from the charge; no complete list of instruments made under s359 was consulted. Both routes rest on A4.",
-      "would_resolve": "An application of every s564G(1) and (2) condition to the Trust's terms, and a complete list of instruments made under s359 read for an exclusion covering the Trust."
+      "would_resolve": "An application of every s564G condition, (1) and (2), and of s564G(3)'s subjection to s564H, to the Trust's terms; and a complete list of instruments made under s359 read for an exclusion covering the Trust."
     },
     {
       "question": "transparent_fund",

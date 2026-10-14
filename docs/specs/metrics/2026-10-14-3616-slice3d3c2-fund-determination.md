@@ -180,7 +180,8 @@ disposal date; A6 the committed legal sources state the law in force at the disp
 are interests in the class bound today at every date from `valid_from` to the disposal; A8 no governing filing on or
 after `monitor_from` and before the disposal or cutoff is missing from the inventory read; A9 no change to the
 governing terms that would change a finding took effect before the disposal without appearing in the reviewed
-documents (Amendment 6, filed 2025-01-27, made changes effective in 2024).
+documents, whether a change of terms or a fact or action under existing powers such as a change of trustee (Amendment 6,
+filed 2025-01-27, made changes effective in 2024).
 
 **The consequence, for 3d-3c-3.** Identification follows from non-reporting status alone: s106A(10)(c) makes an
 interest in a non-reporting fund a relevant security, and transparency does not change reg 4(2) status. Whether the
@@ -233,8 +234,8 @@ exactly those listed. Document and authority ids share one namespace, `[a-z0-9_]
 | `transparent_fund` | `transparent`, `opaque`, `unresolved` |
 | `reg29_sufficient_information`, `reg29_nonreporting_holdings` | `unresolved` only (holding-dependent) |
 
-Hashes are lowercase hexadecimal. A document URL's last path segment is not `.` or `..` and contains no
-percent-encoding (authority URLs are provenance labels, never fetched by the step).
+Hashes are lowercase hexadecimal. A document URL contains no control or space character, equals its canonical parsed form, and its last path segment
+is not `.` or `..` and contains no percent-encoding (authority URLs are provenance labels, never fetched by the step).
 
 Basis rules: an `unresolved` answer if and only if an `unresolved` basis, which needs `would_resolve`; `assumed` needs
 an assumption, other bases have none; every resolved answer has a quote; every finding has reasoning and an authority.
@@ -309,18 +310,19 @@ neighbours; collapse every run of white space (Unicode, so NBSP too) to one spac
 `reporting_status(security, d, evaluated_at)`, pure, over the newest run. Every time is a timezone-aware instant
 normalised to UTC; `reviewed_at`, `review_by` and filing dates are UTC calendar dates, compared inclusively.
 1. `no_run` if there is none; `run_failed` if it did not succeed; `not_observed` if it has no row for the security
-   (no older row is used); `review_out_of_date` if `evaluated_at`'s date is after `review_by`, however recent the run
-   (a run admitted before the deadline is not reused after it);
-2. the security's outcome if it is not `determined` (the first four outcomes carry no determination and are returned
-   before any date test);
-3. `outside_interval` unless `valid_from` ≤ `d` ≤ the run's cutoff date;
-4. `not_offshore_fund` if `offshore_fund` is false, `offshore_fund_unresolved` if unresolved;
-5. `reporting_status_unestablished`, reason `list_match`, if the fund observation's search is `listed` or
+   (no older row is used);
+2. the security's outcome if it is one of the first four (they carry no determination);
+3. `review_out_of_date` if `evaluated_at`'s date is after the determination's `review_by`, however recent the run (a
+   run admitted before the deadline is not reused after it); this precedes every other determination-bearing outcome;
+4. the security's outcome if it is any other non-`determined` outcome;
+5. `outside_interval` unless `valid_from` ≤ `d` ≤ the run's cutoff date;
+6. `not_offshore_fund` if `offshore_fund` is false, `offshore_fund_unresolved` if unresolved;
+7. `reporting_status_unestablished`, reason `list_match`, if the fund observation's search is `listed` or
    `unresolved` (a match on a stored list version; 3d-3c-4 assesses the reporting interval);
-6. `reporting_status_unestablished`, reason `search_unavailable`, if it is `unavailable`;
-7. otherwise (`not_found`), `non_reporting_assumed`.
+8. `reporting_status_unestablished`, reason `search_unavailable`, if it is `unavailable`;
+9. otherwise (`not_found`), `non_reporting_assumed`.
 
-From step 4 on it returns the assumptions it rests on: those of `offshore_fund`, A6, A7, A8 and A9, and A5 for
+From step 6 on it returns the assumptions it rests on: those of `offshore_fund`, A6, A7, A8 and A9, and A5 for
 `non_reporting_assumed`. There is no established non-reporting status: no available evidence can show that Part 3 does
 not apply at `d`, given reg 57(3)'s continuation, reg 54(2)'s timing, an agreed reg 55 extension, a reg 56 appeal, the
 list's lag and the search's own residual (A5). A later list version showing the fund under the same search key turns
@@ -415,16 +417,20 @@ Pure:
    N-30D present in it; staleness kept when a later inventory omits the accession (latched); an older matching
    document fetch beside a newer mismatching one (`determined`, the matching fetch used) and the reverse; a cutoff
    before `reviewed_at` and after `review_by` (`review_out_of_date`); a determination whose file is gone from the
-   deployment (`no_determination`).
+   deployment (`no_determination`); across two runs, a new 497 in a sound inventory while a cited document is
+   unavailable (the accession recorded despite `documents_unavailable`), then the document recovered and the accession
+   absent from the next inventory (`stale`).
 5. `reporting_status`: SPY's 2026-09-23 case (`non_reporting_assumed`, A1–A9); no run (`no_run`); a security absent
    from the newest run (`not_observed`, although an older run has it); a failed newest run (`run_failed`, although an
    older run succeeded); each of the first four outcomes returned before the date test; a date before
    `valid_from` and after the cutoff (`outside_interval`); a `stale` determination passes its
-   outcome through; false and unresolved `offshore_fund` (A6, A7 and A8 still returned); `listed`; `unresolved`;
-   `unavailable`; an all-established determination resting on exactly A5, A6, A7 and A8.
+   outcome through; false and unresolved `offshore_fund` (exactly A6–A9 plus the negative finding's assumptions); `listed`; `unresolved`;
+   `unavailable`; an all-established determination resting on exactly A5–A9; a run that
+   succeeded before `review_by`, evaluated after it with no later run (`review_out_of_date`); `review_out_of_date`
+   preceding `stale` and `documents_unavailable`.
 
 DB (one module):
-6. Insert-only, transition, deletion and sealing triggers (a row added under a finished run refused); the determination and authority CHECKs; a second version for a CIK refused; a
+6. Insert-only, transition, deletion and sealing triggers, including `tax_fund_determination_unreviewed` (a row added under a finished run refused); the determination and authority CHECKs; a second version for a CIK refused; a
    changed file under a stored id, or an authority snapshot with a wrong hash, sets the run `failed` and leaves no
    observation; a document fetched once and not again; a failed fetch stores nothing; the submissions refresh after 7
    days; each Design 2 outcome recorded with its refusal; a `determined` observation with one document row per
@@ -493,7 +499,7 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r5.2, r5.3 (time, replay) | elapsed-time rules for the step; `--cutoff` for replay; the Script's date granularity and absent run history stated |
 | r5.4 (population) | the claim restricted to observed securities |
 | r5.5 (source failures) | unreadable or undecodable documents, authorities and index become refusals |
-| r5.6 (test) | exactly A5–A8 |
+| r5.6 (test) | exactly A5–A9 (r7.4) |
 | r5.7, r5.8 (storage, retrieval) | run-loads keys; initial submissions fetch |
 | r5.9, r5.10 (grammar) | no `.`, `..` or percent-encoding in the last segment; lowercase hex |
 | r5.11, r5.12 (wording) | A2's residual and the January filing pattern restated |
@@ -508,6 +514,12 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r6.9 (URL rule) | scoped to document URLs |
 | r6.10 (population) | the opening states observed securities |
 | r6.12 (docstring) | the cutoff override described |
+| r7.1 (facts under unchanged terms) | A9 extended to facts and actions under existing powers, trustee identity included |
+| r7.2 (order) | Design 3's steps 1–4: run, the first four outcomes, the review deadline, then other refusals |
+| r7.3, r7.4, r7.5 (tests) | evaluation-after-deadline, A5–A9 and two-run latch tests; the Script's replay scope stated |
+| r7.6 (selector) | `--fund-observed-at` needs an offset and is normalised to UTC |
+| r7.7 (URL spelling) | control characters refused; a document URL must equal its canonical form |
+| r7.8 (s564H) | `would_resolve` includes s564G(3) and s564H |
 | r6.13 (index) | Amendment 6's effective dates distinguished in the research index |
 | r3.5 (unresolved basis) | `offshore_basis` `unresolved` |
 | r3.7 (refusal order) | the first four outcomes are returned before the date test |
