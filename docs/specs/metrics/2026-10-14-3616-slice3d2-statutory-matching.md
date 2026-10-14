@@ -238,8 +238,9 @@ so a security, day or pool absent from it is absent (finding 31).
 `{"version": "matching_inputs_v1", "evidence": [[lot_key, fingerprint], …] sorted by lot_key, "subjects": [[subject,
 outcome, instrument_id, execution_evidence, total_fees_unobserved_position_ids], …] sorted by subject,
 "instruments": [[instrument_id, symbol, canonical_instrument_id], …]}`. Tuple positions are fixed; only the outer
-lists are sorted (and `total_fees_unobserved_position_ids` ascending, as stored); where `instruments` holds every member of every component
-the run's evidence names (Design 2), sorted by id, and a named id with no row appears as `[id, null, null]`. Exactly
+lists are sorted (and `total_fees_unobserved_position_ids` ascending, as stored). `instruments` holds every member of
+every component the run's evidence names (Design 2), sorted by id; a named id with no row appears as `[id, null,
+null]`. Exactly
 those instrument rows are stored in `tax_matching_instruments`. 3d-3 adds its character and basis inputs as a new
 document version. The same function computes the digest at publication and at selection.
 
