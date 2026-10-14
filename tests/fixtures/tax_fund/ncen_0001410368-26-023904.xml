@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/ncen" xmlns:com="http://www.sec.gov/edgar/common">
+  <schemaVersion>X0505</schemaVersion>
+  <headerData>
+    <submissionType>N-CEN</submissionType>
+    <filerInfo>
+      <liveTestFlag>LIVE</liveTestFlag>
+      <filer>
+        <issuerCredentials>
+          <cik>0000884394</cik>
+          <ccc>XXXXXXXX</ccc>
+        </issuerCredentials>
+        <fileNumber>811-06125</fileNumber>
+      </filer>
+      <flags>
+        <overrideInternetFlag>false</overrideInternetFlag>
+        <confirmingCopyFlag>false</confirmingCopyFlag>
+      </flags>
+      <investmentCompanyType>S-6</investmentCompanyType>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <generalInfo reportEndingPeriod="2025-12-31" isReportPeriodLt12="N"/>
+    <registrantInfo>
+      <registrantFullName>SPDR S&amp;P 500 ETF TRUST</registrantFullName>
+      <investmentCompFileNo>811-06125</investmentCompFileNo>
+      <registrantCik>0000884394</registrantCik>
+      <registrantLei>549300NZAMSJ8FXPQQ63</registrantLei>
+      <registrantstreet1>11 WALL STREET</registrantstreet1>
+      <registrantstreet2>PDR SERVICES LLC C/O NYSE EURONEXT</registrantstreet2>
+      <registrantcity>New York</registrantcity>
+      <registrantzipCode>10005</registrantzipCode>
+      <registrantstate>US-NY</registrantstate>
+      <registrantcountry>US</registrantcountry>
+      <registrantphoneNumber>212-656-4440</registrantphoneNumber>
+      <websites>
+        <website webpage="https://us.spdrs.com/en"/>
+      </websites>
+      <locationBooksRecords>
+        <locationBooksRecord>
+          <officeName>State Street Bank and Trust Company</officeName>
+          <officeAddress1>1 Congress Street</officeAddress1>
+          <officeAddress2>Suite 1</officeAddress2>
+          <officeCity>Boston</officeCity>
+          <officeStateCountry officeCountry="US" officeState="US-MA"/>
+          <officeRecordsZipCode>02114</officeRecordsZipCode>
+          <officePhone>617-786-3000</officePhone>
+          <booksRecordsDesc>Records related to its function as custodian, administrator, accounting agent, and transfer agent</booksRecordsDesc>
+        </locationBooksRecord>
+      </locationBooksRecords>
+      <isRegistrantFirstFiling>N</isRegistrantFirstFiling>
+      <isRegistrantLastFiling>N</isRegistrantLastFiling>
+      <registrantFamilyInvComp isRegistrantFamilyInvComp="Y" familyInvCompFullName="State Street Global Advisors - advised funds"/>
+      <registrantClassificationType>S-6</registrantClassificationType>
+      <isSecuritiesActRegistration>Y</isSecuritiesActRegistration>
+      <chiefComplianceOfficers>
+        <chiefComplianceOfficer>
+          <ccoName>Lucas Foss</ccoName>
+          <crdNumber>N/A</crdNumber>
+          <ccoStreet1>1290 Broadway, Suite 1000</ccoStreet1>
+          <ccoCity>Denver</ccoCity>
+          <ccoStateCountry ccoCountry="US" ccoState="US-CO"/>
+          <ccoZipCode>80203-5603</ccoZipCode>
+          <ccoPhone>XXXXXX</ccoPhone>
+          <isCcoChangedSinceLastFiling>N</isCcoChangedSinceLastFiling>
+          <ccoEmployers>
+            <ccoEmployer ccoEmployerName="ALPS FUND SERVICES, INC." ccoEmployerId="84-1583422"/>
+          </ccoEmployers>
+        </chiefComplianceOfficer>
+      </chiefComplianceOfficers>
+      <isRegistrantSubmittedMatter>N</isRegistrantSubmittedMatter>
+      <isPreviousLegalProceeding>N</isPreviousLegalProceeding>
+      <isPreviousProceedingTerminated>N</isPreviousProceedingTerminated>
+      <isFinancialSupportDuringPeriod>N</isFinancialSupportDuringPeriod>
+      <releaseNumbers isExemptionFromAct="Y">
+        <releaseNumberInfo releaseNumber="IC-19055"/>
+        <releaseNumberInfo releaseNumber="IC-26419"/>
+      </releaseNumbers>
+      <principalUnderwriters>
+        <principalUnderwriter>
+          <principalUnderwriterName>ALPS Distributors, Inc.</principalUnderwriterName>
+          <principalUnderwriterFileNumber>8-34626</principalUnderwriterFileNumber>
+          <principalUnderwriterCrdNumber>000016853</principalUnderwriterCrdNumber>
+          <principalUnderwriterLei>254900LKY4W5JQXP6213</principalUnderwriterLei>
+          <principalUnderWriterStateCountry principalUnderWriterCountry="US" principalUnderWriterState="US-CO"/>
+          <isPrincipalUnderwriterAffiliatedWithRegistrant>N</isPrincipalUnderwriterAffiliatedWithRegistrant>
+        </principalUnderwriter>
+      </principalUnderwriters>
+      <isUnderwriterHiredOrTerminated>N</isUnderwriterHiredOrTerminated>
+      <publicAccountants>
+        <publicAccountant>
+          <publicAccountantName>PricewaterhouseCoopers LLP</publicAccountantName>
+          <pcaobNumber>238</pcaobNumber>
+          <publicAccountantLei>5493002GVO7EO8RNNS37</publicAccountantLei>
+          <publicAccountantStateCountry publicAccountantCountry="US" publicAccountantState="US-MA"/>
+        </publicAccountant>
+      </publicAccountants>
+      <isPublicAccountantChanged>N</isPublicAccountantChanged>
+      <isOpinionOffered>N</isOpinionOffered>
+      <isMaterialChange>N</isMaterialChange>
+      <isAccountingPrincipleChange>N</isAccountingPrincipleChange>
+    </registrantInfo>
+    <exchangeSeriesInfo>
+      <exchangeTradedFund>
+        <securityExchanges>
+          <securityExchange fundExchange="ARCX" fundsTickerSymbol="SPY"/>
+        </securityExchanges>
+        <authorizedParticipants>
+          <authorizedParticipant authorizedParticipantName="Electronic Transaction Clearing, Inc." authorizedParticipantFileNo="008-67790" authorizedParticipantCrdNo="000146122" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Goldman Sachs &amp; Co. LLC" authorizedParticipantFileNo="8-129" authorizedParticipantCrdNo="000000361" authorizedParticipantLei="FOR8UP27PHTHYVLBNG30" authorizedParticipantPurchaseValue="95986653804.80000000" authorizedParticipantRedeemValue="149617347814.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Jefferies LLC" authorizedParticipantFileNo="8-15074" authorizedParticipantCrdNo="000002347" authorizedParticipantLei="58PU97L1C0WSRCWADL48" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Nomura Securities International, Inc." authorizedParticipantFileNo="8-15255" authorizedParticipantCrdNo="000004297" authorizedParticipantLei="OXTKY6Q8X53C9ILVV871" authorizedParticipantPurchaseValue="911965659.20000000" authorizedParticipantRedeemValue="1507680270.95000000"/>
+          <authorizedParticipant authorizedParticipantName="Morgan Stanley &amp; Co. LLC" authorizedParticipantFileNo="8-15869" authorizedParticipantCrdNo="000008209" authorizedParticipantLei="9R7GPTSO7KV3UQJZQ078" authorizedParticipantPurchaseValue="87955682363.90000000" authorizedParticipantRedeemValue="86481464549.30000000"/>
+          <authorizedParticipant authorizedParticipantName="Pershing LLC" authorizedParticipantFileNo="8-17574" authorizedParticipantCrdNo="000007560" authorizedParticipantLei="ZI8Q1A8EI8LQFJNM0D94" authorizedParticipantPurchaseValue="390868906.00000000" authorizedParticipantRedeemValue="489658999.90000000"/>
+          <authorizedParticipant authorizedParticipantName="Deutsche Bank Securities Inc." authorizedParticipantFileNo="8-17822" authorizedParticipantCrdNo="000002525" authorizedParticipantLei="9J6MBOOO7BECTDTUZW19" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="CIBC World Markets Corp." authorizedParticipantFileNo="8-18333" authorizedParticipantCrdNo="000000630" authorizedParticipantLei="549300445CON3DBMU275" authorizedParticipantPurchaseValue="2831803836.60000000" authorizedParticipantRedeemValue="727534839.90000000"/>
+          <authorizedParticipant authorizedParticipantName="Cantor Fitzgerald &amp; Co." authorizedParticipantFileNo="8-201" authorizedParticipantCrdNo="000000134" authorizedParticipantLei="5493004J7H4GCPG6OB62" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="UBS Securities LLC" authorizedParticipantFileNo="8-22651" authorizedParticipantCrdNo="000007654" authorizedParticipantLei="T6FIZBDPKLYJKFCRVK44" authorizedParticipantPurchaseValue="4440382916.70000000" authorizedParticipantRedeemValue="5869617007.00000000"/>
+          <authorizedParticipant authorizedParticipantName="National Financial Services LLC" authorizedParticipantFileNo="8-26740" authorizedParticipantCrdNo="000013041" authorizedParticipantLei="549300JRHF1MHHWUAW04" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="BNP Paribas Securities Corp." authorizedParticipantFileNo="8-32682" authorizedParticipantCrdNo="000015794" authorizedParticipantLei="RCNB6OTYUAMMP879YW96" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Merrill Lynch Professional Clearing Corp." authorizedParticipantFileNo="8-33359" authorizedParticipantCrdNo="000016139" authorizedParticipantLei="549300PMHS66E71I2D34" authorizedParticipantPurchaseValue="347981782530.35000000" authorizedParticipantRedeemValue="460232889495.40000000"/>
+          <authorizedParticipant authorizedParticipantName="TD Prime Services LLC" authorizedParticipantFileNo="8-3337" authorizedParticipantCrdNo="000001914" authorizedParticipantLei="549300ZBQI1JB1844X09" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="BMO Capital Markets Corp." authorizedParticipantFileNo="8-34344" authorizedParticipantCrdNo="000016686" authorizedParticipantLei="RUC0QBLBRPRCU4W1NE59" authorizedParticipantPurchaseValue="651517227.70000000" authorizedParticipantRedeemValue="1209319876.10000000"/>
+          <authorizedParticipant authorizedParticipantName="ABN AMRO Clearing USA LLC" authorizedParticipantFileNo="8-34354" authorizedParticipantCrdNo="000014020" authorizedParticipantLei="549300U16G4LU3V6C598" authorizedParticipantPurchaseValue="251461061194.50000000" authorizedParticipantRedeemValue="58671801110.80000000"/>
+          <authorizedParticipant authorizedParticipantName="J.P. Morgan Securities LLC/JPMC" authorizedParticipantFileNo="8-35008" authorizedParticipantCrdNo="000000079" authorizedParticipantLei="ZBUT11V806EZRVTWT807" authorizedParticipantPurchaseValue="60535446249.45000000" authorizedParticipantRedeemValue="58603410029.50000000"/>
+          <authorizedParticipant authorizedParticipantName="J.P. Morgan Securities LLC" authorizedParticipantFileNo="8-35008" authorizedParticipantCrdNo="000000079" authorizedParticipantLei="ZBUT11V806EZRVTWT807" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Natwest Markets Securities Inc." authorizedParticipantFileNo="8-37135" authorizedParticipantCrdNo="000011707" authorizedParticipantLei="ZE2ZWJ5BTIQJ8M0C6K34" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Mizuho Securities USA LLC" authorizedParticipantFileNo="8-37710" authorizedParticipantCrdNo="000019647" authorizedParticipantLei="7TK5RJIZDFROZCA6XF66" authorizedParticipantPurchaseValue="13822384865.10000000" authorizedParticipantRedeemValue="17804138754.75000000"/>
+          <authorizedParticipant authorizedParticipantName="National Bank of Canada Financial Inc." authorizedParticipantFileNo="8-39947" authorizedParticipantCrdNo="000022698" authorizedParticipantLei="549300K66TF1ST7A3V76" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="BNP Paribas Prime Brokerage, Inc." authorizedParticipantFileNo="8-40490" authorizedParticipantCrdNo="000024962" authorizedParticipantLei="7VHWWWW4UJS7NUM3PT30" authorizedParticipantPurchaseValue="46158465412.75000000" authorizedParticipantRedeemValue="51714886423.95000000"/>
+          <authorizedParticipant authorizedParticipantName="Barclays Capital Inc." authorizedParticipantFileNo="8-41342" authorizedParticipantCrdNo="000019714" authorizedParticipantLei="AC28XWWI3WIBK2824319" authorizedParticipantPurchaseValue="59937514075.50000000" authorizedParticipantRedeemValue="45824741598.95000000"/>
+          <authorizedParticipant authorizedParticipantName="HSBC Securities (USA) Inc." authorizedParticipantFileNo="8-41562" authorizedParticipantCrdNo="000019585" authorizedParticipantLei="CYYGQCGNHMHPSMRL3R97" authorizedParticipantPurchaseValue="797045377.70000000" authorizedParticipantRedeemValue="205674406.40000000"/>
+          <authorizedParticipant authorizedParticipantName="MUFG Securities Americas Inc." authorizedParticipantFileNo="8-43026" authorizedParticipantCrdNo="000019685" authorizedParticipantLei="K5HU16E3LMSVCCJJJ255" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Mirae Asset Securities (USA) Inc." authorizedParticipantFileNo="8-45034" authorizedParticipantCrdNo="000030679" authorizedParticipantLei="25490087B4GFZLJZE912" authorizedParticipantPurchaseValue="4427010254.10000000" authorizedParticipantRedeemValue="9713660339.90000000"/>
+          <authorizedParticipant authorizedParticipantName="RBC Capital Markets, LLC" authorizedParticipantFileNo="8-45411" authorizedParticipantCrdNo="000031194" authorizedParticipantLei="549300LCO2FLSSVFFR64" authorizedParticipantPurchaseValue="10681962132.55000000" authorizedParticipantRedeemValue="27445427378.50000000"/>
+          <authorizedParticipant authorizedParticipantName="Cowen Execution Services LLC" authorizedParticipantFileNo="8-46838" authorizedParticipantCrdNo="000035693" authorizedParticipantLei="5493005RJDJD18OPUP27" authorizedParticipantPurchaseValue="100689451.35000000" authorizedParticipantRedeemValue="1029862037.60000000"/>
+          <authorizedParticipant authorizedParticipantName="Macquarie Capital (USA) Inc." authorizedParticipantFileNo="8-47198" authorizedParticipantCrdNo="000036368" authorizedParticipantLei="549300670K07JRB5UQ40" authorizedParticipantPurchaseValue="1456780501.00000000" authorizedParticipantRedeemValue="3283781259.15000000"/>
+          <authorizedParticipant authorizedParticipantName="Interactive Brokers LLC" authorizedParticipantFileNo="8-47257" authorizedParticipantCrdNo="000036418" authorizedParticipantLei="50OBSE5T5521O6SMZR28" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Jane Street Capital, LLC" authorizedParticipantFileNo="8-52275" authorizedParticipantCrdNo="000103782" authorizedParticipantLei="549300ZM16HMPEPNV857" authorizedParticipantPurchaseValue="3164510514.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Citadel Securities LLC" authorizedParticipantFileNo="8-53574" authorizedParticipantCrdNo="000116797" authorizedParticipantLei="12UUJYTN7D3SW8KCSG25" authorizedParticipantPurchaseValue="4281789814.80000000" authorizedParticipantRedeemValue="6237669994.35000000"/>
+          <authorizedParticipant authorizedParticipantName="Wells Fargo Securities, LLC" authorizedParticipantFileNo="8-65876" authorizedParticipantCrdNo="000126292" authorizedParticipantLei="VYVVCKR63DVZZN70PB21" authorizedParticipantPurchaseValue="562990457.00000000" authorizedParticipantRedeemValue="2007622240.25000000"/>
+          <authorizedParticipant authorizedParticipantName="SG Americas Securities, LLC" authorizedParticipantFileNo="8-66125" authorizedParticipantCrdNo="000128351" authorizedParticipantLei="549300F35UE0BOM1WJ55" authorizedParticipantPurchaseValue="42271792445.90000000" authorizedParticipantRedeemValue="36367783473.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Virtu Financial BD LLC" authorizedParticipantFileNo="8-68015" authorizedParticipantCrdNo="000148390" authorizedParticipantLei="54930088MP91YZQJT494" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Virtu Americas LLC" authorizedParticipantFileNo="8-68193" authorizedParticipantCrdNo="000149823" authorizedParticipantLei="549300RA02N3BNSWBV74" authorizedParticipantPurchaseValue="3453678255.60000000" authorizedParticipantRedeemValue="4546916263.55000000"/>
+          <authorizedParticipant authorizedParticipantName="ABN AMRO Securities (USA) LLC" authorizedParticipantFileNo="8-68398" authorizedParticipantCrdNo="000151796" authorizedParticipantLei="549300FIFV1CB6HD9A14" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="HRT Financial LP" authorizedParticipantFileNo="8-68430" authorizedParticipantCrdNo="000152144" authorizedParticipantLei="21380037YFKONTT23854" authorizedParticipantPurchaseValue="8148249087.45000000" authorizedParticipantRedeemValue="4401871865.90000000"/>
+          <authorizedParticipant authorizedParticipantName="BofA Securities, Inc." authorizedParticipantFileNo="8-69787" authorizedParticipantCrdNo="000283942" authorizedParticipantLei="549300HN4UKV1E2R3U73" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Clear Street LLC" authorizedParticipantFileNo="8-69972" authorizedParticipantCrdNo="000288933" authorizedParticipantLei="549300KNQS43Y7TO3X67" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="0.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Natixis Securities Americas LLC" authorizedParticipantFileNo="8-719" authorizedParticipantCrdNo="000001101" authorizedParticipantLei="549300L8G1E7ZHVEOG75" authorizedParticipantPurchaseValue="0.00000000" authorizedParticipantRedeemValue="486565602.00000000"/>
+          <authorizedParticipant authorizedParticipantName="Citigroup Global Markets Inc." authorizedParticipantFileNo="8-8177" authorizedParticipantCrdNo="000007059" authorizedParticipantLei="MBNUM2BPBDO7JBLYG310" authorizedParticipantPurchaseValue="7894558341.50000000" authorizedParticipantRedeemValue="5672258396.50000000"/>
+        </authorizedParticipants>
+        <isCollateralRequired>N</isCollateralRequired>
+        <creationUnitNumOfShares>50000.00000000</creationUnitNumOfShares>
+        <averagePercentagePurchased>0.11183254</averagePercentagePurchased>
+        <standardDeviationPurchased>0.08811322</standardDeviationPurchased>
+        <creationUnitPurchasedInKind>99.88816745</creationUnitPurchasedInKind>
+        <creationUnitPurchasedSDInKind>0.08811322</creationUnitPurchasedSDInKind>
+        <averagePercentageRedeemed>0.11446975</averagePercentageRedeemed>
+        <percentSDRedeemed>0.08863664</percentSDRedeemed>
+        <creationUnitPercentageRedeemedInKind>99.88553024</creationUnitPercentageRedeemedInKind>
+        <creationUnitSDRedeemedInKind>0.08863664</creationUnitSDRedeemedInKind>
+        <creationUnitTransactionFeePerUnit>0.00000000</creationUnitTransactionFeePerUnit>
+        <creationUnitTransactionFeeManyUnits>3000.00000000</creationUnitTransactionFeeManyUnits>
+        <creationUnitTransactionFeePercentagePerUnit>0.00000000</creationUnitTransactionFeePercentagePerUnit>
+        <creationUnitTransactionFeeCashPerUnit>0.00000000</creationUnitTransactionFeeCashPerUnit>
+        <creationUnitTransactionFeeCashManyUnits>3000.00000000</creationUnitTransactionFeeCashManyUnits>
+        <creationUnitTransactionFeeCashPercentagePerUnit>0.00000000</creationUnitTransactionFeeCashPercentagePerUnit>
+        <purchaseCreationUnitDollarPerUnit>0.00000000</purchaseCreationUnitDollarPerUnit>
+        <purchaseCreationUnitDollarPerMoreUnits>3000.00000000</purchaseCreationUnitDollarPerMoreUnits>
+        <purchaseCreationUnitDollarPercentagePerUnit>0.00000000</purchaseCreationUnitDollarPercentagePerUnit>
+        <purchaseCreationUnitCashPerUnit>0.00000000</purchaseCreationUnitCashPerUnit>
+        <purchaseCreationUnitCashPerMoreUnits>3000.00000000</purchaseCreationUnitCashPerMoreUnits>
+        <purchaseCreationUnitCashPercentagePerUnit>0.00000000</purchaseCreationUnitCashPercentagePerUnit>
+        <isByAffiliatedPerson>N</isByAffiliatedPerson>
+        <isExclusiveFund>N</isExclusiveFund>
+        <beforeFundFeesExpensesDiff>-0.04000000</beforeFundFeesExpensesDiff>
+        <afterFundFeesExpensesDiff>-0.15000000</afterFundFeesExpensesDiff>
+        <beforeFundFeesExpensesSd>0.05000000</beforeFundFeesExpensesSd>
+        <afterFundFeesExpensesSd>0.05000000</afterFundFeesExpensesSd>
+        <isInKindETF>Y</isInKindETF>
+      </exchangeTradedFund>
+    </exchangeSeriesInfo>
+    <unitInvestmentTrust>
+      <depositors>
+        <depositor>
+          <depositorName>The Depository Trust Company</depositorName>
+          <depositorCrdNo>N/A</depositorCrdNo>
+          <depositorLei>549300HBJLRO8YFMI370</depositorLei>
+          <depositorStateCountry depositorCountry="US" depositorState="US-NY"/>
+          <depositorUltimateParentname>The Depository Trust &amp; Clearing Corporation</depositorUltimateParentname>
+        </depositor>
+      </depositors>
+      <uitAdmins>
+        <uitAdmin>
+          <uitAdminName>State Street Bank and Trust Company</uitAdminName>
+          <uitAdminLei>571474TGEMMWANRLN572</uitAdminLei>
+          <uitAdminStateCountry uitAdminState="US-MA" uitAdminCountry="US"/>
+          <isUitAdminAffiliated>Y</isUitAdminAffiliated>
+          <isUitAdminSubAdmin>N</isUitAdminSubAdmin>
+        </uitAdmin>
+      </uitAdmins>
+      <isUitAdminHiredTerminated>N</isUitAdminHiredTerminated>
+      <notRegistrantSeparateInsuranceAccount isRegistrantSeparateInsuranceAccount="N">
+        <sponsors>
+          <sponsor>
+            <sponsorName>PDR Services LLC</sponsorName>
+            <sponsorCrdNo>N/A</sponsorCrdNo>
+            <sponsorStateCountry sponsorState="US-NY" sponsorCountry="US"/>
+          </sponsor>
+        </sponsors>
+        <trustees>
+          <trustee>
+            <trusteeName>State Street Global Advisors Trust Company</trusteeName>
+            <trusteeStateCountry trusteeState="US-MA" trusteeCountry="US"/>
+          </trustee>
+        </trustees>
+        <numOfExistingSeries>1</numOfExistingSeries>
+        <seriesCIKs>
+          <seriesCIK cik="0000884394"/>
+        </seriesCIKs>
+        <numOfNewSeriesRegistration>0</numOfNewSeriesRegistration>
+        <newSeriesAggregateValue>0.00000000</newSeriesAggregateValue>
+        <numOfSeriesCurrentProspectus>1</numOfSeriesCurrentProspectus>
+        <numOfExistingSeriesAdditionalUnits>0</numOfExistingSeriesAdditionalUnits>
+        <additionalUnitsTotalValue>0.00000000</additionalUnitsTotalValue>
+        <unitInPortfolioValue>0.00000000</unitInPortfolioValue>
+        <totalAssetsSeries>712072540255.17000000</totalAssetsSeries>
+      </notRegistrantSeparateInsuranceAccount>
+      <isRule12D1Dash4Reliance>N</isRule12D1Dash4Reliance>
+      <isRule12D1GReliance>N</isRule12D1GReliance>
+    </unitInvestmentTrust>
+    <signature registrantSignedName="SPDR S&amp;P 500 ETF TRUST" signedDate="2026-03-10" signature="Arthur Jensen" title="Deputy Treasurer"/>
+  </formData>
+</edgarSubmission>
