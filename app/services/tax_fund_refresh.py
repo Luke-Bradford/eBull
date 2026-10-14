@@ -405,11 +405,15 @@ class _Run:
         if got.body is None:
             self.failures.append(f"{source} {request_key}: {got.error}")
             return None
-        # An unsound body is deliberately not stored (spec Design 1, "Soundness": a failed fetch stores nothing). A
-        # stored fetch is evidence: an observation evaluates a source's newest fetch with no fallback, so storing a
-        # transient error page would turn it into an outcome, and sql/492's trigger refuses an unsound content item.
-        # Soundness is checked before persistence; an accepted body is passed to the store unchanged, byte for byte.
-        # Same contract as `refresh_cover_instances` (3d-3a Design 1). The failure itself is recorded in the job note.
+        # An unsound body is deliberately not stored: the spec exempts it from raw-payload persistence.
+        # docs/specs/metrics/2026-10-14-3616-slice3d3c1-fund-identity.md, Design 1 "Soundness" (207-208), verbatim:
+        #   "A response is stored only when it is sound for its source. A *failed fetch* stores nothing: a non-2xx, an
+        #   unsound or over-limit body, a transport error, or the deadline."
+        # Why: an observation evaluates a source's newest fetch with no fallback (Design 2, lines 233-237), so storing
+        # a transient error page would turn it into an outcome; sql/492's fetch trigger refuses an unsound content
+        # item. Same contract as `refresh_cover_instances` (3d-3a Design 1). Soundness is checked before persistence;
+        # an accepted body is passed to the store unchanged, byte for byte. Pinned by
+        # tests/test_tax_fund_refresh_db.py::test_a_failed_fetch_stores_nothing_and_fails_the_step_after_the_rest.
         if not sound(got.body, fetched_at):
             self.failures.append(f"{source} {request_key}: unsound body")
             return None
