@@ -27,7 +27,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, Inexact, Rounded, localcontext
 from typing import Any, Literal, cast
 
@@ -37,13 +37,16 @@ from app.services.trade_events import EventSource, canonical_decimal, classify_o
 
 #: Names the checks, field table, product mapping, normalisation, tolerances, candidate rules and keys (Design 4.11).
 #: Changing any of them is a new policy id.
-TAX_EVIDENCE_POLICY_ID = "broker_evidence_v1"
+TAX_EVIDENCE_POLICY_ID = "broker_evidence_v2"
 
 #: The fingerprint's canonical form (Design 4.10).
 CANONICAL_VERSION = 1
 
 #: The plausibility tolerance (spec "Local policy"): |a - b| <= 0.001 * b, computed with no division.
 TOLERANCE = Decimal("0.001")
+
+#: A sync ``openDateTime`` re-rendered within this span is not an amendment (policy v2, Design 4.6, fact 19).
+RE_RENDERING_SPAN = timedelta(seconds=1)
 
 BIGINT_MAX = 2**63 - 1
 
@@ -733,7 +736,7 @@ def derive_order(
     reasons = _Reasons(partition_reasons)
     subject = f"order:{order_id}"
     position_ids = sorted({e.position_id for e in events})
-    retained = [o for o in observations if o.kind != "unscoped"]
+    retained = sorted((o for o in observations if o.kind != "unscoped"), key=lambda o: o.observation_id)
     unscoped = [o for o in observations if o.kind == "unscoped"]
     f = lookups[-1] if lookups else None
     body = f.body if f is not None else None
@@ -838,8 +841,16 @@ def derive_order(
         ):
             reasons.add("lookup_mismatch:positions")
 
-    # 6. Amendments, and unscoped observations against their baselines (Design 2).
-    if any(o.kind == "amendment" for o in retained):
+    # 6. Amendments, and unscoped observations against their baselines (Design 2). A sync open re-rendering is not an
+    # amendment (policy v2).
+    re_rendered = {p for p in position_ids if _re_rendered_only(_sync_open_payloads(p, events, retained))}
+    unscoped_sync_opens = [
+        o for o in unscoped if o.source == SYNC and o.event_kind == "open" and o.position_id in position_ids
+    ]
+    if any(
+        o.kind == "amendment" and not (o.source == SYNC and o.event_kind == "open" and o.position_id in re_rendered)
+        for o in retained
+    ):
         reasons.add("source_amended")
     if _lookups_amended(lookups):
         reasons.add("lookup_amended")
@@ -944,27 +955,34 @@ def derive_order(
             if not bound:
                 reasons.add("piece_coverage_incomplete")
     else:
-        # A failed isPartiallyAltered field check is its own reason; the remaining values decide.
+        # A failed isPartiallyAltered field check is its own reason; the remaining values decide. An attached unscoped
+        # sync open is adverse evidence too: its batch was withheld, not contradicted.
         altered = [values["isPartiallyAltered"] for _, values in sync_values]
+        altered += [_peek(o.observed_raw, "isPartiallyAltered", _boolean) for o in unscoped_sync_opens]
         if len(position_ids) != 1 or position_ids[0] not in synced_positions or True in altered:
             reasons.add("executions_unestablished")
 
     acquired_at: datetime | None = opening.get("executionTime")
     if lookup is None:
-        # Every retained sync payload, stored or observed: a history-first open's sync evidence is an observation.
-        # Two values are an amendment (one position) or a second position, each already a reason; the time is then
-        # undefined and the checks needing it are skipped. A different London date is still caught below.
-        sync_times = {values["openDateTime"] for _, values in sync_values} - {None}
-        acquired_at = next(iter(sync_times)) if len(sync_times) == 1 else None
+        # Scoped sync payloads only, stored first, then observations by id: a history-first open's sync evidence is an
+        # observation, and an unscoped one is never acquisition evidence. The first is the canonical time. A span of a
+        # second or more is an amendment or a second position, each already a reason; the time is then undefined and
+        # the checks needing it are skipped.
+        sync_times = [t for _, values in sync_values if (t := values["openDateTime"]) is not None]
+        within = bool(sync_times) and max(sync_times) - min(sync_times) < RE_RENDERING_SPAN
+        acquired_at = sync_times[0] if within else None
     candidates = [opening.get("executionTime"), opening.get("openTime")]
     if lookup is not None:
         for _, opening_fields, _ in lookup.executions:
             candidates += [opening_fields.get("executionTime"), opening_fields.get("openTime")]
     candidates += [values["openDateTime"] for _, values in sync_values]
     candidates += [values["openTimestamp"] for _, values in history_values]
-    if len({_to_uk_date(c) for c in candidates if c is not None}) > 1:
+    candidates += [_peek(o.observed_raw, "openDateTime", _timestamp) for o in unscoped_sync_opens]
+    known = [c for c in candidates if c is not None]
+    if len({_to_uk_date(c) for c in known}) > 1:
         reasons.add("acquisition_date_conflict")
-    if acquired_at is not None and any(c.executed_at < acquired_at for c in closes):
+    # Every close is at or after every acquisition time candidate, not only the canonical one (policy v2).
+    if acquired_at is not None and any(c.executed_at < max([acquired_at, *known]) for c in closes):
         reasons.add("close_before_open")
 
     # 9. Quantities and money.
@@ -1113,6 +1131,34 @@ def derive_order(
     return result("admitted", evidence, tuple(lots))
 
 
+def _sync_open_payloads(
+    position_id: int, events: Sequence[LedgerEvent], observations: Iterable[RetainedObservation]
+) -> list[Mapping[str, Any]]:
+    """A position's sync open payloads, normalised (Design 4.3): the stored row first, then observations by id."""
+    stored = [
+        normalise_payload(SYNC, "open", dict(e.raw_payload))
+        for e in events
+        if e.position_id == position_id and e.source == SYNC and e.event_kind == "open"
+    ]
+    return stored + [
+        o.observed_normalised
+        for o in sorted(observations, key=lambda o: o.observation_id)
+        if o.position_id == position_id and o.source == SYNC and o.event_kind == "open"
+    ]
+
+
+def _re_rendered_only(payloads: Sequence[Mapping[str, Any]]) -> bool:
+    """Policy v2 (Design 4.6): one position's sync open payloads differ only in an ``openDateTime`` that spans less
+    than ``RE_RENDERING_SPAN`` on one Europe/London date. Judged over the whole set, never pair by pair, so a chain of
+    small differences cannot carry the time further."""
+    # Plain equality, no serializer: a malformed nested value must fail its field check, not raise here.
+    rest = [{k: v for k, v in p.items() if k != "opendatetime"} for p in payloads]
+    times = [_timestamp(p.get("opendatetime")) for p in payloads]
+    if not payloads or any(r != rest[0] for r in rest) or _INVALID in times:
+        return False
+    return max(times) - min(times) < RE_RENDERING_SPAN and len({_to_uk_date(t) for t in times}) == 1
+
+
 def _check_unscoped(
     obs: RetainedObservation,
     events: Sequence[LedgerEvent],
@@ -1152,7 +1198,11 @@ def _check_unscoped(
     else:
         reasons.add("unscoped_unmatched")
         return
-    if classify_observation(dict(baseline), dict(obs.observed_normalised)) == "amendment":
+    if classify_observation(dict(baseline), dict(obs.observed_normalised)) == "amendment" and not (
+        obs.source == SYNC
+        and obs.event_kind == "open"
+        and _re_rendered_only([*_sync_open_payloads(obs.position_id, events, retained), obs.observed_normalised])
+    ):
         reasons.add("unscoped_conflict")
 
 

@@ -16,7 +16,7 @@ evidence and publishes it as one generation.
   order lookup (`execution_evidence = lookup`), or, when no lookup survives, assumed from one unaltered sync
   observation (`sync_only`); a position the sync never observed has no `totalFees` observation. 3d decides what each
   level suffices for;
-- `excluded_non_share_product`: the order's evidence is bound and unamended, and it is established as a CFD or another
+- `excluded_non_share_product`: the order's evidence is bound and carries no disqualifying amendment, and it is established as a CFD or another
   documented non-share product;
 - `unresolved`, with every reason: anything else.
 
@@ -160,6 +160,22 @@ account's complete history (Limits).
     `daily_tax_reconciliation` docstring (`scheduler.py`, "Requires fx_rates to be") and `app/services/fx.py`'s module
     docstring.
     `daily_tax_reconciliation` is on-demand only (`scheduler.py`, the "Currently on-demand" list in `SCHEDULED_JOBS`).
+19. **Observed sub-second `openDateTime` discrepancies** (dev DB, 2026-10-14, after acceptance run 1; added for
+    policy v2).
+    - *Observation.* `trade_event_observations` holds 7 rows: 2 `supplemental` (history) and 5 `amendment`, all five
+      sync opens written by the first post-deploy sync (00:24Z). In each, `opendatetime` is the only key differing
+      between `stored_normalised` and `observed_normalised` (here the stored row is also the baseline: no earlier
+      observation exists), and the values differ by 3 to 10 ms on the same date (stored → observed, as the broker's text
+      renders them: `10.99` → `10.993`, `11.6` → `11.597`, `24.7` → `24.69`, `03.797` → `03.79`, `10.217` →
+      `10.21`). Of the 10 held positions with a sync open row, the 5 opened in 2025 changed and the 5 opened in 2026
+      did not. None of the five orders has a `found` lookup, so no third timestamp exists for them. Reproduce: each
+      `amendment` row's differing keys between its two normalised columns.
+    - *Documentation.* `docs/etoro-api-reference.md` lists `openDateTime` as `datetime` with no precision; it gives no
+      precision or stability guarantee.
+    - *Hypothesis, not established.* A change in how the broker stores or renders older positions' times (every value
+      on both sides is a whole multiple of 1/300 s, rounded to the millisecond). Five observations from one sync do not
+      distinguish this from a genuine sub-second correction, and say nothing about other fields, sources or years.
+      Policy v2 therefore does not rest on the cause (Local policy).
 
 ## Source rules
 
@@ -311,11 +327,11 @@ hold, so it has no baseline and makes that order `unscoped_unmatched`. One match
 known order is kept and attached to nothing (another account's position, or an order not yet in the ledger, which a
 later derivation attaches once a clean batch writes it). For each attached observation, the baseline is
 the latest retained payload that is not `unscoped` with the same `(position_id, source, event_kind)` and, for a close,
-the same `executed_at`: the stored row if it has that source, else the latest supplemental, amendment or lifecycle
-observation. Then:
+the same `executed_at`: the latest supplemental, amendment or lifecycle observation by `observation_id`, else the
+stored row if it has that source. Then:
 - no baseline (an unseen close piece, a changed close timestamp, or a source the ledger has not retained for that
   position): the order is `unresolved` with `unscoped_unmatched`;
-- different by the amendment rule: `unscoped_conflict`;
+- different by the amendment rule: `unscoped_conflict`, unless the difference is a re-rendering (Design 4.6);
 - identical: nothing.
 
 The comparison runs at each derivation, so an unscoped close that a later clean batch writes unchanged stops being
@@ -361,7 +377,9 @@ source, normalised by Design 4.3's rules; a field present in one and absent in t
 
 Whatever is written becomes the next baseline. A correction writes one amendment, the same correction again nothing, a
 reversion another amendment; amendment rows are never deleted, so `source_amended` is sticky. A lifecycle row does not
-make the order amended, but derivation reads it (Design 4.8).
+make the order amended, but derivation reads it (Design 4.8). `kind` records ingestion's field-by-field comparison and
+nothing more; which amendments make an order `source_amended` is the evidence policy's (Design 4.6), so a policy can
+re-judge every stored row without rewriting it.
 
 **Both sources in one batch.** `merge_events` keeps a portfolio open over a history open of the same position. It now
 also returns the history opens it set aside, and `ingest_trade_events` passes each to the decision above after the
@@ -484,11 +502,28 @@ left undefined is skipped, so `reasons` names causes, not their consequences.
 5. **Lookup binding.** *F*'s `orderId` and every execution's `openingData.orderId` equal the order id; its
    `asset.instrumentId` equals the order's broker instrument id; its executions' `positionId` values are distinct and
    equal, as a set, the order's position ids (else `lookup_mismatch:<what>`).
-6. **Amendments.** An amendment observation of any of the order's events adds `source_amended`; differing `found` bodies
-   add `lookup_amended` (Design 3).
+6. **Amendments.** An amendment observation of any of the order's events adds `source_amended`, unless it is a
+   re-rendering; differing `found` bodies add `lookup_amended` (Design 3).
+
+   **Re-rendering (policy v2, fact 19).** A position's *sync open payloads* are, normalised (Design 4.3), its stored
+   open row when that row is a sync row, then every retained sync open observation (`supplemental`, `amendment`,
+   `lifecycle`) by `observation_id`. A sync open amendment observation does not make the order `source_amended` when
+   the position's sync open payloads are equal in every key except `opendatetime`, and their `opendatetime` values all
+   parse, span less than one second (latest minus earliest) and fall on one Europe/London date. It remains an
+   `amendment` row; only its consequence changes. An attached `unscoped` sync open observation that differs from its
+   baseline (Design 2) is not `unscoped_conflict` when the same holds of the position's sync open payloads with it
+   added. `isPartiallyAltered` is not waived: no re-rendering beside it has been observed.
+
+   The test runs over the position's whole record rather than each amendment against its baseline. For the other keys
+   the two are equivalent, since every observation's baseline is the payload before it in that sequence, so any
+   difference within the set is a difference between some observation and its baseline. For the time it is stricter:
+   a chain of small differences cannot carry it a second or more. Ingestion's `stored_normalised` is the stored row,
+   not the observation's baseline, so it is not used. Every other source and field stays exact: a history
+   `openTimestamp`, a close's `closeTimestamp` (the close's identity, Design 4.10) and lookup bodies change only with
+   an observed case and a new policy id.
 
 If checks 1–6 pass and the product is not `real`, the order is `excluded_non_share_product`: established, bound,
-unamended, and outside share identification. No further checks run and it has no lots; 3d reports it as omitted. Any
+free of disqualifying amendments, and outside share identification. No further checks run and it has no lots; 3d reports it as omitted. Any
 failure in checks 1–6 makes the order `unresolved` whatever its product.
 
 **Checks for real-asset orders.** The remaining fields of the field table (marked *real*) are checked as in check 3.
@@ -514,9 +549,20 @@ failure in checks 1–6 makes the order `unresolved` whatever its product.
      retained sync payload, stored or lifecycle (never observed altered; else `executions_unestablished`). This is weaker evidence: nothing establishes the order's final status or that no
      other execution exists, so the subject and its lots record `execution_evidence = sync_only` (`lookup` with *F*),
      and 3d decides whether that suffices.
-   - **Acquisition date.** Every time candidate — *F*'s `executionTime` and `openTime`, sync `openDateTime`, each
-     history row's `openTimestamp` — falls on one Europe/London date (else `acquisition_date_conflict`). Each close
-     row's `executed_at` is at or after the acquisition time (else `close_before_open`).
+   - **Acquisition date.** Every time candidate — *F*'s `executionTime` and `openTime`, sync `openDateTime` (stored,
+     retained and attached `unscoped`), each history row's `openTimestamp` — falls on one Europe/London date (else
+     `acquisition_date_conflict`). When the acquisition time is defined, each close row's `executed_at` is at or after
+     the acquisition time and every candidate (else `close_before_open`), with or without *F*.
+   - **Acquisition time without *F*.** Taken from scoped sync evidence only: the sync `openDateTime` of the stored row
+     when the stored open is a sync row, then of each retained sync observation by `observation_id`; an `unscoped`
+     observation is contradiction evidence, never acquisition evidence. When those values span less than one second,
+     the acquisition time is the first, a canonical representative of the observed values rather than an established
+     exact execution time. Otherwise the time is undefined and the checks needing it are skipped; a reason is already
+     recorded, because a span of a second or more between one position's sync payloads is a disqualifying amendment
+     (check 6), between two positions' it is `executions_unestablished`, and a missing or unparseable value fails the
+     field check. Under a fixed policy and an unchanged evidence basis the first value never moves, so later
+     re-renderings do not change a lot's `executed_at`. An attached `unscoped` sync open's `isPartiallyAltered` true
+     also makes the order `executions_unestablished`: its batch was withheld, not contradicted.
 9. **Quantities and money.**
    - **Charges and adjustments.** Every observation of every gated indicator (Source rules) is zero: *F*'s
      `totalCosts`, and each execution's `addedFunds`, `openingData.fees`, `openingData.taxes` and `openingData.markup`;
@@ -628,8 +674,11 @@ ascending; NULL as JSON null; timestamps as `YYYY-MM-DDTHH:MM:SS.ffffffZ` in UTC
 trailing fractional zeros and a trailing point removed and `-0` written `0`, inside the Design 1 context (never
 `normalize()`). The pure tests pin one fixed lot to its expected byte string and SHA-256.
 
-**11. Policy.** `TAX_EVIDENCE_POLICY_ID = "broker_evidence_v1"` names the checks, the field table, the product mapping, the
-normalisation, the tolerances, the candidate rules and the keys. Changing any of them is a new policy id.
+**11. Policy.** `TAX_EVIDENCE_POLICY_ID = "broker_evidence_v2"` names the checks, the field table, the product mapping, the
+normalisation, the tolerances, the candidate rules and the keys. Changing any of them is a new policy id. v1 (run 1)
+treated every amendment as `source_amended`; v2 adds the re-rendering rule (check 6) and the acquisition time without
+*F* (check 8). Because the policy id is in the fingerprint, every lot's fingerprint changes once at v2; a reader diffing
+the v1 and v2 generations compares `lot_key` and the other fingerprint inputs, not the fingerprint.
 
 ### 5. Sterling
 
@@ -712,6 +761,18 @@ returns. Registration mirrors `tax_fx_refresh`: `SCHEDULED_JOBS`, the lane map i
 - **The broker's stated amounts are recorded, not yet reconciled** (Source rules); 3d owns reconciliation.
 - **A shared opening is one execution** when every listed piece is bound to positive stored closes or a held position
   (Design 4.8).
+- **Sync `openDateTime` differences under one second on one London date are an accepted timestamp uncertainty**
+  (policy v2, fact 19), whatever their cause. The rows stay amendments; they do not make the order `source_amended`.
+  The bound is set by construction, not fitted to the 3–10 ms observed. Share identification acts on days: TCGA s105(1)
+  applies where securities are "acquired or disposed of by the same person on the same day", s106A(5) identifies a
+  disposal with securities acquired "within the period of thirty days after the disposal", and s104 pools the rest
+  (legislation.gov.uk, read 2026-10-14; HMRC CG51555–CG51575, Source rules). The lot carries
+  that day as `uk_date`, the Europe/London date of `executed_at` (Design 4.10), and the rule requires one London date
+  across every candidate. `close_before_open` is a broker-evidence consistency check, not a tax rule; it holds every
+  close at or after every candidate, so no close between the earliest and latest candidate passes. What the bound
+  admits that v1 refused is a sub-second difference with no other change, e.g. `12:00:00.100` against
+  `12:00:00.900`: the lot then records the first value, which can differ from the instant by under a second and has
+  the same tax day.
 - **Tolerances of 0.1%.** About four times the largest measured proceeds gap (fact 10) and ten times the largest
   acquisition gap (fact 8). They catch a scale or currency error or a misread field, not cents.
 - **An order is admitted whole or not at all.**
@@ -847,6 +908,18 @@ DB (`tests/test_tax_broker_evidence_db.py`), one per new SQL mechanism:
   the sync row and retains the history open as `supplemental`;
 - `record_trade_events` writes a `failed` fetch row for a failed fetch, with its `min_date` and `portfolio_fetched_at`.
 
+Policy v2 (pure; each fixture otherwise passes every check): a sync-only real order whose one amendment differs only
+in `openDateTime` by 3 ms is `admitted` with the stored time as `executed_at`; the same change beside
+`isPartiallyAltered` true is `source_amended` and `executions_unestablished`; a 3 ms re-rendering of a CFD order without
+a lookup is `excluded_non_share_product`; two amendments each under a second from the last but spanning a second or
+more are `source_amended`; `openDateTime` changed beside another key is `source_amended`; a re-rendering across London
+midnight is `source_amended` and `acquisition_date_conflict`; a close between the stored and the re-rendered time is
+`close_before_open`, with and without a lookup; a history-first open with an earlier `unscoped` sync observation and a
+later scoped one 3 ms apart is admitted with the scoped time; an `unscoped` sync open with `isPartiallyAltered` true is
+`executions_unestablished`; an `unscoped` sync open 3 ms from its baseline is not `unscoped_conflict`, one a second or
+more away is, and one across London midnight is `unscoped_conflict` and `acquisition_date_conflict`; a 3 ms history
+`openTimestamp` difference is `source_amended`.
+
 Provider calls are faked; no test reaches the broker.
 
 ## Acceptance (dev DB)
@@ -870,6 +943,15 @@ counts is investigated before 3d starts.
 - `trade_events.environment` is `demo` on every row; `fx_rates` does not exist; `tax_lots` is empty;
   `trade_history_fetches` has a row from the first sync after deploy, whose outcome is `ok` when the history fetch
   succeeded and the batch passed the scope check, and otherwise the outcome recorded for the reason.
+
+**Policy v2 acceptance.** Run 1 (v1) published 7 admitted / 2 excluded / 12 unresolved: the five orders of fact 19
+were `source_amended`. The first v2 run publishes **8 admitted / 6 excluded / 7 unresolved**, with the per-order
+outcomes and reasons listed above: NXH `admitted` (`sync_only`) with acquisition `executed_at` equal to its stored sync
+open payload's `openDateTime` (`.600`, also the row's `executed_at`); VOO, QQQ and IEP ×2 `excluded_non_share_product`;
+no subject `source_amended`; the 5 amendment rows still present. Every `lot_key` of run 1 is in the v2 run with the
+same units, `usd_amount` and `executed_at`, and the same `amount_gbp` when its FX rate date, observation and rates are
+unchanged. A read-only v2 derivation over the dev snapshot of 2026-10-14 ~02:00Z (no publish) gave exactly these
+outcomes, reasons and lots; the PR records it.
 
 ## Full-population verification
 

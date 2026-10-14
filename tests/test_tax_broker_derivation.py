@@ -672,6 +672,120 @@ def test_amendment_of_a_history_close() -> None:
     assert "source_amended" in reasons_of(case.derive())
 
 
+RE_RENDERED = "2026-09-23T13:30:00.503Z"
+
+
+def test_a_sync_open_re_rendered_by_milliseconds_is_not_an_amendment() -> None:
+    case = Held()
+    case.observations.append(observation(case.open, "amendment", sync_payload(21, openDateTime=RE_RENDERED)))
+    result = case.derive()
+    assert (result.outcome, result.execution_evidence) == ("admitted", "sync_only")
+    assert [lot.executed_at for lot in result.lots] == [OPENED_AT]
+
+
+def test_a_re_rendering_beside_a_lifecycle_change_is_an_amendment() -> None:
+    # No re-rendering beside an isPartiallyAltered change has been observed (fact 19), so v2 does not waive it.
+    case = Held()
+    case.observations.append(
+        observation(case.open, "amendment", sync_payload(21, openDateTime=RE_RENDERED, isPartiallyAltered=True))
+    )
+    assert reasons_of(case.derive()) == ["source_amended", "executions_unestablished"]
+
+
+def test_a_re_rendered_cfd_order_without_a_lookup_is_excluded() -> None:
+    case = Held(settlementTypeID=0)
+    case.observations.append(
+        observation(case.open, "amendment", sync_payload(21, settlementTypeID=0, openDateTime=RE_RENDERED))
+    )
+    result = case.derive()
+    assert (result.outcome, result.product) == ("excluded_non_share_product", "cfd")
+
+
+def test_re_renderings_spanning_a_second_are_an_amendment() -> None:
+    case = Held()
+    for moment in ("2026-09-23T13:30:00.9Z", "2026-09-23T13:30:01.5Z"):
+        case.observations.append(observation(case.open, "amendment", sync_payload(21, openDateTime=moment)))
+    assert reasons_of(case.derive()) == ["source_amended"]
+
+
+def test_a_re_rendering_beside_another_change_is_an_amendment() -> None:
+    case = Held()
+    case.observations.append(
+        observation(case.open, "amendment", sync_payload(21, openDateTime=RE_RENDERED, mirrorID=7))
+    )
+    assert "source_amended" in reasons_of(case.derive())
+
+
+def test_a_malformed_nested_sync_field_beside_a_re_rendering_fails_its_field_check() -> None:
+    case = Held(mirrorID={"x": D("1.2")})
+    case.observations.append(
+        observation(case.open, "amendment", sync_payload(21, mirrorID={"x": D("1.2")}, openDateTime=RE_RENDERED))
+    )
+    assert reasons_of(case.derive()) == ["invalid_field:mirrorID"]
+
+
+def test_a_re_rendering_across_london_midnight_is_a_date_conflict() -> None:
+    case = Held(openDateTime="2026-09-23T22:59:59.999Z")  # 23:59:59.999 BST
+    case.observations.append(
+        observation(case.open, "amendment", sync_payload(21, openDateTime="2026-09-23T23:00:00.002Z"))
+    )
+    assert reasons_of(case.derive()) == ["source_amended", "acquisition_date_conflict"]
+
+
+@pytest.mark.parametrize("with_lookup", [False, True])
+def test_a_close_inside_the_re_rendering_span_is_before_the_open(with_lookup: bool) -> None:
+    case = Held()
+    case.observations.append(observation(case.open, "amendment", sync_payload(21, openDateTime=RE_RENDERED)))
+    inside = OPENED_AT + timedelta(milliseconds=1)
+    case.events.append(event("close", 21, history_row(21, "0.5", inside), units="0.5", executed_at=inside))
+    lookups = [found(lookup_body([execution(21, "open", "0.5")]))] if with_lookup else None
+    assert "close_before_open" in reasons_of(case.derive(lookups))
+
+
+def test_a_history_first_open_takes_its_time_from_scoped_sync_evidence_only() -> None:
+    history_open = event("open", 21, history_row(21, "1", CLOSED_A))
+    case = Held()
+    case.open, case.events = history_open, [history_open]
+    case.observations += [
+        observation(None, "unscoped", sync_payload(21, openDateTime="2026-09-23T13:30:00.497Z"), position_id=21),
+        observation(history_open, "supplemental", sync_payload(21), source="etoro_sync"),
+    ]
+    result = case.derive()
+    assert (result.outcome, [lot.executed_at for lot in result.lots]) == ("admitted", [OPENED_AT])
+
+
+def test_an_unscoped_open_marking_the_position_altered_is_unestablished() -> None:
+    case = Held()
+    case.observations.append(observation(None, "unscoped", sync_payload(21, isPartiallyAltered=True), position_id=21))
+    assert reasons_of(case.derive()) == ["executions_unestablished"]
+
+
+def test_an_unscoped_re_rendering_across_london_midnight_is_a_conflict() -> None:
+    case = Held(openDateTime="2026-09-23T22:59:59.999Z")
+    late = "2026-09-23T23:00:00.002Z"
+    case.observations.append(observation(None, "unscoped", sync_payload(21, openDateTime=late), position_id=21))
+    assert reasons_of(case.derive()) == ["unscoped_conflict", "acquisition_date_conflict"]
+
+
+def test_an_unscoped_re_rendering_is_not_a_conflict_but_a_second_is() -> None:
+    case = Held()
+    case.observations.append(observation(None, "unscoped", sync_payload(21, openDateTime=RE_RENDERED), position_id=21))
+    assert case.derive().outcome == "admitted"
+
+    case = Held()
+    late = "2026-09-23T13:30:01.5Z"
+    case.observations.append(observation(None, "unscoped", sync_payload(21, openDateTime=late), position_id=21))
+    assert reasons_of(case.derive()) == ["unscoped_conflict"]
+
+
+def test_a_history_open_timestamp_re_rendering_is_still_an_amendment() -> None:
+    case = Split()
+    case.observations.append(
+        observation(case.close_a, "amendment", history_row(11, "0.5", CLOSED_A, openTimestamp=RE_RENDERED))
+    )
+    assert "source_amended" in reasons_of(case.derive())
+
+
 def test_unscoped_conflict_unmatched_and_identical() -> None:
     case = Held()
     case.observations.append(observation(None, "unscoped", sync_payload(21, totalFees=D("5")), position_id=21))
@@ -814,7 +928,7 @@ def test_extreme_operands_are_exact_and_a_rounding_raises() -> None:
 
 FIXED_BYTES = (
     b'{"amount_gbp":"76.99999999692","canonical_version":1,"consideration_status":"broker_stated_unreconciled",'
-    b'"direction":"acquisition","etoro_instrument_id":1001,"evidence_policy_id":"broker_evidence_v1",'
+    b'"direction":"acquisition","etoro_instrument_id":1001,"evidence_policy_id":"broker_evidence_v2",'
     b'"executed_at":"2026-09-23T13:30:00.500000Z","execution_evidence":"lookup","fx_gbp_per_usd":"0.7692307692",'
     b'"fx_observation_date":"2026-09-23","fx_policy_id":"'
     + TAX_FX_POLICY_ID.encode()
@@ -834,7 +948,7 @@ def test_fingerprint_byte_vector() -> None:
     lot = _fixed_lot()
     assert fingerprint_bytes(lot) == FIXED_BYTES
     assert lot.fingerprint == hashlib.sha256(FIXED_BYTES).hexdigest()
-    assert lot.fingerprint == "d12686be3ad27942d9d2fb7e83af116472ab431593563dd02b4953c53a70d95d"
+    assert lot.fingerprint == "5aa639db6932325664ee1a7cc83687280a676af02f1ef7f5094c9dbea4630a61"
 
 
 def test_fingerprint_is_stable_under_reordering_and_excludes_run_ids() -> None:
@@ -848,7 +962,7 @@ def test_fingerprint_is_stable_under_reordering_and_excludes_run_ids() -> None:
     (moved,) = price_lots([_draft()], other_run)  # type: ignore[misc]
     assert reordered[0].fingerprint == lot.fingerprint == moved.fingerprint  # type: ignore[index]
     assert moved.fx_run_id == 99
-    assert lot_fingerprint(lot, "broker_evidence_v2") != lot.fingerprint
+    assert lot_fingerprint(lot, "broker_evidence_v1") != lot.fingerprint
     assert b"run_id" not in fingerprint_bytes(lot) and b"fingerprint" not in fingerprint_bytes(lot)
 
 
@@ -925,15 +1039,6 @@ def test_an_enum_in_another_case_is_not_an_amendment() -> None:
     later["asset"]["settlementType"] = "real"
     later["status"]["name"] = "FILLED"
     assert case.derive(case.body, later).outcome == "admitted"
-
-
-def test_a_sub_second_open_time_amendment_is_source_amended_only() -> None:
-    # The dev account's 2026-10-14 re-observations: the broker re-rendered openDateTime 3-10 ms apart.
-    case = Held()
-    case.observations.append(
-        observation(case.open, "amendment", sync_payload(21, openDateTime="2026-09-23T13:30:00.497Z"))
-    )
-    assert reasons_of(case.derive()) == ["source_amended"]
 
 
 def test_a_sync_only_amendment_across_london_dates_is_a_date_conflict() -> None:
