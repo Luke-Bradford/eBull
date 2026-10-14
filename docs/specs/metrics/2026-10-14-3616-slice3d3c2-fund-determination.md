@@ -481,7 +481,7 @@ DB (one module):
      reading the newest `sec_submissions` fetch for the CIK with `fetched_at` ≤ cutoff (not the observation's column,
      which is NULL for earlier rows); the temporal rows compare timestamps (`reviewed_at` ≤ cutoff's UTC date ≤
      `review_by`; a submissions fetch present, cutoff − `fetched_at` ≤ 30 days, every `filingDate` ≤ its `fetched_at`
-     UTC date). The first row that applies is the expected outcome; for `determined` every row's predicate is false.
+     UTC date). The first row that applies is the expected outcome; for `determined`, every preceding refusal predicate is false, so the final `otherwise` row applies.
    - Where the walk and the Script disagree (the Script compares the temporal rows by date), the walk's outcome is
      expected and the disagreement is recorded on the PR.
 5. Matching: the effective run's characters, identifications and dependencies, compared before and after, are
@@ -564,6 +564,7 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r4.16 (exclusions, r12) | carried as assumption A4, `assumed` basis, with the resolving work in `would_resolve`; every outcome that rests on it lists it |
 | r13.16 (acceptance vs refusals) | acceptance step 4 splits provenance (every outcome) from applicability (Design 2 walked at full precision; its first applying row is expected); a disagreement with the Script is expected and recorded |
 | r14.17 (acceptance precedence) | the acceptance walk starts at Design 2's first row and reads the newest submissions fetch, so earlier refusals keep their precedence; the document and quote refusals with otherwise valid temporal evidence are Test 4 cases, and IUSA.L and CSPX.L give the live `not_candidate` rows |
+| r15.18 (wording) | corrected: `determined` is the `otherwise` row |
 | r6.3 (boundary cases, r13) | exact 30-day, 30-days-plus-one-second, same-day and equal-timestamp fetch cases in Test 4 |
 | r10.1 (future-row boundary) | coverage, discovery and the Script all bound filing dates by the submissions fetch's UTC date |
 | r6.13 (index) | Amendment 6's effective dates distinguished in the research index |
