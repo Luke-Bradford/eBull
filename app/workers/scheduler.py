@@ -7224,9 +7224,9 @@ def tax_fx_refresh() -> None:
 
 
 def tax_broker_evidence_refresh() -> None:
-    """Capture the broker's order lookups for the tax evidence (#3616 slice 3c, part 2a)."""
+    """Capture the broker's order lookups and publish a generation of tax evidence (#3616 slice 3c, Design 6-7)."""
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
-    from app.services.tax_broker_evidence import run_order_lookup_capture
+    from app.services.tax_broker_evidence import run_tax_broker_evidence
 
     creds = _load_etoro_credentials(JOB_TAX_BROKER_EVIDENCE_REFRESH)
     if creds is None:
@@ -7234,20 +7234,28 @@ def tax_broker_evidence_refresh() -> None:
         return
     api_key, user_key = creds
     with _tracked_job(JOB_TAX_BROKER_EVIDENCE_REFRESH) as tracker:
-        # One autocommit connection: the run holds its session advisory lock on it, and each attempt commits as it
+        # One autocommit connection: the run holds its session advisory lock on it, and each lookup commits as it
         # lands. Lookups are informational reads on the D_order_info quota lane.
         with (
             connect_job(autocommit=True) as conn,
             EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as broker,
         ):
-            report = run_order_lookup_capture(conn, broker, settings.etoro_env)
-        if report.state == "refused":
-            raise RuntimeError(f"tax_broker_evidence_refresh refused: {report.reason}")
-        tracker.row_count = report.attempted
-        tracker.note = (
-            f"state={report.state} attempted={report.attempted} deferred={report.deferred} "
-            f"stopped_by={report.stopped_by} outcomes={report.outcomes}"
+            report = run_tax_broker_evidence(conn, broker, settings.etoro_env)
+        if report.state == "skipped":
+            logger.info("tax_broker_evidence_refresh skipped: %s", report.reason)
+            tracker.note = f"state=skipped reason={report.reason}"
+            return
+        capture = report.capture
+        captured = (
+            f" attempted={capture.attempted} deferred={capture.deferred} stopped_by={capture.stopped_by} "
+            f"outcomes={capture.outcomes}"
+            if capture is not None
+            else ""
         )
+        if report.state == "refused":
+            raise RuntimeError(f"tax_broker_evidence_refresh run {report.run_id} refused: {report.reason}{captured}")
+        tracker.row_count = report.counts.get("acquisitions", 0) + report.counts.get("disposals", 0)
+        tracker.note = f"state=published run={report.run_id} counts={report.counts}{captured}"
 
 
 def etoro_dividend_calendar_capture() -> None:

@@ -5,12 +5,13 @@ Spec: docs/specs/metrics/2026-10-13-3616-slice3c-broker-tax-evidence.md.
 Part 2a (this module so far) captures the broker's order lookups (Design 3). The broker answered ``orders:lookup``
 for recent orders only (spec fact 2), so lookups are captured early and kept as text in ``tax_order_lookups``
 (sql/486), one append-only row per attempt. The pure derivation and sterling values (Design 4-5) are in
-``app/services/tax_broker_derivation.py``; the publishing run (Design 6) follows on the same lock and policy id.
+``app/services/tax_broker_derivation.py``.
 
 - ``classify_lookup`` is the response table of Design 3; ``lookup_candidates`` and ``plan_lookups`` are its candidate
   table, caps and interleaving. All three are pure.
-- ``run_order_lookup_capture`` takes the session lock, checks the ledger scope before asking the broker anything
-  (Design 6 steps 1-3), and commits each attempt as it lands.
+- ``run_tax_broker_evidence`` is a whole run (Design 6): the session lock, the scope pre-check before anything is
+  asked of the broker, the capture (each attempt committed as it lands), one snapshot, the derivation, and one
+  publishing transaction (sql/488).
 """
 
 from __future__ import annotations
@@ -26,9 +27,27 @@ from typing import Any, Literal, Protocol
 
 import psycopg
 import psycopg.rows
+from psycopg.types.json import Jsonb
 
+from app.db.snapshot import snapshot_read
 from app.providers.broker import RawOrderLookup
-from app.services.tax_broker_derivation import TAX_EVIDENCE_POLICY_ID, lookup_field_failures, parse_lookup_body
+from app.services.tax_broker_derivation import (
+    TAX_EVIDENCE_POLICY_ID,
+    EvidenceLot,
+    FoundLookup,
+    FxRefusal,
+    HeldPosition,
+    LedgerEvent,
+    RetainedObservation,
+    Scope,
+    SubjectEvidence,
+    derive_all,
+    lookup_field_failures,
+    parse_lookup_body,
+    price_lots,
+)
+from app.services.tax_fx import load_tax_fx_state, tax_fx_state_is_current
+from app.services.trade_events import canonical_decimal, payload_account_id
 
 logger = logging.getLogger(__name__)
 
@@ -364,27 +383,376 @@ def _insert_attempt(
     )
 
 
-def run_order_lookup_capture(
+@dataclass
+class EvidenceRunReport:
+    state: Literal["published", "refused", "skipped"]
+    run_id: int | None = None
+    reason: str | None = None
+    capture: CaptureReport | None = None
+    counts: dict[str, int] = field(default_factory=dict)
+
+
+class _Refused(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass
+class _Snapshot:
+    scope: Scope
+    events: list[LedgerEvent]
+    observations: list[RetainedObservation]
+    lookups: dict[int, list[FoundLookup]]
+    held: dict[int, HeldPosition]
+    latest_fetch: dict[str, Any] | None
+    ok_fetch_id: int | None
+    watermarks: dict[str, int | None]
+
+
+def _decimal_json(text: str) -> Any:
+    """A stored JSONB value from its text, every number a ``Decimal`` (Design 1, "Precision")."""
+    return json.loads(text, parse_float=Decimal)
+
+
+def _read_snapshot(conn: psycopg.Connection[Any], environment: str) -> _Snapshot:
+    """Design 6 step 5: everything the derivation reads, in one REPEATABLE READ snapshot."""
+    with snapshot_read(conn), conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        scope_row = cur.execute("SELECT environment, account_id FROM trade_ledger_scope").fetchone()
+        if scope_row is None:
+            raise _Refused("scope_unestablished")
+        if scope_row["environment"] != environment:
+            raise _Refused("scope_mismatch")
+        events = [
+            LedgerEvent(
+                event_id=r["event_id"],
+                position_id=r["position_id"],
+                etoro_instrument_id=r["etoro_instrument_id"],
+                instrument_id=r["instrument_id"],
+                event_kind=r["event_kind"],
+                units=r["units"],
+                executed_at=r["executed_at"],
+                order_id=r["order_id"],
+                source=r["source"],
+                raw_payload=_decimal_json(r["payload"]),
+            )
+            for r in cur.execute(
+                """
+                SELECT event_id, position_id, etoro_instrument_id, instrument_id, event_kind, units, executed_at,
+                       order_id, source, raw_payload::text AS payload
+                FROM trade_events WHERE environment = %(env)s ORDER BY event_id
+                """,
+                {"env": environment},
+            ).fetchall()
+        ]
+        # Observations carry their environment through the fetch that wrote them.
+        observations = [
+            RetainedObservation(
+                observation_id=r["observation_id"],
+                event_id=r["event_id"],
+                position_id=r["position_id"],
+                event_kind=r["event_kind"],
+                executed_at=r["executed_at"],
+                kind=r["kind"],
+                source=r["source"],
+                observed_normalised=r["observed_normalised"],
+                observed_raw=_decimal_json(r["raw"]),
+            )
+            for r in cur.execute(
+                """
+                SELECT o.observation_id, o.event_id, o.position_id, o.event_kind, o.executed_at, o.kind, o.source,
+                       o.observed_normalised, o.observed_raw::text AS raw
+                FROM trade_event_observations o
+                JOIN trade_history_fetches f USING (fetch_id)
+                WHERE f.environment = %(env)s
+                ORDER BY o.observation_id
+                """,
+                {"env": environment},
+            ).fetchall()
+        ]
+        lookups: dict[int, list[FoundLookup]] = {}
+        for r in cur.execute(
+            """
+            SELECT lookup_id, order_id, requested_at, policy_id, body_text
+            FROM tax_order_lookups
+            WHERE environment = %(env)s AND outcome = 'found'
+            ORDER BY lookup_id
+            """,
+            {"env": environment},
+        ).fetchall():
+            lookups.setdefault(r["order_id"], []).append(
+                FoundLookup(r["lookup_id"], r["requested_at"], r["policy_id"], parse_lookup_body(r["body_text"]))
+            )
+        held = {
+            r["position_id"]: HeldPosition(r["position_id"], r["units"], r["amount"], _decimal_json(r["payload"]))
+            for r in cur.execute(
+                "SELECT position_id, units, amount, raw_payload::text AS payload "
+                "FROM broker_positions WHERE position_id >= 0"
+            ).fetchall()
+        }
+        latest_fetch = cur.execute(
+            "SELECT fetch_id, environment, account_id, outcome, portfolio_real_positions "
+            "FROM trade_history_fetches ORDER BY fetch_id DESC LIMIT 1"
+        ).fetchone()
+        ok_fetch = cur.execute(
+            "SELECT max(fetch_id) AS fetch_id FROM trade_history_fetches "
+            "WHERE environment = %(env)s AND outcome = 'ok'",
+            {"env": environment},
+        ).fetchone()
+        lookups_max = cur.execute(
+            "SELECT max(lookup_id) AS m FROM tax_order_lookups WHERE environment = %(env)s", {"env": environment}
+        ).fetchone()
+    return _Snapshot(
+        scope=Scope(scope_row["environment"], scope_row["account_id"]),
+        events=events,
+        observations=observations,
+        lookups=lookups,
+        held=held,
+        latest_fetch=latest_fetch,
+        ok_fetch_id=ok_fetch["fetch_id"] if ok_fetch else None,
+        watermarks={
+            "trade_events_max_event_id": max((e.event_id for e in events), default=None),
+            "lookups_max_id": lookups_max["m"] if lookups_max else None,
+            "observations_max_id": max((o.observation_id for o in observations), default=None),
+        },
+    )
+
+
+def _check_portfolio_scope(snapshot: _Snapshot) -> None:
+    """Design 6 step 6: the refresh ``broker_positions`` holds is the scope's, and so is every held position."""
+    latest, scope = snapshot.latest_fetch, snapshot.scope
+    if latest is None:
+        raise _Refused("portfolio_unobserved")
+    empty_unverified = latest["outcome"] == "scope_unverified" and latest["portfolio_real_positions"] == 0
+    if latest["environment"] != scope.environment or (
+        not empty_unverified and (latest["account_id"] != scope.account_id or latest["outcome"] not in ("ok", "failed"))
+    ):
+        raise _Refused("portfolio_out_of_scope")
+    if any(payload_account_id(dict(h.payload)) != scope.account_id for h in snapshot.held.values()):
+        raise _Refused("positions_out_of_scope")
+
+
+def _held_json(held: dict[int, HeldPosition | None]) -> dict[str, Any]:
+    return {
+        str(position_id): None
+        if holding is None
+        else {
+            "units": canonical_decimal(holding.units),
+            "amount": canonical_decimal(holding.amount),
+            "cid": payload_account_id(dict(holding.payload)),
+        }
+        for position_id, holding in sorted(held.items())
+    }
+
+
+def _publish(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    snapshot: _Snapshot,
+    subjects: list[SubjectEvidence],
+    lots: list[EvidenceLot],
+    counts: dict[str, int],
+    fx_run_id: int | None,
+    fx_policy_id: str | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE tax_evidence_runs SET
+            state = 'published', finished_at = clock_timestamp(), account_id = %(account)s,
+            trade_events_max_event_id = %(events_max)s, lookups_max_id = %(lookups_max)s,
+            observations_max_id = %(observations_max)s, history_fetch_latest_id = %(fetch_latest)s,
+            history_fetch_ok_id = %(fetch_ok)s, fx_run_id = %(fx_run)s, fx_policy_id = %(fx_policy)s,
+            counts = %(counts)s
+        WHERE run_id = %(run_id)s
+        """,
+        {
+            "account": snapshot.scope.account_id,
+            "events_max": snapshot.watermarks["trade_events_max_event_id"],
+            "lookups_max": snapshot.watermarks["lookups_max_id"],
+            "observations_max": snapshot.watermarks["observations_max_id"],
+            "fetch_latest": snapshot.latest_fetch["fetch_id"] if snapshot.latest_fetch else None,
+            "fetch_ok": snapshot.ok_fetch_id,
+            "fx_run": fx_run_id,
+            "fx_policy": fx_policy_id,
+            "counts": Jsonb(counts),
+            "run_id": run_id,
+        },
+    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO tax_evidence_subjects
+                (run_id, subject, order_id, etoro_instrument_id, instrument_id, product, outcome, reasons,
+                 trade_event_ids, lookup_id, held_positions, first_event_at, last_event_at, execution_evidence,
+                 total_fees_unobserved_position_ids)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (
+                    run_id,
+                    s.subject,
+                    s.order_id,
+                    s.etoro_instrument_id,
+                    s.instrument_id,
+                    s.product,
+                    s.outcome,
+                    list(s.reasons),
+                    list(s.trade_event_ids),
+                    s.lookup_id,
+                    Jsonb(_held_json(dict(s.held_positions))),
+                    s.first_event_at,
+                    s.last_event_at,
+                    s.execution_evidence,
+                    list(s.total_fees_unobserved_position_ids),
+                )
+                for s in subjects
+            ],
+        )
+        cur.executemany(
+            """
+            INSERT INTO tax_evidence_lots
+                (run_id, lot_key, subject, order_id, instrument_id, etoro_instrument_id, direction, position_ids,
+                 trade_event_ids, executed_at, uk_date, tax_year, units, usd_amount, consideration_status,
+                 execution_evidence, fx_rate_date, fx_status, fx_observation_date, fx_usd_per_gbp, fx_gbp_per_usd,
+                 fx_policy_id, fx_run_id, amount_gbp, fingerprint)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (
+                    run_id,
+                    lot.draft.lot_key,
+                    lot.draft.subject,
+                    lot.draft.order_id,
+                    lot.draft.instrument_id,
+                    lot.draft.etoro_instrument_id,
+                    lot.draft.direction,
+                    sorted(lot.draft.position_ids),
+                    sorted(lot.draft.trade_event_ids),
+                    lot.draft.executed_at,
+                    lot.draft.uk_date,
+                    lot.draft.tax_year,
+                    lot.draft.units,
+                    lot.draft.usd_amount,
+                    lot.draft.consideration_status,
+                    lot.draft.execution_evidence,
+                    lot.fx_rate_date,
+                    lot.fx_status,
+                    lot.fx_observation_date,
+                    lot.fx_usd_per_gbp,
+                    lot.fx_gbp_per_usd,
+                    lot.fx_policy_id,
+                    lot.fx_run_id,
+                    lot.amount_gbp,
+                    lot.fingerprint,
+                )
+                for lot in lots
+            ],
+        )
+
+
+def _finish(conn: psycopg.Connection[Any], run_id: int, state: str, reason: str) -> None:
+    conn.execute(
+        "UPDATE tax_evidence_runs SET state = %s, reason = %s, finished_at = clock_timestamp() "
+        "WHERE run_id = %s AND state = 'in_progress'",
+        (state, reason, run_id),
+    )
+
+
+def run_tax_broker_evidence(
     conn: psycopg.Connection[Any],
     broker: OrderLookupReader,
     environment: str,
-) -> CaptureReport:
-    """Design 6 steps 1-3 on one autocommit connection: lock, scope pre-check, capture.
+) -> EvidenceRunReport:
+    """One run (Design 6) on one autocommit connection.
 
-    Another run holding the lock: ``skipped``, nothing written. No scope row, or a scope in another environment:
-    ``refused``, nothing asked of the broker. The lock is released in every case.
+    Another run holding the lock: ``skipped``, nothing written. A refusal (no scope or another environment before
+    the broker is asked; a portfolio or position outside the scope; an FX date 3b cannot answer; the FX state
+    changing before publication) rolls back and records the run ``refused`` with its reason. An exception records
+    it ``abandoned`` and re-raises. The lock is released in every case, so the connection stays usable.
     """
     if not conn.autocommit:
-        raise ValueError("run_order_lookup_capture needs an autocommit connection: each attempt commits as it lands")
+        raise ValueError("run_tax_broker_evidence needs an autocommit connection: each lookup commits as it lands")
     row = conn.execute("SELECT pg_try_advisory_lock(%s)", [TAX_EVIDENCE_LOCK_KEY]).fetchone()
     if row is None or not row[0]:
-        return CaptureReport(state="skipped", reason="another run holds the lock")
+        return EvidenceRunReport(state="skipped", reason="another run holds the lock")
+    run_id: int | None = None
+    report = EvidenceRunReport(state="refused")
     try:
-        scope = conn.execute("SELECT environment FROM trade_ledger_scope").fetchone()
-        if scope is None:
-            return CaptureReport(state="refused", reason="scope_unestablished")
-        if scope[0] != environment:
-            return CaptureReport(state="refused", reason="scope_mismatch")
-        return capture_order_lookups(conn, broker, environment)
+        # Holding the lock, an in-progress row is a run whose process died.
+        conn.execute(
+            "UPDATE tax_evidence_runs SET state = 'abandoned', finished_at = clock_timestamp(), "
+            "reason = 'superseded: in progress when a later run took the lock' WHERE state = 'in_progress'"
+        )
+        scope = conn.execute("SELECT environment, account_id FROM trade_ledger_scope").fetchone()
+        inserted = conn.execute(
+            """
+            INSERT INTO tax_evidence_runs (environment, account_id, started_at, state, evidence_policy_id)
+            VALUES (%s, %s, clock_timestamp(), 'in_progress', %s)
+            RETURNING run_id
+            """,
+            (environment, scope[1] if scope is not None else None, TAX_EVIDENCE_POLICY_ID),
+        ).fetchone()
+        if inserted is None:
+            raise RuntimeError("tax_evidence_runs insert returned no run_id")
+        run_id = report.run_id = int(inserted[0])
+        try:
+            if scope is None:
+                raise _Refused("scope_unestablished")
+            if scope[0] != environment:
+                raise _Refused("scope_mismatch")
+            report.capture = capture_order_lookups(conn, broker, environment)
+            conn.execute(
+                "UPDATE tax_evidence_runs SET lookups_attempted = %s, lookups_deferred = %s, lookups_stopped_by = %s "
+                "WHERE run_id = %s",
+                (report.capture.attempted, report.capture.deferred, report.capture.stopped_by, run_id),
+            )
+            fx_state = load_tax_fx_state(conn)
+            snapshot = _read_snapshot(conn, environment)
+            _check_portfolio_scope(snapshot)
+            subjects = derive_all(
+                snapshot.scope, snapshot.events, snapshot.observations, snapshot.lookups, snapshot.held
+            )
+            drafts = [lot for subject in subjects for lot in subject.lots]
+            priced = price_lots(drafts, fx_state)
+            if isinstance(priced, FxRefusal):
+                raise _Refused(f"{priced.reason}: {priced.lot_key}")
+            counts = {
+                outcome: sum(1 for s in subjects if s.outcome == outcome)
+                for outcome in ("admitted", "excluded_non_share_product", "unresolved")
+            }
+            counts["acquisitions"] = sum(1 for lot in priced if lot.draft.direction == "acquisition")
+            counts["disposals"] = sum(1 for lot in priced if lot.draft.direction == "disposal")
+            with conn.transaction():
+                if not tax_fx_state_is_current(conn, fx_state):
+                    raise _Refused("fx_state_changed")
+                _publish(
+                    conn,
+                    run_id,
+                    snapshot,
+                    subjects,
+                    priced,
+                    counts,
+                    fx_state.latest_applied_run_id,
+                    priced[0].fx_policy_id if priced else None,
+                )
+        except _Refused as refusal:
+            _rollback(conn)
+            _finish(conn, run_id, "refused", refusal.reason)
+            report.reason = refusal.reason
+            return report
+        report.state = "published"
+        report.counts = counts
+        return report
+    except BaseException as exc:
+        _rollback(conn)
+        if run_id is not None:
+            _finish(conn, run_id, "abandoned", f"{type(exc).__name__}: {exc}")
+        raise
     finally:
+        _rollback(conn)
         conn.execute("SELECT pg_advisory_unlock(%s)", [TAX_EVIDENCE_LOCK_KEY])
+
+
+def _rollback(conn: psycopg.Connection[Any]) -> None:
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        conn.rollback()
