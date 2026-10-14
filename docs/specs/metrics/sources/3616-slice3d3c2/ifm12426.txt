@@ -1,0 +1,12 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12426
+Fetched (UTC): 2026-10-14T19:51:51Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12426
+Title: Offshore Funds: Reporting funds: application for reporting fund status: rejections of application - appeals
+Public updated at: 2019-07-10T16:26:45+01:00
+
+Regulation 56 of SI 2009/3001
+
+If HMRC rejects an application, the person who made the application can appeal to the First-tier Tribunal within a period of 42 days beginning with the day on which a notice rejecting the application was given.
+
+The Tribunal may either uphold or quash the rejection of the application. If the tribunal quashes the rejection of the application, the fund will be treated as a reporting fund as if HMRC had accepted the application in the form in which it was considered by the Tribunal.

@@ -1,0 +1,14 @@
+URL: https://www.legislation.gov.uk/uksi/2009/3001/regulation/11/data.xht
+Fetched (UTC): 2026-10-14T19:51:18Z
+
+PART 1U.K.INTRODUCTION
+
+InterpretationU.K.
+
+Meaning of “transparent fund”U.K.
+
+11. For the purposes of these Regulations a fund is a “transparent fund” if, in the case of holders of interests in the fund who are individuals resident in the United Kingdom, any sums which form part of the income of the fund are of such a nature that those holders—
+
+(a)are chargeable to tax under a provision specified in section 830(2) of ITTOIA 2005 in respect of such of those sums as are referable to their interests, or
+
+(b)if any of that income is derived from assets within the United Kingdom, would be so chargeable had the assets been outside the United Kingdom.

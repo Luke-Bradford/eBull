@@ -1,0 +1,40 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12270
+Fetched (UTC): 2026-10-14T20:18:31Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12270
+Title: Offshore Funds: Definition of an offshore fund: classes of interest
+Public updated at: 2019-07-10T15:12:29+01:00
+
+S361 TIOPA 2010 considers a case where there is more than one class of interest in any arrangements. This includes the case where there is more than one class of interest in a part of an umbrella arrangement (sub-fund).
+
+Where there is more than one class of interest in a sub-fund, each class of interest is treated as a separate arrangement and looked at separately for the purpose of determining whether that class of interest constitutes a mutual fund and an offshore fund, while the main arrangements are disregarded.
+
+“Class of interest” is not limited to share classes. There may be other forms of interest which entitle an investor to realise their investment on a basis calculated entirely or almost entirely by reference to the net asset value (NAV) of the scheme property or an index. For example, certain types of loan may provide a return which tracks NAV or is based on an index. A class of interest may also be created as a result of new issues or conversions of existing rights.
+
+It is possible for an entity, particularly a company, to have a class of interest such as ordinary shares which does not constitute a mutual fund and another class of interest which does constitute such a mutual fund.
+
+However, a particular class of shares can only constitute a single class of interest, even if different types of holders of those shares enjoy different rights. For example, in the case of an exchange traded fund, only the creation unit holders who act as market makers typically have the right to redeem or issue shares directly. Shares acquired by another investor on the secondary market would still form part of the same class of interest and satisfy condition C (s356 TIOPA 2010) because, as a consequence of the market makers’ ability to redeem or create units, all other investors would expect to be able dispose of their interest at or close to NAV. (See also IFM12282 regarding exchange traded funds).
+
+Under s361 TIOPA where there is more than one class of interest in the arrangements, each class of interest is to be treated as separate arrangements and the main arrangements are to be disregarded.
+
+Funds may issue units in ‘series’ on a monthly basis as a method of equalising the charging of performance fees. These units will have different names (2016 - M1, 2016 - M2, 2016 - M3 etc) depending on the month in which they are issued. Each monthly series will be charged performance fees based on different issue prices and to that extent each monthly series may have a different reportable income per unit for the reporting period of issue. In most cases in later years all 2016 units will typically carry exactly the same rights to reportable income per unit.
+
+Strictly each different unit class should be a treated as a separate fund, but HMRC are prepared to reduce the administrative burden placed on fund managers by treating the funds as if they are a single fund in certain circumstances.
+
+HMRC will agree to treat such funds as a single fund where the units of each different class are identical in all respects except in respect of rights to income and expenditure in the first reporting period. Where this is the case the fund should include in its application for reporting fund status (see IFM12423):
+
+details of the different share classes that it intends to issue in the period along with details of how the rights of unit holders vary from other share classes issued in the reporting period.
+
+a statement confirming that the income of all share classes of the fund will derive from a single pool of assets in current and future reporting periods.
+
+a statement confirming that all such share classes will collapse into one reporting fund at the end of the reporting period to the effect that in the next reporting period the same units will hold identical rights.
+
+Example: Vanilla Fund (UK investors)
+
+If a reporting offshore fund issues 1 class of share per month to UK investors only, where in reporting period 1 the units hold different rights, and where going forward all units will collapse into one class the fund may apply to the Collective Investments Scheme Centre to treat all such share classes as one reporting fund. But note that separate reports of reportable income will be required for each new series in the first period in which that series is issued.
+
+Example: UK/ Worldwide investors
+
+If a reporting offshore fund issues some classes of shares to UK investors, and issues other general classes of shares to other investors, where in reporting period 1 the units hold different rights, but at the end of reporting period 1 all units of a share class will collapse into a single class of shares, and the fund wishes to apply for reporting fund status in respect of the share classes relating to UK investors but not for the share classes issued to general investors, the fund may apply to the Collective Investment Schemes Centre for reporting fund status for those share classes relating to UK investors.
+
+However, if the fund later wishes to merge all share classes there could be tax consequences for any UK investors who invested in non-reporting share classes. This is because an offshore income gain may accrue when the units held in the non-reporting fund are merged into a reporting offshore fund (See IFM13380).

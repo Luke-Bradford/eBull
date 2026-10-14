@@ -1,0 +1,44 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm13470
+Fetched (UTC): 2026-10-14T19:51:55Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm13470
+Title: Offshore Funds: investors in non-reporting funds: exceptions to the charge to tax: interests in certain transparent funds
+Public updated at: 2019-07-12T14:17:16+01:00
+
+Regulation 29 of SI 2009/3001
+
+Arrangements that fall within the definition of an offshore fund and are transparent for income purposes but not transparent for capital gains purposes include, for example, so called ‘Baker’ unit trusts (following the case of Archer-Shee v. Baker, 11TC749) and certain foreign contractual arrangements (such as Fonds Commun de Placement (‘FCPs’)).
+
+They are subject to the Offshore Funds (Tax) Regulations 2009 (SI2009/3001) generally, with certain modifications as described below.
+
+The purpose of the offshore funds regime is to ensure that income cannot be rolled up with any subsequent gain on disposal being charged only as a capital gain. If a fund is transparent for income, such as would be the case for certain unit trusts and contractual funds, then any income arising to the fund is treated as arising to an investor in proportion to their rights. This means that income is charged to tax as it arises.
+
+However, it might be the case that an income transparent fund that came within paragraph (b) or (c) of S355(1) of TIOPA 2010 has itself invested in an opaque non-reporting fund, and if that were the case then income could be rolled up in the underlying fund, because income would only be credited to the investing fund if it was actually distributed.
+
+To prevent unnecessary administrative burdens for transparent arrangements that come within the definition of an offshore fund and for their investors, any gain on disposal of an interest in an income-transparent offshore fund will not be taxed as an offshore income gain unless -
+
+during a period beginning on the date the interest (or any part of it) was acquired and ending on the date of the disposal, the offshore fund at any time held interests in other non-reporting funds (except for certain other transparent funds - see below) which amounted in total to more than 5% by value of the offshore fund’s assets (regulation 29(2)), or
+
+the transparent fund is a non-reporting fund, and the fund fails to make sufficient information available to participants in the fund to enable those participants to meet their tax obligations in the United Kingdom with respect to their shares of the income of the fund (regulation 29(3)).
+
+Whilst this means that such funds will have to monitor their underlying investments, it allows them to avoid the need to apply for reporting fund status. UK investors will be charged capital gains tax or corporation tax on a capital gain arising, rather than incurring an offshore income gain, provided the fund has complied with regulation 29(2)).
+
+It follows that, if a transparent offshore fund is invested more than 5% by value of its total investments in non-reporting non-transparent funds, it may apply for reporting fund status in order to allow UK investors to be charged to tax on capital gains on disposal rather than on an offshore income gain. If reporting fund status is granted then the fund will be subject to the requirements of the regulations, including those relating to the calculation of income from non-reporting funds (see regulations 69 to 71).
+
+Provision of ‘sufficient information’ to participants - Regulation 29(3)
+
+If a fund is unable to provide sufficient information to its UK investors to enable them to meet their UK tax obligations then an offshore income gain will be charged on any gains realised on subsequent disposals of relevant interests. The provision of ‘sufficient information’ would include details of an investor’s proportionate share of both income arising to the fund and reported income or offshore income gains arising to it, as well as confirmation as to whether or not the fund has invested more than 5% by value of its assets in non-reporting funds.
+
+In practice, many existing income-transparent funds with UK investors already provide vouchers to those clients detailing income arising to the fund, for example interest income, and foreign or UK dividends.
+
+HMRC consider that, for the purposes of regulations 29 and 92D only, sufficient information will have been provided by the fund to a UK investor if the information would enable the UK investor to compute their final UK tax liability (arising from their interest in the offshore fund) correctly. The required level of detail will depend upon the complexity of the fund and/or its investments.
+
+UK investors will still be required to complete their tax returns in the required format under self-assessment. For example, a unit holder would need to know whether the source of their income is land and property income, trading income, interest, UK dividends, foreign dividends and so on. Where transparent funds have complex structures and a number of sources of income, this can lead to complex tax issues arising for an individual completing their tax return.
+
+Investments by transparent non-reporting funds in other transparent non-reporting funds - Regulation 29(4)
+
+There is one important relaxation of the requirements of regulation 29(2). That is, if a transparent non-reporting fund (‘TNRF1’) invests in another TNRF (TNRF2). Then, where a disposal of an interest in TNRF2 would not itself give rise to an offshore income gain (under regulation 17) for a UK investor, the interest held by TNRF1 in TNRF2 is ignored in determining whether TNRF1 is invested in non-reporting funds by more than 5% of the value of its assets in total. This is because, in such circumstances, there can be no significant roll-up of income in the underlying fund(s).
+
+This means that a TNRF’s investments could, for example, consist wholly of interests in other underlying TNRFs that may only hold UK property or a TNRF could be the top-layer fund in a fund of funds structure, with multiple layers of other TNRFs below the top fund, provided that each of those underlying TNRFs themselves did not hold more than 5% by value of their total assets in other non-transparent, non-reporting funds.
+
+In deciding whether the investee fund qualifies under this regulation, this rule may be applied to the investee fund and to any funds in which it, in turn, holds investments.

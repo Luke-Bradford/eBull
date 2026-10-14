@@ -1,0 +1,22 @@
+URL: https://www.legislation.gov.uk/uksi/2009/3001/regulation/4/data.xht
+Fetched (UTC): 2026-10-14T20:18:15Z
+
+PART 1U.K.INTRODUCTION
+
+General provisionsU.K.
+
+Classification of offshore fundsU.K.
+
+4.—(1) Offshore funds consist of—
+
+(a)non-reporting funds (see Part 2 of these Regulations), and
+
+(b)reporting funds (see Part 3 of these Regulations).
+
+(2) [F1In a period of account] an offshore fund is a non-reporting fund unless it is a fund to which Part 3 of these Regulations applies F2....
+
+Textual Amendments
+
+F1Words in reg. 4(2) inserted (with effect in accordance with reg. 1(2) of the amending S.I.) by The Offshore Funds (Tax) (Amendment) Regulations 2011 (S.I. 2011/1211), regs. 1(1), 28(a)
+
+F2Words in reg. 4(2) omitted (with effect in accordance with reg. 1(2) of the amending S.I.) by virtue of The Offshore Funds (Tax) (Amendment) Regulations 2011 (S.I. 2011/1211), regs. 1(1), 28(b)

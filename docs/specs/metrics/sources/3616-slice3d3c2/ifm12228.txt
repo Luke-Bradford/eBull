@@ -1,0 +1,16 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12228
+Fetched (UTC): 2026-10-14T19:51:38Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12228
+Title: Offshore Funds: Definition of an offshore fund: Meaning of ‘offshore fund’: other arrangements that create rights in the nature of co-ownership -s355(1)(c) TIOPA 2010
+Public updated at: 2019-07-10T14:35:45+01:00
+
+All mutual funds constituted by ‘other arrangements’ (i.e. those not constituted by bodies corporate or where property is held on trust) creating rights in the nature of co-ownership, which take effect by virtue of the law of a territory outside the UK, are brought within the definition of an offshore fund.
+
+This is subject to the important exception provided by s355(2) TIOPA 2010 for partnerships.
+
+“Co-ownership” is not restricted to the meaning of that term in the law of any part of the United Kingdom, so would take its meaning from the law of the territory in which the arrangements take effect.
+
+Types of mutual funds that come within the definition of an offshore fund at s355(1)(c) TIOPA 2010 would include, for example, contractual arrangements such as Luxembourg Fonds Commun de Placement (‘FCPs’) and Irish Common Contractual Funds, but see IFM12250 onwards for further information concerning these and other types of contractual arrangements that are transparent for income purposes.
+
+See IFM12231 for guidance regarding the meaning of the term ‘mutual fund’.

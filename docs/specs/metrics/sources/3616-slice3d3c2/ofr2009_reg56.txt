@@ -1,0 +1,18 @@
+URL: https://www.legislation.gov.uk/uksi/2009/3001/regulation/56/data.xht
+Fetched (UTC): 2026-10-14T19:51:28Z
+
+PART 3U.K.REPORTING FUNDS AND THE TREATMENT OF PARTICIPANTS IN REPORTING FUNDS
+
+CHAPTER 2U.K.ENTRY INTO THE REPORTING FUND REGIME
+
+Procedure on applicationsU.K.
+
+Appeal against rejection of applicationU.K.
+
+56.—(1) If HMRC reject an application, the person who made the application may appeal.
+
+(2) The notice of appeal must be given to HMRC within a period of 42 days beginning with the day on which the notice rejecting the application is given.
+
+(3) On an appeal, the tribunal may uphold or quash the rejection of the application.
+
+(4) If the tribunal quashes the rejection of the application, this Part applies as if HMRC had accepted the application in the form in which it was considered by the tribunal.

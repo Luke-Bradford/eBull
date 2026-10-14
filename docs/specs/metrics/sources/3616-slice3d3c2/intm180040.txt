@@ -1,0 +1,56 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/international-manual/intm180040
+Fetched (UTC): 2026-10-14T19:51:33Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/international-manual/intm180040
+Title: Foreign entity classification for UK tax purposes: How HMRC arrives at a definitive view of specific foreign entities
+Public updated at: 2023-12-12T08:05:33+00:00
+
+General view
+
+INTM180030 includes a list of foreign entities where we have provided a general view as to whether they can be described as “transparent” or “opaque” within the meaning explained at INTM180010. This list is intended to provide HMRC officers and customers with a general view as to whether the members will be liable to UK tax on the profits, income or gains of the entities or only on any distributions made by the entities. However, our view may vary depending on -
+
+the specific terms of the UK taxation provision under which the matter must be considered;
+
+the provisions of any legislation, articles of association, by-laws, agreement or other document governing the entity’s creation, continued existence and management; and
+
+the terms of any relevant double taxation agreement.
+
+Our view of the entities shown on the list may also change if:
+
+HMRC’s view was given many years ago, and there have been significant changes in the relevant foreign law
+
+there are any significant changes in foreign law after the publication of this guidance.
+
+Furthermore, whilst one type of foreign entity may share certain characteristics with another, it does not necessarily follow that HMRC would have the same general view as to whether they are “transparent” or “opaque” or that a specific UK taxation provision would apply to them in the same way. Each entity would need to be considered in accordance with its own characteristics.
+
+The general view provided in the list may therefore help inform customers and HMRC officers when planning their affairs and risk assessing respectively. However, the UK tax treatment will depend on the facts of the case and the application of the specific UK tax provision to those facts. If any customer would like certainty to HMRC’s view in a particular case, they can apply for a clearance in accordance with INTM180060.
+
+Definitive view
+
+To come to a definitive view as to what profits, income or gains a member will be liable to UK tax on, the correct starting point will be to identify which UK taxation provision(s) are possibly relevant.
+
+Once the relevant UK tax provision(s) are identified (and it is therefore known what statutory questions need to be addressed), it will then be necessary to establish the facts of the situation. This will involve investigating the rights and duties of the members in relation to one another on the one hand and the entity on the other hand under the relevant foreign commercial law (i.e. examining any legislation and constitutional documents which govern the entity’s creation, existence and management as referred to above). How the foreign entity is taxed in another country is not relevant.
+
+It will then be necessary to apply the relevant UK taxation provision(s) to the facts as revealed by the analysis of foreign commercial law. This will determine what profits, income or gains the member is liable to UK tax on (including for the purpose of identifying the profits, income or gains by reference to which the UK tax liabilities are computed for double taxation relief purposes, as discussed at INTM161040).
+
+For example, a UK resident individual may be a member of a foreign entity or undertaking which carries on, or through which is carried on, a trade. If the entity or undertaking is not a partnership, such that the provisions of ITTOIA05/Part 9 do not apply, it may be necessary to consider whether the member is liable to Income Tax on the trade profits under ITTOIA05 as a “person receiving or entitled to the profits” of the trade for the purpose of ITTOIA05/S8, or whether they are only liable to Income Tax on any dividends under ITTOIA05/S402 (or ITTOIA05/S383 if the entity is a UK resident company).
+
+Similarly, if an investment business is carried on by, or through, the entity or undertaking in question, you may need to consider whether the member is a person “receiving or entitled to” any taxable interest or dividends from that business for the purposes of ITTOIA05/S371, S385 or S404, or whether the member is only liable to Income Tax on any dividends from the entity.
+
+Whether a member will be treated as a person “receiving or entitled to” the profits or other income in question will depend on the respective rights of the entity and its members in relation to such profits or income, and therefore on the legal regime governing those rights (see Anson v HMRC [2015] UKSC 44 and Khan v HMRC [2021] EWCA Civ 624).
+
+In Khan and in Good HMRC [2023] EWCA Civ 114, the Court of Appeal (CoA) examined the meaning of “receiving or entitled to” for the purpose of ITTOIA05/S385(1)(b) and ITTOIA05/S611 respectively. In Khan, the CoA said the phrase “the person receiving or entitled to” is used in many other provisions of ITTOIA and it must be given a consistent meaning when denoting the persons chargeable to Income Tax. In both cases, the CoA held that the focus of the respective statutory provisions must be on the transaction giving rise to the income in question, that either receipt or entitlement will be sufficient to come within the scope of those provisions and that to satisfy the “entitled to” leg, it is not a requirement for a person to be “beneficially entitled” to the income in the sense used in other statutory provisions.
+
+In Good, the CoA confirmed that the words “entitled to” should be given their ordinary meaning. Whilst Andrews LJ, in Khan, considered it appropriate to use the term “belong(s) to” in that case, Whipple LJ considered that the point at issue in Good was different and it was better to stick to the words of the statute in determining the issue in that case.
+
+HMRC has further guidance on what this phrase means in the context of trade profits, interest and distributions at BIM15015, SAIM2400-10 and SAIM5020.
+
+All relevant facts should be taken into account when considering whether the members receive or are entitled to the profits of a trade carried on by or through a foreign entity or undertaking.
+
+Normally, the person carrying on the trade would receive and be entitled to the profits. If an entity with separate legal personality carries on a trade itself, it contracts to provide the relevant goods and services and it actually receives the takings and incurs the expenses which go into the computation of profits, it beneficially owns the assets used in the trade and is responsible for the debts of the trade, it is likely to be the person who receives and is entitled to the profits (rather than its members).
+
+It is also useful to consider the extent to which the entity displays entity shielding (the protection of entity assets from members and their creditors, see INTM180020 and CTM00510). If the entity carries on the trade and displays strong entity shielding such that a member’s interest is in the entity itself rather than in the assets of the entity, their access to those assets is dependent on a decision by the entity in accordance with its constitution, members only become a creditor of the entity when they become entitled to a distribution, the creditors of the entity have a preferential claim to the assets over the members and creditors of members cannot usually seek recovery out of the assets of the entity, that will be a strong indicator that the members are not entitled to the profits as they arise.
+
+Note that in HMRC v Anson [2010] UKFTT 88 (TC), the US expert appearing on behalf of Mr Anson made the point, accepted by the First Tier Tribunal, that profits and assets are different concepts. That is correct, but there must be a correlation between the two in the accounts. When profits are earned, the balance sheet will reflect a correlating increase in net assets. When profits are withdrawn or distributed, there will be a correlating decrease in net assets. It is therefore relevant to establish the rights of members to the assets when considering whether the correlating profits belong to them as they arise.
+
+It may also be necessary to consider whether the UK resident individual member is liable to UK Capital Gains Tax on any chargeable gains made on disposal of assets held by the foreign entity. In such a case, it will be necessary to consider whether the gains accrue to the member for the purpose of TCGA92/S1 and TCGA92/S2. As explained at CG10720, gains normally accrue to the person who is the beneficial owner of the asset which is sold.

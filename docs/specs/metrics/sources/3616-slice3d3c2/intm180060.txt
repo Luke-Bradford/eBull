@@ -1,0 +1,34 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/international-manual/intm180060
+Fetched (UTC): 2026-10-14T20:18:38Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/international-manual/intm180060
+Title: Foreign entity classification for UK tax purposes: Contacts and clearances
+Public updated at: 2025-11-03T00:00:00+00:00
+
+(This content has been withheld because of exemptions in the Freedom of Information Act 2000)
+
+Contacts and Clearances
+
+We will provide our view of whether we consider a particular foreign entity to be transparent or opaque in specific cases in line with our guidance on non-statutory clearances at - http://www.gov.uk/guidance/non-statutory-clearance-service-guidance
+
+Applications should be made in writing and include -
+
+the name and address of the entity to be considered
+
+why HMRC’s view is being requested
+
+consideration of factors 1 to 6 in INTM180020
+
+if a view is required in respect of a particular source of income, your view of how that source is taxed in the UK
+
+copies of any legislation, articles of association, by-laws, agreements or other documents governing the entity’s creation, continued existence and management, including any amending documents
+
+Applications should be made by email to entityclassificationmailbox@hmrc.gov.uk or by post to:
+
+HM Revenue and Customs
+
+Business, Assets and International
+
+Base Protection Policy Team
+
+NE98 1ZZ
