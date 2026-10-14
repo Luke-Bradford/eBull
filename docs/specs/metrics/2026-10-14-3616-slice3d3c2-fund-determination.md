@@ -295,9 +295,11 @@ security is refused with `run_failed`. A finished run is sealed: no row is added
 newest submissions fetch, before any observation and in its own committed transaction, the run records in
 `tax_fund_determination_unreviewed` each listed filing of a `refresh_forms` form filed on or after `monitor_from` and
 not in `reviewed_filings`, whenever the body is an object whose `cik` is the CIK and whose `filings.recent` lists are
-of equal length, and the row's form, date and accession are well formed. Currency, overflow `files` and the reviewed
-anchors are not required for this; they are required for `determined`. Each record carries the `submissions_fetch_id`
-and run that found it. Records are permanent and survive a later failure of the run, so staleness latches even if a
+of equal length, and the row's form, date and accession are well formed and its date is no later than the submissions
+fetch's `fetched_at` UTC date (a future-dated row is recorded nowhere; coverage refuses its inventory). Currency, overflow
+`files` and the reviewed anchors are not required for this; they are required for `determined`. Each record carries the
+`submissions_fetch_id` and the run that found it, which must be `running` and have loaded the determination. Records are
+permanent and survive a later failure of the run, so staleness latches even if a
 later inventory omits the accession, an earlier-priority refusal hid it, or the discovering inventory was incomplete or
 old.
 
@@ -340,14 +342,15 @@ residual covers that.
 - `tax_fund_determination_runs`: `run_id` identity, `job_run_id` (FK `job_runs`), `fund_observed_at` (NULL when the
   fund step failed), `started_at`, `cutoff` (NULL until `succeeded`), `status` (`running`, `succeeded`, `failed`),
   `failure TEXT`; a trigger allows only `running` → `succeeded` or `failed`, once, and refuses deletion.
-- `tax_fund_determination_unreviewed`, insert only, exempt from run sealing because it is committed before the run
-  finishes: primary key `(determination_id, accession)`, `form`, `filed`, `first_run_id` and `submissions_fetch_id`,
-  each a foreign key to its parent; a trigger checks that the fetch's source is `sec_submissions` with the
-  determination's CIK URL as request key.
 - `tax_fund_determination_run_loads`: primary key `(run_id, determination_id)`, each a foreign key to its parent: the
   run's active determinations.
-- Every child table of a run (loads, observations, document rows) has a trigger refusing an insert under a run that
-  is not `running`, and refusing update and delete.
+- `tax_fund_determination_unreviewed`, insert only, committed in its own transaction while its run is `running`:
+  primary key `(determination_id, accession)`, `form`, `filed`, `first_run_id` and `submissions_fetch_id`;
+  `(first_run_id, determination_id)` is a foreign key to `tax_fund_determination_run_loads` and `submissions_fetch_id`
+  one to its fetch; a trigger checks that the fetch's source is `sec_submissions` with the determination's CIK URL as
+  request key, and that `filed` is no later than the fetch's `fetched_at` UTC date.
+- Every child table of a run (loads, discoveries, observations, document rows) has a trigger refusing an insert under
+  a run that is not `running`, and refusing update and delete. A committed discovery outlives the run's later failure.
 - `tax_fund_determinations`, insert only: `determination_id TEXT PRIMARY KEY`, `policy_id`, `cik` UNIQUE, `version`
   (CHECK = 1), `file_sha256`, `body JSONB`, `loaded_at`; CHECKs that `determination_id` is `policy_id:cik:version` and
   that the body's `determination_id`, `policy_id`, `cik` and `version` equal the columns.
@@ -402,7 +405,10 @@ Pure:
    boolean version; an invalid date; `valid_from_document` not the newest 485BPOS, or `valid_from` not its date;
    `review_by` not one year on (and 2028-02-29 mapping to 2029-02-28); a document filed after `reviewed_at`;
    `refresh_forms` missing a governing form or holding a number; a URL with another CIK, accession or host, a query,
-   a fragment, an empty or nested last segment; a document in no manifest entry or in two; a manifest entry naming a
+   a fragment, an empty or nested last segment, a last segment of `.` or `..` or holding percent-encoding; a URL
+   holding a space, tab, newline, other ASCII control or DEL, U+0080, U+0085, U+00A0 or U+2003, or not equal to its
+   canonical parsed spelling (a URL whose last segment holds `!` and `~`, the printable-ASCII bounds, is accepted); a
+   document in no manifest entry or in two; a manifest entry naming a
    document of another accession or date; a malformed hash; a missing policy assumption; an unknown question or
    answer; a missing question; a resolved holding-dependent finding; `unresolved` answer with another basis; `assumed`
    with no assumption; `established` with one; `unresolved` without `would_resolve`; a resolved answer without a
@@ -428,7 +434,8 @@ Pure:
    unavailable (the accession recorded despite `documents_unavailable`), then the document recovered and the accession
    absent from the next inventory (`stale`); an accession found in an inventory with overflow `files`, and in one 40
    days old, then omitted by an admissible inventory (`stale`); a run that fails after recording a discovery, followed by
-   a successful run whose inventory omits it (`stale`).
+   a successful run whose inventory omits it (`stale`); an unreviewed 497 dated after the submissions fetch's date (not
+   recorded; `coverage_unavailable`), then a corrected inventory without it (`determined`).
 5. `reporting_status`: SPY's 2026-09-23 case (`non_reporting_assumed`, A1–A9); no run (`no_run`); a security absent
    from the newest run (`not_observed`, although an older run has it); a failed newest run (`run_failed`, although an
    older run succeeded); each of the first four outcomes returned before the date test; a date before
@@ -439,7 +446,9 @@ Pure:
    preceding `stale` and `documents_unavailable`.
 
 DB (one module):
-6. Insert-only, transition, deletion and sealing triggers, including `tax_fund_determination_unreviewed` (a row added under a finished run refused); the determination and authority CHECKs; a second version for a CIK refused; a
+6. Insert-only, transition, deletion and sealing triggers, including `tax_fund_determination_unreviewed` (a row added
+   under a finished run refused; a row whose run did not load its determination refused; a row dated after its fetch's
+   date refused; a row committed before its run fails survives the failure); the determination and authority CHECKs; a second version for a CIK refused; a
    changed file under a stored id, or an authority snapshot with a wrong hash, sets the run `failed` and leaves no
    observation; a document fetched once and not again; a failed fetch stores nothing; the submissions refresh after 7
    days; each Design 2 outcome recorded with its refusal; a `determined` observation with one document row per
@@ -532,6 +541,10 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r8.1, r8.2 (latch) | discoveries need only a well-formed body for the CIK, are committed before observations with their submissions fetch and run, and survive run failure |
 | r8.3 (URL characters) | ASCII printable only |
 | r8.4 (docstring) | corrected |
+| r9.1 (sealing) | no exemption: discoveries are sealed like other run children and committed while the run is `running` |
+| r9.2 (discovering run) | `(first_run_id, determination_id)` references the run's loads |
+| r9.3 (future rows) | a discovery's date must not follow its fetch's UTC date, checked in code and by trigger |
+| r9.4 (URL tests) | the character, canonical-spelling, dot-segment and percent-encoding cases are in Test 1 |
 | r6.13 (index) | Amendment 6's effective dates distinguished in the research index |
 | r3.5 (unresolved basis) | `offshore_basis` `unresolved` |
 | r3.7 (refusal order) | the first four outcomes are returned before the date test |
