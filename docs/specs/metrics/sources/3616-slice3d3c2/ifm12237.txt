@@ -1,0 +1,40 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12237
+Fetched (UTC): 2026-10-14T19:51:41Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12237
+Title: Offshore Funds: Meaning of ‘mutual fund’: Condition ‘C’: meaning of realisation of investment by reference to NAV (net asset value) or an index – s356(6) TIOPA 2010
+Public updated at: 2019-07-10T14:52:35+01:00
+
+A ‘reasonable investor’ (see IFM12236) expects to be able to realise all or part of his investment entirely or almost entirely by reference to either the net asset value (NAV) of the scheme property or an index of any description.
+
+There is no definition within the legislation of ‘almost entirely’. Any stated percentage limit of variation from NAV could be susceptible to arrangements seeking to avoid the intention of the offshore funds rules. It depends on what the arrangements are intended to provide. For example, buy-back arrangements normally take effect when there is a large discount to NAV, but may also be used in very exceptional circumstances to buy back at a very small discount or at NAV which, on its own, may not mean that the arrangements constitute a mutual fund. IFM12285 provides further guidance on share buy-backs and share issuance. IFM13412 provides guidance on changes of rights, including when an existing entity becomes an offshore fund.
+
+Open-ended and closed-ended arrangements
+
+Condition C, when read in conjunction with section s357(2) TIOPA 2010, provides a clear distinction between a mutual fund and a company organised in the way that, for example, an investment trust company in the UK is organised. Such a company is a closed-ended company, in the sense that it does not allow investors to redeem their shares on request, nor does it issue new shares on request (but see IFM12286 onwards where such closed-ended companies have a limited life). This contrasts with an open-ended investment company which is designed to enable investors to realise NAV and does so through its ability to issue or redeem shares. Such an open-ended company comes within the definition of ‘mutual fund’.
+
+A reasonable investor, in what may generally be regarded as a closed-ended company that meets conditions A or B, would normally only expect to be able to realise NAV on the liquidation of the company. So s357(2) excludes from section s356 (‘meaning of ‘mutual fund’ etc’) any case where a reasonable investor would only be able to realise the investment in the arrangements in the event of a winding-up, dissolution or termination of the arrangements, and where certain other conditions (condition ‘E’ or ‘F’) apply (s357(1)(b) - see IFM12240 onwards).
+
+Realisation of investment on a basis calculated at or close to NAV
+
+It is not necessary that the investor obtains NAV directly from the fund. Where a reasonable investor could expect to receive NAV on selling their interest on a secondary market the fund will be an offshore fund if all other conditions are satisfied. For example, Exchange Traded Funds (ETFs) are usually operated in such a way that the quoted prices are at NAV or very close to NAV because market makers are able to create or redeem units. In that sense, such funds are open-ended and ETFs would be expected to qualify as mutual funds. On the other hand, arrangements where a fund offered to buy back shares to keep a discount on the share price within a reasonable limit would not make the fund a mutual fund unless it was clear to a reasonable investor, at the time that they invested (or on alteration of the terms of an investment), that there were such arrangements and that they were intended to ensure that such purchases were at, or almost at, NAV.
+
+Where an investment is designed to produce a return for investors that equates in substance to a return on capital invested at interest condition ‘F’ will not apply (S357(4)(c) TIOPA 2010) - see IFM12245.
+
+Shares trading close to NAV
+
+The mere fact that shares in a closed-ended arrangement sometimes trade at or close to NAV does not mean that condition C is satisfied unless that is as a result of arrangements being in place, such that a reasonable investor could expect to receive NAV or close to NAV on selling their interest.
+
+Warrants and options
+
+Warrants or options that give an investor the right to sell shares back to an issuer for a particular price will not cause condition C to be satisfied unless the price is determined by reference to NAV so that the investment can be realised at or close to NAV. Similarly, rights that carry the option to convert to other classes of interest would only satisfy condition C if the new rights themselves permitted an investor to realise their investment at or close to NAV.
+
+Realisation of investment by reference to an index
+
+In some cases, an investor may have a right to redeem an investment at an amount not representing the assets directly invested in, but which is expressed in terms of an index. The fund manager may then invest the assets to produce a return as nearly as possible matching the index that is offered. In such a case condition C will also be met. Again, this is subject to exceptions where conditions E or F apply.
+
+In many cases investments designed to produce an indexed return are likely to be non-income producing (that is, they reflect capital growth only) in which case the exception provided by S357(5) - condition F - may apply (see IFM12247 onwards).
+
+Where an investment is by reference to an index that reflects both capital growth and income returns then S357(5) would not apply, but condition F may still apply due to S357(7) - see IFM12249.
+
+Realisation by reference only to a fixed return does not constitute realisation by reference to an index (although it does not exclude it being by reference to NAV).

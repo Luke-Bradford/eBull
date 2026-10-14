@@ -1,0 +1,901 @@
+{
+  "determination_id": "fund_determination_v1:0000884394:1",
+  "policy_id": "fund_determination_v1",
+  "cik": "0000884394",
+  "version": 1,
+  "binding": {
+    "cik": "0000884394",
+    "lei": "549300NZAMSJ8FXPQQ63",
+    "isin": "US78462F1030",
+    "mic": "ARCX",
+    "ticker": "SPY"
+  },
+  "valid_from": "2026-01-26",
+  "valid_from_document": "prospectus_2026",
+  "reviewed_at": "2026-10-14",
+  "review_by": "2027-10-14",
+  "monitor_from": "2026-01-26",
+  "refresh_forms": [
+    "485APOS",
+    "485BPOS",
+    "485BXT",
+    "497",
+    "497J",
+    "497K",
+    "N-CEN",
+    "N-CEN/A",
+    "N-8F",
+    "N-8F/A"
+  ],
+  "reviewed_filings": [
+    {
+      "accession": "0000950130-97-004319",
+      "form": "485BPOS",
+      "filed": "1997-09-30",
+      "documents": [
+        "standard_terms_amendment_1997"
+      ]
+    },
+    {
+      "accession": "0000950130-99-000390",
+      "form": "485APOS",
+      "filed": "1999-01-25",
+      "documents": [
+        "standard_terms_amendment_1999"
+      ]
+    },
+    {
+      "accession": "0000950136-04-000194",
+      "form": "485APOS",
+      "filed": "2004-01-28",
+      "documents": [
+        "standard_terms_2004"
+      ]
+    },
+    {
+      "accession": "0000950136-05-000453",
+      "form": "485BPOS",
+      "filed": "2005-01-28",
+      "documents": [
+        "amendment_1"
+      ]
+    },
+    {
+      "accession": "0000950123-09-003326",
+      "form": "485BPOS",
+      "filed": "2009-02-24",
+      "documents": [
+        "amendment_2"
+      ]
+    },
+    {
+      "accession": "0000950123-10-005702",
+      "form": "485BPOS",
+      "filed": "2010-01-27",
+      "documents": [
+        "amendment_3"
+      ]
+    },
+    {
+      "accession": "0001193125-18-013487",
+      "form": "485BPOS",
+      "filed": "2018-01-18",
+      "documents": [
+        "amendment_4",
+        "amendment_5"
+      ]
+    },
+    {
+      "accession": "0001193125-25-013181",
+      "form": "485BPOS",
+      "filed": "2025-01-27",
+      "documents": [
+        "amendment_6"
+      ]
+    },
+    {
+      "accession": "0001193125-26-022316",
+      "form": "485BPOS",
+      "filed": "2026-01-26",
+      "documents": [
+        "prospectus_2026",
+        "amendment_7"
+      ]
+    },
+    {
+      "accession": "0001193125-26-022775",
+      "form": "497",
+      "filed": "2026-01-26",
+      "documents": [
+        "prospectus_497_2026"
+      ]
+    },
+    {
+      "accession": "0001193125-26-023648",
+      "form": "497",
+      "filed": "2026-01-27",
+      "documents": [
+        "singapore_497_2026"
+      ]
+    },
+    {
+      "accession": "0001410368-26-023904",
+      "form": "N-CEN",
+      "filed": "2026-03-13",
+      "documents": [
+        "ncen_2025"
+      ]
+    }
+  ],
+  "documents": [
+    {
+      "doc_id": "prospectus_2026",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022316/d77353d485bpos.htm",
+      "accession": "0001193125-26-022316",
+      "form": "485BPOS",
+      "exhibit": null,
+      "filed": "2026-01-26",
+      "role": "prospectus dated 2026-01-26 (Post-Effective Amendment No. 40)",
+      "content_sha256": "d1936eea700d614882aad9eb3c37c163cb2902f0a86a35a6011c8608d7dc7dc8"
+    },
+    {
+      "doc_id": "prospectus_497_2026",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022775/d77353d497.htm",
+      "accession": "0001193125-26-022775",
+      "form": "497",
+      "exhibit": null,
+      "filed": "2026-01-26",
+      "role": "the prospectus as filed under Rule 497(b); compared by sentence both ways, it adds three filing-header lines and lacks the 485BPOS's Form S-6 facing sheet, N-8B-2 cross-reference sheet and Part II",
+      "content_sha256": "7ae58a306028bc0f61fea12d4b7e89392d6157516bc4655ad7f8659154c2d986"
+    },
+    {
+      "doc_id": "singapore_497_2026",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526023648/d935960d497.htm",
+      "accession": "0001193125-26-023648",
+      "form": "497",
+      "exhibit": null,
+      "filed": "2026-01-27",
+      "role": "Singapore offering wrapper incorporating the prospectus; adds Singapore listing, dealing and tax information and changes none of the Trust's terms",
+      "content_sha256": "cb4e75069d37711706afb21b8ab98a0be036a88c7f622f8ed1fd66932180b6c9"
+    },
+    {
+      "doc_id": "ncen_2025",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000141036826023904/primary_doc.xml",
+      "accession": "0001410368-26-023904",
+      "form": "N-CEN",
+      "exhibit": null,
+      "filed": "2026-03-13",
+      "role": "census report for the period ending 2025-12-31 (the 3d-3c-1 candidate's own N-CEN)",
+      "content_sha256": "8a9f123f374408ac987506d7bf43b02eab4057ed2703438090cd1d6dfb993c0a"
+    },
+    {
+      "doc_id": "standard_terms_2004",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013604000194/file002.htm",
+      "accession": "0000950136-04-000194",
+      "form": "485APOS",
+      "exhibit": "EX-99.A1",
+      "filed": "2004-01-28",
+      "role": "Amended and Restated Standard Terms and Conditions of Trust, effective 2004-01-27",
+      "content_sha256": "4e9fb7b8aa8822ad8da6d989c33c5545526e6b05e7d4ce1a6fe023b086786b03"
+    },
+    {
+      "doc_id": "standard_terms_amendment_1997",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013097004319/0000950130-97-004319.txt",
+      "accession": "0000950130-97-004319",
+      "form": "485BPOS",
+      "exhibit": null,
+      "filed": "1997-09-30",
+      "role": "Amendment effective 1997-09-30 to the 1993 Standard Terms and the Trust Indenture: Indenture Section 2F (taxable year to 30 September), the Distributor definition, Section 3.05 (annual report); incorporated in the 2004 restatement",
+      "content_sha256": "133d6e18baf952554ff51ffec0d0a03d307760bece5e8aca8c3df97bd976b038"
+    },
+    {
+      "doc_id": "standard_terms_amendment_1999",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013099000390/0000950130-99-000390.txt",
+      "accession": "0000950130-99-000390",
+      "form": "485APOS",
+      "exhibit": null,
+      "filed": "1999-01-25",
+      "role": "Amendment effective 1999-01-25 to the 1993 Standard Terms: a misweighted-portfolio paragraph added to Section 5.02; incorporated in the 2004 restatement",
+      "content_sha256": "18b9180ea72a5bc5191a6322be87513764d4d9a02c91943f9ef68d2d6f6d5ef0"
+    },
+    {
+      "doc_id": "amendment_1",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013605000453/file004.htm",
+      "accession": "0000950136-05-000453",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1",
+      "filed": "2005-01-28",
+      "role": "Amendment No. 1: Section 3.04 special dividends",
+      "content_sha256": "0ab8dccd45fb34df3e0974bf615b7f66aece738338822c36e411c50193338f3d"
+    },
+    {
+      "doc_id": "amendment_2",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095012309003326/y01192bexv99wa1.htm",
+      "accession": "0000950123-09-003326",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1",
+      "filed": "2009-02-24",
+      "role": "Amendment No. 2: Exchange, Depository and NSCC definitions; successors; Section 10.06 addresses",
+      "content_sha256": "0713fc167c51f63039904254c878145f0bd4867800f461dd74137ad726678bb2"
+    },
+    {
+      "doc_id": "amendment_3",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000095012310005702/y02740exv99waw1.htm",
+      "accession": "0000950123-10-005702",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A.1",
+      "filed": "2010-01-27",
+      "role": "Amendment No. 3: names of the Trust; SPDRs renamed Units throughout; Sections 10.03, 10.06, Exhibit A",
+      "content_sha256": "e27e647908c36f493c6d4735fc6f1212a785b35ad91da4642b193a1d66a9f739"
+    },
+    {
+      "doc_id": "amendment_4",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312518013487/d469152dex99a15.htm",
+      "accession": "0001193125-18-013487",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(5)",
+      "filed": "2018-01-18",
+      "role": "Amendment No. 4: the Trustee definition, from 2017-06-16",
+      "content_sha256": "6e68f91ce9dea0d780c7ee592a05e49b821e9dcf13821df6a09765b9aae2e0fe"
+    },
+    {
+      "doc_id": "amendment_5",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312518013487/d469152dex99a16.htm",
+      "accession": "0001193125-18-013487",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(6)",
+      "filed": "2018-01-18",
+      "role": "Amendment No. 5: settlement days in Sections 2.03, 3.04 (record date) and 5.02 (redemption transfer)",
+      "content_sha256": "5264fa94d76550ce2256d1f614d65bc51bc2e9e67031c6ecec026923d307b3c1"
+    },
+    {
+      "doc_id": "amendment_6",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312525013181/d875286dex99a17.htm",
+      "accession": "0001193125-25-013181",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(7)",
+      "filed": "2025-01-27",
+      "role": "Amendment No. 6: T+1 settlement in Sections 2.03, 3.04 (record date) and 5.02; redemption requests to the Distributor and Trustee",
+      "content_sha256": "f4cbb238994b66580b0d73c1c0b5f2f8784f8726add327fb3d745282b57c2066"
+    },
+    {
+      "doc_id": "amendment_7",
+      "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022316/d77353dex99a18.htm",
+      "accession": "0001193125-26-022316",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(8)",
+      "filed": "2026-01-26",
+      "role": "Amendment No. 7: the Trust's name",
+      "content_sha256": "fb2e38bca4e0ca526f4cfc6b2e60b3e9aadbe4486603acc376b139cf764a7000"
+    }
+  ],
+  "authorities": [
+    {
+      "authority_id": "tiopa_s355",
+      "url": "https://www.legislation.gov.uk/ukpga/2010/8/section/355/data.xht",
+      "version": "current revised text",
+      "content_sha256": "b3edb4f7f778d8e2f887677177c582d9e58be9c8fed36e17a539a2145bd6ed97"
+    },
+    {
+      "authority_id": "tiopa_s356",
+      "url": "https://www.legislation.gov.uk/ukpga/2010/8/section/356/data.xht",
+      "version": "current revised text",
+      "content_sha256": "645addbe3c7490bbc5537908ac33cb43526ea7ca8b1dcb975e821c10038ea336"
+    },
+    {
+      "authority_id": "tiopa_s357",
+      "url": "https://www.legislation.gov.uk/ukpga/2010/8/section/357/data.xht",
+      "version": "current revised text",
+      "content_sha256": "84bff4ac32834bf82d9d625f37601306475b415119b68b3fe3456e5ba45f61f6"
+    },
+    {
+      "authority_id": "tiopa_s359",
+      "url": "https://www.legislation.gov.uk/ukpga/2010/8/section/359/data.xht",
+      "version": "current revised text",
+      "content_sha256": "a56d7330286ccd2744b6fd32adef214258a45ee9d7ca1257ff3f1588a199bd64"
+    },
+    {
+      "authority_id": "tiopa_s360",
+      "url": "https://www.legislation.gov.uk/ukpga/2010/8/section/360/data.xht",
+      "version": "current revised text",
+      "content_sha256": "663a2eb98f313fb2bded2b04e2ba4e4fc64f345a93a6c56589273e678e759ffc"
+    },
+    {
+      "authority_id": "tiopa_s361",
+      "url": "https://www.legislation.gov.uk/ukpga/2010/8/section/361/data.xht",
+      "version": "current revised text",
+      "content_sha256": "0613c4b526fb71745ab8f9a2177c941d1082676c51380afae24e30702154b31b"
+    },
+    {
+      "authority_id": "ita2007_s475",
+      "url": "https://www.legislation.gov.uk/ukpga/2007/3/section/475/data.xht",
+      "version": "current revised text",
+      "content_sha256": "f6f3f8801a47d005f64e387c64926e441cb8880c7d13a078d505f5887a5badde"
+    },
+    {
+      "authority_id": "tcga1992_s69",
+      "url": "https://www.legislation.gov.uk/ukpga/1992/12/section/69/data.xht",
+      "version": "current revised text",
+      "content_sha256": "e2043464567cf34ec716fbb70e0e631076df3c92b95d2c13b83baa3e120ffd8b"
+    },
+    {
+      "authority_id": "tcga1992_s106a",
+      "url": "https://www.legislation.gov.uk/ukpga/1992/12/section/106A/data.xht",
+      "version": "current revised text",
+      "content_sha256": "a0b7989207233527e415f745db6d921cee159570424674a9a444e2fd1366ab6a"
+    },
+    {
+      "authority_id": "ita2007_s564g",
+      "url": "https://www.legislation.gov.uk/ukpga/2007/3/section/564G/data.xht",
+      "version": "current revised text",
+      "content_sha256": "bdf2920f7ee7532b1c08a96589e14ccff3431bac1bf65d8bd4d3f89c001361eb"
+    },
+    {
+      "authority_id": "ita2007_s564u",
+      "url": "https://www.legislation.gov.uk/ukpga/2007/3/section/564U/data.xht",
+      "version": "current revised text",
+      "content_sha256": "0d7a085bd14445e6547c2d67842186d9cbd1a51382f1865012713552cc1518d6"
+    },
+    {
+      "authority_id": "tcga1992_s151w",
+      "url": "https://www.legislation.gov.uk/ukpga/1992/12/section/151W/data.xht",
+      "version": "current revised text",
+      "content_sha256": "376ef8ec96bad435634ba7a860279c559143a5c9d1d640726f72aa3a09a9bbe6"
+    },
+    {
+      "authority_id": "ofr2009_contents",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/contents/data.xht",
+      "version": "current revised text",
+      "content_sha256": "f8c4aeaa3eea2b7f690c86553bbbcbc7e927cc554baf7222ecd482ac9ffd1c83"
+    },
+    {
+      "authority_id": "ofr2009_reg4",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/regulation/4/data.xht",
+      "version": "current revised text",
+      "content_sha256": "16d6623716125730f4f86383160d1af089008c6761ecc429a0aa83c36ae0d4c4"
+    },
+    {
+      "authority_id": "ofr2009_reg11",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/regulation/11/data.xht",
+      "version": "current revised text",
+      "content_sha256": "d362debd5425f9c8f0f55a60facc9242c09a000bef9d786e0ce5e99e8d5b6f56"
+    },
+    {
+      "authority_id": "ofr2009_reg29",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/regulation/29/data.xht",
+      "version": "current revised text",
+      "content_sha256": "5484535c60fcbfb5026cb7cf8f588aee4845968e7d219fc9241a9ddb7fcffed8"
+    },
+    {
+      "authority_id": "ofr2009_reg54",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/regulation/54/data.xht",
+      "version": "current revised text",
+      "content_sha256": "974168f2f2ca2c3bd499942fbbae02c22d9f69bb20b91d4e289ae51cef931a1d"
+    },
+    {
+      "authority_id": "ofr2009_reg55",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/regulation/55/data.xht",
+      "version": "current revised text",
+      "content_sha256": "ae9044fd3a138e5f6c137aa8722f6c507115fcb9ba2612372b255cd31fcebe86"
+    },
+    {
+      "authority_id": "ofr2009_reg56",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/regulation/56/data.xht",
+      "version": "current revised text",
+      "content_sha256": "b2a8b1616e0ee3c7613cc4d8a0aa778f93ca42e2525b9f4d8bc05e8c7a30cde9"
+    },
+    {
+      "authority_id": "ofr2009_reg57",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/regulation/57/data.xht",
+      "version": "current revised text",
+      "content_sha256": "2cb974c6ae15dd1fc5676a5d99a45b268e3d32c93dacc999e2e0e5ba4f5d8f5e"
+    },
+    {
+      "authority_id": "intm120030",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/international-manual/intm120030",
+      "version": "2016-03-11",
+      "content_sha256": "dc54dfe25e0921c0ec5cca9580e918d6286edca2ee4e44af0c85314aa2745f5c"
+    },
+    {
+      "authority_id": "intm120060",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/international-manual/intm120060",
+      "version": "2016-03-11",
+      "content_sha256": "12bee5eec06ff8d17791a425c0f8e9791b4e93564370c9cc86f86e7611ec3d58"
+    },
+    {
+      "authority_id": "intm180030",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/international-manual/intm180030",
+      "version": "as fetched 2026-10-14",
+      "content_sha256": "61aa3f0eb0116ebcca3bd60a1ce0e964cdb0e7333dfcf68f0c34a8a1ebf2b924"
+    },
+    {
+      "authority_id": "intm180040",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/international-manual/intm180040",
+      "version": "2023-12-12",
+      "content_sha256": "d495e676455404d38019b04ed0b384716f1694e0201e8ad2e37b84c1b82357f9"
+    },
+    {
+      "authority_id": "intm180060",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/international-manual/intm180060",
+      "version": "as fetched 2026-10-14",
+      "content_sha256": "9d4b829ee04c6f9030e2bd9af06bad93075d05b5dabcd6929af514d4f0668af0"
+    },
+    {
+      "authority_id": "ifm12228",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12228",
+      "version": "2019-07-10",
+      "content_sha256": "aebb17a3607d7137ade49977524bd55d06bde2377dd7b0fc025e81d8e566c46a"
+    },
+    {
+      "authority_id": "ifm12233",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12233",
+      "version": "2019-07-10",
+      "content_sha256": "a708110cd4d38bf5ef73663758d1ac5967bd6e536dfc1de4c284501b35d45164"
+    },
+    {
+      "authority_id": "ifm12237",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12237",
+      "version": "2019-07-10",
+      "content_sha256": "2f0a5997ebe64cd21d533afe3838d9d3ce244aa06e27ea0d90d6f5952ffa633c"
+    },
+    {
+      "authority_id": "ifm12242",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12242",
+      "version": "2019-07-10",
+      "content_sha256": "07cf03c519ec4cadfe9b28eec67253e5c655a4e84f4a226c07f96d017519bba4"
+    },
+    {
+      "authority_id": "ifm12254",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12254",
+      "version": "2019-07-10",
+      "content_sha256": "9a56de61a5dda9a8aa0a426a020f9926f0466b5785b63883920b7dd09fd89667"
+    },
+    {
+      "authority_id": "ifm12270",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12270",
+      "version": "as fetched 2026-10-14",
+      "content_sha256": "a42b3a74022c955085cb8b8adb13ea0dfa107f72567e313447cb33c0f1d5ce91"
+    },
+    {
+      "authority_id": "ifm12282",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12282",
+      "version": "2019-07-10",
+      "content_sha256": "3b10ca9e05085e124f9f0a494f9439a709de5a6b6cb0db18a2b56d2b853dcaa7"
+    },
+    {
+      "authority_id": "ifm12426",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12426",
+      "version": "2019-07-10",
+      "content_sha256": "1d153f95a93e9892d20d0d3c3601c53e27e124398be2968af65cfbf1c4c12f57"
+    },
+    {
+      "authority_id": "ifm13470",
+      "url": "https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm13470",
+      "version": "2019-07-12",
+      "content_sha256": "8333de3cdcf0fc07f3a2c93f83878f88c06261af3255c7016e77baa1c7926e52"
+    }
+  ],
+  "assumptions": [
+    {
+      "assumption_id": "A1_trustee_cmc",
+      "statement": "The central management and control of State Street Global Advisors Trust Company is not exercised in the United Kingdom, so the trustee is not UK resident (INTM120030).",
+      "evidence": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "TRUSTEE",
+          "text": "The Trustee is a limited-purpose trust company organized under the laws of the Commonwealth of Massachusetts with its principal place of business at One Congress Street, Boston, Massachusetts 02114."
+        }
+      ],
+      "residual": "The documents give the trustee's organisation and principal place of business, not where its board exercises control."
+    },
+    {
+      "assumption_id": "A2_no_uk_branch",
+      "statement": "The trustee does not act as trustee of the Trust in the course of a business it carries on in the United Kingdom through a branch, agency or permanent establishment (ITA 2007 s475(6), TCGA 1992 s69(2D)).",
+      "evidence": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "TRUSTEE",
+          "text": "regulatory authorities of those states and countries in which a branch of the Trustee is located"
+        }
+      ],
+      "residual": "The prospectus refers to regulation by the authorities of the states and countries in which a branch of the Trustee is located; it does not identify any branch, or say from where the trustee acts for the Trust."
+    },
+    {
+      "assumption_id": "A3_indenture",
+      "statement": "The Trust Indenture and Agreement of 1993-01-22 and its amendment of 1996-01-19, which were not located in the reviewed corpus, do not vary the Standard Terms provisions quoted here in a way that changes a finding.",
+      "evidence": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ORGANIZATION OF THE TRUST",
+          "text": "The Trust is organized under New York law and is governed by an amended and restated trust agreement between the Trustee and the Sponsor, dated as of January 1, 2004 and effective as of January 27, 2004, as amended (the “Trust Agreement”)."
+        }
+      ],
+      "residual": "The CIK's EDGAR filing list, the searched boundary, begins 1996-01-25. The Standard Terms let an Indenture vary them for its series. The two later amendments located were read: the first (dated as of 1997-09-01, effective 1997-09-30), to the Standard Terms and the Indenture, replaced Indenture Section 2F (taxable year); the second (dated as of 1999-01-01, effective 1999-01-25), to the Standard Terms, added to Section 5.02; neither touches a quoted provision. The prospectus describes the quoted terms as the Trust's terms."
+    },
+    {
+      "assumption_id": "A4_no_other_exclusion",
+      "statement": "The Trust's units are not investment bond arrangements (ITA 2007 s564G, applied through s564U and TCGA 1992 s151W), and no regulations under TIOPA 2010 s359 exclude the Trust from being a mutual fund.",
+      "evidence": [
+        {
+          "source_id": "tiopa_s355",
+          "locator": "s355(4)",
+          "text": "See also section 151W(b) of TCGA 1992, section 564U(b) of ITA 2007 and section 519(4)(b) of CTA 2009 (which have the effect that investment bond arrangements are not an offshore fund for the purposes of section 354)."
+        }
+      ],
+      "residual": "s564G was read but its conditions (1)(e) (additional payments no more than a commercial return on a loan of the capital) and (1)(i) (a financial liability) were not applied; (2) allows in-kind and reduced redemption payments, and the Trust has a termination date. The s359 search covered the contents of SI 2009/3001 only (2026-10-14)."
+    },
+    {
+      "assumption_id": "A5_part3_not_applying",
+      "statement": "Part 3 of SI 2009/3001 does not apply to the Trust at the disposal date: no application naming a first period of account that begins on or before that date has been accepted, by HMRC under reg 55 or on a reg 56 appeal, and remains in force under reg 57(3) (not withdrawn under reg 54(3)(b), reg 57(4), and not ended under Chapter 11).",
+      "evidence": [
+        {
+          "source_id": "ofr2009_reg4",
+          "locator": "reg 4(2)",
+          "text": "an offshore fund is a non-reporting fund unless it is a fund to which Part 3 of these Regulations applies"
+        }
+      ],
+      "residual": "The only evidence is the 3d-3c-1 list search: no row of any stored version of HMRC's list matched under its tests, which can miss a row naming the fund under a valid ISIN of another country and do not follow identifier history. An application is due before the later of the end of the first period of account it names and the expiry of the period of 3 months beginning with the first day interests are made available to UK-resident investors (reg 54(2)); HMRC may agree a longer period for further information (reg 55(4)(b)); a quashed rejection makes the fund reporting as if accepted (reg 56, IFM12426); the list is published monthly and may lag or omit."
+    },
+    {
+      "assumption_id": "A6_law_current",
+      "statement": "The committed legal sources state the law in force at the disposal date.",
+      "evidence": [],
+      "residual": "The snapshots are legislation.gov.uk's current revised text and HMRC's manual pages as fetched on 2026-10-14. A change is not detected by code; the determination is used for nothing after review_by, and a later change before then is this assumption's residual."
+    },
+    {
+      "assumption_id": "A7_identity_continuity",
+      "statement": "The units disposed of are interests in the class bound today (CIK, LEI, ISIN, MIC and ticker) at every date from valid_from to the disposal.",
+      "evidence": [],
+      "residual": "The binding is checked against the current 3d-3c-1 candidate only; no dated history of the binding is held. A change of identifier between valid_from and the disposal would not be seen unless a governing filing records it."
+    },
+    {
+      "assumption_id": "A8_inventory_complete",
+      "statement": "No governing filing for the CIK made on or after monitor_from and before the disposal or the run's cutoff is missing from the filing inventory the run read.",
+      "evidence": [],
+      "residual": "The inventory is SEC's submissions JSON for the CIK, read up to 30 days before the run's cutoff; a filing after that read, a filing SEC lists late, and the completeness of SEC's own inventory are this assumption's residual."
+    },
+    {
+      "assumption_id": "A9_terms_continuity",
+      "statement": "No change that would change a finding took effect before the disposal date without appearing in the reviewed documents: neither a change to the Trust's governing terms nor a fact or action under existing powers that a finding relies on, including who the trustee is.",
+      "evidence": [
+        {
+          "source_id": "amendment_6",
+          "locator": "paragraph 4",
+          "text": "Effective March 4, 2024, the following sentence in Section 5.02 of the Standard Terms:"
+        }
+      ],
+      "residual": "Amendments can take effect before they are filed: Amendment 6, filed 2025-01-27, made changes effective 2024-03-04 and on the T+1 settlement date in 2024. The Standard Terms also let the trustee resign and a successor be appointed without amending them. A complete filing inventory (A8) does not exclude either taking effect before it is filed."
+    }
+  ],
+  "findings": [
+    {
+      "question": "arrangement",
+      "answer": "single_arrangement_single_class",
+      "basis": "assumed",
+      "assumptions": [
+        "A3_indenture"
+      ],
+      "authorities": [
+        "tiopa_s360",
+        "tiopa_s361",
+        "ifm12270",
+        "ifm12282"
+      ],
+      "quotes": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ORGANIZATION OF THE TRUST",
+          "text": "The Trust is a unit investment trust that issues Units."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "Notes to Financial Statements, Note 1",
+          "text": "Each unit of fractional undivided interest in the Trust is referred to as a “Unit”."
+        }
+      ],
+      "contrary": [],
+      "reasoning": "One trust issuing one kind of Unit, each a fractional undivided interest in the Trust. The 3d-3c-1 candidate requires the N-CEN to report one series whose series CIK is the registrant's. Fungible units are one class of interest (IFM12270, IFM12282), and nothing in the documents creates separately pooled parts (s360).",
+      "would_resolve": null
+    },
+    {
+      "question": "s355_limb",
+      "answer": "b",
+      "basis": "assumed",
+      "assumptions": [
+        "A1_trustee_cmc",
+        "A2_no_uk_branch",
+        "A3_indenture"
+      ],
+      "authorities": [
+        "tiopa_s355",
+        "ita2007_s475",
+        "tcga1992_s69",
+        "intm120030",
+        "ifm12228",
+        "intm120060"
+      ],
+      "quotes": [
+        {
+          "source_id": "standard_terms_2004",
+          "locator": "Section 2.01",
+          "text": "The Trustee declares it holds and will hold the Trust Fund as Trustee for the use and benefit of all present and future Beneficial Owners and subject to the terms and conditions of the Indenture and this Agreement."
+        },
+        {
+          "source_id": "standard_terms_2004",
+          "locator": "Section 2.02",
+          "text": "there will be conveyed and deposited with the Trustee in an irrevocable trust, all cash and securities so deposited"
+        },
+        {
+          "source_id": "standard_terms_2004",
+          "locator": "Section 10.05",
+          "text": "The Indenture and Agreement are executed and delivered in the State of New York, and all laws or rules of construction of such State shall govern the rights of the parties hereto and the Beneficial Owners"
+        },
+        {
+          "source_id": "amendment_4",
+          "locator": "recitals",
+          "text": "the Sponsor has appointed the Trustee as trustee of the SPDR 500 Trust as of June 16, 2017"
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "TRUSTEE",
+          "text": "The Trustee is a limited-purpose trust company organized under the laws of the Commonwealth of Massachusetts with its principal place of business at One Congress Street, Boston, Massachusetts 02114."
+        },
+        {
+          "source_id": "standard_terms_2004",
+          "locator": "Section 10.04(d)",
+          "text": "Nothing set forth in this Indenture and Agreement shall be construed so as to constitute the Beneficial Owners from time to time as partners or members of an association"
+        }
+      ],
+      "contrary": [],
+      "reasoning": "Property is held on trust for the participants (2.01, 2.02) under New York law (10.05). There is one trustee, State Street Global Advisors Trust Company, since 2017-06-16. The trustees are UK resident only if all are (s475(4), s69(2A)); the mixed case cannot arise with one trustee. The trustee is organised in Massachusetts, so it is not UK-incorporated; whether it is UK resident by central management and control (INTM120030), or treated as UK resident by acting through a UK branch, is assumed (A1, A2), not shown. Limb (a) does not apply: the Trust is not a body corporate. Limb (c) covers arrangements 'not constituted by bodies corporate or where property is held on trust' (IFM12228), so it is not an alternative here.",
+      "would_resolve": "Evidence of who actually exercises the trustee's highest-level control and where (INTM120060, the De Beers test, including control exercised by its parent), and of whether it acts for the Trust through any UK branch, agency or permanent establishment (s475(6), s69(2D))."
+    },
+    {
+      "question": "s356_condition_a",
+      "answer": "met",
+      "basis": "assumed",
+      "assumptions": [
+        "A3_indenture"
+      ],
+      "authorities": [
+        "tiopa_s356"
+      ],
+      "quotes": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ORGANIZATION OF THE TRUST",
+          "text": "Units represent an undivided ownership interest in Portfolio Securities of the Trust."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "DIVIDENDS AND DISTRIBUTIONS",
+          "text": "Holders of Units receive on the last Business Day of April, July, October and January an amount corresponding to the amount of any cash dividends declared on the Portfolio Securities during the applicable period, net of fees and expenses associated with operation of the Trust, and taxes, if applicable."
+        }
+      ],
+      "contrary": [],
+      "reasoning": "Participants hold interests in the portfolio and receive its income net of expenses: s356(3)(a) and (b).",
+      "would_resolve": null
+    },
+    {
+      "question": "s356_condition_b",
+      "answer": "met",
+      "basis": "assumed",
+      "assumptions": [
+        "A3_indenture"
+      ],
+      "authorities": [
+        "tiopa_s356",
+        "ifm12233"
+      ],
+      "quotes": [
+        {
+          "source_id": "standard_terms_2004",
+          "locator": "Section 10.04(d)",
+          "text": "No Beneficial Owner shall have any right to vote except as provided in Sections 9.01 and 10.01 or in any manner otherwise to control the operation and management of the Trust Fund"
+        }
+      ],
+      "contrary": [],
+      "reasoning": "Holders have no control of management. Their votes under 9.01 (termination) and 10.01 (amendment) are rights to give directions, which s356(5) excludes from day-to-day control (IFM12233).",
+      "would_resolve": null
+    },
+    {
+      "question": "s356_condition_c",
+      "answer": "met",
+      "basis": "assumed",
+      "assumptions": [
+        "A3_indenture"
+      ],
+      "authorities": [
+        "tiopa_s356",
+        "ifm12237",
+        "ifm12282"
+      ],
+      "quotes": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "PURCHASES AND REDEMPTIONS OF CREATION UNITS",
+          "text": "Units are listed individually for trading on the Exchange at prices established throughout the trading day, like any other listed equity security trading on the Exchange in the secondary market."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "PURCHASES AND REDEMPTIONS OF CREATION UNITS, Redemption",
+          "text": "Units may be redeemed in-kind only in Creation Units at their NAV determined after receipt of a redemption request in proper form by the Distributor and Trustee through the Depository and relevant DTC Participant and only on a Business Day."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "PURCHASES AND REDEMPTIONS OF CREATION UNITS, Purchase (Creation)",
+          "text": "Before trading on the Exchange in the secondary market, Units are created at NAV in Creation Units."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "Summary, trading prices",
+          "text": "While the creation/redemption feature is designed to make it likely that Units normally will trade close to the Trust’s NAV, disruptions to creations and redemptions and/or market volatility may result in trading prices that differ significantly from the Trust’s NAV."
+        }
+      ],
+      "contrary": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "PURCHASES AND REDEMPTIONS OF CREATION UNITS, Redemption",
+          "text": "EXCEPT UPON LIQUIDATION OF THE TRUST, THE TRUST WILL NOT REDEEM UNITS IN AMOUNTS LESS THAN CREATION UNITS."
+        }
+      ],
+      "reasoning": "A retail holder cannot redeem fewer than a Creation Unit, but realises in the secondary market, where Authorized Participants create and redeem at NAV. IFM12237: 'It is not necessary that the investor obtains NAV directly from the fund' and ETFs whose prices stay near NAV 'because market makers are able to create or redeem units' are mutual funds (also IFM12282). The prospectus says the creation/redemption feature 'is designed to make it likely that Units normally will trade close to the Trust’s NAV' and that disruptions or volatility may cause significant differences; a reasonable investor's expectation is the normal case the arrangements are designed for, which IFM12237 treats as condition C.",
+      "would_resolve": null
+    },
+    {
+      "question": "s357_condition_d",
+      "answer": "not_met",
+      "basis": "assumed",
+      "assumptions": [
+        "A3_indenture"
+      ],
+      "authorities": [
+        "tiopa_s357",
+        "ifm12242"
+      ],
+      "quotes": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "PURCHASES AND REDEMPTIONS OF CREATION UNITS",
+          "text": "The Trust continuously issues and redeems “in-kind” its Units only in specified large lots of 50,000 Units or multiples thereof, which are referred to as “Creation Units,” at their once-daily NAV."
+        }
+      ],
+      "contrary": [],
+      "reasoning": "Realisation on a NAV basis is available continuously, through creation and redemption and the secondary market they support, not only on termination. So condition D fails and s357(1) cannot apply whatever E and F would say (IFM12242).",
+      "would_resolve": null
+    },
+    {
+      "question": "other_exclusions",
+      "answer": "no_applicable_exclusion",
+      "basis": "assumed",
+      "assumptions": [
+        "A4_no_other_exclusion"
+      ],
+      "authorities": [
+        "tiopa_s355",
+        "tiopa_s359",
+        "ofr2009_contents",
+        "ita2007_s564g",
+        "ita2007_s564u",
+        "tcga1992_s151w"
+      ],
+      "quotes": [
+        {
+          "source_id": "tiopa_s359",
+          "locator": "s359(2)",
+          "text": "The Treasury may by regulations provide that arrangements are not a mutual fund for the purposes of section 355—"
+        },
+        {
+          "source_id": "tiopa_s355",
+          "locator": "s355(4)",
+          "text": "See also section 151W(b) of TCGA 1992, section 564U(b) of ITA 2007 and section 519(4)(b) of CTA 2009 (which have the effect that investment bond arrangements are not an offshore fund for the purposes of section 354)."
+        },
+        {
+          "source_id": "ita2007_s564g",
+          "locator": "s564G(1)(d)(ii)",
+          "text": "to make a repayment of the capital (“the redemption payment”) to the bond-holder during or at the end of the bond-term (whether or not in instalments), and"
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ORGANIZATION OF THE TRUST",
+          "text": "The Trust has a specified lifetime term. The Trust is scheduled to terminate on the first to occur of (a) January 22, 2118 or (b) the date 20 years after the death of the last survivor of eleven persons named in the Trust Agreement, the oldest of whom was born in 1990 and the youngest of whom was born in 1993."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "Termination of the Trust Agreement",
+          "text": "Units not redeemed before termination of the Trust will be redeemed in cash at NAV based on the proceeds of the sale of Portfolio Securities, with no minimum aggregation of Units required."
+        }
+      ],
+      "contrary": [],
+      "reasoning": "Two further routes exclude arrangements: regulations under s359, and investment bond arrangements (s355(4); TCGA s151W and ITA s564U for capital gains and income tax; CTA 2009 s519 concerns corporation tax), defined in ITA s564G. s564G's conditions were read but not applied to the Trust in full: its subsection (2) allows redemption payments to be reduced or satisfied in shares or other securities, and the Trust has a specified lifetime term and termination provisions, with cash redemption at NAV on termination, so neither in-kind redemption nor the absence of a term disqualifies it. Whether its additional payments are capped at a commercial return on a loan (s564G(1)(e)) and whether its units are a financial liability (s564G(1)(i)) were not analysed. For s359, the contents of SI 2009/3001 (snapshot ofr2009_contents) show no exclusion from the definition in its Part 1; its Part 2 Chapter 3 exceptions (regs 25-31C) are exceptions from the charge; no complete list of instruments made under s359 was consulted. Both routes rest on A4.",
+      "would_resolve": "An application of every s564G condition, (1) and (2), and of s564G(3)'s subjection to s564H, to the Trust's terms; and a complete list of instruments made under s359 read for an exclusion covering the Trust."
+    },
+    {
+      "question": "transparent_fund",
+      "answer": "unresolved",
+      "basis": "unresolved",
+      "assumptions": [],
+      "authorities": [
+        "ofr2009_reg11",
+        "ofr2009_reg29",
+        "ifm12254",
+        "ifm13470",
+        "intm180030",
+        "intm180040",
+        "intm180060"
+      ],
+      "quotes": [
+        {
+          "source_id": "standard_terms_2004",
+          "locator": "Section 10.04(a)",
+          "text": "By the purchase and acceptance or other lawful delivery and acceptance of SPDRs (whether in Creation Unit size aggregations or otherwise), each Beneficial Owner thereof shall be deemed to be a beneficiary of the Trust created by this Agreement and the Indenture and vested with all right, title and interest in the Trust Fund therein created to the extent of the SPDRs in Creation Unit size aggregations or SPDRs set forth, subject to the terms and conditions of this Agreement and the Indenture."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ORGANIZATION OF THE TRUST",
+          "text": "Units represent an undivided ownership interest in Portfolio Securities of the Trust."
+        }
+      ],
+      "contrary": [
+        {
+          "source_id": "standard_terms_2004",
+          "locator": "Section 3.01(a)",
+          "text": "The Trustee shall accrue all Income to the Trust as of the date on which the Trust is entitled to such Income as a holder of record of the Securities."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ADDITIONAL INFORMATION REGARDING DIVIDENDS AND DISTRIBUTIONS",
+          "text": "Beneficial Owners reflected on the records of DTC and the DTC Participants on the Ex-Dividend Date (also, the “Record Date”) are entitled to receive an amount representing dividends accumulated on Portfolio Securities through the quarterly dividend period which ends on the Business Day preceding such Ex-Dividend Date (including stocks with ex-dividend dates falling within such quarterly dividend period), net of fees and expenses, accrued daily for such period."
+        }
+      ],
+      "reasoning": "reg 11 asks whether UK-resident individual holders are chargeable, under a provision in ITTOIA 2005 s830(2), on the fund's income referable to their interests, with reg 11(b)'s hypothesis for UK-source income. IFM12254 describes such holders as 'entitled to income as it arises'. The Standard Terms vest each holder with right, title and interest in the Trust Fund, but income accrues to the Trust, is held and reduced by expenses, and is paid as a distribution entitlement to holders of record. The distribution mechanics do not by themselves decide whether the underlying income belongs to holders as it arises. INTM180040 decides this by establishing the holders' rights under New York commercial law and then applying the relevant UK charging provision; the Trust's US tax status is irrelevant. No source held states that analysis, and INTM180030 has no general view of a New York trust or unit investment trust.",
+      "would_resolve": "A provision-specific UK analysis under reg 11(a) and (b) of the holders' rights in Trust income as established under New York law, with citable authority for the New York-law step, or HMRC's view of this fund on that question (INTM180060 clearance). A general list entry would be supporting evidence only (INTM180040)."
+    },
+    {
+      "question": "reg29_sufficient_information",
+      "answer": "unresolved",
+      "basis": "unresolved",
+      "assumptions": [],
+      "authorities": [
+        "ofr2009_reg29",
+        "ifm13470"
+      ],
+      "quotes": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ADDITIONAL INFORMATION REGARDING DIVIDENDS AND DISTRIBUTIONS (the filing's page number 75 falls inside the sentence)",
+          "text": "With each distribution, the Trustee furnishes for distribution to 75 Beneficial Owners a statement setting forth the amount being distributed, expressed as a dollar amount per Unit."
+        }
+      ],
+      "contrary": [],
+      "reasoning": "The Trustee furnishes a per-distribution statement and an audited annual report. Whether they let a UK holder compute their share of income arising and confirm the reg 29(2) test (IFM13470) is not settled by the documents. Relevant only if the fund is transparent.",
+      "would_resolve": "The information the Trust actually makes available to holders, read against IFM13470's test."
+    },
+    {
+      "question": "reg29_nonreporting_holdings",
+      "answer": "unresolved",
+      "basis": "unresolved",
+      "assumptions": [],
+      "authorities": [
+        "ofr2009_reg29",
+        "ifm13470"
+      ],
+      "quotes": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "INVESTMENT RESTRICTIONS",
+          "text": "Therefore, the Trust is not authorized to invest in the securities of registered investment companies or any other registered or unregistered funds, lend its portfolio securities or other assets, issue senior securities or borrow money for the purpose of investing in securities, purchase securities on margin, sell securities short or invest in derivative instruments, including, without limitation, futures contracts, options or swaps."
+        }
+      ],
+      "contrary": [
+        {
+          "source_id": "prospectus_2026",
+          "locator": "INVESTMENTS BY INVESTMENT COMPANIES",
+          "text": "(c) the Trust cannot invest more than 10% of its total assets in the securities of registered investment companies in the aggregate."
+        }
+      ],
+      "reasoning": "reg 29(2) asks whether at any time in the holding the fund held more than 5% by value in other non-reporting funds, disregarding qualifying transparent funds (reg 29(4)). The prospectus says the Trust only holds Index constituents and is not authorised to invest in any registered or unregistered fund; the section 12(d)(1) ceilings quoted as contrary evidence apply 'notwithstanding the investment restrictions described above, absent an exemption or SEC relief' and are limits, not a power. That is strong evidence, but it uses US terms, speaks as of 2026-01-26, and does not show that no Index constituent is a UK offshore fund at any time in a holding. The finding is holding-dependent, which policy fund_determination_v1 does not model, so it stays unresolved; it matters only if the fund is transparent.",
+      "would_resolve": "A per-holding assessment under a policy that models holding intervals: the restriction's coverage of each holding period, and whether any Index constituent held is an interest in an offshore fund."
+    }
+  ]
+}

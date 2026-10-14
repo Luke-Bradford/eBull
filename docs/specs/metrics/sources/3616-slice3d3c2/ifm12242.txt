@@ -1,0 +1,20 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12242
+Fetched (UTC): 2026-10-14T19:51:43Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12242
+Title: Offshore Funds: Definition of an offshore fund: exceptions to the meaning of mutual fund: introduction - s357(3) TIOPA 2010
+Public updated at: 2019-07-10T14:58:21+01:00
+
+To meet the definition of an offshore fund, arrangements must be a mutual fund. Section 356 provides three conditions, A to C, which must be met for arrangements to be a mutual fund - see IFM12231.
+
+Even if all three conditions are met, s357 provides exceptions to certain types of arrangements that would otherwise be mutual funds. The exceptions are dependent on whether the arrangements are such that they meet the criteria of condition D (s357(2)) and either of the conditions E or F (s357 (1)(b) TIOPA 2010).
+
+Arrangements meet the criteria of condition D where the only occasion on which a reasonable investor would expect to be able to realise an investment based entirely or almost entirely by reference to the net asset value (‘NAV’) of the property or an index of any description is on a winding-up, dissolution or termination of the arrangements. An example is a case where there is a final redemption of a class of interest (s357 (2)).
+
+Section 357(2) has the effect that ‘open-ended’ arrangements (i.e. those that enable investors to realise NAV by disposing of their interest) cannot come within the exceptions provided by s357.
+
+The conditions E or F do, however, except certain types of closed-ended arrangements from the meaning of a ‘mutual fund’.
+
+The exceptions can also apply to arrangements where a reasonable investor could expect to realise their investment at or close to NAV as a result of the intention of a fund to dispose of its assets in tranches followed by a final distribution of any remaining assets, as opposed to a liquidation of all of the fund’s assets on a winding-up
+
+Further guidance on conditions E and F can be found at IFM12244 and IFM12245 to IFM12249 respectively. See IFM12290 for guidance on limited life companies that are subject to a continuation vote.

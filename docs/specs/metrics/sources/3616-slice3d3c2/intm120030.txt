@@ -1,0 +1,32 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/international-manual/intm120030
+Fetched (UTC): 2026-10-14T20:18:36Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/international-manual/intm120030
+Title: Company residence: overview
+Public updated at: 2016-03-11T17:04:03+00:00
+
+Resident companies & dual resident companies
+
+Resident companies
+
+A company is resident in the UK for the purposes of the Taxes Acts if
+
+it is incorporated in the UK (with certain exceptions) or
+
+the central management and control of its business is in the UK.
+
+See INTM120040 for further information on the incorporation rule.
+
+See INTM120060 for further information on the central management and control rule (commonly known as the case law rule).
+
+A company which is resident in the UK should, in practice, also be regarded as ordinarily resident.
+
+HMRC Statement of Practice SP1/90 on company residence is reproduced at INTM120200. It sets out our views on the exceptions from the incorporation rule and on the implications of the decisions of the Courts on the case law rule. SP1/90 should be read as complementary to this guidance.
+
+Dual resident companies
+
+There is an additional requirement for dual resident companies, effective from 30 November 1993.
+
+Where a company is UK resident under either of the above tests but is also resident in the country of a treaty partner, the terms of any company residence tie-breaker in the treaty must be considered. If residence has been or would be awarded to our treaty partner, the company is called ‘treaty non-resident’ (TNR). CTA09/S18 provides that a TNR company is not resident for UK tax purposes.
+
+See INTM120070 and INTM120080 for further information on TNR companies.

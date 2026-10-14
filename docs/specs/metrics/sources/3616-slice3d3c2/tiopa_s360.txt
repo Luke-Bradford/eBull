@@ -1,0 +1,22 @@
+URL: https://www.legislation.gov.uk/ukpga/2010/8/section/360/data.xht
+Fetched (UTC): 2026-10-14T20:18:10Z
+
+Part 8U.K.Offshore funds [F1ETC]
+
+Textual Amendments
+
+F1Word in Pt. 8 heading inserted (retrospective to 5.12.2013) by Finance Act 2014 (c. 26), s. 289(5)(b)(6)
+
+SupplementaryU.K.
+
+360Treatment of umbrella arrangementsU.K.
+
+(1)This section has effect for the purposes of this Part.
+
+(2)In the case of umbrella arrangements (see section 363)—
+
+(a)each part of the umbrella arrangements is to be treated as separate arrangements, and
+
+(b)the umbrella arrangements are to be disregarded.
+
+(3)Subsection (2)(a) is subject to section 361.

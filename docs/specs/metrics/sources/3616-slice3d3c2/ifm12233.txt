@@ -1,0 +1,14 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12233
+Fetched (UTC): 2026-10-14T19:51:40Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12233
+Title: Offshore Funds: Meaning of ‘mutual fund’: condition 'B': s356(4) TIOPA 2010
+Public updated at: 2019-07-10T14:47:49+01:00
+
+Condition B is that the participants do not have day-to-day control of the management of the property. In this context, ‘participants’ means persons acting in the capacity of investors in a particular scheme. Control would therefore mean having control by way of rights as an investor. So, if the scheme manager held units or shares in the fund managed, that would not prevent condition B from being satisfied.
+
+In the case of a fund with an advisory committee, which would typically comprise either a few key investors or independent investment experts, again nothing prevents Condition B from being satisfied (particularly so in this case, as it would not be expected that the role of the investment manager would be usurped by such a committee).
+
+Merely having a right to be consulted or to give directions does not result in a participant having day-to-day control. So, for example, the right to a vote at annual general meetings would not be considered to amount to day-to-day control.
+
+For the arrangements to satisfy condition B, it is sufficient that any one of the individual participants is not party to exercising day-to-day control, regardless of the extent of their interest in the fund.

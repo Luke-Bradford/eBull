@@ -1,0 +1,22 @@
+URL: https://www.legislation.gov.uk/ukpga/2010/8/section/361/data.xht
+Fetched (UTC): 2026-10-14T20:18:13Z
+
+Part 8U.K.Offshore funds [F1ETC]
+
+Textual Amendments
+
+F1Word in Pt. 8 heading inserted (retrospective to 5.12.2013) by Finance Act 2014 (c. 26), s. 289(5)(b)(6)
+
+SupplementaryU.K.
+
+361Treatment of arrangements comprising more than one class of interestU.K.
+
+(1)This section has effect for the purposes of this Part.
+
+(2)Where there is more than one class of interest in arrangements (the “main arrangements”)—
+
+(a)the arrangements relating to each class of interest are to be treated as separate arrangements, and
+
+(b)the main arrangements are to be disregarded.
+
+(3)In relation to umbrella arrangements, “class of interest” does not include a part of the umbrella arrangements (but there may be more than one class of interest in a part of umbrella arrangements).

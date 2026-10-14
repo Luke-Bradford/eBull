@@ -1,0 +1,36 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/international-manual/intm120060
+Fetched (UTC): 2026-10-14T20:36:01Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/international-manual/intm120060
+Title: Company residence: the case law rule - central management and control
+Public updated at: 2016-03-11T17:04:04+00:00
+
+The place of central management and control as a test of residence is now relevant only to
+
+companies not incorporated in the UK and
+
+UK incorporated companies which qualify for exception to the incorporation rule, so long as their place of central management and control is outside the UK
+
+The case law rule
+
+The case law rule for determining the residence of a company is authoritatively expressed in Lord Loreburn’s speech in De Beers Consolidated Mines Ltd v Howe, 5TC213:
+
+‘A company resides … where its real business is carried on … and the real business is carried on where the central management and control actually abides’.
+
+The De Beers company was incorporated in South African and its main trading operations were there. The controlling board of directors exercised its powers in the UK. The company was held to be resident in the UK.
+
+The rule was endorsed in the much later case of Bullock v Unit Construction Co Ltd, 1959, 38TC712. The African subsidiary companies which were incorporated and trading in Africa were held to be resident in the UK by reason of the degree of management and control over their businesses exercised in the UK by the parent company. The constitution of each subsidiary company vested control in its board of directors which was required to hold its meetings outside the UK. The Special Commissioners found that, in fact, the directors ‘were standing aside in all matters of real importance … affecting the central management and control’ and that the real control and management was being exercised, albeit unconstitutionally, by the parent company’s board of directors in the UK.
+
+The decisions in both the De Beers and Unit Construction cases make it clear that the place of central management and control is primarily a question of fact. Both cases also demonstrate that it is the highest level of control of the business which counts. That control may be exercised by the board of directors in accordance with the Articles of the company, as in De Beers, or by some other person, for example, a parent company or individual shareholder who has in fact assumed management and control of the business, as in Unit Construction.
+
+Divided or multiple residence
+
+The De Beers test points to a single country of residence. But the courts have recognised that, exceptionally, a company may have a dual or multiple residence. Lord Radcliffe’s speech in the Unit Construction case, 38TC739, is a useful commentary on this subject. There are some companies for which it is not possible to identify any one country as the seat of central management and control. Management and control may be divided or may change from place to place even. The De Beers test as such cannot be applied.
+
+No general rule for establishing the residence of these companies has been established. But if, in the context of the company’s business, what is done in the UK amounts to part of the management and control, the company is arguably resident here. The decision in the Swedish Railway Company v Thompson, 9TC342, should be interpreted in this way. The company was not engaged in active trading and its administrative control was divided between this country and Sweden. The Courts decided that the company, while it might be resident abroad, was nevertheless also resident here for tax purposes.
+
+Dual residence was also considered in Union Corporation Ltd v CIR (1953), 34TC207. The company was admitted to be resident in the UK. The dual residence issue was whether it was also resident abroad. The view of the Court of Appeal was that a company is resident wherever ‘to a substantial degree’ acts of controlling power and authority are exercised. But the case was decided on another issue and the House of Lords did not consider the question of dual residence.
+
+Further guidance
+
+Further guidance on the central management and control test was given in the International Tax Handbook and the relevant chapter ‘Company Residence: the Law’ is now reproduced at INTM120210.

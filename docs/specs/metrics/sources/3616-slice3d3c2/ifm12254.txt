@@ -1,0 +1,14 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12254
+Fetched (UTC): 2026-10-14T19:51:45Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12254
+Title: Offshore Funds: Definition of an offshore fund: transparent entities: application of the Taxation of Chargeable Gains Act 1992 (TCGA) to interests in arrangements that create rights in the nature of co-ownership
+Public updated at: 2019-07-10T15:09:55+01:00
+
+Certain contractual arrangements (for example, Luxembourg Fonds Commun de placement (‘FCPs’)) were, prior to 1 December 2009, treated as transparent for both income and capital gains purposes.
+
+Section 103A TCGA, which applied from 2009 to 31 December 2017, treated those arrangements as opaque for capital gains purposes by treating the fund as if it were a company and its units were shares. Section 103A shifted the taxation of gains arising to UK residents to the time when they dispose of their interest in a fund, as opposed to being treated as disposing of a fractional interest in underlying fund assets when they were disposed of by the fund. With effect from 1 January 2018 section 103A was repealed and transparent offshore funds now fall under section 103D TCGA. Under that section the underlying assets in the fund are disregarded and the investors units are treated as his asset for TCGA purposes, but the effect is the same.
+
+It remains the case that these funds are transparent for income - investors are entitled to income as it arises (from whatever source or country) and UK investors are taxable on such income as it arises, regardless of whether income is actually distributed. Income arising retains its character where arrangements are fiscally transparent so that, for example, if a fund receives trading income or income from property then UK investors would be chargeable to tax as if they had received that income directly.
+
+Contractual arrangements that come within the meaning of “mutual fund” (s356 TIOPA2010) are offshore funds and the charge to tax under regulation 17 of SI 2009/3001 applies to disposals of units by investors in such funds unless the arrangements are a reporting fund or the exception in regulation 29(1) applies (see IFM12252 and IFM13470).

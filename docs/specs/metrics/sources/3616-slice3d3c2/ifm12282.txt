@@ -1,0 +1,10 @@
+URL: https://www.gov.uk/api/content/hmrc-internal-manuals/investment-funds/ifm12282
+Fetched (UTC): 2026-10-14T19:51:47Z
+
+Public page: https://www.gov.uk/hmrc-internal-manuals/investment-funds/ifm12282
+Title: Offshore Funds: Definition of an offshore fund: particular arrangements: Exchange Traded Funds
+Public updated at: 2019-07-10T15:14:31+01:00
+
+Exchange traded funds are usually operated in such a way that the quoted prices are at net asset value (‘NAV’) or very close to NAV, and so would be expected to meet the characteristics set out in the legislation and to come within the meaning of a mutual fund, and therefore within the definition of an offshore fund.
+
+As with other classes of interest, it is important to note that fungible shares can only constitute a single class of interest even if different types of holders of those shares enjoy different rights (see IFM12270 - Classes of interest).
