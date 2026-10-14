@@ -171,6 +171,8 @@ def _sec_url_ok(url: str, cik: str, accession: str) -> bool:
         and segs[4] == str(int(cik))
         and segs[5] == accession.replace("-", "")
         and bool(segs[6])
+        and segs[6] not in (".", "..")
+        and "%" not in segs[6]
     )
 
 
@@ -386,15 +388,24 @@ def content_hash(url: str, body: bytes) -> tuple[str, str]:
 
 def check_sources(det: dict[str, Any], docs: Path, authorities: Path) -> Sources:
     s = Sources()
-    paths = _local_paths(docs)
+    try:
+        paths = _local_paths(docs)
+    except OSError as exc:
+        err(f"index: UNREADABLE ({type(exc).__name__})")
+        paths = {}
     for d in det["documents"]:
         path = paths.get(d["url"])
         if path is None or not path.exists():
             err(f"document {d['doc_id']}: UNAVAILABLE ({d['url']})")
             s.unavailable.append(d["doc_id"])
             continue
-        body = path.read_bytes()
-        h, text = content_hash(d["url"], body)
+        try:
+            body = path.read_bytes()
+            h, text = content_hash(d["url"], body)
+        except (OSError, UnicodeDecodeError) as exc:
+            err(f"document {d['doc_id']}: UNREADABLE ({type(exc).__name__})")
+            s.unavailable.append(d["doc_id"])
+            continue
         s.texts[d["doc_id"]] = text
         s.hashes[d["doc_id"]] = h
         if d["content_sha256"] not in ("PENDING", h):
@@ -407,9 +418,14 @@ def check_sources(det: dict[str, Any], docs: Path, authorities: Path) -> Sources
             s.bad_authorities.append(a["authority_id"])
             err(f"authority {a['authority_id']}: UNAVAILABLE")
             continue
-        raw = path.read_bytes()
+        try:
+            raw = path.read_bytes()
+            text = raw.decode()
+        except OSError, UnicodeDecodeError:
+            s.bad_authorities.append(a["authority_id"])
+            err(f"authority {a['authority_id']}: UNREADABLE")
+            continue
         h = s.hashes[a["authority_id"]] = hashlib.sha256(raw).hexdigest()
-        text = raw.decode()
         s.texts[a["authority_id"]] = collapse(text)
         api = a["url"].replace("www.gov.uk/hmrc-internal-manuals", "www.gov.uk/api/content/hmrc-internal-manuals")
         if a["content_sha256"] not in ("PENDING", h) or text.splitlines()[0] not in (f"URL: {a['url']}", f"URL: {api}"):
@@ -527,10 +543,11 @@ def reporting_status(
     return "non_reporting_assumed", None, sorted({*rests_on, "A5_part3_not_applying"})
 
 
-def gate(det: dict[str, Any], src: Sources, sub: tuple[Any, date | None], fund_observed_at: str | None) -> bool:
+def gate(
+    det: dict[str, Any], src: Sources, sub: tuple[Any, date | None], fund_observed_at: str | None, cutoff: datetime
+) -> bool:
     """Apply Designs 2 and 3 with one cutoff; return True on a failed verification: no fund observations, or a
     candidate security of the CIK that is not ``determined``."""
-    cutoff = datetime.now(UTC)
     print(f"cutoff {cutoff.isoformat()} (dates compared as {cutoff.date()}; local copies carry fetch dates only)")
     failed = False
     with psycopg.connect(settings.database_url) as conn:
@@ -604,6 +621,7 @@ def main() -> None:
     p.add_argument("--docs", type=Path, required=True)
     p.add_argument("--authorities", type=Path, required=True)
     p.add_argument("--fund-observed-at", help="the fund run to evaluate (default: the newest)")
+    p.add_argument("--cutoff", help="the run cutoff to replay, an ISO timestamp with offset (default: now)")
     p.add_argument("--fill", action="store_true")
     a = p.parse_args()
     out = sys.stderr if a.fill else sys.stdout
@@ -639,7 +657,8 @@ def main() -> None:
         sys.exit(1)
     body, fetched, sub_sha = _submissions(a.docs, det["cik"])
     print(f"submissions sha256 {sub_sha} fetched {fetched}")
-    refused = gate(det, src, (body, fetched), a.fund_observed_at)
+    cutoff = datetime.fromisoformat(a.cutoff) if a.cutoff else datetime.now(UTC)
+    refused = gate(det, src, (body, fetched), a.fund_observed_at, cutoff)
     sys.exit(1 if failures or refused else 0)
 
 

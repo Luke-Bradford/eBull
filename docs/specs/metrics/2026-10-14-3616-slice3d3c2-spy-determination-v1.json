@@ -498,7 +498,7 @@
           "text": "regulatory authorities of those states and countries in which a branch of the Trustee is located"
         }
       ],
-      "residual": "The prospectus says the trustee has branches outside Massachusetts without naming them, and does not say from where it acts for the Trust."
+      "residual": "The prospectus refers to regulation by the authorities of the states and countries in which a branch of the Trustee is located; it does not identify any branch, or say from where the trustee acts for the Trust."
     },
     {
       "assumption_id": "A3_indenture",
@@ -514,15 +514,15 @@
     },
     {
       "assumption_id": "A4_no_other_exclusion",
-      "statement": "No regulations under TIOPA 2010 s359 exclude the Trust from being a mutual fund.",
+      "statement": "The Trust's units are not investment bond arrangements (ITA 2007 s564G, applied through s564U and TCGA 1992 s151W), and no regulations under TIOPA 2010 s359 exclude the Trust from being a mutual fund.",
       "evidence": [
         {
-          "source_id": "tiopa_s359",
-          "locator": "s359(2)",
-          "text": "The Treasury may by regulations provide that arrangements are not a mutual fund for the purposes of section 355—"
+          "source_id": "tiopa_s355",
+          "locator": "s355(4)",
+          "text": "See also section 151W(b) of TCGA 1992, section 564U(b) of ITA 2007 and section 519(4)(b) of CTA 2009 (which have the effect that investment bond arrangements are not an offshore fund for the purposes of section 354)."
         }
       ],
-      "residual": "The search covered the contents of SI 2009/3001 only (snapshot ofr2009_contents, 2026-10-14); no complete list of instruments made under s359 was consulted."
+      "residual": "s564G was read but its conditions (1)(e) (additional payments no more than a commercial return on a loan of the capital) and (1)(i) (a financial liability) were not applied; (2) allows in-kind and reduced redemption payments, and the Trust has a termination date. The s359 search covered the contents of SI 2009/3001 only (2026-10-14)."
     },
     {
       "assumption_id": "A5_part3_not_applying",
@@ -757,7 +757,6 @@
       "answer": "no_applicable_exclusion",
       "basis": "assumed",
       "assumptions": [
-        "A3_indenture",
         "A4_no_other_exclusion"
       ],
       "authorities": [
@@ -783,16 +782,11 @@
           "source_id": "ita2007_s564g",
           "locator": "s564G(1)(d)(ii)",
           "text": "to make a repayment of the capital (“the redemption payment”) to the bond-holder during or at the end of the bond-term (whether or not in instalments), and"
-        },
-        {
-          "source_id": "prospectus_2026",
-          "locator": "PURCHASES AND REDEMPTIONS OF CREATION UNITS, Redemption",
-          "text": "Units may be redeemed in-kind only in Creation Units at their NAV determined after receipt of a redemption request in proper form by the Distributor and Trustee through the Depository and relevant DTC Participant and only on a Business Day."
         }
       ],
       "contrary": [],
-      "reasoning": "Two further routes exclude arrangements. (1) Investment bond arrangements (s355(4); TCGA s151W and ITA s564U for capital gains and income tax; CTA 2009 s519 concerns corporation tax) are defined in ITA s564G and need, among other things, an undertaking to repay the capital as a redemption payment over a bond term and additional payments no more than a reasonable commercial return on a loan of it (s564G(1)(c)-(e)). Units are redeemed at NAV, in kind, with no capital sum repaid and no bond term, so the Trust's units are not investment bond arrangements (on the terms quoted, so A3). (2) Regulations under s359: the contents of SI 2009/3001 (snapshot ofr2009_contents) show no exclusion from the definition in its Part 1; its Part 2 Chapter 3 exceptions (regs 25-31C) are exceptions from the charge. No complete list of instruments made under s359 was consulted (A4).",
-      "would_resolve": null
+      "reasoning": "Two further routes exclude arrangements: regulations under s359, and investment bond arrangements (s355(4); TCGA s151W and ITA s564U for capital gains and income tax; CTA 2009 s519 concerns corporation tax), defined in ITA s564G. s564G's conditions were read but not applied to the Trust in full: its subsection (2) allows redemption payments to be reduced or satisfied in shares or other securities, and the Trust has a fixed termination date with cash redemption at NAV on termination, so neither in-kind redemption nor the absence of a term disqualifies it. Whether its additional payments are capped at a commercial return on a loan (s564G(1)(e)) and whether its units are a financial liability (s564G(1)(i)) were not analysed. For s359, the contents of SI 2009/3001 (snapshot ofr2009_contents) show no exclusion from the definition in its Part 1; its Part 2 Chapter 3 exceptions (regs 25-31C) are exceptions from the charge; no complete list of instruments made under s359 was consulted. Both routes rest on A4.",
+      "would_resolve": "An application of every s564G(1) and (2) condition to the Trust's terms, and a complete list of instruments made under s359 read for an exclusion covering the Trust."
     },
     {
       "question": "transparent_fund",

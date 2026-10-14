@@ -69,7 +69,7 @@ hash of `document_text`, which drops it.
    - The **Trust Indenture and Agreement** of 1993-01-22 and its 1996-01-19 amendment were not located in the reviewed
      corpus. The searched boundary is the CIK's EDGAR filing list, which begins 1996-01-25 (assumption A3).
    - No CUSIP or ISIN appears in these documents. The ISIN binding is 3d-3c-1's candidate chain.
-2. **Sources verify** (Script): no format error; 14 documents and 34 authority snapshots match their hashes; all 33
+2. **Sources verify** (Script): no format error; 14 documents and 34 authority snapshots match their hashes; all 32
    quotes, contrary quotes and evidence quotes occur in their sources. The N-CEN is bound by its bytes, every other
    document by its `document_text`.
 3. **SPY's filings since 2026-01-26** (submissions JSON, 275 filings, no overflow files): 485BPOS and 497 on
@@ -155,10 +155,11 @@ quotes (with locators), reasoning and what would resolve it. This section summar
   for is IFM12237's condition C.
 - **s357 D: `not_met`, assumed (A3).** The Trust "continuously issues and redeems" Creation Units "at their once-daily
   NAV", so realisation on a NAV basis is not confined to termination; s357(1) needs D.
-- **Other exclusions: `no_applicable_exclusion`, assumed (A3, A4).** Investment bond arrangements (s355(4); TCGA
-  s151W, ITA s564U) need an undertaking to repay the capital as a "redemption payment" over a bond term, with returns no
-  more than a commercial return on a loan (ITA s564G(1)); Units are redeemed in kind at NAV, so they are not. No
-  regulations under s359 exclude the Trust (A4; searched: SI 2009/3001's contents, snapshot `ofr2009_contents`).
+- **Other exclusions: `no_applicable_exclusion`, assumed (A4).** Investment bond arrangements (s355(4); TCGA s151W,
+  ITA s564U; defined in ITA s564G) and regulations under s359. s564G was read but not applied in full: its subsection
+  (2) allows in-kind and reduced redemption payments and the Trust has a termination date, so neither settles it, and
+  conditions (1)(e) and (1)(i) were not analysed. The s359 search covered SI 2009/3001's contents (snapshot
+  `ofr2009_contents`). Both rest on A4.
 - **Transparent fund: `unresolved`.** For: "each Beneficial Owner thereof shall be deemed to be a beneficiary of the
   Trust ... and vested with all right, title and interest in the Trust Fund" (10.04(a)), and units are "an undivided
   ownership interest in Portfolio Securities". Against: income accrues "to the Trust" (3.01(a)), is held and reduced by
@@ -230,6 +231,8 @@ exactly those listed. Document and authority ids share one namespace, `[a-z0-9_]
 | `transparent_fund` | `transparent`, `opaque`, `unresolved` |
 | `reg29_sufficient_information`, `reg29_nonreporting_holdings` | `unresolved` only (holding-dependent) |
 
+Hashes are lowercase hexadecimal. A URL's last path segment is not `.` or `..` and contains no percent-encoding.
+
 Basis rules: an `unresolved` answer if and only if an `unresolved` basis, which needs `would_resolve`; `assumed` needs
 an assumption, other bases have none; every resolved answer has a quote; every finding has reasoning and an authority.
 
@@ -261,8 +264,8 @@ the same job run, or none if that step failed or wrote nothing.
    the reason and raises.
 3. It fetches, through the fund step's SEC gate and user agent, no redirects, HTTP 200 only, at most 8 MiB, strict
    UTF-8 for non-XML: each cited document with no stored fetch of the expected hash (at most once per URL per run),
-   and the CIK's submissions JSON (`https://data.sec.gov/submissions/CIK<cik>.json`) when its newest fetch is over 7
-   days old. A failed fetch stores nothing.
+   and the CIK's submissions JSON (`https://data.sec.gov/submissions/CIK<cik>.json`) when no fetch is stored or its
+   newest is over 7 days old (elapsed time). A failed fetch stores nothing.
 4. In one transaction it records one observation per fund security (below), with its document rows, and sets the run
    `succeeded` with the cutoff. Code checks first that every referenced fetch has `fetched_at` ≤ cutoff and every fund
    observation `observed_at` = the run's `fund_observed_at`.
@@ -320,7 +323,8 @@ residual covers that.
 - `tax_fund_determination_runs`: `run_id` identity, `job_run_id` (FK `job_runs`), `fund_observed_at` (NULL when the
   fund step failed), `started_at`, `cutoff` (NULL until `succeeded`), `status` (`running`, `succeeded`, `failed`),
   `failure TEXT`; a trigger allows only `running` → `succeeded` or `failed`, once, and refuses deletion.
-- `tax_fund_determination_run_loads`: `(run_id, determination_id)`, the run's active determinations.
+- `tax_fund_determination_run_loads`: primary key `(run_id, determination_id)`, each a foreign key to its parent: the
+  run's active determinations.
 - Every child table of a run (loads, observations, document rows) has a trigger refusing an insert under a run that
   is not `running`, and refusing update and delete.
 - `tax_fund_determinations`, insert only: `determination_id TEXT PRIMARY KEY`, `policy_id`, `cik` UNIQUE, `version`
@@ -357,8 +361,9 @@ year after `reviewed_at`; Design 3's order and interval. Changing any of these i
 
 - **Version succession.** How a later determination of the same fund confirms, corrects or supersedes an earlier
   one's dates, how holding-dependent findings are modelled, and limbs (a) and (c). They are designed with SPY's next
-  governing filing, under a new policy id; until then a stale v1 withholds SPY. SPY files its 485BPOS each January,
-  but a 497 supplement or other governing filing can come at any time, and `review_by` (2027-10-14) ends v1 regardless.
+  governing filing, under a new policy id; until then a stale v1 withholds SPY. The reviewed recent 485BPOS filings
+  were made in January (2025-01-27, 2026-01-26), which suggests, without establishing, the next; a 497 supplement or
+  other governing filing can come at any time, and `review_by` (2027-10-14) ends v1 regardless.
 - **What clears an `unresolved` list search** (3d-3c-1 assigned it here). No fund has one: SPY's search is
   `not_found`. A clearing rule must restore the completeness `not_found` requires and verify its own evidence.
 - **3d-3c-3:** non-reporting fund disposals: identification, the basic gain, its character, and how a figure resting
@@ -403,7 +408,7 @@ Pure:
    older run succeeded); each of the first four outcomes returned before the date test; a date before
    `valid_from` and after the cutoff (`outside_interval`); a `stale` determination passes its
    outcome through; false and unresolved `offshore_fund` (A6, A7 and A8 still returned); `listed`; `unresolved`;
-   `unavailable`; an all-established determination resting on A5, A6 and A7 only.
+   `unavailable`; an all-established determination resting on exactly A5, A6, A7 and A8.
 
 DB (one module):
 6. Insert-only, transition, deletion and sealing triggers (a row added under a finished run refused); the determination and authority CHECKs; a second version for a CIK refused; a
@@ -419,8 +424,10 @@ DB (one module):
 1. Before deployment, record the row counts of the seven new tables (zero) and the `sec_governing_document` and
    `sec_submissions` fetch counts (zero).
 2. Deploy, run one `tax_broker_evidence_refresh`, and record its `job_runs` id, the determination run and its cutoff.
-3. Rerun the Script against the same evidence: its documents, the step's submissions body saved beside them, and
-   `--fund-observed-at` the run's `fund_observed_at`. The expected rows are the Script's outcomes. For today's evidence that is: one determination
+3. Rerun the Script against the same evidence: its documents, the step's submissions body saved beside them,
+   `--fund-observed-at` the run's `fund_observed_at` and `--cutoff` the run's cutoff. On a fresh deployment no earlier
+   run exists, so latched staleness cannot differ; the Script compares dates where the step compares timestamps (local
+   copies carry fetch dates only), so a fetch on the cutoff's own day is compared as that day. The expected rows are the Script's outcomes. For today's evidence that is: one determination
    (`fund_determination_v1:0000884394:1`, the committed file's hash); 34 authority links; 14 `sec_governing_document`
    fetches whose content hashes equal the JSON's; one `sec_submissions` fetch; run `succeeded`; SPY `determined`
    (`offshore_fund` `true`, `offshore_basis` `assumed`) with 14 document rows; IUSA.L and CSPX.L `not_candidate`;
@@ -432,8 +439,8 @@ DB (one module):
 ## Full-population verification
 
 The Script checks every hash and quote of the only determination and applies Designs 2 and 3 to every fund security
-of the newest fund run (three securities, one disposal). It is a narrower probe than the step: it takes the newest
-fund run rather than a job run's, and one determination. It verifies the determination against its sources and the
+*observed* in the chosen fund run (three securities, one disposal); a security missing from that run is not found by
+it. It is a narrower probe than the step: one determination, date granularity, no run history. It verifies the determination against its sources and the
 rules against the stored rows, not the legal reasoning, which is this spec's checkpoint 1.
 
 ## Finding dispositions
@@ -469,6 +476,14 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r4.17 (next filing) | stated: any governing filing can come at any time, and `review_by` ends v1 |
 | r4.19 (order) | the table's question order |
 | r4.22 (2.01) | quoted whole |
+| r5.1 (investment bonds) | the exclusion rests on A4, which now states s564G's unapplied conditions; the incorrect disqualifiers removed |
+| r5.2, r5.3 (time, replay) | elapsed-time rules for the step; `--cutoff` for replay; the Script's date granularity and absent run history stated |
+| r5.4 (population) | the claim restricted to observed securities |
+| r5.5 (source failures) | unreadable or undecodable documents, authorities and index become refusals |
+| r5.6 (test) | exactly A5–A8 |
+| r5.7, r5.8 (storage, retrieval) | run-loads keys; initial submissions fetch |
+| r5.9, r5.10 (grammar) | no `.`, `..` or percent-encoding in the last segment; lowercase hex |
+| r5.11, r5.12 (wording) | A2's residual and the January filing pattern restated |
 | r3.5 (unresolved basis) | `offshore_basis` `unresolved` |
 | r3.7 (refusal order) | the first four outcomes are returned before the date test |
 | r3.9 (identity continuity) | policy assumption A7 |
