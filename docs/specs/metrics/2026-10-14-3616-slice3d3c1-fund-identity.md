@@ -754,7 +754,7 @@ build's, and tests 2, 6 and 7 cover it.
 3d-3a draft, round 1: finding 6 is answered by Design 2 and finding 16 by Designs 1 and 3. Findings 4, 5 and 9 move
 to 3d-3c-2 by construction of the split.
 
-Rounds 1–4 (`rN.k` is round N finding k):
+Rounds 1–8 (`rN.k` is round N finding k):
 
 | findings | disposition |
 |---|---|
