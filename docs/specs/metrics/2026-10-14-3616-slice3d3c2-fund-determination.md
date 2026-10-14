@@ -25,7 +25,7 @@ It changes no character, no matching run and no figure. Every fund stays withhel
 - **Offshore fund: true, assumed.** A mutual fund (s356 A–C met, s357 condition D not met) under which property is held
   on trust (s355(1)(b)). The trustee's non-UK residence rests on where it is managed and acts (A1, A2); the terms rest
   on the unlocated 1993 Indenture not varying them (A3); no other exclusion was found (A4).
-- **Reporting status at its 2026-09-23 disposal: `non_reporting_assumed`**, resting on A1–A8. By reg 4(2) a fund is
+- **Reporting status at its 2026-09-23 disposal: `non_reporting_assumed`**, resting on A1–A9. By reg 4(2) a fund is
   non-reporting unless Part 3 applies. No available evidence can *establish* that Part 3 does not apply at a date
   (A5); the 3d-3c-1 list search found no matching row.
 - **Transparency (reg 11): unresolved**, so whether SPY's gains are offshore income gains (reg 17) or chargeable gains
@@ -38,7 +38,7 @@ It changes no character, no matching run and no figure. Every fund stays withhel
 worktree). It prints its run time, its own SHA-256, the determination file's SHA-256 (bytes), the invocation and the
 submissions JSON's SHA-256 and fetch date. It validates the draft (Design 1), stops on a format error, reduces each
 saved SEC document with `document_text`, checks every hash and quote, and then, in one REPEATABLE READ snapshot of the
-dev DB, applies Designs 2 and 3 to every fund security. It exits non-zero on any failed check.
+dev DB, applies Designs 2 and 3 to every fund security observed in the selected fund run. It exits non-zero on any failed check.
 
 The SEC documents were fetched from EDGAR on 2026-10-14 (`var/research/3616/slice3d3c2/spy/index.txt`). Two fetches of
 one document on that day gave identical bytes, including SEC's appended `script` element; the determination binds the
@@ -69,7 +69,7 @@ hash of `document_text`, which drops it.
    - The **Trust Indenture and Agreement** of 1993-01-22 and its 1996-01-19 amendment were not located in the reviewed
      corpus. The searched boundary is the CIK's EDGAR filing list, which begins 1996-01-25 (assumption A3).
    - No CUSIP or ISIN appears in these documents. The ISIN binding is 3d-3c-1's candidate chain.
-2. **Sources verify** (Script): no format error; 14 documents and 34 authority snapshots match their hashes; all 32
+2. **Sources verify** (Script): no format error; 14 documents and 34 authority snapshots match their hashes; all 33
    quotes, contrary quotes and evidence quotes occur in their sources. The N-CEN is bound by its bytes, every other
    document by its `document_text`.
 3. **SPY's filings since 2026-01-26** (submissions JSON, 275 filings, no overflow files): 485BPOS and 497 on
@@ -80,7 +80,7 @@ hash of `document_text`, which drops it.
    549300NZAMSJ8FXPQQ63, ISIN US78462F1030, MIC ARCX, symbol SPY, search `not_found`. IUSA.L and CSPX.L are
    `cik_unestablished`.
 5. **Script, Designs 2 and 3:** SPY `determined`; offshore fund true, assumed (A1–A4); disposal 2026-09-23
-   `non_reporting_assumed`, resting on A1–A8. IUSA.L and CSPX.L `not_candidate`.
+   `non_reporting_assumed`, resting on A1–A9. IUSA.L and CSPX.L `not_candidate`.
 6. **INTM180030** has seven USA rows: partnerships under the Uniform Partnership Act and the Uniform Limited
    Partnership Act, LLC, LLP, S corporation, REIT (opaque) and LLLP. It has none for a New York trust or a unit
    investment trust.
@@ -178,13 +178,15 @@ the Trust; A3 the 1993 Indenture and its 1996 amendment do not vary the quoted t
 assumptions, carried by every determination and added by Design 3: A5 Part 3 does not apply to the Trust at the
 disposal date; A6 the committed legal sources state the law in force at the disposal date; A7 the units disposed of
 are interests in the class bound today at every date from `valid_from` to the disposal; A8 no governing filing on or
-after `monitor_from` and before the disposal or cutoff is missing from the inventory read.
+after `monitor_from` and before the disposal or cutoff is missing from the inventory read; A9 no change to the
+governing terms that would change a finding took effect before the disposal without appearing in the reviewed
+documents (Amendment 6, filed 2025-01-27, made changes effective in 2024).
 
 **The consequence, for 3d-3c-3.** Identification follows from non-reporting status alone: s106A(10)(c) makes an
 interest in a non-reporting fund a relevant security, and transparency does not change reg 4(2) status. Whether the
 gain is an offshore income gain or a chargeable gain is unresolved, because reg 29 turns on transparency. If SPY were
 transparent, its holders would also be charged on income as it arises, which bears on 3d-3b. Every figure for SPY
-rests on A1–A8 at least. Whether and how such a figure is published is 3d-3c-3's decision.
+rests on A1–A9 at least. Whether and how such a figure is published is 3d-3c-3's decision.
 
 ## Design
 
@@ -215,8 +217,8 @@ exactly those listed. Document and authority ids share one namespace, `[a-z0-9_]
   the snapshot's bytes (a hash is 64 hex digits; `PENDING` is accepted only by the Script's `--fill` draft mode); the snapshot's
   first line names the URL (or, for an HMRC manual page, its content-API URL).
 - `assumptions`: `{assumption_id, statement, evidence, residual}`, non-blank prose, `evidence` a list of quotes. The
-  policy assumptions `A5_part3_not_applying`, `A6_law_current`, `A7_identity_continuity` and `A8_inventory_complete`
-  are required.
+  policy assumptions `A5_part3_not_applying`, `A6_law_current`, `A7_identity_continuity`, `A8_inventory_complete` and
+  `A9_terms_continuity` are required.
 - `findings`: one per question, `{question, answer, basis, assumptions, authorities, quotes, contrary, reasoning,
   would_resolve}`. A quote is `{source_id, locator, text}`, `source_id` a document or an authority, locator and text
   non-blank after collapsing white space.
@@ -231,7 +233,8 @@ exactly those listed. Document and authority ids share one namespace, `[a-z0-9_]
 | `transparent_fund` | `transparent`, `opaque`, `unresolved` |
 | `reg29_sufficient_information`, `reg29_nonreporting_holdings` | `unresolved` only (holding-dependent) |
 
-Hashes are lowercase hexadecimal. A URL's last path segment is not `.` or `..` and contains no percent-encoding.
+Hashes are lowercase hexadecimal. A document URL's last path segment is not `.` or `..` and contains no
+percent-encoding (authority URLs are provenance labels, never fetched by the step).
 
 Basis rules: an `unresolved` answer if and only if an `unresolved` basis, which needs `would_resolve`; `assumed` needs
 an assumption, other bases have none; every resolved answer has a quote; every finding has reasoning and an authority.
@@ -284,8 +287,13 @@ security is refused with `run_failed`. A finished run is sealed: no row is added
 | `quote_unverified` | a quote, contrary quote or evidence quote, white space collapsed, is not in its source's text (`document_text` for a document; the snapshot, white space collapsed, for an authority) |
 | `review_out_of_date` | the cutoff is before `reviewed_at` or after `review_by` (a version is used for nothing after its review deadline until a successor policy reviews it again) |
 | `coverage_unavailable` | the newest submissions fetch is missing, dated after the cutoff, or older than 30 days at it; or unsound: not an object whose `cik` is the CIK, whose `filings.files` is a list and whose `filings.recent` has equal-length `form`, `filingDate` and `accessionNumber` lists with non-blank forms, valid dates no later than the cutoff and unique accession numbers; or `files` is non-empty; or a reviewed filing on or after `monitor_from` is absent or listed with another form or date |
-| `stale` | it lists a filing of a `refresh_forms` form filed on or after `monitor_from` that is not in `reviewed_filings`, or an earlier run recorded this determination `stale` (staleness is latched; the refusal names the first accession found) |
+| `stale` | an unreviewed governing accession is recorded for the determination (below) |
 | `determined` | otherwise |
+
+**Unreviewed accessions.** Whenever a run reads a sound inventory (the `coverage_unavailable` tests pass), whatever
+the security's outcome, it records in `tax_fund_determination_unreviewed` each listed filing of a `refresh_forms` form
+filed on or after `monitor_from` and not in `reviewed_filings`. The record is permanent, so staleness latches even if
+a later inventory omits the accession, or an earlier-priority refusal hid it at the time.
 
 The submissions JSON is SEC's own filing inventory for the CIK. That it is complete, and that nothing was filed between
 its fetch and the disposal or cutoff, is assumption A8, which Design 3 carries. A stale determination is used for
@@ -298,9 +306,11 @@ neighbours; collapse every run of white space (Unicode, so NBSP too) to one spac
 
 ### 3. Reporting status at a disposal date
 
-`reporting_status(security, d)`, pure, over the newest run:
+`reporting_status(security, d, evaluated_at)`, pure, over the newest run. Every time is a timezone-aware instant
+normalised to UTC; `reviewed_at`, `review_by` and filing dates are UTC calendar dates, compared inclusively.
 1. `no_run` if there is none; `run_failed` if it did not succeed; `not_observed` if it has no row for the security
-   (no older row is used);
+   (no older row is used); `review_out_of_date` if `evaluated_at`'s date is after `review_by`, however recent the run
+   (a run admitted before the deadline is not reused after it);
 2. the security's outcome if it is not `determined` (the first four outcomes carry no determination and are returned
    before any date test);
 3. `outside_interval` unless `valid_from` ≤ `d` ≤ the run's cutoff date;
@@ -310,7 +320,7 @@ neighbours; collapse every run of white space (Unicode, so NBSP too) to one spac
 6. `reporting_status_unestablished`, reason `search_unavailable`, if it is `unavailable`;
 7. otherwise (`not_found`), `non_reporting_assumed`.
 
-From step 4 on it returns the assumptions it rests on: those of `offshore_fund`, A6, A7 and A8, and A5 for
+From step 4 on it returns the assumptions it rests on: those of `offshore_fund`, A6, A7, A8 and A9, and A5 for
 `non_reporting_assumed`. There is no established non-reporting status: no available evidence can show that Part 3 does
 not apply at `d`, given reg 57(3)'s continuation, reg 54(2)'s timing, an agreed reg 55 extension, a reg 56 appeal, the
 list's lag and the search's own residual (A5). A later list version showing the fund under the same search key turns
@@ -323,6 +333,8 @@ residual covers that.
 - `tax_fund_determination_runs`: `run_id` identity, `job_run_id` (FK `job_runs`), `fund_observed_at` (NULL when the
   fund step failed), `started_at`, `cutoff` (NULL until `succeeded`), `status` (`running`, `succeeded`, `failed`),
   `failure TEXT`; a trigger allows only `running` → `succeeded` or `failed`, once, and refuses deletion.
+- `tax_fund_determination_unreviewed`, insert only: primary key `(determination_id, accession)`, `form`, `filed`,
+  `first_run_id`; each a foreign key to its parent.
 - `tax_fund_determination_run_loads`: primary key `(run_id, determination_id)`, each a foreign key to its parent: the
   run's active determinations.
 - Every child table of a run (loads, observations, document rows) has a trigger refusing an insert under a run that
@@ -332,7 +344,7 @@ residual covers that.
   that the body's `determination_id`, `policy_id`, `cik` and `version` equal the columns.
 - `tax_fund_authority_snapshots`, insert only: `content_sha256 TEXT PRIMARY KEY`, `body BYTEA`, CHECK the hash is the
   body's. `tax_fund_determination_authorities`, insert only: `(determination_id, authority_id)` primary key,
-  `content_sha256` (FK); code checks it equals the body's.
+  `determination_id` (FK) and `content_sha256` (FK); code checks it equals the body's.
 - `tax_fund_determination_observations`, insert only: `observation_id` identity, `run_id` (FK), `policy_id`,
   `tax_security_id`, `fund_observation_id` (FK; NULL only for `fund_observation_unavailable`), `determination_id`
   (FK; NULL exactly for the first four outcomes), `outcome` (CHECK on Design 2's codes), `refusal TEXT`,
@@ -343,7 +355,8 @@ residual covers that.
   `fund_observed_at`, and its `policy_id` is `fund_identity_v1` (the one identity policy v1 accepts); and that `submissions_fetch_id`'s source is
   `sec_submissions` with the CIK's URL as request key. Code checks before insert that `offshore_fund` and
   `offshore_basis` equal `offshore_fund(body)`.
-- `tax_fund_determination_documents`, insert only: `(observation_id, doc_id)` primary key, `fetch_id` (FK). A trigger
+- `tax_fund_determination_documents`, insert only: `(observation_id, doc_id)` primary key, `observation_id` (FK) and
+  `fetch_id` (FK). No foreign key here cascades; parents are insert-only. A trigger
   checks that `doc_id` is a document of the observation's determination, that the fetch's source is
   `sec_governing_document` and its request key that document's URL; code checks the fetch's content hash equals the
   body's. A `determined` observation has one row per document.
@@ -403,7 +416,7 @@ Pure:
    document fetch beside a newer mismatching one (`determined`, the matching fetch used) and the reverse; a cutoff
    before `reviewed_at` and after `review_by` (`review_out_of_date`); a determination whose file is gone from the
    deployment (`no_determination`).
-5. `reporting_status`: SPY's 2026-09-23 case (`non_reporting_assumed`, A1–A8); no run (`no_run`); a security absent
+5. `reporting_status`: SPY's 2026-09-23 case (`non_reporting_assumed`, A1–A9); no run (`no_run`); a security absent
    from the newest run (`not_observed`, although an older run has it); a failed newest run (`run_failed`, although an
    older run succeeded); each of the first four outcomes returned before the date test; a date before
    `valid_from` and after the cutoff (`outside_interval`); a `stale` determination passes its
@@ -421,7 +434,7 @@ DB (one module):
 
 ## Acceptance (dev DB)
 
-1. Before deployment, record the row counts of the seven new tables (zero) and the `sec_governing_document` and
+1. Before deployment, record the row counts of the eight new tables (zero) and the `sec_governing_document` and
    `sec_submissions` fetch counts (zero).
 2. Deploy, run one `tax_broker_evidence_refresh`, and record its `job_runs` id, the determination run and its cutoff.
 3. Rerun the Script against the same evidence: its documents, the step's submissions body saved beside them,
@@ -431,7 +444,7 @@ DB (one module):
    (`fund_determination_v1:0000884394:1`, the committed file's hash); 34 authority links; 14 `sec_governing_document`
    fetches whose content hashes equal the JSON's; one `sec_submissions` fetch; run `succeeded`; SPY `determined`
    (`offshore_fund` `true`, `offshore_basis` `assumed`) with 14 document rows; IUSA.L and CSPX.L `not_candidate`;
-   `reporting_status` for SPY's 2026-09-23 disposal `non_reporting_assumed` resting on A1–A8. Any other Script
+   `reporting_status` for SPY's 2026-09-23 disposal `non_reporting_assumed` resting on A1–A9. Any other Script
    outcome (a new filing, list match, fetch failure) is expected instead, with its refusal.
 4. Matching: the effective run's characters, identifications and dependencies, compared before and after, are
    unchanged.
@@ -450,7 +463,7 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | findings | disposition |
 |---|---|
 | r1.1–r1.6, r1.8–r1.15, r1.17–r1.24, r1.28, r1.30, r1.32–r1.35, r1.37–r1.39, r1.41; r2.1, r2.2, r2.4, r2.6, r2.7, r2.9, r2.12, r2.13, r2.17–r2.22, r2.25–r2.32, r2.34, r2.36–r2.38 | resolved (r2 or r3) |
-| r1.7, r1.26, r2.5, r3.2, r3.3, r3.4 (history) | policy v1 holds one version per CIK; succession, renewal and correction are a successor policy's (Not in this slice); `review_by` bounds the dates a version covers |
+| r1.7, r1.26, r2.5, r3.2, r3.3, r3.4 (history) | policy v1 holds one version per CIK; succession, renewal and correction are a successor policy's (Not in this slice); `review_by` bounds when a version may be used (`review_out_of_date`), and the run's cutoff bounds the disposal dates it answers |
 | r1.16, r2.8, r3.11 (reg 29 per holding) | holding-dependent findings must be `unresolved` under v1; the evidence for (2) is recorded in the JSON |
 | r1.25, r2.10, r2.11, r3.16 (coverage) | `files` must be a list, timestamps no later than the cutoff, unique accessions, reviewed anchors matched by form and date; completeness of SEC's inventory is a stated residual |
 | r1.27, r2.15, r2.16, r3.17, r3.18 (validation) | total validation; id and hash grammars; unique manifest membership; the newest-485BPOS anchor; `review_by` exactly one year on |
@@ -472,7 +485,7 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r4.13 (future review) | covered by `review_out_of_date` |
 | r4.14 (forms) | canonical `form` plus `exhibit`; manifest form agreement; the anchor by canonical form |
 | r4.15 (limbs) | v1 supports trust arrangements only (`b`, `none`, `unresolved`) |
-| r4.16 (exclusions) | ITA s564G, s564U and TCGA s151W read and applied; SI contents snapshotted; A4 narrowed to s359 |
+| r4.16 (exclusions) | partly: ITA s564G, s564U and TCGA s151W read and snapshotted, SI contents snapshotted; their application rests on A4 (r5.1) |
 | r4.17 (next filing) | stated: any governing filing can come at any time, and `review_by` ends v1 |
 | r4.19 (order) | the table's question order |
 | r4.22 (2.01) | quoted whole |
@@ -484,10 +497,22 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r5.7, r5.8 (storage, retrieval) | run-loads keys; initial submissions fetch |
 | r5.9, r5.10 (grammar) | no `.`, `..` or percent-encoding in the last segment; lowercase hex |
 | r5.11, r5.12 (wording) | A2's residual and the January filing pattern restated |
+| r6.1 (effective before filing) | policy assumption A9, with Amendment 6 as its evidence |
+| r6.2 (reuse after deadline) | Design 3 takes `evaluated_at` and refuses after `review_by` |
+| r6.3 (time) | aware instants normalised to UTC; inclusive UTC calendar dates; the Script refuses a naive `--cutoff` |
+| r6.4 (source boundary) | one guarded index reader; an empty authority snapshot is refused |
+| r6.5 (latch) | unreviewed accessions recorded from every sound inventory, whatever the outcome |
+| r6.6, r6.11 (dispositions) | corrected |
+| r6.7 (FKs) | stated, none cascading |
+| r6.8 (termination) | "a specified lifetime term and termination provisions" |
+| r6.9 (URL rule) | scoped to document URLs |
+| r6.10 (population) | the opening states observed securities |
+| r6.12 (docstring) | the cutoff override described |
+| r6.13 (index) | Amendment 6's effective dates distinguished in the research index |
 | r3.5 (unresolved basis) | `offshore_basis` `unresolved` |
 | r3.7 (refusal order) | the first four outcomes are returned before the date test |
 | r3.9 (identity continuity) | policy assumption A7 |
-| r3.10 (upper bound) | `outside_interval` after the run's cutoff date or `review_by` |
+| r3.10 (upper bound) | `outside_interval` after the run's cutoff date; use after `review_by` is `review_out_of_date` |
 | r3.12 (s355(4)) | `other_exclusions` covers s359 and the investment bond provisions, assumed (A4) |
 | r3.13 (mixed negatives) | an established negative wins |
 | r3.14 (persistence) | stated for an unchanged search key; a new key is in A5's residual |

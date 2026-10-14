@@ -18,9 +18,11 @@ The exit status is non-zero on any failure, and when a candidate security with a
 
 ``--fill`` validates, checks sources, and prints to stdout only the draft with every ``PENDING`` hash filled; it exits
 non-zero, printing nothing to stdout, if any check other than a pending hash fails. Diagnostics go to stderr.
-``--fund-observed-at`` pins the fund run to evaluate (acceptance passes the step's own); one cutoff, the run time,
-is used throughout. The Script holds no history of runs, so it neither latches staleness nor exercises
-``fund_observation_unavailable``; it fails when the fund run has no observations.
+``--fund-observed-at`` pins the fund run to evaluate (acceptance passes the step's own); ``--cutoff`` pins the replayed
+cutoff, an ISO timestamp with an offset (default: the execution time), normalised to UTC and used throughout; review
+dates and filing dates are UTC calendar dates, compared inclusively. The Script holds no history of runs, so it
+neither latches staleness nor exercises ``fund_observation_unavailable``; it fails when the fund run has no
+observations.
 
 The printout carries dates, symbols, CIKs, LEIs, ISINs and accession numbers, never an account identifier.
 
@@ -53,7 +55,13 @@ GOVERNING_FORMS = frozenset(
     {"485APOS", "485BPOS", "485BXT", "497", "497J", "497K", "N-CEN", "N-CEN/A", "N-8F", "N-8F/A"}
 )
 #: Assumptions every determination must carry, because Design 3 adds them by policy.
-POLICY_ASSUMPTIONS = ("A5_part3_not_applying", "A6_law_current", "A7_identity_continuity", "A8_inventory_complete")
+POLICY_ASSUMPTIONS = (
+    "A5_part3_not_applying",
+    "A6_law_current",
+    "A7_identity_continuity",
+    "A8_inventory_complete",
+    "A9_terms_continuity",
+)
 QUESTIONS: dict[str, frozenset[str]] = {
     "arrangement": frozenset({"single_arrangement_single_class", "unresolved"}),
     "s355_limb": frozenset({"b", "none", "unresolved"}),
@@ -367,9 +375,18 @@ class Sources:
     unverified: list[str] = field(default_factory=list)
 
 
+def _index_lines(docs: Path) -> list[str]:
+    """The corpus index's lines, or none when it is missing or undecodable (every document is then unavailable)."""
+    try:
+        return (docs / "index.txt").read_bytes().decode("utf-8").splitlines()
+    except OSError, UnicodeDecodeError:
+        err("index: UNREADABLE")
+        return []
+
+
 def _local_paths(docs: Path) -> dict[str, Path]:
     out: dict[str, Path] = {}
-    for line in (docs / "index.txt").read_text().splitlines():
+    for line in _index_lines(docs):
         cols = [c.strip() for c in line.split("|")]
         if len(cols) < 2 or not cols[1].startswith("https://"):
             continue
@@ -388,11 +405,7 @@ def content_hash(url: str, body: bytes) -> tuple[str, str]:
 
 def check_sources(det: dict[str, Any], docs: Path, authorities: Path) -> Sources:
     s = Sources()
-    try:
-        paths = _local_paths(docs)
-    except OSError as exc:
-        err(f"index: UNREADABLE ({type(exc).__name__})")
-        paths = {}
+    paths = _local_paths(docs)
     for d in det["documents"]:
         path = paths.get(d["url"])
         if path is None or not path.exists():
@@ -424,6 +437,10 @@ def check_sources(det: dict[str, Any], docs: Path, authorities: Path) -> Sources
         except OSError, UnicodeDecodeError:
             s.bad_authorities.append(a["authority_id"])
             err(f"authority {a['authority_id']}: UNREADABLE")
+            continue
+        if not text.splitlines():
+            s.bad_authorities.append(a["authority_id"])
+            err(f"authority {a['authority_id']}: EMPTY")
             continue
         h = s.hashes[a["authority_id"]] = hashlib.sha256(raw).hexdigest()
         s.texts[a["authority_id"]] = collapse(text)
@@ -531,7 +548,7 @@ def reporting_status(
     if not date.fromisoformat(det["valid_from"]) <= d <= cutoff:
         return "outside_interval", f"{d} outside {det['valid_from']}..{cutoff}", []
     answer, _, rests_on = offshore_fund(det)
-    rests_on = sorted({*rests_on, "A6_law_current", "A7_identity_continuity", "A8_inventory_complete"})
+    rests_on = sorted({*rests_on, *POLICY_ASSUMPTIONS} - {"A5_part3_not_applying"})
     if answer == "false":
         return "not_offshore_fund", None, rests_on
     if answer == "unresolved":
@@ -608,7 +625,7 @@ def _submissions(docs: Path, cik: str) -> tuple[Any, date | None, str | None]:
     except OSError, ValueError:
         return None, None, None
     fetched = None
-    for line in (docs / "index.txt").read_text().splitlines():
+    for line in _index_lines(docs):
         cols = [c.strip() for c in line.split("|")]
         if cols[0] == name and len(cols) > 4 and _is_date(cols[4].removeprefix("fetched ")):
             fetched = date.fromisoformat(cols[4].removeprefix("fetched "))
@@ -658,6 +675,9 @@ def main() -> None:
     body, fetched, sub_sha = _submissions(a.docs, det["cik"])
     print(f"submissions sha256 {sub_sha} fetched {fetched}")
     cutoff = datetime.fromisoformat(a.cutoff) if a.cutoff else datetime.now(UTC)
+    if cutoff.tzinfo is None:
+        raise SystemExit("--cutoff needs a UTC offset")
+    cutoff = cutoff.astimezone(UTC)
     refused = gate(det, src, (body, fetched), a.fund_observed_at, cutoff)
     sys.exit(1 if failures or refused else 0)
 
