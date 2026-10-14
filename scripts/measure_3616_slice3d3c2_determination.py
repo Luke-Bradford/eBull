@@ -72,11 +72,10 @@ QUESTIONS: dict[str, frozenset[str]] = {
     "s357_condition_d": frozenset({"met", "not_met", "unresolved"}),
     "other_exclusions": frozenset({"no_applicable_exclusion", "applies", "unresolved"}),
     "transparent_fund": frozenset({"transparent", "opaque", "unresolved"}),
-    "reg29_sufficient_information": frozenset({"made_available", "not_made_available", "unresolved"}),
-    "reg29_nonreporting_holdings": frozenset({"within_limit", "exceeded", "unresolved"}),
+    #: Holding-dependent; policy v1 does not model holdings, so these are unresolved only.
+    "reg29_sufficient_information": frozenset({"unresolved"}),
+    "reg29_nonreporting_holdings": frozenset({"unresolved"}),
 }
-#: Findings whose answer depends on the holding period; policy v1 does not model holdings, so they must be unresolved.
-HOLDING_DEPENDENT = frozenset({"reg29_sufficient_information", "reg29_nonreporting_holdings"})
 BASES = frozenset({"established", "assumed", "unresolved"})
 OFFSHORE_INPUTS = {
     "s355_limb": (("b",), ("none",)),
@@ -343,8 +342,6 @@ def _validate(det: Any, allow_pending: bool) -> list[str]:
             errs.append(f"{q}: answer or basis")
         if (ans == "unresolved") != (basis == "unresolved"):
             errs.append(f"{q}: unresolved answer needs unresolved basis")
-        if q in HOLDING_DEPENDENT and ans != "unresolved":
-            errs.append(f"{q}: holding-dependent findings must be unresolved under policy v1")
         if basis == "assumed" and not f["assumptions"]:
             errs.append(f"{q}: assumed without an assumption")
         if basis != "assumed" and f["assumptions"]:
