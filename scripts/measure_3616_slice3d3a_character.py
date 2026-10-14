@@ -36,11 +36,14 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import lxml.etree as ET
 import psycopg
 
 from app.config import settings
-from app.services.def14a_recipients import CachedCover, CoverUnresolved, instance_url, parse_cover_instance, symbol_key
+from app.services.def14a_recipients import instance_url, symbol_key
+from app.services.raw_filings import stored_body
 from app.services.tax_matching import effective_tax_matching
+from app.services.xbrl_instance import SAFE_XML_PARSER
 
 INSTANCE_MAX_BYTES = 16 * 1024 * 1024
 PROFILE_MAX_AGE = timedelta(days=30)
@@ -48,10 +51,10 @@ STOCKS_TYPE_ID = 5
 ETF_TYPE_ID = 6
 INVESTMENT_SIC = frozenset({"6722", "6726", "6770", "6799"})
 COVER_FORMS = ("10-K", "10-Q", "8-K")
-_SIC = re.compile(r"^[0-9]{4}$")
+_SIC = re.compile(r"[0-9]{4}")
 _COMMON = re.compile(
-    r"^(CLASS [A-Z] )?(COMMON STOCK|ORDINARY SHARES)"
-    r"(,? ((US)?\$?[0-9]*\.?[0-9]+ PAR VALUE|PAR VALUE (US)?\$?[0-9]*\.?[0-9]+|NO PAR VALUE)( PER SHARE)?)?$"
+    r"(CLASS [A-Z] )?(COMMON STOCK|ORDINARY SHARES)"
+    r"(,? ((US)?\$?[0-9]*\.?[0-9]+ PAR VALUE|PAR VALUE (US)?\$?[0-9]*\.?[0-9]+|NO PAR VALUE)( PER SHARE)?)?"
 )
 
 
@@ -70,8 +73,77 @@ class CoverFiling:
     primary_document_url: str | None
 
 
+XBRLI = "http://www.xbrl.org/2003/instance"
+_DEI = re.compile(r"http://xbrl\.sec\.gov/dei/[0-9]{4}")
+
+
+@dataclass(frozen=True)
+class Cover:
+    """A strictly read cover instance: its registrant CIKs, unambiguous (title, symbol) pairs, ambiguous symbols."""
+
+    entity_ciks: frozenset[str]
+    pairs: frozenset[tuple[str, str]]
+    ambiguous: frozenset[str]
+
+
+def read_cover(body: bytes) -> Cover | None:
+    """Strict tax reader of SEC's extracted instance; None means unusable (not XBRL, a ``dei`` fact on an undefined
+    context, or a CIK that is not digits). A symbol whose context has several titles or symbols, or that two contexts
+    give different titles, is ambiguous; a context with a title and no symbol is ignored (untraded notes)."""
+    try:
+        root = ET.fromstring(body, parser=SAFE_XML_PARSER)
+    except ET.XMLSyntaxError:
+        return None
+    if not isinstance(root.tag, str) or ET.QName(root).text != f"{{{XBRLI}}}xbrl":
+        return None
+    contexts = {el.get("id") for el in root.iter(f"{{{XBRLI}}}context")}
+    ciks: set[str] = set()
+    by_ctx: dict[str, dict[str, set[str]]] = {}
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        q = ET.QName(el)
+        if not (q.namespace and _DEI.fullmatch(q.namespace)):
+            continue
+        if q.localname not in ("EntityCentralIndexKey", "Security12bTitle", "TradingSymbol"):
+            continue
+        if el.get("contextRef") not in contexts:
+            return None
+        text = " ".join("".join(el.itertext()).split())
+        if q.localname == "EntityCentralIndexKey":
+            if not text.isdigit():
+                return None
+            ciks.add(text.zfill(10))
+        else:
+            by_ctx.setdefault(str(el.get("contextRef")), {}).setdefault(q.localname, set()).add(text)
+    titles_of: dict[str, set[str]] = {}
+    ambiguous: set[str] = set()
+    for facts in by_ctx.values():
+        symbols = {symbol_key(x) for x in facts.get("TradingSymbol", set()) if x}
+        titles = facts.get("Security12bTitle", set())
+        if len(symbols) == 1 and len(titles) == 1:
+            titles_of.setdefault(next(iter(symbols)), set()).update(titles)
+        else:
+            ambiguous |= symbols
+    ambiguous |= {sym for sym, ts in titles_of.items() if len(ts) > 1}
+    pairs = frozenset((next(iter(ts)), sym) for sym, ts in titles_of.items() if sym not in ambiguous)
+    return Cover(frozenset(ciks), pairs, frozenset(ambiguous))
+
+
 def common_title(title: str) -> bool:
-    return _COMMON.match(" ".join(title.split()).upper()) is not None
+    return _COMMON.fullmatch(" ".join(title.split()).upper()) is not None
+
+
+def consolidate(filings: list[CoverFiling]) -> list[CoverFiling] | None:
+    """One filing per accession, newest first by (date, accession); None when one accession carries two dates."""
+    by_acc: dict[str, CoverFiling] = {}
+    for f in filings:
+        seen = by_acc.get(f.accession)
+        if seen is not None and seen.filed_on != f.filed_on:
+            return None
+        if seen is None or (f.primary_document_url or "") < (seen.primary_document_url or ""):
+            by_acc[f.accession] = f
+    return sorted(by_acc.values(), key=lambda f: (f.filed_on, f.accession), reverse=True)
 
 
 def classify(
@@ -80,14 +152,14 @@ def classify(
     ciks: set[str],
     symbol: str | None,
     symbols_ever: set[str],
-    profile: Profile | None,
+    profiles: list[Profile | None],
     as_of: datetime,
-    covers: list[CoverFiling],
-    outcomes: dict[str, CachedCover],
+    filings: list[CoverFiling],
+    covers: dict[str, Cover | None],
     first_acq: date | None,
 ) -> tuple[str, str | None]:
-    """``tax_character_v1``: (character, detail), detail None for a share. ``covers`` newest first; ``outcomes`` the
-    cached outcome per accession (absent: not cached)."""
+    """``tax_character_v1``: (character, detail), detail None for a share. ``profiles``: one per member carrying the
+    CIK (None: no row). ``covers``: accession → strictly read cover (None: unusable); absent when no body is stored."""
     if len(types) != 1 or len(ciks) > 1:
         return "unestablished", "member_conflict"
     (kind,) = types
@@ -98,43 +170,51 @@ def classify(
     if not ciks or symbol is None:
         return "unestablished", "cik_unestablished"
     (cik,) = ciks
-    if profile is None or not (as_of - PROFILE_MAX_AGE <= profile.fetched_at <= as_of):
+    if not profiles or any(p is None or not (as_of - PROFILE_MAX_AGE <= p.fetched_at <= as_of) for p in profiles):
         return "unestablished", "sec_profile_unavailable"
-    if profile.entity_type != "operating":
+    facts = {(p.entity_type, p.sic) for p in profiles if p is not None}
+    if len(facts) != 1:
+        return "unestablished", "sec_profile_conflict"
+    ((entity_type, sic),) = facts
+    if entity_type != "operating":
         return "unestablished", "entity_type"
-    if profile.sic is None or not _SIC.match(profile.sic) or profile.sic in INVESTMENT_SIC:
+    if sic is None or not _SIC.fullmatch(sic) or sic in INVESTMENT_SIC:
         return "unestablished", "sic"
+    ordered = consolidate(filings)
+    if ordered is None:
+        return "unestablished", "cover_metadata_conflict"
 
-    def pairs_of(filing: CoverFiling) -> frozenset[tuple[str, str]] | str:
-        got = outcomes.get(filing.accession)
-        if got is None:
-            return "unavailable"
-        if got.outcome != "pairs" or cik not in got.entity_ciks:
-            return "unusable"
-        return got.pairs
+    def read(filing: CoverFiling, prefix: str) -> Cover | str:
+        if filing.accession not in covers:
+            return f"{prefix}cover_unavailable"
+        got = covers[filing.accession]
+        if got is None or got.entity_ciks != {cik}:
+            return f"{prefix}cover_unusable"
+        return got
 
-    if not covers:
+    if not ordered:
         return "unestablished", "cover_unavailable"
-    latest = pairs_of(covers[0])
+    latest = read(ordered[0], "")
     if isinstance(latest, str):
-        return "unestablished", f"cover_{latest}"
-    listed = [t for t, s in latest if s == symbol]
-    if len(listed) != 1 or not common_title(listed[0]):
+        return "unestablished", latest
+    listed = [t for t, s in latest.pairs if s == symbol]
+    if symbol in latest.ambiguous or len(listed) != 1 or not common_title(listed[0]):
         return "unestablished", "listed_class_not_common_stock"
     if first_acq is not None:
-        start = next((f for f in covers if f.filed_on <= first_acq), None)
+        start = next((f for f in ordered if f.filed_on <= first_acq), None)
         if start is None:
             return "unestablished", "holding_start_cover_unavailable"
-        then = pairs_of(start)
+        then = read(start, "holding_start_")
         if isinstance(then, str):
-            return "unestablished", f"holding_start_cover_{then}"
-        bound = [t for t, s in then if s in symbols_ever]
-        if len(bound) != 1 or not common_title(bound[0]):
+            return "unestablished", then
+        bound = [t for t, s in then.pairs if s in symbols_ever]
+        if then.ambiguous & symbols_ever or len(bound) != 1 or not common_title(bound[0]):
             return "unestablished", "holding_start_class_not_common_stock"
     return "share", None
 
 
-def _fetch_instance(client: httpx.Client, url: str, out: Path, accession: str) -> CachedCover | None:
+def _fetch_instance(client: httpx.Client, url: str, out: Path, accession: str) -> bytes | None:
+    """The instance body, refused while reading past ``INSTANCE_MAX_BYTES``; None on any non-200 or refusal."""
     with client.stream("GET", url, headers={"User-Agent": settings.sec_user_agent}) as r:
         size, chunks = 0, []
         for chunk in r.iter_bytes():
@@ -147,15 +227,7 @@ def _fetch_instance(client: httpx.Client, url: str, out: Path, accession: str) -
     body = b"".join(chunks)
     (out / f"instance_{accession}.xml.gz").write_bytes(gzip.compress(body))
     print(f"    fetched {url} http={status} sha256={hashlib.sha256(body).hexdigest()}")
-    if status in (404, 410):
-        return CachedCover(outcome="not_found", entity_ciks=frozenset(), pairs=frozenset())
-    if status != 200:
-        return None
-    try:
-        return parse_cover_instance(body.decode("utf-8"))
-    except (CoverUnresolved, UnicodeDecodeError) as exc:
-        print(f"    {accession}: unresolved: {exc}")
-        return None
+    return body if status == 200 else None
 
 
 def main() -> None:
@@ -246,19 +318,21 @@ def main() -> None:
             (members, list(COVER_FORMS)),
         ).fetchall():
             filings.setdefault(iid, []).append(CoverFiling(acc, form, filed, url))
-        cached: dict[str, CachedCover] = {}
-        accs = [f.accession for fs in filings.values() for f in fs]
-        for acc, outcome, ents in conn.execute(
-            "SELECT cover_accession, outcome, entity_ciks FROM sec_cover_12b_fetches WHERE cover_accession = ANY(%s)",
-            (accs,),
-        ).fetchall():
-            pairs = frozenset(
-                (str(t), str(s))
-                for t, s in conn.execute(
-                    "SELECT security_title, trading_symbol FROM sec_cover_12b_pairs WHERE cover_accession = %s", (acc,)
-                ).fetchall()
-            )
-            cached[acc] = CachedCover(outcome=outcome, entity_ciks=frozenset(ents), pairs=pairs)
+        raw: dict[str, bytes] = {}
+        for acc in {f.accession for fs in filings.values() for f in fs}:
+            body = stored_body(conn, accession_number=acc, document_kind="xbrl_cover_instance")
+            if body is not None:
+                raw[acc] = body.encode("utf-8")
+        mismatched = conn.execute(
+            "SELECT count(*) FROM tax_matching_instruments m LEFT JOIN instruments i USING (instrument_id) "
+            "WHERE m.matching_run_id = %s AND (m.symbol IS DISTINCT FROM i.symbol "
+            "OR m.canonical_instrument_id IS DISTINCT FROM i.canonical_instrument_id)",
+            (run_id,),
+        ).fetchone()
+        assert mismatched is not None
+        if mismatched[0]:
+            print(f"instruments differ from run {run_id}'s sealed mapping in {mismatched[0]} rows; rerun")
+            return
         conn.commit()
     with psycopg.connect(settings.database_url) as conn:
         again = effective_tax_matching(conn)
@@ -276,27 +350,26 @@ def main() -> None:
         symbols_ever = {symbol_key(inst[i][0]) for i in member_ids if i in inst} | {
             x for i in member_ids for x in ever.get(i, set())
         }
-        carrier = [i for i in member_ids if i in ciks]
-        profile = profiles.get(carrier[0]) if len(sec_ciks) == 1 and carrier else None
-        covers = sorted(
-            {f for i in member_ids for f in filings.get(i, [])}, key=lambda f: (f.filed_on, f.accession), reverse=True
-        )
-        wanted = covers[:1]
+        carriers = [i for i in member_ids if i in ciks]
+        sec_profiles = [profiles.get(i) for i in carriers]
+        sec_filings = [f for i in member_ids for f in filings.get(i, [])]
+        ordered = consolidate(sec_filings) or []
+        wanted = ordered[:1]
         start = first_acq.get(sec_id)
         if start is not None:
-            wanted += [f for f in covers if f.filed_on <= start][:1]
-        outcomes: dict[str, CachedCover] = {}
+            wanted += [f for f in ordered if f.filed_on <= start][:1]
+        covers: dict[str, Cover | None] = {}
         print(f"== security {sec_id} members={member_ids} types={sorted(sec_types, key=str)} ciks={sorted(sec_ciks)}")
-        print(f"  symbol={symbol} symbols_ever={sorted(symbols_ever)} profile={profile}")
+        print(f"  symbol={symbol} symbols_ever={sorted(symbols_ever)} profiles={sec_profiles}")
         for f in dict.fromkeys(wanted):
-            got = cached.get(f.accession)
-            source = "cache"
-            if got is None and f.primary_document_url and (url := instance_url(f.primary_document_url)):
-                got = _fetch_instance(client, url, out, f.accession)
+            body = raw.get(f.accession)
+            source = "stored"
+            if body is None and f.primary_document_url and (url := instance_url(f.primary_document_url)):
+                body = _fetch_instance(client, url, out, f.accession)
                 source = f"fetched {url}"
-            if got is not None:
-                outcomes[f.accession] = got
-            print(f"  [cover {f.accession} {f.form} {f.filed_on} {source}] {got}")
+            if body is not None:
+                covers[f.accession] = read_cover(body)
+            print(f"  [cover {f.accession} {f.form} {f.filed_on} {source}] {covers.get(f.accession, 'none')}")
         if set(member_ids) & unplaced:
             character, detail = "unestablished", "identity_unestablished"
         else:
@@ -305,10 +378,10 @@ def main() -> None:
                 ciks=sec_ciks,
                 symbol=symbol,
                 symbols_ever=symbols_ever,
-                profile=profile,
+                profiles=sec_profiles,
                 as_of=as_of,
+                filings=sec_filings,
                 covers=covers,
-                outcomes=outcomes,
                 first_acq=start,
             )
         print(f"  first_acq={start} character={character} detail={detail}")
@@ -350,7 +423,7 @@ def universe(archive: Path) -> None:
                 if entity_type == "other":
                     forms = set(doc.get("filings", {}).get("recent", {}).get("form", []))
                     other_forms[next((x for x in ("20-F", "40-F", "10-K") if x in forms), "none")] += 1
-            elif not isinstance(sic, str) or not _SIC.match(sic) or sic in INVESTMENT_SIC:
+            elif not isinstance(sic, str) or not _SIC.fullmatch(sic) or sic in INVESTMENT_SIC:
                 outcomes["sic"] += 1
                 sics[sic or "empty"] += 1
             else:
