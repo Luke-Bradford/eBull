@@ -33,8 +33,9 @@ pairs. This slice adds no capture table.
 
 "Script" is `scripts/measure_3616_slice3d3a_character.py`, read-only, run on 2026-10-14. It resolves the effective
 matching run with `effective_tax_matching` (run 1, over evidence run 2), then in one REPEATABLE READ transaction reads
-that sealed run's rows and the inputs Design 2 names, checks in that snapshot that `instruments` still matches the
-run's sealed `tax_matching_instruments` mapping, checks afterwards that the effective run is unchanged, reads
+that sealed run's rows and the inputs Design 2 names (the stored bodies of only the selected covers), checks in that
+snapshot that `instruments` still matches the run's sealed `tax_matching_instruments` mapping and that no unmapped
+row now points at, or is the `.RTH` variant of, a member, checks afterwards that the effective run is unchanged, reads
 each needed cover from `filing_raw_documents` or, when absent, fetches it (bounded, not stored), reads it with the
 strict reader `read_cover`, and applies Design 2 through one function, `classify`, which the build moves into the service. Output
 `var/research/3616/slice3d3a/population.txt`; fetched bodies with SHA-256 beside it (gitignored; no account
@@ -58,7 +59,8 @@ CIK (tradable or not, variants included), from the local `submissions.zip` of `s
    the title of each class registered under Exchange Act s12(b) with its trading symbol, tagged in inline XBRL (phased
    in from fiscal periods ending on or after 2019-06-15); `sec_cover_identity` reads the tags `dei:Security12bTitle`,
    `dei:TradingSymbol` and `dei:SecurityExchangeName` sharing one context, and `cover_pairs` keeps only unambiguous
-   (title, symbol) pairs. The tax reader (Design 2) reads the same tags. Script, newest cover per security from `filing_events`: AAPL 10-Q 2026-07-31
+   (title, symbol) pairs. The tax reader (Design 2) reads `dei:EntityCentralIndexKey`, `dei:Security12bTitle` and
+   `dei:TradingSymbol`, not the exchange tag. Script, newest cover per security from `filing_events`: AAPL 10-Q 2026-07-31
    (`0000320193-26-000020`) ("Common Stock, $0.00001 par value per share", AAPL), the six notes on its cover having no
    symbol; NXH 8-K 2026-10-06 (`0001140361-26-038800`) ("Common stock, $0.0001 par value per share", NXH) and its
    warrants; GME 10-Q 2026-09-09 ("Class A Common Stock", GME) and its warrants; ILMN 8-K 2026-10-13 ("Common Stock,
@@ -117,12 +119,15 @@ two covers Design 2 reads for every tax security of the effective generation (3d
 Stocks with one primary CIK: the newest cover, and the newest filed on or before the security's first admitted
 acquisition. For each, when `stored_body(accession, "xbrl_cover_instance")` is None, it fetches
 `instance_url(primary_document_url)` on the shared SEC rate lane with `settings.sec_user_agent`, reading the response
-as a stream and abandoning it past 16 MiB, and on a 200 stores the body with `store_raw`. A refusal, a non-200 or a
+as a stream and abandoning it past 16 MiB, and on a 200 stores the body with `store_raw` only when it parses with
+`SAFE_XML_PARSER` and its root is `{http://www.xbrl.org/2003/instance}xbrl` (an HTML error page served as 200 is not
+stored). A stored body that fails that structural test, or exceeds 16 MiB, is fetched again and replaced on the same
+terms; a structurally sound body that fails a character test is evidence and is kept. A refusal, a non-200 or a
 transport error stores nothing and is retried by the next run; the job fails after trying every cover. The run itself
 never fetches.
 
-**Covers of a security**: the SEC rows of `filing_events` for its members with `filing_type` 10-K, 10-Q or 8-K,
-consolidated by `provider_filing_id` (the accession): one accession with two `filing_date` values makes the security
+**Covers of a security**: every SEC row of `filing_events` for its members with `filing_type` 10-K, 10-Q or 8-K,
+with no prior de-duplication, consolidated by `provider_filing_id` (the accession): one accession with two `filing_date` values makes the security
 `cover_metadata_conflict`; otherwise the row with the smallest `primary_document_url` represents it. Ordered newest
 first by `(filing_date, accession)`.
 
@@ -140,16 +145,17 @@ withheld security; its character is `unestablished`, `identity_unestablished`, w
   exists and has `as_of − 30 days ≤ fetched_at ≤ as_of` (fact 2 measures the refresh), and *agree* when all have the
   same `(entity_type, sic)`.
 - A stored instance is read by `read_cover`, strictly. It is *unusable* when it does not parse with
-  `SAFE_XML_PARSER`, its root is not `{http://www.xbrl.org/2003/instance}xbrl`, a `dei` fact (namespace exactly
-  `http://xbrl.sec.gov/dei/` and four digits) of the three below names a `contextRef` with no `xbrli:context`, or an
-  `EntityCentralIndexKey` is not all digits. Otherwise its *CIKs* are the distinct `dei:EntityCentralIndexKey`
+  `SAFE_XML_PARSER`, is over 16 MiB (checked before parsing), its root is not
+  `{http://www.xbrl.org/2003/instance}xbrl`, an `xbrli:context` has no `id` or shares one with another, a `dei` fact
+  (namespace exactly `http://xbrl.sec.gov/dei/` and four digits) of the three below has no `contextRef` or one naming
+  no context, or an `EntityCentralIndexKey` is not all digits. Otherwise its *CIKs* are the distinct `dei:EntityCentralIndexKey`
   values, zero-padded; per `contextRef`, the `dei:TradingSymbol` values (under `symbol_key`) and
   `dei:Security12bTitle` values (whitespace collapsed) form a *class* when there is exactly one of each; a context with
   symbols and not exactly one title and one symbol makes each of its symbols *ambiguous*, as does a symbol that two
   contexts give different titles; a context with a title and no symbol is ignored (AAPL's untraded notes, fact 3).
   It is *usable* for a CIK when its CIKs are exactly that one CIK.
-- A title is *common* when, whitespace collapsed and upper-cased, it matches in full (`fullmatch`, so no trailing
-  newline) `(CLASS [A-Z] )?(COMMON STOCK|ORDINARY SHARES)(,? (<amount> PAR VALUE|PAR VALUE <amount>|NO PAR VALUE)(
+- A title is *common* when, whitespace collapsed (so a trailing newline is whitespace) and upper-cased, it matches
+  in full `(CLASS [A-Z] )?(COMMON STOCK|ORDINARY SHARES)(,? (<amount> PAR VALUE|PAR VALUE <amount>|NO PAR VALUE)(
   PER SHARE)?)?`, `<amount>` being an optional `US`, an optional `$` and a decimal number: "Common Stock Warrants",
   "Common Stock Units" and "Ordinary Shares of Beneficial Interest" are not common. `def14a_recipients.title_kind` is
   not reused: it counts a trust's "Common Shares of Beneficial Interest" as common, right for proxy recipients and
@@ -272,7 +278,8 @@ Pure, on `read_cover`, `classify`, the title grammar and the digest document:
    profile; a profile 30 days old exactly (current), 30 days and 1 µs (not), dated after `as_of` (not); two carriers,
    one stale; two carriers with different SIC; `other`; SIC 6770, 6722, 6726, 6799, "", " 3571", "6722\n", None; one
    accession with two dates; no cover; the newest uninstanced; unusable instances (not XML, wrong root namespace, a
-   `dei` fact on an undefined context, a non-digit CIK); an instance with two CIKs, one of them ours, whose common
+   `dei` fact on an undefined context, a context without an `id`, two contexts with one `id`, a fact without
+   `contextRef`, a non-digit CIK, a 16 MiB + 1 byte body); an instance with two CIKs, one of them ours, whose common
    class carries our symbol (unusable); our symbol in two contexts, "Common Stock" complete and "Common Units" without
    its exchange tag (ambiguous); a context with two titles and our symbol; the symbol's title "Common Units" (Energy
    Transfer fixture); a `dei` namespace `https://example.invalid/xbrl.sec.gov/dei/2026` (not read); an acquisition and
@@ -282,21 +289,24 @@ Pure, on `read_cover`, `classify`, the title grammar and the digest document:
    "Class A Common Stock", "Common Stock, $0.01 par value", "Common Stock, par value $0.001 per share", "Ordinary
    Shares, US$0.0001 par value per share", "Common Stock, no par value"; not common: "Common Stock Warrants", "Common
    Stock Units", "Ordinary Shares of Beneficial Interest", "Common Shares", "Common Units", "Warrants to Purchase
-   Common Stock", "Class A Common Stock and one-third of one Redeemable Warrant", "Common Stock\n".
+   Common Stock", "Class A Common Stock and one-third of one Redeemable Warrant"; "Common Stock\n" is common (whitespace).
 3. **Shares:** AAPL's instance (its notes without symbols ignored) and NXH's two instances (NXH today, BBBY at the
    start, BBBY in the symbols ever) give `share` with detail None; NXH without its history row gives
    `holding_start_class_not_common_stock`.
 4. **Keying (finding 30):** a CIK on the base and lots on its `.RTH` variant give one character for the base; the
    symbol is the base's, not the variant's; two members with the same CIK are not a conflict; one accession on the
-   base and the variant with the same date counts once; an unestablished identity's members get
+   base and the variant with the same date counts once; one accession twice on one member with two dates, and once
+   on each of two members with two dates, both give `cover_metadata_conflict`; an unestablished identity's members get
    `identity_unestablished`.
 5. **Digest:** an identical profile with a new `fetched_at` gives an identical document; a new cover accession, an
    absent instance A replaced by an absent instance B, an absent instance becoming stored, a changed class, `sic` or
    `entity_type`, and a profile going stale each change it; the bytes and SHA-256 of a pinned fixture.
 
 DB:
-6. **Evidence job:** a 16 MiB + 1 byte response stores nothing; a transport error stores nothing and the next run
-   fetches again; a stored instance is not fetched again; one failed cover fails the job after the others are tried.
+6. **Evidence job:** a 16 MiB + 1 byte response stores nothing; a 200 HTML page stores nothing; a stored HTML body is
+   fetched again and replaced by a valid instance; a stored instance that classifies `listed_class_not_common_stock`
+   is kept; a transport error stores nothing and the next run fetches again; a stored sound instance is not fetched
+   again; only the two selected covers' bodies are read; one failed cover fails the job after the others are tried.
 7. **Seal and schema:** changing `character_policy_id` or `as_of` in the sealing update is refused; a run with a
    policy and no `as_of` is refused; a character row inserted into a published run is refused; refusing a run that has
    a character row is refused.

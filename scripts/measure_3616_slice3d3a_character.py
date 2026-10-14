@@ -4,14 +4,17 @@ Read-only. Resolves the effective matching run with ``effective_tax_matching`` (
 REPEATABLE READ transaction on the dev DB, reads that run's rows (sealed, so immutable): securities, disposals,
 identifications, dependencies, pools, placements and each security's first admitted acquisition date; and the inputs
 Design 2 names: per member its symbol, ``instrument_type_id``, primary SEC CIK, symbol history and SEC profile
-(``instrument_sec_profile``), the members' SEC 10-K / 10-Q / 8-K rows of ``filing_events``, and the cached cover
-outcome (``sec_cover_12b_fetches`` / ``sec_cover_12b_pairs``) of the two covers Design 2 reads. After the transaction
-it checks the effective run is unchanged. A cover not yet cached is fetched: SEC's extracted instance beside the
-primary document, ``<stem>_htm.xml`` (``def14a_recipients.instance_url``; User-Agent ``settings.sec_user_agent``, at
-most 16 MiB), parsed with ``def14a_recipients.parse_cover_instance``, without writing the cache. It applies
-``classify``, the spec's ``tax_character_v1`` table, and prints per security every input, the character and the run's
-figures. Fetched bodies go to a new directory under ``var/research/3616/slice3d3a/`` with their SHA-256; the printout
-carries dates, amounts, symbols, CIKs and accession numbers, never an account identifier.
+(``instrument_sec_profile``), the members' SEC 10-K / 10-Q / 8-K rows of ``filing_events``, and the stored cover
+instance (``filing_raw_documents``, kind ``xbrl_cover_instance``) of only the two covers Design 2 selects. In the same
+snapshot it checks that ``instruments`` still matches the run's sealed mapping and that no unmapped row now points at,
+or is the ``.RTH`` variant of, a member; after it, that the effective run is unchanged. A selected cover with no
+stored instance is fetched (SEC's extracted instance beside the primary document, ``<stem>_htm.xml`` via
+``def14a_recipients.instance_url``; User-Agent ``settings.sec_user_agent``; abandoned past 16 MiB) and not stored.
+Each instance is read by ``read_cover``, the spec's strict reader of ``dei:EntityCentralIndexKey``,
+``dei:Security12bTitle`` and ``dei:TradingSymbol``, and ``classify`` applies the ``tax_character_v1`` table. It prints
+per security every input, the character and the run's figures. Fetched bodies go to a new directory under
+``var/research/3616/slice3d3a/`` with their SHA-256; the printout carries dates, amounts, symbols, CIKs and accession
+numbers, never an account identifier.
 
 ``--universe ARCHIVE`` applies the profile lines (entity type, SIC) to every Stocks instrument with a primary SEC CIK
 (tradable or not, variants included), reading those two fields from a local copy of SEC's nightly
@@ -87,16 +90,22 @@ class Cover:
 
 
 def read_cover(body: bytes) -> Cover | None:
-    """Strict tax reader of SEC's extracted instance; None means unusable (not XBRL, a ``dei`` fact on an undefined
-    context, or a CIK that is not digits). A symbol whose context has several titles or symbols, or that two contexts
-    give different titles, is ambiguous; a context with a title and no symbol is ignored (untraded notes)."""
+    """Strict tax reader of SEC's extracted instance; None means unusable (over ``INSTANCE_MAX_BYTES``, not XBRL, a
+    context without a unique non-empty id, a ``dei`` fact without a ``contextRef`` naming one, or a non-digit
+    CIK). A symbol whose context has several titles or symbols, or that two contexts give different titles, is
+    ambiguous; a context with a title and no symbol is ignored (untraded notes)."""
+    if len(body) > INSTANCE_MAX_BYTES:
+        return None
     try:
         root = ET.fromstring(body, parser=SAFE_XML_PARSER)
     except ET.XMLSyntaxError:
         return None
     if not isinstance(root.tag, str) or ET.QName(root).text != f"{{{XBRLI}}}xbrl":
         return None
-    contexts = {el.get("id") for el in root.iter(f"{{{XBRLI}}}context")}
+    ids = [el.get("id") or "" for el in root.iter(f"{{{XBRLI}}}context")]
+    if "" in ids or len(set(ids)) != len(ids):
+        return None
+    contexts = set(ids)
     ciks: set[str] = set()
     by_ctx: dict[str, dict[str, set[str]]] = {}
     for el in root.iter():
@@ -107,7 +116,8 @@ def read_cover(body: bytes) -> Cover | None:
             continue
         if q.localname not in ("EntityCentralIndexKey", "Security12bTitle", "TradingSymbol"):
             continue
-        if el.get("contextRef") not in contexts:
+        ref = el.get("contextRef") or ""
+        if ref not in contexts:
             return None
         text = " ".join("".join(el.itertext()).split())
         if q.localname == "EntityCentralIndexKey":
@@ -115,7 +125,7 @@ def read_cover(body: bytes) -> Cover | None:
                 return None
             ciks.add(text.zfill(10))
         else:
-            by_ctx.setdefault(str(el.get("contextRef")), {}).setdefault(q.localname, set()).add(text)
+            by_ctx.setdefault(ref, {}).setdefault(q.localname, set()).add(text)
     titles_of: dict[str, set[str]] = {}
     ambiguous: set[str] = set()
     for facts in by_ctx.values():
@@ -311,15 +321,19 @@ def main() -> None:
         }
         filings: dict[int, list[CoverFiling]] = {}
         for iid, acc, form, filed, url in conn.execute(
-            "SELECT DISTINCT ON (instrument_id, provider_filing_id) instrument_id, provider_filing_id, filing_type, "
-            "filing_date, primary_document_url FROM filing_events WHERE provider = 'sec' "
-            "AND instrument_id = ANY(%s) AND filing_type = ANY(%s) ORDER BY instrument_id, provider_filing_id, "
-            "filing_event_id",
+            "SELECT instrument_id, provider_filing_id, filing_type, filing_date, primary_document_url "
+            "FROM filing_events WHERE provider = 'sec' AND instrument_id = ANY(%s) AND filing_type = ANY(%s)",
             (members, list(COVER_FORMS)),
         ).fetchall():
             filings.setdefault(iid, []).append(CoverFiling(acc, form, filed, url))
+        needed: set[str] = set()
+        for sec_id, member_ids, *_ in securities:
+            ordered = consolidate([f for i in member_ids for f in filings.get(i, [])]) or []
+            needed.update(f.accession for f in ordered[:1])
+            if sec_id in first_acq:
+                needed.update([f.accession for f in ordered if f.filed_on <= first_acq[sec_id]][:1])
         raw: dict[str, bytes] = {}
-        for acc in {f.accession for fs in filings.values() for f in fs}:
+        for acc in sorted(needed):
             body = stored_body(conn, accession_number=acc, document_kind="xbrl_cover_instance")
             if body is not None:
                 raw[acc] = body.encode("utf-8")
@@ -330,8 +344,16 @@ def main() -> None:
             (run_id,),
         ).fetchone()
         assert mismatched is not None
-        if mismatched[0]:
-            print(f"instruments differ from run {run_id}'s sealed mapping in {mismatched[0]} rows; rerun")
+        unsealed = conn.execute(
+            "SELECT count(*) FROM instruments i WHERE NOT EXISTS (SELECT 1 FROM tax_matching_instruments m "
+            "WHERE m.matching_run_id = %(r)s AND m.instrument_id = i.instrument_id) AND ("
+            "i.canonical_instrument_id = ANY(%(m)s) OR upper(i.symbol) = ANY(SELECT upper(symbol) || '.RTH' "
+            "FROM instruments WHERE instrument_id = ANY(%(m)s)))",
+            {"r": run_id, "m": members},
+        ).fetchone()
+        assert unsealed is not None
+        if mismatched[0] or unsealed[0]:
+            print(f"instruments differ from run {run_id}'s sealed mapping ({mismatched[0]}, {unsealed[0]}); rerun")
             return
         conn.commit()
     with psycopg.connect(settings.database_url) as conn:
