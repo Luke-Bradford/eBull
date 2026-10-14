@@ -12683,3 +12683,20 @@ neighbouring container and match it.**
   component of its pointers and symbol pairs, and withhold every member when the component is malformed.
 - Enforced in: `docs/specs/metrics/2026-10-14-3616-slice3d2-statutory-matching.md` (Source rules, Designs 2–3, tests 11
   and 12); review only until the build lands those tests.
+
+### A fund holding is not a share holding, and a shared reader is checked for what it drops (#3616)
+
+- Failure (Codex checkpoint 1, slice 3d-3a spec, rounds 1–7, 2026-10-14): the first draft routed a non-reporting
+  fund's gain to an offshore income gain by copying 3d-2's share-identified gain. Interests in a non-reporting fund
+  are relevant securities (TCGA s104(3), s106A(10); HMRC CG51565): outside the s104 pool, identified 30-day FIFO then
+  LIFO, so 3d-2's SPY figure used the wrong identification. Later drafts inferred a share from an SEC name suffix, then
+  reused the DEF 14A job's cover pair cache, whose reader keeps only contexts carrying all three security facts, so a
+  conflicting context missing its exchange tag vanished instead of making the symbol ambiguous; the strict reader then
+  accepted an issuer identifier outside `xbrli:entity` and a document CIK that did not bind the class's own context.
+- Prevention: before routing a holding's tax treatment, establish which identification regime its legal class falls
+  under; withhold a class whose regime is not implemented. Evidence of a security's class is security-specific (the
+  s12(b) title paired with its symbol), never an issuer name. Before reusing a parser for a new decision, list what it
+  discards and whether a discarded element could reverse that decision; bind every consumed fact to its own context's
+  issuer through the direct `xbrli:context/xbrli:entity/xbrli:identifier` path.
+- Enforced in: `docs/specs/metrics/2026-10-14-3616-slice3d3a-tax-character.md` (Source rules, Design 2, tests 1–4) and
+  `scripts/measure_3616_slice3d3a_character.py` (`read_cover`, `classify`); review only until the build lands the tests.
