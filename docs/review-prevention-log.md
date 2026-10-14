@@ -12714,3 +12714,28 @@ neighbouring container and match it.**
   stored-body path falls back to a fetch must print how many bodies came from each path.
 - Enforced in: `sql/490_tax_character.sql` (`tax_cover_instances`), `app/services/tax_matching.py`
   (`refresh_cover_instances`) and `tests/test_tax_matching_db.py` (cover refresh tests).
+
+### A new compared field makes every stored normalisation stale (#3616)
+
+- Failure (slice 3d-3b build, 2026-10-14): v3 gates the sync `openPositionActionType`. The spec assumed ingestion
+  compares the field table, but it compares `trade_events._SYNC_FIELDS`. Codex checkpoint 2 found that a change of
+  that field alone would never be retained. Simply adding the key would have been worse: the stored
+  `observed_normalised` of every existing observation lacks it. The next sync would then write an amendment for each
+  of them that differed by the key's presence alone, and v3 would refuse every such position.
+- Prevention: when a field joins a comparison projection, compare against stored observations re-normalised from
+  `observed_raw` under the current projection, never against their stored normalisation. When a derivation gates a
+  broker field, grep the ingestion projection for it as well as the field table.
+- Enforced in: `app/services/trade_events.py` (both baselines re-normalised), `app/services/tax_broker_evidence.py`
+  (loader re-normalises) and `tests/test_tax_broker_derivation.py`
+  (`test_an_open_reason_change_alone_is_retained_as_an_amendment`).
+
+### A field's default must not pass its own validation (#3616)
+
+- Failure (slice 3d-3b build, PR #3809, review round 1): `SubjectRow.total_fees_nonzero_position_ids` defaulted to
+  `()`, which `_nonzero_ids_valid` accepts as "valid, no income". A caller that omitted the field would have computed
+  without A8 instead of making the lot `unavailable`. The loader also cast `held_positions` keys with `int()`, so a
+  malformed key would crash the whole matching run instead of withholding one security.
+- Prevention: a field that feeds a validity gate takes no default, so every writer must state it. An input cast that
+  can fail turns into the field's invalid value, never an exception.
+- Enforced in: `app/services/tax_matching.py` (`SubjectRow`, `_position_keys`) and `tests/test_tax_matching.py`
+  (`test_a_held_positions_key_that_is_not_an_id_makes_the_lot_unavailable`).

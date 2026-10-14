@@ -25,6 +25,7 @@ from app.services.tax_character import (
 from app.services.tax_ledger import _compute_tax_year
 from app.services.tax_matching import (
     DISPOSAL_FORMULA_ASSUMED,
+    DISTRIBUTION_CHARACTER_ASSUMED,
     EXECUTION_ASSUMED,
     HISTORY_COVERAGE_UNESTABLISHED,
     LOOKUP_EVIDENCE_UNOBSERVED,
@@ -394,8 +395,10 @@ def _subject(
     instrument: int | None = 1,
     evidence: str | None = "lookup",
     unobserved: tuple[int, ...] | None = (),
+    nonzero: tuple[int | None, ...] | None = (),
+    positions: frozenset[int] | None = frozenset(),
 ) -> SubjectRow:
-    return SubjectRow(subject, outcome, instrument, evidence, unobserved)
+    return SubjectRow(subject, outcome, instrument, evidence, unobserved, nonzero, positions)
 
 
 class TestClasses:
@@ -481,10 +484,10 @@ def _inputs(
     characters: dict[int, SecurityEvidence] | None = None,
 ) -> MatchingInputs:
     """By default every security's character inputs are a share's, so these tests exercise identification."""
-    bare = MatchingInputs(1, "broker_evidence_v2", fetch, tuple(subjects), tuple(lots), instruments, AS_OF, {})
+    bare = MatchingInputs(1, "broker_evidence_v3", fetch, tuple(subjects), tuple(lots), instruments, AS_OF, {})
     if characters is None:
         characters = {key: _share(instruments[key].symbol.upper()) for key in security_members(bare)}
-    return MatchingInputs(1, "broker_evidence_v2", fetch, tuple(subjects), tuple(lots), instruments, AS_OF, characters)
+    return MatchingInputs(1, "broker_evidence_v3", fetch, tuple(subjects), tuple(lots), instruments, AS_OF, characters)
 
 
 def _rows_of(*rows: tuple[int, str, int | None]) -> dict[int, InstrumentRow]:
@@ -621,7 +624,10 @@ def test_the_inputs_document_is_pinned() -> None:
     """A missing instrument (7) and a subject with no lot (order:2) fix the document's bytes and SHA-256."""
     inputs = _inputs(
         [_lot_row("L1", instrument=1), _lot_row("L2", instrument=7)],
-        [_subject(unobserved=(9, 3)), _subject("order:2", "unresolved", None, None)],
+        [
+            _subject(unobserved=(9, 3), nonzero=(3,), positions=frozenset({9, 3})),
+            _subject("order:2", "unresolved", None, None),
+        ],
         _rows_of((1, "SPY", None), (2, "SPY.RTH", 1), (5, "OTHER", None)),
     )
     document = inputs_document(inputs)
@@ -630,10 +636,11 @@ def test_the_inputs_document_is_pinned() -> None:
         '["0000000001-26-000001",[["0000000001"],[["Common Stock","SPY"]],[]]],null]],'
         '"evidence":[["L1","' + "f" * 64 + '"],["L2","' + "f" * 64 + '"]],'
         '"instruments":[[1,"SPY",null],[2,"SPY.RTH",1],[7,null,null]],'
-        '"subjects":[["order:1","admitted",1,"lookup",[3,9]],["order:2","unresolved",null,null,[]]],'
-        '"version":"matching_inputs_v2"}'
+        '"subjects":[["order:1","admitted",1,"lookup",[3,9],[3],[3,9]],'
+        '["order:2","unresolved",null,null,[],[],[]]],'
+        '"version":"matching_inputs_v3"}'
     )
-    assert inputs_digest(document) == "ae7c662027195be5afc40a4872e2c3c8d53c4de2ea6a47d3eb95f23d43604982"
+    assert inputs_digest(document) == "8e263b6fdbf459f3e3ab2c291cc11c30897eea6cb1d191c48367c324d0acd65a"
 
 
 # --- run 2, from the spec's own day totals (Facts 3; Acceptance) ------------------------------------------------------
@@ -771,3 +778,83 @@ class TestJobs:
         with pytest.raises(RuntimeError, match=r"http 503.*matching=published"):
             scheduler.daily_tax_reconciliation()
         assert calls == ["covers", "matching", "covers", "matching"]
+
+
+# --- slice 3d-3b: A8 (distribution_character_assumed) -----------------------------------------------------------------
+
+
+def _a8_lot(key: str, subject: str, direction: str, day: date, units: str, gbp: str) -> LotRow:
+    year = "2025/26" if day < date(2026, 4, 6) else "2026/27"
+    return _lot_row(key, direction, subject=subject, uk_date=day, tax_year=year, units=D(units), amount_gbp=D(gbp))
+
+
+class TestDistributionCharacter:
+    def test_a8_on_acquisitions_with_income_only(self) -> None:
+        income = _subject(nonzero=(21,), positions=frozenset({21}))
+        assert DISTRIBUTION_CHARACTER_ASSUMED in classify_lot(_lot_row(), income).reasons
+        assert DISTRIBUTION_CHARACTER_ASSUMED not in classify_lot(_lot_row(direction="disposal"), income).reasons
+        assert (
+            DISTRIBUTION_CHARACTER_ASSUMED not in classify_lot(_lot_row(), _subject(positions=frozenset({21}))).reasons
+        )
+
+    @pytest.mark.parametrize(
+        "nonzero",
+        [None, (None,), (0,), (-1,), (22, 21), (21, 21), (99,)],
+    )
+    def test_an_invalid_array_makes_the_lot_unavailable(self, nonzero: tuple[int | None, ...] | None) -> None:
+        subject = _subject(nonzero=nonzero, positions=frozenset({21, 22}))
+        c = classify_lot(_lot_row(), subject)
+        assert (c.lot_class, c.reasons) == ("unavailable", ("total_fees_nonzero_invalid",))
+        result = compute_matching(_inputs([_lot_row()], [subject], {1: InstrumentRow(1, "SPY", None)}))
+        assert result.securities[0].status == "withheld"
+
+    def test_a8_reaches_a_pooled_gain_of_another_order_and_stays_on_the_pool(self) -> None:
+        lots = [
+            _a8_lot("Y1", "order:Y", "acquisition", date(2026, 1, 5), "10", "100"),
+            _a8_lot("X1", "order:X", "acquisition", date(2026, 3, 2), "10", "120"),
+            _a8_lot("X2", "order:X", "disposal", date(2026, 6, 1), "5", "70"),
+        ]
+        subjects = [
+            _subject("order:Y", nonzero=(31,), positions=frozenset({31})),
+            _subject("order:X", positions=frozenset({41})),
+        ]
+        result = compute_matching(_inputs(lots, subjects, {1: InstrumentRow(1, "SPY", None)}))
+        (security,) = result.securities
+        assert security.status == "computed"
+        (disposal,) = security.disposals
+        assert DISTRIBUTION_CHARACTER_ASSUMED in disposal.reasons
+        assert security.pool is not None and DISTRIBUTION_CHARACTER_ASSUMED in security.pool.reasons
+
+    def test_a_release_without_propagation(self) -> None:
+        lots = [
+            _a8_lot("X1", "order:X", "acquisition", date(2026, 1, 5), "10", "100"),
+            _a8_lot("X2", "order:X", "disposal", date(2026, 1, 5), "10", "101"),
+            _a8_lot("Y1", "order:Y", "acquisition", date(2026, 6, 1), "10", "130"),
+        ]
+        subjects = [
+            _subject("order:X", positions=frozenset({41})),
+            _subject("order:Y", nonzero=(31,), positions=frozenset({31})),
+        ]
+        result = compute_matching(_inputs(lots, subjects, {1: InstrumentRow(1, "SPY", None)}))
+        (security,) = result.securities
+        (disposal,) = security.disposals
+        assert security.status == "computed"
+        assert DISTRIBUTION_CHARACTER_ASSUMED not in disposal.reasons
+
+    def test_a_release_blocked_by_another_unresolved_subject(self) -> None:
+        lots = [_a8_lot("Y1", "order:Y", "acquisition", date(2026, 6, 1), "10", "130")]
+        subjects = [
+            _subject("order:Y", nonzero=(31,), positions=frozenset({31})),
+            _subject("order:Z", "unresolved", 1, None),
+        ]
+        result = compute_matching(_inputs(lots, subjects, {1: InstrumentRow(1, "SPY", None)}))
+        assert result.securities[0].status == "withheld"
+
+
+def test_a_held_positions_key_that_is_not_an_id_makes_the_lot_unavailable() -> None:
+    from app.services.tax_matching import _position_keys
+
+    assert _position_keys(["21", "3"]) == frozenset({21, 3})
+    assert _position_keys(["21", "x"]) is None and _position_keys(["-1"]) is None
+    c = classify_lot(_lot_row(), _subject(positions=None))
+    assert (c.lot_class, c.reasons) == ("unavailable", ("total_fees_nonzero_invalid",))

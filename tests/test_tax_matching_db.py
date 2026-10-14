@@ -126,8 +126,9 @@ def _insert_subject(conn: psycopg.Connection[tuple], run_id: int, s: Subject) ->
         """
         INSERT INTO tax_evidence_subjects
             (run_id, subject, order_id, etoro_instrument_id, instrument_id, product, outcome, reasons,
-             trade_event_ids, held_positions, execution_evidence, total_fees_unobserved_position_ids)
-        VALUES (%s, %s, %s, 1, %s, 'real', %s, %s, '{}', '{}'::jsonb, %s, '{}')
+             trade_event_ids, held_positions, execution_evidence, total_fees_unobserved_position_ids,
+             total_fees_nonzero_position_ids)
+        VALUES (%s, %s, %s, 1, %s, 'real', %s, %s, '{}', '{}'::jsonb, %s, '{}', '{}')
         """,
         (
             run_id,
@@ -176,7 +177,7 @@ def _generation(
     subjects: list[Subject],
     lots: list[Lot],
     *,
-    policy: str = "broker_evidence_v2",
+    policy: str = "broker_evidence_v3",
     account: int = ACCOUNT,
     fetch_started: datetime | None = None,
 ) -> int:
@@ -283,7 +284,7 @@ def test_one_published_run_per_key(spy: None) -> None:
 
 
 def test_another_evidence_policy_is_refused_and_stays_refused(spy: None) -> None:
-    _generation(ADMITTED, LOTS, policy="broker_evidence_v1")
+    _generation(ADMITTED, LOTS, policy="broker_evidence_v2")
     refused = _run()
     assert (refused.outcome, refused.reason) == ("refused", "evidence_policy_unsupported")
     assert _children(refused.matching_run_id or 0) == 0
@@ -551,7 +552,7 @@ def test_selection_is_exact_with_no_fallback(spy: None) -> None:
     _generation(ADMITTED, LOTS[:1])
     assert _effective() is None
     # A refused run is unavailable too.
-    _generation(ADMITTED, LOTS, policy="broker_evidence_v1")
+    _generation(ADMITTED, LOTS, policy="broker_evidence_v2")
     assert _run().outcome == "refused"
     assert _effective() is None
 
@@ -848,3 +849,26 @@ def test_selection_needs_the_current_character_policy_and_a_current_profile(spy:
         "SELECT character_policy_id, as_of IS NOT NULL FROM tax_matching_runs WHERE matching_run_id = %s",
         (stale.matching_run_id,),
     ) == [("tax_character_v1", True)]
+
+
+def test_the_deployment_window_is_unavailable_until_a_v3_run_publishes(
+    spy: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 3d-3b Design 2: a run published under the v2 constants is never selected under the v3 ones."""
+    with monkeypatch.context() as old:
+        old.setattr(tax_matching, "CONSIDERATION_CLASS_POLICY_ID", "consideration_classes_v1")
+        old.setattr(tax_matching, "SUPPORTED_EVIDENCE_POLICY_ID", "broker_evidence_v2")
+        _generation(ADMITTED, LOTS, policy="broker_evidence_v2")
+        assert _run().outcome == "published"
+        assert _effective() is not None
+    # The new constants: the v2-based run no longer matches, and nothing over v3 exists yet.
+    assert _effective() is None
+    _generation(ADMITTED, LOTS)
+    assert _effective() is None
+    published = _run()
+    assert published.outcome == "published"
+    effective = _effective()
+    assert effective is not None and effective.matching_run_id == published.matching_run_id
+    assert _rows(
+        "SELECT class_policy_id FROM tax_matching_runs WHERE matching_run_id = %s", (published.matching_run_id,)
+    ) == [("consideration_classes_v2",)]

@@ -38,7 +38,7 @@ from app.services.tax_broker_derivation import (
     price_lots,
 )
 from app.services.tax_fx import TAX_FX_POLICY_ID, TaxFxState
-from app.services.trade_events import normalise_payload
+from app.services.trade_events import classify_observation, normalise_payload
 
 D = Decimal
 ACCOUNT = 900
@@ -102,6 +102,7 @@ def sync_payload(position_id: int, **over: Any) -> dict[str, Any]:
         "openRate": D("100"),
         "openConversionRate": D("1"),
         "openDateTime": OPENED,
+        "openPositionActionType": 0,
     }
     payload.update(over)
     return payload
@@ -586,10 +587,13 @@ def test_sync_external_fee_beside_a_zero_lookup_fee() -> None:
 
 
 @pytest.mark.parametrize("stored_fee", [D("5"), D("0")])
-def test_total_fees_in_the_stored_row_or_an_amendment(stored_fee: Decimal) -> None:
+def test_total_fees_in_the_stored_row_or_an_amendment_admits_a_held_order(stored_fee: Decimal) -> None:
+    """Policy v3 (3d-3b changes 1-2): a held order's totalFees is position income, not a charge or an amendment."""
     case = Held(totalFees=stored_fee)
     case.observations.append(observation(case.open, "amendment", sync_payload(21, totalFees=D("5") - stored_fee)))
-    assert reasons_of(case.derive()) == ["source_amended", "charges_nonzero:totalFees"]
+    result = case.derive()
+    assert result.outcome == "admitted", result.reasons
+    assert result.total_fees_nonzero_position_ids == (21,)
 
 
 def test_opening_units_and_rate_conflicts() -> None:
@@ -649,10 +653,10 @@ def test_too_many_decimal_places_fails_rather_than_rounds() -> None:
 
 
 def test_several_failures_are_all_recorded_and_dependent_checks_skipped() -> None:
-    case = Held(leverage=2, totalFees=D("1"))
+    case = Held(leverage=2, totalExternalFees=D("1"))
     del case.payload["initialUnits"]
     result = reasons_of(case.derive())
-    assert result == ["missing_field:initialUnits", "unsupported_shape:leverage", "charges_nonzero:totalFees"]
+    assert result == ["missing_field:initialUnits", "unsupported_shape:leverage", "charges_nonzero:totalExternalFees"]
 
 
 def test_a_float_payload_is_a_loader_defect() -> None:
@@ -799,7 +803,7 @@ def test_a_history_open_timestamp_re_rendering_is_still_an_amendment() -> None:
 
 def test_unscoped_conflict_unmatched_and_identical() -> None:
     case = Held()
-    case.observations.append(observation(None, "unscoped", sync_payload(21, totalFees=D("5")), position_id=21))
+    case.observations.append(observation(None, "unscoped", sync_payload(21, totalExternalFees=D("5")), position_id=21))
     assert "unscoped_conflict" in reasons_of(case.derive())
 
     case = Held()
@@ -939,7 +943,7 @@ def test_extreme_operands_are_exact_and_a_rounding_raises() -> None:
 
 FIXED_BYTES = (
     b'{"amount_gbp":"76.99999999692","canonical_version":1,"consideration_status":"broker_stated_unreconciled",'
-    b'"direction":"acquisition","etoro_instrument_id":1001,"evidence_policy_id":"broker_evidence_v2",'
+    b'"direction":"acquisition","etoro_instrument_id":1001,"evidence_policy_id":"broker_evidence_v3",'
     b'"executed_at":"2026-09-23T13:30:00.500000Z","execution_evidence":"lookup","fx_gbp_per_usd":"0.7692307692",'
     b'"fx_observation_date":"2026-09-23","fx_policy_id":"'
     + TAX_FX_POLICY_ID.encode()
@@ -959,7 +963,7 @@ def test_fingerprint_byte_vector() -> None:
     lot = _fixed_lot()
     assert fingerprint_bytes(lot) == FIXED_BYTES
     assert lot.fingerprint == hashlib.sha256(FIXED_BYTES).hexdigest()
-    assert lot.fingerprint == "5aa639db6932325664ee1a7cc83687280a676af02f1ef7f5094c9dbea4630a61"
+    assert lot.fingerprint == "349d3c8d914bac1b1b9d50a6441b0798cfbed15fe2ac4e6d13ba0d95f6baaf22"
 
 
 def test_fingerprint_is_stable_under_reordering_and_excludes_run_ids() -> None:
@@ -1057,3 +1061,152 @@ def test_a_sync_only_amendment_across_london_dates_is_a_date_conflict() -> None:
     case = Held()
     case.observations.append(observation(case.open, "amendment", sync_payload(21, openDateTime="2026-09-23T23:30:00Z")))
     assert reasons_of(case.derive()) == ["source_amended", "acquisition_date_conflict"]
+
+
+# --- policy v3: position income (slice 3d-3b) -------------------------------------------------------------------
+
+
+def _amended(**over: Any) -> Held:
+    case = Held()
+    case.observations.append(observation(case.open, "amendment", sync_payload(21, **over)))
+    return case
+
+
+def test_a_total_fees_only_amendment_is_not_source_amended() -> None:
+    result = _amended(totalFees=D("1.23")).derive()
+    assert result.outcome == "admitted", result.reasons
+    assert result.total_fees_nonzero_position_ids == (21,)
+
+
+def test_total_fees_beside_a_re_rendering_is_waived_but_not_beside_a_second_or_another_key() -> None:
+    assert _amended(totalFees=D("1.23"), openDateTime="2026-09-23T13:30:00.9Z").derive().outcome == "admitted"
+    assert "source_amended" in reasons_of(_amended(totalFees=D("1.23"), openDateTime="2026-09-23T13:30:01.5Z").derive())
+    assert "source_amended" in reasons_of(_amended(totalFees=D("1.23"), initialUnits=D("2")).derive())
+    assert reasons_of(_amended(totalFees=D("1.23"), isPartiallyAltered=True).derive()) == [
+        "source_amended",
+        "executions_unestablished",
+    ]
+
+
+def test_a_cfd_whose_total_fees_changes_stays_excluded_and_an_unparseable_time_does_not() -> None:
+    case = Held(settlementTypeID=0)
+    case.observations.append(
+        observation(case.open, "amendment", sync_payload(21, settlementTypeID=0, totalFees=D("2")))
+    )
+    assert case.derive().outcome == "excluded_non_share_product"
+    case = Held(settlementTypeID=0, openDateTime="not a time")
+    case.observations.append(
+        observation(
+            case.open, "amendment", sync_payload(21, settlementTypeID=0, openDateTime="not a time", totalFees=D("2"))
+        )
+    )
+    assert case.derive().outcome == "unresolved"
+
+
+def test_an_unscoped_total_fees_difference_is_validated_then_waived() -> None:
+    case = Held()
+    case.observations.append(observation(None, "unscoped", sync_payload(21, totalFees=D("5")), position_id=21))
+    result = case.derive()
+    assert result.outcome == "admitted", result.reasons
+    assert result.total_fees_nonzero_position_ids == (21,)
+    for value, reason in ((None, "invalid_field:totalFees"), ("abc", "invalid_field:totalFees")):
+        case = Held()
+        case.observations.append(observation(None, "unscoped", sync_payload(21, totalFees=value), position_id=21))
+        assert reason in reasons_of(case.derive())
+    absent = sync_payload(21)
+    del absent["totalFees"]
+    case = Held()
+    case.observations.append(observation(None, "unscoped", absent, position_id=21))
+    assert "missing_field:totalFees" in reasons_of(case.derive())
+    case = Held()
+    case.observations.append(
+        observation(None, "unscoped", sync_payload(21, totalFees=D("1"), TotalFees=D("2")), position_id=21)
+    )
+    assert "field_conflict:totalFees" in reasons_of(case.derive())
+
+
+def test_held_income_of_either_sign_leaves_the_lots_unchanged() -> None:
+    baseline = Held().derive()
+    case = Held(totalFees=D("1.23"))
+    case.observations.append(observation(case.open, "amendment", sync_payload(21, totalFees=D("-0.40"))))
+    result = case.derive()
+    assert result.outcome == "admitted"
+
+    def economic(lots: Any) -> list[tuple[Any, ...]]:
+        return [(x.direction, x.units, x.usd_amount, x.executed_at, x.execution_evidence) for x in lots]
+
+    assert economic(result.lots) == economic(baseline.lots)
+    assert "charges_nonzero:totalExternalFees" in reasons_of(Held(totalExternalFees=D("0.5")).derive())
+    absent = Held()
+    del absent.payload["totalFees"]
+    assert "missing_field:totalFees" in reasons_of(absent.derive())
+
+
+def test_an_earlier_non_zero_value_followed_by_zero_still_counts() -> None:
+    case = Held(totalFees=D("1.23"))
+    case.observations.append(observation(case.open, "amendment", sync_payload(21, totalFees=D("0"))))
+    assert case.derive().total_fees_nonzero_position_ids == (21,)
+
+
+def _split_with_sync_fee(fee: Decimal) -> Any:
+    case = Split()
+    case.observations.append(
+        observation(case.open_a, "supplemental", sync_payload(11, totalFees=fee), source="etoro_sync")
+    )
+    return case.derive()
+
+
+def test_a_closed_order_with_income_is_unresolved_and_without_income_is_not_changed() -> None:
+    with_income, without = _split_with_sync_fee(D("1.23")), _split_with_sync_fee(D("0"))
+    assert with_income.outcome == "unresolved"
+    assert list(with_income.reasons) == [*without.reasons, "income_in_proceeds_unestablished"]
+    assert with_income.total_fees_nonzero_position_ids == (11,)
+
+
+def test_a_closed_position_the_sync_never_observed_is_not_9a() -> None:
+    result = Split().derive()
+    assert "income_in_proceeds_unestablished" not in result.reasons
+    assert result.total_fees_unobserved_position_ids == (11, 12)
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        (1, "unsupported_shape:openPositionActionType"),
+        (True, "invalid_field:openPositionActionType"),
+        ("0", "invalid_field:openPositionActionType"),
+        (-1, "invalid_field:openPositionActionType"),
+        (D("0.5"), "invalid_field:openPositionActionType"),
+        (None, "invalid_field:openPositionActionType"),
+    ],
+)
+def test_open_reason_must_be_zero(value: Any, reason: str) -> None:
+    assert reason in reasons_of(Held(openPositionActionType=value).derive())
+
+
+def test_open_reason_absent_and_on_a_cfd() -> None:
+    case = Held()
+    del case.payload["openPositionActionType"]
+    assert "missing_field:openPositionActionType" in reasons_of(case.derive())
+    assert Held(settlementTypeID=0, openPositionActionType=1).derive().outcome == "excluded_non_share_product"
+
+
+def test_open_reason_is_read_from_the_held_row_too() -> None:
+    """Ingestion does not retain a change of the open reason alone, so the held row's current value counts."""
+    case = Held()
+    case.held[21] = held(21, openPositionActionType=1)
+    assert "unsupported_shape:openPositionActionType" in reasons_of(case.derive())
+    case.held[21] = held(21, openPositionActionType="1")
+    assert "invalid_field:broker_positions.openPositionActionType" in reasons_of(case.derive())
+    case.held[21] = held(21, openPositionActionType=0)
+    assert case.derive().outcome == "admitted"
+
+
+def test_an_open_reason_change_alone_is_retained_as_an_amendment() -> None:
+    """Ingestion compares the open reason (3d-3b), so a transient 0 -> 1 stays in the ledger."""
+    before = normalise_payload("etoro_sync", "open", sync_payload(21))
+    after = normalise_payload("etoro_sync", "open", sync_payload(21, openPositionActionType=1))
+    assert classify_observation(before, after) == "amendment"
+    case = Held()
+    case.observations.append(observation(case.open, "amendment", sync_payload(21, openPositionActionType=1)))
+    assert "unsupported_shape:openPositionActionType" in reasons_of(case.derive())
