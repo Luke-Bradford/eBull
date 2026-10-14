@@ -12728,3 +12728,14 @@ neighbouring container and match it.**
 - Enforced in: `app/services/trade_events.py` (both baselines re-normalised), `app/services/tax_broker_evidence.py`
   (loader re-normalises) and `tests/test_tax_broker_derivation.py`
   (`test_an_open_reason_change_alone_is_retained_as_an_amendment`).
+
+### A field's default must not pass its own validation (#3616)
+
+- Failure (slice 3d-3b build, PR #3809, review round 1): `SubjectRow.total_fees_nonzero_position_ids` defaulted to
+  `()`, which `_nonzero_ids_valid` accepts as "valid, no income". A caller that omitted the field would have computed
+  without A8 instead of making the lot `unavailable`. The loader also cast `held_positions` keys with `int()`, so a
+  malformed key would crash the whole matching run instead of withholding one security.
+- Prevention: a field that feeds a validity gate takes no default, so every writer must state it. An input cast that
+  can fail turns into the field's invalid value, never an exception.
+- Enforced in: `app/services/tax_matching.py` (`SubjectRow`, `_position_keys`) and `tests/test_tax_matching.py`
+  (`test_a_held_positions_key_that_is_not_an_id_makes_the_lot_unavailable`).

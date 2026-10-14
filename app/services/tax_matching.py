@@ -126,8 +126,9 @@ class SubjectRow:
     total_fees_unobserved_position_ids: tuple[int, ...] | None
     #: Slice 3d-3b: positions with a non-zero ``totalFees`` (A8's predicate), and the subject's positions (the keys
     #: of its ``held_positions``) the array must be drawn from. NULL on runs before ``broker_evidence_v3``.
-    total_fees_nonzero_position_ids: tuple[int | None, ...] | None = ()
-    position_ids: frozenset[int] = frozenset()
+    total_fees_nonzero_position_ids: tuple[int | None, ...] | None
+    #: None when a ``held_positions`` key is not a position id, which makes the lot unavailable.
+    position_ids: frozenset[int] | None
 
 
 @dataclass(frozen=True)
@@ -176,10 +177,20 @@ class LotClassification:
 def _nonzero_ids_valid(subject: SubjectRow) -> bool:
     """Slice 3d-3b Design 2: a sorted, duplicate-free array of positive ids, each one of the subject's positions."""
     ids = subject.total_fees_nonzero_position_ids
-    if ids is None or any(not isinstance(p, int) or isinstance(p, bool) or p <= 0 for p in ids):
+    if ids is None or subject.position_ids is None:
+        return False
+    if any(not isinstance(p, int) or isinstance(p, bool) or p <= 0 for p in ids):
         return False
     positive = cast(tuple[int, ...], ids)
     return list(positive) == sorted(set(positive)) and set(positive) <= subject.position_ids
+
+
+def _position_keys(keys: Iterable[str]) -> frozenset[int] | None:
+    """The subject's positions from its ``held_positions`` keys; None when one is not a decimal id."""
+    keys = list(keys)
+    if any(not (isinstance(k, str) and k.isascii() and k.isdigit()) for k in keys):
+        return None
+    return frozenset(int(k) for k in keys)
 
 
 def classify_lot(lot: LotRow, subject: SubjectRow) -> LotClassification:
@@ -761,7 +772,7 @@ def inputs_document(inputs: MatchingInputs) -> str:
                 s.execution_evidence,
                 None if s.total_fees_unobserved_position_ids is None else sorted(s.total_fees_unobserved_position_ids),
                 None if s.total_fees_nonzero_position_ids is None else list(s.total_fees_nonzero_position_ids),
-                sorted(s.position_ids),
+                None if s.position_ids is None else sorted(s.position_ids),
             ]
             for s in inputs.subjects
         ),
@@ -953,7 +964,7 @@ def _read_inputs(conn: psycopg.Connection[Any], *, bodies: bool = True) -> Match
                 r["execution_evidence"],
                 None if r["unobserved"] is None else tuple(r["unobserved"]),
                 None if r["nonzero"] is None else tuple(r["nonzero"]),
-                frozenset(int(p) for p in r["positions"]),
+                _position_keys(r["positions"]),
             )
             for r in cur.execute(
                 """

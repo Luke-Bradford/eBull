@@ -396,7 +396,7 @@ def _subject(
     evidence: str | None = "lookup",
     unobserved: tuple[int, ...] | None = (),
     nonzero: tuple[int | None, ...] | None = (),
-    positions: frozenset[int] = frozenset(),
+    positions: frozenset[int] | None = frozenset(),
 ) -> SubjectRow:
     return SubjectRow(subject, outcome, instrument, evidence, unobserved, nonzero, positions)
 
@@ -849,3 +849,12 @@ class TestDistributionCharacter:
         ]
         result = compute_matching(_inputs(lots, subjects, {1: InstrumentRow(1, "SPY", None)}))
         assert result.securities[0].status == "withheld"
+
+
+def test_a_held_positions_key_that_is_not_an_id_makes_the_lot_unavailable() -> None:
+    from app.services.tax_matching import _position_keys
+
+    assert _position_keys(["21", "3"]) == frozenset({21, 3})
+    assert _position_keys(["21", "x"]) is None and _position_keys(["-1"]) is None
+    c = classify_lot(_lot_row(), _subject(positions=None))
+    assert (c.lot_class, c.reasons) == ("unavailable", ("total_fees_nonzero_invalid",))

@@ -654,6 +654,14 @@ class _Payload:
     observation_kind: str | None  # None for the stored row
 
 
+def _event_payload(event: LedgerEvent) -> _Payload:
+    return _Payload(event.event_id, event.position_id, event.source, event.event_kind, event.raw_payload, None)
+
+
+def _observation_payload(obs: RetainedObservation) -> _Payload:
+    return _Payload(None, obs.position_id, obs.source, obs.event_kind, obs.observed_raw, obs.kind)
+
+
 def _canonical_ts(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -751,8 +759,7 @@ def derive_order(
     f = lookups[-1] if lookups else None
     body = f.body if f is not None else None
 
-    payloads = [_Payload(e.event_id, e.position_id, e.source, e.event_kind, e.raw_payload, None) for e in events]
-    payloads += [_Payload(None, o.position_id, o.source, o.event_kind, o.observed_raw, o.kind) for o in retained]
+    payloads = [_event_payload(e) for e in events] + [_observation_payload(o) for o in retained]
     sync_payloads = [p for p in payloads if p.source == SYNC]
     history_payloads = [p for p in payloads if p.source == HISTORY]
     close_payloads = [p for p in history_payloads if p.event_kind == "close"]
@@ -943,7 +950,7 @@ def derive_order(
                 reasons.add(f"unsupported_shape:{label}")
     # The held row is rewritten by every sync, while ingestion does not compare the open reason (its projection
     # predates policy v3), so a held position's current reason is read there too.
-    for position_id, holding in own_held.items():
+    for holding in own_held.values():
         if holding is not None and _spellings(holding.payload, "openPositionActionType"):
             label = "broker_positions.openPositionActionType"
             current = _require(holding.payload, "openPositionActionType", label, _non_negative_int, reasons)
@@ -1276,16 +1283,8 @@ def derive_position(subject: SubjectInput, held: Mapping[int, HeldPosition]) -> 
         total_fees_unobserved_position_ids=tuple(p for p in event_positions if p not in synced),
         total_fees_nonzero_position_ids=_nonzero_total_fees(
             [
-                *(
-                    _Payload(e.event_id, e.position_id, e.source, e.event_kind, e.raw_payload, None)
-                    for e in subject.events
-                    if e.source == SYNC
-                ),
-                *(
-                    _Payload(None, o.position_id, o.source, o.event_kind, o.observed_raw, o.kind)
-                    for o in subject.observations
-                    if o.source == SYNC and o.kind != "unscoped"
-                ),
+                *(_event_payload(e) for e in subject.events if e.source == SYNC),
+                *(_observation_payload(o) for o in subject.observations if o.source == SYNC and o.kind != "unscoped"),
             ],
             [o for o in subject.observations if o.source == SYNC and o.event_kind == "open" and o.kind == "unscoped"],
         ),
