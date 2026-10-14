@@ -213,6 +213,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #3616 slice 3c (sql/485) — observations reference events and fetches; the scope is a singleton.
     "trade_event_observations",
     "trade_history_fetches",
+    # #3616 slice 3d-3c-1 (sql/492): insert-only fund evidence, children first; observations reference the runs.
+    "tax_fund_observations",
+    "tax_fund_list_searches",
+    "tax_fund_list_versions",
+    "tax_fund_fetches",
+    "tax_fund_documents",
     # #3616 slice 3d-2 (sql/489): sealed matching runs, children first; they reference the evidence lots and runs.
     "tax_identifications",
     "tax_statutory_disposals",
