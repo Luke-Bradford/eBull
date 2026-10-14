@@ -18,6 +18,9 @@ The exit status is non-zero on any failure, and when a candidate security with a
 
 ``--fill`` validates, checks sources, and prints to stdout only the draft with every ``PENDING`` hash filled; it exits
 non-zero, printing nothing to stdout, if any check other than a pending hash fails. Diagnostics go to stderr.
+``--fund-observed-at`` pins the fund run to evaluate (acceptance passes the step's own); one cutoff, the run time,
+is used throughout. The Script holds no history of runs, so it neither latches staleness nor exercises
+``fund_observation_unavailable``; it fails when the fund run has no observations.
 
 The printout carries dates, symbols, CIKs, LEIs, ISINs and accession numbers, never an account identifier.
 
@@ -50,10 +53,10 @@ GOVERNING_FORMS = frozenset(
     {"485APOS", "485BPOS", "485BXT", "497", "497J", "497K", "N-CEN", "N-CEN/A", "N-8F", "N-8F/A"}
 )
 #: Assumptions every determination must carry, because Design 3 adds them by policy.
-POLICY_ASSUMPTIONS = ("A5_part3_not_applying", "A6_law_current", "A7_identity_continuity")
+POLICY_ASSUMPTIONS = ("A5_part3_not_applying", "A6_law_current", "A7_identity_continuity", "A8_inventory_complete")
 QUESTIONS: dict[str, frozenset[str]] = {
     "arrangement": frozenset({"single_arrangement_single_class", "unresolved"}),
-    "s355_limb": frozenset({"a", "b", "c", "none", "unresolved"}),
+    "s355_limb": frozenset({"b", "none", "unresolved"}),
     "s356_condition_a": frozenset({"met", "not_met", "unresolved"}),
     "s356_condition_b": frozenset({"met", "not_met", "unresolved"}),
     "s356_condition_c": frozenset({"met", "not_met", "unresolved"}),
@@ -67,7 +70,7 @@ QUESTIONS: dict[str, frozenset[str]] = {
 HOLDING_DEPENDENT = frozenset({"reg29_sufficient_information", "reg29_nonreporting_holdings"})
 BASES = frozenset({"established", "assumed", "unresolved"})
 OFFSHORE_INPUTS = {
-    "s355_limb": (("a", "b", "c"), ("none",)),
+    "s355_limb": (("b",), ("none",)),
     "s356_condition_a": (("met",), ("not_met",)),
     "s356_condition_b": (("met",), ("not_met",)),
     "s356_condition_c": (("met",), ("not_met",)),
@@ -178,9 +181,9 @@ def _review_by(reviewed_at: date) -> date:
         return reviewed_at.replace(year=reviewed_at.year + 1, day=28)
 
 
-def validate(det: Any) -> list[str]:
+def validate(det: Any, allow_pending: bool = False) -> list[str]:
     try:
-        return _validate(det)
+        return _validate(det, allow_pending)
     except (TypeError, AttributeError, KeyError, ValueError) as exc:
         return [f"malformed: {type(exc).__name__}: {exc}"]
 
@@ -189,7 +192,7 @@ def _strs(v: Any) -> bool:
     return isinstance(v, list) and all(isinstance(x, str) for x in v)
 
 
-def _validate(det: Any) -> list[str]:
+def _validate(det: Any, allow_pending: bool) -> list[str]:
     errs: list[str] = []
     top = {"determination_id", "policy_id", "cik", "version", "binding", "valid_from", "valid_from_document",
            "reviewed_at", "review_by", "monitor_from", "refresh_forms", "reviewed_filings", "documents", "authorities",
@@ -228,9 +231,13 @@ def _validate(det: Any) -> list[str]:
             return [*errs, f"{k}: not a list"]
     sources: dict[str, str] = {}
     docs: dict[str, dict[str, Any]] = {}
-    dkeys = {"doc_id", "url", "accession", "form", "filed", "role", "content_sha256"}
+    dkeys = {"doc_id", "url", "accession", "form", "exhibit", "filed", "role", "content_sha256"}
     for d in det["documents"]:
-        if not (_keys(d, dkeys, "document", errs) and all(isinstance(d[k], str) for k in dkeys)):
+        if not (
+            _keys(d, dkeys, "document", errs)
+            and all(isinstance(d[k], str) for k in dkeys - {"exhibit"})
+            and (d["exhibit"] is None or _text(d["exhibit"]))
+        ):
             errs.append("document types")
             continue
         if d["doc_id"] in sources or not _ID.fullmatch(d["doc_id"]):
@@ -241,7 +248,7 @@ def _validate(det: Any) -> list[str]:
             errs.append(f"document {d['doc_id']}: accession or url")
         if not (_is_date(d["filed"]) and d["filed"] <= det["reviewed_at"] and _text(d["form"]) and _text(d["role"])):
             errs.append(f"document {d['doc_id']}: form, role or date")
-        if d["content_sha256"] != "PENDING" and not _SHA.fullmatch(d["content_sha256"]):
+        if not (_SHA.fullmatch(d["content_sha256"]) or (allow_pending and d["content_sha256"] == "PENDING")):
             errs.append(f"document {d['doc_id']}: hash")
     prospectuses = [d for d in docs.values() if d["form"] == "485BPOS"]
     anchor = docs.get(det["valid_from_document"])
@@ -260,9 +267,9 @@ def _validate(det: Any) -> list[str]:
         if a["authority_id"] in sources or not _ID.fullmatch(a["authority_id"]):
             errs.append(f"authority id {a['authority_id']}")
         sources[a["authority_id"]] = "authority"
-        if urlsplit(a["url"]).scheme != "https" or not _text(a["version"]):
+        if urlsplit(a["url"]).scheme != "https" or not urlsplit(a["url"]).hostname or not _text(a["version"]):
             errs.append(f"authority {a['authority_id']}")
-        if a["content_sha256"] != "PENDING" and not _SHA.fullmatch(a["content_sha256"]):
+        if not (_SHA.fullmatch(a["content_sha256"]) or (allow_pending and a["content_sha256"] == "PENDING")):
             errs.append(f"authority {a['authority_id']}: hash")
     manifest: dict[str, dict[str, Any]] = {}
     members: list[str] = []
@@ -278,7 +285,7 @@ def _validate(det: Any) -> list[str]:
         members += f["documents"]
         for doc_id in f["documents"]:
             d = docs.get(doc_id)
-            if d is None or d["accession"] != f["accession"] or d["filed"] != f["filed"]:
+            if d is None or d["accession"] != f["accession"] or d["filed"] != f["filed"] or d["form"] != f["form"]:
                 errs.append(f"reviewed filing {f['accession']}: document {doc_id}")
     if sorted(members) != sorted(docs):
         errs.append("every document must belong to exactly one reviewed filing")
@@ -382,7 +389,7 @@ def check_sources(det: dict[str, Any], docs: Path, authorities: Path) -> Sources
     paths = _local_paths(docs)
     for d in det["documents"]:
         path = paths.get(d["url"])
-        if path is None:
+        if path is None or not path.exists():
             err(f"document {d['doc_id']}: UNAVAILABLE ({d['url']})")
             s.unavailable.append(d["doc_id"])
             continue
@@ -422,7 +429,7 @@ def offshore_fund(det: dict[str, Any]) -> tuple[str, str, list[str]]:
     """(answer, basis, assumption ids): ``true``/``false`` with ``established`` or ``assumed``, or ``unresolved``
     with basis ``unresolved`` (spec Design 1). An established decisive negative is preferred to an assumed one."""
     f = {x["question"]: x for x in det["findings"]}
-    negatives = sorted(q for q, (_, neg) in OFFSHORE_INPUTS.items() if f[q]["answer"] in neg)
+    negatives = [q for q in QUESTIONS if q in OFFSHORE_INPUTS and f[q]["answer"] in OFFSHORE_INPUTS[q][1]]
     if negatives:
         established = [q for q in negatives if f[q]["basis"] == "established"]
         if established:
@@ -434,9 +441,11 @@ def offshore_fund(det: dict[str, Any]) -> tuple[str, str, list[str]]:
     return "true", basis, sorted({a for q in OFFSHORE_INPUTS for a in f[q]["assumptions"]})
 
 
-def submissions_coverage(det: dict[str, Any], body: Any, fetched: date, observed: date) -> str | None:
+def submissions_coverage(det: dict[str, Any], body: Any, fetched: date | None, cutoff: date) -> str | None:
     """None if the filing list is a current, sound inventory for the CIK; otherwise the refusal."""
-    if fetched > observed or observed - fetched > SUBMISSIONS_CURRENT:
+    if body is None or fetched is None:
+        return "submissions unavailable"
+    if fetched > cutoff or cutoff - fetched > SUBMISSIONS_CURRENT:
         return "submissions not current"
     try:
         recent = body["filings"]["recent"]
@@ -452,7 +461,7 @@ def submissions_coverage(det: dict[str, Any], body: Any, fetched: date, observed
     for form, filed, acc in zip(*cols, strict=True):
         if not (_text(form) and _is_date(filed) and isinstance(acc, str) and _ACCESSION.fullmatch(acc)):
             return "submissions unsound"
-        if acc in seen or filed > observed.isoformat():
+        if acc in seen or filed > cutoff.isoformat():
             return "submissions unsound"
         seen[acc] = (form, filed)
     if files:
@@ -464,9 +473,10 @@ def submissions_coverage(det: dict[str, Any], body: Any, fetched: date, observed
 
 
 def applicability(
-    det: dict[str, Any], src: Sources, obs: tuple[Any, ...], sub: tuple[Any, date], observed: date
+    det: dict[str, Any], src: Sources, obs: tuple[Any, ...], sub: tuple[Any, date | None], cutoff: date
 ) -> tuple[str, str | None]:
-    """Design 2's ordered outcome for one fund observation."""
+    """Design 2's ordered outcome for one fund observation (staleness is not latched here: the Script has no
+    history of runs)."""
     _, _, _, symbol, outcome, cik, lei, isin, mic, *_rest = obs
     if outcome != "candidate":
         return "not_candidate", None
@@ -484,8 +494,10 @@ def applicability(
         return "document_changed", src.changed[0]
     if src.unverified:
         return "quote_unverified", src.unverified[0]
+    if not det["reviewed_at"] <= cutoff.isoformat() <= det["review_by"]:
+        return "review_out_of_date", f"cutoff {cutoff} outside {det['reviewed_at']}..{det['review_by']}"
     body, fetched = sub
-    refusal = submissions_coverage(det, body, fetched, observed)
+    refusal = submissions_coverage(det, body, fetched, cutoff)
     if refusal:
         return "coverage_unavailable", refusal
     recent = body["filings"]["recent"]
@@ -499,13 +511,11 @@ def applicability(
 def reporting_status(
     det: dict[str, Any], search_outcome: str | None, d: date, cutoff: date
 ) -> tuple[str, str | None, list[str]]:
-    """Design 3, for a ``determined`` security: (status, reason, assumption ids)."""
-    if d < date.fromisoformat(det["valid_from"]):
-        return "outside_interval", "before valid_from", []
-    if d > min(cutoff, date.fromisoformat(det["review_by"])):
-        return "outside_interval", "after the run date or review_by", []
+    """Design 3 from step 3 on, for a ``determined`` security: (status, reason, assumption ids)."""
+    if not date.fromisoformat(det["valid_from"]) <= d <= cutoff:
+        return "outside_interval", f"{d} outside {det['valid_from']}..{cutoff}", []
     answer, _, rests_on = offshore_fund(det)
-    rests_on = sorted({*rests_on, "A6_law_current", "A7_identity_continuity"})
+    rests_on = sorted({*rests_on, "A6_law_current", "A7_identity_continuity", "A8_inventory_complete"})
     if answer == "false":
         return "not_offshore_fund", None, rests_on
     if answer == "unresolved":
@@ -517,33 +527,41 @@ def reporting_status(
     return "non_reporting_assumed", None, sorted({*rests_on, "A5_part3_not_applying"})
 
 
-def gate(det: dict[str, Any], src: Sources, sub: tuple[Any, date]) -> bool:
-    """Apply Designs 2 and 3; return True if a candidate security of the CIK is not ``determined``."""
-    observed = datetime.now(UTC).date()
-    answer, basis, rests_on = offshore_fund(det)
-    print(f"offshore_fund: {answer} ({basis}; {rests_on}); evaluated as of {observed}")
+def gate(det: dict[str, Any], src: Sources, sub: tuple[Any, date | None], fund_observed_at: str | None) -> bool:
+    """Apply Designs 2 and 3 with one cutoff; return True on a failed verification: no fund observations, or a
+    candidate security of the CIK that is not ``determined``."""
+    cutoff = datetime.now(UTC)
+    print(f"cutoff {cutoff.isoformat()} (dates compared as {cutoff.date()}; local copies carry fetch dates only)")
     failed = False
     with psycopg.connect(settings.database_url) as conn:
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         with conn.transaction():
+            at_row = conn.execute(
+                "SELECT COALESCE(%s::timestamptz, (SELECT max(observed_at) FROM tax_fund_observations))",
+                (fund_observed_at,),
+            ).fetchone()
+            run_at = at_row[0] if at_row else None
             rows = conn.execute(
                 """
                 SELECT observation_id, tax_security_id, member_ids, symbol, outcome,
                        cik, lei, isin, mic, search_outcome, evidence_run_id, observed_at
-                FROM tax_fund_observations
-                WHERE observed_at = (SELECT max(observed_at) FROM tax_fund_observations)
-                ORDER BY tax_security_id
-                """
+                FROM tax_fund_observations WHERE observed_at = %s ORDER BY tax_security_id
+                """,
+                (run_at,),
             ).fetchall()
+            print(f"fund run {run_at.isoformat() if run_at else None}: {len(rows)} fund securities observed")
+            if not rows:
+                return True
             for obs in rows:
-                oid, sid, members, symbol, outcome, cik, *_, search, run, at = obs
-                stamp = at.astimezone(UTC).isoformat()
-                print(f"\nsecurity {sid} {symbol} members {members}: fund observation {oid} at {stamp}")
-                result, refusal = applicability(det, src, obs, sub, observed)
+                oid, sid, members, symbol, outcome, cik, *_, search, run, _at = obs
+                print(f"\nsecurity {sid} {symbol} members {members}: fund observation {oid}")
+                result, refusal = applicability(det, src, obs, sub, cutoff.date())
                 print(f"  fund observation {outcome}; search {search}; applicability {result} {refusal or ''}")
                 if result != "determined":
                     failed |= outcome == "candidate" and cik == det["cik"]
                     continue
+                answer, basis, rests_on = offshore_fund(det)
+                print(f"  offshore_fund: {answer} ({basis}; {rests_on})")
                 lots = conn.execute(
                     "SELECT direction, uk_date FROM tax_evidence_lots WHERE run_id = %s AND instrument_id = ANY(%s)",
                     (run, list(members)),
@@ -551,7 +569,7 @@ def gate(det: dict[str, Any], src: Sources, sub: tuple[Any, date]) -> bool:
                 disposals = sorted({u for dirn, u in lots if dirn == "disposal"})
                 print(f"  lots in run {run}: {len(lots)}; disposal dates {[str(x) for x in disposals]}")
                 for d in disposals:
-                    status, reason, assumptions = reporting_status(det, search, d, at.astimezone(UTC).date())
+                    status, reason, assumptions = reporting_status(det, search, d, cutoff.date())
                     print(f"  disposal {d}: {status} {reason or ''}; rests on {assumptions}")
     return failed
 
@@ -563,17 +581,21 @@ def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(pairs)
 
 
-def _submissions(docs: Path, cik: str) -> tuple[Any, date, str]:
+def _submissions(docs: Path, cik: str) -> tuple[Any, date | None, str | None]:
+    """The saved filing list and its fetch date; (None, None, None) when missing or not JSON, which part 3 reports
+    as ``coverage_unavailable``."""
     name = f"submissions_CIK{cik}.json"
-    raw = (docs / name).read_bytes()
+    try:
+        raw = (docs / name).read_bytes()
+        body = json.loads(raw)
+    except OSError, ValueError:
+        return None, None, None
     fetched = None
     for line in (docs / "index.txt").read_text().splitlines():
         cols = [c.strip() for c in line.split("|")]
-        if cols[0] == name:
+        if cols[0] == name and len(cols) > 4 and _is_date(cols[4].removeprefix("fetched ")):
             fetched = date.fromisoformat(cols[4].removeprefix("fetched "))
-    if fetched is None:
-        raise SystemExit(f"{name}: no fetch date in index.txt")
-    return json.loads(raw), fetched, hashlib.sha256(raw).hexdigest()
+    return body, fetched, hashlib.sha256(raw).hexdigest()
 
 
 def main() -> None:
@@ -581,19 +603,25 @@ def main() -> None:
     p.add_argument("--determination", type=Path, required=True)
     p.add_argument("--docs", type=Path, required=True)
     p.add_argument("--authorities", type=Path, required=True)
+    p.add_argument("--fund-observed-at", help="the fund run to evaluate (default: the newest)")
     p.add_argument("--fill", action="store_true")
     a = p.parse_args()
-    raw = a.determination.read_bytes()
-    det = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
     out = sys.stderr if a.fill else sys.stdout
+    raw = a.determination.read_bytes()
     script = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     print(f"run at {datetime.now(UTC).isoformat()}; python {sys.version.split()[0]}; script sha256 {script}", file=out)
     print(f"module {__spec__.name if __spec__ else __file__}; argv {json.dumps(sys.argv[1:])}", file=out)
-    print(f"determination {det.get('determination_id')} file sha256 {hashlib.sha256(raw).hexdigest()}", file=out)
-    errs = validate(det)
+    print(f"determination file sha256 {hashlib.sha256(raw).hexdigest()}", file=out)
+    try:
+        det = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
+    except ValueError as exc:
+        print(f"format errors: ['unreadable: {exc}']", file=out)
+        sys.exit(1)
+    errs = validate(det, allow_pending=a.fill)
     print(f"format errors: {errs}", file=out)
     if errs:
         sys.exit(1)
+    print(f"determination {det['determination_id']}", file=out)
     src = check_sources(det, a.docs, a.authorities)
     failures = src.unavailable + src.changed + src.bad_authorities + src.unverified
     items = det["documents"] + det["authorities"]
@@ -607,11 +635,11 @@ def main() -> None:
                 item["content_sha256"] = src.hashes[item.get("doc_id") or item["authority_id"]]
         print(json.dumps(det, indent=2, ensure_ascii=False))
         return
-    if src.bad_authorities or pending:
+    if src.bad_authorities:
         sys.exit(1)
     body, fetched, sub_sha = _submissions(a.docs, det["cik"])
     print(f"submissions sha256 {sub_sha} fetched {fetched}")
-    refused = gate(det, src, (body, fetched))
+    refused = gate(det, src, (body, fetched), a.fund_observed_at)
     sys.exit(1 if failures or refused else 0)
 
 

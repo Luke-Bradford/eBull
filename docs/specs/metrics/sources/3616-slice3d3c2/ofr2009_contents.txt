@@ -1,0 +1,458 @@
+URL: https://www.legislation.gov.uk/uksi/2009/3001/contents/data.xht
+Fetched (UTC): 2026-10-14T21:07:53Z
+
+Introductory Text
+
+PART 1 INTRODUCTION
+
+Preliminary provisions
+
+1.Citation, commencement and effect
+
+2.Structure of these Regulations
+
+General provisions
+
+3.Definition of “offshore fund”
+
+4.Classification of offshore funds
+
+Treatment of umbrella arrangements and of funds comprising more than one class of interest
+
+5.Treatment of umbrella arrangements
+
+6.Treatment of funds comprising more than one class of interest
+
+Interpretation
+
+7.Meaning of “participant”
+
+8.Meaning of “interest” (of a participant in an offshore fund)
+
+9.Meaning of “guaranteed return fund”
+
+10.Meaning of “market value”
+
+11.Meaning of “transparent fund”
+
+12.General interpretation
+
+Transitional provisions etc.
+
+13.Transitional provisions and savings, repeals, abbreviations and general index
+
+PART 2 THE TREATMENT OF PARTICIPANTS IN NON-REPORTING FUNDS
+
+CHAPTER 1 PRELIMINARY PROVISIONS
+
+14.Structure of this Part
+
+15.Meaning of “material disposal”
+
+CHAPTER 2 CHARGES TO TAX ON PARTICIPANTS IN NON-REPORTING FUNDS
+
+Charge to tax on certain amounts treated as distributions
+
+16.Treatment of certain amounts as distributions
+
+Charge to tax on disposal of asset
+
+17.The charge to tax
+
+18.The charge to tax: further provisions
+
+19.Income treated as arising under regulation 17: remittance basis
+
+Offshore funds and gains of non-resident settlements
+
+20.Application to gains of non-resident settlements
+
+Offshore funds and the transfer of assets abroad
+
+21.Application of transfer of assets abroad provisions
+
+Application of TCGA 1992
+
+22.Application of certain provisions of TCGA 1992
+
+23.Temporary non-residents
+
+23A.Regulation 23: supplementary
+
+24.Application of section 13 of TCGA 1992
+
+CHAPTER 3 EXCEPTIONS ETC. FROM THE CHARGE TO TAX
+
+25.Exceptions from the charge
+
+26.Trading stock etc.
+
+27.Long-term insurance funds of insurance companies
+
+28.Loans other than participating loans
+
+29.Interests in transparent funds
+
+30.Rights in certain existing holdings
+
+31.Charitable companies and charitable trusts
+
+31A.Unlisted trading company exception
+
+31B.Unlisted trading company exception: the investment condition
+
+31C.Unlisted trading company exception: further provision
+
+CHAPTER 4 DISPOSALS OF INTERESTS IN NON-REPORTING FUNDS
+
+Basic provisions
+
+32.Application of this Chapter
+
+33.Disposal of an asset: the basic rule
+
+Further provisions
+
+34.Provisions applicable on death
+
+36A.Exchanges and schemes of reconstruction
+
+37.Exchange of interests of different classes
+
+CHAPTER 5 OFFSHORE INCOME GAINS AND THE COMPUTATION OF OFFSHORE INCOME GAINS
+
+38.General provisions
+
+39.The basic gain and its computation
+
+40.Earlier disposal to which the no gain/no loss basis applies
+
+41.Modifications of TCGA 1992
+
+42.Losses
+
+43.Special rules for certain existing holdings
+
+CHAPTER 6 DEDUCTION OF OFFSHORE INCOME GAINS IN COMPUTING CHARGEABLE GAINS
+
+44.Ambit of this Chapter
+
+45.Treatment of the TCGA disposal: general rules
+
+46.Modification of section 162 of TCGA 1992
+
+47.Application of section 128 of TCGA 1992
+
+CHAPTER 7 THE CONVERSION OF A NON-REPORTING FUND INTO A REPORTING FUND
+
+48.Consequences of conversion for participants
+
+PART 3 REPORTING FUNDS AND THE TREATMENT OF PARTICIPANTS IN REPORTING FUNDS
+
+CHAPTER 1 PRELIMINARY PROVISIONS
+
+49.Structure and application of this Part
+
+50.Meaning of “reporting fund”
+
+50A.Meaning of “equalisation arrangements”, “full equalisation arrangements” and “equalisation amount”
+
+CHAPTER 2 ENTRY INTO THE REPORTING FUND REGIME
+
+Applications for this Part to apply
+
+51.Who may make an application
+
+52.Conversion of non-reporting fund into reporting fund
+
+53.Contents of an application
+
+54.Form, timing and withdrawal of application
+
+Procedure on applications
+
+55.Response by HMRC to application
+
+56.Appeal against rejection of application
+
+CHAPTER 2A AMENDMENT TO APPLICATION FOR THIS PART TO APPLY
+
+56A.Amending a statement relating to equalisation
+
+56B.Appeal against refusal of application to amend a statement
+
+CHAPTER 3 THE GENERAL DUTIES OF REPORTING FUNDS
+
+57.Effects of entry into the reporting fund regime
+
+58.General duties of reporting funds
+
+CHAPTER 4 THE PREPARATION OF ACCOUNTS
+
+59.Accounts to be prepared in accordance with acceptable accounting policy
+
+60.Change in accounting policy
+
+61.Change in accounting practice to a generally accepted accounting practice
+
+CHAPTER 5 THE COMPUTATION OF REPORTABLE INCOME
+
+General
+
+62.Duty to provide computation
+
+63.Computation of reportable income: general
+
+Adjustments for capital items and miscellaneous items
+
+64.Treatment of capital items following IMA SORP
+
+65.Treatment of other capital items and miscellaneous items
+
+Adjustments for special classes of income
+
+66.Effective interest income or comparable amounts
+
+67.Income from wholly-owned subsidiaries
+
+68.Income from other reporting funds
+
+68A.Index tracking funds
+
+69.Income from non-reporting funds: first case
+
+70.Income from non-reporting funds: second case
+
+71.Income from non-reporting funds if first case ceases to apply
+
+Adjustments for equalisation arrangements
+
+72.Treatment of reporting funds operating equalisation arrangements
+
+Adjustments where funds do not operate equalisation arrangements
+
+72A.Reporting Funds not operating equalisation: income adjustments based on reportable income for computation periods
+
+72B.Reporting Funds not operating equalisation: income adjustments based on accounting income for computation periods
+
+72C.Supplementary provisions: average number of units and computation period
+
+CHAPTER 6 TRANSACTIONS BY CERTAIN REPORTING FUNDS WHICH ARE NOT TREATED AS TRADING
+
+Conditions to be met by reporting funds for this Chapter to apply
+
+73.Introductory
+
+74.The equivalence condition
+
+75.The genuine diversity of ownership condition
+
+76.The genuine diversity of ownership condition: further provisions
+
+Clearances in relation to the equivalence and genuine diversity of ownership conditions
+
+77.Who may apply for clearance
+
+78.Procedure for obtaining clearance
+
+79.Circumstances in which clearance may not be relied upon
+
+Investment transactions carried out by diversely owned funds
+
+80.Treatment of investment transactions carried out by diversely owned funds
+
+81.Meaning of “investment transaction”
+
+82.Meaning of “relevant contract”: general
+
+83.Meaning of “relevant contract”: options
+
+84.Meaning of “relevant contract”: futures
+
+85.Options and futures: further provisions
+
+86.Meaning of “relevant contract”: contracts for differences
+
+87.Interpretation of regulation 81(c)
+
+88.Meaning of “units in a collective investment scheme”
+
+89.Meaning of “transaction in a carbon emission trading product”
+
+CHAPTER 6A TRANSPARENT REPORTING FUNDS
+
+89A.Transparent reporting funds
+
+89B.Reportable income: general
+
+89C.Adjustment in relation to income from other reporting funds
+
+89D.Adjustment in relation to income from non-reporting funds: first case
+
+89E.Adjustment in relation to income from non-reporting funds: second case
+
+CHAPTER 7 REPORTS TO PARTICIPANTS
+
+90.Report to participants for a reporting period
+
+91.Meaning of “reporting period”
+
+92.Contents of report to participants: non-transparent funds
+
+92A.Funds which do not operate equalisation arrangements: income adjustments on the basis of reported income
+
+92B.Funds which do not operate equalisation arrangements: income adjustments on the basis of accounting income
+
+92C.Funds which do not operate equalisation arrangements: computation period
+
+92D.Contents of reports to participants: transparent reporting funds
+
+93.Lengthy periods of account where full information not available
+
+CHAPTER 8 THE TAX TREATMENT OF PARTICIPANTS IN REPORTING FUNDS
+
+Tax treatment of the reported income of the fund in the hands of participants
+
+94.Reported income: general provisions
+
+94A.Equalisation amounts not treated as distributions
+
+95.Participants chargeable to income tax: corporate funds
+
+96.Participants chargeable to income tax: other non-transparent funds
+
+97.Participants chargeable to income tax: transparent funds
+
+98.Participants chargeable to corporation tax
+
+Disposals and deemed disposals of interests
+
+99.Disposals of interests
+
+100.Deemed disposals of interests
+
+Charitable companies and charitable trusts
+
+101.Special provisions applying to charitable companies and charitable trusts
+
+Anti-avoidance provisions
+
+102.Treatment of financial traders if conditions specified in regulation 73 are met
+
+103.Amounts brought into account in computing trading profits or losses of financial traders
+
+104.Interests not within regulation 103
+
+105.Meaning of “financial trader”
+
+CHAPTER 9 THE PROVISION OF INFORMATION TO HMRC
+
+106.Reporting requirements
+
+107.Information obligations of reporting funds
+
+CHAPTER 10 BREACHES OF REPORTING FUND REQUIREMENTS
+
+108.Types of breaches
+
+109.Consequences of minor breaches
+
+110.Differences between reported income and reportable income
+
+111.Provision of report that is incorrect or incomplete
+
+112.Cases where information is not provided
+
+113.Serious breaches
+
+114.Consequences of serious breaches
+
+115.Appeal against exclusion from the reporting fund regime
+
+CHAPTER 11 LEAVING THE REPORTING FUND REGIME
+
+116.Termination by notice given by reporting fund
+
+117.Reporting fund not complying with requirements
+
+CHAPTER 12 CONSTANT NAV FUNDS
+
+Interpretation
+
+118.Meaning of “constant NAV fund”
+
+Modified application of this Part
+
+119.General
+
+120.Modified application of Chapter 2
+
+121.Modified application of Chapter 3
+
+122.Disapplication of Chapters 4 to 9
+
+123.Modified application of Chapter 10
+
+124.Disapplication of Chapter 11
+
+PART 3A ANNUAL PAYMENTS TO NON-RESIDENTS
+
+124A.Annual Payments – duty to deduct income tax
+
+124B.Consequences of reasonable but incorrect belief
+
+PART 4 CONSEQUENTIAL AMENDMENTS
+
+125.Amendment of the Inheritance Tax Act 1984
+
+126.Amendment of ICTA
+
+127.Amendment of TCGA 1992
+
+128.Amendment of ITTOIA 2005
+
+129.Amendment of ITA 2007
+
+130.Amendment of FA 2008
+
+131.Amendment of CTA 2009
+
+Signature
+
+SCHEDULE 1
+
+Transitional Provisions and Savings
+
+1.In this Schedule— “distributing fund” means a fund which, immediately...
+
+2.(1) This paragraph applies in the case of an existing...
+
+3.(1) This paragraph applies in the case of an existing...
+
+3A.In the case of a reporting fund which has an...
+
+3B.(1) This paragraph applies in the case of a distributing...
+
+3C.In the case of an exchange of an interest in...
+
+4.(1) This paragraph applies in the case of an existing...
+
+5.(1) This paragraph applies in the case of an existing...
+
+6.(1) This paragraph applies in the case of an existing...
+
+7.(1) This paragraph applies in the case of an arrangement...
+
+SCHEDULE 2
+
+Repeals
+
+SCHEDULE 3
+
+Abbreviations and Defined Expressions
+
+PART 1 Abbreviations of Acts
+
+PART 2 Index of expressions defined or otherwise explained in these Regulations
+
+Explanatory Note

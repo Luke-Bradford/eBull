@@ -133,6 +133,7 @@
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022316/d77353d485bpos.htm",
       "accession": "0001193125-26-022316",
       "form": "485BPOS",
+      "exhibit": null,
       "filed": "2026-01-26",
       "role": "prospectus dated 2026-01-26 (Post-Effective Amendment No. 40)",
       "content_sha256": "d1936eea700d614882aad9eb3c37c163cb2902f0a86a35a6011c8608d7dc7dc8"
@@ -142,6 +143,7 @@
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022775/d77353d497.htm",
       "accession": "0001193125-26-022775",
       "form": "497",
+      "exhibit": null,
       "filed": "2026-01-26",
       "role": "the prospectus as filed under Rule 497(b); compared by sentence both ways, it adds three filing-header lines and lacks the 485BPOS's Form S-6 facing sheet, N-8B-2 cross-reference sheet and Part II",
       "content_sha256": "7ae58a306028bc0f61fea12d4b7e89392d6157516bc4655ad7f8659154c2d986"
@@ -151,6 +153,7 @@
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526023648/d935960d497.htm",
       "accession": "0001193125-26-023648",
       "form": "497",
+      "exhibit": null,
       "filed": "2026-01-27",
       "role": "Singapore offering wrapper incorporating the prospectus; adds Singapore listing, dealing and tax information and changes none of the Trust's terms",
       "content_sha256": "cb4e75069d37711706afb21b8ab98a0be036a88c7f622f8ed1fd66932180b6c9"
@@ -160,6 +163,7 @@
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000141036826023904/primary_doc.xml",
       "accession": "0001410368-26-023904",
       "form": "N-CEN",
+      "exhibit": null,
       "filed": "2026-03-13",
       "role": "census report for the period ending 2025-12-31 (the 3d-3c-1 candidate's own N-CEN)",
       "content_sha256": "8a9f123f374408ac987506d7bf43b02eab4057ed2703438090cd1d6dfb993c0a"
@@ -168,7 +172,8 @@
       "doc_id": "standard_terms_2004",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013604000194/file002.htm",
       "accession": "0000950136-04-000194",
-      "form": "485APOS EX-99.A1",
+      "form": "485APOS",
+      "exhibit": "EX-99.A1",
       "filed": "2004-01-28",
       "role": "Amended and Restated Standard Terms and Conditions of Trust, effective 2004-01-27",
       "content_sha256": "4e9fb7b8aa8822ad8da6d989c33c5545526e6b05e7d4ce1a6fe023b086786b03"
@@ -178,6 +183,7 @@
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013097004319/0000950130-97-004319.txt",
       "accession": "0000950130-97-004319",
       "form": "485BPOS",
+      "exhibit": null,
       "filed": "1997-09-30",
       "role": "Amendment effective 1997-09-30 to the 1993 Standard Terms and the Trust Indenture: Indenture Section 2F (taxable year to 30 September), the Distributor definition, Section 3.05 (annual report); incorporated in the 2004 restatement",
       "content_sha256": "133d6e18baf952554ff51ffec0d0a03d307760bece5e8aca8c3df97bd976b038"
@@ -187,6 +193,7 @@
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013099000390/0000950130-99-000390.txt",
       "accession": "0000950130-99-000390",
       "form": "485APOS",
+      "exhibit": null,
       "filed": "1999-01-25",
       "role": "Amendment effective 1999-01-25 to the 1993 Standard Terms: a misweighted-portfolio paragraph added to Section 5.02; incorporated in the 2004 restatement",
       "content_sha256": "18b9180ea72a5bc5191a6322be87513764d4d9a02c91943f9ef68d2d6f6d5ef0"
@@ -195,7 +202,8 @@
       "doc_id": "amendment_1",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000095013605000453/file004.htm",
       "accession": "0000950136-05-000453",
-      "form": "485BPOS EX-99.A1",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1",
       "filed": "2005-01-28",
       "role": "Amendment No. 1: Section 3.04 special dividends",
       "content_sha256": "0ab8dccd45fb34df3e0974bf615b7f66aece738338822c36e411c50193338f3d"
@@ -204,7 +212,8 @@
       "doc_id": "amendment_2",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000095012309003326/y01192bexv99wa1.htm",
       "accession": "0000950123-09-003326",
-      "form": "485BPOS EX-99.A1",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1",
       "filed": "2009-02-24",
       "role": "Amendment No. 2: Exchange, Depository and NSCC definitions; successors; Section 10.06 addresses",
       "content_sha256": "0713fc167c51f63039904254c878145f0bd4867800f461dd74137ad726678bb2"
@@ -213,7 +222,8 @@
       "doc_id": "amendment_3",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000095012310005702/y02740exv99waw1.htm",
       "accession": "0000950123-10-005702",
-      "form": "485BPOS EX-99.A.1",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A.1",
       "filed": "2010-01-27",
       "role": "Amendment No. 3: names of the Trust; SPDRs renamed Units throughout; Sections 10.03, 10.06, Exhibit A",
       "content_sha256": "e27e647908c36f493c6d4735fc6f1212a785b35ad91da4642b193a1d66a9f739"
@@ -222,7 +232,8 @@
       "doc_id": "amendment_4",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312518013487/d469152dex99a15.htm",
       "accession": "0001193125-18-013487",
-      "form": "485BPOS EX-99.A1(5)",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(5)",
       "filed": "2018-01-18",
       "role": "Amendment No. 4: the Trustee definition, from 2017-06-16",
       "content_sha256": "6e68f91ce9dea0d780c7ee592a05e49b821e9dcf13821df6a09765b9aae2e0fe"
@@ -231,7 +242,8 @@
       "doc_id": "amendment_5",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312518013487/d469152dex99a16.htm",
       "accession": "0001193125-18-013487",
-      "form": "485BPOS EX-99.A1(6)",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(6)",
       "filed": "2018-01-18",
       "role": "Amendment No. 5: settlement days in Sections 2.03, 3.04 (record date) and 5.02 (redemption transfer)",
       "content_sha256": "5264fa94d76550ce2256d1f614d65bc51bc2e9e67031c6ecec026923d307b3c1"
@@ -240,7 +252,8 @@
       "doc_id": "amendment_6",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312525013181/d875286dex99a17.htm",
       "accession": "0001193125-25-013181",
-      "form": "485BPOS EX-99.A1(7)",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(7)",
       "filed": "2025-01-27",
       "role": "Amendment No. 6: T+1 settlement in Sections 2.03, 3.04 (record date) and 5.02; redemption requests to the Distributor and Trustee",
       "content_sha256": "f4cbb238994b66580b0d73c1c0b5f2f8784f8726add327fb3d745282b57c2066"
@@ -249,7 +262,8 @@
       "doc_id": "amendment_7",
       "url": "https://www.sec.gov/Archives/edgar/data/884394/000119312526022316/d77353dex99a18.htm",
       "accession": "0001193125-26-022316",
-      "form": "485BPOS EX-99.A1(8)",
+      "form": "485BPOS",
+      "exhibit": "EX-99.A1(8)",
       "filed": "2026-01-26",
       "role": "Amendment No. 7: the Trust's name",
       "content_sha256": "fb2e38bca4e0ca526f4cfc6b2e60b3e9aadbe4486603acc376b139cf764a7000"
@@ -309,6 +323,30 @@
       "url": "https://www.legislation.gov.uk/ukpga/1992/12/section/106A/data.xht",
       "version": "current revised text",
       "content_sha256": "a0b7989207233527e415f745db6d921cee159570424674a9a444e2fd1366ab6a"
+    },
+    {
+      "authority_id": "ita2007_s564g",
+      "url": "https://www.legislation.gov.uk/ukpga/2007/3/section/564G/data.xht",
+      "version": "current revised text",
+      "content_sha256": "bdf2920f7ee7532b1c08a96589e14ccff3431bac1bf65d8bd4d3f89c001361eb"
+    },
+    {
+      "authority_id": "ita2007_s564u",
+      "url": "https://www.legislation.gov.uk/ukpga/2007/3/section/564U/data.xht",
+      "version": "current revised text",
+      "content_sha256": "0d7a085bd14445e6547c2d67842186d9cbd1a51382f1865012713552cc1518d6"
+    },
+    {
+      "authority_id": "tcga1992_s151w",
+      "url": "https://www.legislation.gov.uk/ukpga/1992/12/section/151W/data.xht",
+      "version": "current revised text",
+      "content_sha256": "376ef8ec96bad435634ba7a860279c559143a5c9d1d640726f72aa3a09a9bbe6"
+    },
+    {
+      "authority_id": "ofr2009_contents",
+      "url": "https://www.legislation.gov.uk/uksi/2009/3001/contents/data.xht",
+      "version": "current revised text",
+      "content_sha256": "f8c4aeaa3eea2b7f690c86553bbbcbc7e927cc554baf7222ecd482ac9ffd1c83"
     },
     {
       "authority_id": "ofr2009_reg4",
@@ -476,7 +514,7 @@
     },
     {
       "assumption_id": "A4_no_other_exclusion",
-      "statement": "No regulations under TIOPA 2010 s359 exclude the Trust from being a mutual fund, and the Trust's units are not investment bond arrangements within TCGA 1992 s151W, ITA 2007 s564U or CTA 2009 s519 (TIOPA 2010 s355(4)).",
+      "statement": "No regulations under TIOPA 2010 s359 exclude the Trust from being a mutual fund.",
       "evidence": [
         {
           "source_id": "tiopa_s359",
@@ -484,7 +522,7 @@
           "text": "The Treasury may by regulations provide that arrangements are not a mutual fund for the purposes of section 355—"
         }
       ],
-      "residual": "The s359 search covered the contents of SI 2009/3001 only, on 2026-10-14; no complete list of instruments made under s359 was consulted. The investment bond provisions were not read."
+      "residual": "The search covered the contents of SI 2009/3001 only (snapshot ofr2009_contents, 2026-10-14); no complete list of instruments made under s359 was consulted."
     },
     {
       "assumption_id": "A5_part3_not_applying",
@@ -502,13 +540,19 @@
       "assumption_id": "A6_law_current",
       "statement": "The committed legal sources state the law in force at the disposal date.",
       "evidence": [],
-      "residual": "The snapshots are legislation.gov.uk's current revised text and HMRC's manual pages as fetched on 2026-10-14; a later change is not detected before review_by or a new version."
+      "residual": "The snapshots are legislation.gov.uk's current revised text and HMRC's manual pages as fetched on 2026-10-14. A change is not detected by code; the determination is used for nothing after review_by, and a later change before then is this assumption's residual."
     },
     {
       "assumption_id": "A7_identity_continuity",
       "statement": "The units disposed of are interests in the class bound today (CIK, LEI, ISIN, MIC and ticker) at every date from valid_from to the disposal.",
       "evidence": [],
       "residual": "The binding is checked against the current 3d-3c-1 candidate only; no dated history of the binding is held. A change of identifier between valid_from and the disposal would not be seen unless a governing filing records it."
+    },
+    {
+      "assumption_id": "A8_inventory_complete",
+      "statement": "No governing filing for the CIK made on or after monitor_from and before the disposal or the run's cutoff is missing from the filing inventory the run read.",
+      "evidence": [],
+      "residual": "The inventory is SEC's submissions JSON for the CIK, read up to 30 days before the run's cutoff; a filing after that read, a filing SEC lists late, and the completeness of SEC's own inventory are this assumption's residual."
     }
   ],
   "findings": [
@@ -562,7 +606,7 @@
         {
           "source_id": "standard_terms_2004",
           "locator": "Section 2.01",
-          "text": "The Trustee declares it holds and will hold the Trust Fund as Trustee for the use and benefit of all present and future Beneficial Owners"
+          "text": "The Trustee declares it holds and will hold the Trust Fund as Trustee for the use and benefit of all present and future Beneficial Owners and subject to the terms and conditions of the Indenture and this Agreement."
         },
         {
           "source_id": "standard_terms_2004",
@@ -713,11 +757,16 @@
       "answer": "no_applicable_exclusion",
       "basis": "assumed",
       "assumptions": [
+        "A3_indenture",
         "A4_no_other_exclusion"
       ],
       "authorities": [
         "tiopa_s355",
-        "tiopa_s359"
+        "tiopa_s359",
+        "ofr2009_contents",
+        "ita2007_s564g",
+        "ita2007_s564u",
+        "tcga1992_s151w"
       ],
       "quotes": [
         {
@@ -729,11 +778,21 @@
           "source_id": "tiopa_s355",
           "locator": "s355(4)",
           "text": "See also section 151W(b) of TCGA 1992, section 564U(b) of ITA 2007 and section 519(4)(b) of CTA 2009 (which have the effect that investment bond arrangements are not an offshore fund for the purposes of section 354)."
+        },
+        {
+          "source_id": "ita2007_s564g",
+          "locator": "s564G(1)(d)(ii)",
+          "text": "to make a repayment of the capital (“the redemption payment”) to the bond-holder during or at the end of the bond-term (whether or not in instalments), and"
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "PURCHASES AND REDEMPTIONS OF CREATION UNITS, Redemption",
+          "text": "Units may be redeemed in-kind only in Creation Units at their NAV determined after receipt of a redemption request in proper form by the Distributor and Trustee through the Depository and relevant DTC Participant and only on a Business Day."
         }
       ],
       "contrary": [],
-      "reasoning": "Two further routes exclude arrangements: regulations under s359, and the investment bond arrangements that s355(4) points to. For s359 the search covered the contents of SI 2009/3001, read on 2026-10-14: its Part 1 makes no exclusion from the definition, and its Part 2 Chapter 3 exceptions (regs 25-31C) are exceptions from the charge. The investment bond provisions s355(4) cites were not read. Both rest on A4.",
-      "would_resolve": "A complete list of instruments made under s359, read for an exclusion covering the Trust."
+      "reasoning": "Two further routes exclude arrangements. (1) Investment bond arrangements (s355(4); TCGA s151W and ITA s564U for capital gains and income tax; CTA 2009 s519 concerns corporation tax) are defined in ITA s564G and need, among other things, an undertaking to repay the capital as a redemption payment over a bond term and additional payments no more than a reasonable commercial return on a loan of it (s564G(1)(c)-(e)). Units are redeemed at NAV, in kind, with no capital sum repaid and no bond term, so the Trust's units are not investment bond arrangements (on the terms quoted, so A3). (2) Regulations under s359: the contents of SI 2009/3001 (snapshot ofr2009_contents) show no exclusion from the definition in its Part 1; its Part 2 Chapter 3 exceptions (regs 25-31C) are exceptions from the charge. No complete list of instruments made under s359 was consulted (A4).",
+      "would_resolve": null
     },
     {
       "question": "transparent_fund",
