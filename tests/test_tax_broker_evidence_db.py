@@ -258,6 +258,8 @@ def test_a_run_publishes_one_generation_and_a_later_one_leaves_it_unchanged(
     assert _rows("SELECT subject, outcome, reasons, held_positions FROM tax_evidence_subjects") == [
         ("order:1000", "admitted", [], {"21": {"units": "1", "amount": "100", "cid": ACCOUNT}})
     ]
+    # Slice 3d-3b: the v3 derivation always writes A8's predicate, empty when no totalFees is non-zero.
+    assert _rows("SELECT total_fees_nonzero_position_ids FROM tax_evidence_subjects") == [([],)]
     assert _rows(
         "SELECT state, account_id, trade_events_max_event_id IS NOT NULL, "
         "history_fetch_latest_id = history_fetch_ok_id, fx_run_id IS NOT NULL, evidence_policy_id "

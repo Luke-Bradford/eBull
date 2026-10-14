@@ -126,6 +126,8 @@ _SYNC_FIELDS = (
     "openrate",
     "openconversionrate",
     "opendatetime",
+    # #3616 slice 3d-3b: the "Position open reason", gated by tax evidence policy v3, is retained when it changes.
+    "openpositionactiontype",
 )
 _HISTORY_OPEN_FIELDS = (
     "orderid",
@@ -663,7 +665,7 @@ def _retain_observation(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         latest = cur.execute(
             """
-            SELECT observed_normalised
+            SELECT observed_raw
             FROM trade_event_observations
             WHERE event_id = %(event_id)s AND source = %(source)s AND event_kind = %(kind)s
             ORDER BY observation_id DESC
@@ -672,7 +674,9 @@ def _retain_observation(
             {"event_id": stored["event_id"], "source": event.source, "kind": event.event_kind},
         ).fetchone()
     if latest is not None:
-        baseline: dict[str, Any] | None = latest["observed_normalised"]
+        # Re-normalised under the current projection: a stored normalisation predating a projection field would
+        # otherwise differ by that key's presence alone.
+        baseline: dict[str, Any] | None = normalise_payload(event.source, event.event_kind, latest["observed_raw"])
     elif stored["source"] == event.source:
         baseline = stored_normalised
     else:
@@ -979,7 +983,7 @@ def _retain_unscoped(
         rows = cur.execute(
             """
             SELECT DISTINCT ON (position_id, source, event_kind, executed_at)
-                   position_id, source, event_kind, executed_at, observed_normalised
+                   position_id, source, event_kind, executed_at, observed_raw
             FROM trade_event_observations
             WHERE kind = 'unscoped' AND position_id = ANY(%(pids)s)
             ORDER BY position_id, source, event_kind, executed_at, observation_id DESC
@@ -987,7 +991,10 @@ def _retain_unscoped(
             {"pids": sorted({o[0] for o in observations})},
         ).fetchall()
     latest = {
-        (r["position_id"], r["source"], r["event_kind"], r["executed_at"]): r["observed_normalised"] for r in rows
+        (r["position_id"], r["source"], r["event_kind"], r["executed_at"]): normalise_payload(
+            r["source"], r["event_kind"], r["observed_raw"]
+        )
+        for r in rows
     }
     for position_id, source, event_kind, executed_at, raw in observations:
         observed = normalise_payload(source, event_kind, raw)

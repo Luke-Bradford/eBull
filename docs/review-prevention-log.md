@@ -12714,3 +12714,17 @@ neighbouring container and match it.**
   stored-body path falls back to a fetch must print how many bodies came from each path.
 - Enforced in: `sql/490_tax_character.sql` (`tax_cover_instances`), `app/services/tax_matching.py`
   (`refresh_cover_instances`) and `tests/test_tax_matching_db.py` (cover refresh tests).
+
+### A new compared field makes every stored normalisation stale (#3616)
+
+- Failure (slice 3d-3b build, 2026-10-14): v3 gates the sync `openPositionActionType`. The spec assumed ingestion
+  compares the field table, but it compares `trade_events._SYNC_FIELDS`. Codex checkpoint 2 found that a change of
+  that field alone would never be retained. Simply adding the key would have been worse: the stored
+  `observed_normalised` of every existing observation lacks it. The next sync would then write an amendment for each
+  of them that differed by the key's presence alone, and v3 would refuse every such position.
+- Prevention: when a field joins a comparison projection, compare against stored observations re-normalised from
+  `observed_raw` under the current projection, never against their stored normalisation. When a derivation gates a
+  broker field, grep the ingestion projection for it as well as the field table.
+- Enforced in: `app/services/trade_events.py` (both baselines re-normalised), `app/services/tax_broker_evidence.py`
+  (loader re-normalises) and `tests/test_tax_broker_derivation.py`
+  (`test_an_open_reason_change_alone_is_retained_as_an_amendment`).

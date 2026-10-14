@@ -3,7 +3,7 @@
 Spec: docs/specs/metrics/2026-10-14-3616-slice3d2-statutory-matching.md. Consideration classes:
 docs/specs/metrics/2026-10-14-3616-slice3d1-consideration-basis.md ("Consideration classes").
 
-- ``classify_lot`` is 3d-1's class table (``consideration_classes_v1``).
+- ``classify_lot`` is 3d-1's class table with slice 3d-3b's A8 (``consideration_classes_v2``).
 - ``tax_security_of`` maps a component of instruments to its tax security (Design 2, ``tax_security_v1``).
 - ``identify_security`` is the identification of one security's admitted lots (Designs 5-8): pure, exact, and
   refusing step 5 (s105(2)) rather than implementing it.
@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Context, Decimal, Inexact, Rounded, localcontext
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -59,13 +59,13 @@ from app.services.tax_ledger import MatchingRule
 
 #: The frozen local policy (spec "Local policy"); changing any part of it is a new id.
 TAX_MATCHING_POLICY_ID = "share_identification_v1"
-#: 3d-1's class table.
-CONSIDERATION_CLASS_POLICY_ID = "consideration_classes_v1"
-#: The one evidence policy ``consideration_classes_v1`` was reviewed against (3d-1 "Consideration classes"). A
-#: generation under any other policy is refused, not matched.
-SUPPORTED_EVIDENCE_POLICY_ID = "broker_evidence_v2"
-#: The version of the canonical inputs document (Design 9).
-INPUTS_VERSION = "matching_inputs_v2"
+#: 3d-1's class table with slice 3d-3b's A8 (``distribution_character_assumed``).
+CONSIDERATION_CLASS_POLICY_ID = "consideration_classes_v2"
+#: The one evidence policy ``consideration_classes_v2`` was reviewed against (slice 3d-3b Design 2). A generation
+#: under any other policy is refused, not matched.
+SUPPORTED_EVIDENCE_POLICY_ID = "broker_evidence_v3"
+#: The version of the canonical inputs document (Design 9); v3 adds each subject's A8 inputs.
+INPUTS_VERSION = "matching_inputs_v3"
 #: Session advisory lock held for a whole run (Design 10): int.from_bytes(b"taxmatch", "big").
 TAX_MATCHING_LOCK_KEY = 8386116392322360168
 
@@ -78,6 +78,8 @@ EXECUTION_ASSUMED = "execution_assumed"
 LOOKUP_EVIDENCE_UNOBSERVED = "lookup_evidence_unobserved"
 DISPOSAL_FORMULA_ASSUMED = "disposal_formula_assumed"
 SYNC_CHARGES_UNOBSERVED = "sync_charges_unobserved"
+#: A8 (slice 3d-3b): every distribution in a position's ``totalFees`` is a separately paid cash income distribution.
+DISTRIBUTION_CHARACTER_ASSUMED = "distribution_character_assumed"
 WINDOW_OPEN = "window_open"
 HISTORY_COVERAGE_UNESTABLISHED = "history_coverage_unestablished"
 #: Carried by every disposal and pool, all of shares (slice 3d-3a Design 3).
@@ -86,6 +88,7 @@ SHARE_REASONS = frozenset({OFFSHORE_FUND_EXCLUSION_ASSUMED, ISSUER_BINDING_ASSUM
 # The fields whose failure makes a lot ``unavailable`` (3d-1; Design 3 ``lot_unavailable``).
 EXECUTION_EVIDENCE_MISMATCH = "execution_evidence_mismatch"
 TOTAL_FEES_UNOBSERVED_NULL = "total_fees_unobserved_null"
+TOTAL_FEES_NONZERO_INVALID = "total_fees_nonzero_invalid"
 DIRECTION_INVALID = "direction_invalid"
 
 LotClass = Literal["final_eligible", "provisional", "unavailable"]
@@ -121,6 +124,10 @@ class SubjectRow:
     instrument_id: int | None
     execution_evidence: str | None
     total_fees_unobserved_position_ids: tuple[int, ...] | None
+    #: Slice 3d-3b: positions with a non-zero ``totalFees`` (A8's predicate), and the subject's positions (the keys
+    #: of its ``held_positions``) the array must be drawn from. NULL on runs before ``broker_evidence_v3``.
+    total_fees_nonzero_position_ids: tuple[int | None, ...] | None = ()
+    position_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -166,6 +173,15 @@ class LotClassification:
     reasons: tuple[str, ...]
 
 
+def _nonzero_ids_valid(subject: SubjectRow) -> bool:
+    """Slice 3d-3b Design 2: a sorted, duplicate-free array of positive ids, each one of the subject's positions."""
+    ids = subject.total_fees_nonzero_position_ids
+    if ids is None or any(not isinstance(p, int) or isinstance(p, bool) or p <= 0 for p in ids):
+        return False
+    positive = cast(tuple[int, ...], ids)
+    return list(positive) == sorted(set(positive)) and set(positive) <= subject.position_ids
+
+
 def classify_lot(lot: LotRow, subject: SubjectRow) -> LotClassification:
     """3d-1's table, from the lot's own row and its subject's row in the same generation."""
     failing: list[str] = []
@@ -175,6 +191,8 @@ def classify_lot(lot: LotRow, subject: SubjectRow) -> LotClassification:
         failing.append(EXECUTION_EVIDENCE_MISMATCH)
     if subject.total_fees_unobserved_position_ids is None:
         failing.append(TOTAL_FEES_UNOBSERVED_NULL)
+    if not _nonzero_ids_valid(subject):
+        failing.append(TOTAL_FEES_NONZERO_INVALID)
     if failing:
         return LotClassification("unavailable", tuple(sorted(failing)))
     reasons: set[str] = set()
@@ -182,6 +200,8 @@ def classify_lot(lot: LotRow, subject: SubjectRow) -> LotClassification:
         reasons.add(SPREAD_INCLUSION_ASSUMED)
         if lot.execution_evidence == "sync_only":
             reasons |= {EXECUTION_ASSUMED, LOOKUP_EVIDENCE_UNOBSERVED}
+        if subject.total_fees_nonzero_position_ids:
+            reasons.add(DISTRIBUTION_CHARACTER_ASSUMED)
     else:
         reasons.add(DISPOSAL_FORMULA_ASSUMED)
     if subject.total_fees_unobserved_position_ids:
@@ -740,6 +760,8 @@ def inputs_document(inputs: MatchingInputs) -> str:
                 s.instrument_id,
                 s.execution_evidence,
                 None if s.total_fees_unobserved_position_ids is None else sorted(s.total_fees_unobserved_position_ids),
+                None if s.total_fees_nonzero_position_ids is None else list(s.total_fees_nonzero_position_ids),
+                sorted(s.position_ids),
             ]
             for s in inputs.subjects
         ),
@@ -930,11 +952,15 @@ def _read_inputs(conn: psycopg.Connection[Any], *, bodies: bool = True) -> Match
                 r["instrument_id"],
                 r["execution_evidence"],
                 None if r["unobserved"] is None else tuple(r["unobserved"]),
+                None if r["nonzero"] is None else tuple(r["nonzero"]),
+                frozenset(int(p) for p in r["positions"]),
             )
             for r in cur.execute(
                 """
                 SELECT subject, outcome, instrument_id, execution_evidence,
-                       total_fees_unobserved_position_ids AS unobserved
+                       total_fees_unobserved_position_ids AS unobserved,
+                       total_fees_nonzero_position_ids AS nonzero,
+                       ARRAY(SELECT jsonb_object_keys(held_positions)) AS positions
                 FROM tax_evidence_subjects WHERE run_id = %(run)s ORDER BY subject
                 """,
                 {"run": run["run_id"]},

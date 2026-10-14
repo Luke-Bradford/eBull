@@ -47,7 +47,7 @@ from app.services.tax_broker_derivation import (
     price_lots,
 )
 from app.services.tax_fx import load_tax_fx_state, tax_fx_state_is_current
-from app.services.trade_events import canonical_decimal, payload_account_id
+from app.services.trade_events import canonical_decimal, normalise_payload, payload_account_id
 
 logger = logging.getLogger(__name__)
 
@@ -455,13 +455,14 @@ def _read_snapshot(conn: psycopg.Connection[Any], environment: str) -> _Snapshot
                 executed_at=r["executed_at"],
                 kind=r["kind"],
                 source=r["source"],
-                observed_normalised=r["observed_normalised"],
+                # Re-normalised under the current projection, as ingestion compares (slice 3d-3b).
+                observed_normalised=normalise_payload(r["source"], r["event_kind"], _decimal_json(r["raw"])),
                 observed_raw=_decimal_json(r["raw"]),
             )
             for r in cur.execute(
                 """
                 SELECT o.observation_id, o.event_id, o.position_id, o.event_kind, o.executed_at, o.kind, o.source,
-                       o.observed_normalised, o.observed_raw::text AS raw
+                       o.observed_raw::text AS raw
                 FROM trade_event_observations o
                 JOIN trade_history_fetches f USING (fetch_id)
                 WHERE f.environment = %(env)s
@@ -584,8 +585,8 @@ def _publish(
             INSERT INTO tax_evidence_subjects
                 (run_id, subject, order_id, etoro_instrument_id, instrument_id, product, outcome, reasons,
                  trade_event_ids, lookup_id, held_positions, first_event_at, last_event_at, execution_evidence,
-                 total_fees_unobserved_position_ids)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 total_fees_unobserved_position_ids, total_fees_nonzero_position_ids)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             [
                 (
@@ -604,6 +605,7 @@ def _publish(
                     s.last_event_at,
                     s.execution_evidence,
                     list(s.total_fees_unobserved_position_ids),
+                    list(s.total_fees_nonzero_position_ids),
                 )
                 for s in subjects
             ],

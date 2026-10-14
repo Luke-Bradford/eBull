@@ -37,7 +37,7 @@ from app.services.trade_events import EventSource, canonical_decimal, classify_o
 
 #: Names the checks, field table, product mapping, normalisation, tolerances, candidate rules and keys (Design 4.11).
 #: Changing any of them is a new policy id.
-TAX_EVIDENCE_POLICY_ID = "broker_evidence_v2"
+TAX_EVIDENCE_POLICY_ID = "broker_evidence_v3"
 
 #: The fingerprint's canonical form (Design 4.10).
 CANONICAL_VERSION = 1
@@ -47,6 +47,11 @@ TOLERANCE = Decimal("0.001")
 
 #: A sync ``openDateTime`` re-rendered within this span is not an amendment (policy v2, Design 4.6, fact 19).
 RE_RENDERING_SPAN = timedelta(seconds=1)
+
+#: Normalised sync open keys a re-rendering may differ in: ``opendatetime`` under ``RE_RENDERING_SPAN`` (v2), and
+#: ``totalfees``, eToro's "Total overnight fees and dividends charged/paid on the position", which is neither
+#: consideration nor a disposal (policy v3, slice 3d-3b Design 1 change 1).
+_RE_RENDERING_EXEMPT = frozenset({"opendatetime", "totalfees"})
 
 BIGINT_MAX = 2**63 - 1
 
@@ -196,6 +201,9 @@ class SubjectEvidence:
     last_event_at: datetime | None
     execution_evidence: ExecutionEvidence | None
     total_fees_unobserved_position_ids: tuple[int, ...]
+    #: Positions with a non-zero ``totalFees`` in any retained sync payload, attached ``unscoped`` included
+    #: (slice 3d-3b Design 2): the predicate of A8, recorded whatever the outcome.
+    total_fees_nonzero_position_ids: tuple[int, ...]
     lots: tuple[LotDraft, ...] = ()
 
 
@@ -411,6 +419,8 @@ _SYNC_REAL: tuple[FieldSpec, ...] = (
     ("openRate", _RATE),
     ("openConversionRate", _RATE),
     ("openDateTime", _timestamp),
+    # "Position open reason" (PnL page, no values documented); check 7 admits only 0 (policy v3, change 4).
+    ("openPositionActionType", _non_negative_int),
 )
 _HISTORY_REAL: tuple[FieldSpec, ...] = (
     ("isBuy", _boolean),
@@ -860,6 +870,7 @@ def derive_order(
     first_event_at = min((e.executed_at for e in events), default=None)
     last_event_at = max((e.executed_at for e in events), default=None)
     unobserved = tuple(p for p in position_ids if p not in synced_positions)
+    nonzero_fees = _nonzero_total_fees(sync_payloads, unscoped_sync_opens)
     own_held = {p: held.get(p) for p in position_ids}
     # An orphan holding the partition attached to this order is recorded, never conserved (it has no event).
     held_positions = own_held | {p: h for p, h in held.items() if p not in own_held}
@@ -883,6 +894,7 @@ def derive_order(
             last_event_at=last_event_at,
             execution_evidence=evidence,
             total_fees_unobserved_position_ids=unobserved,
+            total_fees_nonzero_position_ids=nonzero_fees,
             lots=lots,
         )
 
@@ -920,9 +932,23 @@ def derive_order(
         if lookup.asset.get("leverage") not in (None, 1):
             reasons.add("unsupported_shape:asset.leverage")
     for _, values in sync_values:
-        for label, wanted in (("isBuy", True), ("leverage", 1), ("mirrorID", 0), ("parentPositionID", 0)):
+        for label, wanted in (
+            ("isBuy", True),
+            ("leverage", 1),
+            ("mirrorID", 0),
+            ("parentPositionID", 0),
+            ("openPositionActionType", 0),
+        ):
             if values[label] is not None and values[label] != wanted:
                 reasons.add(f"unsupported_shape:{label}")
+    # The held row is rewritten by every sync, while ingestion does not compare the open reason (its projection
+    # predates policy v3), so a held position's current reason is read there too.
+    for position_id, holding in own_held.items():
+        if holding is not None and _spellings(holding.payload, "openPositionActionType"):
+            label = "broker_positions.openPositionActionType"
+            current = _require(holding.payload, "openPositionActionType", label, _non_negative_int, reasons)
+            if current is not None and current != 0:
+                reasons.add("unsupported_shape:openPositionActionType")
     for _, values in history_values:
         for label, wanted in (("isBuy", True), ("leverage", 1), ("socialTradeId", 0), ("parentPositionId", 0)):
             if values[label] is not None and values[label] != wanted:
@@ -993,12 +1019,17 @@ def derive_order(
             indicators.append(("positionExecutions.addedFunds", fields.get("addedFunds")))
             for key in ("fees", "taxes", "markup"):
                 indicators.append((f"openingData.{key}", opening_fields.get(key)))
+    # totalFees is not a charge indicator (policy v3, change 2): for this shape it holds distributions only.
     for _, values in sync_values:
-        indicators += [(k, values[k]) for k in ("totalExternalFees", "totalExternalTaxes", "totalFees")]
+        indicators += [(k, values[k]) for k in ("totalExternalFees", "totalExternalTaxes")]
     indicators += [("fees", values["fees"]) for _, values in close_values]
     for label, value in indicators:
         if value is not None and value != 0:
             reasons.add(f"charges_nonzero:{label}")
+    # 9a. An order with a close row keeps v2's totalFees gate: whether netProfit includes position income is
+    # undocumented (policy v3, change 3).
+    if closes and nonzero_fees:
+        reasons.add("income_in_proceeds_unestablished")
 
     sync_units = {values["initialUnits"] for _, values in sync_values if values["initialUnits"] is not None}
     execution_units: Decimal | None = opening.get("units") if lookup is not None else None
@@ -1147,12 +1178,22 @@ def _sync_open_payloads(
     ]
 
 
+def _nonzero_total_fees(
+    sync_payloads: Iterable[_Payload], unscoped_sync_opens: Iterable[RetainedObservation]
+) -> tuple[int, ...]:
+    """Positions with a non-zero, in-domain ``totalFees`` in any retained sync payload or attached ``unscoped`` sync
+    open (slice 3d-3b). An absent or invalid value is the field check's to report, not a distribution."""
+    found = {p.position_id for p in sync_payloads if _peek(p.payload, "totalFees", _MONEY) not in (None, 0)}
+    found |= {o.position_id for o in unscoped_sync_opens if _peek(o.observed_raw, "totalFees", _MONEY) not in (None, 0)}
+    return tuple(sorted(found))
+
+
 def _re_rendered_only(payloads: Sequence[Mapping[str, Any]]) -> bool:
-    """Policy v2 (Design 4.6): one position's sync open payloads differ only in an ``openDateTime`` that spans less
-    than ``RE_RENDERING_SPAN`` on one Europe/London date. Judged over the whole set, never pair by pair, so a chain of
-    small differences cannot carry the time further."""
+    """Policy v3 (Design 4.6; slice 3d-3b change 1): one position's sync open payloads differ only in ``totalFees``
+    and in an ``openDateTime`` that spans less than ``RE_RENDERING_SPAN`` on one Europe/London date. Judged over the
+    whole set, never pair by pair, so a chain of small differences cannot carry the time further."""
     # Plain equality, no serializer: a malformed nested value must fail its field check, not raise here.
-    rest = [{k: v for k, v in p.items() if k != "opendatetime"} for p in payloads]
+    rest = [{k: v for k, v in p.items() if k not in _RE_RENDERING_EXEMPT} for p in payloads]
     times = [_timestamp(p.get("opendatetime")) for p in payloads]
     if not payloads or any(r != rest[0] for r in rest) or _INVALID in times:
         return False
@@ -1198,6 +1239,9 @@ def _check_unscoped(
     else:
         reasons.add("unscoped_unmatched")
         return
+    if obs.source == SYNC and obs.event_kind == "open":
+        # The re-rendering test ignores totalFees, so the value is checked here first (policy v3, change 1).
+        _require(obs.observed_raw, "totalFees", "totalFees", _MONEY, reasons)
     if classify_observation(dict(baseline), dict(obs.observed_normalised)) == "amendment" and not (
         obs.source == SYNC
         and obs.event_kind == "open"
@@ -1230,6 +1274,21 @@ def derive_position(subject: SubjectInput, held: Mapping[int, HeldPosition]) -> 
         last_event_at=max((e.executed_at for e in subject.events), default=None),
         execution_evidence=None,
         total_fees_unobserved_position_ids=tuple(p for p in event_positions if p not in synced),
+        total_fees_nonzero_position_ids=_nonzero_total_fees(
+            [
+                *(
+                    _Payload(e.event_id, e.position_id, e.source, e.event_kind, e.raw_payload, None)
+                    for e in subject.events
+                    if e.source == SYNC
+                ),
+                *(
+                    _Payload(None, o.position_id, o.source, o.event_kind, o.observed_raw, o.kind)
+                    for o in subject.observations
+                    if o.source == SYNC and o.kind != "unscoped"
+                ),
+            ],
+            [o for o in subject.observations if o.source == SYNC and o.event_kind == "open" and o.kind == "unscoped"],
+        ),
     )
 
 

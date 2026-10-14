@@ -216,8 +216,14 @@ Four changes. Every other check, field and key is v2's.
    - **The shape check.** Check 7 requires it to be 0, as it requires `leverage` 1. Any other value is
      `unsupported_shape:openPositionActionType`. Absence is `missing_field:…`, and a boolean, string, null, negative or
      fractional value is `invalid_field:…`.
-   - **Effect on ingestion.** Ingestion compares every field of the field table, so the field becomes a retained
-     difference from the first v3 sync onwards. Changes before that were not compared and cannot be recovered.
+   - **Effect on ingestion.** From the first v3 sync onwards a change of the field alone is a retained difference.
+     Changes before that were not compared and cannot be recovered.
+   - **Build correction (2026-10-14).** Ingestion compares `trade_events._SYNC_FIELDS`, its own projection, not the
+     field table. The build adds `openpositionactiontype` there (Codex checkpoint 2: a transient 0 → 1 → 0 would
+     otherwise leave no trace). Ingestion's baselines and the derivation's loader now re-normalise each stored
+     observation from `observed_raw`. A normalisation stored before the key existed would otherwise differ from a
+     new one by the key's presence alone, which would write an amendment for every position with a retained
+     observation and refuse it. Check 7 also reads the held row's current payload.
    - **What it does and does not prove.** It is an allowlist of the one observed value (fact 4), not proof that 0
      means a purchase. It refuses any position whose stated open reason differs from every retained sync open payload
      inspected in fact 4. A non-purchase opening that also carries 0 is not detected. The residual is v2's: such a position is
