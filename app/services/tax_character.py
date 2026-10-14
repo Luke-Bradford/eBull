@@ -46,6 +46,8 @@ SEC_CIK_SCHEME = "http://www.sec.gov/CIK"
 _DEI = re.compile(r"http://xbrl\.sec\.gov/dei/[0-9]{4}")
 _SIC = re.compile(r"[0-9]{4}")
 _CIK = re.compile(r"[0-9]{10}")
+#: The accession format ``tax_cover_instances`` admits (its CHECK).
+ACCESSION = re.compile(r"[0-9]{10}-[0-9]{2}-[0-9]{6}")
 _COMMON = re.compile(
     r"(CLASS [A-Z] )?(COMMON STOCK|ORDINARY SHARES)"
     r"(,? ((US)?\$?[0-9]*\.?[0-9]+ PAR VALUE|PAR VALUE (US)?\$?[0-9]*\.?[0-9]+|NO PAR VALUE)( PER SHARE)?)?"
@@ -106,16 +108,21 @@ class SecurityEvidence:
 # --- the strict reader -------------------------------------------------------------------------------------------
 
 
-def structurally_sound(body: bytes) -> bool:
-    """At most ``INSTANCE_MAX_BYTES``, parses with ``SAFE_XML_PARSER``, and its root is ``xbrli:xbrl``: the test a
-    fetched body passes before it is stored (Design 1)."""
+def _xbrl_root(body: bytes) -> Any | None:
+    """The parsed root when the body is at most ``INSTANCE_MAX_BYTES``, parses with ``SAFE_XML_PARSER`` and its root
+    is ``xbrli:xbrl``; else None."""
     if len(body) > INSTANCE_MAX_BYTES:
-        return False
+        return None
     try:
         root = ET.fromstring(body, parser=SAFE_XML_PARSER)
     except ET.XMLSyntaxError:
-        return False
-    return isinstance(root.tag, str) and ET.QName(root).text == f"{{{XBRLI}}}xbrl"
+        return None
+    return root if isinstance(root.tag, str) and ET.QName(root).text == f"{{{XBRLI}}}xbrl" else None
+
+
+def structurally_sound(body: bytes) -> bool:
+    """The test a fetched body passes before it is stored (Design 1)."""
+    return _xbrl_root(body) is not None
 
 
 def read_cover(body: bytes) -> Cover | None:
@@ -127,9 +134,9 @@ def read_cover(body: bytes) -> Cover | None:
     identifiers of every context they use. A symbol whose context has several titles or symbols, or that two contexts
     give different titles, is ambiguous; a context with a title and no symbol is ignored (untraded notes).
     """
-    if not structurally_sound(body):
+    root = _xbrl_root(body)
+    if root is None:
         return None
-    root = ET.fromstring(body, parser=SAFE_XML_PARSER)
     ids = [el.get("id") or "" for el in root.iter(f"{{{XBRLI}}}context")]
     if "" in ids or len(set(ids)) != len(ids):
         return None

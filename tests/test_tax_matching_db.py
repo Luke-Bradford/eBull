@@ -657,6 +657,23 @@ def test_failed_covers_store_nothing_every_cover_is_tried_and_the_next_run_retri
         (3, "unestablished", "listed_class_not_common_stock"),  # kept: a sound body is evidence
         (4, "unestablished", "cover_unavailable"),
     ]
+    # A malformed accession is a failed cover; the covers after it are still tried.
+    with _connect() as conn:
+        conn.execute("UPDATE filing_events SET provider_filing_id = '000000000A-25-000001' WHERE instrument_id = 1")
+    _generation(
+        [(f"order:{i}", "admitted", i) for i in (1, 2, 3, 4)],
+        [(f"L{i}", f"order:{i}", i, "acquisition", date(2026, 1, 5), "1", "10") for i in (1, 2, 3, 4)],
+    )
+    tried: list[str] = []
+    malformed = _refresh(lambda url: tried.append(url) or FetchedInstance(None, "http 503"))
+    assert malformed.failures == ("0000000002-25-000001: http 503", "000000000A-25-000001: malformed accession")
+    assert [u.split("/")[-1][:10] for u in tried] == ["0000000002"]
+    with _connect() as conn:
+        conn.execute("UPDATE filing_events SET provider_filing_id = '0000000001-25-000001' WHERE instrument_id = 1")
+    _generation(
+        [(f"order:{i}", "admitted", i) for i in (1, 2, 3, 4)],
+        [(f"L{i}", f"order:{i}", i, "acquisition", date(2026, 1, 5), "1", "10") for i in (1, 2, 3, 4)],
+    )
     retried: list[str] = []
     _refresh(lambda url: retried.append(url) or FetchedInstance(None, "http 503"))
     assert sorted(u.split("/")[-1][:10] for u in retried) == ["0000000001", "0000000002"]

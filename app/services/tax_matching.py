@@ -38,6 +38,7 @@ from psycopg.types.json import Jsonb
 from app.db.snapshot import snapshot_read
 from app.services.def14a_recipients import instance_url
 from app.services.tax_character import (
+    ACCESSION,
     IDENTITY_UNESTABLISHED,
     ISSUER_BINDING_ASSUMED,
     OFFSHORE_FUND_EXCLUSION_ASSUMED,
@@ -1277,6 +1278,9 @@ def refresh_cover_instances(
     added = no_url = 0
     failures: list[str] = []
     for accession in sorted(wanted.keys() - stored):
+        if not ACCESSION.fullmatch(accession):  # the table would refuse it; a failed cover, not a raised step
+            failures.append(f"{accession}: malformed accession")
+            continue
         document = wanted[accession]
         url = instance_url(document) if document else None
         if url is None:
