@@ -58,8 +58,10 @@ def _opening(payload: dict[str, Any]) -> Decimal | None:
     return values.pop() if len(values) == 1 else None
 
 
-def _order(payload: dict[str, Any]) -> str:
-    return str(payload.get("orderID", payload.get("orderId")))
+def _order(payload: dict[str, Any]) -> str | None:
+    """The payload's order id, or None when absent (undefined, never merged with other id-less events)."""
+    value = payload.get("orderID", payload.get("orderId"))
+    return None if value is None else str(value)
 
 
 def main() -> None:
@@ -191,9 +193,13 @@ def _close_facts(events: list[Any]) -> None:
 def _intervals(snaps: list[Any], events: list[Any], outcome_of: dict[int, str], total_costs: dict) -> list[Any]:
     first_open: dict[str, Any] = {}
     open_amounts: dict[str, set[Decimal | None]] = {}
+    unbound_opens: list[Any] = []  # opens with no order id: their interval's flow is undefined
     for _, kind, at, payload, _ in events:
         if kind == "open":
             order = _order(payload)
+            if order is None:
+                unbound_opens.append(at)
+                continue
             first_open.setdefault(order, at)
             amount = _opening(payload)
             open_amounts.setdefault(order, set()).add(amount)
@@ -219,7 +225,7 @@ def _intervals(snaps: list[Any], events: list[Any], outcome_of: dict[int, str], 
             continue
         inside_total += len(inside)
         orders = sorted({o for o, at in first_open.items() if start[1] < at <= end[1]})
-        flow: Decimal | None = _D0
+        flow: Decimal | None = None if any(start[1] < at <= end[1] for at in unbound_opens) else _D0
         charges: Decimal | None = _D0
         charge_parts = []
         for o in orders:
@@ -249,7 +255,7 @@ def _intervals(snaps: list[Any], events: list[Any], outcome_of: dict[int, str], 
         windows.append((start[1], end[1], with_))
         symbols = dict(sorted(Counter(e[4] for e in inside).items()))
         outcomes = dict(sorted(Counter(outcome_of.get(e[0], "none") for e in inside).items()))
-        participating = sorted({_order(e[3]) for e in inside})
+        participating = {_order(e[3]) for e in inside}
         print(
             f"{start[0]},{end[0]},{basis},{d_cash},{len(inside)},{len(orders)},{len(participating)},"
             f"{sum(1 for e in inside if e[1] == 'close')},{symbols},{outcomes},{flow},"
