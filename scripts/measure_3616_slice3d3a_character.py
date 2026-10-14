@@ -234,15 +234,19 @@ def classify(
 
 def _fetch_instance(client: httpx.Client, url: str, out: Path, accession: str) -> bytes | None:
     """The instance body, refused while reading past ``INSTANCE_MAX_BYTES``; None on any non-200 or refusal."""
-    with client.stream("GET", url, headers={"User-Agent": settings.sec_user_agent}) as r:
-        size, chunks = 0, []
-        for chunk in r.iter_bytes():
-            size += len(chunk)
-            if size > INSTANCE_MAX_BYTES:
-                print(f"    {accession}: refused, over {INSTANCE_MAX_BYTES} bytes")
-                return None
-            chunks.append(chunk)
-        status = r.status_code
+    try:
+        with client.stream("GET", url, headers={"User-Agent": settings.sec_user_agent}) as r:
+            size, chunks = 0, []
+            for chunk in r.iter_bytes():
+                size += len(chunk)
+                if size > INSTANCE_MAX_BYTES:
+                    print(f"    {accession}: refused, over {INSTANCE_MAX_BYTES} bytes")
+                    return None
+                chunks.append(chunk)
+            status = r.status_code
+    except httpx.HTTPError as exc:
+        print(f"    {accession}: transport error, nothing stored: {exc}")
+        return None
     body = b"".join(chunks)
     (out / f"instance_{accession}.xml.gz").write_bytes(gzip.compress(body))
     print(f"    fetched {url} http={status} sha256={hashlib.sha256(body).hexdigest()}")
