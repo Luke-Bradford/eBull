@@ -794,6 +794,16 @@
           "source_id": "ita2007_s564g",
           "locator": "s564G(1)(d)(ii)",
           "text": "to make a repayment of the capital (“the redemption payment”) to the bond-holder during or at the end of the bond-term (whether or not in instalments), and"
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "ORGANIZATION OF THE TRUST",
+          "text": "The Trust has a specified lifetime term. The Trust is scheduled to terminate on the first to occur of (a) January 22, 2118 or (b) the date 20 years after the death of the last survivor of eleven persons named in the Trust Agreement, the oldest of whom was born in 1990 and the youngest of whom was born in 1993."
+        },
+        {
+          "source_id": "prospectus_2026",
+          "locator": "Termination of the Trust Agreement",
+          "text": "Units not redeemed before termination of the Trust will be redeemed in cash at NAV based on the proceeds of the sale of Portfolio Securities, with no minimum aggregation of Units required."
         }
       ],
       "contrary": [],

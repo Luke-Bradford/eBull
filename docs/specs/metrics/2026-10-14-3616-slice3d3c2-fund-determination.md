@@ -69,7 +69,7 @@ hash of `document_text`, which drops it.
    - The **Trust Indenture and Agreement** of 1993-01-22 and its 1996-01-19 amendment were not located in the reviewed
      corpus. The searched boundary is the CIK's EDGAR filing list, which begins 1996-01-25 (assumption A3).
    - No CUSIP or ISIN appears in these documents. The ISIN binding is 3d-3c-1's candidate chain.
-2. **Sources verify** (Script): no format error; 14 documents and 34 authority snapshots match their hashes; all 33
+2. **Sources verify** (Script): no format error; 14 documents and 34 authority snapshots match their hashes; all 35
    quotes, contrary quotes and evidence quotes occur in their sources. The N-CEN is bound by its bytes, every other
    document by its `document_text`.
 3. **SPY's filings since 2026-01-26** (submissions JSON, 275 filings, no overflow files): 485BPOS and 497 on
@@ -528,7 +528,7 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r6.5 (latch) | unreviewed accessions recorded from every sound inventory, whatever the outcome |
 | r6.6, r6.11 (dispositions) | corrected |
 | r6.7 (FKs) | stated, none cascading |
-| r6.8 (termination) | "a specified lifetime term and termination provisions" |
+| r6.8 (termination) | "a specified lifetime term and termination provisions", with the prospectus's lifetime-term and cash-at-NAV termination sentences quoted (r11) |
 | r6.9 (URL rule) | scoped to document URLs |
 | r6.10 (population) | the opening states observed securities |
 | r6.12 (docstring) | the cutoff override described |
