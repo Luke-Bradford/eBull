@@ -934,3 +934,10 @@ def test_a_sub_second_open_time_amendment_is_source_amended_only() -> None:
         observation(case.open, "amendment", sync_payload(21, openDateTime="2026-09-23T13:30:00.497Z"))
     )
     assert reasons_of(case.derive()) == ["source_amended"]
+
+
+def test_a_sync_only_amendment_across_london_dates_is_a_date_conflict() -> None:
+    # 23:30 UTC on 2026-09-23 is 00:30 on the 24th in London (BST).
+    case = Held()
+    case.observations.append(observation(case.open, "amendment", sync_payload(21, openDateTime="2026-09-23T23:30:00Z")))
+    assert reasons_of(case.derive()) == ["source_amended", "acquisition_date_conflict"]

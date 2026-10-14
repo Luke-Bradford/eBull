@@ -12633,3 +12633,12 @@ neighbouring container and match it.**
   jobs child PID has changed. Before the drop, grep `INSERT INTO <table>` across `app/`, `scripts/` and `tests/`, make
   every writer state the column, and pin the missing-column refusal with a test.
 - Enforced in: `tests/test_trade_ledger_provenance_db.py::test_a_write_without_an_environment_fails`.
+
+### Removing a reason branch: test the case the comment says is still caught (#3616)
+
+- Failure (review bot, PR #3801, 2026-10-14): a fix removed the `acquisition_date_conflict` branch for two sync
+  `openDateTime` values and commented that a different London date "is still caught below". The claim was true (the
+  date check reads every sync payload's time), but only a same-date test shipped, so nothing pinned it.
+- Prevention: when a change removes a check or reason and a comment says another path still covers the case, add the
+  test for that case in the same commit.
+- Enforced in: `tests/test_tax_broker_derivation.py::test_a_sync_only_amendment_across_london_dates_is_a_date_conflict`.
