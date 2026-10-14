@@ -497,7 +497,7 @@ def submissions_coverage(det: dict[str, Any], body: Any, fetched: date | None, c
     for form, filed, acc in zip(*cols, strict=True):
         if not (_text(form) and _is_date(filed) and isinstance(acc, str) and _ACCESSION.fullmatch(acc)):
             return "submissions unsound"
-        if acc in seen or filed > cutoff.isoformat():
+        if acc in seen or filed > fetched.isoformat():
             return "submissions unsound"
         seen[acc] = (form, filed)
     if files:

@@ -287,7 +287,7 @@ security is refused with `run_failed`. A finished run is sealed: no row is added
 | `document_changed` | it has such fetches, none with the version's content hash |
 | `quote_unverified` | a quote, contrary quote or evidence quote, white space collapsed, is not in its source's text (`document_text` for a document; the snapshot, white space collapsed, for an authority) |
 | `review_out_of_date` | the cutoff is before `reviewed_at` or after `review_by` (a version is used for nothing after its review deadline until a successor policy reviews it again) |
-| `coverage_unavailable` | the newest submissions fetch is missing, dated after the cutoff, or older than 30 days at it; or unsound: not an object whose `cik` is the CIK, whose `filings.files` is a list and whose `filings.recent` has equal-length `form`, `filingDate` and `accessionNumber` lists with non-blank forms, valid dates no later than the cutoff and unique accession numbers; or `files` is non-empty; or a reviewed filing on or after `monitor_from` is absent or listed with another form or date |
+| `coverage_unavailable` | the newest submissions fetch is missing, dated after the cutoff, or older than 30 days at it; or unsound: not an object whose `cik` is the CIK, whose `filings.files` is a list and whose `filings.recent` has equal-length `form`, `filingDate` and `accessionNumber` lists with non-blank forms, valid dates no later than the fetch's `fetched_at` UTC date (itself no later than the cutoff) and unique accession numbers; or `files` is non-empty; or a reviewed filing on or after `monitor_from` is absent or listed with another form or date |
 | `stale` | an unreviewed governing accession is recorded for the determination (below) |
 | `determined` | otherwise |
 
@@ -434,8 +434,8 @@ Pure:
    unavailable (the accession recorded despite `documents_unavailable`), then the document recovered and the accession
    absent from the next inventory (`stale`); an accession found in an inventory with overflow `files`, and in one 40
    days old, then omitted by an admissible inventory (`stale`); a run that fails after recording a discovery, followed by
-   a successful run whose inventory omits it (`stale`); an unreviewed 497 dated after the submissions fetch's date (not
-   recorded; `coverage_unavailable`), then a corrected inventory without it (`determined`).
+   a successful run whose inventory omits it (`stale`); an unreviewed 497 dated after the submissions fetch's date and on
+   the cutoff's date (not recorded; `coverage_unavailable`), then a corrected inventory without it (`determined`).
 5. `reporting_status`: SPY's 2026-09-23 case (`non_reporting_assumed`, A1–A9); no run (`no_run`); a security absent
    from the newest run (`not_observed`, although an older run has it); a failed newest run (`run_failed`, although an
    older run succeeded); each of the first four outcomes returned before the date test; a date before
@@ -545,6 +545,7 @@ Rounds 1–3 (`var/research/3616/slice3d3c2/ckpt1_r<n>_final.txt`, loop worktree
 | r9.2 (discovering run) | `(first_run_id, determination_id)` references the run's loads |
 | r9.3 (future rows) | a discovery's date must not follow its fetch's UTC date, checked in code and by trigger |
 | r9.4 (URL tests) | the character, canonical-spelling, dot-segment and percent-encoding cases are in Test 1 |
+| r10.1 (future-row boundary) | coverage, discovery and the Script all bound filing dates by the submissions fetch's UTC date |
 | r6.13 (index) | Amendment 6's effective dates distinguished in the research index |
 | r3.5 (unresolved basis) | `offshore_basis` `unresolved` |
 | r3.7 (refusal order) | the first four outcomes are returned before the date test |
