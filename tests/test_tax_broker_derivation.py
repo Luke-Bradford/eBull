@@ -724,6 +724,17 @@ def test_a_malformed_nested_sync_field_beside_a_re_rendering_fails_its_field_che
     assert reasons_of(case.derive()) == ["invalid_field:mirrorID"]
 
 
+def test_sync_open_payloads_missing_their_open_time_fail_the_field_check_without_raising() -> None:
+    # _timestamp(None) is _INVALID, so the re-rendering test refuses the waiver rather than comparing None times.
+    case = Held()
+    del case.payload["openDateTime"]
+    bare = sync_payload(21)
+    del bare["openDateTime"]
+    case.observations.append(observation(case.open, "amendment", bare))
+    reasons = reasons_of(case.derive())
+    assert "source_amended" in reasons and "missing_field:openDateTime" in reasons
+
+
 def test_a_re_rendering_across_london_midnight_is_a_date_conflict() -> None:
     case = Held(openDateTime="2026-09-23T22:59:59.999Z")  # 23:59:59.999 BST
     case.observations.append(

@@ -12649,5 +12649,7 @@ neighbouring container and match it.**
   through `json.dumps`, which raises on a nested `Decimal`. A malformed broker field (`mirrorID: {"x": 1.2}`) would have
   aborted the whole evidence run instead of leaving one order `unresolved` with `invalid_field:mirrorID`.
 - Prevention: any derivation helper that runs before or beside the field checks compares with plain equality (or a
-  canonicaliser that accepts every JSON shape), so a malformed value reaches the check that owns it.
-- Enforced in: `tests/test_tax_broker_derivation.py::test_a_malformed_nested_sync_field_beside_a_re_rendering_fails_its_field_check`.
+  canonicaliser that accepts every JSON shape), so a malformed value reaches the check that owns it. It treats an
+  absent field like an invalid one (the review bot, PR #3802), and its tests include a payload that omits the field.
+- Enforced in: `tests/test_tax_broker_derivation.py::test_a_malformed_nested_sync_field_beside_a_re_rendering_fails_its_field_check`
+  and `::test_sync_open_payloads_missing_their_open_time_fail_the_field_check_without_raising`.
