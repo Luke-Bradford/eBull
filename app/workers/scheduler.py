@@ -118,7 +118,6 @@ from app.services.strategy_core_eligibility import CORE_ELIGIBILITY_PASS_VERDICT
 from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
-from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import StaleInstrument, find_stale_instruments, generate_thesis, instrument_lock
 from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely, ledger_environment
 from app.services.universe import sync_universe
@@ -7224,7 +7223,12 @@ def tax_fx_refresh() -> None:
 
 
 def tax_broker_evidence_refresh() -> None:
-    """Capture the broker's order lookups and publish a generation of tax evidence (#3616 slice 3c, Design 6-7)."""
+    """Capture the broker's order lookups, publish a generation of tax evidence (#3616 slice 3c, Design 6-7), then
+    match the effective generation (slice 3d-2, Design 10).
+
+    Matching runs even when the evidence step failed: it then matches the still-effective earlier generation if no
+    run exists for its key. The job fails if either step was refused or raised, with both outcomes in the message.
+    """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
     from app.services.tax_broker_evidence import run_tax_broker_evidence
 
@@ -7234,28 +7238,57 @@ def tax_broker_evidence_refresh() -> None:
         return
     api_key, user_key = creds
     with _tracked_job(JOB_TAX_BROKER_EVIDENCE_REFRESH) as tracker:
-        # One autocommit connection: the run holds its session advisory lock on it, and each lookup commits as it
-        # lands. Lookups are informational reads on the D_order_info quota lane.
-        with (
-            connect_job(autocommit=True) as conn,
-            EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as broker,
-        ):
-            report = run_tax_broker_evidence(conn, broker, settings.etoro_env)
-        if report.state == "skipped":
-            logger.info("tax_broker_evidence_refresh skipped: %s", report.reason)
-            tracker.note = f"state=skipped reason={report.reason}"
-            return
-        capture = report.capture
-        captured = (
-            f" attempted={capture.attempted} deferred={capture.deferred} stopped_by={capture.stopped_by} "
-            f"outcomes={capture.outcomes}"
-            if capture is not None
-            else ""
-        )
-        if report.state == "refused":
-            raise RuntimeError(f"tax_broker_evidence_refresh run {report.run_id} refused: {report.reason}{captured}")
-        tracker.row_count = report.counts.get("acquisitions", 0) + report.counts.get("disposals", 0)
-        tracker.note = f"state=published run={report.run_id} counts={report.counts}{captured}"
+        evidence_failure: str | None = None
+        evidence_note: str
+        try:
+            # One autocommit connection: the run holds its session advisory lock on it, and each lookup commits as
+            # it lands. Lookups are informational reads on the D_order_info quota lane.
+            with (
+                connect_job(autocommit=True) as conn,
+                EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as broker,
+            ):
+                report = run_tax_broker_evidence(conn, broker, settings.etoro_env)
+        except Exception as exc:
+            logger.error("tax_broker_evidence_refresh: evidence step failed", exc_info=True)
+            evidence_failure = evidence_note = f"evidence raised {type(exc).__name__}: {exc}"
+        else:
+            capture = report.capture
+            captured = (
+                f" attempted={capture.attempted} deferred={capture.deferred} stopped_by={capture.stopped_by} "
+                f"outcomes={capture.outcomes}"
+                if capture is not None
+                else ""
+            )
+            if report.state == "skipped":
+                evidence_note = f"evidence=skipped reason={report.reason}"
+            elif report.state == "refused":
+                evidence_failure = evidence_note = f"evidence run {report.run_id} refused: {report.reason}{captured}"
+            else:
+                tracker.row_count = report.counts.get("acquisitions", 0) + report.counts.get("disposals", 0)
+                evidence_note = f"evidence=published run={report.run_id} counts={report.counts}{captured}"
+        matching_failure, matching_note = _run_tax_matching_step()
+        tracker.note = f"{evidence_note}; {matching_note}"
+        if evidence_failure is not None or matching_failure is not None:
+            raise RuntimeError(f"tax_broker_evidence_refresh failed: {evidence_note}; {matching_note}")
+
+
+def _run_tax_matching_step() -> tuple[str | None, str]:
+    """One matching run on a fresh autocommit connection: (failure or None, note). A refusal or exception is a
+    failure; ``published``, ``already_published`` and ``no_generation`` are not."""
+    from app.services.tax_matching import run_tax_matching
+
+    try:
+        with connect_job(autocommit=True) as conn:
+            report = run_tax_matching(conn)
+    except Exception as exc:
+        logger.error("tax matching failed", exc_info=True)
+        note = f"matching raised {type(exc).__name__}: {exc}"
+        return note, note
+    note = (
+        f"matching={report.outcome} run={report.matching_run_id} evidence_run={report.evidence_run_id} "
+        f"reason={report.reason} counts={dict(report.counts)}"
+    )
+    return (note if report.outcome == "refused" else None), note
 
 
 def etoro_dividend_calendar_capture() -> None:
@@ -9106,54 +9139,17 @@ def etoro_lookups_refresh() -> None:
 
 
 def daily_tax_reconciliation() -> None:
-    """
-    Ingest cash events into tax_lots and re-run disposal matching.
+    """Run statutory matching over the effective generation of tax evidence, on demand (#3616 slice 3d-2, Design 10).
 
-    Runs on demand. Idempotent — safe to re-run. The fills route and the
-    ``fx_rates`` table it read are retired (#3616 slice 3c, sql/485):
-    tax FX is the slice 3b tables (``tax_fx_*``) and tax evidence is the
-    broker record (the slice 3c evidence run). ``tax_lots`` has no writer
-    until slice 3d moves matching onto the evidence generation.
-
-    Two separate connections are used intentionally so that a matching
-    failure does not roll back committed tax_lot ingestion. If the
-    process crashes between ingestion and matching, disposal_matches
-    will be stale until the next run — acceptable because matching is
-    a full delete-and-recompute and will self-correct on re-run.
+    ``tax_broker_evidence_refresh`` runs the same matching after each evidence run; this is the on-demand invoker of
+    matching alone. Idempotent: a run already stored for the inputs is returned as it stands. Fails on a refusal or
+    an exception.
     """
     with _tracked_job(JOB_DAILY_TAX_RECONCILIATION) as tracker:
-        logger.info("daily_tax_reconciliation: starting")
-
-        try:
-            with connect_job() as conn:
-                ingestion = ingest_tax_events(conn)
-        except Exception:
-            logger.error("daily_tax_reconciliation: ingestion failed", exc_info=True)
-            return
-
-        logger.info(
-            "daily_tax_reconciliation: ingested fills=%d cash_events=%d already_present=%d",
-            ingestion.fills_ingested,
-            ingestion.cash_events_ingested,
-            ingestion.already_present,
-        )
-
-        try:
-            with connect_job() as conn:
-                matching = run_disposal_matching(conn)
-        except Exception:
-            logger.error("daily_tax_reconciliation: matching failed", exc_info=True)
-            return
-
-        tracker.row_count = ingestion.fills_ingested + matching.matches_created
-
-    logger.info(
-        "daily_tax_reconciliation complete: instruments=%d matches=%d gain=%.2f loss=%.2f",
-        matching.instruments_processed,
-        matching.matches_created,
-        matching.total_gain_gbp,
-        matching.total_loss_gbp,
-    )
+        failure, note = _run_tax_matching_step()
+        tracker.note = note
+        if failure is not None:
+            raise RuntimeError(f"daily_tax_reconciliation failed: {failure}")
 
 
 def attribution_summary_job() -> None:

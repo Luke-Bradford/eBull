@@ -778,9 +778,9 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # — ``docs/etl/sources/sec_xbrl_facts.md``). So the lane need not serialise
     # the write.
     "daily_financial_facts": "sec_rate",
-    # daily_tax_reconciliation — pure-DB tax-lot ingest + disposal matching;
-    # sole writer of ``tax_lots`` / ``disposal_matches``
-    # (``app/services/tax_ledger.py``). Catch-all ``db`` lane.
+    # daily_tax_reconciliation — pure-DB statutory matching over the effective
+    # tax evidence generation (``app/services/tax_matching.py``, #3616 slice
+    # 3d-2); writes the sealed ``tax_matching_*`` runs. Catch-all ``db`` lane.
     "daily_tax_reconciliation": "db",
     # --- #1413 bulk-only bootstrap — per-CIK SEC jobs dropped from
     # ``_BOOTSTRAP_STAGE_SPECS`` but KEPT in ``_INVOKERS`` as on-demand

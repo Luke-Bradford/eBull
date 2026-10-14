@@ -268,6 +268,12 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
             assert resp.status_code == 200, resp.text
             assert "available_for_deployment" in resp.json()
 
+            # The legacy tax read surface serves from tables with no writer since #3616 slice 3d-2; it stays
+            # until slice 3d-4 replaces it, so every /tax read must still answer.
+            for path in ("/tax/summary", "/tax/disposals", "/tax/pools", "/tax/tax-years"):
+                resp = client.get(path)
+                assert resp.status_code == 200, f"{path}: {resp.text}"
+
             # /system/processes is the unified admin control hub list
             # endpoint (#1071, umbrella #1064 PR3). The smoke test hits
             # it after a fresh lifespan to catch:
