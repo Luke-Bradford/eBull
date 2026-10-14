@@ -35,7 +35,7 @@ pairs. This slice adds no capture table.
 matching run with `effective_tax_matching` (run 1, over evidence run 2), then in one REPEATABLE READ transaction reads
 that sealed run's rows and the inputs Design 2 names (the stored bodies of only the selected covers), checks in that
 snapshot that `instruments` still matches the run's sealed `tax_matching_instruments` mapping and that no unmapped
-row now points at, or is the `.RTH` variant of, a member, checks afterwards that the effective run is unchanged, reads
+row now points at, is the `.RTH` variant of, or is the base symbol of an `.RTH`, member, checks afterwards that the effective run is unchanged, reads
 each needed cover from `filing_raw_documents` or, when absent, fetches it (bounded, not stored), reads it with the
 strict reader `read_cover`, and applies Design 2 through one function, `classify`, which the build moves into the service. Output
 `var/research/3616/slice3d3a/population.txt`; fetched bodies with SHA-256 beside it (gitignored; no account
@@ -114,8 +114,11 @@ CIK (tradable or not, variants included), from the local `submissions.zip` of `s
 
 ### 1. Evidence
 
-No new capture table. A daily job, `tax_character_evidence_refresh`, makes sure the stored instance exists for the
-two covers Design 2 reads for every tax security of the effective generation (3d-2 Designs 1–2) whose members are
+No new capture table and no new job. A step, `refresh_cover_instances(conn)`, runs inside both invokers of
+`run_tax_matching`, after `tax_broker_evidence_refresh` publishes its generation and before matching (and alone before
+matching in `daily_tax_reconciliation`), so the covers a new generation needs, a new security or an earlier first
+acquisition, are fetched before that generation is matched. It makes sure the stored instance exists for the two
+covers Design 2 reads for every tax security of the effective generation (3d-2 Designs 1–2) whose members are
 Stocks with one primary CIK: the newest cover, and the newest filed on or before the security's first admitted
 acquisition. For each, when `stored_body(accession, "xbrl_cover_instance")` is None, it fetches
 `instance_url(primary_document_url)` on the shared SEC rate lane with `settings.sec_user_agent`, reading the response
@@ -123,8 +126,9 @@ as a stream and abandoning it past 16 MiB, and on a 200 stores the body with `st
 `SAFE_XML_PARSER` and its root is `{http://www.xbrl.org/2003/instance}xbrl` (an HTML error page served as 200 is not
 stored). A stored body that fails that structural test, or exceeds 16 MiB, is fetched again and replaced on the same
 terms; a structurally sound body that fails a character test is evidence and is kept. A refusal, a non-200 or a
-transport error stores nothing and is retried by the next run; the job fails after trying every cover. The run itself
-never fetches.
+transport error stores nothing and is retried by the next run; the job fails after trying every cover, and matching
+still runs on what is stored, as 3d-2 Design 10 runs matching after a failed evidence step. Matching itself never
+fetches.
 
 **Covers of a security**: every SEC row of `filing_events` for its members with `filing_type` 10-K, 10-Q or 8-K,
 with no prior de-duplication, consolidated by `provider_filing_id` (the accession): one accession with two `filing_date` values makes the security
@@ -145,11 +149,13 @@ withheld security; its character is `unestablished`, `identity_unestablished`, w
   exists and has `as_of − 30 days ≤ fetched_at ≤ as_of` (fact 2 measures the refresh), and *agree* when all have the
   same `(entity_type, sic)`.
 - A stored instance is read by `read_cover`, strictly. It is *unusable* when it does not parse with
-  `SAFE_XML_PARSER`, is over 16 MiB (checked before parsing), its root is not
+  `SAFE_XML_PARSER`, is over 16 MiB (from `octet_length(payload)`, before the body is loaded), its root is not
   `{http://www.xbrl.org/2003/instance}xbrl`, an `xbrli:context` has no `id` or shares one with another, a `dei` fact
   (namespace exactly `http://xbrl.sec.gov/dei/` and four digits) of the three below has no `contextRef` or one naming
-  no context, or an `EntityCentralIndexKey` is not all digits. Otherwise its *CIKs* are the distinct `dei:EntityCentralIndexKey`
-  values, zero-padded; per `contextRef`, the `dei:TradingSymbol` values (under `symbol_key`) and
+  no context, that context does not have exactly one `xbrli:entity/xbrli:identifier` with scheme
+  `http://www.sec.gov/CIK` and an all-digit value, or an `EntityCentralIndexKey` is not all digits. Otherwise its
+  *CIKs* are the distinct `dei:EntityCentralIndexKey` values together with the identifiers of every context those
+  facts use, zero-padded, so a class reported in another issuer's context makes the CIKs two; per `contextRef`, the `dei:TradingSymbol` values (under `symbol_key`) and
   `dei:Security12bTitle` values (whitespace collapsed) form a *class* when there is exactly one of each; a context with
   symbols and not exactly one title and one symbol makes each of its symbols *ambiguous*, as does a symbol that two
   contexts give different titles; a context with a title and no symbol is ignored (AAPL's untraded notes, fact 3).
@@ -244,9 +250,9 @@ run makes the current digest differ, so the result is *unavailable* until the ne
 
 ### 5. The job and the run
 
-`tax_character_evidence_refresh` is registered daily before `tax_broker_evidence_refresh` (12:13 UTC), at a minute
-off the :15/:30 connection peaks, so the matching inside the evidence job finds the instances stored.
-`run_tax_matching` reads the character inputs, the stored instances included, inside its REPEATABLE READ snapshot
+`tax_broker_evidence_refresh` becomes: evidence step, then `refresh_cover_instances`, then `run_tax_matching`, each
+outcome captured and the job failed if any failed (3d-2 Design 10's pattern); `daily_tax_reconciliation` runs the
+last two. `run_tax_matching` reads the character inputs, the stored instances included, inside its REPEATABLE READ snapshot
 (3d-2 Design 10), sets `as_of`, and decides characters before identification; a withheld security is never
 identified. `classify` and `read_cover` are pure; `classify` returns `(character, detail)`, `detail` None for a share.
 
@@ -279,7 +285,9 @@ Pure, on `read_cover`, `classify`, the title grammar and the digest document:
    one stale; two carriers with different SIC; `other`; SIC 6770, 6722, 6726, 6799, "", " 3571", "6722\n", None; one
    accession with two dates; no cover; the newest uninstanced; unusable instances (not XML, wrong root namespace, a
    `dei` fact on an undefined context, a context without an `id`, two contexts with one `id`, a fact without
-   `contextRef`, a non-digit CIK, a 16 MiB + 1 byte body); an instance with two CIKs, one of them ours, whose common
+   `contextRef`, a non-digit CIK, a 16 MiB + 1 byte body, a context without an entity identifier, one with a non-SEC
+   scheme); AAPL's only `EntityCentralIndexKey` with ("Common Stock", AAPL) in a context identifying CIK 0001130713
+   (CIKs two: unusable); an instance with two CIKs, one of them ours, whose common
    class carries our symbol (unusable); our symbol in two contexts, "Common Stock" complete and "Common Units" without
    its exchange tag (ambiguous); a context with two titles and our symbol; the symbol's title "Common Units" (Energy
    Transfer fixture); a `dei` namespace `https://example.invalid/xbrl.sec.gov/dei/2026` (not read); an acquisition and
@@ -303,10 +311,12 @@ Pure, on `read_cover`, `classify`, the title grammar and the digest document:
    `entity_type`, and a profile going stale each change it; the bytes and SHA-256 of a pinned fixture.
 
 DB:
-6. **Evidence job:** a 16 MiB + 1 byte response stores nothing; a 200 HTML page stores nothing; a stored HTML body is
+6. **Cover refresh:** a generation that adds a security, and one that moves a first acquisition earlier, get the new
+   covers fetched in the same job run before matching; a 16 MiB + 1 byte response stores nothing; a stored payload
+   over 16 MiB is unusable without being loaded; a 200 HTML page stores nothing; a stored HTML body is
    fetched again and replaced by a valid instance; a stored instance that classifies `listed_class_not_common_stock`
    is kept; a transport error stores nothing and the next run fetches again; a stored sound instance is not fetched
-   again; only the two selected covers' bodies are read; one failed cover fails the job after the others are tried.
+   again; only the two selected covers' bodies are read; one failed cover fails the job after the others are tried and matching still runs.
 7. **Seal and schema:** changing `character_policy_id` or `as_of` in the sealing update is refused; a run with a
    policy and no `as_of` is refused; a character row inserted into a published run is refused; refusing a run that has
    a character row is refused.
@@ -319,7 +329,7 @@ DB:
 
 ## Acceptance (dev DB)
 
-After deployment: one `tax_character_evidence_refresh` run, then `run_tax_matching`. For evidence run 2 (for a later
+After deployment: one `tax_broker_evidence_refresh` run (evidence, cover refresh, matching). For evidence run 2 (for a later
 generation, rerun the Script and re-derive from its output the same way):
 
 | security | character | status | expected |

@@ -77,6 +77,7 @@ class CoverFiling:
 
 
 XBRLI = "http://www.xbrl.org/2003/instance"
+SEC_CIK_SCHEME = "http://www.sec.gov/CIK"
 _DEI = re.compile(r"http://xbrl\.sec\.gov/dei/[0-9]{4}")
 
 
@@ -105,6 +106,12 @@ def read_cover(body: bytes) -> Cover | None:
     ids = [el.get("id") or "" for el in root.iter(f"{{{XBRLI}}}context")]
     if "" in ids or len(set(ids)) != len(ids):
         return None
+    issuer: dict[str, str | None] = {}
+    for ctx in root.iter(f"{{{XBRLI}}}context"):
+        idents = list(ctx.iter(f"{{{XBRLI}}}identifier"))
+        text = (idents[0].text or "").strip() if len(idents) == 1 else ""
+        sec = len(idents) == 1 and idents[0].get("scheme") == SEC_CIK_SCHEME and text.isdigit()
+        issuer[str(ctx.get("id"))] = text.zfill(10) if sec else None
     contexts = set(ids)
     ciks: set[str] = set()
     by_ctx: dict[str, dict[str, set[str]]] = {}
@@ -117,8 +124,9 @@ def read_cover(body: bytes) -> Cover | None:
         if q.localname not in ("EntityCentralIndexKey", "Security12bTitle", "TradingSymbol"):
             continue
         ref = el.get("contextRef") or ""
-        if ref not in contexts:
+        if ref not in contexts or issuer[ref] is None:
             return None
+        ciks.add(str(issuer[ref]))
         text = " ".join("".join(el.itertext()).split())
         if q.localname == "EntityCentralIndexKey":
             if not text.isdigit():
@@ -333,7 +341,16 @@ def main() -> None:
             if sec_id in first_acq:
                 needed.update([f.accession for f in ordered if f.filed_on <= first_acq[sec_id]][:1])
         raw: dict[str, bytes] = {}
+        oversized: set[str] = set()
         for acc in sorted(needed):
+            size = conn.execute(
+                "SELECT octet_length(payload) FROM filing_raw_documents WHERE accession_number = %s "
+                "AND document_kind = 'xbrl_cover_instance'",
+                (acc,),
+            ).fetchone()
+            if size is not None and size[0] is not None and size[0] > INSTANCE_MAX_BYTES:
+                oversized.add(acc)
+                continue
             body = stored_body(conn, accession_number=acc, document_kind="xbrl_cover_instance")
             if body is not None:
                 raw[acc] = body.encode("utf-8")
@@ -348,7 +365,8 @@ def main() -> None:
             "SELECT count(*) FROM instruments i WHERE NOT EXISTS (SELECT 1 FROM tax_matching_instruments m "
             "WHERE m.matching_run_id = %(r)s AND m.instrument_id = i.instrument_id) AND ("
             "i.canonical_instrument_id = ANY(%(m)s) OR upper(i.symbol) = ANY(SELECT upper(symbol) || '.RTH' "
-            "FROM instruments WHERE instrument_id = ANY(%(m)s)))",
+            "FROM instruments WHERE instrument_id = ANY(%(m)s)) OR upper(i.symbol) || '.RTH' = ANY(SELECT "
+            "upper(symbol) FROM instruments WHERE instrument_id = ANY(%(m)s)))",
             {"r": run_id, "m": members},
         ).fetchone()
         assert unsealed is not None
@@ -384,6 +402,10 @@ def main() -> None:
         print(f"== security {sec_id} members={member_ids} types={sorted(sec_types, key=str)} ciks={sorted(sec_ciks)}")
         print(f"  symbol={symbol} symbols_ever={sorted(symbols_ever)} profiles={sec_profiles}")
         for f in dict.fromkeys(wanted):
+            if f.accession in oversized:
+                covers[f.accession] = None
+                print(f"  [cover {f.accession} stored body over {INSTANCE_MAX_BYTES} bytes] unusable")
+                continue
             body = raw.get(f.accession)
             source = "stored"
             if body is None and f.primary_document_url and (url := instance_url(f.primary_document_url)):
