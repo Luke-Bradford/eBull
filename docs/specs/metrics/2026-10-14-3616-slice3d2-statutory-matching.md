@@ -239,10 +239,9 @@ so a security, day or pool absent from it is absent (finding 31).
 outcome, instrument_id, execution_evidence, total_fees_unobserved_position_ids], …] sorted by subject,
 "instruments": [[instrument_id, symbol, canonical_instrument_id], …]}`. Tuple positions are fixed; only the outer
 lists are sorted (and `total_fees_unobserved_position_ids` ascending, as stored). `instruments` holds every member of
-every component the run's evidence names (Design 2), sorted by id; a named id with no row appears as `[id, null,
-null]`. Exactly
-those instrument rows are stored in `tax_matching_instruments`. 3d-3 adds its character and basis inputs as a new
-document version. The same function computes the digest at publication and at selection.
+every component the run's evidence names (Design 2), sorted by id; a named id with no row appears as
+`[id, null, null]`. Exactly those instrument rows are stored in `tax_matching_instruments`. 3d-3 adds its character
+and basis inputs as a new document version. The same function computes the digest at publication and at selection.
 
 Every column below is NOT NULL unless it says NULL is allowed, and every child has an FK to its run.
 - **`tax_matching_runs`**: `matching_run_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`; `evidence_run_id` (FK `tax_evidence_runs`);
