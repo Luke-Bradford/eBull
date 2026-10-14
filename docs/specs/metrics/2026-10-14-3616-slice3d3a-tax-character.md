@@ -22,12 +22,23 @@ figures are superseded, not corrected; 3d-3c computes them.
 **Reuse.** The evidence is already in the DB or fetched the way existing code fetches it: `instrument_sec_profile`
 (SEC entity type and SIC), `filing_events` (10-K, 10-Q and 8-K filings with their primary-document URLs),
 `instrument_symbol_history`, and SEC's extracted XBRL instance of each cover, located by
-`def14a_recipients.instance_url` (`<stem>_htm.xml`) and stored in `filing_raw_documents` (kind
-`xbrl_cover_instance`, `raw_filings.store_raw` / `stored_body`), the kind the DEF 14A recipient job already stores.
-Tax reads the stored instance with its own strict reader (Design 2), not the DEF 14A job's `sec_cover_12b_*` pair
-cache: that reader keeps only contexts carrying all three security facts, so a conflicting context missing its
-exchange tag vanishes instead of making the symbol ambiguous, and the cache stores the document's CIKs apart from its
-pairs. This slice adds no capture table.
+`def14a_recipients.instance_url` (`<stem>_htm.xml`). Tax reads the instance with its own strict reader (Design 2), not
+the DEF 14A job's `sec_cover_12b_*` pair cache: that reader keeps only contexts carrying all three security facts, so
+a conflicting context missing its exchange tag vanishes instead of making the symbol ambiguous, and the cache stores
+the document's CIKs apart from its pairs.
+
+**Build correction (2026-10-14, before any code).** This spec first said tax reads the instance from
+`filing_raw_documents` (kind `xbrl_cover_instance`). That kind is in `raw_filings.SWEPT_DOCUMENT_KINDS`: `store_raw`
+writes it born-compacted, payload NULL. On dev, `SELECT count(*), count(payload) FROM filing_raw_documents WHERE
+document_kind = 'xbrl_cover_instance'` returned 1,118 and 0, so `stored_body` returns None for every cover, and
+refreshing through `store_raw` would still leave no body for matching to read; the Script never read a stored body,
+it fetched. The kind cannot be retained
+either: the settled retention rule (#1617, `docs/settled-decisions.md` "Raw-payload retention") admits a retained
+payload only when a *rewash parser* reads it or it is small and write-only, and a tax reader is neither, while
+retaining every DEF 14A cover would keep full 10-K/10-Q instances for a reader that needs two per held security. So
+tax stores the covers it reads in its own evidence table, `tax_cover_instances` (Design 4), outside
+`filing_raw_documents` and its retention rule, as 3c stores the broker lookups it reads. Every other line of the
+design is unchanged.
 
 ## Facts established first
 
@@ -114,21 +125,24 @@ CIK (tradable or not, variants included), from the local `submissions.zip` of `s
 
 ### 1. Evidence
 
-No new capture table and no new job. A step, `refresh_cover_instances(conn)`, runs inside both invokers of
+One evidence table (`tax_cover_instances`, Design 4; build correction above) and no new job. A step,
+`refresh_cover_instances(conn)`, runs inside both invokers of
 `run_tax_matching`, after `tax_broker_evidence_refresh` publishes its generation and before matching (and alone before
 matching in `daily_tax_reconciliation`), so the covers a new generation needs, a new security or an earlier first
 acquisition, are fetched before that generation is matched. It makes sure the stored instance exists for the two
 covers Design 2 reads for every tax security of the effective generation (3d-2 Designs 1–2) whose members are
 Stocks with one primary CIK: the newest cover, and the newest filed on or before the security's first admitted
-acquisition. For each, when `stored_body(accession, "xbrl_cover_instance")` is None, it fetches
-`instance_url(primary_document_url)` on the shared SEC rate lane with `settings.sec_user_agent`, reading the response
-as a stream and abandoning it past 16 MiB, and on a 200 stores the body with `store_raw` only when it parses with
-`SAFE_XML_PARSER` and its root is `{http://www.xbrl.org/2003/instance}xbrl` (an HTML error page served as 200 is not
-stored). A stored body that fails that structural test, or exceeds 16 MiB, is fetched again and replaced on the same
-terms; a structurally sound body that fails a character test is evidence and is kept. A refusal, a non-200 or a
-transport error stores nothing and is retried by the next run; the job fails after trying every cover, and matching
-still runs on what is stored, as 3d-2 Design 10 runs matching after a failed evidence step. Matching itself never
-fetches.
+acquisition. For each with no `tax_cover_instances` row, it fetches `instance_url(primary_document_url)` on the
+shared SEC rate gate with `settings.sec_user_agent`, reading the response as a stream and abandoning it past 16 MiB,
+and on a 200 stores the body only when it parses with `SAFE_XML_PARSER` and its root is
+`{http://www.xbrl.org/2003/instance}xbrl` (an HTML error page served as 200 is not stored). Only structurally sound
+bodies are stored, so a stored row is never fetched again or replaced: an accession's filed documents are immutable,
+and a structurally sound body that fails a character test is evidence. A refusal (over 16 MiB), a non-200, a 200
+body that fails the structural test or a transport error is a *failed cover*: it stores nothing and is retried by the
+next run; the job fails after trying every cover, and matching still runs on
+what is stored, as 3d-2 Design 10 runs matching after a failed evidence step. A selected cover whose primary document
+is not `.htm` has no instance URL; it is counted, not fetched and not a failure, and classifies `cover_unavailable` or
+`holding_start_cover_unavailable`. Matching itself never fetches.
 
 **Covers of a security**: every SEC row of `filing_events` for its members with `filing_type` 10-K, 10-Q or 8-K,
 with no prior de-duplication, consolidated by `provider_filing_id` (the accession): one accession with two `filing_date` values makes the security
@@ -149,7 +163,7 @@ withheld security; its character is `unestablished`, `identity_unestablished`, w
   exists and has `as_of − 30 days ≤ fetched_at ≤ as_of` (fact 2 measures the refresh), and *agree* when all have the
   same `(entity_type, sic)`.
 - A stored instance is read by `read_cover`, strictly. It is *unusable* when it does not parse with
-  `SAFE_XML_PARSER`, is over 16 MiB (from `octet_length(payload)`, before the body is loaded), its root is not
+  `SAFE_XML_PARSER`, is over 16 MiB (from `octet_length(body)`, before the body is loaded), its root is not
   `{http://www.xbrl.org/2003/instance}xbrl`, an `xbrli:context` has no `id` or shares one with another, a `dei` fact
   (namespace exactly `http://xbrl.sec.gov/dei/` and four digits) of the three below has no `contextRef` or one naming
   no context, that context does not have exactly one direct `xbrli:entity` child holding exactly one direct
@@ -175,7 +189,7 @@ Evaluated in order; the first line that applies decides.
 | unestablished | members have more than one `instrument_type_id` (NULL counts as a value), or more than one primary CIK | `member_conflict` |
 | unestablished | the type is 6 (ETF) | `exchange_traded_fund` |
 | unestablished | the type is not 5 (Stocks) | `instrument_type` |
-| unestablished | no primary CIK | `cik_unestablished` |
+| unestablished | no primary CIK, or its stored value is not one to ten digits (padded to ten; build, Codex checkpoint 2) | `cik_unestablished` |
 | unestablished | the profiles are not current | `sec_profile_unavailable` |
 | unestablished | the profiles do not agree | `sec_profile_conflict` |
 | unestablished | `entity_type` ≠ `operating` | `entity_type` |
@@ -231,6 +245,13 @@ evidence discharges them under this policy.
   lists columns explicitly, so a new column is otherwise unprotected while sealing), and its refused-run check
   includes `tax_matching_characters`.
 - `tax_matching_dependencies.reason` admits `character_unestablished`.
+- **`tax_cover_instances`** (build correction): `accession_number TEXT` PK (SEC's `##########-##-######`),
+  `source_url TEXT NOT NULL`, `fetched_at TIMESTAMPTZ NOT NULL`, `body BYTEA NOT NULL` (the bytes as received, at most
+  16 MiB by CHECK on `octet_length`; PostgreSQL manages its compression and out-of-line storage through TOAST),
+  `body_sha256 TEXT NOT NULL` (CHECK equal to
+  `encode(sha256(body), 'hex')`). Insert only: a trigger refuses update and delete. Written by
+  `refresh_cover_instances` with `ON CONFLICT DO NOTHING`, read by the run inside its snapshot, size from
+  `octet_length(body)` before the body is loaded.
 - **`tax_matching_characters`**: `(matching_run_id, tax_security_id)` PK, FK to the security row; `character TEXT NOT
   NULL` (`share`, `unestablished`); `detail TEXT`, non-NULL iff unestablished, one of the table's codes or
   `identity_unestablished` (CHECK); `cik TEXT` (the single CIK, else NULL); `latest_cover`, `start_cover TEXT` (the
@@ -313,11 +334,12 @@ Pure, on `read_cover`, `classify`, the title grammar and the digest document:
 
 DB:
 6. **Cover refresh:** a generation that adds a security, and one that moves a first acquisition earlier, get the new
-   covers fetched in the same job run before matching; a 16 MiB + 1 byte response stores nothing; a stored payload
-   over 16 MiB is unusable without being loaded; a 200 HTML page stores nothing; a stored HTML body is
-   fetched again and replaced by a valid instance; a stored instance that classifies `listed_class_not_common_stock`
-   is kept; a transport error stores nothing and the next run fetches again; a stored sound instance is not fetched
-   again; only the two selected covers' bodies are read; one failed cover fails the job after the others are tried and matching still runs.
+   covers fetched in the same job run before matching; a 16 MiB + 1 byte response stores nothing; a body over 16 MiB,
+   a `body_sha256` not equal to the body's (a matching one is accepted), an update and a delete are refused by the
+   table; a 200 HTML page stores nothing and is a failed cover; a stored instance that classifies
+   `listed_class_not_common_stock` is kept; a transport error stores nothing and the next run fetches again; a stored
+   instance is not fetched again; a cover with no instance URL is counted and not a failure; only the two selected
+   covers' bodies are read; one failed cover fails the job after the others are tried and matching still runs.
 7. **Seal and schema:** changing `character_policy_id` or `as_of` in the sealing update is refused; a run with a
    policy and no `as_of` is refused; a character row inserted into a published run is refused; refusing a run that has
    a character row is refused.
@@ -365,5 +387,5 @@ correctness from it.
 ## Security
 
 No order or authorisation path changes. The job reads public, account-free SEC documents (operator rule 2026-10-10)
-through the existing SEC rate lane; instance bodies are size-bounded while read, stored in `filing_raw_documents`,
+through the existing SEC rate gate; instance bodies are size-bounded while read, stored in `tax_cover_instances`,
 and parsed with the repo's safe XML parser. The run stays a DB-only derivation.

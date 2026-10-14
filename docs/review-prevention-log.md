@@ -12698,5 +12698,19 @@ neighbouring container and match it.**
   s12(b) title paired with its symbol), never an issuer name. Before reusing a parser for a new decision, list what it
   discards and whether a discarded element could reverse that decision; bind every consumed fact to its own context's
   issuer through the direct `xbrli:context/xbrli:entity/xbrli:identifier` path.
-- Enforced in: `docs/specs/metrics/2026-10-14-3616-slice3d3a-tax-character.md` (Source rules, Design 2, tests 1–4) and
-  `scripts/measure_3616_slice3d3a_character.py` (`read_cover`, `classify`); review only until the build lands the tests.
+- Enforced in: `docs/specs/metrics/2026-10-14-3616-slice3d3a-tax-character.md` (Source rules, Design 2, tests 1–4),
+  `app/services/tax_character.py` (`read_cover`, `classify`) and `tests/test_tax_character.py`.
+
+### A stored raw kind is read only if its retention class keeps the body (#3616)
+
+- Failure (slice 3d-3a build, 2026-10-14, before any code): the spec, through eight checkpoint-1 rounds, had tax read
+  each cover instance from `filing_raw_documents` kind `xbrl_cover_instance` via `stored_body`. That kind is in
+  `raw_filings.SWEPT_DOCUMENT_KINDS`, so `store_raw` writes it born-compacted: on dev 1,118 rows, 0 with a payload.
+  Every security would have been withheld for want of a cover, and the measurement script hid it by fetching whenever
+  `stored_body` returned None.
+- Prevention: before designing a reader over `filing_raw_documents`, run `retention_class_for` on the kind and count
+  `payload IS NOT NULL` on the dev DB. A swept kind has no body; a new reader that is not a rewash parser fits none of
+  the settled retention classes (#1617), so store what it reads in its own evidence table. A measurement script whose
+  stored-body path falls back to a fetch must print how many bodies came from each path.
+- Enforced in: `sql/490_tax_character.sql` (`tax_cover_instances`), `app/services/tax_matching.py`
+  (`refresh_cover_instances`) and `tests/test_tax_matching_db.py` (cover refresh tests).

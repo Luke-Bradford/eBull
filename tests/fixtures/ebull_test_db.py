@@ -217,6 +217,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "tax_identifications",
     "tax_statutory_disposals",
     "tax_matching_dependencies",
+    # #3616 slice 3d-3a (sql/490): one character row per security row; the cover instances are insert-only.
+    "tax_matching_characters",
+    "tax_cover_instances",
     "tax_matching_securities",
     "tax_matching_lot_classes",
     "tax_matching_instruments",

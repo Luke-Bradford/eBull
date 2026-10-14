@@ -11,6 +11,8 @@ docs/specs/metrics/2026-10-14-3616-slice3d1-consideration-basis.md ("Considerati
   (Design 3).
 - ``run_tax_matching`` stores one sealed snapshot per (generation, policy ids, ``inputs_digest``) (Designs 9-10), and
   ``effective_tax_matching`` selects exactly the snapshot of the current inputs, with no fallback.
+- Each security's tax character (slice 3d-3a, ``app/services/tax_character.py``) is decided before identification: a
+  security that is not established as a share is withheld. ``refresh_cover_instances`` fetches the covers it reads.
 
 Nothing here is shown to the operator: the tax-year view is slice 3d-4's.
 """
@@ -20,19 +22,38 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Context, Decimal, Inexact, Rounded, localcontext
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+import httpx
 import psycopg
 import psycopg.rows
 from psycopg import IsolationLevel
 from psycopg.types.json import Jsonb
 
 from app.db.snapshot import snapshot_read
+from app.services.def14a_recipients import instance_url
+from app.services.tax_character import (
+    IDENTITY_UNESTABLISHED,
+    ISSUER_BINDING_ASSUMED,
+    OFFSHORE_FUND_EXCLUSION_ASSUMED,
+    STOCKS_TYPE_ID,
+    TAX_CHARACTER_POLICY_ID,
+    Character,
+    FetchedInstance,
+    SecurityEvidence,
+    classify,
+    document_entry,
+    fetch_instance,
+    is_cik,
+    read_evidence,
+    select_covers,
+    structurally_sound,
+)
 from app.services.tax_ledger import MatchingRule
 
 #: The frozen local policy (spec "Local policy"); changing any part of it is a new id.
@@ -43,7 +64,7 @@ CONSIDERATION_CLASS_POLICY_ID = "consideration_classes_v1"
 #: generation under any other policy is refused, not matched.
 SUPPORTED_EVIDENCE_POLICY_ID = "broker_evidence_v2"
 #: The version of the canonical inputs document (Design 9).
-INPUTS_VERSION = "matching_inputs_v1"
+INPUTS_VERSION = "matching_inputs_v2"
 #: Session advisory lock held for a whole run (Design 10): int.from_bytes(b"taxmatch", "big").
 TAX_MATCHING_LOCK_KEY = 8386116392322360168
 
@@ -58,7 +79,8 @@ DISPOSAL_FORMULA_ASSUMED = "disposal_formula_assumed"
 SYNC_CHARGES_UNOBSERVED = "sync_charges_unobserved"
 WINDOW_OPEN = "window_open"
 HISTORY_COVERAGE_UNESTABLISHED = "history_coverage_unestablished"
-CHARACTER_PENDING = "character_pending"
+#: Carried by every disposal and pool, all of shares (slice 3d-3a Design 3).
+SHARE_REASONS = frozenset({OFFSHORE_FUND_EXCLUSION_ASSUMED, ISSUER_BINDING_ASSUMED})
 
 # The fields whose failure makes a lot ``unavailable`` (3d-1; Design 3 ``lot_unavailable``).
 EXECUTION_EVIDENCE_MISMATCH = "execution_evidence_mismatch"
@@ -67,7 +89,12 @@ DIRECTION_INVALID = "direction_invalid"
 
 LotClass = Literal["final_eligible", "provisional", "unavailable"]
 WithholdReason = Literal[
-    "unresolved_subject", "identity_unestablished", "lot_unavailable", "subsequent_acquisition_rule", "unplaceable"
+    "unresolved_subject",
+    "identity_unestablished",
+    "lot_unavailable",
+    "subsequent_acquisition_rule",
+    "unplaceable",
+    "character_unestablished",
 ]
 Direction = Literal["acquisition", "disposal"]
 
@@ -122,6 +149,10 @@ class MatchingInputs:
     lots: tuple[LotRow, ...]
     #: Every ``instruments`` row, by id.
     instruments: Mapping[int, InstrumentRow]
+    #: The clock reading taken right after the snapshot started (3d-3a Design 5).
+    as_of: datetime
+    #: Each security's character inputs, keyed as ``security_members`` keys them.
+    characters: Mapping[int, SecurityEvidence]
 
 
 # --- consideration classes (3d-1) ---------------------------------------------------------------------------------
@@ -517,7 +548,7 @@ def _identify(lots: Sequence[MatchLot], history_fetch_started_at: datetime | Non
         missing = set(day.missing)
         for i in idents:
             missing |= set(i.missing_lot_keys)
-        reasons = set(day.reasons) | {HISTORY_COVERAGE_UNESTABLISHED, CHARACTER_PENDING}
+        reasons = set(day.reasons) | {HISTORY_COVERAGE_UNESTABLISHED} | SHARE_REASONS
         for i in idents:
             reasons |= set(i.reasons)
         if window_open:
@@ -540,7 +571,7 @@ def _identify(lots: Sequence[MatchLot], history_fetch_started_at: datetime | Non
 
     open_dates = [x.uk_date for x in disposals if WINDOW_OPEN in x.reasons]
     window_open_since = min(open_dates) if open_dates else None
-    final_reasons = pool_reasons | {HISTORY_COVERAGE_UNESTABLISHED}
+    final_reasons = pool_reasons | {HISTORY_COVERAGE_UNESTABLISHED} | SHARE_REASONS
     if window_open_since is not None:
         final_reasons.add(WINDOW_OPEN)
     return Identified(
@@ -594,10 +625,39 @@ class Dependency:
 
 
 @dataclass(frozen=True)
+class CharacterRow:
+    """A security's ``tax_matching_characters`` row (3d-3a Design 4)."""
+
+    character: Character
+    #: None for a share.
+    detail: str | None
+    #: The single CIK, else None.
+    cik: str | None
+    #: The accessions selected, else None.
+    latest_cover: str | None
+    start_cover: str | None
+
+
+def decide_character(ev: SecurityEvidence, as_of: datetime, *, identity_established: bool) -> CharacterRow:
+    """3d-3a Design 2: a member of an unestablished identity component is ``identity_unestablished`` without
+    evaluation; every other security is ``classify``'d."""
+    character, detail = classify(ev, as_of) if identity_established else ("unestablished", IDENTITY_UNESTABLISHED)
+    selection = select_covers(ev.filings, ev.first_acquisition)
+    return CharacterRow(
+        character,
+        detail,
+        next(iter(ev.ciks)) if len(ev.ciks) == 1 and is_cik(next(iter(ev.ciks))) else None,
+        None if selection.latest is None else selection.latest.accession,
+        None if selection.start is None else selection.start.accession,
+    )
+
+
+@dataclass(frozen=True)
 class SecurityResult:
     tax_security_id: int
     instrument_ids: tuple[int, ...]
     status: Literal["computed", "withheld"]
+    character: CharacterRow
     #: None when withheld.
     pool: Pool | None
     disposals: tuple[StatutoryDisposal, ...]
@@ -644,9 +704,31 @@ def placements(inputs: MatchingInputs) -> tuple[InstrumentPlacement, ...]:
     return tuple(out[iid] for iid in sorted(out))
 
 
+def security_members(inputs: MatchingInputs) -> dict[int, tuple[int, ...]]:
+    """Every security a run has a row for, with its members (Designs 2-3): the security of each unresolved subject's
+    and each lot's instrument. An established component is keyed by its base; a member of an unestablished one is its
+    own security; an id with no ``instruments`` row is unplaceable and has none."""
+    placed = placements(inputs)
+    placement_of = {p.instrument_id: p for p in placed}
+    named = [s.instrument_id for s in inputs.subjects if s.outcome == "unresolved" and s.instrument_id is not None]
+    named += [lot.instrument_id for lot in inputs.lots]
+    out: dict[int, tuple[int, ...]] = {}
+    for iid in named:
+        placement = placement_of.get(iid)
+        if placement is None or placement.symbol is None:
+            continue
+        if placement.tax_security_id is None:
+            out[iid] = (iid,)
+        else:
+            out[placement.tax_security_id] = tuple(
+                sorted(p.instrument_id for p in placed if p.component_id == placement.component_id)
+            )
+    return out
+
+
 def inputs_document(inputs: MatchingInputs) -> str:
-    """The canonical inputs document (Design 9), serialized as 3c's fingerprint. Tuple positions are fixed; only the
-    outer lists are sorted."""
+    """The canonical inputs document (Design 9; 3d-3a Design 4), serialized as 3c's fingerprint. Tuple positions are
+    fixed; only the outer lists are sorted."""
     document = {
         "version": INPUTS_VERSION,
         "evidence": sorted([lot.lot_key, lot.fingerprint] for lot in inputs.lots),
@@ -661,6 +743,7 @@ def inputs_document(inputs: MatchingInputs) -> str:
             for s in inputs.subjects
         ),
         "instruments": [[p.instrument_id, p.symbol, p.canonical_instrument_id] for p in placements(inputs)],
+        "character": [document_entry(key, inputs.characters[key], inputs.as_of) for key in sorted(inputs.characters)],
     }
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -680,6 +763,7 @@ def compute_matching(inputs: MatchingInputs) -> MatchingResult:
     dependencies: list[Dependency] = []
     withheld_all = False
     security_keys: dict[int, tuple[int, ...]] = {}
+    unestablished_identity: set[int] = set()
     own_reasons: dict[int, list[Dependency]] = defaultdict(list)
 
     def security_for(instrument_id: int | None) -> int | None:
@@ -693,6 +777,7 @@ def compute_matching(inputs: MatchingInputs) -> MatchingResult:
             return placement.tax_security_id
         if placement.instrument_id not in security_keys:
             security_keys[placement.instrument_id] = (placement.instrument_id,)
+            unestablished_identity.add(placement.instrument_id)
             members = sorted(p.instrument_id for p in placed if p.component_id == placement.component_id)
             own_reasons[placement.instrument_id].append(
                 Dependency(
@@ -736,9 +821,19 @@ def compute_matching(inputs: MatchingInputs) -> MatchingResult:
                 )
             )
 
+    missing = sorted(security_keys.keys() - inputs.characters.keys())
+    if missing:
+        raise RuntimeError(f"character inputs missing for securities {missing}")
+
     securities: list[SecurityResult] = []
     for key in sorted(security_keys):
-        reasons = own_reasons.get(key, [])
+        # Character is decided before identification: a security not established as a share is never identified.
+        character = decide_character(
+            inputs.characters[key], inputs.as_of, identity_established=key not in unestablished_identity
+        )
+        reasons = list(own_reasons.get(key, []))
+        if character.character == "unestablished":
+            reasons.append(Dependency(key, "character_unestablished", detail=character.detail))
         result: Identified | StepFiveReached | None = None
         if not withheld_all and not reasons:
             result = identify_security(
@@ -766,9 +861,11 @@ def compute_matching(inputs: MatchingInputs) -> MatchingResult:
                 ]
         dependencies.extend(reasons)
         if isinstance(result, Identified):
-            securities.append(SecurityResult(key, security_keys[key], "computed", result.pool, result.disposals))
+            securities.append(
+                SecurityResult(key, security_keys[key], "computed", character, result.pool, result.disposals)
+            )
         else:
-            securities.append(SecurityResult(key, security_keys[key], "withheld", None, ()))
+            securities.append(SecurityResult(key, security_keys[key], "withheld", character, None, ()))
 
     result_set = MatchingResult(
         placements=placed,
@@ -803,8 +900,14 @@ def _check_capacities(result: MatchingResult) -> None:
 # --- storage and selection (Designs 9-10) -------------------------------------------------------------------------
 
 
-def _read_inputs(conn: psycopg.Connection[Any]) -> MatchingInputs | None:
-    """The effective generation and everything matching reads (Design 1); the caller holds one snapshot."""
+def _read_inputs(conn: psycopg.Connection[Any], *, bodies: bool = True) -> MatchingInputs | None:
+    """The effective generation and everything matching reads (Design 1; 3d-3a Design 5); the caller holds one
+    snapshot. ``as_of`` is read first, right after the snapshot starts. ``bodies=False`` leaves the cover instances
+    unread (``refresh_cover_instances`` needs only the selection)."""
+    clock = conn.execute("SELECT clock_timestamp()").fetchone()
+    if clock is None:
+        raise RuntimeError("clock_timestamp() returned no row")
+    as_of: datetime = clock[0]
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         run = cur.execute(
             """
@@ -851,14 +954,25 @@ def _read_inputs(conn: psycopg.Connection[Any]) -> MatchingInputs | None:
             r["instrument_id"]: InstrumentRow(r["instrument_id"], r["symbol"], r["canonical_instrument_id"])
             for r in cur.execute("SELECT instrument_id, symbol, canonical_instrument_id FROM instruments").fetchall()
         }
-    return MatchingInputs(
+    inputs = MatchingInputs(
         evidence_run_id=run["run_id"],
         evidence_policy_id=run["evidence_policy_id"],
         history_fetch_started_at=run["fetch_started_at"],
         subjects=subjects,
         lots=lots,
         instruments=instruments,
+        as_of=as_of,
+        characters={},
     )
+    members = security_members(inputs)
+    security_of = {m: key for key, ms in members.items() for m in ms}
+    first_acquisitions: dict[int, date] = {}
+    for lot in lots:
+        key = security_of.get(lot.instrument_id)
+        if key is not None and lot.direction == "acquisition":
+            first_acquisitions[key] = min(first_acquisitions.get(key, lot.uk_date), lot.uk_date)
+    characters = read_evidence(conn, members, first_acquisitions, bodies=bodies)
+    return replace(inputs, characters=characters)
 
 
 def _existing_run(
@@ -867,9 +981,10 @@ def _existing_run(
     row = conn.execute(
         """
         SELECT matching_run_id, state, reason FROM tax_matching_runs
-        WHERE evidence_run_id = %s AND matching_policy_id = %s AND class_policy_id = %s AND inputs_digest = %s
+        WHERE evidence_run_id = %s AND matching_policy_id = %s AND class_policy_id = %s AND character_policy_id = %s
+          AND inputs_digest = %s
         """,
-        (evidence_run_id, TAX_MATCHING_POLICY_ID, CONSIDERATION_CLASS_POLICY_ID, digest),
+        (evidence_run_id, TAX_MATCHING_POLICY_ID, CONSIDERATION_CLASS_POLICY_ID, TAX_CHARACTER_POLICY_ID, digest),
     ).fetchone()
     return None if row is None else (int(row[0]), str(row[1]), row[2])
 
@@ -936,6 +1051,7 @@ def run_tax_matching(conn: psycopg.Connection[Any]) -> MatchingRunReport:
             result = compute_matching(inputs)
             run_id = _insert_run(conn, inputs, document, digest, withheld_all=result.withheld_all)
             _insert_rows(conn, run_id, inputs.evidence_run_id, result)
+            _check_one_character_per_security(conn, run_id)
             counts = result.counts()
             _seal(conn, run_id, "published", None, counts)
         return MatchingRunReport("published", run_id, inputs.evidence_run_id, None, counts)
@@ -950,17 +1066,19 @@ def _insert_run(
     row = conn.execute(
         """
         INSERT INTO tax_matching_runs
-            (evidence_run_id, matching_policy_id, class_policy_id, inputs_digest, inputs_document, state,
-             computed_at, history_fetch_started_at, withheld_all)
-        VALUES (%s, %s, %s, %s, %s, 'building', clock_timestamp(), %s, %s)
+            (evidence_run_id, matching_policy_id, class_policy_id, character_policy_id, inputs_digest, inputs_document,
+             state, computed_at, as_of, history_fetch_started_at, withheld_all)
+        VALUES (%s, %s, %s, %s, %s, %s, 'building', clock_timestamp(), %s, %s, %s)
         RETURNING matching_run_id
         """,
         (
             inputs.evidence_run_id,
             TAX_MATCHING_POLICY_ID,
             CONSIDERATION_CLASS_POLICY_ID,
+            TAX_CHARACTER_POLICY_ID,
             digest,
             document,
+            inputs.as_of,
             inputs.history_fetch_started_at,
             withheld_all,
         ),
@@ -1024,6 +1142,22 @@ def _insert_rows(conn: psycopg.Connection[Any], run_id: int, evidence_run_id: in
             ],
         )
         cur.executemany(
+            "INSERT INTO tax_matching_characters (matching_run_id, tax_security_id, character, detail, cik, "
+            "latest_cover, start_cover) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            [
+                (
+                    run_id,
+                    s.tax_security_id,
+                    s.character.character,
+                    s.character.detail,
+                    s.character.cik,
+                    s.character.latest_cover,
+                    s.character.start_cover,
+                )
+                for s in result.securities
+            ],
+        )
+        cur.executemany(
             "INSERT INTO tax_matching_dependencies (matching_run_id, seq, tax_security_id, reason, subject, lot_key, "
             "instrument_id, detail) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             [
@@ -1077,3 +1211,88 @@ def _insert_rows(conn: psycopg.Connection[Any], run_id: int, evidence_run_id: in
                 for seq, i in enumerate(x.identifications, start=1)
             ],
         )
+
+
+def _check_one_character_per_security(conn: psycopg.Connection[Any], run_id: int) -> None:
+    """Publication requires exactly one character row per security row (3d-3a Design 4), checked before the seal."""
+    row = conn.execute(
+        """
+        SELECT (SELECT count(*) FROM tax_matching_securities WHERE matching_run_id = %(r)s),
+               (SELECT count(*) FROM tax_matching_characters WHERE matching_run_id = %(r)s),
+               (SELECT count(*) FROM tax_matching_securities s WHERE s.matching_run_id = %(r)s AND NOT EXISTS (
+                    SELECT 1 FROM tax_matching_characters c
+                    WHERE c.matching_run_id = s.matching_run_id AND c.tax_security_id = s.tax_security_id))
+        """,
+        {"r": run_id},
+    ).fetchone()
+    if row is None or row[0] != row[1] or row[2] != 0:
+        raise RuntimeError(f"run {run_id}: character rows do not match security rows one to one: {row}")
+
+
+# --- cover instances (3d-3a Design 1) -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CoverRefreshReport:
+    #: Selected covers of Stocks securities with one primary CIK.
+    selected: int
+    already_stored: int
+    stored: int
+    #: Selected covers whose primary document is not ``.htm``: no instance URL, not fetched, not a failure.
+    no_instance_url: int
+    #: ``accession: error`` per failed cover, sorted.
+    failures: tuple[str, ...]
+
+
+def refresh_cover_instances(
+    conn: psycopg.Connection[Any], fetch: Callable[[str], FetchedInstance] | None = None
+) -> CoverRefreshReport:
+    """Store the instance of every cover the effective generation's characters read and ``tax_cover_instances``
+    lacks (3d-3a Design 1), on an autocommit connection; the selection is read in one snapshot, then each missing
+    cover is fetched and committed on its own. Only a structurally sound 200 body is stored; every other outcome is
+    a failed cover, retried by the next run. Every cover is tried before returning."""
+    if not conn.autocommit:
+        raise ValueError("refresh_cover_instances needs an autocommit connection: each stored cover commits alone")
+    if fetch is None:
+        with httpx.Client(timeout=60, follow_redirects=False) as client:
+            return refresh_cover_instances(conn, lambda url: fetch_instance(client, url))
+    wanted: dict[str, str | None] = {}
+    with snapshot_read(conn):
+        inputs = _read_inputs(conn, bodies=False)
+        if inputs is None:
+            return CoverRefreshReport(0, 0, 0, 0, ())
+        for ev in inputs.characters.values():
+            if ev.types != {STOCKS_TYPE_ID} or len(ev.ciks) != 1:
+                continue
+            selection = select_covers(ev.filings, ev.first_acquisition)
+            for filing in (selection.latest, selection.start):
+                if filing is not None:
+                    wanted[filing.accession] = filing.primary_document_url
+        stored = {
+            r[0]
+            for r in conn.execute(
+                "SELECT accession_number FROM tax_cover_instances WHERE accession_number = ANY(%s)", (sorted(wanted),)
+            ).fetchall()
+        }
+    added = no_url = 0
+    failures: list[str] = []
+    for accession in sorted(wanted.keys() - stored):
+        document = wanted[accession]
+        url = instance_url(document) if document else None
+        if url is None:
+            no_url += 1
+            continue
+        got = fetch(url)
+        if got.body is None:
+            failures.append(f"{accession}: {got.error}")
+            continue
+        if not structurally_sound(got.body):
+            failures.append(f"{accession}: not an XBRL instance")
+            continue
+        conn.execute(
+            "INSERT INTO tax_cover_instances (accession_number, source_url, fetched_at, body, body_sha256) "
+            "VALUES (%s, %s, now(), %s, %s) ON CONFLICT (accession_number) DO NOTHING",
+            (accession, url, got.body, hashlib.sha256(got.body).hexdigest()),
+        )
+        added += 1
+    return CoverRefreshReport(len(wanted), len(stored), added, no_url, tuple(failures))
