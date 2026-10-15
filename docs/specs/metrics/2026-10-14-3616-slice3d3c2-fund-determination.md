@@ -10,8 +10,8 @@ on, and is checked by code against hashed copies of its sources before anything 
 
 **What this slice decides and builds.**
 - The determination format and policy (`fund_determination_v1`), and SPY's first determination
-  (`2026-10-14-3616-slice3d3c2-spy-determination-v1.json`, beside this spec; the build moves it unchanged). Its legal
-  sources are committed as snapshots under `docs/specs/metrics/sources/3616-slice3d3c2/` (Crown copyright, Open
+  (`app/services/tax_fund_determinations/0000884394_v1.json`; reviewed beside this spec, moved unchanged by the build). Its legal
+  sources are committed as snapshots under `app/services/tax_fund_determinations/authorities/` (Crown copyright, Open
   Government Licence); the build stores them content-addressed (Design 1).
 - A step that loads determinations, verifies their authorities, captures the SEC documents and filing list they need,
   verifies every hash and quote, and records per fund security whether its determination applies, under a run that
@@ -87,7 +87,7 @@ hash of `document_text`, which drops it.
 
 ## Source rules
 
-Each is quoted from its committed snapshot (`docs/specs/metrics/sources/3616-slice3d3c2/<id>.txt`; URL and fetch time
+Each is quoted from its committed snapshot (`app/services/tax_fund_determinations/authorities/<id>.txt`; URL and fetch time
 on its first lines; legislation.gov.uk's current revised text, HMRC manual pages with their update dates).
 
 - **Offshore fund.** TIOPA 2010 s355(1): a mutual fund (a) constituted by a body corporate resident outside the UK,
