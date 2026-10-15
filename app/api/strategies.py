@@ -5060,6 +5060,7 @@ class MomentumPeriodScoreResponse(BaseModel):
     start: date
     end: date
     names_priced: int
+    names_stale: int
     book_return: float | None
     spy_return: float | None
     control_median: float | None

@@ -222,18 +222,27 @@ def test_load_scorecard_scores_the_formation_against_spy(ebull_test_conn: psycop
         "VALUES (%s, 'SPY', 'SPDR S&P 500', 'MBTEST', 5, TRUE)",
         (spy,),
     )
-    later = date(2026, 10, 20)
+    later = date(2026, 10, 26)
     conn.execute(
         "INSERT INTO price_daily (instrument_id, price_date, close) VALUES (%s, '2026-10-14', 100), (%s, %s, 102)",
         (spy, spy, later),
     )
-    for k in range(N_NAMES):  # every name +10% to the 20th
+    for k in range(N_NAMES):  # every name +10% to the 26th
         conn.execute(
             "INSERT INTO price_daily (instrument_id, price_date, close) "
             "SELECT instrument_id, %s, close * 1.1 FROM price_daily "
             "WHERE instrument_id = %s AND price_date = '2026-10-14'",
             (later, BASE + k),
         )
+    conn.execute(
+        "INSERT INTO price_quarantine_coverage (instrument_id, rule_set_version, first_bar, last_bar, "
+        "bars_evaluated, transitions_evaluated) VALUES (%s, %s, '2026-10-14', %s, 2, 1)",
+        (spy, QUARANTINE_RULE_SET_VERSION, later),
+    )
+    conn.execute(
+        "UPDATE price_quarantine_coverage SET last_bar = %s WHERE instrument_id BETWEEN %s AND %s",
+        (later, BASE, BASE + N_NAMES - 1),
+    )
     conn.commit()
     formed = form_book(conn, session=SESSION)
     assert formed is not None
@@ -245,3 +254,13 @@ def test_load_scorecard_scores_the_formation_against_spy(ebull_test_conn: psycop
     assert period.spy_return == pytest.approx(0.02)
     assert period.control_median == pytest.approx(0.1)
     assert card.book_cumulative == pytest.approx(0.1)
+
+    # A return-unusable end bar is not read: the name falls back to its 14th close, a stale mark at the 26th.
+    conn.execute(
+        "INSERT INTO price_bar_quarantine (instrument_id, price_date, rule_set_version, range_usable, return_usable, "
+        "provisional, rules) VALUES (%s, %s, %s, TRUE, FALSE, FALSE, ARRAY['B1'])",
+        (formed.book[0], later, QUARANTINE_RULE_SET_VERSION),
+    )
+    conn.commit()
+    (period,) = load_scorecard(conn).periods
+    assert (period.names_priced, period.names_stale) == (mb.BOOK_SIZE - 1, 1)

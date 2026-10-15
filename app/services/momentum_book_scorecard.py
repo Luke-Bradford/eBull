@@ -6,9 +6,12 @@ The evidence (``docs/research/2026-10-15-3822-momentum-evidence.md``) says the b
 * **Periods.** Formation k holds from the close of its signal day (the session before its target session, the
   close every entry signal is priced at) to the next formation's signal-day close, or to the latest close while it
   is the current formation. A formation whose period has not seen a close yet is ``pending``.
-* **Book.** The equal-weight price return of the formation's names over the period. A name with no close on the
-  start day (or in the 7 days before it) is left out; a name that stopped trading mid-period (an acquisition, a
-  delisting) is valued at its last close in the period.
+* **Book.** The equal-weight price return of the formation's names over the period. Closes are read under the
+  price-verdict contract (``docs/settled-decisions.md``, 2026-09-15): only bars inside an evaluated quarantine range
+  and not marked return-unusable (clause 1), and no return across an unresolved series break (clause 2). A name is
+  left out when its start close is missing or older than ``STALENESS``, or its return crosses a break; a name whose
+  latest close is older than ``STALENESS`` at the period end is also left out and counted as ``names_stale`` (a
+  stale mark is not scored as current; a name acquired mid-period lands here too, and the count says so).
 * **SPY.** SPY's price return over the same period. eToro closes exclude dividends for both sides.
 * **Control.** ``CONTROL_DRAWS`` baskets of ``BOOK_SIZE`` names, each drawn uniformly from the formation's recorded
   universe (``momentum_book_universes``) with ``random.Random(control_seed(draw, formation_month))``, valued like
@@ -33,12 +36,14 @@ import psycopg
 from app.services import momentum_book as mb
 from app.services.market_calendar import us_market_status
 from app.services.market_regime_provider import BENCHMARK_SYMBOL
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
+from app.services.price_segments import load_unresolved_breaks
 
 Conn = psycopg.Connection[Any]
 
 CONTROL_DRAWS: Final = 200
-#: A start close older than this is stale, and the name is left out of the period.
-START_STALENESS: Final = timedelta(days=7)
+#: A start or end close older than this, against the period's own start or end date, is stale.
+STALENESS: Final = timedelta(days=7)
 
 
 def control_seed(draw: int, formation_month: date) -> str:
@@ -54,20 +59,38 @@ class Period:
     universe: tuple[int, ...]
 
 
-#: Close date -> instrument id -> (the bar's date, close): the latest close on or before that date.
+#: Close date -> instrument id -> (the bar's date, close): the latest usable close on or before that date.
 Closes = Mapping[date, Mapping[int, tuple[date, float]]]
+#: Instrument id -> its unresolved series-break dates (``price_segments.load_unresolved_breaks``).
+Breaks = Mapping[int, Sequence[date]]
 
 
-def basket_return(ids: Sequence[int], start: date, end: date, closes: Closes) -> tuple[float | None, int]:
-    """Equal-weight price return over ``start``..``end`` and the number of names priced."""
+@dataclass(frozen=True)
+class BasketReturn:
+    value: float | None
+    priced: int
+    #: Names whose latest close is older than ``STALENESS`` at the period end.
+    stale: int
+
+
+def basket_return(ids: Sequence[int], start: date, end: date, closes: Closes, breaks: Breaks) -> BasketReturn:
+    """Equal-weight price return over ``start``..``end``."""
     returns = []
+    stale = 0
     for iid in ids:
         first = closes.get(start, {}).get(iid)
+        if first is None or first[0] < start - STALENESS:
+            continue
         last = closes.get(end, {}).get(iid)
-        if first is None or last is None or first[0] < start - START_STALENESS or last[0] < first[0]:
+        if last is None or last[0] < end - STALENESS:
+            stale += 1
+            continue
+        # A break dated d starts a new segment at bar d, so a return from first to last crosses it when
+        # first < d <= last.
+        if last[0] < first[0] or any(first[0] < d <= last[0] for d in breaks.get(iid, ())):
             continue
         returns.append(last[1] / first[1] - 1.0)
-    return (sum(returns) / len(returns) if returns else None), len(returns)
+    return BasketReturn(sum(returns) / len(returns) if returns else None, len(returns), stale)
 
 
 def percentile_of(value: float, draws: Sequence[float]) -> float:
@@ -82,6 +105,7 @@ class PeriodScore:
     start: date
     end: date
     names_priced: int
+    names_stale: int
     book_return: float | None
     spy_return: float | None
     control_median: float | None
@@ -108,7 +132,9 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
     return sorted_values[min(len(sorted_values) - 1, max(0, math.ceil(q * len(sorted_values)) - 1))]
 
 
-def score(periods: Sequence[Period], closes: Closes, *, spy_id: int, draws: int = CONTROL_DRAWS) -> Scorecard:
+def score(
+    periods: Sequence[Period], closes: Closes, breaks: Breaks, *, spy_id: int, draws: int = CONTROL_DRAWS
+) -> Scorecard:
     scored: list[PeriodScore] = []
     pending: list[date] = []
     book_path = spy_path = 1.0
@@ -118,19 +144,21 @@ def score(periods: Sequence[Period], closes: Closes, *, spy_id: int, draws: int 
         if p.end <= p.start:
             pending.append(p.formation_month)
             continue
-        book, priced = basket_return(p.book, p.start, p.end, closes)
-        spy, _ = basket_return((spy_id,), p.start, p.end, closes)
+        basket = basket_return(p.book, p.start, p.end, closes, breaks)
+        book = basket.value
+        spy = basket_return((spy_id,), p.start, p.end, closes, breaks).value
         population = sorted(p.universe)
         control: list[float] = []
         for d in range(draws):
             if len(population) < mb.BOOK_SIZE:
                 break
-            r, _ = basket_return(
+            r = basket_return(
                 random.Random(control_seed(d, p.formation_month)).sample(population, mb.BOOK_SIZE),
                 p.start,
                 p.end,
                 closes,
-            )
+                breaks,
+            ).value
             if r is None:
                 break
             control.append(r)
@@ -141,7 +169,8 @@ def score(periods: Sequence[Period], closes: Closes, *, spy_id: int, draws: int 
                 formation_month=p.formation_month,
                 start=p.start,
                 end=p.end,
-                names_priced=priced,
+                names_priced=basket.priced,
+                names_stale=basket.stale,
                 book_return=book,
                 spy_return=spy,
                 control_median=median(control) if complete else None,
@@ -182,15 +211,24 @@ _FORMATIONS_SQL: Final = """
     ORDER BY f.formation_month
 """
 
-# The latest close on or before each date, per instrument (one index probe per pair).
+# The latest usable close on or before each date, per instrument. Fail-closed like `price_masked_bars._LOAD_SQL`
+# (clause 1): only bars inside an evaluated quarantine range, never one marked return-unusable.
 _CLOSES_SQL: Final = """
     SELECT d.day, i.id, c.price_date, c.close::float8
     FROM unnest(%(days)s::date[]) AS d(day)
     CROSS JOIN unnest(%(ids)s::bigint[]) AS i(id)
     CROSS JOIN LATERAL (
-        SELECT price_date, close FROM price_daily
-        WHERE instrument_id = i.id AND price_date <= d.day AND close IS NOT NULL AND close > 0
-        ORDER BY price_date DESC LIMIT 1
+        SELECT p.price_date, p.close FROM price_daily p
+        JOIN price_quarantine_coverage cov
+          ON cov.instrument_id = p.instrument_id
+         AND cov.rule_set_version = %(quarantine_version)s
+         AND p.price_date BETWEEN cov.first_bar AND cov.last_bar
+        LEFT JOIN price_bar_quarantine q
+          ON q.instrument_id = p.instrument_id AND q.price_date = p.price_date
+         AND q.rule_set_version = %(quarantine_version)s
+        WHERE p.instrument_id = i.id AND p.price_date <= d.day AND p.close IS NOT NULL AND p.close > 0
+          AND COALESCE(q.return_usable, TRUE)
+        ORDER BY p.price_date DESC LIMIT 1
     ) c
 """
 
@@ -206,11 +244,12 @@ def load_scorecard(conn: Conn) -> Scorecard:
     if len(spy) != 1:
         raise ValueError(f"expected one canonical {BENCHMARK_SYMBOL!r} instrument, found {len(spy)}")
     spy_id = int(spy[0][0])
+    # The current period ends at SPY's latest usable close, read under the same mask as every other close.
     latest = conn.execute(
-        "SELECT max(price_date) FROM price_daily WHERE instrument_id = %s AND close > 0", (spy_id,)
+        _CLOSES_SQL, {"days": [date.max], "ids": [spy_id], "quarantine_version": QUARANTINE_RULE_SET_VERSION}
     ).fetchone()
     starts = [_signal_day(r[1]) for r in rows]
-    latest_close = latest[0] if latest and latest[0] else None
+    latest_close = latest[2] if latest else None
     periods = []
     for k, (formation_month, _, book, universe) in enumerate(rows):
         end = starts[k + 1] if k + 1 < len(rows) else (latest_close or starts[k])
@@ -228,9 +267,10 @@ def load_scorecard(conn: Conn) -> Scorecard:
     days = sorted({d for p in periods for d in (p.start, p.end)})
     closes: dict[date, dict[int, tuple[date, float]]] = {}
     if ids and days:
-        for day, iid, bar_date, close in conn.execute(_CLOSES_SQL, {"days": days, "ids": ids}).fetchall():
+        params = {"days": days, "ids": ids, "quarantine_version": QUARANTINE_RULE_SET_VERSION}
+        for day, iid, bar_date, close in conn.execute(_CLOSES_SQL, params).fetchall():
             closes.setdefault(day, {})[int(iid)] = (bar_date, float(close))
-    return score(periods, closes, spy_id=spy_id)
+    return score(periods, closes, load_unresolved_breaks(conn, ids), spy_id=spy_id)
 
 
 __all__ = [
@@ -238,6 +278,7 @@ __all__ = [
     "Period",
     "PeriodScore",
     "Scorecard",
+    "BasketReturn",
     "basket_return",
     "control_seed",
     "load_scorecard",

@@ -21,20 +21,26 @@ def _period(month: date, start: date, end: date, book: tuple[int, ...], universe
 
 def test_basket_return_is_equal_weight_and_skips_unpriced_names() -> None:
     closes = _closes({D0: {1: 10.0, 2: 20.0}, D1: {1: 11.0, 2: 18.0, 3: 5.0}})
-    r, priced = sc.basket_return((1, 2, 3), D0, D1, closes)
-    assert priced == 2
-    assert r == pytest.approx((0.1 - 0.1) / 2)
+    r = sc.basket_return((1, 2, 3), D0, D1, closes, {})
+    assert (r.priced, r.stale) == (2, 0)
+    assert r.value == pytest.approx((0.1 - 0.1) / 2)
 
 
-def test_basket_return_values_a_name_that_stopped_trading_at_its_last_close() -> None:
-    mid = date(2026, 10, 20)
-    closes = {D0: {1: (D0, 10.0)}, D1: {1: (mid, 12.0)}}  # acquired on the 20th
-    assert sc.basket_return((1,), D0, D1, closes) == (pytest.approx(0.2), 1)
+def test_basket_return_counts_a_stale_end_mark_instead_of_scoring_it() -> None:
+    closes = {D0: {1: (D0, 10.0), 2: (D0, 10.0)}, D1: {1: (date(2026, 10, 20), 12.0), 2: (D1, 11.0)}}
+    r = sc.basket_return((1, 2), D0, D1, closes, {})
+    assert (r.value, r.priced, r.stale) == (pytest.approx(0.1), 1, 1)
+
+
+def test_basket_return_never_crosses_an_unresolved_break() -> None:
+    closes = _closes({D0: {1: 10.0, 2: 10.0}, D1: {1: 5.0, 2: 11.0}})
+    r = sc.basket_return((1, 2), D0, D1, closes, {1: (date(2026, 10, 20),), 2: (D0,)})
+    assert (r.value, r.priced) == (pytest.approx(0.1), 1)  # a break ON the start bar is not crossed
 
 
 def test_basket_return_drops_a_stale_start_close() -> None:
     closes = {D0: {1: (date(2026, 10, 1), 10.0)}, D1: {1: (D1, 12.0)}}
-    assert sc.basket_return((1,), D0, D1, closes) == (None, 0)
+    assert sc.basket_return((1,), D0, D1, closes, {}) == sc.BasketReturn(None, 0, 0)
 
 
 def test_percentile_counts_ties_half() -> None:
@@ -51,7 +57,7 @@ def test_score_chains_book_spy_and_each_control_path() -> None:
         _period(date(2026, 9, 1), D0, D1, tuple(range(1, 31)), universe),
         _period(date(2026, 10, 1), D1, D2, tuple(range(1, 31)), universe),
     ]
-    card = sc.score(periods, _closes(prices), spy_id=SPY, draws=20)
+    card = sc.score(periods, _closes(prices), {}, spy_id=SPY, draws=20)
     assert [p.book_return for p in card.periods] == [pytest.approx(0.1)] * 2
     assert card.book_cumulative == pytest.approx(0.21)
     assert card.spy_cumulative == pytest.approx(1.05**2 - 1)
@@ -70,7 +76,7 @@ def test_score_chains_book_spy_and_each_control_path() -> None:
 
 
 def test_a_period_without_a_close_after_its_start_is_pending() -> None:
-    card = sc.score([_period(date(2026, 9, 1), D0, D0, (1,), (1,))], {}, spy_id=SPY)
+    card = sc.score([_period(date(2026, 9, 1), D0, D0, (1,), (1,))], {}, {}, spy_id=SPY)
     assert card.periods == ()
     assert card.pending == (date(2026, 9, 1),)
     assert card.book_cumulative is None
@@ -78,7 +84,7 @@ def test_a_period_without_a_close_after_its_start_is_pending() -> None:
 
 def test_a_period_without_a_recorded_universe_scores_the_book_but_not_the_control() -> None:
     closes = _closes({D0: {1: 10.0, SPY: 100.0}, D1: {1: 11.0, SPY: 101.0}})
-    card = sc.score([_period(date(2026, 9, 1), D0, D1, (1,), ())], closes, spy_id=SPY, draws=5)
+    card = sc.score([_period(date(2026, 9, 1), D0, D1, (1,), ())], closes, {}, spy_id=SPY, draws=5)
     (period,) = card.periods
     assert period.book_return == pytest.approx(0.1)
     assert period.control_median is None and period.book_percentile is None
