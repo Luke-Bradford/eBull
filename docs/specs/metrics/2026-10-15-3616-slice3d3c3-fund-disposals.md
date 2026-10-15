@@ -36,8 +36,9 @@ members are all instrument type 6 (eToro ETF), independent of the character toda
 its other withholding causes and `withheld_all`, reads the newest determination run and applies 3d-3c-2's
 `reporting_status` per Design 1; only a security passing Design 1 with no other cause is identified, under both
 readings of the thirty-day period (Source rules), with Design 2's refusals and invariants enforced, Design 3's
-character and Design 4's reasons, printing one `RECORD` line per expected stored row (character, disposal,
-identification, balance, holding). A security withheld upstream (a cause the fund rules do not produce, an earlier
+character and Design 4's reasons, printing `RECORD` comparison lines (character, security, dependency, disposal,
+identification, balance, holding; a computed security's `security` and `holding` records together are one stored
+security row). A security withheld upstream (a cause the fund rules do not produce, an earlier
 character line, `withheld_all`) gets its character evaluated and is not identified. It exits 1 on a broken invariant
 (including column capacities) and 2 when a security named by `--expect-computed` is not computed. Legal sources fetched 2026-10-15 are under
 `var/research/3616/slice3d3c3/legal/` (earlier ones under `…/slice3d3c2/legal/`), each with its URL and fetch time on
@@ -257,6 +258,7 @@ For a `non_reporting_fund` security, from its admitted lots.
    - per disposal, identified units equal its units;
    - every thirty-day acquisition is in `(d, d+30]`, and every LIFO acquisition is before `t`;
    - the holding's totals equal its balances' sums;
+   - every defined cost taken and remaining is `>= 0`;
    - every value fits its column (3d-2 Design 6's capacities).
 
 ### 3. The gain and its character
@@ -319,9 +321,10 @@ character row's `fund_assumptions` is the one nullable array); units are `NUMERI
   `transparent_fund` (`transparent`, `opaque`, `unresolved`), `transparent_basis` (`established`, `assumed`,
   `unresolved`), `fund_assumptions TEXT[]`. **Legacy rows:** rows of runs whose `character_policy_id` is not
   `tax_character_v2` (run 7 and earlier) are sealed and keep every new column NULL; nothing is backfilled, since a
-  backfill would claim a status those runs never evaluated. The rules below are therefore enforced by an insert
-  trigger on rows of `tax_character_v2` runs only (it reads the parent run's `character_policy_id`), plus a CHECK
-  that a legacy-shaped row (all new columns NULL) is the only shape allowed under any other policy. For v2 rows:
+  backfill would claim a status those runs never evaluated. One insert trigger reads the parent run's
+  `character_policy_id` and enforces both branches: when it `IS DISTINCT FROM` `tax_character_v2` (NULL
+  included), every new column must be NULL and `character` must not be `non_reporting_fund`; otherwise the v2
+  contract below. CHECKs stay row-local (value domains, the two pairs within a row). For v2 rows:
   `non_reporting_fund` ⇔ `fund_determination_id`,
   `fund_determination_run_id`, `transparent_fund`, `transparent_basis` and `fund_assumptions` non-NULL and
   `fund_status` NULL; `fund_status` non-NULL ⇔ detail `exchange_traded_fund`; `transparent_basis` `unresolved` ⇔
@@ -338,16 +341,18 @@ character row's `fund_assumptions` is the one nullable array); units are `NUMERI
   `transparent_fund` finding. Code checks before insert that `fund_assumptions` is the sorted union Design 1
   computed.
 - **`tax_matching_securities`** gains `holding_basis` (`s104_pool`, `relevant_securities`; NULL allowed). Legacy rows
-  keep NULL (no backfill); for rows of `identification_v2` runs an insert trigger requires it NULL exactly for
-  `withheld` rows. For
+  keep NULL (no backfill). An insert trigger reads the parent run: unless its `matching_policy_id` is
+  `identification_v2` and its `character_policy_id` is `tax_character_v2`, `holding_basis` must be NULL; with both,
+  it must be NULL exactly for `withheld` rows. For
   `relevant_securities` the five pool columns hold the holding's totals and reasons. Code checks before the seal that
   a computed security's basis is `relevant_securities` exactly when its character is `non_reporting_fund`.
-- **Routing triggers:** `tax_statutory_disposals` (and so `tax_identifications`) refuse a security whose basis is not
-  `s104_pool`; the three tables below refuse one whose basis is not `relevant_securities` or that is not `computed`.
+- **Routing triggers:** under a v2 run, `tax_statutory_disposals` (and so `tax_identifications`) refuse a security
+  whose basis is not `s104_pool`; the three tables below refuse any row unless the parent run has both v2 policy ids
+  and the security is `computed` with basis `relevant_securities`.
 - `tax_matching_dependencies.reason` admits `time_order_unestablished`, `close_fragments_unestablished`,
   `pre_2009_rights`, `identification_incomplete`.
 - **`tax_fund_disposals`**: PK `(matching_run_id, tax_security_id, lot_key)`, FK to the security row; `seq INTEGER >
-  0` (identification order, unique per security); `executed_at TIMESTAMPTZ`, `uk_date DATE`, `tax_year TEXT`;
+  0` (identification order, unique per security); `executed_at TIMESTAMPTZ`, `uk_date DATE`, `tax_year TEXT` (CHECK `^[0-9]{4}/[0-9]{2}$`, as sql/489);
   `units > 0`; `proceeds_gbp`, `cost_gbp`, `computed_gain_gbp`, `basic_gain_gbp`, `offshore_income_gain_gbp`,
   `chargeable_gain_gbp` (sterling, NULL allowed); `status` (`computed`, `amount_missing`); `gain_character` (NULL
   allowed); `missing_lot_keys TEXT[]`, `reasons TEXT[]`. CHECKs, each `(…) IS TRUE`:
@@ -364,10 +369,11 @@ character row's `fund_assumptions` is the one nullable array); units are `NUMERI
 - **`tax_fund_identifications`**: PK `(matching_run_id, tax_security_id, disposal_lot_key, seq)`, FK to the disposal;
   `seq INTEGER > 0`, from 1 per disposal; `rule TEXT` (`thirty_day`, `lifo`); `acquisition_lot_key TEXT`,
   `acquisition_executed_at TIMESTAMPTZ`, `acquisition_uk_date DATE`; `units NUMERIC(24,8) > 0`; `cost_gbp
-  NUMERIC(44,14)` (NULL allowed) NULL iff `missing_lot_keys` non-empty, which then names the acquisition;
+  NUMERIC(44,14)` (NULL allowed, else `>= 0`) NULL iff `missing_lot_keys` non-empty, which then names the
+  acquisition;
   `missing_lot_keys TEXT[]`, `reasons TEXT[]`.
 - **`tax_fund_acquisition_balances`**: PK `(matching_run_id, tax_security_id, lot_key)`, FK to the security row;
-  `units_left NUMERIC(24,8) > 0`; `cost_left_gbp NUMERIC(44,14)` (NULL allowed) NULL iff `missing_lot_keys`
+  `units_left NUMERIC(24,8) > 0`; `cost_left_gbp NUMERIC(44,14)` (NULL allowed, else `>= 0`) NULL iff `missing_lot_keys`
   non-empty, which then names the acquisition; `missing_lot_keys TEXT[]`, `reasons TEXT[]`.
 - All three take 3d-2's child guard (insert only while the run is `building`; no update or delete), and
   `tax_matching_runs_seal()`'s refused-run check includes them. The cross-row equations (Design 2's invariants; the
@@ -456,7 +462,9 @@ DB (one module):
    refused; a character row naming a determination its run did not determine refused; a fund disposal or balance on
    an `s104_pool` or withheld security, and a statutory disposal on a `relevant_securities` security, refused;
    inserts after sealing refused; the migration applied to a DB holding sealed v1 runs with ETF, share and
-   withheld rows leaves them unchanged and still readable, and a v1-policy run cannot insert a fund-shaped row; a
+   withheld rows leaves them unchanged and still readable; a run with either v1 policy id (including a mixed pair)
+   cannot insert a `non_reporting_fund` character, a non-NULL `holding_basis` or any fund-table row; a negative
+   identification or balance cost and a malformed `tax_year` are refused; a
    rejected-ETF row carrying a determination id or a transparency, and a
    `non_reporting_fund` row whose copied transparency differs from its determination's, refused.
 10. **Run and selection:** after the policy change and before any v2 run, `effective_tax_matching` is unavailable; a
@@ -481,6 +489,9 @@ holds for each security: character, status, dependencies, disposals, identificat
   `security` and `holding` records together give one stored row (a withheld row's pool columns NULL), and
   `instrument_ids` comes from the baseline;
 - 3d-2's disposals and identifications, and the three fund tables: every column but `matching_run_id`;
+- `tax_matching_lot_classes` (`lot_key`, `class`, `reasons`) and `tax_matching_instruments` (every column but the run
+  id), against the baseline: the class policy and the mapping are unchanged, so these rows must be identical, and
+  that is what makes the lot reasons the Script reads from the deployed matcher independent inputs;
 - dependencies: the sorted *list* (multiplicity kept) of `(tax_security_id, reason, subject, lot_key, instrument_id,
   detail)`, `seq` excluded; run-level dependencies (`tax_security_id` NULL) and the run's `withheld_all` included.
 Run ids (`matching_run_id`, `fund_determination_run_id`) are excluded. A baseline row lacks the columns this slice
@@ -628,6 +639,17 @@ Round 6 (`…/ckpt1_r6_final.txt`):
 | r6.9 (earlier lines) | the earlier-line outcome checked against the baseline's detail |
 | r6.10 (retry) | the v1 baseline replayed from a worktree at the pre-deployment commit |
 | r6.11 (layout) | round 5's table moved before Security |
+
+Round 7 (`…/ckpt1_r7_final.txt`):
+
+| findings | disposition |
+|---|---|
+| r7.6 (cross-table CHECK, BLOCKING) | one insert trigger enforces both the legacy and the v2 branch from the parent run's policy (`IS DISTINCT FROM`); CHECKs row-local |
+| r7.7 (policy gating) | `holding_basis` and fund-table inserts require both v2 policy ids; mixed-pair tests |
+| r7.8 (lot classes, instruments) | both tables compared against the baseline |
+| r7.9 (non-negative costs) | `>= 0` CHECKs and invariant; negative-value tests |
+| r7.10 (tax year format) | sql/489's CHECK kept |
+| r7.11 (record wording) | comparison records; `security` + `holding` form one row |
 
 ## Security
 

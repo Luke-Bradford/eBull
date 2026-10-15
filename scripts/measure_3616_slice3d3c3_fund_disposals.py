@@ -15,8 +15,9 @@ character be evaluated but prevents identification. Otherwise the Script recompu
    - ``time``: acquisitions after the disposal's instant, up to the end of UK date d+30;
 3. spec Design 3 (computed and basic gain, character, splits) and Design 4 (reasons) for the policy reading.
 
-For the policy reading it prints one ``RECORD`` line per expected stored row (character, disposal, identification,
-balance, holding) for field-by-field acceptance, and whether the readings agree. It exits 1 on a broken invariant and
+For the policy reading it prints ``RECORD`` comparison lines (character, security, dependency, disposal,
+identification, balance, holding; a computed security's ``security`` and ``holding`` records together are one stored
+security row) for field-by-field acceptance, and whether the readings agree. It exits 1 on a broken invariant and
 2 when a security named by ``--expect-computed`` is not computed; refusals and failing statuses are outcomes, listed
 under ``[outcomes]``.
 
@@ -150,11 +151,13 @@ def identify(lots: list[Lot], reading: str) -> tuple[list[Disposal], list[Lot]]:
             assert sum((c for c in costs if c is not None), ZERO) + a.cost_left == a.amount, f"cost: {a.lot_key}"
     for x in out:
         assert sum((i.units for i in x.idents), ZERO) == x.lot.units, f"disposal units: {x.lot.lot_key}"
+        assert all(i.cost is None or i.cost >= ZERO for i in x.idents), f"negative cost: {x.lot.lot_key}"
         for i in x.idents:
             if i.rule == "thirty_day" and reading == "date":
                 assert x.lot.uk_date < i.acquisition.uk_date <= x.lot.uk_date + timedelta(days=30)
             if i.rule == "lifo":
                 assert i.acquisition.executed_at < x.lot.executed_at
+    assert all(a.cost_left is None or a.cost_left >= ZERO for a in acqs), "negative balance cost"
     return out, [a for a in acqs if a.left > ZERO]
 
 
