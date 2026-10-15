@@ -1611,15 +1611,55 @@ def effective_tax_matching(conn: psycopg.Connection[Any]) -> EffectiveMatching |
     """Exactly the published run of the effective generation, the current policy ids and the current
     ``inputs_digest``, resolved in one snapshot. None means *unavailable*: there is no fallback to an older run."""
     with snapshot_read(conn):
-        inputs = _read_inputs(conn)
-        if inputs is None:
-            return None
-        existing = _existing_run(
-            conn, inputs.evidence_run_id, inputs_digest(inputs_document(inputs, fund_statuses(inputs)))
-        )
+        return _effective_in_snapshot(conn)
+
+
+def _effective_in_snapshot(conn: psycopg.Connection[Any]) -> EffectiveMatching | None:
+    inputs = _read_inputs(conn)
+    if inputs is None:
+        return None
+    existing = _existing_run(
+        conn, inputs.evidence_run_id, inputs_digest(inputs_document(inputs, fund_statuses(inputs)))
+    )
     if existing is None or existing[1] != "published":
         return None
     return EffectiveMatching(existing[0], inputs.evidence_run_id)
+
+
+TaxRunUnavailable = Literal["ledger_scope_not_demo", "no_effective_run"]
+
+
+@dataclass(frozen=True)
+class TaxRunResolution:
+    """The effective run and the ledger scope's environment, or why there is none (3d-4a Design 1)."""
+
+    environment: str | None
+    run: EffectiveMatching | None
+    reason: TaxRunUnavailable | None
+
+
+def require_snapshot(conn: psycopg.Connection[Any]) -> None:
+    """Raise unless ``conn`` holds an active REPEATABLE READ or SERIALIZABLE transaction, read from the server: the
+    connection's ``isolation_level`` describes the next transaction, not necessarily the open one."""
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.INTRANS:
+        raise RuntimeError("tax run resolution needs the caller's open REPEATABLE READ transaction; none is active")
+    row = conn.execute("SELECT current_setting('transaction_isolation')").fetchone()
+    if row is None or row[0] not in ("repeatable read", "serializable"):
+        raise RuntimeError(f"tax run resolution needs REPEATABLE READ or SERIALIZABLE, not {row and row[0]}")
+
+
+def resolve_tax_run(conn: psycopg.Connection[Any]) -> TaxRunResolution:
+    """3d-4a Design 1. Runs inside the caller's snapshot (``require_snapshot``); never commits, never changes the
+    isolation level and opens no transaction, so it is safe on a connection the caller is using."""
+    require_snapshot(conn)
+    scope = conn.execute("SELECT environment FROM trade_ledger_scope").fetchone()
+    environment = None if scope is None else str(scope[0])
+    if environment is None:
+        return TaxRunResolution(None, None, "no_effective_run")
+    if environment != "demo":
+        return TaxRunResolution(environment, None, "ledger_scope_not_demo")
+    run = _effective_in_snapshot(conn)
+    return TaxRunResolution(environment, run, None if run is not None else "no_effective_run")
 
 
 @dataclass(frozen=True)
