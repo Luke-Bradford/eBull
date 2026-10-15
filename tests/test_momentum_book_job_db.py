@@ -6,7 +6,7 @@ import psycopg
 import pytest
 
 from app.services import momentum_book as mb
-from app.services.momentum_book_job import form_book, formation_month_for
+from app.services.momentum_book_job import form_book, formation_month_for, load_candidates
 from app.services.momentum_book_scorecard import load_scorecard
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_control_plane import configure_deployment, create_strategy_trade, decide_funding
@@ -287,3 +287,44 @@ def test_a_failed_universe_reconstruction_still_returns_the_formation(
     existing = form_book(conn, session=SESSION)
     assert existing is not None and not existing.created
     assert conn.execute("SELECT count(*) FROM momentum_book_universes").fetchone() == (0,)
+
+
+@pytest.mark.integration
+def test_a_name_that_stopped_trading_in_month_t_is_not_a_candidate(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    # APGE (#3822): acquired 2026-09-03, last bar 09-02, still flagged tradable. Its pinned price made it a
+    # top-ranked name, and its missing fill close deferred the whole formation on every fire.
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    stopped = BASE + 100
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, exchange, instrument_type_id, is_tradable) "
+        "VALUES (%s, 'MBSTOP', 'Acquired', 'MBTEST', 5, TRUE)",
+        (stopped,),
+    )
+    price = 20.0
+    days = [*_month_ends()[:-1], date(2026, 9, 2)]  # month t's only bar is early in the month
+    for day in days:
+        price *= 1.08  # the strongest momentum in the panel
+        conn.execute(
+            "INSERT INTO price_daily (instrument_id, price_date, close, volume) VALUES (%s, %s, %s, 1000000)",
+            (stopped, day, price),
+        )
+    conn.execute(
+        "INSERT INTO price_quarantine_coverage (instrument_id, rule_set_version, first_bar, last_bar, "
+        "bars_evaluated, transitions_evaluated) VALUES (%s, %s, %s, '2026-09-02', 13, 12)",
+        (stopped, QUARANTINE_RULE_SET_VERSION, days[0]),
+    )
+    conn.commit()
+
+    # The positive twin first: on the month-end rule alone, it would lead the book.
+    with_it = load_candidates(conn, formation_month=date(2026, 9, 1))
+    assert stopped not in {c.instrument_id for c in with_it}
+    still = [
+        *with_it,
+        mb.Candidate(stopped, 1e12, {mb.month_key(d): 20.0 * 1.08 ** (k + 1) for k, d in enumerate(days)}),
+    ]
+    assert mb.target_book(still, mb.month_key(date(2026, 9, 1)))[0] == stopped
+
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None and formed.created
+    assert stopped not in formed.book
