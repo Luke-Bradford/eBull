@@ -860,8 +860,13 @@ def _evaluation_clock(now: datetime | None, clock: Callable[[], datetime] | None
     (#3822, 2026-10-15 16:10Z fire). A pinned ``now`` is returned on every read.
     """
     if now is not None and clock is not None:
-        raise StrategyPaperExecutionError("pass now or clock, not both")
-    read: Callable[[], datetime] = clock or ((lambda: now) if now is not None else (lambda: datetime.now(UTC)))
+        raise StrategyPaperExecutionError("_evaluation_clock: pass a pinned now or a clock, not both")
+    if clock is not None:
+        read = clock
+    elif now is not None:
+        read = lambda: now  # noqa: E731
+    else:
+        read = lambda: datetime.now(UTC)  # noqa: E731
     return lambda: read().astimezone(UTC)
 
 
