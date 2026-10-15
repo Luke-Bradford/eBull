@@ -691,8 +691,8 @@ def _persist_rejection(
                 verdict, reason_code,
                 evaluated_at, quote_at, quote_ask, scan_at, halt_feed_at, halt_identity_rule_version,
                 broker_available_cash, account_equity, account_invested,
-                instrument_invested, gross_expectancy_ci_low_pct
-            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                instrument_invested, gross_expectancy_ci_low_pct, price_reference
+            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 signal_id,
@@ -717,6 +717,9 @@ def _persist_rejection(
                 if risk and intent
                 else None,
                 evidence.gross_expectancy_ci_low_pct if evidence else None,
+                # Only the momentum intent records which price its quote fields hold (sql/497, #3833); the others
+                # price from the stored quote and leave it NULL. Duck-typed: that intent imports this module.
+                getattr(intent, "price_reference", None),
             ),
         )
     return PaperExecutionResult(signal_id, "rejected", reason_code)

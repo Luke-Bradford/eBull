@@ -24,7 +24,7 @@ from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerProvider
 from app.services import momentum_book as mb
-from app.services.momentum_book_executor import execute_momentum_signal
+from app.services.momentum_book_executor import LatestBar, execute_momentum_signal
 from app.services.momentum_book_job import form_book
 from app.services.strategy_paper_executor import _session_is_open
 from app.services.strategy_position_manager import manage_owned_position
@@ -127,6 +127,7 @@ def run_momentum_book(
     broker: BrokerProvider,
     refresh_market: Callable[[], object],
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    latest_bar: LatestBar | None = None,
 ) -> MomentumJobResult:
     observed = clock().astimezone(UTC)
     if not _session_is_open(observed) or observed.time() < ENTRY_TIME_UTC:
@@ -187,7 +188,9 @@ def run_momentum_book(
         refresh_market()
     for signal_id in signal_ids:
         try:
-            result = execute_momentum_signal(conn, broker=broker, signal_id=signal_id, clock=clock)
+            result = execute_momentum_signal(
+                conn, broker=broker, signal_id=signal_id, clock=clock, latest_bar=latest_bar
+            )
         except Exception:
             logger.exception("momentum book: entry signal %s raised; continuing", signal_id)
             if conn.info.transaction_status != TransactionStatus.IDLE:

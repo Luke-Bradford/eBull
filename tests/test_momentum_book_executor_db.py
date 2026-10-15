@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
+from app.providers.market_data import IntradayBar
 from app.services import momentum_book as mb
 from app.services import momentum_book_executor as mx
 from app.services import momentum_book_intent as mi
@@ -182,6 +183,152 @@ def test_a_stale_quote_defers_without_deciding_and_a_later_fire_submits(ebull_te
     conn.commit()
     result = mx.execute_momentum_signal(conn, broker=broker, signal_id=signal_id, clock=lambda: NOW)
     assert result.verdict == "submitted", result
+
+
+def _bar(at: datetime, close: str) -> IntradayBar:
+    c = Decimal(close)
+    return IntradayBar(timestamp=at, open=c, high=c, low=c, close=c, volume=None)
+
+
+def test_a_delayed_quote_is_priced_from_the_latest_candle_close(ebull_test_conn: Conn) -> None:
+    """eToro serves some names a quote 1–2 h late while their OneMinute candles stay real-time (#3833)."""
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    _market(conn, formed.book)
+    signal_id = formed.entry_signal_ids[0]
+    conn.execute(
+        "UPDATE quotes SET quoted_at = %s WHERE instrument_id = %s", (NOW - timedelta(hours=1), formed.book[0])
+    )
+    conn.commit()
+    broker = _stub_broker(formed.book[0])
+    asked: list[int] = []
+
+    def latest_bar(instrument_id: int) -> IntradayBar:
+        asked.append(instrument_id)
+        return _bar(NOW - timedelta(seconds=30), "120")
+
+    result = mx.execute_momentum_signal(
+        conn, broker=broker, signal_id=signal_id, clock=lambda: NOW, latest_bar=latest_bar
+    )
+    assert result.verdict == "submitted", result
+    assert asked == [formed.book[0]]
+    sent = broker.place_demo_strategy_order.call_args.args[0]
+    assert (sent.stop_loss_rate, sent.take_profit_rate) == (Decimal("90.00"), Decimal("240.00"))
+    row = conn.execute(
+        "SELECT p.price_reference, p.quote_at, p.quote_ask, tk.why_now FROM strategy_entry_preflights p, "
+        "strategy_entry_tickets tk WHERE p.signal_id = %s AND tk.order_id = %s",
+        (signal_id, result.order_id),
+    ).fetchone()
+    conn.commit()
+    assert row is not None
+    assert row[:3] == ("candle_close", NOW - timedelta(seconds=30), Decimal("120"))
+    assert "#3833" in row[3]
+
+
+@pytest.mark.parametrize(
+    "latest_bar",
+    [
+        pytest.param(lambda _i: _bar(NOW - timedelta(hours=1), "120"), id="candle-also-stale"),
+        pytest.param(lambda _i: None, id="no-candle"),
+        pytest.param(lambda _i: (_ for _ in ()).throw(RuntimeError("candles down")), id="candle-read-raised"),
+    ],
+)
+def test_a_delayed_quote_without_a_fresh_candle_still_defers(ebull_test_conn: Conn, latest_bar: mx.LatestBar) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    _market(conn, formed.book)
+    signal_id = formed.entry_signal_ids[0]
+    conn.execute(
+        "UPDATE quotes SET quoted_at = %s WHERE instrument_id = %s", (NOW - timedelta(hours=1), formed.book[0])
+    )
+    conn.commit()
+    broker = _stub_broker(formed.book[0])
+    result = mx.execute_momentum_signal(
+        conn, broker=broker, signal_id=signal_id, clock=lambda: NOW, latest_bar=latest_bar
+    )
+    assert (result.verdict, result.reason_code) == ("deferred", "quote_stale")
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_a_candle_priced_entry_refuses_a_wide_live_spread_and_records_its_reference(ebull_test_conn: Conn) -> None:
+    """The candle has no bid/ask, so the live what-if spread is the spread gate; the rejection keeps provenance."""
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    _market(conn, formed.book)
+    signal_id = formed.entry_signal_ids[0]
+    conn.execute(
+        "UPDATE quotes SET quoted_at = %s WHERE instrument_id = %s", (NOW - timedelta(hours=1), formed.book[0])
+    )
+    conn.commit()
+    broker = _stub_broker(formed.book[0])
+    costs = broker.get_what_if_costs.return_value
+    # 0.5 on a 40 ticket = 1.25%, over the 1% bound.
+    broker.get_what_if_costs.return_value = replace(costs, costs=(replace(costs.costs[0], value=Decimal("0.5")),))
+    result = mx.execute_momentum_signal(
+        conn,
+        broker=broker,
+        signal_id=signal_id,
+        clock=lambda: NOW,
+        latest_bar=lambda _i: _bar(NOW - timedelta(seconds=30), "120"),
+    )
+    assert (result.verdict, result.reason_code) == ("rejected", "live_spread_wide")
+    broker.place_demo_strategy_order.assert_not_called()
+    row = conn.execute(
+        "SELECT price_reference, quote_ask FROM strategy_entry_preflights WHERE signal_id = %s", (signal_id,)
+    ).fetchone()
+    conn.commit()
+    assert row == ("candle_close", Decimal("120"))
+
+
+def test_a_candle_that_opens_after_evaluation_began_is_judged_on_arrival(ebull_test_conn: Conn) -> None:
+    """The candle request can cross a minute boundary; its new bar must not read as 'in the future'."""
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    _market(conn, formed.book)
+    conn.execute(
+        "UPDATE quotes SET quoted_at = %s WHERE instrument_id = %s", (NOW - timedelta(hours=1), formed.book[0])
+    )
+    conn.commit()
+    arrived = NOW + timedelta(seconds=70)
+    broker = _stub_broker(formed.book[0])
+    broker.get_what_if_costs.return_value = replace(broker.get_what_if_costs.return_value, last_updated=arrived)
+    reads = iter([NOW])
+    result = mx.execute_momentum_signal(
+        conn,
+        broker=broker,
+        signal_id=formed.entry_signal_ids[0],
+        clock=lambda: next(reads, arrived),
+        latest_bar=lambda _i: _bar(NOW + timedelta(seconds=60), "120"),
+    )
+    assert result.verdict == "submitted", result
+
+
+def test_a_fresh_quote_is_used_and_no_candle_is_read(ebull_test_conn: Conn) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    _market(conn, formed.book)
+    signal_id = formed.entry_signal_ids[0]
+    latest_bar = MagicMock()
+    result = mx.execute_momentum_signal(
+        conn, broker=_stub_broker(formed.book[0]), signal_id=signal_id, clock=lambda: NOW, latest_bar=latest_bar
+    )
+    assert result.verdict == "submitted", result
+    latest_bar.assert_not_called()
+    row = conn.execute(
+        "SELECT price_reference FROM strategy_entry_preflights WHERE signal_id = %s", (signal_id,)
+    ).fetchone()
+    conn.commit()
+    assert row == ("quote",)
 
 
 def test_another_strategys_signal_is_raised_not_persisted(ebull_test_conn: Conn) -> None:

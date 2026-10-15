@@ -600,6 +600,7 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Prevention: In provider HTTP methods, always call `_persist_raw()` before `resp.raise_for_status()`. The persist call captures the response body for auditability regardless of status code.
 - Enforced in: this prevention log
 - Carve-out (#600): ephemeral provider methods that explicitly do **not** feed any SQL audit trail and whose data does not drive scoring / thesis / recommendations / orders / dividends / tax do not require raw-payload persistence. Such methods must (a) be documented as a carve-out in the provider's class docstring naming the locked design ticket, (b) keep the data process-local (in-process cache OK, disk OK only as a debug aid), (c) be auth-gated at the API layer when they consume external quota. The first such carve-out is `EtoroMarketDataProvider.get_intraday_candles` (chart UI). Adding another carve-out requires reopening the design with an architecture-level review (Codex sign-off + epic update), not a unilateral provider-method addition.
+- Order-path reuse of a carve-out method (#3833, Codex ckpt-2): a carve-out read that starts to drive an order leaves the carve-out, so the values it contributed must land in the order's SQL audit row. The momentum book's delayed-quote fallback writes the bar's open time and close to `strategy_entry_preflights` (`quote_at`, `quote_ask`, `price_reference = 'candle_close'`) on allocated and rejected rows alike, and gates the live what-if spread because a candle carries no bid/ask.
 
 ---
 

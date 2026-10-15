@@ -7788,11 +7788,19 @@ def momentum_book() -> None:
         return
     api_key, user_key = creds
     with _tracked_job(JOB_MOMENTUM_BOOK) as tracker:
-        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker, connect_job() as conn:
+        with (
+            EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker,
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
+            connect_job() as conn,
+        ):
             result = run_momentum_book(
                 conn,
                 broker=broker,
                 refresh_market=_execution_market_refresh(JOB_MOMENTUM_BOOK, creds, due_entries),
+                # #3833: eToro delays some names' quotes; their latest OneMinute candle prices the entry instead.
+                latest_bar=lambda instrument_id: next(
+                    iter(reversed(market.get_intraday_candles(instrument_id, "OneMinute", 1))), None
+                ),
             )
         tracker.row_count = result.entries
         tracker.note = result.note

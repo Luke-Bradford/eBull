@@ -648,6 +648,7 @@ const REFUSAL_LABELS: Record<string, string> = {
   quote_missing: "No quote was available for this instrument",
   quote_ask_invalid: "The quoted ask is zero, negative or not a finite number",
   quote_spread_flagged: "The quote is flagged for an abnormal spread",
+  live_spread_wide: "The broker's live spread cost was above 1% of the ticket",
   quote_stale: "The quote was older than policy allows",
   scan_watermark_missing: "No scan watermark exists",
   scan_stale: "The last scan was older than policy allows",
