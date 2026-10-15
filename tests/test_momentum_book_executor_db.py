@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
@@ -101,7 +101,7 @@ def test_a_formed_entry_submits_with_its_levels_and_ticket(ebull_test_conn: Conn
 
     signal_id = formed.entry_signal_ids[0]
     broker = _stub_broker(formed.book[0])
-    result = mx.execute_momentum_signal(conn, broker=broker, signal_id=signal_id, now=NOW)
+    result = mx.execute_momentum_signal(conn, broker=broker, signal_id=signal_id, clock=lambda: NOW)
     assert result.verdict == "submitted", result
     assert result.amount == Decimal("40")
     sent = broker.place_demo_strategy_order.call_args.args[0]
@@ -118,7 +118,7 @@ def test_a_formed_entry_submits_with_its_levels_and_ticket(ebull_test_conn: Conn
     conn.commit()
     # Decided once: a second call returns the stored result and sends nothing.
     broker.place_demo_strategy_order.reset_mock()
-    again = mx.execute_momentum_signal(conn, broker=broker, signal_id=signal_id, now=NOW)
+    again = mx.execute_momentum_signal(conn, broker=broker, signal_id=signal_id, clock=lambda: NOW)
     assert again.verdict == "submitted" and again.order_id == result.order_id
     broker.place_demo_strategy_order.assert_not_called()
 
@@ -131,9 +131,57 @@ def test_an_entry_past_its_session_is_refused_expired(ebull_test_conn: Conn) -> 
     _market(conn, formed.book)
     later = datetime(2026, 10, 16, 15, 30, tzinfo=UTC)
     broker = _stub_broker(formed.book[0])
-    result = mx.execute_momentum_signal(conn, broker=broker, signal_id=formed.entry_signal_ids[0], now=later)
+    result = mx.execute_momentum_signal(conn, broker=broker, signal_id=formed.entry_signal_ids[0], clock=lambda: later)
     assert (result.verdict, result.reason_code) == ("rejected", "decision_expired")
     broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_costs_are_judged_when_they_arrive_not_when_evaluation_began(ebull_test_conn: Conn) -> None:
+    """eToro's what-if ``lastUpdated`` is the server time of the call, about 8 s after evaluation starts. Judged
+    against the start it is 'in the future' and was refused ``costs_stale_or_mismatched`` (#3822, 16 of 30 on
+    2026-10-15)."""
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    _market(conn, formed.book)
+    arrived = NOW + timedelta(seconds=8)
+    broker = _stub_broker(formed.book[0])
+    broker.get_what_if_costs.return_value = replace(broker.get_what_if_costs.return_value, last_updated=arrived)
+    reads = iter([NOW, arrived])
+    result = mx.execute_momentum_signal(
+        conn, broker=broker, signal_id=formed.entry_signal_ids[0], clock=lambda: next(reads, arrived)
+    )
+    assert result.verdict == "submitted", result
+
+
+def test_a_stale_quote_defers_without_deciding_and_a_later_fire_submits(ebull_test_conn: Conn) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    _market(conn, formed.book)
+    signal_id = formed.entry_signal_ids[0]
+    conn.execute(
+        "UPDATE quotes SET quoted_at = %s WHERE instrument_id = %s", (NOW - timedelta(hours=1), formed.book[0])
+    )
+    conn.commit()
+    broker = _stub_broker(formed.book[0])
+
+    deferred = mx.execute_momentum_signal(conn, broker=broker, signal_id=signal_id, clock=lambda: NOW)
+    assert (deferred.verdict, deferred.reason_code) == ("deferred", "quote_stale")
+    written = conn.execute(
+        "SELECT (SELECT count(*) FROM strategy_funding_decisions WHERE signal_id = %(s)s),"
+        "       (SELECT count(*) FROM strategy_entry_preflights WHERE signal_id = %(s)s)",
+        {"s": signal_id},
+    ).fetchone()
+    conn.commit()
+    assert written == (0, 0)
+
+    conn.execute("UPDATE quotes SET quoted_at = %s WHERE instrument_id = %s", (NOW, formed.book[0]))
+    conn.commit()
+    result = mx.execute_momentum_signal(conn, broker=broker, signal_id=signal_id, clock=lambda: NOW)
+    assert result.verdict == "submitted", result
 
 
 def test_another_strategys_signal_is_raised_not_persisted(ebull_test_conn: Conn) -> None:
@@ -152,7 +200,7 @@ def test_another_strategys_signal_is_raised_not_persisted(ebull_test_conn: Conn)
     assert other is not None
     conn.commit()
     with pytest.raises(StrategyPaperExecutionError, match="not a momentum-book signal"):
-        mx.execute_momentum_signal(conn, broker=_stub_broker(1), signal_id=int(other[0]), now=NOW)
+        mx.execute_momentum_signal(conn, broker=_stub_broker(1), signal_id=int(other[0]), clock=lambda: NOW)
 
 
 def test_null_joins_refuse_in_order_without_raising(ebull_test_conn: Conn) -> None:

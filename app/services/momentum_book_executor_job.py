@@ -187,14 +187,15 @@ def run_momentum_book(
         refresh_market()
     for signal_id in signal_ids:
         try:
-            result = execute_momentum_signal(conn, broker=broker, signal_id=signal_id, now=clock())
+            result = execute_momentum_signal(conn, broker=broker, signal_id=signal_id, clock=clock)
         except Exception:
             logger.exception("momentum book: entry signal %s raised; continuing", signal_id)
             if conn.info.transaction_status != TransactionStatus.IDLE:
                 conn.rollback()
             errors += 1
             continue
-        verdicts[result.verdict] += 1
+        # A deferral writes nothing, so the note is the only record of why the entry is still waiting.
+        verdicts[f"deferred_{result.reason_code}" if result.verdict == "deferred" else result.verdict] += 1
     return MomentumJobResult(
         session_open=True,
         formation_id=None if formation is None else formation.formation_id,
