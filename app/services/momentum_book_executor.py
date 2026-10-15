@@ -149,15 +149,16 @@ def _commit_authority(
 
 
 def _execute_locked(conn: Conn, *, broker: BrokerProvider, signal_id: int, now: datetime) -> PaperExecutionResult:
+    owner = conn.execute("SELECT strategy_id FROM strategy_signals WHERE signal_id = %s", (signal_id,)).fetchone()
+    conn.commit()
+    # Raised, never persisted, and checked before any stored result is returned: a refusal written for another
+    # strategy's signal would pre-empt the path that owns it, and its stored result is not this executor's to report.
+    if owner is None or str(owner[0]) != mb.STRATEGY_ID:
+        raise StrategyPaperExecutionError(f"signal {signal_id} is not a momentum-book signal")
     existing = _existing_result(conn, signal_id)
     conn.commit()
     if existing is not None and existing.verdict != "submission_uncertain":
         return existing
-    owner = conn.execute("SELECT strategy_id FROM strategy_signals WHERE signal_id = %s", (signal_id,)).fetchone()
-    conn.commit()
-    # Raised, never persisted: a refusal written for another strategy's signal would pre-empt the path that owns it.
-    if owner is None or str(owner[0]) != mb.STRATEGY_ID:
-        raise StrategyPaperExecutionError(f"signal {signal_id} is not a momentum-book signal")
     refusal = _trading_enabled_refusal(conn)
     if refusal is not None:
         return _persist_rejection(conn, signal_id=signal_id, reason_code=refusal, now=now)

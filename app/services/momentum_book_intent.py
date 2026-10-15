@@ -155,7 +155,7 @@ def load_intent(conn: Conn, *, signal_id: int, now: datetime) -> tuple[MomentumI
         return None, "signal_not_fired_entry", False
     if row["strategy_id"] != mb.STRATEGY_ID or registered_strategy_purpose(str(row["strategy_id"])) != "demo_trial":
         return None, "strategy_not_momentum_book", True
-    if row["formation_id"] is None:
+    if row["formation_id"] is None or row["target_session"] is None:
         return None, "momentum_entry_unformed", True
     today = now.astimezone(_NEW_YORK).date()
     if row["target_session"] < today:

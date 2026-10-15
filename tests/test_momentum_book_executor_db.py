@@ -9,8 +9,10 @@ import pytest
 
 from app.services import momentum_book as mb
 from app.services import momentum_book_executor as mx
+from app.services import momentum_book_intent as mi
 from app.services.momentum_book_job import form_book
 from app.services.strategy_control_plane import configure_deployment, configure_execution_policy, configure_paper_pool
+from app.services.strategy_paper_executor import StrategyPaperExecutionError
 from tests.fixtures.entry_ticket import assert_entry_ticket
 from tests.test_ai_trial_executor_db import _broker, _enable_trading
 from tests.test_momentum_book_job_db import SESSION, _seed
@@ -149,5 +151,17 @@ def test_another_strategys_signal_is_raised_not_persisted(ebull_test_conn: Conn)
     ).fetchone()
     assert other is not None
     conn.commit()
-    with pytest.raises(Exception, match="not a momentum-book signal"):
+    with pytest.raises(StrategyPaperExecutionError, match="not a momentum-book signal"):
         mx.execute_momentum_signal(conn, broker=_stub_broker(1), signal_id=int(other[0]), now=NOW)
+
+
+def test_null_joins_refuse_in_order_without_raising(ebull_test_conn: Conn) -> None:
+    """No deployment, policy, pool, quote or halt feed: every LEFT JOIN is NULL, and the loader returns the first
+    ordered refusal rather than raising (review WARNING on #3825)."""
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    conn.commit()
+    intent, reason, halt_ran = mi.load_intent(conn, signal_id=formed.entry_signal_ids[0], now=NOW)
+    assert (intent, reason, halt_ran) == (None, "paper_deployment_missing", True)
