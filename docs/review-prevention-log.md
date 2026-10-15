@@ -12786,3 +12786,9 @@ neighbouring container and match it.**
   wrong setup, such as a trade that was not `open`, would have passed it too.
 - Prevention: assert the positive case under the same setup before asserting the negative.
 - Enforced in: `.claude/skills/engineering/test-quality.md` ("A negative assertion needs its positive twin").
+
+### A comparison badge has three states, not two (#3831)
+
+- Failure (review on #3831, 2026-10-15): the momentum scorecard's badge used `book >= spy`, so an exact tie read "Ahead of SPY".
+- Prevention: compare with strict `>` and `<`, and give a tie its own neutral badge. Null inputs render no badge.
+- Enforced in: `.claude/skills/frontend/operator-ui-conventions.md` ("Status pill vocabulary"). The edit is posted on #2403, because `.claude/**` is write-refused from the loop worktree.
