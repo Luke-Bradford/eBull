@@ -123,8 +123,9 @@ its first lines.
     shall … be just and reasonable"), by number of units, since they are of one class, bought in one bargain at one
     price. **What is not established:** the legal nature of a broker-held fractional interest (an undivided interest
     held through the broker's nominee, not a registered unit) and so whether a disposal of part of one acquisition's
-    units is instead a part disposal of one asset under s42, whose fraction A/(A+B) would use market values rather
-    than units. F8 is that assumption; under s42 the fraction would use the unreduced consideration (reg 45(6)).
+    units is instead a part disposal of one asset under s42. There the cost is apportioned by A/(A+B), A the
+    consideration for the disposal and B the market value of the part retained (CG12731), rather than by units, and
+    A is not reduced by the OIG deduction (reg 45(6)). F8 is that assumption.
   - **Other allowable expenditure.** s38(1)(b) also allows expenditure "reflected in the state or nature of the asset"
     and "in establishing, preserving or defending his title" (CG15180); s38(1)(c) incidental costs of disposal. None
     is recorded in the evidence. Assumption **F3**: no such expenditure was incurred, no incidental cost beyond 3d-1's
@@ -429,8 +430,8 @@ Pure, each figure computed by hand in the test:
    two securities processed in turn, one with and one without a later same-day acquisition, each with its own
    reasons.
 7. **Status rule:** `non_reporting_assumed` at every date gives `non_reporting_fund`; each other status at an
-   acquisition date, at a disposal date and at the holding date alone gives `exchange_traded_fund` with that status
-   and date; an acquisition before `valid_from` (`outside_interval`); `no_run`, `run_failed` (a newer `running` run)
+   acquisition date, at a disposal date and at the holding date alone gives `exchange_traded_fund` with that status,
+   its date only for `outside_interval` and NULL otherwise; an acquisition before `valid_from` (`outside_interval`); `no_run`, `run_failed` (a newer `running` run)
    and `not_observed` with no date; a run that succeeded before `review_by` and a matching `as_of` after it
    (`review_out_of_date`); a security with no lots evaluated at the holding date only; a determination outside
    `EXCEPTIONS_REVIEWED` (`exceptions_unreviewed`); an all-type-6 security with two primary CIKs keeps
@@ -458,15 +459,21 @@ DB (one module):
 
 **Pinned (evidence run 7):** fact 4's date-reading figures are a unit-test fixture (Test 2).
 
-**Baseline before deployment:** record the effective v1 run (id and evidence run) and every row it holds for each
-security: character, status, dependencies, disposals, identifications, pool.
+**Baseline before deployment:** record the effective v1 run (id, evidence run, `inputs_document`) and every row it
+holds for each security: character, status, dependencies, disposals, identifications, pool.
+
+**Comparison projection** (both populations): run ids (`matching_run_id`, `fund_determination_run_id`) and dependency
+`seq` are excluded; dependencies are compared as the sorted set of `(reason, subject, lot_key, instrument_id,
+detail)`; a baseline row has no `holding_basis`, so it is read as `s104_pool` for a computed row and NULL for a
+withheld one.
 
 **After deployment:** run `daily_tax_reconciliation` (matching only: it publishes no generation, so the v2 run is over
 the baseline's evidence run), then rerun the Script with `--expect-computed 3000`, which must exit 0.
 1. A new matching run under `identification_v2` / `tax_character_v2`, over the baseline's evidence run, selected by
    `effective_tax_matching`.
 2. Every type-6 security's stored rows equal the Script's `RECORD` lines field by field: the character row (every fund
-   column, NULLs included), the security row (`status`, `holding_basis`), the fund-rule dependencies, and the
+   column, NULLs included), the security row (`status`, `holding_basis`), every dependency (upstream ones and those
+   the fund rules produce, including `character_unestablished` with its detail), and the
    disposals, identifications, balances and holding totals; no other fund row exists. `matching_run_id` and
    `fund_determination_run_id` are not compared: the run id is provenance, and an equivalent later determination run
    deliberately reuses the matching run (Design 6), so the stored id is checked instead by the observation trigger
@@ -477,11 +484,14 @@ the baseline's evidence run), then rerun the Script with `--expect-computed 3000
    `non_reporting_status_assumed`, `spread_inclusion_assumed`, `thirty_day_period_assumed`, `window_open` (since
    2026-09-23, until a generation whose fetch starts at or after 2026-10-23 23:00Z); IUSA.L and CSPX.L
    `exchange_traded_fund` with `fund_status` `not_candidate`, no date.
-3. Every other security's rows equal the baseline's field by field.
+3. Every other security's rows equal the baseline's under the projection.
 
-The comparison needs one generation on both sides: the effective evidence run is read before the baseline and after
-the check, and if a scheduled job published a generation in between, the acceptance is unmet and is repeated (the
-deployment stays; only the baseline and check rerun). Without an identical-input v1 baseline it is not passed.
+The comparison needs identical non-fund inputs on both sides, not only one generation: profiles can go stale and
+`instruments` can change without a new generation (3d-3a Design 4; 3d-2 Design 9). The v2 run's stored
+`inputs_document` without its `funds` key and its version string must equal the baseline run's `inputs_document`
+without its version string. If it does not (a new generation, a changed instrument, a profile gone stale), the
+acceptance is unmet and is repeated: the deployment stays, and only the baseline and check rerun. Without an
+identical-input v1 baseline it is not passed.
 
 ## Full-population verification
 
@@ -498,14 +508,14 @@ Round 1 (`var/research/3616/slice3d3c3/ckpt1_r1_final.txt`, loop worktree):
 |---|---|
 | 1 (reg 42) | `computed_gain` stored signed; `basic_gain` floored at nil; Design 3 and storage |
 | 2, 4 (the TCGA computation) | Source rules map each s38 term to 3d-1's evidence or a named assumption; F3 for s37 and s39; the loss row rests on the same computation, its allowability 3d-4's |
-| 3 (s42, reg 45(5)–(6), s37) | identified securities are whole assets, so s42 does not arise; reg 45 replaces s37(1) |
+| 3 (s42, reg 45(5)–(6), s37) | reg 45 replaces s37(1); the asset reasoning here was superseded by F8 (r2.3, r3.2) |
 | 5, 6 (exceptions, protected rights) | each regulation's condition quoted from its fetched text; F4 for the participant's facts; the agreement route in F4 |
 | 7 (reg 29) | full predicate with (2)–(4) and the legal-form condition |
 | 8 (FIG) | F1 restated for both regimes from IFM13414 |
 | 9 (treaty non-residence) | F5 |
 | 10, 11 (coverage, no run) | status at every lot date and the holding date; no-run statuses first; residual stated as A5's |
 | 12 (F2 support) | s105(2)(b) cited; the uncertainty stated precisely; the unsourced general proposition removed |
-| 13 (disposal identity) | F6, the equal-instant refusal including closes of one order |
+| 13 (disposal identity) | F6 and the equal-instant refusal; superseded in part by the same-order refusal (r3.4) |
 | 14 (bounds) | conditional scenarios; NULL never zero |
 | 15, 16 (propagation) | Design 4's matrix; the F2 reason described as potential |
 | 17–21 (Script) | selection by instrument type; Design 1 enforced; `withheld_all` and other causes respected; refusals stop computation; every invariant checked; non-zero exit |
@@ -521,9 +531,9 @@ Round 2 (`…/ckpt1_r2_final.txt`; its items 1–30 are verdicts on round 1, 31�
 | findings | disposition |
 |---|---|
 | r2.2 (R1.2, expenditure) | F3 widened to s38(1)(b) and (c) with CG15180; how evidenced costs enter (a new evidence or class policy); the figure qualified as the computation under A1, A4, F3 |
-| r2.3 (R1.3, apportionment) | s104(1) makes the pool one asset; outside it, one acquisition is several securities bought for one consideration, apportioned under s52(4), by units |
+| r2.3 (R1.3, apportionment) | s52(4) cited; the claim that one acquisition is several separate securities was superseded by F8 (r3.2) |
 | r2.5 (R1.5, exceptions) | F7: fund-level exceptions reviewed per determination, frozen in `EXCEPTIONS_REVIEWED`, with SPY's evidence; others withheld `exceptions_unreviewed` |
-| r2.13 (R1.13, bargains) | F6 stated as a residual; no field groups closes; the equal-instant refusal is the one available signal |
+| r2.13 (R1.13, bargains) | F6 stated as a residual; superseded in part by the same-order refusal (r3.4) |
 | r2.21 (R1.21, invariants) | the Script checks every capacity and both readings' eligibility |
 | r2.25 (R1.25, provenance) | trigger compares the copied transparency to the determination body; full NULL truth table; sorted assumptions checked in code |
 | r2.26 (R1.26, missing amounts) | at least one input NULL; known amounts kept; exact missing-key rule; typed columns; field-specific tests |
@@ -554,6 +564,18 @@ Round 3 (`…/ckpt1_r3_final.txt`):
 | r3.24 (digest) | securities decided by an earlier line omitted from `funds` |
 | r3.25 (headline) | earlier lines and F7 in the summary |
 | r3.26 (quote) | the exact prospectus quote; the paraphrase attributed to the finding's reasoning |
+
+Round 4 (`…/ckpt1_r4_final.txt`):
+
+| findings | disposition |
+|---|---|
+| r4.5 (r3.13, records) | complete dependency records (every cause field) for upstream, earlier-character and fund-rule dependencies; all compared under the projection |
+| r4.12 (identical inputs) | the v2 run's `inputs_document` without `funds` must equal the baseline's, or acceptance is unmet |
+| r4.13 (s42 fraction) | A and B defined (CG12731), reg 45(6) kept |
+| r4.14 (Test 7) | date only for `outside_interval` |
+| r4.15 (superseded dispositions) | marked superseded with their replacements |
+| r4.16 (projection) | one comparison projection: run ids and `seq` excluded, dependencies by semantic key, `holding_basis` normalised |
+
 
 
 ## Security

@@ -288,6 +288,21 @@ def _character(
     )
 
 
+def _dependency(
+    out: Any,
+    reason: str,
+    *,
+    subject: str | None = None,
+    lot_key: str | None = None,
+    instrument_id: int | None = None,
+    detail: str | None = None,
+) -> None:
+    """One expected dependency row by its semantic key (``seq`` and the run id are not compared)."""
+    _record(
+        out, "dependency", reason=reason, subject=subject, lot_key=lot_key, instrument_id=instrument_id, detail=detail
+    )
+
+
 def _check_capacity(value: Decimal | None, precision: int, scale: int, what: str) -> None:
     assert value is None or fits(value, precision, scale), f"{what} {value} does not fit NUMERIC({precision},{scale})"
 
@@ -313,9 +328,19 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
             f" {lot.lot_key} {sorted(lot.reasons)}",
             file=out,
         )
+    for d in sorted(
+        (
+            d
+            for d in result.dependencies
+            if d.tax_security_id == s.tax_security_id and d.reason not in FUND_RULE_REASONS
+        ),
+        key=lambda d: (d.reason, d.subject or "", d.lot_key or "", d.instrument_id or 0, d.detail or ""),
+    ):
+        _dependency(out, d.reason, subject=d.subject, lot_key=d.lot_key, instrument_id=d.instrument_id, detail=d.detail)
     if earlier:
         _character(out, s.character.character, s.character.detail)
         _record(out, "security", status="withheld", holding_basis=None)
+        _dependency(out, "character_unestablished", detail=s.character.detail)
         print("  an earlier character line decides: not evaluated as a fund", file=out)
         return "upstream"
     run, obs = _determination_inputs(conn, s.tax_security_id)
@@ -334,7 +359,7 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
     if failing is not None:
         _character(out, "unestablished", "exchange_traded_fund", status=failing)
         _record(out, "security", status="withheld", holding_basis=None)
-        _record(out, "dependency", reason="character_unestablished", detail="exchange_traded_fund")
+        _dependency(out, "character_unestablished", detail="exchange_traded_fund")
         return "status"
     assumptions = sorted({a for _, r in results for a in r.assumptions})
     # The run id is provenance, not compared: an equivalent later determination run reuses the matching run.
@@ -373,7 +398,8 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
                 print(f"  reading {reading}: REFUSED {e}", file=out)
                 if reading == "date":
                     _record(out, "security", status="withheld", holding_basis=None)
-                    _record(out, "dependency", reason=str(e).split(":")[0])
+                    reason, _, detail = str(e).partition(": ")
+                    _dependency(out, reason, detail=detail)
                     return "refused"
                 continue
             policy = reading == "date"
