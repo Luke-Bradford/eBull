@@ -123,9 +123,12 @@ its first lines.
     shall … be just and reasonable"), by number of units, since they are of one class, bought in one bargain at one
     price. **What is not established:** the legal nature of a broker-held fractional interest (an undivided interest
     held through the broker's nominee, not a registered unit) and so whether a disposal of part of one acquisition's
-    units is instead a part disposal of one asset under s42. There the cost is apportioned by A/(A+B), A the
-    consideration for the disposal and B the market value of the part retained (CG12731), rather than by units, and
-    A is not reduced by the OIG deduction (reg 45(6)). F8 is that assumption.
+    units is instead a part disposal of one asset under s42. There the normal formula is A/(A+B), A the
+    consideration for the disposal and B the market value of the part retained, with A not reduced by the OIG
+    deduction (reg 45(6)); CG12731 also allows dividing the expenditure as a fraction "Where the part sold is clearly
+    a recognisable fraction of the whole asset", which would give the same figure as apportioning by units. Whether
+    that fractional treatment is available for these broker-held interests is not established either. F8 is the
+    assumption that the units apportionment holds.
   - **Other allowable expenditure.** s38(1)(b) also allows expenditure "reflected in the state or nature of the asset"
     and "in establishing, preserving or defending his title" (CG15180); s38(1)(c) incidental costs of disposal. None
     is recorded in the evidence. Assumption **F3**: no such expenditure was incurred, no incidental cost beyond 3d-1's
@@ -226,11 +229,11 @@ publishes them again. That is the contract: the newest run visible in the snapsh
 For a `non_reporting_fund` security, from its admitted lots.
 1. **Disposals.** Each disposal lot is one position's close at its own instant (3c Design 4); there is no same-day
    aggregation for relevant securities (s104(3)). Assumption **F6**, a residual: each such close is a separate
-   disposal, not a fragment of one bargain recorded as several closes. No stored field groups closes into bargains:
-   the evidence has a position id and an execution instant per close, nothing more. The one signal of a shared
-   bargain available, two lots of the security at one `executed_at`, **refuses** the security
-   (`time_order_unestablished`), as does any equal instant, since no order then exists. Closes of positions opened
-   by one order at different instants (AAPL's 2026-09-23 pair is that shape for a share) are *known* candidates
+   disposal, not a fragment of one bargain recorded as several closes. No stored field identifies a disposal
+   bargain. Two signals of a shared bargain are available, and each refuses the security. The first is two lots of
+   the security at one `executed_at` (`time_order_unestablished`), as is any equal instant, since no order then
+   exists. Closes of positions opened
+   by one order at different instants are the second signal (AAPL's 2026-09-23 pair is that shape for a share): *known* candidates
    for fragments of one bargain that the evidence cannot tell apart from separate closes, so for a fund they also
    **refuse** the security (`close_fragments_unestablished`), whatever their instants. F6 then covers only closes of
    different orders.
@@ -462,18 +465,23 @@ DB (one module):
 **Baseline before deployment:** record the effective v1 run (id, evidence run, `inputs_document`) and every row it
 holds for each security: character, status, dependencies, disposals, identifications, pool.
 
-**Comparison projection** (both populations): run ids (`matching_run_id`, `fund_determination_run_id`) and dependency
-`seq` are excluded; dependencies are compared as the sorted set of `(reason, subject, lot_key, instrument_id,
-detail)`; a baseline row has no `holding_basis`, so it is read as `s104_pool` for a computed row and NULL for a
+**Comparison projection** (both populations). Compared fields, by table:
+- character: `character`, `detail`, `cik`, `latest_cover`, `start_cover` and the eight fund columns of Design 5;
+- security: `status`, `instrument_ids`, `holding_basis`, the five pool columns;
+- 3d-2's disposals and identifications, and the three fund tables: every column but `matching_run_id`;
+- dependencies: the sorted *list* (multiplicity kept) of `(tax_security_id, reason, subject, lot_key, instrument_id,
+  detail)`, `seq` excluded; run-level dependencies (`tax_security_id` NULL) and the run's `withheld_all` included.
+Run ids (`matching_run_id`, `fund_determination_run_id`) are excluded. A baseline row lacks the columns this slice
+adds: its fund columns are read as NULL, and its `holding_basis` as `s104_pool` for a computed row and NULL for a
 withheld one.
 
 **After deployment:** run `daily_tax_reconciliation` (matching only: it publishes no generation, so the v2 run is over
 the baseline's evidence run), then rerun the Script with `--expect-computed 3000`, which must exit 0.
 1. A new matching run under `identification_v2` / `tax_character_v2`, over the baseline's evidence run, selected by
    `effective_tax_matching`.
-2. Every type-6 security's stored rows equal the Script's `RECORD` lines field by field: the character row (every fund
-   column, NULLs included), the security row (`status`, `holding_basis`), every dependency (upstream ones and those
-   the fund rules produce, including `character_unestablished` with its detail), and the
+2. Every type-6 security's stored rows equal the Script's `RECORD` lines under the projection: the character row
+   (every fund column, NULLs included), the security row (`status`, `holding_basis`), the dependencies the fund
+   rules produce (`character_unestablished` with its detail and Design 2's refusals), and the
    disposals, identifications, balances and holding totals; no other fund row exists. `matching_run_id` and
    `fund_determination_run_id` are not compared: the run id is provenance, and an equivalent later determination run
    deliberately reuses the matching run (Design 6), so the stored id is checked instead by the observation trigger
@@ -484,7 +492,10 @@ the baseline's evidence run), then rerun the Script with `--expect-computed 3000
    `non_reporting_status_assumed`, `spread_inclusion_assumed`, `thirty_day_period_assumed`, `window_open` (since
    2026-09-23, until a generation whose fetch starts at or after 2026-10-23 23:00Z); IUSA.L and CSPX.L
    `exchange_traded_fund` with `fund_status` `not_candidate`, no date.
-3. Every other security's rows equal the baseline's under the projection.
+3. Against the baseline, under the projection: every row of every non-type-6 security; every type-6 security's
+   dependencies other than those the fund rules produce (its upstream causes are copied by the Script from the
+   deployed matcher, so they are checked against the baseline, not the Script); and the run-level dependencies and
+   `withheld_all`.
 
 The comparison needs identical non-fund inputs on both sides, not only one generation: profiles can go stale and
 `instruments` can change without a new generation (3d-3a Design 4; 3d-2 Design 9). The v2 run's stored
@@ -583,3 +594,14 @@ Round 4 (`…/ckpt1_r4_final.txt`):
 No order or authorisation path changes. Matching stays a DB-only derivation over stored evidence and stored
 determination runs; the Script is read-only and prints no account identifier. The budget's CGT reserve is unchanged
 (3d-2 Design 11; 3d-4).
+
+Round 5 (`…/ckpt1_r5_final.txt`; no BLOCKING):
+
+| findings | disposition |
+|---|---|
+| r5.1 (r4.5, upstream dependencies) | type-6 upstream dependencies compared against the baseline; fund-rule dependencies against the Script |
+| r5.6 (r4.16, new columns) | the projection enumerates compared fields and reads absent baseline columns as NULL |
+| r5.7 (multiplicity) | dependencies compared as sorted lists |
+| r5.8 (run-level) | run-level dependencies and `withheld_all` compared against the baseline; the Script prints them as records |
+| r5.9 (s42 fraction) | A/(A+B) as the normal formula; CG12731's fractional treatment named; both within F8 |
+| r5.10 (fragment signals) | no bargain identifier; two signals named |

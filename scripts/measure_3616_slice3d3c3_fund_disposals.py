@@ -562,8 +562,14 @@ def main() -> None:
                     f" character {s.character.character}/{s.character.detail}, dependencies {sorted(deps)}",
                     file=out,
                 )
-            run_level = [d.reason for d in result.dependencies if d.tax_security_id is None]
-            print(f"  run-level dependencies {run_level}; withheld_all {result.withheld_all}", file=out)
+            print(f"  withheld_all {result.withheld_all}; run-level dependencies:", file=out)
+            for d in sorted(
+                (d for d in result.dependencies if d.tax_security_id is None),
+                key=lambda d: (d.reason, d.subject or "", d.lot_key or "", d.instrument_id or 0, d.detail or ""),
+            ):
+                _dependency(
+                    out, d.reason, subject=d.subject, lot_key=d.lot_key, instrument_id=d.instrument_id, detail=d.detail
+                )
             # Fund securities by instrument type, independent of the character today's code assigns; lots by the
             # same member mapping matching uses (an unestablished identity's member is its own security).
             for s in result.securities:
