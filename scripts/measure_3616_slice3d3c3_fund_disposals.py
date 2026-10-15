@@ -3,9 +3,9 @@
 Read-only. In one REPEATABLE READ snapshot it reads the effective generation as matching reads it
 (``tax_matching._read_inputs``) and computes matching in memory with whatever ``compute_matching`` is deployed. It
 takes every security whose members are all instrument type 6, independent of the character it was given, with its
-lots by the same member mapping matching uses. A security withheld upstream (a dependency other than those the fund
-rules produce, an earlier character-table line, or ``withheld_all``) is reported and not evaluated. Otherwise the
-Script recomputes the fund rules itself:
+lots by the same member mapping matching uses. An earlier character-table line (such as ``member_conflict``) stops
+fund evaluation. Another upstream cause (a dependency the fund rules do not produce, or ``withheld_all``) lets the
+character be evaluated but prevents identification. Otherwise the Script recomputes the fund rules itself:
 
 1. spec Design 1: ``reporting_status`` at every distinct lot date and at the holding date (date-independent failures
    first, with no date); a failing status withholds;
@@ -74,6 +74,7 @@ class Lot:
     reasons: frozenset[str]
     left: Decimal = ZERO
     cost_left: Decimal | None = None
+    subject: str = ""
 
 
 @dataclass
@@ -101,6 +102,9 @@ def identify(lots: list[Lot], reading: str) -> tuple[list[Disposal], list[Lot]]:
     if len(set(instants)) != len(instants):
         raise Refused("time_order_unestablished: two lots share an execution instant")
     acqs = sorted((x for x in lots if x.direction == "acquisition"), key=lambda x: (x.executed_at, x.lot_key))
+    closes = [x.subject for x in lots if x.direction == "disposal"]
+    if len(set(closes)) != len(closes):
+        raise Refused("close_fragments_unestablished: two disposal lots of one order")
     if any(a.uk_date < PRE_2009 for a in acqs):
         raise Refused("pre_2009_rights: an acquisition before 2009-12-01")
     for a in acqs:
@@ -243,13 +247,45 @@ EXCEPTIONS_REVIEWED = frozenset({"fund_determination_v1:0000884394:1"})
 ETF_TYPE_ID = 6
 #: Dependencies the fund rules themselves produce (the Script recomputes these; any other cause is upstream).
 FUND_RULE_REASONS = frozenset(
-    {"character_unestablished", "time_order_unestablished", "pre_2009_rights", "identification_incomplete"}
+    {
+        "character_unestablished",
+        "time_order_unestablished",
+        "close_fragments_unestablished",
+        "pre_2009_rights",
+        "identification_incomplete",
+    }
 )
 
 
 def _record(out: Any, kind: str, **fields: Any) -> None:
     """One canonical expected row, for field-by-field acceptance."""
     print(f"    RECORD {kind} {json.dumps(fields, default=str, sort_keys=True)}", file=out)
+
+
+def _character(
+    out: Any,
+    character: str,
+    detail: str | None,
+    *,
+    status: tuple[str, str | None, date | None] | None = None,
+    determination: str | None = None,
+    transparent: tuple[str | None, str | None] = (None, None),
+    assumptions: list[str] | None = None,
+) -> None:
+    """The complete expected character row (spec Design 5's truth table), every fund column present."""
+    _record(
+        out,
+        "character",
+        character=character,
+        detail=detail,
+        fund_status=None if status is None else status[0],
+        fund_status_reason=None if status is None else status[1],
+        fund_status_date=None if status is None else status[2],
+        fund_determination_id=determination,
+        transparent_fund=transparent[0],
+        transparent_basis=transparent[1],
+        fund_assumptions=assumptions,
+    )
 
 
 def _check_capacity(value: Decimal | None, precision: int, scale: int, what: str) -> None:
@@ -278,7 +314,9 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
             file=out,
         )
     if earlier:
-        print("  an earlier character line decides: not evaluated", file=out)
+        _character(out, s.character.character, s.character.detail)
+        _record(out, "security", status="withheld", holding_basis=None)
+        print("  an earlier character line decides: not evaluated as a fund", file=out)
         return "upstream"
     run, obs = _determination_inputs(conn, s.tax_security_id)
     print(f"  determination run {run and run[:3]}; observation {obs and obs[:3]}", file=out)
@@ -291,48 +329,38 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
     results, failing = statuses(run, obs, lots, inputs.as_of)
     for label, r in results:
         print(f"  status at {label}: {r.status} {r.reason or ''} rests on {list(r.assumptions)}", file=out)
+    if failing is None and obs[2] not in EXCEPTIONS_REVIEWED:
+        failing = ("exceptions_unreviewed", None, None)
     if failing is not None:
-        _record(
-            out,
-            "character",
-            character="unestablished",
-            detail="exchange_traded_fund",
-            fund_status=failing[0],
-            fund_status_reason=failing[1],
-            fund_status_date=failing[2],
-        )
-        return "status"
-    if obs[2] not in EXCEPTIONS_REVIEWED:
-        _record(
-            out,
-            "character",
-            character="unestablished",
-            detail="exchange_traded_fund",
-            fund_status="exceptions_unreviewed",
-            fund_status_reason=None,
-            fund_status_date=None,
-        )
+        _character(out, "unestablished", "exchange_traded_fund", status=failing)
+        _record(out, "security", status="withheld", holding_basis=None)
+        _record(out, "dependency", reason="character_unestablished", detail="exchange_traded_fund")
         return "status"
     assumptions = sorted({a for _, r in results for a in r.assumptions})
-    _record(
-        out,
-        "character",
-        character="non_reporting_fund",
-        detail=None,
-        fund_determination_id=obs[2],
-        fund_determination_run_id=run[0],
-        transparent_fund=transparent,
-        transparent_basis=basis,
-        fund_assumptions=assumptions,
+    # The run id is provenance, not compared: an equivalent later determination run reuses the matching run.
+    _character(
+        out, "non_reporting_fund", None, determination=obs[2], transparent=(transparent, basis), assumptions=assumptions
     )
+    print(f"  (provenance: determination run {run[0]}; stored run must hold a determined observation of it)", file=out)
     if upstream or result.withheld_all:
+        _record(out, "security", status="withheld", holding_basis=None)
         print("  withheld upstream: character evaluated, not identified", file=out)
         return "upstream"
     acquisitions = [x for x in lots if x.direction == "acquisition"]
     computed: dict[str, list[tuple[str, str, Decimal, Decimal | None]]] = {}
     for reading in ("date", "time"):
         fresh = [
-            Lot(x.lot_key, x.direction, x.executed_at, x.uk_date, x.tax_year, x.units, x.amount, x.reasons)
+            Lot(
+                x.lot_key,
+                x.direction,
+                x.executed_at,
+                x.uk_date,
+                x.tax_year,
+                x.units,
+                x.amount,
+                x.reasons,
+                subject=x.subject,
+            )
             for x in lots
         ]
         with localcontext() as ctx:
@@ -344,6 +372,8 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
             except Refused as e:
                 print(f"  reading {reading}: REFUSED {e}", file=out)
                 if reading == "date":
+                    _record(out, "security", status="withheld", holding_basis=None)
+                    _record(out, "dependency", reason=str(e).split(":")[0])
                     return "refused"
                 continue
             policy = reading == "date"
@@ -355,8 +385,9 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
             for seq, x in enumerate(disposals, start=1):
                 costs = [i.cost for i in x.idents]
                 cost = None if any(c is None for c in costs) else sum((c for c in costs if c is not None), ZERO)
-                missing = sorted({x.lot.lot_key} if x.lot.amount is None else set()) + sorted(
-                    {i.acquisition.lot_key for i in x.idents if i.cost is None}
+                missing = sorted(
+                    ({x.lot.lot_key} if x.lot.amount is None else set())
+                    | {i.acquisition.lot_key for i in x.idents if i.cost is None}
                 )
                 if x.lot.amount is None or cost is None:
                     status, gain, ch, basic, oig, chargeable = "amount_missing", None, None, None, None, None
@@ -444,6 +475,7 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
                     ),
                     default=None,
                 )
+                _record(out, "security", status="computed", holding_basis="relevant_securities")
                 _record(
                     out,
                     "holding",
@@ -492,7 +524,7 @@ def main() -> None:
                 file=out,
             )
             rows = conn.execute(
-                """SELECT lot_key, direction, executed_at, uk_date, tax_year, units, amount_gbp, instrument_id
+                """SELECT lot_key, direction, executed_at, uk_date, tax_year, units, amount_gbp, instrument_id, subject
                    FROM tax_evidence_lots WHERE run_id = %s""",
                 [inputs.evidence_run_id],
             ).fetchall()
@@ -513,7 +545,17 @@ def main() -> None:
                     continue
                 members = set(s.instrument_ids)
                 lots = [
-                    Lot(r[0], r[1], r[2], r[3], r[4], r[5], r[6], frozenset(result.lot_classes[r[0]].reasons))
+                    Lot(
+                        r[0],
+                        r[1],
+                        r[2],
+                        r[3],
+                        r[4],
+                        r[5],
+                        r[6],
+                        frozenset(result.lot_classes[r[0]].reasons),
+                        subject=r[8],
+                    )
                     for r in rows
                     if r[7] in members
                 ]
