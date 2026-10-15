@@ -131,6 +131,8 @@ class FundEvidenceReport:
     #: ``(tax_security_id, outcome, search_outcome)`` per observation written.
     observations: tuple[tuple[int, str, str | None], ...]
     failures: tuple[str, ...]
+    #: The ``observed_at`` of the observations written; None when none were.
+    observed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -472,7 +474,13 @@ def _refresh(run: _Run) -> FundEvidenceReport:
         run.failures.append("deadline: list assessment or search interrupted")
     observations = _observe(run, funds, identities, observed_at, evidence_run_id)
     return FundEvidenceReport(
-        len(funds), dict(run.stored), run.assessed, run.searched, observations, tuple(run.failures)
+        len(funds),
+        dict(run.stored),
+        run.assessed,
+        run.searched,
+        observations,
+        tuple(run.failures),
+        observed_at if observations else None,
     )
 
 

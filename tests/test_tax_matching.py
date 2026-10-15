@@ -22,6 +22,7 @@ from app.services.tax_character import (
     Profile,
     SecurityEvidence,
 )
+from app.services.tax_fund_determination_refresh import DeterminationReport
 from app.services.tax_fund_refresh import FundEvidenceReport
 from app.services.tax_ledger import _compute_tax_year
 from app.services.tax_matching import (
@@ -678,7 +679,9 @@ def test_run_2_spy_replays_the_acceptance_figures() -> None:
 
 
 _COVERS_OK = CoverRefreshReport(2, 1, 1, 0, ())
-_FUNDS_OK = FundEvidenceReport(3, {}, 0, 0, ((3000, "candidate", "not_found"),), ())
+_FUND_AT = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
+_FUNDS_OK = FundEvidenceReport(3, {}, 0, 0, ((3000, "candidate", "not_found"),), (), _FUND_AT)
+_DETS_OK = DeterminationReport(9, ("fund_determination_v1:0000884394:1",), {}, 0, ((3000, "determined", None),), ())
 
 
 def _stub_jobs(
@@ -687,6 +690,7 @@ def _stub_jobs(
     matching: MatchingRunReport,
     covers: CoverRefreshReport = _COVERS_OK,
     funds: FundEvidenceReport | Exception = _FUNDS_OK,
+    determinations: DeterminationReport | Exception = _DETS_OK,
 ) -> list[str]:
     from app.workers import scheduler
 
@@ -694,7 +698,7 @@ def _stub_jobs(
 
     @contextmanager
     def tracked(_job_name: str) -> Iterator[SimpleNamespace]:
-        yield SimpleNamespace(row_count=None, note=None)
+        yield SimpleNamespace(row_count=None, note=None, run_id=77)
 
     @contextmanager
     def connected(**_kwargs: object) -> Iterator[MagicMock]:
@@ -724,6 +728,14 @@ def _stub_jobs(
             raise funds
         return funds
 
+    def refresh_determinations(
+        _conn: object, fund_observed_at: datetime | None, *, job_run_id: int | None
+    ) -> DeterminationReport:
+        calls.append(f"determinations at={fund_observed_at and fund_observed_at.isoformat()} job={job_run_id}")
+        if isinstance(determinations, Exception):
+            raise determinations
+        return determinations
+
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)
     monkeypatch.setattr(scheduler, "connect_job", connected)
     monkeypatch.setattr(scheduler, "_load_etoro_credentials", lambda _name: ("api", "user"))
@@ -732,11 +744,18 @@ def _stub_jobs(
     monkeypatch.setattr("app.services.tax_matching.run_tax_matching", run_matching)
     monkeypatch.setattr("app.services.tax_matching.refresh_cover_instances", refresh_covers)
     monkeypatch.setattr("app.services.tax_fund_refresh.refresh_fund_evidence", refresh_funds)
+    monkeypatch.setattr(
+        "app.services.tax_fund_determination_refresh.refresh_fund_determinations", refresh_determinations
+    )
     return calls
 
 
 def _evidence(state: str, reason: str | None = None) -> Any:
     return lambda *_args: EvidenceRunReport(state=state, run_id=5, reason=reason)  # type: ignore[arg-type]
+
+
+_DET = "determinations at=2026-10-15T09:00:00+00:00 job=77"
+_NO_FUND = "determinations at=None job=77"
 
 
 class TestJobs:
@@ -748,7 +767,7 @@ class TestJobs:
         )
         with pytest.raises(RuntimeError, match=r"refused: scope_mismatch.*matching=already_published"):
             scheduler.tax_broker_evidence_refresh()
-        assert calls == ["covers", "funds", "matching"]
+        assert calls == ["covers", "funds", _DET, "matching"]
 
     def test_an_evidence_exception_still_runs_matching_and_fails_the_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -759,7 +778,7 @@ class TestJobs:
         calls = _stub_jobs(monkeypatch, boom, MatchingRunReport("published", 3, 4))
         with pytest.raises(RuntimeError, match=r"evidence raised OSError: broker down.*matching=published"):
             scheduler.tax_broker_evidence_refresh()
-        assert calls == ["covers", "funds", "matching"]
+        assert calls == ["covers", "funds", _DET, "matching"]
 
     def test_a_matching_refusal_fails_the_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -779,7 +798,7 @@ class TestJobs:
         _stub_jobs(monkeypatch, _evidence("skipped", "another run holds the lock"), MatchingRunReport("no_generation"))
         scheduler.tax_broker_evidence_refresh()
         scheduler.daily_tax_reconciliation()
-        assert calls == ["covers", "funds", "matching"]
+        assert calls == ["covers", "funds", _DET, "matching"]
 
     def test_a_failed_cover_still_runs_matching_and_fails_both_jobs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -790,7 +809,7 @@ class TestJobs:
             scheduler.tax_broker_evidence_refresh()
         with pytest.raises(RuntimeError, match=r"http 503.*matching=published"):
             scheduler.daily_tax_reconciliation()
-        assert calls == ["covers", "funds", "matching", "covers", "funds", "matching"]
+        assert calls == ["covers", "funds", _DET, "matching", "covers", "funds", _DET, "matching"]
 
     def test_a_failed_fund_step_still_runs_matching_and_fails_both_jobs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.workers import scheduler
@@ -804,7 +823,24 @@ class TestJobs:
         _stub_jobs(monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), funds=OSError("down"))
         with pytest.raises(RuntimeError, match=r"funds raised OSError: down.*matching=published"):
             scheduler.daily_tax_reconciliation()
-        assert calls == ["covers", "funds", "matching", "covers", "funds", "matching"]
+        assert calls == ["covers", "funds", _NO_FUND, "matching", "covers", "funds", _NO_FUND, "matching"]
+
+    def test_a_failed_determination_step_still_runs_matching_and_fails_both_jobs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.workers import scheduler
+
+        fetch_failed = DeterminationReport(9, (), {}, 0, (), ("sec_submissions X: http 503",))
+        calls = _stub_jobs(
+            monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), determinations=fetch_failed
+        )
+        with pytest.raises(RuntimeError, match=r"determinations run=9 .*http 503.*matching=published"):
+            scheduler.tax_broker_evidence_refresh()
+        raised = RuntimeError("run 9 failed: a stored id has another hash")
+        _stub_jobs(monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), determinations=raised)
+        with pytest.raises(RuntimeError, match=r"determinations raised RuntimeError: run 9 failed.*matching=published"):
+            scheduler.daily_tax_reconciliation()
+        assert calls == ["covers", "funds", _DET, "matching"]
 
 
 # --- slice 3d-3b: A8 (distribution_character_assumed) -----------------------------------------------------------------
