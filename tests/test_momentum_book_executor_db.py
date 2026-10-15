@@ -24,7 +24,7 @@ Conn = psycopg.Connection[Any]
 NOW = datetime(2026, 10, 15, 15, 30, tzinfo=UTC)
 
 
-def _market(conn: Conn, book: tuple[int, ...]) -> None:
+def _quotes(conn: Conn, book: tuple[int, ...]) -> None:
     conn.execute("UPDATE instruments SET currency = 'USD' WHERE instrument_id = ANY(%s)", (list(book),))
     conn.execute(
         "INSERT INTO quotes (instrument_id, quoted_at, bid, ask, last, spread_pct, spread_flag) "
@@ -32,12 +32,18 @@ def _market(conn: Conn, book: tuple[int, ...]) -> None:
         "ON CONFLICT (instrument_id) DO UPDATE SET quoted_at = EXCLUDED.quoted_at",
         (NOW, list(book)),
     )
+
+
+def _halt_feed(conn: Conn) -> None:
     conn.execute(
         "INSERT INTO strategy_halt_feed_state (source, fetched_at, source_pub_at, item_count, payload_sha256) "
         "VALUES ('nasdaq_trader_rss', %s, %s, 0, %s) "
         "ON CONFLICT (source) DO UPDATE SET fetched_at = EXCLUDED.fetched_at",
         (NOW, NOW, "0" * 64),
     )
+
+
+def _pool(conn: Conn) -> None:
     configure_paper_pool(
         conn,
         enabled=True,
@@ -48,7 +54,10 @@ def _market(conn: Conn, book: tuple[int, ...]) -> None:
         changed_by="test",
         reason="#3822 executor fixture",
     )
-    deployment = configure_deployment(
+
+
+def _deployment(conn: Conn) -> int:
+    return configure_deployment(
         conn,
         strategy_id=mb.STRATEGY_ID,
         strategy_version=mb.STRATEGY_VERSION,
@@ -57,13 +66,17 @@ def _market(conn: Conn, book: tuple[int, ...]) -> None:
         enabled=True,
         changed_by="test",
         reason="#3822 executor fixture",
-    )
+    ).deployment_id
+
+
+def _policy(conn: Conn, deployment_id: int, *, fixed_ticket: Decimal | None = Decimal("40")) -> None:
+    """``fixed_ticket=None`` configures percent sizing, which the momentum book refuses."""
     configure_execution_policy(
         conn,
-        deployment_id=deployment.deployment_id,
-        ticket_sizing_mode="fixed",
-        ticket_fraction=None,
-        fixed_ticket_amount=Decimal("40"),
+        deployment_id=deployment_id,
+        ticket_sizing_mode="fixed" if fixed_ticket is not None else "percent",
+        ticket_fraction=None if fixed_ticket is not None else Decimal("0.01"),
+        fixed_ticket_amount=fixed_ticket,
         max_ticket_amount=Decimal("40"),
         stop_loss_pct=Decimal("25"),
         take_profit_pct=Decimal("100"),
@@ -80,6 +93,13 @@ def _market(conn: Conn, book: tuple[int, ...]) -> None:
         changed_by="test",
         reason="#3822 executor fixture",
     )
+
+
+def _market(conn: Conn, book: tuple[int, ...]) -> None:
+    _quotes(conn, book)
+    _halt_feed(conn)
+    _pool(conn)
+    _policy(conn, _deployment(conn))
     _enable_trading(conn)
     conn.commit()
 
@@ -352,11 +372,27 @@ def test_another_strategys_signal_is_raised_not_persisted(ebull_test_conn: Conn)
 
 def test_null_joins_refuse_in_order_without_raising(ebull_test_conn: Conn) -> None:
     """No deployment, policy, pool, quote or halt feed: every LEFT JOIN is NULL, and the loader returns the first
-    ordered refusal rather than raising (review WARNING on #3825)."""
+    ordered refusal rather than raising (review WARNING on #3825). Supplying each join in turn moves the refusal to
+    the next one in `load_intent`'s chain, until the intent authorises (#3827)."""
     conn = ebull_test_conn
     _seed(conn, held=False)
     formed = form_book(conn, session=SESSION)
     assert formed is not None
     conn.commit()
-    intent, reason, halt_ran = mi.load_intent(conn, signal_id=formed.entry_signal_ids[0], now=NOW)
-    assert (intent, reason, halt_ran) == (None, "paper_deployment_missing", True)
+    signal_id = formed.entry_signal_ids[0]
+    deployment: list[int] = []
+    steps: list[tuple[str, Any]] = [
+        ("paper_deployment_missing", lambda: deployment.append(_deployment(conn))),
+        ("paper_pool_unconfigured", lambda: _pool(conn)),
+        ("execution_policy_missing", lambda: _policy(conn, deployment[0], fixed_ticket=None)),
+        ("momentum_ticket_unconfigured", lambda: _policy(conn, deployment[0])),
+        ("quote_missing", lambda: _quotes(conn, formed.book)),
+        ("halt_feed_missing", lambda: _halt_feed(conn)),
+    ]
+    for expected, supply in steps:
+        intent, reason, halt_ran = mi.load_intent(conn, signal_id=signal_id, now=NOW)
+        assert (intent, reason, halt_ran) == (None, expected, True)
+        supply()
+        conn.commit()
+    intent, reason, _ = mi.load_intent(conn, signal_id=signal_id, now=NOW)
+    assert reason is None and intent is not None and intent.signal_id == signal_id
