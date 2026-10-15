@@ -123,7 +123,8 @@ _ALLOCATOR_ADVISORY_LOCK = PAPER_ALLOCATOR_ADVISORY_LOCK
 #: the signal is no longer selected and stays undecided, as one the cycle's limit never reached
 #: does. No order is placed while a deferral holds, so deferring is never less safe than consuming.
 #: Every other refusal -- policy, mandate sizing, a quote or cost the broker DID return, the
-#: trading switch -- is terminal and persisted. ⚠ Paper path only: the #3471 trial (spec §8, "each
+#: trading switch -- is terminal and persisted. ⚠ The paper path and the #3822 momentum book only
+#: (the book's bound is its formation's target session): the #3471 trial (spec §8, "each
 #: executor refusal is persisted and final") and the ranking pot (spec r3-119, one attempt per
 #: rebalance) keep persisting these through the shared ``_persist_rejection``.
 PAPER_ENTRY_DEFERRALS: frozenset[str] = frozenset(

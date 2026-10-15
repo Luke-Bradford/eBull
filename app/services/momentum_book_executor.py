@@ -5,14 +5,21 @@ machinery as the paper, trial and pot paths: the allocator lock, the #2844 sandb
 ``_risk_and_amount``, broker eligibility and what-if costs, the durable-before-I/O order authority, the entry ticket,
 and ``place_demo_strategy_order`` with broker-side stop-loss and take-profit from the execution policy.
 
-An entry is decided once: every refusal is persisted, and an entry not decided on its formation's target session is
-refused ``decision_expired``; the next month's formation re-emits a name still in the book. The hourly job body is
+An entry is decided once, with one exception: a refusal in ``PAPER_ENTRY_DEFERRALS`` (a stale quote or halt feed, a
+closed session, a broker read that raised, an execution block) writes nothing, so the next hourly fire on the same
+target session re-runs every gate. Every other refusal is persisted. An entry still undecided when its target session
+ends is never selected again; the next month's formation re-emits a name still in the book. The hourly job body is
 ``momentum_book_executor_job``.
+
+Broker costs are judged at the moment they are received, not at the start of the evaluation: eToro's what-if
+``lastUpdated`` is the server time of the call, and the risk, eligibility and what-if reads before it take about 8
+seconds, beyond the 5-second future-skew bound of ``_age_ok`` (#3822, 2026-10-15 16:10Z fire).
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -37,8 +44,8 @@ from app.services.strategy_paper_executor import (
     _allocator_lock,
     _eligibility_reason,
     _existing_result,
-    _persist_rejection,
     _reconciliation_overdue,
+    _refuse_paper_entry,
     _resume_uncertain_submission,
     _risk_and_amount,
     _stressed_cost,
@@ -148,7 +155,10 @@ def _commit_authority(
     return trade_id, order_id, request_id
 
 
-def _execute_locked(conn: Conn, *, broker: BrokerProvider, signal_id: int, now: datetime) -> PaperExecutionResult:
+def _execute_locked(
+    conn: Conn, *, broker: BrokerProvider, signal_id: int, clock: Callable[[], datetime]
+) -> PaperExecutionResult:
+    now = clock()
     owner = conn.execute("SELECT strategy_id FROM strategy_signals WHERE signal_id = %s", (signal_id,)).fetchone()
     conn.commit()
     # Raised, never persisted, and checked before any stored result is returned: a refusal written for another
@@ -161,16 +171,16 @@ def _execute_locked(conn: Conn, *, broker: BrokerProvider, signal_id: int, now: 
         return existing
     refusal = _trading_enabled_refusal(conn)
     if refusal is not None:
-        return _persist_rejection(conn, signal_id=signal_id, reason_code=refusal, now=now)
+        return _refuse_paper_entry(conn, signal_id=signal_id, reason_code=refusal, now=now)
     if existing is not None:
         return _resume_uncertain_submission(conn, broker=broker, existing=existing)
     if _reconciliation_overdue(conn, signal_id):
-        return _persist_rejection(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=now)
+        return _refuse_paper_entry(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=now)
 
     intent, reason, halt_evaluated = load_intent(conn, signal_id=signal_id, now=now)
     conn.commit()
     if intent is None:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn,
             signal_id=signal_id,
             reason_code=reason or "preflight_unavailable",
@@ -180,23 +190,23 @@ def _execute_locked(conn: Conn, *, broker: BrokerProvider, signal_id: int, now: 
     try:
         risk = broker.get_account_risk_snapshot()
     except Exception:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code="account_risk_unavailable", now=now, intent=intent
         )
     ticket = intent.fixed_ticket_amount
     sized = _risk_and_amount(conn, intent=intent, risk=risk, now=now, requested_ticket=lambda _base: ticket)
     if isinstance(sized, str):
-        return _persist_rejection(conn, signal_id=signal_id, reason_code=sized, now=now, intent=intent, risk=risk)
+        return _refuse_paper_entry(conn, signal_id=signal_id, reason_code=sized, now=now, intent=intent, risk=risk)
     amount, instrument_invested, drawdown = sized
     try:
         eligibility = broker.check_instrument_eligibility([intent.instrument_id])
     except Exception:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code="eligibility_unavailable", now=now, intent=intent, risk=risk
         )
     eligibility_reason = _eligibility_reason(eligibility, intent, amount)
     if eligibility_reason:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code=eligibility_reason, now=now, intent=intent, risk=risk
         )
     try:
@@ -206,12 +216,12 @@ def _execute_locked(conn: Conn, *, broker: BrokerProvider, signal_id: int, now: 
             )
         )
     except Exception:
-        return _persist_rejection(
+        return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code="costs_unavailable", now=now, intent=intent, risk=risk
         )
-    priced = _stressed_cost(costs, intent=intent, now=now)
+    priced = _stressed_cost(costs, intent=intent, now=clock())
     if isinstance(priced, str):
-        return _persist_rejection(conn, signal_id=signal_id, reason_code=priced, now=now, intent=intent, risk=risk)
+        return _refuse_paper_entry(conn, signal_id=signal_id, reason_code=priced, now=now, intent=intent, risk=risk)
     stressed_cost, cost_basis = priced
 
     # The durable authority, committed before any broker write; decide_funding re-checks the deployment cap.
@@ -243,15 +253,18 @@ def _execute_locked(conn: Conn, *, broker: BrokerProvider, signal_id: int, now: 
 
 
 def execute_momentum_signal(
-    conn: Conn, *, broker: BrokerProvider, signal_id: int, now: datetime | None = None
+    conn: Conn,
+    *,
+    broker: BrokerProvider,
+    signal_id: int,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> PaperExecutionResult:
     """Evaluate one entry and, only if every gate passes, submit it to demo. Serialised with the paper, trial and pot
-    paths under the same allocator lock."""
+    paths under the same allocator lock. ``clock`` is read at the start and again when the broker costs arrive."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPaperExecutionError("momentum-book execution requires an idle connection")
-    evaluated_at = (now or datetime.now(UTC)).astimezone(UTC)
     with _allocator_lock(conn):
-        return _execute_locked(conn, broker=broker, signal_id=signal_id, now=evaluated_at)
+        return _execute_locked(conn, broker=broker, signal_id=signal_id, clock=lambda: clock().astimezone(UTC))
 
 
 __all__ = [
