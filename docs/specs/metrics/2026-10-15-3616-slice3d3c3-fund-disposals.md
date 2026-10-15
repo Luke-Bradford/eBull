@@ -317,7 +317,12 @@ character row's `fund_assumptions` is the one nullable array); units are `NUMERI
   `list_match` or `search_unavailable`, else NULL), `fund_status_date DATE` (non-NULL exactly for
   `outside_interval`), `fund_determination_id`, `fund_determination_run_id`,
   `transparent_fund` (`transparent`, `opaque`, `unresolved`), `transparent_basis` (`established`, `assumed`,
-  `unresolved`), `fund_assumptions TEXT[]`. CHECKs: `non_reporting_fund` ⇔ `fund_determination_id`,
+  `unresolved`), `fund_assumptions TEXT[]`. **Legacy rows:** rows of runs whose `character_policy_id` is not
+  `tax_character_v2` (run 7 and earlier) are sealed and keep every new column NULL; nothing is backfilled, since a
+  backfill would claim a status those runs never evaluated. The rules below are therefore enforced by an insert
+  trigger on rows of `tax_character_v2` runs only (it reads the parent run's `character_policy_id`), plus a CHECK
+  that a legacy-shaped row (all new columns NULL) is the only shape allowed under any other policy. For v2 rows:
+  `non_reporting_fund` ⇔ `fund_determination_id`,
   `fund_determination_run_id`, `transparent_fund`, `transparent_basis` and `fund_assumptions` non-NULL and
   `fund_status` NULL; `fund_status` non-NULL ⇔ detail `exchange_traded_fund`; `transparent_basis` `unresolved` ⇔
   `transparent_fund` `unresolved`; `fund_assumptions` sorted, unique and non-empty. The complete assignments:
@@ -332,8 +337,9 @@ character row's `fund_assumptions` is the one nullable array); units are `NUMERI
   `transparent_fund` and `transparent_basis` equal the answer and basis of that determination body's
   `transparent_fund` finding. Code checks before insert that `fund_assumptions` is the sorted union Design 1
   computed.
-- **`tax_matching_securities`** gains `holding_basis` (`s104_pool`, `relevant_securities`; NULL allowed, NULL exactly
-  for `withheld` rows; the migration sets `s104_pool` on existing computed rows by its own DDL, before the guards). For
+- **`tax_matching_securities`** gains `holding_basis` (`s104_pool`, `relevant_securities`; NULL allowed). Legacy rows
+  keep NULL (no backfill); for rows of `identification_v2` runs an insert trigger requires it NULL exactly for
+  `withheld` rows. For
   `relevant_securities` the five pool columns hold the holding's totals and reasons. Code checks before the seal that
   a computed security's basis is `relevant_securities` exactly when its character is `non_reporting_fund`.
 - **Routing triggers:** `tax_statutory_disposals` (and so `tax_identifications`) refuse a security whose basis is not
@@ -449,7 +455,9 @@ DB (one module):
    violations refused; `amount_missing` with a split refused; `offshore_income_gain` under a non-opaque character
    refused; a character row naming a determination its run did not determine refused; a fund disposal or balance on
    an `s104_pool` or withheld security, and a statutory disposal on a `relevant_securities` security, refused;
-   inserts after sealing refused; a rejected-ETF row carrying a determination id or a transparency, and a
+   inserts after sealing refused; the migration applied to a DB holding sealed v1 runs with ETF, share and
+   withheld rows leaves them unchanged and still readable, and a v1-policy run cannot insert a fund-shaped row; a
+   rejected-ETF row carrying a determination id or a transparency, and a
    `non_reporting_fund` row whose copied transparency differs from its determination's, refused.
 10. **Run and selection:** after the policy change and before any v2 run, `effective_tax_matching` is unavailable; a
     run over SPY's lots publishes one disposal, one identification and seven balances, and is then selected; a
@@ -467,7 +475,11 @@ holds for each security: character, status, dependencies, disposals, identificat
 
 **Comparison projection** (both populations). Compared fields, by table:
 - character: `character`, `detail`, `cik`, `latest_cover`, `start_cover` and the eight fund columns of Design 5;
-- security: `status`, `instrument_ids`, `holding_basis`, the five pool columns;
+  for a type-6 security, `character`, `detail` and the fund columns come from the Script and `cik`,
+  `latest_cover`, `start_cover` from the baseline (3d-3a's inputs, unchanged by this slice);
+- security: `status`, `instrument_ids`, `holding_basis`, the five pool columns; for a type-6 security the Script's
+  `security` and `holding` records together give one stored row (a withheld row's pool columns NULL), and
+  `instrument_ids` comes from the baseline;
 - 3d-2's disposals and identifications, and the three fund tables: every column but `matching_run_id`;
 - dependencies: the sorted *list* (multiplicity kept) of `(tax_security_id, reason, subject, lot_key, instrument_id,
   detail)`, `seq` excluded; run-level dependencies (`tax_security_id` NULL) and the run's `withheld_all` included.
@@ -493,6 +505,10 @@ the baseline's evidence run), then rerun the Script with `--expect-computed 3000
    2026-09-23, until a generation whose fetch starts at or after 2026-10-23 23:00Z); IUSA.L and CSPX.L
    `exchange_traded_fund` with `fund_status` `not_candidate`, no date.
 3. Against the baseline, under the projection: every row of every non-type-6 security; every type-6 security's
+   earlier-line outcome (a baseline detail of `exchange_traded_fund` means 3d-3a's earlier lines passed on the same
+   inputs, so the v2 row must reach Design 1: `non_reporting_fund`, or `exchange_traded_fund` with a `fund_status`;
+   any other baseline detail must be unchanged, with its `character_unestablished` dependency); every type-6
+   security's
    dependencies other than those the fund rules produce (its upstream causes are copied by the Script from the
    deployed matcher, so they are checked against the baseline, not the Script); and the run-level dependencies and
    `withheld_all`.
@@ -501,8 +517,11 @@ The comparison needs identical non-fund inputs on both sides, not only one gener
 `instruments` can change without a new generation (3d-3a Design 4; 3d-2 Design 9). The v2 run's stored
 `inputs_document` without its `funds` key and its version string must equal the baseline run's `inputs_document`
 without its version string. If it does not (a new generation, a changed instrument, a profile gone stale), the
-acceptance is unmet and is repeated: the deployment stays, and only the baseline and check rerun. Without an
-identical-input v1 baseline it is not passed.
+acceptance is unmet and is repeated: the deployment stays. The repeat takes a fresh v1 baseline by replay: in a
+temporary worktree at the last pre-deployment `main` commit, a read-only helper calls that commit's `_read_inputs`
+and `compute_matching` in one REPEATABLE READ snapshot and prints its rows and `inputs_document`; then
+`daily_tax_reconciliation` runs, and the document equality is checked again between the replay and the new v2 run.
+Without an identical-input v1 baseline the acceptance is not passed.
 
 ## Full-population verification
 
@@ -589,12 +608,6 @@ Round 4 (`…/ckpt1_r4_final.txt`):
 
 
 
-## Security
-
-No order or authorisation path changes. Matching stays a DB-only derivation over stored evidence and stored
-determination runs; the Script is read-only and prints no account identifier. The budget's CGT reserve is unchanged
-(3d-2 Design 11; 3d-4).
-
 Round 5 (`…/ckpt1_r5_final.txt`; no BLOCKING):
 
 | findings | disposition |
@@ -605,3 +618,19 @@ Round 5 (`…/ckpt1_r5_final.txt`; no BLOCKING):
 | r5.8 (run-level) | run-level dependencies and `withheld_all` compared against the baseline; the Script prints them as records |
 | r5.9 (s42 fraction) | A/(A+B) as the normal formula; CG12731's fractional treatment named; both within F8 |
 | r5.10 (fragment signals) | no bargain identifier; two signals named |
+
+Round 6 (`…/ckpt1_r6_final.txt`):
+
+| findings | disposition |
+|---|---|
+| r6.7 (legacy rows, BLOCKING) | no backfill; new rules enforced by trigger for v2 runs only; legacy-shaped rows required under other policies; migration test over sealed v1 rows |
+| r6.8 (projected fields) | each compared field's source named (Script or baseline); `security` and `holding` records combine into one row; withheld pool columns NULL |
+| r6.9 (earlier lines) | the earlier-line outcome checked against the baseline's detail |
+| r6.10 (retry) | the v1 baseline replayed from a worktree at the pre-deployment commit |
+| r6.11 (layout) | round 5's table moved before Security |
+
+## Security
+
+No order or authorisation path changes. Matching stays a DB-only derivation over stored evidence and stored
+determination runs; the Script is read-only and prints no account identifier. The budget's CGT reserve is unchanged
+(3d-2 Design 11; 3d-4).

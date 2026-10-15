@@ -303,6 +303,21 @@ def _dependency(
     )
 
 
+def _withheld(out: Any) -> None:
+    """The expected security row of a withheld security: no basis, every pool column NULL."""
+    _record(
+        out,
+        "security",
+        status="withheld",
+        holding_basis=None,
+        pool_units=None,
+        pool_cost_gbp=None,
+        pool_missing_lot_keys=None,
+        pool_reasons=None,
+        window_open_since=None,
+    )
+
+
 def _check_capacity(value: Decimal | None, precision: int, scale: int, what: str) -> None:
     assert value is None or fits(value, precision, scale), f"{what} {value} does not fit NUMERIC({precision},{scale})"
 
@@ -339,7 +354,7 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
         _dependency(out, d.reason, subject=d.subject, lot_key=d.lot_key, instrument_id=d.instrument_id, detail=d.detail)
     if earlier:
         _character(out, s.character.character, s.character.detail)
-        _record(out, "security", status="withheld", holding_basis=None)
+        _withheld(out)
         _dependency(out, "character_unestablished", detail=s.character.detail)
         print("  an earlier character line decides: not evaluated as a fund", file=out)
         return "upstream"
@@ -358,7 +373,7 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
         failing = ("exceptions_unreviewed", None, None)
     if failing is not None:
         _character(out, "unestablished", "exchange_traded_fund", status=failing)
-        _record(out, "security", status="withheld", holding_basis=None)
+        _withheld(out)
         _dependency(out, "character_unestablished", detail="exchange_traded_fund")
         return "status"
     assumptions = sorted({a for _, r in results for a in r.assumptions})
@@ -368,7 +383,7 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
     )
     print(f"  (provenance: determination run {run[0]}; stored run must hold a determined observation of it)", file=out)
     if upstream or result.withheld_all:
-        _record(out, "security", status="withheld", holding_basis=None)
+        _withheld(out)
         print("  withheld upstream: character evaluated, not identified", file=out)
         return "upstream"
     acquisitions = [x for x in lots if x.direction == "acquisition"]
@@ -397,7 +412,7 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
             except Refused as e:
                 print(f"  reading {reading}: REFUSED {e}", file=out)
                 if reading == "date":
-                    _record(out, "security", status="withheld", holding_basis=None)
+                    _withheld(out)
                     reason, _, detail = str(e).partition(": ")
                     _dependency(out, reason, detail=detail)
                     return "refused"
