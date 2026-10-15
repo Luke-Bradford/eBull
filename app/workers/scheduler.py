@@ -609,6 +609,7 @@ JOB_RANKING_POT_REBALANCE = "ranking_pot_rebalance"
 JOB_RANKING_POT_STEP = "ranking_pot_step"
 # #2842 — ranking-pot-v1's executed-book entries, submitted to demo on the target session.
 JOB_RANKING_POT_EXECUTE = "ranking_pot_execute"
+JOB_MOMENTUM_BOOK = "momentum_book"
 # #3592 — ranking-pot-v2's monthly rebalance (shadow-only; v1's orchestration copied, v2's factor gates and snapshot).
 JOB_RANKING_POT_V2_REBALANCE = "ranking_pot_v2_rebalance"
 # #3592 — ranking-pot-v2's online step: shadow, controls, variant and the v1-reference book.
@@ -927,6 +928,8 @@ RANKING_POT_FIRE_MINUTE: Final = 40
 RANKING_POT_STEP_FIRE_MINUTE: Final = 10
 #: #2842 slice 5b — the pot's entry fire minute (the window itself is the executor's, policy-hashed).
 RANKING_POT_EXECUTE_FIRE_MINUTE: Final = 5
+#: #3822 — :10, clear of `ranking_pot_execute` (:05) and `ai_trial_execute` (:00) on the paper lane.
+MOMENTUM_BOOK_FIRE_MINUTE: Final = 10
 #: #3592 — ranking-pot-v2's hourly rebalance minute: a copy of ``ranking_pot_v2_job.FIRE_MINUTE`` (policy-hashed there;
 #: ``tests/test_ranking_pot_v2_job.py`` pins the two equal). After v1's :40 on the same lane (v2 spec §4).
 RANKING_POT_V2_FIRE_MINUTE: Final = 50
@@ -3053,6 +3056,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # :05, clear of `ai_trial_execute` (15:00) and the decision runs (:00 / :30) on the same lane.
         cadence=Cadence.hourly(minute=RANKING_POT_EXECUTE_FIRE_MINUTE),
         # The body refuses outside the session and before 15:00 UTC, and the executor is idempotent per signal.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_MOMENTUM_BOOK,
+        display_name="Momentum book (#3822)",
+        source="ai_trial",
+        description=(
+            "Hourly — on a NYSE session from 15:00 UTC: forms the month's momentum book if it is due (risk-adjusted "
+            "12-1 momentum, top 30 US large caps), closes held names that left the book, then submits the "
+            "formation's entries to demo through the momentum executor's gates. Demo only; does nothing before "
+            "the momentum-30 deployment is activated."
+        ),
+        cadence=Cadence.hourly(minute=MOMENTUM_BOOK_FIRE_MINUTE),
+        # The body refuses outside the session and before 15:00 UTC; formation and execution are idempotent.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -7754,6 +7772,37 @@ def ranking_pot_execute() -> None:
                 errors={"entry_raised": result.errors},
             )
         logger.info("ranking_pot_execute: %s", result.note)
+
+
+def momentum_book() -> None:
+    """Form, rebalance and execute the momentum book in demo (#3822; ``app/services/momentum_book_executor.py``)."""
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.momentum_book_executor_job import due_entries, run_momentum_book
+
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_MOMENTUM_BOOK, "the momentum book is demo-only")
+        return
+    creds = _load_etoro_credentials(JOB_MOMENTUM_BOOK)
+    if creds is None:
+        _record_prereq_skip(JOB_MOMENTUM_BOOK, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_MOMENTUM_BOOK) as tracker:
+        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker, connect_job() as conn:
+            result = run_momentum_book(
+                conn,
+                broker=broker,
+                refresh_market=_execution_market_refresh(JOB_MOMENTUM_BOOK, creds, due_entries),
+            )
+        tracker.row_count = result.entries
+        tracker.note = result.note
+        if result.errors:
+            tracker.progress = JobProgress(
+                candidates_seen=result.entries + result.errors,
+                outcomes=dict(result.verdicts),
+                errors={"raised": result.errors},
+            )
+        logger.info("momentum_book: %s", result.note)
 
 
 def recommendation_order_reconcile() -> None:

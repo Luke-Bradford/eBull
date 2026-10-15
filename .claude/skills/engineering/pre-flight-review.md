@@ -81,6 +81,10 @@ Ask:
 - is the write atomic where it needs to be?
 - could two writers race and produce inconsistent versions?
 - **transaction rollback scope:** for every new `raise` inside a function called from a shared transaction, ask: *what other writes have already executed in this transaction when I raise?* If the rollback would discard writes that are not the helper's concern, hoist the raise to the caller **before** those writes run. Document the split scope in the helper's docstring.
+- **a gate that waits for "all X done" needs an escape:** for every `continue`, skip or refusal path that leaves an X
+  unfinished, ask whether the gate then waits forever (and lets a deadline expire the work behind it). Count only
+  the X that is actually in flight, and test the path that could not start (#3828: an unowned exit blocked a
+  month's entries).
 
 ### G. Interface cleanliness
 Check:
