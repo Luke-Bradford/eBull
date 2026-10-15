@@ -1064,7 +1064,7 @@ def _check_fund_invariants(lots: Sequence[FundLot], out: FundIdentified, transpa
     fit(out.pool.cost_gbp, GBP_PRECISION, GBP_SCALE, "holding cost")
 
 
-# --- one generation (Designs 2-4)---------------------------------------------------------------------------------
+# --- one generation (Designs 2-4) ---------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
