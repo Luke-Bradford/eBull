@@ -23,7 +23,8 @@ schedules this function yet.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Final
 from uuid import UUID
@@ -47,6 +48,7 @@ from app.services.strategy_paper_executor import (
     StrategyPaperExecutionError,
     _allocator_lock,
     _eligibility_reason,
+    _evaluation_clock,
     _existing_result,
     _persist_rejection,
     _protective_rates,
@@ -111,9 +113,9 @@ def _execute_trial_signal_locked(
     *,
     broker: BrokerProvider,
     signal_id: int,
-    now: datetime | None,
+    clock: Callable[[], datetime],
 ) -> PaperExecutionResult:
-    evaluated_at = (now or datetime.now(UTC)).astimezone(UTC)
+    evaluated_at = clock()
     existing = _existing_result(conn, signal_id)
     conn.commit()
     if existing is not None and existing.verdict != "submission_uncertain":
@@ -193,7 +195,7 @@ def _execute_trial_signal_locked(
         return _persist_rejection(
             conn, signal_id=signal_id, reason_code="costs_unavailable", now=evaluated_at, intent=intent, risk=risk
         )
-    priced = _stressed_cost(costs, intent=intent, now=evaluated_at)
+    priced = _stressed_cost(costs, intent=intent, now=clock())
     if isinstance(priced, str):
         return _persist_rejection(
             conn, signal_id=signal_id, reason_code=priced, now=evaluated_at, intent=intent, risk=risk
@@ -417,16 +419,19 @@ def execute_trial_signal(
     broker: BrokerProvider,
     signal_id: int,
     now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> PaperExecutionResult:
     """Evaluate one trial leg's fired entry and, only if every gate passes, submit it to demo.
 
     Serialised with the paper path under the same allocator lock, so the two share one view of
-    account risk, the sandbox and pending orders.
+    account risk, the sandbox and pending orders. ``clock`` is read at the start and again when
+    the broker costs arrive (#3834); ``now`` pins both reads.
     """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPaperExecutionError("trial execution requires an idle connection")
+    read = _evaluation_clock(now, clock)
     with _allocator_lock(conn):
-        return _execute_trial_signal_locked(conn, broker=broker, signal_id=signal_id, now=now)
+        return _execute_trial_signal_locked(conn, broker=broker, signal_id=signal_id, clock=read)
 
 
 __all__ = [

@@ -1056,6 +1056,30 @@ def test_mandate_loss_at_stop_reduces_position_size(
     assert result.amount == Decimal("100.00")
 
 
+def test_costs_are_judged_when_they_arrive_not_when_evaluation_began(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """eToro's what-if ``lastUpdated`` is the server time of the call, about 8 s after evaluation starts. Judged
+    against the start it is 'in the future' and refused ``costs_stale_or_mismatched`` (#3834)."""
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    arrived = _NOW + timedelta(seconds=8)
+    broker = _broker()
+    broker.get_what_if_costs.return_value = replace(broker.get_what_if_costs.return_value, last_updated=arrived)
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+    reads = iter([_NOW, arrived])
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, clock=lambda: next(reads, arrived))
+
+    assert (result.verdict, result.reason_code) == ("submitted", "broker_accepted"), result
+
+
+def test_a_pinned_now_and_a_clock_together_are_refused() -> None:
+    with pytest.raises(strategy_paper_executor.StrategyPaperExecutionError):
+        strategy_paper_executor._evaluation_clock(_NOW, lambda: _NOW)
+
+
 def test_forecast_barriers_drive_loss_sizing_and_submitted_tp_sl(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:

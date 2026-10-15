@@ -7,6 +7,8 @@ leg sized, priced, protected and submitted through the paper path's durable mach
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
@@ -202,6 +204,25 @@ def test_the_arm_leg_submits_its_ticket_with_its_own_levels_and_no_evidence(
     again = execute_trial_signal(conn, broker=broker, signal_id=signals["arm"], now=NOW)
     assert again.order_id == result.order_id
     broker.place_demo_strategy_order.assert_called_once()
+
+
+def test_costs_are_judged_when_they_arrive_not_when_evaluation_began(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """eToro's what-if ``lastUpdated`` is the server time of the call, about 8 s after evaluation starts. Judged
+    against the start it is 'in the future' and refused ``costs_stale_or_mismatched`` (#3834)."""
+    conn = ebull_test_conn
+    _, signals = _published_pair(conn)
+    _enable_trading(conn)
+    arrived = NOW + timedelta(seconds=8)
+    broker = _broker(ARM_INSTRUMENT)
+    broker.get_what_if_costs.return_value = replace(broker.get_what_if_costs.return_value, last_updated=arrived)
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+    reads = iter([NOW, arrived])
+
+    result = execute_trial_signal(conn, broker=broker, signal_id=signals["arm"], clock=lambda: next(reads, arrived))
+
+    assert (result.verdict, result.reason_code) == ("submitted", "broker_accepted"), result
 
 
 def _deployment_of(conn: Conn, signal_id: int) -> int:

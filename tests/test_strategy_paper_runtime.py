@@ -315,7 +315,7 @@ def test_runtime_ranks_the_complete_set_before_applying_its_execution_limit(
     assert weaker_newer > stronger_older
     executed: list[int] = []
 
-    def execute(_conn: object, *, broker: object, signal_id: int, ranking_member_id: int, now: object):
+    def execute(_conn: object, *, broker: object, signal_id: int, ranking_member_id: int, clock: object):
         executed.append(signal_id)
         if signal_id == weaker_newer:
             return PaperExecutionResult(signal_id, "deferred", "costs_unavailable")

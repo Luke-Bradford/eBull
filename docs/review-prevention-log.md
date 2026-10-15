@@ -12804,6 +12804,9 @@ neighbouring container and match it.**
   reasoning about a refusal labelled "stale", check which bound failed; a `stale_or_mismatched` code hides three causes.
 - Enforced in: `app/services/momentum_book_executor.py` (`clock()` at the cost check),
   `tests/test_momentum_book_executor_db.py::test_costs_are_judged_when_they_arrive_not_when_evaluation_began`.
-  The same defect in the paper, trial and pot executors is #3834. Skill text for
+  The paper and trial executors take the same shape through `strategy_paper_executor._evaluation_clock` (#3834),
+  with a same-named test in `tests/test_strategy_paper_executor.py` and `tests/test_ai_trial_executor_db.py`; their
+  job callers pass a live `clock`, never a pinned `now`. The pot executor is policy-hashed and takes the fix with its
+  next version. Skill text for
   `.claude/skills/execution-guard/SKILL.md` ("Invariants") is posted on #2403, because `.claude/**` is write-refused
   from the loop worktree.

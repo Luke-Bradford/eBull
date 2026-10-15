@@ -594,7 +594,7 @@ def run_strategy_paper_cycle(
                 broker=broker,
                 signal_id=member.opportunity.signal_id,
                 ranking_member_id=member.ranking_member_id,
-                now=clock(),
+                clock=clock,
             )
         except Exception:
             logger.exception(
