@@ -70,10 +70,10 @@ def score(returns: Sequence[float]) -> float | None:
     return (math.prod(1.0 + r for r in returns) - 1.0) / sd
 
 
-def target_book(candidates: Iterable[Candidate], t: int) -> tuple[int, ...]:
-    """The book formed at the end of month ``t``: ``BOOK_SIZE`` instrument ids, best score first.
+def universe(candidates: Iterable[Candidate], t: int) -> dict[int, float]:
+    """The ``UNIVERSE_SIZE`` names the book is ranked in at the end of month ``t``: instrument id -> score.
 
-    Ties break on the lower instrument id, so the result is a function of the inputs alone."""
+    It is also the random control's opportunity set (``momentum_book_scorecard``)."""
     # History first, then the dollar-volume cut: the order the evidence was measured in (#3822, Codex ckpt-2).
     eligible: list[tuple[float, int, float]] = []
     for c in candidates:
@@ -83,9 +83,14 @@ def target_book(candidates: Iterable[Candidate], t: int) -> tuple[int, ...]:
         s = None if returns is None else score(returns)
         if s is not None and math.isfinite(s):
             eligible.append((c.adv, c.instrument_id, s))
-    universe = sorted(eligible, key=lambda x: (-x[0], x[1]))[:UNIVERSE_SIZE]
-    scored = [(s, iid) for _, iid, s in universe]
-    scored.sort(key=lambda x: (-x[0], x[1]))
+    return {iid: s for _, iid, s in sorted(eligible, key=lambda x: (-x[0], x[1]))[:UNIVERSE_SIZE]}
+
+
+def target_book(candidates: Iterable[Candidate], t: int) -> tuple[int, ...]:
+    """The book formed at the end of month ``t``: ``BOOK_SIZE`` instrument ids, best score first.
+
+    Ties break on the lower instrument id, so the result is a function of the inputs alone."""
+    scored = sorted(((s, iid) for iid, s in universe(candidates, t).items()), key=lambda x: (-x[0], x[1]))
     return tuple(iid for _, iid in scored[:BOOK_SIZE])
 
 
@@ -122,4 +127,5 @@ __all__ = [
     "rebalance_plan",
     "score",
     "target_book",
+    "universe",
 ]

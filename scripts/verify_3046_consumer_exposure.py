@@ -490,13 +490,21 @@ INVENTORY: tuple[Occurrence, ...] = (
     # --- #3822 momentum book formation ----------------------------------------
     Occurrence(
         "app/services/momentum_book_job.py",
-        46,
+        47,
         "_CANDIDATES_SQL month-end closes and dollar volume",
         "BAR_MASKED",
         ("caller_span_whole_history",),
         "the price_masked_bars coverage + B1-B4 return mask over months t-12..t; no transition verdict",
     ),
-    Occurrence("app/services/momentum_book_job.py", 64, "_ENTRY_CLOSES_SQL entry fill close", "SINGLE_BAR"),
+    Occurrence("app/services/momentum_book_job.py", 65, "_ENTRY_CLOSES_SQL entry fill close", "SINGLE_BAR"),
+    Occurrence(
+        "app/services/momentum_book_scorecard.py",
+        232,
+        "_CLOSES_SQL period start and end closes for the live scorecard",
+        "BAR_MASKED",
+        ("caller_span_whole_history",),
+        "the price_masked_bars coverage + B1-B4 return mask; returns across an unresolved price_segments break dropped",
+    ),
     Occurrence("app/services/price_masked_bars.py", 95, "_LAST_BAR_SQL", "METADATA"),
     Occurrence("app/services/price_masked_bars.py", 119, "_RECENT_LAST_BAR_COUNTS_SQL", "METADATA"),
     Occurrence("app/services/price_masked_bars.py", 133, "_UNION_CALENDAR_SQL", "METADATA"),

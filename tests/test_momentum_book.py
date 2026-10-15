@@ -72,3 +72,10 @@ def test_rebalance_plan() -> None:
     assert plan.exits == (7, 9)
     assert plan.entries == (5, 2)
     assert plan.keeps == (1,)
+
+
+def test_universe_is_the_set_target_book_ranks() -> None:
+    cands = [mb.Candidate(i, 1e9 - i, _closes(T, [0.01 * (i % 7 + 1), 0.005] * 6)) for i in range(40)]
+    universe = mb.universe(cands, T)
+    assert set(mb.target_book(cands, T)) <= set(universe)
+    assert len(universe) == 40

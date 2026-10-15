@@ -46,6 +46,8 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DSR_MODEL_ID
 from app.services.engine_book_risk_status import load_engine_book_risk_status
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
+from app.services.momentum_book_scorecard import BenchmarkInstrumentError
+from app.services.momentum_book_scorecard import load_scorecard as load_momentum_scorecard
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.price_masked_bars import load_bar_spans, load_recent_last_bar_counts
@@ -5052,6 +5054,45 @@ def change_strategy_lifecycle(
         stage=target,
         promotion_id=promotion.promotion_id,
     )
+
+
+class MomentumPeriodScoreResponse(BaseModel):
+    formation_month: date
+    start: date
+    end: date
+    universe_source: str | None
+    names_priced: int
+    names_stale: int
+    book_return: float | None
+    spy_return: float | None
+    control_median: float | None
+    control_p05: float | None
+    control_p95: float | None
+    book_percentile: float | None
+
+
+class MomentumScorecardResponse(BaseModel):
+    periods: list[MomentumPeriodScoreResponse]
+    book_cumulative: float | None
+    spy_cumulative: float | None
+    control_cumulative_median: float | None
+    book_cumulative_percentile: float | None
+    control_draws: int
+    pending: list[date]
+
+
+@router.get("/momentum-book/scorecard", response_model=MomentumScorecardResponse)
+def get_momentum_book_scorecard(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> MomentumScorecardResponse:
+    """The momentum book's rule, per formation and chained, against SPY and random 30-name baskets from its own
+    universe (#3822). Gross of costs on every side; see ``app.services.momentum_book_scorecard``."""
+    try:
+        with snapshot_read(conn):
+            card = load_momentum_scorecard(cast(psycopg.Connection[Any], conn))
+    except BenchmarkInstrumentError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return MomentumScorecardResponse.model_validate(asdict(card))
 
 
 __all__ = ["router"]
