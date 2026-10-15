@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -47,6 +47,7 @@ from app.services.tax_matching import (
     classify_lot,
     compute_matching,
     fits,
+    fund_statuses,
     identify_security,
     inputs_digest,
     inputs_document,
@@ -388,6 +389,8 @@ def _lot_row(
         "fingerprint": "f" * 64,
     }
     base.update(kw)
+    day = cast(date, base["uk_date"])
+    base.setdefault("executed_at", datetime(day.year, day.month, day.day, 12, tzinfo=UTC))
     return LotRow(**base)  # type: ignore[arg-type]
 
 
@@ -437,7 +440,10 @@ class TestClasses:
         lot = _lot_row()
         before, after = _subject(), _subject(unobserved=(7,))
         assert classify_lot(lot, before).reasons != classify_lot(lot, after).reasons
-        docs = [inputs_document(_inputs([lot], [s], {1: InstrumentRow(1, "SPY", None)})) for s in (before, after)]
+        docs = [
+            inputs_document(i, fund_statuses(i))
+            for i in (_inputs([lot], [s], {1: InstrumentRow(1, "SPY", None)}) for s in (before, after))
+        ]
         assert docs[0] != docs[1]
 
     def test_an_unavailable_lot_withholds_its_security_naming_the_field(self) -> None:
@@ -632,17 +638,17 @@ def test_the_inputs_document_is_pinned() -> None:
         ],
         _rows_of((1, "SPY", None), (2, "SPY.RTH", 1), (5, "OTHER", None)),
     )
-    document = inputs_document(inputs)
+    document = inputs_document(inputs, fund_statuses(inputs))
     assert document == (
         '{"character":[[1,[5],["0000000001"],"SPY",["SPY"],["operating","3571"],'
         '["0000000001-26-000001",[["0000000001"],[["Common Stock","SPY"]],[]]],null]],'
-        '"evidence":[["L1","' + "f" * 64 + '"],["L2","' + "f" * 64 + '"]],'
+        '"evidence":[["L1","' + "f" * 64 + '"],["L2","' + "f" * 64 + '"]],"funds":[],'
         '"instruments":[[1,"SPY",null],[2,"SPY.RTH",1],[7,null,null]],'
         '"subjects":[["order:1","admitted",1,"lookup",[3,9],[3],[3,9]],'
         '["order:2","unresolved",null,null,[],[],[]]],'
-        '"version":"matching_inputs_v3"}'
+        '"version":"matching_inputs_v4"}'
     )
-    assert inputs_digest(document) == "8e263b6fdbf459f3e3ab2c291cc11c30897eea6cb1d191c48367c324d0acd65a"
+    assert inputs_digest(document) == "cf7e5624a1d10ba2dfc9f58c193fd992f413655792de6fff4ca25e5adf8cdab5"
 
 
 # --- run 2, from the spec's own day totals (Facts 3; Acceptance) ------------------------------------------------------

@@ -13,8 +13,8 @@ docs/specs/metrics/2026-10-14-3616-slice3d1-consideration-basis.md ("Considerati
   ``effective_tax_matching`` selects exactly the snapshot of the current inputs, with no fallback.
 - Each security's tax character (slice 3d-3a, ``app/services/tax_character.py``) is decided before identification: a
   security that is not established as a share is withheld. ``refresh_cover_instances`` fetches the covers it reads.
-- ``fund_status`` and ``identify_fund`` are slice 3d-3c-3's rules for a non-reporting fund (relevant securities),
-  pure and not yet wired into a run.
+- ``fund_status`` and ``identify_fund`` are slice 3d-3c-3's rules for a non-reporting fund (relevant securities):
+  a fund whose status is ``non_reporting_assumed`` is ``non_reporting_fund`` and is identified with them, not pooled.
 
 Nothing here is shown to the operator: the tax-year view is slice 3d-4's.
 """
@@ -41,12 +41,12 @@ from app.db.snapshot import snapshot_read
 from app.services.def14a_recipients import instance_url
 from app.services.tax_character import (
     ACCESSION,
+    ETF_TYPE_ID,
     IDENTITY_UNESTABLISHED,
     ISSUER_BINDING_ASSUMED,
     OFFSHORE_FUND_EXCLUSION_ASSUMED,
     STOCKS_TYPE_ID,
     TAX_CHARACTER_POLICY_ID,
-    Character,
     FetchedInstance,
     SecurityEvidence,
     classify,
@@ -67,16 +67,15 @@ from app.services.tax_fund_determination import (
 from app.services.tax_ledger import MatchingRule
 
 #: The frozen local policy (spec "Local policy"); changing any part of it is a new id.
-TAX_MATCHING_POLICY_ID = "share_identification_v1"
+TAX_MATCHING_POLICY_ID = "identification_v2"
 #: 3d-1's class table with slice 3d-3b's A8 (``distribution_character_assumed``).
 CONSIDERATION_CLASS_POLICY_ID = "consideration_classes_v2"
 #: The one evidence policy ``consideration_classes_v2`` was reviewed against (slice 3d-3b Design 2). A generation
 #: under any other policy is refused, not matched.
 SUPPORTED_EVIDENCE_POLICY_ID = "broker_evidence_v3"
-#: The version of the canonical inputs document (Design 9); v3 adds each subject's A8 inputs.
-INPUTS_VERSION = "matching_inputs_v3"
-#: v3 plus each fund's Design 1 status (slice 3d-3c-3 Design 6); the version once the fund rules are wired.
-FUND_INPUTS_VERSION = "matching_inputs_v4"
+#: The version of the canonical inputs document (Design 9): v3 added each subject's A8 inputs, v4 each fund's Design 1
+#: status (slice 3d-3c-3 Design 6).
+INPUTS_VERSION = "matching_inputs_v4"
 #: Session advisory lock held for a whole run (Design 10): int.from_bytes(b"taxmatch", "big").
 TAX_MATCHING_LOCK_KEY = 8386116392322360168
 
@@ -110,7 +109,14 @@ WithholdReason = Literal[
     "subsequent_acquisition_rule",
     "unplaceable",
     "character_unestablished",
+    # A fund's Design 2 refusals (slice 3d-3c-3).
+    "time_order_unestablished",
+    "close_fragments_unestablished",
+    "pre_2009_rights",
+    "identification_incomplete",
 ]
+#: ``tax_character_v2``: 3d-3a's characters and slice 3d-3c-3's ``non_reporting_fund``.
+MatchingCharacter = Literal["share", "unestablished", "non_reporting_fund"]
 Direction = Literal["acquisition", "disposal"]
 
 #: Column capacities (Design 6): units NUMERIC(24,8), sterling NUMERIC(44,14).
@@ -155,6 +161,8 @@ class LotRow:
     amount_gbp: Decimal | None
     execution_evidence: str | None
     fingerprint: str
+    #: Enters the digest through ``fingerprint`` (3c Design 4.10); orders a fund's lots (3d-3c-3 Design 2).
+    executed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -173,6 +181,9 @@ class MatchingInputs:
     as_of: datetime
     #: Each security's character inputs, keyed as ``security_members`` keys them.
     characters: Mapping[int, SecurityEvidence]
+    #: What 3d-3c-3's Design 1 reads for each security whose members are all ETFs, keyed likewise. A security absent
+    #: here is read as having no determination run.
+    funds: Mapping[int, FundInputs] = field(default_factory=dict)
 
 
 # --- consideration classes (3d-1) ---------------------------------------------------------------------------------
@@ -646,8 +657,8 @@ def _with_reason(ident: Identification, reason: str) -> Identification:
 #
 # Spec: docs/specs/metrics/2026-10-15-3616-slice3d3c3-fund-disposals.md. Pure: ``fund_status`` is Design 1's status
 # rule, ``identify_fund`` Designs 2-4 for one security whose status is ``non_reporting_assumed``, and
-# ``fund_digest_entry`` its ``matching_inputs_v4`` entry (Design 6). Nothing calls them yet: the storage
-# (``sql/494``), the policy ids and the run wiring are the build's second part.
+# ``fund_digest_entry`` its ``matching_inputs_v4`` entry (Design 6). ``compute_matching`` applies them; ``sql/494``
+# stores the result.
 
 #: Carried by every row of a non-reporting fund (Design 4), with ``HISTORY_COVERAGE_UNESTABLISHED``.
 NON_REPORTING_STATUS_ASSUMED = "non_reporting_status_assumed"
@@ -657,6 +668,8 @@ THIRTY_DAY_PERIOD_ASSUMED = "thirty_day_period_assumed"
 EXCEPTIONS_REVIEWED = frozenset({"fund_determination_v1:0000884394:1"})
 #: Rights acquired before this date are protected (regs 30 and 43): such a security is refused.
 OFFSHORE_FUNDS_COMMENCEMENT = date(2009, 12, 1)
+#: The detail of 3d-3a's ETF line, which ``tax_character_v2`` replaces (Design 1).
+ETF_LINE = "exchange_traded_fund"
 
 FundStatusCode = ReportingStatus | Literal["exceptions_unreviewed"]
 FundRefusalReason = Literal[
@@ -679,6 +692,8 @@ class FundInputs:
     file_sha256: str | None
     #: The fund observation's reporting-fund list search.
     search_outcome: str | None
+    #: The run's id, stored as provenance on a ``non_reporting_fund`` character row.
+    run_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1091,16 +1106,20 @@ class Dependency:
 
 @dataclass(frozen=True)
 class CharacterRow:
-    """A security's ``tax_matching_characters`` row (3d-3a Design 4)."""
+    """A security's ``tax_matching_characters`` row (3d-3a Design 4; 3d-3c-3 Design 5)."""
 
-    character: Character
-    #: None for a share.
+    character: MatchingCharacter
+    #: None for a share or a ``non_reporting_fund``.
     detail: str | None
     #: The single CIK, else None.
     cik: str | None
     #: The accessions selected, else None.
     latest_cover: str | None
     start_cover: str | None
+    #: Design 1's result for a fund that reached the ETF line, else None: a failing status (``exchange_traded_fund``)
+    #: or ``non_reporting_assumed`` (``non_reporting_fund``), with the determination run it was read from.
+    fund: FundStatus | None = None
+    fund_run_id: int | None = None
 
 
 def decide_character(ev: SecurityEvidence, as_of: datetime, *, identity_established: bool) -> CharacterRow:
@@ -1123,9 +1142,17 @@ class SecurityResult:
     instrument_ids: tuple[int, ...]
     status: Literal["computed", "withheld"]
     character: CharacterRow
-    #: None when withheld.
+    #: None when withheld. A computed fund's holding totals (Design 2 step 5).
     pool: Pool | None
     disposals: tuple[StatutoryDisposal, ...]
+    #: A computed ``non_reporting_fund``'s disposals and balances; its ``disposals`` are then empty.
+    fund: FundIdentified | None = None
+
+    @property
+    def holding_basis(self) -> Literal["s104_pool", "relevant_securities"] | None:
+        if self.status == "withheld":
+            return None
+        return "relevant_securities" if self.character.character == "non_reporting_fund" else "s104_pool"
 
 
 @dataclass(frozen=True)
@@ -1138,12 +1165,16 @@ class MatchingResult:
 
     def counts(self) -> dict[str, int]:
         computed = [s for s in self.securities if s.status == "computed"]
+        funds = [s.fund for s in computed if s.fund is not None]
         return {
             "lots": len(self.lot_classes),
             "securities_computed": len(computed),
             "securities_withheld": len(self.securities) - len(computed),
             "statutory_disposals": sum(len(s.disposals) for s in computed),
             "identifications": sum(len(x.identifications) for s in computed for x in s.disposals),
+            "fund_disposals": sum(len(f.disposals) for f in funds),
+            "fund_identifications": sum(len(x.identifications) for f in funds for x in f.disposals),
+            "fund_balances": sum(len(f.balances) for f in funds),
             "dependencies": len(self.dependencies),
         }
 
@@ -1191,15 +1222,32 @@ def security_members(inputs: MatchingInputs) -> dict[int, tuple[int, ...]]:
     return out
 
 
-def inputs_document(inputs: MatchingInputs, funds: Mapping[int, FundStatus] | None = None) -> str:
-    """The canonical inputs document (Design 9; 3d-3a Design 4), serialized as 3c's fingerprint. Tuple positions are
-    fixed; only the outer lists are sorted.
+def fund_statuses(inputs: MatchingInputs) -> dict[int, FundStatus]:
+    """3d-3c-3 Design 1's status of every security that reaches it: an established identity whose character inputs
+    reach 3d-3a's ``exchange_traded_fund`` line. A security decided by an earlier line (``member_conflict`` among
+    them) or of unestablished identity is never evaluated as a fund. Dates are the UK dates of its lots."""
+    established = {p.tax_security_id for p in placements(inputs) if p.tax_security_id is not None}
+    members = security_members(inputs)
+    security_of = {m: key for key, ms in members.items() for m in ms}
+    lot_dates: dict[int, set[date]] = defaultdict(set)
+    for lot in inputs.lots:
+        key = security_of.get(lot.instrument_id)
+        if key is not None:
+            lot_dates[key].add(lot.uk_date)
+    no_run = FundInputs(None, None, None, None, None)
+    return {
+        key: fund_status(inputs.funds.get(key, no_run), lot_dates[key], inputs.as_of)
+        for key in sorted(members)
+        if key in established and classify(inputs.characters[key], inputs.as_of) == ("unestablished", ETF_LINE)
+    }
 
-    With ``funds`` (each type-6 security that reaches 3d-3c-3's Design 1, with its status) it is ``matching_inputs_v4``
-    (3d-3c-3 Design 6): v3's document plus ``funds``. Without, it is v3, which the deployed ``share_identification_v1``
-    runs key on until the v2 policy ids are wired."""
+
+def inputs_document(inputs: MatchingInputs, funds: Mapping[int, FundStatus]) -> str:
+    """The canonical inputs document (Design 9; 3d-3a Design 4), serialized as 3c's fingerprint. Tuple positions are
+    fixed; only the outer lists are sorted. ``funds`` is ``fund_statuses(inputs)``: ``matching_inputs_v4`` is v3's
+    document plus each fund's Design 1 status (3d-3c-3 Design 6)."""
     document: dict[str, Any] = {
-        "version": INPUTS_VERSION if funds is None else FUND_INPUTS_VERSION,
+        "version": INPUTS_VERSION,
         "evidence": sorted([lot.lot_key, lot.fingerprint] for lot in inputs.lots),
         "subjects": sorted(
             [
@@ -1216,8 +1264,7 @@ def inputs_document(inputs: MatchingInputs, funds: Mapping[int, FundStatus] | No
         "instruments": [[p.instrument_id, p.symbol, p.canonical_instrument_id] for p in placements(inputs)],
         "character": [document_entry(key, inputs.characters[key], inputs.as_of) for key in sorted(inputs.characters)],
     }
-    if funds is not None:
-        document["funds"] = [[key, fund_digest_entry(funds[key])] for key in sorted(funds)]
+    document["funds"] = [[key, fund_digest_entry(funds[key])] for key in sorted(funds)]
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
@@ -1298,17 +1345,55 @@ def compute_matching(inputs: MatchingInputs) -> MatchingResult:
     if missing:
         raise RuntimeError(f"character inputs missing for securities {missing}")
 
+    funds = fund_statuses(inputs)
     securities: list[SecurityResult] = []
     for key in sorted(security_keys):
-        # Character is decided before identification: a security not established as a share is never identified.
+        # Character is decided before identification: a security not established as a share or a non-reporting fund
+        # is never identified.
         character = decide_character(
             inputs.characters[key], inputs.as_of, identity_established=key not in unestablished_identity
         )
+        if (key in funds) != (character.detail == ETF_LINE):
+            raise RuntimeError(f"security {key}: fund status and the ETF line disagree")
+        if key in funds:  # tax_character_v2's ETF line (3d-3c-3 Design 1)
+            status = funds[key]
+            if status.status == "non_reporting_assumed":
+                run_id = inputs.funds[key].run_id
+                character = replace(
+                    character, character="non_reporting_fund", detail=None, fund=status, fund_run_id=run_id
+                )
+            else:
+                character = replace(character, fund=status)
         reasons = list(own_reasons.get(key, []))
         if character.character == "unestablished":
             reasons.append(Dependency(key, "character_unestablished", detail=character.detail))
         result: Identified | StepFiveReached | None = None
-        if not withheld_all and not reasons:
+        fund: FundIdentified | FundRefused | None = None
+        if not withheld_all and not reasons and character.character == "non_reporting_fund":
+            transparent = character.fund.transparent_fund if character.fund else None
+            if transparent is None:
+                raise RuntimeError(f"security {key}: non_reporting_fund without its transparency")
+            fund = identify_fund(
+                [
+                    FundLot(
+                        lot.lot_key,
+                        "acquisition" if lot.direction == "acquisition" else "disposal",
+                        lot.subject,
+                        lot.executed_at,
+                        lot.uk_date,
+                        lot.tax_year,
+                        lot.units,
+                        lot.amount_gbp,
+                        frozenset(classes[lot.lot_key].reasons),
+                    )
+                    for lot in lots_by_security.get(key, [])
+                ],
+                inputs.history_fetch_started_at,
+                transparent,
+            )
+            if isinstance(fund, FundRefused):
+                reasons = [Dependency(key, fund.reason, detail=fund.detail)]
+        elif not withheld_all and not reasons:
             result = identify_security(
                 [
                     MatchLot(
@@ -1337,6 +1422,8 @@ def compute_matching(inputs: MatchingInputs) -> MatchingResult:
             securities.append(
                 SecurityResult(key, security_keys[key], "computed", character, result.pool, result.disposals)
             )
+        elif isinstance(fund, FundIdentified):
+            securities.append(SecurityResult(key, security_keys[key], "computed", character, fund.pool, (), fund))
         else:
             securities.append(SecurityResult(key, security_keys[key], "withheld", character, None, ()))
 
@@ -1373,14 +1460,19 @@ def _check_capacities(result: MatchingResult) -> None:
 # --- storage and selection (Designs 9-10) -------------------------------------------------------------------------
 
 
-def _read_inputs(conn: psycopg.Connection[Any], *, bodies: bool = True) -> MatchingInputs | None:
-    """The effective generation and everything matching reads (Design 1; 3d-3a Design 5); the caller holds one
-    snapshot. ``as_of`` is read first, right after the snapshot starts. ``bodies=False`` leaves the cover instances
-    unread (``refresh_cover_instances`` needs only the selection)."""
+def _clock(conn: psycopg.Connection[Any]) -> datetime:
+    """The run's ``as_of`` (3d-3a Design 5): the database clock, read right after the snapshot starts."""
     clock = conn.execute("SELECT clock_timestamp()").fetchone()
     if clock is None:
         raise RuntimeError("clock_timestamp() returned no row")
-    as_of: datetime = clock[0]
+    return clock[0]
+
+
+def _read_inputs(conn: psycopg.Connection[Any], *, bodies: bool = True) -> MatchingInputs | None:
+    """The effective generation and everything matching reads (Design 1; 3d-3a Design 5; 3d-3c-3 Design 6); the caller
+    holds one snapshot. ``as_of`` is read first, right after the snapshot starts. ``bodies=False`` leaves the cover
+    instances unread (``refresh_cover_instances`` needs only the selection)."""
+    as_of = _clock(conn)
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         run = cur.execute(
             """
@@ -1421,7 +1513,7 @@ def _read_inputs(conn: psycopg.Connection[Any], *, bodies: bool = True) -> Match
             for r in cur.execute(
                 """
                 SELECT lot_key, subject, instrument_id, direction, uk_date, tax_year, units, amount_gbp,
-                       execution_evidence, fingerprint
+                       execution_evidence, fingerprint, executed_at
                 FROM tax_evidence_lots WHERE run_id = %(run)s ORDER BY lot_key
                 """,
                 {"run": run["run_id"]},
@@ -1449,7 +1541,50 @@ def _read_inputs(conn: psycopg.Connection[Any], *, bodies: bool = True) -> Match
         if key is not None and lot.direction == "acquisition":
             first_acquisitions[key] = min(first_acquisitions.get(key, lot.uk_date), lot.uk_date)
     characters = read_evidence(conn, members, first_acquisitions, bodies=bodies)
-    return replace(inputs, characters=characters)
+    funds = _read_funds(conn, sorted(key for key, ev in characters.items() if ev.types == {ETF_TYPE_ID}))
+    return replace(inputs, characters=characters, funds=funds)
+
+
+def _read_funds(conn: psycopg.Connection[Any], keys: Sequence[int]) -> dict[int, FundInputs]:
+    """3d-3c-3 Design 1's inputs for each all-ETF security: the newest determination run visible in the snapshot
+    (whatever its status), its observation of the security, the determination body and file hash, and the fund
+    observation's list search."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        run = cur.execute(
+            "SELECT run_id, status, cutoff FROM tax_fund_determination_runs ORDER BY run_id DESC LIMIT 1"
+        ).fetchone()
+        if run is None:
+            return {key: FundInputs(None, None, None, None, None) for key in keys}
+        observed = {
+            r["tax_security_id"]: r
+            for r in cur.execute(
+                """
+                SELECT o.tax_security_id, o.outcome, o.refusal, o.determination_id, d.body, d.file_sha256,
+                       f.search_outcome
+                FROM tax_fund_determination_observations o
+                LEFT JOIN tax_fund_determinations d ON d.determination_id = o.determination_id
+                LEFT JOIN tax_fund_observations f ON f.observation_id = o.fund_observation_id
+                WHERE o.run_id = %(run)s AND o.tax_security_id = ANY(%(keys)s)
+                """,
+                {"run": run["run_id"], "keys": list(keys)},
+            ).fetchall()
+        }
+    state = RunState(run["status"], run["cutoff"])
+    out: dict[int, FundInputs] = {}
+    for key in keys:
+        r = observed.get(key)
+        if r is None:
+            out[key] = FundInputs(state, None, None, None, None, run["run_id"])
+        else:
+            out[key] = FundInputs(
+                state,
+                Decision(r["outcome"], r["refusal"], r["determination_id"]),
+                r["body"],
+                r["file_sha256"],
+                r["search_outcome"],
+                run["run_id"],
+            )
+    return out
 
 
 def _existing_run(
@@ -1479,7 +1614,9 @@ def effective_tax_matching(conn: psycopg.Connection[Any]) -> EffectiveMatching |
         inputs = _read_inputs(conn)
         if inputs is None:
             return None
-        existing = _existing_run(conn, inputs.evidence_run_id, inputs_digest(inputs_document(inputs)))
+        existing = _existing_run(
+            conn, inputs.evidence_run_id, inputs_digest(inputs_document(inputs, fund_statuses(inputs)))
+        )
     if existing is None or existing[1] != "published":
         return None
     return EffectiveMatching(existing[0], inputs.evidence_run_id)
@@ -1512,7 +1649,7 @@ def run_tax_matching(conn: psycopg.Connection[Any]) -> MatchingRunReport:
             inputs = _read_inputs(conn)
             if inputs is None:
                 return MatchingRunReport("no_generation")
-            document = inputs_document(inputs)
+            document = inputs_document(inputs, fund_statuses(inputs))
             digest = inputs_digest(document)
             existing = _existing_run(conn, inputs.evidence_run_id, digest)
             if existing is not None:
@@ -1595,8 +1732,8 @@ def _insert_rows(conn: psycopg.Connection[Any], run_id: int, evidence_run_id: in
         )
         cur.executemany(
             "INSERT INTO tax_matching_securities (matching_run_id, tax_security_id, instrument_ids, status, "
-            "pool_units, pool_cost_gbp, pool_missing_lot_keys, pool_reasons, window_open_since) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "pool_units, pool_cost_gbp, pool_missing_lot_keys, pool_reasons, window_open_since, holding_basis) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 (
                     run_id,
@@ -1614,13 +1751,16 @@ def _insert_rows(conn: psycopg.Connection[Any], run_id: int, evidence_run_id: in
                             s.pool.window_open_since,
                         )
                     ),
+                    s.holding_basis,
                 )
                 for s in result.securities
             ],
         )
         cur.executemany(
             "INSERT INTO tax_matching_characters (matching_run_id, tax_security_id, character, detail, cik, "
-            "latest_cover, start_cover) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            "latest_cover, start_cover, fund_status, fund_status_reason, fund_status_date, fund_determination_id, "
+            "fund_determination_run_id, transparent_fund, transparent_basis, fund_assumptions) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 (
                     run_id,
@@ -1630,6 +1770,7 @@ def _insert_rows(conn: psycopg.Connection[Any], run_id: int, evidence_run_id: in
                     s.character.cik,
                     s.character.latest_cover,
                     s.character.start_cover,
+                    *_fund_columns(s.character),
                 )
                 for s in result.securities
             ],
@@ -1688,10 +1829,98 @@ def _insert_rows(conn: psycopg.Connection[Any], run_id: int, evidence_run_id: in
                 for seq, i in enumerate(x.identifications, start=1)
             ],
         )
+        funds = [(s.tax_security_id, s.fund) for s in computed if s.fund is not None]
+        cur.executemany(
+            "INSERT INTO tax_fund_disposals (matching_run_id, tax_security_id, lot_key, seq, executed_at, uk_date, "
+            "tax_year, units, proceeds_gbp, cost_gbp, computed_gain_gbp, basic_gain_gbp, offshore_income_gain_gbp, "
+            "chargeable_gain_gbp, status, gain_character, missing_lot_keys, reasons) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            [
+                (
+                    run_id,
+                    key,
+                    x.lot_key,
+                    x.seq,
+                    x.executed_at,
+                    x.uk_date,
+                    x.tax_year,
+                    x.units,
+                    x.proceeds_gbp,
+                    x.cost_gbp,
+                    x.computed_gain_gbp,
+                    x.basic_gain_gbp,
+                    x.offshore_income_gain_gbp,
+                    x.chargeable_gain_gbp,
+                    x.status,
+                    x.gain_character,
+                    list(x.missing_lot_keys),
+                    list(x.reasons),
+                )
+                for key, f in funds
+                for x in f.disposals
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO tax_fund_identifications (matching_run_id, tax_security_id, disposal_lot_key, seq, rule, "
+            "acquisition_lot_key, acquisition_executed_at, acquisition_uk_date, units, cost_gbp, missing_lot_keys, "
+            "reasons) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            [
+                (
+                    run_id,
+                    key,
+                    x.lot_key,
+                    seq,
+                    i.rule,
+                    i.acquisition_lot_key,
+                    i.acquisition_executed_at,
+                    i.acquisition_uk_date,
+                    i.units,
+                    i.cost_gbp,
+                    list(i.missing_lot_keys),
+                    list(i.reasons),
+                )
+                for key, f in funds
+                for x in f.disposals
+                for seq, i in enumerate(x.identifications, start=1)
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO tax_fund_acquisition_balances (matching_run_id, tax_security_id, lot_key, units_left, "
+            "cost_left_gbp, missing_lot_keys, reasons) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            [
+                (run_id, key, b.lot_key, b.units_left, b.cost_left_gbp, list(b.missing_lot_keys), list(b.reasons))
+                for key, f in funds
+                for b in f.balances
+            ],
+        )
+
+
+def _fund_columns(c: CharacterRow) -> tuple[Any, ...]:
+    """The character row's eight fund columns (3d-3c-3 Design 5's truth table): all NULL unless the security reached
+    the ETF line; a failing status alone, or the determination, run, transparency and assumptions alone."""
+    f = c.fund
+    if f is None:
+        return (None,) * 8
+    if c.character != "non_reporting_fund":
+        return (f.status, f.reason, f.status_date, None, None, None, None, None)
+    if f.assumptions is None or list(f.assumptions) != sorted(set(f.assumptions)):
+        raise RuntimeError(f"fund assumptions {f.assumptions} are not the sorted union")
+    return (
+        None,
+        None,
+        None,
+        f.determination_id,
+        c.fund_run_id,
+        f.transparent_fund,
+        f.transparent_basis,
+        list(f.assumptions),
+    )
 
 
 def _check_one_character_per_security(conn: psycopg.Connection[Any], run_id: int) -> None:
-    """Publication requires exactly one character row per security row (3d-3a Design 4), checked before the seal."""
+    """Publication requires exactly one character row per security row (3d-3a Design 4), and a computed security's
+    basis to be ``relevant_securities`` exactly when its character is ``non_reporting_fund`` (3d-3c-3 Design 5),
+    checked before the seal."""
     row = conn.execute(
         """
         SELECT (SELECT count(*) FROM tax_matching_securities WHERE matching_run_id = %(r)s),
@@ -1704,6 +1933,17 @@ def _check_one_character_per_security(conn: psycopg.Connection[Any], run_id: int
     ).fetchone()
     if row is None or row[0] != row[1] or row[2] != 0:
         raise RuntimeError(f"run {run_id}: character rows do not match security rows one to one: {row}")
+    mismatched = conn.execute(
+        """
+        SELECT s.tax_security_id FROM tax_matching_securities s
+        JOIN tax_matching_characters c USING (matching_run_id, tax_security_id)
+        WHERE s.matching_run_id = %s AND s.status = 'computed'
+          AND (s.holding_basis = 'relevant_securities') <> (c.character = 'non_reporting_fund')
+        """,
+        (run_id,),
+    ).fetchall()
+    if mismatched:
+        raise RuntimeError(f"run {run_id}: holding basis and character disagree for {[r[0] for r in mismatched]}")
 
 
 # --- cover instances (3d-3a Design 1) -----------------------------------------------------------------------------

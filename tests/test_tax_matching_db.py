@@ -259,6 +259,9 @@ def test_one_published_run_per_key(spy: None) -> None:
         "securities_withheld": 0,
         "statutory_disposals": 1,
         "identifications": 1,
+        "fund_disposals": 0,
+        "fund_identifications": 0,
+        "fund_balances": 0,
         "dependencies": 0,
     }
     assert _rows(
@@ -848,7 +851,7 @@ def test_selection_needs_the_current_character_policy_and_a_current_profile(spy:
     assert _rows(
         "SELECT character_policy_id, as_of IS NOT NULL FROM tax_matching_runs WHERE matching_run_id = %s",
         (stale.matching_run_id,),
-    ) == [("tax_character_v1", True)]
+    ) == [("tax_character_v2", True)]
 
 
 def test_the_deployment_window_is_unavailable_until_a_v3_run_publishes(

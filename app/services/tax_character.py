@@ -4,12 +4,14 @@ Spec: docs/specs/metrics/2026-10-14-3616-slice3d3a-tax-character.md.
 
 - ``read_cover`` is the strict reader of a cover's extracted inline-XBRL instance (Design 2).
 - ``classify`` is the ``tax_character_v1`` table (Design 2): ``share``, or ``unestablished`` with its detail.
+  ``tax_character_v2`` (slice 3d-3c-3 Design 1) keeps it and replaces only its ``exchange_traded_fund`` line, in
+  ``tax_matching``: a fund whose reporting status is ``non_reporting_assumed`` is ``non_reporting_fund``.
 - ``read_evidence`` reads each tax security's character inputs in the caller's snapshot, the stored instances of its
   two selected covers included (Design 5).
 - ``fetch_instance`` is the bounded fetch ``tax_matching.refresh_cover_instances`` stores from (Design 1).
 
-Every exchange-traded fund is withheld: interests in a non-reporting fund are relevant securities outside the s104
-pool (TCGA s104(3), s106A), which slice 3d-3c computes.
+An exchange-traded fund is never a share: interests in a non-reporting fund are relevant securities outside the s104
+pool (TCGA s104(3), s106A), which slice 3d-3c-3 identifies.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from app.services.def14a_recipients import symbol_key
 from app.services.xbrl_instance import SAFE_XML_PARSER
 
 #: The frozen local policy (spec "Local policy"); changing any part of it is a new id.
-TAX_CHARACTER_POLICY_ID = "tax_character_v1"
+TAX_CHARACTER_POLICY_ID = "tax_character_v2"
 
 INSTANCE_MAX_BYTES = 16 * 1024 * 1024
 PROFILE_MAX_AGE = timedelta(days=30)

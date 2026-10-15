@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, cast
 
 import pytest
 
+from app.services.tax_character import SecurityEvidence
 from app.services.tax_fund_determination import Decision, Outcome, RunState, parse_determination
 from app.services.tax_ledger import _compute_tax_year
 from app.services.tax_matching import (
@@ -28,8 +30,15 @@ from app.services.tax_matching import (
     FundLot,
     FundRefused,
     FundStatus,
+    InstrumentRow,
+    LotRow,
     MatchingInputs,
+    SubjectRow,
+    _check_fund_invariants,  # pyright: ignore[reportPrivateUsage]
+    compute_matching,
+    fund_digest_entry,
     fund_status,
+    fund_statuses,
     identify_fund,
     inputs_digest,
     inputs_document,
@@ -615,9 +624,9 @@ def _document(*statuses: tuple[int, FundStatus]) -> str:
 
 
 class TestDigest:
-    def test_without_funds_the_document_is_v3(self) -> None:
-        document = json.loads(inputs_document(_inputs()))
-        assert document["version"] == "matching_inputs_v3" and "funds" not in document
+    def test_with_no_fund_the_document_is_v4_with_an_empty_list(self) -> None:
+        document = json.loads(inputs_document(_inputs(), {}))
+        assert document["version"] == "matching_inputs_v4" and document["funds"] == []
 
     def test_equivalent_determination_runs_give_one_document(self) -> None:
         later = RunState("succeeded", CUTOFF + timedelta(days=3))
@@ -666,3 +675,139 @@ class TestDigest:
         )
         assert inputs_digest(document) == hashlib.sha256(document.encode("ascii")).hexdigest()
         assert inputs_digest(document) == "dd78c971033300e633f640c62bfc918e4932103d3a6cb6c2a3e5e63fb747e026"
+
+
+# --- part B: the run's wiring (compute_matching, fund_statuses; Designs 1, 5 and 6) ---------------------------------
+
+
+def _etf(*ciks: str) -> SecurityEvidence:
+    return SecurityEvidence(
+        types=frozenset({6}),
+        ciks=frozenset(ciks),
+        symbol="SPY",
+        symbols_ever=frozenset({"SPY"}),
+        profiles=(),
+        filings=(),
+        first_acquisition=None,
+        covers={},
+    )
+
+
+def _row(key: str, subject: str, direction: str, at: datetime, units: str, gbp: str) -> LotRow:
+    return LotRow(
+        lot_key=key,
+        subject=subject,
+        instrument_id=3000,
+        direction=direction,
+        uk_date=at.date(),
+        tax_year=_compute_tax_year(at.date()),
+        units=D(units),
+        amount_gbp=D(gbp),
+        execution_evidence="lookup",
+        fingerprint="f" * 64,
+        executed_at=at,
+    )
+
+
+def _subject_row(subject: str) -> SubjectRow:
+    return SubjectRow(subject, "admitted", 3000, "lookup", (), (), frozenset())
+
+
+#: Bought 10 for £100 on 09-18, sold 4 for £60 on 09-23: LIFO, £40 cost, a £20 gain.
+FUND_LOTS = (
+    _row("acq:1", "order:1", "acquisition", _at(date(2026, 9, 18)), "10", "100"),
+    _row("dis:1", "order:1", "disposal", _at(date(2026, 9, 23)), "4", "60"),
+)
+
+
+def _fund_inputs(fund: FundInputs | None, lots: tuple[LotRow, ...] = FUND_LOTS, ev: SecurityEvidence | None = None):
+    return MatchingInputs(
+        evidence_run_id=7,
+        evidence_policy_id="broker_evidence_v3",
+        history_fetch_started_at=LATE,
+        subjects=tuple(_subject_row(s) for s in sorted({lot.subject for lot in lots})),
+        lots=lots,
+        instruments={3000: InstrumentRow(3000, "SPY", None)},
+        as_of=AS_OF,
+        characters={3000: ev or _etf("0000884394")},
+        funds={} if fund is None else {3000: replace(fund, run_id=11)},
+    )
+
+
+class TestWiring:
+    def test_a_non_reporting_fund_is_identified_as_relevant_securities(self) -> None:
+        inputs = _fund_inputs(_fund())
+        result = compute_matching(inputs)
+        (s,) = result.securities
+        assert (s.status, s.holding_basis, s.character.character, s.character.detail) == (
+            "computed",
+            "relevant_securities",
+            "non_reporting_fund",
+            None,
+        )
+        assert s.character.fund == fund_status(_fund(), [date(2026, 9, 18), date(2026, 9, 23)], AS_OF)
+        assert s.character.fund_run_id == 11 and s.disposals == ()
+        assert s.fund is not None
+        (x,) = s.fund.disposals
+        assert [(i.rule, i.acquisition_lot_key, i.units, i.cost_gbp) for i in x.identifications] == [
+            ("lifo", "acq:1", D("4"), D("40"))
+        ]
+        assert (x.computed_gain_gbp, x.gain_character) == (D("20"), "oig_or_capital_unresolved")
+        assert s.pool is not None and s.pool == s.fund.pool
+        assert (s.pool.units, s.pool.cost_gbp) == (D("6"), D("60"))
+        assert result.dependencies == ()
+        counts = result.counts()
+        assert (counts["fund_disposals"], counts["fund_identifications"], counts["fund_balances"]) == (1, 1, 1)
+        assert (counts["statutory_disposals"], counts["identifications"]) == (0, 0)
+        assert s.character.fund is not None
+        assert json.loads(inputs_document(inputs, fund_statuses(inputs)))["funds"] == [
+            [3000, fund_digest_entry(s.character.fund)]
+        ]
+
+    @pytest.mark.parametrize("fund", [None, _fund(outcome="not_candidate"), _fund(search="listed")])
+    def test_any_other_status_withholds_at_the_etf_line(self, fund: FundInputs | None) -> None:
+        result = compute_matching(_fund_inputs(fund))
+        (s,) = result.securities
+        expected = FundStatus("no_run") if fund is None else fund_status(fund, [date(2026, 9, 18)], AS_OF)
+        assert (s.status, s.holding_basis, s.character.character, s.character.detail) == (
+            "withheld",
+            None,
+            "unestablished",
+            "exchange_traded_fund",
+        )
+        assert s.character.fund is not None and s.character.fund.status == expected.status
+        assert s.character.fund_run_id is None and s.fund is None
+        assert [(d.reason, d.detail) for d in result.dependencies] == [
+            ("character_unestablished", "exchange_traded_fund")
+        ]
+
+    def test_a_refusal_withholds_with_its_reason(self) -> None:
+        lots = (*FUND_LOTS, _row("dis:2", "order:1", "disposal", _at(date(2026, 9, 24)), "1", "15"))
+        result = compute_matching(_fund_inputs(_fund(), lots))
+        (s,) = result.securities
+        assert (s.status, s.character.character) == ("withheld", "non_reporting_fund")
+        assert [(d.reason, d.detail) for d in result.dependencies] == [
+            ("close_fragments_unestablished", "two disposal lots of order:1")
+        ]
+
+    def test_two_primary_ciks_keep_member_conflict_and_are_never_a_fund(self) -> None:
+        """Test 7's remaining clause: an all-type-6 security with two primary CIKs."""
+        inputs = _fund_inputs(_fund(), ev=_etf("0000884394", "0000000001"))
+        assert fund_statuses(inputs) == {}
+        (s,) = compute_matching(inputs).securities
+        assert (s.character.character, s.character.detail, s.character.fund) == (
+            "unestablished",
+            "member_conflict",
+            None,
+        )
+        assert json.loads(inputs_document(inputs, fund_statuses(inputs)))["funds"] == []
+
+    def test_a_disposal_cost_differing_from_its_identifications_is_refused_before_insert(self) -> None:
+        lots = [_lot("a", "a", _at(date(2026, 9, 18)), "10", "100"), _lot("d", "d", _at(date(2026, 9, 23)), "4", "60")]
+        good = _identified(lots, LATE)
+        (x,) = good.disposals
+        bad = replace(
+            good, disposals=(replace(x, cost_gbp=D("41"), computed_gain_gbp=D("19"), basic_gain_gbp=D("19")),)
+        )
+        with pytest.raises(RuntimeError, match="identifications' sum"):
+            _check_fund_invariants(lots, bad, "unresolved")
