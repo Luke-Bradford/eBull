@@ -7224,8 +7224,9 @@ def tax_fx_refresh() -> None:
 
 def tax_broker_evidence_refresh() -> None:
     """Capture the broker's order lookups, publish a generation of tax evidence (#3616 slice 3c, Design 6-7), fetch
-    the cover instances its tax characters read (slice 3d-3a, Design 1), observe its held funds (slice 3d-3c-1), then
-    match the effective generation (slice 3d-2, Design 10).
+    the cover instances its tax characters read (slice 3d-3a, Design 1), observe its held funds (slice 3d-3c-1), apply
+    the reviewed fund determinations to those observations (slice 3d-3c-2), then match the effective generation (slice
+    3d-2, Design 10).
 
     Each later step runs even when an earlier one failed: matching then runs on what is stored, matching the
     still-effective earlier generation if no run exists for its key. The job fails if any step was refused, failed a
@@ -7269,13 +7270,13 @@ def tax_broker_evidence_refresh() -> None:
                 tracker.row_count = report.counts.get("acquisitions", 0) + report.counts.get("disposals", 0)
                 evidence_note = f"evidence=published run={report.run_id} counts={report.counts}{captured}"
         cover_failure, cover_note = _run_cover_refresh_step()
-        fund_failure, fund_note = _run_fund_evidence_step()
+        fund_failure, fund_note, fund_observed_at = _run_fund_evidence_step()
+        det_failure, det_note = _run_fund_determination_step(fund_observed_at, tracker.run_id or None)
         matching_failure, matching_note = _run_tax_matching_step()
-        tracker.note = f"{evidence_note}; {cover_note}; {fund_note}; {matching_note}"
-        if any(f is not None for f in (evidence_failure, cover_failure, fund_failure, matching_failure)):
-            raise RuntimeError(
-                f"tax_broker_evidence_refresh failed: {evidence_note}; {cover_note}; {fund_note}; {matching_note}"
-            )
+        notes = f"{evidence_note}; {cover_note}; {fund_note}; {det_note}; {matching_note}"
+        tracker.note = notes
+        if any(f is not None for f in (evidence_failure, cover_failure, fund_failure, det_failure, matching_failure)):
+            raise RuntimeError(f"tax_broker_evidence_refresh failed: {notes}")
 
 
 def _run_cover_refresh_step() -> tuple[str | None, str]:
@@ -7297,9 +7298,10 @@ def _run_cover_refresh_step() -> tuple[str | None, str]:
     return (note if report.failures else None), note
 
 
-def _run_fund_evidence_step() -> tuple[str | None, str]:
+def _run_fund_evidence_step() -> tuple[str | None, str, datetime | None]:
     """Capture the held funds' public evidence and record their observations (#3616 slice 3d-3c-1, Design 4), on a
-    fresh autocommit connection: (failure or None, note). Any recorded failure or an exception is a failure; stored
+    fresh autocommit connection: (failure or None, note, the ``observed_at`` it wrote or None). Any recorded failure
+    or an exception is a failure, and a failed step hands no ``observed_at`` on (slice 3d-3c-2 Design 2); stored
     evidence is never rolled back, and matching still runs."""
     from collections import Counter
 
@@ -7311,10 +7313,35 @@ def _run_fund_evidence_step() -> tuple[str | None, str]:
     except Exception as exc:
         logger.error("tax fund evidence refresh failed", exc_info=True)
         note = f"funds raised {type(exc).__name__}: {exc}"
-        return note, note
+        return note, note, None
     note = (
         f"funds={report.funds} stored={dict(report.stored)} assessed={report.assessed} searched={report.searched} "
         f"observations={dict(Counter(f'{o}/{so}' if so else o for _s, o, so in report.observations))} "
+        f"failures={list(report.failures)}"
+    )
+    if report.failures:
+        return note, note, None
+    return None, note, report.observed_at
+
+
+def _run_fund_determination_step(fund_observed_at: datetime | None, job_run_id: int | None) -> tuple[str | None, str]:
+    """Apply the reviewed fund determinations to the fund observations at ``fund_observed_at`` (#3616 slice 3d-3c-2,
+    Design 2), on a fresh autocommit connection: (failure or None, note). A fetch failure, a failed run or an
+    exception is a failure; matching still runs."""
+    from collections import Counter
+
+    from app.services.tax_fund_determination_refresh import refresh_fund_determinations
+
+    try:
+        with connect_job(autocommit=True) as conn:
+            report = refresh_fund_determinations(conn, fund_observed_at, job_run_id=job_run_id)
+    except Exception as exc:
+        logger.error("tax fund determinations failed", exc_info=True)
+        note = f"determinations raised {type(exc).__name__}: {exc}"
+        return note, note
+    note = (
+        f"determinations run={report.run_id} loaded={list(report.loaded)} stored={dict(report.stored)} "
+        f"discovered={report.discovered} observations={dict(Counter(o for _s, o, _r in report.observations))} "
         f"failures={list(report.failures)}"
     )
     return (note if report.failures else None), note
@@ -9187,21 +9214,24 @@ def etoro_lookups_refresh() -> None:
 
 
 def daily_tax_reconciliation() -> None:
-    """Fetch the cover instances tax characters read, observe the held funds, then run statutory matching over the
-    effective generation of tax evidence, on demand (#3616 slices 3d-3a Design 1, 3d-3c-1, 3d-2 Design 10).
+    """Fetch the cover instances tax characters read, observe the held funds, apply the reviewed fund determinations,
+    then run statutory matching over the effective generation of tax evidence, on demand (#3616 slices 3d-3a Design 1,
+    3d-3c-1, 3d-3c-2, 3d-2 Design 10).
 
-    ``tax_broker_evidence_refresh`` runs the same three steps after each evidence run; this is the on-demand invoker.
+    ``tax_broker_evidence_refresh`` runs the same four steps after each evidence run; this is the on-demand invoker.
     Idempotent: a stored cover is not fetched again, and a run already stored for the inputs is returned as it stands.
-    Matching runs after a failed cover or fund step; the job fails on a failed cover or fund step, a refusal or an
-    exception.
+    Matching runs after a failed cover, fund or determination step; the job fails on any of those failing, a refusal
+    or an exception.
     """
     with _tracked_job(JOB_DAILY_TAX_RECONCILIATION) as tracker:
         cover_failure, cover_note = _run_cover_refresh_step()
-        fund_failure, fund_note = _run_fund_evidence_step()
+        fund_failure, fund_note, fund_observed_at = _run_fund_evidence_step()
+        det_failure, det_note = _run_fund_determination_step(fund_observed_at, tracker.run_id or None)
         failure, note = _run_tax_matching_step()
-        tracker.note = f"{cover_note}; {fund_note}; {note}"
-        if cover_failure is not None or fund_failure is not None or failure is not None:
-            raise RuntimeError(f"daily_tax_reconciliation failed: {cover_note}; {fund_note}; {note}")
+        notes = f"{cover_note}; {fund_note}; {det_note}; {note}"
+        tracker.note = notes
+        if any(f is not None for f in (cover_failure, fund_failure, det_failure, failure)):
+            raise RuntimeError(f"daily_tax_reconciliation failed: {notes}")
 
 
 def attribution_summary_job() -> None:
