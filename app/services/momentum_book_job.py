@@ -88,9 +88,17 @@ def formation_month_for(session: date) -> date:
     return month_start(month_start(session) - timedelta(days=1))
 
 
+#: A candidate's last usable close in month t must fall within this many days of the month's end. A name that stopped
+#: trading earlier (an acquisition closed, a delisting) cannot be bought at the rebalance, and its missing fill close
+#: would defer the whole formation on every fire (#3822: APGE, acquired 2026-09-03, last bar 09-02, still flagged
+#: tradable by eToro).
+MONTH_END_STALENESS: Final = timedelta(days=7)
+
+
 def load_candidates(conn: Conn, *, formation_month: date) -> list[mb.Candidate]:
-    """Every tradable canonical US stock with its month-end closes for months t-12..t and its dollar volume over
-    the last ``ADV_SESSIONS`` sessions to the end of month t."""
+    """Every tradable canonical US stock still trading at the end of month t (``MONTH_END_STALENESS``) with its
+    month-end closes for months t-12..t and its dollar volume over the last ``ADV_SESSIONS`` sessions to the end of
+    month t."""
     end = month_start(formation_month + timedelta(days=32))  # first day after month t
     start = month_start(formation_month - timedelta(days=13 * 31))  # covers month t-12
     rows = conn.execute(
@@ -120,6 +128,8 @@ def load_candidates(conn: Conn, *, formation_month: date) -> list[mb.Candidate]:
         )
         for iid, by_month in closes.items()
         if dollar[iid]
+        and (last := by_month.get(mb.month_key(formation_month)))
+        and last[0] >= end - MONTH_END_STALENESS
     ]
 
 
