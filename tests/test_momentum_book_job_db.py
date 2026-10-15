@@ -252,6 +252,7 @@ def test_load_scorecard_scores_the_formation_against_spy(ebull_test_conn: psycop
     assert (period.start, period.end, period.names_priced) == (date(2026, 10, 14), later, mb.BOOK_SIZE)
     assert period.book_return == pytest.approx(0.1)
     assert period.spy_return == pytest.approx(0.02)
+    assert period.universe_source == "formation"
     assert period.control_median == pytest.approx(0.1)
     assert card.book_cumulative == pytest.approx(0.1)
 
@@ -264,3 +265,25 @@ def test_load_scorecard_scores_the_formation_against_spy(ebull_test_conn: psycop
     conn.commit()
     (period,) = load_scorecard(conn).periods
     assert (period.names_priced, period.names_stale) == (mb.BOOK_SIZE - 1, 1)
+
+
+@pytest.mark.integration
+def test_a_failed_universe_reconstruction_still_returns_the_formation(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    conn.execute(
+        "INSERT INTO momentum_book_formations (strategy_version, formation_month, target_session, candidates, book, "
+        "held) VALUES (%s, '2026-09-01', %s, 35, '[]', '[]')",
+        (mb.STRATEGY_VERSION, SESSION),
+    )
+    conn.commit()
+
+    def boom(*args: object, **kwargs: object) -> list[mb.Candidate]:
+        raise psycopg.errors.QueryCanceled("statement timeout")
+
+    monkeypatch.setattr("app.services.momentum_book_job.load_candidates", boom)
+    existing = form_book(conn, session=SESSION)
+    assert existing is not None and not existing.created
+    assert conn.execute("SELECT count(*) FROM momentum_book_universes").fetchone() == (0,)

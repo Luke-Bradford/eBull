@@ -499,7 +499,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     Occurrence("app/services/momentum_book_job.py", 65, "_ENTRY_CLOSES_SQL entry fill close", "SINGLE_BAR"),
     Occurrence(
         "app/services/momentum_book_scorecard.py",
-        227,
+        232,
         "_CLOSES_SQL period start and end closes for the live scorecard",
         "BAR_MASKED",
         ("caller_span_whole_history",),

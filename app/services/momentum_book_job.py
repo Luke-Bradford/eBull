@@ -173,18 +173,25 @@ def _insert_universe(conn: Conn, formation_id: int, universe: Iterable[int], *, 
 
 def _reconstruct_universe(conn: Conn, formation: Formation) -> None:
     """Record the universe of a formation written before ``momentum_book_universes`` existed, from the same reader
-    and rule. ``price_daily`` may have healed since, so the row says ``reconstructed``."""
-    if conn.execute(
-        "SELECT 1 FROM momentum_book_universes WHERE formation_id = %s", (formation.formation_id,)
-    ).fetchone():
+    and rule. ``price_daily`` may have healed since, so the row says ``reconstructed``.
+
+    Best effort: the universe only feeds the scorecard, so a failure here is logged and the next fire retries; it
+    must never stop ``form_book`` returning the formation the exits and entries run on."""
+    try:
+        if conn.execute(
+            "SELECT 1 FROM momentum_book_universes WHERE formation_id = %s", (formation.formation_id,)
+        ).fetchone():
+            conn.commit()
+            return
+        universe = mb.universe(
+            load_candidates(conn, formation_month=formation.formation_month), mb.month_key(formation.formation_month)
+        )
+        if universe:
+            _insert_universe(conn, formation.formation_id, universe, source="reconstructed")
         conn.commit()
-        return
-    universe = mb.universe(
-        load_candidates(conn, formation_month=formation.formation_month), mb.month_key(formation.formation_month)
-    )
-    if universe:
-        _insert_universe(conn, formation.formation_id, universe, source="reconstructed")
-    conn.commit()
+    except psycopg.Error:
+        logger.exception("momentum book: reconstructing formation %s's universe failed", formation.formation_id)
+        conn.rollback()
 
 
 def _last_session_before(day: date) -> date:

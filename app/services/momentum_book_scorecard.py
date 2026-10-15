@@ -61,6 +61,9 @@ class Period:
     end: date
     book: tuple[int, ...]
     universe: tuple[int, ...]
+    #: ``momentum_book_universes.source``: 'formation', 'reconstructed' (rebuilt later from possibly healed closes,
+    #: so the control may differ slightly from the set actually ranked), or ``None`` when not recorded yet.
+    universe_source: str | None = None
 
 
 #: Close date -> instrument id -> (the bar's date, close): the latest usable close on or before that date.
@@ -108,6 +111,7 @@ class PeriodScore:
     formation_month: date
     start: date
     end: date
+    universe_source: str | None
     names_priced: int
     names_stale: int
     book_return: float | None
@@ -175,6 +179,7 @@ def score(
                 formation_month=p.formation_month,
                 start=p.start,
                 end=p.end,
+                universe_source=p.universe_source,
                 names_priced=basket.priced,
                 names_stale=basket.stale,
                 book_return=book,
@@ -210,7 +215,7 @@ def _signal_day(target_session: date) -> date:
 
 
 _FORMATIONS_SQL: Final = """
-    SELECT f.formation_month, f.target_session, f.book, u.universe
+    SELECT f.formation_month, f.target_session, f.book, u.universe, u.source
     FROM momentum_book_formations f
     LEFT JOIN momentum_book_universes u USING (formation_id)
     WHERE f.strategy_version = %s
@@ -257,7 +262,7 @@ def load_scorecard(conn: Conn) -> Scorecard:
     starts = [_signal_day(r[1]) for r in rows]
     latest_close = latest[2] if latest else None
     periods = []
-    for k, (formation_month, _, book, universe) in enumerate(rows):
+    for k, (formation_month, _, book, universe, universe_source) in enumerate(rows):
         end = starts[k + 1] if k + 1 < len(rows) else (latest_close or starts[k])
         periods.append(
             Period(
@@ -267,6 +272,7 @@ def load_scorecard(conn: Conn) -> Scorecard:
                 book=tuple(int(x["instrument_id"]) for x in book),
                 # A formation whose universe is not recorded yet scores no control (the next job fire records it).
                 universe=tuple(int(x) for x in universe or ()),
+                universe_source=universe_source,
             )
         )
     ids = sorted({spy_id} | {i for p in periods for i in (*p.book, *p.universe)})

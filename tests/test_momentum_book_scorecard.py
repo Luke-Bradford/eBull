@@ -94,3 +94,33 @@ def test_a_period_without_a_recorded_universe_scores_the_book_but_not_the_contro
 def test_score_refuses_zero_draws() -> None:
     with pytest.raises(ValueError, match="draws"):
         sc.score([], {}, {}, spy_id=SPY, draws=0)
+
+
+def test_the_endpoint_serialises_a_scorecard_and_maps_a_missing_spy_to_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Runs the real handler body (its `asdict`/`cast`/`Any` names included) with the DB reads stubbed.
+    from contextlib import nullcontext
+
+    from fastapi import HTTPException
+
+    from app.api import strategies
+
+    card = sc.score(
+        [_period(date(2026, 9, 1), D0, D1, (1,), ())],
+        _closes({D0: {1: 10.0, SPY: 100.0}, D1: {1: 11.0, SPY: 101.0}}),
+        {},
+        spy_id=SPY,
+        draws=1,
+    )
+    monkeypatch.setattr(strategies, "snapshot_read", lambda conn: nullcontext())
+    monkeypatch.setattr(strategies, "load_momentum_scorecard", lambda conn: card)
+    response = strategies.get_momentum_book_scorecard(conn=object())  # type: ignore[arg-type]
+    assert response.periods[0].book_return == pytest.approx(0.1)
+    assert response.control_draws == 1
+
+    def missing(conn: object) -> sc.Scorecard:
+        raise sc.BenchmarkInstrumentError("expected one canonical 'SPY' instrument, found 0")
+
+    monkeypatch.setattr(strategies, "load_momentum_scorecard", missing)
+    with pytest.raises(HTTPException) as exc:
+        strategies.get_momentum_book_scorecard(conn=object())  # type: ignore[arg-type]
+    assert exc.value.status_code == 503

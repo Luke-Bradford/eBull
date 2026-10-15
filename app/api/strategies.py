@@ -5060,6 +5060,7 @@ class MomentumPeriodScoreResponse(BaseModel):
     formation_month: date
     start: date
     end: date
+    universe_source: str | None
     names_priced: int
     names_stale: int
     book_return: float | None
