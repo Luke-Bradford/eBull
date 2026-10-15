@@ -20,7 +20,21 @@ ALTER TABLE momentum_book_entries ENABLE TRIGGER momentum_book_entries_insert_on
 
 ALTER TABLE momentum_book_entries ALTER COLUMN target_session SET NOT NULL;
 
+-- sql/495's inline UNIQUE (formation_id, instrument_id) takes Postgres's default name (checked in `pg_constraint` on
+-- the dev DB). The assertion below fails the migration if a uniqueness on exactly those two columns survives anyway.
 ALTER TABLE momentum_book_entries DROP CONSTRAINT IF EXISTS momentum_book_entries_formation_id_instrument_id_key;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conrelid = 'momentum_book_entries'::regclass AND c.contype = 'u'
+          AND (SELECT array_agg(a.attname::text ORDER BY a.attname)
+               FROM pg_attribute a WHERE a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey))
+              = ARRAY['formation_id', 'instrument_id']
+    ) THEN
+        RAISE EXCEPTION 'momentum_book_entries still has a unique (formation_id, instrument_id)';
+    END IF;
+END $$;
 ALTER TABLE momentum_book_entries DROP CONSTRAINT IF EXISTS momentum_book_entries_formation_instrument_session_key;
 ALTER TABLE momentum_book_entries ADD CONSTRAINT momentum_book_entries_formation_instrument_session_key
     UNIQUE (formation_id, instrument_id, target_session);
