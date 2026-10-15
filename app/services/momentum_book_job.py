@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Final
@@ -162,6 +163,30 @@ def _existing(conn: Conn, formation_month: date) -> Formation | None:
     )
 
 
+def _insert_universe(conn: Conn, formation_id: int, universe: Iterable[int], *, source: str) -> None:
+    conn.execute(
+        "INSERT INTO momentum_book_universes (formation_id, universe, source) VALUES (%s, %s, %s) "
+        "ON CONFLICT (formation_id) DO NOTHING",
+        (formation_id, Jsonb(sorted(universe)), source),
+    )
+
+
+def _reconstruct_universe(conn: Conn, formation: Formation) -> None:
+    """Record the universe of a formation written before ``momentum_book_universes`` existed, from the same reader
+    and rule. ``price_daily`` may have healed since, so the row says ``reconstructed``."""
+    if conn.execute(
+        "SELECT 1 FROM momentum_book_universes WHERE formation_id = %s", (formation.formation_id,)
+    ).fetchone():
+        conn.commit()
+        return
+    universe = mb.universe(
+        load_candidates(conn, formation_month=formation.formation_month), mb.month_key(formation.formation_month)
+    )
+    if universe:
+        _insert_universe(conn, formation.formation_id, universe, source="reconstructed")
+    conn.commit()
+
+
 def _last_session_before(day: date) -> date:
     d = day - timedelta(days=1)
     while us_market_status(d) == "closed":
@@ -178,11 +203,13 @@ def form_book(conn: Conn, *, session: date) -> Formation | None:
     existing = _existing(conn, formation_month)
     conn.commit()
     if existing is not None:
+        _reconstruct_universe(conn, existing)
         return existing
 
     candidates = load_candidates(conn, formation_month=formation_month)
     conn.commit()
     t = mb.month_key(formation_month)
+    universe = mb.universe(candidates, t)
     book = mb.target_book(candidates, t)
     if not book:
         logger.warning("momentum book: no scorable candidate for %s (%d candidates)", formation_month, len(candidates))
@@ -234,6 +261,7 @@ def form_book(conn: Conn, *, session: date) -> Formation | None:
         if row is None:  # a concurrent formation won the race
             return _existing(conn, formation_month)
         formation_id = int(row[0])
+        _insert_universe(conn, formation_id, universe, source="formation")
         signal_ids: list[int] = []
         for instrument_id in plan.entries:
             sid = conn.execute(

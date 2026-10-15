@@ -7,6 +7,7 @@ import pytest
 
 from app.services import momentum_book as mb
 from app.services.momentum_book_job import form_book, formation_month_for
+from app.services.momentum_book_scorecard import load_scorecard
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_control_plane import configure_deployment, create_strategy_trade, decide_funding
 
@@ -178,3 +179,69 @@ def test_a_missing_fill_close_defers_the_whole_formation(ebull_test_conn: psycop
     conn.commit()
     assert form_book(conn, session=SESSION) is None
     assert conn.execute("SELECT count(*) FROM momentum_book_formations").fetchone() == (0,)
+
+
+@pytest.mark.integration
+def test_form_book_records_its_universe(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    row = conn.execute(
+        "SELECT universe, source FROM momentum_book_universes WHERE formation_id = %s", (formed.formation_id,)
+    ).fetchone()
+    assert row == ([BASE + k for k in range(N_NAMES)], "formation")
+
+
+@pytest.mark.integration
+def test_a_formation_without_a_universe_gets_one_reconstructed(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    fid = conn.execute(
+        "INSERT INTO momentum_book_formations (strategy_version, formation_month, target_session, candidates, book, "
+        "held) VALUES (%s, '2026-09-01', %s, 35, '[]', '[]') RETURNING formation_id",
+        (mb.STRATEGY_VERSION, SESSION),
+    ).fetchone()
+    assert fid is not None
+    conn.commit()
+    existing = form_book(conn, session=SESSION)
+    assert existing is not None and not existing.created
+    row = conn.execute(
+        "SELECT jsonb_array_length(universe), source FROM momentum_book_universes WHERE formation_id = %s", (fid[0],)
+    ).fetchone()
+    assert row == (N_NAMES, "reconstructed")
+
+
+@pytest.mark.integration
+def test_load_scorecard_scores_the_formation_against_spy(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    spy = BASE + 500
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, exchange, instrument_type_id, is_tradable) "
+        "VALUES (%s, 'SPY', 'SPDR S&P 500', 'MBTEST', 5, TRUE)",
+        (spy,),
+    )
+    later = date(2026, 10, 20)
+    conn.execute(
+        "INSERT INTO price_daily (instrument_id, price_date, close) VALUES (%s, '2026-10-14', 100), (%s, %s, 102)",
+        (spy, spy, later),
+    )
+    for k in range(N_NAMES):  # every name +10% to the 20th
+        conn.execute(
+            "INSERT INTO price_daily (instrument_id, price_date, close) "
+            "SELECT instrument_id, %s, close * 1.1 FROM price_daily "
+            "WHERE instrument_id = %s AND price_date = '2026-10-14'",
+            (later, BASE + k),
+        )
+    conn.commit()
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+
+    card = load_scorecard(conn)
+    (period,) = card.periods
+    assert (period.start, period.end, period.names_priced) == (date(2026, 10, 14), later, mb.BOOK_SIZE)
+    assert period.book_return == pytest.approx(0.1)
+    assert period.spy_return == pytest.approx(0.02)
+    assert period.control_median == pytest.approx(0.1)
+    assert card.book_cumulative == pytest.approx(0.1)
