@@ -76,7 +76,7 @@ select series_id, m,
        avg(dvol) adv
 from d group by 1, 2
 """
-with psycopg.connect(settings.database_url) as c:
+with psycopg.connect(settings.database_url, options="-c default_transaction_read_only=on") as c:
     rows = c.execute(SQL, (list(linked),)).fetchall()
     spy = c.execute(
         "select date_trunc('month', bar_date)::date m, (array_agg(adj_close::float order by bar_date desc))[1] "
