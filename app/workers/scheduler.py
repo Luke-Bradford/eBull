@@ -7798,6 +7798,9 @@ def momentum_book() -> None:
                 broker=broker,
                 refresh_market=_execution_market_refresh(JOB_MOMENTUM_BOOK, creds, due_entries),
                 # #3833: eToro delays some names' quotes; their latest OneMinute candle prices the entry instead.
+                # No raw payload is persisted, by rule: eToro provider-side raw writes were dropped once their
+                # structured fields land in SQL (#471, docs/review-prevention-log.md). The two fields that price
+                # the order (bar open, close) land in strategy_entry_preflights with price_reference (sql/497).
                 latest_bar=lambda instrument_id: next(
                     iter(reversed(market.get_intraday_candles(instrument_id, "OneMinute", 1))), None
                 ),
