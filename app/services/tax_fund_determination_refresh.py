@@ -418,7 +418,10 @@ def refresh_fund_determinations(
     try:
         return _refresh(_Step(conn, client, clock or Clock()), fund_observed_at, job_run_id, directory)
     finally:
-        conn.execute("SELECT pg_advisory_unlock(%s)", (FUND_DETERMINATION_LOCK_KEY,))
+        try:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (FUND_DETERMINATION_LOCK_KEY,))
+        except psycopg.Error:  # a dead connection releases the lock; never mask the step's own outcome
+            logger.error("tax fund determinations: advisory unlock failed", exc_info=True)
 
 
 def _refresh(

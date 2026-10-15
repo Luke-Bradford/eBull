@@ -836,8 +836,11 @@ class TestJobs:
         )
         with pytest.raises(RuntimeError, match=r"determinations run=9 .*http 503.*matching=published"):
             scheduler.tax_broker_evidence_refresh()
+        assert calls == ["covers", "funds", _DET, "matching"]
         raised = RuntimeError("run 9 failed: a stored id has another hash")
-        _stub_jobs(monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), determinations=raised)
+        calls = _stub_jobs(
+            monkeypatch, _evidence("published"), MatchingRunReport("published", 3, 4), determinations=raised
+        )
         with pytest.raises(RuntimeError, match=r"determinations raised RuntimeError: run 9 failed.*matching=published"):
             scheduler.daily_tax_reconciliation()
         assert calls == ["covers", "funds", _DET, "matching"]
