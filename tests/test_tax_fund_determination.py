@@ -686,3 +686,21 @@ def test_reporting_status_review_deadline_precedes() -> None:
 
 def test_questions_cover_offshore_inputs() -> None:
     assert set(QUESTIONS) == set(ANSWERS)
+
+
+def test_undecodable_xml_with_the_pinned_hash_is_changed_not_raised() -> None:
+    """An XML document is bound by its bytes, but its quotes need its text: undecodable bytes are not evidence."""
+    det = make_det()
+    xml_url = _BASE_URL + "primary_doc.xml"
+    raw = b"<edgarSubmission>\xff</edgarSubmission>"
+    det["documents"][0]["url"] = xml_url
+    det["documents"][0]["content_sha256"] = hashlib.sha256(raw).hexdigest()
+    d = decide(SPY_OBS, {CIK: det}, {xml_url: [Fetch(10, FETCHED, raw)]}, {}, subs(), (), CUTOFF)
+    assert (d.outcome, d.refusal) == ("document_changed", "prospectus")
+
+
+def test_deeply_nested_json_is_refused_not_raised() -> None:
+    deep = b"[" * 100_000 + b"]" * 100_000
+    assert parse_determination(deep)[0] is None
+    assert submissions_coverage(make_det(), Fetch(1, FETCHED, deep), CUTOFF) == "submissions unsound"
+    assert validate(json.loads(b"[" * 500 + b"]" * 500)) != []

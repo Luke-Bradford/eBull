@@ -217,8 +217,8 @@ def parse_determination(raw: bytes) -> tuple[Determination | None, list[str]]:
     and no errors, or ``None`` and the format errors; never raises on bad content."""
     try:
         det = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
-    except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
-        return None, [f"unreadable: {exc}"]
+    except (ValueError, RecursionError) as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+        return None, [f"unreadable: {type(exc).__name__}"]
     errs = validate(det)
     return (det, []) if not errs else (None, errs)
 
@@ -227,8 +227,8 @@ def validate(det: Any) -> list[str]:
     """Design 1's format errors; empty when valid. Total: a wrong type is an error, never an exception."""
     try:
         return _validate(det)
-    except (TypeError, AttributeError, KeyError, ValueError) as exc:
-        return [f"malformed: {type(exc).__name__}: {exc}"]
+    except (TypeError, AttributeError, KeyError, ValueError, RecursionError) as exc:
+        return [f"malformed: {type(exc).__name__}"]
 
 
 def _is_date(v: Any) -> bool:
@@ -566,7 +566,10 @@ def select_document_fetch(
 
 
 def _hash_or_none(url: str, body: bytes) -> str | None:
+    """The bound hash of a fetch that is usable as evidence, or None: its text must also be readable, because quotes
+    are checked against ``document_text`` even where the hash binds an XML document's bytes."""
     try:
+        document_text(body)
         return content_sha256(url, body)
     except UnicodeDecodeError:
         return None
@@ -575,7 +578,7 @@ def _hash_or_none(url: str, body: bytes) -> str | None:
 def _parse_json(body: bytes) -> Any:
     try:
         return json.loads(body.decode("utf-8"), object_pairs_hook=_no_duplicates)
-    except ValueError:
+    except ValueError, RecursionError:
         return None
 
 

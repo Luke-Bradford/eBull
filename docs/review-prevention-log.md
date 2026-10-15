@@ -12739,3 +12739,16 @@ neighbouring container and match it.**
   can fail turns into the field's invalid value, never an exception.
 - Enforced in: `app/services/tax_matching.py` (`SubjectRow`, `_position_keys`) and `tests/test_tax_matching.py`
   (`test_a_held_positions_key_that_is_not_an_id_makes_the_lot_unavailable`).
+
+### A hash over raw bytes does not prove the bytes decode (#3616)
+
+- Failure (slice 3d-3c-2 part A, PR #3815, review round 1): an `.xml` document is bound by the SHA-256 of its bytes,
+  but its quotes are checked against `document_text`, which decodes strict UTF-8. `select_document_fetch` accepted a
+  fetch on the byte hash alone, so `decide` would have raised `UnicodeDecodeError` on an undecodable XML body whose
+  bytes matched. Separately, `json.loads` on deeply nested input raises `RecursionError`, which is not a
+  `ValueError`, so the "never raises" readers did raise.
+- Prevention: a body is usable evidence only if every later read of it succeeds, so decide usability with the same
+  reads the consumer makes (hash and text). A JSON reader that must not raise catches `RecursionError` too.
+- Enforced in: `app/services/tax_fund_determination.py` (`_hash_or_none`, `parse_determination`, `validate`,
+  `_parse_json`) and `tests/test_tax_fund_determination.py`
+  (`test_undecodable_xml_with_the_pinned_hash_is_changed_not_raised`, `test_deeply_nested_json_is_refused_not_raised`).
