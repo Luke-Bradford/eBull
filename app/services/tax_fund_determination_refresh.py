@@ -334,16 +334,20 @@ def _observe(
             ([x.det["determination_id"] for x in loaded],),
         ).fetchall():
             recorded.setdefault(did, set()).add(accession)
+        evidence: dict[str, tuple[dict[str, list[Fetch]], Fetch | None]] = {}
         for security_id in securities:
             obs = _fund_observation(conn, security_id, fund_observed_at)
             x = by_cik.get(obs.cik or "") if obs is not None and obs.outcome == "candidate" else None
             document_fetches: dict[str, list[Fetch]] = {}
             submissions: Fetch | None = None
             if x is not None:
-                document_fetches = {
-                    d["url"]: _fetches(conn, "sec_governing_document", d["url"]) for d in x.det["documents"]
-                }
-                submissions = _newest_fetch(conn, "sec_submissions", SUBMISSIONS_URL.format(cik=x.det["cik"]), cutoff)
+                cik = x.det["cik"]
+                if cik not in evidence:  # read once per CIK, however many of its securities are candidates
+                    evidence[cik] = (
+                        {d["url"]: _fetches(conn, "sec_governing_document", d["url"]) for d in x.det["documents"]},
+                        _newest_fetch(conn, "sec_submissions", SUBMISSIONS_URL.format(cik=cik), cutoff),
+                    )
+                document_fetches, submissions = evidence[cik]
             decision = decide(
                 obs,
                 determinations,
