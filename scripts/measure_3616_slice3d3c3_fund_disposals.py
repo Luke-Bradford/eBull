@@ -92,13 +92,22 @@ class Disposal:
     idents: list[Ident] = field(default_factory=list)
 
 
+class InvariantBroken(Exception):
+    """A spec Design 2 invariant failed: an explicit exception, so ``python -O`` cannot strip the check."""
+
+
+def _invariant(holds: bool, what: str) -> None:
+    if not holds:
+        raise InvariantBroken(what)
+
+
 class Refused(Exception):
     """A Design 2 refusal: the security is withheld."""
 
 
 def identify(lots: list[Lot], reading: str) -> tuple[list[Disposal], list[Lot]]:
     """Spec Design 2 over one security's lots: the disposals in identification order and the remaining acquisitions.
-    Raises ``Refused`` for a Design 2 refusal and ``AssertionError`` for a broken invariant."""
+    Raises ``Refused`` for a Design 2 refusal and ``InvariantBroken`` for a broken invariant."""
     instants = [x.executed_at for x in lots]
     if len(set(instants)) != len(instants):
         raise Refused("time_order_unestablished: two lots share an execution instant")
@@ -144,20 +153,25 @@ def identify(lots: list[Lot], reading: str) -> tuple[list[Disposal], list[Lot]]:
     # Design 2's invariants.
     for a in acqs:
         taken = [i for x in out for i in x.idents if i.acquisition is a]
-        assert sum((i.units for i in taken), ZERO) + a.left == a.units, f"units not conserved: {a.lot_key}"
+        _invariant(sum((i.units for i in taken), ZERO) + a.left == a.units, f"units not conserved: {a.lot_key}")
         if a.amount is not None:
             costs = [i.cost for i in taken]
-            assert all(c is not None for c in costs) and a.cost_left is not None
-            assert sum((c for c in costs if c is not None), ZERO) + a.cost_left == a.amount, f"cost: {a.lot_key}"
+            left = a.cost_left
+            _invariant(all(c is not None for c in costs) and left is not None, f"cost undefined: {a.lot_key}")
+            taken_cost = sum((c for c in costs if c is not None), ZERO)
+            _invariant(left is not None and taken_cost + left == a.amount, f"cost not conserved: {a.lot_key}")
     for x in out:
-        assert sum((i.units for i in x.idents), ZERO) == x.lot.units, f"disposal units: {x.lot.lot_key}"
-        assert all(i.cost is None or i.cost >= ZERO for i in x.idents), f"negative cost: {x.lot.lot_key}"
+        _invariant(sum((i.units for i in x.idents), ZERO) == x.lot.units, f"disposal units: {x.lot.lot_key}")
+        _invariant(all(i.cost is None or i.cost >= ZERO for i in x.idents), f"negative cost: {x.lot.lot_key}")
         for i in x.idents:
             if i.rule == "thirty_day" and reading == "date":
-                assert x.lot.uk_date < i.acquisition.uk_date <= x.lot.uk_date + timedelta(days=30)
+                _invariant(
+                    x.lot.uk_date < i.acquisition.uk_date <= x.lot.uk_date + timedelta(days=30),
+                    f"thirty-day period: {x.lot.lot_key}",
+                )
             if i.rule == "lifo":
-                assert i.acquisition.executed_at < x.lot.executed_at
-    assert all(a.cost_left is None or a.cost_left >= ZERO for a in acqs), "negative balance cost"
+                _invariant(i.acquisition.executed_at < x.lot.executed_at, f"LIFO after disposal: {x.lot.lot_key}")
+    _invariant(all(a.cost_left is None or a.cost_left >= ZERO for a in acqs), "negative balance cost")
     return out, [a for a in acqs if a.left > ZERO]
 
 
@@ -323,7 +337,9 @@ def _withheld(out: Any) -> None:
 
 
 def _check_capacity(value: Decimal | None, precision: int, scale: int, what: str) -> None:
-    assert value is None or fits(value, precision, scale), f"{what} {value} does not fit NUMERIC({precision},{scale})"
+    _invariant(
+        value is None or fits(value, precision, scale), f"{what} {value} does not fit NUMERIC({precision},{scale})"
+    )
 
 
 def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any) -> str:
@@ -473,8 +489,10 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
                     _check_capacity(i.units, UNITS_PRECISION, UNITS_SCALE, "identification units")
                     _check_capacity(i.cost, GBP_PRECISION, GBP_SCALE, "identification cost")
                     if reading == "time" and i.rule == "thirty_day":
-                        assert i.acquisition.executed_at > x.lot.executed_at
-                        assert i.acquisition.uk_date <= x.lot.uk_date + timedelta(days=30)
+                        _invariant(i.acquisition.executed_at > x.lot.executed_at, "time reading: before disposal")
+                        _invariant(
+                            i.acquisition.uk_date <= x.lot.uk_date + timedelta(days=30), "time reading: after d+30"
+                        )
                     if policy:
                         _record(
                             out,
@@ -612,7 +630,7 @@ def main() -> None:
                 ]
                 try:
                     outcomes[s.tax_security_id] = _fund(out, inputs, result, s, lots, conn)
-                except AssertionError as e:
+                except InvariantBroken as e:
                     print(f"  INVARIANT BROKEN: {e}", file=out)
                     broken = True
     print(f"\n[outcomes] {json.dumps(outcomes, sort_keys=True)}", file=out)
