@@ -266,6 +266,9 @@ def _execute_locked(
     # A candle carries no bid or ask, so the stored quote's spread flag is as delayed as its price. The what-if cost
     # is the live spread: for an unleveraged long its only component is ``marketSpread``, whose value per ticket
     # matched the quoted spread at a median 0.995x (#2598, ``_component_amount``). Same 1% bound as the flag.
+    # ``_stressed_cost`` returns ``total * cost_stress_multiplier``, so dividing restores the broker's total. The total
+    # is every component, not ``marketSpread`` alone: any other component is also a cost of the entry, so the bound
+    # can only be stricter than a spread-only one, which is the fail-closed direction.
     if (
         intent.price_reference == "candle_close"
         and stressed_cost / intent.cost_stress_multiplier / amount * 100 > DEFAULT_MAX_SPREAD_PCT
