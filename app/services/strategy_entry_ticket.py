@@ -16,7 +16,13 @@ from typing import Any, Literal
 import psycopg
 
 RationaleClass = Literal["signal", "rebalance", "experiment"]
-EvidenceKind = Literal["strategy_promotion", "ai_trial_declaration", "ranking_pot_declaration", "core_mandate_event"]
+EvidenceKind = Literal[
+    "strategy_promotion",
+    "ai_trial_declaration",
+    "ranking_pot_declaration",
+    "core_mandate_event",
+    "momentum_book_formation",
+]
 
 
 class EntryTicketError(RuntimeError):
