@@ -677,6 +677,9 @@ Round 8 (`…/ckpt1_r8_final.txt`; no BLOCKING):
 | r8.9 (positive-gain converse) | the trigger enforces both branches |
 | r8.10 (status domain) | `fund_status` limited to failure codes; insertion test |
 
+Round 9 (`…/ckpt1_r9_final.txt`): every carried item resolved, no new finding. Checkpoint 1 closed. New BLOCKING
+findings by round: 6, 1, 0, 0, 0, 1, 1, 0, 0.
+
 ## Security
 
 No order or authorisation path changes. Matching stays a DB-only derivation over stored evidence and stored
