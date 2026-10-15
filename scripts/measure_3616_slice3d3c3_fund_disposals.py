@@ -261,7 +261,7 @@ FUND_RULE_REASONS = frozenset(
 
 
 def _record(out: Any, kind: str, **fields: Any) -> None:
-    """One canonical expected row, for field-by-field acceptance."""
+    """One comparison record for field-by-field acceptance (a computed security's ``security`` and ``holding`` records form one row)."""
     print(f"    RECORD {kind} {json.dumps(fields, default=str, sort_keys=True)}", file=out)
 
 
