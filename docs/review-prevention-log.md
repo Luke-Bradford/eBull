@@ -12752,3 +12752,17 @@ neighbouring container and match it.**
 - Enforced in: `app/services/tax_fund_determination.py` (`_hash_or_none`, `parse_determination`, `validate`,
   `_parse_json`) and `tests/test_tax_fund_determination.py`
   (`test_undecodable_xml_with_the_pinned_hash_is_changed_not_raised`, `test_deeply_nested_json_is_refused_not_raised`).
+
+### A due check reads with the consumer's time bound, and a step's population is its input's (#3616)
+
+- Failure (slice 3d-3c-2 part B2, Codex checkpoint 2 before the first push): `refresh_fund_determinations` decided
+  whether a document or filing list was due from every stored fetch, but the observation admits only fetches at or
+  before the cutoff. A fetch dated after the clock would have satisfied the due check and never been admitted, so
+  the run would refuse evidence it never tried to fetch. Separately, it read the fund population from the effective
+  generation at step 4, while the fund observations it applies were written against the generation current at the
+  fund step. A generation published in between would have mixed the two.
+- Prevention: a "do I need to fetch?" check uses the same time bound as the read that consumes the fetch. A step
+  that consumes another step's output takes its population from that output, or refuses when the two disagree.
+- Enforced in: `app/services/tax_fund_determination_refresh.py` (`_fetch_due`, `_observe`) and
+  `tests/test_tax_fund_determination_refresh_db.py` (`test_a_future_dated_fetch_does_not_satisfy_the_due_check`,
+  `test_a_generation_published_since_the_fund_step_fails_the_run`).

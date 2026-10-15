@@ -221,7 +221,8 @@ class _Step:
 
 def _fetch_due(step: _Step, loaded: Sequence[_Loaded]) -> None:
     """Each cited document with no stored fetch of the version's hash (once per URL), then each CIK's filing list
-    when none is stored or its newest is over 7 days old (elapsed time)."""
+    when none is stored or its newest is over 7 days old (elapsed time). A fetch dated after now is not stored
+    evidence for this purpose: the cutoff could not admit it."""
     conn, tried = step.conn, set[str]()
     for x in loaded:
         for d in x.det["documents"]:
@@ -229,12 +230,14 @@ def _fetch_due(step: _Step, loaded: Sequence[_Loaded]) -> None:
             if url in tried:
                 continue
             tried.add(url)
-            fetches = _fetches(conn, "sec_governing_document", url)
+            now = step.clock.now()
+            fetches = [f for f in _fetches(conn, "sec_governing_document", url) if f.fetched_at <= now]
             if not any(_hash_or_none(url, f.body) == d["content_sha256"] for f in fetches):
                 step.fetch("sec_governing_document", url)
         url = SUBMISSIONS_URL.format(cik=x.det["cik"])
-        newest = _newest(conn, "sec_submissions", url, None)
-        if newest is None or step.clock.now() - newest[1] > SUBMISSIONS_REFRESH:
+        now = step.clock.now()
+        newest = _newest(conn, "sec_submissions", url, now)
+        if newest is None or now - newest[1] > SUBMISSIONS_REFRESH:
             step.fetch("sec_submissions", url)
 
 
@@ -306,6 +309,20 @@ def _observe(
     ``succeeded`` with the cutoff, in one transaction (spec Design 2 step 4)."""
     read = _read_funds(conn)
     securities = [f.security_id for f in read[1]] if read is not None else []
+    if fund_observed_at is not None:
+        # The population is the generation the fund step observed: a generation published since would mix the two.
+        observed = {
+            int(r)
+            for (r,) in conn.execute(
+                "SELECT DISTINCT evidence_run_id FROM tax_fund_observations WHERE observed_at = %s AND policy_id = %s",
+                (fund_observed_at, ACCEPTED_IDENTITY_POLICY_ID),
+            ).fetchall()
+        }
+        if read is None or observed != {read[0]}:
+            raise DeterminationRunFailed(
+                f"the fund observations at {fund_observed_at.isoformat()} are of evidence runs {sorted(observed)}, "
+                f"the effective generation is {read[0] if read is not None else None}"
+            )
     by_cik = {x.det["cik"]: x for x in loaded}
     determinations = {cik: x.det for cik, x in by_cik.items()}
     written: list[tuple[int, str, str | None]] = []

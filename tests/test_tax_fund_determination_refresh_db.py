@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 
 from app.services import tax_fund_determination_refresh as tfdr
@@ -274,6 +275,31 @@ def test_a_failure_after_the_run_started_fails_it(
 
     monkeypatch.setattr(tfdr, "_read_funds", boom)
     _failed(dets, fund_at, "OSError: population unreadable")
+
+
+def test_a_generation_published_since_the_fund_step_fails_the_run(
+    fund_at: datetime, dets: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read = tfdr._read_funds  # pyright: ignore[reportPrivateUsage]
+
+    def newer(conn: psycopg.Connection[Any]) -> Any:
+        got = read(conn)
+        assert got is not None
+        return got[0] + 1, got[1]
+
+    monkeypatch.setattr(tfdr, "_read_funds", newer)
+    _failed(dets, fund_at, "the effective generation is")
+
+
+def test_a_future_dated_fetch_does_not_satisfy_the_due_check(fund_at: datetime, dets: Path) -> None:
+    later = T1 + timedelta(hours=1)
+    with _connect() as conn:
+        _store(conn, "sec_governing_document", URL, URL, later, BODY)
+        _store(conn, "sec_submissions", SUBS_URL, SUBS_URL, later, subs_body([ANCHOR]))
+    sec = Sec()
+    report = _step(dets, fund_at, sec)
+    assert sec.log == ["document", "submissions"]
+    assert _outcomes(report.run_id)[SPY] == ("determined", None)
 
 
 def test_a_concurrent_invocation_fails_at_once(fund_at: datetime, dets: Path) -> None:
