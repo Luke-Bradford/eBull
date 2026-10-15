@@ -5,11 +5,15 @@ import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatPct } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "Sep 2026" from a formation month's first day; fixed labels, not locale-dependent. */
 function monthLabel(iso: string): string {
-  return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" });
+  const [year, month] = iso.split("-");
+  return `${MONTHS[Number(month) - 1] ?? month} ${year}`;
 }
 
-/** "beat 72% of random baskets", or a dash when the control is not scored. */
+/** "72%" (the share of random baskets the book beat), or a dash when the control is not scored. */
 function percentileText(p: number | null): string {
   return p === null ? "—" : `${Math.round(p * 100)}%`;
 }
@@ -46,7 +50,8 @@ function PeriodRow({ p }: { p: MomentumPeriodScore }) {
 
 function Body({ card }: { card: MomentumScorecardResponse }) {
   const first = card.periods[0];
-  const pending = card.pending[0];
+  // Only the newest formation can be pending (an older one ends at its successor's start); show the newest.
+  const pending = card.pending.at(-1);
   if (first === undefined) {
     return (
       <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
@@ -102,8 +107,16 @@ function Body({ card }: { card: MomentumScorecardResponse }) {
 export function MomentumScorecardPanel() {
   const card = useAsync(fetchMomentumScorecard, []);
   const data = card.data;
-  const ahead =
-    data?.book_cumulative != null && data.spy_cumulative != null ? data.book_cumulative >= data.spy_cumulative : null;
+  const book = data?.book_cumulative ?? null;
+  const spy = data?.spy_cumulative ?? null;
+  const badge =
+    book === null || spy === null ? null : book > spy ? (
+      <Badge tone="ok">Ahead of SPY</Badge>
+    ) : book < spy ? (
+      <Badge tone="warn">Behind SPY</Badge>
+    ) : (
+      <Badge tone="neutral">Level with SPY</Badge>
+    );
   return (
     <section
       aria-labelledby="momentum-scorecard"
@@ -111,7 +124,7 @@ export function MomentumScorecardPanel() {
     >
       <h2 id="momentum-scorecard" className="flex items-center gap-2 text-sm font-semibold">
         Momentum book vs SPY
-        {ahead === null ? null : ahead ? <Badge tone="ok">Ahead of SPY</Badge> : <Badge tone="warn">Behind SPY</Badge>}
+        {badge}
       </h2>
       {card.loading ? <SectionSkeleton rows={3} /> : null}
       {card.error ? <SectionError onRetry={card.refetch} /> : null}

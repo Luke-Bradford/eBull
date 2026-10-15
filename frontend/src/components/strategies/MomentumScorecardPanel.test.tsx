@@ -42,6 +42,12 @@ describe("MomentumScorecardPanel", () => {
     expect(screen.getByText(/29 priced · 1 stale · control universe rebuilt/)).toBeInTheDocument();
   });
 
+  it("calls a tie level, not ahead", async () => {
+    vi.spyOn(strategiesApi, "fetchMomentumScorecard").mockResolvedValue({ ...SCORED, book_cumulative: 0.0073 });
+    render(<MomentumScorecardPanel />);
+    expect(await screen.findByText("Level with SPY")).toBeInTheDocument();
+  });
+
   it("explains a formed book that has no close yet", async () => {
     vi.spyOn(strategiesApi, "fetchMomentumScorecard").mockResolvedValue({
       ...SCORED,
@@ -53,7 +59,7 @@ describe("MomentumScorecardPanel", () => {
       pending: ["2026-09-01"],
     });
     render(<MomentumScorecardPanel />);
-    expect(await screen.findByText(/Sept? 2026 book is formed; its first score appears after the next close/)).toBeInTheDocument();
+    expect(await screen.findByText(/Sep 2026 book is formed; its first score appears after the next close/)).toBeInTheDocument();
     expect(screen.queryByText("Behind SPY")).not.toBeInTheDocument();
   });
 });
