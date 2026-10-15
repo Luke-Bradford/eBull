@@ -12810,3 +12810,14 @@ neighbouring container and match it.**
   next version. Skill text for
   `.claude/skills/execution-guard/SKILL.md` ("Invariants") is posted on #2403, because `.claude/**` is write-refused
   from the loop worktree.
+
+### A migration that drops an inline constraint by its default name asserts the constraint is gone (#3822)
+
+- Failure (review on #3838, 2026-10-15): sql/498 replaced sql/495's inline `UNIQUE (formation_id, instrument_id)`
+  with `DROP CONSTRAINT IF EXISTS <default name>`. Had the name been wrong, `IF EXISTS` would no-op, the old key would
+  survive, and every catch-up entry insert would fail at runtime instead of the migration failing at boot.
+- Prevention: check the name in `pg_constraint` before writing the drop. After an `IF EXISTS` drop of a constraint
+  whose name was never written explicitly, assert in the same migration that no constraint on those columns survives.
+- Enforced in: `sql/498_momentum_book_catch_up_entries.sql` (the `DO` block after the drop). Skill text for
+  `.claude/skills/engineering/sql-correctness.md` is posted on #2403, because `.claude/**` is write-refused from the
+  loop worktree.

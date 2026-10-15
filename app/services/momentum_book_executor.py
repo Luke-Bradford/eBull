@@ -8,8 +8,8 @@ and ``place_demo_strategy_order`` with broker-side stop-loss and take-profit fro
 An entry is decided once, with one exception: a refusal in ``PAPER_ENTRY_DEFERRALS`` (a stale quote or halt feed, a
 closed session, a broker read that raised, an execution block) writes nothing, so the next hourly fire on the same
 target session re-runs every gate. Every other refusal is persisted. An entry still undecided when its target session
-ends is never selected again; the next month's formation re-emits a name still in the book. The hourly job body is
-``momentum_book_executor_job``.
+ends is never selected again; the next session's ``momentum_book_job.catch_up_entries`` emits a fresh signal for a
+book name that never entered. The hourly job body is ``momentum_book_executor_job``.
 
 Broker costs are judged at the moment they are received, not at the start of the evaluation: eToro's what-if
 ``lastUpdated`` is the server time of the call, and the risk, eligibility and what-if reads before it take about 8

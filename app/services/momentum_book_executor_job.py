@@ -2,7 +2,8 @@
 
 Each fire on a NYSE session from ``ENTRY_TIME_UTC``, once the ``momentum-30`` paper deployment is enabled:
 
-1. ``momentum_book_job.form_book`` forms month t's book if it is due (idempotent).
+1. ``momentum_book_job.form_book`` forms month t's book if it is due (idempotent), and
+   ``momentum_book_job.catch_up_entries`` re-emits, for today, the book names that never entered.
 2. **Exits first.** Every held trade the formation ordered out is closed through the position manager
    (``manage_owned_position(close_reason="strategy_exit")``), which owns the broker close and its reconciliation.
 3. **Entries** wait until every exit of the formation has closed (a closing trade still reserves its capital), then
@@ -25,7 +26,7 @@ from psycopg.pq import TransactionStatus
 from app.providers.broker import BrokerProvider
 from app.services import momentum_book as mb
 from app.services.momentum_book_executor import LatestBar, execute_momentum_signal
-from app.services.momentum_book_job import form_book
+from app.services.momentum_book_job import catch_up_entries, form_book
 from app.services.strategy_paper_executor import _session_is_open
 from app.services.strategy_position_manager import manage_owned_position
 
@@ -40,8 +41,7 @@ ENTRY_TIME_UTC: Final = time(15, 0)
 _DUE_SQL: Final = """
     SELECT me.signal_id
     FROM momentum_book_entries me
-    JOIN momentum_book_formations f ON f.formation_id = me.formation_id
-    WHERE f.target_session = %s
+    WHERE me.target_session = %s
       AND NOT EXISTS (SELECT 1 FROM strategy_funding_decisions fd WHERE fd.signal_id = me.signal_id)
     ORDER BY me.formation_id, me.rank
 """
@@ -70,8 +70,10 @@ _ACTIVATED_SQL: Final = """
     WHERE strategy_id = %s AND strategy_version = %s AND mode = 'paper' AND enabled
 """
 
-# Exits of the formation targeting today whose close is IN FLIGHT: submitted (`closing`) or submitted with an
-# uncertain outcome (`reconcile_required`), either of which may be about to release its capital.
+# Exits whose close is IN FLIGHT — submitted (`closing`) or submitted with an uncertain outcome (`reconcile_required`),
+# either of which may be about to release its capital — of every formation with an entry targeting today. Keyed on
+# the entries, not the formation's own session, so catch-up entries on a later session wait for an exit still
+# closing overnight (Codex ckpt-2 on the catch-up PR).
 #
 # ⚠ Deliberately NOT every non-closed exit (review on #3828, Codex ckpt-3 agreed). An exit that could not be
 # submitted (no owned position, or a broker refusal leaving the trade `open`) would otherwise block every entry of
@@ -82,14 +84,14 @@ _ACTIVATED_SQL: Final = """
 _EXITS_PENDING_SQL: Final = """
     SELECT count(*)
     FROM momentum_book_exits x
-    JOIN momentum_book_formations f ON f.formation_id = x.formation_id
     JOIN strategy_trades t ON t.strategy_trade_id = x.strategy_trade_id
-    WHERE f.target_session = %s AND t.status IN ('closing', 'reconcile_required')
+    WHERE x.formation_id IN (SELECT formation_id FROM momentum_book_entries WHERE target_session = %s)
+      AND t.status IN ('closing', 'reconcile_required')
 """
 
 
 def due_entries(conn: Conn, *, today: date) -> list[int]:
-    """Undecided entry signals of the formation targeting ``today``, best rank first."""
+    """Undecided entry signals targeting ``today``, best rank first."""
     return [int(r[0]) for r in conn.execute(_DUE_SQL, (today,)).fetchall()]
 
 
@@ -141,6 +143,8 @@ def run_momentum_book(
         return MomentumJobResult(session_open=True, activated=False)
     formation = form_book(conn, session=today)
     conn.commit()
+    if formation is not None:
+        catch_up_entries(conn, formation=formation, session=today)
 
     exits: Counter[str] = Counter()
     errors = 0

@@ -6,6 +6,11 @@ it reads every tradable US stock's daily closes from ``price_daily``, forms the 
 ``strategy_signals`` row for each book name not already held, and the exits for held names that left the book.
 A formation that already exists is returned unchanged, so the call is idempotent and restart-safe.
 
+``catch_up_entries`` gives a book name that never entered another chance: on each later session until the next
+formation, a name whose every entry signal ended without a live trade gets a fresh one. Without it, one session's
+refusals leave the book short for the whole month (#3822: 29 of 30 refused on 2026-10-15 for two defects since fixed).
+A name that entered and later closed (a stop-loss) is not bought again.
+
 The executor (``momentum_book_executor``) trades the entries; exits are closed through the position manager. This
 module places no orders.
 """
@@ -211,6 +216,29 @@ def _last_session_before(day: date) -> date:
     return d
 
 
+def _insert_entry(
+    conn: Conn, *, formation_id: int, instrument_id: int, rank: int, signal_day: date, session: date, close: float
+) -> int:
+    """One fired entry signal for ``session`` and its ``momentum_book_entries`` row; the signal id."""
+    sid = conn.execute(
+        """
+        INSERT INTO strategy_signals (
+            strategy_id, strategy_version, instrument_id, signal_bar_date, signal_kind, verdict,
+            fill_bar_date, fill_price, universe, input_rule_set_versions
+        ) VALUES (%s, %s, %s, %s, 'entry', 'fired', %s, %s, 'survivor_only', %s)
+        RETURNING signal_id
+        """,
+        (mb.STRATEGY_ID, mb.STRATEGY_VERSION, instrument_id, signal_day, session, close, Jsonb(RULE_SET_VERSIONS)),
+    ).fetchone()
+    assert sid is not None
+    conn.execute(
+        "INSERT INTO momentum_book_entries (signal_id, formation_id, instrument_id, rank, target_session) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (int(sid[0]), formation_id, instrument_id, rank, session),
+    )
+    return int(sid[0])
+
+
 def form_book(conn: Conn, *, session: date) -> Formation | None:
     """Form month t's book for ``session`` (a NY date), or return the existing formation. ``None`` when ``session``
     is not a NYSE session or no candidate has the history the rule needs."""
@@ -279,33 +307,18 @@ def form_book(conn: Conn, *, session: date) -> Formation | None:
             return _existing(conn, formation_month)
         formation_id = int(row[0])
         _insert_universe(conn, formation_id, universe, source="formation")
-        signal_ids: list[int] = []
-        for instrument_id in plan.entries:
-            sid = conn.execute(
-                """
-                INSERT INTO strategy_signals (
-                    strategy_id, strategy_version, instrument_id, signal_bar_date, signal_kind, verdict,
-                    fill_bar_date, fill_price, universe, input_rule_set_versions
-                ) VALUES (%s, %s, %s, %s, 'entry', 'fired', %s, %s, 'survivor_only', %s)
-                RETURNING signal_id
-                """,
-                (
-                    mb.STRATEGY_ID,
-                    mb.STRATEGY_VERSION,
-                    instrument_id,
-                    signal_day,
-                    session,
-                    closes[instrument_id],
-                    Jsonb(RULE_SET_VERSIONS),
-                ),
-            ).fetchone()
-            assert sid is not None
-            conn.execute(
-                "INSERT INTO momentum_book_entries (signal_id, formation_id, instrument_id, rank) "
-                "VALUES (%s, %s, %s, %s)",
-                (int(sid[0]), formation_id, instrument_id, book.index(instrument_id) + 1),
+        signal_ids = [
+            _insert_entry(
+                conn,
+                formation_id=formation_id,
+                instrument_id=instrument_id,
+                rank=book.index(instrument_id) + 1,
+                signal_day=signal_day,
+                session=session,
+                close=closes[instrument_id],
             )
-            signal_ids.append(int(sid[0]))
+            for instrument_id in plan.entries
+        ]
         exit_trades = [(int(tid), int(iid)) for tid, iid in held if int(iid) in set(plan.exits)]
         for trade_id, instrument_id in exit_trades:
             conn.execute(
@@ -331,4 +344,70 @@ def form_book(conn: Conn, *, session: date) -> Formation | None:
     )
 
 
-__all__ = ["Formation", "form_book", "formation_month_for", "load_candidates", "month_start"]
+# Book names of the formation that never entered: every entry signal for the name targets an earlier session, and none
+# was allocated to a trade that is live, closed or still being opened. A refused or expired signal has no allocated
+# decision; an allocated one whose order failed has a `failed` trade.
+_CATCH_UP_SQL: Final = """
+    SELECT me.instrument_id, min(me.rank)
+    FROM momentum_book_entries me
+    WHERE me.formation_id = %(formation_id)s
+    GROUP BY me.instrument_id
+    HAVING max(me.target_session) < %(session)s
+       AND NOT EXISTS (
+           SELECT 1
+           FROM momentum_book_entries e
+           JOIN strategy_funding_decisions fd ON fd.signal_id = e.signal_id AND fd.verdict = 'allocated'
+           LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
+           WHERE e.formation_id = %(formation_id)s AND e.instrument_id = me.instrument_id
+             AND (t.strategy_trade_id IS NULL OR t.status <> 'failed')
+       )
+    ORDER BY 2
+"""
+
+
+def catch_up_entries(conn: Conn, *, formation: Formation, session: date) -> tuple[int, ...]:
+    """Emit ``session``'s entry signals for ``formation``'s book names that never entered; their signal ids.
+
+    Only on a session after the formation's own, and only for names the formation emitted an entry for (a name held
+    when the book was formed has none). A name with no close in the week before the signal day is skipped and retried
+    next session. Idempotent: a second call on the same session finds every emitted name targeting it."""
+    if us_market_status(session) == "closed" or session <= formation.target_session:
+        return ()
+    due = conn.execute(_CATCH_UP_SQL, {"formation_id": formation.formation_id, "session": session}).fetchall()
+    conn.commit()
+    if not due:
+        return ()
+    signal_day = _last_session_before(session)
+    closes = {
+        int(iid): close
+        for iid, close in conn.execute(
+            _ENTRY_CLOSES_SQL, ([int(r[0]) for r in due], signal_day, signal_day - timedelta(days=7))
+        ).fetchall()
+    }
+    conn.commit()
+    missing = [int(r[0]) for r in due if int(r[0]) not in closes]
+    if missing:
+        logger.warning(
+            "momentum book: no close by %s for catch-up entries %s; retried next session", signal_day, missing
+        )
+    with conn.transaction():
+        signal_ids = tuple(
+            _insert_entry(
+                conn,
+                formation_id=formation.formation_id,
+                instrument_id=int(iid),
+                rank=int(rank),
+                signal_day=signal_day,
+                session=session,
+                close=closes[int(iid)],
+            )
+            for iid, rank in due
+            if int(iid) in closes
+        )
+    logger.info(
+        "momentum book: %d catch-up entries for formation %s on %s", len(signal_ids), formation.formation_id, session
+    )
+    return signal_ids
+
+
+__all__ = ["Formation", "catch_up_entries", "form_book", "formation_month_for", "load_candidates", "month_start"]
