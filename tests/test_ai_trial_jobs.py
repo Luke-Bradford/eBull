@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import signal
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -533,8 +534,8 @@ def test_the_execute_job_submits_due_legs_in_order_only_in_session(monkeypatch: 
         asked.append(today)
         return [1, 2, 3]
 
-    def execute(_conn: Any, *, broker: Any, signal_id: int, now: datetime) -> Any:
-        executed.append((signal_id, now))
+    def execute(_conn: Any, *, broker: Any, signal_id: int, clock: Callable[[], datetime]) -> Any:
+        executed.append((signal_id, clock()))
         return type("R", (), {"verdict": verdicts[signal_id]})()
 
     monkeypatch.setattr(ai_trial_jobs, "due_trial_legs", due)
@@ -604,7 +605,7 @@ def test_one_leg_raising_does_not_skip_the_rest(monkeypatch: pytest.MonkeyPatch)
     """#2948: an unmodelled failure on the FIRST leg; the others still execute."""
     executed: list[int] = []
 
-    def execute(_conn: Any, *, broker: Any, signal_id: int, now: datetime) -> Any:
+    def execute(_conn: Any, *, broker: Any, signal_id: int, clock: Callable[[], datetime]) -> Any:
         if signal_id == 1:
             raise RuntimeError("unmodelled transport error")
         executed.append(signal_id)

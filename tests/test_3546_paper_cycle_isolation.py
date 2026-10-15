@@ -124,7 +124,8 @@ def test_a_contained_failure_leaves_the_connection_idle(stages: dict[str, MagicM
     assert result.management == {"no_change": 1}
 
 
-def test_an_unpinned_cycle_gives_each_item_a_fresh_instant(stages: dict[str, MagicMock]) -> None:
+def test_an_unpinned_cycle_gives_each_item_a_live_clock(stages: dict[str, MagicMock]) -> None:
+    """Each entry reads the clock itself, at its start and again when its broker costs arrive (#3834)."""
     instants = iter([_NOW, datetime(2026, 10, 2, 15, 0, 7, tzinfo=UTC), datetime(2026, 10, 2, 15, 0, 9, tzinfo=UTC)])
 
     class _Clock(datetime):
@@ -134,6 +135,6 @@ def test_an_unpinned_cycle_gives_each_item_a_fresh_instant(stages: dict[str, Mag
 
     with patch(f"{_RUNTIME}.datetime", _Clock):
         runtime.run_strategy_paper_cycle(_conn([]), broker=MagicMock(), strategy_versions=["v1"])
+        sent = [c.kwargs["clock"]() for c in stages["execute_fired_paper_signal"].call_args_list]
 
-    sent = [c.kwargs["now"] for c in stages["execute_fired_paper_signal"].call_args_list]
     assert sent == [datetime(2026, 10, 2, 15, 0, 7, tzinfo=UTC), datetime(2026, 10, 2, 15, 0, 9, tzinfo=UTC)]

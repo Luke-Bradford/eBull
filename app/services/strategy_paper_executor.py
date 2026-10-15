@@ -851,6 +851,25 @@ def _component_amount(component: BrokerCostComponent) -> tuple[Decimal, str] | N
     return None
 
 
+def _evaluation_clock(now: datetime | None, clock: Callable[[], datetime] | None) -> Callable[[], datetime]:
+    """The executor's clock, read when evaluation starts and again when the broker costs arrive (#3834).
+
+    eToro's what-if ``lastUpdated`` is the server time of the call, and the risk, eligibility and
+    what-if reads before it take about 8 seconds, beyond the 5-second future-skew bound of
+    ``_age_ok``: judged against the start of evaluation, a fresh cost reads as "in the future"
+    (#3822, 2026-10-15 16:10Z fire). A pinned ``now`` is returned on every read.
+    """
+    if now is not None and clock is not None:
+        raise StrategyPaperExecutionError("_evaluation_clock: pass a pinned now or a clock, not both")
+    if clock is not None:
+        read = clock
+    elif now is not None:
+        read = lambda: now  # noqa: E731
+    else:
+        read = lambda: datetime.now(UTC)  # noqa: E731
+    return lambda: read().astimezone(UTC)
+
+
 def _costs(
     response: BrokerWhatIfCostResponse,
     *,
@@ -1614,12 +1633,12 @@ def _execute_fired_paper_signal_locked(
     broker: BrokerProvider,
     signal_id: int,
     ranking_member_id: int | None,
-    now: datetime | None = None,
+    clock: Callable[[], datetime],
 ) -> PaperExecutionResult:
     """Evaluate and, only if every gate aligns, submit one demo order."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPaperExecutionError("paper execution requires an idle connection")
-    evaluated_at = (now or datetime.now(UTC)).astimezone(UTC)
+    evaluated_at = clock()
     existing = _existing_result(conn, signal_id)
     conn.commit()
     if existing is not None and existing.verdict != "submission_uncertain":
@@ -1706,7 +1725,7 @@ def _execute_fired_paper_signal_locked(
         return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code="costs_unavailable", now=evaluated_at, intent=intent, risk=risk
         )
-    assessed = _costs(costs, intent=intent, amount=amount, now=evaluated_at)
+    assessed = _costs(costs, intent=intent, amount=amount, now=clock())
     if isinstance(assessed, str):
         return _refuse_paper_entry(
             conn, signal_id=signal_id, reason_code=assessed, now=evaluated_at, intent=intent, risk=risk
@@ -1942,10 +1961,13 @@ def execute_fired_paper_signal(
     signal_id: int,
     ranking_member_id: int | None = None,
     now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> PaperExecutionResult:
-    """Serialize and evaluate one fired signal against whole-account demo risk."""
+    """Serialize and evaluate one fired signal against whole-account demo risk. ``clock`` is read at the start and
+    again when the broker costs arrive; ``now`` pins both reads."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPaperExecutionError("paper execution requires an idle connection")
+    read = _evaluation_clock(now, clock)
     if ranking_member_id is None:
         row = conn.execute(
             """
@@ -1967,7 +1989,7 @@ def execute_fired_paper_signal(
             broker=broker,
             signal_id=signal_id,
             ranking_member_id=ranking_member_id,
-            now=now,
+            clock=read,
         )
 
 

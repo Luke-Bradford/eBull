@@ -487,7 +487,7 @@ def run_trial_execution(
         # connection usable, and surface it on the result. The leg has no funding decision,
         # so the next in-session fire retries it or refuses it `decision_expired`.
         try:
-            result = execute_trial_signal(conn, broker=broker, signal_id=signal_id, now=clock())
+            result = execute_trial_signal(conn, broker=broker, signal_id=signal_id, clock=clock)
         except Exception:
             logger.exception("ai_trial execute: signal %s raised; continuing with the batch", signal_id)
             if conn.info.transaction_status != TransactionStatus.IDLE:
