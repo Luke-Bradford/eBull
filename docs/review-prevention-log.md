@@ -12766,3 +12766,15 @@ neighbouring container and match it.**
 - Enforced in: `app/services/tax_fund_determination_refresh.py` (`_fetch_due`, `_observe`) and
   `tests/test_tax_fund_determination_refresh_db.py` (`test_a_future_dated_fetch_does_not_satisfy_the_due_check`,
   `test_a_generation_published_since_the_fund_step_fails_the_run`).
+
+### A gate that waits for every X to finish must not count an X that could never start (#3828)
+
+- Failure (review on #3828, 2026-10-15): the momentum book's entries waited until every rebalance exit of the
+  formation had closed, counting any exit trade not `closed`/`failed`. An exit whose position had no ownership row
+  was skipped (`position_unowned`) and stayed `open`, so the gate blocked every entry of the session and the
+  session's entries expired with it.
+- Prevention: count only the work that is actually in flight (here a submitted close, `closing`), log the work that
+  could not start, and test that path.
+- Enforced in: `app/services/momentum_book_executor_job.py` (`_EXITS_PENDING_SQL`),
+  `tests/test_momentum_book_executor_job_db.py::test_an_exit_that_could_not_be_submitted_does_not_block_entries`,
+  `.claude/skills/engineering/pre-flight-review.md` §F.

@@ -34,9 +34,16 @@ def test_outside_the_entry_window_does_nothing(ebull_test_conn: Conn) -> None:
     assert conn.execute("SELECT count(*) FROM momentum_book_formations").fetchone() == (0,)
 
 
+def _close_in_flight(conn: Conn) -> None:
+    """The seeded held trade's close has been submitted: the position manager leaves it `closing`."""
+    conn.execute("UPDATE strategy_trades SET status = 'closing' WHERE status NOT IN ('closed', 'failed')")
+    conn.commit()
+
+
 def test_entries_wait_while_a_rebalance_exit_is_still_closing(ebull_test_conn: Conn) -> None:
     conn = ebull_test_conn
     _seed(conn)  # an enabled deployment and one held trade on the weakest name, which leaves the book
+    _close_in_flight(conn)
     refresh = MagicMock()
     result = mj.run_momentum_book(conn, broker=MagicMock(), refresh_market=refresh, clock=lambda: NOW)
     assert result.formation_id is not None
@@ -53,3 +60,20 @@ def test_entries_wait_while_a_rebalance_exit_is_still_closing(ebull_test_conn: C
     ).fetchone()
     assert decided == (0,)
     assert mj.due_entries(conn, today=NOW.date()) != []
+
+
+def test_an_exit_that_could_not_be_submitted_does_not_block_entries(ebull_test_conn: Conn) -> None:
+    """The seeded held trade has no owned broker position: the exit is reported `position_unowned`, logged, and the
+    entries still run (review on #3828: an unsubmittable exit must not consume the month's entries)."""
+    conn = ebull_test_conn
+    _seed(conn)
+    conn.execute("UPDATE strategy_trades SET status = 'open' WHERE status NOT IN ('closed', 'failed')")
+    conn.commit()
+    refresh = MagicMock()
+    result = mj.run_momentum_book(conn, broker=MagicMock(), refresh_market=refresh, clock=lambda: NOW)
+    assert result.exits == {"position_unowned": 1}
+    assert result.exits_pending == 0
+    refresh.assert_called_once()
+    # Every entry was decided (here refused: the fixture deployment has no execution policy), none left waiting.
+    assert result.entries > 0
+    assert mj.due_entries(conn, today=NOW.date()) == []

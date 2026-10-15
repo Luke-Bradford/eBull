@@ -63,13 +63,15 @@ _ACTIVATED_SQL: Final = """
     WHERE strategy_id = %s AND strategy_version = %s AND mode = 'paper' AND enabled
 """
 
-# Exits of the formation targeting today whose trade has not closed yet.
+# Exits of the formation targeting today whose close is IN FLIGHT. Only a submitted close (`closing`) waits: an exit
+# that could not be submitted (no owned position, or a broker refusal that leaves the trade `open`) would otherwise
+# block every entry of the session, and the session's entries expire with it (review on #3828). Those are logged.
 _EXITS_PENDING_SQL: Final = """
     SELECT count(*)
     FROM momentum_book_exits x
     JOIN momentum_book_formations f ON f.formation_id = x.formation_id
     JOIN strategy_trades t ON t.strategy_trade_id = x.strategy_trade_id
-    WHERE f.target_session = %s AND t.status NOT IN ('closed', 'failed')
+    WHERE f.target_session = %s AND t.status = 'closing'
 """
 
 
@@ -131,6 +133,7 @@ def run_momentum_book(
     for trade_id, position_id in conn.execute(_EXITS_DUE_SQL, (today,)).fetchall():
         conn.commit()
         if position_id is None:
+            logger.warning("momentum book: exit of trade %s has no owned broker position; not closed", trade_id)
             exits["position_unowned"] += 1
             continue
         try:
