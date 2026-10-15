@@ -46,6 +46,9 @@ _DUE_SQL: Final = """
     ORDER BY me.formation_id, me.rank
 """
 
+# Exits of the LATEST formation due by today, whose trade is still open. Only the latest: an older formation's exit
+# may name a position the latest book re-selected (the latest formation then holds it and emits no entry), and a name
+# still held and still out of the book gets its own exit row in the latest formation (Codex ckpt-3 on #3828).
 _EXITS_DUE_SQL: Final = """
     SELECT x.strategy_trade_id, own.broker_position_id
     FROM momentum_book_exits x
@@ -53,7 +56,11 @@ _EXITS_DUE_SQL: Final = """
     JOIN strategy_trades t ON t.strategy_trade_id = x.strategy_trade_id
     LEFT JOIN strategy_position_ownership own
       ON own.strategy_trade_id = x.strategy_trade_id AND own.status = 'active'
-    WHERE f.target_session <= %s AND t.status = 'open'
+    WHERE f.target_session <= %(today)s AND t.status = 'open'
+      AND f.formation_id = (
+          SELECT max(formation_id) FROM momentum_book_formations
+          WHERE strategy_version = %(version)s AND target_session <= %(today)s
+      )
     ORDER BY x.strategy_trade_id
 """
 
@@ -63,15 +70,21 @@ _ACTIVATED_SQL: Final = """
     WHERE strategy_id = %s AND strategy_version = %s AND mode = 'paper' AND enabled
 """
 
-# Exits of the formation targeting today whose close is IN FLIGHT. Only a submitted close (`closing`) waits: an exit
-# that could not be submitted (no owned position, or a broker refusal that leaves the trade `open`) would otherwise
-# block every entry of the session, and the session's entries expire with it (review on #3828). Those are logged.
+# Exits of the formation targeting today whose close is IN FLIGHT: submitted (`closing`) or submitted with an
+# uncertain outcome (`reconcile_required`), either of which may be about to release its capital.
+#
+# ⚠ Deliberately NOT every non-closed exit (review on #3828, Codex ckpt-3 agreed). An exit that could not be
+# submitted (no owned position, or a broker refusal leaving the trade `open`) would otherwise block every entry of
+# the session, and they all expire with it. Proceeding instead leaves that trade reserving its own allocation, so the
+# incremental cost is the entries that its reserved dollars displace (about one fixed ticket per stuck exit); other
+# risk terms (realised losses, capacity) still apply as for any entry. The stuck exit surfaces in the job note as
+# `exit_position_unowned=N` or `exit_rejected=N`.
 _EXITS_PENDING_SQL: Final = """
     SELECT count(*)
     FROM momentum_book_exits x
     JOIN momentum_book_formations f ON f.formation_id = x.formation_id
     JOIN strategy_trades t ON t.strategy_trade_id = x.strategy_trade_id
-    WHERE f.target_session = %s AND t.status = 'closing'
+    WHERE f.target_session = %s AND t.status IN ('closing', 'reconcile_required')
 """
 
 
@@ -130,7 +143,8 @@ def run_momentum_book(
 
     exits: Counter[str] = Counter()
     errors = 0
-    for trade_id, position_id in conn.execute(_EXITS_DUE_SQL, (today,)).fetchall():
+    due_exits = conn.execute(_EXITS_DUE_SQL, {"today": today, "version": mb.STRATEGY_VERSION}).fetchall()
+    for trade_id, position_id in due_exits:
         conn.commit()
         if position_id is None:
             logger.warning("momentum book: exit of trade %s has no owned broker position; not closed", trade_id)
