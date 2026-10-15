@@ -504,6 +504,8 @@ def reserve_figures(rows: RunRows, scenario: Scenario, current_year: str) -> Res
     reasons = sorted(
         {r for d in rows.share_disposals for r in d.reasons} | {r for d in rows.fund_disposals for r in d.reasons}
     )
+    # Unreachable today: `dividends_not_computed` is always an omission (spec Design 7, "Under the current policies the
+    # status is always `incomplete`"). `available` exists so that evidence alone can make it reachable.
     return ReserveFigures(
         status="available" if is_complete(run_level) else "incomplete",
         scenario=scenario,
