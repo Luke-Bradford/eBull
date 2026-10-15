@@ -21,7 +21,7 @@ Shares are unchanged. Nothing is shown to the operator (3d-4).
 
 **The outcome on dev today (evidence run 7):** SPY becomes `non_reporting_fund`. Its one disposal (2026-09-23,
 0.29615500 units) is identified with the 2026-09-30 acquisition under the thirty-day rule: computed and basic gain
-**£1.10443720572584**, character `oig_or_capital_unresolved`, resting on 3d-3c-2's A1–A9 and this slice's F1–F5.
+**£1.10443720572584**, character `oig_or_capital_unresolved`, resting on 3d-3c-2's A1–A9 and this slice's F1–F7.
 3d-2 identified it under the share rules (£0.86063438888195); that was the wrong rule for a non-reporting fund (3d-3a)
 and is superseded. IUSA.L and CSPX.L stay withheld.
 
@@ -35,8 +35,10 @@ members are all instrument type 6 (eToro ETF), independent of the character toda
 its other withholding causes and `withheld_all`, reads the newest determination run and applies 3d-3c-2's
 `reporting_status` per Design 1; only a security passing Design 1 with no other cause is identified, under both
 readings of the thirty-day period (Source rules), with Design 2's refusals and invariants enforced, Design 3's
-character and Design 4's reasons. It exits non-zero on a broken invariant, and when a fund security with lots and no
-other cause is refused or not `non_reporting_assumed`. Legal sources fetched 2026-10-15 are under
+character and Design 4's reasons, printing one `RECORD` line per expected stored row (character, disposal,
+identification, balance, holding). A security withheld upstream (a cause the fund rules do not produce, an earlier
+character line, `withheld_all`) gets its character evaluated and is not identified. It exits 1 on a broken invariant
+(including column capacities) and 2 when a security named by `--expect-computed` is not computed. Legal sources fetched 2026-10-15 are under
 `var/research/3616/slice3d3c3/legal/` (earlier ones under `…/slice3d3c2/legal/`), each with its URL and fetch time on
 its first lines.
 
@@ -111,16 +113,24 @@ its first lines.
   the securities identified (TCGA s15, s38(1)(a) and (c)), with the terms mapped as follows.
   - **Consideration** is the disposal lot's amount: 3d-1's basis, assumption A1, reason `disposal_formula_assumed`.
   - **Acquisition cost** is each identified acquisition's amount: assumption A4, reason `spread_inclusion_assumed`.
-    Identification names particular securities (s106A(2): "identified … with securities of the same class that have
-    been acquired"), so each disposal is of whole identified securities, and their cost is the consideration given
-    for them: the acquisition's amount pro rata to the units identified. Nothing is a disposal of part of an asset
-    (unlike a s104 holding, s104(6)), so s42's apportionment does not arise, and reg 45(5)–(6), which keeps the OIG
-    out of the s42 fraction, has nothing to act on.
-  - **Incidental costs** are recognised only when evidenced; none is, while 3c's charge indicators are zero (3d-1).
-  - **No enhancement expenditure** is possible for a fund unit bought and sold through the broker.
-  - **s37 and s39.** Assumption **F3**: no sum in the consideration is charged to income tax otherwise than under
-    this Part (s37), and no expenditure counted is deductible for income tax (s39). A distribution's character is
-    3d-3b's A8 (`distribution_character_assumed`), already carried by any lot it affects.
+  - **The asset and apportionment.** s104(1) is what makes securities of a class "indistinguishable parts of a single
+    asset", and part disposals of that asset take s42 (s104(6)). Relevant securities are outside s104 (s104(3)), so
+    the units of one acquisition are not one asset: they are separate securities bought together for one
+    consideration, and s106A(2) identifies the securities disposed of among them. The consideration for the
+    acquisition is then apportioned to the securities identified under s52(4): "any necessary apportionments shall
+    be made of any consideration or of any expenditure and the method of apportionment adopted shall … be just and
+    reasonable". The units of one acquisition are of one class, bought in one bargain at one price, so the just and
+    reasonable apportionment is by number of units (`apportion`). No s42 part disposal arises, and so reg 45(5)–(6),
+    which keeps the OIG out of the s42 fraction, has nothing to act on; if a later policy found s42 applying, the
+    fraction would use the unreduced consideration (reg 45(6)).
+  - **Other allowable expenditure.** s38(1)(b) also allows expenditure "reflected in the state or nature of the asset"
+    and "in establishing, preserving or defending his title" (CG15180); s38(1)(c) incidental costs of disposal. None
+    is recorded in the evidence. Assumption **F3**: no such expenditure was incurred, no incidental cost beyond 3d-1's
+    consideration basis (whose open charges are its own reasons), no sum in the consideration is charged to income tax
+    otherwise than under this Part (s37), and no expenditure counted is deductible for income tax (s39). A
+    distribution's character is 3d-3b's A8 (`distribution_character_assumed`), already carried by any lot it affects.
+    Evidence of a cost enters only through a new evidence or class policy (3d-1, "Discharging a reason"), which
+    makes a new generation or run; the figure here is the computation under A1, A4 and F3.
 - **Losses and the charge.** reg 42: a computation producing a loss makes "the basic gain on the disposal … nil" and
   "no loss is to be treated as arising" for the Regulations; IFM13550: "any loss arising can be relieved only as a
   capital loss … the capital loss cannot be offset against offshore income gains". reg 17(1)–(2) (Condition A): a
@@ -138,11 +148,18 @@ its first lines.
     the profits of a trade".
   - regs 30 and 43: rights acquired before 1 December 2009, or "in accordance with a legally enforceable agreement in
     writing that was entered into by the participant before 30th April 2009".
-  - **Assumption F4**, stated by 3d-4: the account holder is an individual holding the units as investments, not as
-    trading stock or in the course of a trade, and acquiring each by an ordinary broker purchase, not under a written
-    agreement entered into before 30 April 2009. Every admitted acquisition is a broker order the account placed (3c);
-    an acquisition dated before 2009-12-01 is refused (Design 2). The fund's own facts (not a loan, no
-    unlisted-trading-company purpose) are the determination's (`s355_limb`, s356 conditions) and its A1–A9.
+  - **Assumption F4** (the participant), stated by 3d-4: the account holder is an individual holding the units as
+    investments, not as trading stock or in the course of a trade, and acquiring each by an ordinary broker
+    purchase, not under a written agreement entered into before 30 April 2009. Every admitted acquisition is a broker
+    order the account placed (3c); an acquisition dated before 2009-12-01 is refused (Design 2).
+  - **Assumption F7** (the fund), reviewed per determination and frozen in a policy list (Design 1): the interest is
+    not a loan (reg 28), and the fund's "sole or main purpose" is not investing in qualifying companies (reg 31A
+    Condition B), a qualifying company being one whose "shares … are not listed on a recognised stock exchange or
+    admitted to trading on a regulated market". For SPY v1 the evidence is the determination's
+    `reg29_nonreporting_holdings` finding: the Trust "only holds constituent securities of the Index" and "is not
+    authorized to invest in … any other registered or unregistered funds"; its holdings are S&P 500 constituents,
+    which are listed. The residual is the determination's (documents dated 2026-01-26, A9). A determination not in
+    the list withholds its fund (`exceptions_unreviewed`); the review does not carry over to another fund.
 - **Residence and the basis of taxation.**
   - **F5**: the account holder was UK resident and not Treaty non-resident at every acquisition (s106A(5A)(a) and
     (b)). This extends 3d-2's A5, which names residence only; both are stated by 3d-4.
@@ -180,13 +197,17 @@ snapshot*, with `evaluated_at` the matching run's `as_of`:
    that is the status, with no date.
 2. Otherwise it is evaluated at each *status date*: every distinct UK date of the security's admitted lots,
    acquisitions and disposals, ascending, then the *holding date*, the run's cutoff as a UTC date (the last date the
-   determination answers). The first result that is not `non_reporting_assumed` is the status, with its date.
-3. Otherwise the status is `non_reporting_assumed`; the character row records the determination id, the run id,
-   `transparent_fund`'s answer and basis, and the union of the results' assumptions (A1–A9 for SPY).
+   determination answers). The first result that is not `non_reporting_assumed` is the status, with its date only
+   when it is `outside_interval` (the one result that depends on the date).
+3. Otherwise, if the determination is not in the policy list `EXCEPTIONS_REVIEWED` (F7; today
+   `fund_determination_v1:0000884394:1` only), the status is `exceptions_unreviewed`, with no date.
+4. Otherwise the status is `non_reporting_assumed`; the character row records the determination id, the run id,
+   `transparent_fund`'s answer and basis, and the sorted unique union of the results' assumptions (A1–A9 for SPY).
 
 Every admitted lot date must be inside the determination's interval (`valid_from` .. cutoff date), or the status is
-`outside_interval`. Acquisitions are included because relevant-securities identification and Condition A presuppose
-non-reporting status for the securities identified, not only at the disposal. A *known* reporting episode is one the
+`outside_interval`. Condition A (reg 17(2)) asks for non-reporting status at the disposal only. Checking acquisition
+dates too is this policy's stricter eligibility rule: it keeps out holdings whose status could have changed between
+acquisition and disposal, which would need transition rules (reg 48) this slice does not build. A *known* reporting episode is one the
 determination or the list search shows (a `listed` or `unresolved` search, a determination for another status): it
 withholds. An undetected episode between status dates, or a status change within the holding (reg 17 Condition B,
 reg 48), is the residual of A5 (`A5_part3_not_applying`), which every figure carries; the statuses are evaluated
@@ -200,10 +221,12 @@ publishes them again. That is the contract: the newest run visible in the snapsh
 
 For a `non_reporting_fund` security, from its admitted lots.
 1. **Disposals.** Each disposal lot is one position's close at its own instant (3c Design 4); there is no same-day
-   aggregation for relevant securities (s104(3)). Assumption **F6**: each such close is a separate disposal, not a
-   fragment of one bargain recorded as several closes. Its evidence: a broker close is placed per position and
-   executes at its own instant. Two lots of the security sharing an `executed_at` (where one bargain may have been
-   recorded as several closes, or no order exists) **refuse** the security (`time_order_unestablished`).
+   aggregation for relevant securities (s104(3)). Assumption **F6**, a residual: each such close is a separate
+   disposal, not a fragment of one bargain recorded as several closes. No stored field groups closes into bargains:
+   the evidence has a position id and an execution instant per close, nothing more. The one signal of a shared
+   bargain available, two lots of the security at one `executed_at`, **refuses** the security
+   (`time_order_unestablished`), as does any equal instant, since no order then exists. Closes of one order at
+   different instants (AAPL's 2026-09-23 pair is that shape for a share) are separate disposals under F6.
 2. **Other refusals:** an acquisition dated before 2009-12-01 (`pre_2009_rights`, regs 30 and 43).
 3. **Disposals in turn**, ordered by `(uk_date, executed_at, lot_key)` (s106A(4); CG51652 within a day). For each
    disposal on UK date *d* at instant *t*:
@@ -272,22 +295,26 @@ earlier disposal's identification frees or takes acquisitions that later disposa
 | holding (security row) | the union of its balances' reasons, plus every carried reason; `window_open_since` is the earliest open disposal's date |
 
 With no disposal, nothing is carried. Per acquisition, not per day: a balance keeps only its own acquisition's
-reasons, since there is no averaging. F1, F3–F6 and 3d-2's A5 are stated by 3d-4, not stored per row, as A5 is today.
+reasons, since there is no averaging. F1, F3–F7 and 3d-2's A5 are stated by 3d-4, not stored per row, as A5 is today.
 
 ### 5. Storage (migration `sql/494_tax_fund_disposals.sql`)
 
 Every new column is NOT NULL unless it says NULL is allowed; arrays default to none and are never NULL; units are
 `NUMERIC(24,8)` and sterling `NUMERIC(44,14)` (3d-2's capacities).
 - **`tax_matching_characters`**: `character` admits `non_reporting_fund`. New columns, NULL allowed: `fund_status`
-  (3d-3c-2 Design 3's codes), `fund_status_reason` (its structured reason code, `list_match` or
-  `search_unavailable`, else NULL), `fund_status_date DATE`, `fund_determination_id`, `fund_determination_run_id`,
+  (3d-3c-2 Design 3's codes and `exceptions_unreviewed`), `fund_status_reason` (its structured reason code,
+  `list_match` or `search_unavailable`, else NULL), `fund_status_date DATE` (non-NULL exactly for
+  `outside_interval`), `fund_determination_id`, `fund_determination_run_id`,
   `transparent_fund` (`transparent`, `opaque`, `unresolved`), `transparent_basis` (`established`, `assumed`,
   `unresolved`), `fund_assumptions TEXT[]`. CHECKs: `non_reporting_fund` ⇔ `fund_determination_id`,
   `fund_determination_run_id`, `transparent_fund`, `transparent_basis` and `fund_assumptions` non-NULL and
-  `fund_status` NULL; `fund_status` non-NULL ⇒ detail `exchange_traded_fund`; `fund_status_date` NULL when
-  `fund_status` is `no_run`, `run_failed` or `not_observed`. A trigger checks that a `non_reporting_fund` row's
-  `(fund_determination_run_id, tax_security_id, fund_determination_id)` is a `determined` row of
-  `tax_fund_determination_observations`.
+  `fund_status` NULL; `fund_status` non-NULL ⇔ detail `exchange_traded_fund`; every fund column NULL for any other
+  character or detail; `transparent_basis` `unresolved` ⇔ `transparent_fund` `unresolved`; `fund_assumptions`
+  sorted, unique and non-empty. A trigger checks that a `non_reporting_fund` row's `(fund_determination_run_id,
+  tax_security_id, fund_determination_id)` is a `determined` row of `tax_fund_determination_observations`, and that
+  `transparent_fund` and `transparent_basis` equal the answer and basis of that determination body's
+  `transparent_fund` finding. Code checks before insert that `fund_assumptions` is the sorted union Design 1
+  computed.
 - **`tax_matching_securities`** gains `holding_basis` (`s104_pool`, `relevant_securities`; default `s104_pool`). For
   `relevant_securities` the five pool columns hold the holding's totals and reasons. Code checks before the seal that
   a computed security's basis is `relevant_securities` exactly when its character is `non_reporting_fund`.
@@ -302,16 +329,22 @@ Every new column is NOT NULL unless it says NULL is allowed; arrays default to n
   allowed); `missing_lot_keys TEXT[]`, `reasons TEXT[]`. CHECKs, each `(…) IS TRUE`:
   - `computed` ⇔ proceeds, cost, computed gain, basic gain and `gain_character` non-NULL, `missing_lot_keys` empty and
     `computed_gain_gbp = proceeds_gbp − cost_gbp`;
-  - `amount_missing` ⇔ computed gain, basic gain, character and both splits NULL, and `missing_lot_keys` non-empty;
+  - `amount_missing` ⇔ at least one of `proceeds_gbp` and `cost_gbp` NULL, computed gain, basic gain, character and
+    both splits NULL, and `missing_lot_keys` non-empty. A known proceeds or cost is kept: `proceeds_gbp` is NULL
+    exactly when the disposal lot's FX is pending, `cost_gbp` exactly when some identification's cost is undefined,
+    and `missing_lot_keys` is the sorted set of those pending lot keys (the disposal's own and the identified
+    acquisitions');
   - Design 3's table row by row: the character agrees with the computed gain's sign and fixes `basic_gain_gbp` and
     both splits as listed.
   A trigger refuses `offshore_income_gain` unless the security's character row has `transparent_fund = 'opaque'`.
 - **`tax_fund_identifications`**: PK `(matching_run_id, tax_security_id, disposal_lot_key, seq)`, FK to the disposal;
-  `seq > 0`; `rule` (`thirty_day`, `lifo`); `acquisition_lot_key`, `acquisition_executed_at`, `acquisition_uk_date`;
-  `units > 0`; `cost_gbp` (NULL allowed) NULL iff `missing_lot_keys` non-empty; `missing_lot_keys`, `reasons`.
+  `seq INTEGER > 0`, from 1 per disposal; `rule TEXT` (`thirty_day`, `lifo`); `acquisition_lot_key TEXT`,
+  `acquisition_executed_at TIMESTAMPTZ`, `acquisition_uk_date DATE`; `units NUMERIC(24,8) > 0`; `cost_gbp
+  NUMERIC(44,14)` (NULL allowed) NULL iff `missing_lot_keys` non-empty, which then names the acquisition;
+  `missing_lot_keys TEXT[]`, `reasons TEXT[]`.
 - **`tax_fund_acquisition_balances`**: PK `(matching_run_id, tax_security_id, lot_key)`, FK to the security row;
-  `units_left > 0`; `cost_left_gbp` (NULL allowed) NULL iff `missing_lot_keys` non-empty; `missing_lot_keys`,
-  `reasons`.
+  `units_left NUMERIC(24,8) > 0`; `cost_left_gbp NUMERIC(44,14)` (NULL allowed) NULL iff `missing_lot_keys`
+  non-empty, which then names the acquisition; `missing_lot_keys TEXT[]`, `reasons TEXT[]`.
 - All three take 3d-2's child guard (insert only while the run is `building`; no update or delete), and
   `tax_matching_runs_seal()`'s refused-run check includes them. The cross-row equations (Design 2's invariants; the
   identification's acquisition in its disposal's period for `thirty_day` and before it for `lifo`; every lot key in
@@ -325,7 +358,8 @@ Every new column is NOT NULL unless it says NULL is allowed; arrays default to n
 - **`inputs_digest`** document `matching_inputs_v4`: v3's plus `"funds": [[tax_security_id, status], …]` sorted by
   security, for every type-6 security, where `status` is `[status_code, status_reason_code, status_date,
   determination_id, file_sha256, transparent_fund, transparent_basis, assumptions]` for Design 1's result: the failing
-  status with its date, or `non_reporting_assumed` with a NULL date. Free-text reasons and the cutoff are not entered,
+  status with its date (non-NULL only for `outside_interval`, the one date-dependent result), or
+  `non_reporting_assumed` with a NULL date; `assumptions` sorted and unique. Free-text reasons and the cutoff are not entered,
   so a new determination run with the same results, including the same failing date, makes no new matching run; a
   status change (a new filing making the determination `stale`, `review_out_of_date`, a list match, a lot outside
   the interval) makes one. `executed_at` already enters through each lot's fingerprint (3c Design 4.10).
@@ -338,7 +372,7 @@ Every new column is NOT NULL unless it says NULL is allowed; arrays default to n
 
 ## Local policy (frozen under `identification_v2` and `tax_character_v2`)
 
-F1–F6; the date reading of s106A(5)'s period; time order within a day and the equal-instant refusal; the pre-2009
+F1–F7 and the `EXCEPTIONS_REVIEWED` list; the date reading of s106A(5)'s period; time order within a day and the equal-instant refusal; the pre-2009
 refusal; Design 1's status rule; Design 3's table and its storage; Design 4's matrix. Changing any is a new policy id.
 
 ## Not in this slice
@@ -348,7 +382,7 @@ refusal; Design 1's status rule; Design 3's table and its storage; Design 4's ma
 - **3d-3c-4**: list matches and reporting funds, including the London-listed UCITS ETFs, ERI (reg 99), Condition B,
   reg 48, and a fund whose status changes within the holding.
 - **3d-4**: the tax-year view (OIGs as income, not offsettable by capital losses, IFM13550; loss allowability), the
-  scenarios of an unresolved character, F1, F3–F6 and A5 stated beside the figures, the budget reserve.
+  scenarios of an unresolved character, F1, F3–F7 and A5 stated beside the figures, the budget reserve.
 - Reconsidering F2 when an HMRC statement or case on the question is found.
 
 ## Tests
@@ -367,20 +401,27 @@ Pure, each figure computed by hand in the test:
    `opaque` (OIG = basic = gain, chargeable 0), `transparent` and `unresolved` (`oig_or_capital_unresolved`, splits
    NULL); a gain and a loss on one day stay two disposals with their own characters.
 5. **Withdrawals:** one acquisition drawn by three disposals in three parts, the last taking the exact remainder
-   (costs sum to its amount); pending proceeds (`amount_missing`, all NULL); a pending acquisition partly taken (the
-   taken cost and its balance undefined); a pending acquisition untouched (the holding's total undefined, disposals
-   defined).
+   (costs sum to its amount); pending proceeds (`amount_missing`: proceeds NULL, the known cost kept, the disposal's
+   key in `missing_lot_keys`); a pending acquisition partly taken (proceeds kept, cost NULL, the identification's
+   cost and the balance undefined, the acquisition's key named on each); a pending acquisition untouched (the
+   holding's total undefined, disposals computed); a holding emptied by disposals with an open window (the holding
+   row keeps both always-present reasons and `window_open`).
 6. **Reasons:** Design 4's matrix on every row type; an open window on the first of two disposals marks the second,
    its identifications, every balance and the holding; it clears at elapse (2026-09-23 open at 2026-10-23 22:59:59Z,
    elapsed at 23:00:00Z; a disposal on 2026-10-10 elapses 2026-11-10 00:00Z across the clock change);
-   `thirty_day_period_assumed` from the first disposal with a later same-day acquisition onwards, not on earlier rows.
+   `thirty_day_period_assumed` from the first disposal with a later same-day acquisition onwards, not on earlier rows;
+   two securities processed in turn, one with and one without a later same-day acquisition, each with its own
+   reasons.
 7. **Status rule:** `non_reporting_assumed` at every date gives `non_reporting_fund`; each other status at an
    acquisition date, at a disposal date and at the holding date alone gives `exchange_traded_fund` with that status
    and date; an acquisition before `valid_from` (`outside_interval`); `no_run`, `run_failed` (a newer `running` run)
    and `not_observed` with no date; a run that succeeded before `review_by` and a matching `as_of` after it
-   (`review_out_of_date`); a security with no lots evaluated at the holding date only.
-8. **Digest:** a new determination run with identical results, and one whose cutoff moved while the same lot stays
-   `outside_interval`, give identical documents; a status change, a new file hash and a changed transparency answer
+   (`review_out_of_date`); a security with no lots evaluated at the holding date only; a determination outside
+   `EXCEPTIONS_REVIEWED` (`exceptions_unreviewed`); an all-type-6 security with two primary CIKs keeps
+   `member_conflict` and is never evaluated as a fund.
+8. **Digest:** a new determination run with identical results, one whose cutoff moved while the same lot stays
+   `outside_interval`, and one whose cutoff moved for a no-lot `not_candidate` security (no date), give identical
+   documents; one assumption union assembled in two orders gives one array; a status change, a new file hash and a changed transparency answer
    each change it; a pinned fixture's bytes and SHA-256.
 
 DB (one module):
@@ -391,24 +432,34 @@ DB (one module):
    inserts after sealing refused.
 10. **Run and selection:** after the policy change and before any v2 run, `effective_tax_matching` is unavailable; a
     run over SPY's lots publishes one disposal, one identification and seven balances, and is then selected; a
-    refused v2 run is not selected; shares' rows equal those of the v1 run over the same generation.
+    refused v2 run is not selected; shares' rows equal those of the v1 run over the same generation; a v2 run
+    published before SPY's `review_by`, with the clock then moved past it and no new run of either kind, is no
+    longer selected (the selection recomputes the digest with its own `as_of`, so the status becomes
+    `review_out_of_date`).
 
 ## Acceptance (dev DB)
 
 **Pinned (evidence run 7):** fact 4's date-reading figures are a unit-test fixture (Test 2).
 
-**After deployment:** one `tax_broker_evidence_refresh`, then rerun the Script against the same generation and
-expect the new run to hold exactly its date-reading output:
-1. a new matching run under `identification_v2` / `tax_character_v2`, selected by `effective_tax_matching`;
-2. SPY present and `computed`, character `non_reporting_fund` with the Script's determination, assumptions and
-   transparency, and every disposal, identification, balance and reason as the Script prints them (for evidence run
-   7: one disposal, computed and basic gain £1.10443720572584, `oig_or_capital_unresolved`, splits NULL, one
-   `thirty_day` identification of `acq:demo:385158730`; reasons `disposal_formula_assumed`,
-   `history_coverage_unestablished`, `non_reporting_status_assumed`, `spread_inclusion_assumed`,
-   `thirty_day_period_assumed`, and `window_open` until a generation whose fetch starts at or after
-   2026-10-23 23:00Z);
-3. every other security's character, status, dependencies and share figures equal those the newest v1 run holds for
-   the same evidence run, if one exists; otherwise those the Script prints for today's matching.
+**Baseline before deployment:** record the effective v1 run (id and evidence run) and every row it holds for each
+security: character, status, dependencies, disposals, identifications, pool.
+
+**After deployment:** run `daily_tax_reconciliation` (matching only: it publishes no generation, so the v2 run is over
+the baseline's evidence run), then rerun the Script with `--expect-computed 3000`, which must exit 0.
+1. A new matching run under `identification_v2` / `tax_character_v2`, over the baseline's evidence run, selected by
+   `effective_tax_matching`.
+2. Every fund security's stored rows equal the Script's `RECORD` lines field by field (character, disposals,
+   identifications, balances, holding). For evidence run 7 that is: SPY `non_reporting_fund` with
+   `fund_determination_v1:0000884394:1`, A1–A9, `transparent_fund` `unresolved`; one disposal, computed and basic gain
+   **£1.10443720572584**, `oig_or_capital_unresolved`, splits NULL; one `thirty_day` identification of
+   `acq:demo:385158730`; seven balances; reasons `disposal_formula_assumed`, `history_coverage_unestablished`,
+   `non_reporting_status_assumed`, `spread_inclusion_assumed`, `thirty_day_period_assumed`, `window_open` (since
+   2026-09-23, until a generation whose fetch starts at or after 2026-10-23 23:00Z); IUSA.L and CSPX.L
+   `exchange_traded_fund` with `fund_status` `not_candidate`, no date.
+3. Every other security's rows equal the baseline's field by field.
+
+If a scheduled job publishes a new generation between the baseline and the check, the baseline is retaken from the
+v1 run of that generation if one exists; if none does, step 3 rests on Test 10 and the gap is recorded on the PR.
 
 ## Full-population verification
 
@@ -442,6 +493,29 @@ Round 1 (`var/research/3616/slice3d3c3/ckpt1_r1_final.txt`, loop worktree):
 | 28 (tests) | 5 April, clock change, window boundary, `review_by`, three-part withdrawal |
 | 29 (acceptance) | run-7 figures pinned as a fixture; acceptance against the Script's rerun and the v1 run of the same generation |
 | 30 (run ownership) | the newest run visible in the snapshot, with its consequence |
+
+Round 2 (`…/ckpt1_r2_final.txt`; its items 1–30 are verdicts on round 1, 31–42 new):
+
+| findings | disposition |
+|---|---|
+| r2.2 (R1.2, expenditure) | F3 widened to s38(1)(b) and (c) with CG15180; how evidenced costs enter (a new evidence or class policy); the figure qualified as the computation under A1, A4, F3 |
+| r2.3 (R1.3, apportionment) | s104(1) makes the pool one asset; outside it, one acquisition is several securities bought for one consideration, apportioned under s52(4), by units |
+| r2.5 (R1.5, exceptions) | F7: fund-level exceptions reviewed per determination, frozen in `EXCEPTIONS_REVIEWED`, with SPY's evidence; others withheld `exceptions_unreviewed` |
+| r2.13 (R1.13, bargains) | F6 stated as a residual; no field groups closes; the equal-instant refusal is the one available signal |
+| r2.21 (R1.21, invariants) | the Script checks every capacity and both readings' eligibility |
+| r2.25 (R1.25, provenance) | trigger compares the copied transparency to the determination body; full NULL truth table; sorted assumptions checked in code |
+| r2.26 (R1.26, missing amounts) | at least one input NULL; known amounts kept; exact missing-key rule; typed columns; field-specific tests |
+| r2.28 (R1.28, selection after `review_by`) | Test 10 |
+| r2.29 (R1.29, baseline) | baseline recorded before deployment; matching-only run over the same generation; field-by-field comparison |
+| r2.31 (earlier character lines) | the Script evaluates a fund only when the character table reaches the ETF line; Test 7 |
+| r2.32 (empty holding) | the holding row always carries the base and carried reasons; Test 5 |
+| r2.33 (post-deployment refusals) | the Script recomputes the fund rules and treats only other causes as upstream; acceptance names SPY with `--expect-computed` |
+| r2.34 (RECORD lines) | one canonical record per stored row; field-by-field acceptance |
+| r2.35 (lot mapping) | lots by the security's member ids, as matching keys them |
+| r2.36 (Condition A) | disposal-time condition distinguished from the stricter eligibility rule |
+| r2.37, r2.38 (digest) | date only for `outside_interval`; sorted unique assumptions; Test 8 |
+| r2.39, r2.41, r2.42 (Script) | docstring; sequences from 1; acquisitions passed explicitly |
+| r2.40 (headline) | F1–F7 |
 
 ## Security
 

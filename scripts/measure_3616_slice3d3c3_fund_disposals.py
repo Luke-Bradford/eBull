@@ -1,28 +1,34 @@
 """#3616 slice 3d-3c-3 fact-finding: non-reporting fund disposals under TCGA 1992 s106A, on the dev DB.
 
 Read-only. In one REPEATABLE READ snapshot it reads the effective generation as matching reads it
-(``tax_matching._read_inputs``), computes today's matching in memory (``compute_matching``), and takes every security
-whose character is ``exchange_traded_fund``. For each it reads the newest fund determination run and applies
-3d-3c-2 Design 3 (``reporting_status``) at every disposal date and at the run's cutoff date, then identifies the
-security's admitted lots as relevant securities (spec Design 2) under both readings of s106A(5)'s period:
+(``tax_matching._read_inputs``) and computes matching in memory with whatever ``compute_matching`` is deployed. It
+takes every security whose members are all instrument type 6, independent of the character it was given, with its
+lots by the same member mapping matching uses. A security withheld upstream (a dependency other than those the fund
+rules produce, an earlier character-table line, or ``withheld_all``) is reported and not evaluated. Otherwise the
+Script recomputes the fund rules itself:
 
-- ``date``: acquisitions on the UK dates d+1 .. d+30 (the policy reading, spec Source rules);
-- ``time``: acquisitions after the disposal's execution instant, up to the end of UK date d+30.
+1. spec Design 1: ``reporting_status`` at every distinct lot date and at the holding date (date-independent failures
+   first, with no date); a failing status withholds;
+2. spec Design 2 under both readings of s106A(5)'s period, with its refusals and invariants (including column
+   capacities):
+   - ``date``: acquisitions on the UK dates d+1 .. d+30 (the policy, F2);
+   - ``time``: acquisitions after the disposal's instant, up to the end of UK date d+30;
+3. spec Design 3 (computed and basic gain, character, splits) and Design 4 (reasons) for the policy reading.
 
-Each disposal is identified in turn (s106A(4)), first with acquisitions in its period, earliest first (s106A(5)),
-then with acquisitions made before it, latest first (s106A(6)). Each lot is its own acquisition or disposal: s105
-does not apply to relevant securities (s104(3), s108(1)(c)). Partial withdrawals use ``tax_matching.apportion``;
-every other sum is exact. It prints the basic gain (reg 39(1)) and its character (spec Design 3) per disposal, the
-remaining acquisitions, and where the two readings differ. Exit status is non-zero on a broken invariant.
+For the policy reading it prints one ``RECORD`` line per expected stored row (character, disposal, identification,
+balance, holding) for field-by-field acceptance, and whether the readings agree. It exits 1 on a broken invariant and
+2 when a security named by ``--expect-computed`` is not computed; refusals and failing statuses are outcomes, listed
+under ``[outcomes]``.
 
 The printout carries dates, symbols, amounts and lot keys (the demo account's order and position ids), never an
 account identifier.
 
-    PYTHONPATH=. uv run python -m scripts.measure_3616_slice3d3c3_fund_disposals
+    PYTHONPATH=. uv run python -m scripts.measure_3616_slice3d3c3_fund_disposals --expect-computed 3000
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -42,10 +48,14 @@ from app.services.tax_fund_determination import (
     reporting_status,
 )
 from app.services.tax_matching import (
+    GBP_PRECISION,
+    GBP_SCALE,
+    UNITS_PRECISION,
+    UNITS_SCALE,
     _read_inputs,
     apportion,
     compute_matching,
-    placements,
+    fits,
     window_elapses_at,
 )
 
@@ -174,46 +184,53 @@ def _determination_inputs(conn: psycopg.Connection[Any], security: int) -> tuple
     return run, obs
 
 
-def statuses(run: Any, obs: Any, lots: list[Lot], as_of: datetime) -> tuple[list[tuple[str, Any]], str | None]:
+def statuses(run: Any, obs: Any, lots: list[Lot], as_of: datetime) -> tuple[list[tuple[str, Any]], Any]:
     """Spec Design 1: ``reporting_status`` at each unique lot date, then at the holding date when the newest run
-    succeeded. Returns the results and the first failing status (None when every one is ``non_reporting_assumed``)."""
+    succeeded. Returns the results and the first failing ``(status, reason, date)``, None when every one is
+    ``non_reporting_assumed``; the date is kept only for ``outside_interval``, the one date-dependent refusal."""
     state = None if run is None else RunState(run[1], run[2])
     decision = None if obs is None else Decision(obs[0], obs[1], obs[2])
     det = None if obs is None else obs[3]
     search = None if obs is None else obs[5]
-    dates: list[tuple[str, date]] = [(d.isoformat(), d) for d in sorted({x.uk_date for x in lots})]
     first = reporting_status(state, decision, det, search, date.min, as_of)
-    if first.status in ("no_run", "run_failed", "not_observed") or run[2] is None:
-        return [("any", first)], first.status
+    if first.status in ("no_run", "run_failed", "not_observed"):
+        return [("any", first)], (first.status, None, None)
+    dates: list[tuple[str, date]] = [(d.isoformat(), d) for d in sorted({x.uk_date for x in lots})]
     dates.append(("holding", run[2].astimezone(UTC).date()))
-    results = [(label, reporting_status(state, decision, det, search, d, as_of)) for label, d in dates]
-    failing = next((r.status for _, r in results if r.status != "non_reporting_assumed"), None)
-    return results, failing
+    results = [(label, d, reporting_status(state, decision, det, search, d, as_of)) for label, d in dates]
+    for _, d, r in results:
+        if r.status != "non_reporting_assumed":
+            code = r.reason if r.reason in ("list_match", "search_unavailable") else None
+            return [(label, r) for label, _, r in results], (
+                r.status,
+                code,
+                d if r.status == "outside_interval" else None,
+            )
+    return [(label, r) for label, _, r in results], None
 
 
-def reasons(disposals: list[Disposal], remaining: list[Lot], fetch_started: datetime | None) -> dict[str, list[str]]:
-    """Spec Design 4's matrix: reasons per disposal, identification, balance and the holding."""
+def reasons(
+    disposals: list[Disposal], remaining: list[Lot], acquisitions: list[Lot], fetch_started: datetime | None
+) -> dict[str, list[str]]:
+    """Spec Design 4's matrix: reasons per disposal, identification (from 1), balance and the holding."""
     base = {HISTORY, STATUS}
     out: dict[str, list[str]] = {}
     carried: set[str] = set()
     for x in disposals:
-        own: set[str] = set()
         if fetch_started is None or fetch_started < window_elapses_at(x.lot.uk_date):
-            own.add(WINDOW)
-        if any(a.uk_date == x.lot.uk_date and a.executed_at > x.lot.executed_at for a in ALL_ACQS):
-            own.add(F2)
-        carried |= own
-        for n, i in enumerate(x.idents):
-            out[f"ident {x.lot.lot_key} #{n}"] = sorted(base | i.acquisition.reasons | carried)
-        idents = set().union(*(i.acquisition.reasons for i in x.idents)) if x.idents else set()
+            carried.add(WINDOW)
+        if any(a.uk_date == x.lot.uk_date and a.executed_at > x.lot.executed_at for a in acquisitions):
+            carried.add(F2)
+        for n, i in enumerate(x.idents, start=1):
+            out[f"identification {x.lot.lot_key} seq {n}"] = sorted(base | i.acquisition.reasons | carried)
+        idents: set[str] = set().union(*(i.acquisition.reasons for i in x.idents))
         out[f"disposal {x.lot.lot_key}"] = sorted(base | x.lot.reasons | idents | carried)
     for a in remaining:
         out[f"balance {a.lot_key}"] = sorted(base | a.reasons | carried)
-    out["holding"] = sorted(base | set().union(*(a.reasons for a in remaining)) | carried) if remaining else []
+    out["holding"] = sorted(base | set().union(*(a.reasons for a in remaining)) | carried)
     return out
 
 
-ALL_ACQS: list[Lot] = []
 HISTORY, STATUS, WINDOW, F2 = (
     "history_coverage_unestablished",
     "non_reporting_status_assumed",
@@ -221,44 +238,97 @@ HISTORY, STATUS, WINDOW, F2 = (
     "thirty_day_period_assumed",
 )
 PRE_2009 = date(2009, 12, 1)
+#: Spec Design 1 (F7): determinations whose fund-level exceptions (regs 28, 31A-31C) were reviewed by this spec.
+EXCEPTIONS_REVIEWED = frozenset({"fund_determination_v1:0000884394:1"})
 ETF_TYPE_ID = 6
+#: Dependencies the fund rules themselves produce (the Script recomputes these; any other cause is upstream).
+FUND_RULE_REASONS = frozenset(
+    {"character_unestablished", "time_order_unestablished", "pre_2009_rights", "identification_incomplete"}
+)
 
 
-def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any) -> int:
-    """Print one fund security; returns 1 when a fund with lots and no other cause is not computed."""
+def _record(out: Any, kind: str, **fields: Any) -> None:
+    """One canonical expected row, for field-by-field acceptance."""
+    print(f"    RECORD {kind} {json.dumps(fields, default=str, sort_keys=True)}", file=out)
+
+
+def _check_capacity(value: Decimal | None, precision: int, scale: int, what: str) -> None:
+    assert value is None or fits(value, precision, scale), f"{what} {value} does not fit NUMERIC({precision},{scale})"
+
+
+def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any) -> str:
+    """Print one fund security; returns its outcome: ``computed``, ``upstream``, ``status`` or ``refused``."""
     sym = inputs.instruments[s.tax_security_id].symbol
     print(f"\n[fund {s.tax_security_id} {sym}] matching today: {s.status} {s.character.character}", file=out)
-    other = sorted(
+    upstream = sorted(
         d.reason
         for d in result.dependencies
-        if d.tax_security_id == s.tax_security_id and d.reason != "character_unestablished"
+        if d.tax_security_id == s.tax_security_id and d.reason not in FUND_RULE_REASONS
     )
-    print(f"  other withholding causes: {other}; withheld_all {result.withheld_all}; lots {len(lots)}", file=out)
+    earlier = s.character.character == "unestablished" and s.character.detail != "exchange_traded_fund"
+    print(
+        f"  upstream causes: {upstream}; earlier character line: {s.character.detail if earlier else None};"
+        f" withheld_all {result.withheld_all}; lots {len(lots)}",
+        file=out,
+    )
     for lot in sorted(lots, key=lambda x: (x.executed_at, x.lot_key)):
         print(
             f"    {lot.direction:11} {lot.executed_at.isoformat()} {lot.uk_date} {lot.units} £{lot.amount}"
             f" {lot.lot_key} {sorted(lot.reasons)}",
             file=out,
         )
+    if earlier:
+        print("  an earlier character line decides: not evaluated", file=out)
+        return "upstream"
     run, obs = _determination_inputs(conn, s.tax_security_id)
     print(f"  determination run {run and run[:3]}; observation {obs and obs[:3]}", file=out)
     det = None if obs is None else obs[3]
-    transparent = None
+    transparent = basis = None
     if det is not None:
-        transparent = next(f["answer"] for f in det["findings"] if f["question"] == "transparent_fund")
-        print(f"  file sha256 {obs[4]}; offshore_fund {offshore_fund(det)}", file=out)
-        print(f"  transparent_fund {transparent}; search {obs[5]}", file=out)
+        finding = next(f for f in det["findings"] if f["question"] == "transparent_fund")
+        transparent, basis = finding["answer"], finding["basis"]
+        print(f"  file sha256 {obs[4]}; offshore_fund {offshore_fund(det)}; search {obs[5]}", file=out)
     results, failing = statuses(run, obs, lots, inputs.as_of)
     for label, r in results:
         print(f"  status at {label}: {r.status} {r.reason or ''} rests on {list(r.assumptions)}", file=out)
-    if other or result.withheld_all:
-        print("  withheld by other causes", file=out)
-        return 0
     if failing is not None:
-        print(f"  WITHHELD: fund_status {failing}", file=out)
-        return 1 if lots else 0
-    print("  character non_reporting_fund", file=out)
-    ALL_ACQS[:] = [x for x in lots if x.direction == "acquisition"]
+        _record(
+            out,
+            "character",
+            character="unestablished",
+            detail="exchange_traded_fund",
+            fund_status=failing[0],
+            fund_status_reason=failing[1],
+            fund_status_date=failing[2],
+        )
+        return "status"
+    if obs[2] not in EXCEPTIONS_REVIEWED:
+        _record(
+            out,
+            "character",
+            character="unestablished",
+            detail="exchange_traded_fund",
+            fund_status="exceptions_unreviewed",
+            fund_status_reason=None,
+            fund_status_date=None,
+        )
+        return "status"
+    assumptions = sorted({a for _, r in results for a in r.assumptions})
+    _record(
+        out,
+        "character",
+        character="non_reporting_fund",
+        detail=None,
+        fund_determination_id=obs[2],
+        fund_determination_run_id=run[0],
+        transparent_fund=transparent,
+        transparent_basis=basis,
+        fund_assumptions=assumptions,
+    )
+    if upstream or result.withheld_all:
+        print("  withheld upstream: character evaluated, not identified", file=out)
+        return "upstream"
+    acquisitions = [x for x in lots if x.direction == "acquisition"]
     computed: dict[str, list[tuple[str, str, Decimal, Decimal | None]]] = {}
     for reading in ("date", "time"):
         fresh = [
@@ -272,40 +342,132 @@ def _fund(out: Any, inputs: Any, result: Any, s: Any, lots: list[Lot], conn: Any
             try:
                 disposals, remaining = identify(fresh, reading)
             except Refused as e:
-                print(f"  reading {reading}: WITHHELD {e}", file=out)
-                return 1
-            print(f"  reading {reading}{' (policy)' if reading == 'date' else ''}:", file=out)
+                print(f"  reading {reading}: REFUSED {e}", file=out)
+                if reading == "date":
+                    return "refused"
+                continue
+            policy = reading == "date"
+            print(f"  reading {reading}{' (policy)' if policy else ''}:", file=out)
             computed[reading] = [
                 (x.lot.lot_key, i.acquisition.lot_key, i.units, i.cost) for x in disposals for i in x.idents
             ]
-            for x in disposals:
-                ids = "; ".join(f"{i.rule} {i.acquisition.lot_key} {i.units} £{i.cost}" for i in x.idents)
+            why = reasons(disposals, remaining, acquisitions, inputs.history_fetch_started_at) if policy else {}
+            for seq, x in enumerate(disposals, start=1):
                 costs = [i.cost for i in x.idents]
-                if x.lot.amount is None or any(c is None for c in costs):
-                    print(f"    disposal {x.lot.lot_key}: amount_missing [{ids}]", file=out)
-                    continue
-                cost = sum((c for c in costs if c is not None), ZERO)
-                gain = x.lot.amount - cost
-                ch, basic, oig, chargeable = character(gain, transparent or "unresolved")
+                cost = None if any(c is None for c in costs) else sum((c for c in costs if c is not None), ZERO)
+                missing = sorted({x.lot.lot_key} if x.lot.amount is None else set()) + sorted(
+                    {i.acquisition.lot_key for i in x.idents if i.cost is None}
+                )
+                if x.lot.amount is None or cost is None:
+                    status, gain, ch, basic, oig, chargeable = "amount_missing", None, None, None, None, None
+                else:
+                    status, gain = "computed", x.lot.amount - cost
+                    ch, basic, oig, chargeable = character(gain, transparent or "unresolved")
+                for value, what in ((x.lot.units, "units"),):
+                    _check_capacity(value, UNITS_PRECISION, UNITS_SCALE, what)
+                for value in (x.lot.amount, cost, gain, basic, oig, chargeable):
+                    _check_capacity(value, GBP_PRECISION, GBP_SCALE, "disposal sterling")
                 print(
                     f"    disposal {x.lot.uk_date} {x.lot.tax_year} {x.lot.units} proceeds £{x.lot.amount} cost £{cost}"
-                    f" computed gain £{gain} basic gain £{basic} {ch} OIG {oig} chargeable {chargeable} [{ids}]",
+                    f" computed gain £{gain} basic gain £{basic} {ch} OIG {oig} chargeable {chargeable}",
                     file=out,
                 )
+                if policy:
+                    _record(
+                        out,
+                        "disposal",
+                        lot_key=x.lot.lot_key,
+                        seq=seq,
+                        executed_at=x.lot.executed_at,
+                        uk_date=x.lot.uk_date,
+                        tax_year=x.lot.tax_year,
+                        units=x.lot.units,
+                        proceeds_gbp=x.lot.amount,
+                        cost_gbp=cost,
+                        computed_gain_gbp=gain,
+                        basic_gain_gbp=basic,
+                        offshore_income_gain_gbp=oig,
+                        chargeable_gain_gbp=chargeable,
+                        status=status,
+                        gain_character=ch,
+                        missing_lot_keys=missing,
+                        reasons=why[f"disposal {x.lot.lot_key}"],
+                    )
+                for n, i in enumerate(x.idents, start=1):
+                    _check_capacity(i.units, UNITS_PRECISION, UNITS_SCALE, "identification units")
+                    _check_capacity(i.cost, GBP_PRECISION, GBP_SCALE, "identification cost")
+                    if reading == "time" and i.rule == "thirty_day":
+                        assert i.acquisition.executed_at > x.lot.executed_at
+                        assert i.acquisition.uk_date <= x.lot.uk_date + timedelta(days=30)
+                    if policy:
+                        _record(
+                            out,
+                            "identification",
+                            disposal_lot_key=x.lot.lot_key,
+                            seq=n,
+                            rule=i.rule,
+                            acquisition_lot_key=i.acquisition.lot_key,
+                            acquisition_executed_at=i.acquisition.executed_at,
+                            acquisition_uk_date=i.acquisition.uk_date,
+                            units=i.units,
+                            cost_gbp=i.cost,
+                            missing_lot_keys=[] if i.cost is not None else [i.acquisition.lot_key],
+                            reasons=why[f"identification {x.lot.lot_key} seq {n}"],
+                        )
             units = sum((a.left for a in remaining), ZERO)
             cl = [a.cost_left for a in remaining]
-            total = "undefined" if any(c is None for c in cl) else f"£{sum((c for c in cl if c is not None), ZERO)}"
+            total = None if any(c is None for c in cl) else sum((c for c in cl if c is not None), ZERO)
+            _check_capacity(units, UNITS_PRECISION, UNITS_SCALE, "holding units")
+            _check_capacity(total, GBP_PRECISION, GBP_SCALE, "holding cost")
             print(f"    holding: {len(remaining)} acquisitions, {units} units, cost {total}", file=out)
             for a in remaining:
+                _check_capacity(a.left, UNITS_PRECISION, UNITS_SCALE, "balance units")
+                _check_capacity(a.cost_left, GBP_PRECISION, GBP_SCALE, "balance cost")
                 print(f"      {a.uk_date} {a.left} of {a.units} £{a.cost_left} {a.lot_key}", file=out)
-            if reading == "date":
-                for k, v in reasons(disposals, remaining, inputs.history_fetch_started_at).items():
-                    print(f"    reasons {k}: {v}", file=out)
-    print(f"  readings agree: {computed['date'] == computed['time']}", file=out)
-    return 0
+                if policy:
+                    _record(
+                        out,
+                        "balance",
+                        lot_key=a.lot_key,
+                        units_left=a.left,
+                        cost_left_gbp=a.cost_left,
+                        missing_lot_keys=[] if a.cost_left is not None else [a.lot_key],
+                        reasons=why[f"balance {a.lot_key}"],
+                    )
+            if policy:
+                open_since = min(
+                    (
+                        x.lot.uk_date
+                        for x in disposals
+                        if inputs.history_fetch_started_at is None
+                        or inputs.history_fetch_started_at < window_elapses_at(x.lot.uk_date)
+                    ),
+                    default=None,
+                )
+                _record(
+                    out,
+                    "holding",
+                    holding_basis="relevant_securities",
+                    pool_units=units,
+                    pool_cost_gbp=total,
+                    pool_missing_lot_keys=sorted(a.lot_key for a in remaining if a.cost_left is None),
+                    pool_reasons=why["holding"],
+                    window_open_since=open_since,
+                )
+    print(f"  readings agree: {computed.get('date') == computed.get('time')}", file=out)
+    return "computed"
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--expect-computed",
+        type=int,
+        nargs="*",
+        default=[],
+        help="tax security ids that must come out computed (acceptance fixtures); exit 2 otherwise",
+    )
+    args = parser.parse_args()
     out = sys.stdout
     script = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     print(f"run {datetime.now(UTC).isoformat()}; script sha256 {script}", file=out)
@@ -314,7 +476,8 @@ def main() -> None:
         f" argv {json.dumps(sys.argv[1:])}",
         file=out,
     )
-    failures = 0
+    broken = False
+    outcomes: dict[int, str] = {}
     with psycopg.connect(settings.database_url) as conn:
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         with conn.transaction():
@@ -328,7 +491,6 @@ def main() -> None:
                 f" as_of {inputs.as_of.isoformat()}; history fetch started {inputs.history_fetch_started_at}",
                 file=out,
             )
-            security_of = {p.instrument_id: p.tax_security_id for p in placements(inputs)}
             rows = conn.execute(
                 """SELECT lot_key, direction, executed_at, uk_date, tax_year, units, amount_gbp, instrument_id
                    FROM tax_evidence_lots WHERE run_id = %s""",
@@ -342,21 +504,31 @@ def main() -> None:
                     f" character {s.character.character}/{s.character.detail}, dependencies {sorted(deps)}",
                     file=out,
                 )
-            # Fund securities by instrument type, independent of the character today's code assigns.
+            run_level = [d.reason for d in result.dependencies if d.tax_security_id is None]
+            print(f"  run-level dependencies {run_level}; withheld_all {result.withheld_all}", file=out)
+            # Fund securities by instrument type, independent of the character today's code assigns; lots by the
+            # same member mapping matching uses (an unestablished identity's member is its own security).
             for s in result.securities:
                 if inputs.characters[s.tax_security_id].types != frozenset({ETF_TYPE_ID}):
                     continue
+                members = set(s.instrument_ids)
                 lots = [
                     Lot(r[0], r[1], r[2], r[3], r[4], r[5], r[6], frozenset(result.lot_classes[r[0]].reasons))
                     for r in rows
-                    if security_of.get(r[7]) == s.tax_security_id
+                    if r[7] in members
                 ]
                 try:
-                    failures += _fund(out, inputs, result, s, lots, conn)
+                    outcomes[s.tax_security_id] = _fund(out, inputs, result, s, lots, conn)
                 except AssertionError as e:
                     print(f"  INVARIANT BROKEN: {e}", file=out)
-                    failures += 1
-    sys.exit(1 if failures else 0)
+                    broken = True
+    print(f"\n[outcomes] {json.dumps(outcomes, sort_keys=True)}", file=out)
+    if broken:
+        sys.exit(1)
+    missing = [i for i in args.expect_computed if outcomes.get(i) != "computed"]
+    if missing:
+        print(f"expected computed but not: {missing}", file=out)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
