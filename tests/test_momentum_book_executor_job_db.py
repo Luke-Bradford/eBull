@@ -1,12 +1,17 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 
 import psycopg
 import pytest
 
+from app.services import momentum_book as mb
 from app.services import momentum_book_executor_job as mj
-from tests.test_momentum_book_job_db import _seed
+from app.services.strategy_control_plane import configure_paper_pool
+from tests.test_momentum_book_executor_db import _market, _stub_broker
+from tests.test_momentum_book_job_db import BASE, N_NAMES, _seed
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("marked_daily_loss_neutral")]
 
@@ -120,3 +125,50 @@ def test_catch_up_entries_wait_while_an_exit_is_still_closing_overnight(ebull_te
     assert len(caught_up) == first.entries  # emitted, and left undecided
     assert (result.exits_pending, result.entries) == (1, 0)
     refresh.assert_not_called()
+
+
+def _book_broker() -> MagicMock:
+    """One stub broker that answers eligibility and costs for whichever instrument is asked, and gives each order its
+    own reference."""
+    broker = _stub_broker(0)
+    broker.check_instrument_eligibility.side_effect = lambda ids: (
+        _stub_broker(ids[0]).check_instrument_eligibility.return_value
+    )
+    broker.get_what_if_costs.side_effect = lambda order: (
+        _stub_broker(order.instrument_id).get_what_if_costs.return_value
+    )
+    submission = broker.place_demo_strategy_order.return_value
+    refs = iter(range(3827001, 3827001 + 100))
+    broker.place_demo_strategy_order.side_effect = lambda *a, **k: replace(submission, broker_order_ref=str(next(refs)))
+    return broker
+
+
+def test_once_exits_have_closed_the_job_funds_and_submits_the_entries(ebull_test_conn: Conn) -> None:
+    """End to end through `run_momentum_book` (#3827): the rebalance exit has closed, so every entry of the formation
+    is decided in the same fire, and the funded ones reach the broker with one order each."""
+    conn = ebull_test_conn
+    _seed(conn)
+    conn.execute("UPDATE strategy_trades SET status = 'closed' WHERE status NOT IN ('closed', 'failed')")
+    conn.commit()
+    _market(conn, tuple(range(BASE, BASE + N_NAMES)))
+    # As live (pool event 6): the balanced mandate's 8 concurrent positions would refuse most of a 30-name book.
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("20000"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        max_concurrent_positions_override=40,
+        changed_by="test",
+        reason="#3827 job fixture",
+    )
+    conn.commit()
+    broker = _book_broker()
+    refresh = MagicMock()
+    result = mj.run_momentum_book(conn, broker=broker, refresh_market=refresh, clock=lambda: NOW)
+    assert result.formation_id is not None
+    assert (result.exits, result.exits_pending, result.errors) == ({}, 0, 0)
+    refresh.assert_called_once()
+    assert result.verdicts == {"submitted": result.entries} and result.entries == mb.BOOK_SIZE
+    assert broker.place_demo_strategy_order.call_count == result.entries
+    assert mj.due_entries(conn, today=NOW.date()) == []
