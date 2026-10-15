@@ -207,6 +207,7 @@ DemoTrialPurpose = Literal["demo_trial"]
 #: ``ranking-pot-v1`` (ranking-pot spec §7.1): one placed book; its shadow and controls are computed, so they
 #: have no strategy id. ⚠ Membership here is the PURPOSE only: the AI-trial loader still refuses a pot signal
 #: (it has no AI-trial pair), and the AI-trial start gate counts pot lifecycles as non-trial (spec §7.3).
+#: #3822 adds ``momentum-30``, the monthly momentum book (``app.services.momentum_book``), demo only.
 DEMO_TRIAL_STRATEGY_IDS: Final[frozenset[str]] = frozenset(
     {
         "ai-discretionary-v1",
@@ -214,6 +215,7 @@ DEMO_TRIAL_STRATEGY_IDS: Final[frozenset[str]] = frozenset(
         "ai-discretionary-fund-v1",
         "ai-discretionary-fund-v1-control",
         "ranking-pot-v1",
+        "momentum-30",
     }
 )
 #: The purpose any registered strategy id resolves to: a manifest purpose, or ``demo_trial``.
