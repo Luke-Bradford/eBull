@@ -543,5 +543,8 @@ def get_tax_view(
             WithheldResponse(tax_security_id=w.tax_security_id, symbols=list(w.symbols), reasons=list(w.reasons))
             for w in rows.withheld
         ],
+        # Cannot raise: `assumption_ids()` emits only ALWAYS_STATED ids plus "A8", and
+        # tests/test_tax_year_view.py::test_assumptions_are_defined_and_a8_follows_its_reason asserts
+        # `set(ALWAYS_STATED) | {"A8"} == set(ASSUMPTIONS)`.
         assumption_definitions={a: ASSUMPTIONS[a] for a in view.assumption_ids},
     )
