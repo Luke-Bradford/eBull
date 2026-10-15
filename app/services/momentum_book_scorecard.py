@@ -46,6 +46,10 @@ CONTROL_DRAWS: Final = 200
 STALENESS: Final = timedelta(days=7)
 
 
+class BenchmarkInstrumentError(LookupError):
+    """SPY does not resolve to exactly one canonical instrument, so nothing can be scored against it."""
+
+
 def control_seed(draw: int, formation_month: date) -> str:
     return f"{mb.STRATEGY_ID}:{mb.STRATEGY_VERSION}:control:{draw}:{formation_month.isoformat()}"
 
@@ -135,6 +139,8 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
 def score(
     periods: Sequence[Period], closes: Closes, breaks: Breaks, *, spy_id: int, draws: int = CONTROL_DRAWS
 ) -> Scorecard:
+    if draws < 1:
+        raise ValueError(f"draws must be >= 1, got {draws}")
     scored: list[PeriodScore] = []
     pending: list[date] = []
     book_path = spy_path = 1.0
@@ -242,7 +248,7 @@ def load_scorecard(conn: Conn) -> Scorecard:
         (BENCHMARK_SYMBOL,),
     ).fetchall()
     if len(spy) != 1:
-        raise ValueError(f"expected one canonical {BENCHMARK_SYMBOL!r} instrument, found {len(spy)}")
+        raise BenchmarkInstrumentError(f"expected one canonical {BENCHMARK_SYMBOL!r} instrument, found {len(spy)}")
     spy_id = int(spy[0][0])
     # The current period ends at SPY's latest usable close, read under the same mask as every other close.
     latest = conn.execute(
@@ -275,6 +281,7 @@ def load_scorecard(conn: Conn) -> Scorecard:
 
 __all__ = [
     "CONTROL_DRAWS",
+    "BenchmarkInstrumentError",
     "Period",
     "PeriodScore",
     "Scorecard",

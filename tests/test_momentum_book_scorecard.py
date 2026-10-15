@@ -89,3 +89,8 @@ def test_a_period_without_a_recorded_universe_scores_the_book_but_not_the_contro
     assert period.book_return == pytest.approx(0.1)
     assert period.control_median is None and period.book_percentile is None
     assert card.book_cumulative is None  # nothing chains without the control
+
+
+def test_score_refuses_zero_draws() -> None:
+    with pytest.raises(ValueError, match="draws"):
+        sc.score([], {}, {}, spy_id=SPY, draws=0)
