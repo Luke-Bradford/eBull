@@ -1655,6 +1655,7 @@ def resolve_tax_run(conn: psycopg.Connection[Any]) -> TaxRunResolution:
     scope = conn.execute("SELECT environment FROM trade_ledger_scope").fetchone()
     environment = None if scope is None else str(scope[0])
     if environment is None:
+        # No scope row means no generation: `_read_inputs` joins the scope (Design 1, reason 3).
         return TaxRunResolution(None, None, "no_effective_run")
     if environment != "demo":
         return TaxRunResolution(environment, None, "ledger_scope_not_demo")

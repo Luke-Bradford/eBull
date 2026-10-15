@@ -412,7 +412,9 @@ def _share_disposal(d: ShareDisposalDetail, symbols: list[str]) -> TaxViewDispos
         gain_character=None,
         offshore_income_gain_gbp=None,
         chargeable_gain_gbp=None,
-        member_of="both_readings" if r.status == "computed" and r.gain_gbp else "neither",
+        member_of="both_readings"
+        if r.status == "computed" and r.gain_gbp is not None and r.gain_gbp != 0
+        else "neither",
         identifications=_identifications(d.identifications),
     )
 
