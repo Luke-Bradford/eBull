@@ -561,6 +561,7 @@ describe("StrategiesPage", () => {
     vi.spyOn(rankingPotApi, "fetchRankingPotStatus").mockReturnValue(new Promise(() => {}));
     vi.spyOn(rankingPotApi, "fetchRankingPotV2Status").mockReturnValue(new Promise(() => {}));
     vi.spyOn(strategiesApi, "fetchEngineBookRisk").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(strategiesApi, "fetchMomentumScorecard").mockReturnValue(new Promise(() => {}));
   });
 
   it("keeps unapproved backtests out of portfolio performance", async () => {

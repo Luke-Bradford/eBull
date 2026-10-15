@@ -224,6 +224,7 @@ describe("StrategyPortfolioLens", () => {
     vi.spyOn(rankingPotApi, "fetchRankingPotStatus").mockReturnValue(new Promise(() => {}));
     vi.spyOn(rankingPotApi, "fetchRankingPotV2Status").mockReturnValue(new Promise(() => {}));
     vi.spyOn(strategiesApi, "fetchEngineBookRisk").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(strategiesApi, "fetchMomentumScorecard").mockReturnValue(new Promise(() => {}));
   });
 
   it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
@@ -1186,6 +1187,7 @@ describe("StrategiesHubPage", () => {
     vi.spyOn(rankingPotApi, "fetchRankingPotStatus").mockReturnValue(new Promise(() => {}));
     vi.spyOn(rankingPotApi, "fetchRankingPotV2Status").mockReturnValue(new Promise(() => {}));
     vi.spyOn(strategiesApi, "fetchEngineBookRisk").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(strategiesApi, "fetchMomentumScorecard").mockReturnValue(new Promise(() => {}));
   });
 
   it("lands on the portfolio lens", async () => {

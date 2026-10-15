@@ -4054,3 +4054,33 @@ export interface EngineBookRiskResponse {
   latest: EngineBookRiskLatest | null;
   recent: EngineBookRiskRecent[];
 }
+
+/** One formation of the momentum book, scored (`app/services/momentum_book_scorecard.py::PeriodScore`).
+ *  Returns are FRACTIONS (0.1 = 10%), gross price returns on every side. */
+export interface MomentumPeriodScore {
+  formation_month: string;
+  start: string;
+  end: string;
+  /** "formation", "reconstructed" (rebuilt after the fact), or null when not recorded yet. */
+  universe_source: string | null;
+  names_priced: number;
+  names_stale: number;
+  book_return: number | null;
+  spy_return: number | null;
+  control_median: number | null;
+  control_p05: number | null;
+  control_p95: number | null;
+  /** Share of random baskets that returned less than the book. */
+  book_percentile: number | null;
+}
+
+/** `GET /strategies/momentum-book/scorecard` (#3822). */
+export interface MomentumScorecardResponse {
+  periods: MomentumPeriodScore[];
+  book_cumulative: number | null;
+  spy_cumulative: number | null;
+  control_cumulative_median: number | null;
+  book_cumulative_percentile: number | null;
+  control_draws: number;
+  pending: string[];
+}

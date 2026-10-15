@@ -8,6 +8,7 @@ import type {
   CoreRebalanceResponse,
   EngineBookRiskResponse,
   FiredSignalsResponse,
+  MomentumScorecardResponse,
   StrategyAdvanceResponse,
   StrategyOrderActivityResponse,
   StrategyOperatorAction,
@@ -58,6 +59,10 @@ export function fetchFiredSignals(cursor: number | null, strategyId?: string): P
 
 export function fetchStrategyPnlHistory(): Promise<StrategyPnlHistoryResponse> {
   return apiFetch("/strategies/wealth-history");
+}
+
+export function fetchMomentumScorecard(): Promise<MomentumScorecardResponse> {
+  return apiFetch("/strategies/momentum-book/scorecard");
 }
 
 export function fetchStrategyOrderActivity(): Promise<StrategyOrderActivityResponse> {
