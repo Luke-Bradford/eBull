@@ -530,3 +530,9 @@ adding an exemption — the guard's bluntness is what makes it reliable.
 everything else pure. This one earns its place because only a real database proves
 a new status survives a rewritten `CHECK` constraint — a mocked cursor asserts the
 parameters and passes against a constraint that would reject them.
+
+## A negative assertion needs its positive twin
+
+A test asserting `== []` (or "not called", or "no row") passes vacuously whenever its setup is wrong. Assert the
+positive case first: the same query, under the same setup, returns the row before the condition under test is
+applied. Precedent: #3828, `test_only_the_latest_formations_exits_are_retried`.

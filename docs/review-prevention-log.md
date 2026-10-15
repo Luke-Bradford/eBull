@@ -12778,3 +12778,11 @@ neighbouring container and match it.**
 - Enforced in: `app/services/momentum_book_executor_job.py` (`_EXITS_PENDING_SQL`),
   `tests/test_momentum_book_executor_job_db.py::test_an_exit_that_could_not_be_submitted_does_not_block_entries`,
   `.claude/skills/engineering/pre-flight-review.md` §F.
+
+### A negative test that cannot fail proves nothing (#3828)
+
+- Failure (review on #3828, 2026-10-15): `test_only_the_latest_formations_exits_are_retried` asserted an empty exit
+  list after adding a newer formation, but nothing showed that the older exit would otherwise have been returned. A
+  wrong setup, such as a trade that was not `open`, would have passed it too.
+- Prevention: assert the positive case under the same setup before asserting the negative.
+- Enforced in: `.claude/skills/engineering/test-quality.md` ("A negative assertion needs its positive twin").

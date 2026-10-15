@@ -89,6 +89,9 @@ def test_only_the_latest_formations_exits_are_retried(ebull_test_conn: Conn) -> 
     conn.commit()
     first = mj.run_momentum_book(conn, broker=MagicMock(), refresh_market=MagicMock(), clock=lambda: NOW)
     assert first.exits == {"position_unowned": 1}
+    # Positive case first, so the empty result below is not vacuous: the September formation's exit is due.
+    assert len(conn.execute(mj._EXITS_DUE_SQL, {"today": date(2026, 11, 2), "version": "v1"}).fetchall()) == 1
+    # October's formation (September's was formed on 2026-10-15, so the month is distinct).
     conn.execute(
         """
         INSERT INTO momentum_book_formations (strategy_version, formation_month, target_session, candidates, book, held)
