@@ -80,7 +80,7 @@ class MomentumIntent:
 _INTENT_SQL: Final = f"""
     SELECT s.signal_id, s.strategy_id, s.strategy_version, s.instrument_id,
            i.symbol, i.is_tradable, e.asset_class,
-           me.formation_id, me.rank, f.formation_month, f.target_session,
+           me.formation_id, me.rank, f.formation_month, me.target_session,
            d.deployment_id, d.capital_limit, d.enabled, d.currency,
            pool.enabled AS pool_enabled, pool.capital_limit AS pool_limit, pool.capital_mode, pool.risk_profile,
            pool.max_portfolio_drawdown_pct AS mandate_max_drawdown_pct,

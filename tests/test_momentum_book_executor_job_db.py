@@ -101,3 +101,22 @@ def test_only_the_latest_formations_exits_are_retried(ebull_test_conn: Conn) -> 
     conn.commit()
     later = conn.execute(mj._EXITS_DUE_SQL, {"today": date(2026, 11, 2), "version": "v1"}).fetchall()
     assert later == []
+
+
+def test_catch_up_entries_wait_while_an_exit_is_still_closing_overnight(ebull_test_conn: Conn) -> None:
+    """Catch-up entries on a later session wait for their formation's exit still in flight (Codex ckpt-2): the
+    pending-exit gate is keyed on today's entries, not on the formation's own session."""
+    conn = ebull_test_conn
+    _seed(conn)
+    conn.execute("UPDATE strategy_trades SET status = 'open' WHERE status NOT IN ('closed', 'failed')")
+    conn.commit()
+    first = mj.run_momentum_book(conn, broker=MagicMock(), refresh_market=MagicMock(), clock=lambda: NOW)
+    assert first.entries > 0  # every entry refused (the fixture deployment has no execution policy)
+    _close_in_flight(conn, "closing")
+    nxt = datetime(2026, 10, 16, 15, 30, tzinfo=UTC)
+    refresh = MagicMock()
+    result = mj.run_momentum_book(conn, broker=MagicMock(), refresh_market=refresh, clock=lambda: nxt)
+    caught_up = mj.due_entries(conn, today=nxt.date())
+    assert len(caught_up) == first.entries  # emitted, and left undecided
+    assert (result.exits_pending, result.entries) == (1, 0)
+    refresh.assert_not_called()

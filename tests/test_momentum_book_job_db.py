@@ -6,7 +6,8 @@ import psycopg
 import pytest
 
 from app.services import momentum_book as mb
-from app.services.momentum_book_job import form_book, formation_month_for, load_candidates
+from app.services.momentum_book_executor_job import due_entries
+from app.services.momentum_book_job import catch_up_entries, form_book, formation_month_for, load_candidates
 from app.services.momentum_book_scorecard import load_scorecard
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_control_plane import configure_deployment, create_strategy_trade, decide_funding
@@ -328,3 +329,69 @@ def test_a_name_that_stopped_trading_in_month_t_is_not_a_candidate(ebull_test_co
     formed = form_book(conn, session=SESSION)
     assert formed is not None and formed.created
     assert stopped not in formed.book
+
+
+@pytest.mark.integration
+def test_catch_up_re_emits_only_names_that_never_entered(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    # #3822: on 2026-10-15, 29 of 30 entries refused for two defects since fixed, which left the book at one name
+    # until the next formation. A name refused or whose order failed gets a fresh signal on the next session; a name
+    # that entered does not, nor does the name held when the book was formed.
+    conn = ebull_test_conn
+    _seed(conn)
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None and len(formed.entry_signal_ids) == mb.BOOK_SIZE
+    dep = conn.execute(
+        "SELECT deployment_id FROM strategy_deployments WHERE strategy_id = %s", (mb.STRATEGY_ID,)
+    ).fetchone()
+    assert dep is not None
+    deployment_id = int(dep[0])
+    entered, failed, *refused = formed.entry_signal_ids
+    for sid in (entered, failed):
+        fd = decide_funding(
+            conn,
+            signal_id=sid,
+            verdict="allocated",
+            reason_code="test",
+            deployment_id=deployment_id,
+            amount=Decimal("300"),
+        )
+        create_strategy_trade(conn, fd)
+    conn.execute(
+        "UPDATE strategy_trades SET status = 'failed' WHERE funding_decision_id = "
+        "(SELECT funding_decision_id FROM strategy_funding_decisions WHERE signal_id = %s)",
+        (failed,),
+    )
+    for sid in refused[:-1]:
+        decide_funding(conn, signal_id=sid, verdict="rejected", reason_code="costs_stale_or_mismatched")
+    conn.commit()  # refused[-1] stays undecided: its session ended, so it expired
+    by_signal = dict(
+        conn.execute(
+            "SELECT signal_id, instrument_id FROM momentum_book_entries WHERE formation_id = %s", (formed.formation_id,)
+        ).fetchall()
+    )
+
+    assert catch_up_entries(conn, formation=formed, session=SESSION) == ()  # the formation's own session
+    nxt = date(2026, 10, 16)
+    emitted = catch_up_entries(conn, formation=formed, session=nxt)
+    rows = conn.execute(
+        """
+        SELECT me.instrument_id, me.rank, me.target_session, s.signal_bar_date, s.fill_bar_date
+        FROM momentum_book_entries me JOIN strategy_signals s USING (signal_id)
+        WHERE me.signal_id = ANY(%s) ORDER BY me.rank
+        """,
+        (list(emitted),),
+    ).fetchall()
+    expected = {by_signal[s] for s in (failed, *refused)}
+    assert {r[0] for r in rows} == expected and len(rows) == mb.BOOK_SIZE - 1
+    assert by_signal[entered] not in {r[0] for r in rows}
+    assert HELD_LOSER not in {r[0] for r in rows}
+    assert {(r[2], r[3], r[4]) for r in rows} == {(nxt, SESSION, nxt)}
+    assert [r[1] for r in rows] == sorted(formed.book.index(r[0]) + 1 for r in rows)
+
+    # Idempotent on the session, and today's signals are what the hourly job selects.
+    assert catch_up_entries(conn, formation=formed, session=nxt) == ()
+    assert set(due_entries(conn, today=nxt)) == set(emitted)
+    assert due_entries(conn, today=SESSION) == [refused[-1]]
+    # An undecided catch-up expires with its session and is re-emitted on the next.
+    assert len(catch_up_entries(conn, formation=formed, session=date(2026, 10, 19))) == mb.BOOK_SIZE - 1
+    assert catch_up_entries(conn, formation=formed, session=date(2026, 10, 17)) == ()  # Saturday
