@@ -137,6 +137,7 @@ from app.workers.scheduler import (
     JOB_FX_RATES_REFRESH,
     JOB_IBKR_BORROW_ARCHIVE,
     JOB_LIVENESS_WATCHDOG,
+    JOB_MOMENTUM_BOOK,
     JOB_MONITOR_POSITIONS,
     JOB_MONTHLY_REPORT,
     JOB_MORNING_CANDIDATE_REVIEW,
@@ -241,6 +242,7 @@ from app.workers.scheduler import (
     ibkr_borrow_archive,
     jobs_liveness_watchdog,
     jobs_retry_sweeper,
+    momentum_book,
     monitor_positions_job,
     monthly_report,
     morning_candidate_review,
@@ -503,6 +505,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_AI_TRIAL_DECISION_RUN: _adapt_zero_arg(ai_trial_decision_run),
     JOB_AI_TRIAL_EXECUTE: _adapt_zero_arg(ai_trial_execute),
     JOB_AI_TRIAL_FUND_DECISION_RUN: _adapt_zero_arg(ai_trial_fund_decision_run),
+    JOB_MOMENTUM_BOOK: _adapt_zero_arg(momentum_book),
     JOB_RANKING_POT_EXECUTE: _adapt_zero_arg(ranking_pot_execute),
     JOB_RANKING_POT_REBALANCE: _adapt_zero_arg(ranking_pot_rebalance),
     JOB_RANKING_POT_STEP: _adapt_zero_arg(ranking_pot_step),
@@ -993,6 +996,7 @@ def execution_lane_for(job_name: str) -> str:
         JOB_AI_TRIAL_DECISION_RUN,
         JOB_AI_TRIAL_EXECUTE,
         JOB_AI_TRIAL_FUND_DECISION_RUN,
+        JOB_MOMENTUM_BOOK,
         JOB_RANKING_POT_EXECUTE,
     ):
         # #3471 — the AI trial's jobs are paper-lifecycle work and join its reserved lane

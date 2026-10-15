@@ -2756,6 +2756,7 @@ class TestReservedLaneSchedulerExecutors:
             JOB_AI_TRIAL_EXECUTE,
             JOB_AI_TRIAL_FUND_DECISION_RUN,
             JOB_CORE_CANDIDATE_QUOTE_REFRESH,
+            JOB_MOMENTUM_BOOK,
             JOB_QUOTES_REFRESH,
             JOB_RANKING_POT_EXECUTE,
             JOB_STRATEGY_HALT_FEED_REFRESH,
@@ -2774,6 +2775,11 @@ class TestReservedLaneSchedulerExecutors:
                 JOB_AI_TRIAL_FUND_DECISION_RUN,
                 # #2842 — the ranking pot's entries, the same submission path under the allocator lock.
                 JOB_RANKING_POT_EXECUTE,
+                # #3822 — the momentum book's exits and entries, the same path under the allocator lock.
+                # Reviewed against PERMITS (unchanged at 1) and the connection budget (unchanged: membership
+                # costs a dispatch thread, not a permit). Its ~30 formation-day entries hold the lane for a
+                # few minutes once a month, delaying the 5-minute paper cycle as the pot's entries do.
+                JOB_MOMENTUM_BOOK,
             },
             runtime.EXECUTION_LANE_QUOTE: {
                 JOB_QUOTES_REFRESH,
