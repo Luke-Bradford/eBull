@@ -13,6 +13,8 @@ docs/specs/metrics/2026-10-14-3616-slice3d1-consideration-basis.md ("Considerati
   ``effective_tax_matching`` selects exactly the snapshot of the current inputs, with no fallback.
 - Each security's tax character (slice 3d-3a, ``app/services/tax_character.py``) is decided before identification: a
   security that is not established as a share is withheld. ``refresh_cover_instances`` fetches the covers it reads.
+- ``fund_status`` and ``identify_fund`` are slice 3d-3c-3's rules for a non-reporting fund (relevant securities),
+  pure and not yet wired into a run.
 
 Nothing here is shown to the operator: the tax-year view is slice 3d-4's.
 """
@@ -24,7 +26,7 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Context, Decimal, Inexact, Rounded, localcontext
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
@@ -55,6 +57,13 @@ from app.services.tax_character import (
     select_covers,
     structurally_sound,
 )
+from app.services.tax_fund_determination import (
+    Decision,
+    Determination,
+    ReportingStatus,
+    RunState,
+    reporting_status,
+)
 from app.services.tax_ledger import MatchingRule
 
 #: The frozen local policy (spec "Local policy"); changing any part of it is a new id.
@@ -66,6 +75,8 @@ CONSIDERATION_CLASS_POLICY_ID = "consideration_classes_v2"
 SUPPORTED_EVIDENCE_POLICY_ID = "broker_evidence_v3"
 #: The version of the canonical inputs document (Design 9); v3 adds each subject's A8 inputs.
 INPUTS_VERSION = "matching_inputs_v3"
+#: v3 plus each fund's Design 1 status (slice 3d-3c-3 Design 6); the version once the fund rules are wired.
+FUND_INPUTS_VERSION = "matching_inputs_v4"
 #: Session advisory lock held for a whole run (Design 10): int.from_bytes(b"taxmatch", "big").
 TAX_MATCHING_LOCK_KEY = 8386116392322360168
 
@@ -631,7 +642,429 @@ def _with_reason(ident: Identification, reason: str) -> Identification:
     )
 
 
-# --- one generation (Designs 2-4) ---------------------------------------------------------------------------------
+# --- non-reporting funds (slice 3d-3c-3) --------------------------------------------------------------------------
+#
+# Spec: docs/specs/metrics/2026-10-15-3616-slice3d3c3-fund-disposals.md. Pure: ``fund_status`` is Design 1's status
+# rule, ``identify_fund`` Designs 2-4 for one security whose status is ``non_reporting_assumed``, and
+# ``fund_digest_entry`` its ``matching_inputs_v4`` entry (Design 6). Nothing calls them yet: the storage
+# (``sql/494``), the policy ids and the run wiring are the build's second part.
+
+#: Carried by every row of a non-reporting fund (Design 4), with ``HISTORY_COVERAGE_UNESTABLISHED``.
+NON_REPORTING_STATUS_ASSUMED = "non_reporting_status_assumed"
+#: A disposal with an acquisition later on its own UK date, where F2's reading of the period could matter.
+THIRTY_DAY_PERIOD_ASSUMED = "thirty_day_period_assumed"
+#: Determinations whose fund-level exceptions (regs 28, 31A-31C) the spec reviewed (F7); no other fund is computed.
+EXCEPTIONS_REVIEWED = frozenset({"fund_determination_v1:0000884394:1"})
+#: Rights acquired before this date are protected (regs 30 and 43): such a security is refused.
+OFFSHORE_FUNDS_COMMENCEMENT = date(2009, 12, 1)
+
+FundStatusCode = ReportingStatus | Literal["exceptions_unreviewed"]
+FundRefusalReason = Literal[
+    "time_order_unestablished", "close_fragments_unestablished", "pre_2009_rights", "identification_incomplete"
+]
+GainCharacter = Literal["capital_loss", "nil", "offshore_income_gain", "oig_or_capital_unresolved"]
+_STATUS_REASON_CODES = frozenset({"list_match", "search_unavailable"})
+
+
+@dataclass(frozen=True)
+class FundInputs:
+    """What Design 1 reads for one type-6 security, in the matching run's snapshot."""
+
+    #: The newest determination run visible in the snapshot; None with no run.
+    run: RunState | None
+    #: That run's observation of the security; None when it has none.
+    observed: Decision | None
+    #: The observation's determination body and its file hash; None without a determination.
+    determination: Determination | None
+    file_sha256: str | None
+    #: The fund observation's reporting-fund list search.
+    search_outcome: str | None
+
+
+@dataclass(frozen=True)
+class FundStatus:
+    """Design 1's result. A failing status carries only its code, structured reason and (``outside_interval`` only)
+    date; ``non_reporting_assumed`` carries the determination, its transparency and the assumptions it rests on."""
+
+    status: FundStatusCode
+    reason: str | None = None
+    status_date: date | None = None
+    determination_id: str | None = None
+    file_sha256: str | None = None
+    transparent_fund: str | None = None
+    transparent_basis: str | None = None
+    assumptions: tuple[str, ...] | None = None
+
+
+def fund_status(fund: FundInputs, lot_dates: Iterable[date], as_of: datetime) -> FundStatus:
+    """Design 1: ``reporting_status`` over the newest run, evaluated at ``as_of``.
+
+    1. ``no_run``, ``run_failed`` and ``not_observed`` do not depend on the date and are returned without one.
+    2. Otherwise it is evaluated at each distinct lot date, ascending, then at the holding date (the run's cutoff as a
+       UTC date); the first other result is the status, dated only when it is ``outside_interval``.
+    3. A determination not in ``EXCEPTIONS_REVIEWED`` is ``exceptions_unreviewed``.
+    4. Otherwise ``non_reporting_assumed``, with the sorted union of every result's assumptions.
+    """
+    first = reporting_status(fund.run, fund.observed, fund.determination, fund.search_outcome, date.min, as_of)
+    if first.status in ("no_run", "run_failed", "not_observed"):
+        return FundStatus(first.status)
+    if fund.run is None or fund.run.cutoff is None or fund.observed is None:
+        raise RuntimeError(f"reporting_status returned {first.status} without a succeeded run and an observation")
+    dates = [*sorted(set(lot_dates)), fund.run.cutoff.astimezone(UTC).date()]
+    assumptions: set[str] = set()
+    for d in dates:
+        result = reporting_status(fund.run, fund.observed, fund.determination, fund.search_outcome, d, as_of)
+        if result.status != "non_reporting_assumed":
+            return FundStatus(
+                result.status,
+                result.reason if result.reason in _STATUS_REASON_CODES else None,
+                d if result.status == "outside_interval" else None,
+            )
+        assumptions |= set(result.assumptions)
+    determination_id = fund.observed.determination_id
+    if determination_id not in EXCEPTIONS_REVIEWED:
+        return FundStatus("exceptions_unreviewed")
+    if fund.determination is None or fund.file_sha256 is None:
+        raise RuntimeError(f"determination {determination_id} without its body or file hash")
+    (finding,) = [f for f in fund.determination["findings"] if f["question"] == "transparent_fund"]
+    return FundStatus(
+        "non_reporting_assumed",
+        determination_id=determination_id,
+        file_sha256=fund.file_sha256,
+        transparent_fund=finding["answer"],
+        transparent_basis=finding["basis"],
+        assumptions=tuple(sorted(assumptions)),
+    )
+
+
+def fund_digest_entry(status: FundStatus) -> list[Any]:
+    """``[status_code, status_reason_code, status_date, determination_id, file_sha256, transparent_fund,
+    transparent_basis, assumptions]`` (Design 6): structured codes only, so an equivalent determination run with the
+    same results gives the same entry."""
+    return [
+        status.status,
+        status.reason,
+        None if status.status_date is None else status.status_date.isoformat(),
+        status.determination_id,
+        status.file_sha256,
+        status.transparent_fund,
+        status.transparent_basis,
+        None if status.assumptions is None else list(status.assumptions),
+    ]
+
+
+def gain_character(
+    computed_gain: Decimal, transparent_fund: str
+) -> tuple[GainCharacter, Decimal, Decimal | None, Decimal | None]:
+    """Design 3: ``(gain_character, basic_gain, offshore_income_gain, chargeable_gain)`` for one disposal. A loss is
+    capital whatever the fund's transparency (reg 42 floors the basic gain at nil); only an opaque fund's gain is an
+    offshore income gain (reg 38), whose chargeable gain is nil (reg 45); otherwise the split is unresolved."""
+    if computed_gain < 0:
+        return "capital_loss", _ZERO, _ZERO, computed_gain
+    if computed_gain == 0:
+        return "nil", _ZERO, _ZERO, _ZERO
+    if transparent_fund == "opaque":
+        return "offshore_income_gain", computed_gain, computed_gain, _ZERO
+    return "oig_or_capital_unresolved", computed_gain, None, None
+
+
+@dataclass(frozen=True)
+class FundLot:
+    lot_key: str
+    direction: Direction
+    #: The order that opened the position (3c's subject): two closes of one order may be fragments of one bargain.
+    subject: str
+    executed_at: datetime
+    uk_date: date
+    tax_year: str
+    units: Decimal
+    amount_gbp: Decimal | None
+    reasons: frozenset[str]
+
+
+@dataclass(frozen=True)
+class FundIdentification:
+    rule: Literal["thirty_day", "lifo"]
+    acquisition_lot_key: str
+    acquisition_executed_at: datetime
+    acquisition_uk_date: date
+    units: Decimal
+    #: None iff ``missing_lot_keys`` (then the acquisition's key) is non-empty.
+    cost_gbp: Decimal | None
+    missing_lot_keys: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FundDisposal:
+    #: Identification order, from 1.
+    seq: int
+    lot_key: str
+    executed_at: datetime
+    uk_date: date
+    tax_year: str
+    units: Decimal
+    proceeds_gbp: Decimal | None
+    cost_gbp: Decimal | None
+    computed_gain_gbp: Decimal | None
+    basic_gain_gbp: Decimal | None
+    offshore_income_gain_gbp: Decimal | None
+    chargeable_gain_gbp: Decimal | None
+    status: Literal["computed", "amount_missing"]
+    gain_character: GainCharacter | None
+    missing_lot_keys: tuple[str, ...]
+    reasons: tuple[str, ...]
+    identifications: tuple[FundIdentification, ...]
+
+
+@dataclass(frozen=True)
+class FundBalance:
+    lot_key: str
+    units_left: Decimal
+    #: None iff ``missing_lot_keys`` (then the acquisition's key) is non-empty.
+    cost_left_gbp: Decimal | None
+    missing_lot_keys: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FundIdentified:
+    disposals: tuple[FundDisposal, ...]
+    balances: tuple[FundBalance, ...]
+    #: The holding: the balances' totals (``pool`` holds them, as the security row's five pool columns).
+    pool: Pool
+
+
+@dataclass(frozen=True)
+class FundRefused:
+    """A Design 2 refusal: the security is withheld with this reason."""
+
+    reason: FundRefusalReason
+    detail: str
+
+
+def identify_fund(
+    lots: Sequence[FundLot], history_fetch_started_at: datetime | None, transparent_fund: str
+) -> FundIdentified | FundRefused:
+    """Identify one non-reporting fund's admitted lots as relevant securities (TCGA 1992 s106A(4)-(6); Design 2), then
+    compute each disposal's gain and character (Design 3) and every row's reasons (Design 4).
+
+    No same-day rule and no s104 pool (s104(3)): each disposal lot is its own disposal, taken in ``(uk_date,
+    executed_at, lot_key)`` order, first against acquisitions on UK dates ``d+1 .. d+30``, earliest first (F2), then
+    against acquisitions before its instant, latest first. Arithmetic is exact as in ``identify_security``; the
+    invariants and column capacities are checked before returning, raising on a failure.
+    """
+    with localcontext() as ctx:
+        ctx.prec = 60
+        ctx.traps[Inexact] = True
+        ctx.traps[Rounded] = True
+        return _identify_fund(lots, history_fetch_started_at, transparent_fund)
+
+
+def _identify_fund(
+    lots: Sequence[FundLot], history_fetch_started_at: datetime | None, transparent_fund: str
+) -> FundIdentified | FundRefused:
+    instants = sorted(x.executed_at for x in lots)
+    shared = next((a for a, b in zip(instants, instants[1:], strict=False) if a == b), None)
+    if shared is not None:
+        return FundRefused("time_order_unestablished", f"two lots at {shared.isoformat()}")
+    closes = sorted(x.subject for x in lots if x.direction == "disposal")
+    fragment = next((a for a, b in zip(closes, closes[1:], strict=False) if a == b), None)
+    if fragment is not None:
+        return FundRefused("close_fragments_unestablished", f"two disposal lots of {fragment}")
+    acqs = sorted((x for x in lots if x.direction == "acquisition"), key=lambda x: (x.executed_at, x.lot_key))
+    early = next((a for a in acqs if a.uk_date < OFFSHORE_FUNDS_COMMENCEMENT), None)
+    if early is not None:
+        return FundRefused("pre_2009_rights", f"{early.lot_key} acquired {early.uk_date.isoformat()}")
+    disps = sorted((x for x in lots if x.direction == "disposal"), key=lambda x: (x.uk_date, x.executed_at, x.lot_key))
+
+    units_left = {a.lot_key: a.units for a in acqs}
+    cost_left: dict[str, Decimal | None] = {a.lot_key: a.amount_gbp for a in acqs}
+    taken: dict[str, list[FundIdentification]] = {d.lot_key: [] for d in disps}
+    for d in disps:
+        need = d.units
+        last_day = d.uk_date + timedelta(days=30)
+        thirty_day = [a for a in acqs if d.uk_date < a.uk_date <= last_day]
+        lifo = [a for a in reversed(acqs) if a.executed_at < d.executed_at]
+        for rule, pool in (("thirty_day", thirty_day), ("lifo", lifo)):
+            for a in pool:
+                if need == 0:
+                    break
+                if units_left[a.lot_key] == 0:
+                    continue
+                units = min(need, units_left[a.lot_key])
+                left = cost_left[a.lot_key]
+                if left is None:
+                    cost = None
+                elif units == units_left[a.lot_key]:
+                    cost = left
+                else:
+                    cost = apportion(units, left, units_left[a.lot_key])
+                units_left[a.lot_key] -= units
+                cost_left[a.lot_key] = None if left is None or cost is None else left - cost
+                need -= units
+                taken[d.lot_key].append(
+                    FundIdentification(
+                        cast(Literal["thirty_day", "lifo"], rule),
+                        a.lot_key,
+                        a.executed_at,
+                        a.uk_date,
+                        units,
+                        cost,
+                        () if cost is not None else (a.lot_key,),
+                        (),
+                    )
+                )
+        if need != 0:
+            return FundRefused("identification_incomplete", f"{d.lot_key} leaves {need} units")
+
+    # Design 4: reasons carried from a disposal onwards, in identification order.
+    acq_reasons = {a.lot_key: a.reasons for a in acqs}
+    base = {HISTORY_COVERAGE_UNESTABLISHED, NON_REPORTING_STATUS_ASSUMED}
+    carried: set[str] = set()
+    open_since: date | None = None
+    disposals: list[FundDisposal] = []
+    for seq, d in enumerate(disps, start=1):
+        if history_fetch_started_at is None or history_fetch_started_at < window_elapses_at(d.uk_date):
+            carried.add(WINDOW_OPEN)
+            open_since = d.uk_date if open_since is None else open_since
+        if any(a.uk_date == d.uk_date and a.executed_at > d.executed_at for a in acqs):
+            carried.add(THIRTY_DAY_PERIOD_ASSUMED)
+        idents = tuple(
+            replace(i, reasons=_sorted(base | acq_reasons[i.acquisition_lot_key] | carried)) for i in taken[d.lot_key]
+        )
+        costs = [i.cost_gbp for i in idents]
+        cost = None if any(c is None for c in costs) else sum((c for c in costs if c is not None), _ZERO)
+        missing = {k for i in idents for k in i.missing_lot_keys} | ({d.lot_key} if d.amount_gbp is None else set())
+        if d.amount_gbp is None or cost is None:
+            status: Literal["computed", "amount_missing"] = "amount_missing"
+            gain = basic = oig = chargeable = None
+            character: GainCharacter | None = None
+        else:
+            status, gain = "computed", d.amount_gbp - cost
+            character, basic, oig, chargeable = gain_character(gain, transparent_fund)
+        disposals.append(
+            FundDisposal(
+                seq=seq,
+                lot_key=d.lot_key,
+                executed_at=d.executed_at,
+                uk_date=d.uk_date,
+                tax_year=d.tax_year,
+                units=d.units,
+                proceeds_gbp=d.amount_gbp,
+                cost_gbp=cost,
+                computed_gain_gbp=gain,
+                basic_gain_gbp=basic,
+                offshore_income_gain_gbp=oig,
+                chargeable_gain_gbp=chargeable,
+                status=status,
+                gain_character=character,
+                missing_lot_keys=_sorted(missing),
+                reasons=_sorted(
+                    base | d.reasons | {r for i in idents for r in acq_reasons[i.acquisition_lot_key]} | carried
+                ),
+                identifications=idents,
+            )
+        )
+    balances = tuple(
+        FundBalance(
+            a.lot_key,
+            units_left[a.lot_key],
+            cost_left[a.lot_key],
+            () if cost_left[a.lot_key] is not None else (a.lot_key,),
+            _sorted(base | a.reasons | carried),
+        )
+        for a in acqs
+        if units_left[a.lot_key] > 0
+    )
+    pool_costs = [b.cost_left_gbp for b in balances]
+    pool = Pool(
+        units=sum((b.units_left for b in balances), _ZERO),
+        cost_gbp=None if any(c is None for c in pool_costs) else sum((c for c in pool_costs if c is not None), _ZERO),
+        missing_lot_keys=_sorted(k for b in balances for k in b.missing_lot_keys),
+        reasons=_sorted(base | carried | {r for b in balances for r in b.reasons}),
+        window_open_since=open_since,
+    )
+    out = FundIdentified(tuple(disposals), balances, pool)
+    _check_fund_invariants(lots, out, transparent_fund)
+    return out
+
+
+def _check_fund_invariants(lots: Sequence[FundLot], out: FundIdentified, transparent_fund: str) -> None:
+    """Design 2's invariants and every column capacity; raises on the first failure."""
+    acqs = [x for x in lots if x.direction == "acquisition"]
+    proceeds = {x.lot_key: x.amount_gbp for x in lots if x.direction == "disposal"}
+
+    def require(holds: bool, what: str) -> None:
+        if not holds:
+            raise RuntimeError(f"fund identification invariant: {what}")
+
+    def fit(value: Decimal | None, precision: int, scale: int, what: str) -> None:
+        require(
+            value is None or fits(value, precision, scale), f"{what} {value} does not fit NUMERIC({precision},{scale})"
+        )
+
+    balance = {b.lot_key: b for b in out.balances}
+    for a in acqs:
+        idents = [i for x in out.disposals for i in x.identifications if i.acquisition_lot_key == a.lot_key]
+        b = balance.get(a.lot_key)
+        left_units = _ZERO if b is None else b.units_left
+        require(sum((i.units for i in idents), _ZERO) + left_units == a.units, f"{a.lot_key}: units not conserved")
+        if a.amount_gbp is not None:
+            costs = [i.cost_gbp for i in idents]
+            left_cost = _ZERO if b is None else b.cost_left_gbp
+            require(all(c is not None for c in costs) and left_cost is not None, f"{a.lot_key}: cost undefined")
+            total = sum((c for c in costs if c is not None), _ZERO) + (left_cost or _ZERO)
+            require(total == a.amount_gbp, f"{a.lot_key}: cost not conserved")
+    for x in out.disposals:
+        require(sum((i.units for i in x.identifications), _ZERO) == x.units, f"{x.lot_key}: identified units")
+        for i in x.identifications:
+            if i.rule == "thirty_day":
+                require(x.uk_date < i.acquisition_uk_date <= x.uk_date + timedelta(days=30), f"{x.lot_key}: period")
+            else:
+                require(i.acquisition_executed_at < x.executed_at, f"{x.lot_key}: LIFO acquisition after the disposal")
+            require(i.cost_gbp is None or i.cost_gbp >= 0, f"{x.lot_key}: negative cost")
+            fit(i.units, UNITS_PRECISION, UNITS_SCALE, f"{x.lot_key} identification units")
+            fit(i.cost_gbp, GBP_PRECISION, GBP_SCALE, f"{x.lot_key} identification cost")
+        costs = [i.cost_gbp for i in x.identifications]
+        cost = None if any(c is None for c in costs) else sum((c for c in costs if c is not None), _ZERO)
+        require(x.cost_gbp == cost, f"{x.lot_key}: cost is not its identifications' sum")
+        require(x.proceeds_gbp == proceeds[x.lot_key], f"{x.lot_key}: proceeds are not its lot's amount")
+        if x.proceeds_gbp is None or cost is None:
+            got: tuple[Any, ...] = (x.status, x.computed_gain_gbp, x.gain_character, x.basic_gain_gbp)
+            require(got == ("amount_missing", None, None, None), f"{x.lot_key}: an amount is missing")
+            require(x.offshore_income_gain_gbp is None and x.chargeable_gain_gbp is None, f"{x.lot_key}: split")
+        else:
+            gain = x.proceeds_gbp - cost
+            got = (x.status, x.computed_gain_gbp, x.gain_character, x.basic_gain_gbp, x.offshore_income_gain_gbp)
+            want = ("computed", gain, *gain_character(gain, transparent_fund))
+            require(got + (x.chargeable_gain_gbp,) == want, f"{x.lot_key}: gain and character")
+        fit(x.units, UNITS_PRECISION, UNITS_SCALE, f"{x.lot_key} units")
+        for value in (
+            x.proceeds_gbp,
+            x.cost_gbp,
+            x.computed_gain_gbp,
+            x.basic_gain_gbp,
+            x.offshore_income_gain_gbp,
+            x.chargeable_gain_gbp,
+        ):
+            fit(value, GBP_PRECISION, GBP_SCALE, f"{x.lot_key} sterling")
+    for b in out.balances:
+        require(b.cost_left_gbp is None or b.cost_left_gbp >= 0, f"{b.lot_key}: negative balance cost")
+        fit(b.units_left, UNITS_PRECISION, UNITS_SCALE, f"{b.lot_key} balance units")
+        fit(b.cost_left_gbp, GBP_PRECISION, GBP_SCALE, f"{b.lot_key} balance cost")
+    costs = [b.cost_left_gbp for b in out.balances]
+    require(out.pool.units == sum((b.units_left for b in out.balances), _ZERO), "holding units")
+    require(
+        out.pool.cost_gbp
+        == (None if any(c is None for c in costs) else sum((c for c in costs if c is not None), _ZERO)),
+        "holding cost",
+    )
+    fit(out.pool.units, UNITS_PRECISION, UNITS_SCALE, "holding units")
+    fit(out.pool.cost_gbp, GBP_PRECISION, GBP_SCALE, "holding cost")
+
+
+# --- one generation (Designs 2-4)---------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -758,11 +1191,15 @@ def security_members(inputs: MatchingInputs) -> dict[int, tuple[int, ...]]:
     return out
 
 
-def inputs_document(inputs: MatchingInputs) -> str:
+def inputs_document(inputs: MatchingInputs, funds: Mapping[int, FundStatus] | None = None) -> str:
     """The canonical inputs document (Design 9; 3d-3a Design 4), serialized as 3c's fingerprint. Tuple positions are
-    fixed; only the outer lists are sorted."""
-    document = {
-        "version": INPUTS_VERSION,
+    fixed; only the outer lists are sorted.
+
+    With ``funds`` (each type-6 security that reaches 3d-3c-3's Design 1, with its status) it is ``matching_inputs_v4``
+    (3d-3c-3 Design 6): v3's document plus ``funds``. Without, it is v3, which the deployed ``share_identification_v1``
+    runs key on until the v2 policy ids are wired."""
+    document: dict[str, Any] = {
+        "version": INPUTS_VERSION if funds is None else FUND_INPUTS_VERSION,
         "evidence": sorted([lot.lot_key, lot.fingerprint] for lot in inputs.lots),
         "subjects": sorted(
             [
@@ -779,6 +1216,8 @@ def inputs_document(inputs: MatchingInputs) -> str:
         "instruments": [[p.instrument_id, p.symbol, p.canonical_instrument_id] for p in placements(inputs)],
         "character": [document_entry(key, inputs.characters[key], inputs.as_of) for key in sorted(inputs.characters)],
     }
+    if funds is not None:
+        document["funds"] = [[key, fund_digest_entry(funds[key])] for key in sorted(funds)]
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
