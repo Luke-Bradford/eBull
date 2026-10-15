@@ -12792,3 +12792,17 @@ neighbouring container and match it.**
 - Failure (review on #3831, 2026-10-15): the momentum scorecard's badge used `book >= spy`, so an exact tie read "Ahead of SPY".
 - Prevention: compare with strict `>` and `<`, and give a tie its own neutral badge. Null inputs render no badge.
 - Enforced in: `.claude/skills/frontend/operator-ui-conventions.md` ("Status pill vocabulary"). The edit is posted on #2403, because `.claude/**` is write-refused from the loop worktree.
+
+### A freshness check's reference time must not precede the read it judges (#3822)
+
+- Failure (live fire, 2026-10-15 16:10Z): the momentum executor read its clock, then made the account-risk,
+  eligibility and what-if calls (~8 s), then checked the what-if `lastUpdated` with `_age_ok`, whose upper bound is
+  `now + 5 s`. eToro sets `lastUpdated` to the server time of the call, so every liquid name's fresh cost read as
+  "in the future" and 16 of 30 entries were refused `costs_stale_or_mismatched`, terminally.
+- Prevention: judge a broker-returned timestamp against a clock read taken when the response arrives. Before
+  reasoning about a refusal labelled "stale", check which bound failed; a `stale_or_mismatched` code hides three causes.
+- Enforced in: `app/services/momentum_book_executor.py` (`clock()` at the cost check),
+  `tests/test_momentum_book_executor_db.py::test_costs_are_judged_when_they_arrive_not_when_evaluation_began`.
+  The same defect in the paper, trial and pot executors is #3834. Skill text for
+  `.claude/skills/execution-guard/SKILL.md` ("Invariants") is posted on #2403, because `.claude/**` is write-refused
+  from the loop worktree.
