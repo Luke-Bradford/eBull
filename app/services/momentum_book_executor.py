@@ -14,6 +14,12 @@ ends is never selected again; the next month's formation re-emits a name still i
 Broker costs are judged at the moment they are received, not at the start of the evaluation: eToro's what-if
 ``lastUpdated`` is the server time of the call, and the risk, eligibility and what-if reads before it take about 8
 seconds, beyond the 5-second future-skew bound of ``_age_ok`` (#3822, 2026-10-15 16:10Z fire).
+
+A name whose stored quote is too old is priced from its latest OneMinute candle instead (#3833): eToro's rates
+endpoint serves some US equities a quote 1–2 hours late while their candles stay real-time. The candle is read only
+for such a name, the broker's live what-if spread replaces the delayed quote's spread flag, and the preflight records
+``price_reference = 'candle_close'``. A candle that cannot be read, or is itself too old, leaves the ``quote_stale``
+deferral in place.
 """
 
 from __future__ import annotations
@@ -28,7 +34,9 @@ import psycopg
 from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerAccountRiskSnapshot, BrokerProvider, BrokerWhatIfOrder
+from app.providers.market_data import IntradayBar
 from app.services import momentum_book as mb
+from app.services.market_data import DEFAULT_MAX_SPREAD_PCT
 from app.services.momentum_book_intent import MomentumIntent, load_intent
 from app.services.strategy_control_plane import (
     create_strategy_trade,
@@ -58,6 +66,8 @@ logger = logging.getLogger(__name__)
 Conn = psycopg.Connection[Any]
 
 ALLOCATED_REASON: Final = "all_momentum_entry_gates_passed"
+#: An instrument's latest OneMinute candle, or None when eToro returns none.
+LatestBar = Callable[[int], IntradayBar | None]
 
 
 def _commit_authority(
@@ -104,8 +114,8 @@ def _commit_authority(
             eligibility_checked_at, costs_at, broker_available_cash,
             account_equity, account_invested, instrument_invested,
             account_drawdown_pct, allocated_amount, stressed_cost_amount, cost_basis,
-            stop_loss_rate, take_profit_rate
-        ) VALUES (%s, %s, %s, 'allocated', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            stop_loss_rate, take_profit_rate, price_reference
+        ) VALUES (%s, %s, %s, 'allocated', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             intent.signal_id,
@@ -129,7 +139,14 @@ def _commit_authority(
             cost_basis,
             intent.stop_rate,
             intent.take_rate,
+            intent.price_reference,
         ),
+    )
+    priced_from = (
+        f"; levels priced from the {intent.quote_at:%H:%M}Z OneMinute candle close because eToro's quote for this "
+        "name is delayed (#3833)"
+        if intent.price_reference == "candle_close"
+        else ""
     )
     write_entry_ticket(
         conn,
@@ -143,7 +160,7 @@ def _commit_authority(
             why_now=(
                 f"rank {intent.rank} of {mb.BOOK_SIZE} by risk-adjusted 12-1 momentum in the "
                 f"{intent.formation_month:%Y-%m} formation (#3822); evidence "
-                "docs/research/2026-10-15-3822-momentum-evidence.md"
+                f"docs/research/2026-10-15-3822-momentum-evidence.md{priced_from}"
             ),
             exit_rule=protective_exit_rule(
                 intent.stop_rate, intent.take_rate, then="sold at the first monthly formation that drops it"
@@ -155,11 +172,27 @@ def _commit_authority(
     return trade_id, order_id, request_id
 
 
+def _reference_bar(latest_bar: LatestBar, instrument_id: int) -> tuple[datetime, Decimal] | None:
+    try:
+        bar = latest_bar(instrument_id)
+    except Exception:
+        logger.warning("momentum book: latest candle for instrument %s unavailable", instrument_id, exc_info=True)
+        return None
+    return None if bar is None else (bar.timestamp, bar.close)
+
+
 def _execute_locked(
-    conn: Conn, *, broker: BrokerProvider, signal_id: int, clock: Callable[[], datetime]
+    conn: Conn,
+    *,
+    broker: BrokerProvider,
+    signal_id: int,
+    clock: Callable[[], datetime],
+    latest_bar: LatestBar | None,
 ) -> PaperExecutionResult:
     now = clock()
-    owner = conn.execute("SELECT strategy_id FROM strategy_signals WHERE signal_id = %s", (signal_id,)).fetchone()
+    owner = conn.execute(
+        "SELECT strategy_id, instrument_id FROM strategy_signals WHERE signal_id = %s", (signal_id,)
+    ).fetchone()
     conn.commit()
     # Raised, never persisted, and checked before any stored result is returned: a refusal written for another
     # strategy's signal would pre-empt the path that owns it, and its stored result is not this executor's to report.
@@ -179,6 +212,13 @@ def _execute_locked(
 
     intent, reason, halt_evaluated = load_intent(conn, signal_id=signal_id, now=now)
     conn.commit()
+    if reason == "quote_stale" and latest_bar is not None:
+        bar = _reference_bar(latest_bar, int(owner[1]))
+        if bar is not None:
+            # Re-read: the candle request can cross a minute boundary, and its bar would then open "in the future".
+            now = clock()
+            intent, reason, halt_evaluated = load_intent(conn, signal_id=signal_id, now=now, reference_bar=bar)
+            conn.commit()
     if intent is None:
         return _refuse_paper_entry(
             conn,
@@ -223,6 +263,19 @@ def _execute_locked(
     if isinstance(priced, str):
         return _refuse_paper_entry(conn, signal_id=signal_id, reason_code=priced, now=now, intent=intent, risk=risk)
     stressed_cost, cost_basis = priced
+    # A candle carries no bid or ask, so the stored quote's spread flag is as delayed as its price. The what-if cost
+    # is the live spread: for an unleveraged long its only component is ``marketSpread``, whose value per ticket
+    # matched the quoted spread at a median 0.995x (#2598, ``_component_amount``). Same 1% bound as the flag.
+    # ``_stressed_cost`` returns ``total * cost_stress_multiplier``, so dividing restores the broker's total. The total
+    # is every component, not ``marketSpread`` alone: any other component is also a cost of the entry, so the bound
+    # can only be stricter than a spread-only one, which is the fail-closed direction.
+    if (
+        intent.price_reference == "candle_close"
+        and stressed_cost / intent.cost_stress_multiplier / amount * 100 > DEFAULT_MAX_SPREAD_PCT
+    ):
+        return _refuse_paper_entry(
+            conn, signal_id=signal_id, reason_code="live_spread_wide", now=now, intent=intent, risk=risk
+        )
 
     # The durable authority, committed before any broker write; decide_funding re-checks the deployment cap.
     with conn.transaction():
@@ -258,17 +311,26 @@ def execute_momentum_signal(
     broker: BrokerProvider,
     signal_id: int,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    latest_bar: LatestBar | None = None,
 ) -> PaperExecutionResult:
     """Evaluate one entry and, only if every gate passes, submit it to demo. Serialised with the paper, trial and pot
-    paths under the same allocator lock. ``clock`` is read at the start and again when the broker costs arrive."""
+    paths under the same allocator lock. ``clock`` is read at the start and again when the broker costs arrive.
+    ``latest_bar`` returns an instrument's latest OneMinute candle; without it a delayed quote defers (#3833)."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPaperExecutionError("momentum-book execution requires an idle connection")
     with _allocator_lock(conn):
-        return _execute_locked(conn, broker=broker, signal_id=signal_id, clock=lambda: clock().astimezone(UTC))
+        return _execute_locked(
+            conn,
+            broker=broker,
+            signal_id=signal_id,
+            clock=lambda: clock().astimezone(UTC),
+            latest_bar=latest_bar,
+        )
 
 
 __all__ = [
     "ALLOCATED_REASON",
+    "LatestBar",
     "MomentumIntent",
     "execute_momentum_signal",
     "load_intent",

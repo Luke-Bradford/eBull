@@ -18,6 +18,12 @@ the API endpoint is auth-gated to keep external quota traceable.
 Persisting intraday rows would expand the audit / sync surface
 without analytical value; the no-persistence design is locked at
 epic #585 and reviewed by Codex pre-implementation.
+⚠ One order-path read is NOT a carve-out (#3833): the momentum book
+prices a delayed-quote name from its latest OneMinute bar, and the bar's
+open time and close are written to that entry's
+``strategy_entry_preflights`` row (``quote_at``, ``quote_ask``,
+``price_reference = 'candle_close'``), so the SQL audit trail holds
+every value that drove the order.
 
 ``get_broad_market_snapshot`` is the second narrow exception (#2523). It is a
 two-page, collection-time screening cross-section with no per-row source

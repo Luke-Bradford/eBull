@@ -1,9 +1,9 @@
 """Momentum book (#3822) — the entry intent: authorise one formed entry and price its protective levels.
 
 Read-only: it loads the signal, its formation, the paper deployment and execution policy, the shared pool's
-mandate, the stored quote and the halt feed, and returns either a ``MomentumIntent`` (the shape the shared paper
-helpers size and submit from) or the refusal code. Nothing here touches the broker or writes a row; the executor
-(``momentum_book_executor``) does both.
+mandate, the stored quote (or a caller-supplied candle when that quote is delayed, #3833) and the halt feed, and
+returns either a ``MomentumIntent`` (the shape the shared paper helpers size and submit from) or the refusal code.
+Nothing here touches the broker or writes a row; the executor (``momentum_book_executor``) does both.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ Conn = psycopg.Connection[Any]
 
 _NEW_YORK: Final = ZoneInfo("America/New_York")
 CURRENCY: Final = "USD"
+PriceReference = Literal["quote", "candle_close"]
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,8 @@ class MomentumIntent:
     rank: int
     stop_rate: Decimal
     take_rate: Decimal
+    #: Where ``quote_at`` / ``ask`` came from (sql/497).
+    price_reference: PriceReference = "quote"
 
 
 _INTENT_SQL: Final = f"""
@@ -146,9 +149,14 @@ def _positive(value: object) -> bool:
     return value is not None and _d(value).is_finite() and _d(value) > 0
 
 
-def load_intent(conn: Conn, *, signal_id: int, now: datetime) -> tuple[MomentumIntent | None, str | None, bool]:
+def load_intent(
+    conn: Conn, *, signal_id: int, now: datetime, reference_bar: tuple[datetime, Decimal] | None = None
+) -> tuple[MomentumIntent | None, str | None, bool]:
     """Authorise one entry, or return the refusal code. The bool says the halt SQL ran (same contract as the paper
-    and pot loaders)."""
+    and pot loaders).
+
+    ``reference_bar`` is the instrument's latest OneMinute candle as ``(bar open, close)``. It is used only when the
+    stored quote fails ``max_quote_age_seconds``, and then ``quote_at`` and ``ask`` carry the bar (#3833)."""
     with conn.cursor(row_factory=dict_row) as cur:
         row = cur.execute(_INTENT_SQL, {"signal_id": signal_id}).fetchone()
     if row is None:
@@ -199,14 +207,25 @@ def load_intent(conn: Conn, *, signal_id: int, now: datetime) -> tuple[MomentumI
         if not passed:
             return None, reason, True
     quote_at = cast(datetime, row["quoted_at"])
+    ask = _d(row["ask"])
+    price_reference: PriceReference = "quote"
     halt_feed_at = cast(datetime, row["halt_feed_at"])
-    if not _age_ok(quote_at, now=now, max_seconds=int(row["max_quote_age_seconds"])):
-        return None, "quote_stale", True
+    max_quote_age = int(row["max_quote_age_seconds"])
+    if not _age_ok(quote_at, now=now, max_seconds=max_quote_age):
+        # eToro serves some names a delayed quote while their candles stay real-time (#3833). The bar is held to
+        # the quote's own age bound, measured from its open; the spread gate above stays on the stored quote.
+        if (
+            reference_bar is None
+            or not _positive(reference_bar[1])
+            or not _age_ok(reference_bar[0], now=now, max_seconds=max_quote_age)
+        ):
+            return None, "quote_stale", True
+        quote_at, ask = reference_bar[0], _d(reference_bar[1])
+        price_reference = "candle_close"
     if not _age_ok(halt_feed_at, now=now, max_seconds=int(row["max_halt_feed_age_seconds"])):
         return None, "halt_feed_stale", True
     if not _session_is_open(now):
         return None, "market_session_closed", True
-    ask = _d(row["ask"])
     stop_pct, take_pct = _d(row["stop_loss_pct"]), _d(row["take_profit_pct"])
     stop_rate, take_rate = protective_rates(ask, stop_pct, take_pct)
     return (
@@ -250,10 +269,11 @@ def load_intent(conn: Conn, *, signal_id: int, now: datetime) -> tuple[MomentumI
             rank=int(row["rank"]),
             stop_rate=stop_rate,
             take_rate=take_rate,
+            price_reference=price_reference,
         ),
         None,
         True,
     )
 
 
-__all__ = ["CURRENCY", "MomentumIntent", "load_intent"]
+__all__ = ["CURRENCY", "MomentumIntent", "PriceReference", "load_intent"]

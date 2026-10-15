@@ -7788,11 +7788,27 @@ def momentum_book() -> None:
         return
     api_key, user_key = creds
     with _tracked_job(JOB_MOMENTUM_BOOK) as tracker:
-        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker, connect_job() as conn:
+        with (
+            EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker,
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env="demo") as market,
+            connect_job() as conn,
+        ):
             result = run_momentum_book(
                 conn,
                 broker=broker,
                 refresh_market=_execution_market_refresh(JOB_MOMENTUM_BOOK, creds, due_entries),
+                # #3833: eToro delays some names' quotes; their latest OneMinute candle prices the entry instead.
+                # No raw payload is persisted, by rule. docs/review-prevention-log.md, "Persist error response
+                # body before swallowing HTTP exceptions in providers", reads: "Scope narrowed (#470,
+                # 2026-04-24): the 'raw payload persistence' imperative only applies to sources whose SQL
+                # normalisation is incomplete" and "Further narrowed (#471, 2026-04-24): `etoro` +
+                # `etoro_broker` SQL coverage audit completed and provider-side raw writes dropped". The same
+                # holds for `get_quotes`, which prices every
+                # strategy order. The fields that price this order (bar open, close) land in
+                # strategy_entry_preflights (quote_at, quote_ask, price_reference = 'candle_close'; sql/497).
+                latest_bar=lambda instrument_id: next(
+                    iter(reversed(market.get_intraday_candles(instrument_id, "OneMinute", 1))), None
+                ),
             )
         tracker.row_count = result.entries
         tracker.note = result.note
