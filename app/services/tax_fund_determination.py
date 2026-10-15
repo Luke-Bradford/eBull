@@ -594,7 +594,8 @@ def _recent_rows(body: Any, cik: str) -> list[tuple[Any, Any, Any]] | None:
     cols = (recent.get("form"), recent.get("filingDate"), recent.get("accessionNumber"))
     if not all(isinstance(c, list) for c in cols) or len({len(c) for c in cols if isinstance(c, list)}) != 1:
         return None
-    return list(zip(*cols, strict=True))  # type: ignore[arg-type]
+    forms, dates, accessions = cast(tuple[list[Any], list[Any], list[Any]], cols)
+    return list(zip(forms, dates, accessions, strict=True))
 
 
 def _well_formed(form: Any, filed: Any, acc: Any, fetched_on: date) -> bool:

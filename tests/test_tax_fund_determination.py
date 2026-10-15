@@ -437,6 +437,16 @@ def test_document_text() -> None:
         document_text(b"\xff")
 
 
+@pytest.mark.parametrize(
+    "markup",
+    [b"<!", b"<![CDATA[", b"<![if IE]>", b"<![endif]>", b"<!DOCTYPE", b"<!--", b"<?", b"</", b"<a b='", b"&#99999999;",
+     b"&#x110000;", b"<!-- -- -->", b"<a\x00>", b"<<<<>>>", b"</a b c>", b"<![ x"],
+)  # fmt: skip
+def test_malformed_markup_reduces_without_raising(markup: bytes) -> None:
+    """``html.parser`` on Python 3.14 recovers from malformed markup; only invalid UTF-8 raises (review round 2)."""
+    assert isinstance(document_text(markup), str)
+
+
 def test_xml_hash_binds_attributes() -> None:
     url = _BASE_URL + "primary_doc.xml"
     a = b'<edgarSubmission><reportEndingPeriod>2025-12-31</reportEndingPeriod><x fundsTickerSymbol="SPY"/>'
