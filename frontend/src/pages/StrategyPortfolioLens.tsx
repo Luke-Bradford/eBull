@@ -24,6 +24,7 @@ import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { EmptyState } from "@/components/states/EmptyState";
 import { AiTrialPanel } from "@/components/strategies/AiTrialPanel";
 import { EngineBookRiskPanel } from "@/components/strategies/EngineBookRiskPanel";
+import { MomentumScorecardPanel } from "@/components/strategies/MomentumScorecardPanel";
 import { RankingPotPanel } from "@/components/strategies/RankingPotPanel";
 import { RankingPotV2Panel } from "@/components/strategies/RankingPotV2Panel";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
@@ -545,6 +546,9 @@ export function StrategyPortfolioLens() {
           ))}
         </ul>
       </section>
+
+      {/* #3822: the live strategy's rule against SPY and random baskets. */}
+      <MomentumScorecardPanel />
 
       {/* #3543: the whole engine book's daily risk vs its mandate. */}
       <EngineBookRiskPanel />
