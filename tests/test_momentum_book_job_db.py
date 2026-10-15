@@ -7,6 +7,7 @@ import pytest
 
 from app.services import momentum_book as mb
 from app.services.momentum_book_job import form_book, formation_month_for
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_control_plane import configure_deployment, create_strategy_trade, decide_funding
 
 SESSION = date(2026, 10, 15)  # a Thursday
@@ -24,7 +25,7 @@ def _month_ends() -> list[date]:
     return out
 
 
-def _seed(conn: psycopg.Connection[Any]) -> None:
+def _seed(conn: psycopg.Connection[Any], *, held: bool = True) -> None:
     conn.execute(
         "INSERT INTO etoro_instrument_types (instrument_type_id, description) VALUES (5, 'Stocks') "
         "ON CONFLICT DO NOTHING"
@@ -52,6 +53,14 @@ def _seed(conn: psycopg.Connection[Any]) -> None:
             "INSERT INTO price_daily (instrument_id, price_date, close, volume) VALUES (%s, %s, %s, 1000000)",
             (iid, date(2026, 10, 14), price),
         )
+        conn.execute(
+            "INSERT INTO price_quarantine_coverage (instrument_id, rule_set_version, first_bar, last_bar, "
+            "bars_evaluated, transitions_evaluated) VALUES (%s, %s, %s, %s, 14, 13)",
+            (iid, QUARANTINE_RULE_SET_VERSION, _month_ends()[0], date(2026, 10, 14)),
+        )
+    if not held:
+        conn.commit()
+        return
     # A held momentum position on the weakest name, through the real control-plane writers.
     dep = configure_deployment(
         conn,
@@ -137,3 +146,35 @@ def test_formations_are_insert_only(ebull_test_conn: psycopg.Connection[Any]) ->
     with pytest.raises(psycopg.errors.RaiseException, match="insert only"):
         conn.execute("DELETE FROM momentum_book_formations WHERE formation_id = %s", (formed.formation_id,))
     conn.rollback()
+
+
+@pytest.mark.integration
+def test_a_quarantined_close_is_not_scored(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    weakest = BASE + 0
+    # A fake +900% close on the weakest name's month t-1 bar, quarantined as an unusable return.
+    spike_day = _month_ends()[-2]
+    conn.execute(
+        "UPDATE price_daily SET close = close * 10 WHERE instrument_id = %s AND price_date = %s", (weakest, spike_day)
+    )
+    conn.execute(
+        "INSERT INTO price_bar_quarantine (instrument_id, price_date, rule_set_version, range_usable, return_usable, "
+        "provisional, rules) VALUES (%s, %s, %s, TRUE, FALSE, FALSE, ARRAY['test'])",
+        (weakest, spike_day, QUARANTINE_RULE_SET_VERSION),
+    )
+    conn.commit()
+    formed = form_book(conn, session=SESSION)
+    assert formed is not None
+    assert weakest not in formed.book
+
+
+@pytest.mark.integration
+def test_a_missing_fill_close_defers_the_whole_formation(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    conn = ebull_test_conn
+    _seed(conn, held=False)
+    top = BASE + N_NAMES - 1
+    conn.execute("DELETE FROM price_daily WHERE instrument_id = %s AND price_date >= '2026-10-08'", (top,))
+    conn.commit()
+    assert form_book(conn, session=SESSION) is None
+    assert conn.execute("SELECT count(*) FROM momentum_book_formations").fetchone() == (0,)

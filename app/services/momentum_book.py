@@ -6,8 +6,9 @@ survivorship-free Intrader archive (2014-10..2024-09) this book returned 16.97%/
 
 The rule, fixed before the build:
 
-* **Universe** at formation: tradable US equities with a close of at least ``MIN_CLOSE`` in the formation month, the
-  ``UNIVERSE_SIZE`` largest by average daily dollar volume over the last ``ADV_SESSIONS`` sessions.
+* **Universe** at formation: tradable US equities with a close of at least ``MIN_CLOSE`` in the formation month and
+  the full formation history below, then the ``UNIVERSE_SIZE`` largest by average daily dollar volume over the last
+  ``ADV_SESSIONS`` sessions (the backtest's order).
 * **Signal**: the 11 monthly price returns of months t-11..t-1 (t = the last completed month, which is skipped),
   compounded, divided by their sample standard deviation. A name needs all 12 month-end closes t-12..t-1 and a close
   in month t.
@@ -73,14 +74,17 @@ def target_book(candidates: Iterable[Candidate], t: int) -> tuple[int, ...]:
     """The book formed at the end of month ``t``: ``BOOK_SIZE`` instrument ids, best score first.
 
     Ties break on the lower instrument id, so the result is a function of the inputs alone."""
-    eligible = [c for c in candidates if (c.month_closes.get(t) or 0.0) >= MIN_CLOSE and math.isfinite(c.adv)]
-    universe = sorted(eligible, key=lambda c: (-c.adv, c.instrument_id))[:UNIVERSE_SIZE]
-    scored: list[tuple[float, int]] = []
-    for c in universe:
+    # History first, then the dollar-volume cut: the order the evidence was measured in (#3822, Codex ckpt-2).
+    eligible: list[tuple[float, int, float]] = []
+    for c in candidates:
+        if (c.month_closes.get(t) or 0.0) < MIN_CLOSE or not math.isfinite(c.adv):
+            continue
         returns = formation_returns(c.month_closes, t)
         s = None if returns is None else score(returns)
         if s is not None and math.isfinite(s):
-            scored.append((s, c.instrument_id))
+            eligible.append((c.adv, c.instrument_id, s))
+    universe = sorted(eligible, key=lambda x: (-x[0], x[1]))[:UNIVERSE_SIZE]
+    scored = [(s, iid) for _, iid, s in universe]
     scored.sort(key=lambda x: (-x[0], x[1]))
     return tuple(iid for _, iid in scored[:BOOK_SIZE])
 

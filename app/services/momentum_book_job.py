@@ -23,6 +23,7 @@ from psycopg.types.json import Jsonb
 
 from app.services import momentum_book as mb
 from app.services.market_calendar import us_market_status
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.strategies.validated_universe import US_EQUITY_ASSET_CLASS, resolve_stocks_type_id
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,25 @@ _CANDIDATES_SQL: Final = """
            row_number() OVER (PARTITION BY p.instrument_id ORDER BY p.price_date DESC) AS rn
     FROM price_daily p
     JOIN us USING (instrument_id)
+    -- Fail-closed quarantine, as `price_masked_bars._LOAD_SQL`: only bars inside an evaluated range, and never a
+    -- close the quarantine marks unusable.
+    JOIN price_quarantine_coverage cov
+      ON cov.instrument_id = p.instrument_id
+     AND cov.rule_set_version = %(quarantine_version)s
+     AND p.price_date BETWEEN cov.first_bar AND cov.last_bar
+    LEFT JOIN price_bar_quarantine q
+      ON q.instrument_id = p.instrument_id AND q.price_date = p.price_date
+     AND q.rule_set_version = %(quarantine_version)s
     WHERE p.price_date >= %(start)s AND p.price_date < %(end)s
+      AND p.close IS NOT NULL AND p.close > 0 AND COALESCE(q.return_usable, TRUE)
+"""
+
+# The latest usable close on or before the signal day, per entry name (the signal's fill price).
+_ENTRY_CLOSES_SQL: Final = """
+    SELECT DISTINCT ON (instrument_id) instrument_id, close
+    FROM price_daily
+    WHERE instrument_id = ANY(%s) AND price_date <= %s AND price_date > %s AND close IS NOT NULL AND close > 0
+    ORDER BY instrument_id, price_date DESC
 """
 
 # Open trades the momentum book owns, through the ownership chain (funding decision -> paper deployment).
@@ -80,6 +99,7 @@ def load_candidates(conn: Conn, *, formation_month: date) -> list[mb.Candidate]:
             "type_id": resolve_stocks_type_id(conn),
             "start": start,
             "end": end,
+            "quarantine_version": QUARANTINE_RULE_SET_VERSION,
         },
     ).fetchall()
     closes: dict[int, dict[int, tuple[date, float]]] = defaultdict(dict)
@@ -173,6 +193,20 @@ def form_book(conn: Conn, *, session: date) -> Formation | None:
         if c.instrument_id in book and (r := mb.formation_returns(c.month_closes, t)) is not None
     }
     signal_day = _last_session_before(session)
+    # Every book name's fill price is resolved BEFORE the formation is written: a formation is immutable, so an
+    # entry dropped here would stay dropped for the month (Codex ckpt-2 P1). A missing close forms nothing; the
+    # next fire retries.
+    closes = {
+        int(iid): close
+        for iid, close in conn.execute(
+            _ENTRY_CLOSES_SQL, (list(book), signal_day, signal_day - timedelta(days=7))
+        ).fetchall()
+    }
+    conn.commit()
+    missing = [iid for iid in book if iid not in closes]
+    if missing:
+        logger.warning("momentum book: no close by %s for %s; formation deferred", signal_day, missing)
+        return None
 
     with conn.transaction():
         held = conn.execute(
@@ -200,17 +234,8 @@ def form_book(conn: Conn, *, session: date) -> Formation | None:
         if row is None:  # a concurrent formation won the race
             return _existing(conn, formation_month)
         formation_id = int(row[0])
-        closes = dict(
-            conn.execute(
-                "SELECT instrument_id, close FROM price_daily WHERE price_date = %s AND instrument_id = ANY(%s)",
-                (signal_day, list(plan.entries)),
-            ).fetchall()
-        )
         signal_ids: list[int] = []
         for instrument_id in plan.entries:
-            if instrument_id not in closes:
-                logger.warning("momentum book: no %s close for instrument %s; entry skipped", signal_day, instrument_id)
-                continue
             sid = conn.execute(
                 """
                 INSERT INTO strategy_signals (
