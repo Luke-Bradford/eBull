@@ -74,7 +74,67 @@ panel row cannot fund its own cap, so the clean comparison runs both arms on cov
   earns 0%. This hits 2 of 3,570 held name-months in each covered arm.
 - **Decision:** the book stays uncapped. A theme limit for the live book needs a theme-level grouping, not FF-12.
 
-**Expected, honestly:** a modest and uncertain premium over SPY with lower drawdowns, and long stretches of lagging. The demo book is scored live against SPY and against a random-30 control. A sustained lag stops it.
+## Out of sample, 2024-10..2026-08 (added 2026-10-16)
+
+The backtest stops at 2024-09 because the Intrader archive does. `momentum_oos.py` runs the same rule on the PWB
+`Stocks-Daily-Price@2026-09-09` snapshot for the 23 holding months after it. Its `run()` reproduces the backtest's
+16.97% on Intrader, so the ranking, turnover and cost code match `momentum_backtest.py`; the PWB data path differs as
+listed under "Limits".
+
+- **Universe:** PWB series linked to an instrument the live book could hold today (tradable, canonical, US stock; the
+  `momentum_book_job._CANDIDATES_SQL` predicate). **Survivor-only:** a name delisted before 2026-09 is absent, and the
+  predicate is today's, not each formation's. The live 2026-09 formation's 500-name universe has a PWB series for 498
+  names.
+- **Returns:** total return from `adj_close`. SPY is Yahoo's monthly adjclose (public, no account); its closes match
+  eToro's SPY month-end closes within 0.8% over 24 months. September 2026 is not scored (last PWB bar 2026-09-09).
+
+| 2024-10..2026-08 | cumulative | per year | max DD |
+|---|---|---|---|
+| Book, 0.1% per side | +77.8% | +35.0% | 21.7% |
+| Book, 0.2% per side | +74.6% | +33.8% | 21.7% |
+| SPY | +36.4% | +17.6% | 7.6% |
+| Random 30, same universe (50 seeds) | median +28.0%, range −2.7%..+65.2% | | |
+
+| year | months | book | SPY | random-30 median |
+|---|---|---|---|---|
+| 2024 | 3 | +2.1% | +2.5% | −0.8% |
+| 2025 | 12 | +33.1% | +17.7% | +15.6% |
+| 2026 | 8 | +30.8% | +13.1% | +11.9% |
+
+- **Control:** the book's cumulative return beats all 50 random-30 paths (each re-drawn monthly from the same universe).
+  Both share the survivor-only universe.
+- **Cross-dataset gap:** the same PWB universe over the backtest decade returns 19.88% a year against Intrader's
+  survivorship-free 16.97% (random-30 median: 7.76% against 6.94%). The 2.9-point gap mixes survivorship, universe
+  composition and return construction, so it is not a survivorship estimate and is not subtracted from the result.
+- **Cross-source:** for the six holding months shared with the eToro-close replay posted on #3822 on 2026-10-15
+  (March..August 2026), the two agree within 2.3 points in every month:
+
+  | 2026 | Mar | Apr | May | Jun | Jul | Aug | compounded |
+  |---|---|---|---|---|---|---|---|
+  | PWB, total return | −12.4% | +29.7% | +13.6% | +0.5% | −21.7% | +0.7% | +2.3% |
+  | eToro replay, price | −10.1% | +28.4% | +14.4% | +1.2% | −23.5% | −0.3% | +1.9% |
+
+  The replay's +1.1% total adds September and starts after January and February 2026 (+13.5% and +12.7% here).
+- **Volatility:** the book's months range from −21.7% to +29.7%, and its drawdown is about three times SPY's.
+- **Stop rule** (#2437, 2026-10-16): stop if the stretch lags SPY by more than the backtest's worst lag over a window
+  of the same length. The backtest's worst 23-month lag is 24.8 points (from 2015-08). Out of sample the book leads
+  SPY by 41.4 points. The rule would fire only if the true book returned below +11.6% cumulative (5.9% a year)
+  against the +77.8% measured, so a bias of about 66 points would be needed to reverse it. **Verdict: this
+  survivor-only replay does not trigger the stop rule; the book keeps trading.**
+
+**Limits.**
+- The universe predicate is applied as of today, and series are de-duplicated by full-history bar count.
+- Returns are PWB `adj_close` ratios; the backtest builds them from close, split factor and cash dividends.
+- The $5 filter reads PWB's split-adjusted close, not the as-traded close.
+- PWB bars carry no price quarantine, unlike the live candidate SQL.
+- Two held name-months of 690 have no holding-month return and earn 0%: CDTX (last bar 2026-01-08, held February)
+  and TERN (last bar 2026-05-07, held June). The live rule's 7-day staleness check (#3832) would have excluded both.
+- The stop rule's threshold is the worst of 97 overlapping backtest windows, a sample maximum and not a confidence
+  bound.
+
+**Expected, honestly:** a modest and uncertain premium over SPY, with drawdowns at least as deep as SPY's and long
+stretches of lagging. The demo book is scored live against SPY and against a random-30 control, and the stop rule
+above applies.
 
 ## Live rule
 
