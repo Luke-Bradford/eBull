@@ -11,8 +11,9 @@ Verified URLs (HEAD against www.sec.gov on 2026-05-08):
 - ``submissions.zip``  1.54 GB at /Archives/edgar/daily-index/bulkdata/
 - ``companyfacts.zip`` 1.38 GB at /Archives/edgar/daily-index/xbrl/
 - Form 13F rolling 3-month windows ~90 MB at /files/structureddata/data/form-13f-data-sets/
+  (from the 01jun2026 window: /files/datastandardsinnovation/data/form-13f-data-sets/, #3747)
 - Insider Transactions ~14 MB quarterly at /files/structureddata/data/insider-transactions-data-sets/
-  ``<YYYY>q<N>_form345.zip``
+  ``<YYYY>q<N>_form345.zip`` (from 2026q2: /files/datastandardsinnovation/data/…, #3747)
 - Form N-PORT ~463 MB quarterly at /files/dera/data/form-n-port-data-sets/<YYYY>q<N>_nport.zip
 
 Behaviours:
@@ -71,6 +72,18 @@ SEC_BASE_URL: Final[str] = "https://www.sec.gov"
 #: zero-padded `YYYYqN` with a single-digit quarter — "2005q4" < "2006q1" holds.
 #: A change to the label format breaks the clamp silently.
 INSIDER_DATASET_FIRST_QUARTER: Final[str] = "2006q1"
+
+#: SEC serves the newest insider and 13F data sets from a second path (#3747).
+#: Source rule: the SEC listing pages, read 2026-10-16. The insider page links
+#: 2026q2 and 2026q3 under ``/files/datastandardsinnovation/`` and 2026q1 and
+#: earlier under ``/files/structureddata/``. The 13F page links the
+#: 01jun2026-31aug2026 window under the new path and every earlier window under
+#: the old one. Each path 404s the other's files (HEAD-checked the same day), so
+#: the boundary decides the URL; there is no fallback to try.
+INSIDER_NEW_PATH_FIRST_QUARTER: Final[str] = "2026q2"
+FORM13F_NEW_PATH_FIRST_WINDOW_START: Final[date] = date(2026, 6, 1)
+_SEC_DATA_PATH_OLD: Final[str] = "/files/structureddata/data"
+_SEC_DATA_PATH_NEW: Final[str] = "/files/datastandardsinnovation/data"
 
 
 # Disk + bandwidth budgets. Configurable by env in callers.
@@ -245,6 +258,27 @@ def _form13f_window_for(start_year: int, start_month: int) -> tuple[date, date]:
     return start, end
 
 
+_MONTH_ABBR: Final[tuple[str, ...]] = (
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+)
+
+
+def _form13f_window_start(label: str) -> date:
+    """Return the start date of a ``DDmonYYYY-DDmonYYYY`` 13F window label."""
+    return date(int(label[5:9]), _MONTH_ABBR.index(label[2:5]) + 1, int(label[0:2]))
+
+
 def last_n_13f_periods(n: int, *, today: date | None = None) -> list[str]:
     """Return rolling-3-month period filenames for Form 13F datasets.
 
@@ -258,7 +292,6 @@ def last_n_13f_periods(n: int, *, today: date | None = None) -> list[str]:
     before ``today``.
     """
     today = today or date.today()
-    months = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
     # Walk back through candidate windows newest-first until we have ``n``.
     out: list[str] = []
@@ -271,8 +304,8 @@ def last_n_13f_periods(n: int, *, today: date | None = None) -> list[str]:
             if end_d >= today:
                 continue  # Window not completed yet.
             label = (
-                f"{start_d.day:02d}{months[start_d.month - 1]}{start_d.year}"
-                f"-{end_d.day:02d}{months[end_d.month - 1]}{end_d.year}"
+                f"{start_d.day:02d}{_MONTH_ABBR[start_d.month - 1]}{start_d.year}"
+                f"-{end_d.day:02d}{_MONTH_ABBR[end_d.month - 1]}{end_d.year}"
             )
             out.append(label)
             if len(out) >= n:
@@ -306,10 +339,15 @@ def build_bulk_archive_inventory(
     # ends, so the newest one is expected-404 immediately after a boundary —
     # mark it optional (#1423) so its absence doesn't fatal the stage.
     for idx, label in enumerate(last_n_13f_periods(n_quarters_13f, today=today)):
+        path = (
+            _SEC_DATA_PATH_NEW
+            if _form13f_window_start(label) >= FORM13F_NEW_PATH_FIRST_WINDOW_START
+            else _SEC_DATA_PATH_OLD
+        )
         archives.append(
             BulkArchive(
                 name=f"form13f_{label}.zip",
-                url=f"{SEC_BASE_URL}/files/structureddata/data/form-13f-data-sets/{label}_form13f.zip",
+                url=f"{SEC_BASE_URL}{path}/form-13f-data-sets/{label}_form13f.zip",
                 optional=(idx == 0),
             )
         )
@@ -321,19 +359,19 @@ def build_bulk_archive_inventory(
     #    Walking past the floor generates permanent, guaranteed 404s, so the span
     #    is clamped rather than trusted to the caller's count.
     # 2. NEWEST IS OPTIONAL. `last_n_quarters` excludes the in-progress quarter,
-    #    but SEC's publication lag exceeds one quarter — on 2026-08-14 the most
-    #    recent completed quarter (2026q2) was still 404 while 2026q1 served.
-    #    `n_quarters_13f` already marks its index 0 optional for exactly this;
-    #    the insider loop did not, so any raise of `n_quarters_insider` made
-    #    every run fail on the current quarter.
+    #    and SEC posts a quarter some days after it closes (2026q3's file is
+    #    Last-Modified 2026-10-07). ⚠ The 2026-08-14 observation that "2026q2 was
+    #    still 404" was the old path, not a publication lag: 2026q2 had moved to
+    #    the new path (#3747). Same lag posture as `n_quarters_13f`'s index 0.
     insider_quarters = [
         q for q in last_n_quarters(n_quarters_insider, today=today) if q >= INSIDER_DATASET_FIRST_QUARTER
     ]
     for idx, q in enumerate(insider_quarters):
+        path = _SEC_DATA_PATH_NEW if q >= INSIDER_NEW_PATH_FIRST_QUARTER else _SEC_DATA_PATH_OLD
         archives.append(
             BulkArchive(
                 name=f"insider_{q}.zip",
-                url=f"{SEC_BASE_URL}/files/structureddata/data/insider-transactions-data-sets/{q}_form345.zip",
+                url=f"{SEC_BASE_URL}{path}/insider-transactions-data-sets/{q}_form345.zip",
                 optional=(idx == 0),
             )
         )

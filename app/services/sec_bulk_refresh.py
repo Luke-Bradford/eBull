@@ -86,10 +86,12 @@ Fail-closed
 -----------
 * SEC 5xx on HEAD or GET → return ``skipped_reason`` (do NOT raise).
   The local file is left untouched; the next fire retries.
-* HEAD has no ``ETag`` header → return ``skipped_reason="head_missing_etag"``.
-  Falling back to size-only compare is intentionally NOT done — SEC's
-  ETag is the contractual freshness signal; without it we have no
-  cheap way to tell stale from current.
+* HEAD has no ``ETag`` header and a local archive exists → return
+  ``skipped_reason="head_missing_etag"``. Falling back to size-only
+  compare is intentionally NOT done — SEC's ETag is the contractual
+  freshness signal; without it we have no cheap way to tell stale from
+  current. With no local archive the transfer proceeds (#3747): there is
+  no stale copy to tell apart, and ``/files/`` never sends an ETag.
 * GET returns non-200 / size mismatch / ZIP corrupt → keep the OLD
   archive on disk and return ``skipped_reason``.
 * Bootstrap is running → ``skipped_reason="bootstrap_running"``.
@@ -424,7 +426,13 @@ async def _refresh_one_async(
             )
 
         remote_etag = head.headers.get("etag")
-        if not remote_etag:
+        # ⚠ SEC's ``/files/`` host (every quarterly data set) sends no ETag at
+        # all; only ``/Archives/`` does (HEAD-checked 2026-10-16). Skipping
+        # there meant the quarterly refresh never fetched a newly published
+        # archive (#3747). With no local copy there is nothing to reuse, so the
+        # settled ETag + SHA-256 reuse rule is not engaged: fetch it. A local copy
+        # with no validator to compare against still skips.
+        if not remote_etag and archive_path.exists():
             logger.warning("sec_bulk_refresh: %s HEAD response has no ETag header", archive.name)
             return RefreshResult(
                 archive_name=archive.name,
@@ -648,7 +656,7 @@ async def _refresh_one_async(
         # forever. Missing GET ETag is tolerated — SEC's CDN does
         # return one in practice (verified 2026-05-22) but absence
         # alone shouldn't poison the path.
-        if get_etag is not None and get_etag != remote_etag:
+        if remote_etag and get_etag is not None and get_etag != remote_etag:
             logger.warning(
                 "sec_bulk_refresh: %s CDN race detected — HEAD etag=%s "
                 "GET etag=%s — discarding partial, retrying next fire",

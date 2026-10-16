@@ -157,12 +157,11 @@ class TestInventory:
         assert fsnds_q[0].optional is True, "boundary FSNDS quarter must be optional"
         for a in fsnds_q[1:]:
             assert a.optional is False, f"{a.name} must stay required"
-        # Insider mirrors the same posture (#2701). SEC's publication lag for the
-        # insider data set exceeds one quarter: measured 2026-08-14, the most
-        # recent COMPLETED quarter (2026q2) was still 404 while 2026q1 served.
-        # `last_n_quarters` already excludes the in-progress quarter, so the
-        # newest entry here is a completed-but-unpublished quarter and must be
-        # optional or every run fails on it.
+        # Insider mirrors the same posture (#2701). `last_n_quarters` excludes the
+        # in-progress quarter, but SEC posts a closed quarter some days later, so
+        # the newest entry can be completed-but-unpublished and must be optional
+        # or every run fails on it. (The 2026-08-14 "2026q2 still 404" reading
+        # was the old URL path, #3747, not a lag.)
         insider = [a for a in inventory if a.name.startswith("insider_")]
         assert insider[0].optional is True, "newest insider quarter must be optional"
         for a in insider[1:]:
@@ -186,6 +185,23 @@ class TestInventory:
         assert any(
             "/files/dera/data/form-n-port-data-sets/" in u and u.endswith("_nport.zip") for u in by_name.values()
         )
+
+    def test_newest_insider_and_13f_sets_use_the_moved_path(self) -> None:
+        """#3747: SEC's listing pages (read 2026-10-16) serve insider 2026q2+ and
+        the 01jun2026 13F window onward from ``/files/datastandardsinnovation/``,
+        everything earlier from ``/files/structureddata/``; each path 404s the
+        other's files. Pinned on the full listing as of that date."""
+        inventory = build_bulk_archive_inventory(today=date(2026, 10, 16))
+        by_name = {a.name: a.url for a in inventory}
+        new = "https://www.sec.gov/files/datastandardsinnovation/data"
+        old = "https://www.sec.gov/files/structureddata/data"
+        assert by_name["insider_2026q3.zip"] == f"{new}/insider-transactions-data-sets/2026q3_form345.zip"
+        assert by_name["insider_2026q2.zip"] == f"{new}/insider-transactions-data-sets/2026q2_form345.zip"
+        assert by_name["insider_2026q1.zip"] == f"{old}/insider-transactions-data-sets/2026q1_form345.zip"
+        assert by_name["insider_2024q4.zip"] == f"{old}/insider-transactions-data-sets/2024q4_form345.zip"
+        assert by_name["form13f_01jun2026-31aug2026.zip"] == f"{new}/form-13f-data-sets/01jun2026-31aug2026_form13f.zip"
+        assert by_name["form13f_01mar2026-31may2026.zip"] == f"{old}/form-13f-data-sets/01mar2026-31may2026_form13f.zip"
+        assert by_name["form13f_01sep2025-30nov2025.zip"] == f"{old}/form-13f-data-sets/01sep2025-30nov2025_form13f.zip"
 
 
 # ---------------------------------------------------------------------------

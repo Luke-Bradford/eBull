@@ -93,14 +93,12 @@ def _make_handler(
         if request.method == "GET":
             if get_status != 200:
                 return httpx.Response(get_status)
-            return httpx.Response(
-                200,
-                content=archive_body,
-                headers={
-                    "Content-Length": str(len(archive_body)),
-                    "ETag": effective_get_etag,
-                },
-            )
+            get_headers = {"Content-Length": str(len(archive_body))}
+            # ``include_etag=False`` models SEC's ``/files/`` host, which sends
+            # no ETag on HEAD or GET (#3747); an explicit ``get_etag`` still wins.
+            if include_etag or get_etag is not None:
+                get_headers["ETag"] = effective_get_etag
+            return httpx.Response(200, content=archive_body, headers=get_headers)
         return httpx.Response(405)
 
     return handler
@@ -419,12 +417,15 @@ class TestRefreshOneAsyncFailClosed:
         assert _read_local_etag(archive_path) == '"old-etag"'
 
     @pytest.mark.asyncio
-    async def test_head_missing_etag_skips(self, tmp_path: Path) -> None:
+    async def test_head_missing_etag_skips_when_local_archive_exists(self, tmp_path: Path) -> None:
         url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
-        body = _zip_bytes()
+        body = _zip_bytes(payload=b'{"new": true}')
         archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        old_body = _zip_bytes(payload=b'{"old": true}')
+        archive_path.write_bytes(old_body)
 
-        # No ETag header → skip with structured reason.
+        # No ETag header and a local copy → no validator to compare: skip.
         handler = _make_handler(archive_url=url, archive_body=body, etag="unused", include_etag=False)
         async with _patched_make_client(httpx.MockTransport(handler)):
             result = await _refresh_one_async(
@@ -435,6 +436,34 @@ class TestRefreshOneAsyncFailClosed:
 
         assert result.etag_changed is False
         assert result.skipped_reason == "head_missing_etag"
+        assert archive_path.read_bytes() == old_body
+
+    @pytest.mark.asyncio
+    async def test_head_missing_etag_downloads_when_no_local_archive(self, tmp_path: Path) -> None:
+        """#3747: SEC's ``/files/`` host sends no ETag, so skipping here meant a
+        newly published quarterly data set never landed. With nothing local
+        to reuse, fetch it and leave it uncertified (no ``.etag`` sidecar)."""
+        url = "https://www.sec.gov/files/datastandardsinnovation/data/insider-transactions-data-sets/2026q3_form345.zip"
+        body = _zip_bytes()
+        archive = BulkArchive(name="insider_2026q3.zip", url=url)
+        archive_path = tmp_path / "insider_2026q3.zip"
+
+        handler = _make_handler(archive_url=url, archive_body=body, etag="unused", include_etag=False)
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        assert result.skipped_reason is None
+        assert result.etag_changed is True
+        assert result.bytes_downloaded == len(body)
+        assert archive_path.read_bytes() == body
+        assert _read_local_etag(archive_path) is None
+        import hashlib
+
+        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(body).hexdigest()
 
     @pytest.mark.asyncio
     async def test_get_500_after_head_ok_preserves_old_archive(self, tmp_path: Path) -> None:
