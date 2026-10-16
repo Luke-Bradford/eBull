@@ -132,6 +132,68 @@ listed under "Limits".
 - The stop rule's threshold is the worst of 97 overlapping backtest windows, a sample maximum and not a confidence
   bound.
 
+## Tournament: three challengers, none adopted (added 2026-10-16)
+
+#2437 item 2 asked for three price-only quick tests against the book. A challenger goes to demo only if it beats SPY
+and the book out of sample. `momentum_tournament.py` runs each one through `momentum_oos.run()`: same universe, top
+30 equal weight, monthly, 0.1% per side. Only the ranking changes, and the script reproduces the book's 16.97% and
++77.8% first. Every challenger held 30 names in every formation.
+
+- **52-week high** (George & Hwang 2004): month-end close divided by the highest daily close of the past 12 months,
+  on a split-adjusted price-only level. A missing or filtered month breaks the comparison, so that name is skipped.
+  Ties at the high are broken by the book's signal.
+- **Industry momentum** (Moskowitz & Grinblatt 1999):
+  - **Industry return:** an equal-weighted portfolio of the industry's universe names, rebalanced monthly and
+    compounded over the last 6 months (m-5..m, no skip month). M&G weight by value; no market cap is held for the
+    out-of-sample names.
+  - **Selection:** the top 3 FF-12 industries, each with at least 5 names, supply 30 names by the book's signal.
+  - **Classification:** FF-12 is French's committed `Siccodes12`; M&G's own 20-industry table is not held. SIC is
+    point in time from the #3609 panel in the backtest, which classifies a median 85.8% of universe names. The panel
+    ends at 2024-07, so the 2024-08 formation reuses it. Out of sample, SIC is current (`instrument_sec_profile`,
+    99.6%), which is look-ahead on classification.
+- **Residual momentum** (Blitz, Huij & Martens 2011):
+  - **Model:** 36 monthly excess returns (m-35..m) regressed on market, SMB and HML.
+  - **Score:** the sum of residuals over m-11..m-1, divided by their standard deviation.
+  - **Factors:** French's five-factor monthly file, pinned to snapshot 39 (to 2026-08). Its SMB is the five-factor
+    construction, not the three-factor file's. The latest vintage is used for every month, so factor revisions are
+    not point in time.
+
+| 0.1% per side | backtest 2014-11..2024-09, per year | max DD | 2014-2019 | 2020-2024 | out of sample 2024-10..2026-08, cumulative | max DD | turnover per month |
+|---|---|---|---|---|---|---|---|
+| **Book** | **16.97%** | 22.0% | 8.73% | 26.64% | **+77.8%** | 21.7% | 78% |
+| 52-week high | 5.92% | 21.1% | 1.01% | 11.54% | +9.4% | 19.0% | 160–168% |
+| Industry momentum | 15.25% | 24.0% | 8.48% | 23.10% | +1.5% | 27.1% | 97–111% |
+| Residual momentum | 12.09% | 32.1% | 7.49% | 17.33% | +47.3% | 12.3% | 95–96% |
+| SPY | 13.19% | 23.6% | 11.70% | 14.82% | +36.4% | 7.6% | |
+| Random 30, median of 20 | 6.94% | | | | +29.5% | | |
+
+- **Turnover** is the mean of the sum of absolute weight changes per rebalance, excluding the initial buy. Full
+  replacement is 200%.
+- **Cash-out** is the inherited convention (a held name with no return earns 0%). In the backtest it covers 28, 89,
+  1 and 23 of 3,570 held name-months (book, 52-week high, industry, residual), and in the out-of-sample stretch 2, 5,
+  0 and 2 of 690.
+
+- **None is adopted.** All three trail the book in both windows.
+- **Industry momentum** beats SPY in the backtest (15.25% against 13.19%, 20 of 20 random paths), but out of sample
+  it returns +1.5%, below SPY and every random path.
+  - It is fragile to construction. A first version scored an industry by the mean of its names' compounded 6-month
+    returns. That favours industries holding one or two extreme winners, and it returned +62.3% out of sample (14.99%
+    in the backtest; that version is not in the committed script).
+  - Codex checkpoint 1 flagged that version as unlike M&G's industry portfolio, and the faithful construction above
+    replaced it. Neither version beats the book.
+- **Residual momentum** trails SPY in the backtest (12.09% against 13.19%). Out of sample it beats SPY (+47.3%) with
+  the smallest drawdown of the momentum variants (12.3%), but it trails the book.
+- **52-week high** is a dead end in this form: below the random median in both windows.
+  - Each month, between 0 and 137 universe names close at their 12-month closing high in the backtest (median 17),
+    and between 0 and 56 out of sample (median 28).
+  - The 30th name sits at 0.90–1.00 of its high in the backtest, and 0.96–1.00 out of sample. So the book is mostly
+    "names at their high", rotated almost completely each month.
+  - G&H's evidence is on 6-month holds and decile-wide portfolios, not a monthly top 6%. This test covers only the
+    book's construction.
+- **One configuration each:** apart from the industry-return correction above, each challenger has one configuration
+  fixed before its first run. Variants (industry counts, holding periods, blends) were not searched, so the result is
+  not "the best version of each idea".
+
 **Expected, honestly:** a modest and uncertain premium over SPY, with drawdowns at least as deep as SPY's and long
 stretches of lagging. The demo book is scored live against SPY and against a random-30 control, and the stop rule
 above applies.
