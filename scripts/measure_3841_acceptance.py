@@ -188,6 +188,7 @@ def _report(conn: psycopg.Connection[Any], index_of: Any, per_instrument: Path |
             iid = result.instrument_id
             symbol = symbols.get(iid, str(iid))
             rebuilt = [_comparable(step_row(iid, step, result.stamp, 0)[1:-1]) for step in result.steps]
+            # Both row shapes start at valid_from (``step_row`` minus instrument_id; ``_STORED_STEPS_SQL``'s order).
             differ = set(rebuilt) ^ set(stored.get(iid, []))
             if differ:
                 drift[iid] = min(step[0] for step in differ)

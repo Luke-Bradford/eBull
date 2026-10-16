@@ -531,6 +531,7 @@ def iter_instrument_builds(
             if mean_dv is not None and n == DOLLAR_VOLUME_SESSIONS and math.isfinite(float(mean_dv)):
                 volume_by[iid][day] = float(mean_dv)
 
+        # This batch's max only: the query below reads this batch's ids. ``_build`` takes the max across batches.
         holdings_max_filed_at: datetime | None = None
         units: dict[tuple[int, date], list[tuple[float, list[str]]]] = defaultdict(list)
         for iid, quarter, _filer, unit_value, accessions, filed_at in conn.execute(
