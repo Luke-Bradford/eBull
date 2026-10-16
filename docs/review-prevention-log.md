@@ -12821,3 +12821,21 @@ neighbouring container and match it.**
 - Enforced in: `sql/498_momentum_book_catch_up_entries.sql` (the `DO` block after the drop). Skill text for
   `.claude/skills/engineering/sql-correctness.md` is posted on #2403, because `.claude/**` is write-refused from the
   loop worktree.
+
+### A 404 on a published data set is a moved URL until the listing page says otherwise (#3747)
+
+- Failure (found 2026-10-10, measured 2026-10-16): SEC moved insider data sets from 2026q2 and the 13F window from
+  01jun2026 to `/files/datastandardsinnovation/`. Our builder kept the `/files/structureddata/` URL, and #2701 read the
+  2026q2 404 as "publication lag exceeds one quarter". The newest archive is optional and the quarterly refresh only
+  logs a skip, so both quarters and the newest 13F window stayed off disk while the job reported `success`. A second
+  cause hid it: SEC's `/files/` host sends no ETag on HEAD or GET (only `/Archives/` does), and the refresh skipped
+  every no-ETag archive, so the quarterly refresh fetched 0 bytes on all 6 recorded runs (2026-06-05 to 2026-10-05,
+  `SELECT count(*), sum(row_count) FROM job_runs WHERE job_name = 'sec_quarterly_datasets_bulk_refresh'`).
+- Prevention: before treating a 404 as "not yet published", read the source's listing page for the file's href.
+  Before relying on a response header as a gate, check that the serving host sends it on that path.
+- Enforced in: `app/services/sec_bulk_download.py` (`INSIDER_NEW_PATH_FIRST_QUARTER`,
+  `FORM13F_NEW_PATH_FIRST_WINDOW_START`), `app/services/sec_bulk_refresh.py` (no-ETag skip only when a local copy
+  exists); `tests/test_sec_bulk_download.py::TestInventory::test_newest_insider_and_13f_sets_use_the_moved_path`,
+  `tests/test_sec_bulk_refresh.py::TestRefreshOneAsyncFailClosed::test_head_missing_etag_downloads_when_no_local_archive`.
+  Skill text for `.claude/skills/data-engineer/etl-endpoint-coverage.md` is posted on #2403, because `.claude/**` is
+  write-refused from the loop worktree.
