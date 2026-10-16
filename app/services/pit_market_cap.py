@@ -366,7 +366,11 @@ def _within_tolerance(ratio: float) -> bool:
 
 
 def _finite_positive(value: float | Decimal | None) -> bool:
-    return value is not None and math.isfinite(value) and value > 0
+    """Judged on the float the arithmetic will use: a Decimal beyond float range reads inf, and one below it 0.0."""
+    if value is None:
+        return False
+    as_float = float(value)
+    return math.isfinite(as_float) and as_float > 0
 
 
 # --------------------------------------------------------------------------- steps
@@ -448,11 +452,13 @@ def build_steps(
         factor = basis.factor
         # ``float(Decimal)`` goes through the decimal string: a count beyond float range becomes inf, never an
         # OverflowError, and refuses ``invalid_input`` below (pinned by a test).
-        common_basis = (
+        product = (
             float(shares) * factor
             if shares is not None and factor is not None and _finite_positive(shares) and _finite_positive(factor)
             else None
         )
+        # Every ratio below divides by one of these, so each must be finite and positive, not merely computed.
+        common_basis = product if _finite_positive(product) else None
         checks: dict[str, Check] = {}
 
         sheet = accession_sheet_count(facts, selection.accession) if selection.concept is Concept.COVER else None
@@ -464,9 +470,10 @@ def build_steps(
 
         close = closes.get(session)
         volume = dollar_volume.get(session)
-        cap = None if common_basis is None or close is None or not _finite_positive(close) else common_basis * close
+        raw_cap = None if common_basis is None or close is None or not _finite_positive(close) else common_basis * close
+        cap = raw_cap if _finite_positive(raw_cap) else None
         # A zero mean dollar volume is an operand (the ratio is 0 and passes), not a missing one.
-        if cap is None or volume is None or not math.isfinite(cap) or not math.isfinite(volume) or volume < 0:
+        if cap is None or volume is None or not math.isfinite(volume) or volume < 0:
             checks["turnover"] = Check.UNTESTED
         else:
             checks["turnover"] = Check.FAIL if volume / cap > DOLLAR_VOLUME_ME_CEILING else Check.PASS
@@ -501,7 +508,7 @@ def build_steps(
             refusal = Refusal.INVALID_INPUT
         elif basis.refusal is not None:
             refusal = basis.refusal
-        elif common_basis is None or not math.isfinite(common_basis) or (cap is not None and not math.isfinite(cap)):
+        elif common_basis is None or (raw_cap is not None and cap is None):
             refusal = Refusal.INVALID_INPUT
         elif checks["scale"] is Check.FAIL:
             refusal = Refusal.SHARES_SCALE_CONFLICT
@@ -610,12 +617,11 @@ def gate1(
     for trade in trades:
         factor = trade_factor(trade.day, anchors)
         close = closes.get(trade.day)
-        if factor is None or not _finite_positive(close) or not _finite_positive(trade.price):
+        expected = None if factor is None or close is None or not _finite_positive(close) else close * factor[1]
+        if factor is None or expected is None or not _finite_positive(expected) or not _finite_positive(trade.price):
             untested += 1
             continue
-        assert close is not None
-        quarter, phi = factor
-        ratios.setdefault(quarter, []).append((trade.day, trade.price / (close * phi)))
+        ratios.setdefault(factor[0], []).append((trade.day, trade.price / expected))
     results: dict[date, Gate1Quarter] = {}
     for quarter, rows in sorted(ratios.items()):
         dates = len({day for day, _ in rows})

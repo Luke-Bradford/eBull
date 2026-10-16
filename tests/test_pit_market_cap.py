@@ -397,6 +397,21 @@ def test_extreme_exponent_count_with_a_sheet_comparator_refuses_rather_than_rais
     assert step.evidence["checks"]["scale"]["outcome"] == str(Check.UNTESTED)
 
 
+def test_sheet_count_that_underflows_float_leaves_scale_untested() -> None:
+    # Decimal("1E-400") is positive but reads 0.0 as a float: the guard judges the float, so no division by zero.
+    facts = [
+        cover(date(2025, 4, 20), at(date(2025, 5, 1)), 100, "a1"),
+        ShareFact(Concept.BALANCE_SHEET, "a1", "10-Q", date(2025, 3, 31), at(date(2025, 5, 1)), Decimal("1E-400")),
+    ]
+    (step,) = _steps(facts)
+    assert step.refusal is None
+    assert step.evidence["checks"]["scale"]["outcome"] == str(Check.UNTESTED)
+    (tiny,) = _steps(
+        [ShareFact(Concept.COVER, "a1", "10-Q", date(2025, 4, 20), at(date(2025, 5, 1)), Decimal("1E-400"))]
+    )
+    assert tiny.refusal is Refusal.INVALID_INPUT
+
+
 def test_discontinuity_against_the_previous_published_count() -> None:
     facts = [
         cover(date(2025, 4, 20), at(date(2025, 5, 1)), 100, "a1"),
