@@ -338,9 +338,10 @@ def main(argv: list[str] | None = None) -> int:
             f" {c['not_applicable']:4d} {c['uncovered']:9d}  {share:>8}"
         )
     applicable = tot["covered"] + tot["uncovered"]
+    share = f"{tot['covered'] / applicable:.1%}" if applicable else "-"
     print(
         f"total    {len(manifest):6d} {tot['covered']:7d}{'':25} {tot['not_applicable']:4d} {tot['uncovered']:9d}"
-        f"  {tot['covered'] / applicable:.1%}"
+        f"  {share:>8}"
     )
     print("\nuncovered, by why (absent from every source / otherwise the best verdict any source gave):")
     rank = ("continues", "after_capture", "conflict", "identity_unverified")
