@@ -459,7 +459,8 @@ def build_steps(
         if shares is None or sheet is None or not _finite_positive(shares) or not _finite_positive(sheet):
             checks["scale"] = Check.UNTESTED
         else:
-            checks["scale"] = Check.PASS if _within_tolerance(float(shares / sheet)) else Check.FAIL
+            # Float, not Decimal, division: a Decimal quotient beyond the context's exponent range would trap.
+            checks["scale"] = Check.PASS if _within_tolerance(float(shares) / float(sheet)) else Check.FAIL
 
         close = closes.get(session)
         volume = dollar_volume.get(session)

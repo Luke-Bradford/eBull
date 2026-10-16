@@ -386,6 +386,17 @@ def test_count_beyond_float_range_refuses_rather_than_raising() -> None:
     assert step.refusal is Refusal.INVALID_INPUT and step.market_cap(10.0) is None
 
 
+def test_extreme_exponent_count_with_a_sheet_comparator_refuses_rather_than_raising() -> None:
+    facts = [
+        ShareFact(Concept.COVER, "a1", "10-Q", date(2025, 4, 20), at(date(2025, 5, 1)), Decimal("1E+999999")),
+        sheet(date(2025, 3, 31), at(date(2025, 5, 1)), 1, "a1"),
+    ]
+    # The finite-positive guard (math.isfinite reads the Decimal as float inf) stops the scale ratio being computed.
+    (step,) = _steps(facts)
+    assert step.refusal is Refusal.INVALID_INPUT
+    assert step.evidence["checks"]["scale"]["outcome"] == str(Check.UNTESTED)
+
+
 def test_discontinuity_against_the_previous_published_count() -> None:
     facts = [
         cover(date(2025, 4, 20), at(date(2025, 5, 1)), 100, "a1"),
