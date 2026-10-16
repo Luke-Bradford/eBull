@@ -4072,6 +4072,13 @@ export interface MomentumPeriodScore {
   control_p95: number | null;
   /** Share of random baskets that returned less than the book. */
   book_percentile: number | null;
+  /** Price return plus dividends net of 15% withholding (#3844); null when any dividend is unknown. */
+  book_total_return: number | null;
+  /** Null when an SPY ex-date falls inside the period (no amount source yet). */
+  spy_total_return: number | null;
+  control_total_median: number | null;
+  /** Days in the period with no dividend-calendar capture. */
+  dividend_days_uncaptured: number | null;
 }
 
 /** `GET /strategies/momentum-book/scorecard` (#3822). */
@@ -4083,4 +4090,6 @@ export interface MomentumScorecardResponse {
   book_cumulative_percentile: number | null;
   control_draws: number;
   pending: string[];
+  book_total_cumulative: number | null;
+  spy_total_cumulative: number | null;
 }

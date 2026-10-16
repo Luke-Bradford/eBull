@@ -20,6 +20,10 @@ const SCORED: MomentumScorecardResponse = {
       control_p05: -0.038,
       control_p95: 0.0242,
       book_percentile: 0.085,
+      book_total_return: -0.0301,
+      spy_total_return: null,
+      control_total_median: -0.0041,
+      dividend_days_uncaptured: 0,
     },
   ],
   book_cumulative: -0.0312,
@@ -28,6 +32,8 @@ const SCORED: MomentumScorecardResponse = {
   book_cumulative_percentile: 0.085,
   control_draws: 200,
   pending: [],
+  book_total_cumulative: -0.0301,
+  spy_total_cumulative: null,
 };
 
 describe("MomentumScorecardPanel", () => {
@@ -40,6 +46,13 @@ describe("MomentumScorecardPanel", () => {
     expect(screen.getByText(/beat 9% of the baskets/)).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Momentum book by formation" })).toBeInTheDocument();
     expect(screen.getByText(/29 priced · 1 stale · control universe rebuilt/)).toBeInTheDocument();
+  });
+
+  it("shows the total return beside the price return, and an unknown SPY total as unknown (#3844)", async () => {
+    vi.spyOn(strategiesApi, "fetchMomentumScorecard").mockResolvedValue(SCORED);
+    render(<MomentumScorecardPanel />);
+    expect(await screen.findByText(/With dividends net of 15% withholding: book -3\.01%, SPY unknown\./)).toBeInTheDocument();
+    expect(screen.getByText(/with dividends -3\.01% vs SPY unknown/)).toBeInTheDocument();
   });
 
   it("calls a tie level, not ahead", async () => {
