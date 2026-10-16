@@ -146,10 +146,19 @@ def yahoo_spy() -> dict:
     return out
 
 
-def run(by, ret, start, end, cost, variant="radj", audit=None):
+def radj_score(rs) -> float:
+    """The book's signal: 11 monthly returns compounded, divided by their sample standard deviation."""
+    mu = mean(rs)
+    sd = math.sqrt(sum((r - mu) ** 2 for r in rs) / (len(rs) - 1)) or 1e-9
+    return (math.prod(1 + r for r in rs) - 1) / sd
+
+
+def run(by, ret, start, end, cost, variant="radj", audit=None, rank=None, turns=None):
     """Monthly returns of the book over holding months start..end (formation at the prior month end).
 
     A held name with no return for the holding month earns 0% (the backtest's cash-out); ``audit`` collects each one.
+    ``rank(uni, m)`` replaces the book's signal for another candidate: it receives the formation's universe as
+    ``(adv, sid, rs)`` and returns ``(score, sid)`` for every name it can score; the top ``N`` are held equally.
     """
     months = sorted({m for s in by.values() for m in s})
     pos = {m: i for i, m in enumerate(months)}
@@ -174,14 +183,12 @@ def run(by, ret, start, end, cost, variant="radj", audit=None):
         if variant.startswith("rand"):
             top = random.Random(f"{variant}:{m}").sample([sid for _, sid, _ in uni], N)
         else:
-            scored = []
-            for _, sid, rs in uni:
-                mu = mean(rs)
-                sd = math.sqrt(sum((r - mu) ** 2 for r in rs) / (len(rs) - 1)) or 1e-9
-                scored.append(((math.prod(1 + r for r in rs) - 1) / sd, sid))
+            scored = rank(uni, m) if rank else [(radj_score(rs), sid) for _, sid, rs in uni]
             top = [sid for _, sid in sorted(scored, reverse=True)[:N]]
-        w = {sid: 1 / N for sid in top}
+        w = {sid: 1 / len(top) for sid in top}
         turn = sum(abs(w.get(s, 0) - w_prev.get(s, 0)) for s in set(w) | set(w_prev))
+        if turns is not None:
+            turns.append(turn)
         if audit is not None:
             audit.extend((nxt, s) for s in top if nxt not in ret[s])
         pr = sum(w[s] * ret[s].get(nxt, 0.0) for s in top)
