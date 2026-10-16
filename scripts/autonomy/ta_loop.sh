@@ -90,6 +90,10 @@ BLOCKED_COOLDOWN_SECONDS="${TA_LOOP_BLOCKED_COOLDOWN:-1800}"
 #: TICKET") and consumed once by the driver. A file, not a phrase: the driver
 #: must not depend on how the model words its run note.
 BLOCKED_SENTINEL="$STATE_DIR/BLOCKED_PASS"
+#: Upper bound on a blocked pass's sleep when the sentinel names a wake time
+#: (#2437, 2026-10-16: "sleep until the named wake time, not 30 minutes"). A
+#: mistyped date must not park the loop for days.
+BLOCKED_MAX_SECONDS="${TA_LOOP_BLOCKED_MAX:-43200}"
 
 # ⚠ An installed driver lives at <worktree>/var/autonomy/bin, so its own path
 # states which loop it is. If that disagrees with TA_LOOP_WORKTREE, the agent
@@ -205,6 +209,27 @@ sync_prompt() {
     prompt_status="STALE ${installed_sha:0:12} != $PROMPT_REF ${canon_sha:0:12}, and $PROMPT could not be replaced"
     log "WARN prompt $prompt_status"
   fi
+}
+
+# Seconds from now until a UTC wake time written as YYYY-MM-DDTHH:MM:SSZ;
+# prints nothing when the value is not exactly that shape. The shape is checked
+# before any parsing; BSD date first (the launchd host is macOS), GNU date as
+# the fallback.
+seconds_until() {
+  local epoch now
+  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 0
+  epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null || date -u -d "$1" +%s 2>/dev/null)"
+  [[ "$epoch" =~ ^[0-9]+$ ]] || return 0
+  now="$(date -u +%s)"
+  echo $((epoch - now))
+}
+
+# clamp_seconds VALUE LOW HIGH
+clamp_seconds() {
+  local v="$1"
+  ((v < $2)) && v="$2"
+  ((v > $3)) && v="$3"
+  echo "$v"
 }
 
 # #2658 item 4: the prompt was not the only thing installed once and never
@@ -565,11 +590,27 @@ while true; do
   # $BLOCKED_SENTINEL as the last act of a blocked pass; tests/test_ta_loop_blocked_sentinel.py
   # asserts the prompt and this driver name the SAME path, so a wording change
   # fails CI instead of regressing here.
+  #
+  # The sentinel may carry a UTC wake time on its first line (the observable
+  # event a blocked ticket waits for, e.g. a scheduled job's fire). The driver
+  # then sleeps until it, clamped to [COOLDOWN_SECONDS, BLOCKED_MAX_SECONDS];
+  # an empty, unparseable or already-past wake time keeps the fixed cooldown.
   cooldown="$COOLDOWN_SECONDS"
   if [[ -f "$BLOCKED_SENTINEL" ]]; then
+    wake="$(head -n 1 "$BLOCKED_SENTINEL" | tr -d '[:space:]')"
     rm -f "$BLOCKED_SENTINEL"
     cooldown="$BLOCKED_COOLDOWN_SECONDS"
-    log "blocked pass -- sleeping ${cooldown}s instead of ${COOLDOWN_SECONDS}s (nothing is eligible; re-deriving that costs money)"
+    until_wake=""
+    [[ -n "$wake" ]] && until_wake="$(seconds_until "$wake")"
+    if [[ -n "$until_wake" ]] && ((until_wake > 0)); then
+      cooldown="$(clamp_seconds "$until_wake" "$COOLDOWN_SECONDS" "$BLOCKED_MAX_SECONDS")"
+      log "blocked pass -- sleeping ${cooldown}s until wake time $wake (bounds ${COOLDOWN_SECONDS}..${BLOCKED_MAX_SECONDS}s)"
+    else
+      # A malformed or already-past wake time gets the fixed cooldown, never a
+      # short sleep: a stale timestamp rewritten every pass must not become a spin.
+      [[ -n "$wake" ]] && log "WARN blocked pass -- wake time '$wake' is malformed or already past; using the fixed cooldown"
+      log "blocked pass -- sleeping ${cooldown}s instead of ${COOLDOWN_SECONDS}s (nothing is eligible; re-deriving that costs money)"
+    fi
   fi
   sleep "$cooldown"
 done

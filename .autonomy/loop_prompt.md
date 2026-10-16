@@ -189,6 +189,12 @@ researched it enough to escalate — research it first.
       between 01:07 and 08:58**, produced no PR, and read to the operator as "the loop
       stopped". With it, the driver sleeps 30 minutes. It is consumed (deleted) on read,
       so write it on EVERY blocked pass, not once.
+      **When the wake condition has a known time** (a scheduled job's fire, a market
+      close), write that time into the sentinel instead, in UTC with a `Z`:
+      `echo 2026-10-16T15:20:00Z > var/autonomy/BLOCKED_PASS`. The driver then sleeps
+      until it, bounded to 12 hours, rather than waking every 30 minutes to re-learn the
+      same block (#2437, 2026-10-16). Pick a time just after the event lands, not the event
+      itself.
    4. **end the iteration and spend nothing further.** Sleeping is the correct output.
 
    ⚠ **This rule is audited by a script, not by good intentions:**
