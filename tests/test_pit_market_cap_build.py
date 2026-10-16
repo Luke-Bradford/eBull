@@ -127,6 +127,18 @@ def test_an_amendment_that_recodes_a_row_away_from_p_or_s_still_displaces_the_or
     assert resolve_amendments([original, recoded], FIRST) == ()
 
 
+def test_rows_with_no_report_period_are_never_pooled_into_one_report() -> None:
+    day = date(2025, 3, 3)
+    original = InsiderRow("O-1", 1, "4", "0001", None, None, day, 10.0)
+    other = InsiderRow("O-2", 1, "4", "0002", None, None, day, 11.0)
+    unrelated_amendment = InsiderRow("A-9", 1, "4/A", "0003", None, date(2025, 3, 9), day, 12.0)
+    assert resolve_amendments([original, other, unrelated_amendment], FIRST) == (
+        Trade(day=day, price=10.0),
+        Trade(day=day, price=11.0),
+        Trade(day=day, price=12.0),
+    )
+
+
 def test_rows_qualify_only_as_gate_1_input() -> None:
     day = date(2025, 3, 3)
     base = InsiderRow("O-1", 1, "4", "0001", day, None, day, 10.0)

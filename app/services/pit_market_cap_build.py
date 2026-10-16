@@ -223,15 +223,21 @@ def resolve_amendments(rows: Iterable[InsiderRow], first: date) -> tuple[Trade, 
 
     A 4/A carries no structured link to the accession it amends (``insider_filings`` holds only Box 4's date of the
     original), so the replacement unit is the reporting owner's (filer CIK, period of report) -- Box 3's "date of
-    earliest transaction", which an amendment of the same report repeats. Where any 4/A exists for that unit, only
-    the latest 4/A's rows are kept (by signature date, then accession); otherwise every original's rows are kept.
+    earliest transaction", which an amendment of the same report repeats; a row missing either part is its own unit
+    (its accession). Where any 4/A exists for a unit, only the latest 4/A's rows are kept (by signature date, then
+    accession); otherwise every original's rows are kept.
     Rows are already unique by (accession, row) (``insider_transactions`` unique index). Replacement runs BEFORE the
     qualification filters: a 4/A that corrects a row away from P/S, its price or its date must still displace the
     original row it corrects.
     """
-    groups: dict[tuple[str | None, date | None], list[InsiderRow]] = defaultdict(list)
+    groups: dict[tuple[str, ...], list[InsiderRow]] = defaultdict(list)
     for row in rows:
-        groups[(row.filer_cik, row.period_of_report)].append(row)
+        # A row missing either key part cannot be matched to an original, so it is its own report: pooling the NULLs
+        # would let one such 4/A displace every unrelated report sharing the gap.
+        if row.filer_cik is None or row.period_of_report is None:
+            groups[("accession", row.accession)].append(row)
+        else:
+            groups[("report", row.filer_cik, row.period_of_report.isoformat())].append(row)
     out: list[Trade] = []
     for members in groups.values():
         amendments = [r for r in members if r.document_type == "4/A"]

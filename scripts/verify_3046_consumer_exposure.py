@@ -508,7 +508,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     # --- #3841 point-in-time market cap ----------------------------------------
     Occurrence(
         "app/services/pit_market_cap_build.py",
-        305,
+        311,
         "_BARS_SQL closes and 21-bar mean dollar volume",
         "WINDOWED",
         ("caller_span_whole_history",),

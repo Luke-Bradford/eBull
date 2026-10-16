@@ -12871,3 +12871,17 @@ neighbouring container and match it.**
   `scripts/measure_3841_premise.py`. Skill text for `.claude/skills/market-data/SKILL.md` and
   `.claude/skills/metrics-analyst/SKILL.md` ("Market cap (live)") is posted on #2403, because `.claude/**` is
   write-refused from the loop worktree.
+
+### A grouping key built from nullable columns pools every NULL row into one group (#3841)
+
+- Failure (PR #3853, review bot): Gate 1 replaced a Form 4 original with its 4/A by grouping rows on (filer CIK,
+  period of report). 2,403 of 504,443 Form 4 and 4/A filings on the dev DB carry no `period_of_report`
+  (`SELECT count(*) FILTER (WHERE period_of_report IS NULL), count(*) FROM insider_filings WHERE document_type IN
+  ('4', '4/A')`, 2026-10-16), so every such row shared one `(cik, None)` group, and one 4/A there would have displaced
+  unrelated reports.
+- Prevention: when a dict or `GROUP BY` key carries a nullable column, decide what a NULL part means. If it cannot
+  identify a group, give the row its own key (here, its accession) or skip it; never let `None` act as a shared value.
+- Enforced in: `app/services/pit_market_cap_build.py::resolve_amendments`;
+  `tests/test_pit_market_cap_build.py::test_rows_with_no_report_period_are_never_pooled_into_one_report`. Skill text
+  for `.claude/skills/engineering/python-hygiene.md` is posted on #2403, because `.claude/**` is write-refused from
+  the loop worktree.
