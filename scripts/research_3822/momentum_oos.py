@@ -29,6 +29,7 @@ from pathlib import Path
 from statistics import mean, median
 
 import psycopg
+from platformdirs import user_data_dir
 
 sys.path.insert(0, ".")
 from app.config import settings  # noqa: E402
@@ -76,7 +77,7 @@ def months_apart(a: date, b: date) -> int:
 
 
 def load_intrader(c):
-    link = Path.home() / "Library/Application Support/eBull/research/security_linkage_3361/2026-10-05-805bc9e6/series"
+    link = Path(user_data_dir("eBull")) / "research/security_linkage_3361/2026-10-05-805bc9e6/series"
     linked = []
     for p in link.iterdir():
         doc = json.loads(p.read_text())
@@ -128,14 +129,18 @@ def yahoo_spy() -> dict:
     """Month -> SPY month-end adjclose, from Yahoo's public chart endpoint (no account)."""
     url = "https://query2.finance.yahoo.com/v8/finance/chart/SPY?period1=1719792000&period2=1792108800&interval=1mo&events=div"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    r = json.load(urllib.request.urlopen(req, timeout=30))["chart"]["result"][0]
+    try:
+        r = json.load(urllib.request.urlopen(req, timeout=30))["chart"]["result"][0]
+        rows = zip(r["timestamp"], r["indicators"]["quote"][0]["close"], r["indicators"]["adjclose"][0]["adjclose"])
+    except (KeyError, IndexError, TypeError) as e:
+        raise SystemExit(f"Yahoo chart response for SPY is not the expected shape: {e!r}") from e
     out = {}
-    for t, cl, a in zip(
-        r["timestamp"], r["indicators"]["quote"][0]["close"], r["indicators"]["adjclose"][0]["adjclose"]
-    ):
+    for t, cl, a in rows:
         d = datetime.fromtimestamp(t, UTC).date()
-        if d.day == 1:  # monthly bars; the trailing intramonth row repeats the current month
-            out[d.replace(day=1)] = (a, cl)
+        # Monthly bars only (the trailing intramonth row repeats the current month); a null close is skipped, and a
+        # scored month it leaves missing fails loudly in main().
+        if d.day == 1 and cl is not None and a is not None:
+            out[d] = (float(a), float(cl))
     return out
 
 
@@ -145,10 +150,11 @@ def run(by, ret, start, end, cost, variant="radj", audit=None):
     A held name with no return for the holding month earns 0% (the backtest's cash-out); ``audit`` collects each one.
     """
     months = sorted({m for s in by.values() for m in s})
+    pos = {m: i for i, m in enumerate(months)}
     out, w_prev = [], {}
     for nxt in [m for m in months if start <= m <= end]:
-        m = months[months.index(nxt) - 1]
-        idx = months.index(m)
+        idx = pos[nxt] - 1
+        m = months[idx]
         if idx < 13:
             continue
         hist = months[idx - 11 : idx]  # m-11..m-1 (skip m)
@@ -203,6 +209,9 @@ def max_dd(rs) -> float:
 
 def spy_rets(levels: dict, ms) -> list:
     keys = sorted(levels)
+    missing = [m for m in ms if m not in levels or keys.index(m) == 0]
+    if missing:
+        raise SystemExit(f"SPY levels missing for scored months or their prior month: {missing}")
     return [levels[m] / levels[keys[keys.index(m) - 1]] - 1 for m in ms]
 
 
@@ -211,95 +220,102 @@ def worst_lag(book, spy, k):
     return max((cum(spy[i : i + k]) - cum(book[i : i + k]), i) for i in range(len(book) - k + 1))
 
 
-with psycopg.connect(settings.database_url) as c:
-    ib, iret, ispy, nlinked = load_intrader(c)
-    pb, pret = load_pwb(c)
-    etoro_spy = dict(
-        c.execute(
-            "select date_trunc('month', price_date)::date, (array_agg(close::float order by price_date desc))[1] "
-            "from price_daily where instrument_id = 3000 and price_date >= '2024-09-01' group by 1"
-        ).fetchall()
+def main() -> None:
+    with psycopg.connect(settings.database_url) as c:
+        ib, iret, ispy, nlinked = load_intrader(c)
+        pb, pret = load_pwb(c)
+        etoro_spy = dict(
+            c.execute(
+                "select date_trunc('month', price_date)::date, (array_agg(close::float order by price_date desc))[1] "
+                "from price_daily where instrument_id = 3000 and price_date >= '2024-09-01' group by 1"
+            ).fetchall()
+        )
+        live_uni = c.execute(
+            "select f.formation_month, u.universe from momentum_book_universes u join momentum_book_formations f using (formation_id) order by 1 desc limit 1"
+        ).fetchone()
+        pwb_instr = {
+            r[0]
+            for r in c.execute(
+                "select distinct instrument_id from research_price_series where vendor = %s and instrument_id is not null",
+                (PWB,),
+            ).fetchall()
+        }
+
+    ys = yahoo_spy()
+    ymaps = {m: a for m, (a, _) in ys.items()}
+    diffs = [abs(ys[m][1] / etoro_spy[m] - 1) for m in etoro_spy if m in ys and m <= OOS[1]]
+    if not diffs:
+        raise SystemExit("SPY cross-check: no month overlaps Yahoo and eToro price_daily")
+    print(f"Intrader linked series: {nlinked}; PWB live-linked series: {len(pb)}")
+    print(f"SPY cross-check, Yahoo close vs eToro month-end close: {len(diffs)} months, max |diff| {max(diffs):.3%}")
+    if live_uni:
+        uni_ids = live_uni[1] if isinstance(live_uni[1], list) else list(live_uni[1])
+        ids = {int(x["instrument_id"]) if isinstance(x, dict) else int(x) for x in uni_ids}
+        print(f"live formation {live_uni[0]}: {len(ids)} universe names, {len(ids & pwb_instr)} have a PWB series")
+
+    # 1. Backtest reference: the worst lag over windows the length of the out-of-sample stretch.
+    bt = run(ib, iret, *BACKTEST, 0.001)
+    bt_ms = [m for m, _ in bt]
+    bt_book = [r for _, r in bt]
+    bt_spy = spy_rets(ispy, bt_ms)
+    print(
+        f"\n# backtest {bt_ms[0]:%Y-%m}..{bt_ms[-1]:%Y-%m}, 0.1%/side: book {ann(bt_book):.2%}/yr vs SPY {ann(bt_spy):.2%}/yr"
     )
-    live_uni = c.execute(
-        "select f.formation_month, u.universe from momentum_book_universes u join momentum_book_formations f using (formation_id) order by 1 desc limit 1"
-    ).fetchone()
-    pwb_instr = {
-        r[0]
-        for r in c.execute(
-            "select distinct instrument_id from research_price_series where vendor = %s and instrument_id is not null",
-            (PWB,),
-        ).fetchall()
-    }
 
-ys = yahoo_spy()
-ymaps = {m: a for m, (a, _) in ys.items()}
-diffs = [abs(ys[m][1] / etoro_spy[m] - 1) for m in etoro_spy if m in ys and m <= OOS[1]]
-print(f"Intrader linked series: {nlinked}; PWB live-linked series: {len(pb)}")
-print(f"SPY cross-check, Yahoo close vs eToro month-end close: {len(diffs)} months, max |diff| {max(diffs):.3%}")
-if live_uni:
-    uni_ids = live_uni[1] if isinstance(live_uni[1], list) else list(live_uni[1])
-    ids = {int(x["instrument_id"]) if isinstance(x, dict) else int(x) for x in uni_ids}
-    print(f"live formation {live_uni[0]}: {len(ids)} universe names, {len(ids & pwb_instr)} have a PWB series")
+    cash_outs: list = []
+    oos = {cost: run(pb, pret, *OOS, cost, audit=cash_outs if cost == 0.001 else None) for cost in (0.001, 0.002)}
+    o_ms = [m for m, _ in oos[0.001]]
+    k = len(o_ms)
+    for kk in (k, 24):
+        lag, i = worst_lag(bt_book, bt_spy, kk)
+        print(f"backtest worst {kk}-month lag vs SPY: {lag:+.2%} cumulative (window from {bt_ms[i]:%Y-%m})")
+    ref_lag, _ = worst_lag(bt_book, bt_spy, k)
 
-# 1. Backtest reference: the worst lag over windows the length of the out-of-sample stretch.
-bt = run(ib, iret, *BACKTEST, 0.001)
-bt_ms = [m for m, _ in bt]
-bt_book = [r for _, r in bt]
-bt_spy = spy_rets(ispy, bt_ms)
-print(
-    f"\n# backtest {bt_ms[0]:%Y-%m}..{bt_ms[-1]:%Y-%m}, 0.1%/side: book {ann(bt_book):.2%}/yr vs SPY {ann(bt_spy):.2%}/yr"
-)
+    # 2. Out of sample.
+    spy_o = spy_rets(ymaps, o_ms)
+    rand = {s: [r for _, r in run(pb, pret, *OOS, 0.001, f"rand{s}")] for s in range(SEEDS)}
+    print(f"\n# out of sample {o_ms[0]:%Y-%m}..{o_ms[-1]:%Y-%m} ({k} months), PWB survivor-only")
+    for cost, rs in oos.items():
+        b = [r for _, r in rs]
+        print(f"book {cost:.1%}/side: cum {cum(b):+.2%}, {ann(b):+.2%}/yr, maxDD {max_dd(b):.1%}")
+    print(f"held name-months with no holding-month return (earn 0%): {len(cash_outs)} of {30 * k}: {cash_outs}")
+    rc = sorted(cum(v) for v in rand.values())
+    book = [r for _, r in oos[0.001]]
+    print(f"SPY: cum {cum(spy_o):+.2%}, {ann(spy_o):+.2%}/yr, maxDD {max_dd(spy_o):.1%}")
+    print(
+        f"random-30 ({SEEDS} seeds, 0.1%/side): cum median {median(rc):+.2%}, range {rc[0]:+.2%}..{rc[-1]:+.2%}; book beats {sum(x < cum(book) for x in rc)}/{SEEDS}"
+    )
+    print("\nyear  months  book    SPY     random-30 median")
+    for y in sorted({m.year for m in o_ms}):
+        ix = [i for i, m in enumerate(o_ms) if m.year == y]
+        by_r = median(cum([rand[s][i] for i in ix]) for s in rand)
+        print(f"{y}  {len(ix):>6}  {cum([book[i] for i in ix]):+.2%}  {cum([spy_o[i] for i in ix]):+.2%}  {by_r:+.2%}")
+    print("\nmonth    book    SPY")
+    for m, b, s in zip(o_ms, book, spy_o):
+        print(f"{m:%Y-%m}  {b:+.2%}  {s:+.2%}")
 
-cash_outs: list = []
-oos = {cost: run(pb, pret, *OOS, cost, audit=cash_outs if cost == 0.001 else None) for cost in (0.001, 0.002)}
-o_ms = [m for m, _ in oos[0.001]]
-k = len(o_ms)
-for kk in (k, 24):
-    lag, i = worst_lag(bt_book, bt_spy, kk)
-    print(f"backtest worst {kk}-month lag vs SPY: {lag:+.2%} cumulative (window from {bt_ms[i]:%Y-%m})")
-ref_lag, _ = worst_lag(bt_book, bt_spy, k)
+    # 3. Cross-dataset gap: the same survivor-only PWB universe over the backtest decade, against the survivorship-free
+    # Intrader result. It mixes survivorship, universe composition and return construction; it does not isolate survivorship.
+    pw_bt = [r for _, r in run(pb, pret, *BACKTEST, 0.001)]
+    pw_rand = sorted(ann([r for _, r in run(pb, pret, *BACKTEST, 0.001, f"rand{s}")]) for s in range(20))
+    in_rand = sorted(ann([r for _, r in run(ib, iret, *BACKTEST, 0.001, f"rand{s}")]) for s in range(20))
+    print(f"\n# cross-dataset gap, {BACKTEST[0]:%Y-%m}..{BACKTEST[1]:%Y-%m}, 0.1%/side")
+    print(
+        f"book: PWB survivor-only {ann(pw_bt):.2%}/yr vs Intrader survivorship-free {ann(bt_book):.2%}/yr -> gap {100 * (ann(pw_bt) - ann(bt_book)):+.2f} pts/yr"
+    )
+    print(f"random-30 median (20 seeds): PWB {median(pw_rand):.2%}/yr vs Intrader {median(in_rand):.2%}/yr")
 
-# 2. Out of sample.
-spy_o = spy_rets(ymaps, o_ms)
-rand = {s: [r for _, r in run(pb, pret, *OOS, 0.001, f"rand{s}")] for s in range(SEEDS)}
-print(f"\n# out of sample {o_ms[0]:%Y-%m}..{o_ms[-1]:%Y-%m} ({k} months), PWB survivor-only")
-for cost, rs in oos.items():
-    b = [r for _, r in rs]
-    print(f"book {cost:.1%}/side: cum {cum(b):+.2%}, {ann(b):+.2%}/yr, maxDD {max_dd(b):.1%}")
-print(f"held name-months with no holding-month return (earn 0%): {len(cash_outs)} of {30 * k}: {cash_outs}")
-rc = sorted(cum(v) for v in rand.values())
-book = [r for _, r in oos[0.001]]
-print(f"SPY: cum {cum(spy_o):+.2%}, {ann(spy_o):+.2%}/yr, maxDD {max_dd(spy_o):.1%}")
-print(
-    f"random-30 ({SEEDS} seeds, 0.1%/side): cum median {median(rc):+.2%}, range {rc[0]:+.2%}..{rc[-1]:+.2%}; book beats {sum(x < cum(book) for x in rc)}/{SEEDS}"
-)
-print("\nyear  months  book    SPY     random-30 median")
-for y in sorted({m.year for m in o_ms}):
-    ix = [i for i, m in enumerate(o_ms) if m.year == y]
-    by_r = median(cum([rand[s][i] for i in ix]) for s in rand)
-    print(f"{y}  {len(ix):>6}  {cum([book[i] for i in ix]):+.2%}  {cum([spy_o[i] for i in ix]):+.2%}  {by_r:+.2%}")
-print("\nmonth    book    SPY")
-for m, b, s in zip(o_ms, book, spy_o):
-    print(f"{m:%Y-%m}  {b:+.2%}  {s:+.2%}")
+    lag = cum(spy_o) - cum(book)
+    verdict = "triggers the stop rule" if lag > ref_lag else "does not trigger the stop rule"
+    print(
+        f"\nstop rule: out-of-sample lag {lag:+.2%} vs backtest worst {k}-month lag {ref_lag:+.2%} -> this survivor-only replay {verdict}"
+    )
+    # How large a bias in the book's favour would have to be for the rule to fire: the book's cumulative return at which it would lag SPY by ref_lag.
+    fire_at = cum(spy_o) - ref_lag
+    print(
+        f"the rule fires only if the true book returned below {fire_at:+.2%} cumulative ({(1 + fire_at) ** (12 / k) - 1:+.2%}/yr), against {cum(book):+.2%} measured"
+    )
 
-# 3. Cross-dataset gap: the same survivor-only PWB universe over the backtest decade, against the survivorship-free
-# Intrader result. It mixes survivorship, universe composition and return construction; it does not isolate survivorship.
-pw_bt = [r for _, r in run(pb, pret, *BACKTEST, 0.001)]
-pw_rand = sorted(ann([r for _, r in run(pb, pret, *BACKTEST, 0.001, f"rand{s}")]) for s in range(20))
-in_rand = sorted(ann([r for _, r in run(ib, iret, *BACKTEST, 0.001, f"rand{s}")]) for s in range(20))
-print(f"\n# cross-dataset gap, {BACKTEST[0]:%Y-%m}..{BACKTEST[1]:%Y-%m}, 0.1%/side")
-print(
-    f"book: PWB survivor-only {ann(pw_bt):.2%}/yr vs Intrader survivorship-free {ann(bt_book):.2%}/yr -> gap {100 * (ann(pw_bt) - ann(bt_book)):+.2f} pts/yr"
-)
-print(f"random-30 median (20 seeds): PWB {median(pw_rand):.2%}/yr vs Intrader {median(in_rand):.2%}/yr")
 
-lag = cum(spy_o) - cum(book)
-verdict = "triggers the stop rule" if lag > ref_lag else "does not trigger the stop rule"
-print(
-    f"\nstop rule: out-of-sample lag {lag:+.2%} vs backtest worst {k}-month lag {ref_lag:+.2%} -> this survivor-only replay {verdict}"
-)
-# How large a bias in the book's favour would have to be for the rule to fire: the book's cumulative return at which it would lag SPY by ref_lag.
-fire_at = cum(spy_o) - ref_lag
-print(
-    f"the rule fires only if the true book returned below {fire_at:+.2%} cumulative ({(1 + fire_at) ** (12 / k) - 1:+.2%}/yr), against {cum(book):+.2%} measured"
-)
+if __name__ == "__main__":
+    main()
