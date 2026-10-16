@@ -23,6 +23,9 @@ function PeriodRow({ p }: { p: MomentumPeriodScore }) {
     p.names_stale > 0 ? `${p.names_stale} stale` : null,
     p.universe_source === "reconstructed" ? "control universe rebuilt" : null,
     p.universe_source === null ? "control universe not recorded yet" : null,
+    p.book_total_return !== null
+      ? `with dividends ${formatPct(p.book_total_return)} vs SPY ${p.spy_total_return === null ? "unknown" : formatPct(p.spy_total_return)}`
+      : null,
   ].filter((n): n is string => n !== null);
   return (
     <tr className="border-t border-slate-200 dark:border-slate-800">
@@ -70,6 +73,11 @@ function Body({ card }: { card: MomentumScorecardResponse }) {
           <span className="tabular-nums">{formatPct(card.spy_cumulative)}</span>, random 30-name baskets{" "}
           <span className="tabular-nums">{formatPct(card.control_cumulative_median)}</span> (median of{" "}
           {card.control_draws}). The book beat {percentileText(card.book_cumulative_percentile)} of the baskets.
+          {card.book_total_cumulative !== null
+            ? ` With dividends net of 15% withholding: book ${formatPct(card.book_total_cumulative)}, SPY ${
+                card.spy_total_cumulative === null ? "unknown" : formatPct(card.spy_total_cumulative)
+              }.`
+            : null}
         </p>
       ) : null}
       <div className="mt-3 overflow-x-auto">
@@ -93,8 +101,9 @@ function Body({ card }: { card: MomentumScorecardResponse }) {
         </table>
       </div>
       <p className="mt-2 text-xs text-slate-500">
-        The rule's book, valued close to close before costs, like SPY and the baskets. Executed fills and spreads
-        are in the positions list.
+        The rule's book, valued close to close before costs, like SPY and the baskets. Dividends come from eToro's
+        dividend calendar, whose completeness is not yet measured. Executed fills and spreads are in the positions
+        list.
       </p>
     </>
   );

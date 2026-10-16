@@ -5069,6 +5069,10 @@ class MomentumPeriodScoreResponse(BaseModel):
     control_p05: float | None
     control_p95: float | None
     book_percentile: float | None
+    book_total_return: float | None
+    spy_total_return: float | None
+    control_total_median: float | None
+    dividend_days_uncaptured: int | None
 
 
 class MomentumScorecardResponse(BaseModel):
@@ -5079,6 +5083,8 @@ class MomentumScorecardResponse(BaseModel):
     book_cumulative_percentile: float | None
     control_draws: int
     pending: list[date]
+    book_total_cumulative: float | None
+    spy_total_cumulative: float | None
 
 
 @router.get("/momentum-book/scorecard", response_model=MomentumScorecardResponse)

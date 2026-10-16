@@ -13,6 +13,15 @@ The evidence (``docs/research/2026-10-15-3822-momentum-evidence.md``) says the b
   latest close is older than ``STALENESS`` at the period end is also left out and counted as ``names_stale`` (a
   stale mark is not scored as current; a name acquired mid-period lands here too, and the count says so).
 * **SPY.** SPY's price return over the same period. eToro closes exclude dividends for both sides.
+* **Total return (#3844), beside price return, never instead of it.** Each name's dividends with an ex-date after
+  its start bar and on or before its end bar are added to its end close, net of ``DIVIDEND_WITHHOLDING``, and not
+  reinvested. Stocks read eToro's dividend calendar (``etoro_dividend_calendar``): a name's total is known only when
+  its bars lie inside the captured days with no gap between them, so a period starting before the first capture or
+  spanning a missing or unusable capture has none (``dividend_days_uncaptured`` says how many). The calendar's
+  completeness against an independent source is not measured, so a name missing from it counts as paying nothing.
+  SPY is not on that calendar: its ex-dates come from ``SPY_EX_DATES`` with no amounts, so SPY's total equals its
+  price return when no ex-date falls inside the period, and is ``None`` when one does or the period runs past the
+  schedule.
 * **Control.** ``CONTROL_DRAWS`` baskets of ``BOOK_SIZE`` names, each drawn uniformly from the formation's recorded
   universe (``momentum_book_universes``) with ``random.Random(control_seed(draw, formation_month))``, valued like
   the book. Each draw is chained across periods, so the cumulative control is a distribution of whole paths.
@@ -34,6 +43,7 @@ from typing import Any, Final
 import psycopg
 
 from app.services import momentum_book as mb
+from app.services.etoro_dividend_calendar import load_calendar_dividends
 from app.services.market_calendar import us_market_status
 from app.services.market_regime_provider import BENCHMARK_SYMBOL
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
@@ -42,6 +52,15 @@ from app.services.price_segments import load_unresolved_breaks
 Conn = psycopg.Connection[Any]
 
 CONTROL_DRAWS: Final = 200
+#: US withholding on a UK account's dividends at the UK-US treaty rate (#3844).
+DIVIDEND_WITHHOLDING: Final = 0.15
+#: SPY's ex-dates in State Street's "Dividend Distribution Schedule, Calendar Year 2026" (Quarterly table, SPY
+#: row), the potential excise distribution included:
+#: https://www.ssga.com/library-content/products/fund-data/etfs/us/distribution/SPDR_Dividend_Distribution_Schedule.pdf
+#: No amount source exists yet, so a period containing one of these scores no SPY total return.
+SPY_EX_DATES: Final = (date(2026, 3, 20), date(2026, 6, 18), date(2026, 9, 18), date(2026, 12, 18), date(2026, 12, 31))
+SPY_SCHEDULE_FROM: Final = date(2026, 1, 1)
+SPY_SCHEDULE_THROUGH: Final = date(2026, 12, 31)
 #: A start or end close older than this, against the period's own start or end date, is stale.
 STALENESS: Final = timedelta(days=7)
 
@@ -73,16 +92,49 @@ Breaks = Mapping[int, Sequence[date]]
 
 
 @dataclass(frozen=True)
+class Dividends:
+    """Dividends known for ex-dates in ``known_from``..``known_through`` except on ``gaps``; elsewhere unknown."""
+
+    #: Instrument id -> (ex-date, gross amount per share, or ``None`` when the date is known but the amount is not).
+    events: Mapping[int, Sequence[tuple[date, float | None]]]
+    known_from: date
+    known_through: date
+    #: Days inside the span whose ex-dates are not known (a missing or unusable calendar capture).
+    gaps: frozenset[date] = frozenset()
+
+    def net(self, iid: int, after: date, through: date) -> float | None:
+        """Net dividends per share with an ex-date in (``after``, ``through``], or ``None`` when unknown."""
+        if after + timedelta(days=1) < self.known_from or through > self.known_through:
+            return None
+        if any(after < gap <= through for gap in self.gaps):
+            return None
+        amounts = [a for ex, a in self.events.get(iid, ()) if after < ex <= through]
+        if any(a is None for a in amounts):
+            return None
+        return sum(a for a in amounts if a is not None) * (1 - DIVIDEND_WITHHOLDING)
+
+
+@dataclass(frozen=True)
 class BasketReturn:
     value: float | None
     priced: int
     #: Names whose latest close is older than ``STALENESS`` at the period end.
     stale: int
+    #: Equal-weight total return over the same names; ``None`` when any name's dividends are unknown.
+    total: float | None = None
 
 
-def basket_return(ids: Sequence[int], start: date, end: date, closes: Closes, breaks: Breaks) -> BasketReturn:
-    """Equal-weight price return over ``start``..``end``."""
+def basket_return(
+    ids: Sequence[int],
+    start: date,
+    end: date,
+    closes: Closes,
+    breaks: Breaks,
+    dividends: Dividends | None = None,
+) -> BasketReturn:
+    """Equal-weight price return over ``start``..``end``, and the total return when ``dividends`` is given."""
     returns = []
+    totals: list[float | None] = []
     stale = 0
     for iid in ids:
         first = closes.get(start, {}).get(iid)
@@ -97,7 +149,12 @@ def basket_return(ids: Sequence[int], start: date, end: date, closes: Closes, br
         if last[0] < first[0] or any(first[0] < d <= last[0] for d in breaks.get(iid, ())):
             continue
         returns.append(last[1] / first[1] - 1.0)
-    return BasketReturn(sum(returns) / len(returns) if returns else None, len(returns), stale)
+        net = dividends.net(iid, first[0], last[0]) if dividends is not None else None
+        totals.append(None if net is None else (last[1] + net) / first[1] - 1.0)
+    total = None
+    if totals and all(t is not None for t in totals):
+        total = sum(t for t in totals if t is not None) / len(totals)
+    return BasketReturn(sum(returns) / len(returns) if returns else None, len(returns), stale, total)
 
 
 def percentile_of(value: float, draws: Sequence[float]) -> float:
@@ -121,6 +178,10 @@ class PeriodScore:
     control_p95: float | None
     #: Share of control baskets that returned less than the book.
     book_percentile: float | None
+    book_total_return: float | None = None
+    spy_total_return: float | None = None
+    control_total_median: float | None = None
+    dividend_days_uncaptured: int | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +195,9 @@ class Scorecard:
     control_draws: int
     #: Formations with no close yet after their signal day.
     pending: tuple[date, ...]
+    #: Chained over the same periods as the price figures; ``None`` when any of them lacks a total.
+    book_total_cumulative: float | None = None
+    spy_total_cumulative: float | None = None
 
 
 def _quantile(sorted_values: Sequence[float], q: float) -> float:
@@ -141,37 +205,52 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
 
 
 def score(
-    periods: Sequence[Period], closes: Closes, breaks: Breaks, *, spy_id: int, draws: int = CONTROL_DRAWS
+    periods: Sequence[Period],
+    closes: Closes,
+    breaks: Breaks,
+    *,
+    spy_id: int,
+    draws: int = CONTROL_DRAWS,
+    stock_dividends: Dividends | None = None,
+    spy_dividends: Dividends | None = None,
+    captured_days: Sequence[date] = (),
 ) -> Scorecard:
     if draws < 1:
         raise ValueError(f"draws must be >= 1, got {draws}")
     scored: list[PeriodScore] = []
     pending: list[date] = []
     book_path = spy_path = 1.0
+    book_total_path: float | None = 1.0
+    spy_total_path: float | None = 1.0
     control_paths = [1.0] * draws
     chained = 0
+    captured = set(captured_days)
     for p in periods:
         if p.end <= p.start:
             pending.append(p.formation_month)
             continue
-        basket = basket_return(p.book, p.start, p.end, closes, breaks)
+        basket = basket_return(p.book, p.start, p.end, closes, breaks, stock_dividends)
         book = basket.value
-        spy = basket_return((spy_id,), p.start, p.end, closes, breaks).value
+        spy_basket = basket_return((spy_id,), p.start, p.end, closes, breaks, spy_dividends)
+        spy = spy_basket.value
         population = sorted(p.universe)
         control: list[float] = []
+        control_totals: list[float | None] = []
         for d in range(draws):
             if len(population) < mb.BOOK_SIZE:
                 break
-            r = basket_return(
+            drawn = basket_return(
                 random.Random(control_seed(d, p.formation_month)).sample(population, mb.BOOK_SIZE),
                 p.start,
                 p.end,
                 closes,
                 breaks,
-            ).value
-            if r is None:
+                stock_dividends,
+            )
+            if drawn.value is None:
                 break
-            control.append(r)
+            control.append(drawn.value)
+            control_totals.append(drawn.total)
         complete = book is not None and spy is not None and len(control) == draws
         ordered = sorted(control)
         scored.append(
@@ -188,12 +267,30 @@ def score(
                 control_p05=_quantile(ordered, 0.05) if complete else None,
                 control_p95=_quantile(ordered, 0.95) if complete else None,
                 book_percentile=percentile_of(book, control) if complete and book is not None else None,
+                book_total_return=basket.total,
+                spy_total_return=spy_basket.total,
+                control_total_median=(
+                    median(t for t in control_totals if t is not None)
+                    if complete and all(t is not None for t in control_totals)
+                    else None
+                ),
+                dividend_days_uncaptured=(
+                    sum(p.start + timedelta(days=k) not in captured for k in range(1, (p.end - p.start).days + 1))
+                    if stock_dividends is not None
+                    else None
+                ),
             )
         )
         if complete and book is not None and spy is not None:
             chained += 1
             book_path *= 1 + book
             spy_path *= 1 + spy
+            book_total_path = (
+                None if book_total_path is None or basket.total is None else book_total_path * (1 + basket.total)
+            )
+            spy_total_path = (
+                None if spy_total_path is None or spy_basket.total is None else spy_total_path * (1 + spy_basket.total)
+            )
             control_paths = [path * (1 + r) for path, r in zip(control_paths, control, strict=True)]
     cumulative = [c - 1 for c in control_paths]
     return Scorecard(
@@ -204,6 +301,8 @@ def score(
         book_cumulative_percentile=percentile_of(book_path - 1, cumulative) if chained else None,
         control_draws=draws,
         pending=tuple(pending),
+        book_total_cumulative=book_total_path - 1 if chained and book_total_path is not None else None,
+        spy_total_cumulative=spy_total_path - 1 if chained and spy_total_path is not None else None,
     )
 
 
@@ -282,12 +381,35 @@ def load_scorecard(conn: Conn) -> Scorecard:
         params = {"days": days, "ids": ids, "quarantine_version": QUARANTINE_RULE_SET_VERSION}
         for day, iid, bar_date, close in conn.execute(_CLOSES_SQL, params).fetchall():
             closes.setdefault(day, {})[int(iid)] = (bar_date, float(close))
-    return score(periods, closes, load_unresolved_breaks(conn, ids), spy_id=spy_id)
+    calendar = load_calendar_dividends(conn, since=min(starts)) if starts else None
+    captured_days = calendar.captured_days if calendar is not None else ()
+    stock_dividends = None
+    if calendar is not None and captured_days:
+        span = (captured_days[-1] - captured_days[0]).days + 1
+        stock_dividends = Dividends(
+            calendar.by_instrument,
+            captured_days[0],
+            captured_days[-1],
+            frozenset(captured_days[0] + timedelta(days=k) for k in range(span)) - set(captured_days),
+        )
+    spy_dividends = Dividends({spy_id: [(ex, None) for ex in SPY_EX_DATES]}, SPY_SCHEDULE_FROM, SPY_SCHEDULE_THROUGH)
+    return score(
+        periods,
+        closes,
+        load_unresolved_breaks(conn, ids),
+        spy_id=spy_id,
+        stock_dividends=stock_dividends,
+        spy_dividends=spy_dividends,
+        captured_days=captured_days,
+    )
 
 
 __all__ = [
     "CONTROL_DRAWS",
+    "DIVIDEND_WITHHOLDING",
+    "SPY_EX_DATES",
     "BenchmarkInstrumentError",
+    "Dividends",
     "Period",
     "PeriodScore",
     "Scorecard",
