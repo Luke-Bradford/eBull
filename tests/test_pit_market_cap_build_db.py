@@ -16,7 +16,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.services.pit_market_cap_build import run_market_cap_pit_rebuild
+from app.services.pit_market_cap_build import _TRADES_SQL, run_market_cap_pit_rebuild
 from tests.fixtures.ebull_test_db import STOCKS_TYPE_ID, seed_universe_anchor, test_database_url
 
 Conn = psycopg.Connection[Any]
@@ -184,3 +184,33 @@ def test_view_refuses_a_bar_the_build_never_saw(ebull_test_conn: Conn) -> None:
     )
     conn.commit()
     assert [row[1] for row in _view(conn, 2)] == ["basis_stale", "basis_stale", "basis_stale"]
+
+
+def test_trades_reader_keeps_only_the_instruments_own_issuer(ebull_test_conn: Conn) -> None:
+    """Gate 1 reads a Form 4 only when its issuer is one of the instrument's SEC CIKs: a Form 4 the issuer filed as a
+    reporting owner of ANOTHER issuer is attributed to it by ``insider_transactions`` (BAC's PIMCO fund trades), and
+    must not test its price basis; a non-primary CIK (an (a)(3) predecessor) still counts."""
+    conn = ebull_test_conn
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary) "
+        "VALUES (1, 'sec', 'cik', '0000000077', FALSE)"
+    )
+    # Own issuer at the primary CIK, own issuer at the predecessor CIK, and another issuer the instrument filed on.
+    for accession, issuer in (("F-OWN", CIK), ("F-PRED", "77"), ("F-OTHER", "0000908993")):
+        conn.execute(
+            "INSERT INTO insider_filings (accession_number, instrument_id, document_type, issuer_cik, "
+            "period_of_report) VALUES (%s, 1, '4', %s, '2026-09-01')",
+            (accession, issuer),
+        )
+        conn.execute(
+            "INSERT INTO insider_transactions (instrument_id, accession_number, txn_row_num, filer_name, txn_date, "
+            "txn_code, price, security_title) VALUES (1, %s, 1, 'Owner', '2026-09-01', 'P', 10, 'Common Stock')",
+            (accession,),
+        )
+    conn.commit()
+
+    rows = conn.execute(
+        _TRADES_SQL, {"ids": [1], "first": date(2024, 6, 1), "report_floor": date(2023, 6, 1)}
+    ).fetchall()
+    assert sorted(row[1] for row in rows) == ["F-OWN", "F-PRED"]

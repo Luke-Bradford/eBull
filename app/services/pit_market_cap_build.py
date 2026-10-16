@@ -30,7 +30,10 @@ Readers, each fixed by its source rule:
 * multi-class -- every CIK with a row in ``instrument_class_shares_outstanding`` (by instrument or ``source_cik``);
 * Form 4 trades (Gate 1) -- non-derivative P or S rows with a price > 0 on a title naming common stock, from Form 4
   and 4/A, ``txn_date_invalid`` excluded, qualified only after an amendment has replaced its original
-  (``resolve_amendments``);
+  (``resolve_amendments``). The filing's issuer (Box 2, ``insider_filings.issuer_cik``) must be one of the
+  instrument's SEC CIKs, primary or not: ``insider_transactions`` also attributes to an instrument the Form 4s its
+  issuer FILED as a reporting owner of another issuer (BAC's rows include PIMCO and Nuveen fund trades), and a
+  non-primary CIK keeps an (a)(3) reorganisation's predecessor (XOM, CLBK, XPRO);
 * price integrity -- the view refuses an instrument with a ``price_series_break`` whose ``resolved_by`` is NULL
   (sql/246: "NULL = unresolved = the two sides cannot be joined");
 * basis stamp -- the instrument's ``price_daily_revision`` and ``price_daily_backdated_insert`` counts and its last
@@ -46,7 +49,7 @@ import logging
 import math
 import zipfile
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -64,6 +67,8 @@ from app.services.pit_market_cap import (
     Anchor,
     Concept,
     FloatFact,
+    Gate1Quarter,
+    Gate2Result,
     ShareFact,
     Step,
     Trade,
@@ -261,8 +266,9 @@ def build_instrument(
     multiclass: bool,
     trades: Sequence[Trade],
     floats: Sequence[FloatFact],
-) -> tuple[tuple[Step, ...], dict[str, Counter[str]]]:
-    """Steps for one instrument with Gates 1 and 2 applied (Gate 2 on Gate-1-applied steps), and the gate tallies."""
+) -> tuple[tuple[Step, ...], dict[str, Counter[str]], dict[date, Gate1Quarter], tuple[Gate2Result, ...]]:
+    """Steps for one instrument with Gates 1 and 2 applied (Gate 2 on Gate-1-applied steps), the gate tallies, and
+    each gate's per-quarter / per-float results."""
     steps = build_steps(
         facts, anchors, step_sessions, closes=closes, dollar_volume=dollar_volume, multiclass=multiclass
     )
@@ -274,7 +280,7 @@ def build_instrument(
         "gate1": Counter(str(q.outcome) for q in quarters.values()) + Counter({"untested_trades": untested}),
         "gate2": Counter(str(r.outcome) for r in results),
     }
-    return steps, tallies
+    return steps, tallies, quarters, results
 
 
 # --------------------------------------------------------------------------- readers
@@ -345,6 +351,11 @@ _TRADES_SQL = """
     WHERE t.instrument_id = ANY(%(ids)s::bigint[])
       AND f.document_type IN ('4', '4/A') AND NOT f.is_tombstone
       AND (f.period_of_report >= %(report_floor)s OR t.txn_date >= %(first)s)
+      AND EXISTS (
+          SELECT 1 FROM external_identifiers x
+          WHERE x.instrument_id = t.instrument_id AND x.provider = 'sec' AND x.identifier_type = 'cik'
+            AND ltrim(x.identifier_value, '0') = ltrim(f.issuer_cik, '0')
+      )
 """
 
 _REVISIONS_SQL = """
@@ -393,7 +404,7 @@ class BasisStamp:
     bars_through: date | None
 
 
-def _step_row(instrument_id: int, step: Step, stamp: BasisStamp, build_id: int) -> tuple[Any, ...]:
+def step_row(instrument_id: int, step: Step, stamp: BasisStamp, build_id: int) -> tuple[Any, ...]:
     selection = step.selection
     return (
         instrument_id,
@@ -452,34 +463,50 @@ def run_market_cap_pit_rebuild(
                 conn.execute("SELECT pg_advisory_unlock(%s)", (BUILD_LOCK_KEY,))
 
 
-def _build(
+@dataclass(frozen=True)
+class InstrumentBuild:
+    """One instrument's build result: ``refused`` (the CIK-level reason it has no steps) or its gated steps."""
+
+    instrument_id: int
+    cik: str
+    refused: str | None
+    facts: tuple[ShareFact, ...]
+    steps: tuple[Step, ...]
+    anchor_status: Counter[str]
+    tallies: dict[str, Counter[str]]
+    stamp: BasisStamp
+    gate1: dict[date, Gate1Quarter] = field(default_factory=dict)
+    gate2: tuple[Gate2Result, ...] = ()
+
+
+@dataclass(frozen=True)
+class BatchBuild:
+    instruments: tuple[InstrumentBuild, ...]
+    holdings_max_filed_at: datetime | None
+
+
+def iter_instrument_builds(
     conn: psycopg.Connection[Any],
     *,
+    scope: Sequence[tuple[int, str]],
     index_of: Callable[[str], SubmissionsIndex | str],
     build_date: date,
-    started_at: datetime,
-    submissions_sha256: str,
-    now: Callable[[], datetime],
-) -> BuildReport:
+) -> Iterator[BatchBuild]:
+    """Read and build every instrument in ``scope`` for ``build_date``, one batch at a time; writes nothing.
+
+    The build's only reader path: ``_build`` publishes what this yields, and the acceptance script
+    (``scripts/measure_3841_acceptance.py``) reports on it, so the two cannot drift. Run it inside the caller's
+    REPEATABLE READ transaction so every batch reads one snapshot.
+    """
     quarters = quarter_ends(FIRST_QUARTER, build_date)
     sessions = nyse_sessions(FIRST_QUARTER - timedelta(days=10), build_date)
     step_sessions = tuple(s for s in sessions if s >= FIRST_SESSION)
     anchor_sessions = {q: last_session_on_or_before(sessions, q) for q in quarters}
     first_bar = sessions[0] - timedelta(days=45)  # room for the 21-bar window behind the first session
     min_context = add_months(FIRST_SESSION, -MAX_SHARES_AGE_MONTHS)
-    scope = load_scope(conn)
     multiclass_ciks = load_multiclass_ciks(conn)
-
-    sequence = "SELECT nextval(pg_get_serial_sequence('market_cap_pit_builds', 'build_id'))"
-    build_id_row = conn.execute(sequence).fetchone()
-    assert build_id_row is not None
-    build_id = int(build_id_row[0])
-    conn.execute("DELETE FROM instrument_share_count_pit")
-
-    summary: dict[str, Counter[str]] = defaultdict(Counter)
-    holdings_max_filed_at: datetime | None = None
     indexes: dict[str, SubmissionsIndex | str] = {}
-    step_total = 0
+
     for offset in range(0, len(scope), BATCH_SIZE):
         batch = scope[offset : offset + BATCH_SIZE]
         ids = [iid for iid, _ in batch]
@@ -504,6 +531,7 @@ def _build(
             if mean_dv is not None and n == DOLLAR_VOLUME_SESSIONS and math.isfinite(float(mean_dv)):
                 volume_by[iid][day] = float(mean_dv)
 
+        holdings_max_filed_at: datetime | None = None
         units: dict[tuple[int, date], list[tuple[float, list[str]]]] = defaultdict(list)
         for iid, quarter, _filer, unit_value, accessions, filed_at in conn.execute(
             _UNIT_VALUES_SQL, {**params, "quarters": list(quarters)}
@@ -521,20 +549,22 @@ def _build(
         revisions = dict(conn.execute(_REVISIONS_SQL, params).fetchall())
         backdated = dict(conn.execute(_BACKDATED_SQL, params).fetchall())
 
-        rows: list[tuple[Any, ...]] = []
+        results: list[InstrumentBuild] = []
         for iid, cik in batch:
+            stamp = BasisStamp(int(revisions.get(iid, 0)), int(backdated.get(iid, 0)), bars_through.get(iid))
             if cik not in indexes:
                 indexes[cik] = index_of(cik)
             index = indexes[cik]
             if isinstance(index, str):
-                summary["cik_refused"][index] += 1
+                results.append(InstrumentBuild(iid, cik, index, (), (), Counter(), {}, stamp))
                 continue
             facts, refused = timed_share_facts(facts_by.get(iid, ()), index)
             if refused is not None:
-                summary["cik_refused"][str(refused)] += 1
+                results.append(InstrumentBuild(iid, cik, str(refused), (), (), Counter(), {}, stamp))
                 continue
             closes = closes_by.get(iid, {})
             anchors = []
+            anchor_status: Counter[str] = Counter()
             for quarter in quarters:
                 session = anchor_sessions[quarter]
                 assert session is not None
@@ -547,9 +577,9 @@ def _build(
                     as_of=build_date,
                     accessions=tuple(sorted({a for _, accessions in filers for a in accessions})),
                 )
-                summary["anchor_status"][str(anchor.status)] += 1
+                anchor_status[str(anchor.status)] += 1
                 anchors.append(anchor)
-            steps, tallies = build_instrument(
+            steps, tallies, gate1_quarters, gate2_results = build_instrument(
                 facts=facts,
                 anchors=anchors,
                 sessions=sessions,
@@ -560,19 +590,59 @@ def _build(
                 trades=resolve_amendments(trades_by.get(iid, ()), sessions[0]),
                 floats=public_floats(facts_by.get(iid, ()), index),
             )
-            for name, tally in tallies.items():
+            results.append(
+                InstrumentBuild(
+                    iid, cik, None, facts, steps, anchor_status, tallies, stamp, gate1_quarters, gate2_results
+                )
+            )
+        yield BatchBuild(tuple(results), holdings_max_filed_at)
+
+
+def _build(
+    conn: psycopg.Connection[Any],
+    *,
+    index_of: Callable[[str], SubmissionsIndex | str],
+    build_date: date,
+    started_at: datetime,
+    submissions_sha256: str,
+    now: Callable[[], datetime],
+) -> BuildReport:
+    scope = load_scope(conn)
+
+    sequence = "SELECT nextval(pg_get_serial_sequence('market_cap_pit_builds', 'build_id'))"
+    build_id_row = conn.execute(sequence).fetchone()
+    assert build_id_row is not None
+    build_id = int(build_id_row[0])
+    conn.execute("DELETE FROM instrument_share_count_pit")
+
+    summary: dict[str, Counter[str]] = defaultdict(Counter)
+    holdings_max_filed_at: datetime | None = None
+    step_total = 0
+    done = 0
+    for batch in iter_instrument_builds(conn, scope=scope, index_of=index_of, build_date=build_date):
+        if batch.holdings_max_filed_at is not None and (
+            holdings_max_filed_at is None or batch.holdings_max_filed_at > holdings_max_filed_at
+        ):
+            holdings_max_filed_at = batch.holdings_max_filed_at
+        rows: list[tuple[Any, ...]] = []
+        for result in batch.instruments:
+            if result.refused is not None:
+                summary["cik_refused"][result.refused] += 1
+                continue
+            summary["anchor_status"].update(result.anchor_status)
+            for name, tally in result.tallies.items():
                 summary[name].update(tally)
-            if not steps:
+            if not result.steps:
                 summary["instruments"]["no_eligible_count"] += 1
                 continue
             summary["instruments"]["with_steps"] += 1
-            stamp = BasisStamp(int(revisions.get(iid, 0)), int(backdated.get(iid, 0)), bars_through.get(iid))
-            for step in steps:
+            for step in result.steps:
                 summary["step_refusal"][str(step.refusal) if step.refusal else "published"] += 1
-                rows.append(_step_row(iid, step, stamp, build_id))
+                rows.append(step_row(result.instrument_id, step, result.stamp, build_id))
         step_total += len(rows)
         _copy_steps(conn, rows)
-        logger.info("market_cap_pit_rebuild: %d/%d instruments, %d steps", offset + len(batch), len(scope), step_total)
+        done += len(batch.instruments)
+        logger.info("market_cap_pit_rebuild: %d/%d instruments, %d steps", done, len(scope), step_total)
 
     summary["instruments"]["scope"] = len(scope)
     finished_at = now()
