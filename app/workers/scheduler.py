@@ -545,6 +545,8 @@ JOB_ETORO_DIVIDEND_CALENDAR_CAPTURE = "etoro_dividend_calendar_capture"
 # #3616 slice 3b — Bank of England XUDLUSS tax FX source, verified against the GOV.UK bank-holiday calendar.
 JOB_TAX_FX_REFRESH = "tax_fx_refresh"
 JOB_TAX_BROKER_EVIDENCE_REFRESH = "tax_broker_evidence_refresh"
+# #3841 slice 2 — point-in-time market cap steps on a measured price basis.
+JOB_MARKET_CAP_PIT_REBUILD = "market_cap_pit_rebuild"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -2900,6 +2902,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "working days behind."
         ),
         cadence=Cadence.daily(hour=11, minute=43),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_MARKET_CAP_PIT_REBUILD,
+        display_name="Point-in-time market cap rebuild (#3841)",
+        source="db",
+        description=(
+            "Daily 08:20 UTC (after the nightly daily_candle_refresh, measured finishing by 06:50) — rebuilds the "
+            "share-count steps behind instrument_market_cap_pit for the validated US universe: SEC share counts "
+            "timed by EDGAR acceptance, on a price basis measured from 13F value / shares, checked against Form 4 "
+            "trade prices and the public float. One transaction; a failed build leaves the previous one active."
+        ),
+        cadence=Cadence.daily(hour=8, minute=20),
         catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,
     ),
@@ -7220,6 +7236,29 @@ def ibkr_borrow_archive() -> None:
             f"status={report.status} snapshot={report.snapshot_id} rows={report.row_count} "
             f"as_of={report.provider_as_of.isoformat()} sha={report.response_sha256[:12]}"
         )
+
+
+def market_cap_pit_rebuild() -> None:
+    """Rebuild the point-in-time market cap steps (#3841; ``app/services/pit_market_cap_build.py``)."""
+    from app.security.master_key import resolve_data_dir
+    from app.services.pit_fundamentals import NEW_YORK
+    from app.services.pit_market_cap_build import run_market_cap_pit_rebuild
+
+    submissions_path = resolve_data_dir() / "sec" / "bulk" / "submissions.zip"
+    if not submissions_path.exists():
+        # The first-install drain purges the archive; sec_submissions_bulk_refresh (daily 08:00 UTC) restores it.
+        _record_prereq_skip(JOB_MARKET_CAP_PIT_REBUILD, "submissions.zip absent until sec_submissions_bulk_refresh")
+        return
+    with _tracked_job(JOB_MARKET_CAP_PIT_REBUILD) as tracker:
+        # Autocommit: the build lock is a session lock taken before the build's REPEATABLE READ snapshot opens.
+        with connect_job(autocommit=True) as conn:
+            report = run_market_cap_pit_rebuild(
+                conn,
+                submissions_path=submissions_path,
+                build_date=datetime.now(NEW_YORK).date(),
+            )
+        tracker.row_count = report.steps
+        tracker.note = f"build={report.build_id} instruments={report.instruments} steps={report.steps}"
 
 
 def tax_fx_refresh() -> None:
