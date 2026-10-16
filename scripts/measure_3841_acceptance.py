@@ -250,14 +250,20 @@ def _report(conn: psycopg.Connection[Any], index_of: Any, per_instrument: Path |
         f"  quarters pass {gate1_total[GateOutcome.PASS]} · fail {gate1_total[GateOutcome.FAIL]} · "
         f"untested {gate1_total[GateOutcome.UNTESTED]} · untested trades {gate1_total['untested_trades']}"
     )
-    print(*gate1_failures, sep="\n") if gate1_failures else print("  no failed quarter")
+    if gate1_failures:
+        print(*gate1_failures, sep="\n")
+    else:
+        print("  no failed quarter")
 
     print("\n== Gate 2 (count magnitude, one-sided)")
     print(
         f"  pass {gate2_total[GateOutcome.PASS]} · fail {gate2_total[GateOutcome.FAIL]} · "
         f"uncomparable {gate2_total[GateOutcome.UNCOMPARABLE]}"
     )
-    print(*gate2_failures, sep="\n") if gate2_failures else print("  no failure")
+    if gate2_failures:
+        print(*gate2_failures, sep="\n")
+    else:
+        print("  no failure")
 
     _print_coverage(coverage, len(scope), sessions)
     _print_formation(conn, outcomes_by_instrument, symbols, max(s for s in sessions if s < build_date))
