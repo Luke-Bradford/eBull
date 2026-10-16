@@ -12897,3 +12897,16 @@ neighbouring container and match it.**
 - Enforced in: `app/services/pit_market_cap_build.py::run_market_cap_pit_rebuild`. The DB test
   `tests/test_pit_market_cap_build_db.py::test_rebuild_replaces_steps_and_appends_its_build_row` runs through the
   guard.
+
+### A Form 4 row's instrument is its issuer, not the instrument it is stored under (#3841)
+
+- Failure (#3841 slice 3 acceptance): Gate 1 failed BAC, BLK, BX and AGO on medians of 0.02–0.24.
+  `insider_transactions` stores under BAC the Form 4s that BofA FILED as a reporting owner of PIMCO and Nuveen funds.
+  On the dev DB, 2,585 of 1,138,385 Form 4/4A rows on 96 instruments have an `issuer_cik` that differs from the
+  instrument's primary CIK. The query is on #3854.
+- Prevention: a reader of Form 4 rows keyed by `instrument_id` filters on `insider_filings.issuer_cik` being one of
+  the instrument's SEC CIKs. Include non-primary CIK rows, which keep an (a)(3) predecessor such as XOM or CLBK.
+- Enforced in: `app/services/pit_market_cap_build.py::_TRADES_SQL`;
+  `tests/test_pit_market_cap_build_db.py::test_trades_reader_keeps_only_the_instruments_own_issuer`. The ingest fix is
+  #3854. Skill text for `.claude/skills/data-sources/sec-edgar.md` is posted on #2403, because `.claude/**` is
+  write-refused from the loop worktree.
