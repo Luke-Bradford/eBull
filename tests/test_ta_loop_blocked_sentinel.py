@@ -73,20 +73,21 @@ def _driver_functions() -> str:
     return "\n".join(out)
 
 
-def _bash(script: str) -> str:
+def _bash(script: str, *args: str) -> str:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, env=env).stdout.strip()
+    cmd = ["bash", "-c", script, "_", *args]
+    return subprocess.run(cmd, capture_output=True, text=True, check=True, env=env).stdout.strip()
 
 
 def test_seconds_until_reads_a_utc_wake_time() -> None:
     wake = (datetime.now(UTC) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    seconds = int(_bash(f"{_driver_functions()}\nseconds_until {wake}"))
+    seconds = int(_bash(f'{_driver_functions()}\nseconds_until "$1"', wake))
     assert 7_100 <= seconds <= 7_200
 
 
 def test_seconds_until_prints_nothing_for_a_malformed_wake_time() -> None:
-    for bad in ("garbage", "2026-10-16T15:20:00", "2026-10-16 15:20", "tomorrow"):
-        assert _bash(f"{_driver_functions()}\nseconds_until '{bad}'") == "", bad
+    for bad in ("garbage", "2026-10-16T15:20:00", "2026-10-16 15:20", "tomorrow", "2026-10-16T15:20:00Zjunk"):
+        assert _bash(f'{_driver_functions()}\nseconds_until "$1"', bad) == "", bad
 
 
 def test_clamp_seconds_bounds_the_sleep() -> None:
@@ -100,6 +101,8 @@ def test_driver_sleeps_until_the_wake_time_and_keeps_the_fixed_fallback() -> Non
     driver = DRIVER.read_text()
     assert 'wake="$(head -n 1 "$BLOCKED_SENTINEL"' in driver
     assert 'cooldown="$(clamp_seconds "$until_wake" "$COOLDOWN_SECONDS" "$BLOCKED_MAX_SECONDS")"' in driver
+    # A past wake time must take the fixed cooldown, not the 60 s floor.
+    assert '[[ -n "$until_wake" ]] && ((until_wake > 0))' in driver
     assert re.search(r'BLOCKED_MAX_SECONDS="\$\{TA_LOOP_BLOCKED_MAX:-\d+\}"', driver)
 
 
