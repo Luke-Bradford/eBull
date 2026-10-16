@@ -378,6 +378,14 @@ def test_cap_product_that_overflows_is_invalid_input() -> None:
     assert step.refusal is Refusal.INVALID_INPUT and step.split_factor is None
 
 
+def test_count_beyond_float_range_refuses_rather_than_raising() -> None:
+    # float(Decimal) converts through the decimal string, so a count above sys.float_info.max becomes inf (no
+    # OverflowError, unlike float(int)); the non-finite product then refuses.
+    assert float(Decimal(10**400)) == float("inf")
+    (step,) = _steps([cover(date(2025, 4, 20), at(date(2025, 5, 1)), 10**400, "a1")])
+    assert step.refusal is Refusal.INVALID_INPUT and step.market_cap(10.0) is None
+
+
 def test_discontinuity_against_the_previous_published_count() -> None:
     facts = [
         cover(date(2025, 4, 20), at(date(2025, 5, 1)), 100, "a1"),

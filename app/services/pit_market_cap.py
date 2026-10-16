@@ -446,6 +446,8 @@ def build_steps(
         basis = bases[interval]
         shares = selection.shares
         factor = basis.factor
+        # ``float(Decimal)`` goes through the decimal string: a count beyond float range becomes inf, never an
+        # OverflowError, and refuses ``invalid_input`` below (pinned by a test).
         common_basis = (
             float(shares) * factor
             if shares is not None and factor is not None and _finite_positive(shares) and _finite_positive(factor)
