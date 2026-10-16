@@ -505,6 +505,16 @@ INVENTORY: tuple[Occurrence, ...] = (
         ("caller_span_whole_history",),
         "the price_masked_bars coverage + B1-B4 return mask; returns across an unresolved price_segments break dropped",
     ),
+    # --- #3841 point-in-time market cap ----------------------------------------
+    Occurrence(
+        "app/services/pit_market_cap_build.py",
+        313,
+        "_BARS_SQL closes and 21-bar mean dollar volume",
+        "WINDOWED",
+        ("caller_span_whole_history",),
+        "single closes price the anchors and Gate 1; the 21-bar mean feeds the turnover check. The view refuses an "
+        "instrument with an unresolved price_series_break or a revision since the build (basis_stale)",
+    ),
     Occurrence("app/services/price_masked_bars.py", 95, "_LAST_BAR_SQL", "METADATA"),
     Occurrence("app/services/price_masked_bars.py", 119, "_RECENT_LAST_BAR_COUNTS_SQL", "METADATA"),
     Occurrence("app/services/price_masked_bars.py", 133, "_UNION_CALENDAR_SQL", "METADATA"),

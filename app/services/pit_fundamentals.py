@@ -27,6 +27,7 @@ import importlib.metadata
 import importlib.resources
 import json
 import platform
+import zipfile
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -291,6 +292,24 @@ def parse_submissions(cik10: str, main: object, read_page: Callable[[str], objec
             for accn, (accepted, form, _) in seen.items()
         }
     )
+
+
+def submissions_reader(archive: zipfile.ZipFile) -> Callable[[str], SubmissionsIndex | str]:
+    """A filer's parsed submissions (main file and overflow pages) from ``submissions.zip``, or the integrity-failure
+    reason (rules 2 + 5; ``no_submissions_entry`` when the archive holds no file for the CIK)."""
+    names = set(archive.namelist())
+
+    def index(cik: str) -> SubmissionsIndex | str:
+        member = f"CIK{cik}.json"
+        if member not in names:
+            return "no_submissions_entry"
+
+        def read_page(page: str) -> object | None:
+            return json.loads(archive.read(page)) if page in names else None
+
+        return parse_submissions(cik, json.loads(archive.read(member)), read_page)
+
+    return index
 
 
 def cik_int(value: object) -> int | None:

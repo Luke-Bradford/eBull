@@ -36,7 +36,7 @@ import os
 import re
 import zipfile
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from app.services.factor_panel_artefact import read_gz_lines
-from app.services.pit_fundamentals import SubmissionsIndex, acceptance_ny_date, parse_submissions
+from app.services.pit_fundamentals import SubmissionsIndex, acceptance_ny_date, submissions_reader
 from app.services.security_linkage import WINDOW_DAYS, Admitted, admit_row
 from scripts.build_3361_security_linkage import _admit_all, _submission_text
 from scripts.build_3739_slice2 import EXTRACT_FROM, Filing, checked, read_extract, sha256_of
@@ -283,23 +283,6 @@ def read_notes_archive(path: Path, ledger: Counter[str]) -> list[NoteFact]:
     for member, count in malformed.items():
         ledger[f"malformed:{label}:{member}"] += count
     return sorted(facts, key=lambda f: (f.adsh, f.tag, f.ddate, f.qtrs, f.segments, f.coreg, f.value, f.uom))
-
-
-def submissions_reader(archive: zipfile.ZipFile) -> Callable[[str], SubmissionsIndex | str]:
-    """A filer's parsed submissions (main file and overflow pages), or #3360's integrity-failure reason."""
-    names = set(archive.namelist())
-
-    def index(cik: str) -> SubmissionsIndex | str:
-        member = f"CIK{cik}.json"
-        if member not in names:
-            return "no_submissions_entry"
-
-        def read_page(page: str) -> object | None:
-            return json.loads(archive.read(page)) if page in names else None
-
-        return parse_submissions(cik, json.loads(archive.read(member)), read_page)
-
-    return index
 
 
 def with_acceptance(facts: Sequence[NoteFact], submissions: zipfile.ZipFile, ledger: Counter[str]) -> list[NoteFact]:

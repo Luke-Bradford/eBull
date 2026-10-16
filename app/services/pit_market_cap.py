@@ -166,6 +166,10 @@ class Anchor:
         return 1.0 if self.spread <= SNAP_BAND else self.f_hat
 
     def evidence(self) -> dict[str, Any]:
+        """The quarter's status for a step's evidence. The 13F accession list is carried as its count and the sha256
+        of the sorted list: a large issuer's list runs to thousands of accessions per quarter, repeated in every step
+        whose window holds the quarter, and the build row's snapshot re-derives the list to compare against."""
+        accessions = sorted(self.accessions)
         return {
             "q": self.quarter.isoformat(),
             "s": self.session.isoformat(),
@@ -175,7 +179,8 @@ class Anchor:
             "f_hat": self.f_hat,
             "spread": self.spread,
             "provisional": self.provisional,
-            "accessions": list(self.accessions),
+            "accessions": len(accessions),
+            "accessions_sha256": hashlib.sha256("\n".join(accessions).encode()).hexdigest(),
         }
 
 

@@ -551,6 +551,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "hunt_terminal",
     # #3471 slice 2c-iii-c: no FK anywhere.
     "broker_private_events",
+    # #3841 slice 2 (sql/499), child-to-parent.
+    "instrument_share_count_pit",
+    "market_cap_pit_builds",
 )
 
 # ---------------------------------------------------------------------------
