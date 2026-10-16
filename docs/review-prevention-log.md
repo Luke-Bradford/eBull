@@ -12866,6 +12866,8 @@ neighbouring container and match it.**
 - Prevention: never multiply a filed share count by a stored eToro price without putting both on one share basis.
   Measure the vendor's re-basing with an observed raw price: 13F value ÷ shares at the quarter end (Form 13F Special
   Instruction 8) divided by the stored close on that session. Do not infer splits from counts.
-- Enforced in: `docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md`; `scripts/measure_3841_premise.py`. Skill
-  text for `.claude/skills/market-data/SKILL.md` and `.claude/skills/metrics-analyst/SKILL.md` ("Market cap (live)")
-  is posted on #2403, because `.claude/**` is write-refused from the loop worktree.
+- Enforced in: the #3841 construction (`docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md`). Its build and
+  `scripts/measure_3841_acceptance.py` follow in the build PR. The evidence is measured, not enforced, by
+  `scripts/measure_3841_premise.py`. Skill text for `.claude/skills/market-data/SKILL.md` and
+  `.claude/skills/metrics-analyst/SKILL.md` ("Market cap (live)") is posted on #2403, because `.claude/**` is
+  write-refused from the loop worktree.

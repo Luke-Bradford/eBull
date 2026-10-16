@@ -22,11 +22,13 @@ from __future__ import annotations
 import argparse
 import json
 import zipfile
+from datetime import date, timedelta
 from pathlib import Path
 
 import psycopg
 
 from app.config import settings
+from app.services.market_calendar import us_market_status
 
 DEFAULT_COMPANYFACTS = Path.home() / "Library/Application Support/eBull/sec/bulk/companyfacts.zip"
 RATIO_TAGS = ("StockholdersEquityNoteStockSplitConversionRatio1", "StockholdersEquityNoteStockSplitConversionRatio")
@@ -34,6 +36,27 @@ RATIO_TAGS = ("StockholdersEquityNoteStockSplitConversionRatio1", "StockholdersE
 UNIVERSE = """
     SELECT (jsonb_array_elements_text(universe))::bigint AS iid FROM momentum_book_universes WHERE formation_id = 1
 """
+
+
+def _quarter_ends(first: date) -> list[date]:
+    """Calendar quarter ends from ``first`` through the end of the current year."""
+    out: list[date] = []
+    year, month = first.year, first.month
+    while year <= date.today().year:
+        end = date(year, month, 30 if month in (6, 9) else 31)
+        if end >= first:
+            out.append(end)
+        month += 3
+        if month > 12:
+            year, month = year + 1, 3
+    return out
+
+
+def _last_session_on_or_before(day: date) -> date:
+    """The last NYSE session on or before ``day`` (``nyse-market-calendar-v1``)."""
+    while us_market_status(day) == "closed":
+        day -= timedelta(days=1)
+    return day
 
 
 def main() -> None:
@@ -143,50 +166,75 @@ def main() -> None:
             ).fetchall()
             print(f"  {symbol}:", ", ".join(f"{d} {float(c):.2f}" for d, c in bars))
 
-        # Anchor factor F^(q) = median 13F value/shares / eToro close at the last session <= q (spec "The primitive").
-        # Every instrument with >= 20 13F rows for q, not only the momentum universe.
+        # The spec's anchor ("Construction" / "Anchors"), measured exactly: s(q) is the last NYSE session on or before
+        # q; one value per filer from its latest-filed report for (instrument, q); >= 20 filers; coherence = share of
+        # filers within m <= 1.02 of the median; bands on m(F^) = max(F^, 1/F^). Every instrument, not only formation 1.
+        quarter_ends = [q for q in _quarter_ends(date(2024, 6, 30)) if q <= date.today()]
+        sessions = [_last_session_on_or_before(q) for q in quarter_ends]
         anchors = conn.execute(
             f"""
             WITH u AS ({UNIVERSE}),
-            per_filer AS (
-                SELECT instrument_id, period_of_report AS q, filer_id,
-                       percentile_cont(0.5) WITHIN GROUP (ORDER BY market_value_usd / shares) AS unit_value
-                FROM institutional_holdings
-                WHERE is_put_call IS NULL AND shares > 0 AND market_value_usd > 0 AND period_of_report >= '2024-06-30'
+            sq AS (SELECT * FROM unnest(%(qs)s::date[], %(ss)s::date[]) AS t(q, s)),
+            latest AS (
+                SELECT h.filer_id, h.instrument_id, h.period_of_report, max(h.filed_at) AS filed_at
+                FROM institutional_holdings h JOIN sq ON sq.q = h.period_of_report
                 GROUP BY 1, 2, 3
             ),
-            h AS (
-                SELECT instrument_id, q, count(*) AS n,
-                       percentile_cont(0.5) WITHIN GROUP (ORDER BY unit_value) AS raw
+            per_filer AS (
+                SELECT h.instrument_id, h.period_of_report AS q, h.filer_id,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY h.market_value_usd / h.shares) AS unit_value
+                FROM institutional_holdings h
+                JOIN latest l USING (filer_id, instrument_id, period_of_report, filed_at)
+                WHERE h.is_put_call IS NULL AND h.shares > 0 AND h.market_value_usd > 0
+                  AND h.shares <> 'NaN'::numeric AND h.market_value_usd <> 'NaN'::numeric
+                GROUP BY 1, 2, 3
+            ),
+            agg AS (
+                SELECT instrument_id, q, count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY unit_value) AS med
                 FROM per_filer GROUP BY 1, 2 HAVING count(*) >= 20
+            ),
+            coh AS (
+                SELECT a.instrument_id, a.q, a.n, a.med,
+                       avg((greatest(p.unit_value / a.med, a.med / p.unit_value) <= 1.02)::int) AS coherent
+                FROM agg a JOIN per_filer p USING (instrument_id, q)
+                GROUP BY 1, 2, 3, 4
             )
-            SELECT h.q, i.symbol, h.n, h.raw / p.close AS f, h.instrument_id IN (SELECT iid FROM u) AS in_universe
-            FROM h
-            JOIN instruments i ON i.instrument_id = h.instrument_id
-            JOIN LATERAL (
-                SELECT close FROM price_daily d
-                WHERE d.instrument_id = h.instrument_id AND d.price_date <= h.q AND d.price_date > h.q - 7
-                ORDER BY d.price_date DESC LIMIT 1
-            ) p ON p.close > 0
-            ORDER BY 1, 4
-            """
+            SELECT c.q, i.symbol, c.n, c.coherent, c.med / d.close AS f, c.instrument_id IN (SELECT iid FROM u)
+            FROM coh c
+            JOIN sq ON sq.q = c.q
+            JOIN price_daily d ON d.instrument_id = c.instrument_id AND d.price_date = sq.s AND d.close > 0
+            JOIN instruments i ON i.instrument_id = c.instrument_id
+            ORDER BY 1, 5
+            """,
+            {"qs": quarter_ends, "ss": sessions},
         ).fetchall()
-        print("\nanchor F^ per quarter, every instrument with >= 20 distinct 13F filers and a close:")
-        print("quarter | anchors | |F-1|<=2% | <=10% | ambiguous (10-20%) | split-sized | max |F-1| inside 10%")
-        quarters = sorted({row[0] for row in anchors})
-        for q in quarters:
-            fs = [float(row[3]) for row in anchors if row[0] == q]
-            dev = [abs(f - 1) for f in fs]
-            ambiguous = sum(1 for f in fs if 1.1 < max(f, 1 / f) < 1.2)
-            split = sum(1 for f in fs if max(f, 1 / f) >= 1.2)
-            inside = max((d for d in dev if d <= 0.10), default=0.0)
+        print("\nanchors per quarter: >= 20 filers and a close on exactly s(q); bands on m = max(F^, 1/F^)")
+        print(
+            "quarter | s(q) | anchors | incoherent | ok | ok within m<=1.02 (share) | snapped m<=1.10 | "
+            "ambiguous 1.10<m<1.25 | split m>=1.25 | max m-1 among snapped"
+        )
+        totals: list[int] = []
+        for q, s in zip(quarter_ends, sessions, strict=True):
+            rows = [row for row in anchors if row[0] == q]
+            ok = [float(row[4]) for row in rows if float(row[3]) >= 0.75]
+            m = [max(f, 1 / f) for f in ok]
+            snapped = [x for x in m if x <= 1.10]
+            within = sum(1 for x in m if x <= 1.02)
+            share = within / len(ok) if ok else 0.0
+            totals.append(len(rows))
             print(
-                f"{q} | {len(fs)} | {sum(d <= 0.02 for d in dev)} | {sum(d <= 0.10 for d in dev)} | {ambiguous} | "
-                f"{split} | {inside:.4f}"
+                f"{q} | {s} | {len(rows)} | {len(rows) - len(ok)} | {len(ok)} | {within} ({share:.1%}) | "
+                f"{len(snapped)} | {sum(1 for x in m if 1.10 < x < 1.25)} | {sum(1 for x in m if x >= 1.25)} | "
+                f"{max(snapped, default=1.0) - 1:.4f}"
             )
-        print("formation-1 names outside 2%, per quarter:")
-        for q in quarters:
-            outside = [(s, n, round(float(f), 4)) for qq, s, n, f, u in anchors if qq == q and u and abs(f - 1) > 0.02]
+        print(f"anchors per quarter range: {min(totals)}..{max(totals)}")
+        print("formation-1 ok anchors with m > 1.02, per quarter:")
+        for q in quarter_ends:
+            outside = [
+                (sym, n, round(float(f), 4))
+                for qq, sym, n, coherent, f, in_universe in anchors
+                if qq == q and in_universe and float(coherent) >= 0.75 and max(float(f), 1 / float(f)) > 1.02
+            ]
             print(f"  {q}: {outside}")
         print("named series, F^ (distinct filers): splits, reverse splits and a spin-off (FTV, 2025-06-28)")
         for symbol in ("NFLX", "BKNG", "KLAC", "APH", "DD", "HON", "FTV", "CMCSA", "GE"):
