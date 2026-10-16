@@ -186,8 +186,6 @@ class TestSidecars:
         path = tmp_path / "big.bin"
         payload = b"x" * (5 * 1024 * 1024)
         path.write_bytes(payload)
-        import hashlib
-
         expected = hashlib.sha256(payload).hexdigest()
         assert _compute_sha256(path) == expected
 
@@ -351,8 +349,6 @@ class TestRefreshOneAsyncChanged:
         # ETag sidecar updated to the new value (verbatim, with quotes).
         assert _read_local_etag(archive_path) == new_etag
         # SHA-256 sidecar landed.
-        import hashlib
-
         expected_sha = hashlib.sha256(new_body).hexdigest()
         assert _sha256_sidecar_path(archive_path).read_text().strip() == expected_sha
         # No leftover partial.
@@ -461,9 +457,32 @@ class TestRefreshOneAsyncFailClosed:
         assert result.bytes_downloaded == len(body)
         assert archive_path.read_bytes() == body
         assert _read_local_etag(archive_path) is None
-        import hashlib
-
         assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(body).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_head_without_etag_get_with_etag_records_the_get_etag(self, tmp_path: Path) -> None:
+        """#3747: with no HEAD ETag there is no HEAD/GET pair to race, so a GET
+        ETag is not a CDN race; it describes exactly the bytes kept and is
+        recorded. Pins the ``None`` HEAD validator through every later branch."""
+        url = "https://www.sec.gov/files/datastandardsinnovation/data/insider-transactions-data-sets/2026q2_form345.zip"
+        body = _zip_bytes()
+        archive = BulkArchive(name="insider_2026q2.zip", url=url)
+        archive_path = tmp_path / "insider_2026q2.zip"
+
+        handler = _make_handler(
+            archive_url=url, archive_body=body, etag="unused", include_etag=False, get_etag='"get-only"'
+        )
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        assert result.skipped_reason is None
+        assert result.bytes_downloaded == len(body)
+        assert archive_path.read_bytes() == body
+        assert _read_local_etag(archive_path) == '"get-only"'
 
     @pytest.mark.asyncio
     async def test_get_500_after_head_ok_preserves_old_archive(self, tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from app.services.sec_bulk_download import (
     BulkDownloadResult,
     _download_one,
     _fatal_download_failures,
+    _form13f_window_start,
     _zip_round_trip,
     build_bulk_archive_inventory,
     check_disk_space,
@@ -185,6 +186,14 @@ class TestInventory:
         assert any(
             "/files/dera/data/form-n-port-data-sets/" in u and u.endswith("_nport.zip") for u in by_name.values()
         )
+
+    def test_form13f_window_start_round_trips_every_generated_label(self) -> None:
+        """The path boundary parses labels this module builds; a format drift in
+        ``last_n_13f_periods`` must fail here, not in the inventory build."""
+        for label in last_n_13f_periods(12, today=date(2026, 10, 16)):
+            start = _form13f_window_start(label)
+            assert start.day == 1 and start.month in (3, 6, 9, 12)
+            assert label.startswith(f"01{start.strftime('%b').lower()}{start.year}-")
 
     def test_newest_insider_and_13f_sets_use_the_moved_path(self) -> None:
         """#3747: SEC's listing pages (read 2026-10-16) serve insider 2026q2+ and
