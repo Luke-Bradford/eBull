@@ -136,10 +136,12 @@ def yahoo_spy() -> dict:
         raise SystemExit(f"Yahoo chart response for SPY is not the expected shape: {e!r}") from e
     out = {}
     for t, cl, a in rows:
-        d = datetime.fromtimestamp(t, UTC).date()
         # Monthly bars only (the trailing intramonth row repeats the current month); a null close is skipped, and a
         # scored month it leaves missing fails loudly in main().
-        if d.day == 1 and cl is not None and a is not None:
+        if t is None or cl is None or a is None:
+            continue
+        d = datetime.fromtimestamp(t, UTC).date()
+        if d.day == 1:
             out[d] = (float(a), float(cl))
     return out
 
@@ -207,12 +209,16 @@ def max_dd(rs) -> float:
     return dd
 
 
+def prior_month(m: date) -> date:
+    return date(m.year - 1, 12, 1) if m.month == 1 else date(m.year, m.month - 1, 1)
+
+
 def spy_rets(levels: dict, ms) -> list:
-    keys = sorted(levels)
-    missing = [m for m in ms if m not in levels or keys.index(m) == 0]
+    """SPY return for each scored month against the calendar-prior month; a gap fails rather than spanning months."""
+    missing = [m for m in ms if not levels.get(m) or not levels.get(prior_month(m))]
     if missing:
         raise SystemExit(f"SPY levels missing for scored months or their prior month: {missing}")
-    return [levels[m] / levels[keys[keys.index(m) - 1]] - 1 for m in ms]
+    return [levels[m] / levels[prior_month(m)] - 1 for m in ms]
 
 
 def worst_lag(book, spy, k):
@@ -243,7 +249,7 @@ def main() -> None:
 
     ys = yahoo_spy()
     ymaps = {m: a for m, (a, _) in ys.items()}
-    diffs = [abs(ys[m][1] / etoro_spy[m] - 1) for m in etoro_spy if m in ys and m <= OOS[1]]
+    diffs = [abs(ys[m][1] / etoro_spy[m] - 1) for m in etoro_spy if m in ys and m <= OOS[1] and etoro_spy[m]]
     if not diffs:
         raise SystemExit("SPY cross-check: no month overlaps Yahoo and eToro price_daily")
     print(f"Intrader linked series: {nlinked}; PWB live-linked series: {len(pb)}")
