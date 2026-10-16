@@ -13,7 +13,10 @@ production.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -57,3 +60,49 @@ def test_the_driver_does_not_fall_back_to_matching_transcript_wording() -> None:
     assert "blocked pass|no ticket taken" not in driver, (
         "the driver must not decide the cooldown by grepping the model's prose"
     )
+
+
+def _driver_functions() -> str:
+    """The driver's ``seconds_until`` and ``clamp_seconds`` definitions, extracted so they run without the loop."""
+    driver = DRIVER.read_text()
+    out = []
+    for name in ("seconds_until", "clamp_seconds"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", driver, re.S | re.M)
+        assert match is not None, f"ta_loop.sh must define {name}()"
+        out.append(match.group(0))
+    return "\n".join(out)
+
+
+def _bash(script: str) -> str:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, env=env).stdout.strip()
+
+
+def test_seconds_until_reads_a_utc_wake_time() -> None:
+    wake = (datetime.now(UTC) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    seconds = int(_bash(f"{_driver_functions()}\nseconds_until {wake}"))
+    assert 7_100 <= seconds <= 7_200
+
+
+def test_seconds_until_prints_nothing_for_a_malformed_wake_time() -> None:
+    for bad in ("garbage", "2026-10-16T15:20:00", "2026-10-16 15:20", "tomorrow"):
+        assert _bash(f"{_driver_functions()}\nseconds_until '{bad}'") == "", bad
+
+
+def test_clamp_seconds_bounds_the_sleep() -> None:
+    functions = _driver_functions()
+    assert _bash(f"{functions}\nclamp_seconds -500 60 43200") == "60"
+    assert _bash(f"{functions}\nclamp_seconds 999999 60 43200") == "43200"
+    assert _bash(f"{functions}\nclamp_seconds 3600 60 43200") == "3600"
+
+
+def test_driver_sleeps_until_the_wake_time_and_keeps_the_fixed_fallback() -> None:
+    driver = DRIVER.read_text()
+    assert 'wake="$(head -n 1 "$BLOCKED_SENTINEL"' in driver
+    assert 'cooldown="$(clamp_seconds "$until_wake" "$COOLDOWN_SECONDS" "$BLOCKED_MAX_SECONDS")"' in driver
+    assert re.search(r'BLOCKED_MAX_SECONDS="\$\{TA_LOOP_BLOCKED_MAX:-\d+\}"', driver)
+
+
+def test_prompt_shows_how_to_write_a_wake_time() -> None:
+    prompt = PROMPT.read_text()
+    assert re.search(rf"echo \d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}}Z > \S*{SENTINEL_BASENAME}", prompt)
