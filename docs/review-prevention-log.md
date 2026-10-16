@@ -12851,3 +12851,23 @@ neighbouring container and match it.**
   `tests/test_etoro_dividend_calendar.py::test_counts_rather_than_guesses_a_malformed_row`. Skill text for
   `.claude/skills/engineering/python-hygiene.md` is posted on #2403, because `.claude/**` is write-refused from the
   loop worktree.
+
+### A share count times an eToro close is wrong across every later split (#3841)
+
+- Failure (spec for #3841, 2026-10-16): the ticket's construction for a dated market cap was "shares from the latest
+  filing × that session's close". eToro `price_daily` is back-adjusted for splits up to its last refetch, while XBRL
+  share counts are as reported. NFLX's cover count goes from 423.7M to 4.22B across its 10-for-1, yet its stored closes
+  read 110–115 on both sides. So the product understates every session before a later split by that split's ratio, and
+  the live `market_cap_live` pairs a pre-split count with a post-split price until the next 10-Q: MNST read $44.9B,
+  about half (#3850).
+- Second failure, in the first fix: inferring splits from count jumps plus the XBRL
+  `StockholdersEquityNoteStockSplitConversionRatio1` fact. That cannot separate a split from a merger (COF, DVN, AVAV
+  carry no ratio fact), and KLAC's fact reads 10000 for a 10-for-1.
+- Prevention: never multiply a filed share count by a stored eToro price without putting both on one share basis.
+  Measure the vendor's re-basing with an observed raw price: 13F value ÷ shares at the quarter end (Form 13F Special
+  Instruction 8) divided by the stored close on that session. Do not infer splits from counts.
+- Enforced in: the #3841 construction (`docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md`). Its build and
+  `scripts/measure_3841_acceptance.py` follow in the build PR. The evidence is measured, not enforced, by
+  `scripts/measure_3841_premise.py`. Skill text for `.claude/skills/market-data/SKILL.md` and
+  `.claude/skills/metrics-analyst/SKILL.md` ("Market cap (live)") is posted on #2403, because `.claude/**` is
+  write-refused from the loop worktree.
