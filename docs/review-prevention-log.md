@@ -12885,3 +12885,15 @@ neighbouring container and match it.**
   `tests/test_pit_market_cap_build.py::test_rows_with_no_report_period_are_never_pooled_into_one_report`. Skill text
   for `.claude/skills/engineering/python-hygiene.md` is posted on #2403, because `.claude/**` is write-refused from
   the loop worktree.
+
+### An isolation level set inside a transaction is a claim until it is read back (#3841)
+
+- Failure (PR #3853, review bot, unverified): `market_cap_pit_rebuild` relies on one REPEATABLE READ snapshot, set by
+  `SET TRANSACTION ISOLATION LEVEL` inside `conn.transaction()`. Postgres honours that only as the first statement
+  after BEGIN, before any query fixes the snapshot, and nothing in the code showed that it had taken effect.
+- Prevention: when correctness rests on an isolation level, read `current_setting('transaction_isolation')` back
+  inside the transaction and raise when it differs. Take any advisory lock that must precede the snapshot before
+  BEGIN.
+- Enforced in: `app/services/pit_market_cap_build.py::run_market_cap_pit_rebuild`. The DB test
+  `tests/test_pit_market_cap_build_db.py::test_rebuild_replaces_steps_and_appends_its_build_row` runs through the
+  guard.

@@ -31,6 +31,8 @@ Readers, each fixed by its source rule:
 * Form 4 trades (Gate 1) -- non-derivative P or S rows with a price > 0 on a title naming common stock, from Form 4
   and 4/A, ``txn_date_invalid`` excluded, qualified only after an amendment has replaced its original
   (``resolve_amendments``);
+* price integrity -- the view refuses an instrument with a ``price_series_break`` whose ``resolved_by`` is NULL
+  (sql/246: "NULL = unresolved = the two sides cannot be joined");
 * basis stamp -- the instrument's ``price_daily_revision`` and ``price_daily_backdated_insert`` counts and its last
   stored bar, so the view refuses (``basis_stale``) any bar written or revised after the snapshot;
 * public float (Gate 2) -- ``dei:EntityPublicFloat`` in USD, the latest-accepted accession per context date.
@@ -424,6 +426,8 @@ def run_market_cap_pit_rebuild(
     if not conn.autocommit:
         raise ValueError("run_market_cap_pit_rebuild needs an autocommit connection (lock before snapshot)")
     started_at = now()
+    # One handle serves the hash and the reads. sec_bulk_refresh replaces the archive by rename
+    # (``partial_path.replace(archive_path)``), so an open handle keeps reading the file it hashed.
     with submissions_path.open("rb") as handle:
         submissions_sha256 = _sha256_file(handle)
         with zipfile.ZipFile(handle) as archive:
@@ -431,7 +435,11 @@ def run_market_cap_pit_rebuild(
             conn.execute("SELECT pg_advisory_lock(%s)", (BUILD_LOCK_KEY,))
             try:
                 with conn.transaction():
+                    # The first statement after BEGIN, before any query fixes the snapshot; asserted, not assumed.
                     conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    level = conn.execute("SELECT current_setting('transaction_isolation')").fetchone()
+                    if level is None or level[0] != "repeatable read":
+                        raise RuntimeError(f"market_cap_pit_rebuild needs REPEATABLE READ, got {level}")
                     return _build(
                         conn,
                         index_of=index_of,
@@ -558,9 +566,9 @@ def _build(
                 summary["instruments"]["no_eligible_count"] += 1
                 continue
             summary["instruments"]["with_steps"] += 1
+            stamp = BasisStamp(int(revisions.get(iid, 0)), int(backdated.get(iid, 0)), bars_through.get(iid))
             for step in steps:
                 summary["step_refusal"][str(step.refusal) if step.refusal else "published"] += 1
-                stamp = BasisStamp(int(revisions.get(iid, 0)), int(backdated.get(iid, 0)), bars_through.get(iid))
                 rows.append(_step_row(iid, step, stamp, build_id))
         step_total += len(rows)
         _copy_steps(conn, rows)
