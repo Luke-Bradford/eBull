@@ -12839,3 +12839,15 @@ neighbouring container and match it.**
   `tests/test_sec_bulk_refresh.py::TestRefreshOneAsyncFailClosed::test_head_missing_etag_downloads_when_no_local_archive`.
   Skill text for `.claude/skills/data-engineer/etl-endpoint-coverage.md` is posted on #2403, because `.claude/**` is
   write-refused from the loop worktree.
+
+### `float()` on a scraped cell accepts "nan", "inf" and negatives (#3844)
+
+- Failure (review on #3849, 2026-10-16): the eToro dividend-calendar reader parsed the amount cell with a bare
+  `float()`. A "nan" or "inf" cell would count as a parsed row and turn a basket's total return into NaN without
+  any error; a negative amount would reduce it.
+- Prevention: every `float(...)` on scraped or third-party text checks `math.isfinite` and the value's domain (here,
+  non-negative), and treats a failure as an unparsed row.
+- Enforced in: `app/services/etoro_dividend_calendar.py::parse_calendar`;
+  `tests/test_etoro_dividend_calendar.py::test_counts_rather_than_guesses_a_malformed_row`. Skill text for
+  `.claude/skills/engineering/python-hygiene.md` is posted on #2403, because `.claude/**` is write-refused from the
+  loop worktree.

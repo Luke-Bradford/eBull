@@ -34,9 +34,12 @@ def test_counts_rather_than_guesses_a_malformed_row() -> None:
     bad_amount = _row("A", "2026-10-14", "2026-10-14</td><td>2026-10-29</td><td>1.0</td><td>n/a</td>")
     date_disagrees = _row("B", "2026-10-14", "2026-10-15</td><td>2026-10-29</td><td>1.0</td><td>0.25</td>")
     missing_cell = _row("C", "2026-10-14", "2026-10-14</td><td>2026-10-29</td><td>0.25</td>")
+    nan = _row("E", "2026-10-14", "2026-10-14</td><td>2026-10-29</td><td>1.0</td><td>nan</td>")
+    inf = _row("F", "2026-10-14", "2026-10-14</td><td>2026-10-29</td><td>1.0</td><td>inf</td>")
+    negative = _row("G", "2026-10-14", "2026-10-14</td><td>2026-10-29</td><td>1.0</td><td>-0.25</td>")
     good = _row("D", "2026-10-14", "2026-10-14</td><td>2026-10-29</td><td>1.0</td><td>0.25</td>")
-    page = parse_calendar(bad_amount + date_disagrees + missing_cell + good)
-    assert page.unparsed == 3
+    page = parse_calendar(bad_amount + date_disagrees + missing_cell + nan + inf + negative + good)
+    assert page.unparsed == 6
     assert [r.ticker for r in page.rows] == ["D"]
 
 

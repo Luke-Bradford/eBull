@@ -59,6 +59,7 @@ DIVIDEND_WITHHOLDING: Final = 0.15
 #: https://www.ssga.com/library-content/products/fund-data/etfs/us/distribution/SPDR_Dividend_Distribution_Schedule.pdf
 #: No amount source exists yet, so a period containing one of these scores no SPY total return.
 SPY_EX_DATES: Final = (date(2026, 3, 20), date(2026, 6, 18), date(2026, 9, 18), date(2026, 12, 18), date(2026, 12, 31))
+SPY_SCHEDULE_FROM: Final = date(2026, 1, 1)
 SPY_SCHEDULE_THROUGH: Final = date(2026, 12, 31)
 #: A start or end close older than this, against the period's own start or end date, is stale.
 STALENESS: Final = timedelta(days=7)
@@ -391,7 +392,7 @@ def load_scorecard(conn: Conn) -> Scorecard:
             captured_days[-1],
             frozenset(captured_days[0] + timedelta(days=k) for k in range(span)) - set(captured_days),
         )
-    spy_dividends = Dividends({spy_id: [(ex, None) for ex in SPY_EX_DATES]}, date(2026, 1, 1), SPY_SCHEDULE_THROUGH)
+    spy_dividends = Dividends({spy_id: [(ex, None) for ex in SPY_EX_DATES]}, SPY_SCHEDULE_FROM, SPY_SCHEDULE_THROUGH)
     return score(
         periods,
         closes,

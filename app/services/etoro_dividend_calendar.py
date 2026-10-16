@@ -13,7 +13,7 @@ Treatment, fixed here because the page states none:
 * **Identity.** The ticker is matched to ``instruments.symbol`` case-insensitively, canonical rows only; a ticker
   matching more than one is dropped.
 * **Unparsed rows.** A row without exactly the five cells, a date cell that disagrees with the attribute, or a
-  non-numeric amount is skipped and counted, never guessed.
+  non-numeric, non-finite or negative amount is skipped and counted, never guessed.
 * **Covered days.** A capture's UTC date counts as covered only when every ``data-ex-dividend-date`` marker on it
   parsed (marker count = parsed rows, none unparsed). An empty page (stored before its job fails) or a drifted one
   therefore leaves a gap, and a consumer must treat a gap as "dividends unknown", never as "none paid".
@@ -24,6 +24,7 @@ Completeness against an independent dividend source is not measured; consumers m
 from __future__ import annotations
 
 import gzip
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -64,12 +65,16 @@ def parse_calendar(html: str) -> ParsedPage:
         try:
             if ticker is None or ex is None or len(cells) != 5 or cells[1] != ex.group(1):
                 raise ValueError("row shape")
+            amount = float(cells[4])
+            # float() accepts "nan", "inf" and negatives; any of them would poison a basket's total silently.
+            if not math.isfinite(amount) or amount < 0:
+                raise ValueError("amount")
             rows.append(
                 CalendarRow(
                     ticker=ticker.group(1).upper(),
                     ex_date=date.fromisoformat(cells[1]),
                     pay_date=date.fromisoformat(cells[2]),
-                    amount=float(cells[4]),
+                    amount=amount,
                 )
             )
         except ValueError:
