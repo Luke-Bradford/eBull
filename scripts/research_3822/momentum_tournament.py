@@ -20,6 +20,7 @@ Run: PYTHONPATH=. uv run python scripts/research_3822/momentum_tournament.py
 """
 
 import gzip
+import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -53,7 +54,9 @@ from scripts.research_3822.momentum_oos import (  # noqa: E402
 RESEARCH = Path(user_data_dir("eBull")) / "research"
 LINK = RESEARCH / "security_linkage_3361/2026-10-05-805bc9e6/series"
 PANEL_RUNS = ("2026-10-09-af7889cc-stageA", "2026-10-09-25577cff-stageB-1c5de22cccda4937b55eb7e16e505b7f")
-SIC_CACHE = Path("/tmp/momentum_tournament/panel_sic.json")
+SIC_CACHE = Path(
+    f"/tmp/momentum_tournament/panel_sic-{hashlib.sha256('|'.join(PANEL_RUNS).encode()).hexdigest()[:12]}.json"
+)
 SEEDS = 20
 FRENCH_SNAPSHOT = 39  # french_five_factor_monthly, observations to 2026-08-31, fetched 2026-10-04
 TOP_INDUSTRIES, MIN_INDUSTRY_NAMES = 3, 5
@@ -214,7 +217,7 @@ def rank_52wk(high, diag: list):
         out = []
         for _, sid, rs in uni:
             hs = [high[sid].get(x) for x in window(m, 12)]
-            if any(h is None or h[1] is None or h[2] != hs[-1][2] for h in hs):
+            if hs[-1] is None or any(h is None or h[1] is None or h[2] != hs[-1][2] for h in hs):
                 continue
             out.append(((hs[-1][0] / max(h[1] for h in hs), radj_score(rs)), sid))
         ratios = sorted((score[0] for score, _ in out), reverse=True)
