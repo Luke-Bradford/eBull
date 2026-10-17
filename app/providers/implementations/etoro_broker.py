@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 import httpx
@@ -231,6 +231,13 @@ class TradeHistoryParseError(Exception):
     so it is never swallowed by the incidental-exception handlers
     inside the parse loop.
     """
+
+
+# Documented maximum page size for the closed-events counter. One row per
+# (close year, asset type), so a single page covers decades of history; the
+# page cap only bounds a server that keeps reporting hasNext.
+_CLOSED_EVENT_COUNT_PAGE_SIZE: Final[int] = 500
+_CLOSED_EVENT_COUNT_MAX_PAGES: Final[int] = 10
 
 
 class ClosedPositionEventCountParseError(Exception):
@@ -1290,40 +1297,62 @@ class EtoroBrokerProvider(BrokerProvider):
         table — a caller reaching this path outside the provider is recorded as
         ``unclassified`` and its draw on lane G goes uncounted.
 
+        The body is a ``ClosedPositionEventsHistoryPage``: ``results`` plus a
+        ``pagination`` object with ``hasNext`` (live portal, 2026-10-17; the
+        bare-array body #2991 parsed no longer comes back). Pages are followed at
+        the documented maximum ``pageSize`` of 500, so one request covers any
+        realistic history.
+
         Raises on HTTP or network errors (caller should handle).
         """
-        response = self._http_read.get(
-            "/api/v1/data/positions/closed-events/history",
-            headers=self._request_headers(),
-        )
-        response.raise_for_status()
-        try:
-            rows = response.json()
-        except ValueError as exc:  # 200 with a non-JSON body
-            raise ClosedPositionEventCountParseError(f"response body is not JSON: {exc}") from exc
-        if not isinstance(rows, list):
-            raise ClosedPositionEventCountParseError(f"expected a JSON array, got {type(rows).__name__}")
         counts: list[ClosedPositionEventCount] = []
-        for idx, row in enumerate(rows):
-            if not isinstance(row, dict):
-                raise ClosedPositionEventCountParseError(f"row {idx}: expected an object")
+        for page in range(1, _CLOSED_EVENT_COUNT_MAX_PAGES + 1):
+            response = self._http_read.get(
+                "/api/v1/data/positions/closed-events/history",
+                params={"page": page, "pageSize": _CLOSED_EVENT_COUNT_PAGE_SIZE},
+                headers=self._request_headers(),
+            )
+            response.raise_for_status()
             try:
-                events = int(row["closedPositionEvents"])
-                # A count cannot be negative. This is the field's definition, not a
-                # chosen bound — and without it a negative parses as a valid figure and
-                # drags a total (#2993's comparison) toward agreement.
-                if events < 0:
-                    raise ValueError(f"closedPositionEvents must be >= 0, got {events}")
-                counts.append(
-                    ClosedPositionEventCount(
-                        close_year=int(row["closeYear"]),
-                        asset_type=str(row["assetType"]),
-                        closed_position_events=events,
-                    )
+                body = response.json()
+            except ValueError as exc:  # 200 with a non-JSON body
+                raise ClosedPositionEventCountParseError(f"response body is not JSON: {exc}") from exc
+            if not isinstance(body, dict):
+                raise ClosedPositionEventCountParseError(f"expected a JSON object, got {type(body).__name__}")
+            rows = body.get("results")
+            pagination = body.get("pagination")
+            if not isinstance(rows, list):
+                raise ClosedPositionEventCountParseError("results: expected a JSON array")
+            if not isinstance(pagination, dict) or not isinstance(pagination.get("hasNext"), bool):
+                raise ClosedPositionEventCountParseError("pagination.hasNext: expected a boolean")
+            if pagination.get("page") != page:
+                # A server ignoring ``page`` would re-serve page 1 and double-count.
+                raise ClosedPositionEventCountParseError(
+                    f"pagination.page: asked for {page}, got {pagination.get('page')!r}"
                 )
-            except (KeyError, ValueError, TypeError) as exc:
-                raise ClosedPositionEventCountParseError(f"row {idx}: {exc}") from exc
-        return tuple(counts)
+            for idx, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    raise ClosedPositionEventCountParseError(f"page {page} row {idx}: expected an object")
+                try:
+                    events = int(row["closedPositionEvents"])
+                    # A count cannot be negative. This is the field's definition, not a
+                    # chosen bound — and without it a negative parses as a valid figure and
+                    # drags a total (#2993's comparison) toward agreement.
+                    if events < 0:
+                        raise ValueError(f"closedPositionEvents must be >= 0, got {events}")
+                    counts.append(
+                        ClosedPositionEventCount(
+                            close_year=int(row["closeYear"]),
+                            asset_type=str(row["assetType"]),
+                            closed_position_events=events,
+                        )
+                    )
+                except (KeyError, ValueError, TypeError) as exc:
+                    raise ClosedPositionEventCountParseError(f"page {page} row {idx}: {exc}") from exc
+            if not pagination["hasNext"]:
+                return tuple(counts)
+        # Never a silently short tuple: a partial count reads as a real one.
+        raise ClosedPositionEventCountParseError(f"more than {_CLOSED_EVENT_COUNT_MAX_PAGES} pages")
 
 
 # ------------------------------------------------------------------
