@@ -341,10 +341,8 @@ def test_a_naive_fill_time_is_refused_rather_than_read_as_local_time() -> None:
 
 @pytest.mark.parametrize("band", BANDS, ids=[b.label for b in BANDS])
 def test_every_bands_model_spread_is_its_p75_as_a_fraction(band: PriceBand) -> None:
-    (row,) = band_rows(
-        [entry_tca(_row(fill=band.lower or band.upper / 2))],
-        [],  # a price inside the band
-    )
+    inside = band.lower if band.lower is not None else Decimal("1")  # the open-below band's floor is 0
+    (row,) = band_rows([entry_tca(_row(fill=inside))], [])
     assert row.band == band
     assert row.model_spread == band.p75_spread_pct / 100
     assert row.model_half_spread == band.p75_spread_pct / 200
