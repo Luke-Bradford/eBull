@@ -46,7 +46,7 @@ and a negative offset means earlier than the header acceptance. Raw outputs are 
 
 1. **`manifest --n 300`**, a sample of the 637,635 rows that have `accepted_at`:
    - 290 headers `found`: 270 exact, 19 early by 14,400 or 18,000 s, 1 late.
-   - 9 `absent` and 1 `invalid`.
+   - 9 `absent` and 1 `bad_response` (labelled `invalid` by the first script version).
 2. **`captures`** on those 290 rows. Disjoint tuples of (manifest, 08-22, 10-06, 10-17), each minus the header:
 
    | tuple | rows |
