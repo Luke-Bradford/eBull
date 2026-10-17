@@ -13020,4 +13020,6 @@ neighbouring container and match it.**
 - Prevention: when one list is used for two properties, check each member against the second one on the data. Here
   that is the `dividend <> 0` stamp count per symbol, reproducible from the query on #3676. Write the property in the
   list's comment.
-- Enforced in: `app/services/etf_total_return_reader.py::PRICE_RETURN_POOLS` (comment); `tests/test_etf_total_return_reader.py::test_dbc_distributes_so_it_is_not_a_pool_and_its_2022_months_are_flagged`.
+- Enforced in: `app/services/etf_total_return_reader.py::PRICE_RETURN_POOLS` (comment); `tests/test_etf_total_return_reader.py::test_dbc_distributes_so_it_is_not_a_pool_and_its_2022_months_are_flagged`
+  and `::test_the_pool_list_changes_only_with_its_distribution_evidence` (pins the list, because the test DB holds no
+  research corpus to measure each member).

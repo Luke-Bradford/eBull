@@ -8,6 +8,7 @@ from decimal import Decimal
 from app.services.etf_total_return_reader import (
     ETORO_SOURCE,
     NPORT_SOURCE,
+    PRICE_RETURN_POOLS,
     EtfVerdict,
     NportFiling,
     NportMonth,
@@ -189,7 +190,15 @@ def test_dbc_distributes_so_it_is_not_a_pool_and_its_2022_months_are_flagged() -
     )
     assert verdict is EtfVerdict.UNRESOLVED_REFERENCE
     assert {r.source for r in rows} == {INTRADER_VENDOR}
+    assert {r.dividend_capture_degraded for r in rows} == {False, True}
     assert all(r.dividend_capture_degraded == (r.month >= date(2022, 1, 1)) for r in rows)
+
+
+def test_the_pool_list_changes_only_with_its_distribution_evidence() -> None:
+    """Membership means "pays no distributions" (#3676), which only the research corpus can show, and this
+    test DB does not hold it. So the list is pinned: whoever changes it re-runs the ``dividend <> 0`` stamp
+    count on #3676 for the new member (0 stamps for each of these four on dev, 2026-10-17) and updates this pin."""
+    assert frozenset({"GLD", "IAU", "SLV", "USO"}) == PRICE_RETURN_POOLS
 
 
 # --- assemble_symbol: declared pools on eToro -----------------------------------------------------
