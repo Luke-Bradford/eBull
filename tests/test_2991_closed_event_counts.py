@@ -56,11 +56,18 @@ def _serve(broker: EtoroBrokerProvider, response: httpx.Response) -> list[httpx.
     return seen
 
 
-def _body() -> list[dict[str, Any]]:
-    return [
-        {"closeYear": 2021, "assetType": "Stocks", "closedPositionEvents": 113},
-        {"closeYear": 2026, "assetType": "Crypto Currencies", "closedPositionEvents": 1},
-    ]
+def _page(rows: list[Any], *, page: int = 1, has_next: bool = False) -> dict[str, Any]:
+    """The documented ``ClosedPositionEventsHistoryPage`` envelope (live portal, 2026-10-17)."""
+    return {"results": rows, "pagination": {"page": page, "pageSize": 500, "hasNext": has_next}}
+
+
+def _body() -> dict[str, Any]:
+    return _page(
+        [
+            {"closeYear": 2021, "assetType": "Stocks", "closedPositionEvents": 113},
+            {"closeYear": 2026, "assetType": "Crypto Currencies", "closedPositionEvents": 1},
+        ]
+    )
 
 
 def test_counts_are_parsed_and_the_request_lands_on_the_read_lane(broker: EtoroBrokerProvider) -> None:
@@ -74,14 +81,14 @@ def test_counts_are_parsed_and_the_request_lands_on_the_read_lane(broker: EtoroB
     )
     assert len(seen) == 1
     assert seen[0].url.path == "/api/v1/data/positions/closed-events/history"
-    # No env segment and no query parameters: the operation answers for the caller's GCID.
-    assert not seen[0].url.params
+    # No env segment: the operation answers for the caller's GCID. Only paging params.
+    assert dict(seen[0].url.params) == {"page": "1", "pageSize": "500"}
     assert etoro_lane_counters()[_READ_KEY].attempts == 1
 
 
 def test_an_empty_history_is_not_an_error(broker: EtoroBrokerProvider) -> None:
     """Documented: a customer with no closed positions returns 200 with an empty array."""
-    _serve(broker, httpx.Response(200, json=[]))
+    _serve(broker, httpx.Response(200, json=_page([])))
 
     assert broker.get_closed_position_event_counts() == ()
 
@@ -89,12 +96,16 @@ def test_an_empty_history_is_not_an_error(broker: EtoroBrokerProvider) -> None:
 @pytest.mark.parametrize(
     ("body", "fragment"),
     [
-        ({"closeYear": 2021}, "expected a JSON array"),
-        ([[2021, "Stocks", 1]], "row 0: expected an object"),
-        ([{"assetType": "Stocks", "closedPositionEvents": 1}], "row 0"),
-        ([{"closeYear": "nineteen", "assetType": "Stocks", "closedPositionEvents": 1}], "row 0"),
+        # The pre-2026-10 bare-array body is no longer the contract.
+        ([{"closeYear": 2021, "assetType": "Stocks", "closedPositionEvents": 1}], "expected a JSON object"),
+        ({"closeYear": 2021}, "results: expected a JSON array"),
+        ({"results": []}, "pagination.hasNext"),
+        ({"results": [], "pagination": {"hasNext": "no"}}, "pagination.hasNext"),
+        (_page([[2021, "Stocks", 1]]), "row 0: expected an object"),
+        (_page([{"assetType": "Stocks", "closedPositionEvents": 1}]), "row 0"),
+        (_page([{"closeYear": "nineteen", "assetType": "Stocks", "closedPositionEvents": 1}]), "row 0"),
         # A count cannot be negative; an int that parses is not therefore a figure.
-        ([{"closeYear": 2021, "assetType": "Stocks", "closedPositionEvents": -3}], "must be >= 0"),
+        (_page([{"closeYear": 2021, "assetType": "Stocks", "closedPositionEvents": -3}]), "must be >= 0"),
     ],
 )
 def test_a_malformed_body_raises_rather_than_returning_a_partial_set(
@@ -119,4 +130,31 @@ def test_an_http_error_propagates_to_the_caller(broker: EtoroBrokerProvider) -> 
     _serve(broker, httpx.Response(403, json={"errorCode": "InsufficientPermissions"}))
 
     with pytest.raises(httpx.HTTPStatusError):
+        broker.get_closed_position_event_counts()
+
+
+def test_pages_are_followed_until_has_next_is_false(broker: EtoroBrokerProvider) -> None:
+    pages = {
+        "1": _page([{"closeYear": 2021, "assetType": "Stocks", "closedPositionEvents": 113}], page=1, has_next=True),
+        "2": _page([{"closeYear": 2026, "assetType": "Stocks", "closedPositionEvents": 7}], page=2),
+    }
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=pages[request.url.params["page"]])
+
+    broker._client._transport = httpx.MockTransport(handler)
+
+    counts = broker.get_closed_position_event_counts()
+
+    assert [c.closed_position_events for c in counts] == [113, 7]
+    assert [r.url.params["page"] for r in seen] == ["1", "2"]
+
+
+def test_a_server_that_never_stops_paging_raises(broker: EtoroBrokerProvider) -> None:
+    """Never a silently short tuple: a capped read is not the whole history."""
+    _serve(broker, httpx.Response(200, json=_page([], has_next=True)))
+
+    with pytest.raises(ClosedPositionEventCountParseError, match="more than"):
         broker.get_closed_position_event_counts()
